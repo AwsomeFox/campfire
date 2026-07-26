@@ -14,7 +14,16 @@ import { useTranslation } from 'react-i18next';
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useAnnounce } from '../../components/Announcer';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import type { Character, CampaignMember, CampaignInvite, InviteRole, Role, AuditEntry } from '@campfire/schema';
+import type {
+  Character,
+  CampaignMember,
+  CampaignInvite,
+  GuestDmGrant,
+  GuestDmGrantScope,
+  InviteRole,
+  Role,
+  AuditEntry,
+} from '@campfire/schema';
 import { api, API, ApiError, translateApiError } from '../../lib/api';
 import { joinPublicBase } from '../../lib/public-base';
 import { usePanelData } from '../../lib/usePanelData';
@@ -62,6 +71,11 @@ const ROLE_CHIP: Record<Role, string> = {
   viewer: 'cf-chip-private',
 };
 const ROLE_LABEL: Record<Role, string> = { dm: 'DM', player: 'Player', viewer: 'Viewer' };
+const GRANT_SCOPE_LABEL: Record<GuestDmGrantScope, string> = {
+  dm: 'DM play authority',
+  membership_admin: 'Membership admin',
+  destructive: 'Destructive lifecycle',
+};
 
 export default function MembersPage() {
   const { t } = useTranslation();
@@ -93,6 +107,11 @@ export default function MembersPage() {
     useCallback(() => api.get<AuditEntry[]>(`${API}/campaigns/${id}/audit`), [id]),
     isDm,
     t('admin.errors.loadAuditLog'),
+  );
+  const grantsPanel = usePanelData<GuestDmGrant[]>(
+    useCallback(() => api.get<GuestDmGrant[]>(`${API}/campaigns/${id}/members/grants`), [id]),
+    isDm,
+    "Couldn't load guest DM grants.",
   );
 
   const load = useCallback(async () => {
@@ -180,6 +199,19 @@ export default function MembersPage() {
         onChange={() => {
           void load();
           charactersPanel.retry();
+        }}
+      />
+
+      <GuestDmGrantsCard
+        campaignId={id}
+        members={members ?? []}
+        grants={grantsPanel.data ?? []}
+        loading={grantsPanel.loading}
+        error={grantsPanel.error}
+        onRetry={grantsPanel.retry}
+        onChange={() => {
+          grantsPanel.retry();
+          void load();
         }}
       />
 
@@ -627,6 +659,214 @@ function InviteCard({ campaignId }: { campaignId: number }) {
   );
 }
 
+type GrantDurationPreset = '2h' | '24h' | '7d';
+
+function grantExpiryForPreset(preset: GrantDurationPreset): string {
+  const ms =
+    preset === '2h'
+      ? 2 * 60 * 60 * 1000
+      : preset === '24h'
+        ? 24 * 60 * 60 * 1000
+        : 7 * 24 * 60 * 60 * 1000;
+  return new Date(Date.now() + ms).toISOString();
+}
+
+function grantStatus(grant: GuestDmGrant): 'active' | 'upcoming' | 'expired' | 'revoked' | 'handed back' {
+  if (grant.revokedAt) return 'revoked';
+  if (grant.handedBackAt) return 'handed back';
+  const now = Date.now();
+  if (new Date(grant.startsAt).getTime() > now) return 'upcoming';
+  if (new Date(grant.expiresAt).getTime() <= now) return 'expired';
+  return 'active';
+}
+
+function GuestDmGrantsCard({
+  campaignId,
+  members,
+  grants,
+  loading,
+  error,
+  onRetry,
+  onChange,
+}: {
+  campaignId: number;
+  members: CampaignMember[];
+  grants: GuestDmGrant[];
+  loading: boolean;
+  error: string | null;
+  onRetry: () => void;
+  onChange: () => void;
+}) {
+  const { t } = useTranslation();
+  const announce = useAnnounce();
+  const eligibleMembers = members.filter((member) => !member.disabled);
+  const [selectedUserId, setSelectedUserId] = useState<number | ''>('');
+  const [duration, setDuration] = useState<GrantDurationPreset>('2h');
+  const [scopes, setScopes] = useState<GuestDmGrantScope[]>(['dm']);
+  const [creating, setCreating] = useState(false);
+  const [mutatingGrantId, setMutatingGrantId] = useState<number | null>(null);
+  const [localError, setLocalError] = useState<string | null>(null);
+
+  const selectedMember = selectedUserId === '' ? null : members.find((member) => member.userId === selectedUserId) ?? null;
+  const previewExpiry = grantExpiryForPreset(duration);
+  const safeDefault = scopes.includes('dm') && !scopes.includes('membership_admin') && !scopes.includes('destructive');
+
+  function toggleScope(scope: GuestDmGrantScope, checked: boolean) {
+    setScopes((current) => {
+      const next = checked ? [...new Set([...current, scope])] : current.filter((s) => s !== scope);
+      return next.length > 0 ? next : ['dm'];
+    });
+  }
+
+  async function createGrant() {
+    if (selectedUserId === '') return;
+    setCreating(true);
+    setLocalError(null);
+    try {
+      await api.post<GuestDmGrant>(`${API}/campaigns/${campaignId}/members/grants`, {
+        granteeUserId: selectedUserId,
+        scopes,
+        expiresAt: grantExpiryForPreset(duration),
+      });
+      announce(`Temporary DM grant created for ${selectedMember ? memberDisplayName(selectedMember) : 'member'}.`);
+      setSelectedUserId('');
+      setScopes(['dm']);
+      setDuration('2h');
+      onChange();
+    } catch (err) {
+      const msg = translateApiError(err, t, { fallbackKey: 'errors.loadFailed' });
+      setLocalError(msg);
+      announce(msg, { assertive: true });
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  async function revokeGrant(grantId: number) {
+    setMutatingGrantId(grantId);
+    setLocalError(null);
+    try {
+      await api.post<GuestDmGrant>(`${API}/campaigns/${campaignId}/members/grants/${grantId}/revoke`, {});
+      announce('Temporary DM grant revoked.');
+      onChange();
+    } catch (err) {
+      const msg = translateApiError(err, t, { fallbackKey: 'errors.loadFailed' });
+      setLocalError(msg);
+      announce(msg, { assertive: true });
+    } finally {
+      setMutatingGrantId(null);
+    }
+  }
+
+  return (
+    <Card className="space-y-2.5" data-testid="guest-dm-grants-card">
+      <div className="flex items-center gap-2">
+        <p className="card-kicker mb-0">Temporary DM handoff</p>
+        {loading && !error && <span className="text-[11px] text-secondary">Loading grants…</span>}
+      </div>
+      <p className="text-muted text-[11.5px] m-0">
+        Give a trusted guest limited DM authority for a session. The default scope can run play and read DM-only
+        prep, but cannot manage members, demote the protected owner, or trash/purge the campaign.
+      </p>
+      {(error || localError) && <ErrorNote message={error ?? localError ?? ''} onRetry={error ? onRetry : undefined} />}
+
+      <div className="cf-inset border-slate-600/40 rounded px-3 py-2.5 space-y-2">
+        <div className="grid sm:grid-cols-2 gap-2">
+          <div className="field">
+            <label htmlFor="guest-dm-member">Member</label>
+            <select
+              id="guest-dm-member"
+              className="input"
+              value={selectedUserId}
+              onChange={(event) => setSelectedUserId(event.target.value ? Number(event.target.value) : '')}
+            >
+              <option value="">Choose a member…</option>
+              {eligibleMembers.map((member) => (
+                <option key={member.id} value={member.userId}>
+                  {memberDisplayName(member)}{member.primaryOwner ? ' (protected owner)' : ''}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="field">
+            <label htmlFor="guest-dm-duration">Expires</label>
+            <select
+              id="guest-dm-duration"
+              className="input"
+              value={duration}
+              onChange={(event) => setDuration(event.target.value as GrantDurationPreset)}
+            >
+              <option value="2h">In 2 hours</option>
+              <option value="24h">In 24 hours</option>
+              <option value="7d">In 7 days</option>
+            </select>
+          </div>
+        </div>
+
+        <fieldset className="space-y-1">
+          <legend className="text-[10px] font-bold uppercase tracking-wide text-secondary">Scopes</legend>
+          {(['dm', 'membership_admin', 'destructive'] as GuestDmGrantScope[]).map((scope) => (
+            <label key={scope} className="flex items-center gap-2 text-[12px] text-slate-300">
+              <input
+                type="checkbox"
+                checked={scopes.includes(scope)}
+                onChange={(event) => toggleScope(scope, event.target.checked)}
+              />
+              <span>{GRANT_SCOPE_LABEL[scope]}</span>
+            </label>
+          ))}
+        </fieldset>
+
+        <div className="cf-inset border-amber-500/25 rounded px-3 py-2 space-y-1" aria-label="Guest DM grant preview">
+          <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest m-0">Preview</p>
+          <p className="text-[12px] text-slate-300 m-0">
+            {selectedMember ? memberDisplayName(selectedMember) : 'Selected member'} receives {scopes.map((scope) => GRANT_SCOPE_LABEL[scope]).join(', ')}
+            {' '}until {new Date(previewExpiry).toLocaleString()}.
+          </p>
+          <p className={`text-[11px] m-0 ${safeDefault ? 'text-emerald-400' : 'text-amber-300'}`}>
+            {safeDefault
+              ? 'Safe default: membership admin and destructive actions stay excluded.'
+              : 'Elevated scopes selected: use only for trusted co-DMs.'}
+          </p>
+        </div>
+
+        <Btn className="!min-h-0 !py-1.5 text-xs" onClick={createGrant} disabled={creating || selectedUserId === ''}>
+          {creating ? 'Granting…' : 'Grant temporary DM'}
+        </Btn>
+      </div>
+
+      <div className="space-y-1.5">
+        {grants.length === 0 ? (
+          <p className="text-muted text-[11px] m-0">No temporary DM grants yet.</p>
+        ) : (
+          grants.map((grant) => {
+            const status = grantStatus(grant);
+            const activeOrUpcoming = status === 'active' || status === 'upcoming';
+            return (
+              <div key={grant.id} className="flex items-center gap-2 flex-wrap text-[12px] border-t border-slate-800 pt-2">
+                <span className="font-semibold text-white">{grant.displayName || grant.username || `User ${grant.granteeUserId}`}</span>
+                <span className="text-secondary">{status}</span>
+                <span className="text-muted">until {new Date(grant.expiresAt).toLocaleString()}</span>
+                <span className="text-muted">{grant.scopes.map((scope) => GRANT_SCOPE_LABEL[scope]).join(', ')}</span>
+                {activeOrUpcoming && (
+                  <button
+                    type="button"
+                    className="text-[12px] text-secondary hover:text-rose-400 ml-auto"
+                    disabled={mutatingGrantId === grant.id}
+                    onClick={() => void revokeGrant(grant.id)}
+                  >
+                    {mutatingGrantId === grant.id ? 'Revoking…' : 'Revoke'}
+                  </button>
+                )}
+              </div>
+            );
+          })
+        )}
+      </div>
+    </Card>
+  );
+}
+
 function ReadOnlyMemberTable({ members }: { members: CampaignMember[] }) {
   const { t } = useTranslation();
   if (members.length === 0) return <EmptyState icon="shield" title={t('admin.empty.noMembers')} />;
@@ -988,6 +1228,7 @@ function MemberRow({
       <div className="min-w-0">
         <p className="text-[13.5px] m-0 flex items-center gap-1.5">
           {member.displayName || member.username}
+          {member.primaryOwner && <span className="text-[10px] text-amber-300">protected owner</span>}
           {member.disabled && <span className="text-[10px] text-rose-400">disabled</span>}
         </p>
         <p className="text-muted text-[11px] m-0">{character?.name || 'no character linked'}</p>
@@ -997,8 +1238,9 @@ function MemberRow({
         className="cf-select !min-h-0 !py-1 text-xs"
         style={{ width: 96 }}
         value={member.role}
-        disabled={savingRole}
+        disabled={savingRole || member.primaryOwner}
         aria-label={memberRoleControlLabel(name)}
+        title={member.primaryOwner ? 'Protected campaign owner cannot be demoted.' : undefined}
         onChange={(e) => changeRole(e.target.value as Role)}
       >
         <option value="dm" disabled={member.disabled}>dm</option>
@@ -1033,6 +1275,8 @@ function MemberRow({
         type="button"
         className="text-[12px] text-secondary hover:text-rose-400"
         aria-label={memberRemoveLabel(name)}
+        disabled={member.primaryOwner}
+        title={member.primaryOwner ? 'Protected campaign owner cannot be removed.' : undefined}
         onClick={() => setConfirmingRemove(true)}
       >
         Remove

@@ -2727,6 +2727,54 @@ function migrateAiScribeSessionScope499(sqlite: Database.Database): void {
   `);
 }
 
+/**
+ * Issue #545: protected campaign owner plus temporary guest/co-DM grants.
+ *
+ * Existing campaigns did not record their owner separately from the mutable DM
+ * role. On upgrade, mark the earliest DM seat in each campaign as primary owner
+ * so ordinary co-DM role edits/removals can no longer orphan the original
+ * authority path. The guest grant table is new and idempotent.
+ */
+function migrateGuestDmHandoff545(sqlite: Database.Database): void {
+  const hasMembersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaign_members'")
+    .get();
+  if (hasMembersTable) {
+    const columns = sqlite.prepare('PRAGMA table_info(campaign_members)').all() as Array<{ name: string }>;
+    if (!columns.some((c) => c.name === 'is_primary_owner')) {
+      sqlite.exec('ALTER TABLE campaign_members ADD COLUMN is_primary_owner INTEGER NOT NULL DEFAULT 0');
+      sqlite.exec(`
+        UPDATE campaign_members
+        SET is_primary_owner = 1
+        WHERE id IN (
+          SELECT MIN(id)
+          FROM campaign_members
+          WHERE role = 'dm'
+          GROUP BY campaign_id
+        )
+      `);
+    }
+  }
+
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS campaign_guest_dm_grants (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+      grantee_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      granted_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      scopes TEXT NOT NULL DEFAULT '["dm"]',
+      starts_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      revoked_at TEXT,
+      handed_back_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_guest_dm_grants_active
+      ON campaign_guest_dm_grants(campaign_id, grantee_user_id, starts_at, expires_at);
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
   { name: '0001_users_oidc', run: migrateUsersTableForOidc },
   { name: '0002_campaigns_rule_system', run: migrateCampaignsTableForRuleSystem },
@@ -2832,6 +2880,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0103_combatants_statblock_json', run: migrateCombatantsTableForStatblockJson },
   { name: '0104_campaign_library_monsters', run: migrateCampaignLibraryMonstersTable },
   { name: '0105_campaign_library_monsters_fk', run: migrateCampaignLibraryMonstersForeignKeys },
+  { name: '0106_guest_dm_handoff_545', run: migrateGuestDmHandoff545 },
 ];
 
 /**

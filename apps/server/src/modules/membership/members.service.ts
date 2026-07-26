@@ -1,10 +1,17 @@
-import { BadRequestException, ConflictException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { and, count, eq } from 'drizzle-orm';
 import type { z } from 'zod';
-import { MemberCreate, MemberUpdate } from '@campfire/schema';
-import type { CampaignMember } from '@campfire/schema';
+import { GuestDmGrantCreate, MemberCreate, MemberUpdate } from '@campfire/schema';
+import type { CampaignMember, GuestDmGrant, GuestDmGrantScope } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { campaignMembers, campaigns, users, characters, participantSupportPreferences } from '../../db/schema';
+import {
+  campaignGuestDmGrants,
+  campaignMembers,
+  campaigns,
+  users,
+  characters,
+  participantSupportPreferences,
+} from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -14,7 +21,9 @@ import type { RequestUser } from '../../common/user.types';
 
 type MemberCreateInput = z.infer<typeof MemberCreate>;
 type MemberUpdateInput = z.infer<typeof MemberUpdate>;
+type GuestDmGrantCreateInput = z.infer<typeof GuestDmGrantCreate>;
 type SyncDb = DrizzleDb | Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
+const MAX_GUEST_DM_GRANT_MS = 30 * 24 * 60 * 60 * 1000;
 
 /**
  * SQLITE_CONSTRAINT_* on a unique-index race (issue #819 exclusive character seat).
@@ -51,6 +60,7 @@ export class MembersService {
         userId: campaignMembers.userId,
         role: campaignMembers.role,
         characterId: campaignMembers.characterId,
+        primaryOwner: campaignMembers.primaryOwner,
         createdAt: campaignMembers.createdAt,
         updatedAt: campaignMembers.updatedAt,
         username: users.username,
@@ -67,6 +77,7 @@ export class MembersService {
       userId: r.userId,
       role: r.role as CampaignMember['role'],
       characterId: r.characterId,
+      primaryOwner: r.primaryOwner,
       username: r.username ?? '',
       displayName: r.displayName ?? '',
       disabled: r.disabled ?? true,
@@ -101,6 +112,16 @@ export class MembersService {
       .get()?.value ?? 0;
   }
 
+  private primaryOwnerCountTx(tx: SyncDb, campaignId: number): number {
+    return (
+      tx
+        .select({ value: count() })
+        .from(campaignMembers)
+        .where(and(eq(campaignMembers.campaignId, campaignId), eq(campaignMembers.primaryOwner, true)))
+        .get()?.value ?? 0
+    );
+  }
+
   private assignableUserTx(tx: SyncDb, userId: number): typeof users.$inferSelect {
     const user = tx.select().from(users).where(eq(users.id, userId)).limit(1).get();
     if (!user) throw new NotFoundException(`User ${userId} not found`);
@@ -116,7 +137,7 @@ export class MembersService {
     this.db.transaction((tx) => {
       this.assignableUserTx(tx, userId);
       tx.insert(campaignMembers)
-        .values({ campaignId, userId, role: 'dm', characterId: null, createdAt: ts, updatedAt: ts })
+        .values({ campaignId, userId, role: 'dm', characterId: null, primaryOwner: true, createdAt: ts, updatedAt: ts })
         .onConflictDoNothing()
         .run();
     });
@@ -135,7 +156,7 @@ export class MembersService {
   addCreatorAsDmTx(tx: SyncDb, campaignId: number, userId: number, ts: string): void {
     this.assignableUserTx(tx, userId);
     tx.insert(campaignMembers)
-      .values({ campaignId, userId, role: 'dm', characterId: null, createdAt: ts, updatedAt: ts })
+      .values({ campaignId, userId, role: 'dm', characterId: null, primaryOwner: true, createdAt: ts, updatedAt: ts })
       .onConflictDoNothing()
       .run();
   }
@@ -334,6 +355,227 @@ export class MembersService {
     });
   }
 
+  private parseGrantScopes(raw: string): GuestDmGrantScope[] {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (!Array.isArray(parsed)) return ['dm'];
+      const scopes = parsed.filter(
+        (scope): scope is GuestDmGrantScope =>
+          scope === 'dm' || scope === 'membership_admin' || scope === 'destructive',
+      );
+      return scopes.length > 0 ? [...new Set(scopes)] : ['dm'];
+    } catch {
+      return ['dm'];
+    }
+  }
+
+  private async emitGrantRoleRefresh(campaignId: number, userId: number, role: CampaignMember['role']): Promise<void> {
+    const row = await this.db
+      .select({ id: campaignMembers.id })
+      .from(campaignMembers)
+      .where(and(eq(campaignMembers.campaignId, campaignId), eq(campaignMembers.userId, userId)))
+      .limit(1);
+    if (!row[0]) return;
+    this.events.emit({
+      type: 'membership.updated',
+      campaignId,
+      userId: String(userId),
+      memberId: row[0].id,
+      role,
+    });
+  }
+
+  async listGuestDmGrants(campaignId: number): Promise<GuestDmGrant[]> {
+    const rows = await this.db
+      .select({
+        grant: campaignGuestDmGrants,
+        username: users.username,
+        displayName: users.displayName,
+      })
+      .from(campaignGuestDmGrants)
+      .leftJoin(users, eq(campaignGuestDmGrants.granteeUserId, users.id))
+      .where(eq(campaignGuestDmGrants.campaignId, campaignId));
+
+    return rows.map((row) => ({
+      id: row.grant.id,
+      campaignId: row.grant.campaignId,
+      granteeUserId: row.grant.granteeUserId,
+      grantedByUserId: row.grant.grantedByUserId,
+      scopes: this.parseGrantScopes(row.grant.scopes),
+      startsAt: row.grant.startsAt,
+      expiresAt: row.grant.expiresAt,
+      revokedAt: row.grant.revokedAt,
+      handedBackAt: row.grant.handedBackAt,
+      username: row.username ?? '',
+      displayName: row.displayName ?? '',
+      createdAt: row.grant.createdAt,
+      updatedAt: row.grant.updatedAt,
+    }));
+  }
+
+  async createGuestDmGrant(
+    campaignId: number,
+    input: GuestDmGrantCreateInput,
+    actor: RequestUser,
+  ): Promise<GuestDmGrant> {
+    const ts = nowIso();
+    const startsAt = input.startsAt ?? ts;
+    const startsAtMs = new Date(startsAt).getTime();
+    const expiresAtMs = new Date(input.expiresAt).getTime();
+    const nowMs = Date.now();
+    if (!Number.isFinite(startsAtMs) || !Number.isFinite(expiresAtMs)) {
+      throw new BadRequestException('Grant dates must be valid ISO timestamps');
+    }
+    if (expiresAtMs <= startsAtMs || expiresAtMs <= nowMs) {
+      throw new BadRequestException('Guest DM grant must expire in the future after its start time');
+    }
+    if (expiresAtMs - startsAtMs > MAX_GUEST_DM_GRANT_MS) {
+      throw new BadRequestException('Guest DM grants cannot exceed 30 days');
+    }
+
+    const scopes = [...new Set(input.scopes ?? ['dm'])] as GuestDmGrantScope[];
+    const row = this.db.transaction((tx) => {
+      const member = tx
+        .select({ role: campaignMembers.role, disabled: users.disabled })
+        .from(campaignMembers)
+        .innerJoin(users, eq(campaignMembers.userId, users.id))
+        .where(and(eq(campaignMembers.campaignId, campaignId), eq(campaignMembers.userId, input.granteeUserId)))
+        .limit(1)
+        .get();
+      if (!member) throw new BadRequestException('Guest DM grants can only target an existing campaign member');
+      if (member.disabled) throw new BadRequestException('Cannot grant guest DM authority to a disabled account');
+
+      const grantedByUserId = Number(actor.id);
+      return tx
+        .insert(campaignGuestDmGrants)
+        .values({
+          campaignId,
+          granteeUserId: input.granteeUserId,
+          grantedByUserId: Number.isInteger(grantedByUserId) ? grantedByUserId : null,
+          scopes: JSON.stringify(scopes),
+          startsAt,
+          expiresAt: input.expiresAt,
+          revokedAt: null,
+          handedBackAt: null,
+          createdAt: ts,
+          updatedAt: ts,
+        })
+        .returning()
+        .get();
+    });
+
+    await this.audit.log({
+      actor: auditActor(actor),
+      actorRole: 'dm',
+      action: 'guest_dm_grant.create',
+      entityType: 'campaign_guest_dm_grant',
+      entityId: row.id,
+      campaignId,
+      detail: JSON.stringify({ granteeUserId: input.granteeUserId, scopes, startsAt, expiresAt: input.expiresAt }),
+    });
+
+    if (scopes.includes('dm') && startsAtMs <= nowMs) {
+      await this.emitGrantRoleRefresh(campaignId, input.granteeUserId, 'dm');
+    }
+
+    const [full] = (await this.listGuestDmGrants(campaignId)).filter((grant) => grant.id === row.id);
+    return full;
+  }
+
+  async revokeGuestDmGrant(campaignId: number, grantId: number, actor: RequestUser): Promise<GuestDmGrant> {
+    const ts = nowIso();
+    const row = this.db.transaction((tx) => {
+      const existing = tx
+        .select({ grant: campaignGuestDmGrants, memberRole: campaignMembers.role })
+        .from(campaignGuestDmGrants)
+        .leftJoin(
+          campaignMembers,
+          and(
+            eq(campaignMembers.campaignId, campaignGuestDmGrants.campaignId),
+            eq(campaignMembers.userId, campaignGuestDmGrants.granteeUserId),
+          ),
+        )
+        .where(and(eq(campaignGuestDmGrants.id, grantId), eq(campaignGuestDmGrants.campaignId, campaignId)))
+        .limit(1)
+        .get();
+      if (!existing) throw new NotFoundException(`Guest DM grant ${grantId} not found`);
+      if (existing.grant.revokedAt || existing.grant.handedBackAt) return existing;
+      tx.update(campaignGuestDmGrants)
+        .set({ revokedAt: ts, updatedAt: ts })
+        .where(and(eq(campaignGuestDmGrants.id, grantId), eq(campaignGuestDmGrants.campaignId, campaignId)))
+        .run();
+      return { ...existing, grant: { ...existing.grant, revokedAt: ts, updatedAt: ts } };
+    });
+
+    await this.audit.log({
+      actor: auditActor(actor),
+      actorRole: 'dm',
+      action: 'guest_dm_grant.revoke',
+      entityType: 'campaign_guest_dm_grant',
+      entityId: grantId,
+      campaignId,
+      detail: JSON.stringify({ granteeUserId: row.grant.granteeUserId }),
+    });
+
+    await this.emitGrantRoleRefresh(
+      campaignId,
+      row.grant.granteeUserId,
+      (row.memberRole as CampaignMember['role'] | null) ?? 'viewer',
+    );
+    const [full] = (await this.listGuestDmGrants(campaignId)).filter((grant) => grant.id === grantId);
+    return full;
+  }
+
+  async handBackGuestDmGrant(campaignId: number, grantId: number, actor: RequestUser): Promise<GuestDmGrant> {
+    const actorUserId = Number(actor.id);
+    if (!Number.isInteger(actorUserId)) throw new ForbiddenException('Only the grantee can hand back a guest DM grant');
+
+    const ts = nowIso();
+    const row = this.db.transaction((tx) => {
+      const existing = tx
+        .select({ grant: campaignGuestDmGrants, memberRole: campaignMembers.role })
+        .from(campaignGuestDmGrants)
+        .leftJoin(
+          campaignMembers,
+          and(
+            eq(campaignMembers.campaignId, campaignGuestDmGrants.campaignId),
+            eq(campaignMembers.userId, campaignGuestDmGrants.granteeUserId),
+          ),
+        )
+        .where(and(eq(campaignGuestDmGrants.id, grantId), eq(campaignGuestDmGrants.campaignId, campaignId)))
+        .limit(1)
+        .get();
+      if (!existing) throw new NotFoundException(`Guest DM grant ${grantId} not found`);
+      if (existing.grant.granteeUserId !== actorUserId) {
+        throw new ForbiddenException('Only the grantee can hand back a guest DM grant');
+      }
+      if (existing.grant.revokedAt || existing.grant.handedBackAt) return existing;
+      tx.update(campaignGuestDmGrants)
+        .set({ handedBackAt: ts, updatedAt: ts })
+        .where(and(eq(campaignGuestDmGrants.id, grantId), eq(campaignGuestDmGrants.campaignId, campaignId)))
+        .run();
+      return { ...existing, grant: { ...existing.grant, handedBackAt: ts, updatedAt: ts } };
+    });
+
+    await this.audit.log({
+      actor: auditActor(actor),
+      actorRole: (row.memberRole as CampaignMember['role'] | null) ?? 'player',
+      action: 'guest_dm_grant.handback',
+      entityType: 'campaign_guest_dm_grant',
+      entityId: grantId,
+      campaignId,
+      detail: JSON.stringify({ granteeUserId: row.grant.granteeUserId }),
+    });
+
+    await this.emitGrantRoleRefresh(
+      campaignId,
+      row.grant.granteeUserId,
+      (row.memberRole as CampaignMember['role'] | null) ?? 'viewer',
+    );
+    const [full] = (await this.listGuestDmGrants(campaignId)).filter((grant) => grant.id === grantId);
+    return full;
+  }
+
   async create(campaignId: number, input: MemberCreateInput, actor: RequestUser): Promise<CampaignMember> {
     const ts = nowIso();
     let seatResolution: CharacterSeatResolution | null = null;
@@ -368,6 +610,7 @@ export class MembersService {
             userId: input.userId,
             role: input.role,
             characterId: input.characterId ?? null,
+            primaryOwner: input.role === 'dm' && this.primaryOwnerCountTx(tx, campaignId) === 0,
             createdAt: ts,
             updatedAt: ts,
           })
@@ -468,6 +711,9 @@ export class MembersService {
           input.role !== undefined && input.role !== 'dm' && row.member.role === 'dm' && !row.disabled;
         if (demotingUsableDm && this.usableDmCountTx(tx, campaignId) <= 1) {
           throw new ConflictException('Cannot demote the last dm of this campaign');
+        }
+        if (demotingUsableDm && row.member.primaryOwner) {
+          throw new ConflictException('Cannot demote the protected campaign owner');
         }
 
         // Preserve the established error precedence: last-DM conflict before an
@@ -605,6 +851,14 @@ export class MembersService {
         .limit(1)
         .get();
       if (!row) throw new NotFoundException(`Member ${memberId} not found`);
+
+      if (row.member.primaryOwner) {
+        throw new ConflictException(
+          opts?.selfLeave
+            ? 'You are the protected campaign owner — grant temporary DM authority or add a permanent co-DM before leaving'
+            : 'Cannot remove the protected campaign owner',
+        );
+      }
 
       if (row.member.role === 'dm' && !row.disabled && this.usableDmCountTx(tx, campaignId) <= 1) {
         throw new ConflictException(

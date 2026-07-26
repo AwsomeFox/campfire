@@ -1,8 +1,8 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, eq } from 'drizzle-orm';
-import type { Role } from '@campfire/schema';
+import { and, eq, gt, isNull, lte } from 'drizzle-orm';
+import type { GuestDmGrantScope, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { campaignMembers } from '../../db/schema';
+import { campaignGuestDmGrants, campaignMembers } from '../../db/schema';
 import { minRole, type RequestUser } from '../../common/user.types';
 
 /**
@@ -31,6 +31,17 @@ export class RoleResolver {
   constructor(@Inject(DB) private readonly db: DrizzleDb) {}
 
   async effectiveRole(user: RequestUser, campaignId: number): Promise<Role | null> {
+    const role = await this.baseOrGrantedEffectiveRole(user, campaignId);
+    if (!role) return null;
+
+    const tokenContext = user.tokenContext;
+    if (!tokenContext) return role;
+
+    if (tokenContext.campaignId !== null && tokenContext.campaignId !== campaignId) return null;
+    return minRole(tokenContext.scope, role);
+  }
+
+  async permanentEffectiveRole(user: RequestUser, campaignId: number): Promise<Role | null> {
     const role = await this.baseEffectiveRole(user, campaignId);
     if (!role) return null;
 
@@ -64,6 +75,61 @@ export class RoleResolver {
     return row ? (row.role as Role) : null;
   }
 
+  private parseScopes(raw: string): GuestDmGrantScope[] {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (!Array.isArray(parsed)) return [];
+      return parsed.filter(
+        (scope): scope is GuestDmGrantScope =>
+          scope === 'dm' || scope === 'membership_admin' || scope === 'destructive',
+      );
+    } catch {
+      return [];
+    }
+  }
+
+  async activeGrantHasScope(
+    user: RequestUser,
+    campaignId: number,
+    scope: GuestDmGrantScope,
+  ): Promise<boolean> {
+    if (user.devRole) return user.devRole === 'dm';
+
+    const tokenContext = user.tokenContext;
+    if (tokenContext && (tokenContext.campaignId !== null && tokenContext.campaignId !== campaignId)) return false;
+    if (tokenContext && minRole(tokenContext.scope, 'dm') !== 'dm') return false;
+
+    const numericId = Number(user.id);
+    if (!Number.isInteger(numericId)) return false;
+
+    const baseRole = await this.baseEffectiveRole(user, campaignId);
+    if (!baseRole) return false;
+
+    const now = new Date().toISOString();
+    const grants = await this.db
+      .select({ scopes: campaignGuestDmGrants.scopes })
+      .from(campaignGuestDmGrants)
+      .where(
+        and(
+          eq(campaignGuestDmGrants.campaignId, campaignId),
+          eq(campaignGuestDmGrants.granteeUserId, numericId),
+          lte(campaignGuestDmGrants.startsAt, now),
+          gt(campaignGuestDmGrants.expiresAt, now),
+          isNull(campaignGuestDmGrants.revokedAt),
+          isNull(campaignGuestDmGrants.handedBackAt),
+        ),
+      );
+
+    return grants.some((grant) => this.parseScopes(grant.scopes).includes(scope));
+  }
+
+  private async baseOrGrantedEffectiveRole(user: RequestUser, campaignId: number): Promise<Role | null> {
+    const baseRole = await this.baseEffectiveRole(user, campaignId);
+    if (!baseRole) return null;
+    if (baseRole === 'dm') return 'dm';
+    return (await this.activeGrantHasScope(user, campaignId, 'dm')) ? 'dm' : baseRole;
+  }
+
   /**
    * Whether this caller is the dm of at least one campaign — the only
    * non-admin context that legitimately needs the server-wide user directory
@@ -91,10 +157,36 @@ export class RoleResolver {
       .from(campaignMembers)
       .where(and(eq(campaignMembers.userId, numericId), eq(campaignMembers.role, 'dm')));
 
-    if (tokenContext?.campaignId != null) {
-      return rows.some((r) => r.campaignId === tokenContext.campaignId);
-    }
-    return rows.length > 0;
+    const hasPermanentDm = tokenContext?.campaignId != null
+      ? rows.some((r) => r.campaignId === tokenContext.campaignId)
+      : rows.length > 0;
+    if (hasPermanentDm) return true;
+
+    const now = new Date().toISOString();
+    const grantRows = await this.db
+      .select({ campaignId: campaignGuestDmGrants.campaignId, scopes: campaignGuestDmGrants.scopes })
+      .from(campaignGuestDmGrants)
+      .innerJoin(
+        campaignMembers,
+        and(
+          eq(campaignMembers.campaignId, campaignGuestDmGrants.campaignId),
+          eq(campaignMembers.userId, campaignGuestDmGrants.granteeUserId),
+        ),
+      )
+      .where(
+        and(
+          eq(campaignGuestDmGrants.granteeUserId, numericId),
+          lte(campaignGuestDmGrants.startsAt, now),
+          gt(campaignGuestDmGrants.expiresAt, now),
+          isNull(campaignGuestDmGrants.revokedAt),
+          isNull(campaignGuestDmGrants.handedBackAt),
+        ),
+      );
+    return grantRows.some(
+      (grant) =>
+        (tokenContext?.campaignId == null || grant.campaignId === tokenContext.campaignId) &&
+        this.parseScopes(grant.scopes).includes('dm'),
+    );
   }
 
   /**

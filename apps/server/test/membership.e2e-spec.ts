@@ -6,6 +6,7 @@ describe('membership + effective roles (e2e, real cookie sessions)', () => {
   let adminAgent: ReturnType<typeof request.agent>;
   let userA: ReturnType<typeof request.agent>;
   let userB: ReturnType<typeof request.agent>;
+  let userAId: number;
   let userBId: number;
   let campaignId: number;
 
@@ -16,8 +17,9 @@ describe('membership + effective roles (e2e, real cookie sessions)', () => {
     adminAgent = request.agent(server);
     await adminAgent.post('/api/v1/auth/setup').send({ username: 'root-admin', password: 'admin-password-1' });
 
-    await adminAgent.post('/api/v1/users').send({ username: 'user-a', password: 'password-a-1', serverRole: 'user' });
+    const createA = await adminAgent.post('/api/v1/users').send({ username: 'user-a', password: 'password-a-1', serverRole: 'user' });
     const createB = await adminAgent.post('/api/v1/users').send({ username: 'user-b', password: 'password-b-1', serverRole: 'user' });
+    userAId = createA.body.id;
     userBId = createB.body.id;
 
     userA = request.agent(server);
@@ -97,6 +99,127 @@ describe('membership + effective roles (e2e, real cookie sessions)', () => {
       .send({ role: 'player', characterId: 999999 });
     expect(demoteWithBadCharacter.status).toBe(409);
     expect(demoteWithBadCharacter.body.message).toBe('Cannot demote the last dm of this campaign');
+  });
+
+  describe('Issue #545: protected owner and temporary guest DM handoff', () => {
+    let ownerMemberId: number;
+
+    it('marks the creator as protected owner and blocks ordinary co-DM demotion/removal', async () => {
+      const createCoDm = await adminAgent
+        .post('/api/v1/users')
+        .send({ username: 'codm-545', password: 'password-codm-545', serverRole: 'user' });
+      expect(createCoDm.status).toBe(201);
+      const coDmId = createCoDm.body.id;
+      const coDm = request.agent(ctx.app.getHttpServer());
+      await coDm.post('/api/v1/auth/login').send({ username: 'codm-545', password: 'password-codm-545' });
+
+      const addCoDm = await userA
+        .post(`/api/v1/campaigns/${campaignId}/members`)
+        .send({ userId: coDmId, role: 'dm' });
+      expect(addCoDm.status).toBe(201);
+
+      let membersRes = await userA.get(`/api/v1/campaigns/${campaignId}/members`);
+      expect(membersRes.status).toBe(200);
+      const owner = membersRes.body.find((m: { userId: number }) => m.userId === userAId);
+      expect(owner).toMatchObject({ role: 'dm', primaryOwner: true });
+      ownerMemberId = owner.id;
+
+      const demoteOwner = await coDm
+        .patch(`/api/v1/campaigns/${campaignId}/members/${ownerMemberId}`)
+        .send({ role: 'player' });
+      expect(demoteOwner.status).toBe(409);
+      expect(demoteOwner.body.message).toBe('Cannot demote the protected campaign owner');
+
+      const removeOwner = await coDm.delete(`/api/v1/campaigns/${campaignId}/members/${ownerMemberId}`);
+      expect(removeOwner.status).toBe(409);
+      expect(removeOwner.body.message).toBe('Cannot remove the protected campaign owner');
+
+      membersRes = await userA.get(`/api/v1/campaigns/${campaignId}/members`);
+      const stillOwner = membersRes.body.find((m: { id: number }) => m.id === ownerMemberId);
+      expect(stillOwner).toMatchObject({ role: 'dm', primaryOwner: true });
+    });
+
+    it('default guest DM grant can run play, but cannot manage members or trash the campaign, and expires', async () => {
+      const createGuest = await adminAgent
+        .post('/api/v1/users')
+        .send({ username: 'guest-545', password: 'password-guest-545', serverRole: 'user' });
+      expect(createGuest.status).toBe(201);
+      const guestId = createGuest.body.id;
+      const guest = request.agent(ctx.app.getHttpServer());
+      await guest.post('/api/v1/auth/login').send({ username: 'guest-545', password: 'password-guest-545' });
+
+      const addGuest = await userA
+        .post(`/api/v1/campaigns/${campaignId}/members`)
+        .send({ userId: guestId, role: 'player' });
+      expect(addGuest.status).toBe(201);
+
+      const expiresAt = new Date(Date.now() + 750).toISOString();
+      const grant = await userA
+        .post(`/api/v1/campaigns/${campaignId}/members/grants`)
+        .send({ granteeUserId: guestId, expiresAt });
+      expect(grant.status).toBe(201);
+      expect(grant.body.scopes).toEqual(['dm']);
+      expect(grant.body.revokedAt).toBeNull();
+
+      const meDuringGrant = await guest.get('/api/v1/me');
+      expect(meDuringGrant.body.memberships.find((m: { campaignId: number }) => m.campaignId === campaignId).role).toBe('dm');
+
+      const canRunPlay = await guest.post(`/api/v1/campaigns/${campaignId}/quests`).send({ title: 'Guest DM scene' });
+      expect(canRunPlay.status).toBe(201);
+
+      const cannotManageMembers = await guest
+        .patch(`/api/v1/campaigns/${campaignId}/members/${ownerMemberId}`)
+        .send({ role: 'player' });
+      expect(cannotManageMembers.status).toBe(403);
+
+      const cannotTrash = await guest.delete(`/api/v1/campaigns/${campaignId}`);
+      expect(cannotTrash.status).toBe(403);
+
+      await new Promise((resolve) => setTimeout(resolve, 900));
+
+      const meAfterExpiry = await guest.get('/api/v1/me');
+      expect(meAfterExpiry.body.memberships.find((m: { campaignId: number }) => m.campaignId === campaignId).role).toBe('player');
+      const afterExpiry = await guest.post(`/api/v1/campaigns/${campaignId}/quests`).send({ title: 'Expired scene' });
+      expect(afterExpiry.status).toBe(403);
+    });
+
+    it('owner revoke and grantee handback end temporary authority early', async () => {
+      const createTemp = await adminAgent
+        .post('/api/v1/users')
+        .send({ username: 'handback-545', password: 'password-handback-545', serverRole: 'user' });
+      expect(createTemp.status).toBe(201);
+      const tempId = createTemp.body.id;
+      const temp = request.agent(ctx.app.getHttpServer());
+      await temp.post('/api/v1/auth/login').send({ username: 'handback-545', password: 'password-handback-545' });
+
+      const addTemp = await userA
+        .post(`/api/v1/campaigns/${campaignId}/members`)
+        .send({ userId: tempId, role: 'player' });
+      expect(addTemp.status).toBe(201);
+
+      const longExpiry = () => new Date(Date.now() + 60_000).toISOString();
+      const revocable = await userA
+        .post(`/api/v1/campaigns/${campaignId}/members/grants`)
+        .send({ granteeUserId: tempId, expiresAt: longExpiry() });
+      expect(revocable.status).toBe(201);
+      expect((await temp.post(`/api/v1/campaigns/${campaignId}/quests`).send({ title: 'Before revoke' })).status).toBe(201);
+
+      const revoked = await userA.post(`/api/v1/campaigns/${campaignId}/members/grants/${revocable.body.id}/revoke`);
+      expect(revoked.status).toBe(201);
+      expect(revoked.body.revokedAt).toEqual(expect.any(String));
+      expect((await temp.post(`/api/v1/campaigns/${campaignId}/quests`).send({ title: 'After revoke' })).status).toBe(403);
+
+      const handbackGrant = await userA
+        .post(`/api/v1/campaigns/${campaignId}/members/grants`)
+        .send({ granteeUserId: tempId, expiresAt: longExpiry() });
+      expect(handbackGrant.status).toBe(201);
+      expect((await temp.post(`/api/v1/campaigns/${campaignId}/quests`).send({ title: 'Before handback' })).status).toBe(201);
+
+      const handedBack = await temp.post(`/api/v1/campaigns/${campaignId}/members/grants/${handbackGrant.body.id}/handback`);
+      expect(handedBack.status).toBe(201);
+      expect(handedBack.body.handedBackAt).toEqual(expect.any(String));
+      expect((await temp.post(`/api/v1/campaigns/${campaignId}/quests`).send({ title: 'After handback' })).status).toBe(403);
+    });
   });
 
   it('GET /campaigns scoping: everyone — the server admin included — sees only campaigns they are a member of', async () => {

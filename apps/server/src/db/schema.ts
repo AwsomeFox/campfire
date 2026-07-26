@@ -610,6 +610,27 @@ export const campaignMembers = sqliteTable('campaign_members', {
   userId: integer('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
   role: text('role').notNull(),
   characterId: integer('character_id'),
+  // Issue #545: protected campaign owner/creator marker. This is a seat-level
+  // invariant, not a role; temporary guest DMs and ordinary co-DMs cannot remove
+  // or demote it.
+  primaryOwner: integer('is_primary_owner', { mode: 'boolean' }).notNull().default(false),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+// Issue #545: time-bounded guest/co-DM authority. `scopes` is a JSON string[]
+// using GuestDmGrantScope from @campfire/schema; active grants elevate a member
+// to DM only while unrevoked, unhanded-back and within [startsAt, expiresAt).
+export const campaignGuestDmGrants = sqliteTable('campaign_guest_dm_grants', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  campaignId: integer('campaign_id').notNull().references(() => campaigns.id, { onDelete: 'cascade' }),
+  granteeUserId: integer('grantee_user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  grantedByUserId: integer('granted_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+  scopes: text('scopes').notNull().default('["dm"]'),
+  startsAt: text('starts_at').notNull(),
+  expiresAt: text('expires_at').notNull(),
+  revokedAt: text('revoked_at'),
+  handedBackAt: text('handed_back_at'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });

@@ -71,6 +71,7 @@ describe('campaign purge cascade (real SQLite, no orphan rows)', () => {
         'proposals',
         'encounters',
         'attachments',
+        'campaign_guest_dm_grants',
         'campaign_members',
         'api_tokens',
       ];
@@ -195,7 +196,7 @@ describe('campaign purge cascade (real SQLite, no orphan rows)', () => {
       const campaignScoped = [
         'characters', 'quests', 'story_arcs', 'story_beats', 'timeline_events', 'timeline_calendars',
         'session_zero', 'npcs', 'factions', 'locations', 'sessions', 'session_shares', 'scheduled_sessions',
-        'notes', 'comments', 'entity_revisions', 'campaign_members', 'campaign_invites', 'api_tokens',
+        'notes', 'comments', 'entity_revisions', 'campaign_guest_dm_grants', 'campaign_members', 'campaign_invites', 'api_tokens',
         'proposals', 'attachments', 'encounters', 'dice_rolls', 'notifications', 'inventory_items',
         'party_treasury', 'ai_dm_seats',
       ];
