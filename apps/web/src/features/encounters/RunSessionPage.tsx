@@ -26,6 +26,7 @@ import type {
   Character,
   Combatant,
   CombatantKind,
+  ConditionInstance,
   CombatantStatblock as CombatantStatblockData,
   DifficultyBand,
   EncounterDifficulty,
@@ -193,6 +194,128 @@ const STATUS_TAG_CLASS: Record<string, string> = {
   running: 'tag tag-accent',
   ended: 'tag tag-outline',
 };
+
+type ConditionSourceOption = { id: number; name: string };
+type ConditionTiming = ConditionInstance['timing'];
+
+const CONDITION_TIMING_OPTIONS: Array<{ value: ConditionTiming; label: string }> = [
+  { value: 'none', label: 'Manual / until removed' },
+  { value: 'start-of-turn', label: 'Start of affected turn' },
+  { value: 'end-of-turn', label: 'End of affected turn' },
+];
+
+const SAVE_TIMING_OPTIONS: Array<{ value: ConditionTiming; label: string }> = [
+  { value: 'none', label: 'No repeat save' },
+  { value: 'start-of-turn', label: 'Start of affected turn' },
+  { value: 'end-of-turn', label: 'End of affected turn' },
+];
+
+type ConditionDraft = {
+  name: string;
+  source: string;
+  sourceCombatantId: string;
+  ruleEntryId: string;
+  durationRounds: string;
+  timing: ConditionTiming;
+  saveTiming: ConditionTiming;
+  saveAbility: string;
+  saveDc: string;
+  isConcentration: boolean;
+  syncConcentration: boolean;
+  stacks: string;
+  notes: string;
+};
+
+function emptyConditionDraft(sourceCombatantId: number | null): ConditionDraft {
+  return {
+    name: '',
+    source: '',
+    sourceCombatantId: sourceCombatantId == null ? '' : String(sourceCombatantId),
+    ruleEntryId: '',
+    durationRounds: '',
+    timing: 'end-of-turn',
+    saveTiming: 'none',
+    saveAbility: '',
+    saveDc: '',
+    isConcentration: false,
+    syncConcentration: true,
+    stacks: '1',
+    notes: '',
+  };
+}
+
+function conditionDraftFromInstance(instance: ConditionInstance): ConditionDraft {
+  return {
+    name: instance.name,
+    source: instance.source ?? '',
+    sourceCombatantId: instance.sourceCombatantId == null ? '' : String(instance.sourceCombatantId),
+    ruleEntryId: instance.ruleEntryId == null ? '' : String(instance.ruleEntryId),
+    durationRounds: instance.durationRounds == null ? '' : String(instance.durationRounds),
+    timing: instance.timing,
+    saveTiming: instance.saveTiming,
+    saveAbility: instance.saveAbility ?? '',
+    saveDc: instance.saveDc == null ? '' : String(instance.saveDc),
+    isConcentration: instance.isConcentration,
+    syncConcentration: false,
+    stacks: String(instance.stacks),
+    notes: instance.notes,
+  };
+}
+
+function parseOptionalPositiveInt(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const value = Number(trimmed);
+  return Number.isInteger(value) && value >= 1 ? value : null;
+}
+
+function makeConditionInstanceId(name: string, existingIds: ReadonlySet<string>): string {
+  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 18) || 'condition';
+  const stamp = Date.now().toString(36).slice(-6);
+  for (let i = 0; i < 100; i += 1) {
+    const suffix = i === 0 ? stamp : `${stamp}_${i}`;
+    const id = `ci_${slug}_${suffix}`.slice(0, 40);
+    if (!existingIds.has(id)) return id;
+  }
+  return `ci_${slug}_${Math.random().toString(36).slice(2, 8)}`.slice(0, 40);
+}
+
+function buildConditionInstance(
+  draft: ConditionDraft,
+  conditionSuggestions: readonly string[],
+  existingInstances: readonly ConditionInstance[],
+  existingId?: string,
+): ConditionInstance | null {
+  const name = draft.name.trim().slice(0, 40);
+  if (!name) return null;
+  const durationRounds = parseOptionalPositiveInt(draft.durationRounds);
+  const sourceCombatantValue = Number(draft.sourceCombatantId);
+  const ruleEntryValue = Number(draft.ruleEntryId);
+  const saveDcValue = Number(draft.saveDc);
+  const stacksValue = Number(draft.stacks);
+  return {
+    id: existingId ?? makeConditionInstanceId(name, new Set(existingInstances.map((i) => i.id))),
+    name,
+    ruleEntryId: Number.isInteger(ruleEntryValue) && ruleEntryValue > 0 ? ruleEntryValue : null,
+    source: draft.source.trim() ? draft.source.trim().slice(0, 160) : null,
+    sourceCombatantId: Number.isInteger(sourceCombatantValue) && sourceCombatantValue > 0 ? sourceCombatantValue : null,
+    durationRounds,
+    roundsRemaining: durationRounds,
+    timing: durationRounds == null ? 'none' : draft.timing,
+    saveTiming: draft.saveTiming,
+    saveDc: Number.isInteger(saveDcValue) && saveDcValue > 0 ? saveDcValue : null,
+    saveAbility: draft.saveAbility.trim() ? draft.saveAbility.trim().toUpperCase().slice(0, 24) : null,
+    isConcentration: draft.isConcentration,
+    stacks: Number.isInteger(stacksValue) ? Math.max(1, Math.min(99, stacksValue)) : 1,
+    notes: draft.notes.trim().slice(0, 300),
+    custom: !conditionSuggestions.some((s) => s.toLowerCase() === name.toLowerCase()),
+  };
+}
+
+function conditionSourceLabel(sourceCombatantId: number | null, options: readonly ConditionSourceOption[]): string | null {
+  if (sourceCombatantId == null) return null;
+  return options.find((o) => o.id === sourceCombatantId)?.name ?? `Combatant #${sourceCombatantId}`;
+}
 
 type EncounterGridPatch = Partial<
   Pick<
@@ -2060,6 +2183,8 @@ export default function RunSessionPage() {
               }
               busy={pendingCombatantIds.has(c.id)}
               conditionSuggestions={conditionSuggestions}
+              conditionSourceOptions={canDmWrite ? orderedCombatants.map((source) => ({ id: source.id, name: source.name })) : [{ id: c.id, name: c.name }]}
+              defaultConditionSourceCombatantId={currentCombatantId ?? c.id}
               ruleSystem={ruleSystem}
               onHpDelta={(delta) => {
                 const actorId = hpLogActorId(currentCombatantId, c.id);
@@ -2076,6 +2201,11 @@ export default function RunSessionPage() {
               onSetHpMax={(value) => patchCombatant(c.id, { hpMax: value })}
               onSetTokenSize={(size) => setTokenSize(c.id, size)}
               onPatchCombatant={(patch) => patchCombatant(c.id, patch)}
+              onPatchSourceTurnState={
+                canDmWrite || c.id === currentCombatantId
+                  ? (sourceCombatantId, patch) => patchCombatantTurnState(sourceCombatantId, patch)
+                  : undefined
+              }
               legendaryActions={c.legendaryActions}
               onUseLegendary={
                 canDmWrite && c.legendaryActions
@@ -4750,6 +4880,8 @@ function CombatantRow({
   onUseMonsterAction,
   busy,
   conditionSuggestions,
+  conditionSourceOptions,
+  defaultConditionSourceCombatantId,
   ruleSystem,
   onHpDelta,
   onSetTempHp,
@@ -4763,6 +4895,7 @@ function CombatantRow({
   onSetHpMax,
   onSetTokenSize,
   onPatchCombatant,
+  onPatchSourceTurnState,
   legendaryActions,
   onUseLegendary,
   onReleaseLegendary,
@@ -4800,6 +4933,10 @@ function CombatantRow({
   busy: boolean;
   /** Condition chips offered by the active campaign's rule-system adapter (issue #234). */
   conditionSuggestions: readonly string[];
+  /** Visible combatants that may be recorded as the source/caster of a condition (issue #423). */
+  conditionSourceOptions: readonly ConditionSourceOption[];
+  /** Best default source for new conditions: usually the current turn actor. */
+  defaultConditionSourceCombatantId: number | null;
   /** Active campaign's rule system — selects the statblock adapter (issue #234). */
   ruleSystem: string | null;
   onHpDelta: (delta: number) => void;
@@ -4816,6 +4953,7 @@ function CombatantRow({
   onSetHpMax: (value: number) => void;
   onSetTokenSize: (size: TokenSize) => void;
   onPatchCombatant?: (patch: Record<string, unknown>) => void;
+  onPatchSourceTurnState?: (combatantId: number, patch: Record<string, unknown>) => void;
   legendaryActions?: Combatant['legendaryActions'];
   onUseLegendary?: () => void;
   onReleaseLegendary?: () => void;
@@ -4832,6 +4970,8 @@ function CombatantRow({
   const [hpMaxDraft, setHpMaxDraft] = useState(combatant.hpMax?.toString() ?? '');
   const [tempDraft, setTempDraft] = useState('');
   const [readiedDraft, setReadiedDraft] = useState(combatant.turnState?.readied ?? '');
+  const [conditionDraft, setConditionDraft] = useState<ConditionDraft>(() => emptyConditionDraft(defaultConditionSourceCombatantId));
+  const [editingConditionId, setEditingConditionId] = useState<string | null>(null);
   useEffect(() => {
     setNameDraft(combatant.name);
     setHpMaxDraft(combatant.hpMax?.toString() ?? '');
@@ -4839,6 +4979,13 @@ function CombatantRow({
   useEffect(() => {
     setReadiedDraft(combatant.turnState?.readied ?? '');
   }, [combatant.turnState?.readied]);
+  useEffect(() => {
+    setConditionDraft((prev) =>
+      prev.sourceCombatantId
+        ? prev
+        : { ...prev, sourceCombatantId: defaultConditionSourceCombatantId == null ? '' : String(defaultConditionSourceCombatantId) },
+    );
+  }, [defaultConditionSourceCombatantId]);
 
   const adapter = useMemo(() => ruleSystemAdapter(ruleSystem), [ruleSystem]);
   const isStarfinder = adapter.id === STARFINDER_ADAPTER_ID || ruleSystem?.startsWith('starfinder');
@@ -4859,6 +5006,23 @@ function CombatantRow({
     if (!Number.isInteger(value) || value < 0) return;
     onSetTempHp(value);
     setTempDraft('');
+  }
+
+  function submitConditionDraft(event?: FormEvent) {
+    event?.preventDefault();
+    const instance = buildConditionInstance(conditionDraft, conditionSuggestions, combatant.conditionInstances ?? [], editingConditionId ?? undefined);
+    if (!instance) return;
+    if (onPatchCombatant) {
+      onPatchCombatant(editingConditionId ? { updateConditionInstance: instance } : { addConditionInstance: instance });
+      if (instance.isConcentration && instance.sourceCombatantId != null && conditionDraft.syncConcentration && onPatchSourceTurnState) {
+        onPatchSourceTurnState(instance.sourceCombatantId, { concentration: instance.name });
+      }
+    } else {
+      onAddCondition(instance.name);
+    }
+    setConditionDraft(emptyConditionDraft(defaultConditionSourceCombatantId));
+    setEditingConditionId(null);
+    setAddingCondition(false);
   }
   // Draft of the initiative field (DM only). Kept local so typing doesn't fire a
   // PATCH per keystroke — committed on blur / Enter.
@@ -5120,6 +5284,35 @@ function CombatantRow({
                 Readied
               </span>
             )}
+            {combatant.turnState?.concentration && (
+              <span
+                className="tag tag-outline"
+                data-testid={`concentration-${combatant.id}`}
+                title={`Concentrating on ${combatant.turnState.concentration}`}
+                style={{ gap: 6 }}
+              >
+                Conc: {combatant.turnState.concentration}
+                {canEdit && onPatchSourceTurnState && (
+                  <button
+                    type="button"
+                    aria-label={`Clear ${combatant.name} concentration`}
+                    onClick={() => onPatchSourceTurnState(combatant.id, { concentration: null })}
+                    disabled={busy}
+                    style={{
+                      cursor: busy ? 'default' : 'pointer',
+                      opacity: 0.7,
+                      background: 'transparent',
+                      border: 0,
+                      padding: 0,
+                      font: 'inherit',
+                      color: 'inherit',
+                    }}
+                  >
+                    <span aria-hidden="true">x</span>
+                  </button>
+                )}
+              </span>
+            )}
             {canEditIdentity && (
               <button
                 type="button"
@@ -5155,8 +5348,16 @@ function CombatantRow({
         {(combatant.conditionInstances?.length ?? 0) > 0 ? (
           <div style={{ display: 'flex', gap: 4, marginTop: 4, flexWrap: 'wrap' }}>
             {combatant.conditionInstances!.map((inst) => {
+              const sourceCombatantName = conditionSourceLabel(inst.sourceCombatantId, conditionSourceOptions);
               const details = [
                 inst.source ? `Source: ${inst.source}` : '',
+                sourceCombatantName ? `Source combatant: ${sourceCombatantName}` : '',
+                inst.ruleEntryId != null ? `Rule entry #${inst.ruleEntryId}` : '',
+                inst.roundsRemaining != null ? `${inst.roundsRemaining} round${inst.roundsRemaining === 1 ? '' : 's'} remaining` : '',
+                inst.timing !== 'none' ? `Expires: ${inst.timing}` : '',
+                inst.saveTiming !== 'none' ? `Save timing: ${inst.saveTiming}` : '',
+                inst.isConcentration ? 'Concentration-linked' : '',
+                inst.custom ? 'Custom condition' : '',
                 inst.notes ? `Notes: ${inst.notes}` : '',
                 inst.saveAbility ? `Save: DC ${inst.saveDc ?? '?'} ${inst.saveAbility}` : '',
               ].filter(Boolean).join(' · ');
@@ -5187,23 +5388,46 @@ function CombatantRow({
                     )}
                   </span>
                   {canEdit && (
-                    <button
-                      type="button"
-                      aria-label={`Remove ${inst.name}`}
-                      onClick={() => onPatchCombatant ? onPatchCombatant({ removeConditionInstanceId: inst.id }) : onRemoveCondition(inst.name)}
-                      disabled={busy}
-                      style={{
-                        cursor: busy ? 'default' : 'pointer',
-                        opacity: 0.7,
-                        background: 'transparent',
-                        border: 0,
-                        padding: 0,
-                        font: 'inherit',
-                        color: 'inherit',
-                      }}
-                    >
-                      <span aria-hidden="true">✕</span>
-                    </button>
+                    <>
+                      <button
+                        type="button"
+                        aria-label={`Edit ${inst.name}`}
+                        onClick={() => {
+                          setEditingConditionId(inst.id);
+                          setConditionDraft(conditionDraftFromInstance(inst));
+                          setAddingCondition(true);
+                        }}
+                        disabled={busy}
+                        style={{
+                          cursor: busy ? 'default' : 'pointer',
+                          opacity: 0.7,
+                          background: 'transparent',
+                          border: 0,
+                          padding: 0,
+                          font: 'inherit',
+                          color: 'inherit',
+                        }}
+                      >
+                        <span aria-hidden="true">edit</span>
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={`Remove ${inst.name}`}
+                        onClick={() => onPatchCombatant ? onPatchCombatant({ removeConditionInstanceId: inst.id }) : onRemoveCondition(inst.name)}
+                        disabled={busy}
+                        style={{
+                          cursor: busy ? 'default' : 'pointer',
+                          opacity: 0.7,
+                          background: 'transparent',
+                          border: 0,
+                          padding: 0,
+                          font: 'inherit',
+                          color: 'inherit',
+                        }}
+                      >
+                        <span aria-hidden="true">x</span>
+                      </button>
+                    </>
                   )}
                 </span>
               );
@@ -5321,33 +5545,236 @@ function CombatantRow({
         {canEdit && (
           <div style={{ marginTop: 4, display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
             {addingCondition ? (
-              <div className="flex gap-1 flex-wrap">
-                {conditionSuggestions.filter((s) => !combatant.conditions.includes(s)).map((s) => (
-                  <button
-                    key={s}
-                    className="btn btn-ghost"
-                    style={{ fontSize: 'var(--type-label)', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)', minHeight: 24, padding: '2px 8px' }}
-                    onClick={() => {
-                      onAddCondition(s);
-                      setAddingCondition(false);
-                    }}
+              <form
+                onSubmit={submitConditionDraft}
+                className="flex gap-2 flex-wrap items-end"
+                style={{
+                  width: '100%',
+                  padding: 8,
+                  border: '1px dashed var(--color-divider)',
+                  borderRadius: 'var(--radius-lg)',
+                  background: 'color-mix(in srgb, var(--color-surface) 96%, var(--color-accent) 4%)',
+                }}
+              >
+                <p className="text-muted text-xs" style={{ flexBasis: '100%', margin: 0 }}>
+                  {editingConditionId ? 'Edit structured condition instance.' : 'Add a structured condition instance.'}
+                </p>
+                <div className="field" style={{ minWidth: 150, flex: '1 1 180px' }}>
+                  <label htmlFor={`condition-name-${combatant.id}`}>Condition</label>
+                  <input
+                    id={`condition-name-${combatant.id}`}
+                    className="input"
+                    list={`condition-vocab-${combatant.id}`}
+                    value={conditionDraft.name}
+                    maxLength={40}
+                    disabled={busy}
+                    autoFocus
+                    placeholder="Known or custom condition"
+                    onChange={(e) => setConditionDraft((prev) => ({ ...prev, name: e.target.value }))}
+                  />
+                  <datalist id={`condition-vocab-${combatant.id}`}>
+                    {conditionSuggestions.map((s) => (
+                      <option key={s} value={s} />
+                    ))}
+                  </datalist>
+                </div>
+                <div className="field" style={{ minWidth: 130, flex: '1 1 150px' }}>
+                  <label htmlFor={`condition-source-${combatant.id}`}>Source</label>
+                  <input
+                    id={`condition-source-${combatant.id}`}
+                    className="input"
+                    value={conditionDraft.source}
+                    maxLength={160}
+                    disabled={busy}
+                    placeholder="Spell, trap, aura..."
+                    onChange={(e) => setConditionDraft((prev) => ({ ...prev, source: e.target.value }))}
+                  />
+                </div>
+                <div className="field" style={{ minWidth: 130, flex: '1 1 150px' }}>
+                  <label htmlFor={`condition-source-combatant-${combatant.id}`}>Source combatant</label>
+                  <select
+                    id={`condition-source-combatant-${combatant.id}`}
+                    value={conditionDraft.sourceCombatantId}
+                    disabled={busy}
+                    onChange={(e) => setConditionDraft((prev) => ({ ...prev, sourceCombatantId: e.target.value }))}
+                    style={{ minHeight: 32, borderRadius: 'var(--radius-md)', border: '1px solid var(--color-divider)', background: 'transparent', color: 'var(--color-text)', fontSize: 12, padding: '0 6px' }}
                   >
-                    + {s}
-                  </button>
-                ))}
+                    <option value="">None</option>
+                    {conditionSourceOptions.map((source) => (
+                      <option key={source.id} value={source.id}>
+                        {source.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="field" style={{ width: 86 }}>
+                  <label htmlFor={`condition-rule-${combatant.id}`}>Rule ID</label>
+                  <input
+                    id={`condition-rule-${combatant.id}`}
+                    className="input"
+                    type="number"
+                    min={1}
+                    value={conditionDraft.ruleEntryId}
+                    disabled={busy}
+                    placeholder="#"
+                    onChange={(e) => setConditionDraft((prev) => ({ ...prev, ruleEntryId: e.target.value }))}
+                  />
+                </div>
+                <div className="field" style={{ width: 86 }}>
+                  <label htmlFor={`condition-duration-${combatant.id}`}>Rounds</label>
+                  <input
+                    id={`condition-duration-${combatant.id}`}
+                    className="input"
+                    type="number"
+                    min={1}
+                    max={999}
+                    value={conditionDraft.durationRounds}
+                    disabled={busy}
+                    placeholder="Until clear"
+                    onChange={(e) => setConditionDraft((prev) => ({ ...prev, durationRounds: e.target.value }))}
+                  />
+                </div>
+                <div className="field" style={{ minWidth: 142 }}>
+                  <label htmlFor={`condition-expiry-${combatant.id}`}>Tick / expire</label>
+                  <select
+                    id={`condition-expiry-${combatant.id}`}
+                    value={conditionDraft.timing}
+                    disabled={busy || conditionDraft.durationRounds.trim() === ''}
+                    onChange={(e) => setConditionDraft((prev) => ({ ...prev, timing: e.target.value as ConditionTiming }))}
+                    style={{ minHeight: 32, borderRadius: 'var(--radius-md)', border: '1px solid var(--color-divider)', background: 'transparent', color: 'var(--color-text)', fontSize: 12, padding: '0 6px' }}
+                  >
+                    {CONDITION_TIMING_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>{opt.label}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="field" style={{ minWidth: 142 }}>
+                  <label htmlFor={`condition-save-timing-${combatant.id}`}>Repeat save</label>
+                  <select
+                    id={`condition-save-timing-${combatant.id}`}
+                    value={conditionDraft.saveTiming}
+                    disabled={busy}
+                    onChange={(e) => setConditionDraft((prev) => ({ ...prev, saveTiming: e.target.value as ConditionTiming }))}
+                    style={{ minHeight: 32, borderRadius: 'var(--radius-md)', border: '1px solid var(--color-divider)', background: 'transparent', color: 'var(--color-text)', fontSize: 12, padding: '0 6px' }}
+                  >
+                    {SAVE_TIMING_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>{opt.label}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="field" style={{ width: 74 }}>
+                  <label htmlFor={`condition-save-ability-${combatant.id}`}>Save</label>
+                  <input
+                    id={`condition-save-ability-${combatant.id}`}
+                    className="input"
+                    value={conditionDraft.saveAbility}
+                    maxLength={24}
+                    disabled={busy || conditionDraft.saveTiming === 'none'}
+                    placeholder="CON"
+                    onChange={(e) => setConditionDraft((prev) => ({ ...prev, saveAbility: e.target.value }))}
+                  />
+                </div>
+                <div className="field" style={{ width: 72 }}>
+                  <label htmlFor={`condition-save-dc-${combatant.id}`}>DC</label>
+                  <input
+                    id={`condition-save-dc-${combatant.id}`}
+                    className="input"
+                    type="number"
+                    min={1}
+                    value={conditionDraft.saveDc}
+                    disabled={busy || conditionDraft.saveTiming === 'none'}
+                    onChange={(e) => setConditionDraft((prev) => ({ ...prev, saveDc: e.target.value }))}
+                  />
+                </div>
+                <div className="field" style={{ width: 70 }}>
+                  <label htmlFor={`condition-stacks-${combatant.id}`}>Stacks</label>
+                  <input
+                    id={`condition-stacks-${combatant.id}`}
+                    className="input"
+                    type="number"
+                    min={1}
+                    max={99}
+                    value={conditionDraft.stacks}
+                    disabled={busy}
+                    onChange={(e) => setConditionDraft((prev) => ({ ...prev, stacks: e.target.value }))}
+                  />
+                </div>
+                <label className="flex items-center gap-1 text-xs" style={{ minHeight: 32 }}>
+                  <input
+                    type="checkbox"
+                    checked={conditionDraft.isConcentration}
+                    disabled={busy || conditionDraft.sourceCombatantId === ''}
+                    onChange={(e) => setConditionDraft((prev) => ({ ...prev, isConcentration: e.target.checked }))}
+                  />
+                  Concentration link
+                </label>
+                {conditionDraft.isConcentration && (
+                  <label className="flex items-center gap-1 text-xs" style={{ minHeight: 32 }}>
+                    <input
+                      type="checkbox"
+                      checked={conditionDraft.syncConcentration}
+                      disabled={busy || !onPatchSourceTurnState}
+                      onChange={(e) => setConditionDraft((prev) => ({ ...prev, syncConcentration: e.target.checked }))}
+                    />
+                    Mark source concentrating
+                  </label>
+                )}
+                <div className="field" style={{ minWidth: 180, flex: '2 1 240px' }}>
+                  <label htmlFor={`condition-notes-${combatant.id}`}>Notes</label>
+                  <input
+                    id={`condition-notes-${combatant.id}`}
+                    className="input"
+                    value={conditionDraft.notes}
+                    maxLength={300}
+                    disabled={busy}
+                    placeholder="Save ends, while in aura, stage 2..."
+                    onChange={(e) => setConditionDraft((prev) => ({ ...prev, notes: e.target.value }))}
+                  />
+                </div>
+                <div className="flex gap-1 flex-wrap" style={{ flexBasis: '100%' }}>
+                  {conditionSuggestions.slice(0, 12).map((s) => (
+                    <button
+                      key={s}
+                      type="button"
+                      className="btn btn-ghost"
+                      disabled={busy}
+                      style={{ fontSize: 'var(--type-label)', minHeight: 24, padding: '2px 8px' }}
+                      onClick={() => setConditionDraft((prev) => ({ ...prev, name: s }))}
+                    >
+                      {s}
+                    </button>
+                  ))}
+                  {conditionSuggestions.length > 12 && (
+                    <span className="text-muted text-xs" style={{ alignSelf: 'center' }}>
+                      Type to pick from all {conditionSuggestions.length} known conditions, or enter a custom one.
+                    </span>
+                  )}
+                </div>
+                <Btn type="submit" disabled={busy || conditionDraft.name.trim() === ''}>
+                  {editingConditionId ? 'Update condition' : 'Add condition'}
+                </Btn>
                 <button
+                  type="button"
                   className="btn btn-ghost"
-                  style={{ fontSize: 'var(--type-label)', minHeight: 24, padding: '2px 8px' }}
-                  onClick={() => setAddingCondition(false)}
+                  style={{ fontSize: 'var(--type-label)' }}
+                  onClick={() => {
+                    setConditionDraft(emptyConditionDraft(defaultConditionSourceCombatantId));
+                    setEditingConditionId(null);
+                    setAddingCondition(false);
+                  }}
                 >
                   Cancel
                 </button>
-              </div>
+              </form>
             ) : (
               <button
                 className="btn btn-ghost"
                 style={{ fontSize: 'var(--type-label)', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)', minHeight: 24, padding: '2px 8px' }}
-                onClick={() => setAddingCondition(true)}
+                onClick={() => {
+                  setEditingConditionId(null);
+                  setConditionDraft(emptyConditionDraft(defaultConditionSourceCombatantId));
+                  setAddingCondition(true);
+                }}
               >
                 + condition
               </button>
