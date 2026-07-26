@@ -595,7 +595,7 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
     expect(JSON.stringify(updatePing)).not.toMatch(/secret-invite|surprise dragon/i);
 
     // Cancellation notifies with a cancelled snapshot.
-    const cancel = await dm.delete(`/api/v1/schedule/${scheduleId}`);
+    const cancel = await dm.delete(`/api/v1/schedule/${scheduleId}`).send({});
     expect(cancel.status).toBe(200);
     const afterCancel = ofType(await listFor(player), 'session_scheduled');
     expect(afterCancel).toHaveLength(before + 2);

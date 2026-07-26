@@ -113,6 +113,11 @@ describe('campaign import (e2e, real cookie sessions)', () => {
       .post(`/api/v1/campaigns/${campaignId}/schedule`)
       .send({ scheduledAt: '2099-07-01T20:00:00.000Z', title: 'Heist night', notes: 'Dark moon' });
     await playerAgent.put(`/api/v1/schedule/${scheduleRes.body.id}/rsvp`).send({ status: 'maybe', note: 'Checking schedule' });
+    // Issue #504: cancelling retains the row, so a cancelled night now reaches the export.
+    const cancelledScheduleRes = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/schedule`)
+      .send({ scheduledAt: '2099-07-08T20:00:00.000Z', title: 'Called off night' });
+    await dmAgent.delete(`/api/v1/schedule/${cancelledScheduleRes.body.id}`).send({ reason: 'Snowed in' });
     await dmAgent.put(`/api/v1/sessions/${sessionId}/attendance`).send({ characterIds: [characterId] });
 
     await dmAgent
@@ -236,9 +241,24 @@ describe('campaign import (e2e, real cookie sessions)', () => {
     // Scheduled sessions + RSVPs round-trip with remapped schedule ids.
     expect(Array.isArray(exportDoc.scheduledSessions)).toBe(true);
     const schedules = await dmAgent.get(`/api/v1/campaigns/${imported.id}/schedule`);
-    expect(schedules.body.length).toBe(1);
-    expect(schedules.body[0].title).toBe('Heist night');
-    expect(schedules.body[0].rsvps.some((r: { status: string; note: string }) => r.status === 'maybe' && r.note === 'Checking schedule')).toBe(true);
+    expect(schedules.body.length).toBe(2);
+    const importedHeist = schedules.body.find((s: { title: string }) => s.title === 'Heist night');
+    expect(importedHeist).toBeDefined();
+    expect(importedHeist.status).toBe('scheduled');
+    expect(importedHeist.rsvps.some((r: { status: string; note: string }) => r.status === 'maybe' && r.note === 'Checking schedule')).toBe(true);
+
+    // Issue #504: the cancelled lifecycle state round-trips. Importing it back as a LIVE
+    // night would resurrect a called-off game into Upcoming, the reminder sweep and the
+    // ICS feed. `cancelledBy` is an install-local user id, so it is deliberately dropped.
+    const importedCancelled = schedules.body.find((s: { title: string }) => s.title === 'Called off night');
+    expect(importedCancelled).toMatchObject({
+      status: 'cancelled',
+      cancellationReason: 'Snowed in',
+      cancelledBy: null,
+      sessionId: null,
+    });
+    const importedUpcoming = await dmAgent.get(`/api/v1/campaigns/${imported.id}/schedule/upcoming`);
+    expect(importedUpcoming.body.map((s: { title: string }) => s.title)).toEqual(['Heist night']);
 
     // Session attendance remapped to imported session + character ids.
     const attendance = await dmAgent.get(`/api/v1/sessions/${sessions.body[0].id}/attendance`);

@@ -954,6 +954,7 @@ export const Session = z.object({
   playedAt: IsoDate.nullable().default(null),
   recap: z.string().max(100_000).default(''), // markdown
   dmSecret: z.string().max(20_000).default(''), // DM only — stripped for non-DM (session prep notes)
+  scheduledSessionId: Id.nullable().default(null),
   // Encounters linked to this session (issue #480) — present on GET reads only.
   linkedEncounters: z
     .array(
@@ -1135,10 +1136,25 @@ export const ScheduledSession = z.object({
   title: z.string().max(200).default(''),
   location: z.string().max(200).default(''), // "Sam's place", a VTT link…
   notes: z.string().max(5000).default(''),
+  status: z.enum(['scheduled', 'cancelled', 'completed']).default('scheduled'),
+  cancelledAt: IsoDateTime.nullable().default(null),
+  cancelledBy: z.string().max(120).nullable().default(null),
+  cancellationReason: z.string().max(1000).default(''),
+  sessionId: Id.nullable().default(null),
   ...timestamps,
 });
 export type ScheduledSession = z.infer<typeof ScheduledSession>;
-export const ScheduledSessionCreate = ScheduledSession.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true })
+export const ScheduledSessionCreate = ScheduledSession.omit({
+  id: true,
+  campaignId: true,
+  status: true,
+  cancelledAt: true,
+  cancelledBy: true,
+  cancellationReason: true,
+  sessionId: true,
+  createdAt: true,
+  updatedAt: true,
+})
   .partial()
   .required({ scheduledAt: true })
   .extend({
@@ -1155,6 +1171,18 @@ export const ScheduledSessionUpdate = z.object({
   location: z.string().max(200).optional(),
   notes: z.string().max(5000).optional(),
 });
+export const ScheduledSessionCancel = z.object({
+  reason: z.string().max(1000).optional(),
+});
+export type ScheduledSessionCancel = z.infer<typeof ScheduledSessionCancel>;
+export const ScheduledSessionDuplicate = z.object({
+  scheduledAt: IsoDateTime.optional(),
+  durationMinutes: z.number().int().min(15).max(24 * 60).optional(),
+  title: z.string().max(200).optional(),
+  location: z.string().max(200).optional(),
+  notes: z.string().max(5000).optional(),
+});
+export type ScheduledSessionDuplicate = z.infer<typeof ScheduledSessionDuplicate>;
 
 export const RsvpStatus = z.enum(['yes', 'no', 'maybe']);
 export type RsvpStatus = z.infer<typeof RsvpStatus>;
@@ -4344,6 +4372,16 @@ export const RulePackSectionProgress = z.object({
 });
 export type RulePackSectionProgress = z.infer<typeof RulePackSectionProgress>;
 
+export const RulePackUpdatePreview = z.object({
+  added: z.number().int().nonnegative().default(0),
+  changed: z.number().int().nonnegative().default(0),
+  removed: z.number().int().nonnegative().default(0),
+  unchanged: z.number().int().nonnegative().default(0),
+  sourceHash: z.string().length(64),
+  sourceVersion: z.string().max(40).default(''),
+});
+export type RulePackUpdatePreview = z.infer<typeof RulePackUpdatePreview>;
+
 /**
  * Status of a background rule-pack install (issue #20). Install is no longer a
  * blocking request: POST /rules/packs/install (or /upload) returns 202 with one of
@@ -4367,6 +4405,9 @@ export const RulePackInstallJob = z.object({
   pack: RulePack.nullable().default(null), // populated on success
   added: z.number().int().nonnegative().nullable().default(null), // incremental installs only
   skippedExisting: z.number().int().nonnegative().nullable().default(null), // incremental installs only
+  changed: z.number().int().nonnegative().nullable().default(null),
+  removed: z.number().int().nonnegative().nullable().default(null),
+  preview: RulePackUpdatePreview.nullable().default(null),
   error: z.string().nullable().default(null), // populated on failure
   ...timestamps,
 });

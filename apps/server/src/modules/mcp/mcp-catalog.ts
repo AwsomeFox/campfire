@@ -218,6 +218,8 @@ export const MCP_TOOL_NAMES = [
   'schedule_session',
   'update_scheduled_session',
   'cancel_scheduled_session',
+  'restore_scheduled_session',
+  'duplicate_scheduled_session',
   'set_rsvp',
   'rotate_calendar_feed',
   'disable_calendar_feed',
