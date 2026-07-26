@@ -58,12 +58,22 @@ describe('scheduled backup catch-up (issue #732, real SQLite + settings row)', (
   let prevBackupDir: string | undefined;
   let prevEnabled: string | undefined;
   let prevInterval: string | undefined;
+  let prevKeepCount: string | undefined;
+  let prevKeepDays: string | undefined;
+  let prevMaxTotalBytes: string | undefined;
+  let prevMinFreeBytes: string | undefined;
+  let prevProtectLastGood: string | undefined;
 
   beforeEach(() => {
     prevDataDir = process.env.DATA_DIR;
     prevBackupDir = process.env.BACKUP_DIR;
     prevEnabled = process.env.BACKUP_SCHEDULE_ENABLED;
     prevInterval = process.env.BACKUP_INTERVAL_HOURS;
+    prevKeepCount = process.env.BACKUP_KEEP_COUNT;
+    prevKeepDays = process.env.BACKUP_KEEP_DAYS;
+    prevMaxTotalBytes = process.env.BACKUP_MAX_TOTAL_BYTES;
+    prevMinFreeBytes = process.env.BACKUP_MIN_FREE_BYTES;
+    prevProtectLastGood = process.env.BACKUP_PROTECT_LAST_GOOD;
 
     dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'campfire-catchup-'));
     backupDir = path.join(dataDir, 'backups');
@@ -73,6 +83,11 @@ describe('scheduled backup catch-up (issue #732, real SQLite + settings row)', (
     // A short cadence keeps the test fast; the catch-up decision is independent
     // of the magnitude (see backup-cadence.spec for the boundary math).
     process.env.BACKUP_INTERVAL_HOURS = '1';
+    process.env.BACKUP_MIN_FREE_BYTES = '0';
+    delete process.env.BACKUP_KEEP_COUNT;
+    delete process.env.BACKUP_KEEP_DAYS;
+    delete process.env.BACKUP_MAX_TOTAL_BYTES;
+    delete process.env.BACKUP_PROTECT_LAST_GOOD;
   });
 
   afterEach(() => {
@@ -84,6 +99,16 @@ describe('scheduled backup catch-up (issue #732, real SQLite + settings row)', (
     else process.env.BACKUP_SCHEDULE_ENABLED = prevEnabled;
     if (prevInterval === undefined) delete process.env.BACKUP_INTERVAL_HOURS;
     else process.env.BACKUP_INTERVAL_HOURS = prevInterval;
+    if (prevKeepCount === undefined) delete process.env.BACKUP_KEEP_COUNT;
+    else process.env.BACKUP_KEEP_COUNT = prevKeepCount;
+    if (prevKeepDays === undefined) delete process.env.BACKUP_KEEP_DAYS;
+    else process.env.BACKUP_KEEP_DAYS = prevKeepDays;
+    if (prevMaxTotalBytes === undefined) delete process.env.BACKUP_MAX_TOTAL_BYTES;
+    else process.env.BACKUP_MAX_TOTAL_BYTES = prevMaxTotalBytes;
+    if (prevMinFreeBytes === undefined) delete process.env.BACKUP_MIN_FREE_BYTES;
+    else process.env.BACKUP_MIN_FREE_BYTES = prevMinFreeBytes;
+    if (prevProtectLastGood === undefined) delete process.env.BACKUP_PROTECT_LAST_GOOD;
+    else process.env.BACKUP_PROTECT_LAST_GOOD = prevProtectLastGood;
     fs.rmSync(dataDir, { recursive: true, force: true });
   });
 
@@ -233,5 +258,51 @@ describe('scheduled backup catch-up (issue #732, real SQLite + settings row)', (
       // No archive written, and the stale catch-up path was never taken.
       expect(fs.readdirSync(blockingParent).length).toBe(0);
     }
+  });
+
+  it('skips a scheduled backup before writing when the disk reserve would be breached', async () => {
+    holder = new DbHolder();
+    const service = makeService();
+    process.env.BACKUP_MIN_FREE_BYTES = String(Number.MAX_SAFE_INTEGER);
+
+    await service.onApplicationBootstrap();
+
+    const files = fs.existsSync(backupDir) ? fs.readdirSync(backupDir) : [];
+    expect(files).toEqual([]);
+    const cadence = readCadenceRow(holder.proxy);
+    expect(cadence).not.toBeNull();
+    expect(cadence!.lastSuccessAt).toBeNull();
+    expect(cadence!.lastError).toMatch(/low disk space/i);
+    expect(cadence!.consecutiveFailures).toBe(1);
+    expect(cadence!.metrics?.failureCount).toBe(1);
+  });
+
+  it('prunes old verified archives after a new verified scheduled backup, but keeps partial archives', async () => {
+    holder = new DbHolder();
+    const service = makeService();
+    process.env.BACKUP_KEEP_COUNT = '1';
+    process.env.BACKUP_KEEP_DAYS = '0';
+
+    fs.mkdirSync(backupDir, { recursive: true });
+    const validArchive = await service.buildBackup();
+    const oldVerified = path.join(backupDir, 'campfire-backup-2026-07-20T00-00-00-000Z.zip');
+    const partialArchive = path.join(backupDir, 'campfire-backup-2026-07-21T00-00-00-000Z.zip');
+    fs.writeFileSync(oldVerified, validArchive);
+    fs.writeFileSync(partialArchive, Buffer.from('not a zip'));
+    const oldTime = new Date('2026-07-20T00:00:00Z');
+    fs.utimesSync(oldVerified, oldTime, oldTime);
+    fs.utimesSync(partialArchive, oldTime, oldTime);
+
+    await service.onApplicationBootstrap();
+
+    const files = fs.readdirSync(backupDir).sort();
+    expect(files).toContain(path.basename(partialArchive));
+    expect(files).not.toContain(path.basename(oldVerified));
+    expect(files.filter((name) => /^campfire-backup-.*\.zip$/.test(name)).length).toBe(2);
+    const cadence = readCadenceRow(holder.proxy);
+    expect(cadence!.lastError).toBe('');
+    expect(cadence!.metrics?.pruneCount).toBe(1);
+    expect(cadence!.metrics?.prunedBytes).toBe(validArchive.length);
+    expect(cadence!.lastArchiveName).toMatch(/^campfire-backup-.*\.zip$/);
   });
 });

@@ -44,6 +44,10 @@ function formatTimestamp(iso: string | null): string {
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
 }
 
+function formatPolicyNumber(value: number | null, suffix = ''): string {
+  return value === null ? 'disabled' : `${value.toLocaleString()}${suffix}`;
+}
+
 function operatorLabel(displayName: string, username: string): string {
   const trimmed = displayName.trim();
   return trimmed.length > 0 ? `${trimmed} (@${username})` : `@${username}`;
@@ -200,7 +204,7 @@ export function ServerBackupWorkflowCard() {
       setStatus(null);
       setStatusError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     void loadStatus();
@@ -435,10 +439,69 @@ export function ServerBackupWorkflowCard() {
                     {status.cadence.lastChecksum ? `${status.cadence.lastChecksum.slice(0, 16)}…` : '—'}
                   </dd>
                 </div>
+                <div>
+                  <dt className="text-[10px] uppercase tracking-widest text-secondary">Last verified archive</dt>
+                  <dd className="font-semibold text-white truncate" title={status.cadence.lastArchiveName ?? undefined}>
+                    {status.cadence.lastArchiveName ?? '—'}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-[10px] uppercase tracking-widest text-secondary">Failures</dt>
+                  <dd className="font-semibold text-white">
+                    {(status.cadence.consecutiveFailures ?? 0).toLocaleString()} consecutive
+                    {status.cadence.metrics
+                      ? ` · ${status.cadence.metrics.failureCount.toLocaleString()} total`
+                      : ''}
+                  </dd>
+                </div>
               </dl>
             )}
-            {status.cadence?.lastError && (
-              <p className="text-rose-400">Last scheduled run failed: {status.cadence.lastError}</p>
+            {status.disk && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2">
+                <div>
+                  <p className="text-[10px] uppercase tracking-widest text-secondary">Disk free / reserve</p>
+                  <p className={status.disk.lowSpace ? 'font-semibold text-amber-400' : 'font-semibold text-white'}>
+                    {formatBytes(status.disk.freeBytes)} free · reserve {formatBytes(status.disk.reserveBytes)}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-[10px] uppercase tracking-widest text-secondary">Next archive estimate</p>
+                  <p className="font-semibold text-white">{formatBytes(status.disk.estimatedNextBytes)}</p>
+                </div>
+              </div>
+            )}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2">
+              <div>
+                <p className="text-[10px] uppercase tracking-widest text-secondary">Retention policy</p>
+                <p className="font-semibold text-white">
+                  keep {formatPolicyNumber(status.retention.policy.keepCount)} ·{' '}
+                  {formatPolicyNumber(status.retention.policy.keepDays, 'd')} · max{' '}
+                  {status.retention.policy.maxTotalBytes === null
+                    ? 'disabled'
+                    : formatBytes(status.retention.policy.maxTotalBytes)}
+                </p>
+              </div>
+              <div>
+                <p className="text-[10px] uppercase tracking-widest text-secondary">Retention metrics</p>
+                <p className="font-semibold text-white">
+                  {status.retention.archiveCount.toLocaleString()} archive(s), {formatBytes(status.retention.totalBytes)} · pruned{' '}
+                  {status.retention.pruneCount.toLocaleString()} ({formatBytes(status.retention.prunedBytes)})
+                </p>
+              </div>
+            </div>
+            {status.retention.protectedLastGoodName && (
+              <p className="text-[11px] text-secondary">
+                Last-known-good protection: <span className="text-slate-300">{status.retention.protectedLastGoodName}</span>
+              </p>
+            )}
+            {status.alerts.length > 0 && (
+              <div className="space-y-1" role="alert">
+                {status.alerts.map((alert) => (
+                  <p key={alert} className="text-amber-400">
+                    {alert}
+                  </p>
+                ))}
+              </div>
             )}
             {status.onDisk.length > 0 && (
               <div>
