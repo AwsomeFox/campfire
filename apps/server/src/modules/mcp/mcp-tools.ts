@@ -3968,6 +3968,29 @@ export class McpToolsService {
     this.writeTool(
       server,
       user,
+      'set_escalation_die',
+      'DM only: for 13th Age encounters, hold automatic escalation and/or set/clear the escalation die override (0–6). ' +
+        'Pass override=null to clear an override; pass held=false to resume automatic round defaults.',
+      {
+        encounterId: Id.describe('Encounter id'),
+        held: z.boolean().optional().describe('When true, automatic round advancement keeps the current escalation value'),
+        override: z.number().int().min(0).max(6).nullable().optional().describe('Set a DM override value, or null to clear it'),
+      },
+      async ({ encounterId, held, override }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.encounters.updateEscalationDie(
+          encounterId as number,
+          { held: held as boolean | undefined, override: override as number | null | undefined },
+          user,
+          role,
+        );
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
       'end_turn',
       'End the CURRENT combatant\'s turn (issue #413). The DM may always end it; a player may end the turn of their ' +
         'OWN active character when the campaign allows player advancement (dmControlsTurns=false). The server validates ' +

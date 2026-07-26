@@ -62,7 +62,7 @@ import {
   hitTestFogRegion,
   moveFogRegion,
 } from '@campfire/schema';
-import { ruleSystemAdapter, hasDeathSavesForAdapter, STARFINDER_ADAPTER_ID, applyStarfinderDamage, filterAoeTemplatesForViewer, gridDistanceForAdapter } from '@campfire/schema';
+import { ARCHMAGE_ADAPTER_ID, ruleSystemAdapter, hasDeathSavesForAdapter, STARFINDER_ADAPTER_ID, applyStarfinderDamage, filterAoeTemplatesForViewer, gridDistanceForAdapter } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, API, ApiError, isReadTimeout, isTransientError, translateApiError } from '../../lib/api';
@@ -722,8 +722,10 @@ export default function RunSessionPage() {
   // module scope with no argument — so a future non-5e adapter's condition vocabulary and
   // statblock mapping actually take effect. Default (5e) is unchanged.
   const ruleSystem = campaign?.ruleSystem ?? null;
-  const isStarfinder = ruleSystemAdapter(ruleSystem).id === STARFINDER_ADAPTER_ID || ruleSystem?.startsWith('starfinder') || false;
-  const conditionSuggestions = useMemo(() => [...ruleSystemAdapter(ruleSystem).conditions], [ruleSystem]);
+  const activeAdapter = useMemo(() => ruleSystemAdapter(ruleSystem), [ruleSystem]);
+  const isStarfinder = activeAdapter.id === STARFINDER_ADAPTER_ID || ruleSystem?.startsWith('starfinder') || false;
+  const isArchmage = activeAdapter.id === ARCHMAGE_ADAPTER_ID;
+  const conditionSuggestions = useMemo(() => [...activeAdapter.conditions], [activeAdapter]);
 
   const queryClient = useQueryClient();
 
@@ -784,6 +786,7 @@ export default function RunSessionPage() {
     spec: ActionSpec;
   } | null>(null);
   const [actionUndo, setActionUndo] = useState<{ token: ActionUndoToken; label: string } | null>(null);
+  const [escalationOverrideDraft, setEscalationOverrideDraft] = useState('');
   // Live battle-map pings (issue #238) — transient markers pushed over SSE, each auto-expires
   // after a short lifetime. A monotonic key disambiguates simultaneous pings at the same spot.
   const [pings, setPings] = useState<Array<{ key: number; x: number; y: number }>>([]);
@@ -830,6 +833,10 @@ export default function RunSessionPage() {
     refetchInterval: 5_000,
   });
   const encounter = encounterQuery.data ?? null;
+
+  useEffect(() => {
+    setEscalationOverrideDraft(encounter?.escalationDieOverride == null ? '' : String(encounter.escalationDieOverride));
+  }, [encounter?.id, encounter?.escalationDieOverride]);
 
   useEffect(() => {
     if (!encounterQuery.isSuccess || encounterQuery.isFetching || encounterQuery.dataUpdatedAt === 0) return;
@@ -1167,6 +1174,14 @@ export default function RunSessionPage() {
     },
   });
 
+  const escalationControl = useMutation({
+    mutationFn: (body: { held?: boolean; override?: number | null }) =>
+      api.post(`${API}/encounters/${eid}/escalation`, body),
+    onMutate: () => setActionError(null),
+    onError: reportError,
+    onSettled: () => invalidateEncounter(queryClient, eid),
+  });
+
   // Optimistic HP steppers (issue #73) — the headline fix. onMutate writes the guessed HP
   // straight into the query cache so the click lands instantly (no round-trip wait, no
   // disabled control); onError rolls back to the pre-click snapshot; onSettled reconciles
@@ -1277,6 +1292,16 @@ export default function RunSessionPage() {
   const rollInitiative = () => runControl.mutate({ action: 'roll-initiative' });
   const startEncounter = () => runControl.mutate({ action: 'start' });
   const nextTurn = () => runControl.mutate({ action: 'next-turn' });
+  const toggleEscalationHold = (held: boolean) => escalationControl.mutate({ held });
+  const clearEscalationOverride = () => escalationControl.mutate({ override: null });
+  const applyEscalationOverride = () => {
+    const value = Number(escalationOverrideDraft);
+    if (!Number.isInteger(value) || value < 0 || value > 6) {
+      surfaceActionError('Escalation override must be a whole number from 0 to 6.');
+      return;
+    }
+    escalationControl.mutate({ override: value });
+  };
   // Close the confirm on success *or* failure so a rejected End (e.g. stale
   // preparing status) does not leave the modal parked over the error banner (#420).
   const endEncounter = () =>
@@ -1476,7 +1501,7 @@ export default function RunSessionPage() {
   const setTokenSize = (combatantId: number, size: TokenSize) => patchCombatant(combatantId, { tokenSize: size });
 
   // Header run-control group shares one pending flag (see runControl above).
-  const headerBusy = runControl.isPending || deleteEncounterMut.isPending;
+  const headerBusy = runControl.isPending || deleteEncounterMut.isPending || escalationControl.isPending;
   const nextTurnShortcut = useKeyboardCommandHint('encounterNextTurn');
 
   useKeyboardGuardedAction(
@@ -1767,6 +1792,88 @@ export default function RunSessionPage() {
         >
           {encounterSyncBanner}
         </p>
+      )}
+
+      {isArchmage && encounter.status === 'running' && (
+        <div
+          className="card elev-sm"
+          data-testid="archmage-escalation-panel"
+          style={{
+            padding: '12px 14px',
+            borderLeft: '2px solid var(--color-accent)',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 8,
+          }}
+        >
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-sm font-semibold text-white">Escalation die</span>
+            <span className="tag tag-accent" aria-label={`Escalation die plus ${encounter.escalationDie}`}>
+              +{encounter.escalationDie}
+            </span>
+            <span className="text-xs text-muted">
+              Round {encounter.round} default +{Math.max(0, Math.min(6, encounter.round - 1))}
+              {encounter.escalationDieHeld ? ' · held' : ''}
+              {encounter.escalationDieOverride != null ? ` · override +${encounter.escalationDieOverride}` : ''}
+            </span>
+            {canDmWrite && (
+              <div className="flex items-center gap-2 flex-wrap ml-auto">
+                <Btn
+                  ghost
+                  className="!min-h-0 !py-1.5 text-xs"
+                  disabled={headerBusy || riskyBlocked}
+                  onClick={() => toggleEscalationHold(!encounter.escalationDieHeld)}
+                >
+                  {encounter.escalationDieHeld ? 'Resume auto' : 'Hold'}
+                </Btn>
+                <TextInput
+                  aria-label="Escalation die override"
+                  inputMode="numeric"
+                  value={escalationOverrideDraft}
+                  onChange={(e) => setEscalationOverrideDraft(e.target.value)}
+                  placeholder="0–6"
+                  style={{ width: 72, minHeight: 30, fontSize: 12 }}
+                />
+                <Btn
+                  ghost
+                  className="!min-h-0 !py-1.5 text-xs"
+                  disabled={headerBusy || riskyBlocked || escalationOverrideDraft.trim() === ''}
+                  onClick={applyEscalationOverride}
+                >
+                  Override
+                </Btn>
+                {encounter.escalationDieOverride != null && (
+                  <Btn
+                    ghost
+                    className="!min-h-0 !py-1.5 text-xs"
+                    disabled={headerBusy || riskyBlocked}
+                    onClick={clearEscalationOverride}
+                  >
+                    Clear
+                  </Btn>
+                )}
+              </div>
+            )}
+          </div>
+          <details>
+            <summary className="text-xs text-muted cursor-pointer">13th Age escalation rules and history</summary>
+            <div className="text-xs text-muted mt-2 space-y-1">
+              <p className="m-0">
+                At the start of round 2 the escalation die is +1, then rises by +1 each round to +6.
+                Player characters add it to attacks; monsters and NPCs do not. Fear prevents a PC from using it.
+              </p>
+              {encounter.escalationDieHistory.length > 0 && (
+                <ol className="m-0 pl-4">
+                  {encounter.escalationDieHistory.slice(-5).map((h, i) => (
+                    <li key={`${h.at}-${i}`}>
+                      Round {h.round}: +{h.value} ({h.note || h.source})
+                    </li>
+                  ))}
+                </ol>
+              )}
+            </div>
+          </details>
+        </div>
       )}
 
       {/* Transient "the AI just acted" row(s) (#344 point 2) — sourced from live tool
