@@ -283,37 +283,37 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
     const { orm, service } = build();
     const { encounterId } = seedArchmageRunningEncounter(orm);
 
-    let snapshot = await service.nextTurn(encounterId, dmUser, 'dm');
+    let snapshot = await service.nextTurn(encounterId, {}, dmUser, 'dm');
     expect(snapshot.round).toBe(1);
     expect(snapshot.escalationDie).toBe(0);
 
     for (let round = 2; round <= 8; round++) {
-      snapshot = await service.nextTurn(encounterId, dmUser, 'dm');
+      snapshot = await service.nextTurn(encounterId, {}, dmUser, 'dm');
       expect(snapshot.round).toBe(round);
       expect(snapshot.escalationDie).toBe(Math.min(round - 1, 6));
       if (round < 8) {
-        snapshot = await service.nextTurn(encounterId, dmUser, 'dm');
+        snapshot = await service.nextTurn(encounterId, {}, dmUser, 'dm');
         expect(snapshot.round).toBe(round);
       }
     }
 
     const heldSeed = seedArchmageRunningEncounter(orm);
-    await service.nextTurn(heldSeed.encounterId, dmUser, 'dm');
-    snapshot = await service.nextTurn(heldSeed.encounterId, dmUser, 'dm');
+    await service.nextTurn(heldSeed.encounterId, {}, dmUser, 'dm');
+    snapshot = await service.nextTurn(heldSeed.encounterId, {}, dmUser, 'dm');
     expect(snapshot.round).toBe(2);
     expect(snapshot.escalationDie).toBe(1);
 
     snapshot = await service.updateEscalationDie(heldSeed.encounterId, { held: true }, dmUser, 'dm');
     expect(snapshot.escalationDieHeld).toBe(true);
-    await service.nextTurn(heldSeed.encounterId, dmUser, 'dm');
-    snapshot = await service.nextTurn(heldSeed.encounterId, dmUser, 'dm');
+    await service.nextTurn(heldSeed.encounterId, {}, dmUser, 'dm');
+    snapshot = await service.nextTurn(heldSeed.encounterId, {}, dmUser, 'dm');
     expect(snapshot.round).toBe(3);
     expect(snapshot.escalationDie).toBe(1);
 
     snapshot = await service.updateEscalationDie(heldSeed.encounterId, { override: 4 }, dmUser, 'dm');
     expect(snapshot.escalationDie).toBe(4);
-    await service.nextTurn(heldSeed.encounterId, dmUser, 'dm');
-    snapshot = await service.nextTurn(heldSeed.encounterId, dmUser, 'dm');
+    await service.nextTurn(heldSeed.encounterId, {}, dmUser, 'dm');
+    snapshot = await service.nextTurn(heldSeed.encounterId, {}, dmUser, 'dm');
     expect(snapshot.round).toBe(4);
     expect(snapshot.escalationDie).toBe(4);
 

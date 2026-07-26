@@ -20,6 +20,7 @@ import { useEffect, useMemo, useState } from 'react';
 import type { CombatantTurnState, TurnWorkspace as TurnWorkspaceData, ActionSpec } from '@campfire/schema';
 import { hasDeathSavesForAdapter, ruleSystemAdapter } from '@campfire/schema';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useKeyedMutation } from '../../lib/keyedMutation';
 import { api, API, translateApiError } from '../../lib/api';
 import { queryKeys, invalidateEncounter } from '../../lib/query';
 import { useAnnounce } from '../../components/Announcer';
@@ -118,14 +119,20 @@ export function TurnWorkspace({
     void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(encounterId) });
   };
 
-  const endTurn = useMutation({
-    mutationFn: () => {
+  // Issue #580: the workspace's "End turn" is the same non-idempotent advance as the
+  // tracker's, so it takes the same protection — one operation id per click, carried
+  // unchanged through the automatic retry, alongside the existing expected-combatant CAS.
+  const endTurn = useKeyedMutation({
+    mutationFn: ({ idempotencyKey }: { idempotencyKey: string }) => {
       // Use the combatant id from the SAME response the UI is rendering (not the parent
       // prop, which can be briefly stale/null). Hard-fail rather than POST to /null or send
       // a null guard (which would disable the server's double-advance protection).
       const cid = turn?.current?.combatantId;
       if (cid == null) throw new Error('No current combatant to end the turn for — refresh and try again.');
-      return api.post(`${API}/encounters/${encounterId}/end-turn`, { expectedCurrentCombatantId: cid });
+      return api.post(`${API}/encounters/${encounterId}/end-turn`, {
+        expectedCurrentCombatantId: cid,
+        idempotencyKey,
+      });
     },
     onMutate: () => setError(null),
     onError: (err) => setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.actionFailed' })),
@@ -423,7 +430,7 @@ export function TurnWorkspace({
       {/* End turn — a player may end their own turn when allowed; the DM always may. */}
       <div className="flex items-center gap-2 flex-wrap">
         {turn.canEndTurn ? (
-          <Btn disabled={controlsDisabled} onClick={() => endTurn.mutate()} data-testid="workspace-end-turn">
+          <Btn disabled={controlsDisabled} onClick={() => endTurn.mutate({})} data-testid="workspace-end-turn">
             {turn.isYourTurn ? 'End my turn →' : 'End turn →'}
           </Btn>
         ) : turn.isYourTurn && turn.dmControlsTurns ? (
