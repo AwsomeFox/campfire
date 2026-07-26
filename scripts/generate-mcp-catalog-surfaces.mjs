@@ -23,36 +23,33 @@ function write(rel, content) {
 function replace(rel, pairs) {
   let content = read(rel);
   for (const [from, to] of pairs) {
-    if (!content.includes(from)) {
+    if (content.includes(from)) {
+      content = content.replace(from, to);
+      continue;
+    }
+    if (!content.includes(to)) {
       throw new Error(`generate-mcp-catalog-surfaces: ${rel} missing expected fragment: ${from}`);
     }
-    content = content.replace(from, to);
   }
   write(rel, content);
 }
 
 function replacePattern(rel, pairs) {
   let content = read(rel);
-  for (const [pattern, to] of pairs) {
-    pattern.lastIndex = 0;
-    if (!pattern.test(content)) {
-      throw new Error(`generate-mcp-catalog-surfaces: ${rel} missing expected pattern: ${pattern}`);
+  for (const [from, to] of pairs) {
+    // Match GLOBALLY: several surfaces state the tool count more than once
+    // (README.md and roadmap.md each mention it twice). A non-global replace only
+    // ever rewrote the FIRST occurrence, so later mentions froze one bump behind and
+    // drifted further every release — that is how roadmap.md ended up claiming a
+    // "217-tool set" two lines under "Full MCP parity — 218 tools".
+    const all = new RegExp(from.source, from.flags.includes('g') ? from.flags : `${from.flags}g`);
+    if (!all.test(content)) {
+      throw new Error(`generate-mcp-catalog-surfaces: ${rel} missing expected pattern: ${from}`);
     }
-    pattern.lastIndex = 0;
-    content = content.replace(pattern, to);
+    all.lastIndex = 0;
+    content = content.replace(all, to);
   }
   write(rel, content);
-}
-
-function replaceOptional(rel, from, to) {
-  const content = read(rel);
-  if (content.includes(from)) {
-    write(rel, content.replace(from, to));
-    return;
-  }
-  if (!content.includes(to)) {
-    throw new Error(`generate-mcp-catalog-surfaces: ${rel} missing expected fragment: ${from}`);
-  }
 }
 
 write(
@@ -83,30 +80,43 @@ replacePattern('website/docs/index.md', [[/\*\*\d+-tool\*\*/, `**${tools}-tool**
 replacePattern('website/docs/ai/capabilities.md', [[/server\*\* \(\d+ tools\)/, `server** (${tools} tools)`]]);
 
 replacePattern('website/docs/ai/reference.md', [
-  [/^- \*\*Tools:\*\* \d+ covering/m, `- **Tools:** ${tools} covering`],
-  [/^- \*\*Resources:\*\* \d+ read surfaces/m, `- **Resources:** ${resources} read surfaces`],
-  [/^- \*\*Prompts:\*\* \d+ authoring prompts/m, `- **Prompts:** ${prompts} authoring prompts`],
-]);
-
-replacePattern('website/docs/reference/roadmap.md', [
-  [/\*\*Full MCP parity — \d+ tools\*\*/g, `**Full MCP parity — ${tools} tools**`],
   [
-    /\d+ read surfaces plus \d+ prep\/recap prompts, beyond the \d+-tool set/g,
-    `${resources} read surfaces plus ${prompts} prep/recap prompts, beyond the ${tools}-tool set`,
+    /- \*\*Tools:\*\* \d+ covering campaigns, quests, objectives, story arcs\/beats\/branches,[\s\S]*?`prompts\/list` to discover them\./,
+    `- **Tools:** ${tools} covering campaigns, quests, objectives, story arcs/beats/branches,\n` +
+      '  NPCs, locations, factions, characters, encounters and combatants, dice, sessions,\n' +
+      '  notes, the inbox, proposals, the AI Dungeon Master seat, members, rule packs, the\n' +
+      '  session-zero charter, audit, and export.\n' +
+      '  Call `tools/list` for the live catalogue with full input schemas — every tool\'s\n' +
+      '  arguments are strictly validated and described.\n' +
+      `- **Resources:** ${resources} read surfaces (campaign index, campaign summary, party,\n` +
+      '  session recaps, session-zero charter, AI-authorized support preferences) exposed as\n' +
+      '  MCP **resources** — call `resources/list` to discover concrete URIs.\n' +
+      `- **Prompts:** ${prompts} authoring prompts (recap-writer, session-prep) — call\n` +
+      '  `prompts/list` to discover them.',
   ],
 ]);
 
-replaceOptional(
-  'apps/web/src/i18n/locales/en/preferences.json',
-  'Point Claude (or any MCP client) at this server to read and write your campaigns — 36+ tools covering quests, NPCs, characters, encounters, dice and more.',
-  'Point Claude (or any MCP client) at this server to read and write your campaigns — {{toolCount}} tools covering quests, NPCs, characters, encounters, dice and more.',
-);
+replacePattern('website/docs/reference/roadmap.md', [
+  [
+    /- ✅ \*\*Full MCP parity — \d+ tools\*\* covering campaign lifecycle/,
+    `- ✅ **Full MCP parity — ${tools} tools** covering campaign lifecycle`,
+  ],
+  [
+    /- ✅ \*\*MCP resources & prompts\*\* — \d+ read surfaces plus \d+ prep\/recap prompts, beyond the \d+-tool set/,
+    `- ✅ **MCP resources & prompts** — ${resources} read surfaces plus ${prompts} prep/recap prompts, beyond the ${tools}-tool set`,
+  ],
+]);
 
-replaceOptional(
-  'apps/web/src/i18n/locales/ar/preferences.json',
-  'Point Claude (or any MCP client) at this server to read and write your campaigns — 36+ tools covering quests, NPCs, characters, encounters, dice and more.',
-  'Point Claude (or any MCP client) at this server to read and write your campaigns — {{toolCount}} tools covering quests, NPCs, characters, encounters, dice and more.',
-);
+for (const rel of ['apps/web/src/i18n/locales/en/preferences.json', 'apps/web/src/i18n/locales/ar/preferences.json']) {
+  const content = read(rel);
+  if (content.includes('{{toolCount}} tools covering')) continue;
+  replace(rel, [
+    [
+      'Point Claude (or any MCP client) at this server to read and write your campaigns — 36+ tools covering quests, NPCs, characters, encounters, dice and more.',
+      'Point Claude (or any MCP client) at this server to read and write your campaigns — {{toolCount}} tools covering quests, NPCs, characters, encounters, dice and more.',
+    ],
+  ]);
+}
 
 console.log(
   `generate-mcp-catalog-surfaces: ok — ${tools} tools, ${resources} resources, ${prompts} prompts`,

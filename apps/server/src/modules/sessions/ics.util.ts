@@ -118,6 +118,7 @@ export function buildCampaignIcs(campaign: { id: number; name: string }, schedul
       `DTEND:${toIcsUtc(endIso)}`,
       `SUMMARY:${icsEscape(s.title || `${campaign.name} — D&D session`)}`,
     );
+    if (s.status === 'cancelled') lines.push('STATUS:CANCELLED');
     if (s.location) lines.push(`LOCATION:${icsEscape(s.location)}`);
     if (s.notes) lines.push(`DESCRIPTION:${icsEscape(s.notes)}`);
     lines.push(`LAST-MODIFIED:${toIcsUtc(s.updatedAt)}`, 'END:VEVENT');
