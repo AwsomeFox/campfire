@@ -42,7 +42,9 @@ function buildService(entities: {
     { listForCampaign: async () => entities.npcs ?? [] } as any, // npcs
     { listForCampaign: async () => entities.locations ?? [] } as any, // locations
     { listRecapsForCampaign: async () => entities.sessions ?? [], listAttendanceForCampaign: async () => [] } as any, // sessions
-    { listForCampaign: async () => [] } as any, // scheduling
+    // scheduling — the archive reads listForExport, deliberately the RAW rows (#504);
+    // exposing only that method keeps the stub honest if the call site ever changes back.
+    { listForExport: async () => [] } as any,
     { listForCampaign: async () => entities.characters ?? [] } as any, // characters
     { listForCampaign: noop as any, listAllForCampaign: async () => [] } as any, // notes
     { listForCampaign: noop as any } as any, // comments

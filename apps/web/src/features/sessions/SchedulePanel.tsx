@@ -6,7 +6,7 @@ import { useTranslation } from 'react-i18next';
  * DM: schedule/edit/cancel sessions, enable/rotate/disable the feed.
  * Everyone: see what's coming, one-tap RSVP.
  */
-import { useCallback, useEffect, useId, useMemo, useReducer, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useReducer, useRef, useState, type FormEvent } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import type { CalendarFeed, RsvpStatus, ScheduledSessionListPage, ScheduledSessionWithRsvps, SessionRsvp } from '@campfire/schema';
 import {
@@ -15,13 +15,13 @@ import {
   partitionSchedules,
   scheduleEndsAtMs,
 } from '@campfire/schema';
-import { api, API, ApiError, isStaleWrite } from '../../lib/api';
+import { api, API, ApiError, isStaleWrite, translateApiError } from '../../lib/api';
 import { joinPublicBase } from '../../lib/public-base';
 import { usePanelData } from '../../lib/usePanelData';
 import { formatDateTime, useFormattingLocale, useTimeFormat } from '../../lib/format';
 import { useAuth } from '../../app/auth';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
-import { Card, Btn, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
+import { Card, Btn, Dialog, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
 import { sanitizeFieldPrefix } from '../../components/Field';
 import { LabeledField } from '../../components/LabeledField';
 import { useAnnounce } from '../../components/Announcer';
@@ -105,6 +105,8 @@ export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showAddForm, setShowAddForm] = useState(() => searchParams.get('action') === 'new');
+  const [restoreBusyId, setRestoreBusyId] = useState<number | null>(null);
+  const [duplicateTarget, setDuplicateTarget] = useState<ScheduledSessionWithRsvps | null>(null);
 
   const closeAddForm = useCallback(() => {
     setShowAddForm(false);
@@ -164,7 +166,7 @@ export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: 
     } finally {
       setLoading(false);
     }
-  }, [campaignId]);
+  }, [campaignId, t]);
 
   const loadMorePast = useCallback(async () => {
     if (!pastHasMore || loadingPast) return;
@@ -217,6 +219,37 @@ export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: 
   }, [inProgress, upcoming, scheduleNowMs]);
   const [next, ...later] = upcoming;
   const hasLive = inProgress.length > 0 || Boolean(next);
+
+  function actionError(action: 'restore' | 'duplicate', err: unknown): string {
+    const detail = translateApiError(err, t, { fallbackKey: 'sessions.errors.loadSchedule' });
+    return `Couldn't ${action} scheduled session.${detail ? ` ${detail}` : ''}`;
+  }
+
+  async function restoreSchedule(id: number) {
+    setRestoreBusyId(id);
+    setError(null);
+    try {
+      await api.post<ScheduledSessionWithRsvps>(`${API}/schedule/${id}/restore`);
+      await load();
+    } catch (err) {
+      setError(actionError('restore', err));
+    } finally {
+      setRestoreBusyId(null);
+    }
+  }
+
+  async function duplicateSchedule(schedule: ScheduledSessionWithRsvps, body: ScheduleDraft) {
+    setError(null);
+    await api.post<ScheduledSessionWithRsvps>(`${API}/schedule/${schedule.id}/duplicate`, {
+      scheduledAt: body.scheduledAt,
+      durationMinutes: body.durationMinutes,
+      title: body.title,
+      location: body.location,
+      notes: body.notes,
+    });
+    setDuplicateTarget(null);
+    await load();
+  }
 
   if (loading) {
     return (
@@ -343,10 +376,42 @@ export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: 
         <div className="space-y-1">
           <h2 className="text-sm font-bold text-white m-0">Past</h2>
           {pastSchedules.map((s) => (
-            <p key={s.id} className="text-muted text-xs m-0" {...entityTargetProps('scheduled_session', s.id)}>
-              {formatWhen(s.scheduledAt)}
-              {s.title ? ` — ${s.title}` : ''}
-            </p>
+            <div
+              key={s.id}
+              className="text-muted text-xs m-0 flex items-center gap-2 flex-wrap"
+              {...entityTargetProps('scheduled_session', s.id)}
+            >
+              <span>
+                {formatWhen(s.scheduledAt)}
+                {s.title ? ` — ${s.title}` : ''}
+              </span>
+              {s.status !== 'scheduled' && (
+                <span className="tag">{s.status === 'cancelled' ? 'Cancelled' : 'Completed'}</span>
+              )}
+              {s.status === 'cancelled' && s.cancellationReason && (
+                <span>Reason: {s.cancellationReason}</span>
+              )}
+              {s.sessionId && (
+                <Link to={`/c/${campaignId}/sessions?session=${s.sessionId}`} className="underline">
+                  Recap
+                </Link>
+              )}
+              {canDmWrite && s.status === 'cancelled' && (
+                <Btn
+                  ghost
+                  className="!min-h-0 !py-1 text-xs"
+                  onClick={() => void restoreSchedule(s.id)}
+                  busy={restoreBusyId === s.id}
+                >
+                  {restoreBusyId === s.id ? 'Restoring…' : 'Restore'}
+                </Btn>
+              )}
+              {canDmWrite && (
+                <Btn ghost className="!min-h-0 !py-1 text-xs" onClick={() => setDuplicateTarget(s)}>
+                  Duplicate
+                </Btn>
+              )}
+            </div>
           ))}
           {pastHasMore && (
             <Btn
@@ -360,6 +425,15 @@ export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: 
             </Btn>
           )}
         </div>
+      )}
+
+      {duplicateTarget && (
+        <DuplicateScheduleDialog
+          schedule={duplicateTarget}
+          formatError={(err) => actionError('duplicate', err)}
+          onCancel={() => setDuplicateTarget(null)}
+          onSubmit={(body) => duplicateSchedule(duplicateTarget, body)}
+        />
       )}
     </div>
   );
@@ -391,6 +465,7 @@ function ScheduleItem({
   const rsvpStatusId = `schedule-rsvp-status-${schedule.id}`;
   const [editing, setEditing] = useState(false);
   const [confirmingCancel, setConfirmingCancel] = useState(false);
+  const [cancellationReason, setCancellationReason] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -497,7 +572,8 @@ function ScheduleItem({
     setBusy(true);
     setError(null);
     try {
-      await api.delete(`${API}/schedule/${schedule.id}`);
+      const reason = cancellationReason.trim();
+      await api.delete(`${API}/schedule/${schedule.id}`, reason ? { json: { reason } } : undefined);
       onChange();
     } catch {
       setError(t('sessions.errors.cancelSession'));
@@ -735,11 +811,31 @@ function ScheduleItem({
       {confirmingCancel && (
         <ConfirmDialog
           title="Cancel this session?"
-          body="The scheduled session and everyone's RSVPs will be removed."
+          body={
+            <div className="space-y-2">
+              <p className="m-0">
+                The schedule will be marked cancelled. RSVPs and attendance history stay attached for audit and restore.
+              </p>
+              <label className="block text-xs font-bold text-secondary uppercase tracking-wide" htmlFor={`cancel-reason-${schedule.id}`}>
+                Reason (optional)
+              </label>
+              <textarea
+                id={`cancel-reason-${schedule.id}`}
+                className="input w-full min-h-[70px]"
+                value={cancellationReason}
+                maxLength={1000}
+                onChange={(event) => setCancellationReason(event.target.value)}
+                disabled={busy}
+              />
+            </div>
+          }
           confirmLabel="Cancel session"
           busy={busy}
           onConfirm={cancel}
-          onCancel={() => setConfirmingCancel(false)}
+          onCancel={() => {
+            setConfirmingCancel(false);
+            setCancellationReason('');
+          }}
         />
       )}
     </Card>
@@ -767,6 +863,152 @@ function RsvpList({ rsvps }: { rsvps: SessionRsvp[] }) {
         );
       })}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+
+function DuplicateScheduleDialog({
+  schedule,
+  formatError,
+  onSubmit,
+  onCancel,
+}: {
+  schedule: ScheduledSessionWithRsvps;
+  formatError: (err: unknown) => string;
+  onSubmit: (body: ScheduleDraft) => Promise<void>;
+  onCancel: () => void;
+}) {
+  const announce = useAnnounce();
+  const reactId = useId();
+  const idPrefix = `duplicate-schedule-${schedule.id}-${sanitizeFieldPrefix(reactId)}`;
+  const titleId = `${idPrefix}-title`;
+  const formErrorId = `${idPrefix}-error`;
+  const [when, setWhen] = useState(isoToDatetimeLocalInputValue(schedule.scheduledAt));
+  const [duration, setDuration] = useState(String(schedule.durationMinutes));
+  const [title, setTitle] = useState(schedule.title);
+  const [location, setLocation] = useState(schedule.location);
+  const [notes, setNotes] = useState(schedule.notes);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function save(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const parsed = Date.parse(when);
+    const minutes = Number(duration);
+    if (Number.isNaN(parsed)) {
+      setError('Pick a valid date and time to duplicate this session.');
+      return;
+    }
+    if (!Number.isFinite(minutes) || minutes < 15 || minutes > 1440) {
+      setError('Duration must be between 15 and 1440 minutes.');
+      return;
+    }
+
+    setSaving(true);
+    setError(null);
+    try {
+      await onSubmit({
+        scheduledAt: new Date(parsed).toISOString(),
+        durationMinutes: Math.floor(minutes),
+        title: title.trim(),
+        location: location.trim(),
+        notes,
+      });
+      announce('Scheduled session duplicated.');
+    } catch (err) {
+      const message = formatError(err);
+      setError(message);
+      announce(message, { assertive: true });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Dialog title="Duplicate scheduled session" titleId={titleId} onBackdropClick={saving ? undefined : onCancel}>
+      <form className="space-y-3" onSubmit={(event) => void save(event)} aria-describedby={error ? formErrorId : undefined}>
+        <p className="m-0 text-xs text-muted">
+          Copy the cancelled or past session into a new scheduled game night. RSVPs are not copied.
+        </p>
+        {error && (
+          <div id={formErrorId}>
+            <ErrorNote message={error} />
+          </div>
+        )}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <LabeledField
+            idPrefix={idPrefix}
+            name={SCHEDULE_FIELD_NAMES.when}
+            type="datetime-local"
+            label="When"
+            help={SCHEDULE_WHEN_HELP}
+            value={when}
+            onChange={(e) => setWhen(e.target.value)}
+            disabled={saving}
+            describedBy={error ? formErrorId : undefined}
+            autoFocus
+          />
+          <LabeledField
+            idPrefix={idPrefix}
+            name={SCHEDULE_FIELD_NAMES.durationMinutes}
+            type="number"
+            label="Duration (minutes)"
+            help={SCHEDULE_DURATION_HELP}
+            min={15}
+            max={1440}
+            step={15}
+            value={duration}
+            onChange={(e) => setDuration(e.target.value)}
+            disabled={saving}
+            describedBy={error ? formErrorId : undefined}
+          />
+        </div>
+        <LabeledField
+          idPrefix={idPrefix}
+          name={SCHEDULE_FIELD_NAMES.title}
+          label="Title"
+          help={SCHEDULE_TITLE_HELP}
+          placeholder='e.g. "Session 12 — the heist"'
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+          disabled={saving}
+          describedBy={error ? formErrorId : undefined}
+        />
+        <LabeledField
+          idPrefix={idPrefix}
+          name={SCHEDULE_FIELD_NAMES.location}
+          label="Where"
+          help={SCHEDULE_LOCATION_HELP}
+          placeholder="Sam's place, VTT link…"
+          value={location}
+          onChange={(e) => setLocation(e.target.value)}
+          disabled={saving}
+          describedBy={error ? formErrorId : undefined}
+        />
+        <LabeledField
+          idPrefix={idPrefix}
+          name={SCHEDULE_FIELD_NAMES.notes}
+          as="textarea"
+          label="Notes"
+          help={SCHEDULE_NOTES_HELP}
+          placeholder="Bring level 5 sheets, we start on time…"
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+          minHeight={60}
+          disabled={saving}
+          describedBy={error ? formErrorId : undefined}
+        />
+        <div className="dialog-actions">
+          <Btn ghost type="button" onClick={onCancel} disabled={saving}>
+            Cancel
+          </Btn>
+          <Btn type="submit" busy={saving} disabled={saving}>
+            {saving ? 'Duplicating…' : 'Duplicate'}
+          </Btn>
+        </div>
+      </form>
+    </Dialog>
   );
 }
 
