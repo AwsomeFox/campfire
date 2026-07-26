@@ -38,6 +38,7 @@ import { AiDmLiveActivityProvider, useAiDmLiveActivityState } from '../features/
 import { GameIcon } from '../components/GameIcon';
 import { BrandMark } from '../components/BrandMark';
 import { UIIcon } from '../components/UIIcon';
+import { TermHelp } from '../components/TermHelp';
 import { EntityDeepLinkFocus } from './EntityDeepLinkFocus';
 import { RouteChangeFocus } from './RouteChangeFocus';
 import { SkipToMainLink } from './SkipToMainLink';
@@ -357,6 +358,7 @@ function SidebarNavButton({
   ariaKeyshortcuts?: string;
   title?: string;
 }) {
+  const termHelp = item.termId ? <TermHelp termId={item.termId} align="end" /> : null;
   const inner = (
     <>
       <span
@@ -391,6 +393,7 @@ function SidebarNavButton({
         style={{ ...sharedStyle, color: 'var(--color-text-secondary)' }}
       >
         {inner}
+        {termHelp}
       </div>
     );
   }
@@ -406,6 +409,21 @@ function SidebarNavButton({
       >
         {inner}
       </button>
+    );
+  }
+  if (termHelp) {
+    return (
+      <div className="flex items-center gap-1">
+        <Link
+          to={item.to}
+          onClick={onClick}
+          className="flex items-center gap-2 px-2.5 text-sm min-w-0 flex-1"
+          style={{ ...sharedStyle, ...activeStyle }}
+        >
+          {inner}
+        </Link>
+        {termHelp}
+      </div>
     );
   }
   return (
@@ -845,6 +863,10 @@ function LayoutContent() {
             />
             <SidebarKeyboardShortcutsButton />
             <SidebarNavButton
+              item={{ key: 'glossary', label: t('glossary.navLabel'), to: '/glossary' }}
+              active={location.pathname === '/glossary'}
+            />
+            <SidebarNavButton
               item={{ key: 'change-password', label: t('nav.changePassword'), to: undefined }}
               active={false}
               onClick={() => setShowPasswordModal(true)}
@@ -948,6 +970,9 @@ function LayoutContent() {
             )}
             <Link to="/tokens" className="btn btn-ghost" style={{ fontSize: 12.5 }}>
               {t('nav.apiTokens')}
+            </Link>
+            <Link to="/glossary" className="btn btn-ghost" style={{ fontSize: 12.5 }}>
+              {t('glossary.navLabel')}
             </Link>
             <span className="text-muted" style={{ fontSize: 12 }}>{displayName}</span>
             <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={onLogout}>
@@ -1190,6 +1215,11 @@ function MoreSheet({
             active={isActivePath('/preferences')}
             onNavigate={onClose}
           />
+          <MoreSheetItem
+            item={{ key: 'glossary', label: t('glossary.navLabel'), to: '/glossary' }}
+            active={isActivePath('/glossary')}
+            onNavigate={onClose}
+          />
           <button
             className="flex items-center gap-2.5 min-h-[46px] px-2.5 text-left rounded-md w-full"
             style={{ fontSize: 14.5, color: 'var(--color-text)' }}
@@ -1235,6 +1265,33 @@ function MoreSheetItem({
       >
         {item.label}
         <span className="tag tag-neutral ml-auto" style={{ fontSize: 9 }}>soon</span>
+      </div>
+    );
+  }
+  if (item.termId) {
+    return (
+      <div className="flex items-center gap-1">
+        <Link
+          to={item.to}
+          state={state}
+          onClick={(event) => {
+            onClick?.(event);
+            if (!event.defaultPrevented) onNavigate();
+          }}
+          className="flex items-center gap-2.5 min-h-[46px] px-2.5 text-left rounded-md min-w-0 flex-1"
+          style={{ fontSize: 14.5, ...activeStyle }}
+          aria-current={active ? 'page' : undefined}
+        >
+          <span className="flex-1 truncate">{item.label}</span>
+          {!!item.badge && (
+            <span className="tag tag-accent" style={{ fontSize: 9.5 }}>
+              {item.badge}
+            </span>
+          )}
+        </Link>
+        {/* onNavigate closes the sheet: without it "Open glossary" navigates
+            while the aria-modal More sheet stays mounted over the destination. */}
+        <TermHelp termId={item.termId} align="end" onNavigate={onNavigate} />
       </div>
     );
   }
@@ -1318,6 +1375,9 @@ function UserMenu({
       </Link>
       <Link to="/preferences" role="menuitem" className="block px-2 py-1.5 rounded-md" style={{ color: 'var(--color-text)' }} onClick={onClose}>
         Preferences
+      </Link>
+      <Link to="/glossary" role="menuitem" className="block px-2 py-1.5 rounded-md" style={{ color: 'var(--color-text)' }} onClick={onClose}>
+        Glossary
       </Link>
       <Link to="/credits" role="menuitem" className="block px-2 py-1.5 rounded-md" style={{ color: 'var(--color-text)' }} onClick={onClose}>
         Credits

@@ -358,9 +358,9 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(MIGRATION_NAMES).toContain('0095_campaign_catch_up_cursors');
       expect(MIGRATION_NAMES).toContain('0098_encounters_aftermath_dismissed');
       expect(MIGRATION_NAMES).toContain('0102_ai_scribe_session_scope_499');
-      // 0108 (#559): durable AI Driver control state is created as a NEW table on an old-shaped
+      // 0112 (#559): durable AI Driver control state is created as a NEW table on an old-shaped
       // DB, so pause/takeover/vote/stuck survive a restart after an in-place upgrade.
-      expect(MIGRATION_NAMES).toContain('0108_ai_driver_control_state_559');
+      expect(MIGRATION_NAMES).toContain('0112_ai_driver_control_state_559');
       expect(columnNames(sqlite, 'ai_driver_control_state')).toEqual(
         expect.arrayContaining([
           'campaign_id', 'status', 'state', 'scene', 'last_narration', 'last_turn_at',

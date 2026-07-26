@@ -35,6 +35,8 @@ export const COMPENDIUM_URL_TYPE_VALUES = [
   'class',
   'race',
   'feat',
+  'section',
+  'other',
 ] as const;
 
 export type CompendiumUrlType = (typeof COMPENDIUM_URL_TYPE_VALUES)[number] | 'all';

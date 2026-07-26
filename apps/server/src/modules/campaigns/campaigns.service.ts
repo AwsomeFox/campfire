@@ -44,6 +44,7 @@ import {
   factions,
   sessionAttendees,
   sessionShares,
+  castSessions,
   scheduledSessions,
   sessionRsvps,
   comments,
@@ -3199,6 +3200,7 @@ export class CampaignsService {
         tx.delete(comments).where(eq(comments.campaignId, id)).run();
         tx.delete(entityRevisions).where(eq(entityRevisions.campaignId, id)).run();
         tx.delete(sessionShares).where(eq(sessionShares.campaignId, id)).run();
+        tx.delete(castSessions).where(eq(castSessions.campaignId, id)).run();
         tx.delete(sessions).where(eq(sessions.campaignId, id)).run();
         tx.delete(scheduledSessions).where(eq(scheduledSessions.campaignId, id)).run();
         tx.delete(proposals).where(eq(proposals.campaignId, id)).run();

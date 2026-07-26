@@ -162,6 +162,10 @@ describe('campaign purge cascade (real SQLite, no orphan rows)', () => {
     run('INSERT INTO session_zero (campaign_id, created_at, updated_at) VALUES (?, ?, ?)', campaignId, now, now);
     run('INSERT INTO factions (campaign_id, name, created_at, updated_at) VALUES (?, ?, ?, ?)', campaignId, 'Faction', now, now);
     run('INSERT INTO session_shares (session_id, campaign_id, token_hash, token_prefix, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)', sessionId, campaignId, 'hash-235', 'pfx', now, now);
+    run(
+      'INSERT INTO cast_sessions (campaign_id, label, created_by, token_hash, token_prefix, exit_pin_hash, expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      campaignId, 'Table TV', 'dm', 'cast-hash-547', 'cf_cast_0000', 'pin-hash-547', '2099-01-01T00:00:00.000Z', now, now,
+    );
     run('INSERT INTO session_attendees (session_id, character_id, created_at) VALUES (?, ?, ?)', sessionId, characterId, now);
     const scheduledId = run('INSERT INTO scheduled_sessions (campaign_id, scheduled_at, created_at, updated_at) VALUES (?, ?, ?, ?)', campaignId, now, now, now);
     run('INSERT INTO session_rsvps (scheduled_session_id, user_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)', scheduledId, 'u1', 'yes', now, now);
@@ -197,7 +201,7 @@ describe('campaign purge cascade (real SQLite, no orphan rows)', () => {
       // Every table keyed directly off campaign_id must be empty for this campaign.
       const campaignScoped = [
         'characters', 'quests', 'story_arcs', 'story_beats', 'timeline_events', 'timeline_calendars',
-        'session_zero', 'npcs', 'factions', 'locations', 'sessions', 'session_shares', 'scheduled_sessions',
+        'session_zero', 'npcs', 'factions', 'locations', 'sessions', 'session_shares', 'cast_sessions', 'scheduled_sessions',
         'notes', 'comments', 'entity_revisions', 'campaign_guest_dm_grants', 'campaign_members', 'campaign_invites', 'api_tokens',
         'proposals', 'attachments', 'encounters', 'dice_rolls', 'notifications', 'inventory_items',
         'party_treasury', 'ai_dm_seats', 'ai_driver_control_state',

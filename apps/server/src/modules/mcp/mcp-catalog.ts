@@ -181,6 +181,7 @@ export const MCP_TOOL_NAMES = [
   'roll_initiative',
   'begin_encounter',
   'next_turn',
+  'set_escalation_die',
   'end_turn',
   'undo_turn',
   'set_turn_state',
