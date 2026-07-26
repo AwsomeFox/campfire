@@ -578,10 +578,22 @@ describe('session scheduling (e2e)', () => {
     expect(whileTrashed.status).toBe(200);
     expect(whileTrashed.body).toMatchObject({ id: scheduleId, sessionId: null, status: 'scheduled' });
 
-    // The list projections agree with the single read.
+    // Every list projection must agree with that single read — including the LIVE ones,
+    // which filter in SQL and so never reached the read-time reconciliation. This night
+    // is future-dated, so once it reconciles to 'scheduled' it is a real upcoming game
+    // again: it must come BACK to Upcoming/Next and must NOT sit in Past. Filtering on
+    // the raw status silently dropped it from the view a DM plans from.
+    const upcomingWhileTrashed = await request(server).get(`/api/v1/campaigns/${campaignId}/schedule/upcoming`).set(player);
+    expect(upcomingWhileTrashed.body.map((s: { id: number }) => s.id)).toContain(scheduleId);
+    expect(upcomingWhileTrashed.body.find((s: { id: number }) => s.id === scheduleId)).toMatchObject({
+      sessionId: null,
+      status: 'scheduled',
+    });
+
+    // Live and past are exact complements: present in Upcoming means absent from Past.
     const pastWhileTrashed = await request(server).get(`/api/v1/campaigns/${campaignId}/schedule/past`).set(player);
-    const pastRow = pastWhileTrashed.body.items.find((s: { id: number }) => s.id === scheduleId);
-    if (pastRow) expect(pastRow).toMatchObject({ sessionId: null, status: 'scheduled' });
+    expect(pastWhileTrashed.body.items.map((s: { id: number }) => s.id)).not.toContain(scheduleId);
+
     const fullList = await request(server).get(`/api/v1/campaigns/${campaignId}/schedule`).set(player);
     expect(fullList.body.find((s: { id: number }) => s.id === scheduleId)).toMatchObject({
       sessionId: null,
@@ -597,6 +609,42 @@ describe('session scheduling (e2e)', () => {
     const afterRestore = await request(server).get(`/api/v1/schedule/${scheduleId}`).set(player);
     expect(afterRestore.status).toBe(200);
     expect(afterRestore.body).toMatchObject({ id: scheduleId, status: 'completed', sessionId });
+
+    // ...and the live/past split flips back with it, still exactly complementary.
+    const upcomingAfterRestore = await request(server).get(`/api/v1/campaigns/${campaignId}/schedule/upcoming`).set(player);
+    expect(upcomingAfterRestore.body.map((s: { id: number }) => s.id)).not.toContain(scheduleId);
+    const pastAfterRestore = await request(server).get(`/api/v1/campaigns/${campaignId}/schedule/past`).set(player);
+    expect(pastAfterRestore.body.items.map((s: { id: number }) => s.id)).toContain(scheduleId);
+  });
+
+  it('exports the RAW schedule row even while its linked recap is trashed', async () => {
+    const server = ctx.app.getHttpServer();
+    const scheduled = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/schedule`)
+      .set(dm)
+      .send({ scheduledAt: '2099-12-20T18:00:00Z', title: 'Archive fidelity' });
+    const recap = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/sessions`)
+      .set(dm)
+      .send({
+        title: 'Archived recap',
+        playedAt: '2099-12-20',
+        recap: 'Exported while trashed.',
+        scheduledSessionId: scheduled.body.id,
+      });
+    expect(recap.status).toBe(201);
+    await request(server).delete(`/api/v1/sessions/${recap.body.id}`).set(dm).expect(200);
+
+    // Reads reconcile the trashed link away...
+    const read = await request(server).get(`/api/v1/schedule/${scheduled.body.id}`).set(player);
+    expect(read.body).toMatchObject({ status: 'scheduled', sessionId: null });
+
+    // ...but the archive must record what the DB actually holds. The trash is
+    // reversible; an export that downgraded the night to 'scheduled' would not be.
+    const exported = await request(server).get(`/api/v1/campaigns/${campaignId}/export`).set(dm);
+    expect(exported.status).toBe(200);
+    const archived = exported.body.scheduledSessions.find((s: { title: string }) => s.title === 'Archive fidelity');
+    expect(archived).toMatchObject({ status: 'completed', sessionId: recap.body.id });
   });
 
   it('duplicating a session whose window was shrunk below the create floor clamps the duration', async () => {

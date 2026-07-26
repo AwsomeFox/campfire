@@ -1,5 +1,5 @@
 import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, asc, desc, eq, inArray, count, ne, or } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, count, ne } from 'drizzle-orm';
 import type { z } from 'zod';
 import {
   ScheduledSessionCreate,
@@ -34,10 +34,10 @@ import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { buildCampaignIcs } from './ics.util';
 import {
-  scheduleEndedSql,
   scheduleInProgressSql,
   scheduleLiveSql,
   scheduleNotEndedSql,
+  schedulePastSql,
   scheduleUpcomingOnlySql,
 } from './scheduling-queries';
 
@@ -192,18 +192,21 @@ export class SchedulingService {
     return map;
   }
 
-  private async attachRsvps(rows: Array<typeof scheduledSessions.$inferSelect>): Promise<ScheduledSessionWithRsvps[]> {
+  private async attachRsvps(
+    rows: Array<typeof scheduledSessions.$inferSelect>,
+    reconcileLinks = true,
+  ): Promise<ScheduledSessionWithRsvps[]> {
     if (rows.length === 0) return [];
     const [rsvpRows, liveLinks] = await Promise.all([
       this.db
         .select()
         .from(sessionRsvps)
         .where(inArray(sessionRsvps.scheduledSessionId, rows.map((r) => r.id))),
-      this.liveLinkedSessionIds(rows),
+      reconcileLinks ? this.liveLinkedSessionIds(rows) : Promise.resolve(new Set<number>()),
     ]);
     const grouped = this.groupRsvps(rsvpRows);
     return rows.map((row) => ({
-      ...this.projectLink(row, liveLinks),
+      ...(reconcileLinks ? this.projectLink(row, liveLinks) : toDomain(row)),
       rsvps: grouped.get(row.id) ?? [],
     }));
   }
@@ -257,6 +260,26 @@ export class SchedulingService {
   }
 
   /**
+   * Archive read for campaign export: the RAW stored rows, deliberately NOT
+   * link-reconciled (#504).
+   *
+   * Every other read reconciles a `completed` row whose recap is trashed back to
+   * `scheduled`, because that is the honest thing to SHOW. An archive is not a view: it
+   * must record what the database actually holds. Reconciling here would let a recap
+   * that merely happened to be in the trash at export time permanently downgrade a
+   * completed night to `scheduled` in the portable copy — the trash is reversible, but
+   * the export would not be.
+   */
+  async listForExport(campaignId: number): Promise<ScheduledSessionWithRsvps[]> {
+    const rows = await this.db
+      .select()
+      .from(scheduledSessions)
+      .where(eq(scheduledSessions.campaignId, campaignId))
+      .orderBy(asc(scheduledSessions.scheduledAt));
+    return this.attachRsvps(rows, false);
+  }
+
+  /**
    * Live schedule projection: in-progress + upcoming nights, soonest-first (#612).
    * Queries only not-yet-ended rows instead of loading full history.
    */
@@ -284,14 +307,7 @@ export class SchedulingService {
         : SCHEDULE_PAST_DEFAULT_LIMIT;
     const offset = page?.offset !== undefined ? Math.max(0, Math.floor(page.offset)) : 0;
     const nowIso = new Date(nowMs).toISOString();
-    const where = and(
-      eq(scheduledSessions.campaignId, campaignId),
-      or(
-        scheduleEndedSql(nowIso),
-        eq(scheduledSessions.status, 'cancelled'),
-        eq(scheduledSessions.status, 'completed'),
-      ),
-    );
+    const where = and(eq(scheduledSessions.campaignId, campaignId), schedulePastSql(nowIso));
 
     const [{ value: total }] = await this.db.select({ value: count() }).from(scheduledSessions).where(where);
 
