@@ -177,7 +177,7 @@ export default function MembersPage() {
           <h2 className="font-bold text-white text-sm border-b border-slate-700 pb-2">Members</h2>
           <ReadOnlyMemberTable members={members ?? []} />
         </Card>
-        <AiConsentCard campaignId={id} members={members ?? []} myUserId={myUserId} onChange={() => void load()} />
+        <AiConsentCard campaignId={id} members={members ?? []} myUserId={myUserId} onChange={() => load()} />
         <YourMembershipCard campaignId={id} members={members ?? []} myUserId={myUserId} />
       </div>
     );
@@ -203,7 +203,7 @@ export default function MembersPage() {
         }}
       />
 
-      <AiConsentCard campaignId={id} members={members ?? []} myUserId={myUserId} onChange={() => void load()} />
+      <AiConsentCard campaignId={id} members={members ?? []} myUserId={myUserId} onChange={() => load()} />
 
       <GuestDmGrantsCard
         campaignId={id}
@@ -922,7 +922,12 @@ function AiConsentCard({
   campaignId: number;
   members: CampaignMember[];
   myUserId: number | null;
-  onChange: () => void;
+  /**
+   * Refetch the shared member list. MUST be awaitable: the optimistic `pending` value is
+   * held until the refreshed `members` prop has actually arrived, otherwise the checkbox
+   * flickers next → old → next (see `save`).
+   */
+  onChange: () => void | Promise<void>;
 }) {
   const { t } = useTranslation();
   const [saving, setSaving] = useState(false);
@@ -943,14 +948,27 @@ function AiConsentCard({
       await api.patch<CampaignMember>(`${API}/campaigns/${campaignId}/members/me/ai-consent`, {
         aiExternalUseConsent: next,
       });
-      // Refetch the shared list so the DM-facing consent chip is not stale.
-      onChange();
     } catch (err) {
       setError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
-    } finally {
+      // The write failed, so the server value is still authoritative — drop the optimistic
+      // value immediately and let the checkbox snap back to what is actually stored.
       setPending(null);
       setSaving(false);
+      return;
     }
+
+    // Saved. Refetch the shared list so the DM-facing consent chip is not stale, and AWAIT
+    // it: clearing `pending` before the refreshed `members` prop arrives would let `checked`
+    // fall back to the stale prop for a frame — the exact next → old → next flicker the
+    // pending value exists to prevent.
+    try {
+      await onChange();
+    } catch {
+      // The refresh is best-effort; the consent write itself already succeeded, so this
+      // must not revert the checkbox or surface as a save error.
+    }
+    setPending(null);
+    setSaving(false);
   }
 
   return (

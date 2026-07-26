@@ -71,8 +71,12 @@ export interface RecapDraftSource {
     Partial<Pick<EncounterWithCombatants, 'id'>> & { events?: EncounterEvent[] })[];
   // Issue #673: paper-table / physical rolls logged during play — honest totals without
   // fabricated dice — so recap drafts can mention notable off-screen checks.
+  // `rollerUserId` is carried ONLY between assembly and the #501 consent gate, which uses it
+  // as the join key for redacting `rollerName` (the member's own display name) on rolls whose
+  // roller has not consented to external use. Both gate exits strip it again, so it never
+  // reaches a prompt, a source hash, or an MCP client.
   diceRolls?: (Pick<DiceRoll, 'label' | 'actor' | 'rollerName' | 'total' | 'dc' | 'success' | 'natural20' | 'source' | 'createdAt'> &
-    Partial<Pick<DiceRoll, 'id'>>)[];
+    Partial<Pick<DiceRoll, 'id' | 'rollerUserId'>>)[];
 }
 
 /** One line summarising an encounter for the Recap section seed. */

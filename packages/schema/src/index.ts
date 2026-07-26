@@ -5161,6 +5161,21 @@ export const AiGenerationProvenance = z.object({
   promptHash: z.string(),
   consent: z.object({
     campaignPolicy: AiExternalContentPolicy,
+    /**
+     * Whether this generation actually handed content to an endpoint OFF this server,
+     * and therefore whether the member EXTERNAL-use consent gate applied to the material.
+     *
+     * `false` means the text came from the built-in no-op/injected seam, or from an
+     * endpoint the operator explicitly declared local — nothing left the deployment, so
+     * external-use consent was not the applicable gate (issue #501 is scoped to external
+     * use). Without this flag a stored blob reading `excludedInboxByConsent: 0` is
+     * ambiguous between "every author consented" and "no consent gate was applied";
+     * provenance must not be ambiguous about that.
+     *
+     * Defaults to `true`: fail-closed for an unrecognised blob, and historically accurate
+     * for rows written before the flag existed (the filter always ran, sends were external).
+     */
+    externalSend: z.boolean().default(true),
     includedAuthorUserIds: z.array(z.string()).default([]),
     excludedAuthorUserIds: z.array(z.string()).default([]),
     includedInboxCount: z.number().int().nonnegative().default(0),

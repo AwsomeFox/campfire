@@ -53,7 +53,7 @@ import {
   type ScribeSessionScope,
   type ScribeSourceScope,
 } from './scribe-scope';
-import { filterSourceForExternalAiConsent, type ScribeConsentSummary } from './scribe-consent';
+import { applyScribeConsent, type ScribeConsentSummary, type ScribeEgress } from './scribe-consent';
 
 type ScribeConfigUpdateInput = z.infer<typeof ScribeConfigUpdate>;
 
@@ -84,6 +84,21 @@ const SCRIBE_SYSTEM_USER: RequestUser = {
   serverRole: 'admin',
   devRole: 'dm',
 };
+
+/**
+ * Append an explicit "N notes withheld" clause to a run's `detail` (issue #501).
+ *
+ * A run whose material was emptied by the consent gate must never read as a bare
+ * "nothing to recap" — that is the failure operators experience as "the scribe broke
+ * after upgrading", when in fact it is working exactly as configured and needs a member
+ * action. The count is also archived on `sourceStats` for the UI; this is the
+ * human-readable half that shows up in job history and error surfaces.
+ */
+export function withheldConsentDetail(base: string, consent: ScribeConsentSummary): string {
+  const withheld = consent.excludedInboxByConsent;
+  if (withheld <= 0) return base;
+  return `${base}; ${withheld} note${withheld === 1 ? '' : 's'} withheld pending author consent for external AI use`;
+}
 
 /** Default scribe config for a campaign that has never configured one (never persisted). */
 function defaultConfig(campaignId: number): ScribeConfig {
@@ -250,16 +265,6 @@ export class ScribeService implements OnApplicationBootstrap {
 
   // ── source assembly ───────────────────────────────────────────────────────
 
-  /**
-   * Assemble recap source material. When `scope` is set, only inbox notes resolved
-   * during the window, encounters fought/linked in the window, and dice rolls logged
-   * in the window are included (#499). Without scope, all campaign material is loaded
-   * then filtered (on-demand default).
-   */
-  async assembleSource(campaignId: number, scope?: ScribeSourceScope): Promise<RecapDraftSource | null> {
-    return (await this.assembleSourceWithConsent(campaignId, scope)).source;
-  }
-
   private async aiContentPolicy(campaignId: number): Promise<AiExternalContentPolicy> {
     const [row] = await this.db
       .select({ aiExternalContentPolicy: campaigns.aiExternalContentPolicy })
@@ -277,13 +282,57 @@ export class ScribeService implements OnApplicationBootstrap {
     return new Set(rows.map((row) => String(row.userId)));
   }
 
-  private async applyExternalAiConsent(
+  /**
+   * The operator's EXPLICIT declaration that the configured provider endpoint is
+   * on-box / operator-controlled, so a generation through it does not constitute
+   * external use (issue #501).
+   *
+   * Deliberately an explicit opt-in rather than an inference. Campfire will NOT try to
+   * decide that a `baseUrl` is "local enough" by inspecting its host: a loopback or
+   * RFC1918 address can just as easily be an egress proxy forwarding to a public vendor,
+   * and guessing wrong leaks member-authored content that a member declined to share.
+   * That is the operator's call to make, and it defaults to OFF (fail-closed).
+   *
+   * Note this is NOT the same knob as `AI_PROVIDER_ALLOW_PRIVATE_HOSTS`, which is the SSRF
+   * host policy — permitting a private host as a *destination* says nothing about whether
+   * content sent there stays inside the deployment.
+   */
+  private operatorDeclaredLocalEndpoint(): boolean {
+    const raw = process.env.AI_PROVIDER_ENDPOINT_IS_LOCAL?.trim().toLowerCase();
+    return raw === '1' || raw === 'true';
+  }
+
+  /**
+   * Decide, BEFORE any material is assembled, whether this campaign's generation will
+   * actually leave the server (issue #501).
+   *
+   * `getEffectiveView` is the non-decrypting mirror of `resolveEffectiveConfig`'s
+   * precedence: both resolve `campaign ?? server`, and `resolveEffectiveConfig` returns
+   * null exactly when neither row exists — which is exactly when `configured` is false.
+   * So "no provider row" ⟺ the run falls through to the injected/no-op seam, where
+   * `endpointScope` resolves to `'injected'`/`'none'` and nothing is transmitted anywhere.
+   *
+   * Anything else is treated as external. A configured `baseUrl` is genuinely ambiguous —
+   * it could be a localhost Ollama or a public API — so it stays external unless the
+   * operator has explicitly declared otherwise.
+   */
+  private async resolveEgress(campaignId: number): Promise<ScribeEgress> {
+    const view = await this.providerConfig.getEffectiveView(campaignId);
+    if (!view.configured) return 'local';
+    return this.operatorDeclaredLocalEndpoint() ? 'local' : 'external';
+  }
+
+  private async applyConsentGate(
     campaignId: number,
     source: RecapDraftSource,
+    egress: ScribeEgress,
   ): Promise<ScribeAssembly> {
     const policy = await this.aiContentPolicy(campaignId);
-    const consented = policy === 'member_consent' ? await this.consentingMemberIds(campaignId) : new Set<string>();
-    return filterSourceForExternalAiConsent(source, policy, consented);
+    const consented =
+      egress === 'external' && policy === 'member_consent'
+        ? await this.consentingMemberIds(campaignId)
+        : new Set<string>();
+    return applyScribeConsent(source, policy, consented, egress);
   }
 
   /**
@@ -293,8 +342,16 @@ export class ScribeService implements OnApplicationBootstrap {
    * `draft_session_recap` tool hands this same material straight to a connected
    * agent (which IS an external model), so it must go through the identical
    * consent filter rather than reading notes directly.
+   *
+   * `egress` defaults to `'external'` — the fail-closed choice — so any caller that has
+   * not reasoned about where the material is going gets the strict gate. Only the run
+   * engine, which has resolved the effective provider first, passes `'local'`.
    */
-  async assembleSourceWithConsent(campaignId: number, scope?: ScribeSourceScope): Promise<ScribeAssembly> {
+  async assembleSourceWithConsent(
+    campaignId: number,
+    scope?: ScribeSourceScope,
+    egress: ScribeEgress = 'external',
+  ): Promise<ScribeAssembly> {
     const resolvedInbox = await this.notes.listAllInbox(campaignId, true);
     const encounterList = await this.encounters.listForCampaign(campaignId);
     const encountersWithCombatants = await Promise.all(encounterList.map((e) => this.encounters.getWithCombatantsOrThrow(e.id)));
@@ -348,6 +405,8 @@ export class ScribeService implements OnApplicationBootstrap {
         label: r.label,
         actor: r.actor,
         rollerName: r.rollerName,
+        // Join key for the consent gate only — stripped again before the prompt (#501).
+        rollerUserId: r.rollerUserId,
         total: r.total,
         dc: r.dc,
         success: r.success,
@@ -358,7 +417,7 @@ export class ScribeService implements OnApplicationBootstrap {
     };
 
     const scoped = scope ? filterSourceByScope(source, scope, sessionPlayedAtById) : source;
-    const filtered = await this.applyExternalAiConsent(campaignId, scoped);
+    const filtered = await this.applyConsentGate(campaignId, scoped, egress);
     const filteredSource = filtered.source ?? scoped;
     const fought = filteredSource.encounters.filter((e) => e.status === 'running' || e.status === 'ended');
     if (fought.length === 0 && filteredSource.resolvedInbox.length === 0 && (filteredSource.diceRolls?.length ?? 0) === 0) {
@@ -460,14 +519,23 @@ export class ScribeService implements OnApplicationBootstrap {
       return this.record(campaignId, trigger, user, 'disabled', { detail: 'AI DM seat not enabled', scope });
     }
 
-    const assembly = await this.assembleSourceWithConsent(campaignId, scope);
+    // Resolve WHERE this generation will go BEFORE assembling, so the consent gate that
+    // runs inside assembly is the one that actually applies (#501). Issue #501 is scoped
+    // to EXTERNAL use; gating a purely local generation on external-use consent silently
+    // empties recaps on the default self-hosted install, where nothing is transmitted at
+    // all. The gate still runs strictly inside assembly, before any bytes exist to send.
+    const egress = await this.resolveEgress(campaignId);
+    const assembly = await this.assembleSourceWithConsent(campaignId, scope, egress);
     const source = assembly.source;
     const stats = this.sourceStats(source ?? { resolvedInbox: [], encounters: [] }, scope, assembly.consent);
     if (!source) {
       return this.record(campaignId, trigger, user, 'no_material', {
-        detail: scope && isSessionScope(scope)
-          ? `no inbox/encounter material for scheduled session #${scope.scheduledSessionId}`
-          : 'no inbox/encounter material',
+        detail: withheldConsentDetail(
+          scope && isSessionScope(scope)
+            ? `no inbox/encounter material for scheduled session #${scope.scheduledSessionId}`
+            : 'no inbox/encounter material',
+          assembly.consent,
+        ),
         scope,
         sourceStats: stats,
       });
@@ -606,6 +674,17 @@ export class ScribeService implements OnApplicationBootstrap {
           '\n\n' +
           buildNarrationLanguageContract(narrationResolved.language, narrationResolved.provenance);
         if (config) {
+          // Ordering interlock (#501). The consent gate ran during assembly against the
+          // egress we predicted BEFORE the spend lock. If a provider row appeared in the
+          // meantime, this material was assembled unfiltered for a local seam and is now
+          // about to be handed to an external endpoint. Refuse rather than send: the catch
+          // below releases the reservation and records a failed run.
+          if (egress === 'local' && !this.operatorDeclaredLocalEndpoint()) {
+            throw new Error(
+              'provider configuration changed to an external endpoint after source assembly; ' +
+                'refusing to send material that was not filtered for external-use consent',
+            );
+          }
           const provider: AiProvider = createAiProvider({ ...config, params: { ...config.params, maxTokens } });
           const effective = await this.providerConfig.getEffectiveView(campaignId);
           const result = await provider.generate({

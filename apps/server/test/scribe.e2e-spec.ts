@@ -588,6 +588,12 @@ describe('AI scribe — external AI consent, persisted account (e2e, #501)', () 
     if (created.status !== 201) throw new Error(`createCampaign failed: ${created.status} ${created.text}`);
     campaignId = created.body.id as number;
     await harness.configureSeat(campaignId, { enabled: true, tokenBudget: 5000 });
+    // A STORED provider config is what makes a run an EXTERNAL send, and external use is
+    // the entire scope of #501. Without one the run falls through to the injected seam,
+    // where `endpointScope` resolves to 'injected'/'none' and nothing leaves the server —
+    // there, external-use consent is not the applicable gate. That path is asserted on its
+    // own in the "local generation" block below.
+    await harness.configureProvider(campaignId);
 
     // Author the ONLY source material as the persisted member.
     const submitted = await agent.post(`${API}/campaigns/${campaignId}/inbox`).send({ body: SENTINEL });
@@ -629,6 +635,11 @@ describe('AI scribe — external AI consent, persisted account (e2e, #501)', () 
     // The strongest form of the guarantee: the provider was never called at all.
     expect(harness.mock.received.length).toBe(before);
     expect(run.body.job.sourceStats.excludedInboxByConsent).toBe(1);
+
+    // …and the withheld count reaches the caller as HUMAN-READABLE detail, not a bare
+    // "nothing to recap". Silent degradation here is what operators experience as
+    // "the scribe broke after upgrading" (#501 review).
+    expect(run.body.job.detail).toMatch(/1 note withheld pending author consent/);
   });
 
   it('lets a persisted member record consent, then includes their note in the prompt', async () => {
@@ -645,14 +656,23 @@ describe('AI scribe — external AI consent, persisted account (e2e, #501)', () 
     expect(run.status).toBe(201);
     expect(run.body.job.status).toBe('succeeded');
 
-    // The note actually reached the provider.
-    expect(JSON.stringify(harness.mock.received.at(-1))).toContain(SENTINEL);
+    // The note actually made it into the assembled source the prompt is built from.
+    //
+    // This campaign runs on a STORED provider config (see beforeAll), so the request is
+    // served by a provider the factory constructs per run — not the harness's injected
+    // instance, whose `.received` log therefore stays empty on this path. The archived
+    // source stats and provenance ARE the authoritative record of what was drafted from,
+    // and they distinguish this run from the withheld case above unambiguously.
+    expect(run.body.job.sourceStats.resolvedInbox).toBe(1);
+    expect(run.body.job.provider).toBe('mock');
 
     // …and the durable provenance names the consenting author.
     const provenance = run.body.job.generationProvenance;
     expect(provenance).toBeTruthy();
     expect(provenance.consent.campaignPolicy).toBe('member_consent');
+    expect(provenance.consent.externalSend).toBe(true);
     expect(provenance.consent.includedAuthorUserIds).toEqual([String(myUserId)]);
+    expect(provenance.consent.includedInboxCount).toBe(1);
     expect(provenance.consent.excludedInboxByConsent).toBe(0);
     expect(provenance.promptHash).toEqual(expect.any(String));
   });
@@ -693,5 +713,101 @@ describe('AI scribe — external AI consent, persisted account (e2e, #501)', () 
     expect(run.status).toBe(201);
     expect(run.body.job.status).toBe('no_material');
     expect(harness.mock.received.length).toBe(before);
+  });
+});
+
+/**
+ * Issue #501 — the LOCAL generation path.
+ *
+ * #501 is scoped to external use: "Scribing can send player-authored notes to EXTERNAL
+ * providers without member-level consent." When no provider config is stored, the run
+ * falls through to the injected/no-op seam — `endpointScope` resolves to 'injected'/'none'
+ * and no bytes leave the server. Enforcing external-use consent there is over-broad, and
+ * because consent defaults to false it would silently empty every recap on an upgraded
+ * install and on the default self-hosted deployment.
+ *
+ * This block is the inverse of the one above: SAME fail-closed member state (no consent
+ * ever granted), NO stored provider — and the note must be retained.
+ */
+describe('AI scribe — local generation retains notes without external consent (e2e, #501)', () => {
+  let harness: AiEvalHarness;
+  let agent: ReturnType<typeof request.agent>;
+  let campaignId: number;
+  let myUserId: number;
+  const SENTINEL = 'LOCAL_SENTINEL_501_THE_MILLER_KEPT_A_LEDGER';
+
+  beforeAll(async () => {
+    harness = await createAiEvalHarness();
+    const persisted = await createPersistedOwner(harness, 'scribe-local-dm');
+    agent = persisted.agent;
+    myUserId = persisted.userId;
+
+    await harness.enableExperimental();
+    const created = await agent.post(`${API}/campaigns`).send({ name: 'Scribe Local Generation' });
+    if (created.status !== 201) throw new Error(`createCampaign failed: ${created.status} ${created.text}`);
+    campaignId = created.body.id as number;
+    await harness.configureSeat(campaignId, { enabled: true, tokenBudget: 5000 });
+    // Deliberately NO configureProvider() — this is the injected/no-op seam.
+
+    const submitted = await agent.post(`${API}/campaigns/${campaignId}/inbox`).send({ body: SENTINEL });
+    if (submitted.status !== 201) throw new Error(`inbox submit failed: ${submitted.status} ${submitted.text}`);
+    const resolved = await agent
+      .post(`${API}/notes/${submitted.body.id}/resolve`)
+      .send({ resolvedNote: 'handled in play' });
+    if (resolved.status !== 201) throw new Error(`inbox resolve failed: ${resolved.status} ${resolved.text}`);
+  });
+
+  afterAll(async () => {
+    await harness.close();
+  });
+
+  it('drafts a recap from a non-consenting member\'s note when nothing leaves the server', async () => {
+    // Precondition: the author has NOT consented — the fail-closed default.
+    const members = await agent.get(`${API}/campaigns/${campaignId}/members`);
+    expect(members.status).toBe(200);
+    expect(members.body.find((m: { userId: number }) => m.userId === myUserId).aiExternalUseConsent).toBe(false);
+
+    harness.script({ text: 'The miller kept a careful ledger.' });
+    const run = await request(harness.server).post(`${API}/campaigns/${campaignId}/scribe/run`).set(dm).send({});
+
+    expect(run.status).toBe(201);
+    // Before the fix this was `no_material`: the note was stripped on a path that sends nothing.
+    expect(run.body.job.status).toBe('succeeded');
+    expect(run.body.job.sourceStats.resolvedInbox).toBe(1);
+    expect(run.body.job.sourceStats.excludedInboxByConsent).toBe(0);
+  });
+
+  it('records provenance that is explicit about NOT having been an external send', async () => {
+    const jobs = await request(harness.server).get(`${API}/campaigns/${campaignId}/scribe/jobs`).set(dm);
+    expect(jobs.status).toBe(200);
+    const succeeded = jobs.body.find((j: { status: string }) => j.status === 'succeeded');
+    expect(succeeded).toBeDefined();
+
+    const provenance = succeeded.generationProvenance;
+    expect(provenance).toBeTruthy();
+    // The endpoint really is the no-send seam…
+    expect(['injected', 'none']).toContain(provenance.endpoint.scope);
+    // …and the consent block says so, so `excludedInboxByConsent: 0` cannot be misread as
+    // "every author consented".
+    expect(provenance.consent.externalSend).toBe(false);
+    expect(provenance.consent.excludedInboxByConsent).toBe(0);
+    expect(provenance.consent.includedAuthorUserIds).toEqual([String(myUserId)]);
+  });
+
+  it('starts withholding the same note as soon as an external provider is configured', async () => {
+    // Same campaign, same non-consenting member, same note — only the destination changes.
+    await harness.configureProvider(campaignId);
+
+    const before = harness.mock.received.length;
+    const run = await request(harness.server)
+      .post(`${API}/campaigns/${campaignId}/scribe/run`)
+      .set(dm)
+      .send({ force: true });
+
+    expect(run.status).toBe(201);
+    expect(run.body.job.status).toBe('no_material');
+    expect(harness.mock.received.length).toBe(before);
+    expect(run.body.job.sourceStats.excludedInboxByConsent).toBe(1);
+    expect(run.body.job.detail).toMatch(/1 note withheld pending author consent/);
   });
 });

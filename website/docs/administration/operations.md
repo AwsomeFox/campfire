@@ -149,6 +149,40 @@ There's no separate migration command to run.
     successful migration is not supported — the pre-upgrade snapshot is your rollback
     path.
 
+### Behaviour change: AI scribe member consent
+
+Installs running the **AI scribe against an external AI provider** will see a change after
+upgrading to the release that adds member consent controls.
+
+Every campaign gains an AI content policy defaulting to `member_consent`, and every
+existing membership gains a per-member consent flag defaulting to **off** — the
+fail-closed default, since nobody can retroactively consent on a player's behalf.
+
+**What you will observe**
+
+- With an **external AI provider configured**, scribe recaps stop including
+  member-authored inbox notes until each author opts in. A run whose material was
+  entirely withheld records `no_material` and reports *"N notes withheld pending author
+  consent"* rather than failing silently — visible in the scribe panel and in the run's
+  job history.
+- With **no provider configured** — the default self-hosted install, using the shipped
+  no-op provider — **nothing changes**. Consent gates external use only, and that path
+  sends nothing off the server.
+
+**What members and DMs need to do**
+
+1. Each member opens **Members** in their campaign and ticks *"Allow external AI use of my
+   authored source notes"*. This is self-service by design: a DM cannot set it for
+   someone else.
+2. A DM who wants no member notes sent at all can set the campaign policy to `disabled`
+   in campaign settings.
+3. If your configured provider is a model running on your own box and you want generations
+   through it treated as local rather than external, set `AI_PROVIDER_ENDPOINT_IS_LOCAL=1`
+   (defaults to off).
+
+See [Member consent for external AI use](../ai/capabilities.md#member-consent-for-external-ai-use)
+for the full model.
+
 ## Health
 
 Campfire exposes two unauthenticated health endpoints:

@@ -22,6 +22,7 @@ import { useAiDmSeat } from '../../lib/query';
 import { Card, Btn, EmptyState, Skeleton, SkeletonConditionalRegion, ErrorNote } from '../../components/ui';
 import { conditionalRegionPhase } from '../../components/loadingSkeletonState';
 import { Markdown } from '../../components/Markdown';
+import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { useDialog } from '../../components/useDialog';
 import { useDisclosure } from '../../components/useDisclosure';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
@@ -33,6 +34,16 @@ const TRIGGER_LABEL: Record<ScribeTrigger, string> = {
   post_session: 'Post-session sweep',
   cron: 'Cron sweep',
 };
+
+/**
+ * The DM-facing sentence for material the consent gate held back (#501).
+ *
+ * Kept as one phrase so every surface — filed, previewed, and nothing-drafted — says the
+ * same thing, and so the count is never rendered without the reason or the remedy.
+ */
+function withheldNote(count: number): string {
+  return `${count} note${count === 1 ? '' : 's'} withheld pending author consent for external AI use — each author can opt in from the members page.`;
+}
 
 /** Tag class + human label for a recorded job's status. A dry-run "succeeded" job never
  * carries a proposalId (nothing was filed), so it's told apart from a real, filed run. */
@@ -98,6 +109,10 @@ export function ScribePanel({ campaignId, isDm }: { campaignId: number; isDm: bo
   const [outcome, setOutcome] = useState<Outcome | null>(null);
   const [busy, setBusy] = useState<'run' | 'preview' | 'filing' | null>(null);
   const [preview, setPreview] = useState<{ text: string } | null>(null);
+  // Pending external-send confirmation. Replaces a native `window.confirm`, which was both
+  // off-pattern for this codebase and invisible to Playwright (which auto-dismisses native
+  // dialogs unless a spec registers a handler, so a driven run would silently no-op).
+  const [confirmingRun, setConfirmingRun] = useState<{ dryRun: boolean } | null>(null);
 
   const load = useCallback(async () => {
     setLoadError(null);
@@ -130,33 +145,42 @@ export function ScribePanel({ campaignId, isDm }: { campaignId: number; isDm: bo
   if (seatPhase === 'ready-hidden') return null;
 
   async function run(dryRun: boolean) {
-    // Preview is NOT a local dry run: the server still calls the provider to produce the
-    // draft and only skips FILING the proposal. The external-send impact is identical, so
-    // both paths must be confirmed (#501).
-    const ok = window.confirm(
-      (dryRun
-        ? 'Previewing still sends the prompt to the configured AI provider — it only skips filing the proposal. '
-        : 'The AI scribe sends allowed campaign source material to the configured AI provider. ') +
-        'Only resolved inbox notes from members who opted in are included; private and opted-out notes are excluded. Continue?',
-    );
-    if (!ok) return;
     setBusy(dryRun ? 'preview' : preview ? 'filing' : 'run');
     setOutcome(null);
     try {
       const result = await api.post<ScribeRunResult>(`${API}/campaigns/${campaignId}/scribe/run`, { dryRun });
       void load(); // refresh history + (if a config-side effect ever touches it) config
       const { job } = result;
+      // How many member-authored notes the server held back for want of consent. Never let
+      // this pass silently: a recap that quietly omits half the table's notes, or an empty
+      // one, otherwise reads as "the scribe is broken" (#501).
+      const withheld = job.sourceStats?.excludedInboxByConsent ?? 0;
+      const withheldSuffix = withheld > 0 ? ` ${withheldNote(withheld)}` : '';
+
       if (job.status === 'succeeded') {
         if (dryRun) {
           setPreview({ text: result.preview ?? '' });
+          if (withheld > 0) {
+            setOutcome({
+              kind: 'info',
+              text: withheldNote(withheld),
+              href: `/c/${campaignId}/members`,
+              hrefLabel: 'Open consent settings',
+            });
+          }
           return;
         }
         setPreview(null);
         const pid = result.proposalIds[0];
         setOutcome(
           pid
-            ? { kind: 'success', text: `Recap drafted and filed as a pending proposal.`, href: `/c/${campaignId}/proposals`, hrefLabel: 'Review the proposal' }
-            : { kind: 'success', text: 'Recap drafted.' },
+            ? {
+                kind: withheld > 0 ? 'info' : 'success',
+                text: `Recap drafted and filed as a pending proposal.${withheldSuffix}`,
+                href: withheld > 0 ? `/c/${campaignId}/members` : `/c/${campaignId}/proposals`,
+                hrefLabel: withheld > 0 ? 'Open consent settings' : 'Review the proposal',
+              }
+            : { kind: withheld > 0 ? 'info' : 'success', text: `Recap drafted.${withheldSuffix}` },
         );
         return;
       }
@@ -171,7 +195,19 @@ export function ScribePanel({ campaignId, isDm }: { campaignId: number; isDm: bo
         return;
       }
       if (job.status === 'no_material') {
-        setOutcome({ kind: 'info', text: 'Nothing to recap yet — resolve some inbox threads or run an encounter first.' });
+        // The important distinction: "there is genuinely nothing" vs "everything there was
+        // got withheld for consent". The second is fixable by a member, and telling the DM
+        // to go resolve more inbox threads would be actively misleading.
+        setOutcome(
+          withheld > 0
+            ? {
+                kind: 'info',
+                text: `No recap drafted. ${withheldNote(withheld)}`,
+                href: `/c/${campaignId}/members`,
+                hrefLabel: 'Open consent settings',
+              }
+            : { kind: 'info', text: 'Nothing to recap yet — resolve some inbox threads or run an encounter first.' },
+        );
         return;
       }
       if (GATE_FAILURE_STATUSES.includes(job.status)) {
@@ -226,10 +262,10 @@ export function ScribePanel({ campaignId, isDm }: { campaignId: number; isDm: bo
 
           {canDmWrite && (
             <div className="flex items-center gap-2 flex-wrap">
-              <Btn className="!min-h-0 !py-1.5 text-xs" onClick={() => void run(false)} disabled={busy !== null}>
+              <Btn className="!min-h-0 !py-1.5 text-xs" onClick={() => setConfirmingRun({ dryRun: false })} disabled={busy !== null}>
                 {busy === 'run' ? 'Drafting…' : 'Draft recap with AI'}
               </Btn>
-              <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => void run(true)} disabled={busy !== null}>
+              <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setConfirmingRun({ dryRun: true })} disabled={busy !== null}>
                 {busy === 'preview' ? 'Generating preview…' : 'Preview first'}
               </Btn>
               <Btn ghost className="!min-h-0 !py-1.5 text-xs" {...configDisclosure.buttonProps}>
@@ -264,10 +300,39 @@ export function ScribePanel({ campaignId, isDm }: { campaignId: number; isDm: bo
         </div>
       )}
 
+      {confirmingRun && (
+        <ConfirmDialog
+          title="Send source material to the AI provider?"
+          body={
+            <>
+              <p className="m-0">
+                {confirmingRun.dryRun
+                  ? 'Previewing is not a local dry run: the server still sends the prompt to the configured AI provider and only skips filing the proposal.'
+                  : 'The AI scribe sends allowed campaign source material to the configured AI provider.'}
+              </p>
+              <p className="m-0">
+                Only resolved inbox notes from members who opted in are included; private, whisper, and opted-out notes
+                are excluded.
+              </p>
+            </>
+          }
+          confirmLabel={confirmingRun.dryRun ? 'Generate preview' : 'Draft recap'}
+          danger={false}
+          onConfirm={() => {
+            const { dryRun } = confirmingRun;
+            setConfirmingRun(null);
+            void run(dryRun);
+          }}
+          onCancel={() => setConfirmingRun(null)}
+        />
+      )}
+
       {preview && (
         <PreviewModal
           text={preview.text}
           filing={busy === 'filing'}
+          // Filing does re-run generation, but against the SAME material and the SAME
+          // endpoint the DM just confirmed and read the output of, so it does not re-prompt.
           onFile={() => void run(false)}
           onDiscard={() => {
             setPreview(null);
