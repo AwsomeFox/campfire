@@ -93,6 +93,7 @@ import { CharacterStatCard } from '../../components/CharacterStatCard';
 import { Card, Btn, TextInput, HpBar, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { ImageUpload, MapUploadButton, castEncounterMapUrl, encounterMapSrcSet, encounterMapUrl, uploadAttachment } from '../../components/ImageUpload';
 import { useDerivativeManifest } from '../../components/useAttachmentDerivatives';
+import { planEncounterMapResponsive } from '../../components/attachmentSrcSet';
 import { GetAMapPanel } from '../../components/GetAMapPanel';
 import { MapConceptGlossary, MapPurposePreview } from '../../components/mapOnboarding';
 import { NotFoundState } from '../../components/NotFoundState';
@@ -2820,24 +2821,23 @@ export function BattleMap({
   // untouched and players get responsive delivery too. `src` stays the full-size
   // role-safe URL, so the board still renders while rungs process or if they failed.
   //
-  // BOTH are disabled on a cast display (#547). Those URLs authenticate from the session
-  // COOKIE, so on a shared TV still holding the DM's cookie a srcset rung would be served
-  // the UNFOGGED SOURCE map — reintroducing precisely the leak the cast capability exists
-  // to close. A cast display therefore keeps plain `src` through its capability URL and
-  // simply forgoes responsive rungs; correctness outranks bytes on the one surface where
-  // getting this wrong shows players the DM's hidden map.
-  const mapDerivatives = useDerivativeManifest(
-    encounter.mapAttachmentId != null && !castToken ? `${API}/encounters/${encounter.id}/map/derivatives` : null,
-    // Regeneration is a DM action on the underlying attachment; players get the
-    // status text without a button.
-    effectiveCanDmWrite && encounter.mapAttachmentId != null && !castToken
-      ? `${API}/attachments/${encounter.mapAttachmentId}/derivatives/retry`
-      : null,
-  );
-  const mapSrcSet =
-    encounter.mapAttachmentId != null && !castToken
-      ? encounterMapSrcSet(encounter.id, encounter.updatedAt, mapDerivatives.manifest)
-      : undefined;
+  // BOTH are disabled on a cast display (#547) — see planEncounterMapResponsive, which
+  // owns that rule as a single pure decision so the three things it gates (manifest
+  // fetch, retry, srcset) can never drift apart. In short: those URLs authenticate from
+  // the session COOKIE, so on a shared TV still holding the DM's cookie a srcset rung
+  // would be served the UNFOGGED SOURCE map — reintroducing precisely the leak the cast
+  // capability exists to close. A cast display keeps plain `src` through its capability
+  // URL and simply forgoes responsive rungs.
+  const mapResponsive = planEncounterMapResponsive({
+    encounterId: encounter.id,
+    mapAttachmentId: encounter.mapAttachmentId,
+    castToken,
+    canDmWrite: effectiveCanDmWrite,
+  });
+  const mapDerivatives = useDerivativeManifest(mapResponsive.manifestUrl, mapResponsive.retryUrl);
+  const mapSrcSet = mapResponsive.responsive
+    ? encounterMapSrcSet(encounter.id, encounter.updatedAt, mapDerivatives.manifest)
+    : undefined;
   // Issue #418: fog-redacted tokens keep null coords but set tokenHiddenByFog — do not
   // treat them as Unplaced (that offered a no-op place-at-center for the owner).
   const { placed, unplaced, hiddenByFog } = partitionMapTokens(encounter.combatants);
