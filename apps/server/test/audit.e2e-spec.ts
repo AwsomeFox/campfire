@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import request from 'supertest';
 import { sql } from 'drizzle-orm';
 import { createTestApp, createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
@@ -151,6 +152,160 @@ describe('audit log (e2e)', () => {
     const audit = ctx.app.get(AuditService);
     expect(await audit.pruneExpired(0)).toBe(0);
     expect(await audit.pruneExpired(-5)).toBe(0);
+  });
+
+  // -------- #502: explicit audit retention policy --------
+
+  it('#502 — startup discloses retention but does not delete old audit rows', async () => {
+    const first = await createTestApp();
+    const db = first.app.get<DrizzleDb>(DB);
+    await db.insert(auditLog).values({
+      campaignId: null,
+      actor: 'test',
+      actorRole: 'admin',
+      action: 'test.boot_old',
+      detail: 'must survive restart',
+      createdAt: new Date(Date.now() - 500 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+    const dataDir = first.dataDir;
+    await first.app.close();
+
+    const second = await createTestApp({ dataDir });
+    try {
+      const rows = second.app
+        .get<DrizzleDb>(DB)
+        .all<{ n: number }>(sql`SELECT count(*) AS n FROM audit_log WHERE action = 'test.boot_old'`);
+      expect(rows[0].n).toBe(1);
+    } finally {
+      await second.app.close();
+      fs.rmSync(dataDir, { recursive: true, force: true });
+      process.env.DATA_DIR = ctx.dataDir;
+    }
+  });
+
+  it('#502 — audit list responses disclose retention headers', async () => {
+    const server = ctx.app.getHttpServer();
+    const adminRes = await request(server).get('/api/v1/admin/audit').set(dm);
+    expect(adminRes.status).toBe(200);
+    expect(adminRes.headers['x-audit-retention-days']).toBeDefined();
+    expect(adminRes.headers['x-audit-auto-prune']).toMatch(/^[01]$/);
+
+    const campaignRes = await request(server).get(`/api/v1/campaigns/${campaignId}/audit`).set(dm);
+    expect(campaignRes.status).toBe(200);
+    expect(campaignRes.headers['x-audit-retention-days']).toBeDefined();
+    expect(campaignRes.headers['x-audit-auto-prune']).toMatch(/^[01]$/);
+  });
+
+  it('#502 — dry-run preview counts eligible rows and legal-hold rows without deleting', async () => {
+    const server = ctx.app.getHttpServer();
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const heldCampaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Held Audit' });
+    const freeCampaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Free Audit' });
+    const old = new Date(Date.now() - 500 * 24 * 60 * 60 * 1000).toISOString();
+    await db.insert(auditLog).values([
+      { campaignId: heldCampaign.body.id, actor: 'test', actorRole: 'dm', action: 'test.held', detail: '', createdAt: old },
+      { campaignId: freeCampaign.body.id, actor: 'test', actorRole: 'dm', action: 'test.free', detail: '', createdAt: old },
+    ]);
+
+    const holdRes = await request(server)
+      .put('/api/v1/admin/audit/legal-hold')
+      .set(dm)
+      .send({ global: false, campaignIds: [heldCampaign.body.id] });
+    expect(holdRes.status).toBe(200);
+
+    const preview = await request(server)
+      .post('/api/v1/admin/audit/retention/preview')
+      .set(dm)
+      .send({ retentionDays: 365 });
+    expect(preview.status).toBe(201);
+    expect(preview.body.eligibleCount).toBeGreaterThanOrEqual(1);
+    expect(preview.body.heldCount).toBeGreaterThanOrEqual(1);
+
+    const heldRows = db.all<{ action: string }>(sql`SELECT action FROM audit_log WHERE action IN ('test.held', 'test.free')`);
+    expect(heldRows.map((r) => r.action).sort()).toEqual(['test.free', 'test.held']);
+
+    await request(server).put('/api/v1/admin/audit/legal-hold').set(dm).send({ global: false, campaignIds: [] });
+  });
+
+  it('#502 — global legal hold blocks prune even when no rows are currently held', async () => {
+    const server = ctx.app.getHttpServer();
+    const holdRes = await request(server)
+      .put('/api/v1/admin/audit/legal-hold')
+      .set(dm)
+      .send({ global: true, campaignIds: [] });
+    expect(holdRes.status).toBe(200);
+
+    const denied = await request(server)
+      .post('/api/v1/admin/audit/retention/prune')
+      .set(dm)
+      .send({ confirm: true, retentionDays: 365 });
+    expect(denied.status).toBe(409);
+    expect(denied.body.message).toMatch(/Global audit legal hold is enabled/);
+
+    await request(server).put('/api/v1/admin/audit/legal-hold').set(dm).send({ global: false, campaignIds: [] });
+  });
+
+  it('#502 — prune requires a recent backup when policy demands it', async () => {
+    const server = ctx.app.getHttpServer();
+    const policy = await request(server)
+      .patch('/api/v1/admin/audit/retention')
+      .set(dm)
+      .send({ requireRecentBackupHours: 24 });
+    expect(policy.status).toBe(200);
+
+    const denied = await request(server)
+      .post('/api/v1/admin/audit/retention/prune')
+      .set(dm)
+      .send({ confirm: true, retentionDays: 365 });
+    expect(denied.status).toBe(409);
+
+    await request(server)
+      .patch('/api/v1/admin/audit/retention')
+      .set(dm)
+      .send({ requireRecentBackupHours: 0 });
+  });
+
+  it('#502 — prune archives eligible rows, deletes them, records job status and audits the action', async () => {
+    const server = ctx.app.getHttpServer();
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const old = new Date(Date.now() - 500 * 24 * 60 * 60 * 1000).toISOString();
+    await db.insert(auditLog).values({
+      campaignId,
+      actor: 'test',
+      actorRole: 'dm',
+      action: 'test.archive_prune',
+      detail: 'archive me',
+      createdAt: old,
+    });
+
+    const prune = await request(server)
+      .post('/api/v1/admin/audit/retention/prune')
+      .set(dm)
+      .send({ confirm: true, retentionDays: 365 });
+    expect(prune.status).toBe(201);
+    expect(prune.body.status).toBe('succeeded');
+    expect(prune.body.deletedCount).toBeGreaterThanOrEqual(1);
+    expect(prune.body.archivedPath).toBeTruthy();
+    expect(fs.existsSync(prune.body.archivedPath)).toBe(true);
+
+    const stale = db.all<{ n: number }>(sql`SELECT count(*) AS n FROM audit_log WHERE action = 'test.archive_prune'`);
+    expect(stale[0].n).toBe(0);
+    const auditRows = db.all<{ n: number }>(sql`SELECT count(*) AS n FROM audit_log WHERE action = 'audit.prune'`);
+    expect(auditRows[0].n).toBeGreaterThanOrEqual(1);
+  });
+
+  it('#502 — policy updates are audited', async () => {
+    const server = ctx.app.getHttpServer();
+    const patch = await request(server)
+      .patch('/api/v1/admin/audit/retention')
+      .set(dm)
+      .send({ days: 366, autoPruneEnabled: false, requireArchiveBeforePrune: true });
+    expect(patch.status).toBe(200);
+
+    const rows = ctx.app
+      .get<DrizzleDb>(DB)
+      .all<{ n: number }>(sql`SELECT count(*) AS n FROM audit_log WHERE action = 'audit.retention.update'`);
+    expect(rows[0].n).toBeGreaterThanOrEqual(1);
   });
 
   // -------- #23: server-wide admin trail --------
