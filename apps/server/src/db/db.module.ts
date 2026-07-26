@@ -2965,6 +2965,43 @@ function migrateCastSessionsTable(sqlite: Database.Database): void {
   `);
 }
 
+/**
+ * Issue #580 — per-intent idempotency records for non-idempotent encounter mutations
+ * (HP deltas, turn advancement). Purely additive: a new table plus its indexes, so the
+ * whole migration is `CREATE ... IF NOT EXISTS` and is safe to re-run. The `PRAGMA
+ * table_info` probe below is belt-and-braces for the one case IF NOT EXISTS cannot
+ * cover — an install that somehow carries an EARLIER shape of the table (there is none
+ * shipped, but the ordinal after this one must not have to guess) — and re-creates it.
+ * Dropping is safe: the table holds only short-lived replay records, never durable
+ * campaign state, so the worst case of losing it is that an in-flight retry re-applies.
+ */
+function migrateEncounterOpIdempotency580(sqlite: Database.Database): void {
+  const existing = sqlite.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='encounter_op_idempotency'`).all();
+  if (existing.length > 0) {
+    const cols = sqlite.prepare(`PRAGMA table_info(encounter_op_idempotency)`).all() as Array<{ name: string }>;
+    const names = new Set(cols.map((c) => c.name));
+    const expected = ['actor_id', 'operation', 'key', 'encounter_id', 'campaign_id', 'fingerprint', 'response_json', 'response_role', 'created_at'];
+    if (expected.every((c) => names.has(c))) return;
+    sqlite.exec(`DROP TABLE encounter_op_idempotency`);
+  }
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS encounter_op_idempotency (
+      actor_id TEXT NOT NULL,
+      operation TEXT NOT NULL,
+      key TEXT NOT NULL,
+      encounter_id INTEGER NOT NULL REFERENCES encounters(id) ON DELETE CASCADE,
+      campaign_id INTEGER NOT NULL,
+      fingerprint TEXT NOT NULL,
+      response_json TEXT,
+      response_role TEXT,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (actor_id, operation, key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_encounter_op_idempotency_created ON encounter_op_idempotency(created_at);
+    CREATE INDEX IF NOT EXISTS idx_encounter_op_idempotency_encounter ON encounter_op_idempotency(encounter_id);
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
   { name: '0001_users_oidc', run: migrateUsersTableForOidc },
   { name: '0002_campaigns_rule_system', run: migrateCampaignsTableForRuleSystem },
@@ -3081,13 +3118,14 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // after all of them, so the scheduling lifecycle migration takes the next genuinely
   // free ordinal rather than collide.
   { name: '0111_scheduling_lifecycle_504', run: migrateSchedulingLifecycle504 },
-  // The 0112-0113 gap is deliberate: both are contested across still-open branches
-  // (#559 holds 0112 as half of an adjacent create+backfill pair that must stay together;
-  // #601 holds 0112 too), so this branch jumps clear of the band rather than renumber
-  // again each time one of them lands. Ordinals are presentational — `runMigrations` keys
-  // on the full NAME string and applies in array order — so a gap is harmless, where a
-  // duplicate name would not be.
+  // The 0112-0113 gap is deliberate, not a miscount: the merge coordinator is holding
+  // those for other in-flight work and assigned 0114 to this branch (#501), 0115 to #572,
+  // and 0116 to encounter-op idempotency (#580). Dedup is by the FULL name rather than the
+  // ordinal, so the issue-number suffix is what actually guarantees each runs exactly once
+  // even if a sibling branch lands a colliding ordinal first; the numbers are
+  // presentational and `runMigrations` applies them in array order.
   { name: '0114_ai_consent_provenance_501', run: migrateAiConsentAndProvenance501 },
+  { name: '0116_encounter_op_idempotency_580', run: migrateEncounterOpIdempotency580 },
 ];
 
 /**

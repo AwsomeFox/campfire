@@ -505,8 +505,11 @@ export class ScribeService implements OnApplicationBootstrap {
     // that does not satisfy the schema silently becomes "no provenance recorded" at read
     // time with nothing logged at either end. For a provenance feature, losing the record
     // is precisely the failure it exists to prevent, so make it loud instead of silent.
+    //
+    // This is a LOUD LOG, not a guard: the blob is still returned and persisted either
+    // way. Failing the run outright would trade a degraded record for a lost recap, which
+    // is the worse outcome — the log is what turns a silent drop into a visible one.
     // Not currently reachable: every field comes from a validated config or a constant.
-    // This guards the next field that quietly exceeds a schema limit.
     const parsed = AiGenerationProvenance.safeParse(provenance);
     if (!parsed.success) {
       this.logger.error(

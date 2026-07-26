@@ -28,6 +28,7 @@ import {
   DifficultyBand,
   EncounterShape,
   EncounterUpdate,
+  EncounterNextTurn,
   EncounterPreviewRequest,
   EncounterCommit,
   DangerLevel,
@@ -3965,12 +3966,16 @@ export class McpToolsService {
       server,
       user,
       'next_turn',
-      'DM only: advance an encounter to the next combatant’s turn, wrapping to the next round when past the last combatant.',
-      { encounterId: Id.describe('Encounter id') },
-      async ({ encounterId }) => {
+      'DM only: advance an encounter to the next combatant’s turn, wrapping to the next round when past the last combatant. ' +
+        'Issue #580 — pass idempotencyKey (a stable id minted once for this ONE advance, reused verbatim on every retry) so ' +
+        'retrying after a timeout replays the original result instead of advancing twice, and expectedCurrentCombatantId ' +
+        '(the combatant you believe holds the turn) so a 409 tells you a human already advanced rather than silently ' +
+        'skipping that combatant’s turn.',
+      { encounterId: Id.describe('Encounter id'), ...EncounterNextTurn.shape },
+      async ({ encounterId, ...body }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
         const role = await this.access.requireRole(user, row.campaignId, 'dm');
-        return this.encounters.nextTurn(encounterId as number, user, role);
+        return this.encounters.nextTurn(encounterId as number, body as EncounterNextTurn, user, role);
       },
     );
 

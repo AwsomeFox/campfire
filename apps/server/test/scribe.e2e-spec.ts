@@ -739,6 +739,14 @@ describe('AI scribe — external AI consent, persisted account (e2e, #501)', () 
     expect(policy.status).toBe(200);
     expect(policy.body.aiExternalContentPolicy).toBe('disabled');
 
+    // Re-READ rather than trust the PATCH response. If `update()` ever moved from a
+    // generic `.set({ ...input })` to a field allow-list that forgot this column, the
+    // toggle would silently no-op while the PATCH still echoed the requested value —
+    // and this spec would keep passing against a dead control (#501 review).
+    const reread = await agent.get(`${API}/campaigns/${campaignId}`);
+    expect(reread.status).toBe(200);
+    expect(reread.body.aiExternalContentPolicy).toBe('disabled');
+
     const before = harness.mock.received.length;
     const run = await request(harness.server).post(`${API}/campaigns/${campaignId}/scribe/run`).set(dm).send({});
     expect(run.status).toBe(201);
