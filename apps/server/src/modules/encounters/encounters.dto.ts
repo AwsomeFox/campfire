@@ -1,5 +1,5 @@
 import { createZodDto } from 'nestjs-zod';
-import { EncounterCreate, EncounterGenerate, EncounterPreviewRequest, EncounterCommit, EncounterUpdate, EncounterEscalationUpdate, EncounterReopen, CombatantCreate, CombatantUpdate, CombatantTurnStatePatch, EncounterEndTurn, RollRequest, ActionRollRequest, ManualRollRequest, MapPing, ExpectedUpdatedAt, ActionResolveRequest, ActionResolution, ActionUndoToken } from '@campfire/schema';
+import { EncounterCreate, EncounterGenerate, EncounterPreviewRequest, EncounterCommit, EncounterUpdate, EncounterEscalationUpdate, EncounterReopen, CombatantCreate, CombatantUpdate, CombatantTurnStatePatch, EncounterEndTurn, EncounterNextTurn, RollRequest, ActionRollRequest, ManualRollRequest, MapPing, ExpectedUpdatedAt, ActionResolveRequest, ActionResolution, ActionUndoToken } from '@campfire/schema';
 
 export class EncounterCreateDto extends createZodDto(EncounterCreate.strict()) {}
 // Encounter generator request (issue #304). .strict() so an unknown/misspelled key 400s
@@ -40,6 +40,16 @@ export class EncounterReopenDto extends createZodDto(EncounterReopen.strict()) {
 // Issue #413: player/DM end-turn body (optimistic double-advance guard) and
 // the per-combatant turn-state declaration patch (action economy, movement, effects, delay/ready).
 export class EncounterEndTurnDto extends createZodDto(EncounterEndTurn.strict()) {}
+// Issue #580: next-turn gained a body — an `idempotencyKey` (retry dedup) and an
+// `expectedCurrentCombatantId` (cross-device CAS). Both fields are optional, because
+// next-turn is routinely called with no body at all: the historic bodyless POST, the
+// MCP tool, and any `fetch(url, { method: 'POST' })`.
+//
+// `.default({})` keeps that correct on its own, without depending on
+// normalizeMissingBody() (see common/normalize-body.middleware.ts) being registered
+// upstream. This is the endpoint that actually broke when the body arrived as
+// `undefined`, so it does not delegate its own precondition to global middleware.
+export class EncounterNextTurnDto extends createZodDto(EncounterNextTurn.strict().default({})) {}
 export class CombatantTurnStatePatchDto extends createZodDto(CombatantTurnStatePatch.strict()) {}
 // Issue #414: structured action resolver. Resolve (with optional atomic commit), apply a
 // previewed resolution (DM confirm path), and undo an applied resolution. Not .strict() on
