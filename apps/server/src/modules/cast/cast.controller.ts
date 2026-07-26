@@ -113,7 +113,13 @@ export class PublicCastController {
     description: 'Only `status=running` is supported for Player Display. Results are projected as viewer.',
   })
   @ApiResponse({ status: 200, description: 'Viewer-safe running encounter list.' })
+  @ApiResponse({ status: 404, description: 'Cast session is invalid, revoked, or expired.' })
   async encounters(@Param('token') token: string, @Query('status') status?: string): Promise<Encounter[]> {
+    // Validate the capability BEFORE short-circuiting an unsupported status: returning
+    // `200 []` for a bogus token told a stale shared-TV link its request had succeeded,
+    // which contradicts the uniform 404 this endpoint's own docstring promises and that
+    // every other cast endpoint delivers (Devin review on #1438).
+    this.cast.assertActive(token);
     if (status !== undefined && status !== 'running') return [];
     return this.cast.runningEncounters(token);
   }

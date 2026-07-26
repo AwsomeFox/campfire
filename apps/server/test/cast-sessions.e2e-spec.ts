@@ -212,6 +212,24 @@ describe('Player Display cast sessions (e2e)', () => {
     expect((await request(server).post(`/api/v1/cast/${token}/exit`).send({ pin: created.body.exitPin })).status).toBe(201);
   });
 
+  it('404s an invalid capability even for an unsupported status filter', async () => {
+    const server = ctx.app.getHttpServer();
+    const bogus = `cf_cast_${'0'.repeat(48)}`;
+    // The list endpoint only answers status=running, but an unknown/expired capability
+    // must still 404 uniformly rather than being told `200 []` that its request worked.
+    expect((await request(server).get(`/api/v1/cast/${bogus}/encounters`).query({ status: 'ended' })).status).toBe(404);
+    expect((await request(server).get(`/api/v1/cast/${bogus}/encounters`)).status).toBe(404);
+
+    // A VALID capability still gets an empty list for a status it does not serve.
+    const created = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/cast-sessions`)
+      .set(dm)
+      .send({ label: 'Status TV', expiresAt: futureExpiry() });
+    const ended = await request(server).get(`/api/v1/cast/${created.body.token}/encounters`).query({ status: 'ended' });
+    expect(ended.status).toBe(200);
+    expect(ended.body).toEqual([]);
+  });
+
   it('scopes cast encounter reads to the RUNNING fight only', async () => {
     const server = ctx.app.getHttpServer();
     const created = await request(server)

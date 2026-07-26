@@ -228,6 +228,19 @@ export class CastService {
   }
 
   /**
+   * Validate a cast capability without projecting any campaign data.
+   *
+   * The encounter LIST endpoint answers only `status=running`, but it must still 404 an
+   * invalid/expired/revoked capability for any other status rather than returning an empty
+   * list — otherwise a stale shared-TV link is told its request succeeded, contradicting
+   * the uniform not-found contract every other cast endpoint (and that endpoint's own
+   * docstring) promises. Devin review on #1438.
+   */
+  assertActive(token: string): void {
+    this.resolveActive(token);
+  }
+
+  /**
    * Resolve an encounter row a cast capability is allowed to read. Mirrors the
    * running-only contract the cast LIST endpoint enforces: the Player Display only
    * ever shows the live fight, so a cast URL must not be able to pull rosters for
