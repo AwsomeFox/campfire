@@ -117,6 +117,8 @@ export default function CampaignSettingsPage() {
 
     let observer: MutationObserver | undefined;
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    const settleTimeouts: ReturnType<typeof setTimeout>[] = [];
+    let settleScrollsScheduled = false;
     const stopObserving = () => {
       observer?.disconnect();
       observer = undefined;
@@ -124,13 +126,30 @@ export default function CampaignSettingsPage() {
         clearTimeout(timeoutId);
         timeoutId = undefined;
       }
+      while (settleTimeouts.length > 0) {
+        const id = settleTimeouts.pop();
+        if (id !== undefined) clearTimeout(id);
+      }
     };
-    const focusTarget = () => {
+    const scrollTarget = () => {
       const target = document.getElementById(targetId);
       if (!(target instanceof HTMLElement)) return false;
       target.focus({ preventScroll: true });
       target.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
-      stopObserving();
+      return true;
+    };
+    const scheduleSettledScrolls = () => {
+      if (settleScrollsScheduled) return;
+      settleScrollsScheduled = true;
+      requestAnimationFrame(scrollTarget);
+      [100, 500, 1_000].forEach((delay) => {
+        settleTimeouts.push(setTimeout(scrollTarget, delay));
+      });
+      settleTimeouts.push(setTimeout(stopObserving, 1_200));
+    };
+    const focusTarget = () => {
+      if (!scrollTarget()) return false;
+      scheduleSettledScrolls();
       return true;
     };
 
