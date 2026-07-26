@@ -761,6 +761,39 @@ describe('Issue #601: moderation evidence + incident workflow (e2e)', () => {
     });
 
     /**
+     * A notification body is an excerpt of the comment copied at post time. It is the
+     * one surviving copy that reaches the REPORTER — the person the quarantine exists
+     * to shield — so it has to go too.
+     */
+    it('withdraws notification excerpts of a quarantined comment', async () => {
+      // A reply to the victim's comment notifies the victim, carrying an excerpt.
+      const victimComment = await postComment(victim, 'a perfectly ordinary post victor');
+      const reply = await abuser
+        .post(`/api/v1/campaigns/${campaignId}/comments`)
+        .send({ entityType: 'session', entityId: sessionId, parentId: victimComment, body: 'NOTIFY LEAK whiskey abusive' });
+      expect(reply.status).toBe(201);
+      const replyId = reply.body.id as number;
+
+      const before = await victim.get('/api/v1/notifications');
+      expect(before.status).toBe(200);
+      expect(JSON.stringify(before.body)).toContain('NOTIFY LEAK whiskey');
+
+      const report = await fileReport(victim, { targetType: 'comment', targetId: replyId, reason: 'harassment' });
+      await dmUser
+        .post(`/api/v1/campaigns/${campaignId}/moderation/reports/${report.body.id}/actions`)
+        .send({ action: 'quarantine' });
+
+      const after = await victim.get('/api/v1/notifications');
+      expect(after.status).toBe(200);
+      expect(JSON.stringify(after.body)).not.toContain('NOTIFY LEAK whiskey');
+
+      // The badge must not advertise an item the list will never show.
+      const unread = await victim.get('/api/v1/notifications/unread-count');
+      expect(unread.status).toBe(200);
+      expect(unread.body.count).toBe(after.body.items.filter((n: { readAt: string | null }) => n.readAt === null).length);
+    });
+
+    /**
      * The campaign export ships every revision row INCLUDING live tips, and a live
      * tip's snapshot holds the entity's current prose — so an unfiltered export
      * carries the exact body the quarantine withholds.
