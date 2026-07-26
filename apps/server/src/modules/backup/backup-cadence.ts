@@ -75,6 +75,25 @@ export interface BackupCadenceState {
   lastChecksum: string | null;
   /** Non-empty when the most recent attempt FAILED; empty string on success. */
   lastError: string;
+  /** Filename of the most recent verified scheduled archive, when known (#505). */
+  lastArchiveName?: string | null;
+  /** ISO timestamp when the most recent scheduled archive was manifest-verified. */
+  lastVerifiedAt?: string | null;
+  /** Consecutive scheduled failures/skips, used for exponential backoff. */
+  consecutiveFailures?: number;
+  /** Operator-facing counters and byte gauges for scheduled backups (#505). */
+  metrics?: BackupCadenceMetrics;
+}
+
+export interface BackupCadenceMetrics {
+  successCount: number;
+  failureCount: number;
+  pruneCount: number;
+  prunedBytes: number;
+  lastFreeBytes: number | null;
+  lastEstimatedBytes: number | null;
+  lastPruneAt: string | null;
+  lastPruneError: string;
 }
 
 /**

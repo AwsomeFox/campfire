@@ -114,6 +114,11 @@ the server as a blind SSRF proxy on a shared multi-tenant host.
 | `BACKUP_INTERVAL_HOURS` | `24` | Hours between scheduled backups (only when scheduling is enabled) |
 | `BACKUP_DIR` | `$DATA_DIR/backups` | Where scheduled backup archives are written (only when scheduling is enabled) |
 | `BACKUP_KEY_PASSPHRASE` | *(unset)* | When set (≥12 characters), scheduled backups wrap the auto-generated `ai-config.key` in an encrypted envelope inside the archive (#496). Interactive downloads use `POST /api/v1/backup/download` with the same passphrase in the JSON body. |
+| `BACKUP_KEEP_COUNT` | `14` | Keep this many newest verified scheduled archives (`0` disables count pruning) |
+| `BACKUP_KEEP_DAYS` | `30` | Prune verified scheduled archives older than this many days (`0` disables age pruning) |
+| `BACKUP_MAX_TOTAL_BYTES` | *(unset)* | Optional scheduled-backup directory size cap in bytes |
+| `BACKUP_MIN_FREE_BYTES` | `536870912` | Free-space reserve; scheduled runs skip before writing if the next archive would breach it |
+| `BACKUP_PROTECT_LAST_GOOD` | `true` | Protect the most recent verified scheduled archive from retention pruning |
 
 Local username/password auth works out of the box; OIDC is entirely optional and
 layered on when those variables are set.

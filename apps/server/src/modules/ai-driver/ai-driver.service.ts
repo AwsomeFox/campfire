@@ -420,6 +420,7 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'begin_encounter',
   'end_encounter',
   'next_turn',
+  'set_escalation_die',
   'add_combatant',
   'update_combatant',
   'remove_combatant',

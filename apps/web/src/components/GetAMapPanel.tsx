@@ -46,14 +46,24 @@ import { AiMapButton } from '../features/ai-dm/AiMapWizard';
 import { useAuth } from '../app/auth';
 import { useAiDmSeat } from '../lib/query';
 import { useDisclosure } from './useDisclosure';
+import {
+  MapConceptGlossary,
+  MapPurposePicker,
+  MapPurposePreview,
+  mapPurposeMismatchMessage,
+  type MapPurpose,
+} from './mapOnboarding';
 
 export function GetAMapPanel({
   campaignId,
+  surfacePurpose = 'encounter',
   onImported,
   onGenerate,
   onError,
 }: {
   campaignId: number;
+  /** Which map purpose this host panel can actually save to. */
+  surfacePurpose?: MapPurpose;
   /** Called with the new hidden 'map' attachment id after a successful import. */
   onImported: (attachmentId: number) => void;
   /**
@@ -82,6 +92,7 @@ export function GetAMapPanel({
   });
   const generatorOpen = generatorDisclosure.open;
   const [importSource, setImportSource] = useState<MapSource | null>(null);
+  const [intendedPurpose, setIntendedPurpose] = useState<MapPurpose>(surfacePurpose);
 
   // Same self-gate as DraftWithAiButton (DM + AI-DM seat enabled, co_dm/driver mode) —
   // checked here too so the panel doesn't collapse to nothing when there are no external
@@ -119,6 +130,8 @@ export function GetAMapPanel({
 
   const generators = (sources ?? []).filter((s) => s.kind === 'generator-external');
   const importable = (sources ?? []).filter((s) => s.importable);
+  const purposeMismatch = mapPurposeMismatchMessage(intendedPurpose, surfacePurpose);
+  const showPurposeControls = generatorOpen || (open && hasSources);
 
   return (
     <div className="cf-inset" style={{ padding: '10px 12px', marginTop: 8 }}>
@@ -162,12 +175,30 @@ export function GetAMapPanel({
         {canDraftWithAi && <DraftWithAiButton campaignId={campaignId} target="map" />}
       </div>
 
+      {showPurposeControls && (
+        <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <MapConceptGlossary compact />
+          <MapPurposePicker
+            value={intendedPurpose}
+            surfacePurpose={surfacePurpose}
+            onChange={(next) => {
+              setIntendedPurpose(next);
+              setImportSource(null);
+            }}
+          />
+          <MapPurposePreview purpose={intendedPurpose} surfacePurpose={surfacePurpose} />
+        </div>
+      )}
+
       {/* First-party procedural generator wizard (issue #409): preview → reroll → use,
           without attaching or revealing until the DM commits. */}
       {canGenerate && generatorOpen && (
         <div {...generatorDisclosure.regionProps}>
           <GenerateMapPanel
             campaignId={campaignId}
+            purpose={intendedPurpose}
+            surfacePurpose={surfacePurpose}
+            useDisabledReason={purposeMismatch}
             onError={onError}
             onCancel={() => generatorDisclosure.setOpen(false)}
             onUse={async (params) => {
@@ -193,6 +224,9 @@ export function GetAMapPanel({
               campaignId={campaignId}
               source={s}
               acquisitionActive={acquisition?.sourceId === s.id}
+              purpose={intendedPurpose}
+              surfacePurpose={surfacePurpose}
+              importDisabledReason={purposeMismatch}
               onOpenGenerator={() => setAcquisition(saveAcquisition(campaignId, s.id, Date.now()))}
               onCancelAcquisition={() => {
                 clearAcquisition(campaignId);
@@ -223,6 +257,9 @@ export function GetAMapPanel({
                 <ImportForm
                   campaignId={campaignId}
                   source={s}
+                  purpose={intendedPurpose}
+                  surfacePurpose={surfacePurpose}
+                  submitDisabledReason={purposeMismatch}
                   onImported={(id) => {
                     setImportSource(null);
                     onImported(id);
@@ -247,12 +284,18 @@ export function GetAMapPanel({
 function ImportForm({
   campaignId,
   source,
+  purpose,
+  surfacePurpose,
+  submitDisabledReason,
   onImported,
   onCancel,
   onError,
 }: {
   campaignId: number;
   source: MapSource;
+  purpose: MapPurpose;
+  surfacePurpose: MapPurpose;
+  submitDisabledReason?: string | null;
   onImported: (attachmentId: number) => void;
   onCancel: () => void;
   onError?: (message: string) => void;
@@ -263,7 +306,7 @@ function ImportForm({
   const [file, setFile] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const canSubmit = title.trim().length > 0 && author.trim().length > 0 && file != null && !busy;
+  const canSubmit = title.trim().length > 0 && author.trim().length > 0 && file != null && !busy && !submitDisabledReason;
 
   async function submit() {
     if (!file) return;
@@ -284,6 +327,7 @@ function ImportForm({
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }} data-testid="map-import-form">
+      <MapPurposePreview purpose={purpose} surfacePurpose={surfacePurpose} mode="upload" />
       <Field
         idPrefix={MAP_IMPORT_PREFIX}
         name={MAP_IMPORT_FIELD.title}
@@ -325,13 +369,23 @@ function ImportForm({
         required
       />
       <div style={{ display: 'flex', gap: 6 }}>
-        <Btn className="!min-h-0 !py-1 text-[11px]" disabled={!canSubmit} onClick={() => void submit()}>
+        <Btn
+          className="!min-h-0 !py-1 text-[11px]"
+          disabled={!canSubmit}
+          onClick={() => void submit()}
+          title={submitDisabledReason ?? undefined}
+        >
           {busy ? 'Importing…' : 'Import map'}
         </Btn>
         <Btn ghost className="!min-h-0 !py-1 text-[11px]" disabled={busy} onClick={onCancel}>
           Cancel
         </Btn>
       </div>
+      {submitDisabledReason && (
+        <p className="text-amber-300/90" style={{ fontSize: 11, margin: 0 }} data-testid="map-import-route-required">
+          {submitDisabledReason}
+        </p>
+      )}
     </div>
   );
 }
