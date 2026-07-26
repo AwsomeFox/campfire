@@ -1141,6 +1141,34 @@ CREATE TABLE IF NOT EXISTS encounter_events (
   created_at TEXT NOT NULL
 );
 
+-- Issue #580: per-intent idempotency for NON-idempotent encounter mutations (HP deltas,
+-- turn advancement). One row per (actor, operation, key); the row is INSERTed inside the
+-- SAME synchronous transaction as the effect, so there is no window in which a crash can
+-- leave a phantom block (key recorded, effect missing) or a double-apply (effect landed,
+-- key missing).
+--
+-- response_json stores the ORIGINAL response body: a client that retried did so precisely
+-- because it does not know the outcome, so a bare 200/409 tells it nothing — it needs the
+-- committed HP / turn pointer to reconcile. response_role scopes that cached body to the
+-- role it was rendered for (encounter reads are role-redacted); a replay for a different
+-- role re-derives fresh instead of leaking a DM-shaped body to a player.
+--
+-- encounter_id/campaign_id are stored (not keyed on) so a key minted for one encounter or
+-- campaign cannot be replayed against another — that is a 409 IDEMPOTENCY_KEY_REUSE, not a
+-- silent cross-scope replay. Pruned by created_at TTL on write.
+CREATE TABLE IF NOT EXISTS encounter_op_idempotency (
+  actor_id TEXT NOT NULL,
+  operation TEXT NOT NULL,
+  key TEXT NOT NULL,
+  encounter_id INTEGER NOT NULL REFERENCES encounters(id) ON DELETE CASCADE,
+  campaign_id INTEGER NOT NULL,
+  fingerprint TEXT NOT NULL,
+  response_json TEXT,
+  response_role TEXT,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (actor_id, operation, key)
+);
+
 CREATE INDEX IF NOT EXISTS idx_users_oidc_sub ON users(oidc_sub);
 CREATE INDEX IF NOT EXISTS idx_characters_campaign ON characters(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_quests_campaign ON quests(campaign_id);
@@ -1249,6 +1277,8 @@ CREATE INDEX IF NOT EXISTS idx_inventory_items_campaign ON inventory_items(campa
 CREATE INDEX IF NOT EXISTS idx_inventory_items_character ON inventory_items(character_id);
 CREATE INDEX IF NOT EXISTS idx_inventory_qty_idempotency_item ON inventory_qty_idempotency(item_id);
 CREATE INDEX IF NOT EXISTS idx_inventory_qty_idempotency_created ON inventory_qty_idempotency(created_at);
+CREATE INDEX IF NOT EXISTS idx_encounter_op_idempotency_created ON encounter_op_idempotency(created_at);
+CREATE INDEX IF NOT EXISTS idx_encounter_op_idempotency_encounter ON encounter_op_idempotency(encounter_id);
 `;
 
 /**

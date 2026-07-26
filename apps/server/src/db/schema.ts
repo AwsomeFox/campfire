@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer, real, uniqueIndex } from 'drizzle-orm/sqlite-core';
+import { sqliteTable, text, integer, real, uniqueIndex, primaryKey } from 'drizzle-orm/sqlite-core';
 import type { AiDmProactiveSettings } from '@campfire/schema';
 
 /**
@@ -1437,3 +1437,33 @@ export const encounterEvents = sqliteTable('encounter_events', {
   metadataJson: text('metadata_json'),
   createdAt: text('created_at').notNull(),
 });
+
+// Issue #580: per-intent idempotency for non-idempotent encounter mutations (HP deltas and
+// turn advancement). The row is written inside the SAME synchronous better-sqlite3
+// transaction as the effect it guards, so claim and effect commit or roll back together.
+//
+// `responseJson` is the ORIGINAL response body (role-scoped via `responseRole`), replayed
+// verbatim to a retry so an unreliable client can reconcile without guessing. It is
+// nullable: the turn endpoints return the whole role-redacted encounter, which is derived
+// asynchronously after the tx commits, so the claim lands first and the body is backfilled
+// immediately after — a replay that finds no body falls back to fresh server truth, never
+// to re-executing the effect.
+//
+// Keyed on (actorId, operation, key): two DMs cannot collide, and reusing one key for a
+// different operation (or a different encounter/campaign — see `encounterId`/`campaignId`)
+// is a 409 rather than a cross-scope replay. Pruned by createdAt TTL on write.
+export const encounterOpIdempotency = sqliteTable(
+  'encounter_op_idempotency',
+  {
+    actorId: text('actor_id').notNull(),
+    operation: text('operation').notNull(),
+    key: text('key').notNull(),
+    encounterId: integer('encounter_id').notNull(),
+    campaignId: integer('campaign_id').notNull(),
+    fingerprint: text('fingerprint').notNull(),
+    responseJson: text('response_json'),
+    responseRole: text('response_role'),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => ({ pk: primaryKey({ columns: [t.actorId, t.operation, t.key] }) }),
+);

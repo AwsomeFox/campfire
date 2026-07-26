@@ -69,6 +69,16 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, API, ApiError, isReadTimeout, isTransientError, translateApiError } from '../../lib/api';
 import { formatDateTime, useFormattingLocale, useTimeFormat } from '../../lib/format';
 import { queryKeys, invalidateCampaignCharacters, invalidateCampaignCheckRequests, invalidateEncounter } from '../../lib/query';
+import { newOperationId, useKeyedMutation } from '../../lib/keyedMutation';
+import {
+  beginReconcile,
+  blocksFurtherActions,
+  clearReconcile,
+  completeReconcile,
+  IDLE_RECONCILE,
+  isAmbiguousOutcome,
+  type ReconcileState,
+} from '../../lib/ambiguousMutation';
 import { useCampaignEvents, type CampaignEventsStatus } from '../../lib/useCampaignEvents';
 import {
   inlineCharacterSheetsInteractive,
@@ -1223,6 +1233,18 @@ export default function RunSessionPage() {
     setActionError(message ? makeActionError(message) : null);
   }, []);
 
+  // Issue #580 — the ambiguous-outcome gate. When a combat write times out or its socket
+  // drops, the outcome is genuinely unknown: the server may have committed. Showing a
+  // plain "failed" would invite a re-click, which is a NEW intent (new key) and really
+  // would double the damage. So we say we're checking, re-read committed state, and
+  // refuse further non-idempotent actions until that read lands.
+  const [reconcile, setReconcile] = useState<ReconcileState>(IDLE_RECONCILE);
+  const enterReconciling = useCallback(() => {
+    setReconcile((prev) => beginReconcile(prev, Date.now()));
+    setActionError(null);
+  }, []);
+  const reconcileBlocks = blocksFurtherActions(reconcile);
+
   const undoAction = useMutation({
     mutationFn: (token: ActionUndoToken) => api.post(`${API}/encounters/${eid}/actions/undo`, token),
     onSuccess: () => {
@@ -1289,16 +1311,74 @@ export default function RunSessionPage() {
     },
   });
 
-  const endTurn = useMutation({
-    mutationFn: (expectedCurrentCombatantId: number) =>
-      api.post(`${API}/encounters/${eid}/end-turn`, { expectedCurrentCombatantId }),
+  // Turn advancement (issue #580). Both directions of protection travel together: the
+  // operation id makes a RETRY replay, and expectedCurrentCombatantId makes a RACE with
+  // another device a 409 rather than a second advance.
+  const endTurn = useKeyedMutation({
+    mutationFn: ({
+      expectedCurrentCombatantId,
+      idempotencyKey,
+    }: {
+      expectedCurrentCombatantId: number;
+      idempotencyKey: string;
+    }) => api.post(`${API}/encounters/${eid}/end-turn`, { expectedCurrentCombatantId, idempotencyKey }),
     onMutate: () => setActionError(null),
-    onError: reportError,
+    onError: (err) => {
+      if (isAmbiguousOutcome(err)) enterReconciling();
+      else reportError(err);
+    },
     onSettled: () => {
       invalidateEncounter(queryClient, eid);
       void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
     },
   });
+
+  const nextTurnMut = useKeyedMutation({
+    mutationFn: ({
+      expectedCurrentCombatantId,
+      idempotencyKey,
+    }: {
+      expectedCurrentCombatantId: number | null;
+      idempotencyKey: string;
+    }) => api.post(`${API}/encounters/${eid}/next-turn`, { expectedCurrentCombatantId, idempotencyKey }),
+    onMutate: () => setActionError(null),
+    onError: (err) => {
+      if (isAmbiguousOutcome(err)) enterReconciling();
+      else reportError(err);
+    },
+    onSettled: () => {
+      invalidateEncounter(queryClient, eid);
+      void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
+    },
+  });
+
+  // Drive the gate: on entering `checking`, force a fresh read of committed server state,
+  // then release. Deliberately a refetch rather than a cache invalidation — the point is
+  // to have actually observed server truth before the DM is allowed to act again, and an
+  // invalidation only marks the data stale.
+  useEffect(() => {
+    if (reconcile.phase !== 'checking') return;
+    let cancelled = false;
+    void encounterQuery
+      .refetch()
+      .catch(() => undefined)
+      .then(() => {
+        if (!cancelled) setReconcile((prev) => completeReconcile(prev, Date.now()));
+      });
+    return () => {
+      cancelled = true;
+    };
+    // encounterQuery identity changes every render; the phase transition is the trigger.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reconcile.phase]);
+
+  // Clear the "we checked" acknowledgement once the DM has seen it for a moment, so the
+  // banner does not become permanent furniture on a flaky connection.
+  useEffect(() => {
+    if (reconcile.phase !== 'reconciled') return;
+    const timer = setTimeout(() => setReconcile(clearReconcile()), 6_000);
+    return () => clearTimeout(timer);
+  }, [reconcile.phase, reconcile]);
 
   const escalationControl = useMutation({
     mutationFn: (body: { held?: boolean; override?: number | null }) =>
@@ -1313,13 +1393,28 @@ export default function RunSessionPage() {
   // disabled control); onError rolls back to the pre-click snapshot; onSettled reconciles
   // against server truth, but only once the *last* of a rapid burst settles so spamming
   // ±1 doesn't trigger a refetch storm.
+  //
+  // Issue #580: this is the mutation the double-damage bug lived in. `useKeyedMutation`
+  // mints ONE operation id per click and reuses it across the automatic retry, so a
+  // committed-but-lost response is replayed by the server rather than re-applied. Retry
+  // is enabled only because the key is present — the two arrive together by construction.
   const HP_MUTATION_KEY = useMemo(() => ['encounter', eid, 'hpDelta'] as const, [eid]);
-  const hpDelta = useMutation({
+  const hpDelta = useKeyedMutation({
     mutationKey: HP_MUTATION_KEY,
-    mutationFn: ({ combatantId, delta, actorId }: { combatantId: number; delta: number; actorId?: number }) =>
+    mutationFn: ({
+      combatantId,
+      delta,
+      actorId,
+      idempotencyKey,
+    }: {
+      combatantId: number;
+      delta: number;
+      actorId?: number;
+      idempotencyKey: string;
+    }) =>
       api.patch(
         `${API}/encounters/${eid}/combatants/${combatantId}`,
-        hpPatchWithActor({ hpDelta: delta }, actorId, combatantId),
+        hpPatchWithActor({ hpDelta: delta, idempotencyKey }, actorId, combatantId),
       ),
     onMutate: async ({ combatantId, delta }) => {
       setActionError(null);
@@ -1335,7 +1430,12 @@ export default function RunSessionPage() {
     },
     onError: (err, _vars, ctx) => {
       if (ctx?.previous) queryClient.setQueryData(queryKeys.encounter(eid), ctx.previous);
-      reportError(err);
+      // An ambiguous failure must NOT be reported as a plain error: the optimistic HP was
+      // just rolled back, but the server may in fact have applied it. Telling the DM "that
+      // failed" invites a re-click that is a fresh intent and really would double the
+      // damage. Hold the controls and re-read committed state instead.
+      if (isAmbiguousOutcome(err)) enterReconciling();
+      else reportError(err);
     },
     onSettled: () => {
       // Only reconcile after the last in-flight HP write of a burst settles.
@@ -1360,21 +1460,37 @@ export default function RunSessionPage() {
           ),
         });
       }
+      // Issue #580: one id for this apply-to-all, extended per target so each PATCH gets a
+      // distinct key (the server fingerprints the payload, so one key cannot cover two
+      // different combatants). This loop is a plain async function, not a TanStack
+      // mutation, so it is not auto-retried and the retry hazard the keys guard does not
+      // arise here — their value is that every resulting combat-log line carries the
+      // operation id, so an AoE burst is identifiable as one action in the audit trail.
+      // A DM manually re-running a half-failed apply-to-all still double-applies to the
+      // targets that succeeded; making that safe needs a stable id on the pending-apply
+      // itself and is deliberately left out of this change.
+      const bulkOperationId = newOperationId();
       try {
         for (const combatantId of combatantIds) {
           await api.patch(
             `${API}/encounters/${eid}/combatants/${combatantId}`,
-            hpPatchWithActor({ hpDelta: delta }, actorId, combatantId),
+            hpPatchWithActor(
+              { hpDelta: delta, idempotencyKey: `${bulkOperationId}:${combatantId}` },
+              actorId,
+              combatantId,
+            ),
           );
         }
         await invalidateEncounter(queryClient, eid);
       } catch (err) {
         if (previous) queryClient.setQueryData(queryKeys.encounter(eid), previous);
-        reportError(err);
+        // Same rule as the single-target stepper: an unknown outcome is not a failure.
+        if (isAmbiguousOutcome(err)) enterReconciling();
+        else reportError(err);
         throw err;
       }
     },
-    [eid, queryClient, reportError, ruleSystem],
+    [eid, queryClient, reportError, ruleSystem, enterReconciling],
   );
 
   const patchCombatant = useCallback(
@@ -1417,7 +1533,13 @@ export default function RunSessionPage() {
 
   const rollInitiative = () => runControl.mutate({ action: 'roll-initiative' });
   const startEncounter = () => runControl.mutate({ action: 'start' });
-  const nextTurn = () => runControl.mutate({ action: 'next-turn' });
+  // Issue #580: next-turn no longer rides the generic (unkeyed) runControl mutation. It
+  // carries an operation id AND the combatant the DM believes holds the turn, so a lost
+  // response replays and a co-DM's simultaneous advance conflicts instead of skipping.
+  const nextTurn = () =>
+    nextTurnMut.mutate({
+      expectedCurrentCombatantId: encounter?.status === 'running' ? (encounter.currentCombatantId ?? null) : null,
+    });
   const toggleEscalationHold = (held: boolean) => escalationControl.mutate({ held });
   const clearEscalationOverride = () => escalationControl.mutate({ override: null });
   const applyEscalationOverride = () => {
@@ -1627,7 +1749,11 @@ export default function RunSessionPage() {
   const setTokenSize = (combatantId: number, size: TokenSize) => patchCombatant(combatantId, { tokenSize: size });
 
   // Header run-control group shares one pending flag (see runControl above).
-  const headerBusy = runControl.isPending || deleteEncounterMut.isPending || escalationControl.isPending;
+  // `reconcileBlocks` folds into the same busy flag the header already honors (issue
+  // #580): while the client is checking committed state, every non-idempotent DM control
+  // is unavailable, which is the "reconcile before another action is allowed" rule.
+  const headerBusy =
+    runControl.isPending || nextTurnMut.isPending || deleteEncounterMut.isPending || escalationControl.isPending || reconcileBlocks;
   const nextTurnShortcut = useKeyboardCommandHint('encounterNextTurn');
 
   useKeyboardGuardedAction(
@@ -1757,6 +1883,25 @@ export default function RunSessionPage() {
           }}
           onDismiss={actionError ? () => setActionError(null) : undefined}
         />
+      )}
+
+      {/* Issue #580 — ambiguous outcome. NOT an error banner: the write may well have
+          succeeded, and calling it a failure is what pushes a DM into re-clicking (a new
+          intent, new key, real double damage). While `checking`, the HP steppers and turn
+          controls below are disabled; the message flips to a short acknowledgement once
+          committed state has actually been re-read. */}
+      {reconcile.phase !== 'idle' && (
+        <div
+          role="status"
+          aria-live="polite"
+          data-testid="mutation-reconcile-banner"
+          data-phase={reconcile.phase}
+          className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm"
+        >
+          {reconcile.phase === 'checking'
+            ? t('encounters.reconcile.checking')
+            : t('encounters.reconcile.done')}
+        </div>
       )}
 
       {/* Issue #415: the targeted player's in-page check-request prompt(s). Shown for any viewer
@@ -2297,12 +2442,15 @@ export default function RunSessionPage() {
                   ? (actionIndex, actionName, spec) => onUseActionRequested(c.id, c.name, actionIndex, actionName, spec)
                   : undefined
               }
-              busy={pendingCombatantIds.has(c.id)}
+              busy={pendingCombatantIds.has(c.id) || reconcileBlocks}
               conditionSuggestions={conditionSuggestions}
               conditionSourceOptions={canDmWrite ? orderedCombatants.map((source) => ({ id: source.id, name: source.name })) : [{ id: c.id, name: c.name }]}
               defaultConditionSourceCombatantId={currentCombatantId ?? c.id}
               ruleSystem={ruleSystem}
               onHpDelta={(delta) => {
+                // Belt-and-braces with the `busy` prop above: never let a second damage
+                // intent start while the outcome of the previous one is still unknown (#580).
+                if (reconcileBlocks) return;
                 const actorId = hpLogActorId(currentCombatantId, c.id);
                 hpDelta.mutate({ combatantId: c.id, delta, actorId });
               }}
@@ -2340,7 +2488,7 @@ export default function RunSessionPage() {
               }
               onEndMyTurn={
                 c.id === currentCombatantId
-                  ? () => endTurn.mutate(c.id)
+                  ? () => endTurn.mutate({ expectedCurrentCombatantId: c.id })
                   : undefined
               }
               onPatchTurnState={

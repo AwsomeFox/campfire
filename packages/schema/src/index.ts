@@ -71,6 +71,18 @@ export type Role = z.infer<typeof Role>;
 export const Id = z.number().int().positive();
 export const IsoDate = z.string(); // ISO-8601, server-assigned
 
+/**
+ * A client-minted operation id that makes ONE logical, non-idempotent intent safe to
+ * retry (issue #580). Optional on the wire so existing callers (and MCP) keep working;
+ * when present the server deduplicates by (actor, operation, key) and REPLAYS the
+ * original response rather than re-executing the effect.
+ *
+ * The contract that matters is where it is minted: once per user intent (the click),
+ * never once per HTTP attempt. A key generated inside a fetch/retry wrapper differs on
+ * every attempt and protects nothing.
+ */
+export const IdempotencyKey = z.string().min(1).max(128).optional();
+
 export * from './encounter-aftermath';
 
 const timestamps = {
@@ -7390,6 +7402,12 @@ export const CombatantUpdate = z.object({
   tokenSize: TokenSize.optional(),
   // Inline homebrew statblock edits (issue #425) — dm only, enforced server-side.
   statblock: CombatantStatblock.optional(),
+  // Issue #580: per-intent operation id. `hpDelta` / `spDelta` / `rpDelta` /
+  // `deathSaveRoll` are relative writes — replaying one double-damages. Send a key
+  // minted at the click and a retry after a lost response replays the ORIGINAL
+  // committed combatant (same hpCurrent, same death state) instead of re-applying.
+  // Reusing one key for a DIFFERENT patch is a 409 IDEMPOTENCY_KEY_REUSE.
+  idempotencyKey: IdempotencyKey,
 });
 
 /**
@@ -7497,6 +7515,11 @@ export const EncounterEventMetadata = z.object({
   escalationDie: z.number().int().min(0).max(6).optional(),
   escalationApplied: z.boolean().optional(),
   escalationPrevented: z.boolean().optional(),
+  // Issue #580: the client-minted operation id behind this event, when the write that
+  // produced it carried one. Makes the combat log auditable for the exact question the
+  // idempotency layer answers — "did this damage land once, or did a retry double it?" —
+  // by letting an operator group log lines by intent rather than by wall-clock proximity.
+  operationId: z.string().max(128).optional(),
 });
 export type EncounterEventMetadata = z.infer<typeof EncounterEventMetadata>;
 
@@ -7652,8 +7675,30 @@ export type TurnWorkspace = z.infer<typeof TurnWorkspace>;
  */
 export const EncounterEndTurn = z.object({
   expectedCurrentCombatantId: Id.nullable().optional(),
+  // Issue #580: client-minted operation id for this ONE logical "end turn" intent.
+  // Minted where the user's action originates (not inside the fetch wrapper), so a
+  // TanStack auto-retry of a lost response carries the SAME key and the server replays
+  // the original response instead of advancing the turn a second time.
+  idempotencyKey: IdempotencyKey,
 });
 export type EncounterEndTurn = z.infer<typeof EncounterEndTurn>;
+
+/**
+ * Body for POST /encounters/:id/next-turn (issue #580). Previously a bodyless POST, which
+ * made the DM's highest-frequency combat control both non-idempotent AND un-serialized:
+ * a lost response retried once advanced twice, and two DM devices each advanced once.
+ *
+ * `idempotencyKey` dedupes the RETRY of one intent (replaying the original response), and
+ * `expectedCurrentCombatantId` compare-and-swaps against the live turn pointer so two
+ * DISTINCT intents racing across devices produce one advance plus a 409 — a retry and a
+ * race are different failures and need different mechanisms. Both stay optional so the
+ * classic bodyless call (and MCP) keeps working, unprotected.
+ */
+export const EncounterNextTurn = z.object({
+  expectedCurrentCombatantId: Id.nullable().optional(),
+  idempotencyKey: IdempotencyKey,
+});
+export type EncounterNextTurn = z.infer<typeof EncounterNextTurn>;
 
 /**
  * Body for POST /encounters/:id/combatants/:cid/turn-state (issue #413) — declare/resolve
