@@ -121,9 +121,11 @@ test.describe('semantic reading preferences', () => {
     expect(recapType.lineHeight).toBe(31.5);
 
     await page.goto(`/c/${fixture.campaignId}/characters/${fixture.navigation.characterId}`);
+    await expect(page.locator('html')).toHaveAttribute('data-reading-mode', 'large');
     const characterReading = page.locator('.reading-surface').first();
     await expect(characterReading).toBeVisible();
-    expect((await typography(characterReading)).fontSize).toBe(18);
+    // Poll: character pages can mount before computed styles settle (NaN fontSize flake on CI).
+    await expect.poll(async () => (await typography(characterReading)).fontSize).toBe(18);
     // Issue #646: inactive tabpanels are hidden, so Build-only edit controls are not
     // visible on the default Play tab. Player fixture views a DM-owned nav character
     // (read-only); DetailPageWayfinding's back link still uses legacy `.btn`.
