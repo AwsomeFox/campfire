@@ -8,6 +8,7 @@ import {
   ActionSpec,
   ActionTargetAllow,
   ActionUndoToken,
+  ARCHMAGE_ADAPTER_ID,
   DND5E_ADAPTER_ID,
   EncounterEventMetadata,
   EncounterEventPerformedBy,
@@ -146,6 +147,10 @@ export class ActionResolverService {
    */
   private proficiencyBonus(adapter: RuleSystemAdapter, level: number): number {
     return adapter.id === DND5E_ADAPTER_ID ? dnd5eProficiencyBonus(level) : 0;
+  }
+
+  private isFearPreventingEscalation(row: typeof combatants.$inferSelect): boolean {
+    return fromJsonText<string[]>(row.conditions, []).some((c) => c.trim().toLowerCase() === 'fear');
   }
 
   private linkedCharacter(row: typeof combatants.$inferSelect): typeof characters.$inferSelect | null {
@@ -428,7 +433,7 @@ export class ActionResolverService {
     for (const tid of targetIds) {
       const target = this.combatantRowOrThrow(encounterId, tid);
       this.assertTargetAllowed(spec.targets.allow, actor, target, name);
-      resolvedTargets.push(this.resolveOneTarget(spec, name, adapter as unknown as ResolverAdapter, actorStats, prof, roll, target));
+      resolvedTargets.push(this.resolveOneTarget(spec, name, adapter as unknown as ResolverAdapter, encounter, actor, actorStats, prof, roll, target));
     }
 
     const resolution = this.buildResolution(spec, name, actor, resolvedTargets);
@@ -446,6 +451,8 @@ export class ActionResolverService {
     spec: ActionSpec,
     actionName: string,
     adapter: ResolverAdapter,
+    encounter: typeof encounters.$inferSelect,
+    actor: typeof combatants.$inferSelect,
     actorStats: Record<string, number>,
     prof: number,
     roll: ActionRollFn,
@@ -457,6 +464,9 @@ export class ActionResolverService {
       attackTotal: null as number | null,
       naturalRoll: null as number | null,
       vsValue: null as number | null,
+      escalationDie: 0,
+      escalationApplied: false,
+      escalationPrevented: false,
       saveTotal: null as number | null,
       saveDc: null as number | null,
       degree: null as ResolvedTarget['degree'],
@@ -473,7 +483,12 @@ export class ActionResolverService {
     let dmDetail = '';
 
     if (spec.mode === 'attack') {
-      const { modifier } = computeAttackModifier(spec, adapter, actorStats, prof);
+      const attack = computeAttackModifier(spec, adapter, actorStats, prof);
+      let modifier = attack.modifier;
+      const escalationDie = adapter.id === ARCHMAGE_ADAPTER_ID ? Math.max(0, Math.min(6, encounter.escalationDie ?? 0)) : 0;
+      const escalationPrevented = adapter.id === ARCHMAGE_ADAPTER_ID && actor.kind === 'character' && this.isFearPreventingEscalation(actor);
+      const escalationApplied = actor.kind === 'character' && escalationDie > 0 && !escalationPrevented;
+      if (escalationApplied) modifier += escalationDie;
       const nat = this.rollD20(roll);
       const total = nat + modifier;
       const ac = this.targetDefenseValue(target, adapter as unknown as RuleSystemAdapter);
@@ -483,8 +498,18 @@ export class ActionResolverService {
       base.attackTotal = total;
       base.naturalRoll = nat;
       base.vsValue = ac;
+      base.escalationDie = escalationDie;
+      base.escalationApplied = escalationApplied;
+      base.escalationPrevented = escalationPrevented;
       playerVerb = outcome === 'crit' ? 'critically hits' : outcome === 'hit' ? 'hits' : outcome === 'critMiss' ? 'critically misses' : 'misses';
-      dmDetail = `attack ${total} (d20 ${nat} ${signedModifier(modifier)}) vs AC ${ac} → ${outcome}`;
+      const parts = [...attack.breakdown.map((b) => `${b.label} ${b.value >= 0 ? '+' : ''}${b.value}`)];
+      if (adapter.id === ARCHMAGE_ADAPTER_ID) {
+        if (escalationApplied) parts.push(`escalation die +${escalationDie}`);
+        else if (escalationPrevented) parts.push(`escalation die +${escalationDie} blocked by Fear`);
+        else if (actor.kind !== 'character') parts.push('no escalation die for monsters/NPCs');
+      }
+      const detail = parts.length ? `; ${parts.join(', ')}` : '';
+      dmDetail = `attack ${total} (d20 ${nat} ${signedModifier(modifier)}${detail}) vs AC ${ac} → ${outcome}`;
     } else if (spec.mode === 'save' || spec.mode === 'check') {
       const { dc } = computeSaveDc(spec.save.dc, adapter, actorStats, prof);
       if (dc === null) throw new BadRequestException(`"${actionName}" has no resolvable DC — resolve manually rather than inventing one.`);
@@ -581,6 +606,9 @@ export class ActionResolverService {
       outcome: t.outcome,
       naturalRoll: t.naturalRoll,
       attackTotal: t.attackTotal,
+      escalationDie: t.escalationDie || undefined,
+      escalationApplied: t.escalationApplied || undefined,
+      escalationPrevented: t.escalationPrevented || undefined,
       saveTotal: t.saveTotal,
       vsValue: t.vsValue,
       saveDc: t.saveDc,

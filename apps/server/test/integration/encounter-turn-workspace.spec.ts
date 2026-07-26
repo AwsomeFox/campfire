@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import { eq } from 'drizzle-orm';
+import { ActionSpec } from '@campfire/schema';
 import { openDatabase } from '../../src/db/db.module';
-import { campaigns, characters, combatants, encounters } from '../../src/db/schema';
+import { campaigns, characters, combatants, encounters, ruleEntries, rulePacks } from '../../src/db/schema';
 import { AuditService } from '../../src/modules/audit/audit.service';
 import { CampaignEventsService } from '../../src/modules/events/campaign-events.service';
 import { RollsService } from '../../src/modules/rolls/rolls.service';
@@ -10,6 +11,7 @@ import { AttachmentsService } from '../../src/modules/attachments/attachments.se
 import { FsDeletionService } from '../../src/modules/attachments/fs-deletion.service';
 import { CampaignLibraryService } from '../../src/modules/campaign-library/campaign-library.service';
 import { EncountersService } from '../../src/modules/encounters/encounters.service';
+import { ActionResolverService } from '../../src/modules/encounters/action-resolver.service';
 import type { RequestUser } from '../../src/common/user.types';
 import { makeTempDataDir } from './fixtures';
 
@@ -36,7 +38,8 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
     const attachments = new AttachmentsService(orm, audit, new FsDeletionService(orm, audit));
     const campaignLibrary = new CampaignLibraryService(orm, audit);
     const service = new EncountersService(orm, audit, events, rolls, revisions, attachments, campaignLibrary);
-    return { orm, service };
+    const actions = new ActionResolverService(orm, events, audit);
+    return { orm, service, actions };
   }
 
   const dmUser: RequestUser = { id: 'dev:dm', name: 'DM', serverRole: 'admin', devRole: 'dm' };
@@ -237,4 +240,225 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
     expect(other.current?.combatantId).toBe(c1);
     expect(other.actionEconomy).toHaveLength(0);
   });
+
+  it('13th Age auto-added PCs get DEX + level initiative breakdowns', async () => {
+    dataDir = makeTempDataDir();
+    const { orm, service } = build();
+    const ts = new Date().toISOString();
+    const [campaign] = orm
+      .insert(campaigns)
+      .values({ name: 'Archmage', ruleSystem: 'archmage', createdAt: ts, updatedAt: ts })
+      .returning()
+      .all();
+    await orm
+      .insert(characters)
+      .values({
+        campaignId: campaign.id,
+        ownerUserId: player1.id,
+        name: 'Iconic Rogue',
+        level: 5,
+        stats: JSON.stringify({ DEX: 14 }),
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .run();
+
+    const created = await service.create(campaign.id, { name: 'Ambush' }, dmUser, 'dm');
+    expect(created.combatants).toHaveLength(1);
+    expect(created.combatants[0].initMod).toBe(7);
+    expect(created.combatants[0].initiativeBreakdown?.terms).toEqual([
+      { label: 'DEX', value: 2 },
+      { label: 'level', value: 5 },
+    ]);
+  });
+
+  it('13th Age escalation advances rounds 1-8, caps at +6, supports hold/override, and undo restores round default', async () => {
+    dataDir = makeTempDataDir();
+    const { orm, service } = build();
+    const { encounterId } = seedArchmageRunningEncounter(orm);
+
+    let snapshot = await service.nextTurn(encounterId, dmUser, 'dm');
+    expect(snapshot.round).toBe(1);
+    expect(snapshot.escalationDie).toBe(0);
+
+    for (let round = 2; round <= 8; round++) {
+      snapshot = await service.nextTurn(encounterId, dmUser, 'dm');
+      expect(snapshot.round).toBe(round);
+      expect(snapshot.escalationDie).toBe(Math.min(round - 1, 6));
+      if (round < 8) {
+        snapshot = await service.nextTurn(encounterId, dmUser, 'dm');
+        expect(snapshot.round).toBe(round);
+      }
+    }
+
+    const heldSeed = seedArchmageRunningEncounter(orm);
+    await service.nextTurn(heldSeed.encounterId, dmUser, 'dm');
+    snapshot = await service.nextTurn(heldSeed.encounterId, dmUser, 'dm');
+    expect(snapshot.round).toBe(2);
+    expect(snapshot.escalationDie).toBe(1);
+
+    snapshot = await service.updateEscalationDie(heldSeed.encounterId, { held: true }, dmUser, 'dm');
+    expect(snapshot.escalationDieHeld).toBe(true);
+    await service.nextTurn(heldSeed.encounterId, dmUser, 'dm');
+    snapshot = await service.nextTurn(heldSeed.encounterId, dmUser, 'dm');
+    expect(snapshot.round).toBe(3);
+    expect(snapshot.escalationDie).toBe(1);
+
+    snapshot = await service.updateEscalationDie(heldSeed.encounterId, { override: 4 }, dmUser, 'dm');
+    expect(snapshot.escalationDie).toBe(4);
+    await service.nextTurn(heldSeed.encounterId, dmUser, 'dm');
+    snapshot = await service.nextTurn(heldSeed.encounterId, dmUser, 'dm');
+    expect(snapshot.round).toBe(4);
+    expect(snapshot.escalationDie).toBe(4);
+
+    snapshot = await service.updateEscalationDie(heldSeed.encounterId, { held: false, override: null }, dmUser, 'dm');
+    expect(snapshot.escalationDie).toBe(3);
+    snapshot = await service.undoTurn(heldSeed.encounterId, dmUser, 'dm');
+    expect(snapshot.round).toBe(3);
+    expect(snapshot.escalationDie).toBe(2);
+    expect(snapshot.escalationDieHistory.length).toBeGreaterThan(0);
+  });
+
+  it('13th Age action resolution applies escalation to PCs only and Fear blocks it', () => {
+    dataDir = makeTempDataDir();
+    const { orm, actions } = build();
+    const { encounterId, pc, monster } = seedArchmageActionEncounter(orm);
+    const strike = ActionSpec.parse({
+      mode: 'attack',
+      attack: { bonus: '+5' },
+      targets: { count: 1, allow: 'enemy' },
+      outcomes: { hit: { damage: [{ flat: 1, type: 'untyped' }] } },
+    });
+
+    let resolved = actions.resolve(
+      encounterId,
+      { actorCombatantId: pc, spec: strike, targetIds: [monster], commit: false },
+      dmUser,
+      'dm',
+    );
+    expect(resolved.resolution.dmSummary).toContain('escalation die +3');
+
+    orm.update(combatants).set({ conditions: JSON.stringify(['fear']) }).where(eq(combatants.id, pc)).run();
+    resolved = actions.resolve(
+      encounterId,
+      { actorCombatantId: pc, spec: strike, targetIds: [monster], commit: false },
+      dmUser,
+      'dm',
+    );
+    expect(resolved.resolution.dmSummary).toContain('blocked by Fear');
+
+    resolved = actions.resolve(
+      encounterId,
+      { actorCombatantId: monster, spec: strike, targetIds: [pc], commit: false },
+      dmUser,
+      'dm',
+    );
+    expect(resolved.resolution.dmSummary).toContain('no escalation die for monsters/NPCs');
+    expect(resolved.resolution.dmSummary).not.toContain('escalation die +3');
+  });
+
+  function seedArchmageRunningEncounter(
+    orm: ReturnType<typeof build>['orm'],
+  ): { campaignId: number; encounterId: number; c1: number; c2: number } {
+    const ts = new Date().toISOString();
+    const [campaign] = orm
+      .insert(campaigns)
+      .values({ name: 'Archmage Turns', ruleSystem: 'archmage', createdAt: ts, updatedAt: ts })
+      .returning()
+      .all();
+    const [encounter] = orm
+      .insert(encounters)
+      .values({
+        campaignId: campaign.id,
+        name: 'Escalating Fight',
+        status: 'running',
+        round: 1,
+        escalationDie: 0,
+        turnIndex: 0,
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .returning()
+      .all();
+    const [c1] = orm
+      .insert(combatants)
+      .values({ encounterId: encounter.id, kind: 'character', name: 'PC One', initiative: 20, hpCurrent: 20, hpMax: 20, sortOrder: 0 })
+      .returning()
+      .all();
+    const [c2] = orm
+      .insert(combatants)
+      .values({ encounterId: encounter.id, kind: 'character', name: 'PC Two', initiative: 10, hpCurrent: 20, hpMax: 20, sortOrder: 1 })
+      .returning()
+      .all();
+    orm.update(encounters).set({ currentCombatantId: c1.id }).where(eq(encounters.id, encounter.id)).run();
+    return { campaignId: campaign.id, encounterId: encounter.id, c1: c1.id, c2: c2.id };
+  }
+
+  function seedArchmageActionEncounter(
+    orm: ReturnType<typeof build>['orm'],
+  ): { campaignId: number; encounterId: number; pc: number; monster: number } {
+    const ts = new Date().toISOString();
+    const [campaign] = orm
+      .insert(campaigns)
+      .values({ name: 'Archmage Actions', ruleSystem: 'archmage', createdAt: ts, updatedAt: ts })
+      .returning()
+      .all();
+    const [pack] = orm
+      .insert(rulePacks)
+      .values({ slug: `archmage-test-${campaign.id}`, name: 'Archmage Test', installedAt: ts })
+      .returning()
+      .all();
+    const [entry] = orm
+      .insert(ruleEntries)
+      .values({
+        packId: pack.id,
+        slug: `monster-${campaign.id}`,
+        name: 'Test Monster',
+        type: 'monster',
+        dataJson: JSON.stringify({ ac: 16, hp: 30, initiative: 4 }),
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .returning()
+      .all();
+    const [character] = orm
+      .insert(characters)
+      .values({
+        campaignId: campaign.id,
+        ownerUserId: player1.id,
+        name: 'Hero',
+        ac: 15,
+        stats: JSON.stringify({ STR: 18, DEX: 14 }),
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .returning()
+      .all();
+    const [encounter] = orm
+      .insert(encounters)
+      .values({
+        campaignId: campaign.id,
+        name: 'Action Fight',
+        status: 'running',
+        round: 4,
+        escalationDie: 3,
+        turnIndex: 0,
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .returning()
+      .all();
+    const [pc] = orm
+      .insert(combatants)
+      .values({ encounterId: encounter.id, kind: 'character', characterId: character.id, name: 'Hero', initiative: 20, hpCurrent: 25, hpMax: 25, sortOrder: 0 })
+      .returning()
+      .all();
+    const [monster] = orm
+      .insert(combatants)
+      .values({ encounterId: encounter.id, kind: 'monster', name: 'Test Monster', initiative: 10, initMod: 4, hpCurrent: 30, hpMax: 30, ruleEntryId: entry.id, sortOrder: 1 })
+      .returning()
+      .all();
+    orm.update(encounters).set({ currentCombatantId: pc.id }).where(eq(encounters.id, encounter.id)).run();
+    return { campaignId: campaign.id, encounterId: encounter.id, pc: pc.id, monster: monster.id };
+  }
 });

@@ -64,6 +64,7 @@ const RESOURCE_BY_NAME: Record<string, ToolResource> = {
   remove_combatant: 'encounter',
   update_combatant: 'encounter',
   next_turn: 'encounter',
+  set_escalation_die: 'encounter',
   roll_initiative: 'encounter',
   get_encounter_difficulty: 'encounter',
   // character / HP / condition → the party sheet
