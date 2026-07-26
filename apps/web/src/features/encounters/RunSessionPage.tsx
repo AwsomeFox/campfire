@@ -105,6 +105,7 @@ import { EncounterAiDriverPanel } from '../ai-dm/EncounterAiDriverPanel';
 import { AiDmPresenceTag, AiDmToolActivityRow } from '../ai-dm/AiDmActivityChip';
 import { resolveToolActivity, toolResource } from '../ai-dm/toolActivity';
 import { GameIcon } from '../../components/GameIcon';
+import { TermHelp } from '../../components/TermHelp';
 import { useDisclosure } from '../../components/useDisclosure';
 import {
   advanceCombatLogAnnouncements,
@@ -1808,14 +1809,19 @@ export default function RunSessionPage() {
         </button>
         <div className="flex-1" />
         {isDm && (
-          <Btn
-            ghost
-            className="!min-h-0 !py-1.5 text-xs"
-            onClick={() => navigate(`/c/${cid}/screen`)}
-            title="Open the player display — initiative + revealed info, no secrets"
-          >
-            <GameIcon slug="tv" size={13} className="inline align-text-bottom mr-1" />Cast
-          </Btn>
+          <>
+            {/* No aria-label / title here: the visible word "Cast" is the
+                accessible name, and the adjacent TermHelp carries the
+                explanation without a hover-only tooltip (issue #518). */}
+            <Btn
+              ghost
+              className="!min-h-0 !py-1.5 text-xs"
+              onClick={() => navigate(`/c/${cid}/screen`)}
+            >
+              <GameIcon slug="tv" size={13} className="inline align-text-bottom mr-1" />Cast
+            </Btn>
+            <TermHelp termId="cast" />
+          </>
         )}
         {canDmWrite && (
           <div className="flex gap-2 flex-wrap">
