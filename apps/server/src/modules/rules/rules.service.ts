@@ -1575,7 +1575,7 @@ export class RulesService implements OnModuleInit {
       // stale entry an operator can delete by hand, versus silent data loss.
       //
       // Do not re-enable this without first making the importer distinguish a drifted statblock
-      // from a prose heading and count the former — see the follow-up issue linked in PR #1441.
+      // from a prose heading and count the former — tracked in issue #1522.
       completeManifestOptions(sections, ALL_ARCHMAGE_SECTIONS, sectionResults, ARCHMAGE_MAX_ENTRIES_PER_SECTION, {
         dropsAreCounted: false,
       }),
