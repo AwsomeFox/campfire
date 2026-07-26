@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import sharp from 'sharp';
 import type { FogRect } from '@campfire/schema';
+import { derivativeSpec, type RequestedSize } from '../attachments/image-derivatives';
 
 /** Opaque fog fill in 0–255 channel units (matches sharp/raw RGBA buffers). */
 export const FOG_BACKGROUND = { r: 11, g: 17, b: 32, alpha: 255 } as const;
@@ -75,17 +76,26 @@ function fillFog(data: Buffer, start: number, end: number): void {
 export async function renderFogSafeMap(
   source: Buffer,
   revealed: FogRect[],
-  variant: 'original' | 'thumb' = 'original',
+  variant: RequestedSize = 'original',
 ): Promise<FogMapRenderResult> {
   let pipeline = sharp(source, {
     failOn: 'error',
     limitInputPixels: FOG_MAP_MAX_INPUT_PIXELS,
   }).rotate();
 
-  if (variant === 'thumb') {
+  // Issue #604: the fog renderer now honours the SAME responsive ladder as the
+  // attachment derivatives ('thumb' | 'md' | 'lg'), so a player on a phone gets a
+  // 1280px fogged map instead of a full-resolution one. The rendered result is
+  // NOT stored as a derivative row — it is per-role, per-reveal-mask, and must
+  // never be written to the shared uploads tree where an unauthorized reader
+  // could find it (#463); the bounded in-process LRU in EncounterMapService is
+  // the correct cache for it. FOG_MAP_THUMB_MAX_DIM is kept as the historical
+  // name for the smallest rung's cap.
+  if (variant !== 'original') {
+    const maxDim = derivativeSpec(variant).maxDim;
     pipeline = pipeline.resize({
-      width: FOG_MAP_THUMB_MAX_DIM,
-      height: FOG_MAP_THUMB_MAX_DIM,
+      width: maxDim,
+      height: maxDim,
       fit: 'inside',
       withoutEnlargement: true,
     });
