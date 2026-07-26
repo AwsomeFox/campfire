@@ -1233,6 +1233,27 @@ export const aiDmSeats = sqliteTable('ai_dm_seats', {
   updatedAt: text('updated_at').notNull(),
 });
 
+// Durable AI Driver control state (issue #559). This is intentionally separate from
+// ai_dm_seats config/counters: it stores the live recovery controls that used to be
+// process-local only (pause, takeover, votes, stuck state, and replay input).
+export const aiDriverControlState = sqliteTable('ai_driver_control_state', {
+  campaignId: integer('campaign_id').primaryKey(),
+  status: text('status').notNull().default('idle'),
+  state: text('state').notNull().default('running'),
+  scene: text('scene'),
+  lastNarration: text('last_narration'),
+  lastTurnAt: text('last_turn_at'),
+  turnCount: integer('turn_count').notNull().default(0),
+  stuck: text('stuck'),
+  actingDm: text('acting_dm'),
+  vote: text('vote'),
+  takeoverRequestedBy: text('takeover_requested_by'),
+  lastInput: text('last_input'),
+  /** The recovery shape last announced to the table — suppresses re-announcing a steady state. */
+  announcedRecovery: text('announced_recovery'),
+  updatedAt: text('updated_at').notNull(),
+});
+
 // AI DM per-turn usage history (issue #1060). One row per metered turn (driver step or
 // co-DM draft or scribe run). Used to power a per-campaign usage-history endpoint and
 // the DM settings sparkline. Written by AiDmService.meterTurn as best-effort — a
