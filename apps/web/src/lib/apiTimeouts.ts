@@ -104,6 +104,11 @@ function readTimeoutPhase(firedPhase: TimerPhase | null): ReadTimeoutPhase {
     : 'overall';
 }
 
+/** Fetch null-body statuses — Response cannot be reconstructed with a stream body. */
+function isNullBodyStatus(status: number): boolean {
+  return status === 101 || status === 103 || status === 204 || status === 205 || status === 304;
+}
+
 /**
  * Keep the overall budget armed until the caller finishes reading the body.
  * Headers alone must not clear the round-trip timer (reads and mutations).
@@ -219,11 +224,17 @@ export async function fetchWithBudget(
     for (const clear of clearEarlyTimers) clear();
     clearEarlyTimers.length = 0;
 
-    // Streams only bound connect. Empty / missing bodies need no wrap — and
-    // Content-Length: 0 responses are often returned without reading the body
-    // (api.ts), so wrapping would leak the overall timer + abort listener.
+    // Streams only bound connect. Empty / missing / null-body-status responses
+    // need no wrap — reconstructing a Response with a stream body throws for
+    // 204/205/304, and Content-Length: 0 responses are often returned without
+    // reading the body (api.ts), which would leak the overall timer.
     const contentLength = res.headers.get('Content-Length');
-    if (kind === 'stream' || res.body == null || contentLength === '0') {
+    if (
+      kind === 'stream' ||
+      res.body == null ||
+      contentLength === '0' ||
+      isNullBodyStatus(res.status)
+    ) {
       clearAll();
       return res;
     }

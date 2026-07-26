@@ -289,6 +289,34 @@ test.describe('fetchWithBudget (#581)', () => {
     }
   });
 
+  test('204/null-body statuses are returned unwrapped (Response cannot carry a stream)', async () => {
+    const originalFetch = globalThis.fetch;
+    // Chromium exposes a non-null empty body on 204; reconstructing with a stream
+    // throws "Response with null body status cannot have body".
+    globalThis.fetch = async () => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.close();
+        },
+      });
+      const res = new Response(stream, { status: 200, statusText: 'No Content' });
+      Object.defineProperty(res, 'status', { value: 204 });
+      return res;
+    };
+    try {
+      const res = await fetchWithBudget(
+        '/api/v1/users/1/password',
+        { method: 'POST', body: '{}' },
+        'write',
+        API_WRITE_BUDGET,
+      );
+      expect(res.status).toBe(204);
+      expect(res.body).not.toBeNull();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test('DNS / refusal surfaces as transient network errors', async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = async () => {
