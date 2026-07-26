@@ -71,7 +71,13 @@ type ScheduledSessionUpdateInput = z.infer<typeof ScheduledSessionUpdate>;
 type ScheduledSessionCancelInput = z.infer<typeof ScheduledSessionCancel>;
 type ScheduledSessionDuplicateInput = z.infer<typeof ScheduledSessionDuplicate>;
 type RsvpSetInput = z.infer<typeof RsvpSet>;
-type SyncDb = DrizzleDb | Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
+export type SyncDb = DrizzleDb | Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
+
+/** Result of the row-level half of a schedule↔session link (#504). */
+export type LinkSessionOutcome = { campaignId: number; linked: boolean; wasPreviouslyCompleted: boolean };
+
+/** Result of the row-level half of a schedule↔session unlink (#504). */
+export type UnlinkSessionOutcome = { campaignId: number; scheduleIds: number[] };
 
 function toDomain(row: typeof scheduledSessions.$inferSelect): ScheduledSession {
   return {
@@ -637,47 +643,95 @@ export class SchedulingService {
     return created;
   }
 
-  async linkSession(scheduleId: number, sessionId: number, user: RequestUser, role: Role): Promise<ScheduledSessionWithRsvps> {
-    const outcome = this.db.transaction((tx) => {
-      const schedule = this.getRowOrThrowTx(tx, scheduleId);
-      if (schedule.status === 'cancelled') throw new BadRequestException('Cancelled scheduled sessions cannot be completed');
-      if (schedule.status === 'completed' && schedule.sessionId !== sessionId) {
-        throw new BadRequestException('Scheduled session is already linked to a different session');
-      }
-      const [session] = tx.select().from(sessions).where(eq(sessions.id, sessionId)).limit(1).all();
-      if (!session || session.deletedAt != null) throw new NotFoundException(`Session ${sessionId} not found`);
-      if (session.campaignId !== schedule.campaignId) {
-        throw new BadRequestException('Session must belong to the same campaign as the scheduled session');
-      }
-      if (schedule.status === 'completed' && schedule.sessionId === sessionId) {
-        return { campaignId: schedule.campaignId, linked: false, wasPreviouslyCompleted: true };
-      }
-      if (session.scheduledSessionId != null && session.scheduledSessionId !== scheduleId) {
-        throw new BadRequestException('Session is already linked to a different scheduled session');
-      }
-      const [otherSchedule] = tx
-        .select({ id: scheduledSessions.id })
-        .from(scheduledSessions)
-        .where(and(eq(scheduledSessions.sessionId, sessionId), ne(scheduledSessions.id, scheduleId)))
-        .limit(1)
-        .all();
-      if (otherSchedule) {
-        throw new BadRequestException('Session is already linked to a different scheduled session');
-      }
-      const ts = nowIso();
-      tx.update(scheduledSessions)
-        .set({ status: 'completed', sessionId, updatedAt: ts })
-        .where(eq(scheduledSessions.id, scheduleId))
-        .run();
-      tx.update(sessions)
-        .set({ scheduledSessionId: scheduleId, updatedAt: ts })
-        .where(eq(sessions.id, sessionId))
-        .run();
-      return { campaignId: schedule.campaignId, linked: true, wasPreviouslyCompleted: schedule.status === 'completed' };
-    });
-    if (!outcome.linked) {
-      return this.getWithRsvps(scheduleId);
+  /** Read-only schedule fetch inside a caller's transaction (#504). */
+  getScheduleRowInTx(tx: SyncDb, id: number) {
+    return this.getRowOrThrowTx(tx, id);
+  }
+
+  /**
+   * Every precondition a link must satisfy, evaluated read-only against `db`.
+   *
+   * Single source of truth for the guards: `linkSessionInTx` runs it inside its write
+   * transaction (for correctness under concurrency), and callers that persist other
+   * changes alongside a link run it up front via `assertCanLinkSession` so a link that
+   * cannot succeed is rejected before anything is written.
+   *
+   * Returns `alreadyLinked` for the idempotent case (this exact pair is already linked)
+   * so callers can tell a no-op apart from a rejection.
+   */
+  private checkLinkable(db: SyncDb, scheduleId: number, sessionId: number): {
+    schedule: typeof scheduledSessions.$inferSelect;
+    alreadyLinked: boolean;
+  } {
+    const schedule = this.getRowOrThrowTx(db, scheduleId);
+    if (schedule.status === 'cancelled') throw new BadRequestException('Cancelled scheduled sessions cannot be completed');
+    if (schedule.status === 'completed' && schedule.sessionId !== sessionId) {
+      throw new BadRequestException('Scheduled session is already linked to a different session');
     }
+    const [session] = db.select().from(sessions).where(eq(sessions.id, sessionId)).limit(1).all();
+    if (!session || session.deletedAt != null) throw new NotFoundException(`Session ${sessionId} not found`);
+    if (session.campaignId !== schedule.campaignId) {
+      throw new BadRequestException('Session must belong to the same campaign as the scheduled session');
+    }
+    if (schedule.status === 'completed' && schedule.sessionId === sessionId) {
+      return { schedule, alreadyLinked: true };
+    }
+    if (session.scheduledSessionId != null && session.scheduledSessionId !== scheduleId) {
+      throw new BadRequestException('Session is already linked to a different scheduled session');
+    }
+    const [otherSchedule] = db
+      .select({ id: scheduledSessions.id })
+      .from(scheduledSessions)
+      .where(and(eq(scheduledSessions.sessionId, sessionId), ne(scheduledSessions.id, scheduleId)))
+      .limit(1)
+      .all();
+    if (otherSchedule) {
+      throw new BadRequestException('Session is already linked to a different scheduled session');
+    }
+    return { schedule, alreadyLinked: false };
+  }
+
+  /**
+   * Read-only pre-flight for callers that write other changes before linking (#504).
+   * Throws exactly what the link itself would, so a rejected edit can fail before it
+   * has persisted anything — otherwise the caller commits its field changes and then
+   * returns a 400 that does not match what was actually saved.
+   */
+  assertCanLinkSession(scheduleId: number, sessionId: number): void {
+    this.checkLinkable(this.db, scheduleId, sessionId);
+  }
+
+  /**
+   * Row-writes half of a link, for callers that link inside their own transaction so
+   * the link commits (or rolls back) together with their other writes. Pair with
+   * `recordSessionLink` after the transaction commits for audit + SSE.
+   */
+  linkSessionInTx(tx: SyncDb, scheduleId: number, sessionId: number): LinkSessionOutcome {
+    const { schedule, alreadyLinked } = this.checkLinkable(tx, scheduleId, sessionId);
+    if (alreadyLinked) {
+      return { campaignId: schedule.campaignId, linked: false, wasPreviouslyCompleted: true };
+    }
+    const ts = nowIso();
+    tx.update(scheduledSessions)
+      .set({ status: 'completed', sessionId, updatedAt: ts })
+      .where(eq(scheduledSessions.id, scheduleId))
+      .run();
+    tx.update(sessions)
+      .set({ scheduledSessionId: scheduleId, updatedAt: ts })
+      .where(eq(sessions.id, sessionId))
+      .run();
+    return { campaignId: schedule.campaignId, linked: true, wasPreviouslyCompleted: schedule.status === 'completed' };
+  }
+
+  /** Audit + SSE half of a link — run after the owning transaction has committed. */
+  async recordSessionLink(
+    outcome: LinkSessionOutcome,
+    scheduleId: number,
+    sessionId: number,
+    user: RequestUser,
+    role: Role,
+  ): Promise<void> {
+    if (!outcome.linked) return;
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -699,6 +753,11 @@ export class SchedulingService {
       });
     }
     this.emitScheduleUpdated(outcome.campaignId, scheduleId);
+  }
+
+  async linkSession(scheduleId: number, sessionId: number, user: RequestUser, role: Role): Promise<ScheduledSessionWithRsvps> {
+    const outcome = this.db.transaction((tx) => this.linkSessionInTx(tx, scheduleId, sessionId));
+    await this.recordSessionLink(outcome, scheduleId, sessionId, user, role);
     return this.getWithRsvps(scheduleId);
   }
 
@@ -716,27 +775,39 @@ export class SchedulingService {
    * Any schedule row pointing at this session is swept, so pre-existing half-links from
    * older data heal on the next unlink instead of persisting forever.
    */
-  async unlinkSession(sessionId: number, user: RequestUser, role: Role): Promise<void> {
-    const outcome = this.db.transaction((tx) => {
-      const [session] = tx.select().from(sessions).where(eq(sessions.id, sessionId)).limit(1).all();
-      if (!session) throw new NotFoundException(`Session ${sessionId} not found`);
-      const linked = tx
-        .select()
-        .from(scheduledSessions)
-        .where(eq(scheduledSessions.sessionId, sessionId))
-        .all();
-      const ts = nowIso();
-      tx.update(sessions).set({ scheduledSessionId: null, updatedAt: ts }).where(eq(sessions.id, sessionId)).run();
-      for (const schedule of linked) {
-        tx.update(scheduledSessions)
-          // Only 'completed' is an artefact of the link; a cancelled row keeps its
-          // cancellation lifecycle state (and its cancellation metadata) untouched.
-          .set({ status: schedule.status === 'completed' ? 'scheduled' : schedule.status, sessionId: null, updatedAt: ts })
-          .where(eq(scheduledSessions.id, schedule.id))
-          .run();
-      }
-      return { campaignId: session.campaignId, scheduleIds: linked.map((s) => s.id) };
-    });
+  /**
+   * Row-writes half of an unlink, for callers unlinking inside their own transaction.
+   * Clears BOTH sides, so a caller must not also write `scheduledSessionId` itself.
+   * Pair with `recordSessionUnlink` after the transaction commits.
+   */
+  unlinkSessionInTx(tx: SyncDb, sessionId: number): UnlinkSessionOutcome {
+    const [session] = tx.select().from(sessions).where(eq(sessions.id, sessionId)).limit(1).all();
+    if (!session) throw new NotFoundException(`Session ${sessionId} not found`);
+    const linked = tx
+      .select()
+      .from(scheduledSessions)
+      .where(eq(scheduledSessions.sessionId, sessionId))
+      .all();
+    const ts = nowIso();
+    tx.update(sessions).set({ scheduledSessionId: null, updatedAt: ts }).where(eq(sessions.id, sessionId)).run();
+    for (const schedule of linked) {
+      tx.update(scheduledSessions)
+        // Only 'completed' is an artefact of the link; a cancelled row keeps its
+        // cancellation lifecycle state (and its cancellation metadata) untouched.
+        .set({ status: schedule.status === 'completed' ? 'scheduled' : schedule.status, sessionId: null, updatedAt: ts })
+        .where(eq(scheduledSessions.id, schedule.id))
+        .run();
+    }
+    return { campaignId: session.campaignId, scheduleIds: linked.map((s) => s.id) };
+  }
+
+  /** Audit + SSE half of an unlink — run after the owning transaction has committed. */
+  async recordSessionUnlink(
+    outcome: UnlinkSessionOutcome,
+    sessionId: number,
+    user: RequestUser,
+    role: Role,
+  ): Promise<void> {
     for (const scheduleId of outcome.scheduleIds) {
       await this.audit.log({
         actor: auditActor(user),
@@ -749,6 +820,11 @@ export class SchedulingService {
       });
       this.emitScheduleUpdated(outcome.campaignId, scheduleId);
     }
+  }
+
+  async unlinkSession(sessionId: number, user: RequestUser, role: Role): Promise<void> {
+    const outcome = this.db.transaction((tx) => this.unlinkSessionInTx(tx, sessionId));
+    await this.recordSessionUnlink(outcome, sessionId, user, role);
   }
 
   // ----- RSVPs (availability) -----

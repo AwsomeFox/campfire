@@ -388,6 +388,113 @@ describe('session scheduling (e2e)', () => {
     });
   });
 
+  it('a rejected relink rolls back the other fields in the same PATCH (no partial write)', async () => {
+    const server = ctx.app.getHttpServer();
+    const originalSchedule = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/schedule`)
+      .set(dm)
+      .send({ scheduledAt: '2099-11-04T18:00:00Z', title: 'Partial-write origin' });
+    const recap = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/sessions`)
+      .set(dm)
+      .send({
+        title: 'Original title',
+        playedAt: '2099-11-04',
+        recap: 'Original recap body.',
+        scheduledSessionId: originalSchedule.body.id,
+      });
+    expect(recap.status).toBe(201);
+
+    const replacementSchedule = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/schedule`)
+      .set(dm)
+      .send({ scheduledAt: '2099-11-11T18:00:00Z', title: 'Partial-write replacement' });
+
+    // A PATCH carrying BOTH a field edit and a relink that must be rejected. The field
+    // edit used to commit (and audit) before the link guard fired, so the caller got a
+    // 400 describing a change that had in fact been saved.
+    const rejected = await request(server)
+      .patch(`/api/v1/sessions/${recap.body.id}`)
+      .set(dm)
+      .send({
+        title: 'Title that must NOT stick',
+        recap: 'Recap that must NOT stick.',
+        scheduledSessionId: replacementSchedule.body.id,
+      });
+    expect(rejected.status).toBe(400);
+
+    const after = await request(server).get(`/api/v1/sessions/${recap.body.id}`).set(dm);
+    expect(after.status).toBe(200);
+    expect(after.body).toMatchObject({
+      title: 'Original title',
+      recap: 'Original recap body.',
+      scheduledSessionId: originalSchedule.body.id,
+    });
+
+    // ...and neither schedule moved.
+    const origAfter = await request(server).get(`/api/v1/schedule/${originalSchedule.body.id}`).set(player);
+    expect(origAfter.body).toMatchObject({ status: 'completed', sessionId: recap.body.id });
+    const replAfter = await request(server).get(`/api/v1/schedule/${replacementSchedule.body.id}`).set(player);
+    expect(replAfter.body).toMatchObject({ status: 'scheduled', sessionId: null });
+  });
+
+  it('a field edit and an unlink in one PATCH both apply, leaving no half-link', async () => {
+    const server = ctx.app.getHttpServer();
+    const scheduled = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/schedule`)
+      .set(dm)
+      .send({ scheduledAt: '2099-11-06T18:00:00Z', title: 'Unlink with edit' });
+    const recap = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/sessions`)
+      .set(dm)
+      .send({
+        title: 'Before edit',
+        playedAt: '2099-11-06',
+        recap: 'Before edit body.',
+        scheduledSessionId: scheduled.body.id,
+      });
+    expect(recap.status).toBe(201);
+
+    const patched = await request(server)
+      .patch(`/api/v1/sessions/${recap.body.id}`)
+      .set(dm)
+      .send({ title: 'After edit', scheduledSessionId: null });
+    expect(patched.status).toBe(200);
+    expect(patched.body).toMatchObject({ title: 'After edit', scheduledSessionId: null });
+
+    // The schedule side cleared in the same transaction — no dangling completed row.
+    const scheduleAfter = await request(server).get(`/api/v1/schedule/${scheduled.body.id}`).set(player);
+    expect(scheduleAfter.body).toMatchObject({ status: 'scheduled', sessionId: null });
+  });
+
+  it('an identical retry of a linked recap is idempotent instead of 400', async () => {
+    const server = ctx.app.getHttpServer();
+    const scheduled = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/schedule`)
+      .set(dm)
+      .send({ scheduledAt: '2099-12-15T18:00:00Z', title: 'Retry night' });
+    const body = {
+      title: 'Retry recap',
+      playedAt: '2099-12-15',
+      recap: 'A byte-identical retry of this recap must not 400.',
+      scheduledSessionId: scheduled.body.id,
+    };
+
+    const first = await request(server).post(`/api/v1/campaigns/${campaignId}/sessions`).set(dm).send(body);
+    expect(first.status).toBe(201);
+    expect(first.body.scheduledSessionId).toBe(scheduled.body.id);
+
+    // #160 retry-safety: the first call flipped the schedule to 'completed', which used
+    // to make the retry's pre-check reject it outright. It must dedupe to the same row.
+    const retry = await request(server).post(`/api/v1/campaigns/${campaignId}/sessions`).set(dm).send(body);
+    expect(retry.status).toBe(201);
+    expect(retry.body.id).toBe(first.body.id);
+    expect(retry.body.scheduledSessionId).toBe(scheduled.body.id);
+
+    const scheduleAfter = await request(server).get(`/api/v1/schedule/${scheduled.body.id}`).set(player);
+    expect(scheduleAfter.body).toMatchObject({ status: 'completed', sessionId: first.body.id });
+  });
+
   it('clearing scheduledSessionId unlinks BOTH sides instead of stranding the schedule', async () => {
     const server = ctx.app.getHttpServer();
     const scheduled = await request(server)

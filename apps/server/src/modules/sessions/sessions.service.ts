@@ -377,15 +377,6 @@ export class SessionsService {
     const ts = nowIso();
     const recap = input.recap ?? '';
     const requestedScheduledSessionId = input.scheduledSessionId ?? null;
-    if (requestedScheduledSessionId != null) {
-      const schedule = await this.scheduling.getRowOrThrow(requestedScheduledSessionId);
-      if (schedule.campaignId !== campaignId) {
-        throw new BadRequestException('Scheduled session must belong to the same campaign as the session');
-      }
-      if (schedule.status !== 'scheduled') {
-        throw new BadRequestException('Only scheduled sessions can be completed by a recap');
-      }
-    }
 
     // Number assignment and the insert happen in one synchronous better-sqlite3
     // transaction so the campaign-unique guard is airtight:
@@ -399,7 +390,27 @@ export class SessionsService {
     // the newest session is treated as a duplicate retry — we return the existing
     // row instead of appending a second canonical session (which the pre-tool
     // max+1 numbering would have sidestepped the guard to do).
+    // Schedule linking joins this SAME transaction (#504). Validating and linking after
+    // the insert had committed left two holes: a schedule cancelled concurrently between
+    // the pre-check and the link produced a persisted-but-unlinked session alongside a
+    // 400, and an identical retry of a linked recap 400'd on the now-'completed' schedule
+    // instead of returning the existing row. In-transaction, a rejected link rolls the
+    // insert back, so the request is all-or-nothing.
     const result = this.db.transaction((tx) => {
+      const linkInTx = (row: typeof sessions.$inferSelect) => {
+        if (requestedScheduledSessionId == null) return null;
+        // An identical retry whose row is already linked to the requested schedule is
+        // the idempotent no-op, not a re-link attempt — don't re-validate it.
+        if (row.scheduledSessionId === requestedScheduledSessionId) return null;
+        const schedule = this.scheduling.getScheduleRowInTx(tx, requestedScheduledSessionId);
+        if (schedule.campaignId !== campaignId) {
+          throw new BadRequestException('Scheduled session must belong to the same campaign as the session');
+        }
+        if (schedule.status !== 'scheduled') {
+          throw new BadRequestException('Only scheduled sessions can be completed by a recap');
+        }
+        return this.scheduling.linkSessionInTx(tx, requestedScheduledSessionId, row.id);
+      };
       if (input.number === undefined || input.number === null) {
         const [newest] = tx
           .select()
@@ -409,7 +420,13 @@ export class SessionsService {
           .limit(1)
           .all();
         if (newest && recap.trim() !== '' && newest.recap === recap) {
-          return { row: newest, deduped: true };
+          // #160 retry: reuse the existing row, but still honour a requested link so a
+          // retry that asked to link is not silently returned unlinked.
+          const linkOutcome = linkInTx(newest);
+          const row = linkOutcome?.linked
+            ? tx.select().from(sessions).where(eq(sessions.id, newest.id)).limit(1).all()[0]
+            : newest;
+          return { row, deduped: true, linkOutcome };
         }
         const [{ max }] = tx
           .select({ max: sql<number>`coalesce(max(${sessions.number}), 0)` })
@@ -422,7 +439,11 @@ export class SessionsService {
           .values({ campaignId, number, title: input.title ?? '', playedAt: input.playedAt ?? null, recap, dmSecret: input.dmSecret ?? '', scheduledSessionId: null, createdAt: ts, updatedAt: ts })
           .returning()
           .all();
-        return { row: inserted, deduped: false };
+        const linkOutcome = linkInTx(inserted);
+        const row = linkOutcome?.linked
+          ? tx.select().from(sessions).where(eq(sessions.id, inserted.id)).limit(1).all()[0]
+          : inserted;
+        return { row, deduped: false, linkOutcome };
       }
       // Explicit number: enforce campaign-uniqueness inside the same transaction.
       const [conflict] = tx
@@ -437,14 +458,22 @@ export class SessionsService {
         .values({ campaignId, number: input.number, title: input.title ?? '', playedAt: input.playedAt ?? null, recap, dmSecret: input.dmSecret ?? '', scheduledSessionId: null, createdAt: ts, updatedAt: ts })
         .returning()
         .all();
-      return { row: inserted, deduped: false };
+      const linkOutcome = linkInTx(inserted);
+      const row = linkOutcome?.linked
+        ? tx.select().from(sessions).where(eq(sessions.id, inserted.id)).limit(1).all()[0]
+        : inserted;
+      return { row, deduped: false, linkOutcome };
     });
 
-    let row = result.row;
+    const row = result.row;
 
     // A deduped retry is a no-op: the row (and its recap_posted notification and
-    // audit entry) already exists from the first call — return it untouched.
+    // audit entry) already exists from the first call — return it untouched. A link
+    // the retry newly established still gets its audit trail.
     if (result.deduped) {
+      if (result.linkOutcome) {
+        await this.scheduling.recordSessionLink(result.linkOutcome, requestedScheduledSessionId!, row.id, user, role);
+      }
       return redactSecret(toDomain(row), role);
     }
 
@@ -472,9 +501,9 @@ export class SessionsService {
       campaignId,
     });
 
-    if (requestedScheduledSessionId != null) {
-      await this.scheduling.linkSession(requestedScheduledSessionId, row.id, user, role);
-      row = await this.getRowOrThrow(row.id);
+    // The link itself already committed with the insert; this is only its audit + SSE.
+    if (result.linkOutcome) {
+      await this.scheduling.recordSessionLink(result.linkOutcome, requestedScheduledSessionId!, row.id, user, role);
     }
 
     if (row.recap.trim() !== '') {
@@ -527,6 +556,12 @@ export class SessionsService {
       if (schedule.status !== 'scheduled') {
         throw new BadRequestException('Only scheduled sessions can be completed by a recap');
       }
+      // The remaining guards are about the SESSION (already linked elsewhere, or some
+      // other schedule already claims it). They used to fire only inside linkSession,
+      // i.e. AFTER the field update and its audit entry had committed — so a PATCH
+      // carrying a title change plus a doomed relink saved the title and still returned
+      // 400. Evaluated here, a rejected relink leaves the recap completely unchanged.
+      this.scheduling.assertCanLinkSession(input.scheduledSessionId!, id);
     }
     // Commit an immutable prose version when the recap actually changes (#157/#813):
     // close the prior tip (real author preserved) and open a tip for the new prose.
@@ -541,12 +576,29 @@ export class SessionsService {
       });
     }
     const { scheduledSessionId, ...restInput } = input;
+    // `scheduledSessionId` is never written by the plain patch: linkSessionInTx /
+    // unlinkSessionInTx own that column so both sides of the relationship always move
+    // together. The field update joins their transaction, so a guard that trips on a
+    // concurrent change rolls the field update back too — a rejected edit changes
+    // nothing, and a committed edit never leaves a half-link.
     const updatePatch = shouldLinkSchedule || shouldUnlinkSchedule ? restInput : input;
-    let [row] = await this.db
-      .update(sessions)
-      .set({ ...updatePatch, updatedAt: nowIso() })
-      .where(eq(sessions.id, id))
-      .returning();
+    const written = this.db.transaction((tx) => {
+      const [updated] = tx
+        .update(sessions)
+        .set({ ...updatePatch, updatedAt: nowIso() })
+        .where(eq(sessions.id, id))
+        .returning()
+        .all();
+      let linkOutcome = null as ReturnType<SchedulingService['linkSessionInTx']> | null;
+      let unlinkOutcome = null as ReturnType<SchedulingService['unlinkSessionInTx']> | null;
+      if (shouldLinkSchedule) linkOutcome = this.scheduling.linkSessionInTx(tx, scheduledSessionId!, id);
+      else if (shouldUnlinkSchedule) unlinkOutcome = this.scheduling.unlinkSessionInTx(tx, id);
+      const row = linkOutcome || unlinkOutcome
+        ? tx.select().from(sessions).where(eq(sessions.id, id)).limit(1).all()[0]
+        : updated;
+      return { row, linkOutcome, unlinkOutcome };
+    });
+    const row = written.row;
 
     await this.audit.log({
       actor: auditActor(user),
@@ -562,12 +614,12 @@ export class SessionsService {
       detail: JSON.stringify(auditableSessionPatch(input)),
     });
 
-    if (shouldLinkSchedule) {
-      await this.scheduling.linkSession(scheduledSessionId!, row.id, user, role);
-      row = await this.getRowOrThrow(id);
-    } else if (shouldUnlinkSchedule) {
-      await this.scheduling.unlinkSession(row.id, user, role);
-      row = await this.getRowOrThrow(id);
+    // Both relationship writes already committed with the field update above; these are
+    // only their audit + SSE halves.
+    if (written.linkOutcome) {
+      await this.scheduling.recordSessionLink(written.linkOutcome, scheduledSessionId!, id, user, role);
+    } else if (written.unlinkOutcome) {
+      await this.scheduling.recordSessionUnlink(written.unlinkOutcome, id, user, role);
     }
 
     // recap_posted fires only on the empty -> non-empty transition (posting the
