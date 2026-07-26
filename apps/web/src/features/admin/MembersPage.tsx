@@ -111,7 +111,7 @@ export default function MembersPage() {
   const grantsPanel = usePanelData<GuestDmGrant[]>(
     useCallback(() => api.get<GuestDmGrant[]>(`${API}/campaigns/${id}/members/grants`), [id]),
     isDm,
-    "Couldn't load guest DM grants.",
+    t('admin.errors.loadGuestDmGrants'),
   );
 
   const load = useCallback(async () => {

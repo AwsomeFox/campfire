@@ -41,6 +41,7 @@
       "loadCampaigns": "Couldn't load campaigns.",
       "loadAuditLog": "Couldn't load the audit log.",
       "loadCharacters": "Couldn't load characters for linking.",
+      "loadGuestDmGrants": "Couldn't load guest DM grants.",
       "loadAiConsole": "Couldn't load the AI console.",
       "toggleKillSwitch": "Couldn't toggle the kill switch.",
       "saveCap": "Couldn't save the cap.",
