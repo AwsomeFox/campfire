@@ -4534,7 +4534,8 @@ export class McpToolsService {
       user,
       'update_scheduled_session',
       'DM only: update a scheduled game night\'s time/duration/title/location/notes. Meaningful changes ' +
-        '(time, duration, venue/VTT link, notes) re-notify the party once with a field summary; title-only edits stay silent.',
+        '(time, duration, venue/VTT link, notes) re-notify the party once with a field summary; title-only edits stay silent. ' +
+        'A cancelled night is rejected — restore_scheduled_session first, so the party is never notified about a game that is not happening.',
       { scheduleId: Id.describe('Scheduled session id — from list_scheduled_sessions'), expectedUpdatedAt: ExpectedUpdatedAt, ...ScheduledSessionUpdate.shape },
       async ({ scheduleId, expectedUpdatedAt, ...fields }) => {
         const row = await this.scheduling.getRowOrThrow(scheduleId as number);

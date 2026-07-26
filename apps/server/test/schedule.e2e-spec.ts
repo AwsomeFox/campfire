@@ -617,6 +617,143 @@ describe('session scheduling (e2e)', () => {
     expect(pastAfterRestore.body.items.map((s: { id: number }) => s.id)).toContain(scheduleId);
   });
 
+  it('accepts RSVPs and a DM cancel on a future night whose linked recap is trashed', async () => {
+    // Regression: the read path reconciles this row to an effective 'scheduled' and
+    // scheduleLiveSql() keeps it in Upcoming, so the web renders it as an ordinary game
+    // night with RSVP controls and a Cancel button. Both write guards used to read the
+    // RAW 'completed' column and 400 — the card looked live and every control on it failed.
+    const server = ctx.app.getHttpServer();
+    const scheduled = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/schedule`)
+      .set(dm)
+      .send({ scheduledAt: '2099-11-27T18:00:00Z', title: 'Write guards vs trashed recap' });
+    expect(scheduled.status).toBe(201);
+    const scheduleId = scheduled.body.id;
+
+    const recap = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/sessions`)
+      .set(dm)
+      .send({
+        title: 'Recap headed for the trash',
+        playedAt: '2099-11-27',
+        recap: 'Soon to be trashed.',
+        scheduledSessionId: scheduleId,
+      });
+    expect(recap.status).toBe(201);
+    await request(server).delete(`/api/v1/sessions/${recap.body.id}`).set(dm).expect(200);
+
+    // What the UI is looking at: a normal upcoming night.
+    const upcoming = await request(server).get(`/api/v1/campaigns/${campaignId}/schedule/upcoming`).set(player);
+    expect(upcoming.body.find((s: { id: number }) => s.id === scheduleId)).toMatchObject({
+      status: 'scheduled',
+      sessionId: null,
+    });
+
+    // (a) a player's RSVP must land, not 400.
+    const rsvp = await request(server)
+      .put(`/api/v1/schedule/${scheduleId}/rsvp`)
+      .set(player)
+      .send({ status: 'yes', note: 'bringing dice' });
+    expect(rsvp.status).toBe(200);
+    expect(rsvp.body.rsvps).toEqual(
+      expect.arrayContaining([expect.objectContaining({ userId: 'dev:player-1', status: 'yes' })]),
+    );
+
+    // (b) the DM's Cancel must land, not 400.
+    const cancel = await request(server)
+      .delete(`/api/v1/schedule/${scheduleId}`)
+      .set(dm)
+      .send({ reason: 'called off after all' });
+    expect(cancel.status).toBe(200);
+    expect(cancel.body).toMatchObject({ id: scheduleId, status: 'cancelled', cancellationReason: 'called off after all' });
+
+    // Cancelling leaves the stored link alone (the trash stays reversible), and the
+    // cancelled night drops out of Upcoming like any other.
+    const upcomingAfter = await request(server).get(`/api/v1/campaigns/${campaignId}/schedule/upcoming`).set(player);
+    expect(upcomingAfter.body.map((s: { id: number }) => s.id)).not.toContain(scheduleId);
+  });
+
+  it('rejects an edit to a cancelled night rather than notifying the party about it', async () => {
+    // update() had no status guard at all: a DM could PATCH the time of a called-off
+    // game and the party would get a "rescheduled" push for a night that is not
+    // happening (plus a committed notes revision). Restore is the way back.
+    const server = ctx.app.getHttpServer();
+    const created = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/schedule`)
+      .set(dm)
+      .send({ scheduledAt: '2099-11-28T18:00:00Z', title: 'Called off' });
+    expect(created.status).toBe(201);
+    const id = created.body.id;
+
+    await request(server).delete(`/api/v1/schedule/${id}`).set(dm).send({ reason: 'flu' }).expect(200);
+
+    const patch = await request(server)
+      .patch(`/api/v1/schedule/${id}`)
+      .set(dm)
+      .send({ scheduledAt: '2099-11-29T18:00:00Z', notes: 'moved it' });
+    expect(patch.status).toBe(400);
+
+    // Nothing was written — not the time, not the notes.
+    const unchanged = await request(server).get(`/api/v1/schedule/${id}`).set(dm);
+    expect(unchanged.body).toMatchObject({
+      id,
+      status: 'cancelled',
+      scheduledAt: '2099-11-28T18:00:00.000Z',
+      notes: '',
+    });
+
+    // Restore first, then edit: the documented path, and it still works.
+    await request(server).post(`/api/v1/schedule/${id}/restore`).set(dm).expect(201);
+    const afterRestore = await request(server)
+      .patch(`/api/v1/schedule/${id}`)
+      .set(dm)
+      .send({ scheduledAt: '2099-11-29T18:00:00Z' });
+    expect(afterRestore.status).toBe(200);
+    expect(afterRestore.body.scheduledAt).toBe('2099-11-29T18:00:00.000Z');
+  });
+
+  it('keeps cancelled nights out of campaign search, which has no room to badge them', async () => {
+    // Before #504 a cancelled night was hard-deleted, so search never returned one.
+    // SearchResult carries no status field, so a retained cancelled row would look
+    // exactly like a live game night in the results list.
+    const server = ctx.app.getHttpServer();
+    const searchCampaign = await request(server)
+      .post('/api/v1/campaigns')
+      .set(dm)
+      .send({ name: 'Schedule Search Campaign' });
+    const searchCampaignId = searchCampaign.body.id;
+
+    const live = await request(server)
+      .post(`/api/v1/campaigns/${searchCampaignId}/schedule`)
+      .set(dm)
+      .send({ scheduledAt: '2099-05-05T18:00:00Z', title: 'Basilisk Gulch showdown' });
+    const doomed = await request(server)
+      .post(`/api/v1/campaigns/${searchCampaignId}/schedule`)
+      .set(dm)
+      .send({ scheduledAt: '2099-05-12T18:00:00Z', title: 'Basilisk Gulch rematch' });
+    expect(doomed.status).toBe(201);
+
+    const before = await request(server)
+      .get(`/api/v1/campaigns/${searchCampaignId}/search?q=Basilisk%20Gulch`)
+      .set(dm);
+    expect(before.status).toBe(200);
+    const idsBefore = before.body.results
+      .filter((r: { type: string }) => r.type === 'scheduled_session')
+      .map((r: { id: number }) => r.id);
+    expect(idsBefore).toEqual(expect.arrayContaining([live.body.id, doomed.body.id]));
+
+    await request(server).delete(`/api/v1/schedule/${doomed.body.id}`).set(dm).send({}).expect(200);
+
+    const after = await request(server)
+      .get(`/api/v1/campaigns/${searchCampaignId}/search?q=Basilisk%20Gulch`)
+      .set(dm);
+    const idsAfter = after.body.results
+      .filter((r: { type: string }) => r.type === 'scheduled_session')
+      .map((r: { id: number }) => r.id);
+    expect(idsAfter).toContain(live.body.id);
+    expect(idsAfter).not.toContain(doomed.body.id);
+  });
+
   it('exports the RAW schedule row even while its linked recap is trashed', async () => {
     const server = ctx.app.getHttpServer();
     const scheduled = await request(server)

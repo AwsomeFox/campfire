@@ -124,8 +124,14 @@ export class ScheduleController {
   }
 
   @Patch(':id')
-  @ApiOperation({ summary: 'Update a scheduled session', description: 'dm role required.' })
+  @ApiOperation({
+    summary: 'Update a scheduled session',
+    description:
+      'dm role required. A cancelled game night is not editable — restore it first, so the party is never pushed a '
+      + '"rescheduled" notification for a game that is not happening.',
+  })
   @ApiResponse({ status: 200, description: 'Updated scheduled session.' })
+  @ApiResponse({ status: 400, description: 'The scheduled session is cancelled.' })
   @ApiResponse({ status: 409, description: 'STALE_WRITE with the current revision token.' })
   async update(
     @Param('id', ParseIntPipe) id: number,

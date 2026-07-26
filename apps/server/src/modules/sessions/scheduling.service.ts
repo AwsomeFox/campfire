@@ -249,6 +249,35 @@ export class SchedulingService {
     };
   }
 
+  /**
+   * The lifecycle status a WRITE guard must reason about (#504).
+   *
+   * Reads reconcile a `completed` row whose recap is trashed back to `scheduled`
+   * (projectLink), and scheduleLiveSql() deliberately keeps such a row in the
+   * live/Upcoming projection, so the web renders it as an ordinary upcoming game
+   * night with full RSVP + Cancel controls. A guard that consults the RAW `status`
+   * column therefore rejects the exact actions the UI is offering — the player's
+   * RSVP and the DM's Cancel both 400 on a card that looks completely normal.
+   *
+   * There is one definition of "effective status" and it is projectLink()'s; this
+   * helper only applies it to a single row, so reads and writes cannot drift apart.
+   */
+  private async effectiveStatusOf(
+    row: typeof scheduledSessions.$inferSelect,
+  ): Promise<ScheduledSession['status']> {
+    const liveLinks = await this.liveLinkedSessionIds([row]);
+    return this.projectLink(row, liveLinks).status;
+  }
+
+  /** Point read for a write path: the raw row (for its stored fields) + its effective status. */
+  private async getRowWithEffectiveStatus(id: number): Promise<{
+    row: typeof scheduledSessions.$inferSelect;
+    status: ScheduledSession['status'];
+  }> {
+    const row = await this.getRowOrThrow(id);
+    return { row, status: await this.effectiveStatusOf(row) };
+  }
+
   /** Full schedule list — kept for export/MCP backward compatibility. Prefer upcoming/past splits (#612). */
   async listForCampaign(campaignId: number): Promise<ScheduledSessionWithRsvps[]> {
     const rows = await this.db
@@ -345,18 +374,30 @@ export class SchedulingService {
       .from(scheduledSessions)
       .where(eq(scheduledSessions.campaignId, campaignId))
       .orderBy(asc(scheduledSessions.scheduledAt), asc(scheduledSessions.id));
-    const matches = rows
-      .filter(
-        (r) =>
-          foldedIncludes(r.title, folded)
-          || foldedIncludes(r.scheduledAt, folded)
-          || foldedIncludes(r.notes, folded),
-      )
-      .slice(0, boundedLimit);
+    const matches = rows.filter(
+      (r) =>
+        foldedIncludes(r.title, folded)
+        || foldedIncludes(r.scheduledAt, folded)
+        || foldedIncludes(r.notes, folded),
+    );
     // Same read-time link reconciliation as every other projection: search must not
     // hand back a sessionId pointing at a trashed recap either.
     const liveLinks = await this.liveLinkedSessionIds(matches);
-    return matches.map((row) => this.projectLink(row, liveLinks));
+    return (
+      matches
+        .map((row) => this.projectLink(row, liveLinks))
+        // Cancelled nights are excluded (#504). Before this issue, cancelling HARD-
+        // DELETED the row, so search never returned one; retaining the row for the
+        // Schedule tab's Past list must not silently turn campaign search into a
+        // graveyard of called-off nights. SearchResult carries no status/badge field
+        // (type/title/snippet/matchedField only), so a cancelled hit would be
+        // indistinguishable from a live game night in the results list — the same
+        // "UI shows it as normal, it isn't" trap this file already fixes elsewhere.
+        // Cancelled nights stay discoverable where they can be labelled: the Schedule
+        // tab's Past list badges them "Cancelled" and offers Restore.
+        .filter((s) => s.status !== 'cancelled')
+        .slice(0, boundedLimit)
+    );
   }
 
   /**
@@ -478,7 +519,19 @@ export class SchedulingService {
     role: Role,
     opts?: { expectedUpdatedAt?: string },
   ): Promise<ScheduledSessionWithRsvps> {
-    const existing = await this.getRowOrThrow(id);
+    const { row: existing, status: effectiveStatus } = await this.getRowWithEffectiveStatus(id);
+    // A cancelled night is not editable: this write commits a notes revision, an audit
+    // entry, and — for time/duration/venue/notes — a "rescheduled" push to the whole
+    // party for a game that is not happening. Rejecting is preferred over silently
+    // suppressing the notification: the DM's edit would otherwise appear to succeed
+    // while the party is never told, and the schedule they are looking at is stale
+    // either way. `restore` is the documented way back to an editable night, and the
+    // Schedule tab only offers Restore/Duplicate on a cancelled card, so nothing in
+    // the UI is broken by this. `completed` stays editable — a played night's notes
+    // are legitimate history to correct. Effective, not raw (see effectiveStatusOf).
+    if (effectiveStatus === 'cancelled') {
+      throw new BadRequestException('Cancelled scheduled sessions cannot be edited — restore it first');
+    }
     const patch = { ...input };
     if (patch.scheduledAt !== undefined) patch.scheduledAt = this.normalizeScheduledAt(patch.scheduledAt);
     const next = {
@@ -543,9 +596,11 @@ export class SchedulingService {
   }
 
   async remove(id: number, user: RequestUser, role: Role, input: ScheduledSessionCancelInput = {}): Promise<ScheduledSessionWithRsvps> {
-    const existing = await this.getRowOrThrow(id);
-    if (existing.status === 'cancelled') return this.getWithRsvps(id);
-    if (existing.status === 'completed') {
+    // Effective, not raw: a future night whose recap is in the Trash is shown in
+    // Upcoming with the DM's Cancel button, so Cancel has to actually work on it.
+    const { row: existing, status: effectiveStatus } = await this.getRowWithEffectiveStatus(id);
+    if (effectiveStatus === 'cancelled') return this.getWithRsvps(id);
+    if (effectiveStatus === 'completed') {
       throw new BadRequestException('Completed scheduled sessions cannot be cancelled');
     }
     const ts = nowIso();
@@ -587,8 +642,12 @@ export class SchedulingService {
   }
 
   async restore(id: number, user: RequestUser, role: Role): Promise<ScheduledSessionWithRsvps> {
-    const existing = await this.getRowOrThrow(id);
-    if (existing.status !== 'cancelled') throw new NotFoundException(`Scheduled session ${id} is not cancelled`);
+    // Effective status here too, so every write guard in this file reads the same
+    // projection the API returns. ('cancelled' is never link-derived, so this one is
+    // equivalent to the raw column today — it is written this way so the next guard
+    // added here copies the correct pattern.)
+    const { row: existing, status: effectiveStatus } = await this.getRowWithEffectiveStatus(id);
+    if (effectiveStatus !== 'cancelled') throw new NotFoundException(`Scheduled session ${id} is not cancelled`);
     const ts = nowIso();
     await this.db
       .update(scheduledSessions)
@@ -674,6 +733,18 @@ export class SchedulingService {
    *
    * Returns `alreadyLinked` for the idempotent case (this exact pair is already linked)
    * so callers can tell a no-op apart from a rejection.
+   *
+   * Deliberately the only write guard in this file that reasons about the RAW status
+   * rather than the effective one (see effectiveStatusOf). The other guards ask "what
+   * lifecycle state is the user looking at?"; this one asks "does a stored link already
+   * occupy this row?", and the stored link is real even while its recap sits in the
+   * Trash. Reconciling it away here would let a second recap overwrite `session_id`
+   * while the trashed recap kept its `scheduled_session_id` back-pointer — a
+   * one-directional dangling link, and it would break the invariant this whole fix
+   * rests on: untrashing a recap heals the row with no repair write. So the stale-link
+   * case is still rejected, but the message names the remedy instead of describing a
+   * link the caller cannot see. ('cancelled' is never link-derived, so for that branch
+   * raw and effective are the same value.)
    */
   private checkLinkable(db: SyncDb, scheduleId: number, sessionId: number): {
     schedule: typeof scheduledSessions.$inferSelect;
@@ -682,7 +753,15 @@ export class SchedulingService {
     const schedule = this.getRowOrThrowTx(db, scheduleId);
     if (schedule.status === 'cancelled') throw new BadRequestException('Cancelled scheduled sessions cannot be completed');
     if (schedule.status === 'completed' && schedule.sessionId !== sessionId) {
-      throw new BadRequestException('Scheduled session is already linked to a different session');
+      const linkedId = schedule.sessionId;
+      const [linkedRecap] = linkedId == null
+        ? []
+        : db.select({ deletedAt: sessions.deletedAt }).from(sessions).where(eq(sessions.id, linkedId)).limit(1).all();
+      throw new BadRequestException(
+        linkedRecap?.deletedAt != null
+          ? 'Scheduled session is linked to a session in the Trash — restore that session before linking a different one'
+          : 'Scheduled session is already linked to a different session',
+      );
     }
     const [session] = db.select().from(sessions).where(eq(sessions.id, sessionId)).limit(1).all();
     if (!session || session.deletedAt != null) throw new NotFoundException(`Session ${sessionId} not found`);
@@ -847,8 +926,10 @@ export class SchedulingService {
 
   /** Upsert the calling member's own availability for a scheduled session. */
   async setRsvp(scheduleId: number, input: RsvpSetInput, user: RequestUser, role: Role): Promise<ScheduledSessionWithRsvps> {
-    const schedule = await this.getRowOrThrow(scheduleId);
-    if (schedule.status !== 'scheduled') {
+    // Effective, not raw: a future night whose recap is in the Trash reads back as
+    // 'scheduled' and is rendered with live RSVP controls, so it must accept them.
+    const { row: schedule, status: effectiveStatus } = await this.getRowWithEffectiveStatus(scheduleId);
+    if (effectiveStatus !== 'scheduled') {
       throw new BadRequestException('RSVPs can only be changed for scheduled sessions');
     }
     const ts = nowIso();
