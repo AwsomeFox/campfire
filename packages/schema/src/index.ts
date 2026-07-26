@@ -5464,6 +5464,7 @@ export const AiDmReadinessCheckKey = z.enum([
   'serverCap',
   'provider',
   'model',
+  'mode',
   'budget',
   'writeMode',
   'rulesContent',
@@ -5480,6 +5481,17 @@ export const AiDmReadinessCheck = z.object({
   actor: z.enum(['admin', 'dm', 'table']),
   title: z.string(),
   detail: z.string(),
+  /**
+   * Machine-readable id for {@link detail}. The server renders `detail` in English for
+   * API consumers and logs; localized clients look up
+   * `aiOnboarding.checklist.checkDetails.<detailKey>` (interpolating {@link detailParams})
+   * and fall back to `detail` when they do not know the id, so a server that grows a new
+   * variant never blanks a checklist row on an older client (issue #629 keeps every
+   * user-facing string translatable).
+   */
+  detailKey: z.string(),
+  /** Interpolation values for {@link detailKey} — counts, model names, provider ids. */
+  detailParams: z.record(z.string(), z.union([z.string(), z.number()])).default({}),
   requiredForDriver: z.boolean().default(false),
   fixHref: z.string().nullable().default(null),
 });

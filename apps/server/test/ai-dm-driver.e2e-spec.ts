@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import request from 'supertest';
 import { createAiEvalHarness, dm, player, viewer, type AiEvalHarness } from './ai-eval-harness';
 import { mcpToolsToAiSchemas } from '../src/modules/ai-dm/providers/tool-registry';
@@ -94,6 +96,87 @@ describe('ai-dm driver runtime — session loop + streamed narration + tool exec
         estimatedTotalTokens: expect.any(Number),
       }),
     );
+  });
+
+  it('#519 readiness never reports driver-ready while the seat mode is off', async () => {
+    // Regression: `driverOk` was computed from the configuration checks alone, none of which
+    // look at seat.mode/seat.enabled. A table with provider + model + budget all green but the
+    // AI switched OFF therefore reported driverOk:true — and the setup checklist painted a
+    // "The AI DM is ready … the AI is co-DMing" banner over an AI that does nothing, while
+    // `assertRunnable` would 403 the very next turn.
+    const campaignId = await h.createCampaign('AI Readiness 519 mode off');
+    await h.configureProvider(campaignId);
+    // Arm every driver prerequisite, then switch the operating mode back off.
+    const armed = await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 20_000 });
+    expect(armed.status).toBe(200);
+    const ready = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/readiness`).set(dm);
+    expect(ready.body.driverOk).toBe(true);
+
+    const off = await h.configureSeat(campaignId, { mode: 'off', tokenBudget: 20_000 });
+    expect(off.status).toBe(200);
+
+    const res = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/readiness`).set(dm);
+    expect(res.status).toBe(200);
+    expect(res.body.mode).toBe('off');
+    // Every configuration check still passes …
+    for (const check of res.body.checks) {
+      if (check.requiredForDriver) expect({ key: check.key, ok: check.ok }).toEqual({ key: check.key, ok: true });
+    }
+    // … but the seat is not runnable, and readiness says so on both aggregates.
+    expect(res.body.driverOk).toBe(false);
+    expect(res.body.ok).toBe(false);
+    expect(typeof res.body.driverUnavailableReason).toBe('string');
+    expect(res.body.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ key: 'mode', ok: false, status: 'blocked', detailKey: 'mode.off' }),
+      ]),
+    );
+    // The mode step deep-links to the control that fixes it.
+    const modeCheck = res.body.checks.find((c: { key: string }) => c.key === 'mode');
+    expect(modeCheck.fixHref).toBe(`/c/${campaignId}/settings#ai-dm-mode`);
+
+    // Co-DM arms the seat for propose-only work: the mode check clears, but the DRIVER
+    // aggregate stays false because `assertRunnable` accepts driver mode only.
+    const coDm = await h.configureSeat(campaignId, { mode: 'co_dm', tokenBudget: 20_000 });
+    expect(coDm.status).toBe(200);
+    const asCoDm = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/readiness`).set(dm);
+    expect(asCoDm.body.ok).toBe(true);
+    expect(asCoDm.body.driverOk).toBe(false);
+    expect(asCoDm.body.checks).toEqual(
+      expect.arrayContaining([expect.objectContaining({ key: 'mode', ok: true, detailKey: 'mode.coDm' })]),
+    );
+  });
+
+  it('#519 every readiness check carries a translatable detailKey the web catalog knows', async () => {
+    // #629 makes every user-facing string translatable. The checklist renders each check's
+    // body from `aiOnboarding.checklist.checkDetails.<detailKey>`, so a check whose id is
+    // missing from the English catalog would silently fall back to the server's English.
+    const campaignId = await h.createCampaign('AI Readiness 519 i18n');
+    await h.configureProvider(campaignId);
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 20_000 });
+    const res = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/readiness`).set(dm);
+    expect(res.status).toBe(200);
+
+    const catalog = JSON.parse(
+      readFileSync(resolve(__dirname, '../../web/src/i18n/locales/en/aiOnboarding.json'), 'utf8'),
+    ) as {
+      aiOnboarding: {
+        checklist: { checkDetails: Record<string, Record<string, string>>; checkTitles: Record<string, string> };
+      };
+    };
+    const { checkDetails, checkTitles } = catalog.aiOnboarding.checklist;
+
+    for (const check of res.body.checks as { key: string; detailKey: string; detailParams: unknown }[]) {
+      expect(typeof check.detailKey).toBe('string');
+      expect(check.detailKey.length).toBeGreaterThan(0);
+      expect(check.detailParams).toBeDefined();
+      const [group, variant] = check.detailKey.split('.');
+      expect({ detailKey: check.detailKey, known: !!checkDetails[group]?.[variant] }).toEqual({
+        detailKey: check.detailKey,
+        known: true,
+      });
+      expect({ key: check.key, titled: !!checkTitles[check.key] }).toEqual({ key: check.key, titled: true });
+    }
   });
 
   it('#519 readiness is DM-only and never leaks provider key material', async () => {

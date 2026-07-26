@@ -25,6 +25,7 @@ import type { AiDmReadiness } from '@campfire/schema';
 import { api, API } from '../../lib/api';
 import { queryKeys, useAiDmSeat } from '../../lib/query';
 import { classifyAiGate } from './aiGate';
+import { isAiDmSetupComplete, localizeDetailParams } from './aiReadiness';
 import { CopyControl } from '../../components/CopyControl';
 import { GameIcon } from '../../components/GameIcon';
 import { Btn, Card } from '../../components/ui';
@@ -76,11 +77,16 @@ export function AiSetupChecklist({
   const mode = readiness.mode;
   const readinessSteps: Step[] = readiness.checks.map((check): Step => ({
     key: check.key,
-    // Titles and CTA labels are stable per check KEY, so they stay localized here. The
-    // `detail` is the server's live diagnostic (counts, model names, allowlist reasons)
-    // and is passed through as-is — it has no client-side equivalent.
+    // Titles and CTA labels are stable per check KEY, so they stay localized here. The body
+    // is localized off the check's `detailKey` (a stable id) with the server's live values
+    // interpolated; the server's English `detail` is only the fallback for an id this build
+    // does not carry, so a newer server never blanks a row (#629 keeps the checklist
+    // translatable rather than pinned to the server's English).
     title: t(`aiOnboarding.checklist.checkTitles.${check.key}`, { defaultValue: check.title }),
-    body: check.detail,
+    body: t(`aiOnboarding.checklist.checkDetails.${check.detailKey}`, {
+      defaultValue: check.detail,
+      ...localizeDetailParams(check.detailParams),
+    }),
     done: check.status === 'unknown' ? null : check.ok,
     actor: check.actor,
     fix: check.fixHref && !check.ok
@@ -108,7 +114,7 @@ export function AiSetupChecklist({
 
   const gating = steps.filter((s) => s.key !== 'table');
   const doneCount = gating.filter((s) => s.done === true).length;
-  const allDone = readiness.driverOk || (readiness.ok && mode === 'co_dm');
+  const allDone = isAiDmSetupComplete(readiness);
 
   return (
     <div id="ai-dm-readiness" className={`text-left space-y-3 settings-anchor ${className}`} tabIndex={-1}>

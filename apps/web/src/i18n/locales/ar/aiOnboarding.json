@@ -27,6 +27,7 @@
         "serverCap": "Server-wide token cap",
         "provider": "Provider and credential",
         "model": "Executable model",
+        "mode": "Operating mode",
         "budget": "Budget available",
         "writeMode": "Write mode",
         "rulesContent": "Rules and table content",
@@ -40,12 +41,65 @@
         "serverCap": "Open AI console",
         "provider": "Configure provider",
         "model": "Choose an allowed model",
+        "mode": "Choose a mode",
         "budget": "Set a budget",
         "writeMode": "Use a direct-write session",
         "rulesContent": "Open session zero",
         "supportConsent": "Review support consent",
         "secretPolicy": "Review provider privacy",
         "driverTools": "Choose a tool-calling provider"
+      },
+      "checkDetails": {
+        "serverFlag": {
+          "on": "The server-wide AI switch is on.",
+          "offAdmin": "Turn on the server-wide AI switch before promoting AI actions.",
+          "offMember": "A server admin must enable experimental AI before this campaign can run AI actions."
+        },
+        "serverCap": {
+          "none": "No server-wide AI token cap is set.",
+          "within": "{{total}} / {{cap}} server-wide tokens used.",
+          "reached": "The server-wide AI token cap is reached ({{total}}/{{cap}}). A server admin must raise it or reset usage."
+        },
+        "provider": {
+          "ready": "Using {{providerType}} / {{model}} from {{source}} with {{credentialSource}} credentials.",
+          "noCredential": "A provider is configured, but no usable credential is available.",
+          "unconfigured": "Configure a campaign provider or ask a server admin to set a server default."
+        },
+        "model": {
+          "allowed": "Execution model {{model}} passes the server allowlist.",
+          "selected": "Model {{model}} is selected.",
+          "choose": "Choose the model that will execute AI requests.",
+          "rejected": "{{reason}}"
+        },
+        "mode": {
+          "off": "The AI DM is off for this campaign. Pick Co-DM (it only proposes) or Driver (it holds the DM seat) to switch it on.",
+          "coDm": "Co-DM mode is selected — the AI only proposes, and a human DM approves every change.",
+          "driver": "Driver mode is selected — the AI holds the DM seat and acts directly."
+        },
+        "budget": {
+          "available": "{{used}} / {{budget}} tokens used; {{remaining}} remain.",
+          "unset": "Set a positive hard token budget before Driver can run."
+        },
+        "writeMode": {
+          "direct": "This session can make direct DM-approved writes when the selected AI mode allows them.",
+          "readOnly": "This token is read-only; use a direct-write DM session before starting Driver.",
+          "proposalOnly": "This token is proposal-only; use a direct-write DM session before starting Driver."
+        },
+        "rulesContent": {
+          "present": "Session-zero safety, house-rule, or tone guidance is available to the AI.",
+          "missing": "Add session-zero lines, veils, safety tools, house rules, or tone guidance so AI output has table boundaries."
+        },
+        "supportConsent": {
+          "none": "No participant support notes are on file.",
+          "counts": "{{consented}} of {{total}} support notes allow AI use; {{tableConsented}} can influence public narration."
+        },
+        "secretPolicy": {
+          "body": "Provider keys stay write-only/redacted, participant support text is opt-in for AI, and Driver uses player-scoped reads unless a DM-approved secret is explicitly needed."
+        },
+        "driverTools": {
+          "ok": "{{providerType}} supports tool calls for live Driver play.",
+          "missing": "Driver requires a provider with tool-calling support."
+        }
       },
       "steps": {
         "flag": {

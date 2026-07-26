@@ -419,6 +419,8 @@ export class AiDmService implements OnApplicationBootstrap {
         : opts.isAdmin
           ? 'Turn on the server-wide AI switch before promoting AI actions.'
           : 'A server admin must enable experimental AI before this campaign can run AI actions.',
+      detailKey: settings.experimentalAiDm ? 'serverFlag.on' : opts.isAdmin ? 'serverFlag.offAdmin' : 'serverFlag.offMember',
+      detailParams: {},
       requiredForDriver: true,
       fixHref: opts.isAdmin ? '/admin/ai' : null,
     });
@@ -434,6 +436,8 @@ export class AiDmService implements OnApplicationBootstrap {
         : serverCap.withinCap
           ? `${serverCap.total.toLocaleString()} / ${serverCap.cap.toLocaleString()} server-wide tokens used.`
           : `The server-wide AI token cap is reached (${serverCap.total.toLocaleString()}/${serverCap.cap.toLocaleString()}). A server admin must raise it or reset usage.`,
+      detailKey: serverCap.cap <= 0 ? 'serverCap.none' : serverCap.withinCap ? 'serverCap.within' : 'serverCap.reached',
+      detailParams: { total: serverCap.total, cap: serverCap.cap },
       requiredForDriver: true,
       fixHref: opts.isAdmin ? '/admin/ai' : null,
     });
@@ -452,6 +456,17 @@ export class AiDmService implements OnApplicationBootstrap {
           ? `Using ${provider.providerType ?? 'provider'} / ${provider.model ?? 'model'} from ${provider.source ?? 'configuration'} with ${provider.credentialSource} credentials.`
           : 'A provider is configured, but no usable credential is available.'
         : 'Configure a campaign provider or ask a server admin to set a server default.',
+      detailKey: provider.configured
+        ? provider.ready
+          ? 'provider.ready'
+          : 'provider.noCredential'
+        : 'provider.unconfigured',
+      detailParams: {
+        providerType: provider.providerType ?? 'provider',
+        model: provider.model ?? 'model',
+        source: provider.source ?? 'configuration',
+        credentialSource: provider.credentialSource,
+      },
       requiredForDriver: true,
       fixHref: fix('ai-dm-provider'),
     });
@@ -460,13 +475,23 @@ export class AiDmService implements OnApplicationBootstrap {
     let modelDetail = provider.model
       ? `Model ${provider.model} is selected.`
       : 'Choose the model that will execute AI requests.';
+    let modelDetailKey = provider.model ? 'model.selected' : 'model.choose';
+    let modelDetailParams: Record<string, string | number> = { model: provider.model ?? '' };
     try {
       const execution = await this.providerConfig.resolveExecutionModel(campaignId);
       modelOk = !!execution;
-      if (execution) modelDetail = `Execution model ${execution.model} passes the server allowlist.`;
+      if (execution) {
+        modelDetail = `Execution model ${execution.model} passes the server allowlist.`;
+        modelDetailKey = 'model.allowed';
+        modelDetailParams = { model: execution.model };
+      }
     } catch (err) {
       modelOk = false;
       modelDetail = err instanceof Error ? err.message : 'The selected model is not executable.';
+      // The rejection reason is composed by the allowlist policy at throw time and has no
+      // enumerable id, so this variant carries the server sentence through as a parameter.
+      modelDetailKey = 'model.rejected';
+      modelDetailParams = { reason: modelDetail };
     }
     push({
       key: 'model',
@@ -475,8 +500,36 @@ export class AiDmService implements OnApplicationBootstrap {
       actor: 'dm',
       title: 'Executable model',
       detail: modelDetail,
+      detailKey: modelDetailKey,
+      detailParams: modelDetailParams,
       requiredForDriver: true,
       fixHref: fix('ai-dm-provider'),
+    });
+
+    // The gating step every other check silently assumed (#519 review): a table can have a
+    // provider, a model and a budget and still have the AI switched OFF. `assertRunnable`
+    // refuses an off/disabled seat, so readiness must report it rather than let the client
+    // paint a green "ready" banner over an AI that does nothing. It is deliberately NOT
+    // `requiredForDriver` — that set answers "is the configuration driver-capable", while
+    // the driver ALSO needs mode === 'driver' specifically (folded into `driverOk` below);
+    // marking it driver-required would either fail Co-DM tables or read as ok for a Co-DM
+    // seat the driver cannot use.
+    const seatArmed = seat.enabled && seat.mode !== 'off';
+    push({
+      key: 'mode',
+      ok: seatArmed,
+      status: seatArmed ? 'ok' : 'blocked',
+      actor: 'dm',
+      title: 'Operating mode',
+      detail: !seatArmed
+        ? 'The AI DM is off for this campaign. Pick Co-DM (it only proposes) or Driver (it holds the DM seat) to switch it on.'
+        : seat.mode === 'driver'
+          ? 'Driver mode is selected — the AI holds the DM seat and acts directly.'
+          : 'Co-DM mode is selected — the AI only proposes, and a human DM approves every change.',
+      detailKey: !seatArmed ? 'mode.off' : seat.mode === 'driver' ? 'mode.driver' : 'mode.coDm',
+      detailParams: {},
+      requiredForDriver: false,
+      fixHref: fix('ai-dm-mode'),
     });
 
     push({
@@ -488,6 +541,8 @@ export class AiDmService implements OnApplicationBootstrap {
       detail: seat.tokenBudget > 0
         ? `${seat.tokensUsed.toLocaleString()} / ${seat.tokenBudget.toLocaleString()} tokens used; ${budgetRemaining.toLocaleString()} remain.`
         : 'Set a positive hard token budget before Driver can run.',
+      detailKey: seat.tokenBudget > 0 ? 'budget.available' : 'budget.unset',
+      detailParams: { used: seat.tokensUsed, budget: seat.tokenBudget, remaining: budgetRemaining },
       requiredForDriver: true,
       fixHref: fix('ai-dm-budget'),
     });
@@ -502,6 +557,8 @@ export class AiDmService implements OnApplicationBootstrap {
       detail: writeScope === 'direct'
         ? 'This session can make direct DM-approved writes when the selected AI mode allows them.'
         : `This token is ${writeScope === 'none' ? 'read-only' : 'proposal-only'}; use a direct-write DM session before starting Driver.`,
+      detailKey: writeScope === 'direct' ? 'writeMode.direct' : writeScope === 'none' ? 'writeMode.readOnly' : 'writeMode.proposalOnly',
+      detailParams: {},
       requiredForDriver: true,
       fixHref: null,
     });
@@ -521,6 +578,8 @@ export class AiDmService implements OnApplicationBootstrap {
       detail: contentCount > 0
         ? 'Session-zero safety, house-rule, or tone guidance is available to the AI.'
         : 'Add session-zero lines, veils, safety tools, house rules, or tone guidance so AI output has table boundaries.',
+      detailKey: contentCount > 0 ? 'rulesContent.present' : 'rulesContent.missing',
+      detailParams: {},
       requiredForDriver: false,
       fixHref: `/c/${campaignId}/session-zero`,
     });
@@ -534,6 +593,8 @@ export class AiDmService implements OnApplicationBootstrap {
       detail: consent.total === 0
         ? 'No participant support notes are on file.'
         : `${consent.consented} of ${consent.total} support notes allow AI use; ${consent.tableConsented} can influence public narration.`,
+      detailKey: consent.total === 0 ? 'supportConsent.none' : 'supportConsent.counts',
+      detailParams: { consented: consent.consented, total: consent.total, tableConsented: consent.tableConsented },
       requiredForDriver: false,
       fixHref: `/c/${campaignId}/session-zero#support-preferences`,
     });
@@ -546,6 +607,8 @@ export class AiDmService implements OnApplicationBootstrap {
       title: 'Secret and privacy policy',
       detail:
         'Provider keys stay write-only/redacted, participant support text is opt-in for AI, and Driver uses player-scoped reads unless a DM-approved secret is explicitly needed.',
+      detailKey: 'secretPolicy.body',
+      detailParams: {},
       requiredForDriver: false,
       fixHref: fix('ai-dm-provider'),
     });
@@ -560,13 +623,25 @@ export class AiDmService implements OnApplicationBootstrap {
       detail: caps?.toolCalling
         ? `${provider.providerType} supports tool calls for live Driver play.`
         : 'Driver requires a provider with tool-calling support.',
+      detailKey: caps?.toolCalling ? 'driverTools.ok' : 'driverTools.missing',
+      detailParams: { providerType: provider.providerType ?? 'provider' },
       requiredForDriver: true,
       fixHref: fix('ai-dm-provider'),
     });
 
     const driverChecks = checks.filter((check) => check.requiredForDriver);
-    const driverOk = driverChecks.every((check) => check.ok);
+    // `driverOk` must answer the same question `assertRunnable` does — "would a driver turn
+    // start right now?" — or the checklist paints a green banner over a 403. `assertRunnable`
+    // demands an ENABLED seat in DRIVER mode on top of the configuration checks, and none of
+    // those checks looks at the seat's mode, so fold it in here (#519 review).
+    const driverModeReady = seat.enabled && seat.mode === 'driver';
+    const driverOk = driverChecks.every((check) => check.ok) && driverModeReady;
     const firstBlocked = driverChecks.find((check) => !check.ok);
+    const driverModeReason = driverModeReady
+      ? null
+      : seat.mode === 'co_dm'
+        ? 'The AI DM is in Co-DM mode. Switch the operating mode to Driver to run autonomous turns.'
+        : 'The AI DM is off for this campaign. Switch the operating mode to Driver to run autonomous turns.';
     // Per-turn estimate. When this campaign has metered turns on record we use their mean
     // (real data beats a guess); otherwise we fall back to a conservative default shape.
     // It is deliberately NOT clamped to the remaining budget: a run that would overrun the
@@ -595,7 +670,7 @@ export class AiDmService implements OnApplicationBootstrap {
           ? 'Per-turn estimate from this campaign’s recent metered turns. Actual usage depends on context, tools, and model pricing.'
           : 'Best-effort per-turn estimate before sending to the provider — this campaign has no metered turns yet. Actual usage depends on context, tools, and model pricing.',
       },
-      driverUnavailableReason: firstBlocked?.detail ?? null,
+      driverUnavailableReason: firstBlocked?.detail ?? driverModeReason,
     };
   }
 
