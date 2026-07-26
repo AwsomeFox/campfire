@@ -676,22 +676,6 @@ export class NotesService {
     // Optimistic concurrency (#157): a co-author's stale save 409s instead of clobbering.
     this.revisions.assertNotStale(existing, opts?.expectedUpdatedAt);
 
-    // Commit an immutable prose version when the body changes (#157/#233/#813) — #157
-    // cited notes.service by line as the prose being destroyed, so a clobbered note is
-    // recoverable. The revision-read/restore endpoints are gated on the note's OWN
-    // visibility + author (RevisionsController), never a blanket dm-gate, so history is
-    // no redaction back-door. Mirrors the quests/npcs/locations commit-on-change pattern.
-    if (input.body !== undefined && input.body !== existing.body) {
-      await this.revisions.commitProseVersion({
-        entityType: 'note',
-        entityId: id,
-        campaignId: existing.campaignId,
-        priorProse: existing.body,
-        nextProse: input.body,
-        user,
-      });
-    }
-
     // Recompute the whisper target from the RESULTING visibility + recipient: switching
     // away from whisper clears the recipient, switching into whisper (or re-targeting)
     // re-validates it against campaign membership. issue #127.
@@ -705,9 +689,21 @@ export class NotesService {
     // delete and record content that is not what the edit actually overwrote.
     // better-sqlite3 is synchronous and SQLite serializes write transactions, so no
     // other writer can interleave. No-op unless an unresolved report names this note.
+    //
+    // The visibility gate is re-applied here too. `getRowOrThrow` above 404s a
+    // quarantined or trashed note, but it read the row BEFORE this transaction
+    // opened: a DM who quarantines the note in that window would not actually have
+    // stopped the edit, which for a whisper under an open report is exactly the
+    // "subject rewrites the words" move quarantine exists to block. Re-checked
+    // against the row the write will touch, and matching getRowOrThrow's error
+    // exactly — a quarantined note reads as nonexistent on every path, so this
+    // refusal must not be the one place that confirms it is there.
     const row = this.db.transaction((tx) => {
       const [current] = tx.select().from(notes).where(eq(notes.id, id)).limit(1).all();
-      if (current) this.moderation.snapshotNoteIfWatched(tx, current, 'pre_edit');
+      if (!current || current.deletedAt != null || current.quarantinedAt != null) {
+        throw new NotFoundException(`Note ${id} not found`);
+      }
+      this.moderation.snapshotNoteIfWatched(tx, current, 'pre_edit');
       const rows = tx
         .update(notes)
         .set({ ...input, recipientUserId, updatedAt: nowIso() })
@@ -716,6 +712,27 @@ export class NotesService {
         .all();
       return rows[0];
     });
+
+    // Commit an immutable prose version when the body changes (#157/#233/#813) — #157
+    // cited notes.service by line as the prose being destroyed, so a clobbered note is
+    // recoverable. The revision-read/restore endpoints are gated on the note's OWN
+    // visibility + author (RevisionsController), never a blanket dm-gate, so history is
+    // no redaction back-door. Mirrors the quests/npcs/locations commit-on-change pattern.
+    //
+    // Ordered AFTER the write transaction (as CommentsService.update already does) so
+    // an edit the transaction REFUSES — a stale save, or the quarantine re-check above
+    // — leaves no revision behind. A version tip recording prose that was never stored
+    // is the same defect as an evidence snapshot for an edit that never happened.
+    if (input.body !== undefined && input.body !== existing.body) {
+      await this.revisions.commitProseVersion({
+        entityType: 'note',
+        entityId: id,
+        campaignId: existing.campaignId,
+        priorProse: existing.body,
+        nextProse: input.body,
+        user,
+      });
+    }
 
     await this.audit.log({
       actor: auditActor(user),
@@ -759,11 +776,17 @@ export class NotesService {
     }
     // Issue #601: same atomic snapshot-then-mutate as update(). This is the sharper
     // case — an abuser racing a victim's report must not be able to delete the
-    // whisper between the report reading it and the report recording it.
+    // whisper between the report reading it and the report recording it. The
+    // quarantine/trash gate that `getRowOrThrow` applied to a pre-transaction read is
+    // re-applied here against the row this write will touch, so a quarantine landing
+    // in that window actually stops the delete instead of merely preceding it.
     const ts = nowIso();
     this.db.transaction((tx) => {
       const [current] = tx.select().from(notes).where(eq(notes.id, id)).limit(1).all();
-      if (current) this.moderation.snapshotNoteIfWatched(tx, current, 'pre_delete');
+      if (!current || current.deletedAt != null || current.quarantinedAt != null) {
+        throw new NotFoundException(`Note ${id} not found`);
+      }
+      this.moderation.snapshotNoteIfWatched(tx, current, 'pre_delete');
       tx.update(notes).set({ deletedAt: ts, updatedAt: ts }).where(eq(notes.id, id)).run();
     });
     await this.audit.log({
@@ -787,11 +810,22 @@ export class NotesService {
     if (existing.authorUserId !== user.id) {
       throw new ForbiddenException('Only the author may restore this note');
     }
-    const [row] = await this.db
-      .update(notes)
-      .set({ deletedAt: null, updatedAt: nowIso() })
-      .where(eq(notes.id, id))
-      .returning();
+    // Issue #601: gate and write in one transaction, as in update()/remove(). Restore
+    // is the sharpest of the three — it puts a withheld note back into view — so a
+    // quarantine that landed after the `getRowOrThrow` above would otherwise be undone
+    // by the very request it was taken to stop. 404, matching getRowOrThrow.
+    const row = this.db.transaction((tx) => {
+      const [current] = tx.select().from(notes).where(eq(notes.id, id)).limit(1).all();
+      if (!current || current.quarantinedAt != null) throw new NotFoundException(`Note ${id} not found`);
+      if (current.deletedAt == null) throw new NotFoundException(`Note ${id} is not in the trash`);
+      const rows = tx
+        .update(notes)
+        .set({ deletedAt: null, updatedAt: nowIso() })
+        .where(eq(notes.id, id))
+        .returning()
+        .all();
+      return rows[0];
+    });
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,

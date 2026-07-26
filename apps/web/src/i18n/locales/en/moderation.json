@@ -90,7 +90,7 @@
     "reportSubmit": "Send report",
     "reportSubmitting": "Sending…",
     "reportSent": "Report sent",
-    "reportSentBody": "Your DM has been notified. Thank you for flagging this.",
+    "reportSentBody": "This is now in your DM's moderation queue, where they review reports. No alert is sent, so it may be a while before they look. Thank you for flagging this.",
     "reportFailed": "Couldn't send that report.",
     "reportClose": "Close",
     "reportCancel": "Cancel",

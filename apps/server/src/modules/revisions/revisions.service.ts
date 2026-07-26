@@ -429,14 +429,27 @@ export class RevisionsService {
    *
    * Placed on the two RevisionsService chokepoints rather than in the controller so
    * every caller inherits it, including CommentsService.listRevisions.
+   *
+   * Takes its own reader so `restore` can run it a second time INSIDE its write
+   * transaction, against the row the prose write will actually touch. Called only
+   * before the transaction, it would be a check on a row read earlier — and a
+   * quarantine landing in that window would not stop the restore from putting the
+   * withheld prose straight back into the live row, which is the whole reason this
+   * guard exists. Reads are synchronous under better-sqlite3, so one method serves
+   * both the pre-flight (fail fast) and the in-transaction (binding) call.
    */
-  private async assertTargetNotQuarantined(entityType: RevisionEntityType, entityId: number): Promise<void> {
+  private assertTargetNotQuarantined(
+    reader: SyncDb,
+    entityType: RevisionEntityType,
+    entityId: number,
+  ): void {
     if (entityType === 'comment') {
-      const [row] = await this.db
+      const row = reader
         .select({ quarantinedAt: comments.quarantinedAt })
         .from(comments)
         .where(eq(comments.id, entityId))
-        .limit(1);
+        .limit(1)
+        .get();
       if (row?.quarantinedAt != null) {
         // 403, matching CommentsService: the author wrote it and the placeholder
         // already tells every reader it is under review, so a 404 would buy no
@@ -448,11 +461,12 @@ export class RevisionsService {
       return;
     }
     if (entityType === 'note') {
-      const [row] = await this.db
+      const row = reader
         .select({ quarantinedAt: notes.quarantinedAt })
         .from(notes)
         .where(eq(notes.id, entityId))
-        .limit(1);
+        .limit(1)
+        .get();
       // 404, matching NotesService.getRow: a quarantined note reads as nonexistent
       // on every path, so its history must not confirm otherwise.
       if (row?.quarantinedAt != null) throw new NotFoundException(`note ${entityId} not found`);
@@ -481,7 +495,7 @@ export class RevisionsService {
    * null) — history is prior canon, not the current editor buffer.
    */
   async listForEntity(entityType: RevisionEntityType, entityId: number): Promise<EntityRevision[]> {
-    await this.assertTargetNotQuarantined(entityType, entityId);
+    this.assertTargetNotQuarantined(this.db, entityType, entityId);
     const rows = await this.db
       .select()
       .from(entityRevisions)
@@ -836,8 +850,10 @@ export class RevisionsService {
     opts?: { expectedUpdatedAt?: string },
   ): Promise<{ entityType: RevisionEntityType; entityId: number; updatedAt: string; revisions: EntityRevision[] }> {
     // Issue #601 — restoring a pre-quarantine revision would put the withheld prose
-    // straight back into the live row. See assertTargetNotQuarantined.
-    await this.assertTargetNotQuarantined(entityType, entityId);
+    // straight back into the live row. See assertTargetNotQuarantined. This is the
+    // fail-fast pre-flight; the binding check is the identical call inside the write
+    // transaction below, against the row the prose write actually touches.
+    this.assertTargetNotQuarantined(this.db, entityType, entityId);
     const revision = this.db
       .select()
       .from(entityRevisions)
@@ -946,6 +962,11 @@ export class RevisionsService {
 
       const target = this.loadTarget(tx, entityType, entityId);
       if (!target) throw new NotFoundException(`${entityType} ${entityId} not found`);
+      // Issue #601 — the binding quarantine check: same gate as the pre-flight above,
+      // but reading inside this transaction so a quarantine that landed in between
+      // still stops the restore rather than merely preceding it. Throwing here rolls
+      // the whole restore back, evidence snapshot included.
+      this.assertTargetNotQuarantined(tx, entityType, entityId);
       this.assertNotStale(target, opts?.expectedUpdatedAt);
 
       // Issue #601 — a restore REWRITES the live prose, so for a comment or note it is

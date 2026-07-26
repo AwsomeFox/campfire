@@ -90,7 +90,7 @@
     "reportSubmit": "Send report",
     "reportSubmitting": "Sending…",
     "reportSent": "Report sent",
-    "reportSentBody": "Your DM has been notified. Thank you for flagging this.",
+    "reportSentBody": "أصبح هذا الآن في قائمة الإشراف لدى الـ DM، حيث يراجع البلاغات. لا يُرسَل أي تنبيه، لذا قد يمرّ بعض الوقت قبل أن يطّلع عليه. شكرًا لك على الإبلاغ.",
     "reportFailed": "Couldn't send that report.",
     "reportClose": "Close",
     "reportCancel": "إلغاء",

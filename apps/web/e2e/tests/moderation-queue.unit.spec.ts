@@ -1,4 +1,6 @@
 import { expect, test } from '@playwright/test';
+import { readFileSync, readdirSync } from 'node:fs';
+import { resolve } from 'node:path';
 import type { ModerationReport } from '@campfire/schema';
 import {
   availableActions,
@@ -115,5 +117,42 @@ test.describe('#601 moderation queue state', () => {
     const t = (key: string) => key;
     expect(targetLabel(report(), t)).toBe('moderation.targetComment #10');
     expect(targetLabel(report({ targetType: 'conduct', targetId: null }), t)).toBe('moderation.targetConduct');
+  });
+});
+
+/**
+ * Issue #601 — the report-sent confirmation must describe what actually happens.
+ *
+ * Filing a report writes the incident and its evidence snapshot; it emits NO
+ * notification to the DM. Discovery is the moderation queue, which a DM visits.
+ * The shipped copy said "Your DM has been notified", which promises a push that
+ * does not exist — to a person who has just reported harassment and is deciding
+ * whether they still need to do something else about it. Copy that oversells the
+ * response is worse than no copy at all here, so it is pinned.
+ */
+test.describe('#601 report confirmation copy matches the shipped behaviour', () => {
+  const localesRoot = resolve(__dirname, '../../src/i18n/locales');
+
+  function catalog(lang: string): Record<string, Record<string, string>> {
+    return JSON.parse(readFileSync(resolve(localesRoot, lang, 'moderation.json'), 'utf8'));
+  }
+
+  test('does not claim the DM was notified, in any locale', () => {
+    for (const lang of readdirSync(localesRoot)) {
+      const body = catalog(lang).moderation.reportSentBody;
+      expect(body, `${lang}: reportSentBody must exist`).toBeTruthy();
+      // No push/alert/notification promise, in the English catalog or in any
+      // translation that still carries the English wording verbatim.
+      expect(body, `${lang}: must not promise a notification`).not.toMatch(/notified|notification|alerted/i);
+    }
+  });
+
+  test('names the queue as the discovery path', () => {
+    expect(catalog('en').moderation.reportSentBody).toMatch(/queue/i);
+  });
+
+  test('keeps the Arabic catalog a translation, not English text in an Arabic file', () => {
+    // At least one Arabic letter — a synced-from-English placeholder would have none.
+    expect(catalog('ar').moderation.reportSentBody).toMatch(/[؀-ۿ]/);
   });
 });

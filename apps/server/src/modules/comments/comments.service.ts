@@ -605,9 +605,31 @@ export class CommentsService {
     // transactions, so nothing can interleave here. The capture is a no-op unless
     // an unresolved report already names this comment (see snapshotCommentIfWatched
     // for why we do not snapshot every edit).
+    //
+    // Everything the write is conditional on is therefore ALSO decided in here,
+    // against `current`, in this order and for these reasons:
+    //
+    //  1. Quarantine. `assertNotQuarantined(existing)` above runs against a row read
+    //     before the transaction opened. A DM who quarantines this comment in the
+    //     window between that read and this write would not actually have stopped
+    //     the edit — the very race quarantine exists to win (the subject rewriting
+    //     the words under an open report). Re-checked here so the gate and the write
+    //     observe the same row. The pre-transaction check is kept because it fails
+    //     fast, before any of the validation work above; this one is what binds.
+    //  2. Staleness. Decided BEFORE the snapshot, not by letting the CAS in the
+    //     WHERE clause come up empty afterwards: a rejected stale write commits no
+    //     edit, so recording a `pre_edit` snapshot for it would file evidence of a
+    //     mutation that never happened. Evidence is only worth having if the trail
+    //     matches what the content actually did, so the capture belongs strictly on
+    //     the path that commits. Throwing here also rolls the transaction back, so
+    //     even a snapshot taken by some future reordering could not survive.
     const updated = this.db.transaction((tx) => {
       const [current] = tx.select().from(comments).where(eq(comments.id, id)).limit(1).all();
       if (!current) return undefined;
+      this.assertNotQuarantined(current);
+      if (opts?.expectedUpdatedAt && current.updatedAt !== opts.expectedUpdatedAt) {
+        throw staleWrite(opts.expectedUpdatedAt, current.updatedAt);
+      }
       this.moderation.snapshotCommentIfWatched(tx, current, 'pre_edit');
       const rows = tx
         .update(comments)
@@ -621,6 +643,10 @@ export class CommentsService {
         .all();
       return rows[0];
     });
+    // Reached only when the row vanished entirely between the two reads (a campaign
+    // purge's CASCADE): getRowOrThrow 404s. The staleWrite fallback is kept as a
+    // belt-and-braces for a CAS that somehow came up empty without the in-transaction
+    // check firing; it should be unreachable now that staleness is decided above.
     if (!updated) {
       const current = await this.getRowOrThrow(id);
       throw staleWrite(opts?.expectedUpdatedAt, current.updatedAt);
@@ -716,9 +742,17 @@ export class CommentsService {
     // the message between the report reading it and the report recording it. The row
     // is re-read inside the transaction and snapshotted there, so the evidence is
     // whatever the delete is about to hide, captured in the same exclusive window.
+    //
+    // The quarantine gate is re-applied against that same in-transaction row: the
+    // `assertNotQuarantined(existing)` above read the comment before the transaction
+    // opened, so on its own it would let a delete through that a DM quarantined in
+    // between — handing the subject of an open report exactly the "remove the
+    // evidence" move the quarantine was taken to prevent.
     const row = this.db.transaction((tx) => {
       const [current] = tx.select().from(comments).where(eq(comments.id, id)).limit(1).all();
-      if (current) this.moderation.snapshotCommentIfWatched(tx, current, 'pre_delete');
+      if (!current) throw new NotFoundException(`Comment ${id} not found`);
+      this.assertNotQuarantined(current);
+      this.moderation.snapshotCommentIfWatched(tx, current, 'pre_delete');
       const rows = tx
         .update(comments)
         .set({ deletedAt: ts, deletedBy: auditActor(user) })
@@ -765,11 +799,26 @@ export class CommentsService {
     // here would falsely mark a restored comment as edited. Provenance of the
     // tombstone (who deleted it, when) is preserved in the audit log, not on the
     // row (deletedAt/deletedBy are cleared so the comment reads as live again).
-    const [row] = await this.db
-      .update(comments)
-      .set({ deletedAt: null, deletedBy: null })
-      .where(eq(comments.id, id))
-      .returning();
+    //
+    // Issue #601: the gate and the write share one transaction, for the same reason
+    // as update()/remove(). Restore is the one that would hurt most if it slipped —
+    // it puts a withheld comment back into everyone's view, so a quarantine landing
+    // between the pre-read above and this write would be undone by the very request
+    // it was meant to stop. Both the tombstone precondition and the quarantine check
+    // are re-decided here against the row the write will actually touch.
+    const row = this.db.transaction((tx) => {
+      const [current] = tx.select().from(comments).where(eq(comments.id, id)).limit(1).all();
+      if (!current) throw new NotFoundException(`Comment ${id} not found`);
+      if (current.deletedAt == null) throw new NotFoundException(`Comment ${id} is not tombstoned`);
+      this.assertNotQuarantined(current);
+      const rows = tx
+        .update(comments)
+        .set({ deletedAt: null, deletedBy: null })
+        .where(eq(comments.id, id))
+        .returning()
+        .all();
+      return rows[0];
+    });
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
