@@ -21,11 +21,11 @@ import { useId, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useQuery } from '@tanstack/react-query';
-import type { AiDmReadiness } from '@campfire/schema';
+import { aiDmReadinessProgress, aiDmSetupComplete, type AiDmReadiness } from '@campfire/schema';
 import { api, API } from '../../lib/api';
 import { queryKeys, useAiDmSeat } from '../../lib/query';
 import { classifyAiGate } from './aiGate';
-import { isAiDmSetupComplete, localizeDetailParams } from './aiReadiness';
+import { localizeDetailParams } from './aiReadiness';
 import { CopyControl } from '../../components/CopyControl';
 import { GameIcon } from '../../components/GameIcon';
 import { Btn, Card } from '../../components/ui';
@@ -112,9 +112,14 @@ export function AiSetupChecklist({
     },
   ]);
 
-  const gating = steps.filter((s) => s.key !== 'table');
-  const doneCount = gating.filter((s) => s.done === true).length;
-  const allDone = isAiDmSetupComplete(readiness);
+  // Progress counts BLOCKING checks only, so the tally reaches its total exactly when the
+  // done-banner fires. Advisory `warning` checks (a campaign with no session-zero content)
+  // are still rendered as suggestions, but counting them would strand a perfectly runnable
+  // table at "10 of 11" next to a green "the AI DM is ready" — the same class of
+  // self-contradiction this checklist exists to remove. The invariant is pinned in
+  // apps/server/test/unit/ai-dm-readiness-rules.spec.ts.
+  const { done: doneCount, total: gatingTotal } = aiDmReadinessProgress(readiness);
+  const allDone = aiDmSetupComplete(readiness);
 
   return (
     <div id="ai-dm-readiness" className={`text-left space-y-3 settings-anchor ${className}`} tabIndex={-1}>
@@ -146,7 +151,7 @@ export function AiSetupChecklist({
       </div>
 
       <p className="text-[11px] text-secondary">
-        {t('aiOnboarding.checklist.progress', { done: doneCount, total: gating.length })}
+        {t('aiOnboarding.checklist.progress', { done: doneCount, total: gatingTotal })}
       </p>
 
       <ol className="space-y-2.5">

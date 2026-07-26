@@ -5519,6 +5519,52 @@ export const AiDmReadiness = z.object({
 });
 export type AiDmReadiness = z.infer<typeof AiDmReadiness>;
 
+/**
+ * A readiness check BLOCKS the AI when it is not `ok` and not merely advisory.
+ * `warning` checks (session-zero content, participant consent counts) are suggestions a DM
+ * may ignore; every other status gates. This is the same rule the server applies when it
+ * computes `AiDmReadiness.ok`, exported so a client cannot re-derive it differently.
+ */
+export function aiDmReadinessCheckBlocks(check: Pick<AiDmReadinessCheck, 'ok' | 'status'>): boolean {
+  return !check.ok && check.status !== 'warning';
+}
+
+/**
+ * Is the AI DM actually ready to do something for this table?
+ *
+ * The mode is part of the answer, not a detail: a campaign can have the server flag, a
+ * provider, a model and a budget and still have the seat switched OFF, in which case the AI
+ * does nothing. Reporting "ready" there is a lie, so each mode owns its own readiness:
+ *   - `driver` — `driverOk`, which mirrors `AiDmService.assertRunnable` (every driver-required
+ *     check passes AND the seat is armed in driver mode), AND `ok`. `driverOk` alone would
+ *     ignore any BLOCKING check that is not driver-specific, letting the banner fire while
+ *     the progress tally is still short — the contradiction {@link aiDmReadinessProgress}
+ *     exists to prevent. `driverOk ⊆ ok` in practice, so this only closes the hole.
+ *   - `co_dm`  — `ok`, i.e. every blocking check passes (propose-only needs no driver extras).
+ *   - `off`    — never ready; picking a mode is the remaining work.
+ */
+export function aiDmSetupComplete(readiness: Pick<AiDmReadiness, 'ok' | 'driverOk' | 'mode'>): boolean {
+  if (readiness.mode === 'driver') return readiness.driverOk && readiness.ok;
+  if (readiness.mode === 'co_dm') return readiness.ok;
+  return false;
+}
+
+/**
+ * Checklist progress, counted over BLOCKING checks only.
+ *
+ * The total must be reachable exactly when {@link aiDmSetupComplete} is true, or the UI says
+ * two contradictory things about one state — a runnable table reading "10 of 11" beside a
+ * green "the AI DM is ready" banner, because an advisory `warning` check (a campaign with no
+ * session-zero content) can never be ticked off. Advisory checks are still rendered; they
+ * just do not count against a total that gates the ready claim.
+ */
+export function aiDmReadinessProgress(
+  readiness: Pick<AiDmReadiness, 'checks'>,
+): { done: number; total: number } {
+  const gating = readiness.checks.filter((check) => check.status !== 'warning');
+  return { done: gating.filter((check) => check.ok).length, total: gating.length };
+}
+
 // ── Co-DM authoring: draft content for the approval queue (issue #313) ────────
 // The AI acts as a co-DM that DRAFTS content the human DM reviews. A `draft`
 // request is turned by the configured provider into structured entity content and

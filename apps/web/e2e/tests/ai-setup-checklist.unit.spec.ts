@@ -1,44 +1,30 @@
 /**
- * AI setup checklist readiness rules (issue #519).
+ * AI setup checklist WIRING (issue #519).
  *
- * Regression under test: the checklist used to declare the AI ready with
- * `allDone = readiness.driverOk || (readiness.ok && mode === 'co_dm')`. No server readiness
- * check reflected the seat's mode, so a table with the provider, model and budget all green
- * but the AI switched OFF got a green "The AI DM is ready" banner whose copy said the AI was
- * co-DMing — while the AI did nothing and the next turn would 403. The mode is now part of
- * the answer on both sides: the server emits a gating `mode` check (and folds the mode into
- * `driverOk`), and the banner asks {@link isAiDmSetupComplete}, which never says yes for an
- * off seat.
+ * The readiness rules themselves are asserted in apps/server/test/unit/ai-dm-readiness-rules
+ * .spec.ts, which CI actually runs (`*.unit.spec.ts` here never executes — issue #1516).
+ * What is left for this file is the component wiring those rules: that the banner and the
+ * progress tally both come from the shared rules rather than being re-derived here, that the
+ * check body is localized off the server's `detailKey`, and that the catalog carries the mode
+ * step's copy.
  */
 import { expect, test } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { isAiDmSetupComplete, localizeDetailParams } from '../../src/features/ai-dm/aiReadiness';
+import { localizeDetailParams } from '../../src/features/ai-dm/aiReadiness';
 
 const CHECKLIST = resolve(__dirname, '../../src/features/ai-dm/AiSetupChecklist.tsx');
 const EN_CATALOG = resolve(__dirname, '../../src/i18n/locales/en/aiOnboarding.json');
 
 test.describe('AI setup checklist readiness (#519)', () => {
-  test('an off seat is never "ready", however green the prerequisites are', () => {
-    // The exact shape the bug produced: everything configured, mode still off.
-    expect(isAiDmSetupComplete({ ok: true, driverOk: true, mode: 'off' })).toBe(false);
-    expect(isAiDmSetupComplete({ ok: false, driverOk: false, mode: 'off' })).toBe(false);
-  });
-
-  test('each mode owns its own readiness', () => {
-    // Driver: the driver aggregate decides — and it now includes "the seat is in driver mode".
-    expect(isAiDmSetupComplete({ ok: true, driverOk: true, mode: 'driver' })).toBe(true);
-    expect(isAiDmSetupComplete({ ok: true, driverOk: false, mode: 'driver' })).toBe(false);
-    // Co-DM: propose-only, so the blocking-check aggregate decides. Driver extras are moot.
-    expect(isAiDmSetupComplete({ ok: true, driverOk: false, mode: 'co_dm' })).toBe(true);
-    expect(isAiDmSetupComplete({ ok: false, driverOk: true, mode: 'co_dm' })).toBe(false);
-  });
-
-  test('the done banner is gated on that rule, not on driverOk alone', () => {
+  test('the banner and the tally both come from the shared rules', () => {
     const source = readFileSync(CHECKLIST, 'utf8');
-    expect(source).toMatch(/const allDone = isAiDmSetupComplete\(readiness\)/);
-    // The old formula must not creep back in.
+    expect(source).toMatch(/const allDone = aiDmSetupComplete\(readiness\)/);
+    expect(source).toMatch(/aiDmReadinessProgress\(readiness\)/);
+    // The old formula must not creep back in, and neither may a locally re-derived tally
+    // that could disagree with the banner.
     expect(source).not.toMatch(/readiness\.driverOk \|\|/);
+    expect(source).not.toMatch(/const gating = steps\.filter/);
   });
 
   test('check bodies are translated from the server detailKey, with the English detail as fallback', () => {

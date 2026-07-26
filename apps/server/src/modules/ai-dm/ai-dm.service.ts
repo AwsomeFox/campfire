@@ -33,6 +33,7 @@ import { AI_DM_PROVIDER, type AiDmProvider } from './ai-dm.provider';
 import { SessionZeroService } from '../session-zero/session-zero.service';
 import { SupportPreferencesService } from '../session-zero/support-preferences.service';
 import { providerCapabilities } from './providers';
+import type { AiProviderConfig } from './providers/factory';
 
 type AiDmSeatUpdateInput = z.infer<typeof AiDmSeatUpdate>;
 type AiDmTurnRequestInput = z.infer<typeof AiDmTurnRequest>;
@@ -408,6 +409,15 @@ export class AiDmService implements OnApplicationBootstrap {
     const checks: AiDmReadinessCheck[] = [];
     const push = (check: AiDmReadinessCheck) => checks.push(check);
 
+    // Disclosure decision (#519 review): this reports the server-wide AI flag's real value
+    // to any campaign DM, where the old client-side checklist showed non-admins only an
+    // "ask your admin" note. That is deliberate, not drift. The flag is not a secret — every
+    // AI gate already answers a member with a 403 that names it, and an admin-only console
+    // read is not what kept it private. Telling a DM *why* the AI is unavailable is strictly
+    // more useful than a vague "ask someone": it is the difference between a dead end and a
+    // copyable request (see the `serverFlag` extra in AiSetupChecklist). The one thing we do
+    // NOT do is imply the DM can act on it: `status` stays 'unknown' rather than 'blocked'
+    // for a non-admin, and `fixHref` is null, so the row reads as someone else's step.
     push({
       key: 'serverFlag',
       ok: !!settings.experimentalAiDm,
@@ -478,7 +488,13 @@ export class AiDmService implements OnApplicationBootstrap {
     let modelDetailKey = provider.model ? 'model.selected' : 'model.choose';
     let modelDetailParams: Record<string, string | number> = { model: provider.model ?? '' };
     try {
-      const execution = await this.providerConfig.resolveExecutionModel(campaignId);
+      // Readiness is a plain GET that a settings UI may poll, and it sends NOTHING outbound,
+      // so it must not drag the DNS-resolving half of the baseUrl gate onto the read path —
+      // that would let a polling client drive a resolver lookup per poll. The literal host
+      // policy and the model allowlist still run here, and the rebinding defense itself is
+      // untouched: `createAiProviderGuardedFetch` re-resolves and pins addresses on every
+      // real outbound request, which is where it actually matters.
+      const execution = await this.providerConfig.resolveExecutionModel(campaignId, { resolveDns: false });
       modelOk = !!execution;
       if (execution) {
         modelDetail = `Execution model ${execution.model} passes the server allowlist.`;
@@ -647,7 +663,11 @@ export class AiDmService implements OnApplicationBootstrap {
     // It is deliberately NOT clamped to the remaining budget: a run that would overrun the
     // budget must still show its true expected size — `budgetRemaining` reports the ceiling
     // separately, and the budget check above is what actually blocks the run.
-    const estimatedTotalTokens = recentUsage ?? DEFAULT_ESTIMATED_PROMPT_TOKENS + DEFAULT_ESTIMATED_COMPLETION_TOKENS;
+    // Parenthesized deliberately: `+` binds tighter than `??`, so the intent is already what
+    // this reads — but an unparenthesized mix of the two is a silent-breakage trap for the
+    // next edit, and this value is a spend estimate a DM makes decisions on.
+    const estimatedTotalTokens =
+      recentUsage ?? (DEFAULT_ESTIMATED_PROMPT_TOKENS + DEFAULT_ESTIMATED_COMPLETION_TOKENS);
     const estimatedCompletionTokens = Math.round(estimatedTotalTokens * DEFAULT_COMPLETION_SHARE);
     const estimatedPromptTokens = estimatedTotalTokens - estimatedCompletionTokens;
     return {
@@ -694,17 +714,57 @@ export class AiDmService implements OnApplicationBootstrap {
         'Driver mode requires a configured AI provider. Set a provider (or a server default) with an API key, then switch the mode to Driver.',
       );
     }
-    const execution = await this.providerConfig.resolveExecutionModel(campaignId);
-    if (!execution) {
-      throw new ConflictException(
-        'Driver mode requires an executable AI model. Set a provider model that passes the server allowlist, then switch the mode to Driver.',
-      );
-    }
+    // `resolveExecutionModel` does not signal every failure by returning null — it THROWS
+    // BadRequest when the model is off a tightened allowlist or the stored baseUrl fails
+    // host policy. Left uncaught, tightening the allowlist would answer this gate with a
+    // 400 while every neighbouring rejection in it is a 409, and the client would have to
+    // sniff the message string to tell them apart. Re-raise as this gate's own status with
+    // the reason preserved, so the HTTP contract is coherent per gate.
+    const execution = await this.resolveExecutionModelForGate(
+      campaignId,
+      (reason) => new ConflictException(reason),
+      'Driver mode requires an executable AI model. Set a provider model that passes the server allowlist, then switch the mode to Driver.',
+    );
     if (!providerCapabilities(execution.config.providerType).toolCalling) {
       throw new ConflictException(
         `Driver mode requires a provider with tool-calling support. ${execution.config.providerType} cannot run the live Driver seat.`,
       );
     }
+  }
+
+  /**
+   * Shared adapter between {@link AiProviderConfigService.resolveExecutionModel} and the two
+   * driver gates. It normalizes BOTH failure shapes — the `null` return (nothing configured)
+   * and the thrown `BadRequestException` (allowlist tightened, stored baseUrl now blocked) —
+   * into the status the calling gate promises, keeping the underlying reason as the message
+   * so the UI's gate explainer still has something specific to say.
+   *
+   * `resolveDns` is passed through: a gate that is immediately followed by the real provider
+   * resolution (assertRunnable → runTurn) leaves the DNS-resolving revalidation to that one
+   * call rather than doing it twice per turn.
+   */
+  private async resolveExecutionModelForGate(
+    campaignId: number,
+    wrap: (reason: string) => Error,
+    unconfiguredReason: string,
+    opts: { resolveDns?: boolean } = {},
+  ): Promise<{ model: string; config: AiProviderConfig }> {
+    let execution: { model: string; config: AiProviderConfig } | null;
+    try {
+      execution = await this.providerConfig.resolveExecutionModel(campaignId, opts);
+    } catch (err) {
+      if (err instanceof BadRequestException) {
+        const response = err.getResponse();
+        const reason =
+          typeof response === 'string'
+            ? response
+            : ((response as { message?: string | string[] }).message ?? err.message);
+        throw wrap(Array.isArray(reason) ? reason.join(' ') : reason);
+      }
+      throw err;
+    }
+    if (!execution) throw wrap(unconfiguredReason);
+    return execution;
   }
 
   /** Configure the seat (dm only). Gated on the server experimental flag. Upserts; omitted fields are left unchanged. */
@@ -1027,12 +1087,18 @@ export class AiDmService implements OnApplicationBootstrap {
         'Driver mode requires a configured AI provider. Set a provider (or a server default) with an API key, then switch the mode to Driver.',
       );
     }
-    const execution = await this.providerConfig.resolveExecutionModel(campaignId);
-    if (!execution) {
-      throw new ForbiddenException(
-        'Driver mode requires an executable AI model. Set a provider model that passes the server allowlist, then switch the mode to Driver.',
-      );
-    }
+    // Same status-coherence adapter as assertDriverAllowed, but this gate answers 403.
+    // `resolveDns: false` here because the caller (AiDriverService.runTurn) resolves the
+    // provider for real moments later through the execution choke point, which DOES resolve
+    // DNS — doing it in both made every driver turn perform two resolver lookups for one
+    // request. The rebinding defense is unchanged: the guarded fetch re-resolves and pins
+    // addresses per outbound request, and the allowlist + literal host policy still run here.
+    const execution = await this.resolveExecutionModelForGate(
+      campaignId,
+      (reason) => new ForbiddenException(reason),
+      'Driver mode requires an executable AI model. Set a provider model that passes the server allowlist, then switch the mode to Driver.',
+      { resolveDns: false },
+    );
     if (!providerCapabilities(execution.config.providerType).toolCalling) {
       throw new ForbiddenException(
         `Driver mode requires a provider with tool-calling support. ${execution.config.providerType} cannot run the live Driver seat.`,
