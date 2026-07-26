@@ -8,6 +8,7 @@ import { CAMPAIGN_SEARCH_FTS_AVAILABLE, DB, type DrizzleDb } from '../../db/db.m
 import {
   characters,
   comments,
+  campaigns,
   encounters,
   factions,
   inventoryItems,
@@ -354,23 +355,40 @@ export class SearchService {
     const noteVisibility = role === 'dm'
       ? sql`(n.visibility = 'party_shared' OR n.author_user_id = ${user.id} OR n.visibility = 'dm_shared' OR n.visibility = 'whisper')`
       : sql`(n.visibility = 'party_shared' OR n.author_user_id = ${user.id} OR (n.visibility = 'whisper' AND n.recipient_user_id = ${user.id}))`;
-    const commentAnchorVisible = role === 'dm'
-      ? sql`1 = 1`
-      : sql`(
-          c.entity_type NOT IN ('quest', 'npc', 'faction', 'location')
-          OR (c.entity_type = 'quest' AND EXISTS (
-            SELECT 1 FROM quests cq WHERE cq.id = c.entity_id AND cq.campaign_id = c.campaign_id AND cq.deleted_at IS NULL AND cq.hidden = 0
-          ))
-          OR (c.entity_type = 'npc' AND EXISTS (
-            SELECT 1 FROM npcs cn WHERE cn.id = c.entity_id AND cn.campaign_id = c.campaign_id AND cn.deleted_at IS NULL AND cn.hidden = 0
-          ))
-          OR (c.entity_type = 'faction' AND EXISTS (
-            SELECT 1 FROM factions cf WHERE cf.id = c.entity_id AND cf.campaign_id = c.campaign_id AND cf.deleted_at IS NULL AND cf.hidden = 0
-          ))
-          OR (c.entity_type = 'location' AND EXISTS (
-            SELECT 1 FROM locations cl WHERE cl.id = c.entity_id AND cl.campaign_id = c.campaign_id AND cl.deleted_at IS NULL AND cl.status <> 'unexplored'
-          ))
-        )`;
+    const commentAnchorVisible = sql`(
+      (c.entity_type = 'quest' AND EXISTS (
+        SELECT 1 FROM quests cq
+        WHERE cq.id = c.entity_id AND cq.campaign_id = c.campaign_id AND cq.deleted_at IS NULL
+          ${role === 'dm' ? sql`` : sql`AND cq.hidden = 0`}
+      ))
+      OR (c.entity_type = 'npc' AND EXISTS (
+        SELECT 1 FROM npcs cn
+        WHERE cn.id = c.entity_id AND cn.campaign_id = c.campaign_id AND cn.deleted_at IS NULL
+          ${role === 'dm' ? sql`` : sql`AND cn.hidden = 0`}
+      ))
+      OR (c.entity_type = 'faction' AND EXISTS (
+        SELECT 1 FROM factions cf
+        WHERE cf.id = c.entity_id AND cf.campaign_id = c.campaign_id
+          ${role === 'dm' ? sql`` : sql`AND cf.hidden = 0`}
+      ))
+      OR (c.entity_type = 'location' AND EXISTS (
+        SELECT 1 FROM locations cl
+        WHERE cl.id = c.entity_id AND cl.campaign_id = c.campaign_id AND cl.deleted_at IS NULL
+          ${role === 'dm' ? sql`` : sql`AND cl.status <> 'unexplored'`}
+      ))
+      OR (c.entity_type = 'session' AND EXISTS (
+        SELECT 1 FROM sessions cs WHERE cs.id = c.entity_id AND cs.campaign_id = c.campaign_id AND cs.deleted_at IS NULL
+      ))
+      OR (c.entity_type = 'character' AND EXISTS (
+        SELECT 1 FROM characters cch WHERE cch.id = c.entity_id AND cch.campaign_id = c.campaign_id AND cch.deleted_at IS NULL
+      ))
+      OR (c.entity_type = 'encounter' AND EXISTS (
+        SELECT 1 FROM encounters ce WHERE ce.id = c.entity_id AND ce.campaign_id = c.campaign_id
+      ))
+      OR (c.entity_type = 'campaign' AND c.entity_id = c.campaign_id AND EXISTS (
+        SELECT 1 FROM campaigns cc WHERE cc.id = c.campaign_id AND cc.deleted_at IS NULL
+      ))
+    )`;
 
     return sql`(
       (campaign_search_fts.entity_type = 'quest' AND EXISTS (
@@ -585,6 +603,7 @@ export class SearchService {
         eq(notes.kind, 'note'),
         notDeleted(notes.deletedAt),
       ));
+      const noteEntityNames = await this.resolveNoteEntityNames(campaignId, rows);
       for (const note of rows) {
         const canSee =
           note.visibility === 'party_shared'
@@ -592,10 +611,13 @@ export class SearchService {
           || (role === 'dm' && (note.visibility === 'dm_shared' || note.visibility === 'whisper'))
           || (note.visibility === 'whisper' && note.recipientUserId === user.id);
         if (!canSee) continue;
+        const entityName = note.entityType && note.entityId != null
+          ? noteEntityNames.get(`${note.entityType}:${note.entityId}`) ?? null
+          : null;
         addHit({
           type: 'note',
           id: note.id,
-          title: 'Note',
+          title: entityName ? `Note on ${entityName}` : 'Note',
           fields: [{ field: 'body', text: note.body }],
           extra: { entityType: note.entityType as SearchResult['entityType'], entityId: note.entityId },
         });
@@ -766,6 +788,81 @@ export class SearchService {
       });
     }
     return results;
+  }
+
+  private async resolveNoteEntityNames(
+    campaignId: number,
+    rows: Array<{ entityType: string | null; entityId: number | null }>,
+  ): Promise<Map<string, string>> {
+    const idsByType = new Map<string, Set<number>>();
+    for (const row of rows) {
+      if (!row.entityType || row.entityId == null) continue;
+      const set = idsByType.get(row.entityType) ?? new Set<number>();
+      set.add(row.entityId);
+      idsByType.set(row.entityType, set);
+    }
+
+    const names = new Map<string, string>();
+    const addNames = (type: string, found: Array<{ id: number; name: string }>) => {
+      for (const row of found) names.set(`${type}:${row.id}`, row.name);
+    };
+
+    for (const [type, idSet] of idsByType) {
+      const ids = [...idSet];
+      switch (type) {
+        case 'quest':
+          addNames(type, await this.db
+            .select({ id: quests.id, name: quests.title })
+            .from(quests)
+            .where(and(eq(quests.campaignId, campaignId), inArray(quests.id, ids), notDeleted(quests.deletedAt))));
+          break;
+        case 'npc':
+          addNames(type, await this.db
+            .select({ id: npcs.id, name: npcs.name })
+            .from(npcs)
+            .where(and(eq(npcs.campaignId, campaignId), inArray(npcs.id, ids), notDeleted(npcs.deletedAt))));
+          break;
+        case 'location':
+          addNames(type, await this.db
+            .select({ id: locations.id, name: locations.name })
+            .from(locations)
+            .where(and(eq(locations.campaignId, campaignId), inArray(locations.id, ids), notDeleted(locations.deletedAt))));
+          break;
+        case 'character':
+          addNames(type, await this.db
+            .select({ id: characters.id, name: characters.name })
+            .from(characters)
+            .where(and(eq(characters.campaignId, campaignId), inArray(characters.id, ids), notDeleted(characters.deletedAt))));
+          break;
+        case 'session': {
+          const found = await this.db
+            .select({ id: sessions.id, title: sessions.title, number: sessions.number })
+            .from(sessions)
+            .where(and(eq(sessions.campaignId, campaignId), inArray(sessions.id, ids), notDeleted(sessions.deletedAt)));
+          addNames(type, found.map((row) => ({ id: row.id, name: row.title || `Session ${row.number}` })));
+          break;
+        }
+        case 'campaign':
+          addNames(type, await this.db
+            .select({ id: campaigns.id, name: campaigns.name })
+            .from(campaigns)
+            .where(and(eq(campaigns.id, campaignId), inArray(campaigns.id, ids), notDeleted(campaigns.deletedAt))));
+          break;
+        case 'encounter':
+          addNames(type, await this.db
+            .select({ id: encounters.id, name: encounters.name })
+            .from(encounters)
+            .where(and(eq(encounters.campaignId, campaignId), inArray(encounters.id, ids), notDeleted(encounters.deletedAt))));
+          break;
+        case 'faction':
+          addNames(type, await this.db
+            .select({ id: factions.id, name: factions.name })
+            .from(factions)
+            .where(and(eq(factions.campaignId, campaignId), inArray(factions.id, ids), notDeleted(factions.deletedAt))));
+          break;
+      }
+    }
+    return names;
   }
 
   /**

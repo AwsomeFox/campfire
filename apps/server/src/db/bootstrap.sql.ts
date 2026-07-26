@@ -1529,6 +1529,7 @@ CREATE TRIGGER IF NOT EXISTS campaign_search_encounters_ad AFTER DELETE ON encou
   DELETE FROM campaign_search_fts WHERE rowid = old.id * 32 + 13;
 END;
 CREATE TRIGGER IF NOT EXISTS campaign_search_encounters_au AFTER UPDATE ON encounters BEGIN
+  DELETE FROM campaign_search_fts WHERE rowid = new.id * 32 + 13;
   INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
   SELECT new.id * 32 + 13, new.campaign_id, 'encounter', new.id, '', new.name, '',
     trim(coalesce(case when q.id is not null and q.deleted_at is null and q.hidden = 0 then q.title else '' end, '') || ' ' ||
@@ -1567,6 +1568,8 @@ CREATE TRIGGER IF NOT EXISTS campaign_search_scheduled_sessions_au AFTER UPDATE 
     replace(replace(replace(coalesce(new.notes, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
     replace(replace(replace(coalesce(new.scheduled_at || ' ' || replace(replace(replace(new.scheduled_at, 'T', ' '), ':', ' '), '-', ' '), ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '');
 END;
+
+DELETE FROM campaign_search_fts;
 
 INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
 SELECT id * 32 + 1, campaign_id, 'quest', id, title, '', body, reward, dm_secret,
