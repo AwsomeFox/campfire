@@ -81,7 +81,11 @@ export function isSensitiveApiPathname(path: string): boolean {
   if (path.startsWith('/api/v1/invites') || /\/invites(\/|$)/.test(path)) return true;
   if (/\/ai-provider(\/|$)/.test(path)) return true;
   if (path.startsWith('/api/v1/mcp')) return true;
-  if (/^\/api\/v1\/encounters\/\d+\/map$/.test(path)) return true;
+  // The whole `/encounters/:id/map` SUBTREE, not only the bytes route (#463 + #604).
+  // `/map/derivatives` describes the DM's source map (per-rung pixel dimensions and
+  // generation state) and is role-scoped exactly like the render itself, so it must
+  // never linger in the origin-wide Cache Storage a shared device keeps after logout.
+  if (/^\/api\/v1\/encounters\/\d+\/map(\/|$)/.test(path)) return true;
   // Attachment *originals* are sensitive; thumbs are handled via URL search in
   // {@link isSensitiveCachedRequest} so activate purge does not wipe the image bucket.
   return false;
@@ -179,8 +183,11 @@ export function matchNetworkOnlyApi({ url, request }: WorkboxMatchOptions): bool
     return url.searchParams.get('size') !== 'thumb';
   }
 
-  // Role/fog-specific VTT map renders — never Cache Storage (#463).
-  if (/^\/api\/v1\/encounters\/\d+\/map$/.test(path)) return true;
+  // Role/fog-specific VTT map renders — never Cache Storage (#463). The `(\/|$)`
+  // covers the whole subtree, so #604's `/map/derivatives` manifest is excluded too:
+  // it is role-scoped map data, and a NetworkFirst copy would also let a stale
+  // "ready" ladder outlive the rungs it describes.
+  if (/^\/api\/v1\/encounters\/\d+\/map(\/|$)/.test(path)) return true;
 
   return false;
 }
@@ -247,7 +254,9 @@ export function matchApiJsonCache({ url, request }: WorkboxMatchOptions): boolea
   if (path.startsWith('/api/v1/invites') || /\/invites(\/|$)/.test(path)) return false;
   if (/\/ai-provider(\/|$)/.test(path)) return false;
   if (path.startsWith('/api/v1/attachments/')) return false;
-  if (/^\/api\/v1\/encounters\/\d+\/map$/.test(path)) return false;
+  // Whole `/map` subtree — the #604 derivative manifest matches the `encounters/:id/`
+  // JSON allowlist above, so it must be re-excluded here (see matchNetworkOnlyApi).
+  if (/^\/api\/v1\/encounters\/\d+\/map(\/|$)/.test(path)) return false;
 
   return true;
 }

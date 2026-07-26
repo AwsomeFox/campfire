@@ -27,6 +27,11 @@ import { CampaignAccessService } from '../membership/campaign-access.service';
 import { AttachmentsService, ALLOWED_MIME_TO_EXT, MAX_UPLOAD_BYTES } from './attachments.service';
 import { AttachmentUploadDto } from './attachments.dto';
 import { contentDispositionHeader } from './filename';
+import {
+  DERIVATIVE_VARIANT_NAMES,
+  isDerivativeVariantName,
+  type RequestedSize,
+} from './image-derivatives';
 
 // Express.Multer.File augments the Express namespace via @types/multer; import side-effect only.
 type MulterFile = Express.Multer.File;
@@ -144,12 +149,18 @@ export class AttachmentsController {
    * should also append `?v=<versionToken>` so an authorization change yields a
    * new URL and the browser cache misses.
    *
-   * `?size=thumb` serves a downscaled PNG preview for list/dashboard use (see
-   * AttachmentsService.resolveFile / thumbnail.ts).
+   * `?size=thumb|md|lg` serves a durable responsive derivative (issue #604) —
+   * generated once, off the request path, by AttachmentDerivativesService. When
+   * no rung is ready yet (or the source is already small enough, or generation
+   * failed) the ORIGINAL is served as a documented last resort and the
+   * `X-Campfire-Derivative` header says `original-fallback` so the client can
+   * show a processing/error state instead of silently believing it got a small
+   * image. Omitting `size` (or `?download=1`) is the explicit "give me the
+   * untouched original" path the DM needs for printing/VTT export.
    */
   @Get(':id/file')
-  @ApiOperation({ summary: 'Stream attachment bytes', description: 'Requires campaign membership — attachment files are never served from a public URL. Responses carry a strong ETag but must revalidate authorization and visibility before reuse; a matching authorized If-None-Match returns 304. `?size=thumb` serves a downscaled PNG preview. `?download=1` sends Content-Disposition: attachment for a download.' })
-  @ApiQuery({ name: 'size', required: false, enum: ['thumb'], description: 'Omit for the full-size original; `thumb` for a downscaled PNG preview.' })
+  @ApiOperation({ summary: 'Stream attachment bytes', description: 'Requires campaign membership — attachment files are never served from a public URL. Responses carry a strong ETag but must revalidate authorization and visibility before reuse; a matching authorized If-None-Match returns 304. `?size=thumb|md|lg` serves a durable responsive derivative (issue #604); the `X-Campfire-Derivative` header names the rung actually served, or `original-fallback` when no derivative was available. `?download=1` sends Content-Disposition: attachment for a download of the original.' })
+  @ApiQuery({ name: 'size', required: false, enum: [...DERIVATIVE_VARIANT_NAMES], description: 'Omit for the full-size original; `thumb` (512px), `md` (1280px) or `lg` (2560px) cap the longest edge.' })
   @ApiQuery({ name: 'download', required: false, enum: ['1'], description: 'Set to 1 to force a download with Content-Disposition: attachment.' })
   @ApiQuery({ name: 'v', required: false, type: String, description: 'Authorization-aware version token (see AttachmentsService.versionToken). Optional but recommended — clients should append it so a content/hidden change produces a new URL.' })
   @ApiResponse({ status: 200, description: 'Raw file bytes, with Content-Type/Content-Disposition/ETag set from the stored attachment.' })
@@ -164,8 +175,10 @@ export class AttachmentsController {
     @Query('size') size?: string,
     @Query('download') download?: string,
   ) {
-    if (size !== undefined && size !== 'thumb') {
-      throw new BadRequestException("Unsupported size — allowed: 'thumb' (or omit for the original)");
+    if (size !== undefined && !isDerivativeVariantName(size)) {
+      throw new BadRequestException(
+        `Unsupported size — allowed: ${DERIVATIVE_VARIANT_NAMES.map((v) => `'${v}'`).join(', ')} (or omit for the original)`,
+      );
     }
     if (download !== undefined && download !== '1') {
       throw new BadRequestException("Unsupported download — allowed: '1' (or omit for inline)");
@@ -192,12 +205,14 @@ export class AttachmentsController {
     // Issue #84: the DB row can outlive its bytes on disk — an orphaned row from a
     // failed write, a restore that didn't carry the uploads/ dir, or a lossy import.
     // Verify the original file is present *before* resolveFile() (which reads it to
-    // hash the ETag, and — for ?size=thumb — to generate the thumbnail), so a missing
-    // file becomes a clean catchable 404 instead of a 500, and the stream below can
-    // never hit a listener-less ENOENT that crashes the process.
+    // hash the ETag), so a missing file becomes a clean catchable 404 instead of a
+    // 500, and the stream below can never hit a listener-less ENOENT that crashes
+    // the process. Since #604 resolveFile no longer DECODES anything on this path —
+    // it looks up the best ready derivative in an indexed table — but it still
+    // needs the original present for the fallback + ETag.
     await this.assertFileReadable(this.attachmentsService.filePath(row), id);
 
-    const variant = size === 'thumb' ? 'thumb' : 'original';
+    const variant: RequestedSize = size !== undefined && isDerivativeVariantName(size) ? size : 'original';
     const file = this.attachmentsService.resolveFile(row, variant);
 
     // Issue #498 — honest cache policy for a permission-dependent resource. See the
@@ -210,6 +225,11 @@ export class AttachmentsController {
       'Cache-Control': 'private, no-cache, must-revalidate',
       Vary: 'Cookie, Authorization, x-dev-role, x-dev-user',
       ETag: file.etag,
+      // Issue #604: name the rung actually served ('thumb'|'md'|'lg'|'original'),
+      // or 'original-fallback' when the requested rung was not available. Set
+      // BEFORE the 304 short-circuit so a revalidating client still learns that a
+      // derivative has since become ready and can re-request a smaller URL.
+      'X-Campfire-Derivative': file.derivative,
     });
 
     if (ifNoneMatchSatisfied(req.headers['if-none-match'], file.etag)) {
@@ -238,6 +258,75 @@ export class AttachmentsController {
       }
     });
     stream.pipe(res);
+  }
+
+  /**
+   * Responsive-delivery manifest (issue #604).
+   *
+   * This is what lets a map surface render honest LOADING / STALE / ERROR states
+   * instead of pretending an original-sized fallback is a derivative: it reports
+   * per-rung `state` (pending / ready / failed / skipped), the real pixel
+   * dimensions of every ready rung (so the client can emit an accurate `srcset`
+   * with `w` descriptors rather than guessing from the max-dim cap), and a
+   * `stale` flag when a rung was generated from source bytes that have since been
+   * replaced.
+   *
+   * Authorization is identical to the bytes route — including the hidden/fog
+   * checks — because "how many rungs does this map have" is itself a hint about a
+   * staged handout's existence (#97/#463).
+   */
+  @Get(':id/derivatives')
+  @ApiOperation({
+    summary: 'Responsive derivative status for an attachment',
+    description:
+      'Requires campaign membership; hidden or fog-protected attachments 404 for non-DMs exactly as the bytes route does. ' +
+      'Returns per-rung state (pending/ready/failed/skipped) plus the real pixel dimensions of ready rungs, so a client can ' +
+      'build a correct srcset and show processing/stale/error states.',
+  })
+  @ApiResponse({ status: 200, description: 'Derivative manifest.' })
+  @ApiResponse({ status: 404, description: 'Attachment not found or hidden.' })
+  async derivatives(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const row = await this.requireReadableAttachment(id, user);
+    return this.attachmentsService.derivativeManifest(row);
+  }
+
+  /**
+   * Recovery action for a failed or stale ladder (issue #604) — the "Retry" the
+   * map surfaces offer when generation errored.
+   *
+   * dm-only: regenerating is real CPU + disk work, and the DM is the person who
+   * owns the map. Re-plans from the CURRENT source header (so it also fixes a
+   * ladder that went stale after a restore) and returns the fresh manifest, which
+   * flips the UI straight to "processing" without waiting for a poll.
+   */
+  @Post(':id/derivatives/retry')
+  @ApiOperation({
+    summary: 'Regenerate an attachment\'s responsive derivatives',
+    description: 'dm role required. Resets the ladder and schedules background regeneration; returns the new manifest.',
+  })
+  @ApiResponse({ status: 201, description: 'Ladder re-planned; generation runs in the background.' })
+  async retryDerivatives(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const row = await this.attachmentsService.getRowOrThrow(id);
+    await this.access.requireRole(user, row.campaignId, 'dm');
+    return this.attachmentsService.retryDerivatives(row);
+  }
+
+  /**
+   * Shared authorization preamble for the read-only derivative routes: membership,
+   * then the same hidden/fog secrecy rules the bytes route applies (see getFile).
+   * Kept as one helper so a future route cannot accidentally expose a staged
+   * handout's metadata by forgetting one of the two checks.
+   */
+  private async requireReadableAttachment(id: number, user: RequestUser) {
+    const row = await this.attachmentsService.getRowOrThrow(id);
+    const role = await this.access.requireMember(user, row.campaignId);
+    if (role !== 'dm') {
+      if (row.hidden) throw new NotFoundException(`Attachment ${id} not found`);
+      if (await this.attachmentsService.isFogProtectedEncounterMap(id, row.campaignId)) {
+        throw new NotFoundException(`Attachment ${id} not found`);
+      }
+    }
+    return row;
   }
 
   /**

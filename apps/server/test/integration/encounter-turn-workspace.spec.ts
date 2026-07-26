@@ -8,6 +8,8 @@ import { CampaignEventsService } from '../../src/modules/events/campaign-events.
 import { RollsService } from '../../src/modules/rolls/rolls.service';
 import { RevisionsService } from '../../src/modules/revisions/revisions.service';
 import { AttachmentsService } from '../../src/modules/attachments/attachments.service';
+// Issue #604: AttachmentsService now delegates responsive derivative generation.
+import { AttachmentDerivativesService } from '../../src/modules/attachments/attachment-derivatives.service';
 import { FsDeletionService } from '../../src/modules/attachments/fs-deletion.service';
 import { CampaignLibraryService } from '../../src/modules/campaign-library/campaign-library.service';
 import { EncountersService } from '../../src/modules/encounters/encounters.service';
@@ -35,7 +37,7 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
     const events = new CampaignEventsService();
     const rolls = new RollsService(orm);
     const revisions = new RevisionsService(orm);
-    const attachments = new AttachmentsService(orm, audit, new FsDeletionService(orm, audit));
+    const attachments = new AttachmentsService(orm, audit, new FsDeletionService(orm, audit), new AttachmentDerivativesService(orm));
     const campaignLibrary = new CampaignLibraryService(orm, audit);
     const service = new EncountersService(orm, audit, events, rolls, revisions, attachments, campaignLibrary);
     const actions = new ActionResolverService(orm, events, audit);

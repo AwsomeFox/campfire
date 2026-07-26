@@ -8,6 +8,8 @@ import { CampaignEventsService } from '../../src/modules/events/campaign-events.
 import { RevisionsService } from '../../src/modules/revisions/revisions.service';
 import { RollsService } from '../../src/modules/rolls/rolls.service';
 import { AttachmentsService } from '../../src/modules/attachments/attachments.service';
+// Issue #604: AttachmentsService now delegates responsive derivative generation.
+import { AttachmentDerivativesService } from '../../src/modules/attachments/attachment-derivatives.service';
 import { FsDeletionService } from '../../src/modules/attachments/fs-deletion.service';
 import { CampaignLibraryService } from '../../src/modules/campaign-library/campaign-library.service';
 import { Dnd5eAdapter, Pf2eAdapter, resourceVocabularyForAdapter } from '@campfire/schema';
@@ -31,7 +33,7 @@ describe('inline spell slots & character resources (issue #422)', () => {
     const revisions = new RevisionsService(db);
     const rolls = new RollsService(db);
     const fsDeletion = new FsDeletionService(db, audit);
-    const attachments = new AttachmentsService(db, audit, fsDeletion);
+    const attachments = new AttachmentsService(db, audit, fsDeletion, new AttachmentDerivativesService(db));
     const campaignLibrary = new CampaignLibraryService(db, audit);
 
     charactersService = new CharactersService(db, audit, revisions, events, rolls);
