@@ -109,7 +109,8 @@ export default function AiDmCard({
 
   if (!seat) return null;
 
-  const usagePct = seat.tokenBudget > 0 ? Math.min(100, Math.round((seat.tokensUsed / seat.tokenBudget) * 100)) : 0;
+  const committedTokens = seat.tokensUsed + seat.tokensReserved + seat.tokensUnknown;
+  const usagePct = seat.tokenBudget > 0 ? Math.min(100, Math.round((committedTokens / seat.tokenBudget) * 100)) : 0;
 
   return (
     <div
@@ -436,11 +437,23 @@ function BudgetSection({
           />
         </div>
         <span className="text-muted" style={{ fontSize: 11 }}>
-          {seat.tokensUsed.toLocaleString()} / {seat.tokenBudget.toLocaleString()} tokens used
+          {seat.tokensUsed.toLocaleString()} used
+          {' · '}
+          {seat.tokensReserved.toLocaleString()} reserved
+          {' · '}
+          {seat.tokensUnknown.toLocaleString()} unknown
+          {' · '}
+          {seat.budgetRemaining.toLocaleString()} / {seat.tokenBudget.toLocaleString()} remaining
           {' · '}
           {seat.turnCount} turn{seat.turnCount === 1 ? '' : 's'}
           {seat.lastTurnAt ? ` · last ${new Date(seat.lastTurnAt).toLocaleString()}` : ''}
         </span>
+        {(seat.tokensRefunded > 0 || seat.tokensOverage > 0) && (
+          <span className="text-muted" style={{ fontSize: 11 }}>
+            {seat.tokensRefunded.toLocaleString()} refunded
+            {seat.tokensOverage > 0 ? ` · ${seat.tokensOverage.toLocaleString()} overage recorded` : ''}
+          </span>
+        )}
       </div>
       {error && <p className="text-sm" style={{ color: '#f87171' }}>{error}</p>}
       <div className="flex gap-2 items-center">

@@ -407,7 +407,8 @@ function CampaignUsageTable({ ov }: { ov: AiConsoleOverview }) {
           </thead>
           <tbody className="divide-y divide-slate-800">
             {rows.map((r) => {
-              const over = r.tokenBudget > 0 && r.tokensUsed >= r.tokenBudget;
+              const committed = r.tokensUsed + r.tokensReserved + r.tokensUnknown;
+              const over = r.tokenBudget > 0 && committed >= r.tokenBudget;
               return (
                 <tr key={r.campaignId}>
                   <td className="py-2 pr-4 font-semibold text-white">{r.campaignName}</td>
@@ -418,7 +419,16 @@ function CampaignUsageTable({ ov }: { ov: AiConsoleOverview }) {
                     </span>
                   </td>
                   <td className={`pr-4 text-right ${over ? 'text-rose-400' : 'text-slate-300'}`}>
-                    {fmt(r.tokensUsed)} / {r.tokenBudget > 0 ? fmt(r.tokenBudget) : '∞'}
+                    <div>{fmt(r.tokensUsed)} / {r.tokenBudget > 0 ? fmt(r.tokenBudget) : '∞'}</div>
+                    {(r.tokensReserved > 0 || r.tokensUnknown > 0 || r.tokensOverage > 0) && (
+                      <div className="text-[10px] text-secondary">
+                        {r.tokensReserved > 0 ? `${fmt(r.tokensReserved)} reserved` : ''}
+                        {r.tokensReserved > 0 && (r.tokensUnknown > 0 || r.tokensOverage > 0) ? ' · ' : ''}
+                        {r.tokensUnknown > 0 ? `${fmt(r.tokensUnknown)} unknown` : ''}
+                        {r.tokensUnknown > 0 && r.tokensOverage > 0 ? ' · ' : ''}
+                        {r.tokensOverage > 0 ? `${fmt(r.tokensOverage)} overage` : ''}
+                      </div>
+                    )}
                   </td>
                   <td className="pr-4 text-right text-slate-400">{fmt(r.turnCount)}</td>
                 </tr>
@@ -440,7 +450,7 @@ function CampaignUsageTable({ ov }: { ov: AiConsoleOverview }) {
       )}
       <p className="text-[11px] text-secondary">
         Set a campaign&apos;s budget from its own AI-DM settings, or raise the server cap above. Usage aggregates the
-        per-turn metering.
+        per-turn metering, active reservations, and conservative unknown-usage holds.
       </p>
     </div>
   );

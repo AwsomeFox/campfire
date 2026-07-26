@@ -1455,6 +1455,32 @@ function migrateAiDmSeatsTableForProactiveSettings(sqlite: Database.Database): v
 }
 
 /**
+ * Issue #563: AI budget enforcement now reserves capacity before provider contact.
+ * These counters are cumulative/active token state for upgraded seats:
+ *   - tokens_reserved: currently in-flight capacity held before provider contact
+ *   - tokens_refunded: unused reserved capacity returned after known usage
+ *   - tokens_unknown : reserved capacity consumed by provider calls with unknown usage
+ *   - tokens_overage : known usage above the pre-call reservation
+ */
+function migrateAiDmSeatsTableForTokenReservations(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ai_dm_seats'")
+    .get();
+  if (!hasTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(ai_dm_seats)').all() as Array<{ name: string }>;
+  const add = (name: string) => {
+    if (!columns.some((c) => c.name === name)) {
+      sqlite.exec(`ALTER TABLE ai_dm_seats ADD COLUMN ${name} INTEGER NOT NULL DEFAULT 0`);
+    }
+  };
+  add('tokens_reserved');
+  add('tokens_refunded');
+  add('tokens_unknown');
+  add('tokens_overage');
+}
+
+/**
  * Migration for DBs created before the AI scribe (issue #316): the
  * `ai_scribe_configs` + `ai_scribe_jobs` tables didn't exist. Like the
  * ai_provider_configs migration (0040) these are NEW tables, so BOOTSTRAP_SQL's
@@ -2949,7 +2975,10 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0105_campaign_library_monsters_fk', run: migrateCampaignLibraryMonstersForeignKeys },
   { name: '0106_guest_dm_handoff_545', run: migrateGuestDmHandoff545 },
   { name: '0107_archmage_escalation_542', run: migrateArchmageEscalation542 },
-  { name: '0108_cast_sessions_547', run: migrateCastSessionsTable },
+  { name: '0108_ai_dm_token_reservations_563', run: migrateAiDmSeatsTableForTokenReservations },
+  // 0108 was taken on main by the AI token-reservation migration (#563); this branch
+  // merges after it, so cast sessions take the next free ordinal.
+  { name: '0109_cast_sessions_547', run: migrateCastSessionsTable },
 ];
 
 /**
