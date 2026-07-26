@@ -105,6 +105,21 @@ describe('portable content projection (issue #585)', () => {
     expect(hashPortable('npc', { name: 'X' })).not.toBe(hashPortable('faction', { name: 'X' }));
   });
 
+  it('defaults enum-backed columns instead of normalizing them to an out-of-range empty string', () => {
+    // `''` is not a member of LocationStatus, and a location whose status is not
+    // `unexplored` is visible to players — so an omitted status must land on the enum's
+    // canonical value, and must do so HERE so the baseline and the live row agree.
+    expect(projectPortable('location', { name: 'Keep' }).status).toBe('unexplored');
+    expect(projectPortable('npc', { name: 'Vex' }).disposition).toBe('neutral');
+    expect(projectPortable('quest', { title: 'Rescue' }).status).toBe('available');
+    expect(projectPortable('faction', { name: 'Hand' }).standing).toBe('neutral');
+    // An explicit value still wins, and null/'' collapse onto the same default.
+    expect(projectPortable('location', { status: 'explored' }).status).toBe('explored');
+    expect(hashPortable('location', { name: 'Keep', status: '' })).toBe(
+      hashPortable('location', { name: 'Keep', status: null }),
+    );
+  });
+
   it('drops quest-objective play state (`done`) from the publisher-owned payload', () => {
     const withDone = projectPortable('quest', { objectives: [{ text: 'Find it', sortOrder: 0, done: true }] });
     const without = projectPortable('quest', { objectives: [{ text: 'Find it', sortOrder: 0 }] });

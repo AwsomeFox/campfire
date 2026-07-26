@@ -310,6 +310,24 @@ export class CampaignModulesService {
         throw new BadRequestException(`Package ships artifact ${id} that the manifest does not declare.`);
       }
     }
+    // Every cross-reference must name an artifact THIS package ships. A dangling key is
+    // rejected rather than quietly dropped: it would resolve to NULL on the row while the
+    // baseline still recorded the key, so the artifact's live projection could never match
+    // its own baseline and the install would report itself `locally_edited` forever — and
+    // would take the "the table edited this, keep it" branch on every later update.
+    for (const [id, content] of contentById) {
+      const kind = id.slice(0, id.indexOf(':')) as ModuleArtifactKind;
+      for (const [field, , refKind] of REFERENCE_FIELDS[kind]) {
+        const key = content[field];
+        if (typeof key !== 'string' || key === '') continue;
+        const target = artifactId(refKind, key);
+        if (!contentById.has(target)) {
+          throw new BadRequestException(
+            `Artifact ${id} references ${target} via ${field}, but the package does not ship it. Module cross-references must stay inside the package.`,
+          );
+        }
+      }
+    }
   }
 
   /** Upstream content, projected and keyed by `<kind>:<key>`. */
@@ -417,14 +435,33 @@ export class CampaignModulesService {
     }
   }
 
+  /**
+   * Rewrite a quest's objectives from portable content.
+   *
+   * `done` is PLAY STATE — deliberately excluded from the portable payload, and therefore
+   * NOT the publisher's to set. Because this rewrite is a delete+insert (objective rows have
+   * no stable portable id), the completion flags have to be carried across explicitly, or
+   * every module update that touches any field of a quest would silently reset the party's
+   * progress on it. Carry-over is matched on the objective TEXT: an objective that was only
+   * reordered keeps its tick, one whose wording the publisher actually changed is a
+   * different objective and starts untucked. Duplicated text is matched positionally.
+   */
   private writeObjectives(db: Db, questId: number, content: PortableContent): void {
     const list = Array.isArray(content.objectives)
       ? (content.objectives as Array<{ text: string; sortOrder: number }>)
       : [];
+    const doneByText = new Map<string, boolean[]>();
+    for (const row of db.select().from(questObjectives).where(eq(questObjectives.questId, questId)).all()) {
+      const queue = doneByText.get(row.text) ?? [];
+      queue.push(row.done);
+      doneByText.set(row.text, queue);
+    }
     db.delete(questObjectives).where(eq(questObjectives.questId, questId)).run();
     for (const [index, item] of list.entries()) {
+      const queue = doneByText.get(item.text);
+      const done = queue != null && queue.length > 0 ? (queue.shift() as boolean) : false;
       db.insert(questObjectives)
-        .values({ questId, text: item.text, done: false, sortOrder: item.sortOrder ?? index })
+        .values({ questId, text: item.text, done, sortOrder: item.sortOrder ?? index })
         .run();
     }
   }
@@ -517,10 +554,39 @@ export class CampaignModulesService {
     }
   }
 
+  /** The current value of each of a kind's reference columns for one row. */
+  private refColumnValues(db: Db, kind: ModuleArtifactKind, entityId: number): Record<string, number | null> {
+    const row = ((): Record<string, unknown> | undefined => {
+      switch (kind) {
+        case 'location':
+          return db.select().from(locations).where(eq(locations.id, entityId)).limit(1).all()[0];
+        case 'npc':
+          return db.select().from(npcs).where(eq(npcs.id, entityId)).limit(1).all()[0];
+        case 'quest':
+          return db.select().from(quests).where(eq(quests.id, entityId)).limit(1).all()[0];
+        default:
+          return undefined;
+      }
+    })();
+    const out: Record<string, number | null> = {};
+    for (const [, column] of REFERENCE_FIELDS[kind]) {
+      const value = row?.[column];
+      out[column] = typeof value === 'number' ? value : null;
+    }
+    return out;
+  }
+
   /**
    * Second pass: turn `*Key` references into local ids now that every artifact in the batch
-   * has one. A key that names an artifact this module does not ship resolves to NULL rather
-   * than dangling — cross-module references are not part of the contract.
+   * has one. A key that names an artifact this module does not ship does not resolve —
+   * cross-module references are not part of the contract.
+   *
+   * An UNRESOLVED reference is NOT the same as "clear the column". The portable model can
+   * only name this module's own artifacts, so a table that re-points a module NPC at one of
+   * their OWN locations produces content whose `locationKey` is null purely because the link
+   * is inexpressible — writing that null back would silently destroy the DM's edit on the
+   * next publisher correction. A reference is therefore only cleared when the link it would
+   * clear is one this module still owns; a link to anything else is left alone.
    */
   private resolveReferences(
     db: Db,
@@ -531,30 +597,38 @@ export class CampaignModulesService {
   ): void {
     const refs = REFERENCE_FIELDS[kind];
     if (refs.length === 0) return;
+    // Owned ids are per-kind: ids are per-table, so location 1 and npc 1 are unrelated.
+    const ownedByKind = new Map<string, Set<number>>();
+    for (const [id, ownedId] of idByArtifact) {
+      const ownedKind = id.slice(0, id.indexOf(':'));
+      const set = ownedByKind.get(ownedKind) ?? new Set<number>();
+      set.add(ownedId);
+      ownedByKind.set(ownedKind, set);
+    }
+    const current = this.refColumnValues(db, kind, entityId);
     const patch: Record<string, number | null> = {};
     for (const [field, column, refKind] of refs) {
       const key = content[field];
       const resolved = typeof key === 'string' ? (idByArtifact.get(artifactId(refKind, key)) ?? null) : null;
+      if (resolved === null) {
+        const existing = current[column];
+        if (existing != null && !(ownedByKind.get(refKind)?.has(existing) ?? false)) continue;
+      }
       // A quest/location may not be its own parent. The guard is deliberately scoped to
       // SAME-kind references: ids are per-table, so npc 1 pointing at location 1 is an
       // ordinary reference, not a self-reference.
       patch[column] = refKind === kind && resolved === entityId ? null : resolved;
     }
+    if (Object.keys(patch).length === 0) return;
     switch (kind) {
       case 'location':
-        db.update(locations).set({ parentId: patch.parentId ?? null }).where(eq(locations.id, entityId)).run();
+        db.update(locations).set(patch).where(eq(locations.id, entityId)).run();
         return;
       case 'npc':
-        db.update(npcs)
-          .set({ locationId: patch.locationId ?? null, factionId: patch.factionId ?? null })
-          .where(eq(npcs.id, entityId))
-          .run();
+        db.update(npcs).set(patch).where(eq(npcs.id, entityId)).run();
         return;
       case 'quest':
-        db.update(quests)
-          .set({ giverNpcId: patch.giverNpcId ?? null, parentId: patch.parentId ?? null })
-          .where(eq(quests.id, entityId))
-          .run();
+        db.update(quests).set(patch).where(eq(quests.id, entityId)).run();
         return;
       default:
     }
@@ -1530,8 +1604,11 @@ export class CampaignModulesService {
           upstreamModuleId: state.install.upstreamModuleId,
           upstreamVersion: state.install.upstreamVersion,
           forkedAt: state.install.forkedAt,
-          detached: state.install.detached,
-          detachedAt: state.install.detachedAt,
+          // `detached` / `detachedAt` are DELIBERATELY not restored. Detaching is its own
+          // deliberate, documented-as-permanent action and is not snapshotted, so replaying
+          // a pre-detach snapshot over it would silently re-attach an install the table had
+          // chosen to sever — an undo of something this rollback never did. Nothing that IS
+          // snapshotted can change the flag: apply is blocked outright on a detached install.
           updatedAt: ts,
         })
         .where(eq(campaignModuleInstalls.id, install.id))

@@ -1,8 +1,10 @@
 import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, asc, desc, eq, inArray, count } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, count, ne } from 'drizzle-orm';
 import type { z } from 'zod';
 import {
   ScheduledSessionCreate,
+  ScheduledSessionCancel,
+  ScheduledSessionDuplicate,
   ScheduledSessionUpdate,
   RsvpSet,
   diffScheduleNotificationFields,
@@ -17,8 +19,9 @@ import type { ScheduledSession, ScheduledSessionWithRsvps, ScheduledSessionListP
 import { SCHEDULE_PAST_DEFAULT_LIMIT, SCHEDULE_PAST_MAX_LIMIT } from '@campfire/schema';
 import { applyPage } from '../../common/pagination';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { scheduledSessions, sessionRsvps, campaigns } from '../../db/schema';
+import { scheduledSessions, sessionRsvps, campaigns, sessions, notificationReminders } from '../../db/schema';
 import { nowIso } from '../../common/time';
+import { notDeleted } from '../../common/soft-delete';
 import { generateIcsFeedToken, looksLikeIcsFeedToken } from '../../common/crypto';
 import { resolveIcsFeedTokenTtlDays } from '../../common/throttle.constants';
 import { foldForSearch, foldedIncludes } from '../../common/text-search';
@@ -31,9 +34,10 @@ import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { buildCampaignIcs } from './ics.util';
 import {
-  scheduleEndedSql,
   scheduleInProgressSql,
+  scheduleLiveSql,
   scheduleNotEndedSql,
+  schedulePastSql,
   scheduleUpcomingOnlySql,
 } from './scheduling-queries';
 
@@ -52,9 +56,28 @@ function icsTokenIsExpired(expiresAt: string | null): boolean {
   return new Date(expiresAt).getTime() < Date.now();
 }
 
+/** ScheduledSessionCreate's duration bounds — a NEW live night is at least 15 minutes. */
+const CREATE_MIN_DURATION_MINUTES = 15;
+const CREATE_MAX_DURATION_MINUTES = 24 * 60;
+
+/** Clamp a copied duration into the create-time window (see duplicate()). */
+function clampToCreateDuration(minutes: number): number {
+  if (!Number.isFinite(minutes)) return CREATE_MIN_DURATION_MINUTES;
+  return Math.min(CREATE_MAX_DURATION_MINUTES, Math.max(CREATE_MIN_DURATION_MINUTES, Math.floor(minutes)));
+}
+
 type ScheduledSessionCreateInput = z.infer<typeof ScheduledSessionCreate>;
 type ScheduledSessionUpdateInput = z.infer<typeof ScheduledSessionUpdate>;
+type ScheduledSessionCancelInput = z.infer<typeof ScheduledSessionCancel>;
+type ScheduledSessionDuplicateInput = z.infer<typeof ScheduledSessionDuplicate>;
 type RsvpSetInput = z.infer<typeof RsvpSet>;
+export type SyncDb = DrizzleDb | Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
+
+/** Result of the row-level half of a schedule↔session link (#504). */
+export type LinkSessionOutcome = { campaignId: number; linked: boolean; wasPreviouslyCompleted: boolean };
+
+/** Result of the row-level half of a schedule↔session unlink (#504). */
+export type UnlinkSessionOutcome = { campaignId: number; scheduleIds: number[] };
 
 function toDomain(row: typeof scheduledSessions.$inferSelect): ScheduledSession {
   return {
@@ -65,6 +88,11 @@ function toDomain(row: typeof scheduledSessions.$inferSelect): ScheduledSession 
     title: row.title,
     location: row.location,
     notes: row.notes,
+    status: row.status as ScheduledSession['status'],
+    cancelledAt: row.cancelledAt,
+    cancelledBy: row.cancelledBy,
+    cancellationReason: row.cancellationReason,
+    sessionId: row.sessionId,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -164,17 +192,108 @@ export class SchedulingService {
     return map;
   }
 
-  private async attachRsvps(rows: Array<typeof scheduledSessions.$inferSelect>): Promise<ScheduledSessionWithRsvps[]> {
+  private async attachRsvps(
+    rows: Array<typeof scheduledSessions.$inferSelect>,
+    reconcileLinks = true,
+  ): Promise<ScheduledSessionWithRsvps[]> {
     if (rows.length === 0) return [];
-    const rsvpRows = await this.db
-      .select()
-      .from(sessionRsvps)
-      .where(inArray(sessionRsvps.scheduledSessionId, rows.map((r) => r.id)));
+    const [rsvpRows, liveLinks] = await Promise.all([
+      this.db
+        .select()
+        .from(sessionRsvps)
+        .where(inArray(sessionRsvps.scheduledSessionId, rows.map((r) => r.id))),
+      reconcileLinks ? this.liveLinkedSessionIds(rows) : Promise.resolve(new Set<number>()),
+    ]);
     const grouped = this.groupRsvps(rsvpRows);
     return rows.map((row) => ({
-      ...toDomain(row),
+      ...(reconcileLinks ? this.projectLink(row, liveLinks) : toDomain(row)),
       rsvps: grouped.get(row.id) ?? [],
     }));
+  }
+
+  /**
+   * Which of these rows' linked recaps are still readable (not trashed)?
+   * One batched query; skipped entirely when nothing is linked.
+   */
+  private async liveLinkedSessionIds(rows: Array<typeof scheduledSessions.$inferSelect>): Promise<Set<number>> {
+    const linkedIds = [...new Set(rows.map((r) => r.sessionId).filter((id): id is number => id != null))];
+    if (linkedIds.length === 0) return new Set();
+    const live = await this.db
+      .select({ id: sessions.id })
+      .from(sessions)
+      .where(and(inArray(sessions.id, linkedIds), notDeleted(sessions.deletedAt)));
+    return new Set(live.map((r) => r.id));
+  }
+
+  /**
+   * Read-time reconciliation of the schedule↔recap link (#504).
+   *
+   * A recap is soft-deleted (trashed), never hard-deleted, so `ON DELETE SET NULL`
+   * never fires and the stored link survives — deliberately. Tearing the link down on
+   * trash would mean restoring the session silently fails to restore the link, trading
+   * a visible bug for silent data loss. But a trashed recap is invisible to every
+   * session read, so surfacing `sessionId` renders a "Recap" link that 404s, and
+   * reporting `completed` claims a night was played by a recap nobody can open.
+   *
+   * So both are hidden at READ time only. SQLite still holds `status='completed'` and
+   * `session_id`, so restoring the session reconciles the row with no write at all.
+   * `cancelled` is never link-derived, so its STATUS is passed through untouched — but
+   * a cancelled night never advertises a recap link either (see below).
+   */
+  private projectLink(row: typeof scheduledSessions.$inferSelect, liveLinkedIds: Set<number>): ScheduledSession {
+    const domain = toDomain(row);
+    // A cancelled night is not a played night, so it must not render a "Recap" link.
+    //
+    // Reachable since remove() started using the EFFECTIVE status (#504): a future
+    // `completed` row whose recap is trashed reads as `scheduled`, so the DM can cancel
+    // it — and cancel deliberately leaves `session_id` alone. Untrash the recap later
+    // and the raw row is `cancelled` WITH a live link, which the Schedule tab would
+    // render as a "Cancelled" tag beside a working "Recap" link.
+    //
+    // Fixed at READ time rather than by clearing the link on cancel. Clearing it would
+    // have to clear the recap's reciprocal `scheduled_session_id` too (otherwise it is
+    // the one-directional dangling link this file works hard to avoid), which means
+    // cancelling a night would silently and permanently destroy a recap↔night
+    // association nobody asked to remove — trading a cosmetic contradiction for real
+    // data loss, and breaking the invariant the whole fix rests on: the stored link
+    // survives so untrashing heals the row with no repair write. Restoring the
+    // SCHEDULE brings the link straight back, because nothing was thrown away.
+    if (domain.status === 'cancelled') return { ...domain, sessionId: null };
+    if (domain.sessionId == null || liveLinkedIds.has(domain.sessionId)) return domain;
+    return {
+      ...domain,
+      sessionId: null,
+      status: domain.status === 'completed' ? 'scheduled' : domain.status,
+    };
+  }
+
+  /**
+   * The lifecycle status a WRITE guard must reason about (#504).
+   *
+   * Reads reconcile a `completed` row whose recap is trashed back to `scheduled`
+   * (projectLink), and scheduleLiveSql() deliberately keeps such a row in the
+   * live/Upcoming projection, so the web renders it as an ordinary upcoming game
+   * night with full RSVP + Cancel controls. A guard that consults the RAW `status`
+   * column therefore rejects the exact actions the UI is offering — the player's
+   * RSVP and the DM's Cancel both 400 on a card that looks completely normal.
+   *
+   * There is one definition of "effective status" and it is projectLink()'s; this
+   * helper only applies it to a single row, so reads and writes cannot drift apart.
+   */
+  private async effectiveStatusOf(
+    row: typeof scheduledSessions.$inferSelect,
+  ): Promise<ScheduledSession['status']> {
+    const liveLinks = await this.liveLinkedSessionIds([row]);
+    return this.projectLink(row, liveLinks).status;
+  }
+
+  /** Point read for a write path: the raw row (for its stored fields) + its effective status. */
+  private async getRowWithEffectiveStatus(id: number): Promise<{
+    row: typeof scheduledSessions.$inferSelect;
+    status: ScheduledSession['status'];
+  }> {
+    const row = await this.getRowOrThrow(id);
+    return { row, status: await this.effectiveStatusOf(row) };
   }
 
   /** Full schedule list — kept for export/MCP backward compatibility. Prefer upcoming/past splits (#612). */
@@ -188,6 +307,26 @@ export class SchedulingService {
   }
 
   /**
+   * Archive read for campaign export: the RAW stored rows, deliberately NOT
+   * link-reconciled (#504).
+   *
+   * Every other read reconciles a `completed` row whose recap is trashed back to
+   * `scheduled`, because that is the honest thing to SHOW. An archive is not a view: it
+   * must record what the database actually holds. Reconciling here would let a recap
+   * that merely happened to be in the trash at export time permanently downgrade a
+   * completed night to `scheduled` in the portable copy — the trash is reversible, but
+   * the export would not be.
+   */
+  async listForExport(campaignId: number): Promise<ScheduledSessionWithRsvps[]> {
+    const rows = await this.db
+      .select()
+      .from(scheduledSessions)
+      .where(eq(scheduledSessions.campaignId, campaignId))
+      .orderBy(asc(scheduledSessions.scheduledAt));
+    return this.attachRsvps(rows, false);
+  }
+
+  /**
    * Live schedule projection: in-progress + upcoming nights, soonest-first (#612).
    * Queries only not-yet-ended rows instead of loading full history.
    */
@@ -196,7 +335,7 @@ export class SchedulingService {
     const rows = await this.db
       .select()
       .from(scheduledSessions)
-      .where(and(eq(scheduledSessions.campaignId, campaignId), scheduleNotEndedSql(nowIso)))
+      .where(and(eq(scheduledSessions.campaignId, campaignId), scheduleLiveSql(), scheduleNotEndedSql(nowIso)))
       .orderBy(asc(scheduledSessions.scheduledAt));
     return this.attachRsvps(rows);
   }
@@ -215,7 +354,7 @@ export class SchedulingService {
         : SCHEDULE_PAST_DEFAULT_LIMIT;
     const offset = page?.offset !== undefined ? Math.max(0, Math.floor(page.offset)) : 0;
     const nowIso = new Date(nowMs).toISOString();
-    const where = and(eq(scheduledSessions.campaignId, campaignId), scheduleEndedSql(nowIso));
+    const where = and(eq(scheduledSessions.campaignId, campaignId), schedulePastSql(nowIso));
 
     const [{ value: total }] = await this.db.select({ value: count() }).from(scheduledSessions).where(where);
 
@@ -253,15 +392,30 @@ export class SchedulingService {
       .from(scheduledSessions)
       .where(eq(scheduledSessions.campaignId, campaignId))
       .orderBy(asc(scheduledSessions.scheduledAt), asc(scheduledSessions.id));
-    return rows
-      .filter(
-        (r) =>
-          foldedIncludes(r.title, folded)
-          || foldedIncludes(r.scheduledAt, folded)
-          || foldedIncludes(r.notes, folded),
-      )
-      .slice(0, boundedLimit)
-      .map(toDomain);
+    const matches = rows.filter(
+      (r) =>
+        foldedIncludes(r.title, folded)
+        || foldedIncludes(r.scheduledAt, folded)
+        || foldedIncludes(r.notes, folded),
+    );
+    // Same read-time link reconciliation as every other projection: search must not
+    // hand back a sessionId pointing at a trashed recap either.
+    const liveLinks = await this.liveLinkedSessionIds(matches);
+    return (
+      matches
+        .map((row) => this.projectLink(row, liveLinks))
+        // Cancelled nights are excluded (#504). Before this issue, cancelling HARD-
+        // DELETED the row, so search never returned one; retaining the row for the
+        // Schedule tab's Past list must not silently turn campaign search into a
+        // graveyard of called-off nights. SearchResult carries no status/badge field
+        // (type/title/snippet/matchedField only), so a cancelled hit would be
+        // indistinguishable from a live game night in the results list — the same
+        // "UI shows it as normal, it isn't" trap this file already fixes elsewhere.
+        // Cancelled nights stay discoverable where they can be labelled: the Schedule
+        // tab's Past list badges them "Cancelled" and offers Restore.
+        .filter((s) => s.status !== 'cancelled')
+        .slice(0, boundedLimit)
+    );
   }
 
   /**
@@ -289,13 +443,13 @@ export class SchedulingService {
       this.db
         .select()
         .from(scheduledSessions)
-        .where(and(eq(scheduledSessions.campaignId, campaignId), scheduleInProgressSql(nowIso)))
+        .where(and(eq(scheduledSessions.campaignId, campaignId), scheduleLiveSql(), scheduleInProgressSql(nowIso)))
         .orderBy(asc(scheduledSessions.scheduledAt))
         .limit(1),
       this.db
         .select()
         .from(scheduledSessions)
-        .where(and(eq(scheduledSessions.campaignId, campaignId), scheduleUpcomingOnlySql(nowIso)))
+        .where(and(eq(scheduledSessions.campaignId, campaignId), scheduleLiveSql(), scheduleUpcomingOnlySql(nowIso)))
         .orderBy(asc(scheduledSessions.scheduledAt))
         .limit(1),
     ]);
@@ -315,10 +469,19 @@ export class SchedulingService {
     return row;
   }
 
+  private getRowOrThrowTx(tx: SyncDb, id: number) {
+    const [row] = tx.select().from(scheduledSessions).where(eq(scheduledSessions.id, id)).limit(1).all();
+    if (!row) throw new NotFoundException(`Scheduled session ${id} not found`);
+    return row;
+  }
+
   async getWithRsvps(id: number): Promise<ScheduledSessionWithRsvps> {
     const row = await this.getRowOrThrow(id);
-    const rsvpRows = await this.db.select().from(sessionRsvps).where(eq(sessionRsvps.scheduledSessionId, id));
-    return { ...toDomain(row), rsvps: rsvpRows.map(rsvpToDomain) };
+    const [rsvpRows, liveLinks] = await Promise.all([
+      this.db.select().from(sessionRsvps).where(eq(sessionRsvps.scheduledSessionId, id)),
+      this.liveLinkedSessionIds([row]),
+    ]);
+    return { ...this.projectLink(row, liveLinks), rsvps: rsvpRows.map(rsvpToDomain) };
   }
 
   /** Client-supplied ISO date-time -> canonical ISO UTC (validated by the Zod schema already). */
@@ -374,7 +537,19 @@ export class SchedulingService {
     role: Role,
     opts?: { expectedUpdatedAt?: string },
   ): Promise<ScheduledSessionWithRsvps> {
-    const existing = await this.getRowOrThrow(id);
+    const { row: existing, status: effectiveStatus } = await this.getRowWithEffectiveStatus(id);
+    // A cancelled night is not editable: this write commits a notes revision, an audit
+    // entry, and — for time/duration/venue/notes — a "rescheduled" push to the whole
+    // party for a game that is not happening. Rejecting is preferred over silently
+    // suppressing the notification: the DM's edit would otherwise appear to succeed
+    // while the party is never told, and the schedule they are looking at is stale
+    // either way. `restore` is the documented way back to an editable night, and the
+    // Schedule tab only offers Restore/Duplicate on a cancelled card, so nothing in
+    // the UI is broken by this. `completed` stays editable — a played night's notes
+    // are legitimate history to correct. Effective, not raw (see effectiveStatusOf).
+    if (effectiveStatus === 'cancelled') {
+      throw new BadRequestException('Cancelled scheduled sessions cannot be edited — restore it first');
+    }
     const patch = { ...input };
     if (patch.scheduledAt !== undefined) patch.scheduledAt = this.normalizeScheduledAt(patch.scheduledAt);
     const next = {
@@ -438,21 +613,38 @@ export class SchedulingService {
     return this.getWithRsvps(id);
   }
 
-  async remove(id: number, user: RequestUser, role: Role): Promise<void> {
-    const existing = await this.getRowOrThrow(id);
-    await this.db.delete(sessionRsvps).where(eq(sessionRsvps.scheduledSessionId, id));
-    await this.db.delete(scheduledSessions).where(eq(scheduledSessions.id, id));
+  async remove(id: number, user: RequestUser, role: Role, input: ScheduledSessionCancelInput = {}): Promise<ScheduledSessionWithRsvps> {
+    // Effective, not raw: a future night whose recap is in the Trash is shown in
+    // Upcoming with the DM's Cancel button, so Cancel has to actually work on it.
+    const { row: existing, status: effectiveStatus } = await this.getRowWithEffectiveStatus(id);
+    if (effectiveStatus === 'cancelled') return this.getWithRsvps(id);
+    if (effectiveStatus === 'completed') {
+      throw new BadRequestException('Completed scheduled sessions cannot be cancelled');
+    }
+    const ts = nowIso();
+    const reason = (input.reason ?? '').trim();
+    await this.db
+      .update(scheduledSessions)
+      .set({
+        status: 'cancelled',
+        cancelledAt: ts,
+        cancelledBy: user.id,
+        cancellationReason: reason,
+        updatedAt: ts,
+      })
+      .where(eq(scheduledSessions.id, id));
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
-      action: 'schedule.delete',
+      action: 'schedule.cancel',
       entityType: 'session',
       entityId: id,
       campaignId: existing.campaignId,
+      detail: reason,
     });
     this.emitScheduleUpdated(existing.campaignId, id);
-    // Issue #820: cancellation is a lifecycle event — notify with a snapshot of
-    // the removed night so the bell can still show a localized cancelled detail.
+    // Cancellation is a lifecycle event: keep the row/RSVPs, but notify with a
+    // snapshot so members and calendar clients can update their copies.
     await this.notifyScheduleLifecycle(
       existing.campaignId,
       user,
@@ -464,13 +656,320 @@ export class SchedulingService {
         changeType: 'cancelled',
       }),
     );
+    return this.getWithRsvps(id);
+  }
+
+  async restore(id: number, user: RequestUser, role: Role): Promise<ScheduledSessionWithRsvps> {
+    // Effective status here too, so every write guard in this file reads the same
+    // projection the API returns. ('cancelled' is never link-derived, so this one is
+    // equivalent to the raw column today — it is written this way so the next guard
+    // added here copies the correct pattern.)
+    const { row: existing, status: effectiveStatus } = await this.getRowWithEffectiveStatus(id);
+    if (effectiveStatus !== 'cancelled') throw new NotFoundException(`Scheduled session ${id} is not cancelled`);
+    const ts = nowIso();
+    // Un-cancelling and re-arming the reminders are one change, so they commit or roll
+    // back together — a half-applied restore would put the night back on the calendar
+    // with its reminders permanently suppressed, and nothing would ever report it.
+    //
+    // The `notification_reminders` ledger is the sweep's dedup guard: a surviving
+    // (schedule, user, kind) row makes emitOnce()'s claim lose, silently. The sweep only
+    // purges the ledger for nights that have already STARTED, so a night cancelled and
+    // restored while still inside the 24h lead window kept its rows and never reminded
+    // anyone again. Before #504 this sequence did not exist — cancel hard-deleted the
+    // row (and cascaded the ledger with it) — so restore is where the fix belongs.
+    //
+    // Purging on restore rather than on cancel is deliberate: while a night is
+    // cancelled the ledger is a useful record of what the party was already told, and
+    // restore is the exact moment the night becomes eligible to remind again. Restore
+    // starts a new incarnation of the night, so it starts with a clean ledger.
+    this.db.transaction((tx) => {
+      tx.update(scheduledSessions)
+        .set({
+          status: 'scheduled',
+          cancelledAt: null,
+          cancelledBy: null,
+          cancellationReason: '',
+          updatedAt: ts,
+        })
+        .where(eq(scheduledSessions.id, id))
+        .run();
+      tx.delete(notificationReminders)
+        .where(eq(notificationReminders.scheduledSessionId, id))
+        .run();
+    });
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'schedule.restore',
+      entityType: 'session',
+      entityId: id,
+      campaignId: existing.campaignId,
+    });
+    this.emitScheduleUpdated(existing.campaignId, id);
+    await this.notifyScheduleLifecycle(
+      existing.campaignId,
+      user,
+      this.scheduleNotificationData({
+        scheduleId: existing.id,
+        scheduledAt: existing.scheduledAt,
+        durationMinutes: existing.durationMinutes,
+        title: existing.title,
+        changeType: 'updated',
+      }),
+    );
+    return this.getWithRsvps(id);
+  }
+
+  async duplicate(
+    id: number,
+    input: ScheduledSessionDuplicateInput,
+    user: RequestUser,
+    role: Role,
+  ): Promise<ScheduledSessionWithRsvps> {
+    const existing = await this.getRowOrThrow(id);
+    const created = await this.create(
+      existing.campaignId,
+      {
+        scheduledAt: input.scheduledAt ?? existing.scheduledAt,
+        // A duplicate is a brand-new LIVE night, so it must satisfy the create-time
+        // floor that ScheduledSessionCreate enforces (min 15). The source row can sit
+        // below it — mid-session "End session" (#818) shrinks durationMinutes to 0 —
+        // and create() takes an already-typed input without re-parsing, so copying the
+        // raw value would mint a live schedule the create DTO would have rejected.
+        durationMinutes: input.durationMinutes ?? clampToCreateDuration(existing.durationMinutes),
+        title: input.title ?? existing.title,
+        location: input.location ?? existing.location,
+        notes: input.notes ?? existing.notes,
+      },
+      user,
+      role,
+    );
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'schedule.duplicate',
+      entityType: 'session',
+      entityId: created.id,
+      campaignId: existing.campaignId,
+      detail: `from=${id}`,
+    });
+    return created;
+  }
+
+  /** Read-only schedule fetch inside a caller's transaction (#504). */
+  getScheduleRowInTx(tx: SyncDb, id: number) {
+    return this.getRowOrThrowTx(tx, id);
+  }
+
+  /**
+   * Every precondition a link must satisfy, evaluated read-only against `db`.
+   *
+   * Single source of truth for the guards: `linkSessionInTx` runs it inside its write
+   * transaction (for correctness under concurrency), and callers that persist other
+   * changes alongside a link run it up front via `assertCanLinkSession` so a link that
+   * cannot succeed is rejected before anything is written.
+   *
+   * Returns `alreadyLinked` for the idempotent case (this exact pair is already linked)
+   * so callers can tell a no-op apart from a rejection.
+   *
+   * Deliberately the only write guard in this file that reasons about the RAW status
+   * rather than the effective one (see effectiveStatusOf). The other guards ask "what
+   * lifecycle state is the user looking at?"; this one asks "does a stored link already
+   * occupy this row?", and the stored link is real even while its recap sits in the
+   * Trash. Reconciling it away here would let a second recap overwrite `session_id`
+   * while the trashed recap kept its `scheduled_session_id` back-pointer — a
+   * one-directional dangling link, and it would break the invariant this whole fix
+   * rests on: untrashing a recap heals the row with no repair write. So the stale-link
+   * case is still rejected, but the message names the remedy instead of describing a
+   * link the caller cannot see. ('cancelled' is never link-derived, so for that branch
+   * raw and effective are the same value.)
+   */
+  private checkLinkable(db: SyncDb, scheduleId: number, sessionId: number): {
+    schedule: typeof scheduledSessions.$inferSelect;
+    alreadyLinked: boolean;
+  } {
+    const schedule = this.getRowOrThrowTx(db, scheduleId);
+    if (schedule.status === 'cancelled') throw new BadRequestException('Cancelled scheduled sessions cannot be completed');
+    if (schedule.status === 'completed' && schedule.sessionId !== sessionId) {
+      const linkedId = schedule.sessionId;
+      const [linkedRecap] = linkedId == null
+        ? []
+        : db.select({ deletedAt: sessions.deletedAt }).from(sessions).where(eq(sessions.id, linkedId)).limit(1).all();
+      throw new BadRequestException(
+        linkedRecap?.deletedAt != null
+          ? 'Scheduled session is linked to a session in the Trash — restore that session before linking a different one'
+          : 'Scheduled session is already linked to a different session',
+      );
+    }
+    const [session] = db.select().from(sessions).where(eq(sessions.id, sessionId)).limit(1).all();
+    if (!session || session.deletedAt != null) throw new NotFoundException(`Session ${sessionId} not found`);
+    if (session.campaignId !== schedule.campaignId) {
+      throw new BadRequestException('Session must belong to the same campaign as the scheduled session');
+    }
+    if (schedule.status === 'completed' && schedule.sessionId === sessionId) {
+      return { schedule, alreadyLinked: true };
+    }
+    if (session.scheduledSessionId != null && session.scheduledSessionId !== scheduleId) {
+      throw new BadRequestException('Session is already linked to a different scheduled session');
+    }
+    const [otherSchedule] = db
+      .select({ id: scheduledSessions.id })
+      .from(scheduledSessions)
+      .where(and(eq(scheduledSessions.sessionId, sessionId), ne(scheduledSessions.id, scheduleId)))
+      .limit(1)
+      .all();
+    if (otherSchedule) {
+      throw new BadRequestException('Session is already linked to a different scheduled session');
+    }
+    return { schedule, alreadyLinked: false };
+  }
+
+  /**
+   * Read-only pre-flight for callers that write other changes before linking (#504).
+   * Throws exactly what the link itself would, so a rejected edit can fail before it
+   * has persisted anything — otherwise the caller commits its field changes and then
+   * returns a 400 that does not match what was actually saved.
+   */
+  assertCanLinkSession(scheduleId: number, sessionId: number): void {
+    this.checkLinkable(this.db, scheduleId, sessionId);
+  }
+
+  /**
+   * Row-writes half of a link, for callers that link inside their own transaction so
+   * the link commits (or rolls back) together with their other writes. Pair with
+   * `recordSessionLink` after the transaction commits for audit + SSE.
+   */
+  linkSessionInTx(tx: SyncDb, scheduleId: number, sessionId: number): LinkSessionOutcome {
+    const { schedule, alreadyLinked } = this.checkLinkable(tx, scheduleId, sessionId);
+    if (alreadyLinked) {
+      return { campaignId: schedule.campaignId, linked: false, wasPreviouslyCompleted: true };
+    }
+    const ts = nowIso();
+    tx.update(scheduledSessions)
+      .set({ status: 'completed', sessionId, updatedAt: ts })
+      .where(eq(scheduledSessions.id, scheduleId))
+      .run();
+    tx.update(sessions)
+      .set({ scheduledSessionId: scheduleId, updatedAt: ts })
+      .where(eq(sessions.id, sessionId))
+      .run();
+    return { campaignId: schedule.campaignId, linked: true, wasPreviouslyCompleted: schedule.status === 'completed' };
+  }
+
+  /** Audit + SSE half of a link — run after the owning transaction has committed. */
+  async recordSessionLink(
+    outcome: LinkSessionOutcome,
+    scheduleId: number,
+    sessionId: number,
+    user: RequestUser,
+    role: Role,
+  ): Promise<void> {
+    if (!outcome.linked) return;
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'schedule.link',
+      entityType: 'session',
+      entityId: scheduleId,
+      campaignId: outcome.campaignId,
+      detail: `session=${sessionId}`,
+    });
+    if (!outcome.wasPreviouslyCompleted) {
+      await this.audit.log({
+        actor: auditActor(user),
+        actorRole: role,
+        action: 'schedule.complete',
+        entityType: 'session',
+        entityId: scheduleId,
+        campaignId: outcome.campaignId,
+        detail: `session=${sessionId}`,
+      });
+    }
+    this.emitScheduleUpdated(outcome.campaignId, scheduleId);
+  }
+
+  async linkSession(scheduleId: number, sessionId: number, user: RequestUser, role: Role): Promise<ScheduledSessionWithRsvps> {
+    const outcome = this.db.transaction((tx) => this.linkSessionInTx(tx, scheduleId, sessionId));
+    await this.recordSessionLink(outcome, scheduleId, sessionId, user, role);
+    return this.getWithRsvps(scheduleId);
+  }
+
+  /**
+   * Tear down a schedule↔session link from the SESSION side, both directions at once.
+   *
+   * `SessionUpdate.scheduledSessionId` is nullable, so REST/MCP `update_session` can
+   * send an explicit `null`. Clearing only `sessions.scheduled_session_id` would strand
+   * the schedule as `status='completed'` with `session_id` still pointing back — a
+   * one-directional dangling link that renders a dead "Recap" link in the Schedule tab
+   * and that no later linkSession() can repair (the reciprocal-row guard would keep
+   * rejecting it). Both sides are cleared in one better-sqlite3 transaction, and a
+   * schedule that was only `completed` BECAUSE of this link returns to `scheduled`.
+   *
+   * Any schedule row pointing at this session is swept, so pre-existing half-links from
+   * older data heal on the next unlink instead of persisting forever.
+   */
+  /**
+   * Row-writes half of an unlink, for callers unlinking inside their own transaction.
+   * Clears BOTH sides, so a caller must not also write `scheduledSessionId` itself.
+   * Pair with `recordSessionUnlink` after the transaction commits.
+   */
+  unlinkSessionInTx(tx: SyncDb, sessionId: number): UnlinkSessionOutcome {
+    const [session] = tx.select().from(sessions).where(eq(sessions.id, sessionId)).limit(1).all();
+    if (!session) throw new NotFoundException(`Session ${sessionId} not found`);
+    const linked = tx
+      .select()
+      .from(scheduledSessions)
+      .where(eq(scheduledSessions.sessionId, sessionId))
+      .all();
+    const ts = nowIso();
+    tx.update(sessions).set({ scheduledSessionId: null, updatedAt: ts }).where(eq(sessions.id, sessionId)).run();
+    for (const schedule of linked) {
+      tx.update(scheduledSessions)
+        // Only 'completed' is an artefact of the link; a cancelled row keeps its
+        // cancellation lifecycle state (and its cancellation metadata) untouched.
+        .set({ status: schedule.status === 'completed' ? 'scheduled' : schedule.status, sessionId: null, updatedAt: ts })
+        .where(eq(scheduledSessions.id, schedule.id))
+        .run();
+    }
+    return { campaignId: session.campaignId, scheduleIds: linked.map((s) => s.id) };
+  }
+
+  /** Audit + SSE half of an unlink — run after the owning transaction has committed. */
+  async recordSessionUnlink(
+    outcome: UnlinkSessionOutcome,
+    sessionId: number,
+    user: RequestUser,
+    role: Role,
+  ): Promise<void> {
+    for (const scheduleId of outcome.scheduleIds) {
+      await this.audit.log({
+        actor: auditActor(user),
+        actorRole: role,
+        action: 'schedule.unlink',
+        entityType: 'session',
+        entityId: scheduleId,
+        campaignId: outcome.campaignId,
+        detail: `session=${sessionId}`,
+      });
+      this.emitScheduleUpdated(outcome.campaignId, scheduleId);
+    }
+  }
+
+  async unlinkSession(sessionId: number, user: RequestUser, role: Role): Promise<void> {
+    const outcome = this.db.transaction((tx) => this.unlinkSessionInTx(tx, sessionId));
+    await this.recordSessionUnlink(outcome, sessionId, user, role);
   }
 
   // ----- RSVPs (availability) -----
 
   /** Upsert the calling member's own availability for a scheduled session. */
   async setRsvp(scheduleId: number, input: RsvpSetInput, user: RequestUser, role: Role): Promise<ScheduledSessionWithRsvps> {
-    const schedule = await this.getRowOrThrow(scheduleId);
+    // Effective, not raw: a future night whose recap is in the Trash reads back as
+    // 'scheduled' and is rendered with live RSVP controls, so it must accept them.
+    const { row: schedule, status: effectiveStatus } = await this.getRowWithEffectiveStatus(scheduleId);
+    if (effectiveStatus !== 'scheduled') {
+      throw new BadRequestException('RSVPs can only be changed for scheduled sessions');
+    }
     const ts = nowIso();
     const [existing] = await this.db
       .select()

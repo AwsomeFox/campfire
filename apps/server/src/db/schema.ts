@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer, real, uniqueIndex } from 'drizzle-orm/sqlite-core';
+import { sqliteTable, text, integer, real, uniqueIndex, primaryKey } from 'drizzle-orm/sqlite-core';
 import type { AiDmProactiveSettings } from '@campfire/schema';
 
 /**
@@ -333,6 +333,9 @@ export const sessions = sqliteTable('sessions', {
   recap: text('recap').notNull().default(''),
   // Nullable in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
   dmSecret: text('dm_secret').notNull().default(''),
+  // Optional durable link back to the planned schedule row this recap/play log completed (#504).
+  // Nullable in older DBs pre-migration; see db/db.module.ts migrateSchedulingLifecycle504().
+  scheduledSessionId: integer('scheduled_session_id'),
   // Soft-delete / trash timestamp (issue #116) — see campaigns.deletedAt.
   deletedAt: text('deleted_at'),
   createdAt: text('created_at').notNull(),
@@ -400,6 +403,11 @@ export const scheduledSessions = sqliteTable('scheduled_sessions', {
   title: text('title').notNull().default(''),
   location: text('location').notNull().default(''),
   notes: text('notes').notNull().default(''),
+  status: text('status').notNull().default('scheduled'),
+  cancelledAt: text('cancelled_at'),
+  cancelledBy: text('cancelled_by'),
+  cancellationReason: text('cancellation_reason').notNull().default(''),
+  sessionId: integer('session_id'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -1429,6 +1437,36 @@ export const encounterEvents = sqliteTable('encounter_events', {
   metadataJson: text('metadata_json'),
   createdAt: text('created_at').notNull(),
 });
+
+// Issue #580: per-intent idempotency for non-idempotent encounter mutations (HP deltas and
+// turn advancement). The row is written inside the SAME synchronous better-sqlite3
+// transaction as the effect it guards, so claim and effect commit or roll back together.
+//
+// `responseJson` is the ORIGINAL response body (role-scoped via `responseRole`), replayed
+// verbatim to a retry so an unreliable client can reconcile without guessing. It is
+// nullable: the turn endpoints return the whole role-redacted encounter, which is derived
+// asynchronously after the tx commits, so the claim lands first and the body is backfilled
+// immediately after — a replay that finds no body falls back to fresh server truth, never
+// to re-executing the effect.
+//
+// Keyed on (actorId, operation, key): two DMs cannot collide, and reusing one key for a
+// different operation (or a different encounter/campaign — see `encounterId`/`campaignId`)
+// is a 409 rather than a cross-scope replay. Pruned by createdAt TTL on write.
+export const encounterOpIdempotency = sqliteTable(
+  'encounter_op_idempotency',
+  {
+    actorId: text('actor_id').notNull(),
+    operation: text('operation').notNull(),
+    key: text('key').notNull(),
+    encounterId: integer('encounter_id').notNull(),
+    campaignId: integer('campaign_id').notNull(),
+    fingerprint: text('fingerprint').notNull(),
+    responseJson: text('response_json'),
+    responseRole: text('response_role'),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => ({ pk: primaryKey({ columns: [t.actorId, t.operation, t.key] }) }),
+);
 
 // ---------- campaign modules (issue #585) ----------
 // A distributable package of campaign prep with a stable UUID, semver, authors,

@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, ne, sql } from 'drizzle-orm';
 import type { MentionTarget, Role, SearchResponse, SearchResult, SearchResultType } from '@campfire/schema';
 import type { RequestUser } from '../../common/user.types';
 import { compareSearchText, foldForSearch, foldedIncludes, foldedIndexOf } from '../../common/text-search';
@@ -454,6 +454,11 @@ export class SearchService {
       OR (campaign_search_fts.entity_type = 'scheduled_session' AND EXISTS (
         SELECT 1 FROM scheduled_sessions ss
         WHERE ss.id = campaign_search_fts.entity_id AND ss.campaign_id = campaign_search_fts.campaign_id
+          -- A cancelled night is search's equivalent of a soft-deleted row (#504):
+          -- before cancellation became a lifecycle state it was a hard DELETE, so
+          -- search never returned one, and SearchResult has no status field to badge
+          -- it with. Mirrors SchedulingService.searchForCampaign's filter.
+          AND ss.status != 'cancelled'
       ))
     )`;
   }
@@ -754,6 +759,9 @@ export class SearchService {
       const rows = await this.db.select().from(scheduledSessions).where(and(
         eq(scheduledSessions.campaignId, campaignId),
         inArray(scheduledSessions.id, scheduledIds),
+        // Re-checked at hydration like every other type's deleted/hidden filter, so a
+        // stale FTS candidate can never be rendered as an ordinary game night (#504).
+        ne(scheduledSessions.status, 'cancelled'),
       ));
       for (const scheduled of rows) {
         const title = scheduled.title.trim()

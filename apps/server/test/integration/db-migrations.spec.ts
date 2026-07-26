@@ -359,7 +359,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(MIGRATION_NAMES).toContain('0098_encounters_aftermath_dismissed');
       expect(MIGRATION_NAMES).toContain('0102_ai_scribe_session_scope_499');
       // Issue #585 — campaign module identity/lineage/baseline/snapshot tables.
-      expect(MIGRATION_NAMES).toContain('0114_campaign_modules_585');
+      expect(MIGRATION_NAMES).toContain('0120_campaign_modules_585');
       for (const table of ['campaign_module_installs', 'campaign_module_artifacts', 'campaign_module_snapshots']) {
         expect(
           sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(table),

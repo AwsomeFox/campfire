@@ -48,6 +48,15 @@ export type FieldSpec = {
    * `*Key` reference fields, whose column holds a local id resolved from the key.
    */
   column?: string;
+  /**
+   * Canonical value for a `string` field whose column is a CLOSED ENUM. Without it a
+   * package that simply omits `status`/`disposition`/`standing` normalizes to `''`, which
+   * is not a member of the enum: the row is then written with an out-of-range value (and
+   * a location with `status: ''` is not `unexplored`, so it is visible to players from the
+   * moment it is installed). Defaulting HERE rather than at the insert keeps the baseline
+   * and the live row projecting to the same value, which is what the hash compare needs.
+   */
+  default?: string;
 };
 
 /**
@@ -62,7 +71,7 @@ export const PORTABLE_FIELDS: Record<ModuleArtifactKind, readonly FieldSpec[]> =
   location: [
     { name: 'name', type: 'string' },
     { name: 'kind', type: 'string' },
-    { name: 'status', type: 'string' },
+    { name: 'status', type: 'string', default: 'unexplored' },
     { name: 'body', type: 'string' },
     { name: 'dmSecret', type: 'string' },
     { name: 'mapX', type: 'nullableNumber' },
@@ -72,7 +81,7 @@ export const PORTABLE_FIELDS: Record<ModuleArtifactKind, readonly FieldSpec[]> =
   npc: [
     { name: 'name', type: 'string' },
     { name: 'role', type: 'string' },
-    { name: 'disposition', type: 'string' },
+    { name: 'disposition', type: 'string', default: 'neutral' },
     { name: 'body', type: 'string' },
     { name: 'dmSecret', type: 'string' },
     { name: 'iconSlug', type: 'string' },
@@ -83,7 +92,7 @@ export const PORTABLE_FIELDS: Record<ModuleArtifactKind, readonly FieldSpec[]> =
   quest: [
     { name: 'title', type: 'string' },
     { name: 'body', type: 'string' },
-    { name: 'status', type: 'string' },
+    { name: 'status', type: 'string', default: 'available' },
     { name: 'reward', type: 'string' },
     { name: 'dmSecret', type: 'string' },
     { name: 'hidden', type: 'boolean' },
@@ -100,7 +109,7 @@ export const PORTABLE_FIELDS: Record<ModuleArtifactKind, readonly FieldSpec[]> =
     { name: 'dmSecret', type: 'string' },
     { name: 'hidden', type: 'boolean' },
     { name: 'reputation', type: 'number' },
-    { name: 'standing', type: 'string' },
+    { name: 'standing', type: 'string', default: 'neutral' },
   ],
 };
 
@@ -183,8 +192,10 @@ function normalizeObjectives(value: unknown): Array<{ text: string; sortOrder: n
 
 function normalizeField(spec: FieldSpec, value: unknown): unknown {
   switch (spec.type) {
-    case 'string':
-      return normalizeString(value);
+    case 'string': {
+      const text = normalizeString(value);
+      return text === '' && spec.default != null ? spec.default : text;
+    }
     case 'number':
       return normalizeNumber(value);
     case 'nullableNumber':

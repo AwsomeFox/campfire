@@ -12,6 +12,7 @@ import { APP_VERSION } from './common/build-metadata';
 import { resolveTrustProxy, resolveAllowInsecureHttp, isDevAuthActive } from './common/security-config';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 import { requestContextMiddleware } from './common/request-context.middleware';
+import { normalizeMissingBody } from './common/normalize-body.middleware';
 import { registerErrorSchemas } from './common/openapi-error-schemas';
 
 patchNestJsSwagger();
@@ -104,6 +105,9 @@ export function configureApp(app: INestApplication): void {
   // size limit, not these parsers, so this cap doesn't affect them.
   app.use(express.json({ limit: '16mb' }));
   app.use(express.urlencoded({ extended: true, limit: '16mb' }));
+  // Issue #580 — a POST with no payload must reach the handler as `{}`, not `undefined`.
+  // See normalize-body.middleware.ts for the body-parser 1.x/2.x divergence behind this.
+  app.use(normalizeMissingBody);
   // Issue #682 / #684 — per-request id on every response + AsyncLocalStorage context
   // for structured logs, audit rows, MCP envelopes, and provider retries.
   app.use(requestContextMiddleware);

@@ -2883,6 +2883,35 @@ function migrateGuestDmHandoff545(sqlite: Database.Database): void {
 }
 
 /**
+ * Issue #504: scheduled sessions are no longer deleted when cancelled. Add a
+ * lifecycle status, cancellation metadata, and nullable schedule↔play-log links.
+ */
+function migrateSchedulingLifecycle504(sqlite: Database.Database): void {
+  const hasScheduledSessions = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='scheduled_sessions'")
+    .get();
+  if (hasScheduledSessions) {
+    const scheduleCols = sqlite.prepare('PRAGMA table_info(scheduled_sessions)').all() as Array<{ name: string }>;
+    const has = (name: string) => scheduleCols.some((c) => c.name === name);
+    if (!has('status')) sqlite.exec("ALTER TABLE scheduled_sessions ADD COLUMN status TEXT NOT NULL DEFAULT 'scheduled'");
+    if (!has('cancelled_at')) sqlite.exec('ALTER TABLE scheduled_sessions ADD COLUMN cancelled_at TEXT');
+    if (!has('cancelled_by')) sqlite.exec('ALTER TABLE scheduled_sessions ADD COLUMN cancelled_by TEXT');
+    if (!has('cancellation_reason')) sqlite.exec("ALTER TABLE scheduled_sessions ADD COLUMN cancellation_reason TEXT NOT NULL DEFAULT ''");
+    if (!has('session_id')) sqlite.exec('ALTER TABLE scheduled_sessions ADD COLUMN session_id INTEGER');
+  }
+
+  const hasSessions = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'")
+    .get();
+  if (hasSessions) {
+    const sessionCols = sqlite.prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>;
+    if (!sessionCols.some((c) => c.name === 'scheduled_session_id')) {
+      sqlite.exec('ALTER TABLE sessions ADD COLUMN scheduled_session_id INTEGER');
+    }
+  }
+}
+
+/**
  * Issue #547 — expiring, read-only Player Display cast sessions. These are
  * capability tokens for shared TVs/kiosks, stored hashed like recap shares.
  */
@@ -2905,6 +2934,43 @@ function migrateCastSessionsTable(sqlite: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_cast_sessions_campaign ON cast_sessions(campaign_id);
     CREATE INDEX IF NOT EXISTS idx_cast_sessions_expires_at ON cast_sessions(expires_at);
+  `);
+}
+
+/**
+ * Issue #580 — per-intent idempotency records for non-idempotent encounter mutations
+ * (HP deltas, turn advancement). Purely additive: a new table plus its indexes, so the
+ * whole migration is `CREATE ... IF NOT EXISTS` and is safe to re-run. The `PRAGMA
+ * table_info` probe below is belt-and-braces for the one case IF NOT EXISTS cannot
+ * cover — an install that somehow carries an EARLIER shape of the table (there is none
+ * shipped, but the ordinal after this one must not have to guess) — and re-creates it.
+ * Dropping is safe: the table holds only short-lived replay records, never durable
+ * campaign state, so the worst case of losing it is that an in-flight retry re-applies.
+ */
+function migrateEncounterOpIdempotency580(sqlite: Database.Database): void {
+  const existing = sqlite.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='encounter_op_idempotency'`).all();
+  if (existing.length > 0) {
+    const cols = sqlite.prepare(`PRAGMA table_info(encounter_op_idempotency)`).all() as Array<{ name: string }>;
+    const names = new Set(cols.map((c) => c.name));
+    const expected = ['actor_id', 'operation', 'key', 'encounter_id', 'campaign_id', 'fingerprint', 'response_json', 'response_role', 'created_at'];
+    if (expected.every((c) => names.has(c))) return;
+    sqlite.exec(`DROP TABLE encounter_op_idempotency`);
+  }
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS encounter_op_idempotency (
+      actor_id TEXT NOT NULL,
+      operation TEXT NOT NULL,
+      key TEXT NOT NULL,
+      encounter_id INTEGER NOT NULL REFERENCES encounters(id) ON DELETE CASCADE,
+      campaign_id INTEGER NOT NULL,
+      fingerprint TEXT NOT NULL,
+      response_json TEXT,
+      response_role TEXT,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (actor_id, operation, key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_encounter_op_idempotency_created ON encounter_op_idempotency(created_at);
+    CREATE INDEX IF NOT EXISTS idx_encounter_op_idempotency_encounter ON encounter_op_idempotency(encounter_id);
   `);
 }
 
@@ -3050,15 +3116,27 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0106_guest_dm_handoff_545', run: migrateGuestDmHandoff545 },
   { name: '0107_archmage_escalation_542', run: migrateArchmageEscalation542 },
   { name: '0108_ai_dm_token_reservations_563', run: migrateAiDmSeatsTableForTokenReservations },
-  // 0108 was taken on main by the AI token-reservation migration (#563); this branch
-  // merges after it, so cast sessions take the next free ordinal.
   { name: '0109_cast_sessions_547', run: migrateCastSessionsTable },
   // 0108/0109 both landed on main while this branch was open; derivatives take 0110.
   { name: '0110_attachment_derivatives_604', run: migrateAttachmentDerivativesTable604 },
-  // 0111-0113 are claimed by branches still in flight, so campaign modules take the first
-  // ordinal beyond them. Ordinals are never reused or renumbered — a gap in the sequence is
-  // cheaper than two branches colliding on a name (see the existing 0042/0078 gaps).
-  { name: '0114_campaign_modules_585', run: migrateCampaignModules585 },
+  // 0108/0109 were claimed on main by the AI token-reservation (#563) and cast-session
+  // (#547) migrations, and 0110 by attachment derivatives (#604); this branch merges
+  // after all of them, so the scheduling lifecycle migration takes the next genuinely
+  // free ordinal rather than collide.
+  { name: '0111_scheduling_lifecycle_504', run: migrateSchedulingLifecycle504 },
+  // 0116 is assigned to this branch by the merge coordinator, who is holding 0112-0113
+  // for other in-flight work and reassigned the contested 0114/0115 to #501 and #572.
+  // The gap above 0111 is therefore deliberate, not a miscount. Dedup is by the FULL
+  // name rather than the ordinal, so the issue-number suffix is what actually guarantees
+  // this runs exactly once even if a sibling branch lands a colliding ordinal first.
+  { name: '0116_encounter_op_idempotency_580', run: migrateEncounterOpIdempotency580 },
+  // Campaign modules take 0120, assigned centrally. The 0117-0119 gap above is DELIBERATE,
+  // not a miscount: 0117 is held for #1514 and 0118/0119 for #1442, both still in flight,
+  // and the 0114/0115 this branch originally carried were reassigned to #1443 and #1524.
+  // Ordinals are never reused or renumbered — a gap is cheaper than two branches colliding
+  // on a name (see the existing 0042/0078 gaps). Dedup is by the FULL name, so the `_585`
+  // suffix is what actually guarantees this runs exactly once.
+  { name: '0120_campaign_modules_585', run: migrateCampaignModules585 },
 ];
 
 /**

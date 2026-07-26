@@ -53,6 +53,8 @@ export const queryKeys = {
   // mode/enabled/budget/instructions config (instructions server-omitted for non-DMs, #261).
   aiDmSession: (campaignId: number) => ['campaign', campaignId, 'ai-dm', 'session'] as const,
   aiDmSeat: (campaignId: number) => ['campaign', campaignId, 'ai-dm', 'seat'] as const,
+  /** The #519 readiness checklist: derived from the seat, provider, settings and consent. */
+  aiDmReadiness: (campaignId: number) => ['campaign', campaignId, 'ai-dm', 'readiness'] as const,
 } satisfies Record<string, (...args: never[]) => QueryKey>;
 
 /**
@@ -174,10 +176,16 @@ export function useAiDmSeat(campaignId: number | undefined): UseQueryResult<AiDm
   });
 }
 
-/** Mark the AI-DM session + seat reads stale (called from stuck/state/vote/takeover signals). */
+/**
+ * Mark the AI-DM session + seat + readiness reads stale (called from stuck/state/vote/takeover
+ * signals). Readiness is derived from the seat's budget/mode and the metered usage a turn
+ * spends, so it goes stale on exactly the same signals — without this the onboarding checklist
+ * and the per-turn cost estimate keep rendering pre-turn numbers (#519).
+ */
 export function invalidateAiDm(client: QueryClient, campaignId: number): void {
   void client.invalidateQueries({ queryKey: queryKeys.aiDmSession(campaignId) });
   void client.invalidateQueries({ queryKey: queryKeys.aiDmSeat(campaignId) });
+  void client.invalidateQueries({ queryKey: queryKeys.aiDmReadiness(campaignId) });
 }
 
 export const queryClient = new QueryClient({
@@ -195,11 +203,17 @@ export const queryClient = new QueryClient({
       staleTime: 5_000,
     },
     mutations: {
-      // Same 4xx-is-terminal rule as reads.
-      retry: (failureCount, error) => {
-        if (error instanceof ApiError && error.status >= 400 && error.status < 500) return false;
-        return failureCount < 1;
-      },
+      // Issue #580: NO automatic retry by default. Reads are safe to repeat; mutations
+      // are not. This app's mutations include relative writes (HP deltas, turn advance),
+      // and a retry of one whose response was merely lost re-applies the damage or skips
+      // a combatant's turn. The old default — retry once on any network/5xx — made every
+      // endpoint retryable whether or not it could survive being replayed.
+      //
+      // Retry is now opt-IN, via useKeyedMutation (lib/keyedMutation.ts), which enables it
+      // only alongside the idempotency key that makes it safe. Opting in without a key is
+      // not expressible, which is the point: a new endpoint cannot inherit retry it has
+      // not been protected for.
+      retry: false,
     },
   },
 });

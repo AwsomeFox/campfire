@@ -636,6 +636,103 @@ describe('campaign modules (e2e, real cookie sessions)', () => {
     expect((await otherDm.get(api(`/module-updates/${MODULE_ID}/installs`))).body).toEqual([]);
   });
 
+  // ------------------------------------------------ what an update must NOT destroy
+  //
+  // Every case below was a real regression found in review: each one silently discarded
+  // something the table owned, and each fails against the pre-fix implementation.
+
+  it('preserves quest-objective completion across an update that rewrites the quest', async () => {
+    const cid = (await dm.post(api('/campaigns')).send({ name: 'Objective Table' })).body.id as number;
+    const install = (await dm.post(api(`/campaigns/${cid}/modules`)).send({ package: buildPackage('1.0.0', v1Artifacts()) }))
+      .body.id as number;
+
+    const quests = (await dm.get(api(`/campaigns/${cid}/quests`))).body as Array<Record<string, unknown>>;
+    const qid = quests.find((q) => q.title === 'Rescue the Cartographer')!.id as number;
+    const detail = (await dm.get(api(`/quests/${qid}`))).body as { objectives: Array<{ id: number; text: string }> };
+    // The party completes the first objective.
+    await dm.patch(api(`/quests/${qid}/objectives/${detail.objectives[0].id}`)).send({ done: true });
+
+    // The publisher corrects an UNRELATED field on the same quest.
+    const next = v1Artifacts();
+    (next[4].data as Record<string, unknown>).reward = '350gp';
+    const applied = await dm
+      .post(api(`/campaigns/${cid}/modules/${install}/update`))
+      .send({ package: buildPackage('1.1.0', next) });
+    expect(applied.body.applied).toBe(true);
+
+    const after = (await dm.get(api(`/quests/${qid}`))).body as {
+      reward: string;
+      objectives: Array<{ text: string; done: boolean }>;
+    };
+    expect(after.reward).toBe('350gp'); // the correction landed
+    // …and the party's progress on it survived. `done` is play state, never the publisher's.
+    expect(after.objectives.find((o) => o.text === 'Reach the cellar')!.done).toBe(true);
+    expect(after.objectives.find((o) => o.text === 'Find the cartographer')!.done).toBe(false);
+  });
+
+  it("keeps a table's link to one of their OWN entities, which the portable model cannot name", async () => {
+    const cid = (await dm.post(api('/campaigns')).send({ name: 'Homebrew Table' })).body.id as number;
+    const install = (await dm.post(api(`/campaigns/${cid}/modules`)).send({ package: buildPackage('1.0.0', v1Artifacts()) }))
+      .body.id as number;
+
+    // The DM moves the module's NPC into a location of their own making. That link is not
+    // expressible as a module artifact key, so the projection reads it as "no reference".
+    const homebrew = (await dm.post(api(`/campaigns/${cid}/locations`)).send({ name: 'My Own Tavern' })).body.id as number;
+    const npcList = (await dm.get(api(`/campaigns/${cid}/npcs`))).body as Array<Record<string, unknown>>;
+    const vexId = npcList.find((n) => n.name === 'Vex')!.id as number;
+    await dm.patch(api(`/npcs/${vexId}`)).send({ locationId: homebrew });
+
+    const next = v1Artifacts();
+    (next[3].data as Record<string, unknown>).body = 'Sells maps and rumours.';
+    await dm.post(api(`/campaigns/${cid}/modules/${install}/update`)).send({ package: buildPackage('1.1.0', next) });
+
+    const after = (await dm.get(api(`/campaigns/${cid}/npcs`))).body as Array<Record<string, unknown>>;
+    const vex = after.find((n) => n.id === vexId)!;
+    expect(vex.body).toBe('Sells maps and rumours.'); // the correction landed
+    expect(vex.locationId).toBe(homebrew); // the DM's own link was not wiped
+  });
+
+  it('installs enum-backed columns at their canonical default when the package omits them', async () => {
+    const cid = (await dm.post(api('/campaigns')).send({ name: 'Defaults Table' })).body.id as number;
+    const arts = v1Artifacts();
+    arts.push({ kind: 'location', key: 'unstated', data: { name: 'Unstated Room', kind: 'room', body: 'No status shipped.' } });
+    const install = (await dm.post(api(`/campaigns/${cid}/modules`)).send({ package: buildPackage('1.0.0', arts) })).body;
+    // A location whose status is '' is NOT `unexplored`, so it would be visible to players
+    // from the moment it installed. Defaulting happens in the projection, so the baseline
+    // agrees with the row and the artifact does not read as edited.
+    const locations = (await dm.get(api(`/campaigns/${cid}/locations`))).body as Array<Record<string, unknown>>;
+    expect(locations.find((l) => l.name === 'Unstated Room')!.status).toBe('unexplored');
+    expect(install.locallyEditedCount).toBe(0);
+  });
+
+  it('rejects a package whose cross-reference names an artifact it does not ship', async () => {
+    const arts = v1Artifacts();
+    (arts[3].data as Record<string, unknown>).factionKey = 'not-shipped';
+    const cid = (await dm.post(api('/campaigns')).send({ name: 'Dangling Table' })).body.id as number;
+    const res = await dm.post(api(`/campaigns/${cid}/modules`)).send({ package: buildPackage('1.0.0', arts) });
+    // Silently dropping it would leave the row's column NULL while the baseline still held
+    // the key — an install that reports itself locally edited forever.
+    expect(res.status).toBe(400);
+    expect(String(res.body.message)).toContain('does not ship it');
+  });
+
+  it('does not un-detach an install when an earlier update is rolled back', async () => {
+    const cid = (await dm.post(api('/campaigns')).send({ name: 'Detach Table' })).body.id as number;
+    const install = (await dm.post(api(`/campaigns/${cid}/modules`)).send({ package: buildPackage('1.0.0', v1Artifacts()) }))
+      .body.id as number;
+    const next = v1Artifacts();
+    next[1].data.body = 'A drowned fortress, rebuilt.';
+    await dm.post(api(`/campaigns/${cid}/modules/${install}/update`)).send({ package: buildPackage('1.1.0', next) });
+    await dm.post(api(`/campaigns/${cid}/modules/${install}/detach`)).send({});
+
+    await dm.post(api(`/campaigns/${cid}/modules/${install}/rollback`)).send({});
+    const after = (await dm.get(api(`/campaigns/${cid}/modules/${install}`))).body;
+    // Content went back, but detaching is a separate deliberate act this rollback never did.
+    const locations = (await dm.get(api(`/campaigns/${cid}/locations`))).body as Array<Record<string, unknown>>;
+    expect(locations.find((l) => l.name === 'The Sunken Keep')!.body).toBe('A drowned fortress.');
+    expect(after.lineage.detached).toBe(true);
+  });
+
   // ------------------------------------------------------------------ access control
 
   it('is dm-only', async () => {

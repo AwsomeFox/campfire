@@ -5,7 +5,9 @@ import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
 import { AllExceptionsFilter } from '../src/common/filters/all-exceptions.filter';
 import { requestContextMiddleware } from '../src/common/request-context.middleware';
+import { normalizeMissingBody } from '../src/common/normalize-body.middleware';
 import cookieParser from 'cookie-parser';
+import express from 'express';
 import { AppModule } from '../src/app.module';
 
 export interface TestAppContext {
@@ -31,6 +33,14 @@ export interface CreateTestAppOptions {
   overrides?: TestAppOverride[];
   /** Re-open an existing test data directory (used by interruption/recovery specs). */
   dataDir?: string;
+  /**
+   * Express middleware installed BEFORE `app.init()` — i.e. ahead of the Nest router.
+   * Used by the mutation-idempotency fault-injection suite (#580) to simulate a response
+   * that is lost, or replaced by a gateway error, AFTER the handler has already committed.
+   * Must run before init to sit in front of the routes; adding it afterwards would append
+   * it behind the router where it never executes.
+   */
+  middleware?: Array<(req: unknown, res: unknown, next: () => void) => void>;
 }
 
 /**
@@ -40,6 +50,15 @@ export interface CreateTestAppOptions {
  * DEV_AUTH=1 keeps the legacy x-dev-role/x-dev-user header path alive for all
  * the pre-existing e2e suites; new auth-flow suites use a real cookie-session
  * supertest agent instead, which SessionAuthGuard prefers over headers.
+ *
+ * Issue #580 — the app is created with `bodyParser: false` and its own `express.json()`,
+ * mirroring main.ts's bootstrap. This is not cosmetic. `apps/server` resolves express 5,
+ * whose body-parser is 2.x; Nest's DEFAULT parser resolves the hoisted body-parser 1.x.
+ * The two disagree on exactly one thing that matters: for a request with no body, 1.x
+ * coerces `req.body` to `{}` while 2.x leaves it `undefined`. A suite running on the
+ * default parser therefore cannot see a body-less POST 400-ing against a DTO — which is
+ * precisely the regression that reached CI on this issue's first run, invisible to a
+ * green server suite. The harness must parse bodies the way production does.
  */
 export async function createTestApp(options: CreateTestAppOptions = {}): Promise<TestAppContext> {
   const dataDir = options.dataDir ?? fs.mkdtempSync(path.join(os.tmpdir(), 'campfire-test-'));
@@ -58,8 +77,16 @@ export async function createTestApp(options: CreateTestAppOptions = {}): Promise
   }
   const moduleRef = await builder.compile();
 
-  const app = moduleRef.createNestApplication();
+  const app = moduleRef.createNestApplication({ bodyParser: false });
   app.use(cookieParser());
+  // Same parsers, same limits, same order as main.ts's configureApp().
+  app.use(express.json({ limit: '16mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '16mb' }));
+  app.use(normalizeMissingBody);
+  for (const mw of options.middleware ?? []) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    app.use(mw as any);
+  }
   app.setGlobalPrefix('api/v1', {
     exclude: [
       'healthz',
@@ -107,8 +134,12 @@ export async function createTestAppNoDevAuth(): Promise<TestAppContext> {
     imports: [AppModule],
   }).compile();
 
-  const app = moduleRef.createNestApplication();
+  const app = moduleRef.createNestApplication({ bodyParser: false });
   app.use(cookieParser());
+  // Mirror main.ts (see createTestApp's note on the body-parser 1.x/2.x divergence).
+  app.use(express.json({ limit: '16mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '16mb' }));
+  app.use(normalizeMissingBody);
   app.setGlobalPrefix('api/v1', {
     exclude: [
       'healthz',

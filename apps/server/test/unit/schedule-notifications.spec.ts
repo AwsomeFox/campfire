@@ -159,7 +159,7 @@ describe('schedule notification helpers (issue #820)', () => {
     expect(formatScheduleNotificationTitle(data({ changeType: 'cancelled' }), locale, tz)).toMatch(
       /cancelled · was .*Jul\s*21/,
     );
-    expect(formatScheduleNotificationBody(data({ changeType: 'cancelled' }))).toMatch(/removed from the calendar/i);
+    expect(formatScheduleNotificationBody(data({ changeType: 'cancelled' }))).toMatch(/RSVP history is preserved/i);
     expect(
       formatScheduleNotificationBody(data({ changeType: 'updated', changedFields: ['venue', 'notes'] })),
     ).toBe('Changed: venue and notes.');
