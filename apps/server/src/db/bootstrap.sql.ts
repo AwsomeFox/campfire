@@ -1088,6 +1088,29 @@ CREATE TABLE IF NOT EXISTS ai_dm_seats (
   updated_at TEXT NOT NULL
 );
 
+-- Issue #559: durable AI Driver control state. The driver stores live recovery
+-- controls separately from seat configuration so pause/takeover/vote/stuck
+-- state and replay input survive a server restart.
+CREATE TABLE IF NOT EXISTS ai_driver_control_state (
+  campaign_id INTEGER PRIMARY KEY REFERENCES campaigns(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'idle',
+  state TEXT NOT NULL DEFAULT 'running',
+  scene TEXT,
+  last_narration TEXT,
+  last_turn_at TEXT,
+  turn_count INTEGER NOT NULL DEFAULT 0,
+  stuck TEXT,
+  acting_dm TEXT,
+  vote TEXT,
+  takeover_requested_by TEXT,
+  last_input TEXT,
+  -- The recovery shape most recently ANNOUNCED to the table. A seat sitting in a steady
+  -- state (paused / human_control / stuck / open vote) is announced once, not re-announced
+  -- on every subsequent restart.
+  announced_recovery TEXT,
+  updated_at TEXT NOT NULL
+);
+
 -- Issue #1060: per-turn AI usage history for the DM's usage sparkline and audit.
 -- One row per metered turn (driver step, co-DM draft, scribe run). Cascades on
 -- campaign delete so purge cleans it up automatically.
