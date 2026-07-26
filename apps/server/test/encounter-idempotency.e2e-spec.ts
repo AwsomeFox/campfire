@@ -524,4 +524,22 @@ describe('encounter mutation idempotency (e2e, issue #580)', () => {
     expect(res.status).toBe(201);
     expect(res.body.currentCombatantId).toBe(goblinId);
   });
+
+  it('next-turn accepts a request with NO body and NO Content-Type at all', async () => {
+    // Regression guard for the exact shape #580 risked breaking. Adding a validated
+    // @Body() to a previously bodyless endpoint is only safe if a request carrying
+    // literally nothing still validates — and "nothing" has more than one flavor.
+    // supertest's `.send()` (above) still emits a JSON content-type, so it does NOT
+    // exercise this path; a bare POST with neither header nor body — what Playwright's
+    // `request.post(url)` and any plain `fetch(url, { method: 'POST' })` send — does.
+    const res = await request(server()).post(`/api/v1/encounters/${encounterId}/next-turn`).set(dm);
+    expect(res.status).toBe(201);
+    expect(res.body.currentCombatantId).toBe(goblinId);
+  });
+
+  it('next-turn accepts an explicitly empty JSON body', async () => {
+    const res = await request(server()).post(`/api/v1/encounters/${encounterId}/next-turn`).set(dm).send({});
+    expect(res.status).toBe(201);
+    expect(res.body.currentCombatantId).toBe(goblinId);
+  });
 });
