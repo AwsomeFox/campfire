@@ -6,7 +6,7 @@ import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { contentDispositionHeader } from '../attachments/filename';
 import { EncountersService } from './encounters.service';
-import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, RollRequestDto, ActionRollRequestDto, ManualRollRequestDto, MapPingDto, ActionResolveRequestDto, ActionResolutionDto, ActionUndoTokenDto } from './encounters.dto';
+import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterEscalationUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, RollRequestDto, ActionRollRequestDto, ManualRollRequestDto, MapPingDto, ActionResolveRequestDto, ActionResolutionDto, ActionUndoTokenDto } from './encounters.dto';
 import { EncounterMapService } from './encounter-map.service';
 import { ActionResolverService } from './action-resolver.service';
 import type { Request, Response } from 'express';
@@ -496,6 +496,20 @@ export class EncountersController {
     const row = await this.encounters.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
     return this.encounters.nextTurn(id, user, role);
+  }
+
+  @Post(':id/escalation')
+  @ApiOperation({
+    summary: 'Set 13th Age escalation die controls',
+    description:
+      'dm role required. For 13th Age encounters, hold automatic round-based escalation and/or set/clear a DM override (0–6). The server records structured history and combat-log entries.',
+  })
+  @ApiResponse({ status: 201, description: 'Encounter with updated escalation die state.' })
+  @ApiResponse({ status: 400, description: 'Not a 13th Age encounter, or invalid override.' })
+  async escalation(@Param('id', ParseIntPipe) id: number, @Body() body: EncounterEscalationUpdateDto, @CurrentUser() user: RequestUser) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    return this.encounters.updateEscalationDie(id, body, user, role);
   }
 
   @Get(':id/turn')

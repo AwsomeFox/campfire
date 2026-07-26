@@ -270,6 +270,9 @@ export const ResolvedTarget = z.object({
   attackTotal: z.number().int().nullable().default(null),
   naturalRoll: z.number().int().nullable().default(null),
   vsValue: z.number().int().nullable().default(null), // the AC / DC compared against
+  escalationDie: z.number().int().min(0).max(6).default(0),
+  escalationApplied: z.boolean().default(false),
+  escalationPrevented: z.boolean().default(false),
   // Save/check path mechanics.
   saveTotal: z.number().int().nullable().default(null),
   saveDc: z.number().int().nullable().default(null),
