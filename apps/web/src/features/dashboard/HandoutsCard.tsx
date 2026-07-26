@@ -62,14 +62,16 @@ export function HandoutsCard({ campaignId }: { campaignId: number }) {
     void load();
   }, [load, campaignId]);
 
-  async function commitVisibilityToggle(a: Attachment) {
+  async function commitVisibilityToggle(a: Attachment): Promise<boolean> {
     setBusyId(a.id);
     setError(null);
     try {
       await api.post(`${API}/attachments/${a.id}/${a.hidden ? 'reveal' : 'hide'}`);
       await load();
+      return true;
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't update the handout.");
+      return false;
     } finally {
       setBusyId(null);
     }
@@ -238,7 +240,9 @@ export function HandoutsCard({ campaignId }: { campaignId: number }) {
           confirmLabel="Reveal raw file"
           pendingLabel="Revealing…"
           busy={busyId === pendingReveal.id}
-          onConfirm={() => void commitVisibilityToggle(pendingReveal).then(() => setPendingReveal(null))}
+          onConfirm={() => void commitVisibilityToggle(pendingReveal).then((ok) => {
+            if (ok) setPendingReveal(null);
+          })}
           onCancel={() => setPendingReveal(null)}
         />
       )}

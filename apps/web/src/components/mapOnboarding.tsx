@@ -161,7 +161,13 @@ export function MapPurposePreview({
       <div style={{ display: 'flex', gap: 6, alignItems: 'baseline', flexWrap: 'wrap' }}>
         <span className="card-kicker">{copy.label}</span>
         <span className="text-muted" style={{ fontSize: 11 }}>
-          {mode === 'reveal' ? 'visibility warning' : mode === 'upload' ? 'upload preview' : 'save preview'}
+          {mode === 'reveal'
+            ? 'visibility warning'
+            : mode === 'upload'
+              ? 'upload preview'
+              : mode === 'preview'
+                ? 'preview'
+                : 'save preview'}
         </span>
       </div>
       <ul className="text-muted" style={{ fontSize: 11, margin: '4px 0 0', paddingLeft: 18 }}>
