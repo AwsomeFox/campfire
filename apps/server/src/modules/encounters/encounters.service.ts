@@ -297,6 +297,31 @@ function combatantToDomain(row: typeof combatants.$inferSelect): Combatant {
   };
 }
 
+/** Stable structured wrapper for one legacy string condition (issue #423 migration bridge). */
+function legacyConditionInstance(rawName: string): ConditionInstance | null {
+  const name = rawName.trim();
+  if (!name) return null;
+  // Bound the generated id to the schema max(40) and keep it stable.
+  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 33);
+  return {
+    id: `legacy_${slug || 'condition'}`.slice(0, 40),
+    name,
+    ruleEntryId: null,
+    source: null,
+    sourceCombatantId: null,
+    durationRounds: null,
+    roundsRemaining: null,
+    timing: 'none',
+    saveTiming: 'none',
+    saveDc: null,
+    saveAbility: null,
+    isConcentration: false,
+    stacks: 1,
+    notes: '',
+    custom: false,
+  };
+}
+
 /** Parse stored condition instances JSON or synthesize default instances from legacy conditions array (issue #423). */
 function parseConditionInstances(text: string | null, stringConditions: string[] = []): ConditionInstance[] {
   let instances: ConditionInstance[] = [];
@@ -312,25 +337,8 @@ function parseConditionInstances(text: string | null, stringConditions: string[]
       const key = name.toLowerCase();
       if (!existingNames.has(key)) {
         existingNames.add(key);
-        // Bound the generated id to the schema max(40) and keep it stable.
-        const slug = key.replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 33);
-        instances.push({
-          id: `legacy_${slug}`.slice(0, 40),
-          name,
-          ruleEntryId: null,
-          source: null,
-          sourceCombatantId: null,
-          durationRounds: null,
-          roundsRemaining: null,
-          timing: 'none',
-          saveTiming: 'none',
-          saveDc: null,
-          saveAbility: null,
-          isConcentration: false,
-          stacks: 1,
-          notes: '',
-          custom: false,
-        });
+        const legacy = legacyConditionInstance(name);
+        if (legacy) instances.push(legacy);
       }
     }
   }
@@ -3071,6 +3079,7 @@ export class EncountersService {
       patch.removeConditionInstanceId !== undefined ||
       patch.updateConditionInstance !== undefined ||
       patch.conditionInstances !== undefined;
+    const conditionFieldsTouched = conditionsTouched || conditionInstancesTouched;
 
     const spFieldsTouched =
       patch.spSet !== undefined ||
@@ -3082,8 +3091,7 @@ export class EncountersService {
     if (
       Object.keys(staticUpdate).length === 0 &&
       !recomputeHp &&
-      !conditionsTouched &&
-      !conditionInstancesTouched &&
+      !conditionFieldsTouched &&
       !spFieldsTouched &&
       !deathStateTouched &&
       patch.statblock === undefined
@@ -3117,7 +3125,7 @@ export class EncountersService {
       existing.kind === 'character' &&
       existing.characterId !== null &&
       encounterRow.status !== 'ended' &&
-      (recomputeHp || conditionsTouched || conditionInstancesTouched || spFieldsTouched || deathStateTouched);
+      (recomputeHp || conditionFieldsTouched || spFieldsTouched || deathStateTouched);
     let row!: typeof combatants.$inferSelect;
     // Captured inside the transaction (off the fresh committed read + the write result)
     // so the combat-log events appended after commit reflect the real before/after HP
@@ -3145,60 +3153,55 @@ export class EncountersService {
       _beforeSucc = fresh.deathSaveSuccesses;
       _beforeFail = fresh.deathSaveFailures;
       const writeSet: Partial<typeof combatants.$inferInsert> = { ...staticUpdate };
-      if (conditionsTouched) {
-        if (
-          patch.removeConditionInstanceId !== undefined ||
-          patch.conditionInstances !== undefined ||
-          patch.addConditionInstance !== undefined ||
-          patch.updateConditionInstance !== undefined
-        ) {
-          // Instance-level condition writes (issue #423): apply a single
-          // add/update/remove delta against the fresh instances, or replace the
-          // whole array, then derive the legacy string[] conditions array.
-          let instances = parseConditionInstances(fresh.conditionInstances, []);
-          beforeConditions = new Set(fromJsonText<string[]>(fresh.conditions, []));
-          if (patch.conditionInstances !== undefined) {
-            instances = [...patch.conditionInstances];
-          } else {
-            if (patch.addConditionInstance !== undefined) {
-              // Add a single instance (idempotent: replace if id already present).
-              const addIdx = instances.findIndex((i) => i.id === patch.addConditionInstance!.id);
-              if (addIdx >= 0) instances[addIdx] = patch.addConditionInstance;
-              else instances.push(patch.addConditionInstance);
-            }
-            if (patch.updateConditionInstance !== undefined) {
-              // Update a single instance by id; ignore if not present (no-op).
-              const upd = patch.updateConditionInstance;
-              const updIdx = instances.findIndex((i) => i.id === upd.id);
-              if (updIdx >= 0) instances[updIdx] = upd;
-            }
-            if (patch.removeConditionInstanceId !== undefined) {
-              // Remove only the targeted instance — not all instances.
-              instances = instances.filter((i) => i.id !== patch.removeConditionInstanceId);
+      if (conditionFieldsTouched) {
+        // Rebase every condition mutation against the FRESH row (issue #747 / #423).
+        // Legacy string deltas and structured instance deltas share this path so a
+        // removeConditions patch cannot leave stale conditionInstances behind, and an
+        // addConditionInstance patch actually persists without needing a legacy field.
+        const legacyConditions = fromJsonText<string[]>(fresh.conditions, []);
+        let instances = parseConditionInstances(fresh.conditionInstances, legacyConditions);
+        beforeConditions = new Set(deriveConditionNames(instances));
+
+        if (patch.conditionInstances !== undefined) {
+          instances = [...patch.conditionInstances];
+        } else {
+          if (patch.addConditionInstance !== undefined) {
+            // Add a single instance (idempotent: replace if id already present).
+            const addIdx = instances.findIndex((i) => i.id === patch.addConditionInstance!.id);
+            if (addIdx >= 0) instances[addIdx] = patch.addConditionInstance;
+            else instances.push(patch.addConditionInstance);
+          }
+          if (patch.updateConditionInstance !== undefined) {
+            // Update a single instance by id; ignore if not present (no-op).
+            const upd = patch.updateConditionInstance;
+            const updIdx = instances.findIndex((i) => i.id === upd.id);
+            if (updIdx >= 0) instances[updIdx] = upd;
+          }
+          if (patch.removeConditionInstanceId !== undefined) {
+            // Remove only the targeted instance — not all instances with the same name.
+            instances = instances.filter((i) => i.id !== patch.removeConditionInstanceId);
+          }
+          if (patch.removeConditions !== undefined) {
+            const removedNames = new Set(patch.removeConditions.map((c) => c.trim()).filter(Boolean));
+            instances = instances.filter((i) => !removedNames.has(i.name));
+          }
+          if (patch.addConditions !== undefined) {
+            const existingNames = new Set(instances.map((i) => i.name));
+            for (const rawName of patch.addConditions) {
+              const legacy = legacyConditionInstance(rawName);
+              if (!legacy) continue;
+              if (existingNames.has(legacy.name)) continue;
+              existingNames.add(legacy.name);
+              instances.push(legacy);
             }
           }
-          const derived = deriveConditionNames(instances);
-          afterConditions = new Set(derived);
-          writeSet.conditionInstances = toJsonText(instances);
-          writeSet.conditions = toJsonText(derived);
-        } else {
-          // Rebase the add/remove deltas against the FRESH row's conditions (issue
-          // #747). A stale whole-array write — derived outside the tx from the
-          // pre-await read — let two concurrent callers clobber each other: caller A
-          // adds 'poisoned' while caller B removes 'prone', and whichever wrote
-          // second replaced the array entirely, dropping the other's change. By
-          // reading `fresh.conditions` inside the serialized transaction and applying
-          // both deltas as set union/difference, concurrent changes compose — the
-          // same read-from-fresh pattern the HP path uses. Retries (re-adding an
-          // already-present or re-removing an absent condition) are idempotent: the
-          // set ops are no-ops and `afterConditions` equals `beforeConditions`.
-          const current = new Set(fromJsonText<string[]>(fresh.conditions, []));
-          beforeConditions = new Set(current);
-          for (const c of patch.removeConditions ?? []) current.delete(c);
-          for (const c of patch.addConditions ?? []) current.add(c);
-          afterConditions = new Set(current);
-          writeSet.conditions = toJsonText([...current]);
         }
+
+        instances = instances.slice(0, 50);
+        const derived = deriveConditionNames(instances);
+        afterConditions = new Set(derived);
+        writeSet.conditionInstances = toJsonText(instances);
+        writeSet.conditions = toJsonText(derived);
       }
       if (patch.eac !== undefined && isDm) writeSet.eac = patch.eac;
       if (patch.kac !== undefined && isDm) writeSet.kac = patch.kac;
@@ -3264,7 +3267,7 @@ export class EncountersService {
       afterDeath = updated.deathState;
       afterSucc = updated.deathSaveSuccesses;
       afterFail = updated.deathSaveFailures;
-      if (conditionsTouched) {
+      if (conditionFieldsTouched) {
         afterConditions = new Set(fromJsonText<string[]>(updated.conditions, []));
       }
       if (mirrorSheet) {
@@ -3281,7 +3284,7 @@ export class EncountersService {
           sheetSet.deathSaveSuccesses = updated.deathSaveSuccesses;
           sheetSet.deathSaveFailures = updated.deathSaveFailures;
         }
-        if (conditionsTouched) {
+        if (conditionFieldsTouched) {
           sheetSet.conditions = updated.conditions;
         }
         tx.update(characters)
@@ -3302,7 +3305,7 @@ export class EncountersService {
     // identity edits (rename / hpMax / initMod, issue #114) — which are rare and
     // worth a trail. An update that ONLY touched HP/death-save fields is skipped.
     const changedNonHp =
-      conditionsTouched ||
+      conditionFieldsTouched ||
       staticUpdate.initiative !== undefined ||
       staticUpdate.name !== undefined ||
       staticUpdate.initMod !== undefined ||
@@ -3446,7 +3449,7 @@ export class EncountersService {
     // caller). Logging the symmetric difference of the two committed sets means a
     // retry that landed nothing new logs nothing, while a real concurrent change
     // still logs exactly the conditions this caller's delta flipped.
-    if (conditionsTouched) {
+    if (conditionFieldsTouched) {
       for (const c of afterConditions) {
         if (!beforeConditions.has(c)) {
           await this.appendEvent(encounterId, round, 'condition', {
