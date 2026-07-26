@@ -83,6 +83,8 @@
     "changePasswordFailed": "Failed to change password.",
     "cancel": "Cancel",
     "saving": "Saving…",
-    "save": "Save"
+    "save": "Save",
+    "moderation": "Moderation",
+    "myReports": "My reports"
   }
 }

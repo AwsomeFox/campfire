@@ -2360,6 +2360,33 @@ function migrateArchmageEscalation542(sqlite: Database.Database): void {
 }
 
 /**
+ * Issue #601: moderation incidents — evidence snapshots, reports, mutes, and the
+ * quarantine columns on the two moderated content tables.
+ *
+ * The three new tables (moderation_evidence / moderation_reports /
+ * moderation_mutes) are created by BOOTSTRAP_SQL, which runs on every boot and so
+ * reaches fresh AND upgraded DBs — same pattern entity_revisions (#157) uses. This
+ * migration therefore exists only for the two ALTER TABLE paths bootstrap cannot
+ * express: `comments.quarantined_at/_by` and `notes.quarantined_at/_by`. Both are
+ * plain nullable ADD COLUMNs — no table rebuild, and no FTS trigger impact (the
+ * comments FTS index covers `body`, which is untouched; quarantine is enforced as a
+ * WHERE predicate alongside the existing deleted_at one, not by reindexing).
+ *
+ * Probes sqlite_master before PRAGMA table_info so a DB predating either table is a
+ * clean no-op, matching migrateAiProviderConfigTable / migrateArchmageEscalation542.
+ */
+function migrateModerationIncidents601(sqlite: Database.Database): void {
+  for (const table of ['comments', 'notes'] as const) {
+    const exists = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(table);
+    if (!exists) continue; // fresh DB — BOOTSTRAP_SQL already declares both columns.
+    const columns = sqlite.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    const has = (name: string): boolean => columns.some((c) => c.name === name);
+    if (!has('quarantined_at')) sqlite.exec(`ALTER TABLE ${table} ADD COLUMN quarantined_at TEXT`);
+    if (!has('quarantined_by')) sqlite.exec(`ALTER TABLE ${table} ADD COLUMN quarantined_by TEXT`);
+  }
+}
+
+/**
  * Issue #413: campaign turn-advancement controls. `dm_controls_turns` keeps combat
  * advancement DM-only (a player cannot end their own turn); `require_dm_turn_confirmation`
  * stages a player's end-turn for DM approval instead of advancing immediately. Both plain
@@ -2923,6 +2950,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0105_campaign_library_monsters_fk', run: migrateCampaignLibraryMonstersForeignKeys },
   { name: '0106_guest_dm_handoff_545', run: migrateGuestDmHandoff545 },
   { name: '0107_archmage_escalation_542', run: migrateArchmageEscalation542 },
+  { name: '0108_moderation_incidents_601', run: migrateModerationIncidents601 },
 ];
 
 /**

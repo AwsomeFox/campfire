@@ -36,10 +36,12 @@ import {
 } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
+import { canSee } from '../../common/note-visibility';
 import { foldForSearch, foldedIncludes } from '../../common/text-search';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService, excerpt } from '../notifications/notifications.service';
 import { RevisionsService } from '../revisions/revisions.service';
+import { ModerationService } from '../moderation/moderation.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import {
@@ -91,26 +93,14 @@ function entityNameFor(
 }
 
 /**
- * Can `user` see this note? private -> author only; dm_shared -> author+dm;
- * party_shared -> everyone; whisper -> author + the single targeted recipient + any
- * DM (oversight, so the whisper still enters the campaign record — issue #127). A
- * non-target, non-DM member must NEVER see a whisper, and this is the single
- * server-side chokepoint every read path (GET, list, MCP) funnels through.
+ * Note visibility (issue #127). The rule itself moved to `common/note-visibility.ts`
+ * for issue #601 — the moderation module must apply the IDENTICAL check when
+ * authorizing "may this reporter report this whisper", and importing it from here
+ * would close a circular module edge (NotesService now depends on ModerationService
+ * for pre-mutation evidence capture). Re-exported so every existing importer
+ * (RevisionsController, the MCP tools) is untouched.
  */
-export function canSee(
-  note: { authorUserId: string; visibility: string; recipientUserId?: string | null },
-  user: RequestUser,
-  role: Role,
-): boolean {
-  if (note.visibility === 'party_shared') return true;
-  if (note.authorUserId === user.id) return true;
-  if (note.visibility === 'dm_shared' && role === 'dm') return true;
-  if (note.visibility === 'whisper') {
-    if (note.recipientUserId === user.id) return true;
-    if (role === 'dm') return true;
-  }
-  return false;
-}
+export { canSee } from '../../common/note-visibility';
 
 @Injectable()
 export class NotesService {
@@ -121,6 +111,10 @@ export class NotesService {
     private readonly audit: AuditService,
     private readonly notifications: NotificationsService,
     private readonly revisions: RevisionsService,
+    // Issue #601: pre-mutation abuse-evidence capture + mute enforcement, and the
+    // quarantine path that finally lets a DM withhold an abusive whisper. The
+    // dependency runs one way (notes -> moderation).
+    private readonly moderation: ModerationService,
   ) {}
 
   /**
@@ -384,7 +378,19 @@ export class NotesService {
     visibility.push(and(eq(notes.visibility, 'whisper'), eq(notes.recipientUserId, user.id))!);
     if (role === 'dm') visibility.push(eq(notes.visibility, 'whisper'));
 
-    const conds: SQL[] = [eq(notes.campaignId, campaignId), eq(notes.kind, 'note'), notDeleted(notes.deletedAt), or(...visibility)!];
+    // notDeleted(quarantinedAt) (issue #601): a quarantined note/whisper is dropped
+    // from every normal read exactly like a trashed one — including for its own
+    // author and, for a whisper, its recipient. Withholding it from the target is
+    // the entire point: the DM has judged the content abusive, and "the victim can
+    // still read it" is not a moderation outcome. It stays reachable only through
+    // the separately-gated moderation evidence path.
+    const conds: SQL[] = [
+      eq(notes.campaignId, campaignId),
+      eq(notes.kind, 'note'),
+      notDeleted(notes.deletedAt),
+      notDeleted(notes.quarantinedAt),
+      or(...visibility)!,
+    ];
     if (filters.entityType) conds.push(eq(notes.entityType, filters.entityType));
     if (filters.entityId !== undefined) conds.push(eq(notes.entityId, filters.entityId));
     if (filters.mine) conds.push(eq(notes.authorUserId, user.id));
@@ -586,6 +592,11 @@ export class NotesService {
     const [row] = await this.db.select().from(notes).where(eq(notes.id, id)).limit(1);
     // A trashed note (soft-deleted, #116) reads as nonexistent unless includeDeleted (restore).
     if (!row || (!includeDeleted && row.deletedAt != null)) throw new NotFoundException(`Note ${id} not found`);
+    // A QUARANTINED note (issue #601) reads as nonexistent to every caller on every
+    // path, including restore — only the moderation queue may lift a quarantine, so
+    // there is deliberately no includeDeleted-style escape hatch here. Without this,
+    // an author could restore their own quarantined note straight back into view.
+    if (row.quarantinedAt != null) throw new NotFoundException(`Note ${id} not found`);
     return row;
   }
 
@@ -597,6 +608,10 @@ export class NotesService {
   }
 
   async create(campaignId: number, input: NoteCreateInput, user: RequestUser, role: Role): Promise<Note> {
+    // Issue #601: a moderation mute must actually stop the muted member posting —
+    // including via a whisper, which is exactly the channel a muted harasser would
+    // reach for next. Checked first so a muted request does no writes at all.
+    await this.moderation.assertNotMuted(campaignId, user);
     const ts = nowIso();
     const visibility = input.visibility ?? 'private';
     const recipientUserId = await this.resolveWhisperTarget(campaignId, visibility, input.recipientUserId);
@@ -684,11 +699,23 @@ export class NotesService {
     const finalRecipientRaw = 'recipientUserId' in input ? input.recipientUserId : existing.recipientUserId;
     const recipientUserId = await this.resolveWhisperTarget(existing.campaignId, finalVisibility, finalRecipientRaw);
 
-    const [row] = await this.db
-      .update(notes)
-      .set({ ...input, recipientUserId, updatedAt: nowIso() })
-      .where(eq(notes.id, id))
-      .returning();
+    // Issue #601: capture the pre-edit abuse-evidence snapshot INSIDE the write
+    // transaction, from the row as it exists there — not from `existing`, read
+    // earlier. A snapshot taken outside this window could be beaten by a concurrent
+    // delete and record content that is not what the edit actually overwrote.
+    // better-sqlite3 is synchronous and SQLite serializes write transactions, so no
+    // other writer can interleave. No-op unless an unresolved report names this note.
+    const row = this.db.transaction((tx) => {
+      const [current] = tx.select().from(notes).where(eq(notes.id, id)).limit(1).all();
+      if (current) this.moderation.snapshotNoteIfWatched(tx, current, 'pre_edit');
+      const rows = tx
+        .update(notes)
+        .set({ ...input, recipientUserId, updatedAt: nowIso() })
+        .where(eq(notes.id, id))
+        .returning()
+        .all();
+      return rows[0];
+    });
 
     await this.audit.log({
       actor: auditActor(user),
@@ -730,7 +757,15 @@ export class NotesService {
     if (existing.authorUserId !== user.id) {
       throw new ForbiddenException('Only the author may delete this note');
     }
-    await this.db.update(notes).set({ deletedAt: nowIso(), updatedAt: nowIso() }).where(eq(notes.id, id));
+    // Issue #601: same atomic snapshot-then-mutate as update(). This is the sharper
+    // case — an abuser racing a victim's report must not be able to delete the
+    // whisper between the report reading it and the report recording it.
+    const ts = nowIso();
+    this.db.transaction((tx) => {
+      const [current] = tx.select().from(notes).where(eq(notes.id, id)).limit(1).all();
+      if (current) this.moderation.snapshotNoteIfWatched(tx, current, 'pre_delete');
+      tx.update(notes).set({ deletedAt: ts, updatedAt: ts }).where(eq(notes.id, id)).run();
+    });
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -834,6 +869,9 @@ export class NotesService {
       eq(notes.kind, 'inbox'),
       eq(notes.resolved, resolved),
       notDeleted(notes.deletedAt),
+      // Quarantined inbox submissions are withheld from the DM inbox too (#601) —
+      // the queue is where a moderated one is handled, not the ordinary inbox.
+      notDeleted(notes.quarantinedAt),
     ];
 
     if (resolved) {

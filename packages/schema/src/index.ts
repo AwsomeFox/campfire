@@ -1629,6 +1629,15 @@ export const Comment = z.object({
   // already covers the author touching their own prose).
   editedAt: IsoDate.nullable().default(null),
   editedBy: z.string().max(120).nullable().default(null),
+  // Moderation quarantine (issue #601). null = normal; an ISO timestamp means a DM
+  // has withheld this comment's body pending review — `body` reads back as a neutral
+  // placeholder for EVERY caller, including the author and the DM who quarantined it.
+  // Distinct from `deletedAt` on purpose: a tombstone is a lifecycle act by the author
+  // or a DM and reads as "[deleted]"; a quarantine is a moderation act tied to an open
+  // report and reads as "[withheld pending moderation review]". Surfacing the flag is
+  // deliberate — a reader who sees a placeholder deserves to know which one it is, and
+  // the original prose lives on only in the (separately gated) evidence snapshot.
+  quarantinedAt: IsoDate.nullable().default(null),
   ...timestamps,
 });
 export type Comment = z.infer<typeof Comment>;
@@ -1643,6 +1652,7 @@ export const CommentCreate = Comment.omit({
   deletedBy: true,
   editedAt: true,
   editedBy: true,
+  quarantinedAt: true,
   createdAt: true,
   updatedAt: true,
 })
@@ -8013,6 +8023,315 @@ export const AuditRetentionStatus = z.object({
   lastJob: AuditPruneJob.nullable(),
 });
 export type AuditRetentionStatus = z.infer<typeof AuditRetentionStatus>;
+
+// ---------- moderation / abuse incidents (issue #601) ----------
+//
+// The finding behind #601: an author could edit or delete a comment with no
+// recoverable, integrity-protected copy of what they wrote; DMs had no way to
+// quarantine an abusive whisper; and there was no durable report/incident path
+// at all. Everything in this block exists to make abuse EVIDENCE survive the
+// abuser's own cleanup, and to keep that evidence walled off from ordinary
+// campaign content reads.
+//
+// Deliberate modelling choice — ONE generic (targetType, targetId) pair rather
+// than six near-duplicate report shapes. The six reportable surfaces named in
+// #601 (comment / whisper / note / notification / AI narration / conduct) differ
+// only in how the server RESOLVES the target and who may see it; the report
+// record itself is identical. `whisper` is a distinct target type from `note`
+// even though both live in the notes table, because a whisper is the one
+// surface with a single private recipient — the reporter is usually the victim,
+// and the DM queue must be able to quarantine it without touching ordinary notes.
+
+/**
+ * What a report is about. Resolution rules per type (server-enforced):
+ *  - `comment`       — a comments row; reporter must be able to see the anchor entity.
+ *  - `whisper`       — a notes row with visibility 'whisper'; reporter must be author, recipient, or DM.
+ *  - `note`          — any other notes row the reporter can see.
+ *  - `notification`  — a notifications row DELIVERED TO the reporter (you may only report your own bell).
+ *  - `ai_narration`  — AI-generated prose. Campfire does not persist narration turns as
+ *                      addressable rows, so this is the one target whose content is
+ *                      REPORTER-SUPPLIED (see ModerationEvidence.source). `targetId` is
+ *                      optional and, when present, is an opaque client-side turn id.
+ *  - `conduct`       — out-of-band behaviour with no single artefact (voice chat, table
+ *                      conduct). No targetId; content is reporter-supplied.
+ */
+export const ModerationTargetType = z.enum(['comment', 'whisper', 'note', 'notification', 'ai_narration', 'conduct']);
+export type ModerationTargetType = z.infer<typeof ModerationTargetType>;
+
+/** Target types whose content the SERVER captures itself (never reporter-supplied). */
+export const MODERATION_SERVER_CAPTURED_TARGETS: readonly ModerationTargetType[] = [
+  'comment',
+  'whisper',
+  'note',
+  'notification',
+];
+
+export const ModerationReportReason = z.enum([
+  'harassment',
+  'hate',
+  'sexual_content',
+  'threat_or_violence',
+  'self_harm',
+  'privacy',
+  'spam',
+  'other',
+]);
+export type ModerationReportReason = z.infer<typeof ModerationReportReason>;
+
+/**
+ * Report lifecycle. `escalated` is terminal for the DM queue but NOT for the
+ * incident: an escalated report leaves DM jurisdiction entirely and can only be
+ * read through server-admin break-glass. That is the conflicted-DM path — a
+ * report whose subject IS a DM of the campaign is auto-escalated at creation and
+ * never appears in that campaign's DM queue.
+ */
+export const ModerationReportStatus = z.enum(['open', 'acknowledged', 'escalated', 'resolved']);
+export type ModerationReportStatus = z.infer<typeof ModerationReportStatus>;
+
+/**
+ * How a report ended. `rejected` is the FALSE-REPORT outcome: it resolves the
+ * report AND lifts any quarantine the report caused, so a good-faith-but-wrong
+ * (or malicious) report cannot permanently suppress someone's content.
+ */
+export const ModerationResolution = z.enum(['upheld', 'rejected', 'no_action']);
+export type ModerationResolution = z.infer<typeof ModerationResolution>;
+
+/**
+ * DM queue verbs (#601 bullet 4). `unquarantine` / `unmute` are not in the
+ * issue's list but are required for `rejected` to mean anything — a quarantine
+ * with no lift is a one-way censor button.
+ */
+export const ModerationActionType = z.enum([
+  'acknowledge',
+  'quarantine',
+  'unquarantine',
+  'mute',
+  'unmute',
+  'remove',
+  'escalate',
+  'resolve',
+]);
+export type ModerationActionType = z.infer<typeof ModerationActionType>;
+
+/**
+ * Integrity state of a stored evidence snapshot, recomputed on every read.
+ *  - `intact`   — sha256 over the canonical payload still matches `contentHash`.
+ *  - `redacted` — content was deliberately redacted (retention expiry or an explicit
+ *                 redaction request). The ORIGINAL hash is preserved, so the fact that
+ *                 the bytes no longer match is expected and recorded, not suspicious.
+ *  - `tampered` — hash mismatch with no recorded redaction. Something wrote to the
+ *                 evidence row out of band. Fail loud.
+ */
+export const ModerationEvidenceIntegrity = z.enum(['intact', 'redacted', 'tampered']);
+export type ModerationEvidenceIntegrity = z.infer<typeof ModerationEvidenceIntegrity>;
+
+/** Why a snapshot was taken. Drives nothing but review comprehension — keep it honest. */
+export const ModerationEvidenceReason = z.enum(['report', 'pre_edit', 'pre_delete', 'pre_quarantine', 'pre_remove']);
+export type ModerationEvidenceReason = z.infer<typeof ModerationEvidenceReason>;
+
+/** Where the snapshot's bytes came from — see ModerationTargetType for why this matters. */
+export const ModerationEvidenceSource = z.enum(['server_capture', 'reporter_supplied']);
+export type ModerationEvidenceSource = z.infer<typeof ModerationEvidenceSource>;
+
+/**
+ * An integrity-protected snapshot of reportable content, captured BEFORE the
+ * source row is mutated (or at report time, whichever happens first).
+ *
+ * `contentHash` is a sha256 over a canonical, unambiguous serialization of the
+ * evidence fields — the server's `moderationEvidenceHash` defines the exact byte
+ * layout. It is NOT a hash of the JSON row (key order would make that
+ * meaningless) and NOT keyed/HMAC'd: an operator with DB write access could
+ * recompute a keyed MAC just as easily as a plain digest unless the key lives
+ * off-box, which a self-hosted single-binary deployment cannot promise. What
+ * this DOES buy is exactly what the issue asks for — tamper EVIDENCE: any edit
+ * to the stored content, author, timestamps, or context that is not accompanied
+ * by a recorded redaction shows up as `tampered` on the next read.
+ */
+export const ModerationEvidence = z.object({
+  id: Id,
+  campaignId: Id,
+  targetType: ModerationTargetType,
+  targetId: Id.nullable().default(null),
+  reason: ModerationEvidenceReason,
+  source: ModerationEvidenceSource,
+  /** Who authored the captured content (the report SUBJECT). '' when unknown (conduct). */
+  authorUserId: z.string().max(120).default(''),
+  authorName: z.string().max(120).default(''),
+  /** For a whisper/notification: the single member it was delivered to. */
+  recipientUserId: z.string().max(120).nullable().default(null),
+  /** The entity the content hung off, so a reviewer can situate it months later. */
+  anchorEntityType: z.string().max(40).nullable().default(null),
+  anchorEntityId: Id.nullable().default(null),
+  /**
+   * The source row's own `updated_at` at capture time — the "revision" #601 asks
+   * for. Combined with `capturedAt` it pins the snapshot to one specific version
+   * of the content, so two snapshots of the same target are orderable.
+   */
+  revisionAt: z.string().max(64).default(''),
+  /** The captured prose. Replaced with a placeholder once `redactedAt` is set. */
+  content: z.string().max(40_000).default(''),
+  /** Extra situating context as JSON (visibility, inCharacter, parentId, ...). */
+  context: z.record(z.unknown()).default({}),
+  contentHash: z.string().max(128),
+  integrity: ModerationEvidenceIntegrity,
+  redactedAt: IsoDate.nullable().default(null),
+  redactedBy: z.string().max(120).nullable().default(null),
+  redactionReason: z.string().max(500).default(''),
+  /**
+   * When the captured CONTENT stops being retained (bullet 6, "suitable for
+   * minors"). At/after this instant the content is redacted to a placeholder —
+   * the report shell, hashes, and audit trail survive so the incident record
+   * stays coherent, but the abusive material itself does not linger forever.
+   */
+  expiresAt: IsoDate.nullable().default(null),
+  capturedAt: IsoDate,
+});
+export type ModerationEvidence = z.infer<typeof ModerationEvidence>;
+
+/**
+ * The durable incident record. Note what is NOT here: the evidence CONTENT. A
+ * report row is queue metadata; reading the actual words requires the separate,
+ * always-audited evidence endpoint (#601 bullet 3 — "separate sensitive evidence
+ * access from ordinary campaign content").
+ */
+export const ModerationReport = z.object({
+  id: Id,
+  campaignId: Id,
+  targetType: ModerationTargetType,
+  targetId: Id.nullable().default(null),
+  reporterUserId: z.string().max(120),
+  reporterName: z.string().max(120).default(''),
+  /** Who the report is ABOUT — denormalized from the evidence so conflicted-DM checks never need a join. */
+  subjectUserId: z.string().max(120).default(''),
+  subjectName: z.string().max(120).default(''),
+  reason: ModerationReportReason,
+  details: z.string().max(4000).default(''),
+  status: ModerationReportStatus,
+  resolution: ModerationResolution.nullable().default(null),
+  resolutionNote: z.string().max(2000).default(''),
+  /** FK into moderation_evidence. Always set — a report without a snapshot is not durable. */
+  evidenceId: Id,
+  /** Integrity of the linked snapshot, surfaced on the queue row so a tampered incident is obvious. */
+  evidenceIntegrity: ModerationEvidenceIntegrity,
+  /** True while the reported content is withheld from normal reads because of THIS report. */
+  quarantined: z.boolean().default(false),
+  /** Set when the report left DM jurisdiction (conflicted DM, or an explicit escalate). */
+  escalatedAt: IsoDate.nullable().default(null),
+  escalationReason: z.string().max(500).default(''),
+  acknowledgedAt: IsoDate.nullable().default(null),
+  resolvedAt: IsoDate.nullable().default(null),
+  createdAt: IsoDate,
+  updatedAt: IsoDate,
+});
+export type ModerationReport = z.infer<typeof ModerationReport>;
+
+export const ModerationReportCreate = z
+  .object({
+    targetType: ModerationTargetType,
+    targetId: Id.nullable().optional(),
+    reason: ModerationReportReason,
+    details: z.string().max(4000).default(''),
+    /**
+     * ONLY honoured for `ai_narration` / `conduct`, whose content the server has
+     * no addressable row for. Supplying it for a server-captured target is a 400,
+     * not a silent drop — a reporter must never believe they attached evidence
+     * that the server then ignored.
+     */
+    content: z.string().max(20_000).optional(),
+    /**
+     * ONLY honoured for `conduct`, where there is no artefact to read the subject
+     * off. Must name a current campaign member. Rejected for every server-captured
+     * target: there the server knows who wrote the content and a reporter must not
+     * get to assert otherwise. Without it a conduct report is still filed, but the
+     * `mute` action has nobody to act on and is refused.
+     */
+    subjectUserId: z.string().max(120).optional(),
+  })
+  .strict();
+export type ModerationReportCreate = z.infer<typeof ModerationReportCreate>;
+
+export const ModerationActionRequest = z
+  .object({
+    action: ModerationActionType,
+    /** Required for `resolve`; ignored otherwise. */
+    resolution: ModerationResolution.optional(),
+    note: z.string().max(2000).default(''),
+    /** For `mute`: how long, in hours. Omit for an indefinite mute. */
+    muteHours: z.number().int().positive().max(24 * 365).optional(),
+  })
+  .strict();
+export type ModerationActionRequest = z.infer<typeof ModerationActionRequest>;
+
+/** An active posting mute in a campaign (the `mute` queue action). */
+export const ModerationMute = z.object({
+  id: Id,
+  campaignId: Id,
+  userId: z.string().max(120),
+  userName: z.string().max(120).default(''),
+  reason: z.string().max(500).default(''),
+  /** null = indefinite, until a DM lifts it. */
+  expiresAt: IsoDate.nullable().default(null),
+  createdBy: z.string().max(120).default(''),
+  createdAt: IsoDate,
+});
+export type ModerationMute = z.infer<typeof ModerationMute>;
+
+/** Default page size for the DM moderation queue. */
+export const MODERATION_LIST_DEFAULT_LIMIT = 25;
+/** Hard cap for `?limit=` on moderation lists — the queue is paged, never bulk-dumped. */
+export const MODERATION_LIST_MAX_LIMIT = 100;
+
+export const ModerationReportPage = CursorListPage(ModerationReport);
+export type ModerationReportPage = z.infer<typeof ModerationReportPage>;
+
+/**
+ * The controlled export bundle (#601 bullet 6). Produced only by an explicit,
+ * audited export call — never by the ordinary campaign export, which must not
+ * carry abuse evidence out of the moderation boundary.
+ */
+export const ModerationIncidentExport = z.object({
+  report: ModerationReport,
+  /** The snapshot taken when the report was filed. */
+  evidence: ModerationEvidence,
+  /**
+   * Every LATER snapshot of the same target, oldest-first: the pre_edit / pre_delete /
+   * pre_quarantine / pre_remove captures taken while this incident was open. Without
+   * these the mutation hooks would be write-only, and the single most important thing
+   * a reviewer needs — "what did they change after they were reported?" — would be
+   * unanswerable. Empty when the content was never touched again.
+   */
+  additionalEvidence: z.array(ModerationEvidence).default([]),
+  /** The incident's own audit rows (acknowledge/quarantine/…/resolve), oldest-first. */
+  timeline: z.array(AuditEntry),
+  exportedAt: IsoDate,
+  exportedBy: z.string().max(200),
+});
+export type ModerationIncidentExport = z.infer<typeof ModerationIncidentExport>;
+
+/**
+ * Retention for moderation evidence. Deliberately the SAME shape as
+ * AuditRetentionPolicy's persisted half (days / auto-sweep flag) so operators
+ * meet one mental model, and it INHERITS the audit policy's `days` when unset
+ * rather than inventing a second default nobody will tune.
+ *
+ * The critical difference from audit pruning: expiry REDACTS rather than
+ * deletes. Destroying the report shell would destroy the record that an
+ * incident happened at all, which is the opposite of what a safeguarding
+ * retention policy wants.
+ */
+export const ModerationRetentionPolicy = z.object({
+  days: z.number().int(),
+  defaultDays: z.number().int().positive(),
+  autoRedactEnabled: z.boolean(),
+  source: z.enum(['default', 'audit', 'settings']),
+});
+export type ModerationRetentionPolicy = z.infer<typeof ModerationRetentionPolicy>;
+
+export const ModerationRetentionPolicyUpdate = z.object({
+  days: z.number().int().optional(),
+  autoRedactEnabled: z.boolean().optional(),
+});
+export type ModerationRetentionPolicyUpdate = z.infer<typeof ModerationRetentionPolicyUpdate>;
 
 // ---------- admin observability (issue #22) ----------
 // Server-wide operational snapshot for the admin console (GET /admin/metrics,
