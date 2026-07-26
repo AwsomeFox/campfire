@@ -10,7 +10,18 @@ import {
 import { and, desc, eq, gt, gte, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import { AiDmProactiveSettings } from '@campfire/schema';
-import type { AiDmMode, AiDmSeat, AiDmSeatUpdate, AiDmTurnRequest, AiDmTurnResult, AiDmUsageHistoryEntry, AiDmUsageHistoryResponse, Role } from '@campfire/schema';
+import type {
+  AiDmMode,
+  AiDmReadiness,
+  AiDmReadinessCheck,
+  AiDmSeat,
+  AiDmSeatUpdate,
+  AiDmTurnRequest,
+  AiDmTurnResult,
+  AiDmUsageHistoryEntry,
+  AiDmUsageHistoryResponse,
+  Role,
+} from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { aiDmSeats, aiDmUsageHistory, settings } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -19,12 +30,29 @@ import { AuditService } from '../audit/audit.service';
 import { SettingsService } from '../settings/settings.service';
 import { AiProviderConfigService } from '../ai-provider-config/ai-provider-config.service';
 import { AI_DM_PROVIDER, type AiDmProvider } from './ai-dm.provider';
+import { SessionZeroService } from '../session-zero/session-zero.service';
+import { SupportPreferencesService } from '../session-zero/support-preferences.service';
+import { providerCapabilities } from './providers';
+import type { AiProviderConfig } from './providers/factory';
 
 type AiDmSeatUpdateInput = z.infer<typeof AiDmSeatUpdate>;
 type AiDmTurnRequestInput = z.infer<typeof AiDmTurnRequest>;
 
 /** Default per-turn output cap when the caller doesn't specify maxTokens. */
 const DEFAULT_MAX_TOKENS = 512;
+
+/**
+ * Readiness cost-estimate shape (#519) used only when a campaign has NO metered turns to
+ * average yet: a typical assembled prompt plus one bounded narration reply. Once real turns
+ * exist, {@link AiDmService.recentTurnTokenAverage} replaces this with observed usage.
+ */
+const DEFAULT_ESTIMATED_PROMPT_TOKENS = 750;
+const DEFAULT_ESTIMATED_COMPLETION_TOKENS = 1024;
+/** Share of a turn's tokens attributed to completion when only a total is known. */
+const DEFAULT_COMPLETION_SHARE =
+  DEFAULT_ESTIMATED_COMPLETION_TOKENS / (DEFAULT_ESTIMATED_PROMPT_TOKENS + DEFAULT_ESTIMATED_COMPLETION_TOKENS);
+/** How many recent metered turns the readiness estimate averages over. */
+const READINESS_USAGE_SAMPLE = 20;
 
 export interface AiDmTokenReservation {
   campaignId: number;
@@ -49,6 +77,7 @@ function budgetRemainingFor(seat: {
 }): number {
   return Math.max(0, seat.tokenBudget - seat.tokensUsed - seat.tokensReserved - seat.tokensUnknown);
 }
+
 
 function toDomain(row: typeof aiDmSeats.$inferSelect): AiDmSeat {
   return {
@@ -147,6 +176,8 @@ export class AiDmService implements OnApplicationBootstrap {
     private readonly audit: AuditService,
     private readonly settings: SettingsService,
     private readonly providerConfig: AiProviderConfigService,
+    private readonly sessionZero: SessionZeroService,
+    private readonly supportPreferences: SupportPreferencesService,
     @Inject(AI_DM_PROVIDER) private readonly provider: AiDmProvider,
   ) {}
 
@@ -262,19 +293,46 @@ export class AiDmService implements OnApplicationBootstrap {
    * it, so the driver (the path that actually burns provider tokens) ignored the cap.
    */
   async assertWithinServerTokenCap(): Promise<void> {
+    const status = await this.serverTokenCapStatus();
+    if (!status.withinCap) {
+      throw new ForbiddenException(
+        `Server-wide AI token cap reached (${status.total}/${status.cap}). A server admin must raise it in the AI console (PUT /settings/ai/caps) or reset usage to continue.`,
+      );
+    }
+  }
+
+  /**
+   * Mean tokens per metered turn over this campaign's most recent turns, or `null` when it
+   * has none yet. Powers the readiness cost estimate (#519) so the number a DM sees before a
+   * run reflects what THIS table actually spends rather than a fixed guess.
+   */
+  private async recentTurnTokenAverage(campaignId: number): Promise<number | null> {
+    const rows = await this.db
+      .select({ tokensUsed: aiDmUsageHistory.tokensUsed })
+      .from(aiDmUsageHistory)
+      .where(eq(aiDmUsageHistory.campaignId, campaignId))
+      .orderBy(desc(aiDmUsageHistory.id))
+      .limit(READINESS_USAGE_SAMPLE);
+    const samples = rows.map((row) => Number(row.tokensUsed)).filter((n) => Number.isFinite(n) && n > 0);
+    if (samples.length === 0) return null;
+    return Math.round(samples.reduce((sum, n) => sum + n, 0) / samples.length);
+  }
+
+  /**
+   * Non-throwing read of the same ceiling {@link assertWithinServerTokenCap} enforces, so
+   * the readiness model (#519) can REPORT the cap instead of showing a green checklist that
+   * the very next turn 403s on. Both share this one query so the two can never diverge.
+   */
+  private async serverTokenCapStatus(): Promise<{ cap: number; total: number; withinCap: boolean }> {
     const { aiServerTokenCap: cap } = await this.settings.getAll();
-    if (!cap || cap <= 0) return;
+    if (!cap || cap <= 0) return { cap: 0, total: 0, withinCap: true };
     const [agg] = await this.db
       .select({
         total: sql<number>`COALESCE(SUM(${aiDmSeats.tokensUsed} + ${aiDmSeats.tokensReserved} + ${aiDmSeats.tokensUnknown}), 0)`,
       })
       .from(aiDmSeats);
     const total = Number(agg?.total ?? 0);
-    if (total >= cap) {
-      throw new ForbiddenException(
-        `Server-wide AI token cap reached (${total}/${cap}). A server admin must raise it in the AI console (PUT /settings/ai/caps) or reset usage to continue.`,
-      );
-    }
+    return { cap, total, withinCap: total < cap };
   }
 
   /**
@@ -322,6 +380,321 @@ export class AiDmService implements OnApplicationBootstrap {
   }
 
   /**
+   * Central AI onboarding readiness model (#519). This is intentionally read-only
+   * and non-secret: it summarizes whether the table is ready to promote AI actions
+   * without returning provider keys, participant support text, or DM instructions.
+   */
+  async getReadiness(
+    campaignId: number,
+    user: RequestUser,
+    opts: { isAdmin: boolean },
+  ): Promise<AiDmReadiness> {
+    const seat = await this.getSeat(campaignId);
+    const [settings, providerView, charter, consent, serverCap, recentUsage] = await Promise.all([
+      this.settings.getAll(),
+      this.providerConfig.getEffectiveView(campaignId),
+      this.sessionZero.get(campaignId),
+      this.supportPreferences.aiConsentCounts(campaignId),
+      this.serverTokenCapStatus(),
+      this.recentTurnTokenAverage(campaignId),
+    ]);
+    const provider = providerView as AiDmReadiness['provider'];
+    // Use the SAME formula the spend gates use (#563 added tokensReserved/tokensUnknown to
+    // budgetRemainingFor). Computing it as tokenBudget - tokensUsed here would let readiness
+    // report budget available while in-flight reservations or unknown spend have actually
+    // exhausted the seat — reopening for the campaign budget precisely the readiness-says-
+    // green-then-403 divergence this issue closed for the server cap.
+    const budgetRemaining = budgetRemainingFor(seat);
+    const fix = (hash: string) => `/c/${campaignId}/settings#${hash}`;
+    const checks: AiDmReadinessCheck[] = [];
+    const push = (check: AiDmReadinessCheck) => checks.push(check);
+
+    // Disclosure decision (#519 review): this reports the server-wide AI flag's real value
+    // to any campaign DM, where the old client-side checklist showed non-admins only an
+    // "ask your admin" note. That is deliberate, not drift. The flag is not a secret — every
+    // AI gate already answers a member with a 403 that names it, and an admin-only console
+    // read is not what kept it private. Telling a DM *why* the AI is unavailable is strictly
+    // more useful than a vague "ask someone": it is the difference between a dead end and a
+    // copyable request (see the `serverFlag` extra in AiSetupChecklist). The one thing we do
+    // NOT do is imply the DM can act on it: `status` stays 'unknown' rather than 'blocked'
+    // for a non-admin, and `fixHref` is null, so the row reads as someone else's step.
+    push({
+      key: 'serverFlag',
+      ok: !!settings.experimentalAiDm,
+      status: settings.experimentalAiDm ? 'ok' : opts.isAdmin ? 'blocked' : 'unknown',
+      actor: 'admin',
+      title: 'Server AI enabled',
+      detail: settings.experimentalAiDm
+        ? 'The server-wide AI switch is on.'
+        : opts.isAdmin
+          ? 'Turn on the server-wide AI switch before promoting AI actions.'
+          : 'A server admin must enable experimental AI before this campaign can run AI actions.',
+      detailKey: settings.experimentalAiDm ? 'serverFlag.on' : opts.isAdmin ? 'serverFlag.offAdmin' : 'serverFlag.offMember',
+      detailParams: {},
+      requiredForDriver: true,
+      fixHref: opts.isAdmin ? '/admin/ai' : null,
+    });
+
+    push({
+      key: 'serverCap',
+      ok: serverCap.withinCap,
+      status: serverCap.withinCap ? 'ok' : 'blocked',
+      actor: 'admin',
+      title: 'Server-wide token cap',
+      detail: serverCap.cap <= 0
+        ? 'No server-wide AI token cap is set.'
+        : serverCap.withinCap
+          ? `${serverCap.total.toLocaleString()} / ${serverCap.cap.toLocaleString()} server-wide tokens used.`
+          : `The server-wide AI token cap is reached (${serverCap.total.toLocaleString()}/${serverCap.cap.toLocaleString()}). A server admin must raise it or reset usage.`,
+      detailKey: serverCap.cap <= 0 ? 'serverCap.none' : serverCap.withinCap ? 'serverCap.within' : 'serverCap.reached',
+      detailParams: { total: serverCap.total, cap: serverCap.cap },
+      requiredForDriver: true,
+      fixHref: opts.isAdmin ? '/admin/ai' : null,
+    });
+
+    push({
+      key: 'provider',
+      ok: provider.configured && provider.ready,
+      status: provider.configured && provider.ready ? 'ok' : 'blocked',
+      // The deep link always points at CAMPAIGN settings, where a DM can add (or fix) a
+      // campaign override — so the DM is the actor unless the effective config is the
+      // server default, which only an admin can repair in place.
+      actor: provider.configured && provider.source === 'server' ? 'admin' : 'dm',
+      title: 'Provider and credential',
+      detail: provider.configured
+        ? provider.ready
+          ? `Using ${provider.providerType ?? 'provider'} / ${provider.model ?? 'model'} from ${provider.source ?? 'configuration'} with ${provider.credentialSource} credentials.`
+          : 'A provider is configured, but no usable credential is available.'
+        : 'Configure a campaign provider or ask a server admin to set a server default.',
+      detailKey: provider.configured
+        ? provider.ready
+          ? 'provider.ready'
+          : 'provider.noCredential'
+        : 'provider.unconfigured',
+      detailParams: {
+        providerType: provider.providerType ?? 'provider',
+        model: provider.model ?? 'model',
+        source: provider.source ?? 'configuration',
+        credentialSource: provider.credentialSource,
+      },
+      requiredForDriver: true,
+      fixHref: fix('ai-dm-provider'),
+    });
+
+    let modelOk = provider.configured && provider.ready;
+    let modelDetail = provider.model
+      ? `Model ${provider.model} is selected.`
+      : 'Choose the model that will execute AI requests.';
+    let modelDetailKey = provider.model ? 'model.selected' : 'model.choose';
+    let modelDetailParams: Record<string, string | number> = { model: provider.model ?? '' };
+    try {
+      // Readiness is a plain GET that a settings UI may poll, and it sends NOTHING outbound,
+      // so it must not drag the DNS-resolving half of the baseUrl gate onto the read path —
+      // that would let a polling client drive a resolver lookup per poll. The literal host
+      // policy and the model allowlist still run here, and the rebinding defense itself is
+      // untouched: `createAiProviderGuardedFetch` re-resolves and pins addresses on every
+      // real outbound request, which is where it actually matters.
+      const execution = await this.providerConfig.resolveExecutionModel(campaignId, { resolveDns: false });
+      modelOk = !!execution;
+      if (execution) {
+        modelDetail = `Execution model ${execution.model} passes the server allowlist.`;
+        modelDetailKey = 'model.allowed';
+        modelDetailParams = { model: execution.model };
+      }
+    } catch (err) {
+      modelOk = false;
+      modelDetail = err instanceof Error ? err.message : 'The selected model is not executable.';
+      // The rejection reason is composed by the allowlist policy at throw time and has no
+      // enumerable id, so this variant carries the server sentence through as a parameter.
+      modelDetailKey = 'model.rejected';
+      modelDetailParams = { reason: modelDetail };
+    }
+    push({
+      key: 'model',
+      ok: modelOk,
+      status: modelOk ? 'ok' : 'blocked',
+      actor: 'dm',
+      title: 'Executable model',
+      detail: modelDetail,
+      detailKey: modelDetailKey,
+      detailParams: modelDetailParams,
+      requiredForDriver: true,
+      fixHref: fix('ai-dm-provider'),
+    });
+
+    // The gating step every other check silently assumed (#519 review): a table can have a
+    // provider, a model and a budget and still have the AI switched OFF. `assertRunnable`
+    // refuses an off/disabled seat, so readiness must report it rather than let the client
+    // paint a green "ready" banner over an AI that does nothing. It is deliberately NOT
+    // `requiredForDriver` — that set answers "is the configuration driver-capable", while
+    // the driver ALSO needs mode === 'driver' specifically (folded into `driverOk` below);
+    // marking it driver-required would either fail Co-DM tables or read as ok for a Co-DM
+    // seat the driver cannot use.
+    const seatArmed = seat.enabled && seat.mode !== 'off';
+    push({
+      key: 'mode',
+      ok: seatArmed,
+      status: seatArmed ? 'ok' : 'blocked',
+      actor: 'dm',
+      title: 'Operating mode',
+      detail: !seatArmed
+        ? 'The AI DM is off for this campaign. Pick Co-DM (it only proposes) or Driver (it holds the DM seat) to switch it on.'
+        : seat.mode === 'driver'
+          ? 'Driver mode is selected — the AI holds the DM seat and acts directly.'
+          : 'Co-DM mode is selected — the AI only proposes, and a human DM approves every change.',
+      detailKey: !seatArmed ? 'mode.off' : seat.mode === 'driver' ? 'mode.driver' : 'mode.coDm',
+      detailParams: {},
+      requiredForDriver: false,
+      fixHref: fix('ai-dm-mode'),
+    });
+
+    push({
+      key: 'budget',
+      ok: seat.tokenBudget > 0 && budgetRemaining > 0,
+      status: seat.tokenBudget > 0 && budgetRemaining > 0 ? 'ok' : 'blocked',
+      actor: 'dm',
+      title: 'Budget available',
+      detail: seat.tokenBudget > 0
+        ? `${seat.tokensUsed.toLocaleString()} / ${seat.tokenBudget.toLocaleString()} tokens used; ${budgetRemaining.toLocaleString()} remain.`
+        : 'Set a positive hard token budget before Driver can run.',
+      detailKey: seat.tokenBudget > 0 ? 'budget.available' : 'budget.unset',
+      detailParams: { used: seat.tokensUsed, budget: seat.tokenBudget, remaining: budgetRemaining },
+      requiredForDriver: true,
+      fixHref: fix('ai-dm-budget'),
+    });
+
+    const writeScope = user.tokenContext?.writeScope ?? 'direct';
+    push({
+      key: 'writeMode',
+      ok: writeScope === 'direct',
+      status: writeScope === 'direct' ? 'ok' : 'blocked',
+      actor: 'dm',
+      title: 'Write mode',
+      detail: writeScope === 'direct'
+        ? 'This session can make direct DM-approved writes when the selected AI mode allows them.'
+        : `This token is ${writeScope === 'none' ? 'read-only' : 'proposal-only'}; use a direct-write DM session before starting Driver.`,
+      detailKey: writeScope === 'direct' ? 'writeMode.direct' : writeScope === 'none' ? 'writeMode.readOnly' : 'writeMode.proposalOnly',
+      detailParams: {},
+      requiredForDriver: true,
+      fixHref: null,
+    });
+
+    const contentCount =
+      charter.lines.length +
+      charter.veils.length +
+      charter.safetyTools.length +
+      (charter.houseRules.trim() ? 1 : 0) +
+      (charter.toneAndExpectations.trim() ? 1 : 0);
+    push({
+      key: 'rulesContent',
+      ok: contentCount > 0,
+      status: contentCount > 0 ? 'ok' : 'warning',
+      actor: 'dm',
+      title: 'Rules and table content',
+      detail: contentCount > 0
+        ? 'Session-zero safety, house-rule, or tone guidance is available to the AI.'
+        : 'Add session-zero lines, veils, safety tools, house rules, or tone guidance so AI output has table boundaries.',
+      detailKey: contentCount > 0 ? 'rulesContent.present' : 'rulesContent.missing',
+      detailParams: {},
+      requiredForDriver: false,
+      fixHref: `/c/${campaignId}/session-zero`,
+    });
+
+    push({
+      key: 'supportConsent',
+      ok: consent.total === 0 || consent.consented > 0,
+      status: consent.total === 0 || consent.consented > 0 ? 'ok' : 'warning',
+      actor: 'table',
+      title: 'Participant support consent',
+      detail: consent.total === 0
+        ? 'No participant support notes are on file.'
+        : `${consent.consented} of ${consent.total} support notes allow AI use; ${consent.tableConsented} can influence public narration.`,
+      detailKey: consent.total === 0 ? 'supportConsent.none' : 'supportConsent.counts',
+      detailParams: { consented: consent.consented, total: consent.total, tableConsented: consent.tableConsented },
+      requiredForDriver: false,
+      fixHref: `/c/${campaignId}/session-zero#support-preferences`,
+    });
+
+    push({
+      key: 'secretPolicy',
+      ok: true,
+      status: 'ok',
+      actor: 'dm',
+      title: 'Secret and privacy policy',
+      detail:
+        'Provider keys stay write-only/redacted, participant support text is opt-in for AI, and Driver uses player-scoped reads unless a DM-approved secret is explicitly needed.',
+      detailKey: 'secretPolicy.body',
+      detailParams: {},
+      requiredForDriver: false,
+      fixHref: fix('ai-dm-provider'),
+    });
+
+    const caps = provider.providerType ? providerCapabilities(provider.providerType) : null;
+    push({
+      key: 'driverTools',
+      ok: !!caps?.toolCalling,
+      status: caps?.toolCalling ? 'ok' : 'blocked',
+      actor: 'dm',
+      title: 'Driver tool capability',
+      detail: caps?.toolCalling
+        ? `${provider.providerType} supports tool calls for live Driver play.`
+        : 'Driver requires a provider with tool-calling support.',
+      detailKey: caps?.toolCalling ? 'driverTools.ok' : 'driverTools.missing',
+      detailParams: { providerType: provider.providerType ?? 'provider' },
+      requiredForDriver: true,
+      fixHref: fix('ai-dm-provider'),
+    });
+
+    const driverChecks = checks.filter((check) => check.requiredForDriver);
+    // `driverOk` must answer the same question `assertRunnable` does — "would a driver turn
+    // start right now?" — or the checklist paints a green banner over a 403. `assertRunnable`
+    // demands an ENABLED seat in DRIVER mode on top of the configuration checks, and none of
+    // those checks looks at the seat's mode, so fold it in here (#519 review).
+    const driverModeReady = seat.enabled && seat.mode === 'driver';
+    const driverOk = driverChecks.every((check) => check.ok) && driverModeReady;
+    const firstBlocked = driverChecks.find((check) => !check.ok);
+    const driverModeReason = driverModeReady
+      ? null
+      : seat.mode === 'co_dm'
+        ? 'The AI DM is in Co-DM mode. Switch the operating mode to Driver to run autonomous turns.'
+        : 'The AI DM is off for this campaign. Switch the operating mode to Driver to run autonomous turns.';
+    // Per-turn estimate. When this campaign has metered turns on record we use their mean
+    // (real data beats a guess); otherwise we fall back to a conservative default shape.
+    // It is deliberately NOT clamped to the remaining budget: a run that would overrun the
+    // budget must still show its true expected size — `budgetRemaining` reports the ceiling
+    // separately, and the budget check above is what actually blocks the run.
+    // Parenthesized deliberately: `+` binds tighter than `??`, so the intent is already what
+    // this reads — but an unparenthesized mix of the two is a silent-breakage trap for the
+    // next edit, and this value is a spend estimate a DM makes decisions on.
+    const estimatedTotalTokens =
+      recentUsage ?? (DEFAULT_ESTIMATED_PROMPT_TOKENS + DEFAULT_ESTIMATED_COMPLETION_TOKENS);
+    const estimatedCompletionTokens = Math.round(estimatedTotalTokens * DEFAULT_COMPLETION_SHARE);
+    const estimatedPromptTokens = estimatedTotalTokens - estimatedCompletionTokens;
+    return {
+      campaignId,
+      // A check that is not `ok` never counts as ready — including one whose status is
+      // `unknown` because the caller cannot see it (the server flag, for a non-admin DM).
+      // Only `warning` checks (advisory, never blocking) may be false and still be ready.
+      ok: checks.every((check) => check.ok || check.status === 'warning'),
+      driverOk,
+      mode: seat.mode,
+      provider,
+      budgetRemaining,
+      checks,
+      estimatedCost: {
+        estimatedPromptTokens,
+        estimatedCompletionTokens,
+        estimatedTotalTokens: estimatedPromptTokens + estimatedCompletionTokens,
+        estimatedUsd: null,
+        note: recentUsage
+          ? 'Per-turn estimate from this campaign’s recent metered turns. Actual usage depends on context, tools, and model pricing.'
+          : 'Best-effort per-turn estimate before sending to the provider — this campaign has no metered turns yet. Actual usage depends on context, tools, and model pricing.',
+      },
+      driverUnavailableReason: firstBlocked?.detail ?? driverModeReason,
+    };
+  }
+
+  /**
    * Driver mode (issue #311) hands the DM seat to the AI, so it carries hard
    * preconditions beyond the server experimental flag (already asserted by every
    * configure): a POSITIVE token budget AND a configured provider (a campaign
@@ -335,12 +708,63 @@ export class AiDmService implements OnApplicationBootstrap {
         'Driver mode requires a positive token budget. Set a budget first, then switch the mode to Driver.',
       );
     }
-    const effective = await this.providerConfig.resolveEffectiveConfig(campaignId);
-    if (!effective) {
+    const effective = await this.providerConfig.getEffectiveView(campaignId);
+    if (!effective.configured || !effective.ready) {
       throw new ConflictException(
         'Driver mode requires a configured AI provider. Set a provider (or a server default) with an API key, then switch the mode to Driver.',
       );
     }
+    // `resolveExecutionModel` does not signal every failure by returning null — it THROWS
+    // BadRequest when the model is off a tightened allowlist or the stored baseUrl fails
+    // host policy. Left uncaught, tightening the allowlist would answer this gate with a
+    // 400 while every neighbouring rejection in it is a 409, and the client would have to
+    // sniff the message string to tell them apart. Re-raise as this gate's own status with
+    // the reason preserved, so the HTTP contract is coherent per gate.
+    const execution = await this.resolveExecutionModelForGate(
+      campaignId,
+      (reason) => new ConflictException(reason),
+      'Driver mode requires an executable AI model. Set a provider model that passes the server allowlist, then switch the mode to Driver.',
+    );
+    if (!providerCapabilities(execution.config.providerType).toolCalling) {
+      throw new ConflictException(
+        `Driver mode requires a provider with tool-calling support. ${execution.config.providerType} cannot run the live Driver seat.`,
+      );
+    }
+  }
+
+  /**
+   * Shared adapter between {@link AiProviderConfigService.resolveExecutionModel} and the two
+   * driver gates. It normalizes BOTH failure shapes — the `null` return (nothing configured)
+   * and the thrown `BadRequestException` (allowlist tightened, stored baseUrl now blocked) —
+   * into the status the calling gate promises, keeping the underlying reason as the message
+   * so the UI's gate explainer still has something specific to say.
+   *
+   * `resolveDns` is passed through: a gate that is immediately followed by the real provider
+   * resolution (assertRunnable → runTurn) leaves the DNS-resolving revalidation to that one
+   * call rather than doing it twice per turn.
+   */
+  private async resolveExecutionModelForGate(
+    campaignId: number,
+    wrap: (reason: string) => Error,
+    unconfiguredReason: string,
+    opts: { resolveDns?: boolean } = {},
+  ): Promise<{ model: string; config: AiProviderConfig }> {
+    let execution: { model: string; config: AiProviderConfig } | null;
+    try {
+      execution = await this.providerConfig.resolveExecutionModel(campaignId, opts);
+    } catch (err) {
+      if (err instanceof BadRequestException) {
+        const response = err.getResponse();
+        const reason =
+          typeof response === 'string'
+            ? response
+            : ((response as { message?: string | string[] }).message ?? err.message);
+        throw wrap(Array.isArray(reason) ? reason.join(' ') : reason);
+      }
+      throw err;
+    }
+    if (!execution) throw wrap(unconfiguredReason);
+    return execution;
   }
 
   /** Configure the seat (dm only). Gated on the server experimental flag. Upserts; omitted fields are left unchanged. */
@@ -655,6 +1079,29 @@ export class AiDmService implements OnApplicationBootstrap {
     if (remaining <= 0) {
       throw new ForbiddenException(
         `AI Dungeon Master token budget exhausted (${seat.tokensUsed + seat.tokensUnknown + seat.tokensReserved}/${seat.tokenBudget}). Raise tokenBudget or reset usage to continue.`,
+      );
+    }
+    const effective = await this.providerConfig.getEffectiveView(campaignId);
+    if (!effective.configured || !effective.ready) {
+      throw new ForbiddenException(
+        'Driver mode requires a configured AI provider. Set a provider (or a server default) with an API key, then switch the mode to Driver.',
+      );
+    }
+    // Same status-coherence adapter as assertDriverAllowed, but this gate answers 403.
+    // `resolveDns: false` here because the caller (AiDriverService.runTurn) resolves the
+    // provider for real moments later through the execution choke point, which DOES resolve
+    // DNS — doing it in both made every driver turn perform two resolver lookups for one
+    // request. The rebinding defense is unchanged: the guarded fetch re-resolves and pins
+    // addresses per outbound request, and the allowlist + literal host policy still run here.
+    const execution = await this.resolveExecutionModelForGate(
+      campaignId,
+      (reason) => new ForbiddenException(reason),
+      'Driver mode requires an executable AI model. Set a provider model that passes the server allowlist, then switch the mode to Driver.',
+      { resolveDns: false },
+    );
+    if (!providerCapabilities(execution.config.providerType).toolCalling) {
+      throw new ForbiddenException(
+        `Driver mode requires a provider with tool-calling support. ${execution.config.providerType} cannot run the live Driver seat.`,
       );
     }
     // The driver is the path that actually spends provider tokens — bound it by the server-wide

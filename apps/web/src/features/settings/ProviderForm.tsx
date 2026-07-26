@@ -403,6 +403,10 @@ export function ProviderForm({
             fallback. A value tests or saves that new key.
           </p>
         </div>
+        <p className="text-muted" style={{ margin: 0, fontSize: 11 }}>
+          Test connection is safe and non-mutating: it sends the visible draft to the provider test endpoint without
+          saving provider settings or returning any key material.
+        </p>
         {error && <p className="text-sm" style={{ color: '#f87171' }}>{error}</p>}
         {testError && <p role="alert" className="text-sm" style={{ color: '#f87171' }}>Test failed: {testError}</p>}
         {testResult && (

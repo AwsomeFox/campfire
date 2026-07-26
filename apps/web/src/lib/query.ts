@@ -53,6 +53,8 @@ export const queryKeys = {
   // mode/enabled/budget/instructions config (instructions server-omitted for non-DMs, #261).
   aiDmSession: (campaignId: number) => ['campaign', campaignId, 'ai-dm', 'session'] as const,
   aiDmSeat: (campaignId: number) => ['campaign', campaignId, 'ai-dm', 'seat'] as const,
+  /** The #519 readiness checklist: derived from the seat, provider, settings and consent. */
+  aiDmReadiness: (campaignId: number) => ['campaign', campaignId, 'ai-dm', 'readiness'] as const,
 } satisfies Record<string, (...args: never[]) => QueryKey>;
 
 /**
@@ -174,10 +176,16 @@ export function useAiDmSeat(campaignId: number | undefined): UseQueryResult<AiDm
   });
 }
 
-/** Mark the AI-DM session + seat reads stale (called from stuck/state/vote/takeover signals). */
+/**
+ * Mark the AI-DM session + seat + readiness reads stale (called from stuck/state/vote/takeover
+ * signals). Readiness is derived from the seat's budget/mode and the metered usage a turn
+ * spends, so it goes stale on exactly the same signals — without this the onboarding checklist
+ * and the per-turn cost estimate keep rendering pre-turn numbers (#519).
+ */
 export function invalidateAiDm(client: QueryClient, campaignId: number): void {
   void client.invalidateQueries({ queryKey: queryKeys.aiDmSession(campaignId) });
   void client.invalidateQueries({ queryKey: queryKeys.aiDmSeat(campaignId) });
+  void client.invalidateQueries({ queryKey: queryKeys.aiDmReadiness(campaignId) });
 }
 
 export const queryClient = new QueryClient({
