@@ -1736,12 +1736,34 @@ export class CampaignModulesService {
     };
   }
 
-  /** Campaign ids that currently have at least one install of `moduleId` (or a fork of it). */
-  async campaignsWithModule(moduleId: string): Promise<number[]> {
+  /**
+   * Every campaign that has `moduleId` installed (directly or as the upstream of a fork).
+   * Discovery for the bulk dry run — without it a coordinator would have to guess campaign
+   * ids. The controller filters the result down to campaigns the caller is a dm of.
+   */
+  async campaignsWithModule(moduleId: string): Promise<Array<{ campaignId: number; campaignName: string; installId: number; version: string; forked: boolean; detached: boolean }>> {
     const rows = this.db
-      .select({ campaignId: campaignModuleInstalls.campaignId, moduleId: campaignModuleInstalls.moduleId, upstreamModuleId: campaignModuleInstalls.upstreamModuleId })
+      .select({
+        campaignId: campaignModuleInstalls.campaignId,
+        campaignName: campaigns.name,
+        installId: campaignModuleInstalls.id,
+        version: campaignModuleInstalls.version,
+        moduleId: campaignModuleInstalls.moduleId,
+        upstreamModuleId: campaignModuleInstalls.upstreamModuleId,
+        detached: campaignModuleInstalls.detached,
+      })
       .from(campaignModuleInstalls)
+      .innerJoin(campaigns, eq(campaigns.id, campaignModuleInstalls.campaignId))
       .all();
-    return [...new Set(rows.filter((r) => r.moduleId === moduleId || r.upstreamModuleId === moduleId).map((r) => r.campaignId))];
+    return rows
+      .filter((r) => r.moduleId === moduleId || r.upstreamModuleId === moduleId)
+      .map((r) => ({
+        campaignId: r.campaignId,
+        campaignName: r.campaignName,
+        installId: r.installId,
+        version: r.version,
+        forked: r.moduleId !== moduleId,
+        detached: r.detached,
+      }));
   }
 }

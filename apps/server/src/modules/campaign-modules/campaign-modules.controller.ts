@@ -202,6 +202,28 @@ export class ModuleUpdatesController {
     private readonly access: CampaignAccessService,
   ) {}
 
+  @Get(':moduleId/installs')
+  @ApiOperation({
+    summary: 'Find which of the caller\'s tables have a module installed',
+    description:
+      'Discovery for the bulk dry run: every campaign the caller is a dm of that has this module UUID installed, directly or as the upstream of a fork. Campaigns the caller cannot see are omitted entirely (this route must not leak the existence of other tables).',
+  })
+  @ApiResponse({ status: 200, description: 'Installs visible to the caller.' })
+  async installs(@Param('moduleId') moduleId: string, @CurrentUser() user: RequestUser) {
+    const rows = await this.modules.campaignsWithModule(moduleId);
+    const visible = [];
+    for (const row of rows) {
+      try {
+        await this.access.requireRole(user, row.campaignId, 'dm', { allowArchived: true });
+        visible.push(row);
+      } catch {
+        // Not the caller's table — omitted, not reported, so this cannot be used to probe
+        // for the existence of campaigns the caller has no access to.
+      }
+    }
+    return visible;
+  }
+
   @Post('preview')
   @ApiOperation({
     summary: 'Bulk dry-run one module update across selected tables',

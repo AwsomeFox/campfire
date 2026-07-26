@@ -618,6 +618,24 @@ describe('campaign modules (e2e, real cookie sessions)', () => {
     expect(stillClean.find((n) => n.name === 'Vex')!.body).toBe('Sells maps.');
   });
 
+  it('discovers which of the caller\'s tables have the module, and omits tables they cannot see', async () => {
+    const mine = (await dm.get(api(`/module-updates/${MODULE_ID}/installs`))).body as Array<{
+      campaignId: number;
+      installId: number;
+      forked: boolean;
+      detached: boolean;
+    }>;
+    expect(mine.length).toBeGreaterThan(0);
+    expect(mine.every((r) => r.campaignId !== otherCampaignId)).toBe(true);
+    expect(mine.some((r) => r.campaignId === campaignId)).toBe(true);
+    // A forked table is still discoverable, matched on its recorded upstream.
+    expect(mine.some((r) => r.forked)).toBe(true);
+    expect(mine.some((r) => r.detached)).toBe(true);
+
+    // Someone with no installs of this module sees nothing rather than other people's tables.
+    expect((await otherDm.get(api(`/module-updates/${MODULE_ID}/installs`))).body).toEqual([]);
+  });
+
   // ------------------------------------------------------------------ access control
 
   it('is dm-only', async () => {
