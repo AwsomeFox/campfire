@@ -379,7 +379,9 @@ function InstallPanel({
         return;
       }
       if (job.outcome === 'updated') {
-        setDone(`Done — added ${job.added ?? 0}, already had ${job.skippedExisting ?? 0}.`);
+        setDone(
+          `Done — added ${job.added ?? 0}, updated ${job.changed ?? 0}, removed ${job.removed ?? 0}, already had ${job.preview?.unchanged ?? job.skippedExisting ?? 0}.`,
+        );
       } else {
         setDone(`Installed ${job.pack?.entryCount ?? 0} entries.`);
       }

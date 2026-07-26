@@ -163,6 +163,14 @@ export interface Pf2eSectionResult {
   skippedCount: number;
   /** Same-name rows collapsed to one canonical entry per (name, type). */
   dedupedCount: number;
+  /**
+   * True when pagination stopped EARLY at the per-section page cap rather than reaching the
+   * end of the source. Deliberately separate from `skippedCount`: no row was dropped here, so
+   * folding it into the skip count would tell an operator rows were discarded when none were.
+   * rules.service's manifestIsComplete() consults both — a truncated fetch is not a provable
+   * full manifest and must not authorise deleting installed rows.
+   */
+  truncated: boolean;
 }
 
 interface AonHit {
@@ -565,6 +573,7 @@ export async function fetchPf2eSection(
   // type, so a lowercased name is the (name, type) key. First-seen wins (stable order).
   const byName = new Map<string, ImportedEntry>();
   let skippedCount = 0;
+  let truncated = false;
   let dedupedCount = 0;
   let from = 0;
   let pagesFetched = 0;
@@ -572,6 +581,10 @@ export async function fetchPf2eSection(
   while (byName.size < MAX_ENTRIES_PER_SECTION) {
     if (pagesFetched >= MAX_PAGES_PER_SECTION) {
       logger.warn(`${logPrefix} section "${section}": hit page cap (${MAX_PAGES_PER_SECTION} pages) after ${byName.size} entries — stopping`);
+      // Truncation, NOT a dropped row: tracked on its own flag so the skip count keeps meaning
+      // "rows discarded" while rules.service's manifestIsComplete() still sees that this fetch
+      // may have left entries behind and must not authorise deletion.
+      truncated = true;
       break;
     }
     pagesFetched += 1;
@@ -648,7 +661,7 @@ export async function fetchPf2eSection(
     logger.warn(`${logPrefix} section "${section}": imported ${entries.length} entries, skipped ${skippedCount} row(s)`);
   }
 
-  return { entries, skippedCount, dedupedCount };
+  return { entries, skippedCount, dedupedCount, truncated };
 }
 
 export function entryTypeForSection(section: Pf2eSection): RuleEntryType {
