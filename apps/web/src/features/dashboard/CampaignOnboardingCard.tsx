@@ -60,6 +60,7 @@ export function CampaignOnboardingCard({
   }), [aiSeatQuery.data, aiSeatQuery.isError, campaignId, membersQuery.data, prefs.soloMode, summary]);
 
   if (!isDm) return null;
+  if (plan.complete) return null;
 
   if (prefs.skipped) {
     return (
