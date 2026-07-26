@@ -69,7 +69,14 @@ const PAGE_RETRY_BACKOFFS_MS = [1_000, 3_000];
 
 export type Open5eSection = 'spells' | 'monsters' | 'items' | 'conditions' | 'classes' | 'races' | 'feats';
 
-const SECTION_TO_PATH: Record<Open5eSection, string> = {
+/**
+ * Campfire section → Open5e v2 URL path. EXPORTED (issue #568) so the nightly live-source
+ * smoke (test/rules-live-smoke.e2e-spec.ts) probes the paths this importer ACTUALLY requests
+ * rather than a hand-copied list in the test. The `/v2/monsters/` → `/v2/creatures/` and
+ * `/v2/races/` → `/v2/species/` moves recorded in the file header are precisely the kind of
+ * drift a duplicated list would stop noticing the moment the two copies diverge.
+ */
+export const OPEN5E_SECTION_TO_PATH: Record<Open5eSection, string> = {
   spells: 'spells',
   monsters: 'creatures', // v2 has no /monsters/ route — see file header note.
   items: 'magicitems',
@@ -625,7 +632,7 @@ export async function fetchOpen5eSection(
   section: Open5eSection,
   logger: Open5eImportLogger = consoleLogger,
 ): Promise<Open5eSectionResult> {
-  const path = SECTION_TO_PATH[section];
+  const path = OPEN5E_SECTION_TO_PATH[section];
   const mapper = SECTION_MAPPER[section];
   // De-dupe same-name rows across Open5e documents (issue #143): a section is a single
   // entry type, so keying by lowercased name is keying by (name,type). We keep the

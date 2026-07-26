@@ -1,0 +1,83 @@
+# Nightly live rule-source smoke (issue #568).
+#
+# WHY THIS IS ITS OWN WORKFLOW AND NOT PART OF ci.yml. Every rule-pack importer talks to a
+# third-party upstream Campfire does not control (Open5e, Archives of Nethys, raw GitHub, …).
+# The PR gate must stay deterministic: a network-dependent job in ci.yml would turn every
+# unrelated PR red whenever an upstream is slow, rate-limits the runner, or has a blip —
+# strictly worse than the drift problem this is defending against. So the live checks run on a
+# schedule (and on demand), where a failure means "an upstream changed, go look" rather than
+# "your PR is broken".
+#
+# WHAT IT COVERS. `RUN_LIVE_RULES_SMOKE=1` un-skips:
+#   - test/rules-live-smoke.e2e-spec.ts — one probe per importer under
+#     apps/server/src/modules/rules/, driven off each importer's own exported
+#     `*_DEFAULT_BASE_URL`; asserts the URL resolves, is not an HTML error page, parses as the
+#     format the importer expects, carries the container field the importer reads, and that a
+#     representative section survives the importer's real fetch + mapping with populated
+#     name/slug/type/body/license.
+#   - test/rules.e2e-spec.ts — the pre-existing opt-in live smokes (#346 Open Legend install
+#     against the real repo, #555 Pathfinder 1e default-path rejection), which never ran in CI
+#     before because nothing set the variable.
+#
+# The coverage guards in rules-live-smoke.e2e-spec.ts are NOT gated on the variable: they are
+# offline and run in ordinary CI, so a newly added importer without a probe fails the PR gate.
+
+name: Rules live-source smoke
+
+on:
+  schedule:
+    # 04:15 UTC nightly — off the hour to avoid the GitHub-wide cron stampede.
+    - cron: '15 4 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: rules-live-smoke
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  live-smoke:
+    name: live rule-source smoke
+    runs-on: ubuntu-latest
+    # Upstreams can be slow; the suite itself allows generous per-probe timeouts.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          cache: npm
+      - name: Restore node_modules
+        id: modcache
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            apps/*/node_modules
+            packages/*/node_modules
+          # Same key shape as ci.yml so this job reuses that cache rather than
+          # rebuilding native deps (better-sqlite3, sharp) every night.
+          key: node-modules-24x-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.ImageVersion }}-${{ hashFiles('package-lock.json') }}
+      - name: Install
+        if: steps.modcache.outputs.cache-hit != 'true'
+        run: npm ci
+      # The server suite imports @campfire/schema from source via jest's moduleNameMapper,
+      # but the workspace build is what materialises its dist for anything that needs it.
+      - name: Build schema dependency
+        run: npm run build -w packages/schema
+
+      - name: Live rule-source probes (every importer's default base URL)
+        working-directory: apps/server
+        env:
+          RUN_LIVE_RULES_SMOKE: '1'
+        run: npx jest --runTestsByPath test/rules-live-smoke.e2e-spec.ts --verbose
+
+      # Runs even if the probes above failed, so one drifting source doesn't hide another.
+      - name: Rule-pack suite with the pre-existing live smokes enabled (#346, #555)
+        if: always()
+        working-directory: apps/server
+        env:
+          RUN_LIVE_RULES_SMOKE: '1'
+        run: npx jest --runTestsByPath test/rules.e2e-spec.ts
