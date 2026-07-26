@@ -285,25 +285,26 @@ body {
   border-color: color-mix(in srgb, var(--color-accent) 55%, var(--color-divider));
 }
 
+/* Fixed, not absolute: hosts like the desktop sidebar (w-[230px], and
+   overflow-x-hidden because it also scrolls vertically) are narrower than the
+   panel and clip absolutely-positioned descendants. A fixed box is laid out
+   against the viewport, so it escapes ancestor overflow clipping. TermHelp
+   anchors top/left from the trigger's bounding rect and clamps both axes
+   inside the viewport, at every breakpoint — no hover, no media query. */
 .cf-term-help__panel {
-  position: absolute;
-  top: calc(100% + 6px);
+  position: fixed;
+  top: 0;
+  left: 0;
   width: min(280px, calc(100vw - 24px));
+  max-height: calc(100dvh - 96px);
+  overflow: auto;
   z-index: var(--cf-layer-dialog);
   display: flex;
   flex-direction: column;
   gap: 7px;
   padding: 12px;
-  text-align: left;
+  text-align: start;
   white-space: normal;
-}
-
-.cf-term-help--start .cf-term-help__panel {
-  left: 0;
-}
-
-.cf-term-help--end .cf-term-help__panel {
-  right: 0;
 }
 
 .cf-term-help__title {
@@ -348,17 +349,6 @@ body {
   border: 0;
   background: transparent;
   padding: 0;
-}
-
-@media (max-width: 40rem) {
-  .cf-term-help__panel {
-    position: fixed;
-    inset-inline: 12px;
-    top: 72px;
-    width: auto;
-    max-height: calc(100dvh - 96px);
-    overflow: auto;
-  }
 }
 
 

@@ -1289,7 +1289,9 @@ function MoreSheetItem({
             </span>
           )}
         </Link>
-        <TermHelp termId={item.termId} align="end" />
+        {/* onNavigate closes the sheet: without it "Open glossary" navigates
+            while the aria-modal More sheet stays mounted over the destination. */}
+        <TermHelp termId={item.termId} align="end" onNavigate={onNavigate} />
       </div>
     );
   }

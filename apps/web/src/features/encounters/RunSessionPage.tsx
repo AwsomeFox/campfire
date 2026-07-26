@@ -1661,11 +1661,13 @@ export default function RunSessionPage() {
         <div className="flex-1" />
         {isDm && (
           <>
+            {/* No aria-label / title here: the visible word "Cast" is the
+                accessible name, and the adjacent TermHelp carries the
+                explanation without a hover-only tooltip (issue #518). */}
             <Btn
               ghost
               className="!min-h-0 !py-1.5 text-xs"
               onClick={() => navigate(`/c/${cid}/screen`)}
-              aria-label="Open Cast player or TV display"
             >
               <GameIcon slug="tv" size={13} className="inline align-text-bottom mr-1" />Cast
             </Btn>

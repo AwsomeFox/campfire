@@ -164,11 +164,13 @@ export function StatusHeader({
         </span>
         {isDm && (
           <>
+            {/* No aria-label / title here: the visible word "Cast" is the
+                accessible name, and the adjacent TermHelp carries the
+                explanation without a hover-only tooltip (issue #518). */}
             <Link
               to={`/c/${campaignId}/screen`}
               className="btn btn-ghost"
               style={{ fontSize: 12, textDecoration: 'none' }}
-              aria-label="Open Cast player or TV display"
             >
               <GameIcon slug="tv" size={14} className="inline align-text-bottom mr-1" />Cast
             </Link>
