@@ -777,6 +777,15 @@ describe('AI scribe — local generation retains notes without external consent 
     expect(run.body.job.sourceStats.excludedInboxByConsent).toBe(0);
   });
 
+  it('reports externalSend=false on the config so the DM-facing confirmation cannot overstate', async () => {
+    const cfg = await request(harness.server).get(`${API}/campaigns/${campaignId}/scribe`).set(dm);
+    expect(cfg.status).toBe(200);
+    // No provider row for this campaign, so a run cannot reach an external endpoint. The
+    // panel keys its external-send warning off this — warning about a vendor call that
+    // will not happen trains DMs to ignore the dialog before it matters (#501 review).
+    expect(cfg.body.externalSend).toBe(false);
+  });
+
   it('records provenance that is explicit about NOT having been an external send', async () => {
     const jobs = await request(harness.server).get(`${API}/campaigns/${campaignId}/scribe/jobs`).set(dm);
     expect(jobs.status).toBe(200);
@@ -797,6 +806,11 @@ describe('AI scribe — local generation retains notes without external consent 
   it('starts withholding the same note as soon as an external provider is configured', async () => {
     // Same campaign, same non-consenting member, same note — only the destination changes.
     await harness.configureProvider(campaignId);
+
+    // The config now reports an external send, so the DM-facing warning flips on too.
+    const cfg = await request(harness.server).get(`${API}/campaigns/${campaignId}/scribe`).set(dm);
+    expect(cfg.status).toBe(200);
+    expect(cfg.body.externalSend).toBe(true);
 
     const before = harness.mock.received.length;
     const run = await request(harness.server)

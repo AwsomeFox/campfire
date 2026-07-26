@@ -64,6 +64,15 @@ export function filterSourceForExternalAiConsent(
   consentingMemberIds: ReadonlySet<string>,
 ): { source: RecapDraftSource; consent: ScribeConsentSummary } {
   const includedAuthorUserIds = new Set<string>();
+  /**
+   * Authors who had at least one note excluded for ANY reason — consent OR visibility.
+   *
+   * Deliberately not "authors who withheld consent": a member whose only excluded note was
+   * a whisper appears here even though granting consent would not surface it. Nothing
+   * user-facing is driven off this set — the "N notes withheld pending author consent"
+   * copy reads `excludedInboxByConsent` — but do not treat membership here as evidence
+   * that someone declined.
+   */
   const excludedAuthorUserIds = new Set<string>();
   let excludedInboxByConsent = 0;
   let excludedInboxPrivate = 0;

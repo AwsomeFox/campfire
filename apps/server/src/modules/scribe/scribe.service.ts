@@ -109,6 +109,8 @@ function defaultConfig(campaignId: number): ScribeConfig {
     cron: false,
     budgetPerRun: 2000,
     sourceCursorAt: null,
+    // Fail-closed placeholder; `getConfig` recomputes it from the resolved provider (#501).
+    externalSend: true,
     createdAt: ts,
     updatedAt: ts,
   };
@@ -121,6 +123,8 @@ function configToDomain(row: typeof aiScribeConfigs.$inferSelect): ScribeConfig 
     cron: row.cron,
     budgetPerRun: row.budgetPerRun,
     sourceCursorAt: row.sourceCursorAt ?? null,
+    // Fail-closed placeholder; `getConfig` recomputes it from the resolved provider (#501).
+    externalSend: true,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -213,7 +217,12 @@ export class ScribeService implements OnApplicationBootstrap {
 
   async getConfig(campaignId: number): Promise<ScribeConfig> {
     const [row] = await this.db.select().from(aiScribeConfigs).where(eq(aiScribeConfigs.campaignId, campaignId)).limit(1);
-    return row ? configToDomain(row) : defaultConfig(campaignId);
+    const stored = row ? configToDomain(row) : defaultConfig(campaignId);
+    // Derived per read (#501): the DM-facing external-send confirmation must describe what
+    // a run will ACTUALLY do. On an install with no provider configured nothing leaves the
+    // server, and warning about a vendor call that will not happen trains DMs to ignore
+    // the dialog before the run where it does matter.
+    return { ...stored, externalSend: (await this.resolveEgress(campaignId)) === 'external' };
   }
 
   async putConfig(campaignId: number, input: ScribeConfigUpdateInput, user: RequestUser): Promise<ScribeConfig> {
@@ -471,7 +480,7 @@ export class ScribeService implements OnApplicationBootstrap {
     endpointBaseUrl?: string | null;
     consent: ScribeConsentSummary;
   }): AiGenerationProvenance {
-    return {
+    const provenance: AiGenerationProvenance = {
       source: 'ai_scribe',
       provider: input.provider,
       providerType: input.providerType,
@@ -488,6 +497,21 @@ export class ScribeService implements OnApplicationBootstrap {
       retentionNotice: AI_EXTERNAL_PROVIDER_PRIVACY.retentionNote,
       createdAt: nowIso(),
     };
+
+    // Validate on WRITE, not just on read (#501). Every read path — `parseGenerationProvenance`
+    // here and `proposal-records.toDomain` — validates and falls back to `null`, so a blob
+    // that does not satisfy the schema silently becomes "no provenance recorded" at read
+    // time with nothing logged at either end. For a provenance feature, losing the record
+    // is precisely the failure it exists to prevent, so make it loud instead of silent.
+    // Not currently reachable: every field comes from a validated config or a constant.
+    // This guards the next field that quietly exceeds a schema limit.
+    const parsed = AiGenerationProvenance.safeParse(provenance);
+    if (!parsed.success) {
+      this.logger.error(
+        `scribe generationProvenance failed schema validation and will be dropped on read: ${parsed.error.message}`,
+      );
+    }
+    return provenance;
   }
 
   // ── the run engine ──────────────────────────────────────────────────────────

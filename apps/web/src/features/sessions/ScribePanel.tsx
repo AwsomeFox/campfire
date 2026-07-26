@@ -113,6 +113,10 @@ export function ScribePanel({ campaignId, isDm }: { campaignId: number; isDm: bo
   // off-pattern for this codebase and invisible to Playwright (which auto-dismisses native
   // dialogs unless a spec registers a handler, so a driven run would silently no-op).
   const [confirmingRun, setConfirmingRun] = useState<{ dryRun: boolean } | null>(null);
+  // Whether a run would really reach an external endpoint, derived server-side (#501).
+  // Fail closed while the config is still loading or failed to load: an unknown state
+  // shows the strict external-send warning rather than a reassurance we cannot back up.
+  const externalSend = config?.externalSend ?? true;
 
   const load = useCallback(async () => {
     setLoadError(null);
@@ -253,10 +257,17 @@ export function ScribePanel({ campaignId, isDm }: { campaignId: number; isDm: bo
             Drafts a session recap from resolved inbox notes and encounters that were run, and files it as a{' '}
             <strong>pending proposal</strong> for you to review — nothing is ever published automatically.
           </p>
-          <p className="text-[11px] text-amber-200 m-0">
-            External-send notice: when a provider is configured, generation sends the prompt to that endpoint.
-            Member-authored inbox notes are included only when the campaign policy allows it and that member has opted in.
-          </p>
+          {externalSend ? (
+            <p className="text-[11px] text-amber-200 m-0">
+              External-send notice: generation sends the prompt to the configured AI provider. Member-authored inbox
+              notes are included only when the campaign policy allows it and that member has opted in.
+            </p>
+          ) : (
+            <p className="text-[11px] text-secondary m-0">
+              No external AI provider is in effect — recaps are generated on this server and no campaign content leaves
+              it, so member consent is not required. Private and whisper notes are excluded either way.
+            </p>
+          )}
 
           {loadError && <ErrorNote message={loadError} onRetry={load} />}
 
@@ -302,19 +313,37 @@ export function ScribePanel({ campaignId, isDm }: { campaignId: number; isDm: bo
 
       {confirmingRun && (
         <ConfirmDialog
-          title="Send source material to the AI provider?"
+          // The server decides whether a run actually leaves the box (#501); say what will
+          // really happen. Warning about an external send that cannot occur is a false
+          // alarm, and a DM who learns this dialog overstates will stop reading it before
+          // the run where it genuinely matters. Unknown config ⇒ assume external.
+          title={externalSend ? 'Send source material to the AI provider?' : 'Draft a recap on this server?'}
           body={
-            <>
-              <p className="m-0">
-                {confirmingRun.dryRun
-                  ? 'Previewing is not a local dry run: the server still sends the prompt to the configured AI provider and only skips filing the proposal.'
-                  : 'The AI scribe sends allowed campaign source material to the configured AI provider.'}
-              </p>
-              <p className="m-0">
-                Only resolved inbox notes from members who opted in are included; private, whisper, and opted-out notes
-                are excluded.
-              </p>
-            </>
+            externalSend ? (
+              <>
+                <p className="m-0">
+                  {confirmingRun.dryRun
+                    ? 'Previewing is not a local dry run: the server still sends the prompt to the configured AI provider and only skips filing the proposal.'
+                    : 'The AI scribe sends allowed campaign source material to the configured AI provider.'}
+                </p>
+                <p className="m-0">
+                  Only resolved inbox notes from members who opted in are included; private, whisper, and opted-out
+                  notes are excluded.
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="m-0">
+                  No external AI provider is in effect for this campaign, so the recap is generated on this server and
+                  no campaign content leaves it.
+                  {confirmingRun.dryRun ? ' Previewing additionally skips filing the proposal.' : ''}
+                </p>
+                <p className="m-0">
+                  Because nothing is sent externally, member consent is not required — but private and whisper notes are
+                  still excluded.
+                </p>
+              </>
+            )
           }
           confirmLabel={confirmingRun.dryRun ? 'Generate preview' : 'Draft recap'}
           danger={false}

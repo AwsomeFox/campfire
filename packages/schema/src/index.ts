@@ -5895,6 +5895,17 @@ export const ScribeConfig = z.object({
   budgetPerRun: z.number().int().min(1).max(200_000).default(2000), // per-run output-token cap
   // Durable cursor for cron/incremental runs — only material newer than this is assembled (#499).
   sourceCursorAt: IsoDate.nullable().default(null),
+  /**
+   * DERIVED, read-only: whether a run right now would actually send content OFF this
+   * server (issue #501). True when a provider config is resolved and the operator has not
+   * declared the endpoint local; false for the built-in no-op/injected seam.
+   *
+   * Not part of `ScribeConfigUpdate` — it is computed per read, never stored. It exists so
+   * the DM-facing external-send confirmation can describe what will really happen instead
+   * of warning about a vendor call that will not occur. Defaults to `true` (fail-closed),
+   * so a client that cannot read it still shows the strict warning.
+   */
+  externalSend: z.boolean().default(true),
   ...timestamps,
 });
 export type ScribeConfig = z.infer<typeof ScribeConfig>;
