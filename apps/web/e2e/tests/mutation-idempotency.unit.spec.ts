@@ -1,4 +1,6 @@
 import { expect, test } from '@playwright/test';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import {
   beginReconcile,
   blocksFurtherActions,
@@ -76,5 +78,38 @@ test.describe('mutation idempotency client seam (#580)', () => {
 
   test('completing a reconcile that never started is a no-op', () => {
     expect(completeReconcile(IDLE_RECONCILE, 5).phase).toBe('idle');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Wiring guards. The logic above is pure and cheap to test; these assert that the
+  // combat surfaces actually go through it, since a correct helper nobody calls is
+  // exactly the shape this regression would take if someone reverted a call site.
+  // ---------------------------------------------------------------------------
+
+  const RUN_SESSION_PAGE = resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx');
+  const TURN_WORKSPACE = resolve(__dirname, '../../src/features/encounters/TurnWorkspace.tsx');
+  const QUERY_CLIENT = resolve(__dirname, '../../src/lib/query.ts');
+
+  test('the HP stepper and both turn controls are keyed mutations', () => {
+    const src = readFileSync(RUN_SESSION_PAGE, 'utf8');
+    expect(src).toContain('const hpDelta = useKeyedMutation(');
+    expect(src).toContain('const endTurn = useKeyedMutation(');
+    expect(src).toContain('const nextTurnMut = useKeyedMutation(');
+    // next-turn must also carry the cross-device CAS, not only the retry key.
+    expect(src).toContain('expectedCurrentCombatantId');
+    expect(readFileSync(TURN_WORKSPACE, 'utf8')).toContain('const endTurn = useKeyedMutation(');
+  });
+
+  test('the combat surfaces route ambiguous failures into the gate, not the error banner', () => {
+    const src = readFileSync(RUN_SESSION_PAGE, 'utf8');
+    // Three call sites: HP stepper, end-turn, next-turn (plus bulk apply-to-all).
+    expect(src.match(/isAmbiguousOutcome\(/g)?.length ?? 0).toBeGreaterThanOrEqual(3);
+    expect(src).toContain('blocksFurtherActions(');
+  });
+
+  test('mutations do not auto-retry by default — retry is opt-in with a key', () => {
+    const src = readFileSync(QUERY_CLIENT, 'utf8');
+    // The whole point of #580's client half: no blanket mutation retry.
+    expect(src).toMatch(/mutations:\s*\{[\s\S]*?retry:\s*false/);
   });
 });
