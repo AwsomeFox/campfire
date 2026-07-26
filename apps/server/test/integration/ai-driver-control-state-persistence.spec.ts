@@ -250,7 +250,63 @@ describe('AI driver control state persistence across restart (#559, real SQLite)
     expect(restarted.notifications.notifyCampaign).toHaveBeenCalled();
 
     // The frozen state is itself durable: a second restart before anyone resumes stays paused.
-    expect(boot().service.getSession(campaignId).state).toBe('paused');
+    const third = boot();
+    expect(third.service.getSession(campaignId).state).toBe('paused');
+    // ...and is SILENT. The seat settles into `paused`, which is what was recorded, so the table
+    // is not told a second time about a freeze it was just told about.
+    expect(third.notifications.notifyCampaign).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The interrupted-turn path is the one case where the announced shape and the persisted status
+   * deliberately disagree: the crash announces `interrupted_turn`, but the row is reconciled to
+   * `status='paused'`, so a later boot recomputes `paused`. Recording the ANNOUNCED shape rather
+   * than the SETTLED one made that later boot look like a fresh transition and fire a redundant
+   * "came back paused" notice — the bug the marker exists to prevent, moved one boot along.
+   */
+  it('crash → one notice → untouched restart → silence → human action → one notice again', () => {
+    const first = firstBoot();
+    const session = first.service.getSession(campaignId);
+    session.status = 'running';
+    (first.service as unknown as { persistControlState: (s: unknown) => void }).persistControlState(session);
+
+    // 1. First boot after the crash: exactly one announcement, and it names the interrupted turn.
+    const crashBoot = boot();
+    expect(crashBoot.service.getSession(campaignId).state).toBe('paused');
+    expect(crashBoot.notifications.notifyCampaign).toHaveBeenCalledTimes(1);
+    expect(
+      crashBoot.audit.log.mock.calls
+        .map((c) => c[0] as { action: string; detail: string })
+        .filter((a) => a.action === 'ai-dm.driver.control_state.recovered'),
+    ).toHaveLength(1);
+    // The marker records the SETTLED shape (`paused`), not the announced reason.
+    expect(rawRow()).toMatchObject({ status: 'paused', announced_recovery: 'paused' });
+
+    // 2. Restart again with nothing changed: ZERO announcements, and no audit row either.
+    for (const _restart of [1, 2]) {
+      const quiet = boot();
+      expect(quiet.service.getSession(campaignId).state).toBe('paused');
+      expect(quiet.notifications.notifyCampaign).not.toHaveBeenCalled();
+      expect(auditActions(quiet)).not.toContain('ai-dm.driver.control_state.recovered');
+    }
+
+    // 3. A human resumes, a fresh turn is reserved, and the process dies again. That is a new
+    //    interrupted turn, so it must announce — the earlier suppression must not be sticky.
+    const resumed = boot();
+    resumed.service.setPaused(campaignId, false);
+    expect(rawRow()).toMatchObject({ announced_recovery: null });
+    const live = resumed.service.getSession(campaignId);
+    live.status = 'running';
+    (resumed.service as unknown as { persistControlState: (s: unknown) => void }).persistControlState(live);
+
+    const secondCrash = boot();
+    expect(secondCrash.service.getSession(campaignId).state).toBe('paused');
+    expect(secondCrash.notifications.notifyCampaign).toHaveBeenCalledTimes(1);
+    expect(
+      secondCrash.audit.log.mock.calls
+        .map((c) => c[0] as { action: string; detail: string })
+        .find((a) => a.action === 'ai-dm.driver.control_state.recovered')?.detail,
+    ).toContain('interrupted_turn');
   });
 
   it('an interrupted turn that was also stuck drops back to the stuck ladder on explicit resume', () => {

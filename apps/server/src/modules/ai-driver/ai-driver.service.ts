@@ -448,8 +448,14 @@ const RECOVERY_SHAPES = allowlist<ControlStateRecovery>({
 
 interface HydratedControlState {
   session: AiDmSessionState;
-  /** The reconciled recovery shape, or null when the seat came back clean. */
+  /** What the table is TOLD came back, or null when the seat came back clean. */
   recovery: ControlStateRecovery | null;
+  /**
+   * The STEADY shape the seat settled into — what a later boot will recompute once the one-shot
+   * crash marker is gone. Recorded in `announced_recovery`. Equals `recovery` except for an
+   * interrupted turn, which announces its own reason but settles into `paused`.
+   */
+  settled: ControlStateRecovery | null;
   /**
    * True only when `recovery` is a genuine TRANSITION away from the shape the table was last
    * told about. A seat left deliberately paused (or under human control, stuck, or mid-vote)
@@ -1070,7 +1076,7 @@ export class AiDriverService {
 
   private loadPersistedControlState(campaignId: number): HydratedControlState {
     const fresh = this.freshSession(campaignId);
-    if (!this.db) return { session: fresh, recovery: null, announce: false, dirty: false };
+    if (!this.db) return { session: fresh, recovery: null, settled: null, announce: false, dirty: false };
 
     // Reading the control state is best-effort in exactly the way writing it is: `ensureSession`
     // sits under EVERY driver endpoint (including the read-only GET /session), so a failed read
@@ -1085,9 +1091,9 @@ export class AiDriverService {
         .get() as AiDriverControlStateRow | undefined;
     } catch (err) {
       this.logger.error(`Failed to load AI driver control state for campaign ${campaignId}`, err);
-      return { session: fresh, recovery: null, announce: false, dirty: false };
+      return { session: fresh, recovery: null, settled: null, announce: false, dirty: false };
     }
-    if (!row) return { session: fresh, recovery: null, announce: false, dirty: false };
+    if (!row) return { session: fresh, recovery: null, settled: null, announce: false, dirty: false };
 
     const storedState = LADDER_STATES.has(row.state) ? row.state as AiDmLadderState : 'running';
     fresh.state = storedState;
@@ -1137,22 +1143,36 @@ export class AiDriverService {
     }
     fresh.levers = this.leversFor(fresh);
 
-    let recovery: ControlStateRecovery | null = null;
-    if (interruptedTurn) recovery = 'interrupted_turn';
-    else if (fresh.state === 'human_control') recovery = 'human_control';
-    else if (fresh.state === 'paused') recovery = 'paused';
-    else if (fresh.stuck) recovery = 'stuck';
-    else if (fresh.vote && !fresh.vote.resolved) recovery = 'open_vote';
+    // The STEADY shape: what a later boot will recompute from the reconciled session once the
+    // one-shot crash marker is gone. This — not `recovery` — is what gets recorded, because it is
+    // what the next hydration will compare against.
+    let settled: ControlStateRecovery | null = null;
+    if (fresh.state === 'human_control') settled = 'human_control';
+    else if (fresh.state === 'paused') settled = 'paused';
+    else if (fresh.stuck) settled = 'stuck';
+    else if (fresh.vote && !fresh.vote.resolved) settled = 'open_vote';
 
-    // Announce only on a genuine transition. `announced_recovery` records the shape the table
-    // was last told about; a seat that keeps hydrating into that same shape across restarts is a
-    // steady state, not news. Without this, a table that deliberately left the AI paused got a
-    // fresh "came back paused" notice on every deploy, forever — and the one notice that really
-    // matters, `interrupted_turn`, would drown in it.
+    // What the table is TOLD. Differs from `settled` only for an interrupted turn, which has its
+    // own one-time reason but settles into `paused`.
+    const recovery: ControlStateRecovery | null = interruptedTurn ? 'interrupted_turn' : settled;
+
+    // Announce only on a genuine transition. `announced_recovery` records the steady shape the
+    // table has already been informed about; a seat that keeps hydrating into that same shape
+    // across restarts is a steady state, not news. Without this, a table that deliberately left
+    // the AI paused got a fresh "came back paused" notice on every deploy, forever.
+    //
+    // Comparing `settled` (not `recovery`) is what keeps the interrupted-turn path honest. That
+    // path is the one case where the announced shape and the persisted status deliberately
+    // disagree: the crash is announced as `interrupted_turn`, but the row is reconciled to
+    // `status='paused'`, so the NEXT boot recomputes `paused`. Recording `interrupted_turn` would
+    // make that next boot look like a transition and fire a redundant "came back paused" notice
+    // for a freeze the table was just told about — the very bug this marker exists to prevent,
+    // moved one boot along. Recording `settled` closes it, and a genuinely new interrupted turn
+    // still announces, because reserving a turn writes the marker back to null.
     const lastAnnounced = RECOVERY_SHAPES.has(row.announcedRecovery ?? '')
       ? row.announcedRecovery as ControlStateRecovery
       : null;
-    const announce = recovery !== null && recovery !== lastAnnounced;
+    const announce = recovery !== null && settled !== lastAnnounced;
 
     // Anything reconciliation changed relative to the row must be written back, or the next
     // restart re-derives it from the same stale bytes — an expired vote in particular would look
@@ -1160,10 +1180,10 @@ export class AiDriverService {
     // marker is part of that: if it is not persisted, every boot looks like a transition again.
     const dirty = interruptedTurn
       || voteExpiredOnLoad
+      || settled !== lastAnnounced
       || fresh.state !== storedState
-      || fresh.status !== row.status
-      || recovery !== lastAnnounced;
-    return { session: fresh, recovery, announce, dirty };
+      || fresh.status !== row.status;
+    return { session: fresh, recovery, settled, announce, dirty };
   }
 
   /**
@@ -1449,14 +1469,15 @@ export class AiDriverService {
   private ensureSession(campaignId: number): AiDmSessionState {
     let s = this.sessions.get(campaignId);
     if (!s) {
-      const { session, recovery, announce, dirty } = this.loadPersistedControlState(campaignId);
+      const { session, recovery, settled, announce, dirty } = this.loadPersistedControlState(campaignId);
       s = session;
       // Publish BEFORE persisting/announcing: both re-enter this service, and the map entry must
       // already be the canonical object so nothing hydrates a second time.
       this.sessions.set(campaignId, s);
-      // Record the shape as announced even when `announce` is false: the marker must survive to
-      // the next boot either way, or a steady state looks like a fresh transition every time.
-      if (dirty) this.persistControlState(s, recovery);
+      // Record `settled`, not `recovery`: the marker must match what the NEXT boot recomputes, and
+      // it must be written even when `announce` is false, or a steady state looks like a fresh
+      // transition every time.
+      if (dirty) this.persistControlState(s, settled);
       if (announce && recovery) this.announceRecoveredState(s, recovery);
     }
     return s;

@@ -1566,10 +1566,25 @@ function migrateAiDriverControlStateTable(sqlite: Database.Database): void {
       updated_at TEXT NOT NULL
     );
   `);
+}
 
-  // `announced_recovery` was added while #559 was still in review, so a DB that ran an
-  // earlier build of this branch already has the table (without the column) and would
-  // no-op the CREATE above. Probe and backfill, same pattern as migrateAiScribeSessionScope499.
+/**
+ * Backfill `announced_recovery` on `ai_driver_control_state` (issue #559).
+ *
+ * Deliberately its OWN ordinal rather than a probe bolted inside the create-table migration.
+ * `runMigrations` skips any migration whose name is already recorded in `__migrations`, so a
+ * probe living inside `migrateAiDriverControlStateTable` would never run on exactly the DBs that
+ * need it — one that recorded `0112_ai_driver_control_state_559` against an earlier build whose
+ * CREATE lacked the column. The column would stay missing, every drizzle read/write against the
+ * table would throw, and the best-effort try/catch around persistence would swallow it, silently
+ * disabling restart-safety with no visible symptom. An additive column change gets its own
+ * ordinal so it runs independently of whether the CREATE was already recorded.
+ */
+function migrateAiDriverControlStateAnnouncedRecovery(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ai_driver_control_state'")
+    .get();
+  if (!hasTable) return;
   const cols = sqlite.prepare('PRAGMA table_info(ai_driver_control_state)').all() as Array<{ name: string }>;
   if (!cols.some((c) => c.name === 'announced_recovery')) {
     sqlite.exec('ALTER TABLE ai_driver_control_state ADD COLUMN announced_recovery TEXT');
@@ -3015,6 +3030,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // 0110/0111 are reserved by in-flight branches (#504, #501). Main took 0107-0109 while
   // #559 was in review, so durable driver control state lands on the next free ordinal.
   { name: '0112_ai_driver_control_state_559', run: migrateAiDriverControlStateTable },
+  { name: '0113_ai_driver_control_state_announced_recovery_559', run: migrateAiDriverControlStateAnnouncedRecovery },
 ];
 
 /**
