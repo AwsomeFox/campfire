@@ -1,9 +1,0 @@
-packages:
-  - apps/*
-  - packages/*
-onlyBuiltDependencies:
-  - '@nestjs/core'
-  - '@scarf/scarf'
-  - better-sqlite3
-  - esbuild
-  - sharp
