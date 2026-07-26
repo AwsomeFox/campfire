@@ -8,6 +8,10 @@ import { attachments, campaigns } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { ALLOWED_MIME_TO_EXT, GENERATED_MIME_TO_EXT } from './attachments.service';
 import { uploadsRoot } from './uploads-path';
+import { DERIVATIVE_EXT, DERIVATIVE_VARIANT_NAMES } from './image-derivatives';
+
+/** `<id>.<variant>.png` — every responsive derivative artifact (issue #604). */
+const DERIVATIVE_FILENAME_RE = new RegExp(`^(\\d+)\\.(${DERIVATIVE_VARIANT_NAMES.join('|')})\\.${DERIVATIVE_EXT}$`);
 
 /**
  * Classification of an issue found during attachment diagnostics scan.
@@ -16,7 +20,8 @@ import { uploadsRoot } from './uploads-path';
  *  - wrong-extension:      file extension doesn't match what the MIME type maps to
  *  - duplicate:            multiple files share the same content hash (sha256)
  *  - malformed:            filename on disk doesn't match the expected `<id>.<ext>` pattern
- *  - unexpected-thumbnail: a `.thumb.png` file exists without a parent attachment row
+ *  - unexpected-thumbnail: a responsive derivative file (`<id>.<variant>.png`, e.g.
+ *                          `.thumb.png`) exists without a parent attachment row (#604)
  *  - orphan:               file on disk with no DB row at all
  *  - missing:              DB row whose expected file does not exist on disk
  */
@@ -314,12 +319,16 @@ export class DiagnosticsService {
             continue;
           }
 
-          // Parse filename: expected forms are `<id>.<ext>` or `<id>.thumb.png`
-          const thumbMatch = entry.name.match(/^(\d+)\.thumb\.png$/);
+          // Parse filename: expected forms are `<id>.<ext>` or a responsive derivative
+          // `<id>.<variant>.png` (issue #604 — `thumb`/`md`/`lg`; `thumb` is the same
+          // name the pre-#604 synchronous thumbnailer used, so old files still match).
+          // Without this, every `<id>.md.png` would fall through to the single-dot
+          // `normalMatch` below and be reported as a malformed filename.
+          const derivativeMatch = entry.name.match(DERIVATIVE_FILENAME_RE);
           const normalMatch = entry.name.match(/^(\d+)\.([a-z0-9]+)$/);
 
-          if (thumbMatch) {
-            const id = Number.parseInt(thumbMatch[1], 10);
+          if (derivativeMatch) {
+            const id = Number.parseInt(derivativeMatch[1], 10);
             if (!rowById.has(id)) {
               issues.push({
                 type: 'unexpected-thumbnail',
@@ -330,10 +339,11 @@ export class DiagnosticsService {
                 canonicalPath: null,
                 size,
                 checksum: checksumFile(filePath),
-                detail: `Thumbnail file ${entry.name} has no parent attachment row (id=${id})`,
+                detail: `Derivative file ${entry.name} has no parent attachment row (id=${id})`,
               });
             }
-            // Thumbnails don't count toward the "seen on disk" set for their parent row.
+            // Derivatives don't count toward the "seen on disk" set for their parent
+            // row — the row's canonical file is its ORIGINAL.
             continue;
           }
 

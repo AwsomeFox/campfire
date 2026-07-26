@@ -60,6 +60,27 @@ function pngHeight(buf: Buffer): number {
   return buf.readUInt32BE(20); // IHDR height directly follows width
 }
 
+/**
+ * Issue #604: derivative generation moved OFF the request path, so a `?size=` GET
+ * issued in the same tick as the upload legitimately answers with the original.
+ * Poll the manifest until the background drain settles before asserting on
+ * derivative bytes. The assertions themselves are unchanged — only the moment we
+ * make them.
+ */
+async function waitForDerivatives(
+  server: Parameters<typeof request>[0],
+  attachmentId: number,
+  headers: Record<string, string>,
+): Promise<Record<string, unknown>> {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const res = await request(server).get(`/api/v1/attachments/${attachmentId}/derivatives`).set(headers);
+    expect(res.status).toBe(200);
+    if (res.body.status !== 'processing') return res.body;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`Derivatives for attachment ${attachmentId} never settled`);
+}
+
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' };
 const player = { 'x-dev-role': 'player', 'x-dev-user': 'player-1' };
 const viewer = { 'x-dev-role': 'viewer', 'x-dev-user': 'viewer-1' };
@@ -760,6 +781,7 @@ describe('attachments (e2e)', () => {
 
     it('?size=thumb serves a downscaled PNG (longest edge capped at 512px)', async () => {
       const server = ctx.app.getHttpServer();
+      await waitForDerivatives(server, pngId, dm); // #604: generation is asynchronous
       const full = await request(server).get(`/api/v1/attachments/${pngId}/file`).set(dm);
       const thumb = await request(server).get(`/api/v1/attachments/${pngId}/file?size=thumb`).set(dm);
 
@@ -778,6 +800,7 @@ describe('attachments (e2e)', () => {
 
     it('?size=thumb revalidates to 304 too', async () => {
       const server = ctx.app.getHttpServer();
+      await waitForDerivatives(server, pngId, dm); // #604: generation is asynchronous
       const first = await request(server).get(`/api/v1/attachments/${pngId}/file?size=thumb`).set(dm);
       const res = await request(server)
         .get(`/api/v1/attachments/${pngId}/file?size=thumb`)
@@ -793,8 +816,12 @@ describe('attachments (e2e)', () => {
         .set(dm)
         .field('kind', 'image')
         .attach('file', TINY_PNG, { filename: 'tiny.png', contentType: 'image/png' });
+      // Every rung is `skipped` for a 1x1 source, so the manifest settles immediately
+      // and the documented last-resort fallback (the original bytes) is what wins.
+      await waitForDerivatives(server, up.body.id, dm);
       const thumb = await request(server).get(`/api/v1/attachments/${up.body.id}/file?size=thumb`).set(dm);
       expect(thumb.status).toBe(200);
+      expect(thumb.headers['x-campfire-derivative']).toBe('original-fallback');
       expect(Buffer.compare(thumb.body, TINY_PNG)).toBe(0);
     });
 

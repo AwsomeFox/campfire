@@ -1363,6 +1363,31 @@ export const campaignLibraryMonsters = sqliteTable('campaign_library_monsters', 
   updatedAt: text('updated_at').notNull(),
 });
 
+/**
+ * Durable responsive derivatives for image attachments (issue #604). See the DDL in
+ * bootstrap.sql.ts for the full rationale; in short, one row per (attachment, ladder
+ * rung) makes derivative generation a once-ever, crash-recoverable background job
+ * instead of a synchronous full-pixel decode on the request path.
+ */
+export const attachmentDerivatives = sqliteTable('attachment_derivatives', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  attachmentId: integer('attachment_id').notNull(),
+  campaignId: integer('campaign_id').notNull(),
+  variant: text('variant').notNull(), // DerivativeVariantName: 'thumb' | 'md' | 'lg'
+  state: text('state').notNull().default('pending'), // 'pending' | 'ready' | 'failed' | 'skipped'
+  format: text('format').notNull().default(''), // always 'png' today (see DERIVATIVE_MIME)
+  width: integer('width').notNull().default(0),
+  height: integer('height').notNull().default(0),
+  bytes: integer('bytes').notNull().default(0),
+  checksum: text('checksum').notNull().default(''),
+  /** Source content hash at generation time — a mismatch means this rung is stale. */
+  sourceEtag: text('source_etag').notNull().default(''),
+  attempts: integer('attempts').notNull().default(0),
+  lastError: text('last_error').notNull().default(''),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
 // Persistent per-encounter combat log (issue #61) — see modules/encounters. One row
 // per meaningful combat mutation (damage/heal, condition add/remove, death, turn/round),
 // written by EncountersService so the run view can show a scrollable history that

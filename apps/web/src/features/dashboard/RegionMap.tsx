@@ -12,7 +12,8 @@ import type { Attachment, Campaign, GenerateMapParams, GeneratedMapResult, Locat
 import { api, API, ApiError } from '../../lib/api';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { ErrorNote } from '../../components/ui';
-import { ImageUpload, MapUploadButton, attachmentFileUrl, uploadAttachment } from '../../components/ImageUpload';
+import { ImageUpload, MapUploadButton, attachmentFileUrl, attachmentSrcSet, uploadAttachment } from '../../components/ImageUpload';
+import { useAttachmentDerivatives } from '../../components/useAttachmentDerivatives';
 import { GetAMapPanel } from '../../components/GetAMapPanel';
 import { CampaignCover } from '../../components/CampaignCover';
 import { MapConceptGlossary, MapPurposePreview } from '../../components/mapOnboarding';
@@ -300,6 +301,22 @@ export function RegionMap({
 
   const mapImageUrl = campaign.mapAttachmentId ? attachmentFileUrl(campaign.mapAttachmentId) : null;
 
+  /**
+   * Responsive world map (issue #604). This card renders at ~360–640 CSS px, but it
+   * used to load the FULL original — a multi-MB campaign map — on every dashboard
+   * visit, on every device. `srcSet` + `sizes` now let the browser pick the
+   * smallest ready derivative that still covers the slot, while `src` stays the
+   * original so the card is never broken while the ladder is still generating (or
+   * when the source is already small enough that no rung was materialised).
+   */
+  const derivatives = useAttachmentDerivatives(campaign.mapAttachmentId ?? null);
+  const mapSrcSet = campaign.mapAttachmentId
+    ? attachmentSrcSet(campaign.mapAttachmentId, derivatives.manifest)
+    : undefined;
+  // The card is full-bleed in a single dashboard column on phones and roughly half
+  // the viewport once the dashboard goes two-up.
+  const mapSizes = '(max-width: 768px) 100vw, 50vw';
+
   async function handleMapUpload(attachment: Attachment, options?: { manageBusy?: boolean }) {
     // uploadMapFile owns busy for the full upload+patch path; skip nested toggles.
     const manageBusy = options?.manageBusy ?? true;
@@ -516,6 +533,21 @@ export function RegionMap({
             onRemove={() => void handleMapRemove()}
           />
         )}
+        {/* Explicit "download original" (issue #604). Now that the card renders a
+            downscaled derivative, the DM still needs a one-click route to the exact
+            bytes they uploaded — for printing, for a VTT import, or to hand to a
+            player. ?download=1 sends Content-Disposition: attachment. */}
+        {canDmWrite && campaign.mapAttachmentId != null && (
+          <a
+            data-testid="world-map-download-original"
+            className="btn btn-ghost"
+            style={{ fontSize: 12 }}
+            href={attachmentFileUrl(campaign.mapAttachmentId, undefined, { download: '1' })}
+            download
+          >
+            Download original
+          </a>
+        )}
         <Link to={`/c/${campaignId}/locations`} className="btn btn-ghost" style={{ fontSize: 12 }}>
           All locations →
         </Link>
@@ -528,6 +560,43 @@ export function RegionMap({
             pending={retryPending || busy || kbSaving}
             onRetry={canRetry ? handleRetry : undefined}
           />
+        </div>
+      )}
+
+      {/* Derivative lifecycle for the world map (issue #604). The map itself always
+          renders — these states explain WHY a first load may be heavy (processing),
+          warn when the optimised copy predates the current source (stale), and give
+          the DM a recovery action when generation failed. Nothing here blocks the
+          map; a silent full-size fallback was the old, opaque behaviour. */}
+      {mapImageUrl && derivatives.error && (
+        <div style={{ padding: '8px 14px 0' }}>
+          <ErrorNote
+            message={`Couldn't prepare optimised sizes for this map — it is still shown at full size. ${derivatives.error}`}
+            pending={derivatives.retrying}
+            onRetry={canDmWrite ? () => void derivatives.retry() : undefined}
+          />
+        </div>
+      )}
+      {mapImageUrl && !derivatives.error && (derivatives.processing || derivatives.stale) && (
+        <div
+          data-testid="world-map-derivative-status"
+          role="status"
+          className="text-muted"
+          style={{ padding: '8px 14px 0', fontSize: 'var(--type-meta)' }}
+        >
+          {derivatives.processing
+            ? 'Preparing faster map sizes — showing the full-size original for now.'
+            : 'Showing an optimised copy made before this map last changed.'}
+          {derivatives.stale && canDmWrite && (
+            <button
+              className="btn btn-ghost"
+              style={{ fontSize: 11, minHeight: 0, padding: '2px 8px', marginInlineStart: 8 }}
+              disabled={derivatives.retrying}
+              onClick={() => void derivatives.retry()}
+            >
+              {derivatives.retrying ? 'Refreshing…' : 'Refresh sizes'}
+            </button>
+          )}
         </div>
       )}
 
@@ -566,7 +635,13 @@ export function RegionMap({
         onLostPointerCapture={onSurfaceLostPointerCapture}
       >
         {mapImageUrl ? (
-          <img src={mapImageUrl} alt="Campaign map" className="absolute inset-0 w-full h-full object-cover" />
+          <img
+            src={mapImageUrl}
+            srcSet={mapSrcSet}
+            sizes={mapSrcSet ? mapSizes : undefined}
+            alt="Campaign map"
+            className="absolute inset-0 w-full h-full object-cover"
+          />
         ) : (
           <div
             className="absolute inset-0 opacity-35"
