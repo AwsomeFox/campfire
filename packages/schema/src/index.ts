@@ -4301,6 +4301,16 @@ export const RulePackSectionProgress = z.object({
 });
 export type RulePackSectionProgress = z.infer<typeof RulePackSectionProgress>;
 
+export const RulePackUpdatePreview = z.object({
+  added: z.number().int().nonnegative().default(0),
+  changed: z.number().int().nonnegative().default(0),
+  removed: z.number().int().nonnegative().default(0),
+  unchanged: z.number().int().nonnegative().default(0),
+  sourceHash: z.string().length(64),
+  sourceVersion: z.string().max(40).default(''),
+});
+export type RulePackUpdatePreview = z.infer<typeof RulePackUpdatePreview>;
+
 /**
  * Status of a background rule-pack install (issue #20). Install is no longer a
  * blocking request: POST /rules/packs/install (or /upload) returns 202 with one of
@@ -4324,6 +4334,9 @@ export const RulePackInstallJob = z.object({
   pack: RulePack.nullable().default(null), // populated on success
   added: z.number().int().nonnegative().nullable().default(null), // incremental installs only
   skippedExisting: z.number().int().nonnegative().nullable().default(null), // incremental installs only
+  changed: z.number().int().nonnegative().nullable().default(null),
+  removed: z.number().int().nonnegative().nullable().default(null),
+  preview: RulePackUpdatePreview.nullable().default(null),
   error: z.string().nullable().default(null), // populated on failure
   ...timestamps,
 });

@@ -3,7 +3,7 @@ import type { Server } from 'node:http';
 import { eq } from 'drizzle-orm';
 import { createTestApp, createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
 import { DB, type DrizzleDb } from '../src/db/db.module';
-import { ruleEntries } from '../src/db/schema';
+import { auditLog, campaigns, ruleEntries } from '../src/db/schema';
 import {
   startFakeOpen5e,
   startFakeOpen5eWithBadPagination,
@@ -140,6 +140,15 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
     expect(reJob.outcome).toBe('updated');
     expect(reJob.added).toBe(0);
     expect(reJob.skippedExisting).toBe(2 + 2 + 1 + 4 + 2 + 2 + 1);
+    expect(reJob.changed).toBe(1);
+    expect(reJob.removed).toBe(0);
+    expect(reJob.preview).toMatchObject({
+      added: 0,
+      changed: 1,
+      removed: 0,
+      unchanged: (2 + 2 + 1 + 4 + 2 + 2 + 1) - 1,
+    });
+    expect(reJob.preview.sourceHash).toMatch(/^[a-f0-9]{64}$/);
     expect(reJob.pack.entryCount).toBe(2 + 2 + 1 + 4 + 2 + 2 + 1); // unchanged
 
     // search: free text finds the fireball spell
@@ -562,6 +571,89 @@ describe('rules / rule packs — generic upload (issue #19)', () => {
     expect(secondJob.added).toBe(1);
     expect(secondJob.skippedExisting).toBe(3);
     expect(secondJob.pack.entryCount).toBe(4);
+
+    await request(server).delete(`/api/v1/rules/packs/${secondJob.pack.id}`).set(uploader);
+  });
+
+  it('re-uploading a full manifest applies add/change/remove atomically and preserves overrides', async () => {
+    const server = ctx.app.getHttpServer();
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const slug = 'pf2e-sync-srd';
+    const initialPack = { ...pf2ePack, pack: { ...pf2ePack.pack, slug } };
+
+    const firstRes = await uploadPack(initialPack);
+    const firstJob = await pollJob(server, uploader, firstRes.body.id);
+    expect(firstJob.outcome).toBe('created');
+    expect(firstJob.pack.entryCount).toBe(3);
+
+    const fireballRes = await request(server).get('/api/v1/rules/search').query({ q: 'fireball', pack: slug }).set(uploader);
+    const fireball = searchItems(fireballRes.body).find((e: { slug: string }) => e.slug === 'pf2e-fireball');
+    expect(fireball).toBeTruthy();
+    const iconRes = await request(server)
+      .patch(`/api/v1/rules/entries/${fireball.id}`)
+      .set(uploader)
+      .send({ iconSlug: 'fire-ray' });
+    expect(iconRes.status).toBe(200);
+
+    const now = new Date().toISOString();
+    const [campaign] = db.insert(campaigns)
+      .values({
+        name: 'Rule Sync Campaign',
+        description: '',
+        status: 'active',
+        dangerLevel: 'low',
+        sessionCount: 0,
+        ruleSystem: slug,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning()
+      .all();
+
+    const secondRes = await uploadPack({
+      ...initialPack,
+      pack: { ...initialPack.pack, version: '2024.2' },
+      entries: [
+        {
+          slug: 'pf2e-fireball',
+          name: 'Fireball',
+          type: 'spell',
+          summary: 'A corrected roaring blast of flame.',
+          body: 'Corrected fire erupts from a point you choose.',
+        },
+        { slug: 'pf2e-goblin', name: 'Goblin Warrior', type: 'monster', summary: 'CR -1', dataJson: JSON.stringify({ hp: 6 }) },
+        { slug: 'pf2e-shield', name: 'Shield', type: 'item', summary: 'A sturdy shield.' },
+      ],
+    });
+    const secondJob = await pollJob(server, uploader, secondRes.body.id);
+    expect(secondJob.outcome).toBe('updated');
+    expect(secondJob.added).toBe(1);
+    expect(secondJob.changed).toBe(1);
+    expect(secondJob.removed).toBe(1);
+    expect(secondJob.skippedExisting).toBe(2);
+    expect(secondJob.preview).toMatchObject({ added: 1, changed: 1, removed: 1, unchanged: 1, sourceVersion: '2024.2' });
+    expect(secondJob.preview.sourceHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(secondJob.pack.entryCount).toBe(3);
+    expect(secondJob.pack.version).toBe('2024.2');
+
+    const refreshedRes = await request(server).get('/api/v1/rules/search').query({ q: 'corrected roaring', pack: slug }).set(uploader);
+    const refreshed = searchItems(refreshedRes.body).find((e: { slug: string }) => e.slug === 'pf2e-fireball');
+    expect(refreshed.id).toBe(fireball.id);
+    expect(refreshed.iconSlug).toBe('fire-ray');
+    expect(refreshed.summary).toBe('A corrected roaring blast of flame.');
+
+    const removedRes = await request(server).get('/api/v1/rules/search').query({ q: 'fighter', pack: slug }).set(uploader);
+    expect(searchItems(removedRes.body).some((e: { slug: string }) => e.slug === 'pf2e-fighter')).toBe(false);
+    const addedRes = await request(server).get('/api/v1/rules/search').query({ q: 'shield', pack: slug }).set(uploader);
+    expect(searchItems(addedRes.body).some((e: { slug: string }) => e.slug === 'pf2e-shield')).toBe(true);
+
+    const [campaignAfterSync] = db.select().from(campaigns).where(eq(campaigns.id, campaign.id)).all();
+    expect(campaignAfterSync.ruleSystem).toBe(slug);
+
+    const auditRows = db.select().from(auditLog).where(eq(auditLog.entityId, secondJob.pack.id)).all();
+    const updateAudit = auditRows.find((row) => row.detail.includes('+1 ~1 -1') && row.detail.includes('manifest='));
+    expect(updateAudit?.detail).toContain('source=https://example.com/pf2e');
+    expect(updateAudit?.detail).toContain('version=2024.2');
 
     await request(server).delete(`/api/v1/rules/packs/${secondJob.pack.id}`).set(uploader);
   });

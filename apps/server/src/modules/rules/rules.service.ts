@@ -12,6 +12,7 @@ import {
   type RulePack,
   type RulePackInstall,
   type RulePackInstallJob,
+  type RulePackUpdatePreview,
   type RulePackInstallSource,
   type RulePackUpload,
   type RuleSearchPage,
@@ -123,7 +124,22 @@ interface ImportJobProgress {
   skipped: number;
   failed: number;
   sections: Array<{ section: string; status: string; imported: number }>;
+  changed?: number;
+  removed?: number;
+  sourceHash?: string;
+  sourceVersion?: string;
+  preview?: RulePackUpdatePreview;
 }
+
+type PersistPackResult = RulePack & {
+  added?: number;
+  skippedExisting?: number;
+  changed?: number;
+  removed?: number;
+  sourceHash?: string;
+  sourceVersion?: string;
+  preview?: RulePackUpdatePreview;
+};
 
 /**
  * better-sqlite3 throws a synchronous Error with `.code` set to one of the
@@ -196,6 +212,75 @@ function effectiveEntryProvenance(
     author: (entry.author ?? '').trim(),
     sourceUrl: (entry.sourceUrl ?? '').trim() || packSourceUrl,
   };
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function sha256Hex(value: unknown): string {
+  return createHash('sha256').update(stableJson(value)).digest('hex');
+}
+
+function importedEntryHash(entry: ImportedEntry, packLicense: string, packSourceUrl: string, packName: string): string {
+  const prov = effectiveEntryProvenance(entry, packLicense, packSourceUrl, packName);
+  return sha256Hex({
+    slug: entry.slug,
+    type: entry.type,
+    name: entry.name,
+    summary: entry.summary,
+    body: entry.body,
+    dataJson: entry.dataJson,
+    source: entry.source,
+    license: prov.license,
+    attribution: prov.attribution,
+    author: prov.author,
+    sourceUrl: prov.sourceUrl,
+  });
+}
+
+function storedEntryHash(row: typeof ruleEntries.$inferSelect): string {
+  return sha256Hex({
+    slug: row.slug,
+    type: row.type,
+    name: row.name,
+    summary: row.summary,
+    body: row.body,
+    dataJson: row.dataJson,
+    source: row.source ?? '',
+    license: row.license ?? '',
+    attribution: row.attribution ?? '',
+    author: row.author ?? '',
+    sourceUrl: row.sourceUrl ?? '',
+  });
+}
+
+function packManifestHash(
+  meta: { slug: string; name: string; version: string; license: string; sourceUrl: string; sectionLabels: string[] },
+  entries: ImportedEntry[],
+): string {
+  return sha256Hex({
+    slug: meta.slug,
+    name: meta.name,
+    version: meta.version,
+    license: meta.license,
+    sourceUrl: meta.sourceUrl,
+    sections: [...meta.sectionLabels].sort(),
+    entries: entries
+      .map((entry) => ({
+        key: `${entry.type}::${entry.slug}`,
+        hash: importedEntryHash(entry, meta.license, meta.sourceUrl, meta.name),
+      }))
+      .sort((a, b) => a.key.localeCompare(b.key)),
+  });
 }
 
 /**
@@ -299,6 +384,9 @@ export class RulesService implements OnModuleInit {
       pack,
       added: row.status === 'completed' ? progress.committed : null,
       skippedExisting: row.status === 'completed' ? progress.skipped : null,
+      changed: row.status === 'completed' ? progress.changed ?? 0 : null,
+      removed: row.status === 'completed' ? progress.removed ?? 0 : null,
+      preview: row.status === 'completed' ? progress.preview ?? null : null,
       error: RulesService.parseErrors(row.errors)[0] ?? null,
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
@@ -327,7 +415,21 @@ export class RulesService implements OnModuleInit {
     this.db.update(importJobs).set({ progress: JSON.stringify(progress), cursor, updatedAt: nowIso() }).where(eq(importJobs.id, jobId)).run();
   }
 
-  private markJobCompleted(jobId: string, outcome: 'created' | 'updated', added: number, skipped: number, pack?: RulePack, isIncremental = false): void {
+  private markJobCompleted(
+    jobId: string,
+    outcome: 'created' | 'updated',
+    result: {
+      added: number;
+      skippedExisting: number;
+      changed?: number;
+      removed?: number;
+      sourceHash?: string;
+      sourceVersion?: string;
+      preview?: RulePackUpdatePreview;
+    },
+    pack?: RulePack,
+    isIncremental = false,
+  ): void {
     const [row] = this.db.select().from(importJobs).where(eq(importJobs.id, jobId)).all();
     if (!row || row.status === 'cancelled') {
       this.runningJobs.delete(jobId);
@@ -335,9 +437,14 @@ export class RulesService implements OnModuleInit {
     }
     const progress = RulesService.parseProgress(row.progress);
     if (isIncremental) {
-      progress.committed = added;
-      progress.skipped = skipped;
+      progress.committed = result.added;
+      progress.skipped = result.skippedExisting;
     }
+    progress.changed = result.changed ?? 0;
+    progress.removed = result.removed ?? 0;
+    if (result.sourceHash) progress.sourceHash = result.sourceHash;
+    if (result.sourceVersion) progress.sourceVersion = result.sourceVersion;
+    if (result.preview) progress.preview = result.preview;
     if (pack) (progress as unknown as Record<string, unknown>).packSlug = pack.slug;
     progress.sections.forEach((s) => { if (s.status !== 'done') s.status = 'done'; });
     const ts = nowIso();
@@ -386,7 +493,7 @@ export class RulesService implements OnModuleInit {
     return row?.status === 'cancelled';
   }
 
-  private async runJob(jobId: string, work: () => Promise<RulePack & { added?: number; skippedExisting?: number }>): Promise<void> {
+  private async runJob(jobId: string, work: () => Promise<PersistPackResult>): Promise<void> {
     if (this.isJobCancelled(jobId)) {
       this.runningJobs.delete(jobId);
       return;
@@ -407,8 +514,22 @@ export class RulesService implements OnModuleInit {
         return;
       }
       const isIncremental = 'added' in result;
-      const { added, skippedExisting, ...pack } = result as RulePack & { added?: number; skippedExisting?: number };
-      this.markJobCompleted(jobId, isIncremental ? 'updated' : 'created', added ?? 0, skippedExisting ?? 0, pack, isIncremental);
+      const { added, skippedExisting, changed, removed, sourceHash, sourceVersion, preview, ...pack } = result;
+      this.markJobCompleted(
+        jobId,
+        isIncremental ? 'updated' : 'created',
+        {
+          added: added ?? preview?.added ?? 0,
+          skippedExisting: skippedExisting ?? 0,
+          changed: changed ?? preview?.changed ?? 0,
+          removed: removed ?? preview?.removed ?? 0,
+          sourceHash: sourceHash ?? preview?.sourceHash,
+          sourceVersion: sourceVersion ?? preview?.sourceVersion,
+          preview,
+        },
+        pack,
+        isIncremental,
+      );
     } catch (err) {
       if (this.isJobCancelled(jobId)) {
         this.runningJobs.delete(jobId);
@@ -938,7 +1059,7 @@ export class RulesService implements OnModuleInit {
       allEntries,
       user,
       `(cap ${MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
-      { refreshExisting: true },
+      { removeMissing: sections.length === ALL_OPEN5E_SECTIONS.length },
     );
   }
 
@@ -982,6 +1103,7 @@ export class RulesService implements OnModuleInit {
       allEntries,
       user,
       `(cap ${PF2E_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
+      { removeMissing: sections.length === ALL_PF2E_SECTIONS.length },
     );
   }
 
@@ -1016,6 +1138,7 @@ export class RulesService implements OnModuleInit {
       allEntries,
       user,
       `(cap ${PF2E_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
+      { removeMissing: sections.length === ALL_PF2E_SECTIONS.length },
     );
   }
 
@@ -1068,6 +1191,7 @@ export class RulesService implements OnModuleInit {
       allEntries,
       user,
       `(cap ${OL_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
+      { removeMissing: sections.length === ALL_OPEN_LEGEND_SECTIONS.length },
     );
   }
 
@@ -1110,6 +1234,7 @@ export class RulesService implements OnModuleInit {
       allEntries,
       user,
       `(cap ${PF1E_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
+      { removeMissing: sections.length === ALL_PF1E_SECTIONS.length },
     );
   }
 
@@ -1158,6 +1283,7 @@ export class RulesService implements OnModuleInit {
       allEntries,
       user,
       `(cap ${STARFINDER_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
+      { removeMissing: sections.length === ALL_STARFINDER_SECTIONS.length },
     );
   }
 
@@ -1199,6 +1325,7 @@ export class RulesService implements OnModuleInit {
       allEntries,
       user,
       `(cap ${ARCHMAGE_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
+      { removeMissing: sections.length === ALL_ARCHMAGE_SECTIONS.length },
     );
   }
 
@@ -1245,6 +1372,7 @@ export class RulesService implements OnModuleInit {
       allEntries,
       user,
       `(cap ${OSR_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
+      { removeMissing: sections.length === ALL_OSR_SECTIONS.length },
     );
   }
 
@@ -1297,7 +1425,7 @@ export class RulesService implements OnModuleInit {
       allEntries,
       user,
       `(${totalSkipped} skipped)`,
-      { refreshExisting: true },
+      { removeMissing: true },
     );
   }
 
@@ -1347,6 +1475,7 @@ export class RulesService implements OnModuleInit {
       allEntries,
       user,
       `(cap ${DATASWORN_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
+      { removeMissing: sections.length === ALL_DATASWORN_SECTIONS.length },
     );
   }
 
@@ -1412,6 +1541,7 @@ export class RulesService implements OnModuleInit {
       entries,
       user,
       `upload (${entries.length} entries)`,
+      { removeMissing: true },
     );
   }
 
@@ -1428,8 +1558,8 @@ export class RulesService implements OnModuleInit {
     rawEntries: ImportedEntry[],
     user: RequestUser,
     detailSuffix: string,
-    options: { refreshExisting?: boolean } = {},
-  ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
+    options: { removeMissing?: boolean } = {},
+  ): Promise<PersistPackResult> {
     // De-dupe the incoming entries by (type, slug), keeping the first occurrence. Importers
     // only de-dupe WITHIN a section, but several sources map two sections onto one entry
     // type (PF2e feats+backgrounds→feat, OL boons+banes→condition, SF equipment/starships/
@@ -1445,9 +1575,19 @@ export class RulesService implements OnModuleInit {
       return true;
     });
 
+    const sourceHash = packManifestHash(meta, entries);
+    const previewForFresh: RulePackUpdatePreview = {
+      added: entries.length,
+      changed: 0,
+      removed: 0,
+      unchanged: 0,
+      sourceHash,
+      sourceVersion: meta.version,
+    };
+
     const [existing] = await this.db.select().from(rulePacks).where(eq(rulePacks.slug, meta.slug)).limit(1);
     if (existing) {
-      return this.addEntriesToExistingPack(existing, entries, meta.sectionLabels, user, options);
+      return this.syncExistingPack(existing, meta, entries, sourceHash, user, options);
     }
 
     const ts = nowIso();
@@ -1500,7 +1640,7 @@ export class RulesService implements OnModuleInit {
       // incremental path against it instead of surfacing a raw 500.
       const [raced] = await this.db.select().from(rulePacks).where(eq(rulePacks.slug, meta.slug)).limit(1);
       if (!raced) throw err; // shouldn't happen, but don't swallow a genuine failure
-      return this.addEntriesToExistingPack(raced, entries, meta.sectionLabels, user, options);
+      return this.syncExistingPack(raced, meta, entries, sourceHash, user, options);
     }
 
     await this.audit.log({
@@ -1509,112 +1649,171 @@ export class RulesService implements OnModuleInit {
       action: 'rulepack.install',
       entityType: 'rule_pack',
       entityId: pack.id,
-      detail: `${entries.length} entries from ${meta.sectionLabels.join(',')} ${detailSuffix}`,
+      detail: `${entries.length} entries from ${meta.sectionLabels.join(',')} ${detailSuffix}; source=${meta.sourceUrl || 'upload'} version=${meta.version} manifest=${sourceHash.slice(0, 12)}`,
     });
 
-    return packToDomain(pack);
+    return { ...packToDomain(pack), sourceHash, sourceVersion: meta.version, preview: previewForFresh };
   }
 
   /**
-   * Adds whichever of `fetchedEntries` aren't already present (by slug+type) in
-   * `packRow`'s entries, bumping entryCount/version. Callers may additionally refresh
-   * importer-owned fields on matching rows while preserving row ids, createdAt, and
-   * user-selected iconSlug. Wrapped in a transaction so a partial write never happens;
-   * also absorbs a UNIQUE-constraint race between concurrent incremental installs.
+   * Synchronizes an already-installed pack against a freshly fetched/uploaded manifest.
+   * Existing rows are compared by (type, slug); importer-owned fields are updated when
+   * their content hash changes, while row ids, createdAt, and manual icon overrides are
+   * preserved. Full-manifest callers may also remove rows no longer present upstream.
    */
-  private async addEntriesToExistingPack(
+  private async syncExistingPack(
     packRow: typeof rulePacks.$inferSelect,
+    meta: { slug: string; name: string; version: string; license: string; sourceUrl: string; sectionLabels: string[] },
     fetchedEntries: ImportedEntry[],
-    sections: string[],
+    sourceHash: string,
     user: RequestUser,
-    options: { refreshExisting?: boolean } = {},
-  ): Promise<RulePack & { added: number; skippedExisting: number }> {
-    const existingRows = await this.db
-      .select({ id: ruleEntries.id, slug: ruleEntries.slug, type: ruleEntries.type })
-      .from(ruleEntries)
-      .where(eq(ruleEntries.packId, packRow.id));
-    const existingKeys = new Set(existingRows.map((r) => `${r.type}::${r.slug}`));
-    const existingIds = new Map(existingRows.map((r) => [`${r.type}::${r.slug}`, r.id]));
-
-    const toAdd = fetchedEntries.filter((e) => !existingKeys.has(`${e.type}::${e.slug}`));
-    const toRefresh = options.refreshExisting
-      ? fetchedEntries.flatMap((entry) => {
-          const id = existingIds.get(`${entry.type}::${entry.slug}`);
-          return id === undefined ? [] : [{ id, entry }];
-        })
-      : [];
-    const skippedExisting = fetchedEntries.length - toAdd.length;
+    options: { removeMissing?: boolean } = {},
+  ): Promise<PersistPackResult> {
     const ts = nowIso();
 
     let updatedPack = packRow;
-    if (toAdd.length > 0 || toRefresh.length > 0) {
-      try {
-        updatedPack = this.db.transaction((tx) => {
-          for (const { id, entry } of toRefresh) {
-            const prov = effectiveEntryProvenance(entry, packRow.license, packRow.sourceUrl, packRow.name);
-            tx.update(ruleEntries)
-              .set({
-                name: entry.name,
-                summary: entry.summary,
-                body: entry.body,
-                dataJson: entry.dataJson,
-                source: entry.source,
-                license: prov.license,
-                attribution: prov.attribution,
-                author: prov.author,
-                sourceUrl: prov.sourceUrl,
-                updatedAt: ts,
-              })
-              .where(eq(ruleEntries.id, id))
-              .run();
+    let preview: RulePackUpdatePreview = {
+      added: 0,
+      changed: 0,
+      removed: 0,
+      unchanged: 0,
+      sourceHash,
+      sourceVersion: meta.version,
+    };
+
+    try {
+      const result = this.db.transaction((tx) => {
+        const existingRows = tx.select().from(ruleEntries).where(eq(ruleEntries.packId, packRow.id)).all();
+        const existingByKey = new Map(existingRows.map((r) => [`${r.type}::${r.slug}`, r]));
+        const fetchedByKey = new Map(fetchedEntries.map((entry) => [`${entry.type}::${entry.slug}`, entry]));
+
+        const toAdd: ImportedEntry[] = [];
+        const toChange: Array<{ row: typeof ruleEntries.$inferSelect; entry: ImportedEntry }> = [];
+        let unchanged = 0;
+
+        for (const entry of fetchedEntries) {
+          const key = `${entry.type}::${entry.slug}`;
+          const existing = existingByKey.get(key);
+          if (!existing) {
+            toAdd.push(entry);
+            continue;
           }
-          for (const entry of toAdd) {
-            const prov = effectiveEntryProvenance(entry, packRow.license, packRow.sourceUrl, packRow.name);
-            tx.insert(ruleEntries)
-              .values({
-                packId: packRow.id,
-                slug: entry.slug,
-                name: entry.name,
-                type: entry.type,
-                summary: entry.summary,
-                body: entry.body,
-                dataJson: entry.dataJson,
-                source: entry.source,
-                license: prov.license,
-                attribution: prov.attribution,
-                author: prov.author,
-                sourceUrl: prov.sourceUrl,
-                iconSlug: entry.iconSlug ?? '',
-                createdAt: ts,
-                updatedAt: ts,
-              })
-              .run();
-          }
-          const [row] = tx
-            .update(rulePacks)
-            .set({ entryCount: packRow.entryCount + toAdd.length, version: ts.slice(0, 10) })
-            .where(eq(rulePacks.id, packRow.id))
-            .returning()
-            .all();
-          return row;
-        });
-      } catch (err) {
-        if (!isUniqueConstraintError(err)) throw err;
-        // Another concurrent incremental install inserted one of the same (slug,type)
-        // rows first — re-derive what's actually there now rather than 500ing. This
-        // install just contributed nothing new (safe under the dedupe-by-slug+type rule).
-        const [freshPack] = await this.db.select().from(rulePacks).where(eq(rulePacks.id, packRow.id)).limit(1);
-        updatedPack = freshPack ?? packRow;
-        await this.audit.log({
-          actor: auditActor(user),
-          actorRole: auditActorRole(user),
-          action: 'rulepack.install',
-          entityType: 'rule_pack',
-          entityId: updatedPack.id,
-          detail: `incremental install lost a race for pack "${packRow.slug}" (sections ${sections.join(',')}) — 0 added after retry`,
-        });
-        return { ...packToDomain(updatedPack), added: 0, skippedExisting: fetchedEntries.length };
-      }
+          const nextHash = importedEntryHash(entry, meta.license, meta.sourceUrl, meta.name);
+          if (storedEntryHash(existing) === nextHash) unchanged += 1;
+          else toChange.push({ row: existing, entry });
+        }
+
+        const toRemove = options.removeMissing
+          ? existingRows.filter((row) => !fetchedByKey.has(`${row.type}::${row.slug}`))
+          : [];
+
+        for (const { row, entry } of toChange) {
+          const prov = effectiveEntryProvenance(entry, meta.license, meta.sourceUrl, meta.name);
+          tx.update(ruleEntries)
+            .set({
+              name: entry.name,
+              summary: entry.summary,
+              body: entry.body,
+              dataJson: entry.dataJson,
+              source: entry.source,
+              license: prov.license,
+              attribution: prov.attribution,
+              author: prov.author,
+              sourceUrl: prov.sourceUrl,
+              updatedAt: ts,
+            })
+            .where(eq(ruleEntries.id, row.id))
+            .run();
+        }
+
+        for (const entry of toAdd) {
+          const prov = effectiveEntryProvenance(entry, meta.license, meta.sourceUrl, meta.name);
+          tx.insert(ruleEntries)
+            .values({
+              packId: packRow.id,
+              slug: entry.slug,
+              name: entry.name,
+              type: entry.type,
+              summary: entry.summary,
+              body: entry.body,
+              dataJson: entry.dataJson,
+              source: entry.source,
+              license: prov.license,
+              attribution: prov.attribution,
+              author: prov.author,
+              sourceUrl: prov.sourceUrl,
+              iconSlug: entry.iconSlug ?? '',
+              createdAt: ts,
+              updatedAt: ts,
+            })
+            .run();
+        }
+
+        for (const row of toRemove) {
+          tx.update(combatants).set({ ruleEntryId: null }).where(eq(combatants.ruleEntryId, row.id)).run();
+          tx.delete(ruleEntries).where(eq(ruleEntries.id, row.id)).run();
+        }
+
+        const nextEntryCount = existingRows.length + toAdd.length - toRemove.length;
+        const [row] = tx
+          .update(rulePacks)
+          .set({
+            name: meta.name,
+            version: meta.version,
+            license: meta.license,
+            sourceUrl: meta.sourceUrl,
+            entryCount: nextEntryCount,
+          })
+          .where(eq(rulePacks.id, packRow.id))
+          .returning()
+          .all();
+
+        return {
+          pack: row,
+          preview: {
+            added: toAdd.length,
+            changed: toChange.length,
+            removed: toRemove.length,
+            unchanged,
+            sourceHash,
+            sourceVersion: meta.version,
+          } satisfies RulePackUpdatePreview,
+        };
+      });
+      updatedPack = result.pack;
+      preview = result.preview;
+    } catch (err) {
+      if (!isUniqueConstraintError(err)) throw err;
+      // Another concurrent sync inserted one of the same (slug,type) rows first. The
+      // transaction rolled back; surface a clean updated result against the now-current pack.
+      const [freshPack] = await this.db.select().from(rulePacks).where(eq(rulePacks.id, packRow.id)).limit(1);
+      updatedPack = freshPack ?? packRow;
+      preview = {
+        added: 0,
+        changed: 0,
+        removed: 0,
+        unchanged: fetchedEntries.length,
+        sourceHash,
+        sourceVersion: meta.version,
+      };
+      await this.audit.log({
+        actor: auditActor(user),
+        actorRole: auditActorRole(user),
+        action: 'rulepack.install',
+        entityType: 'rule_pack',
+        entityId: updatedPack.id,
+        detail: `rule pack update lost a race for "${packRow.slug}" (sections ${meta.sectionLabels.join(',')}); source=${meta.sourceUrl || 'upload'} version=${meta.version} manifest=${sourceHash.slice(0, 12)}`,
+      });
+      return {
+        ...packToDomain(updatedPack),
+        added: 0,
+        skippedExisting: fetchedEntries.length,
+        changed: 0,
+        removed: 0,
+        sourceHash,
+        sourceVersion: meta.version,
+        preview,
+      };
     }
 
     await this.audit.log({
@@ -1623,10 +1822,19 @@ export class RulesService implements OnModuleInit {
       action: 'rulepack.install',
       entityType: 'rule_pack',
       entityId: updatedPack.id,
-      detail: `incremental install for pack "${packRow.slug}": +${toAdd.length} entries from sections ${sections.join(',')}, ${skippedExisting} already present${options.refreshExisting ? ` (${toRefresh.length} refreshed)` : ''}`,
+      detail: `rule pack update for "${packRow.slug}": +${preview.added} ~${preview.changed} -${preview.removed} unchanged=${preview.unchanged} sections=${meta.sectionLabels.join(',')} source=${meta.sourceUrl || 'upload'} version=${meta.version} manifest=${sourceHash.slice(0, 12)}`,
     });
 
-    return { ...packToDomain(updatedPack), added: toAdd.length, skippedExisting };
+    return {
+      ...packToDomain(updatedPack),
+      added: preview.added,
+      skippedExisting: preview.changed + preview.unchanged,
+      changed: preview.changed,
+      removed: preview.removed,
+      sourceHash,
+      sourceVersion: meta.version,
+      preview,
+    };
   }
 
   async uninstall(id: number, user: RequestUser): Promise<void> {
