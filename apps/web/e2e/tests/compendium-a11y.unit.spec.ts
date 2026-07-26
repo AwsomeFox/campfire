@@ -39,7 +39,8 @@ test.describe('compendium URL filter params (issue #647)', () => {
     expect(parseCompendiumTypeParam('all')).toBe('all');
     expect(parseCompendiumTypeParam('spell')).toBe('spell');
     expect(parseCompendiumTypeParam('monster')).toBe('monster');
-    expect(parseCompendiumTypeParam('section')).toBe('all');
+    expect(parseCompendiumTypeParam('section')).toBe('section');
+    expect(parseCompendiumTypeParam('other')).toBe('other');
     expect(parseCompendiumTypeParam('nope')).toBe('all');
   });
 
@@ -68,11 +69,11 @@ test.describe('compendium URL filter params (issue #647)', () => {
 
     const filterChange = applyCompendiumSearchParams(withCursor, {
       q: 'goblin',
-      type: 'monster',
+      type: 'section',
       cursor: null,
     });
     expect(filterChange.get(COMPENDIUM_URL_Q)).toBe('goblin');
-    expect(filterChange.get(COMPENDIUM_URL_TYPE)).toBe('monster');
+    expect(filterChange.get(COMPENDIUM_URL_TYPE)).toBe('section');
     expect(filterChange.get(COMPENDIUM_URL_CURSOR)).toBeNull();
   });
 
@@ -167,10 +168,10 @@ test.describe('compendium results status (issue #647)', () => {
         loading: false,
         resultCount: 0,
         query: '',
-        typeKey: 'monster',
-        typeLabel: 'Monsters',
+        typeKey: 'section',
+        typeLabel: 'Rules',
       }),
-    ).toMatch(/no monsters/i);
+    ).toMatch(/no rules/i);
 
     expect(
       compendiumResultsStatus({
