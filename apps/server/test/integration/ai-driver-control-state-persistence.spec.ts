@@ -119,7 +119,8 @@ describe('AI driver control state persistence across restart (#559, real SQLite)
     expect(cols).toEqual(
       expect.arrayContaining([
         'campaign_id', 'status', 'state', 'scene', 'last_narration', 'last_turn_at',
-        'turn_count', 'stuck', 'acting_dm', 'vote', 'takeover_requested_by', 'last_input', 'updated_at',
+        'turn_count', 'stuck', 'acting_dm', 'vote', 'takeover_requested_by', 'last_input',
+        'announced_recovery', 'updated_at',
       ]),
     );
     // Reopening the already-migrated file must not throw (migrations re-run on every boot).
@@ -282,6 +283,81 @@ describe('AI driver control state persistence across restart (#559, real SQLite)
     expect(session.status).toBe('idle');
     // Nothing was recovered, so the table is not spammed with a recovery notice.
     expect(auditActions(restarted)).not.toContain('ai-dm.driver.control_state.recovered');
+  });
+
+  it('announces a steady paused seat exactly once, no matter how many restarts follow', () => {
+    const first = firstBoot();
+    first.service.setPaused(campaignId, true);
+
+    // Boot 2: the pause is news — the table is told, and the announcement is recorded on disk.
+    const second = boot();
+    expect(second.service.getSession(campaignId).state).toBe('paused');
+    expect(second.notifications.notifyCampaign).toHaveBeenCalledTimes(1);
+    expect(auditActions(second)).toContain('ai-dm.driver.control_state.recovered');
+    expect(rawRow()).toMatchObject({ announced_recovery: 'paused' });
+
+    // Boots 3-5: same steady state, already announced. Silence — no notice, no audit row.
+    for (const _boot of [3, 4, 5]) {
+      const later = boot();
+      expect(later.service.getSession(campaignId).state).toBe('paused');
+      expect(later.notifications.notifyCampaign).not.toHaveBeenCalled();
+      expect(auditActions(later)).not.toContain('ai-dm.driver.control_state.recovered');
+    }
+  });
+
+  it('re-announces after a resume and a fresh pause — the marker tracks transitions, not shapes', () => {
+    const first = firstBoot();
+    first.service.setPaused(campaignId, true);
+    // Hydration is lazy — `getSession` loads and announces, not `boot()` on its own.
+    const second = boot();
+    second.service.getSession(campaignId);
+    expect(second.notifications.notifyCampaign).toHaveBeenCalledTimes(1); // announced once
+    const third = boot();
+    third.service.getSession(campaignId);
+    expect(third.notifications.notifyCampaign).not.toHaveBeenCalled(); // steady state, silent
+
+    // A DM resumes and later re-pauses: the lever write clears the marker, so the NEXT restart
+    // is a genuine transition again and the table is told.
+    const acting = boot();
+    acting.service.setPaused(campaignId, false);
+    expect(rawRow()).toMatchObject({ announced_recovery: null });
+    acting.service.setPaused(campaignId, true);
+
+    const restarted = boot();
+    expect(restarted.service.getSession(campaignId).state).toBe('paused');
+    expect(restarted.notifications.notifyCampaign).toHaveBeenCalledTimes(1);
+  });
+
+  it('announces an interrupted turn even when the seat was already announced as stuck', () => {
+    const first = firstBoot();
+    const session = first.service.getSession(campaignId);
+    session.state = 'awaiting_players';
+    session.stuck = { reason: 'loop', detail: 'repeated itself', since: '2026-07-26T00:00:01.000Z', turn: 2 };
+    (first.service as unknown as { persistControlState: (s: unknown) => void }).persistControlState(session);
+
+    // Boot 2 announces `stuck` and records it; boot 3 is silent — still stuck, already told.
+    const second = boot();
+    expect(second.service.getSession(campaignId).state).toBe('awaiting_players');
+    expect(second.notifications.notifyCampaign).toHaveBeenCalledTimes(1);
+    expect(rawRow()).toMatchObject({ announced_recovery: 'stuck' });
+    const third = boot();
+    third.service.getSession(campaignId);
+    expect(third.notifications.notifyCampaign).not.toHaveBeenCalled();
+
+    // Now a turn is reserved and the process dies mid-generation. That is a DIFFERENT shape, so
+    // the interrupted-turn notice is NOT suppressed by the earlier `stuck` announcement.
+    const running = boot();
+    const live = running.service.getSession(campaignId);
+    live.status = 'running';
+    (running.service as unknown as { persistControlState: (s: unknown) => void }).persistControlState(live);
+
+    const restarted = boot();
+    expect(restarted.service.getSession(campaignId).state).toBe('paused');
+    expect(restarted.notifications.notifyCampaign).toHaveBeenCalledTimes(1);
+    const recoveryAudit = restarted.audit.log.mock.calls
+      .map((c) => c[0] as { action: string; detail: string })
+      .find((a) => a.action === 'ai-dm.driver.control_state.recovered');
+    expect(recoveryAudit?.detail).toContain('interrupted_turn');
   });
 
   it('two concurrent open-vote requests cannot clobber (and persist over) each other', async () => {

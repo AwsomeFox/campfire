@@ -1562,9 +1562,18 @@ function migrateAiDriverControlStateTable(sqlite: Database.Database): void {
       vote TEXT,
       takeover_requested_by TEXT,
       last_input TEXT,
+      announced_recovery TEXT,
       updated_at TEXT NOT NULL
     );
   `);
+
+  // `announced_recovery` was added while #559 was still in review, so a DB that ran an
+  // earlier build of this branch already has the table (without the column) and would
+  // no-op the CREATE above. Probe and backfill, same pattern as migrateAiScribeSessionScope499.
+  const cols = sqlite.prepare('PRAGMA table_info(ai_driver_control_state)').all() as Array<{ name: string }>;
+  if (!cols.some((c) => c.name === 'announced_recovery')) {
+    sqlite.exec('ALTER TABLE ai_driver_control_state ADD COLUMN announced_recovery TEXT');
+  }
 }
 
 /**

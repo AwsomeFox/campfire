@@ -1241,6 +1241,8 @@ export const aiDriverControlState = sqliteTable('ai_driver_control_state', {
   vote: text('vote'),
   takeoverRequestedBy: text('takeover_requested_by'),
   lastInput: text('last_input'),
+  /** The recovery shape last announced to the table — suppresses re-announcing a steady state. */
+  announcedRecovery: text('announced_recovery'),
   updatedAt: text('updated_at').notNull(),
 });
 

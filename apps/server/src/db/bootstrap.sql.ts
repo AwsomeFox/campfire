@@ -974,6 +974,10 @@ CREATE TABLE IF NOT EXISTS ai_driver_control_state (
   vote TEXT,
   takeover_requested_by TEXT,
   last_input TEXT,
+  -- The recovery shape most recently ANNOUNCED to the table. A seat sitting in a steady
+  -- state (paused / human_control / stuck / open vote) is announced once, not re-announced
+  -- on every subsequent restart.
+  announced_recovery TEXT,
   updated_at TEXT NOT NULL
 );
 

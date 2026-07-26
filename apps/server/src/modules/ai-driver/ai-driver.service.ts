@@ -438,10 +438,25 @@ function persistedStatusFor(session: AiDmSessionState): AiDmSessionStatus {
 /** Why a hydrated session came back in a non-default shape — announced to the table on recovery (#559). */
 type ControlStateRecovery = 'interrupted_turn' | 'paused' | 'human_control' | 'stuck' | 'open_vote';
 
+const RECOVERY_SHAPES = allowlist<ControlStateRecovery>({
+  interrupted_turn: true,
+  paused: true,
+  human_control: true,
+  stuck: true,
+  open_vote: true,
+});
+
 interface HydratedControlState {
   session: AiDmSessionState;
-  /** Non-null when the table should be told what came back; drives the recovery audit + notice. */
+  /** The reconciled recovery shape, or null when the seat came back clean. */
   recovery: ControlStateRecovery | null;
+  /**
+   * True only when `recovery` is a genuine TRANSITION away from the shape the table was last
+   * told about. A seat left deliberately paused (or under human control, stuck, or mid-vote)
+   * keeps hydrating into that same shape on every subsequent boot; announcing it each time
+   * would bury the one notice that matters — `interrupted_turn` — under restart noise.
+   */
+  announce: boolean;
   /** True when hydration reconciled the row (interrupted turn, lapsed vote, impossible ladder). */
   dirty: boolean;
 }
@@ -1055,7 +1070,7 @@ export class AiDriverService {
 
   private loadPersistedControlState(campaignId: number): HydratedControlState {
     const fresh = this.freshSession(campaignId);
-    if (!this.db) return { session: fresh, recovery: null, dirty: false };
+    if (!this.db) return { session: fresh, recovery: null, announce: false, dirty: false };
 
     // Reading the control state is best-effort in exactly the way writing it is: `ensureSession`
     // sits under EVERY driver endpoint (including the read-only GET /session), so a failed read
@@ -1070,9 +1085,9 @@ export class AiDriverService {
         .get() as AiDriverControlStateRow | undefined;
     } catch (err) {
       this.logger.error(`Failed to load AI driver control state for campaign ${campaignId}`, err);
-      return { session: fresh, recovery: null, dirty: false };
+      return { session: fresh, recovery: null, announce: false, dirty: false };
     }
-    if (!row) return { session: fresh, recovery: null, dirty: false };
+    if (!row) return { session: fresh, recovery: null, announce: false, dirty: false };
 
     const storedState = LADDER_STATES.has(row.state) ? row.state as AiDmLadderState : 'running';
     fresh.state = storedState;
@@ -1129,21 +1144,39 @@ export class AiDriverService {
     else if (fresh.stuck) recovery = 'stuck';
     else if (fresh.vote && !fresh.vote.resolved) recovery = 'open_vote';
 
+    // Announce only on a genuine transition. `announced_recovery` records the shape the table
+    // was last told about; a seat that keeps hydrating into that same shape across restarts is a
+    // steady state, not news. Without this, a table that deliberately left the AI paused got a
+    // fresh "came back paused" notice on every deploy, forever — and the one notice that really
+    // matters, `interrupted_turn`, would drown in it.
+    const lastAnnounced = RECOVERY_SHAPES.has(row.announcedRecovery ?? '')
+      ? row.announcedRecovery as ControlStateRecovery
+      : null;
+    const announce = recovery !== null && recovery !== lastAnnounced;
+
     // Anything reconciliation changed relative to the row must be written back, or the next
     // restart re-derives it from the same stale bytes — an expired vote in particular would look
-    // freshly open again to any reader that goes straight to the table.
+    // freshly open again to any reader that goes straight to the table. The announced-shape
+    // marker is part of that: if it is not persisted, every boot looks like a transition again.
     const dirty = interruptedTurn
       || voteExpiredOnLoad
       || fresh.state !== storedState
-      || fresh.status !== row.status;
-    return { session: fresh, recovery, dirty };
+      || fresh.status !== row.status
+      || recovery !== lastAnnounced;
+    return { session: fresh, recovery, announce, dirty };
   }
 
   /**
-   * Announce a recovered control state to the table (#559): persist the reconciled shape so the
-   * row on disk matches what the seat now believes, wake open stream clients, audit the recovery,
-   * and notify the campaign. Everything here is best-effort — a failure to announce must never
-   * stop the session from being served.
+   * Announce a recovered control state to the table (#559): wake open stream clients, audit the
+   * recovery, and notify the campaign. This function does NOT write to the DB — persisting the
+   * reconciled row (including the `announced_recovery` marker that stops a steady state being
+   * re-announced) is the `if (dirty) this.persistControlState(s)` step in `ensureSession`, which
+   * runs immediately before this. Everything here is best-effort: a failure to announce must
+   * never stop the session from being served.
+   *
+   * Called ONLY on a genuine transition (`HydratedControlState.announce`), so both the audit row
+   * and the player-visible notification describe a real recovery event rather than the fact that
+   * the process restarted while the seat sat in a state the table already knows about.
    */
   private announceRecoveredState(session: AiDmSessionState, recovery: ControlStateRecovery): void {
     this.stream.emit({ type: 'state', campaignId: session.campaignId, state: session.state });
@@ -1160,12 +1193,22 @@ export class AiDriverService {
     void this.notify(session.campaignId, RECOVERY_ACTOR, 'AI DM state recovered', RECOVERY_SUMMARY[recovery]);
   }
 
-  private persistControlState(session: AiDmSessionState): void {
+  /**
+   * Write the session's control state to disk.
+   *
+   * `announced` records which recovery shape the table has been told about. It defaults to null,
+   * which is the correct value for every runtime control lever: a human just acted, so whatever
+   * shape the seat lands in is news again the next time the process comes back. Only the
+   * hydration write-back in `ensureSession` passes a non-null value, to mark a steady state as
+   * already announced.
+   */
+  private persistControlState(session: AiDmSessionState, announced: ControlStateRecovery | null = null): void {
     if (!this.db || session.detached) return;
 
     const ts = nowIso();
     const values = {
       campaignId: session.campaignId,
+      announcedRecovery: announced,
       status: persistedStatusFor(session),
       state: session.state,
       scene: stringOrNull(session.scene),
@@ -1202,6 +1245,7 @@ export class AiDriverService {
             vote: values.vote,
             takeoverRequestedBy: values.takeoverRequestedBy,
             lastInput: values.lastInput,
+            announcedRecovery: values.announcedRecovery,
             updatedAt: values.updatedAt,
           },
         })
@@ -1405,13 +1449,15 @@ export class AiDriverService {
   private ensureSession(campaignId: number): AiDmSessionState {
     let s = this.sessions.get(campaignId);
     if (!s) {
-      const { session, recovery, dirty } = this.loadPersistedControlState(campaignId);
+      const { session, recovery, announce, dirty } = this.loadPersistedControlState(campaignId);
       s = session;
       // Publish BEFORE persisting/announcing: both re-enter this service, and the map entry must
       // already be the canonical object so nothing hydrates a second time.
       this.sessions.set(campaignId, s);
-      if (dirty) this.persistControlState(s);
-      if (recovery) this.announceRecoveredState(s, recovery);
+      // Record the shape as announced even when `announce` is false: the marker must survive to
+      // the next boot either way, or a steady state looks like a fresh transition every time.
+      if (dirty) this.persistControlState(s, recovery);
+      if (announce && recovery) this.announceRecoveredState(s, recovery);
     }
     return s;
   }

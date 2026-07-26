@@ -364,7 +364,8 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(columnNames(sqlite, 'ai_driver_control_state')).toEqual(
         expect.arrayContaining([
           'campaign_id', 'status', 'state', 'scene', 'last_narration', 'last_turn_at',
-          'turn_count', 'stuck', 'acting_dm', 'vote', 'takeover_requested_by', 'last_input', 'updated_at',
+          'turn_count', 'stuck', 'acting_dm', 'vote', 'takeover_requested_by', 'last_input',
+          'announced_recovery', 'updated_at',
         ]),
       );
       expect(countRows(sqlite, 'ai_driver_control_state')).toBe(0);
