@@ -295,11 +295,12 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
 
   it('creates a fully-formed DB from scratch and reports FTS availability', () => {
     dataDir = makeTempDataDir();
-    const { sqlite, orm, ftsAvailable } = openDatabase(dataDir);
+    const { sqlite, orm, ftsAvailable, campaignSearchFtsAvailable } = openDatabase(dataDir);
     try {
       expect(orm).toBeDefined();
       // better-sqlite3's bundled build ships fts5, so the probe should succeed here.
       expect(ftsAvailable).toBe(true);
+      expect(campaignSearchFtsAvailable).toBe(true);
       // Fresh DB already has the modern columns (never touched a migration path).
       expect(columnNames(sqlite, 'characters')).toEqual(expect.arrayContaining(['xp', 'dm_secret', 'spell_slots']));
       expect(columnNames(sqlite, 'users')).toEqual(expect.arrayContaining(['oidc_sub', 'accent_color', 'text_size']));

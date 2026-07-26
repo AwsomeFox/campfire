@@ -1,7 +1,26 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import type { MentionTarget, Role, SearchResponse, SearchResult, SearchResultType } from '@campfire/schema';
 import type { RequestUser } from '../../common/user.types';
 import { compareSearchText, foldForSearch, foldedIncludes, foldedIndexOf } from '../../common/text-search';
+import { notDeleted } from '../../common/soft-delete';
+import { CAMPAIGN_SEARCH_FTS_AVAILABLE, DB, type DrizzleDb } from '../../db/db.module';
+import {
+  characters,
+  comments,
+  encounters,
+  factions,
+  inventoryItems,
+  locations,
+  notes,
+  npcs,
+  quests,
+  scheduledSessions,
+  sessions,
+  storyArcs,
+  storyBeats,
+  timelineEvents,
+} from '../../db/schema';
 import { NpcsService } from '../npcs/npcs.service';
 import { FactionsService } from '../factions/factions.service';
 import { QuestsService } from '../quests/quests.service';
@@ -23,6 +42,18 @@ const SNIPPET_PAD = 60;
 
 /** One searchable field of an entity: which field it is, and its text. */
 type Field = { field: string; text: string };
+type Candidate = { type: SearchResultType; id: number; rank: number };
+type HitInput = {
+  type: SearchResultType;
+  id: number;
+  title: string;
+  fields: Field[];
+  extra?: Partial<SearchResult>;
+};
+
+const FTS_TITLE_COLUMNS = '{title name title_fold name_fold}';
+const FTS_PUBLIC_COLUMNS = '{title name body aux title_fold name_fold body_fold aux_fold}';
+const FTS_DM_COLUMNS = '{title name body aux dm_secret title_fold name_fold body_fold aux_fold dm_secret_fold}';
 
 /**
  * Build the snippet shown for a hit. For a short field (a name/title) we show it
@@ -52,6 +83,20 @@ function fieldRank(field: string): number {
   return 1;
 }
 
+/** Escapes an FTS5 MATCH query string by quoting each token and enabling prefix matching. */
+function toFtsQuery(q: string): string {
+  const tokens = q
+    .split(/[^\p{L}\p{N}]+/u)
+    .map((t) => t.replace(/["]/g, ''))
+    .filter(Boolean);
+  if (tokens.length === 0) return '';
+  return tokens.map((t) => `"${t}"*`).join(' ');
+}
+
+function candidateKey(type: SearchResultType, id: number): string {
+  return `${type}:${id}`;
+}
+
 /**
  * Campaign-wide free-text search across quests, NPCs, factions, locations,
  * characters, sessions, encounters, scheduled sessions, notes, timeline events,
@@ -76,6 +121,8 @@ function fieldRank(field: string): number {
 @Injectable()
 export class SearchService {
   constructor(
+    @Inject(DB) private readonly db: DrizzleDb,
+    @Inject(CAMPAIGN_SEARCH_FTS_AVAILABLE) private readonly campaignSearchFtsAvailable: boolean,
     private readonly quests: QuestsService,
     private readonly npcs: NpcsService,
     private readonly factions: FactionsService,
@@ -92,6 +139,43 @@ export class SearchService {
   ) {}
 
   async search(campaignId: number, user: RequestUser, role: Role, q: string, limit = DEFAULT_LIMIT): Promise<SearchResponse> {
+    const needle = foldForSearch(q.trim());
+    if (!needle) return { query: q, results: [] };
+    if (!this.campaignSearchFtsAvailable) {
+      return this.searchFallback(campaignId, user, role, q, limit);
+    }
+
+    const ftsQuery = toFtsQuery(needle);
+    if (!ftsQuery) return { query: q, results: [] };
+
+    const candidateLimit = Math.max(limit * 8, 100);
+    const titleCandidates = this.searchFtsCandidates(campaignId, role, user, `${FTS_TITLE_COLUMNS}: ${ftsQuery}`, candidateLimit);
+    const fullColumns = role === 'dm' ? FTS_DM_COLUMNS : FTS_PUBLIC_COLUMNS;
+    const fullCandidates = this.searchFtsCandidates(campaignId, role, user, `${fullColumns}: ${ftsQuery}`, candidateLimit);
+
+    const seen = new Set<string>();
+    const candidates: Candidate[] = [];
+    for (const candidate of [...titleCandidates, ...fullCandidates]) {
+      const key = candidateKey(candidate.type, candidate.id);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      candidates.push(candidate);
+    }
+
+    const results = await this.hydrateFtsCandidates(campaignId, user, role, needle, candidates);
+    results.sort(
+      (a, b) => fieldRank(a.matchedField) - fieldRank(b.matchedField) || compareSearchText(a.title, b.title),
+    );
+    return { query: q, results: results.slice(0, limit) };
+  }
+
+  private async searchFallback(
+    campaignId: number,
+    user: RequestUser,
+    role: Role,
+    q: string,
+    limit = DEFAULT_LIMIT,
+  ): Promise<SearchResponse> {
     // Fold once; encounter/schedule helpers receive this same folded needle (#624).
     const needle = foldForSearch(q.trim());
     if (!needle) return { query: q, results: [] };
@@ -264,6 +348,424 @@ export class SearchService {
       (a, b) => fieldRank(a.matchedField) - fieldRank(b.matchedField) || compareSearchText(a.title, b.title),
     );
     return { query: q, results: results.slice(0, limit) };
+  }
+
+  private campaignSearchVisibilitySql(role: Role, user: RequestUser) {
+    const noteVisibility = role === 'dm'
+      ? sql`(n.visibility = 'party_shared' OR n.author_user_id = ${user.id} OR n.visibility = 'dm_shared' OR n.visibility = 'whisper')`
+      : sql`(n.visibility = 'party_shared' OR n.author_user_id = ${user.id} OR (n.visibility = 'whisper' AND n.recipient_user_id = ${user.id}))`;
+    const commentAnchorVisible = role === 'dm'
+      ? sql`1 = 1`
+      : sql`(
+          c.entity_type NOT IN ('quest', 'npc', 'faction', 'location')
+          OR (c.entity_type = 'quest' AND EXISTS (
+            SELECT 1 FROM quests cq WHERE cq.id = c.entity_id AND cq.campaign_id = c.campaign_id AND cq.deleted_at IS NULL AND cq.hidden = 0
+          ))
+          OR (c.entity_type = 'npc' AND EXISTS (
+            SELECT 1 FROM npcs cn WHERE cn.id = c.entity_id AND cn.campaign_id = c.campaign_id AND cn.deleted_at IS NULL AND cn.hidden = 0
+          ))
+          OR (c.entity_type = 'faction' AND EXISTS (
+            SELECT 1 FROM factions cf WHERE cf.id = c.entity_id AND cf.campaign_id = c.campaign_id AND cf.deleted_at IS NULL AND cf.hidden = 0
+          ))
+          OR (c.entity_type = 'location' AND EXISTS (
+            SELECT 1 FROM locations cl WHERE cl.id = c.entity_id AND cl.campaign_id = c.campaign_id AND cl.deleted_at IS NULL AND cl.status <> 'unexplored'
+          ))
+        )`;
+
+    return sql`(
+      (campaign_search_fts.entity_type = 'quest' AND EXISTS (
+        SELECT 1 FROM quests q
+        WHERE q.id = campaign_search_fts.entity_id AND q.campaign_id = campaign_search_fts.campaign_id
+          AND q.deleted_at IS NULL ${role === 'dm' ? sql`` : sql`AND q.hidden = 0`}
+      ))
+      OR (campaign_search_fts.entity_type = 'npc' AND EXISTS (
+        SELECT 1 FROM npcs n
+        WHERE n.id = campaign_search_fts.entity_id AND n.campaign_id = campaign_search_fts.campaign_id
+          AND n.deleted_at IS NULL ${role === 'dm' ? sql`` : sql`AND n.hidden = 0`}
+      ))
+      OR (campaign_search_fts.entity_type = 'faction' AND EXISTS (
+        SELECT 1 FROM factions f
+        WHERE f.id = campaign_search_fts.entity_id AND f.campaign_id = campaign_search_fts.campaign_id
+          AND f.deleted_at IS NULL ${role === 'dm' ? sql`` : sql`AND f.hidden = 0`}
+      ))
+      OR (campaign_search_fts.entity_type = 'location' AND EXISTS (
+        SELECT 1 FROM locations l
+        WHERE l.id = campaign_search_fts.entity_id AND l.campaign_id = campaign_search_fts.campaign_id
+          AND l.deleted_at IS NULL ${role === 'dm' ? sql`` : sql`AND l.status <> 'unexplored'`}
+      ))
+      OR (campaign_search_fts.entity_type = 'character' AND EXISTS (
+        SELECT 1 FROM characters ch
+        WHERE ch.id = campaign_search_fts.entity_id AND ch.campaign_id = campaign_search_fts.campaign_id AND ch.deleted_at IS NULL
+      ))
+      OR (campaign_search_fts.entity_type = 'session' AND EXISTS (
+        SELECT 1 FROM sessions s
+        WHERE s.id = campaign_search_fts.entity_id AND s.campaign_id = campaign_search_fts.campaign_id AND s.deleted_at IS NULL
+      ))
+      OR (campaign_search_fts.entity_type = 'note' AND EXISTS (
+        SELECT 1 FROM notes n
+        WHERE n.id = campaign_search_fts.entity_id AND n.campaign_id = campaign_search_fts.campaign_id
+          AND n.kind = 'note' AND n.deleted_at IS NULL AND ${noteVisibility}
+      ))
+      OR (campaign_search_fts.entity_type = 'timeline' AND EXISTS (
+        SELECT 1 FROM timeline_events t
+        WHERE t.id = campaign_search_fts.entity_id AND t.campaign_id = campaign_search_fts.campaign_id
+          AND t.deleted_at IS NULL ${role === 'dm' ? sql`` : sql`AND t.hidden = 0`}
+      ))
+      OR (campaign_search_fts.entity_type = 'item' AND EXISTS (
+        SELECT 1 FROM inventory_items i
+        WHERE i.id = campaign_search_fts.entity_id AND i.campaign_id = campaign_search_fts.campaign_id AND i.deleted_at IS NULL
+      ))
+      OR (campaign_search_fts.entity_type = 'comment' AND EXISTS (
+        SELECT 1 FROM comments c
+        WHERE c.id = campaign_search_fts.entity_id AND c.campaign_id = campaign_search_fts.campaign_id
+          AND c.deleted_at IS NULL AND ${commentAnchorVisible}
+      ))
+      OR (${role === 'dm' ? sql`1 = 1` : sql`0 = 1`} AND campaign_search_fts.entity_type = 'arc' AND EXISTS (
+        SELECT 1 FROM story_arcs a
+        WHERE a.id = campaign_search_fts.entity_id AND a.campaign_id = campaign_search_fts.campaign_id AND a.deleted_at IS NULL
+      ))
+      OR (${role === 'dm' ? sql`1 = 1` : sql`0 = 1`} AND campaign_search_fts.entity_type = 'beat' AND EXISTS (
+        SELECT 1 FROM story_beats b
+        WHERE b.id = campaign_search_fts.entity_id AND b.campaign_id = campaign_search_fts.campaign_id AND b.deleted_at IS NULL
+      ))
+      OR (campaign_search_fts.entity_type = 'encounter' AND EXISTS (
+        SELECT 1 FROM encounters e
+        WHERE e.id = campaign_search_fts.entity_id AND e.campaign_id = campaign_search_fts.campaign_id
+          AND e.deleted_at IS NULL ${role === 'dm' ? sql`` : sql`AND e.hidden = 0`}
+      ))
+      OR (campaign_search_fts.entity_type = 'scheduled_session' AND EXISTS (
+        SELECT 1 FROM scheduled_sessions ss
+        WHERE ss.id = campaign_search_fts.entity_id AND ss.campaign_id = campaign_search_fts.campaign_id
+      ))
+    )`;
+  }
+
+  private searchFtsCandidates(campaignId: number, role: Role, user: RequestUser, matchQuery: string, limit: number): Candidate[] {
+    const rows = this.db.all<{ type: string; id: number; rank: number }>(sql`
+      SELECT campaign_search_fts.entity_type AS type, campaign_search_fts.entity_id AS id, campaign_search_fts.rank AS rank
+      FROM campaign_search_fts
+      WHERE campaign_search_fts.campaign_id = ${campaignId}
+        AND campaign_search_fts MATCH ${matchQuery}
+        AND ${this.campaignSearchVisibilitySql(role, user)}
+      ORDER BY campaign_search_fts.rank, campaign_search_fts.rowid
+      LIMIT ${limit}
+    `);
+    return rows.map((r) => ({ type: r.type as SearchResultType, id: Number(r.id), rank: Number(r.rank) }));
+  }
+
+  private async hydrateFtsCandidates(
+    campaignId: number,
+    user: RequestUser,
+    role: Role,
+    needle: string,
+    candidates: Candidate[],
+  ): Promise<SearchResult[]> {
+    const idsByType = new Map<SearchResultType, number[]>();
+    for (const candidate of candidates) {
+      idsByType.set(candidate.type, [...(idsByType.get(candidate.type) ?? []), candidate.id]);
+    }
+    const ids = (type: SearchResultType) => idsByType.get(type) ?? [];
+    const byKey = new Map<string, HitInput>();
+    const addHit = (hit: HitInput) => byKey.set(candidateKey(hit.type, hit.id), hit);
+
+    const questIds = ids('quest');
+    if (questIds.length) {
+      const rows = await this.db.select().from(quests).where(and(
+        eq(quests.campaignId, campaignId),
+        inArray(quests.id, questIds),
+        notDeleted(quests.deletedAt),
+        role === 'dm' ? undefined : eq(quests.hidden, false),
+      ));
+      for (const quest of rows) {
+        addHit({ type: 'quest', id: quest.id, title: quest.title, fields: [
+          { field: 'title', text: quest.title },
+          { field: 'body', text: quest.body },
+          { field: 'reward', text: quest.reward },
+          { field: 'dmSecret', text: role === 'dm' ? quest.dmSecret : '' },
+        ] });
+      }
+    }
+
+    const npcIds = ids('npc');
+    if (npcIds.length) {
+      const rows = await this.db.select().from(npcs).where(and(
+        eq(npcs.campaignId, campaignId),
+        inArray(npcs.id, npcIds),
+        notDeleted(npcs.deletedAt),
+        role === 'dm' ? undefined : eq(npcs.hidden, false),
+      ));
+      for (const npc of rows) {
+        addHit({ type: 'npc', id: npc.id, title: npc.name, fields: [
+          { field: 'name', text: npc.name },
+          { field: 'role', text: npc.role },
+          { field: 'body', text: npc.body },
+          { field: 'dmSecret', text: role === 'dm' ? npc.dmSecret : '' },
+        ] });
+      }
+    }
+
+    const factionIds = ids('faction');
+    if (factionIds.length) {
+      const rows = await this.db.select().from(factions).where(and(
+        eq(factions.campaignId, campaignId),
+        inArray(factions.id, factionIds),
+        notDeleted(factions.deletedAt),
+        role === 'dm' ? undefined : eq(factions.hidden, false),
+      ));
+      for (const faction of rows) {
+        addHit({ type: 'faction', id: faction.id, title: faction.name, fields: [
+          { field: 'name', text: faction.name },
+          { field: 'kind', text: faction.kind },
+          { field: 'body', text: faction.body },
+          { field: 'goals', text: faction.goals },
+          { field: 'dmSecret', text: role === 'dm' ? faction.dmSecret : '' },
+        ] });
+      }
+    }
+
+    const locationIds = ids('location');
+    if (locationIds.length) {
+      const rows = await this.db.select().from(locations).where(and(
+        eq(locations.campaignId, campaignId),
+        inArray(locations.id, locationIds),
+        notDeleted(locations.deletedAt),
+        role === 'dm' ? undefined : sql`${locations.status} <> 'unexplored'`,
+      ));
+      for (const loc of rows) {
+        addHit({ type: 'location', id: loc.id, title: loc.name, fields: [
+          { field: 'name', text: loc.name },
+          { field: 'kind', text: loc.kind },
+          { field: 'body', text: loc.body },
+          { field: 'dmSecret', text: role === 'dm' ? loc.dmSecret : '' },
+        ] });
+      }
+    }
+
+    const characterIds = ids('character');
+    if (characterIds.length) {
+      const rows = await this.db.select().from(characters).where(and(
+        eq(characters.campaignId, campaignId),
+        inArray(characters.id, characterIds),
+        notDeleted(characters.deletedAt),
+      ));
+      for (const ch of rows) {
+        addHit({ type: 'character', id: ch.id, title: ch.name, fields: [
+          { field: 'name', text: ch.name },
+          { field: 'species', text: ch.species },
+          { field: 'className', text: ch.className },
+          { field: 'background', text: ch.background },
+          { field: 'notes', text: ch.notes },
+          { field: 'dmSecret', text: role === 'dm' ? ch.dmSecret : '' },
+        ] });
+      }
+    }
+
+    const sessionIds = ids('session');
+    if (sessionIds.length) {
+      const rows = await this.db.select().from(sessions).where(and(
+        eq(sessions.campaignId, campaignId),
+        inArray(sessions.id, sessionIds),
+        notDeleted(sessions.deletedAt),
+      ));
+      for (const s of rows) {
+        const title = s.title.trim() || `Session ${s.number}`;
+        addHit({ type: 'session', id: s.id, title, fields: [
+          { field: 'title', text: title },
+          { field: 'recap', text: s.recap },
+          { field: 'dmSecret', text: role === 'dm' ? s.dmSecret : '' },
+        ] });
+      }
+    }
+
+    const noteIds = ids('note');
+    if (noteIds.length) {
+      const rows = await this.db.select().from(notes).where(and(
+        eq(notes.campaignId, campaignId),
+        inArray(notes.id, noteIds),
+        eq(notes.kind, 'note'),
+        notDeleted(notes.deletedAt),
+      ));
+      for (const note of rows) {
+        const canSee =
+          note.visibility === 'party_shared'
+          || note.authorUserId === user.id
+          || (role === 'dm' && (note.visibility === 'dm_shared' || note.visibility === 'whisper'))
+          || (note.visibility === 'whisper' && note.recipientUserId === user.id);
+        if (!canSee) continue;
+        addHit({
+          type: 'note',
+          id: note.id,
+          title: 'Note',
+          fields: [{ field: 'body', text: note.body }],
+          extra: { entityType: note.entityType as SearchResult['entityType'], entityId: note.entityId },
+        });
+      }
+    }
+
+    const timelineIds = ids('timeline');
+    if (timelineIds.length) {
+      const rows = await this.db.select().from(timelineEvents).where(and(
+        eq(timelineEvents.campaignId, campaignId),
+        inArray(timelineEvents.id, timelineIds),
+        notDeleted(timelineEvents.deletedAt),
+        role === 'dm' ? undefined : eq(timelineEvents.hidden, false),
+      ));
+      for (const event of rows) {
+        addHit({ type: 'timeline', id: event.id, title: event.title, fields: [
+          { field: 'title', text: event.title },
+          { field: 'inWorldDate', text: event.inWorldDate },
+          { field: 'era', text: event.era },
+          { field: 'body', text: event.body },
+          { field: 'dmSecret', text: role === 'dm' ? event.dmSecret : '' },
+        ] });
+      }
+    }
+
+    const itemIds = ids('item');
+    if (itemIds.length) {
+      const rows = await this.db.select().from(inventoryItems).where(and(
+        eq(inventoryItems.campaignId, campaignId),
+        inArray(inventoryItems.id, itemIds),
+        notDeleted(inventoryItems.deletedAt),
+      ));
+      for (const item of rows) {
+        addHit({ type: 'item', id: item.id, title: item.name, fields: [
+          { field: 'name', text: item.name },
+          { field: 'notes', text: item.notes },
+        ] });
+      }
+    }
+
+    const commentIds = ids('comment');
+    if (commentIds.length) {
+      const rows = await this.db.select().from(comments).where(and(
+        eq(comments.campaignId, campaignId),
+        inArray(comments.id, commentIds),
+        notDeleted(comments.deletedAt),
+      ));
+      for (const comment of rows) {
+        addHit({
+          type: 'comment',
+          id: comment.id,
+          title: `Comment on ${comment.entityType}`,
+          fields: [{ field: 'body', text: comment.body }],
+          extra: { entityType: comment.entityType as SearchResult['entityType'], entityId: comment.entityId },
+        });
+      }
+    }
+
+    if (role === 'dm') {
+      const arcIds = ids('arc');
+      if (arcIds.length) {
+        const rows = await this.db.select().from(storyArcs).where(and(
+          eq(storyArcs.campaignId, campaignId),
+          inArray(storyArcs.id, arcIds),
+          notDeleted(storyArcs.deletedAt),
+        ));
+        for (const arc of rows) {
+          addHit({ type: 'arc', id: arc.id, title: arc.title, fields: [
+            { field: 'title', text: arc.title },
+            { field: 'summary', text: arc.summary },
+          ] });
+        }
+      }
+
+      const beatIds = ids('beat');
+      if (beatIds.length) {
+        const rows = await this.db.select().from(storyBeats).where(and(
+          eq(storyBeats.campaignId, campaignId),
+          inArray(storyBeats.id, beatIds),
+          notDeleted(storyBeats.deletedAt),
+        ));
+        for (const beat of rows) {
+          addHit({ type: 'beat', id: beat.id, title: beat.title, fields: [
+            { field: 'title', text: beat.title },
+            { field: 'body', text: beat.body },
+          ] });
+        }
+      }
+    }
+
+    const encounterIds = ids('encounter');
+    if (encounterIds.length) {
+      const questLabel = role === 'dm'
+        ? sql<string>`coalesce(${quests.title}, '')`
+        : sql<string>`case when ${quests.hidden} = 0 then coalesce(${quests.title}, '') else '' end`;
+      const locationLabel = role === 'dm'
+        ? sql<string>`coalesce(${locations.name}, '')`
+        : sql<string>`case when ${locations.status} <> 'unexplored' then coalesce(${locations.name}, '') else '' end`;
+      const sessionLabel = sql<string>`case
+        when ${sessions.id} is null then ''
+        when length(trim(coalesce(${sessions.title}, ''))) > 0 then ${sessions.title}
+        else 'Session ' || ${sessions.number}
+      end`;
+      const rows = await this.db
+        .select({
+          id: encounters.id,
+          name: encounters.name,
+          locationLabel,
+          questLabel,
+          sessionLabel,
+        })
+        .from(encounters)
+        .leftJoin(locations, and(eq(locations.id, encounters.locationId), eq(locations.campaignId, campaignId), notDeleted(locations.deletedAt)))
+        .leftJoin(quests, and(eq(quests.id, encounters.questId), eq(quests.campaignId, campaignId), notDeleted(quests.deletedAt)))
+        .leftJoin(sessions, and(eq(sessions.id, encounters.sessionId), eq(sessions.campaignId, campaignId), notDeleted(sessions.deletedAt)))
+        .where(and(
+          eq(encounters.campaignId, campaignId),
+          inArray(encounters.id, encounterIds),
+          notDeleted(encounters.deletedAt),
+          role === 'dm' ? undefined : eq(encounters.hidden, false),
+        ));
+      for (const encounter of rows) {
+        addHit({ type: 'encounter', id: encounter.id, title: encounter.name, fields: [
+          { field: 'name', text: encounter.name },
+          { field: 'location', text: encounter.locationLabel ?? '' },
+          { field: 'quest', text: encounter.questLabel ?? '' },
+          { field: 'session', text: encounter.sessionLabel ?? '' },
+        ] });
+      }
+    }
+
+    const scheduledIds = ids('scheduled_session');
+    if (scheduledIds.length) {
+      const rows = await this.db.select().from(scheduledSessions).where(and(
+        eq(scheduledSessions.campaignId, campaignId),
+        inArray(scheduledSessions.id, scheduledIds),
+      ));
+      for (const scheduled of rows) {
+        const title = scheduled.title.trim()
+          || `Scheduled session — ${scheduled.scheduledAt.slice(0, 16).replace('T', ' ')} UTC`;
+        addHit({ type: 'scheduled_session', id: scheduled.id, title, fields: [
+          { field: 'title', text: scheduled.title },
+          { field: 'scheduledAt', text: scheduled.scheduledAt },
+          { field: 'notes', text: scheduled.notes },
+        ] });
+      }
+    }
+
+    const results: SearchResult[] = [];
+    const pushed = new Set<string>();
+    for (const candidate of candidates) {
+      const key = candidateKey(candidate.type, candidate.id);
+      if (pushed.has(key)) continue;
+      const hit = byKey.get(key);
+      if (!hit) continue;
+      const matched = hit.fields.find((f) => f.text && foldedIncludes(f.text, needle));
+      if (!matched) continue;
+      pushed.add(key);
+      results.push({
+        type: hit.type,
+        id: hit.id,
+        campaignId,
+        title: hit.title,
+        snippet: makeSnippet(matched.text, needle),
+        matchedField: matched.field,
+        entityType: hit.extra?.entityType ?? null,
+        entityId: hit.extra?.entityId ?? null,
+      });
+    }
+    return results;
   }
 
   /**

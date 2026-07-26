@@ -1198,3 +1198,456 @@ CREATE TRIGGER IF NOT EXISTS rule_entries_au AFTER UPDATE ON rule_entries BEGIN
   INSERT INTO rule_entries_fts(rowid, name, summary, body) VALUES (new.id, new.name, new.summary, new.body);
 END;
 `;
+
+/**
+ * Denormalized FTS5 index for campaign-wide search. A single virtual table keeps
+ * the SearchService hot path bounded by MATCH + LIMIT while triggers below keep
+ * each source table synchronized. The *_fold columns carry the small full-fold
+ * cases SQLite's unicode61 tokenizer does not handle itself (notably ß -> ss);
+ * SearchService still hydrates source rows and builds snippets from original
+ * text so response spelling and role redaction stay unchanged.
+ */
+export const CAMPAIGN_SEARCH_FTS_SQL = `
+CREATE VIRTUAL TABLE IF NOT EXISTS campaign_search_fts USING fts5(
+  campaign_id UNINDEXED,
+  entity_type UNINDEXED,
+  entity_id UNINDEXED,
+  title,
+  name,
+  body,
+  aux,
+  dm_secret,
+  title_fold,
+  name_fold,
+  body_fold,
+  aux_fold,
+  dm_secret_fold,
+  tokenize = 'unicode61 remove_diacritics 2'
+);
+
+CREATE TRIGGER IF NOT EXISTS campaign_search_quests_ai AFTER INSERT ON quests BEGIN
+  INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+  VALUES (new.id * 32 + 1, new.campaign_id, 'quest', new.id, new.title, '', new.body, new.reward, new.dm_secret,
+    replace(replace(replace(coalesce(new.title, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '',
+    replace(replace(replace(coalesce(new.body, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+    replace(replace(replace(coalesce(new.reward, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+    replace(replace(replace(coalesce(new.dm_secret, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'));
+END;
+CREATE TRIGGER IF NOT EXISTS campaign_search_quests_ad AFTER DELETE ON quests BEGIN
+  DELETE FROM campaign_search_fts WHERE rowid = old.id * 32 + 1;
+  INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+  SELECT e.id * 32 + 13, e.campaign_id, 'encounter', e.id, '', e.name, '',
+    trim(coalesce(case when l.id is not null and l.deleted_at is null and l.status <> 'unexplored' then l.name else '' end, '') || ' ' ||
+         coalesce(case when s.id is not null and s.deleted_at is null then case when length(trim(coalesce(s.title, ''))) > 0 then s.title else 'Session ' || s.number end else '' end, '')),
+    trim(coalesce(case when l.id is not null and l.deleted_at is null and l.status = 'unexplored' then l.name else '' end, '')),
+    '', replace(replace(replace(coalesce(e.name, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '',
+    replace(replace(replace(trim(coalesce(case when l.id is not null and l.deleted_at is null and l.status <> 'unexplored' then l.name else '' end, '') || ' ' ||
+         coalesce(case when s.id is not null and s.deleted_at is null then case when length(trim(coalesce(s.title, ''))) > 0 then s.title else 'Session ' || s.number end else '' end, '')), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+    replace(replace(replace(trim(coalesce(case when l.id is not null and l.deleted_at is null and l.status = 'unexplored' then l.name else '' end, '')), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i')
+  FROM encounters e
+  LEFT JOIN locations l ON l.id = e.location_id AND l.campaign_id = e.campaign_id
+  LEFT JOIN sessions s ON s.id = e.session_id AND s.campaign_id = e.campaign_id
+  WHERE e.quest_id = old.id;
+END;
+CREATE TRIGGER IF NOT EXISTS campaign_search_quests_au AFTER UPDATE ON quests BEGIN
+  INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+  VALUES (new.id * 32 + 1, new.campaign_id, 'quest', new.id, new.title, '', new.body, new.reward, new.dm_secret,
+    replace(replace(replace(coalesce(new.title, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '',
+    replace(replace(replace(coalesce(new.body, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+    replace(replace(replace(coalesce(new.reward, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+    replace(replace(replace(coalesce(new.dm_secret, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'));
+  INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+  SELECT e.id * 32 + 13, e.campaign_id, 'encounter', e.id, '', e.name, '',
+    trim(coalesce(case when q.id is not null and q.deleted_at is null and q.hidden = 0 then q.title else '' end, '') || ' ' ||
+         coalesce(case when l.id is not null and l.deleted_at is null and l.status <> 'unexplored' then l.name else '' end, '') || ' ' ||
+         coalesce(case when s.id is not null and s.deleted_at is null then case when length(trim(coalesce(s.title, ''))) > 0 then s.title else 'Session ' || s.number end else '' end, '')),
+    trim(coalesce(case when q.id is not null and q.deleted_at is null and q.hidden <> 0 then q.title else '' end, '') || ' ' ||
+         coalesce(case when l.id is not null and l.deleted_at is null and l.status = 'unexplored' then l.name else '' end, '')),
+    '', replace(replace(replace(coalesce(e.name, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '',
+    replace(replace(replace(trim(coalesce(case when q.id is not null and q.deleted_at is null and q.hidden = 0 then q.title else '' end, '') || ' ' ||
+         coalesce(case when l.id is not null and l.deleted_at is null and l.status <> 'unexplored' then l.name else '' end, '') || ' ' ||
+         coalesce(case when s.id is not null and s.deleted_at is null then case when length(trim(coalesce(s.title, ''))) > 0 then s.title else 'Session ' || s.number end else '' end, '')), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+    replace(replace(replace(trim(coalesce(case when q.id is not null and q.deleted_at is null and q.hidden <> 0 then q.title else '' end, '') || ' ' ||
+         coalesce(case when l.id is not null and l.deleted_at is null and l.status = 'unexplored' then l.name else '' end, '')), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i')
+  FROM encounters e
+  LEFT JOIN quests q ON q.id = e.quest_id AND q.campaign_id = e.campaign_id
+  LEFT JOIN locations l ON l.id = e.location_id AND l.campaign_id = e.campaign_id
+  LEFT JOIN sessions s ON s.id = e.session_id AND s.campaign_id = e.campaign_id
+  WHERE e.quest_id = new.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS campaign_search_npcs_ai AFTER INSERT ON npcs BEGIN
+  INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+  VALUES (new.id * 32 + 2, new.campaign_id, 'npc', new.id, '', new.name, new.body, new.role, new.dm_secret, '',
+    replace(replace(replace(coalesce(new.name, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+    replace(replace(replace(coalesce(new.body, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+    replace(replace(replace(coalesce(new.role, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+    replace(replace(replace(coalesce(new.dm_secret, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'));
+END;
+CREATE TRIGGER IF NOT EXISTS campaign_search_npcs_ad AFTER DELETE ON npcs BEGIN
+  DELETE FROM campaign_search_fts WHERE rowid = old.id * 32 + 2;
+END;
+CREATE TRIGGER IF NOT EXISTS campaign_search_npcs_au AFTER UPDATE ON npcs BEGIN
+  INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+  VALUES (new.id * 32 + 2, new.campaign_id, 'npc', new.id, '', new.name, new.body, new.role, new.dm_secret, '',
+    replace(replace(replace(coalesce(new.name, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+    replace(replace(replace(coalesce(new.body, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+    replace(replace(replace(coalesce(new.role, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+    replace(replace(replace(coalesce(new.dm_secret, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'));
+END;
+
+CREATE TRIGGER IF NOT EXISTS campaign_search_factions_ai AFTER INSERT ON factions BEGIN
+  INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+  VALUES (new.id * 32 + 3, new.campaign_id, 'faction', new.id, '', new.name, new.body, trim(new.kind || ' ' || new.goals), new.dm_secret, '',
+    replace(replace(replace(coalesce(new.name, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+    replace(replace(replace(coalesce(new.body, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+    replace(replace(replace(trim(coalesce(new.kind, '') || ' ' || coalesce(new.goals, '')), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+    replace(replace(replace(coalesce(new.dm_secret, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'));
+END;
+CREATE TRIGGER IF NOT EXISTS campaign_search_factions_ad AFTER DELETE ON factions BEGIN
+  DELETE FROM campaign_search_fts WHERE rowid = old.id * 32 + 3;
+END;
+CREATE TRIGGER IF NOT EXISTS campaign_search_factions_au AFTER UPDATE ON factions BEGIN
+  INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+  VALUES (new.id * 32 + 3, new.campaign_id, 'faction', new.id, '', new.name, new.body, trim(new.kind || ' ' || new.goals), new.dm_secret, '',
+    replace(replace(replace(coalesce(new.name, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+    replace(replace(replace(coalesce(new.body, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+    replace(replace(replace(trim(coalesce(new.kind, '') || ' ' || coalesce(new.goals, '')), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+    replace(replace(replace(coalesce(new.dm_secret, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'));
+END;
+
+CREATE TRIGGER IF NOT EXISTS campaign_search_locations_ai AFTER INSERT ON locations BEGIN
+  INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+  VALUES (new.id * 32 + 4, new.campaign_id, 'location', new.id, '', new.name, new.body, new.kind, new.dm_secret, '',
+    replace(replace(replace(coalesce(new.name, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+    replace(replace(replace(coalesce(new.body, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+    replace(replace(replace(coalesce(new.kind, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+    replace(replace(replace(coalesce(new.dm_secret, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'));
+END;
+CREATE TRIGGER IF NOT EXISTS campaign_search_locations_ad AFTER DELETE ON locations BEGIN
+  DELETE FROM campaign_search_fts WHERE rowid = old.id * 32 + 4;
+END;
+CREATE TRIGGER IF NOT EXISTS campaign_search_locations_au AFTER UPDATE ON locations BEGIN
+  INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+  VALUES (new.id * 32 + 4, new.campaign_id, 'location', new.id, '', new.name, new.body, new.kind, new.dm_secret, '',
+    replace(replace(replace(coalesce(new.name, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+    replace(replace(replace(coalesce(new.body, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+    replace(replace(replace(coalesce(new.kind, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+    replace(replace(replace(coalesce(new.dm_secret, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'));
+  INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+  SELECT e.id * 32 + 13, e.campaign_id, 'encounter', e.id, '', e.name, '',
+    trim(coalesce(case when q.id is not null and q.deleted_at is null and q.hidden = 0 then q.title else '' end, '') || ' ' ||
+         coalesce(case when l.id is not null and l.deleted_at is null and l.status <> 'unexplored' then l.name else '' end, '') || ' ' ||
+         coalesce(case when s.id is not null and s.deleted_at is null then case when length(trim(coalesce(s.title, ''))) > 0 then s.title else 'Session ' || s.number end else '' end, '')),
+    trim(coalesce(case when q.id is not null and q.deleted_at is null and q.hidden <> 0 then q.title else '' end, '') || ' ' ||
+         coalesce(case when l.id is not null and l.deleted_at is null and l.status = 'unexplored' then l.name else '' end, '')),
+    '', replace(replace(replace(coalesce(e.name, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '',
+    replace(replace(replace(trim(coalesce(case when q.id is not null and q.deleted_at is null and q.hidden = 0 then q.title else '' end, '') || ' ' ||
+         coalesce(case when l.id is not null and l.deleted_at is null and l.status <> 'unexplored' then l.name else '' end, '') || ' ' ||
+         coalesce(case when s.id is not null and s.deleted_at is null then case when length(trim(coalesce(s.title, ''))) > 0 then s.title else 'Session ' || s.number end else '' end, '')), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+    replace(replace(replace(trim(coalesce(case when q.id is not null and q.deleted_at is null and q.hidden <> 0 then q.title else '' end, '') || ' ' ||
+         coalesce(case when l.id is not null and l.deleted_at is null and l.status = 'unexplored' then l.name else '' end, '')), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i')
+  FROM encounters e
+  LEFT JOIN quests q ON q.id = e.quest_id AND q.campaign_id = e.campaign_id
+  LEFT JOIN locations l ON l.id = e.location_id AND l.campaign_id = e.campaign_id
+  LEFT JOIN sessions s ON s.id = e.session_id AND s.campaign_id = e.campaign_id
+  WHERE e.location_id = new.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS campaign_search_characters_ai AFTER INSERT ON characters BEGIN
+  INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+  VALUES (new.id * 32 + 5, new.campaign_id, 'character', new.id, '', new.name, new.notes, trim(new.species || ' ' || new.class_name || ' ' || new.background), new.dm_secret, '',
+    replace(replace(replace(coalesce(new.name, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+    replace(replace(replace(coalesce(new.notes, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+    replace(replace(replace(trim(coalesce(new.species, '') || ' ' || coalesce(new.class_name, '') || ' ' || coalesce(new.background, '')), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+    replace(replace(replace(coalesce(new.dm_secret, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'));
+END;
+CREATE TRIGGER IF NOT EXISTS campaign_search_characters_ad AFTER DELETE ON characters BEGIN
+  DELETE FROM campaign_search_fts WHERE rowid = old.id * 32 + 5;
+END;
+CREATE TRIGGER IF NOT EXISTS campaign_search_characters_au AFTER UPDATE ON characters BEGIN
+  INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+  VALUES (new.id * 32 + 5, new.campaign_id, 'character', new.id, '', new.name, new.notes, trim(new.species || ' ' || new.class_name || ' ' || new.background), new.dm_secret, '',
+    replace(replace(replace(coalesce(new.name, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+    replace(replace(replace(coalesce(new.notes, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+    replace(replace(replace(trim(coalesce(new.species, '') || ' ' || coalesce(new.class_name, '') || ' ' || coalesce(new.background, '')), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+    replace(replace(replace(coalesce(new.dm_secret, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'));
+END;
+
+CREATE TRIGGER IF NOT EXISTS campaign_search_sessions_ai AFTER INSERT ON sessions BEGIN
+  INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+  VALUES (new.id * 32 + 6, new.campaign_id, 'session', new.id, case when length(trim(coalesce(new.title, ''))) > 0 then new.title else 'Session ' || new.number end, '', new.recap, '', new.dm_secret,
+    replace(replace(replace(coalesce(case when length(trim(coalesce(new.title, ''))) > 0 then new.title else 'Session ' || new.number end, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '',
+    replace(replace(replace(coalesce(new.recap, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '',
+    replace(replace(replace(coalesce(new.dm_secret, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'));
+END;
+CREATE TRIGGER IF NOT EXISTS campaign_search_sessions_ad AFTER DELETE ON sessions BEGIN
+  DELETE FROM campaign_search_fts WHERE rowid = old.id * 32 + 6;
+END;
+CREATE TRIGGER IF NOT EXISTS campaign_search_sessions_au AFTER UPDATE ON sessions BEGIN
+  INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+  VALUES (new.id * 32 + 6, new.campaign_id, 'session', new.id, case when length(trim(coalesce(new.title, ''))) > 0 then new.title else 'Session ' || new.number end, '', new.recap, '', new.dm_secret,
+    replace(replace(replace(coalesce(case when length(trim(coalesce(new.title, ''))) > 0 then new.title else 'Session ' || new.number end, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '',
+    replace(replace(replace(coalesce(new.recap, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '',
+    replace(replace(replace(coalesce(new.dm_secret, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'));
+  INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+  SELECT e.id * 32 + 13, e.campaign_id, 'encounter', e.id, '', e.name, '',
+    trim(coalesce(case when q.id is not null and q.deleted_at is null and q.hidden = 0 then q.title else '' end, '') || ' ' ||
+         coalesce(case when l.id is not null and l.deleted_at is null and l.status <> 'unexplored' then l.name else '' end, '') || ' ' ||
+         coalesce(case when s.id is not null and s.deleted_at is null then case when length(trim(coalesce(s.title, ''))) > 0 then s.title else 'Session ' || s.number end else '' end, '')),
+    trim(coalesce(case when q.id is not null and q.deleted_at is null and q.hidden <> 0 then q.title else '' end, '') || ' ' ||
+         coalesce(case when l.id is not null and l.deleted_at is null and l.status = 'unexplored' then l.name else '' end, '')),
+    '', replace(replace(replace(coalesce(e.name, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '',
+    replace(replace(replace(trim(coalesce(case when q.id is not null and q.deleted_at is null and q.hidden = 0 then q.title else '' end, '') || ' ' ||
+         coalesce(case when l.id is not null and l.deleted_at is null and l.status <> 'unexplored' then l.name else '' end, '') || ' ' ||
+         coalesce(case when s.id is not null and s.deleted_at is null then case when length(trim(coalesce(s.title, ''))) > 0 then s.title else 'Session ' || s.number end else '' end, '')), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+    replace(replace(replace(trim(coalesce(case when q.id is not null and q.deleted_at is null and q.hidden <> 0 then q.title else '' end, '') || ' ' ||
+         coalesce(case when l.id is not null and l.deleted_at is null and l.status = 'unexplored' then l.name else '' end, '')), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i')
+  FROM encounters e
+  LEFT JOIN quests q ON q.id = e.quest_id AND q.campaign_id = e.campaign_id
+  LEFT JOIN locations l ON l.id = e.location_id AND l.campaign_id = e.campaign_id
+  LEFT JOIN sessions s ON s.id = e.session_id AND s.campaign_id = e.campaign_id
+  WHERE e.session_id = new.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS campaign_search_notes_ai AFTER INSERT ON notes BEGIN
+  INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+  VALUES (new.id * 32 + 7, new.campaign_id, 'note', new.id, '', '', new.body, '', '', '', '',
+    replace(replace(replace(coalesce(new.body, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '', '');
+END;
+CREATE TRIGGER IF NOT EXISTS campaign_search_notes_ad AFTER DELETE ON notes BEGIN
+  DELETE FROM campaign_search_fts WHERE rowid = old.id * 32 + 7;
+END;
+CREATE TRIGGER IF NOT EXISTS campaign_search_notes_au AFTER UPDATE ON notes BEGIN
+  INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+  VALUES (new.id * 32 + 7, new.campaign_id, 'note', new.id, '', '', new.body, '', '', '', '',
+    replace(replace(replace(coalesce(new.body, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '', '');
+END;
+
+CREATE TRIGGER IF NOT EXISTS campaign_search_timeline_ai AFTER INSERT ON timeline_events BEGIN
+  INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+  VALUES (new.id * 32 + 8, new.campaign_id, 'timeline', new.id, new.title, '', new.body, trim(new.in_world_date || ' ' || new.era), new.dm_secret,
+    replace(replace(replace(coalesce(new.title, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '',
+    replace(replace(replace(coalesce(new.body, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+    replace(replace(replace(trim(coalesce(new.in_world_date, '') || ' ' || coalesce(new.era, '')), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+    replace(replace(replace(coalesce(new.dm_secret, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'));
+END;
+CREATE TRIGGER IF NOT EXISTS campaign_search_timeline_ad AFTER DELETE ON timeline_events BEGIN
+  DELETE FROM campaign_search_fts WHERE rowid = old.id * 32 + 8;
+END;
+CREATE TRIGGER IF NOT EXISTS campaign_search_timeline_au AFTER UPDATE ON timeline_events BEGIN
+  INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+  VALUES (new.id * 32 + 8, new.campaign_id, 'timeline', new.id, new.title, '', new.body, trim(new.in_world_date || ' ' || new.era), new.dm_secret,
+    replace(replace(replace(coalesce(new.title, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '',
+    replace(replace(replace(coalesce(new.body, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+    replace(replace(replace(trim(coalesce(new.in_world_date, '') || ' ' || coalesce(new.era, '')), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+    replace(replace(replace(coalesce(new.dm_secret, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'));
+END;
+
+CREATE TRIGGER IF NOT EXISTS campaign_search_inventory_ai AFTER INSERT ON inventory_items BEGIN
+  INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+  VALUES (new.id * 32 + 9, new.campaign_id, 'item', new.id, '', new.name, '', new.notes, '', '',
+    replace(replace(replace(coalesce(new.name, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '',
+    replace(replace(replace(coalesce(new.notes, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '');
+END;
+CREATE TRIGGER IF NOT EXISTS campaign_search_inventory_ad AFTER DELETE ON inventory_items BEGIN
+  DELETE FROM campaign_search_fts WHERE rowid = old.id * 32 + 9;
+END;
+CREATE TRIGGER IF NOT EXISTS campaign_search_inventory_au AFTER UPDATE ON inventory_items BEGIN
+  INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+  VALUES (new.id * 32 + 9, new.campaign_id, 'item', new.id, '', new.name, '', new.notes, '', '',
+    replace(replace(replace(coalesce(new.name, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '',
+    replace(replace(replace(coalesce(new.notes, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '');
+END;
+
+CREATE TRIGGER IF NOT EXISTS campaign_search_comments_ai AFTER INSERT ON comments BEGIN
+  INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+  VALUES (new.id * 32 + 10, new.campaign_id, 'comment', new.id, '', '', new.body, '', '', '', '',
+    replace(replace(replace(coalesce(new.body, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '', '');
+END;
+CREATE TRIGGER IF NOT EXISTS campaign_search_comments_ad AFTER DELETE ON comments BEGIN
+  DELETE FROM campaign_search_fts WHERE rowid = old.id * 32 + 10;
+END;
+CREATE TRIGGER IF NOT EXISTS campaign_search_comments_au AFTER UPDATE ON comments BEGIN
+  INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+  VALUES (new.id * 32 + 10, new.campaign_id, 'comment', new.id, '', '', new.body, '', '', '', '',
+    replace(replace(replace(coalesce(new.body, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '', '');
+END;
+
+CREATE TRIGGER IF NOT EXISTS campaign_search_arcs_ai AFTER INSERT ON story_arcs BEGIN
+  INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+  VALUES (new.id * 32 + 11, new.campaign_id, 'arc', new.id, new.title, '', new.summary, '', '',
+    replace(replace(replace(coalesce(new.title, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '',
+    replace(replace(replace(coalesce(new.summary, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '', '');
+END;
+CREATE TRIGGER IF NOT EXISTS campaign_search_arcs_ad AFTER DELETE ON story_arcs BEGIN
+  DELETE FROM campaign_search_fts WHERE rowid = old.id * 32 + 11;
+END;
+CREATE TRIGGER IF NOT EXISTS campaign_search_arcs_au AFTER UPDATE ON story_arcs BEGIN
+  INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+  VALUES (new.id * 32 + 11, new.campaign_id, 'arc', new.id, new.title, '', new.summary, '', '',
+    replace(replace(replace(coalesce(new.title, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '',
+    replace(replace(replace(coalesce(new.summary, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '', '');
+END;
+
+CREATE TRIGGER IF NOT EXISTS campaign_search_beats_ai AFTER INSERT ON story_beats BEGIN
+  INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+  VALUES (new.id * 32 + 12, new.campaign_id, 'beat', new.id, new.title, '', new.body, '', '',
+    replace(replace(replace(coalesce(new.title, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '',
+    replace(replace(replace(coalesce(new.body, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '', '');
+END;
+CREATE TRIGGER IF NOT EXISTS campaign_search_beats_ad AFTER DELETE ON story_beats BEGIN
+  DELETE FROM campaign_search_fts WHERE rowid = old.id * 32 + 12;
+END;
+CREATE TRIGGER IF NOT EXISTS campaign_search_beats_au AFTER UPDATE ON story_beats BEGIN
+  INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+  VALUES (new.id * 32 + 12, new.campaign_id, 'beat', new.id, new.title, '', new.body, '', '',
+    replace(replace(replace(coalesce(new.title, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '',
+    replace(replace(replace(coalesce(new.body, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '', '');
+END;
+
+CREATE TRIGGER IF NOT EXISTS campaign_search_encounters_ai AFTER INSERT ON encounters BEGIN
+  INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+  SELECT new.id * 32 + 13, new.campaign_id, 'encounter', new.id, '', new.name, '',
+    trim(coalesce(case when q.id is not null and q.deleted_at is null and q.hidden = 0 then q.title else '' end, '') || ' ' ||
+         coalesce(case when l.id is not null and l.deleted_at is null and l.status <> 'unexplored' then l.name else '' end, '') || ' ' ||
+         coalesce(case when s.id is not null and s.deleted_at is null then case when length(trim(coalesce(s.title, ''))) > 0 then s.title else 'Session ' || s.number end else '' end, '')),
+    trim(coalesce(case when q.id is not null and q.deleted_at is null and q.hidden <> 0 then q.title else '' end, '') || ' ' ||
+         coalesce(case when l.id is not null and l.deleted_at is null and l.status = 'unexplored' then l.name else '' end, '')),
+    '', replace(replace(replace(coalesce(new.name, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '',
+    replace(replace(replace(trim(coalesce(case when q.id is not null and q.deleted_at is null and q.hidden = 0 then q.title else '' end, '') || ' ' ||
+         coalesce(case when l.id is not null and l.deleted_at is null and l.status <> 'unexplored' then l.name else '' end, '') || ' ' ||
+         coalesce(case when s.id is not null and s.deleted_at is null then case when length(trim(coalesce(s.title, ''))) > 0 then s.title else 'Session ' || s.number end else '' end, '')), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+    replace(replace(replace(trim(coalesce(case when q.id is not null and q.deleted_at is null and q.hidden <> 0 then q.title else '' end, '') || ' ' ||
+         coalesce(case when l.id is not null and l.deleted_at is null and l.status = 'unexplored' then l.name else '' end, '')), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i')
+  FROM (SELECT 1) one
+  LEFT JOIN quests q ON q.id = new.quest_id AND q.campaign_id = new.campaign_id
+  LEFT JOIN locations l ON l.id = new.location_id AND l.campaign_id = new.campaign_id
+  LEFT JOIN sessions s ON s.id = new.session_id AND s.campaign_id = new.campaign_id;
+END;
+CREATE TRIGGER IF NOT EXISTS campaign_search_encounters_ad AFTER DELETE ON encounters BEGIN
+  DELETE FROM campaign_search_fts WHERE rowid = old.id * 32 + 13;
+END;
+CREATE TRIGGER IF NOT EXISTS campaign_search_encounters_au AFTER UPDATE ON encounters BEGIN
+  INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+  SELECT new.id * 32 + 13, new.campaign_id, 'encounter', new.id, '', new.name, '',
+    trim(coalesce(case when q.id is not null and q.deleted_at is null and q.hidden = 0 then q.title else '' end, '') || ' ' ||
+         coalesce(case when l.id is not null and l.deleted_at is null and l.status <> 'unexplored' then l.name else '' end, '') || ' ' ||
+         coalesce(case when s.id is not null and s.deleted_at is null then case when length(trim(coalesce(s.title, ''))) > 0 then s.title else 'Session ' || s.number end else '' end, '')),
+    trim(coalesce(case when q.id is not null and q.deleted_at is null and q.hidden <> 0 then q.title else '' end, '') || ' ' ||
+         coalesce(case when l.id is not null and l.deleted_at is null and l.status = 'unexplored' then l.name else '' end, '')),
+    '', replace(replace(replace(coalesce(new.name, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '',
+    replace(replace(replace(trim(coalesce(case when q.id is not null and q.deleted_at is null and q.hidden = 0 then q.title else '' end, '') || ' ' ||
+         coalesce(case when l.id is not null and l.deleted_at is null and l.status <> 'unexplored' then l.name else '' end, '') || ' ' ||
+         coalesce(case when s.id is not null and s.deleted_at is null then case when length(trim(coalesce(s.title, ''))) > 0 then s.title else 'Session ' || s.number end else '' end, '')), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+    replace(replace(replace(trim(coalesce(case when q.id is not null and q.deleted_at is null and q.hidden <> 0 then q.title else '' end, '') || ' ' ||
+         coalesce(case when l.id is not null and l.deleted_at is null and l.status = 'unexplored' then l.name else '' end, '')), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i')
+  FROM (SELECT 1) one
+  LEFT JOIN quests q ON q.id = new.quest_id AND q.campaign_id = new.campaign_id
+  LEFT JOIN locations l ON l.id = new.location_id AND l.campaign_id = new.campaign_id
+  LEFT JOIN sessions s ON s.id = new.session_id AND s.campaign_id = new.campaign_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS campaign_search_scheduled_sessions_ai AFTER INSERT ON scheduled_sessions BEGIN
+  INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+  VALUES (new.id * 32 + 14, new.campaign_id, 'scheduled_session', new.id, new.title, '', new.notes,
+    new.scheduled_at || ' ' || replace(replace(replace(new.scheduled_at, 'T', ' '), ':', ' '), '-', ' '), '',
+    replace(replace(replace(coalesce(new.title, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '',
+    replace(replace(replace(coalesce(new.notes, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+    replace(replace(replace(coalesce(new.scheduled_at || ' ' || replace(replace(replace(new.scheduled_at, 'T', ' '), ':', ' '), '-', ' '), ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '');
+END;
+CREATE TRIGGER IF NOT EXISTS campaign_search_scheduled_sessions_ad AFTER DELETE ON scheduled_sessions BEGIN
+  DELETE FROM campaign_search_fts WHERE rowid = old.id * 32 + 14;
+END;
+CREATE TRIGGER IF NOT EXISTS campaign_search_scheduled_sessions_au AFTER UPDATE ON scheduled_sessions BEGIN
+  INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+  VALUES (new.id * 32 + 14, new.campaign_id, 'scheduled_session', new.id, new.title, '', new.notes,
+    new.scheduled_at || ' ' || replace(replace(replace(new.scheduled_at, 'T', ' '), ':', ' '), '-', ' '), '',
+    replace(replace(replace(coalesce(new.title, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '',
+    replace(replace(replace(coalesce(new.notes, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+    replace(replace(replace(coalesce(new.scheduled_at || ' ' || replace(replace(replace(new.scheduled_at, 'T', ' '), ':', ' '), '-', ' '), ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '');
+END;
+
+INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+SELECT id * 32 + 1, campaign_id, 'quest', id, title, '', body, reward, dm_secret,
+  replace(replace(replace(coalesce(title, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '',
+  replace(replace(replace(coalesce(body, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+  replace(replace(replace(coalesce(reward, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+  replace(replace(replace(coalesce(dm_secret, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i') FROM quests;
+INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+SELECT id * 32 + 2, campaign_id, 'npc', id, '', name, body, role, dm_secret, '',
+  replace(replace(replace(coalesce(name, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+  replace(replace(replace(coalesce(body, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+  replace(replace(replace(coalesce(role, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+  replace(replace(replace(coalesce(dm_secret, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i') FROM npcs;
+INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+SELECT id * 32 + 3, campaign_id, 'faction', id, '', name, body, trim(kind || ' ' || goals), dm_secret, '',
+  replace(replace(replace(coalesce(name, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+  replace(replace(replace(coalesce(body, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+  replace(replace(replace(trim(coalesce(kind, '') || ' ' || coalesce(goals, '')), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+  replace(replace(replace(coalesce(dm_secret, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i') FROM factions;
+INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+SELECT id * 32 + 4, campaign_id, 'location', id, '', name, body, kind, dm_secret, '',
+  replace(replace(replace(coalesce(name, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+  replace(replace(replace(coalesce(body, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+  replace(replace(replace(coalesce(kind, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+  replace(replace(replace(coalesce(dm_secret, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i') FROM locations;
+INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+SELECT id * 32 + 5, campaign_id, 'character', id, '', name, notes, trim(species || ' ' || class_name || ' ' || background), dm_secret, '',
+  replace(replace(replace(coalesce(name, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+  replace(replace(replace(coalesce(notes, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+  replace(replace(replace(trim(coalesce(species, '') || ' ' || coalesce(class_name, '') || ' ' || coalesce(background, '')), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+  replace(replace(replace(coalesce(dm_secret, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i') FROM characters;
+INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+SELECT id * 32 + 6, campaign_id, 'session', id, case when length(trim(coalesce(title, ''))) > 0 then title else 'Session ' || number end, '', recap, '', dm_secret,
+  replace(replace(replace(coalesce(case when length(trim(coalesce(title, ''))) > 0 then title else 'Session ' || number end, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '',
+  replace(replace(replace(coalesce(recap, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '',
+  replace(replace(replace(coalesce(dm_secret, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i') FROM sessions;
+INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+SELECT id * 32 + 7, campaign_id, 'note', id, '', '', body, '', '', '', '',
+  replace(replace(replace(coalesce(body, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '', '' FROM notes;
+INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+SELECT id * 32 + 8, campaign_id, 'timeline', id, title, '', body, trim(in_world_date || ' ' || era), dm_secret,
+  replace(replace(replace(coalesce(title, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '',
+  replace(replace(replace(coalesce(body, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+  replace(replace(replace(trim(coalesce(in_world_date, '') || ' ' || coalesce(era, '')), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+  replace(replace(replace(coalesce(dm_secret, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i') FROM timeline_events;
+INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+SELECT id * 32 + 9, campaign_id, 'item', id, '', name, '', notes, '', '',
+  replace(replace(replace(coalesce(name, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '',
+  replace(replace(replace(coalesce(notes, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '' FROM inventory_items;
+INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+SELECT id * 32 + 10, campaign_id, 'comment', id, '', '', body, '', '', '', '',
+  replace(replace(replace(coalesce(body, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '', '' FROM comments;
+INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+SELECT id * 32 + 11, campaign_id, 'arc', id, title, '', summary, '', '',
+  replace(replace(replace(coalesce(title, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '',
+  replace(replace(replace(coalesce(summary, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '', '' FROM story_arcs;
+INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+SELECT id * 32 + 12, campaign_id, 'beat', id, title, '', body, '', '',
+  replace(replace(replace(coalesce(title, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '',
+  replace(replace(replace(coalesce(body, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '', '' FROM story_beats;
+INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+SELECT e.id * 32 + 13, e.campaign_id, 'encounter', e.id, '', e.name, '',
+  trim(coalesce(case when q.id is not null and q.deleted_at is null and q.hidden = 0 then q.title else '' end, '') || ' ' ||
+       coalesce(case when l.id is not null and l.deleted_at is null and l.status <> 'unexplored' then l.name else '' end, '') || ' ' ||
+       coalesce(case when s.id is not null and s.deleted_at is null then case when length(trim(coalesce(s.title, ''))) > 0 then s.title else 'Session ' || s.number end else '' end, '')),
+  trim(coalesce(case when q.id is not null and q.deleted_at is null and q.hidden <> 0 then q.title else '' end, '') || ' ' ||
+       coalesce(case when l.id is not null and l.deleted_at is null and l.status = 'unexplored' then l.name else '' end, '')),
+  '', replace(replace(replace(coalesce(e.name, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '',
+  replace(replace(replace(trim(coalesce(case when q.id is not null and q.deleted_at is null and q.hidden = 0 then q.title else '' end, '') || ' ' ||
+       coalesce(case when l.id is not null and l.deleted_at is null and l.status <> 'unexplored' then l.name else '' end, '') || ' ' ||
+       coalesce(case when s.id is not null and s.deleted_at is null then case when length(trim(coalesce(s.title, ''))) > 0 then s.title else 'Session ' || s.number end else '' end, '')), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+  replace(replace(replace(trim(coalesce(case when q.id is not null and q.deleted_at is null and q.hidden <> 0 then q.title else '' end, '') || ' ' ||
+       coalesce(case when l.id is not null and l.deleted_at is null and l.status = 'unexplored' then l.name else '' end, '')), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i')
+FROM encounters e
+LEFT JOIN quests q ON q.id = e.quest_id AND q.campaign_id = e.campaign_id
+LEFT JOIN locations l ON l.id = e.location_id AND l.campaign_id = e.campaign_id
+LEFT JOIN sessions s ON s.id = e.session_id AND s.campaign_id = e.campaign_id;
+INSERT OR REPLACE INTO campaign_search_fts(rowid, campaign_id, entity_type, entity_id, title, name, body, aux, dm_secret, title_fold, name_fold, body_fold, aux_fold, dm_secret_fold)
+SELECT id * 32 + 14, campaign_id, 'scheduled_session', id, title, '', notes,
+  scheduled_at || ' ' || replace(replace(replace(scheduled_at, 'T', ' '), ':', ' '), '-', ' '), '',
+  replace(replace(replace(coalesce(title, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '',
+  replace(replace(replace(coalesce(notes, ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'),
+  replace(replace(replace(coalesce(scheduled_at || ' ' || replace(replace(replace(scheduled_at, 'T', ' '), ':', ' '), '-', ' '), ''), 'ß', 'ss'), 'ẞ', 'ss'), 'İ', 'i'), '' FROM scheduled_sessions;
+`;
