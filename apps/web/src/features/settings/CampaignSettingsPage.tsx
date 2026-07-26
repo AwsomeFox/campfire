@@ -27,7 +27,12 @@ import { adminRulesHref } from '../../lib/adminNavigation';
 import { useCampaigns } from '../../app/CampaignContext';
 import { Card, ErrorNote, Skeleton } from '../../components/ui';
 import { CampaignMetadataFields, isCampaignMetadataDirty } from '../../components/CampaignMetadataFields';
-import { mechanicsForPackSlug, ruleSystemAdapterLabel } from '../../lib/rules';
+import {
+  capabilityStatusLabel,
+  mechanicsForPackSlug,
+  rulesetCapabilitiesForSelection,
+  ruleSystemAdapterLabel,
+} from '../../lib/rules';
 import { scrollBehavior } from '../../lib/prefersReducedMotion';
 import AiDmCard from './AiDmCard';
 import {
@@ -1342,14 +1347,17 @@ function RuleSystemCard({
   // resolves to the D&D 5e adapter for combat — surface that plainly rather than a bare slug.
   const dangling = !!currentSlug && !!packs && !currentPack;
   const currentMechanics = currentSlug ? mechanicsForPackSlug(currentSlug) : undefined;
+  const currentProfile = packs ? rulesetCapabilitiesForSelection(currentSlug, packs) : null;
 
   // The pending switch — what mechanically changes if the admin applies `selected` (#348).
   const dirty = selected !== currentSlug;
   const targetPack = packs?.find((p) => p.slug === selected);
   const targetLabel = selected ? targetPack?.name ?? selected : 'None / homebrew';
-  const targetMechanics = selected
-    ? mechanicsForPackSlug(selected) ?? `Falls back to ${ruleSystemAdapterLabel(selected)} combat math.`
-    : 'No installed rules — dice, sheets and notes still work; combat uses D&D 5e defaults.';
+  const targetProfile = packs ? rulesetCapabilitiesForSelection(selected, packs) : null;
+  const targetMechanics = targetProfile?.mechanicsSummary ??
+    (selected
+      ? mechanicsForPackSlug(selected) ?? `Falls back to ${ruleSystemAdapterLabel(selected)} combat math.`
+      : 'No installed rules text. Combat math falls back to D&D 5e defaults; this does not select a 5e rules pack.');
 
   return (
     <div
@@ -1384,12 +1392,18 @@ function RuleSystemCard({
         )}
       </div>
       <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
-        Powers the compendium, character math, statblocks and AI rules lookups. Packs install server-wide from open
-        sources; switching systems keeps existing sheets and combatant stats and only re-interprets them.
+        Powers the compendium, character math, statblocks, encounter generation, difficulty and AI rules lookups.
+        None / homebrew is allowed, but it has no rules compendium and uses disclosed fallback combat behavior.
+        Switching keeps existing sheets and combatant stats and only re-interprets them.
       </p>
       {currentPack && currentMechanics && (
         <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
           <strong>Current rules:</strong> {currentMechanics}
+        </p>
+      )}
+      {!currentSlug && currentProfile && (
+        <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
+          <strong>Current rules:</strong> {currentProfile.mechanicsSummary}
         </p>
       )}
       {dangling && (
@@ -1437,6 +1451,31 @@ function RuleSystemCard({
             Existing encounters and combatants keep their stored numbers — only the interpretation (initiative,
             DC model, condition list, degrees of success) changes at read time. Nothing is recalculated or lost.
           </p>
+          {targetProfile && (
+            <>
+              <ul className="text-muted" style={{ margin: 0, paddingLeft: '1rem' }}>
+                {targetProfile.migrationPreview.map((line) => (
+                  <li key={line}>{line}</li>
+                ))}
+              </ul>
+              <ul className="flex flex-col gap-1" style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+                {targetProfile.capabilities.map((capability) => (
+                  <li key={capability.key} className="flex gap-2">
+                    <span
+                      className="tag tag-neutral"
+                      style={{ fontSize: 10, height: 'fit-content', minWidth: 72, justifyContent: 'center' }}
+                    >
+                      {capabilityStatusLabel(capability.status)}
+                    </span>
+                    <span className="text-muted">
+                      <strong style={{ color: 'var(--color-text)' }}>{capability.label}:</strong>{' '}
+                      {capability.summary}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
           <div className="flex gap-2 items-center" style={{ marginTop: 4 }}>
             <button className="btn btn-primary" style={{ fontSize: 12.5 }} disabled={saving} onClick={applyRuleSystem}>
               {saving ? 'Applying…' : 'Apply change'}
@@ -1454,8 +1493,18 @@ function RuleSystemCard({
       )}
       {packs && packs.length === 0 && (
         <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
-          No rule packs are installed on this server yet.
-          {isAdmin ? ' Install one from Server admin → Rule systems.' : ' Ask a server admin to install one.'}
+          No rule packs are installed on this server yet. This campaign can stay None / homebrew.
+          {isAdmin ? (
+            <>
+              {' '}Install one from{' '}
+              <Link to={adminRulesHref(`/c/${campaignId}/settings`)} style={{ color: 'var(--color-text)', textDecoration: 'underline' }}>
+                Server admin → Rule systems
+              </Link>
+              .
+            </>
+          ) : (
+            ' Ask a server admin to install one from Server admin → Rule systems.'
+          )}
         </p>
       )}
       {error && <p className="text-sm" style={{ color: '#f87171' }}>{error}</p>}

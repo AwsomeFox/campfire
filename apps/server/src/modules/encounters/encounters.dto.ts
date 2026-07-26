@@ -1,5 +1,5 @@
 import { createZodDto } from 'nestjs-zod';
-import { EncounterCreate, EncounterGenerate, EncounterPreviewRequest, EncounterCommit, EncounterUpdate, EncounterReopen, CombatantCreate, CombatantUpdate, CombatantTurnStatePatch, EncounterEndTurn, RollRequest, ActionRollRequest, ManualRollRequest, MapPing, ExpectedUpdatedAt, ActionResolveRequest, ActionResolution, ActionUndoToken } from '@campfire/schema';
+import { EncounterCreate, EncounterGenerate, EncounterPreviewRequest, EncounterCommit, EncounterUpdate, EncounterEscalationUpdate, EncounterReopen, CombatantCreate, CombatantUpdate, CombatantTurnStatePatch, EncounterEndTurn, RollRequest, ActionRollRequest, ManualRollRequest, MapPing, ExpectedUpdatedAt, ActionResolveRequest, ActionResolution, ActionUndoToken } from '@campfire/schema';
 
 export class EncounterCreateDto extends createZodDto(EncounterCreate.strict()) {}
 // Encounter generator request (issue #304). .strict() so an unknown/misspelled key 400s
@@ -17,6 +17,7 @@ export class EncounterCommitDto extends createZodDto(EncounterCommit.strict()) {
 // entity (multiple DM devices), so it gets the same optimistic-concurrency invariant as its
 // quest/npc/location/session peers.
 export class EncounterUpdateDto extends createZodDto(EncounterUpdate.extend({ expectedUpdatedAt: ExpectedUpdatedAt }).strict()) {}
+export class EncounterEscalationUpdateDto extends createZodDto(EncounterEscalationUpdate.strict()) {}
 
 // .strict() here (not on the shared CombatantCreate/CombatantUpdate exports in
 // @campfire/schema — those are reused as-is by mcp-tools.ts and elsewhere, and

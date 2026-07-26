@@ -19,6 +19,10 @@
  */
 import type { RulePackInstallSection, RulePackInstallSource, OsrInstallSystem } from '@campfire/schema';
 import {
+  actionEconomyForAdapter,
+  ddbImportSupported,
+  DND5E_ADAPTER_ID,
+  encounterDifficultySupported,
   OPEN_LEGEND_PACK_SLUG,
   PF2E_PACK_SLUG,
   SF2E_PACK_SLUG,
@@ -291,4 +295,235 @@ export function mechanicsForPackSlug(slug: string | null | undefined): string | 
  */
 export function ruleSystemAdapterLabel(slug: string | null | undefined): string {
   return ruleSystemAdapter(slug ?? '').label;
+}
+
+export type RulesetCapabilityStatus = 'available' | 'fallback' | 'limited' | 'unavailable';
+
+export interface RulesetCapability {
+  key:
+    | 'compendium'
+    | 'characterMath'
+    | 'combatMath'
+    | 'encounterGeneration'
+    | 'difficulty'
+    | 'actions'
+    | 'ai'
+    | 'ddb';
+  label: string;
+  status: RulesetCapabilityStatus;
+  summary: string;
+}
+
+export interface RulesetCapabilityProfile {
+  slug: string;
+  name: string;
+  isHomebrew: boolean;
+  adapterLabel: string;
+  mechanicsSummary: string;
+  migrationPreview: string[];
+  capabilities: RulesetCapability[];
+}
+
+const CAPABILITY_STATUS_LABEL: Record<RulesetCapabilityStatus, string> = {
+  available: 'Available',
+  fallback: 'Fallback',
+  limited: 'Limited',
+  unavailable: 'Unavailable',
+};
+
+export function capabilityStatusLabel(status: RulesetCapabilityStatus): string {
+  return CAPABILITY_STATUS_LABEL[status];
+}
+
+function hasNativeAdapter(slug: string): boolean {
+  return !!ruleSystemForPackSlug(slug);
+}
+
+function actionEconomySummary(slug: string, native: boolean): { status: RulesetCapabilityStatus; summary: string } {
+  const adapter = ruleSystemAdapter(slug);
+  const actions = actionEconomyForAdapter(adapter).slots.map((slot) => slot.label).join(', ');
+  if (!native) {
+    return {
+      status: 'fallback',
+      summary: `Uses ${adapter.label} fallback turn slots (${actions}) and condition suggestions.`,
+    };
+  }
+  return {
+    status: 'available',
+    summary: `Uses ${adapter.label} turn slots (${actions}) and condition suggestions.`,
+  };
+}
+
+export function homebrewCapabilities(): RulesetCapabilityProfile {
+  const fallbackAdapter = ruleSystemAdapter('');
+  const actionSummary = actionEconomySummary('', false);
+  return {
+    slug: '',
+    name: 'None / homebrew',
+    isHomebrew: true,
+    adapterLabel: fallbackAdapter.label,
+    mechanicsSummary:
+      `No installed rules text. Combat math falls back to ${fallbackAdapter.label} defaults; this does not select a 5e rules pack.`,
+    migrationPreview: [
+      'Settings can attach an installed rules pack later without deleting sheets, notes, encounters or combatants.',
+      'Adding a pack enables that pack compendium, rules lookups, AI context and any native action/difficulty math it supports.',
+      `Until then, combat uses ${fallbackAdapter.label} fallback math and actions, while D&D Beyond import stays hidden because no explicit 5e pack is selected.`,
+    ],
+    capabilities: [
+      {
+        key: 'compendium',
+        label: 'Compendium and rules lookup',
+        status: 'unavailable',
+        summary: 'No rules entries, monsters, spells or source text are installed for this campaign.',
+      },
+      {
+        key: 'characterMath',
+        label: 'Character math',
+        status: 'fallback',
+        summary: `Generic sheets still work, but ability modifiers and progression math use ${fallbackAdapter.label} fallback defaults where the app needs a rule model.`,
+      },
+      {
+        key: 'combatMath',
+        label: 'Combat math',
+        status: 'fallback',
+        summary: `Initiative, condition suggestions and statblock interpretation fall back to ${fallbackAdapter.label}.`,
+      },
+      {
+        key: 'encounterGeneration',
+        label: 'Encounter generation',
+        status: 'limited',
+        summary: 'No pack monsters or hazards are available to search; use manual combatants or provide your own statblocks.',
+      },
+      {
+        key: 'difficulty',
+        label: 'Difficulty estimates',
+        status: encounterDifficultySupported('') ? 'fallback' : 'unavailable',
+        summary: `Difficulty uses ${fallbackAdapter.label} XP/CR fallback when the combatants have compatible data; otherwise it remains unknown.`,
+      },
+      {
+        key: 'actions',
+        label: 'Actions and conditions',
+        status: actionSummary.status,
+        summary: actionSummary.summary,
+      },
+      {
+        key: 'ai',
+        label: 'AI rules context',
+        status: 'limited',
+        summary: 'AI can use campaign notes and your prompt, but has no installed rules pack to cite or retrieve from.',
+      },
+      {
+        key: 'ddb',
+        label: 'D&D Beyond import',
+        status: ddbImportSupported('') ? 'available' : 'unavailable',
+        summary: 'Hidden until you select an explicit D&D 5e-compatible pack.',
+      },
+    ],
+  };
+}
+
+export function rulePackCapabilities(pack: {
+  slug: string;
+  name: string;
+  entryCount: number;
+}): RulesetCapabilityProfile {
+  const native = hasNativeAdapter(pack.slug);
+  const adapter = ruleSystemAdapter(pack.slug);
+  const actionSummary = actionEconomySummary(pack.slug, native);
+  const compendiumAvailable = pack.entryCount > 0;
+  const ddbAvailable = ddbImportSupported(pack.slug);
+  const difficultyAvailable = encounterDifficultySupported(pack.slug);
+  const adapterCopy = native
+    ? adapter.label
+    : `${adapter.label} fallback because this pack does not have a native combat adapter`;
+  return {
+    slug: pack.slug,
+    name: pack.name,
+    isHomebrew: false,
+    adapterLabel: adapter.label,
+    mechanicsSummary:
+      mechanicsForPackSlug(pack.slug) ??
+      `Rules text is installed; combat math uses ${adapterCopy}.`,
+    migrationPreview: [
+      'Settings can switch to another installed pack or back to None / homebrew later.',
+      'Switching keeps existing sheets, notes, encounters and combatants, but changes how stored stats are interpreted.',
+      'Compendium results, AI rules context, action economy, difficulty and D&D Beyond import availability update to the newly selected system.',
+    ],
+    capabilities: [
+      {
+        key: 'compendium',
+        label: 'Compendium and rules lookup',
+        status: compendiumAvailable ? 'available' : 'unavailable',
+        summary: compendiumAvailable
+          ? `${pack.entryCount} installed entries can power search, reader pages and rules lookup.`
+          : 'The pack is installed but currently has no entries to search.',
+      },
+      {
+        key: 'characterMath',
+        label: 'Character math',
+        status: native ? 'available' : 'fallback',
+        summary: native
+          ? `Character calculations use the ${adapter.label} adapter.`
+          : `Character calculations use ${adapter.label} fallback defaults because this pack has no native adapter.`,
+      },
+      {
+        key: 'combatMath',
+        label: 'Combat math',
+        status: native ? 'available' : 'fallback',
+        summary: native
+          ? `Initiative, conditions and statblock interpretation use ${adapter.label}.`
+          : `Initiative, conditions and statblock interpretation fall back to ${adapter.label}.`,
+      },
+      {
+        key: 'encounterGeneration',
+        label: 'Encounter generation',
+        status: compendiumAvailable ? 'available' : 'limited',
+        summary: compendiumAvailable
+          ? 'Generator and add-combatant search can draw on matching compendium monsters or hazards when the pack provides them.'
+          : 'No pack monsters or hazards are available; use manual combatants or provide your own statblocks.',
+      },
+      {
+        key: 'difficulty',
+        label: 'Difficulty estimates',
+        status: difficultyAvailable ? (native ? 'available' : 'fallback') : 'unavailable',
+        summary: difficultyAvailable
+          ? native || adapter.id !== DND5E_ADAPTER_ID
+            ? `Difficulty uses ${adapter.label} encounter math when combatants have compatible data.`
+            : `Difficulty uses ${adapter.label} fallback XP/CR math when combatants have compatible data.`
+          : `${adapter.label} does not provide automatic encounter difficulty math; judge balance manually.`,
+      },
+      {
+        key: 'actions',
+        label: 'Actions and conditions',
+        status: actionSummary.status,
+        summary: actionSummary.summary,
+      },
+      {
+        key: 'ai',
+        label: 'AI rules context',
+        status: compendiumAvailable ? 'available' : 'limited',
+        summary: compendiumAvailable
+          ? 'AI rules lookup can retrieve and cite this pack alongside campaign notes.'
+          : 'AI can use campaign notes and prompts, but this pack has no rules entries to retrieve.',
+      },
+      {
+        key: 'ddb',
+        label: 'D&D Beyond import',
+        status: ddbAvailable ? 'available' : 'unavailable',
+        summary: ddbAvailable
+          ? 'D&D Beyond character import is available because this is an explicit 5e-compatible pack.'
+          : 'D&D Beyond import stays hidden for this ruleset.',
+      },
+    ],
+  };
+}
+
+export function rulesetCapabilitiesForSelection(
+  slug: string | null | undefined,
+  packs: Array<{ slug: string; name: string; entryCount: number }> | null | undefined,
+): RulesetCapabilityProfile {
+  if (!slug) return homebrewCapabilities();
+  const pack = packs?.find((p) => p.slug === slug);
+  if (pack) return rulePackCapabilities(pack);
+  return rulePackCapabilities({ slug, name: slug, entryCount: 0 });
 }
