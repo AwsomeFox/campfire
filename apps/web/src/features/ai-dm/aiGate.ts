@@ -22,6 +22,8 @@ export type AiGateKind =
   | 'serverCap' // server-wide token cap reached — admin fixes
   | 'needBudget' // switching to Driver without a budget — DM fixes
   | 'needProvider' // switching to Driver without a provider — DM fixes
+  | 'needModel' // selected model is not executable / allowlisted — DM fixes
+  | 'needDriverTools' // provider cannot make tool calls for Driver — DM fixes
   | 'paused' // session paused (a state, not an error) — DM resumes
   | 'humanControl' // a human took the seat — hand back to resume
   | 'unknown';
@@ -67,6 +69,8 @@ export function classifyAiGate(err: unknown): AiGateInfo {
     if (has(m, 'server-wide ai token cap')) return GATE.serverCap;
     if (has(m, 'requires a positive token budget')) return GATE.needBudget;
     if (has(m, 'requires a configured ai provider')) return GATE.needProvider;
+    if (has(m, 'requires an executable ai model') || has(m, 'not in the server admin')) return GATE.needModel;
+    if (has(m, 'requires a provider with tool-calling support')) return GATE.needDriverTools;
   }
   return GATE.unknown;
 }
@@ -87,6 +91,8 @@ const GATE: Record<AiGateKind, AiGateInfo> = {
   budgetExhausted: { kind: 'budgetExhausted', actor: 'dm', titleKey: 'aiOnboarding.gate.budgetExhausted.title', bodyKey: 'aiOnboarding.gate.budgetExhausted.body', to: SETTINGS('ai-dm-budget') },
   needBudget: { kind: 'needBudget', actor: 'dm', titleKey: 'aiOnboarding.gate.needBudget.title', bodyKey: 'aiOnboarding.gate.needBudget.body', to: SETTINGS('ai-dm-budget') },
   needProvider: { kind: 'needProvider', actor: 'dm', titleKey: 'aiOnboarding.gate.needProvider.title', bodyKey: 'aiOnboarding.gate.needProvider.body', to: SETTINGS('ai-dm-provider') },
+  needModel: { kind: 'needModel', actor: 'dm', titleKey: 'aiOnboarding.gate.needModel.title', bodyKey: 'aiOnboarding.gate.needModel.body', to: SETTINGS('ai-dm-provider') },
+  needDriverTools: { kind: 'needDriverTools', actor: 'dm', titleKey: 'aiOnboarding.gate.needDriverTools.title', bodyKey: 'aiOnboarding.gate.needDriverTools.body', to: SETTINGS('ai-dm-provider') },
   paused: { kind: 'paused', actor: 'dm', titleKey: 'aiOnboarding.gate.paused.title', bodyKey: 'aiOnboarding.gate.paused.body', to: null },
   humanControl: { kind: 'humanControl', actor: 'table', titleKey: 'aiOnboarding.gate.humanControl.title', bodyKey: 'aiOnboarding.gate.humanControl.body', to: null },
   unknown: { kind: 'unknown', actor: 'dm', titleKey: 'aiOnboarding.gate.seatDisabled.title', bodyKey: 'aiOnboarding.gate.seatDisabled.body', to: null },
