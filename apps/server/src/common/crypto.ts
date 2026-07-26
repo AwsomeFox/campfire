@@ -1,5 +1,6 @@
 import {
   randomBytes,
+  randomInt,
   scryptSync,
   timingSafeEqual,
   createHash,
@@ -123,6 +124,35 @@ export function shareTokenPrefix(token: string): string {
 
 export function looksLikeShareToken(token: string): boolean {
   return /^cf_share_[0-9a-f]{48}$/.test(token);
+}
+
+/**
+ * Player Display cast token: `cf_cast_<48 hex chars>` (24 random bytes). This is
+ * an unguessable, expiring, read-only capability for the shared TV/kiosk view.
+ * DB storage mirrors public recap shares and PATs: sha256(token) only, plus a
+ * short display prefix that cannot reconstruct the secret.
+ */
+const CAST_TOKEN_PREFIX = 'cf_cast_';
+const CAST_TOKEN_DISPLAY_PREFIX_LEN = 12;
+
+export function generateCastToken(): string {
+  return `${CAST_TOKEN_PREFIX}${randomBytes(24).toString('hex')}`;
+}
+
+export function hashCastToken(token: string): string {
+  return createHash('sha256').update(token).digest('hex');
+}
+
+export function castTokenPrefix(token: string): string {
+  return token.slice(0, CAST_TOKEN_DISPLAY_PREFIX_LEN);
+}
+
+export function looksLikeCastToken(token: string): boolean {
+  return /^cf_cast_[0-9a-f]{48}$/.test(token);
+}
+
+export function generateCastExitPin(): string {
+  return randomInt(0, 1_000_000).toString().padStart(6, '0');
 }
 
 /**

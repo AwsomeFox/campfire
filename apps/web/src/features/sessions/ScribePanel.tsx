@@ -26,6 +26,7 @@ import { useDialog } from '../../components/useDialog';
 import { useDisclosure } from '../../components/useDisclosure';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { GameIcon } from '../../components/GameIcon';
+import { TermHelp } from '../../components/TermHelp';
 
 const TRIGGER_LABEL: Record<ScribeTrigger, string> = {
   on_demand: 'Manual run',
@@ -198,6 +199,7 @@ export function ScribePanel({ campaignId, isDm }: { campaignId: number; isDm: bo
       <div className="flex items-center gap-2 flex-wrap">
         <span className="flex leading-none"><GameIcon slug="feather" size={18} /></span>
         <h2 className="font-bold text-white text-sm m-0">AI Scribe</h2>
+        <TermHelp termId="scribe" />
         {latest && (
           <span className={jobBadge(latest).cls} style={{ fontSize: 10 }}>
             Last: {jobBadge(latest).label} · {timeAgo(latest.createdAt)}

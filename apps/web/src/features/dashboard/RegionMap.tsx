@@ -15,6 +15,7 @@ import { ErrorNote } from '../../components/ui';
 import { ImageUpload, MapUploadButton, attachmentFileUrl, uploadAttachment } from '../../components/ImageUpload';
 import { GetAMapPanel } from '../../components/GetAMapPanel';
 import { CampaignCover } from '../../components/CampaignCover';
+import { MapConceptGlossary, MapPurposePreview } from '../../components/mapOnboarding';
 import { clampPercentInt } from './mapPercent';
 
 export { clampPercentInt };
@@ -532,6 +533,10 @@ export function RegionMap({
 
       {canDmWrite && !mapImageUrl && (
         <div style={{ padding: '8px 14px 0' }}>
+          <MapConceptGlossary compact />
+          <div style={{ marginTop: 8 }}>
+            <MapPurposePreview purpose="world" surfacePurpose="world" mode="upload" />
+          </div>
           <DmMapUploader
             campaignId={campaignId}
             onUploaded={handleMapUpload}
@@ -542,6 +547,7 @@ export function RegionMap({
               wires it as the campaign region map (revealed to the party, like an upload). */}
           <GetAMapPanel
             campaignId={campaignId}
+            surfacePurpose="world"
             onImported={(id) => void handleMapUpload({ id } as Attachment)}
             onGenerate={generateRegionMap}
             onError={handleUploaderError}

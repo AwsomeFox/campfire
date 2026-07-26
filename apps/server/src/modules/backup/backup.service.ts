@@ -11,7 +11,7 @@ import {
 } from '@nestjs/common';
 import Database from 'better-sqlite3';
 import JSZip from 'jszip';
-import { DB_HOLDER, DbHolder, resolveDataDir } from '../../db/db.module';
+import { DB_HOLDER, DbHolder, dbFilePath, resolveDataDir } from '../../db/db.module';
 import { decryptSecret } from '../../common/crypto';
 import { AiProviderConfigService } from '../ai-provider-config/ai-provider-config.service';
 import { nowIso } from '../../common/time';
@@ -24,7 +24,16 @@ import {
   isBackupOverdue,
   parseBackupIntervalHours,
   type BackupCadenceState,
+  type BackupCadenceMetrics,
 } from './backup-cadence';
+import {
+  estimateNextBackupBytes,
+  parseBackupMinFreeBytes,
+  parseBackupRetentionPolicy,
+  planBackupRetention,
+  type BackupRetentionCandidate,
+  type BackupRetentionPolicy,
+} from './backup-retention';
 import {
   BACKUP_APP,
   BACKUP_FORMAT_VERSION,
@@ -65,6 +74,11 @@ export { DB_ENTRY };
 /** Zip entry names inside a backup archive. */
 export const MANIFEST_ENTRY = 'manifest.json';
 const UPLOADS_PREFIX = 'uploads/';
+const SCHEDULED_BACKUP_PREFIX = 'campfire-backup-';
+const SCHEDULED_BACKUP_SUFFIX = '.zip';
+const BACKUP_SCHEDULER_POLL_MS = 60 * 1000;
+const BACKUP_FAILURE_BACKOFF_MIN_MS = 5 * 60 * 1000;
+const BACKUP_FAILURE_BACKOFF_MAX_MS = 6 * 60 * 60 * 1000;
 
 /**
  * Restore is destructive (it overwrites the entire database + uploads). The
@@ -101,12 +115,34 @@ export interface BackupOnDiskEntry {
   mtime: string;
 }
 
+export interface BackupDiskStatus {
+  freeBytes: number;
+  totalBytes: number;
+  reserveBytes: number;
+  estimatedNextBytes: number;
+  lowSpace: boolean;
+}
+
+export interface BackupRetentionStatus {
+  policy: BackupRetentionPolicy;
+  archiveCount: number;
+  totalBytes: number;
+  protectedLastGoodName: string | null;
+  pruneCount: number;
+  prunedBytes: number;
+  lastPruneAt: string | null;
+  lastPruneError: string;
+}
+
 /** Operator-facing scheduled-backup status (issue #444). */
 export interface BackupStatus {
   scheduleEnabled: boolean;
   intervalHours: number;
   backupDir: string;
   cadence: BackupCadenceState | null;
+  disk: BackupDiskStatus | null;
+  retention: BackupRetentionStatus;
+  alerts: string[];
   onDisk: BackupOnDiskEntry[];
 }
 
@@ -155,6 +191,35 @@ function listFilesRecursive(root: string): string[] {
   };
   walk(root, '');
   return out;
+}
+
+function scheduledBackupName(stamp: string): string {
+  return `${SCHEDULED_BACKUP_PREFIX}${stamp}${SCHEDULED_BACKUP_SUFFIX}`;
+}
+
+function isScheduledBackupArchiveName(name: string): boolean {
+  return name.startsWith(SCHEDULED_BACKUP_PREFIX) && name.endsWith(SCHEDULED_BACKUP_SUFFIX);
+}
+
+function safeFileBytes(filePath: string): number {
+  try {
+    const stat = fs.statSync(filePath);
+    return stat.isFile() ? stat.size : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function directoryBytes(root: string): number {
+  return listFilesRecursive(root).reduce((sum, rel) => sum + safeFileBytes(path.join(root, rel)), 0);
+}
+
+function lastScheduledAttemptAlert(lastError: string): string {
+  const lowDiskSkipPrefix = 'Scheduled backup skipped: low disk space';
+  if (lastError.toLowerCase().startsWith(lowDiskSkipPrefix.toLowerCase())) {
+    return `Last scheduled backup skipped: ${lastError.slice('Scheduled backup skipped: '.length)}`;
+  }
+  return `Last scheduled backup failed: ${lastError}`;
 }
 
 function looksLikeSqlite(buf: Buffer): boolean {
@@ -364,7 +429,7 @@ export class BackupService implements OnApplicationBootstrap {
     // reflects reality and so test app.init() doesn't race a fire-and-forget.
     try {
       const cadence = await this.readCadence();
-      if (isBackupOverdue(cadence?.lastAttemptAt ?? null, intervalMs)) {
+      if (this.isScheduledRunDue(cadence, intervalMs)) {
         this.logger.log('Scheduled backup is overdue — running a catch-up backup now');
         await this.runScheduledBackup(intervalMs);
       }
@@ -377,15 +442,28 @@ export class BackupService implements OnApplicationBootstrap {
     }
 
     const timer = setInterval(() => {
-      void this.runScheduledBackup(intervalMs).catch((err) => {
+      void this.runScheduledBackupIfDue(intervalMs).catch((err) => {
         this.logger.error(`Scheduled backup failed: ${err instanceof Error ? err.message : String(err)}`);
       });
-    }, intervalMs);
+    }, Math.min(intervalMs, BACKUP_SCHEDULER_POLL_MS));
     timer.unref();
   }
 
   private backupDir(): string {
     return process.env.BACKUP_DIR || path.join(resolveDataDir(), 'backups');
+  }
+
+  private isScheduledRunDue(cadence: BackupCadenceState | null, intervalMs: number): boolean {
+    if (!cadence) return true;
+    const nextMs = Date.parse(cadence.nextRunAt);
+    if (!Number.isNaN(nextMs)) return Date.now() >= nextMs;
+    return isBackupOverdue(cadence.lastAttemptAt, intervalMs);
+  }
+
+  private async runScheduledBackupIfDue(intervalMs: number): Promise<void> {
+    const cadence = await this.readCadence();
+    if (!this.isScheduledRunDue(cadence, intervalMs)) return;
+    await this.runScheduledBackup(intervalMs);
   }
 
   /**
@@ -401,10 +479,29 @@ export class BackupService implements OnApplicationBootstrap {
     }
     this.scheduledRunning = true;
     const attemptAt = nowIso();
-    const previous = await this.readCadence();
+    let previous: BackupCadenceState | null = null;
+    let disk: BackupDiskStatus | null = null;
+    let estimatedBytes = 0;
     try {
+      previous = await this.readCadence();
+      const retentionPolicy = parseBackupRetentionPolicy();
+      const minFreeBytes = parseBackupMinFreeBytes();
       const dir = this.backupDir();
+      estimatedBytes = estimateNextBackupBytes(
+        previous?.lastSize ?? null,
+        () => this.estimateFallbackBackupBytes(),
+      );
+      disk = this.probeDisk(dir, minFreeBytes, estimatedBytes);
       fs.mkdirSync(dir, { recursive: true });
+      disk = this.probeDisk(dir, minFreeBytes, estimatedBytes);
+      if (disk && disk.lowSpace) {
+        const message =
+          `Scheduled backup skipped: low disk space in BACKUP_DIR ` +
+          `(free ${disk.freeBytes}B, estimate ${disk.estimatedNextBytes}B, reserve ${disk.reserveBytes}B)`;
+        await this.writeFailureCadence(previous, attemptAt, intervalMs, message, disk, estimatedBytes);
+        this.logger.warn(message);
+        return;
+      }
       // #496: Scheduled backups pick up a passphrase from BACKUP_KEY_PASSPHRASE
       // so an unattended cron produces credential-portable archives when the
       // server is running with the auto-generated keyfile. Empty / unset means
@@ -414,13 +511,18 @@ export class BackupService implements OnApplicationBootstrap {
         scheduledPassphrase ? { keyPassphrase: scheduledPassphrase } : undefined,
       );
       const stamp = attemptAt.replace(/[:.]/g, '-');
-      const filePath = path.join(dir, `campfire-backup-${stamp}.zip`);
+      const archiveName = scheduledBackupName(stamp);
+      const filePath = path.join(dir, archiveName);
       fs.writeFileSync(filePath, buffer);
       const size = buffer.length;
       const checksum = createHash('sha256').update(buffer).digest('hex');
-      // Persist cadence BEFORE the success log so a crash between the write and
-      // the log still leaves a correct "last success" on disk.
+      const verification = await this.verifyScheduledArchive(filePath);
+      if (!verification.verified) {
+        throw new Error(`Scheduled backup failed verification after write: ${verification.error}`);
+      }
+      const prune = await this.pruneVerifiedScheduledBackups(dir, retentionPolicy, archiveName, checksum);
       const nextRunAt = new Date(Date.now() + intervalMs).toISOString();
+      const metrics = this.metricsAfterSuccess(previous?.metrics, disk, estimatedBytes, prune);
       await this.writeCadence({
         lastAttemptAt: attemptAt,
         lastSuccessAt: attemptAt,
@@ -428,9 +530,14 @@ export class BackupService implements OnApplicationBootstrap {
         lastSize: size,
         lastChecksum: checksum,
         lastError: '',
+        lastArchiveName: archiveName,
+        lastVerifiedAt: attemptAt,
+        consecutiveFailures: 0,
+        metrics,
       });
       this.logger.log(
-        `Scheduled backup written: ${filePath} (${size} bytes, sha256 ${checksum.slice(0, 16)}…); next run ${nextRunAt}`,
+        `Scheduled backup written: ${filePath} (${size} bytes, sha256 ${checksum.slice(0, 16)}…); ` +
+          `pruned ${prune.count} archive(s), ${prune.bytes} bytes; next run ${nextRunAt}`,
       );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -440,14 +547,7 @@ export class BackupService implements OnApplicationBootstrap {
       // reading the row sees the real last-good time + size, not a misleading
       // recent timestamp. lastError records the failure for diagnostics.
       try {
-        await this.writeCadence({
-          lastAttemptAt: attemptAt,
-          lastSuccessAt: previous?.lastSuccessAt ?? null,
-          nextRunAt: new Date(Date.now() + intervalMs).toISOString(),
-          lastSize: previous?.lastSize ?? null,
-          lastChecksum: previous?.lastChecksum ?? null,
-          lastError: message,
-        });
+        await this.writeFailureCadence(previous, attemptAt, intervalMs, message, disk, estimatedBytes);
       } catch {
         // best-effort — the original error is the one that matters
       }
@@ -455,6 +555,222 @@ export class BackupService implements OnApplicationBootstrap {
     } finally {
       this.scheduledRunning = false;
     }
+  }
+
+  private estimateFallbackBackupBytes(): number {
+    const dataDir = resolveDataDir();
+    return safeFileBytes(dbFilePath(dataDir)) + directoryBytes(uploadsRoot(dataDir));
+  }
+
+  private probeDisk(
+    dir: string,
+    reserveBytes: number,
+    estimatedNextBytes: number,
+  ): BackupDiskStatus | null {
+    const statRoot = this.existingPathForStatfs(dir);
+    if (!statRoot) return null;
+    try {
+      const stat = fs.statfsSync(statRoot);
+      const freeBytes = stat.bavail * stat.bsize;
+      const totalBytes = stat.blocks * stat.bsize;
+      return {
+        freeBytes,
+        totalBytes,
+        reserveBytes,
+        estimatedNextBytes,
+        lowSpace: reserveBytes > 0 && freeBytes - estimatedNextBytes < reserveBytes,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private existingPathForStatfs(target: string): string | null {
+    let current = path.resolve(target);
+    while (!fs.existsSync(current)) {
+      const parent = path.dirname(current);
+      if (parent === current) return null;
+      current = parent;
+    }
+    return current;
+  }
+
+  private failureBackoffMs(previous: BackupCadenceState | null, intervalMs: number): number {
+    const consecutiveFailures = (previous?.consecutiveFailures ?? 0) + 1;
+    const exponential = BACKUP_FAILURE_BACKOFF_MIN_MS * 2 ** Math.min(consecutiveFailures - 1, 10);
+    return Math.min(intervalMs, BACKUP_FAILURE_BACKOFF_MAX_MS, exponential);
+  }
+
+  private async writeFailureCadence(
+    previous: BackupCadenceState | null,
+    attemptAt: string,
+    intervalMs: number,
+    message: string,
+    disk: BackupDiskStatus | null,
+    estimatedBytes: number,
+  ): Promise<void> {
+    const nextRunAt = new Date(Date.now() + this.failureBackoffMs(previous, intervalMs)).toISOString();
+    await this.writeCadence({
+      lastAttemptAt: attemptAt,
+      lastSuccessAt: previous?.lastSuccessAt ?? null,
+      nextRunAt,
+      lastSize: previous?.lastSize ?? null,
+      lastChecksum: previous?.lastChecksum ?? null,
+      lastError: message,
+      lastArchiveName: previous?.lastArchiveName ?? null,
+      lastVerifiedAt: previous?.lastVerifiedAt ?? null,
+      consecutiveFailures: (previous?.consecutiveFailures ?? 0) + 1,
+      metrics: this.metricsAfterFailure(previous?.metrics, disk, estimatedBytes),
+    });
+  }
+
+  private defaultMetrics(): BackupCadenceMetrics {
+    return {
+      successCount: 0,
+      failureCount: 0,
+      pruneCount: 0,
+      prunedBytes: 0,
+      lastFreeBytes: null,
+      lastEstimatedBytes: null,
+      lastPruneAt: null,
+      lastPruneError: '',
+    };
+  }
+
+  private normalizeMetrics(metrics: BackupCadenceMetrics | undefined): BackupCadenceMetrics {
+    return { ...this.defaultMetrics(), ...(metrics ?? {}) };
+  }
+
+  private metricsAfterFailure(
+    previous: BackupCadenceMetrics | undefined,
+    disk: BackupDiskStatus | null,
+    estimatedBytes: number,
+  ): BackupCadenceMetrics {
+    const metrics = this.normalizeMetrics(previous);
+    return {
+      ...metrics,
+      failureCount: metrics.failureCount + 1,
+      lastFreeBytes: disk?.freeBytes ?? null,
+      lastEstimatedBytes: estimatedBytes,
+    };
+  }
+
+  private metricsAfterSuccess(
+    previous: BackupCadenceMetrics | undefined,
+    disk: BackupDiskStatus | null,
+    estimatedBytes: number,
+    prune: { count: number; bytes: number; error: string },
+  ): BackupCadenceMetrics {
+    const metrics = this.normalizeMetrics(previous);
+    return {
+      ...metrics,
+      successCount: metrics.successCount + 1,
+      pruneCount: metrics.pruneCount + prune.count,
+      prunedBytes: metrics.prunedBytes + prune.bytes,
+      lastFreeBytes: disk?.freeBytes ?? null,
+      lastEstimatedBytes: estimatedBytes,
+      lastPruneAt: prune.count > 0 ? nowIso() : metrics.lastPruneAt,
+      lastPruneError: prune.error,
+    };
+  }
+
+  private listScheduledBackupFiles(dir: string): Array<BackupOnDiskEntry & { abs: string; mtimeMs: number }> {
+    const onDisk: Array<BackupOnDiskEntry & { abs: string; mtimeMs: number }> = [];
+    if (!fs.existsSync(dir)) return onDisk;
+    try {
+      for (const name of fs.readdirSync(dir)) {
+        if (!isScheduledBackupArchiveName(name)) continue;
+        const abs = path.join(dir, name);
+        let stat: fs.Stats;
+        try {
+          stat = fs.statSync(abs);
+        } catch {
+          continue;
+        }
+        if (!stat.isFile()) continue;
+        onDisk.push({ name, abs, bytes: stat.size, mtime: stat.mtime.toISOString(), mtimeMs: stat.mtimeMs });
+      }
+      onDisk.sort((a, b) => b.mtime.localeCompare(a.mtime));
+    } catch {
+      // BACKUP_DIR exists but is unreadable or not a directory — degrade to empty listing.
+    }
+    return onDisk;
+  }
+
+  private async verifyScheduledArchive(
+    filePath: string,
+  ): Promise<{ verified: boolean; checksum: string | null; error: string }> {
+    let buffer: Buffer;
+    try {
+      buffer = fs.readFileSync(filePath);
+    } catch (err) {
+      return { verified: false, checksum: null, error: err instanceof Error ? err.message : String(err) };
+    }
+    const checksum = createHash('sha256').update(buffer).digest('hex');
+    try {
+      const inspect = await this.inspect(buffer);
+      if (inspect.reconciliation && !inspect.reconciliation.clean) {
+        return { verified: false, checksum, error: 'archive reconciliation is not clean' };
+      }
+      return { verified: true, checksum, error: '' };
+    } catch (err) {
+      return { verified: false, checksum, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  private retentionMarkers(abs: string): { pinned: boolean; offsite: boolean } {
+    return {
+      pinned: fs.existsSync(`${abs}.pin`) || fs.existsSync(`${abs}.keep`),
+      offsite: fs.existsSync(`${abs}.offsite`),
+    };
+  }
+
+  private async pruneVerifiedScheduledBackups(
+    dir: string,
+    policy: BackupRetentionPolicy,
+    lastArchiveName: string,
+    lastChecksum: string,
+  ): Promise<{ count: number; bytes: number; error: string }> {
+    const files = this.listScheduledBackupFiles(dir);
+    const candidates: BackupRetentionCandidate[] = [];
+    for (const file of files) {
+      const verification = await this.verifyScheduledArchive(file.abs);
+      const markers = this.retentionMarkers(file.abs);
+      candidates.push({
+        name: file.name,
+        bytes: file.bytes,
+        mtimeMs: file.mtimeMs,
+        verified: verification.verified,
+        lastKnownGood:
+          file.name === lastArchiveName ||
+          (lastArchiveName.length === 0 && verification.checksum === lastChecksum),
+        pinned: markers.pinned,
+        offsite: markers.offsite,
+      });
+      if (!verification.verified) {
+        this.logger.warn(`Retention will not prune unverified backup ${file.name}: ${verification.error}`);
+      }
+    }
+
+    const plan = planBackupRetention(candidates, policy);
+    let count = 0;
+    let bytes = 0;
+    const errors: string[] = [];
+    for (const decision of plan.prune) {
+      const file = files.find((entry) => entry.name === decision.name);
+      if (!file) continue;
+      try {
+        fs.rmSync(file.abs);
+        count += 1;
+        bytes += decision.bytes;
+        this.logger.log(
+          `Pruned scheduled backup ${decision.name} (${decision.bytes} bytes; ${decision.reasons.join(', ')})`,
+        );
+      } catch (err) {
+        errors.push(`${decision.name}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    return { count, bytes, error: errors.join('; ') };
   }
 
   /** Read the persisted cadence state, or null if never recorded. */
@@ -473,6 +789,37 @@ export class BackupService implements OnApplicationBootstrap {
     return `campfire-backup-${date}.zip`;
   }
 
+  private backupStatusAlerts(input: {
+    scheduleEnabled: boolean;
+    cadence: BackupCadenceState | null;
+    disk: BackupDiskStatus | null;
+    retention: BackupRetentionStatus;
+    onDisk: BackupOnDiskEntry[];
+  }): string[] {
+    const alerts: string[] = [];
+    if (input.cadence?.lastError) {
+      alerts.push(lastScheduledAttemptAlert(input.cadence.lastError));
+    }
+    if (input.disk?.lowSpace) {
+      alerts.push(
+        `Backup volume is below reserve: free ${input.disk.freeBytes}B, ` +
+          `estimated next archive ${input.disk.estimatedNextBytes}B, reserve ${input.disk.reserveBytes}B`,
+      );
+    }
+    if (input.retention.lastPruneError) {
+      alerts.push(`Last retention prune had errors: ${input.retention.lastPruneError}`);
+    }
+    if (
+      input.scheduleEnabled &&
+      input.retention.policy.protectLastGood &&
+      input.cadence?.lastArchiveName &&
+      !input.onDisk.some((entry) => entry.name === input.cadence?.lastArchiveName)
+    ) {
+      alerts.push(`Last-known-good archive ${input.cadence.lastArchiveName} is not present in BACKUP_DIR`);
+    }
+    return alerts;
+  }
+
   /**
    * Operator-facing scheduled-backup status (issue #444). Read-only — cadence
    * is driven by env (`BACKUP_SCHEDULE_ENABLED`, `BACKUP_INTERVAL_HOURS`,
@@ -483,31 +830,36 @@ export class BackupService implements OnApplicationBootstrap {
     const intervalHours = parseBackupIntervalHours();
     const dir = this.backupDir();
     const cadence = await this.readCadence();
-    const onDisk: BackupOnDiskEntry[] = [];
-    if (fs.existsSync(dir)) {
-      try {
-        for (const name of fs.readdirSync(dir)) {
-          if (!name.startsWith('campfire-backup-') || !name.endsWith('.zip')) continue;
-          const abs = path.join(dir, name);
-          let stat: fs.Stats;
-          try {
-            stat = fs.statSync(abs);
-          } catch {
-            continue;
-          }
-          if (!stat.isFile()) continue;
-          onDisk.push({ name, bytes: stat.size, mtime: stat.mtime.toISOString() });
-        }
-        onDisk.sort((a, b) => b.mtime.localeCompare(a.mtime));
-      } catch {
-        // BACKUP_DIR exists but is unreadable or not a directory — degrade to empty listing.
-      }
-    }
+    const onDiskWithPaths = this.listScheduledBackupFiles(dir);
+    const onDisk: BackupOnDiskEntry[] = onDiskWithPaths.map(({ name, bytes, mtime }) => ({ name, bytes, mtime }));
+    const policy = parseBackupRetentionPolicy();
+    const reserveBytes = parseBackupMinFreeBytes();
+    const estimatedNextBytes = estimateNextBackupBytes(
+      cadence?.lastSize ?? null,
+      () => this.estimateFallbackBackupBytes(),
+    );
+    const disk = this.probeDisk(dir, reserveBytes, estimatedNextBytes);
+    const metrics = this.normalizeMetrics(cadence?.metrics);
+    const totalBytes = onDisk.reduce((sum, entry) => sum + entry.bytes, 0);
+    const retention: BackupRetentionStatus = {
+      policy,
+      archiveCount: onDisk.length,
+      totalBytes,
+      protectedLastGoodName: policy.protectLastGood ? cadence?.lastArchiveName ?? null : null,
+      pruneCount: metrics.pruneCount,
+      prunedBytes: metrics.prunedBytes,
+      lastPruneAt: metrics.lastPruneAt,
+      lastPruneError: metrics.lastPruneError,
+    };
+    const alerts = this.backupStatusAlerts({ scheduleEnabled, cadence, disk, retention, onDisk });
     return {
       scheduleEnabled,
       intervalHours,
       backupDir: dir,
       cadence,
+      disk,
+      retention,
+      alerts,
       onDisk: onDisk.slice(0, 20),
     };
   }

@@ -256,11 +256,14 @@ describe('AI scribe — on-demand run files a recap proposal (e2e)', () => {
     expect(run.body.job.detail).toMatch(/metering error: injected metering failure/);
     expect(run.body.proposalIds).toHaveLength(0);
 
-    // Metering threw before counters advanced — seat activity stays untouched.
+    // Metering threw after provider contact. The reservation is consumed as
+    // unknown spend rather than refunded, so future budget gates stay conservative.
     const seat = await harness.getSeat(campaignId);
     expect(seat.body.tokensUsed).toBe(0);
-    expect(seat.body.turnCount).toBe(0);
-    expect(seat.body.lastTurnAt).toBeNull();
+    expect(seat.body.tokensReserved).toBe(0);
+    expect(seat.body.tokensUnknown).toBeGreaterThan(0);
+    expect(seat.body.turnCount).toBe(1);
+    expect(seat.body.lastTurnAt).not.toBeNull();
 
     spy.mockRestore();
   });
@@ -426,7 +429,9 @@ describe('AI driver + scribe — shared spend lock (#1058)', () => {
     }
 
     const seat = await harness.getSeat(campaignId);
-    expect(seat.body.tokensUsed).toBe(1);
+    expect(seat.body.tokensReserved).toBe(0);
+    expect(seat.body.tokensUsed).toBeGreaterThan(1);
+    expect(seat.body.tokensOverage).toBe(seat.body.tokensUsed - 1);
     expect(seat.body.turnCount).toBe(1);
   });
 });

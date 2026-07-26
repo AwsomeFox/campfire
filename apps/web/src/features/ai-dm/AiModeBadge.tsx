@@ -18,6 +18,7 @@ import { useAiDmSeat } from '../../lib/query';
 import { AiTransparencyNote } from './AiSetupChecklist';
 import { GameIcon } from '../../components/GameIcon';
 import { useDialog } from '../../components/useDialog';
+import { TermHelp } from '../../components/TermHelp';
 
 const POPOVER_GAP = 8;
 const VIEWPORT_MARGIN = 12;
@@ -74,14 +75,17 @@ export function AiModeBadge({ campaignId }: { campaignId: number }) {
 
   if (mode === 'driver') {
     return (
-      <Link
-        to={`/c/${campaignId}/table`}
-        className="tag tag-accent"
-        style={{ whiteSpace: 'nowrap', cursor: 'pointer', textDecoration: 'none' }}
-        aria-label={t('aiOnboarding.badge.driverAria')}
-      >
-        <GameIcon slug="sparkles" size={12} className="inline align-text-bottom mr-1" />{t('aiOnboarding.badge.driver')}
-      </Link>
+      <span className="inline-flex items-center gap-1">
+        <Link
+          to={`/c/${campaignId}/table`}
+          className="tag tag-accent"
+          style={{ whiteSpace: 'nowrap', cursor: 'pointer', textDecoration: 'none' }}
+          aria-label={t('aiOnboarding.badge.driverAria')}
+        >
+          <GameIcon slug="sparkles" size={12} className="inline align-text-bottom mr-1" />{t('aiOnboarding.badge.driver')}
+        </Link>
+        <TermHelp termId="driver" />
+      </span>
     );
   }
 
@@ -101,6 +105,7 @@ export function AiModeBadge({ campaignId }: { campaignId: number }) {
       >
         <GameIcon slug="sparkles" size={12} className="inline align-text-bottom mr-1" />{t('aiOnboarding.badge.coDm')}
       </button>
+      <TermHelp termId="coDm" />
       {open && (
         <AiModePopover id={popoverId} triggerRef={triggerRef} onClose={() => setOpen(false)} />
       )}

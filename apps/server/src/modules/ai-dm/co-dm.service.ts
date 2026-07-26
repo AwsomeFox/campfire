@@ -6,7 +6,7 @@ import {
   UnprocessableEntityException,
 } from '@nestjs/common';
 import crypto from 'node:crypto';
-import { eq, sql } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import type { z } from 'zod';
 import {
   NpcCreate,
@@ -24,9 +24,9 @@ import {
 } from '@campfire/schema';
 import type { AiGenerationProvenance, CoDmDraftRequest, CoDmDraftResult, CoDmDraftTarget, NarrationLanguage, Proposal, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { aiDmSeats, campaigns, storyArcs } from '../../db/schema';
-import { nowIso } from '../../common/time';
+import { campaigns, storyArcs } from '../../db/schema';
 import { auditActor, type RequestUser } from '../../common/user.types';
+import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
 import { SettingsService } from '../settings/settings.service';
 import { ProposalRecordsService, type ProposableEntityType } from '../proposals/proposal-records.service';
@@ -108,16 +108,6 @@ export class CoDmService {
         'The AI Dungeon Master seat is not enabled for this campaign. Configure it first: PUT /campaigns/:id/ai-dm {enabled:true, tokenBudget:N}.',
       );
     }
-    const remaining = seat.tokenBudget - seat.tokensUsed;
-    if (remaining <= 0) {
-      throw new ForbiddenException(
-        `AI Dungeon Master token budget exhausted (${seat.tokensUsed}/${seat.tokenBudget}). Raise tokenBudget or reset usage to continue.`,
-      );
-    }
-    // Server-wide admin token cap (#384/#315): a co-DM draft spends provider tokens too, so it
-    // must respect the global ceiling — a per-campaign budget with room doesn't override it.
-    await this.aiDm.assertWithinServerTokenCap();
-
     const count = MULTI_TARGETS.has(input.target) ? input.count ?? 1 : 1;
     if (input.target === 'beat' && input.arcId != null) {
       const [arc] = await this.db
@@ -129,8 +119,6 @@ export class CoDmService {
         throw new BadRequestException(`Story arc ${input.arcId} does not belong to this campaign`);
       }
     }
-    const maxTokens = Math.min(DRAFT_MAX_TOKENS, remaining);
-
     // Issue #564: the executable model derives ONLY from the effective provider config
     // (allowlist-validated at execution via AiDmService.resolveExecutionModel), NEVER from
     // the legacy `seat.model` label. Falling back to '' for an unconfigured provider keeps
@@ -152,47 +140,74 @@ export class CoDmService {
       await this.resolveLanguageContract(campaignId, input.narrationLanguage),
     );
     const config = await this.providerConfig.resolveEffectiveConfig(campaignId);
+    const reservation = await this.aiDm.reserveTokenBudget(campaignId, DRAFT_MAX_TOKENS);
 
-    let narration: string;
-    let tokensUsed: number;
-    let resolvedModel: string;
-    let providerName: string;
+    let narration = '';
+    let tokensUsed = 0;
+    let resolvedModel = '';
+    // #501 provenance: which provider/model/endpoint actually produced the draft.
+    // Only assigned on the success paths — a provider throw releases the reservation
+    // and rethrows below, so no half-resolved provenance is ever recorded.
+    let providerName = '';
     let providerType: string | null = null;
     let endpointScope: AiGenerationProvenance['endpoint']['scope'] = 'injected';
     let endpointBaseUrl: string | null = null;
 
-    if (config) {
-      const aiProvider: AiProvider = createAiProvider(config);
-      const effective = await this.providerConfig.getEffectiveView(campaignId);
-      const result = await aiProvider.generate({
-        system: instructions,
-        messages: [{ role: 'user', content: input.prompt }],
-        model: config.model,
-        maxTokens,
+    try {
+      if (config) {
+        const aiProvider: AiProvider = createAiProvider(config);
+        const effective = await this.providerConfig.getEffectiveView(campaignId);
+        const result = await aiProvider.generate({
+          system: instructions,
+          messages: [{ role: 'user', content: input.prompt }],
+          model: config.model,
+          maxTokens: reservation.tokensReserved,
+        });
+        narration = result.text;
+        tokensUsed = result.usage.totalTokens;
+        resolvedModel = result.model || config.model;
+        providerName = aiProvider.name;
+        providerType = config.providerType;
+        endpointScope = effective.source ?? 'none';
+        endpointBaseUrl = config.baseUrl ?? null;
+      } else {
+        const result = await this.provider.generate({
+          campaignId,
+          kind: input.target === 'recap' ? 'recap' : 'narrate',
+          prompt: input.prompt,
+          instructions,
+          model: execModel,
+          maxTokens: reservation.tokensReserved,
+        });
+        narration = result.narration;
+        tokensUsed = result.tokensUsed;
+        resolvedModel = execModel;
+        providerName = this.provider.name;
+        providerType = null;
+        endpointScope = providerName === 'noop' ? 'none' : 'injected';
+      }
+    } catch (err) {
+      await this.aiDm.releaseReservationQuietly(reservation, {
+        actor: auditActor(user),
+        action: 'ai-dm.draft.unknown',
+        detail: `${input.target} draft usage unknown after provider error`,
+        model: config?.model ?? execModel,
       });
-      narration = result.text;
-      tokensUsed = result.usage.totalTokens;
-      resolvedModel = result.model || config.model;
-      providerName = aiProvider.name;
-      providerType = config.providerType;
-      endpointScope = effective.source ?? 'none';
-      endpointBaseUrl = config.baseUrl ?? null;
-    } else {
-      const result = await this.provider.generate({
-        campaignId,
-        kind: input.target === 'recap' ? 'recap' : 'narrate',
-        prompt: input.prompt,
-        instructions,
-        model: execModel,
-        maxTokens,
-      });
-      narration = result.narration;
-      tokensUsed = result.tokensUsed;
-      resolvedModel = execModel;
-      providerName = this.provider.name;
-      providerType = null;
-      endpointScope = providerName === 'noop' ? 'none' : 'injected';
+      throw err;
     }
+
+    const clampedTokens = Math.max(0, Math.floor(tokensUsed));
+    const metered = await this.aiDm.meterTurn(
+      campaignId,
+      clampedTokens,
+      {
+        actor: auditActor(user),
+        action: 'ai-dm.draft',
+        detail: `${input.target} draft metering (+${clampedTokens} tokens, reserved=${reservation.tokensReserved})`,
+        model: resolvedModel,
+      },
+      reservation,
+    );
 
     // Turn the provider text into validated proposal payloads for the target's entity type.
     const entityType = TARGET_ENTITY_TYPE[input.target];
@@ -228,16 +243,15 @@ export class CoDmService {
       proposals.push(await this.records.create(campaignId, entityType, null, 'create', payload, user, role, attribution));
     }
 
-    const clampedTokens = Math.max(0, Math.floor(tokensUsed));
-    const newTokensUsed = this.meterUsage(campaignId, seat.tokenBudget, clampedTokens);
-
     await this.audit.log({
       actor: auditActor(user),
       actorRole: 'dm',
       action: 'ai-dm.draft',
       entityType: 'ai-dm',
       campaignId,
-      detail: `${input.target} → ${proposals.length} ${entityType} proposal(s) via ${providerName} (+${tokensUsed} tokens)`,
+      // `providerName` (not `this.provider.name`) — with a configured provider the
+      // injected no-op seam is bypassed entirely, so only the resolved name is truthful.
+      detail: `${input.target} → ${proposals.length} ${entityType} proposal(s) via ${providerName} (+${clampedTokens} tokens, reserved=${reservation.tokensReserved})`,
     });
 
     return {
@@ -252,34 +266,10 @@ export class CoDmService {
       entityType,
       proposalIds: proposals.map((p) => p.id),
       proposals,
-      tokensUsed,
+      tokensUsed: clampedTokens,
       tokenBudget: seat.tokenBudget,
-      budgetRemaining: Math.max(0, seat.tokenBudget - newTokensUsed),
+      budgetRemaining: metered.budgetRemaining,
     };
-  }
-
-  /**
-   * Meter the draft's token cost atomically against the seat budget (issue #272 idiom):
-   * increment IN SQL, clamped to the budget, inside a transaction so concurrent drafts/turns
-   * can't clobber each other's read-modify-write. Returns the post-update tokensUsed.
-   */
-  private meterUsage(campaignId: number, tokenBudget: number, tokensUsed: number): number {
-    let total = tokenBudget;
-    this.db.transaction((tx) => {
-      const [updated] = tx
-        .update(aiDmSeats)
-        .set({
-          tokensUsed: sql`MIN(${aiDmSeats.tokenBudget}, ${aiDmSeats.tokensUsed} + ${tokensUsed})`,
-          updatedAt: nowIso(),
-        })
-        .where(eq(aiDmSeats.campaignId, campaignId))
-        .returning()
-        .all();
-      // An enabled seat always has a persisted row (defaultSeat is disabled), so `updated`
-      // exists; fall back to the budget defensively if it somehow doesn't.
-      total = updated ? updated.tokensUsed : tokenBudget;
-    });
-    return total;
   }
 
   private buildGenerationProvenance(input: {
