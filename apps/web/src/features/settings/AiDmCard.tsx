@@ -264,30 +264,38 @@ function ModeSection({
   return (
     <Section title="Operating mode" id="ai-dm-mode">
       <div className="flex flex-col gap-2">
-        {MODES.map((m) => (
-          <label
-            key={m.value}
-            className="flex gap-2"
-            style={{ cursor: saving ? 'wait' : 'pointer', alignItems: 'flex-start' }}
-          >
-            <input
-              type="radio"
-              name="ai-dm-mode"
-              checked={seat.mode === m.value}
-              disabled={!!saving}
-              onChange={() => void pick(m.value)}
-              style={{ marginTop: 2 }}
-            />
-            <span className="flex flex-col">
-              <span className="inline-flex items-center gap-1 flex-wrap" style={{ fontSize: 13, fontWeight: 600 }}>
-                {m.label}
-                {m.value === 'co_dm' && <TermHelp termId="coDm" />}
-                {m.value === 'driver' && <TermHelp termId="driver" />}
+        {MODES.map((m) => {
+          const inputId = `ai-dm-mode-${m.value}`;
+          return (
+            <div key={m.value} className="flex gap-2" style={{ alignItems: 'flex-start' }}>
+              <input
+                id={inputId}
+                type="radio"
+                name="ai-dm-mode"
+                checked={seat.mode === m.value}
+                disabled={!!saving}
+                onChange={() => void pick(m.value)}
+                style={{ marginTop: 2 }}
+              />
+              <span className="flex flex-col">
+                <span className="inline-flex items-center gap-1 flex-wrap" style={{ fontSize: 13, fontWeight: 600 }}>
+                  <label htmlFor={inputId} style={{ cursor: saving ? 'wait' : 'pointer' }}>
+                    {m.label}
+                  </label>
+                  {m.value === 'co_dm' && <TermHelp termId="coDm" />}
+                  {m.value === 'driver' && <TermHelp termId="driver" />}
+                </span>
+                <label
+                  htmlFor={inputId}
+                  className="text-muted"
+                  style={{ cursor: saving ? 'wait' : 'pointer', fontSize: 11.5 }}
+                >
+                  {m.blurb}
+                </label>
               </span>
-              <span className="text-muted" style={{ fontSize: 11.5 }}>{m.blurb}</span>
-            </span>
-          </label>
-        ))}
+            </div>
+          );
+        })}
       </div>
       {error && <p className="text-sm" style={{ color: '#f87171' }}>{error}</p>}
     </Section>

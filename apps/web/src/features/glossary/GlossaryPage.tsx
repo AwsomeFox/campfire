@@ -14,7 +14,13 @@ export default function GlossaryPage() {
 
   useEffect(() => {
     if (!location.hash) return;
-    const id = decodeURIComponent(location.hash.slice(1));
+    const rawId = location.hash.slice(1);
+    let id = rawId;
+    try {
+      id = decodeURIComponent(rawId);
+    } catch {
+      id = rawId;
+    }
     const handle = window.requestAnimationFrame(() => {
       document.getElementById(id)?.focus({ preventScroll: false });
     });

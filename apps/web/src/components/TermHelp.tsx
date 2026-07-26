@@ -40,11 +40,12 @@ export function TermHelp({
     function onKeyDown(event: KeyboardEvent) {
       if (event.key === 'Escape') {
         event.preventDefault();
+        event.stopPropagation();
         setOpen(false);
       }
     }
-    document.addEventListener('keydown', onKeyDown);
-    return () => document.removeEventListener('keydown', onKeyDown);
+    document.addEventListener('keydown', onKeyDown, true);
+    return () => document.removeEventListener('keydown', onKeyDown, true);
   }, [open, setOpen]);
 
   if (dismissed) return null;
