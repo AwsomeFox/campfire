@@ -4355,12 +4355,24 @@ export const RuleSearchQuery = z.object({
   cursor: z.string().max(512).optional(),
 });
 
+export const RuleSearchFacet = z.object({
+  type: RuleEntryType,
+  label: z.string().min(1).max(80),
+  count: z.number().int().nonnegative(),
+});
+export type RuleSearchFacet = z.infer<typeof RuleSearchFacet>;
+
 /**
  * Paginated rule-search response (issue #613).
  *
  * Replaces the historical bare `RuleEntry[]` (hard-capped at 50 with no totals).
  * Always includes `total` + `hasMore` so clients never silently truncate; continue
- * with `nextCursor` when `hasMore` is true.
+ * with `nextCursor` when `hasMore` is true. `facets` reports the type categories the
+ * active pack actually contains (categories absent from the pack are omitted entirely),
+ * each carrying a live count for the current query/pack computed *before* the active
+ * type filter is applied — so a facet's count always equals what selecting it would
+ * return, and a category present in the pack but with no match for the current query is
+ * reported with `count: 0` rather than dropped from the chip row (issue #544).
  */
 export const RuleSearchPage = z.object({
   items: z.array(RuleEntry),
@@ -4368,6 +4380,7 @@ export const RuleSearchPage = z.object({
   hasMore: z.boolean(),
   nextCursor: z.string().max(512).optional(),
   limit: z.number().int().positive(),
+  facets: z.array(RuleSearchFacet).default([]),
 });
 export type RuleSearchPage = z.infer<typeof RuleSearchPage>;
 
