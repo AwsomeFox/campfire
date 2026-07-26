@@ -86,6 +86,28 @@ test.describe('glossary term help (#518) — DM', () => {
     await expect(page.locator('#glossary-compendium')).toBeFocused();
   });
 
+  test('dismissing one marker hides every other marker for the same term immediately', async ({ page }) => {
+    // The inbox renders a `scribe` marker in its header while the always-mounted
+    // sidebar nav item renders one too, so both are on screen at once. Each instance
+    // seeds `dismissed` from localStorage only at mount, so without a cross-instance
+    // signal the sidebar copy would survive every route change and only vanish on a
+    // full reload — i.e. "Dismiss" would visibly fail to dismiss (issue #518).
+    await page.goto(`/c/${seed().campaignId}/inbox`);
+
+    const scribeTriggers = page.getByTestId('term-help-trigger-scribe');
+    await expect.poll(() => scribeTriggers.count()).toBeGreaterThan(1);
+
+    await scribeTriggers.first().click();
+    await expect(page.getByTestId('term-help-panel-scribe').first()).toBeVisible();
+    await page.getByTestId('term-help-panel-scribe').first().getByRole('button', { name: 'Dismiss' }).click();
+
+    // No reload, no navigation: every sibling marker for this term goes at once.
+    await expect(scribeTriggers).toHaveCount(0);
+
+    // A different term is unaffected — dismissal is per-term, not global.
+    await expect(page.getByTestId('term-help-trigger-compendium')).toBeVisible();
+  });
+
   test('dismissing the first-use help hides it and the dismissal persists', async ({ page }) => {
     await page.goto(dashboardUrl());
 

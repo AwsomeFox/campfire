@@ -34,6 +34,35 @@ import {
   type GlossaryTermId,
 } from '../features/glossary/glossaryTerms';
 
+/**
+ * Cross-instance dismissal signal (issue #518).
+ *
+ * A term's help marker can be mounted more than once at the same time — the desktop
+ * sidebar nav item and the page header both render one for `scribe`/`proposals`, and
+ * the sidebar is part of the app chrome, so it survives route changes. Each instance
+ * seeds its `dismissed` flag from localStorage at mount, so dismissing one would leave
+ * its siblings on screen until a full reload. This tiny registry lets a dismissal reach
+ * every mounted marker for the same term immediately.
+ *
+ * Module-level rather than context: TermHelp is dropped into unrelated trees (nav,
+ * headers, the More sheet) and threading a provider through all of them buys nothing.
+ */
+const termHelpDismissListeners = new Map<GlossaryTermId, Set<() => void>>();
+
+function subscribeTermHelpDismissed(termId: GlossaryTermId, listener: () => void): () => void {
+  const listeners = termHelpDismissListeners.get(termId) ?? new Set<() => void>();
+  listeners.add(listener);
+  termHelpDismissListeners.set(termId, listeners);
+  return () => {
+    listeners.delete(listener);
+    if (listeners.size === 0) termHelpDismissListeners.delete(termId);
+  };
+}
+
+function notifyTermHelpDismissed(termId: GlossaryTermId): void {
+  for (const listener of termHelpDismissListeners.get(termId) ?? []) listener();
+}
+
 export function TermHelp({
   termId,
   className = '',
@@ -111,6 +140,22 @@ export function TermHelp({
   }, [open, triggerRef, updatePosition]);
 
   useEffect(() => {
+    if (dismissed) return;
+    const hide = () => setDismissed(true);
+    const unsubscribe = subscribeTermHelpDismissed(termId, hide);
+    // Another tab dismissing the same term writes localStorage but cannot reach this
+    // tab's registry, so mirror it through the storage event.
+    function onStorage(event: StorageEvent) {
+      if (event.key === termHelpStorageKey(termId) && event.newValue === '1') hide();
+    }
+    window.addEventListener('storage', onStorage);
+    return () => {
+      unsubscribe();
+      window.removeEventListener('storage', onStorage);
+    };
+  }, [dismissed, termId]);
+
+  useEffect(() => {
     if (!open) return;
     function onKeyDown(event: KeyboardEvent) {
       if (event.key === 'Escape') {
@@ -145,6 +190,12 @@ export function TermHelp({
     }
     setOpen(false);
     setDismissed(true);
+    // Hide every OTHER mounted marker for this term too. Several terms render in two
+    // persistent places at once — the always-mounted desktop sidebar nav item and the
+    // page header — and each instance seeds `dismissed` from localStorage only at mount.
+    // Without this the sidebar copy survives every route change and only disappears on a
+    // full reload, so "Dismiss" visibly fails to dismiss (Devin review on #1431).
+    notifyTermHelpDismissed(termId);
   }
 
   return (
