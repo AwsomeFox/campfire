@@ -92,6 +92,14 @@ export interface OpenLegendSectionResult {
   entries: OlImportedEntry[];
   skippedCount: number;
   dedupedCount: number;
+  /**
+   * True when pagination stopped EARLY at the per-section page cap rather than reaching the
+   * end of the source. Deliberately separate from `skippedCount`: no row was dropped here, so
+   * folding it into the skip count would tell an operator rows were discarded when none were.
+   * rules.service's manifestIsComplete() consults both — a truncated fetch is not a provable
+   * full manifest and must not authorise deleting installed rows.
+   */
+  truncated: boolean;
 }
 
 /** License/attribution stamped on entries that don't carry their own (the repo's files don't). */
@@ -325,6 +333,7 @@ export async function fetchOpenLegendSection(
   const mapper = SECTION_MAPPER[section];
   const byName = new Map<string, OlImportedEntry>();
   let skippedCount = 0;
+  let truncated = false;
   let dedupedCount = 0;
   let pagesFetched = 0;
   let url: string | null = sectionUrl(baseUrl, section);
@@ -334,6 +343,10 @@ export async function fetchOpenLegendSection(
       logger.warn(
         `[open-legend-importer] section "${section}": hit page cap (${MAX_PAGES_PER_SECTION} pages) after ${byName.size} entries — stopping pagination`,
       );
+      // Truncation, NOT a dropped row: tracked on its own flag so the skip count keeps meaning
+      // "rows discarded" while rules.service's manifestIsComplete() still sees that this fetch
+      // may have left entries behind and must not authorise deletion.
+      truncated = true;
       break;
     }
     pagesFetched += 1;
@@ -400,7 +413,7 @@ export async function fetchOpenLegendSection(
     logger.warn(`[open-legend-importer] section "${section}": imported ${entries.length} entries, skipped ${skippedCount} row(s)`);
   }
 
-  return { entries, skippedCount, dedupedCount };
+  return { entries, skippedCount, dedupedCount, truncated };
 }
 
 export function entryTypeForOpenLegendSection(section: OpenLegendSection): RuleEntryType {

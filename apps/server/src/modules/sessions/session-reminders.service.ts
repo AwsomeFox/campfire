@@ -9,6 +9,7 @@ import {
   sessionRsvps,
 } from '../../db/schema';
 import { NotificationsService } from '../notifications/notifications.service';
+import { scheduleLiveSql } from './scheduling-queries';
 
 /** Send the pre-session reminder once a game night is within this window of now. */
 const REMINDER_LEAD_MS = 24 * 60 * 60 * 1000;
@@ -68,10 +69,21 @@ export class SessionRemindersService implements OnApplicationBootstrap {
       await this.db.delete(notificationReminders).where(inArray(notificationReminders.scheduledSessionId, pastIds));
     }
 
+    // scheduleLiveSql(), not the raw status column (#504). This is a projection of
+    // "live upcoming game nights", so it has to be THE live projection — the same one
+    // Upcoming/Next render and the same one the RSVP/cancel write guards consult via
+    // effectiveStatusOf. A `completed` row whose recap is trashed is effectively
+    // `scheduled` again: it shows on the calendar as an ordinary night and accepts
+    // RSVPs, so it must also remind. Filtering on the raw column left exactly one thing
+    // broken on an otherwise-working card — the part that happens with nobody present.
     const upcoming = await this.db
       .select()
       .from(scheduledSessions)
-      .where(and(gt(scheduledSessions.scheduledAt, nowStr), lte(scheduledSessions.scheduledAt, horizonStr)));
+      .where(and(
+        scheduleLiveSql(),
+        gt(scheduledSessions.scheduledAt, nowStr),
+        lte(scheduledSessions.scheduledAt, horizonStr),
+      ));
 
     if (upcoming.length === 0) return { reminders: 0, nudges: 0 };
 

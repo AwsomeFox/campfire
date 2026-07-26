@@ -283,4 +283,67 @@ describe('session reminders + RSVP nudges (issue #789, e2e)', () => {
     await reminders.runReminderSweep();
     expect(ofType(await listFor(player), 'session_reminder').filter((n) => n.entityId === scheduleId)).toHaveLength(0);
   });
+
+  it('re-arms reminders when a night is cancelled and restored inside the lead window (#504)', async () => {
+    // The sweep only purges the dedup ledger for nights that have already STARTED, so a
+    // future night cancelled and restored inside the lead window kept its
+    // (schedule, user, kind) rows: emitOnce()'s claim lost and the reminder was skipped
+    // in silence. The night is back on the calendar and nobody is told. Before #504 the
+    // sequence did not exist at all — cancel hard-deleted the row.
+    const soon = new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString();
+    const sched = await dm
+      .post(`/api/v1/campaigns/${campaignId}/schedule`)
+      .send({ scheduledAt: soon, title: 'Off again, on again' });
+    expect(sched.status).toBe(201);
+    const scheduleId = sched.body.id as number;
+
+    const reminders = ctx.app.get(SessionRemindersService);
+    await reminders.runReminderSweep();
+    expect(ofType(await listFor(player), 'session_reminder').filter((n) => n.entityId === scheduleId)).toHaveLength(1);
+
+    // Cancelled: the sweep must not remind for a game that is off.
+    expect((await dm.delete(`/api/v1/schedule/${scheduleId}`).send({ reason: 'snowed in' })).status).toBe(200);
+    const whileCancelled = await reminders.runReminderSweep();
+    expect(whileCancelled).toBeDefined();
+    expect(ofType(await listFor(player), 'session_reminder').filter((n) => n.entityId === scheduleId)).toHaveLength(1);
+
+    // Restored: the night is on again, so the party has to be told again.
+    expect((await dm.post(`/api/v1/schedule/${scheduleId}/restore`)).status).toBe(201);
+    await reminders.runReminderSweep();
+    expect(ofType(await listFor(player), 'session_reminder').filter((n) => n.entityId === scheduleId)).toHaveLength(2);
+
+    // ...and the ledger is re-armed, not disabled: a repeat sweep still does not double-send.
+    await reminders.runReminderSweep();
+    expect(ofType(await listFor(player), 'session_reminder').filter((n) => n.entityId === scheduleId)).toHaveLength(2);
+  });
+
+  it('reminds for a future night whose linked recap is trashed (effective status, #504)', async () => {
+    // This row stores `completed`, but its recap is in the Trash so every read — and
+    // Upcoming/Next, and the RSVP and cancel guards — treat it as `scheduled` again.
+    // The sweep filtered on the RAW status column, so the one part of the card that
+    // works without a user present was the only part that silently did nothing.
+    const soon = new Date(Date.now() + 5 * 60 * 60 * 1000).toISOString();
+    const sched = await dm
+      .post(`/api/v1/campaigns/${campaignId}/schedule`)
+      .send({ scheduledAt: soon, title: 'Recap in the bin' });
+    expect(sched.status).toBe(201);
+    const scheduleId = sched.body.id as number;
+
+    const recap = await dm.post(`/api/v1/campaigns/${campaignId}/sessions`).send({
+      title: 'Binned recap',
+      playedAt: '2099-03-03',
+      recap: 'Headed for the trash.',
+      scheduledSessionId: scheduleId,
+    });
+    expect(recap.status).toBe(201);
+    expect((await dm.delete(`/api/v1/sessions/${recap.body.id}`)).status).toBe(200);
+
+    // What every other surface says about this row.
+    const read = await dm.get(`/api/v1/schedule/${scheduleId}`);
+    expect(read.body).toMatchObject({ status: 'scheduled', sessionId: null });
+
+    const reminders = ctx.app.get(SessionRemindersService);
+    await reminders.runReminderSweep();
+    expect(ofType(await listFor(player), 'session_reminder').filter((n) => n.entityId === scheduleId)).toHaveLength(1);
+  });
 });

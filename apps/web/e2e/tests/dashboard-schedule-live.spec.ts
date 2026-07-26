@@ -15,7 +15,7 @@ async function clearIssueSchedules(request: APIRequestContext, campaignId: numbe
     'list issue #790 schedules',
   );
   for (const schedule of schedules.filter((item) => item.title.startsWith('E2E790 '))) {
-    await json<unknown>(await request.delete(`/api/v1/schedule/${schedule.id}`), 'remove prior issue #790 schedule');
+    await json<unknown>(await request.delete(`/api/v1/schedule/${schedule.id}`, { data: {} }), 'remove prior issue #790 schedule');
   }
 }
 
@@ -155,7 +155,7 @@ test('dashboard next-session projection stays live across remote writes, campaig
     await expect(sessionLog.getByText('E2E790 Gamma', { exact: true })).toBeVisible();
     await expect(page.getByText(/showing last-known next-session details/)).toHaveCount(0);
 
-    await json<unknown>(await writer.request.delete(`/api/v1/schedule/${created.id}`), 'cancel remotely');
+    await json<unknown>(await writer.request.delete(`/api/v1/schedule/${created.id}`, { data: {} }), 'cancel remotely');
     await expect(sessionLog.getByText('E2E790 Gamma', { exact: true })).toHaveCount(0);
     // The global-setup seed 'DLRNAV Saturday Game' (2032-07-24) is the
     // campaign's only remaining future session, so once the test-authored

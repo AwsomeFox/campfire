@@ -2938,6 +2938,35 @@ function migrateGuestDmHandoff545(sqlite: Database.Database): void {
 }
 
 /**
+ * Issue #504: scheduled sessions are no longer deleted when cancelled. Add a
+ * lifecycle status, cancellation metadata, and nullable schedule↔play-log links.
+ */
+function migrateSchedulingLifecycle504(sqlite: Database.Database): void {
+  const hasScheduledSessions = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='scheduled_sessions'")
+    .get();
+  if (hasScheduledSessions) {
+    const scheduleCols = sqlite.prepare('PRAGMA table_info(scheduled_sessions)').all() as Array<{ name: string }>;
+    const has = (name: string) => scheduleCols.some((c) => c.name === name);
+    if (!has('status')) sqlite.exec("ALTER TABLE scheduled_sessions ADD COLUMN status TEXT NOT NULL DEFAULT 'scheduled'");
+    if (!has('cancelled_at')) sqlite.exec('ALTER TABLE scheduled_sessions ADD COLUMN cancelled_at TEXT');
+    if (!has('cancelled_by')) sqlite.exec('ALTER TABLE scheduled_sessions ADD COLUMN cancelled_by TEXT');
+    if (!has('cancellation_reason')) sqlite.exec("ALTER TABLE scheduled_sessions ADD COLUMN cancellation_reason TEXT NOT NULL DEFAULT ''");
+    if (!has('session_id')) sqlite.exec('ALTER TABLE scheduled_sessions ADD COLUMN session_id INTEGER');
+  }
+
+  const hasSessions = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'")
+    .get();
+  if (hasSessions) {
+    const sessionCols = sqlite.prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>;
+    if (!sessionCols.some((c) => c.name === 'scheduled_session_id')) {
+      sqlite.exec('ALTER TABLE sessions ADD COLUMN scheduled_session_id INTEGER');
+    }
+  }
+}
+
+/**
  * Issue #547 — expiring, read-only Player Display cast sessions. These are
  * capability tokens for shared TVs/kiosks, stored hashed like recap shares.
  */
@@ -3071,18 +3100,26 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0106_guest_dm_handoff_545', run: migrateGuestDmHandoff545 },
   { name: '0107_archmage_escalation_542', run: migrateArchmageEscalation542 },
   { name: '0108_ai_dm_token_reservations_563', run: migrateAiDmSeatsTableForTokenReservations },
-  // 0108 was taken on main by the AI token-reservation migration (#563); this branch
-  // merges after it, so cast sessions take the next free ordinal.
   { name: '0109_cast_sessions_547', run: migrateCastSessionsTable },
   // 0108/0109 both landed on main while this branch was open; derivatives take 0110.
   { name: '0110_attachment_derivatives_604', run: migrateAttachmentDerivativesTable604 },
-  // #604 took 0110 on main while #559 was in review, so the driver control state pair shifts to
-  // the next free ordinals. These two MUST stay adjacent and in this order: the create-table step
-  // first, then the additive column. They are deliberately separate names rather than one
-  // migration — see migrateAiDriverControlStateAnnouncedRecovery for why folding them back
-  // together silently breaks any DB that already recorded the create.
-  { name: '0111_ai_driver_control_state_559', run: migrateAiDriverControlStateTable },
-  { name: '0112_ai_driver_control_state_announced_recovery_559', run: migrateAiDriverControlStateAnnouncedRecovery },
+  // 0108/0109 were claimed on main by the AI token-reservation (#563) and cast-session
+  // (#547) migrations, and 0110 by attachment derivatives (#604); this branch merges
+  // after all of them, so the scheduling lifecycle migration takes the next genuinely
+  // free ordinal rather than collide.
+  { name: '0111_scheduling_lifecycle_504', run: migrateSchedulingLifecycle504 },
+  // #559 deliberately skips past the contested 0112-0117 band rather than taking the next free
+  // ordinal: this pair has already been renumbered three times by other branches landing first,
+  // and 0114-0117 are spoken for by #501/#572/#580/#601, any of which may merge before this.
+  //
+  // Two invariants, both load-bearing:
+  //   1. These two stay ADJACENT and IN THIS ORDER — create table, then add the column.
+  //   2. Both names must be NEVER-BEFORE-RECORDED. runMigrations skips by exact name string, so
+  //      reusing a name any DB already recorded silently skips the migration and the column is
+  //      never added. This pair has previously shipped as 0107/0108/0111/0112 (create) and
+  //      0112/0113 (backfill); 0118/0119 collide with none of them.
+  { name: '0118_ai_driver_control_state_559', run: migrateAiDriverControlStateTable },
+  { name: '0119_ai_driver_control_state_announced_recovery_559', run: migrateAiDriverControlStateAnnouncedRecovery },
 ];
 
 /**

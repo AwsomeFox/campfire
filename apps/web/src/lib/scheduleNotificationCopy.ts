@@ -105,13 +105,13 @@ export function cancelledScheduleDetailCopy(
     return {
       heading: 'Game night cancelled',
       when: '',
-      body: 'This game night was removed from the calendar.',
+      body: 'This game night was cancelled; RSVP history is preserved.',
     };
   }
   const label = scheduleNotificationLabel(data.label);
   return {
     heading: `${label} was cancelled`,
     when: formatScheduleNotificationInstant(data.scheduledAt, locale, timeZone, timeFormat),
-    body: 'This game night was removed from the calendar.',
+    body: 'This game night was cancelled; RSVP history is preserved.',
   };
 }
