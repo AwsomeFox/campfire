@@ -86,6 +86,28 @@ Off by default. Set `BACKUP_SCHEDULE_ENABLED=1` and Campfire writes a fresh arch
 `$DATA_DIR/backups`) every `BACKUP_INTERVAL_HOURS` (default `24`). Because these land
 on the same volume, copy them off-box for real disaster recovery.
 
+Scheduled backups now have retention and free-space protection:
+
+- `BACKUP_KEEP_COUNT` (default `14`) keeps the newest verified archives; set `0` to
+  disable count pruning.
+- `BACKUP_KEEP_DAYS` (default `30`) prunes verified archives older than that age; set
+  `0` to disable age pruning.
+- `BACKUP_MAX_TOTAL_BYTES` (unset by default) caps total scheduled-backup bytes by
+  pruning oldest verified, unprotected archives first.
+- `BACKUP_MIN_FREE_BYTES` (default `536870912`, 512 MiB) reserves disk space. Before
+  writing, Campfire estimates the next archive from the last successful backup (or
+  current DB/uploads size on first run). If the estimate would breach the reserve, the
+  run is skipped, `backup.cadence.lastError` is stamped, and the next attempt backs off.
+- `BACKUP_PROTECT_LAST_GOOD` (default `true`) prevents retention from deleting the most
+  recent manifest-verified scheduled archive.
+
+Retention only deletes archives that pass zip/manifest parsing and clean reconciliation.
+Malformed or partial archives stay on disk for operator review. To protect a specific
+archive from local pruning, place a sidecar marker next to the zip: `.pin` or `.keep` for
+a local pin, or `.offsite` after you have copied it to protected off-box storage.
+Server admins can see disk free/reserve, retention policy/metrics, and low-disk/prune
+alerts in the backup card.
+
 ## Per-campaign export & import
 
 Any DM can export their campaign from **Campaign settings → Export** as **JSON**

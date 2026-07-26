@@ -1,10 +1,10 @@
-import { Injectable, type CanActivate, type ExecutionContext, UnauthorizedException } from '@nestjs/common';
+import { ForbiddenException, Injectable, type CanActivate, type ExecutionContext, UnauthorizedException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import type { Request, Response } from 'express';
 import { Role } from '@campfire/schema';
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
 import type { RequestUser, TokenContext } from '../user.types';
-import { looksLikeApiToken, looksLikeOAuthAccessToken } from '../crypto';
+import { looksLikeApiToken, looksLikeCastToken, looksLikeOAuthAccessToken } from '../crypto';
 import { isDevAuthActive } from '../security-config';
 import { AuthService } from '../../modules/auth/auth.service';
 import { SESSION_COOKIE_NAME } from '../../modules/auth/auth.constants';
@@ -68,6 +68,10 @@ export class SessionAuthGuard implements CanActivate {
           return true;
         }
         // Known OAuth access-token format but not found/expired/owner disabled: fall through -> 401 below unless @Public.
+      } else if (looksLikeCastToken(rawToken) && !isPublic) {
+        // Cast credentials are intentionally not normal user tokens. Refuse to
+        // fall through to a DM cookie/dev-auth on shared devices.
+        throw new ForbiddenException('Cast credentials may only call cast display endpoints');
       }
     }
 

@@ -34,6 +34,7 @@ test.describe('campaign nav IA (#643)', () => {
       'proposals',
       'trash',
       'members',
+      'audit',
     ]);
   });
 
@@ -47,7 +48,7 @@ test.describe('campaign nav IA (#643)', () => {
     });
     const manage = groups.find((g) => g.key === 'manage');
     expect(manage?.items).toEqual([
-      { key: 'proposals', label: 'nav.myProposals', to: '/c/7/proposals' },
+      { key: 'proposals', label: 'nav.myProposals', to: '/c/7/proposals', termId: 'proposals' },
       { key: 'membership', label: 'nav.yourData', to: '/c/7/members' },
     ]);
     expect(groups.find((g) => g.key === 'prepare')?.items.some((i) => i.key === 'storylines')).toBe(false);

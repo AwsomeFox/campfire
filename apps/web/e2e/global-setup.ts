@@ -202,24 +202,8 @@ export default async function globalSetup(config: FullConfig) {
     }
   }
 
-  // --- DM builds the campaign + memberships + fixtures -------------------------
-  const dm = await loginContext(baseURL, 'dm');
-  const campaign = await okJson(dm, 'post', '/api/v1/campaigns', { name: 'E2E — Cinderhaven' });
-  const campaignId: number = campaign.id;
-
-  // Accessibility fixtures for the AI drafting dialog + mode disclosure (#812).
-  // Co-DM mode needs no provider and keeps the rest of the suite away from live-driver flows.
-  await okJson(admin, 'post', '/api/v1/settings/ai/kill', { enabled: true });
-  await okJson(dm, 'put', `/api/v1/campaigns/${campaignId}/ai-dm`, {
-    mode: 'co_dm',
-    tokenBudget: 10_000,
-  });
-
-  await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/members`, { userId: userIds.player, role: 'player' });
-  await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/members`, { userId: userIds.viewer, role: 'viewer' });
-
-  // Issue #621 browser fixture: use the public upload/search/encounter APIs so both the
-  // compendium reader and combat card consume exactly the same persisted dataJson string.
+  // Install the e2e rule pack before campaign creation so the main seed campaign
+  // explicitly opts into the fixture pack instead of the homebrew/no-pack path.
   const statblockUpload = await okJson(admin, 'post', '/api/v1/rules/packs/upload', {
     source: 'upload',
     pack: {
@@ -239,6 +223,28 @@ export default async function globalSetup(config: FullConfig) {
     ],
   });
   await waitForInstall(admin, statblockUpload.id);
+
+  // --- DM builds the campaign + memberships + fixtures -------------------------
+  const dm = await loginContext(baseURL, 'dm');
+  const campaign = await okJson(dm, 'post', '/api/v1/campaigns', {
+    name: 'E2E — Cinderhaven',
+    ruleSystem: 'e2e-open5e-actions',
+  });
+  const campaignId: number = campaign.id;
+
+  // Accessibility fixtures for the AI drafting dialog + mode disclosure (#812).
+  // Co-DM mode needs no provider and keeps the rest of the suite away from live-driver flows.
+  await okJson(admin, 'post', '/api/v1/settings/ai/kill', { enabled: true });
+  await okJson(dm, 'put', `/api/v1/campaigns/${campaignId}/ai-dm`, {
+    mode: 'co_dm',
+    tokenBudget: 10_000,
+  });
+
+  await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/members`, { userId: userIds.player, role: 'player' });
+  await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/members`, { userId: userIds.viewer, role: 'viewer' });
+
+  // Issue #621 browser fixture: use the public upload/search/encounter APIs so both the
+  // compendium reader and combat card consume exactly the same persisted dataJson string.
   const statblockSearch = await okJson(dm, 'get', '/api/v1/rules/search?q=fixture%20sentinel&type=monster&pack=e2e-open5e-actions');
   const statblockEntry = (statblockSearch.items ?? statblockSearch)[0];
   if (!statblockEntry) throw new Error('Uploaded statblock fixture was not searchable');

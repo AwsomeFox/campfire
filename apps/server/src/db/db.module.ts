@@ -1455,6 +1455,32 @@ function migrateAiDmSeatsTableForProactiveSettings(sqlite: Database.Database): v
 }
 
 /**
+ * Issue #563: AI budget enforcement now reserves capacity before provider contact.
+ * These counters are cumulative/active token state for upgraded seats:
+ *   - tokens_reserved: currently in-flight capacity held before provider contact
+ *   - tokens_refunded: unused reserved capacity returned after known usage
+ *   - tokens_unknown : reserved capacity consumed by provider calls with unknown usage
+ *   - tokens_overage : known usage above the pre-call reservation
+ */
+function migrateAiDmSeatsTableForTokenReservations(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ai_dm_seats'")
+    .get();
+  if (!hasTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(ai_dm_seats)').all() as Array<{ name: string }>;
+  const add = (name: string) => {
+    if (!columns.some((c) => c.name === name)) {
+      sqlite.exec(`ALTER TABLE ai_dm_seats ADD COLUMN ${name} INTEGER NOT NULL DEFAULT 0`);
+    }
+  };
+  add('tokens_reserved');
+  add('tokens_refunded');
+  add('tokens_unknown');
+  add('tokens_overage');
+}
+
+/**
  * Migration for DBs created before the AI scribe (issue #316): the
  * `ai_scribe_configs` + `ai_scribe_jobs` tables didn't exist. Like the
  * ai_provider_configs migration (0040) these are NEW tables, so BOOTSTRAP_SQL's
@@ -2331,6 +2357,35 @@ function migrateCampaignLibraryMonstersForeignKeys(sqlite: Database.Database): v
 }
 
 /**
+ * Issue #542: 13th Age initiative transparency and escalation die state.
+ * Encounters store the current escalation value, hold/override controls, and a bounded
+ * JSON history. Combatants store the initiative roll/modifier breakdown shown in the UI/log.
+ */
+function migrateArchmageEscalation542(sqlite: Database.Database): void {
+  const hasEncountersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='encounters'")
+    .get();
+  if (hasEncountersTable) {
+    const columns = sqlite.prepare('PRAGMA table_info(encounters)').all() as Array<{ name: string }>;
+    const has = (name: string): boolean => columns.some((c) => c.name === name);
+    if (!has('escalation_die')) sqlite.exec('ALTER TABLE encounters ADD COLUMN escalation_die INTEGER NOT NULL DEFAULT 0');
+    if (!has('escalation_die_held')) sqlite.exec('ALTER TABLE encounters ADD COLUMN escalation_die_held INTEGER NOT NULL DEFAULT 0');
+    if (!has('escalation_die_override')) sqlite.exec('ALTER TABLE encounters ADD COLUMN escalation_die_override INTEGER');
+    if (!has('escalation_die_history')) sqlite.exec('ALTER TABLE encounters ADD COLUMN escalation_die_history TEXT');
+  }
+
+  const hasCombatantsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'")
+    .get();
+  if (hasCombatantsTable) {
+    const columns = sqlite.prepare('PRAGMA table_info(combatants)').all() as Array<{ name: string }>;
+    if (!columns.some((c) => c.name === 'initiative_breakdown')) {
+      sqlite.exec('ALTER TABLE combatants ADD COLUMN initiative_breakdown TEXT');
+    }
+  }
+}
+
+/**
  * Issue #413: campaign turn-advancement controls. `dm_controls_turns` keeps combat
  * advancement DM-only (a player cannot end their own turn); `require_dm_turn_confirmation`
  * stages a player's end-turn for DM approval instead of advancing immediately. Both plain
@@ -2787,6 +2842,32 @@ function migrateGuestDmHandoff545(sqlite: Database.Database): void {
   `);
 }
 
+/**
+ * Issue #547 — expiring, read-only Player Display cast sessions. These are
+ * capability tokens for shared TVs/kiosks, stored hashed like recap shares.
+ */
+function migrateCastSessionsTable(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS cast_sessions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+      label TEXT NOT NULL DEFAULT '',
+      created_by TEXT NOT NULL DEFAULT '',
+      token_hash TEXT NOT NULL UNIQUE,
+      token_prefix TEXT NOT NULL,
+      exit_pin_hash TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      access_count INTEGER NOT NULL DEFAULT 0,
+      first_accessed_at TEXT,
+      last_accessed_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_cast_sessions_campaign ON cast_sessions(campaign_id);
+    CREATE INDEX IF NOT EXISTS idx_cast_sessions_expires_at ON cast_sessions(expires_at);
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
   { name: '0001_users_oidc', run: migrateUsersTableForOidc },
   { name: '0002_campaigns_rule_system', run: migrateCampaignsTableForRuleSystem },
@@ -2893,6 +2974,11 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0104_campaign_library_monsters', run: migrateCampaignLibraryMonstersTable },
   { name: '0105_campaign_library_monsters_fk', run: migrateCampaignLibraryMonstersForeignKeys },
   { name: '0106_guest_dm_handoff_545', run: migrateGuestDmHandoff545 },
+  { name: '0107_archmage_escalation_542', run: migrateArchmageEscalation542 },
+  { name: '0108_ai_dm_token_reservations_563', run: migrateAiDmSeatsTableForTokenReservations },
+  // 0108 was taken on main by the AI token-reservation migration (#563); this branch
+  // merges after it, so cast sessions take the next free ordinal.
+  { name: '0109_cast_sessions_547', run: migrateCastSessionsTable },
 ];
 
 /**

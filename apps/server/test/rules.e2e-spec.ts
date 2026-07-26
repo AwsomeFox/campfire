@@ -63,6 +63,11 @@ function searchItems(body: { items?: unknown[] } | unknown[]): any[] {
   throw new Error(`unexpected rules search body: ${JSON.stringify(body)}`);
 }
 
+function searchFacets(body: { facets?: unknown[] }): any[] {
+  if (body && typeof body === 'object' && Array.isArray(body.facets)) return body.facets as any[];
+  throw new Error(`unexpected rules search facets: ${JSON.stringify(body)}`);
+}
+
 describe('rules / rule packs (e2e, fake Open5e server)', () => {
   let ctx: TestAppContext;
   let fake: FakeOpen5e;
@@ -156,6 +161,28 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
     expect(searchRes.status).toBe(200);
     expect(searchItems(searchRes.body).length).toBeGreaterThan(0);
     expect(searchItems(searchRes.body).some((e: { name: string }) => e.name === 'Fireball')).toBe(true);
+
+    // issue #544: live facets are counted from all matching entries in the active pack/query,
+    // and absent categories (section/other for Open5e) are not advertised.
+    const facetRes = await request(server).get('/api/v1/rules/search').query({ pack: 'open5e-srd' }).set(dm);
+    expect(facetRes.status).toBe(200);
+    expect(searchFacets(facetRes.body)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'spell', label: 'Spells', count: 2 }),
+      expect.objectContaining({ type: 'monster', label: 'Monsters', count: 2 }),
+      expect.objectContaining({ type: 'item', label: 'Items', count: 1 }),
+    ]));
+    expect(searchFacets(facetRes.body).some((f: { type: string }) => f.type === 'section' || f.type === 'other')).toBe(false);
+    // The chip row must add up to the list it labels: with no type filter, the facet
+    // counts sum to the same `total` the search reports.
+    expect(
+      searchFacets(facetRes.body).reduce((sum: number, f: { count: number }) => sum + f.count, 0),
+    ).toBe(facetRes.body.total);
+    // A campaign pointed at a rule system with nothing installed gets an empty facet row
+    // rather than a hardcoded 5e-shaped one.
+    const missingPackRes = await request(server).get('/api/v1/rules/search').query({ pack: 'not-installed' }).set(dm);
+    expect(missingPackRes.status).toBe(200);
+    expect(searchFacets(missingPackRes.body)).toEqual([]);
+    expect(missingPackRes.body.total).toBe(0);
 
     // search: type filter narrows to monsters only
     const monsterSearchRes = await request(server).get('/api/v1/rules/search').query({ q: 'fixture sentinel', type: 'monster' }).set(dm);
@@ -593,6 +620,106 @@ describe('rules / rule packs — generic upload (issue #19)', () => {
     expect(searchItems(classRes.body).some((e: { name: string }) => e.name === 'Fighter')).toBe(true);
 
     await request(server).delete(`/api/v1/rules/packs/${job.pack.id}`).set(uploader);
+  });
+
+  it('reports live source-native facets for PF2e, Open Legend, OSR, and prose uploads (issue #544)', async () => {
+    const server = ctx.app.getHttpServer();
+    const jobs: Array<{ pack?: { id: number } }> = [];
+
+    async function uploadAndPoll(body: Record<string, unknown>) {
+      const res = await uploadPack(body);
+      expect(res.status).toBe(202);
+      const job = await pollJob(server, uploader, res.body.id);
+      expect(job.status).toBe('completed');
+      jobs.push(job);
+      return job;
+    }
+
+    async function facetsFor(pack: string, query: Record<string, string> = {}) {
+      const res = await request(server).get('/api/v1/rules/search').query({ pack, ...query }).set(uploader);
+      expect(res.status).toBe(200);
+      return searchFacets(res.body);
+    }
+
+    try {
+      await uploadAndPoll({
+        ...pf2ePack,
+        entries: [
+          ...pf2ePack.entries,
+          { slug: 'pf2e-plane', name: 'Astral Plane', type: 'section', summary: 'Planar rules.' },
+          { slug: 'pf2e-deity', name: 'Cayden Cailean', type: 'other', summary: 'Deity reference.' },
+        ],
+      });
+      expect(await facetsFor('pf2e-srd')).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: 'monster', label: 'Creatures', count: 1 }),
+        expect.objectContaining({ type: 'section', label: 'Rules', count: 1 }),
+        expect.objectContaining({ type: 'other', label: 'Reference', count: 1 }),
+      ]));
+
+      await uploadAndPoll({
+        source: 'upload',
+        pack: { slug: 'open-legend-srd', name: 'Open Legend SRD', license: 'CC-BY-4.0' },
+        entries: [
+          { slug: 'baned', name: 'Bane', type: 'condition', summary: 'A negative condition.' },
+          { slug: 'mighty-blow', name: 'Mighty Blow', type: 'feat', summary: 'A feat.' },
+        ],
+      });
+      expect(await facetsFor('open-legend-srd')).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: 'condition', label: 'Banes & Boons', count: 1 }),
+      ]));
+
+      await uploadAndPoll({
+        source: 'upload',
+        pack: { slug: 'old-school-essentials', name: 'Old-School Essentials', license: 'OGL 1.0a' },
+        entries: [
+          { slug: 'torch', name: 'Torch', type: 'item', summary: 'Equipment.' },
+          { slug: 'skeleton', name: 'Skeleton', type: 'monster', summary: 'Undead monster.' },
+        ],
+      });
+      expect(await facetsFor('old-school-essentials')).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: 'item', label: 'Equipment', count: 1 }),
+      ]));
+
+      await uploadAndPoll({
+        source: 'upload',
+        pack: { slug: 'prose-rules', name: 'Prose Rules', license: 'CC-BY-4.0' },
+        entries: [
+          { slug: 'downtime', name: 'Downtime', type: 'section', summary: 'Rules chapter.' },
+          { slug: 'bibliography', name: 'Bibliography', type: 'other', summary: 'Reference note.' },
+        ],
+      });
+      const proseSection = await facetsFor('prose-rules', { type: 'section' });
+      expect(proseSection).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: 'section', label: 'Rules', count: 1 }),
+        expect.objectContaining({ type: 'other', label: 'Reference', count: 1 }),
+      ]));
+      expect((await facetsFor('prose-rules')).some((f: { type: string }) => f.type === 'monster')).toBe(false);
+
+      // A text query narrows the COUNTS but not the chip SET: `other` is still offered
+      // (at 0) so the reader can pivot without clearing the search, and the order stays
+      // canonical. Counts sum to the unfiltered `total` the same list reports.
+      expect(await facetsFor('prose-rules', { q: 'Downtime' })).toEqual([
+        expect.objectContaining({ type: 'section', label: 'Rules', count: 1 }),
+        expect.objectContaining({ type: 'other', label: 'Reference', count: 0 }),
+      ]);
+      const proseQueryRes = await request(server)
+        .get('/api/v1/rules/search')
+        .query({ pack: 'prose-rules', q: 'Downtime' })
+        .set(uploader);
+      expect(proseQueryRes.status).toBe(200);
+      expect(proseQueryRes.body.total).toBe(1);
+      expect(
+        searchFacets(proseQueryRes.body).reduce((sum: number, f: { count: number }) => sum + f.count, 0),
+      ).toBe(proseQueryRes.body.total);
+
+      const otherRes = await request(server).get('/api/v1/rules/search').query({ pack: 'prose-rules', type: 'other' }).set(uploader);
+      expect(otherRes.status).toBe(200);
+      expect(searchItems(otherRes.body)).toEqual([expect.objectContaining({ type: 'other', name: 'Bibliography' })]);
+    } finally {
+      for (const job of jobs.reverse()) {
+        if (job.pack?.id) await request(server).delete(`/api/v1/rules/packs/${job.pack.id}`).set(uploader);
+      }
+    }
   });
 
   it('rejects a non-open (proprietary) license synchronously with 400 — no job created', async () => {

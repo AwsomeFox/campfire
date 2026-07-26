@@ -4,7 +4,7 @@ import { auditActor, roleAtLeast, type RequestUser } from '../../common/user.typ
 import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService, excerpt } from '../notifications/notifications.service';
-import { AiDmService } from '../ai-dm/ai-dm.service';
+import { AiDmService, type AiDmTokenReservation } from '../ai-dm/ai-dm.service';
 import { McpToolsService, type DriverTool, type DriverToolset } from '../mcp/mcp-tools';
 import { CampaignsService } from '../campaigns/campaigns.service';
 import { RulesService } from '../rules/rules.service';
@@ -420,6 +420,7 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'begin_encounter',
   'end_encounter',
   'next_turn',
+  'set_escalation_die',
   'add_combatant',
   'update_combatant',
   'remove_combatant',
@@ -1341,7 +1342,7 @@ export class AiDriverService {
     const perStepCap = clamp(opts.maxTokens ?? DEFAULT_STEP_MAX_TOKENS, 1, 4096);
 
     let totalTokens = 0;
-    let budgetRemaining = seat.tokenBudget - seat.tokensUsed;
+    let budgetRemaining = seat.budgetRemaining;
     let finalNarration = '';
     let latestSeat = seat;
     let stopReason: AiDmStopReason = 'complete';
@@ -1370,7 +1371,7 @@ export class AiDriverService {
         // exhaust the budget without this driver making another provider call.
         const spend = await this.aiDm.withSpendLock(campaignId, async () => {
           const currentSeat = await this.aiDm.getSeat(campaignId);
-          const currentRemaining = currentSeat.tokenBudget - currentSeat.tokensUsed;
+          const currentRemaining = currentSeat.budgetRemaining;
           if (currentRemaining <= 0) {
             return { kind: 'budget_exhausted' as const, seat: currentSeat, budgetRemaining: 0 };
           }
@@ -1387,39 +1388,88 @@ export class AiDriverService {
               metered: null,
             };
           }
+          let reservation: AiDmTokenReservation;
           try {
-            await this.aiDm.assertWithinServerTokenCap();
+            reservation = await this.aiDm.reserveTokenBudget(campaignId, Math.min(perStepCap, currentRemaining));
           } catch {
             return { kind: 'server_cap' as const, seat: currentSeat, budgetRemaining: currentRemaining };
           }
 
-          const maxTokens = Math.min(perStepCap, currentRemaining);
+          const maxTokens = reservation.tokensReserved;
           steps = stepNumber;
-          const step = await this.streamStep(campaignId, provider, session, generationSignal, {
-            system,
-            messages,
-            // Issue #564: the executable model derives ONLY from the effective provider
-            // config (allowlist-validated at resolution above), NEVER from legacy seat.model.
-            model: execModel,
-            maxTokens,
-            tools: toolSchemas,
-          });
+          let step:
+            | { ok: true; text: string; result: AiGenerateResult | undefined; aborted: boolean; cancelled: boolean }
+            | { ok: false; text: string; result: AiGenerateResult | undefined; error: AiProviderError };
+          try {
+            step = await this.streamStep(campaignId, provider, session, generationSignal, {
+              system,
+              messages,
+              // Issue #564: the executable model derives ONLY from the effective provider
+              // config (allowlist-validated at resolution above), NEVER from legacy seat.model.
+              model: execModel,
+              maxTokens,
+              tools: toolSchemas,
+            });
+          } catch (err) {
+            // Settling the hold is bookkeeping; the provider error is what the caller
+            // needs to see. Never let a failed settle replace it (#563).
+            let unknownMetered: { seat: AiDmSeat; budgetRemaining: number };
+            try {
+              unknownMetered = await this.aiDm.markReservationUsageUnknown(reservation, {
+                actor,
+                action: 'ai-dm.driver.usage_unknown',
+                detail: `step ${stepNumber} provider exception model=${execModel} usage unknown by ${triggeredBy.id}`,
+                model: execModel,
+              });
+            } catch (releaseErr) {
+              this.logger.error(
+                `Failed to release AI token reservation (campaign=${campaignId}, tokens=${reservation.tokensReserved}) after a provider exception: ${
+                  releaseErr instanceof Error ? releaseErr.message : String(releaseErr)
+                }`,
+              );
+              unknownMetered = { seat: currentSeat, budgetRemaining: currentRemaining };
+            }
+            const error =
+              err instanceof AiProviderError
+                ? err
+                : new AiProviderError('unknown', err instanceof Error ? err.message : String(err), {
+                    provider: provider.name,
+                    cause: err,
+                  });
+            return {
+              kind: 'provider_error' as const,
+              seat: unknownMetered.seat,
+              budgetRemaining: unknownMetered.budgetRemaining,
+              text: '',
+              error,
+              usageUnknown: true,
+              metered: undefined,
+            };
+          }
 
           if (!step.ok) {
             const resolved = resolveProviderStepUsage(step.text, step.result);
             let metered: { seat: AiDmSeat; tokensUsed: number; budgetRemaining: number } | undefined;
-            if (!resolved.unknown && resolved.tokens > 0) {
+            let unknownMetered: { seat: AiDmSeat; budgetRemaining: number } | undefined;
+            if (resolved.unknown) {
+              unknownMetered = await this.aiDm.markReservationUsageUnknown(reservation, {
+                actor,
+                action: 'ai-dm.driver.usage_unknown',
+                detail: `step ${stepNumber} provider_error model=${execModel} usage unknown by ${triggeredBy.id}`,
+                model: step.result?.model || execModel,
+              });
+            } else {
               metered = await this.aiDm.meterTurn(campaignId, resolved.tokens, {
                 actor,
                 action: 'ai-dm.driver.turn',
                 detail: `step ${stepNumber} provider_error model=${execModel} +${resolved.tokens} tokens (partial) by ${triggeredBy.id}`,
                 model: step.result?.model || execModel,
-              });
+              }, reservation);
             }
             return {
               kind: 'provider_error' as const,
-              seat: metered?.seat ?? currentSeat,
-              budgetRemaining: metered?.budgetRemaining ?? currentRemaining,
+              seat: metered?.seat ?? unknownMetered?.seat ?? currentSeat,
+              budgetRemaining: metered?.budgetRemaining ?? unknownMetered?.budgetRemaining ?? currentRemaining,
               text: step.text,
               error: step.error,
               usageUnknown: resolved.unknown,
@@ -1451,7 +1501,7 @@ export class AiDriverService {
             actor,
             action: 'ai-dm.driver.turn',
             detail: `step ${stepNumber} model=${servedModel || 'default'} +${usage} tokens by ${triggeredBy.id}`,
-          });
+          }, reservation);
           // streamStep sets `aborted` on mode-switch detach and `cancelled` on stop-control abort (#558).
           if (aborted || cancelled || session.detached) {
             const postAuth = await this.checkGenerationAuthority(campaignId, session, generationSignal);

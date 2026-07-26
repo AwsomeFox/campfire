@@ -1073,6 +1073,38 @@ export type SessionSharePolicyUpdate = z.infer<typeof SessionSharePolicyUpdate>;
 export const SessionShareMutationResult = z.object({ revoked: z.number().int().nonnegative() });
 export type SessionShareMutationResult = z.infer<typeof SessionShareMutationResult>;
 
+// Read-only Player Display cast sessions. The raw token and exit PIN are shown once
+// at creation; persisted/listed metadata never carries enough material to recreate them.
+export const CastSession = z.object({
+  id: Id,
+  campaignId: Id,
+  label: z.string(),
+  createdBy: z.string(),
+  tokenPrefix: z.string(),
+  expiresAt: IsoDate,
+  accessCount: z.number().int().nonnegative(),
+  firstAccessedAt: IsoDate.nullable(),
+  lastAccessedAt: IsoDate.nullable(),
+  ...timestamps,
+});
+export type CastSession = z.infer<typeof CastSession>;
+export const CastSessionCreate = z.object({
+  label: z.string().trim().max(120).default(''),
+  expiresAt: z.string().datetime({ offset: true }),
+});
+export type CastSessionCreate = z.infer<typeof CastSessionCreate>;
+export const CastSessionCreated = z.object({
+  token: z.string(),
+  exitPin: z.string(),
+  url: z.string(),
+  session: CastSession,
+});
+export type CastSessionCreated = z.infer<typeof CastSessionCreated>;
+export const CastSessionExit = z.object({ pin: z.string().trim().min(4).max(20) });
+export type CastSessionExit = z.infer<typeof CastSessionExit>;
+export const CastSessionMutationResult = z.object({ revoked: z.number().int().nonnegative() });
+export type CastSessionMutationResult = z.infer<typeof CastSessionMutationResult>;
+
 // Payload served by the UNauthenticated GET /shared/recaps/:token endpoint.
 // Deliberately minimal — no internal ids, no dmSecret-bearing entities, just
 // what an absent player needs to catch up on the session.
@@ -2663,6 +2695,8 @@ export interface RuleSystemAdapter {
     representation?: AbilityRepresentation,
     level?: number,
   ): number;
+  /** Optional extra term for systems whose character initiative adds level separately (13th Age). */
+  levelInitiativeBonus?(level: number): number;
   /**
    * OPTIONAL — resolve an initiative modifier, or `null` when it cannot be derived
    * (issue #764). Systems that implement this (PF1e) let encounter/generator callers
@@ -3663,7 +3697,10 @@ export function neutralCheckCatalog(adapter: RuleSystemAdapter, character: Check
   const FLAT_PROFICIENCY = 2;
   const out: RollCheckDefinition[] = [];
 
-  const initMod = adapter.initiativeModifier(stats, 'score', character.level);
+  const initBase = adapter.initiativeModifier(stats, 'score', character.level);
+  const initLevel = adapter.levelInitiativeBonus?.(character.level) ?? 0;
+  const initMod = initBase + initLevel;
+  const initiativeLabel = adapter.id === ARCHMAGE_ADAPTER_ID ? 'DEX' : 'initiative';
   out.push({
     id: 'initiative',
     label: 'Initiative',
@@ -3672,7 +3709,13 @@ export function neutralCheckCatalog(adapter: RuleSystemAdapter, character: Check
     proficiency: null,
     favorite: true,
     modifier: initMod,
-    breakdown: [{ label: 'initiative', value: initMod }],
+    breakdown:
+      initLevel !== 0
+        ? [
+            { label: initiativeLabel, value: initBase },
+            { label: 'level', value: initLevel },
+          ]
+        : [{ label: initiativeLabel, value: initMod }],
     die: adapter.initiativeDie > 0 ? adapter.initiativeDie : 20,
     supportsAdvantage: true,
     supportsDegrees: false,
@@ -4357,12 +4400,24 @@ export const RuleSearchQuery = z.object({
   cursor: z.string().max(512).optional(),
 });
 
+export const RuleSearchFacet = z.object({
+  type: RuleEntryType,
+  label: z.string().min(1).max(80),
+  count: z.number().int().nonnegative(),
+});
+export type RuleSearchFacet = z.infer<typeof RuleSearchFacet>;
+
 /**
  * Paginated rule-search response (issue #613).
  *
  * Replaces the historical bare `RuleEntry[]` (hard-capped at 50 with no totals).
  * Always includes `total` + `hasMore` so clients never silently truncate; continue
- * with `nextCursor` when `hasMore` is true.
+ * with `nextCursor` when `hasMore` is true. `facets` reports the type categories the
+ * active pack actually contains (categories absent from the pack are omitted entirely),
+ * each carrying a live count for the current query/pack computed *before* the active
+ * type filter is applied — so a facet's count always equals what selecting it would
+ * return, and a category present in the pack but with no match for the current query is
+ * reported with `count: 0` rather than dropped from the chip row (issue #544).
  */
 export const RuleSearchPage = z.object({
   items: z.array(RuleEntry),
@@ -4370,6 +4425,7 @@ export const RuleSearchPage = z.object({
   hasMore: z.boolean(),
   nextCursor: z.string().max(512).optional(),
   limit: z.number().int().positive(),
+  facets: z.array(RuleSearchFacet).default([]),
 });
 export type RuleSearchPage = z.infer<typeof RuleSearchPage>;
 
@@ -5343,11 +5399,16 @@ export const AiDmSeat = z.object({
   enabled: z.boolean().default(false), // per-campaign on/off (in addition to the server flag)
   model: z.string().max(120).default(''), // informational label of the model/agent occupying the seat
   instructions: z.string().max(20_000).default(''), // the DM persona / house rules the connected agent should follow
-  // Per-campaign metering, in tokens. tokenBudget is a HARD cap: a turn whose cost
-  // would push tokensUsed past it is rejected (403). 0 = no budget → no turns allowed
-  // (a positive budget must be configured to run the seat).
+  // Per-campaign metering, in tokens. tokenBudget is a HARD cap enforced by
+  // reserving capacity before provider contact (#563). 0 = no budget → no turns
+  // allowed (a positive budget must be configured to run the seat).
   tokenBudget: z.number().int().nonnegative().max(1_000_000_000).default(0),
   tokensUsed: z.number().int().nonnegative().default(0),
+  tokensReserved: z.number().int().nonnegative().default(0), // active in-flight provider reservations
+  tokensRefunded: z.number().int().nonnegative().default(0), // cumulative unused reservation returned
+  tokensUnknown: z.number().int().nonnegative().default(0), // conservative spend when provider usage is unknown
+  tokensOverage: z.number().int().nonnegative().default(0), // known usage above its pre-call reservation
+  budgetRemaining: z.number().int().nonnegative().default(0), // after used + reserved + unknown
   turnCount: z.number().int().nonnegative().default(0),
   lastTurnAt: IsoDate.nullable().default(null),
   proactiveSettings: AiDmProactiveSettings.default({}),
@@ -5647,6 +5708,11 @@ export const AiUsageCampaignRow = z.object({
   model: z.string(),
   tokenBudget: z.number().int().nonnegative(), // per-campaign hard cap (0 = seat can't run)
   tokensUsed: z.number().int().nonnegative(),
+  tokensReserved: z.number().int().nonnegative().default(0),
+  tokensRefunded: z.number().int().nonnegative().default(0),
+  tokensUnknown: z.number().int().nonnegative().default(0),
+  tokensOverage: z.number().int().nonnegative().default(0),
+  budgetRemaining: z.number().int().nonnegative().default(0),
   turnCount: z.number().int().nonnegative(),
   lastTurnAt: IsoDate.nullable(),
 });
@@ -5664,6 +5730,10 @@ export type AiUsageModelRow = z.infer<typeof AiUsageModelRow>;
 // The full usage rollup (GET /settings/ai/usage) — aggregated live from seat counters.
 export const AiUsageRollup = z.object({
   totalTokensUsed: z.number().int().nonnegative(),
+  totalTokensReserved: z.number().int().nonnegative().default(0),
+  totalTokensRefunded: z.number().int().nonnegative().default(0),
+  totalTokensUnknown: z.number().int().nonnegative().default(0),
+  totalTokensOverage: z.number().int().nonnegative().default(0),
   totalTurns: z.number().int().nonnegative(),
   seatCount: z.number().int().nonnegative(), // configured seats (persisted rows)
   activeSeatCount: z.number().int().nonnegative(), // seats with enabled=true
@@ -5876,6 +5946,43 @@ export type Attachment = z.infer<typeof Attachment>;
 export const EncounterStatus = z.enum(['preparing', 'running', 'ended']);
 export type EncounterStatus = z.infer<typeof EncounterStatus>;
 
+/** One transparent component of an initiative modifier. */
+export const InitiativeBreakdownTerm = z.object({
+  label: z.string().min(1).max(80),
+  value: z.number().int(),
+});
+export type InitiativeBreakdownTerm = z.infer<typeof InitiativeBreakdownTerm>;
+
+/**
+ * Stored initiative provenance for a combatant. `roll` and `total` are null until
+ * initiative is rolled; `terms` explain the stored modifier (e.g. DEX + level for 13th Age).
+ */
+export const CombatantInitiativeBreakdown = z.object({
+  die: z.number().int().positive().max(100),
+  roll: z.number().int().nullable().default(null),
+  modifier: z.number().int(),
+  total: z.number().int().nullable().default(null),
+  terms: z.array(InitiativeBreakdownTerm).max(10).default([]),
+  formula: z.string().max(160).default(''),
+});
+export type CombatantInitiativeBreakdown = z.infer<typeof CombatantInitiativeBreakdown>;
+
+/** Why the 13th Age escalation die changed for this encounter. */
+export const EscalationDieHistorySource = z.enum(['start', 'round', 'hold', 'override', 'undo']);
+export type EscalationDieHistorySource = z.infer<typeof EscalationDieHistorySource>;
+
+/** Bounded, structured history used by UI, logs, MCP, and AI to explain escalation state. */
+export const EscalationDieHistoryEntry = z.object({
+  round: z.number().int().nonnegative(),
+  value: z.number().int().min(0).max(6),
+  source: EscalationDieHistorySource,
+  held: z.boolean().default(false),
+  override: z.number().int().min(0).max(6).nullable().default(null),
+  note: z.string().max(160).default(''),
+  at: IsoDate,
+});
+export type EscalationDieHistoryEntry = z.infer<typeof EscalationDieHistoryEntry>;
+
 // ---------- VTT: grid, token size, fog of war (issue #40, phases 2–3) ----------
 
 /**
@@ -5986,6 +6093,13 @@ export const Encounter = z.object({
   name: z.string().min(1).max(120),
   status: EncounterStatus.default('preparing'),
   round: z.number().int().nonnegative().default(0),
+  // 13th Age / Archmage Engine escalation die state (issue #542). Non-Archmage campaigns
+  // keep the inert defaults. The current value is stored rather than derived-only so DM
+  // hold/override decisions, undo, logs, MCP, and AI all observe the same state.
+  escalationDie: z.number().int().min(0).max(6).default(0),
+  escalationDieHeld: z.boolean().default(false),
+  escalationDieOverride: z.number().int().min(0).max(6).nullable().default(null),
+  escalationDieHistory: z.array(EscalationDieHistoryEntry).max(200).default([]),
   // Positional turn cursor, kept in lockstep with `currentCombatantId` as a
   // display/back-compat convenience — it is the index of the current combatant in
   // the server-sorted order. `currentCombatantId` is the AUTHORITATIVE pointer
@@ -6105,6 +6219,14 @@ export const EncounterUpdate = z.object({
   // from non-DM reads; the DM "reveals" it by patching hidden back to false.
   hidden: z.boolean().optional(),
 });
+
+/** DM control for the 13th Age escalation die: hold automatic advancement and/or override it. */
+export const EncounterEscalationUpdate = z.object({
+  held: z.boolean().optional(),
+  // null clears an override; omitted leaves the current override unchanged.
+  override: z.number().int().min(0).max(6).nullable().optional(),
+});
+export type EncounterEscalationUpdate = z.infer<typeof EncounterEscalationUpdate>;
 
 // ---------- procedural battle-map generation (issue #306) ----------
 
@@ -6930,6 +7052,7 @@ export const Combatant = z.object({
   name: z.string().min(1).max(120),
   initiative: z.number().int().nullable().default(null),
   initMod: z.number().int().default(0),
+  initiativeBreakdown: CombatantInitiativeBreakdown.nullable().default(null),
   // Initiative side/group for OSR group-initiative variants (issue #765). Combatants sharing
   // the same group name (e.g. "party", "monsters") roll one d6 for the whole side. null =
   // individual initiative (default for 5e and individual-mode OSR).
@@ -7182,6 +7305,9 @@ export const EncounterEventMetadata = z.object({
   spellLevelSpent: z.number().int().optional(),
   undoOfChainId: z.string().max(64).optional(),
   ruleSystem: z.string().max(40).optional(),
+  escalationDie: z.number().int().min(0).max(6).optional(),
+  escalationApplied: z.boolean().optional(),
+  escalationPrevented: z.boolean().optional(),
 });
 export type EncounterEventMetadata = z.infer<typeof EncounterEventMetadata>;
 

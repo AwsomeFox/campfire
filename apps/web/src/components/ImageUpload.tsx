@@ -114,6 +114,17 @@ export function encounterMapUrl(encounterId: number, revision: string): string {
   return `${API}/encounters/${encounterId}/map?revision=${encodeURIComponent(revision)}`;
 }
 
+/**
+ * Cast-capability map endpoint (issue #547). An <img> cannot send an Authorization
+ * header, so a cast display MUST NOT point at encounterMapUrl(): that route
+ * authenticates from the session cookie, and on a shared TV that still holds the
+ * DM's cookie it would return the unfogged SOURCE map. This URL carries the cast
+ * capability instead, and the server pins the projection to `viewer`.
+ */
+export function castEncounterMapUrl(castToken: string, encounterId: number, revision: string): string {
+  return `${API}/cast/${encodeURIComponent(castToken)}/encounters/${encounterId}/map?revision=${encodeURIComponent(revision)}`;
+}
+
 /** Dev-auth headers (mirrors the JSON api client) for the multipart helpers below. */
 function devAuthHeaders(): Record<string, string> {
   const headers: Record<string, string> = {};

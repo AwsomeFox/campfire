@@ -42,6 +42,29 @@ const MOCK_STATUS = {
     lastChecksum: 'deadbeef'.repeat(8),
     lastError: '',
   },
+  disk: {
+    freeBytes: 8 * 1024 * 1024 * 1024,
+    totalBytes: 32 * 1024 * 1024 * 1024,
+    reserveBytes: 512 * 1024 * 1024,
+    estimatedNextBytes: 2048000,
+    lowSpace: false,
+  },
+  retention: {
+    policy: {
+      keepCount: 14,
+      keepDays: 30,
+      maxTotalBytes: null,
+      protectLastGood: true,
+    },
+    archiveCount: 1,
+    totalBytes: 2048000,
+    protectedLastGoodName: 'campfire-backup-2026-07-20T18-00-00-000Z.zip',
+    pruneCount: 0,
+    prunedBytes: 0,
+    lastPruneAt: null,
+    lastPruneError: '',
+  },
+  alerts: [],
   onDisk: [{ name: 'campfire-backup-2026-07-20T18-00-00-000Z.zip', bytes: 2048000, mtime: '2026-07-20T18:00:00.000Z' }],
 };
 
