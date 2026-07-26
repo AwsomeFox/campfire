@@ -161,6 +161,7 @@ export const MCP_TOOL_NAMES = [
   'install_rule_pack',
   'uninstall_rule_pack',
   'roll_dice',
+  'roll_action_dice',
   'saving_throw',
   'roll_check',
   'request_check',

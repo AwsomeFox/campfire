@@ -47,6 +47,7 @@ export const MCP_REST_PARITY_ISSUE_683: readonly McpRestParityEntry[] = [
   { rest: 'POST /locations/:id/restore', mcpTool: 'restore_location' },
   { rest: 'POST /notes/:id/restore', mcpTool: 'restore_note' },
   // encounters
+  { rest: 'POST /campaigns/:campaignId/roll/action', mcpTool: 'roll_action_dice' },
   { rest: 'POST /encounters/:id/reopen', mcpTool: 'reopen_encounter' },
   // campaign library monsters (issue #425)
   { rest: 'GET /campaigns/:campaignId/library/monsters', mcpTool: 'list_campaign_library_monsters' },

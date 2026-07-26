@@ -1,6 +1,13 @@
 import { randomInt } from 'node:crypto';
 import { BadRequestException } from '@nestjs/common';
-import { DiceExprPattern, type RollResult } from '@campfire/schema';
+import {
+  DiceExprPattern,
+  rollActionDice,
+  type ActionDiceRoll,
+  type ExplodingDieRoll,
+  type RollResult,
+  type RollResultTerm,
+} from '@campfire/schema';
 
 /**
  * Tiny, SAFE dice expression parser/roller — no eval(), no dynamic Function().
@@ -227,6 +234,49 @@ function keptIndices(rolls: number[], keep: KeepSpec): number[] {
 function rollOne(sides: number): number {
   // randomInt's max is exclusive -> [1, sides]
   return randomInt(1, sides + 1);
+}
+
+function flattenExplodingDice(dice: ExplodingDieRoll[]): number[] {
+  return dice.flatMap((d) => d.faces);
+}
+
+function actionDieTerm(die: ExplodingDieRoll, discarded = false): RollResultTerm {
+  return {
+    term: `${discarded ? 'discarded ' : ''}d${die.sides}!`,
+    value: discarded ? 0 : die.total,
+    rolls: die.faces,
+    ...(discarded ? { kept: [] } : {}),
+    sides: die.sides,
+    exploded: die.faces.length > 1,
+    ...(discarded ? { discarded: true } : {}),
+  };
+}
+
+/** Convert schema's pure Open Legend action roll into the persisted dice-log shape. */
+export function actionDiceRollToRollResult(action: ActionDiceRoll): RollResult {
+  const keptFaces = flattenExplodingDice(action.dice);
+  const discardedFaces = action.discarded ? flattenExplodingDice(action.discarded) : [];
+  const pool = action.pool.map((sides) => `d${sides}!`).join(' + ');
+  const result: RollResult = {
+    // Keep the expression human-readable and non-d20-shaped so crit/fumble UI never treats an
+    // Open Legend pool's anchoring d20 as a 5e natural 20/1 attack result.
+    expr: `Open Legend action score ${action.score}`,
+    rolls: action.disadvantage ? [...keptFaces, ...discardedFaces] : keptFaces,
+    total: action.total,
+    source: 'rolled',
+    label: `Action dice (${pool})`,
+    terms: [
+      ...action.dice.map((die) => actionDieTerm(die)),
+      ...(action.discarded ?? []).map((die) => actionDieTerm(die, true)),
+    ],
+  };
+  if (action.disadvantage) result.kept = keptFaces;
+  return result;
+}
+
+/** Roll Open Legend action dice with the server's crypto-backed roller. */
+export function rollOpenLegendActionDice(score: number): RollResult {
+  return actionDiceRollToRollResult(rollActionDice(score, rollOne));
 }
 
 /** Per-term breakdown entry surfaced to the UI (issue #536), matching RollResult.terms. */

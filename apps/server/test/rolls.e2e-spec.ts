@@ -2,8 +2,9 @@ import request from 'supertest';
 import { eq } from 'drizzle-orm';
 import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
 import { DB, type DrizzleDb } from '../src/db/db.module';
-import { diceRolls } from '../src/db/schema';
+import { campaigns, diceRolls } from '../src/db/schema';
 import { RollsService, DEFAULT_DICE_ROLLS_RETENTION } from '../src/modules/rolls/rolls.service';
+import { OPEN_LEGEND_PACK_SLUG } from '@campfire/schema';
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' };
 const player = { 'x-dev-role': 'player', 'x-dev-user': 'p-1' };
@@ -176,6 +177,61 @@ describe('shared dice log (e2e)', () => {
 
     const feed = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls?limit=5`).set(player);
     expect(feed.body.some((r: { id: number }) => r.id === res.body.id)).toBe(true);
+  });
+
+  it('POST /campaigns/:id/roll/action persists one Open Legend exploding-pool event', async () => {
+    const server = ctx.app.getHttpServer();
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Open Legend Dice' });
+    expect(campRes.status).toBe(201);
+    const openLegendId = campRes.body.id;
+    await db.update(campaigns).set({ ruleSystem: OPEN_LEGEND_PACK_SLUG }).where(eq(campaigns.id, openLegendId));
+
+    const res = await request(server)
+      .post(`/api/v1/campaigns/${openLegendId}/roll/action`)
+      .set(player)
+      .send({ score: 5, attribute: 'Might', dc: 15 });
+    expect(res.status).toBe(201);
+    expect(res.body.expr).toBe('Open Legend action score 5');
+    expect(res.body.label).toContain('Might');
+    expect(res.body.dc).toBe(15);
+    expect(typeof res.body.success).toBe('boolean');
+    expect(res.body.terms.map((t: { sides?: number }) => t.sides)).toEqual([20, 6, 6]);
+    expect(res.body.terms.reduce((sum: number, t: { value: number }) => sum + t.value, 0)).toBe(res.body.total);
+    expect(res.body.rolls).toEqual(res.body.terms.flatMap((t: { rolls?: number[] }) => t.rolls ?? []));
+
+    const feed = await request(server).get(`/api/v1/campaigns/${openLegendId}/rolls?limit=5`).set(player);
+    expect(feed.status).toBe(200);
+    const persisted = feed.body.find((r: { id: number }) => r.id === res.body.id);
+    expect(persisted.terms).toEqual(res.body.terms);
+  });
+
+  it('POST /campaigns/:id/roll/action records score-zero disadvantage', async () => {
+    const server = ctx.app.getHttpServer();
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Open Legend Disadvantage' });
+    expect(campRes.status).toBe(201);
+    const openLegendId = campRes.body.id;
+    await db.update(campaigns).set({ ruleSystem: OPEN_LEGEND_PACK_SLUG }).where(eq(campaigns.id, openLegendId));
+
+    const res = await request(server)
+      .post(`/api/v1/campaigns/${openLegendId}/roll/action`)
+      .set(player)
+      .send({ score: 0, attribute: 'Agility' });
+    expect(res.status).toBe(201);
+    expect(res.body.kept).toBeDefined();
+    expect(res.body.kept.length).toBeGreaterThanOrEqual(1);
+    expect(res.body.terms.some((t: { discarded?: boolean }) => t.discarded === true)).toBe(true);
+    expect(res.body.total).toBe(res.body.kept.reduce((sum: number, face: number) => sum + face, 0));
+  });
+
+  it('POST /campaigns/:id/roll/action rejects campaigns without an attribute dice pool', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/roll/action`)
+      .set(player)
+      .send({ score: 4, attribute: 'Might' });
+    expect(res.status).toBe(400);
   });
 
   it('rolls are scoped per campaign — another campaign has its own empty feed', async () => {

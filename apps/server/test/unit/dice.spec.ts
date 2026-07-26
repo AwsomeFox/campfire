@@ -1,4 +1,5 @@
 import { BadRequestException } from '@nestjs/common';
+import { rollActionDice as rollOpenLegendActionDicePure } from '@campfire/schema';
 import {
   parseDiceExpr,
   parseCompoundDiceExpr,
@@ -437,5 +438,48 @@ describe('dice — rollDice (compound)', () => {
 
   it('rejects an out-of-bounds die hidden mid-expression via the 400 path', () => {
     expect(() => rollDice('1d20+1d7+3')).toThrow(BadRequestException);
+  });
+});
+
+describe('Open Legend action dice — rollActionDice', () => {
+  function scriptedRoll(values: number[]): (sides: number) => number {
+    const queue = [...values];
+    return (sides: number) => {
+      const next = queue.shift();
+      if (next === undefined) throw new Error(`No scripted d${sides} roll left`);
+      if (next < 1 || next > sides) throw new Error(`Scripted roll ${next} is outside d${sides}`);
+      return next;
+    };
+  }
+
+  it('records multi-explosion chains on more than one die', () => {
+    const result = rollOpenLegendActionDicePure(4, scriptedRoll([20, 20, 3, 10, 2]));
+    expect(result.pool).toEqual([20, 10]);
+    expect(result.dice).toEqual([
+      { sides: 20, faces: [20, 20, 3], total: 43 },
+      { sides: 10, faces: [10, 2], total: 12 },
+    ]);
+    expect(result.total).toBe(55);
+    expect(result.disadvantage).toBe(false);
+  });
+
+  it('rolls a mixed score-5 pool as one summed action', () => {
+    const result = rollOpenLegendActionDicePure(5, scriptedRoll([7, 6, 1, 2]));
+    expect(result.pool).toEqual([20, 6, 6]);
+    expect(result.dice).toEqual([
+      { sides: 20, faces: [7], total: 7 },
+      { sides: 6, faces: [6, 1], total: 7 },
+      { sides: 6, faces: [2], total: 2 },
+    ]);
+    expect(result.total).toBe(16);
+  });
+
+  it('rolls score zero at disadvantage and keeps the lower exploding total', () => {
+    const result = rollOpenLegendActionDicePure(0, scriptedRoll([20, 1, 5]));
+    expect(result.pool).toEqual([20]);
+    expect(result.disadvantage).toBe(true);
+    expect(result.dice).toEqual([{ sides: 20, faces: [5], total: 5 }]);
+    expect(result.discarded).toEqual([{ sides: 20, faces: [20, 1], total: 21 }]);
+    expect(result.total).toBe(5);
   });
 });

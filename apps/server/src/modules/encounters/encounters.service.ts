@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, ForbiddenException, Inject, Inj
 import { and, eq, gt, inArray, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
-import { ActiveEffect, AoeTemplate, CombatantCreate, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, EncounterCommit, EncounterCreate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, STARFINDER_ADAPTER_ID, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, defaultCombatantStatblock, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
+import { ActiveEffect, AoeTemplate, CombatantCreate, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, EncounterCommit, EncounterCreate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, STARFINDER_ADAPTER_ID, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, defaultCombatantStatblock, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
 import { z as zod } from 'zod';
 import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -12,7 +12,7 @@ import { notDeleted } from '../../common/soft-delete';
 import { filterHidden, isVisibleTo, resolveCreateHidden } from '../../common/redact';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { fogConcealsPixels, parseFogState } from '../../common/fog';
-import { rollDice, rollInitiative } from '../../common/dice';
+import { rollDice, rollInitiative, rollOpenLegendActionDice } from '../../common/dice';
 import { foldForSearch, foldedIncludes } from '../../common/text-search';
 import { RollsService } from '../rolls/rolls.service';
 import { AuditService } from '../audit/audit.service';
@@ -64,6 +64,7 @@ type EncounterReopenInput = z.infer<typeof EncounterReopen>;
 type CombatantCreateInput = z.infer<typeof CombatantCreate>;
 type CombatantUpdateInput = z.infer<typeof CombatantUpdate>;
 type RollRequestInput = z.infer<typeof RollRequest>;
+type ActionRollRequestInput = z.infer<typeof ActionRollRequest>;
 type ManualRollRequestInput = z.infer<typeof ManualRollRequest>;
 
 /**
@@ -4849,6 +4850,48 @@ export class EncountersService {
       result.dc = input.dc;
       result.success = result.total >= input.dc;
     }
+    const persisted = await this.rolls.record(campaignId, result, user);
+
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'dice.roll',
+      entityType: null,
+      entityId: null,
+      campaignId,
+      detail:
+        `${result.label ? `${result.label}: ` : ''}${result.expr} = ${result.total}` +
+        (result.dc != null ? ` vs DC ${result.dc} (${result.success ? 'success' : 'fail'})` : ''),
+    });
+
+    return persisted;
+  }
+
+  /**
+   * Rolls an adapter-native action dice pool (Open Legend) for a campaign. The request carries
+   * a native attribute score only; the server gates on adapter.attributeDicePool, runs the
+   * schema exploding-pool resolver with crypto RNG, and persists the pool/explosion/disadvantage
+   * breakdown as ONE dice-log event.
+   */
+  async rollActionDiceForCampaign(
+    campaignId: number,
+    input: ActionRollRequestInput,
+    user: RequestUser,
+    role: Role,
+  ): Promise<DiceRoll> {
+    const adapter = await this.adapterForCampaign(campaignId);
+    if (!adapter.attributeDicePool) {
+      throw new BadRequestException(`${adapter.label} does not support native action dice pools`);
+    }
+
+    const result = rollOpenLegendActionDice(input.score);
+    const label = input.label?.trim() || input.attribute?.trim();
+    if (label) result.label = `${label}: ${result.label ?? 'Action dice'}`;
+    if (typeof input.dc === 'number') {
+      result.dc = input.dc;
+      result.success = result.total >= input.dc;
+    }
+
     const persisted = await this.rolls.record(campaignId, result, user);
 
     await this.audit.log({

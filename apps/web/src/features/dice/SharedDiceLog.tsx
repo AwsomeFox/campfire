@@ -12,7 +12,7 @@
  */
 import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import type { DiceRoll } from '@campfire/schema';
+import { ruleSystemAdapter, type ActionRollRequest, type DiceRoll } from '@campfire/schema';
 import { api, API, ApiError, getWithHeaders } from '../../lib/api';
 import { Card, TextInput, Btn } from '../../components/ui';
 import { useAnnounce } from '../../components/Announcer';
@@ -41,6 +41,7 @@ import {
   rememberLocalDiceAnnouncement,
   takeLocalDiceAnnouncements,
 } from './localDiceAnnouncements';
+import { useCampaign } from '../../app/CampaignContext';
 
 const POLL_MS = 5000;
 
@@ -57,6 +58,8 @@ function timeAgo(iso: string): string {
 export function SharedDiceLog({ campaignId, compact = false }: { campaignId: number; compact?: boolean }) {
   const { t } = useTranslation();
   const { canMemberWrite } = useCampaignAccessFor(campaignId);
+  const campaign = useCampaign(campaignId);
+  const supportsActionDice = Boolean(ruleSystemAdapter(campaign?.ruleSystem).attributeDicePool);
   const limit = compact ? 4 : 8;
   const [expr, setExpr] = useState('1d20');
   const [physical, setPhysical] = useState<PhysicalRollFormFields>(EMPTY_PHYSICAL_ROLL_FORM);
@@ -213,6 +216,45 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
     [campaignId, limit, announce, beginRollAnimation, cancelRollAnimation, showRoll, t],
   );
 
+  const submitActionRoll = useCallback(
+    async (payload: ActionRollRequest): Promise<DiceRoll | null> => {
+      setRolling(true);
+      setError(null);
+      beginRollAnimation(t('dice.rollActionDice'));
+      try {
+        const result = await api.post<DiceRoll>(`${API}/campaigns/${campaignId}/roll/action`, payload);
+        const batch = formatDiceRollAnnouncementBatch([result], t);
+        if (batch) {
+          rememberLocalDiceAnnouncement(campaignId, result.id);
+          announce(batch, {
+            dedupeKey: `dice-roll:${campaignId}:1:${result.id}:${result.id}`,
+          });
+        }
+        setRolls((prev) => {
+          rollsCampaignIdRef.current = campaignId;
+          const next = [result, ...prev.filter((r) => r.id !== result.id)].slice(0, limit);
+          const previous = rollAnnouncementRef.current;
+          const cursor = previous?.campaignId === campaignId ? previous.cursor : null;
+          const advanced = advanceDiceRollAnnouncements(next, cursor);
+          rollAnnouncementRef.current = { campaignId, cursor: advanced.cursor };
+          return next;
+        });
+        setJustRolledId(result.id);
+        showRoll(result);
+        return result;
+      } catch (err) {
+        cancelRollAnimation();
+        const message = err instanceof ApiError ? err.message : t('dice.rollError');
+        setError(message);
+        announce(message, { assertive: true });
+        return null;
+      } finally {
+        setRolling(false);
+      }
+    },
+    [campaignId, limit, announce, beginRollAnimation, cancelRollAnimation, showRoll, t],
+  );
+
   async function rollFromInput(e: FormEvent) {
     e.preventDefault();
     await submitExpr(expr);
@@ -281,7 +323,14 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
       <span className="card-kicker">{compact ? t('dice.dice') : t('dice.diceLog')}</span>
       {canMemberWrite ? (
         <>
-          <DiceTray onSubmitExpr={submitExpr} rolling={rolling} campaignId={campaignId} compact={compact} />
+          <DiceTray
+            onSubmitExpr={submitExpr}
+            onSubmitActionRoll={submitActionRoll}
+            supportsActionDice={supportsActionDice}
+            rolling={rolling}
+            campaignId={campaignId}
+            compact={compact}
+          />
           <details className="dice-advanced">
             <summary className="text-muted" style={{ fontSize: 11.5, cursor: 'pointer' }}>
               {t('dice.advancedSummary')}
@@ -387,7 +436,13 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
       >
         {rolls.length === 0 ? (
           <p className="text-muted" style={{ fontSize: 11.5, margin: 0 }}>
-            {compact ? t('dice.emptyCompact') : t('dice.emptyFull')}
+            {supportsActionDice
+              ? compact
+                ? t('dice.emptyActionCompact')
+                : t('dice.emptyActionFull')
+              : compact
+                ? t('dice.emptyCompact')
+                : t('dice.emptyFull')}
           </p>
         ) : (
           rolls.map((r) => {

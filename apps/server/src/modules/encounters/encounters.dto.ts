@@ -1,5 +1,5 @@
 import { createZodDto } from 'nestjs-zod';
-import { EncounterCreate, EncounterGenerate, EncounterPreviewRequest, EncounterCommit, EncounterUpdate, EncounterReopen, CombatantCreate, CombatantUpdate, CombatantTurnStatePatch, EncounterEndTurn, RollRequest, ManualRollRequest, MapPing, ExpectedUpdatedAt, ActionResolveRequest, ActionResolution, ActionUndoToken } from '@campfire/schema';
+import { EncounterCreate, EncounterGenerate, EncounterPreviewRequest, EncounterCommit, EncounterUpdate, EncounterReopen, CombatantCreate, CombatantUpdate, CombatantTurnStatePatch, EncounterEndTurn, RollRequest, ActionRollRequest, ManualRollRequest, MapPing, ExpectedUpdatedAt, ActionResolveRequest, ActionResolution, ActionUndoToken } from '@campfire/schema';
 
 export class EncounterCreateDto extends createZodDto(EncounterCreate.strict()) {}
 // Encounter generator request (issue #304). .strict() so an unknown/misspelled key 400s
@@ -29,6 +29,7 @@ export class EncounterUpdateDto extends createZodDto(EncounterUpdate.extend({ ex
 export class CombatantCreateDto extends createZodDto(CombatantCreate.strict()) {}
 export class CombatantUpdateDto extends createZodDto(CombatantUpdate.strict()) {}
 export class RollRequestDto extends createZodDto(RollRequest.strict()) {}
+export class ActionRollRequestDto extends createZodDto(ActionRollRequest.strict()) {}
 export class ManualRollRequestDto extends createZodDto(ManualRollRequest.strict()) {}
 // Transient battle-map ping (issue #238) — a one-shot SSE broadcast, nothing persisted.
 export class MapPingDto extends createZodDto(MapPing.strict()) {}

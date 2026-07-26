@@ -6,7 +6,7 @@ import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { contentDispositionHeader } from '../attachments/filename';
 import { EncountersService } from './encounters.service';
-import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, RollRequestDto, ManualRollRequestDto, MapPingDto, ActionResolveRequestDto, ActionResolutionDto, ActionUndoTokenDto } from './encounters.dto';
+import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, RollRequestDto, ActionRollRequestDto, ManualRollRequestDto, MapPingDto, ActionResolveRequestDto, ActionResolutionDto, ActionUndoTokenDto } from './encounters.dto';
 import { EncounterMapService } from './encounter-map.service';
 import { ActionResolverService } from './action-resolver.service';
 import type { Request, Response } from 'express';
@@ -159,6 +159,26 @@ export class CampaignRollController {
     // write: rolls are audited activity — an archived (read-only) campaign takes no new rolls.
     const role = await this.access.requireMember(user, campaignId, { write: true });
     return this.encounters.rollDiceForCampaign(campaignId, body, user, role);
+  }
+
+  /** Native Open Legend-style action dice: attribute score -> exploding pool. */
+  @Post('action')
+  @ApiOperation({
+    summary: 'Roll native action dice',
+    description:
+      'Any campaign member. For adapters with an attribute dice pool (Open Legend), sends a native attribute score; ' +
+      'the server resolves the exploding pool, rolls with crypto RNG, persists one campaign-shared dice-log event, ' +
+      'and returns the full pool/explosion/disadvantage breakdown.',
+  })
+  @ApiResponse({ status: 201, description: 'Persisted action roll with pool and explosion breakdown.' })
+  @ApiResponse({ status: 400, description: 'Campaign rule system does not support action dice, or score is invalid.' })
+  async rollAction(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @Body() body: ActionRollRequestDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const role = await this.access.requireMember(user, campaignId, { write: true });
+    return this.encounters.rollActionDiceForCampaign(campaignId, body, user, role);
   }
 
   /** Log a paper-table / physical roll without Campfire generating dice (issue #673). */
