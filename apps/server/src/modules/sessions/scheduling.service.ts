@@ -55,6 +55,16 @@ function icsTokenIsExpired(expiresAt: string | null): boolean {
   return new Date(expiresAt).getTime() < Date.now();
 }
 
+/** ScheduledSessionCreate's duration bounds — a NEW live night is at least 15 minutes. */
+const CREATE_MIN_DURATION_MINUTES = 15;
+const CREATE_MAX_DURATION_MINUTES = 24 * 60;
+
+/** Clamp a copied duration into the create-time window (see duplicate()). */
+function clampToCreateDuration(minutes: number): number {
+  if (!Number.isFinite(minutes)) return CREATE_MIN_DURATION_MINUTES;
+  return Math.min(CREATE_MAX_DURATION_MINUTES, Math.max(CREATE_MIN_DURATION_MINUTES, Math.floor(minutes)));
+}
+
 type ScheduledSessionCreateInput = z.infer<typeof ScheduledSessionCreate>;
 type ScheduledSessionUpdateInput = z.infer<typeof ScheduledSessionUpdate>;
 type ScheduledSessionCancelInput = z.infer<typeof ScheduledSessionCancel>;
@@ -554,7 +564,12 @@ export class SchedulingService {
       existing.campaignId,
       {
         scheduledAt: input.scheduledAt ?? existing.scheduledAt,
-        durationMinutes: input.durationMinutes ?? existing.durationMinutes,
+        // A duplicate is a brand-new LIVE night, so it must satisfy the create-time
+        // floor that ScheduledSessionCreate enforces (min 15). The source row can sit
+        // below it — mid-session "End session" (#818) shrinks durationMinutes to 0 —
+        // and create() takes an already-typed input without re-parsing, so copying the
+        // raw value would mint a live schedule the create DTO would have rejected.
+        durationMinutes: input.durationMinutes ?? clampToCreateDuration(existing.durationMinutes),
         title: input.title ?? existing.title,
         location: input.location ?? existing.location,
         notes: input.notes ?? existing.notes,
@@ -637,6 +652,55 @@ export class SchedulingService {
     }
     this.emitScheduleUpdated(outcome.campaignId, scheduleId);
     return this.getWithRsvps(scheduleId);
+  }
+
+  /**
+   * Tear down a schedule↔session link from the SESSION side, both directions at once.
+   *
+   * `SessionUpdate.scheduledSessionId` is nullable, so REST/MCP `update_session` can
+   * send an explicit `null`. Clearing only `sessions.scheduled_session_id` would strand
+   * the schedule as `status='completed'` with `session_id` still pointing back — a
+   * one-directional dangling link that renders a dead "Recap" link in the Schedule tab
+   * and that no later linkSession() can repair (the reciprocal-row guard would keep
+   * rejecting it). Both sides are cleared in one better-sqlite3 transaction, and a
+   * schedule that was only `completed` BECAUSE of this link returns to `scheduled`.
+   *
+   * Any schedule row pointing at this session is swept, so pre-existing half-links from
+   * older data heal on the next unlink instead of persisting forever.
+   */
+  async unlinkSession(sessionId: number, user: RequestUser, role: Role): Promise<void> {
+    const outcome = this.db.transaction((tx) => {
+      const [session] = tx.select().from(sessions).where(eq(sessions.id, sessionId)).limit(1).all();
+      if (!session) throw new NotFoundException(`Session ${sessionId} not found`);
+      const linked = tx
+        .select()
+        .from(scheduledSessions)
+        .where(eq(scheduledSessions.sessionId, sessionId))
+        .all();
+      const ts = nowIso();
+      tx.update(sessions).set({ scheduledSessionId: null, updatedAt: ts }).where(eq(sessions.id, sessionId)).run();
+      for (const schedule of linked) {
+        tx.update(scheduledSessions)
+          // Only 'completed' is an artefact of the link; a cancelled row keeps its
+          // cancellation lifecycle state (and its cancellation metadata) untouched.
+          .set({ status: schedule.status === 'completed' ? 'scheduled' : schedule.status, sessionId: null, updatedAt: ts })
+          .where(eq(scheduledSessions.id, schedule.id))
+          .run();
+      }
+      return { campaignId: session.campaignId, scheduleIds: linked.map((s) => s.id) };
+    });
+    for (const scheduleId of outcome.scheduleIds) {
+      await this.audit.log({
+        actor: auditActor(user),
+        actorRole: role,
+        action: 'schedule.unlink',
+        entityType: 'session',
+        entityId: scheduleId,
+        campaignId: outcome.campaignId,
+        detail: `session=${sessionId}`,
+      });
+      this.emitScheduleUpdated(outcome.campaignId, scheduleId);
+    }
   }
 
   // ----- RSVPs (availability) -----

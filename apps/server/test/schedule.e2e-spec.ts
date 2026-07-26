@@ -388,6 +388,82 @@ describe('session scheduling (e2e)', () => {
     });
   });
 
+  it('clearing scheduledSessionId unlinks BOTH sides instead of stranding the schedule', async () => {
+    const server = ctx.app.getHttpServer();
+    const scheduled = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/schedule`)
+      .set(dm)
+      .send({ scheduledAt: '2099-11-17T18:00:00Z', title: 'Unlink me' });
+    expect(scheduled.status).toBe(201);
+    const scheduleId = scheduled.body.id;
+
+    const recap = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/sessions`)
+      .set(dm)
+      .send({
+        title: 'Unlink recap',
+        playedAt: '2099-11-17',
+        recap: 'Linked, then unlinked.',
+        scheduledSessionId: scheduleId,
+      });
+    expect(recap.status).toBe(201);
+
+    const linked = await request(server).get(`/api/v1/schedule/${scheduleId}`).set(player);
+    expect(linked.body).toMatchObject({ status: 'completed', sessionId: recap.body.id });
+
+    const unlink = await request(server)
+      .patch(`/api/v1/sessions/${recap.body.id}`)
+      .set(dm)
+      .send({ scheduledSessionId: null });
+    expect(unlink.status).toBe(200);
+    expect(unlink.body.scheduledSessionId).toBeNull();
+
+    // The schedule must not stay 'completed' pointing back at a recap that no longer
+    // claims it — that half-link renders a dead Recap link and blocks every future link.
+    const afterUnlink = await request(server).get(`/api/v1/schedule/${scheduleId}`).set(player);
+    expect(afterUnlink.status).toBe(200);
+    expect(afterUnlink.body).toMatchObject({ id: scheduleId, status: 'scheduled', sessionId: null });
+
+    // Back to 'scheduled' means it is live again, and re-linking is possible.
+    const upcoming = await request(server).get(`/api/v1/campaigns/${campaignId}/schedule/upcoming`).set(player);
+    expect(upcoming.body.some((s: { id: number }) => s.id === scheduleId)).toBe(true);
+
+    const relink = await request(server)
+      .patch(`/api/v1/sessions/${recap.body.id}`)
+      .set(dm)
+      .send({ scheduledSessionId: scheduleId });
+    expect(relink.status).toBe(200);
+    expect(relink.body.scheduledSessionId).toBe(scheduleId);
+  });
+
+  it('duplicating a session whose window was shrunk below the create floor clamps the duration', async () => {
+    const server = ctx.app.getHttpServer();
+    const created = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/schedule`)
+      .set(dm)
+      .send({ scheduledAt: '2099-11-24T18:00:00Z', durationMinutes: 240, title: 'Ended early' });
+    expect(created.status).toBe(201);
+
+    // Mid-session "End session" (#818) legitimately shrinks a live night below the
+    // 15-minute create floor; ScheduledSessionUpdate allows min 0.
+    const shrink = await request(server)
+      .patch(`/api/v1/schedule/${created.body.id}`)
+      .set(dm)
+      .send({ durationMinutes: 0 });
+    expect(shrink.status).toBe(200);
+    expect(shrink.body.durationMinutes).toBe(0);
+
+    // Duplicate copies the source duration when the caller omits it (REST/MCP path).
+    // The copy is a NEW live night, so it must still satisfy the create floor of 15.
+    const duplicate = await request(server)
+      .post(`/api/v1/schedule/${created.body.id}/duplicate`)
+      .set(dm)
+      .send({ scheduledAt: '2099-12-01T18:00:00Z' });
+    expect(duplicate.status).toBe(201);
+    expect(duplicate.body.status).toBe('scheduled');
+    expect(duplicate.body.durationMinutes).toBeGreaterThanOrEqual(15);
+  });
+
   describe('in-progress schedule window (issue #818)', () => {
     let liveCampaignId: number;
 

@@ -362,7 +362,7 @@ takeover), and — like everything else — every action is audit-logged with ac
 
 ## Roadmap
 
-Shipped: entities + notes + OpenAPI, OIDC/roles, MCP server (217 tools), media & maps
+Shipped: entities + notes + OpenAPI, OIDC/roles, MCP server (218 tools), media & maps
 (attachments) with fog of war, real rule systems from open sources (5e / PF2e / Open
 Legend live), encounter/combat tracker, the full game-icons.net icon set, a DM-approval
 proposal queue, the **AI Dungeon Master** (co-DM + driver) and a **scheduled AI scribe**

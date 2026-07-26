@@ -514,6 +514,11 @@ export class SessionsService {
       await this.assertNumberAvailable(existing.campaignId, input.number, id);
     }
     const shouldLinkSchedule = input.scheduledSessionId != null && input.scheduledSessionId !== existing.scheduledSessionId;
+    // An explicit `scheduledSessionId: null` is an UNLINK, not a plain column write —
+    // it has to clear the schedule's side too, or the schedule stays 'completed' with
+    // session_id pointing at this recap (dangling half-link). Delegated to
+    // SchedulingService.unlinkSession so both rows move in one transaction.
+    const shouldUnlinkSchedule = input.scheduledSessionId === null && existing.scheduledSessionId != null;
     if (shouldLinkSchedule) {
       const schedule = await this.scheduling.getRowOrThrow(input.scheduledSessionId!);
       if (schedule.campaignId !== existing.campaignId) {
@@ -536,7 +541,7 @@ export class SessionsService {
       });
     }
     const { scheduledSessionId, ...restInput } = input;
-    const updatePatch = shouldLinkSchedule ? restInput : input;
+    const updatePatch = shouldLinkSchedule || shouldUnlinkSchedule ? restInput : input;
     let [row] = await this.db
       .update(sessions)
       .set({ ...updatePatch, updatedAt: nowIso() })
@@ -559,6 +564,9 @@ export class SessionsService {
 
     if (shouldLinkSchedule) {
       await this.scheduling.linkSession(scheduledSessionId!, row.id, user, role);
+      row = await this.getRowOrThrow(id);
+    } else if (shouldUnlinkSchedule) {
+      await this.scheduling.unlinkSession(row.id, user, role);
       row = await this.getRowOrThrow(id);
     }
 

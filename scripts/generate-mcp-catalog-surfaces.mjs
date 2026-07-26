@@ -37,10 +37,17 @@ function replace(rel, pairs) {
 function replacePattern(rel, pairs) {
   let content = read(rel);
   for (const [from, to] of pairs) {
-    if (!from.test(content)) {
+    // Match GLOBALLY: several surfaces state the tool count more than once
+    // (README.md and roadmap.md each mention it twice). A non-global replace only
+    // ever rewrote the FIRST occurrence, so later mentions froze one bump behind and
+    // drifted further every release — that is how roadmap.md ended up claiming a
+    // "217-tool set" two lines under "Full MCP parity — 218 tools".
+    const all = new RegExp(from.source, from.flags.includes('g') ? from.flags : `${from.flags}g`);
+    if (!all.test(content)) {
       throw new Error(`generate-mcp-catalog-surfaces: ${rel} missing expected pattern: ${from}`);
     }
-    content = content.replace(from, to);
+    all.lastIndex = 0;
+    content = content.replace(all, to);
   }
   write(rel, content);
 }
