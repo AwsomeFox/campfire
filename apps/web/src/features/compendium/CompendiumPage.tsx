@@ -393,7 +393,7 @@ export default function CompendiumPage() {
             >
               {chip.label}
               {typeof chip.count === 'number' && (
-                <span className="text-muted" style={{ marginLeft: 4 }}>
+                <span style={{ marginLeft: 4, color: 'inherit' }}>
                   ({chip.count})
                 </span>
               )}
