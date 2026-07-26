@@ -5243,6 +5243,16 @@ export const AiGenerationProvenance = z.object({
     includedAuthorUserIds: z.array(z.string()).default([]),
     excludedAuthorUserIds: z.array(z.string()).default([]),
     includedInboxCount: z.number().int().nonnegative().default(0),
+    /**
+     * Notes the EXTERNAL-USE gate withheld — for either reason it can fire.
+     *
+     * Read `campaignPolicy` for the cause, which fully determines it: under `disabled` the
+     * gate rejects every shareable note regardless of who consented, so all of these are
+     * policy-excluded and none are consent-excluded; under `member_consent` the reverse.
+     * They never mix, which is why this is one truthful total rather than two counters
+     * where one is always zero. The distinction matters because the remedies differ — a
+     * disabled policy is the DM's to change, and no amount of member opt-in affects it.
+     */
     excludedInboxByConsent: z.number().int().nonnegative().default(0),
     excludedInboxPrivate: z.number().int().nonnegative().default(0),
   }).optional(),
@@ -6094,6 +6104,18 @@ export const ScribeSourceStats = z.object({
   diceRolls: z.number().int().nonnegative().default(0),
   excludedInboxByConsent: z.number().int().nonnegative().default(0),
   excludedInboxPrivate: z.number().int().nonnegative().default(0),
+  /**
+   * The AI content policy in force when this run assembled (#501).
+   *
+   * Archived because it is the CAUSE behind `excludedInboxByConsent`, and the two remedies
+   * are different people's: under `member_consent` each author opts in for themselves,
+   * under `disabled` only the DM can change the policy. Telling a DM to chase member
+   * consent on a disabled-policy campaign sends everyone to a control that cannot help.
+   *
+   * Optional: rows archived before this field existed do not carry it, and a `no_material`
+   * run records no provenance, so this is the only place the UI can read the policy from.
+   */
+  campaignPolicy: AiExternalContentPolicy.optional(),
   scheduledSessionId: Id.optional(),
   windowStart: IsoDate.optional(),
   windowEnd: IsoDate.optional(),

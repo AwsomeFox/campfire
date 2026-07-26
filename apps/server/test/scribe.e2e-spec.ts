@@ -752,6 +752,21 @@ describe('AI scribe — external AI consent, persisted account (e2e, #501)', () 
     expect(run.status).toBe(201);
     expect(run.body.job.status).toBe('no_material');
     expect(harness.mock.received.length).toBe(before);
+
+    // The DM must be told the CAUSE, and it is not a missing opt-in: under a disabled
+    // policy no amount of member consent changes the outcome, so advising one sends
+    // everybody — DM and players alike — to a control that will appear broken when they
+    // use it (#501 review).
+    expect(run.body.job.detail).toContain('AI content policy');
+    expect(run.body.job.detail).not.toContain('pending author consent');
+    expect(run.body.job.detail).not.toMatch(/opt in/i);
+
+    // The volume is still reported truthfully whatever the cause, and the archived policy
+    // is what lets the DM-facing UI pick the right remedy on a run that, being
+    // `no_material`, records no provenance to read the policy from.
+    expect(run.body.job.sourceStats.excludedInboxByConsent).toBeGreaterThan(0);
+    expect(run.body.job.sourceStats.campaignPolicy).toBe('disabled');
+    expect(run.body.job.generationProvenance).toBeNull();
   });
 });
 

@@ -55,7 +55,12 @@ import {
   type ScribeSessionScope,
   type ScribeSourceScope,
 } from './scribe-scope';
-import { applyScribeConsent, type ScribeConsentSummary, type ScribeEgress } from './scribe-consent';
+import {
+  applyScribeConsent,
+  withheldConsentDetail,
+  type ScribeConsentSummary,
+  type ScribeEgress,
+} from './scribe-consent';
 
 type ScribeConfigUpdateInput = z.infer<typeof ScribeConfigUpdate>;
 
@@ -105,21 +110,6 @@ const SCRIBE_SYSTEM_USER: RequestUser = {
   serverRole: 'admin',
   devRole: 'dm',
 };
-
-/**
- * Append an explicit "N notes withheld" clause to a run's `detail` (issue #501).
- *
- * A run whose material was emptied by the consent gate must never read as a bare
- * "nothing to recap" — that is the failure operators experience as "the scribe broke
- * after upgrading", when in fact it is working exactly as configured and needs a member
- * action. The count is also archived on `sourceStats` for the UI; this is the
- * human-readable half that shows up in job history and error surfaces.
- */
-export function withheldConsentDetail(base: string, consent: ScribeConsentSummary): string {
-  const withheld = consent.excludedInboxByConsent;
-  if (withheld <= 0) return base;
-  return `${base}; ${withheld} note${withheld === 1 ? '' : 's'} withheld pending author consent for external AI use`;
-}
 
 /** Default scribe config for a campaign that has never configured one (never persisted). */
 function defaultConfig(campaignId: number): ScribeConfig {
@@ -243,6 +233,11 @@ export class ScribeService implements OnApplicationBootstrap {
     // a run will ACTUALLY do. On an install with no provider configured nothing leaves the
     // server, and warning about a vendor call that will not happen trains DMs to ignore
     // the dialog before the run where it does matter.
+    //
+    // COST, accepted deliberately: this makes every getConfig a provider-config resolution,
+    // including the call inside the spend lock that only wants `budgetPerRun`. It is two
+    // indexed row reads via the NON-decrypting `getEffectiveView`, so it neither decrypts a
+    // key nor touches the network. Revisit if provider resolution ever grows either.
     return { ...stored, externalSend: (await this.resolveEgress(campaignId)) === 'external' };
   }
 
@@ -467,6 +462,10 @@ export class ScribeService implements OnApplicationBootstrap {
       ...sourceStatsFrom(source, scope),
       excludedInboxByConsent: consent.excludedInboxByConsent,
       excludedInboxPrivate: consent.excludedInboxPrivate,
+      // The CAUSE behind the count, archived so the DM-facing copy can name the remedy that
+      // applies. A `no_material` run records no provenance, so this is the only place the
+      // UI can learn the policy from (#501 review).
+      campaignPolicy: consent.campaignPolicy,
     };
   }
 

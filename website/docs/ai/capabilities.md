@@ -168,10 +168,18 @@ that is a separate confidentiality rule, not a consent question.
     nothing about whether content sent there stays inside your deployment.
 
 Withheld material is reported, never silently dropped. A run that held notes back says so
-— *"N notes withheld pending author consent"* — in the scribe panel, in the run's job
-history, and in the durable provenance stored on the filed proposal, with a link to the
-consent control. Each recap proposal also records which provider, model, endpoint scope,
-and source IDs produced it, and whether the generation was an external send at all.
+in the scribe panel and in the run's job history — and names the remedy that applies,
+because the two gates belong to different people:
+
+- Under **`member_consent`**: *"N notes withheld pending author consent"*, linking to the
+  members page, where each author opts in for themselves.
+- Under **`disabled`**: *"N notes withheld because this campaign's AI content policy
+  disallows external use of member-authored notes"*, linking to campaign settings. No
+  amount of member opt-in changes this one — only a DM changing the policy does.
+
+The count is the same total either way; only the stated cause and the remedy differ. Each
+recap proposal also records which provider, model, endpoint scope, and source IDs produced
+it, and whether the generation was an external send at all.
 
 **Dice rolls and encounter events are not consent-gated** — they are mechanical play
 records rather than authored prose. The one member-identifying field a roll carries, the

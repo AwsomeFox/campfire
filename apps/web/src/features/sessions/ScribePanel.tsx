@@ -16,7 +16,7 @@ import { useTranslation } from 'react-i18next';
  */
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import type { ScribeConfig, ScribeJob, ScribeJobStatus, ScribeRunResult, ScribeTrigger } from '@campfire/schema';
+import type { ScribeConfig, ScribeJob, ScribeJobStatus, ScribeRunResult, ScribeSourceStats, ScribeTrigger } from '@campfire/schema';
 import { api, API, translateApiError } from '../../lib/api';
 import { useAiDmSeat } from '../../lib/query';
 import { Card, Btn, EmptyState, Skeleton, SkeletonConditionalRegion, ErrorNote } from '../../components/ui';
@@ -36,13 +36,21 @@ const TRIGGER_LABEL: Record<ScribeTrigger, string> = {
 };
 
 /**
- * The DM-facing sentence for material the consent gate held back (#501).
+ * The DM-facing sentence for material the external-use gate held back (#501).
  *
  * Kept as one phrase so every surface — filed, previewed, and nothing-drafted — says the
  * same thing, and so the count is never rendered without the reason or the remedy.
+ *
+ * The remedy depends on WHY the gate fired, and the two belong to different people.
  */
-function withheldNote(count: number): string {
-  return `${count} note${count === 1 ? '' : 's'} withheld pending author consent for external AI use — each author can opt in from the members page.`;
+function withheldNote(count: number, policy: ScribeSourceStats['campaignPolicy']): string {
+  const notes = `${count} note${count === 1 ? '' : 's'}`;
+  // Under a `disabled` policy the gate rejects every member-authored note whatever its
+  // author consented to, so pointing players at the consent checkbox hands them a control
+  // that will appear broken when they use it. Only a DM changing the policy has any effect.
+  return policy === 'disabled'
+    ? `${notes} withheld: this campaign's AI content policy disallows external use of member-authored notes. A DM can change that in campaign settings.`
+    : `${notes} withheld pending author consent for external AI use — each author can opt in from the members page.`;
 }
 
 /** Tag class + human label for a recorded job's status. A dry-run "succeeded" job never
@@ -155,11 +163,18 @@ export function ScribePanel({ campaignId, isDm }: { campaignId: number; isDm: bo
       const result = await api.post<ScribeRunResult>(`${API}/campaigns/${campaignId}/scribe/run`, { dryRun });
       void load(); // refresh history + (if a config-side effect ever touches it) config
       const { job } = result;
-      // How many member-authored notes the server held back for want of consent. Never let
-      // this pass silently: a recap that quietly omits half the table's notes, or an empty
-      // one, otherwise reads as "the scribe is broken" (#501).
+      // How many member-authored notes the external-use gate held back. Never let this pass
+      // silently: a recap that quietly omits half the table's notes, or an empty one,
+      // otherwise reads as "the scribe is broken" (#501).
       const withheld = job.sourceStats?.excludedInboxByConsent ?? 0;
-      const withheldSuffix = withheld > 0 ? ` ${withheldNote(withheld)}` : '';
+      const withheldPolicy = job.sourceStats?.campaignPolicy;
+      const withheldSuffix = withheld > 0 ? ` ${withheldNote(withheld, withheldPolicy)}` : '';
+      // Send them where the fix actually lives: campaign settings owns the policy, the
+      // members page owns per-member consent.
+      const withheldHref =
+        withheldPolicy === 'disabled' ? `/c/${campaignId}/settings` : `/c/${campaignId}/members`;
+      const withheldHrefLabel =
+        withheldPolicy === 'disabled' ? 'Open campaign AI settings' : 'Open consent settings';
 
       if (job.status === 'succeeded') {
         if (dryRun) {
@@ -167,9 +182,9 @@ export function ScribePanel({ campaignId, isDm }: { campaignId: number; isDm: bo
           if (withheld > 0) {
             setOutcome({
               kind: 'info',
-              text: withheldNote(withheld),
-              href: `/c/${campaignId}/members`,
-              hrefLabel: 'Open consent settings',
+              text: withheldNote(withheld, withheldPolicy),
+              href: withheldHref,
+              hrefLabel: withheldHrefLabel,
             });
           }
           return;
@@ -181,8 +196,8 @@ export function ScribePanel({ campaignId, isDm }: { campaignId: number; isDm: bo
             ? {
                 kind: withheld > 0 ? 'info' : 'success',
                 text: `Recap drafted and filed as a pending proposal.${withheldSuffix}`,
-                href: withheld > 0 ? `/c/${campaignId}/members` : `/c/${campaignId}/proposals`,
-                hrefLabel: withheld > 0 ? 'Open consent settings' : 'Review the proposal',
+                href: withheld > 0 ? withheldHref : `/c/${campaignId}/proposals`,
+                hrefLabel: withheld > 0 ? withheldHrefLabel : 'Review the proposal',
               }
             : { kind: withheld > 0 ? 'info' : 'success', text: `Recap drafted.${withheldSuffix}` },
         );
@@ -200,15 +215,16 @@ export function ScribePanel({ campaignId, isDm }: { campaignId: number; isDm: bo
       }
       if (job.status === 'no_material') {
         // The important distinction: "there is genuinely nothing" vs "everything there was
-        // got withheld for consent". The second is fixable by a member, and telling the DM
-        // to go resolve more inbox threads would be actively misleading.
+        // got withheld by the external-use gate". The second is fixable — by a member or by
+        // the DM depending on cause — and telling them to go resolve more inbox threads
+        // would be actively misleading.
         setOutcome(
           withheld > 0
             ? {
                 kind: 'info',
-                text: `No recap drafted. ${withheldNote(withheld)}`,
-                href: `/c/${campaignId}/members`,
-                hrefLabel: 'Open consent settings',
+                text: `No recap drafted. ${withheldNote(withheld, withheldPolicy)}`,
+                href: withheldHref,
+                hrefLabel: withheldHrefLabel,
               }
             : { kind: 'info', text: 'Nothing to recap yet — resolve some inbox threads or run an encounter first.' },
         );

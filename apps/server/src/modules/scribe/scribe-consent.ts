@@ -74,6 +74,16 @@ export function filterSourceForExternalAiConsent(
    * that someone declined.
    */
   const excludedAuthorUserIds = new Set<string>();
+  /**
+   * Notes the external-use gate withheld — counting BOTH reasons it can fire.
+   *
+   * Under `disabled` the gate rejects every shareable note whatever its author consented
+   * to, so all of these are policy-excluded and none are consent-excluded; under
+   * `member_consent` the reverse. The two never mix, so `campaignPolicy` alone determines
+   * the cause and this stays one truthful total rather than two counters where one is
+   * always zero. Anything rendering this MUST branch on `campaignPolicy` for the remedy —
+   * telling players to opt in cannot help on a disabled-policy campaign.
+   */
   let excludedInboxByConsent = 0;
   let excludedInboxPrivate = 0;
 
@@ -169,6 +179,31 @@ export function retainSourceForLocalGeneration(
       excludedInboxPrivate,
     },
   };
+}
+
+/**
+ * Append an explicit "N notes withheld" clause to a run's `detail` (issue #501).
+ *
+ * A run whose material was emptied by the external-use gate must never read as a bare
+ * "nothing to recap" — that is the failure operators experience as "the scribe broke after
+ * upgrading", when in fact it is working exactly as configured and needs a human action.
+ * The count is also archived on `sourceStats` for the UI; this is the human-readable half
+ * that shows up in job history and error surfaces.
+ *
+ * Lives here rather than on the service so the copy is unit-testable as a pure function —
+ * this is exactly the kind of wording that gets silently reverted later.
+ */
+export function withheldConsentDetail(base: string, consent: ScribeConsentSummary): string {
+  const withheld = consent.excludedInboxByConsent;
+  if (withheld <= 0) return base;
+  const notes = `${withheld} note${withheld === 1 ? '' : 's'}`;
+  // Name the remedy that can ACTUALLY work. Under a `disabled` policy the gate rejects
+  // every shareable note whatever its author consented to, so "pending author consent"
+  // would send the DM — and any player acting on it — to a control that cannot change the
+  // outcome. Only the DM changing the POLICY can.
+  return consent.campaignPolicy === 'disabled'
+    ? `${base}; ${notes} withheld because this campaign's AI content policy disallows external use of member-authored notes`
+    : `${base}; ${notes} withheld pending author consent for external AI use`;
 }
 
 /** Apply the gate appropriate to where this material is actually going. */

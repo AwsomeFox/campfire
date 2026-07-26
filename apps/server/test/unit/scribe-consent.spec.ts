@@ -4,6 +4,7 @@ import {
   applyScribeConsent,
   filterSourceForExternalAiConsent,
   retainSourceForLocalGeneration,
+  withheldConsentDetail,
 } from '../../src/modules/scribe/scribe-consent';
 
 function source(): RecapDraftSource {
@@ -250,5 +251,67 @@ describe('applyScribeConsent dispatch (#501)', () => {
 
     expect(applyScribeConsent(source(), 'member_consent', consenting, 'local').source.resolvedInbox).toHaveLength(2);
     expect(applyScribeConsent(source(), 'member_consent', consenting, 'external').source.resolvedInbox).toHaveLength(1);
+  });
+});
+
+/**
+ * Issue #501 review — the withheld message must name a remedy that can actually work.
+ *
+ * `excludedInboxByConsent` counts BOTH reasons the external-use gate fires, because
+ * `consents()` returns false for a disabled policy exactly as it does for a non-consenting
+ * member. Rendering "pending author consent" for a disabled-policy campaign sends the DM,
+ * and any player who acts on it, to a control that changes nothing.
+ */
+describe('withheld-material message (#501)', () => {
+  const summary = (over: Partial<Parameters<typeof withheldConsentDetail>[1]>) => ({
+    campaignPolicy: 'member_consent' as const,
+    externalSend: true,
+    includedAuthorUserIds: [],
+    excludedAuthorUserIds: [],
+    includedInboxCount: 0,
+    excludedInboxByConsent: 0,
+    excludedInboxPrivate: 0,
+    ...over,
+  });
+
+  it('leaves the base detail untouched when nothing was withheld', () => {
+    expect(withheldConsentDetail('no inbox/encounter material', summary({}))).toBe('no inbox/encounter material');
+  });
+
+  it('points at member consent under a member_consent policy', () => {
+    const detail = withheldConsentDetail('no inbox/encounter material', summary({ excludedInboxByConsent: 2 }));
+
+    expect(detail).toContain('2 notes withheld pending author consent');
+    expect(detail).not.toContain('policy');
+  });
+
+  it('points at the campaign POLICY — not author consent — when the policy is disabled', () => {
+    const detail = withheldConsentDetail(
+      'no inbox/encounter material',
+      summary({ campaignPolicy: 'disabled', excludedInboxByConsent: 3 }),
+    );
+
+    // The count stays truthful about the volume withheld, whatever the cause…
+    expect(detail).toContain('3 notes');
+    expect(detail).toContain('AI content policy');
+    // …but must NOT advise an opt-in that cannot change the outcome.
+    expect(detail).not.toContain('pending author consent');
+    expect(detail).not.toMatch(/opt in/i);
+  });
+
+  it('says "1 note" rather than "1 notes" on both branches', () => {
+    expect(withheldConsentDetail('x', summary({ excludedInboxByConsent: 1 }))).toContain('1 note withheld');
+    expect(
+      withheldConsentDetail('x', summary({ campaignPolicy: 'disabled', excludedInboxByConsent: 1 })),
+    ).toContain('1 note withheld');
+  });
+
+  it('reports the disabled-policy cause for material the gate actually rejected', () => {
+    // End-to-end through the real filter rather than a hand-built summary: a disabled
+    // policy excludes both dm_shared notes even though author 10 IS in the consenting set.
+    const filtered = filterSourceForExternalAiConsent(source(), 'disabled', new Set(['10']));
+
+    expect(filtered.consent.excludedInboxByConsent).toBe(2);
+    expect(withheldConsentDetail('no inbox/encounter material', filtered.consent)).toContain('AI content policy');
   });
 });
