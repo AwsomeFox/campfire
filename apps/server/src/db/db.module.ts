@@ -2883,6 +2883,35 @@ function migrateGuestDmHandoff545(sqlite: Database.Database): void {
 }
 
 /**
+ * Issue #504: scheduled sessions are no longer deleted when cancelled. Add a
+ * lifecycle status, cancellation metadata, and nullable schedule↔play-log links.
+ */
+function migrateSchedulingLifecycle504(sqlite: Database.Database): void {
+  const hasScheduledSessions = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='scheduled_sessions'")
+    .get();
+  if (hasScheduledSessions) {
+    const scheduleCols = sqlite.prepare('PRAGMA table_info(scheduled_sessions)').all() as Array<{ name: string }>;
+    const has = (name: string) => scheduleCols.some((c) => c.name === name);
+    if (!has('status')) sqlite.exec("ALTER TABLE scheduled_sessions ADD COLUMN status TEXT NOT NULL DEFAULT 'scheduled'");
+    if (!has('cancelled_at')) sqlite.exec('ALTER TABLE scheduled_sessions ADD COLUMN cancelled_at TEXT');
+    if (!has('cancelled_by')) sqlite.exec('ALTER TABLE scheduled_sessions ADD COLUMN cancelled_by TEXT');
+    if (!has('cancellation_reason')) sqlite.exec("ALTER TABLE scheduled_sessions ADD COLUMN cancellation_reason TEXT NOT NULL DEFAULT ''");
+    if (!has('session_id')) sqlite.exec('ALTER TABLE scheduled_sessions ADD COLUMN session_id INTEGER');
+  }
+
+  const hasSessions = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'")
+    .get();
+  if (hasSessions) {
+    const sessionCols = sqlite.prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>;
+    if (!sessionCols.some((c) => c.name === 'scheduled_session_id')) {
+      sqlite.exec('ALTER TABLE sessions ADD COLUMN scheduled_session_id INTEGER');
+    }
+  }
+}
+
+/**
  * Issue #547 — expiring, read-only Player Display cast sessions. These are
  * capability tokens for shared TVs/kiosks, stored hashed like recap shares.
  */
@@ -3016,11 +3045,14 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0106_guest_dm_handoff_545', run: migrateGuestDmHandoff545 },
   { name: '0107_archmage_escalation_542', run: migrateArchmageEscalation542 },
   { name: '0108_ai_dm_token_reservations_563', run: migrateAiDmSeatsTableForTokenReservations },
-  // 0108 was taken on main by the AI token-reservation migration (#563); this branch
-  // merges after it, so cast sessions take the next free ordinal.
   { name: '0109_cast_sessions_547', run: migrateCastSessionsTable },
   // 0108/0109 both landed on main while this branch was open; derivatives take 0110.
   { name: '0110_attachment_derivatives_604', run: migrateAttachmentDerivativesTable604 },
+  // 0108/0109 were claimed on main by the AI token-reservation (#563) and cast-session
+  // (#547) migrations, and 0110 by attachment derivatives (#604); this branch merges
+  // after all of them, so the scheduling lifecycle migration takes the next genuinely
+  // free ordinal rather than collide.
+  { name: '0111_scheduling_lifecycle_504', run: migrateSchedulingLifecycle504 },
 ];
 
 /**

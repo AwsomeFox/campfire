@@ -206,7 +206,7 @@ export function formatScheduleNotificationBody(
   _locale?: string,
   _timeZone?: string,
 ): string {
-  if (data.changeType === 'cancelled') return 'This game night was removed from the calendar.';
+  if (data.changeType === 'cancelled') return 'This game night was cancelled; RSVP history is preserved.';
   if (data.changeType === 'created') return '';
   const summary = summarizeScheduleChangedFields(data.changedFields);
   if (!summary) return '';
