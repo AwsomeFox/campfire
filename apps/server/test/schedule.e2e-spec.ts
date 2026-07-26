@@ -436,6 +436,62 @@ describe('session scheduling (e2e)', () => {
     expect(relink.body.scheduledSessionId).toBe(scheduleId);
   });
 
+  it('hides the recap link while the linked session is trashed, and restores it on untrash', async () => {
+    const server = ctx.app.getHttpServer();
+    const scheduled = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/schedule`)
+      .set(dm)
+      .send({ scheduledAt: '2099-11-20T18:00:00Z', title: 'Trash the recap' });
+    expect(scheduled.status).toBe(201);
+    const scheduleId = scheduled.body.id;
+
+    const recap = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/sessions`)
+      .set(dm)
+      .send({
+        title: 'Trashable recap',
+        playedAt: '2099-11-20',
+        recap: 'This recap gets trashed.',
+        scheduledSessionId: scheduleId,
+      });
+    expect(recap.status).toBe(201);
+    const sessionId = recap.body.id;
+
+    const linked = await request(server).get(`/api/v1/schedule/${scheduleId}`).set(player);
+    expect(linked.body).toMatchObject({ status: 'completed', sessionId });
+
+    // Trash (soft-delete) the recap. The session becomes unreadable...
+    const trash = await request(server).delete(`/api/v1/sessions/${sessionId}`).set(dm);
+    expect(trash.status).toBe(200);
+    expect((await request(server).get(`/api/v1/sessions/${sessionId}`).set(dm)).status).toBe(404);
+
+    // ...so the schedule must stop advertising a Recap link that would 404, and must
+    // stop claiming it was completed by a recap nobody can open.
+    const whileTrashed = await request(server).get(`/api/v1/schedule/${scheduleId}`).set(player);
+    expect(whileTrashed.status).toBe(200);
+    expect(whileTrashed.body).toMatchObject({ id: scheduleId, sessionId: null, status: 'scheduled' });
+
+    // The list projections agree with the single read.
+    const pastWhileTrashed = await request(server).get(`/api/v1/campaigns/${campaignId}/schedule/past`).set(player);
+    const pastRow = pastWhileTrashed.body.items.find((s: { id: number }) => s.id === scheduleId);
+    if (pastRow) expect(pastRow).toMatchObject({ sessionId: null, status: 'scheduled' });
+    const fullList = await request(server).get(`/api/v1/campaigns/${campaignId}/schedule`).set(player);
+    expect(fullList.body.find((s: { id: number }) => s.id === scheduleId)).toMatchObject({
+      sessionId: null,
+      status: 'scheduled',
+    });
+
+    // The link is only HIDDEN, never torn down — restoring the recap brings it back
+    // with no repair write. This is the whole reason the fix is read-time.
+    const restored = await request(server).post(`/api/v1/sessions/${sessionId}/restore`).set(dm);
+    expect(restored.status).toBe(201);
+    expect(restored.body.scheduledSessionId).toBe(scheduleId);
+
+    const afterRestore = await request(server).get(`/api/v1/schedule/${scheduleId}`).set(player);
+    expect(afterRestore.status).toBe(200);
+    expect(afterRestore.body).toMatchObject({ id: scheduleId, status: 'completed', sessionId });
+  });
+
   it('duplicating a session whose window was shrunk below the create floor clamps the duration', async () => {
     const server = ctx.app.getHttpServer();
     const created = await request(server)

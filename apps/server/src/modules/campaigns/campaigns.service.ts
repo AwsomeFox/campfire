@@ -2049,6 +2049,14 @@ export class CampaignsService {
         // user id (like the RSVP userIds below) so it is not carried across installs;
         // `session_id` stays null because schedules are inserted before sessions and the
         // exported id belongs to the source install.
+        //
+        // `completed` is imported AS completed, deliberately, even though its sessionId
+        // cannot cross an install boundary. Reviewed and declined the alternative of
+        // downgrading it to `scheduled`: completed is historical truth (the night was
+        // played), so downgrading would make a played night look unplayed, and for a
+        // future-dated row would resurrect it into Upcoming — exactly the bug the
+        // cancelled case above fixes. A "Completed" tag with no recap link is mildly
+        // lossy but honest. Please don't re-litigate without re-reading this.
         const importedStatus = s.status === 'cancelled' || s.status === 'completed' ? s.status : 'scheduled';
         const [row] = tx
           .insert(scheduledSessions)

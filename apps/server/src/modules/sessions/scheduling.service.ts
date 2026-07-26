@@ -21,6 +21,7 @@ import { applyPage } from '../../common/pagination';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { scheduledSessions, sessionRsvps, campaigns, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
+import { notDeleted } from '../../common/soft-delete';
 import { generateIcsFeedToken, looksLikeIcsFeedToken } from '../../common/crypto';
 import { resolveIcsFeedTokenTtlDays } from '../../common/throttle.constants';
 import { foldForSearch, foldedIncludes } from '../../common/text-search';
@@ -187,15 +188,56 @@ export class SchedulingService {
 
   private async attachRsvps(rows: Array<typeof scheduledSessions.$inferSelect>): Promise<ScheduledSessionWithRsvps[]> {
     if (rows.length === 0) return [];
-    const rsvpRows = await this.db
-      .select()
-      .from(sessionRsvps)
-      .where(inArray(sessionRsvps.scheduledSessionId, rows.map((r) => r.id)));
+    const [rsvpRows, liveLinks] = await Promise.all([
+      this.db
+        .select()
+        .from(sessionRsvps)
+        .where(inArray(sessionRsvps.scheduledSessionId, rows.map((r) => r.id))),
+      this.liveLinkedSessionIds(rows),
+    ]);
     const grouped = this.groupRsvps(rsvpRows);
     return rows.map((row) => ({
-      ...toDomain(row),
+      ...this.projectLink(row, liveLinks),
       rsvps: grouped.get(row.id) ?? [],
     }));
+  }
+
+  /**
+   * Which of these rows' linked recaps are still readable (not trashed)?
+   * One batched query; skipped entirely when nothing is linked.
+   */
+  private async liveLinkedSessionIds(rows: Array<typeof scheduledSessions.$inferSelect>): Promise<Set<number>> {
+    const linkedIds = [...new Set(rows.map((r) => r.sessionId).filter((id): id is number => id != null))];
+    if (linkedIds.length === 0) return new Set();
+    const live = await this.db
+      .select({ id: sessions.id })
+      .from(sessions)
+      .where(and(inArray(sessions.id, linkedIds), notDeleted(sessions.deletedAt)));
+    return new Set(live.map((r) => r.id));
+  }
+
+  /**
+   * Read-time reconciliation of the schedule↔recap link (#504).
+   *
+   * A recap is soft-deleted (trashed), never hard-deleted, so `ON DELETE SET NULL`
+   * never fires and the stored link survives — deliberately. Tearing the link down on
+   * trash would mean restoring the session silently fails to restore the link, trading
+   * a visible bug for silent data loss. But a trashed recap is invisible to every
+   * session read, so surfacing `sessionId` renders a "Recap" link that 404s, and
+   * reporting `completed` claims a night was played by a recap nobody can open.
+   *
+   * So both are hidden at READ time only. SQLite still holds `status='completed'` and
+   * `session_id`, so restoring the session reconciles the row with no write at all.
+   * `cancelled` is never link-derived, so it is passed through untouched.
+   */
+  private projectLink(row: typeof scheduledSessions.$inferSelect, liveLinkedIds: Set<number>): ScheduledSession {
+    const domain = toDomain(row);
+    if (domain.sessionId == null || liveLinkedIds.has(domain.sessionId)) return domain;
+    return {
+      ...domain,
+      sessionId: null,
+      status: domain.status === 'completed' ? 'scheduled' : domain.status,
+    };
   }
 
   /** Full schedule list — kept for export/MCP backward compatibility. Prefer upcoming/past splits (#612). */
@@ -281,15 +323,18 @@ export class SchedulingService {
       .from(scheduledSessions)
       .where(eq(scheduledSessions.campaignId, campaignId))
       .orderBy(asc(scheduledSessions.scheduledAt), asc(scheduledSessions.id));
-    return rows
+    const matches = rows
       .filter(
         (r) =>
           foldedIncludes(r.title, folded)
           || foldedIncludes(r.scheduledAt, folded)
           || foldedIncludes(r.notes, folded),
       )
-      .slice(0, boundedLimit)
-      .map(toDomain);
+      .slice(0, boundedLimit);
+    // Same read-time link reconciliation as every other projection: search must not
+    // hand back a sessionId pointing at a trashed recap either.
+    const liveLinks = await this.liveLinkedSessionIds(matches);
+    return matches.map((row) => this.projectLink(row, liveLinks));
   }
 
   /**
@@ -351,8 +396,11 @@ export class SchedulingService {
 
   async getWithRsvps(id: number): Promise<ScheduledSessionWithRsvps> {
     const row = await this.getRowOrThrow(id);
-    const rsvpRows = await this.db.select().from(sessionRsvps).where(eq(sessionRsvps.scheduledSessionId, id));
-    return { ...toDomain(row), rsvps: rsvpRows.map(rsvpToDomain) };
+    const [rsvpRows, liveLinks] = await Promise.all([
+      this.db.select().from(sessionRsvps).where(eq(sessionRsvps.scheduledSessionId, id)),
+      this.liveLinkedSessionIds([row]),
+    ]);
+    return { ...this.projectLink(row, liveLinks), rsvps: rsvpRows.map(rsvpToDomain) };
   }
 
   /** Client-supplied ISO date-time -> canonical ISO UTC (validated by the Zod schema already). */
