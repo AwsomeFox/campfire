@@ -8,7 +8,7 @@
  * orchestrator-owned; this keeps the flow reachable from the "+ New campaign"
  * tile on the hub without new route wiring.
  */
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { forwardRef, useCallback, useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { api, ApiError, API } from '../../lib/api';
 import type { Campaign, RulePack } from '@campfire/schema';
@@ -30,6 +30,11 @@ const STEP_TITLES: Record<Step, string> = {
 };
 
 const DEFAULT_DOCUMENT_TITLE = 'Campfire';
+const HOMEBREW_RULE_SYSTEM_KEY = '__homebrew__';
+
+function ruleSystemChoiceKey(value: string | null) {
+  return value ?? HOMEBREW_RULE_SYSTEM_KEY;
+}
 
 export function NewCampaignWizard({
   onClose,
@@ -52,6 +57,7 @@ export function NewCampaignWizard({
 
   const stepHeadingRef = useRef<HTMLHeadingElement>(null);
   const prevStepRef = useRef<Step | null>(null);
+  const ruleSystemChoiceRefs = useRef<Record<string, HTMLButtonElement | null>>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -127,6 +133,30 @@ export function NewCampaignWizard({
 
   const selectedProfile =
     packs === null ? null : rulesetCapabilitiesForSelection(ruleSystem, packs);
+
+  const focusRuleSystemChoice = useCallback((value: string | null) => {
+    ruleSystemChoiceRefs.current[ruleSystemChoiceKey(value)]?.focus();
+  }, []);
+
+  function onRuleSystemChoiceKeyDown(e: KeyboardEvent<HTMLButtonElement>, value: string | null) {
+    if (packs === null) return;
+
+    const optionValues: Array<string | null> = [...packs.map((pack) => pack.slug), null];
+    const idx = optionValues.indexOf(value);
+    if (idx === -1) return;
+
+    let nextIdx: number | null = null;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') nextIdx = (idx + 1) % optionValues.length;
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') nextIdx = (idx - 1 + optionValues.length) % optionValues.length;
+    else if (e.key === 'Home') nextIdx = 0;
+    else if (e.key === 'End') nextIdx = optionValues.length - 1;
+    if (nextIdx == null) return;
+
+    e.preventDefault();
+    const next = optionValues[nextIdx]!;
+    setRuleSystem(next);
+    focusRuleSystemChoice(next);
+  }
 
   return (
     <div
@@ -224,27 +254,33 @@ export function NewCampaignWizard({
                   {packs.length === 0 && (
                     <EmptyRulePacksNotice isAdmin={isAdmin} packsError={packsError} />
                   )}
-                  {packs.length > 0 && (
-                    <div className="flex flex-col gap-2" role="group" aria-label="Installed rule systems">
-                      {packs.map((pack) => (
-                        <RuleSystemChoice
-                          key={pack.id}
-                          selected={ruleSystem === pack.slug}
-                          onSelect={() => setRuleSystem(pack.slug)}
-                          title={pack.name}
-                          meta={`v${pack.version} · ${pack.license} · ${pack.entryCount} entries`}
-                          description={mechanicsForPackSlug(pack.slug)}
-                        />
-                      ))}
-                    </div>
-                  )}
-                  <RuleSystemChoice
-                    selected={ruleSystem === null}
-                    onSelect={() => setRuleSystem(null)}
-                    title="None / homebrew"
-                    meta="No installed compendium or rules text"
-                    description="Sheets, dice and notes still work; combat and difficulty use disclosed fallback behavior."
-                  />
+                  <div className="flex flex-col gap-2" role="radiogroup" aria-label="Installed rule systems">
+                    {packs.map((pack) => (
+                      <RuleSystemChoice
+                        key={pack.id}
+                        ref={(el) => {
+                          ruleSystemChoiceRefs.current[ruleSystemChoiceKey(pack.slug)] = el;
+                        }}
+                        selected={ruleSystem === pack.slug}
+                        onSelect={() => setRuleSystem(pack.slug)}
+                        onKeyDown={(e) => onRuleSystemChoiceKeyDown(e, pack.slug)}
+                        title={pack.name}
+                        meta={`v${pack.version} · ${pack.license} · ${pack.entryCount} entries`}
+                        description={mechanicsForPackSlug(pack.slug)}
+                      />
+                    ))}
+                    <RuleSystemChoice
+                      ref={(el) => {
+                        ruleSystemChoiceRefs.current[ruleSystemChoiceKey(null)] = el;
+                      }}
+                      selected={ruleSystem === null}
+                      onSelect={() => setRuleSystem(null)}
+                      onKeyDown={(e) => onRuleSystemChoiceKeyDown(e, null)}
+                      title="None / homebrew"
+                      meta="No installed compendium or rules text"
+                      description="Sheets, dice and notes still work; combat and difficulty use disclosed fallback behavior."
+                    />
+                  </div>
                   {selectedProfile && (
                     <RulesetCapabilityDisclosure
                       profile={selectedProfile}
@@ -277,24 +313,36 @@ export function NewCampaignWizard({
   );
 }
 
-function RuleSystemChoice({
-  selected,
-  onSelect,
-  title,
-  meta,
-  description,
-}: {
+const RuleSystemChoice = forwardRef<HTMLButtonElement, {
   selected: boolean;
   onSelect: () => void;
+  onKeyDown: (e: KeyboardEvent<HTMLButtonElement>) => void;
   title: string;
   meta: string;
   description?: string;
-}) {
+}>(function RuleSystemChoice({
+  selected,
+  onSelect,
+  onKeyDown,
+  title,
+  meta,
+  description,
+}, ref) {
+  const titleId = useId();
+  const metaId = useId();
+  const descriptionId = useId();
+
   return (
     <button
+      ref={ref}
       type="button"
+      role="radio"
+      aria-checked={selected}
+      aria-labelledby={titleId}
+      aria-describedby={description ? `${metaId} ${descriptionId}` : metaId}
+      tabIndex={selected ? 0 : -1}
       onClick={onSelect}
-      aria-pressed={selected}
+      onKeyDown={onKeyDown}
       className="flex items-start gap-2.5 text-left"
       style={{
         padding: '11px 12px',
@@ -327,22 +375,21 @@ function RuleSystemChoice({
         />
       </span>
       <span style={{ minWidth: 0 }}>
-        <span style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 13.5 }}>
+        <span id={titleId} style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 13.5 }}>
           {title}
-          {selected && <span className="sr-only"> selected</span>}
         </span>
-        <span className="text-muted" style={{ display: 'block', fontSize: 11.5, marginTop: 2 }}>
+        <span id={metaId} className="text-muted" style={{ display: 'block', fontSize: 11.5, marginTop: 2 }}>
           {meta}
         </span>
         {description && (
-          <span className="text-muted" style={{ display: 'block', fontSize: 11, marginTop: 2, opacity: 0.85 }}>
+          <span id={descriptionId} className="text-muted" style={{ display: 'block', fontSize: 11, marginTop: 2, opacity: 0.85 }}>
             {description}
           </span>
         )}
       </span>
     </button>
   );
-}
+});
 
 function EmptyRulePacksNotice({
   isAdmin,

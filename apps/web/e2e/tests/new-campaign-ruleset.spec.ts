@@ -33,7 +33,7 @@ test.describe('New campaign rule system persistence (#539)', () => {
     await page.goto('/?newCampaign=1');
     await page.getByLabel('Name').fill(campaignName);
     await page.getByRole('button', { name: /Next: rule system/ }).click();
-    await page.getByRole('button', { name: E2E_PACK_NAME }).click();
+    await page.getByRole('radio', { name: E2E_PACK_NAME }).click();
 
     const createReq = page.waitForRequest(
       (req) =>
@@ -78,7 +78,7 @@ test.describe('New campaign rule system persistence (#539)', () => {
     await page.goto('/?newCampaign=1');
     await page.getByLabel('Name').fill(`E2E539 fail ${Date.now()}`);
     await page.getByRole('button', { name: /Next: rule system/ }).click();
-    await page.getByRole('button', { name: E2E_PACK_NAME }).click();
+    await page.getByRole('radio', { name: E2E_PACK_NAME }).click();
     await page.getByRole('button', { name: 'Create campaign' }).click();
 
     await expect(page.getByText(failMessage)).toBeVisible();
@@ -91,7 +91,7 @@ test.describe('New campaign rule system persistence (#539)', () => {
     const campaignName = `E2E508 homebrew ${Date.now()}`;
     await openRulesetStepWithEmptyPacks(page, campaignName);
 
-    await expect(page.getByRole('button', { name: /None \/ homebrew/ })).toBeVisible();
+    await expect(page.getByRole('radio', { name: /None \/ homebrew/ })).toBeVisible();
     await expect(page.getByText('Before you create with None / homebrew')).toBeVisible();
     await expect(page.getByText('does not select a 5e rules pack')).toBeVisible();
     await expect(page.getByText('D&D Beyond import:', { exact: true })).toBeVisible();
@@ -124,7 +124,7 @@ test.describe('New campaign empty-pack guidance (#508)', () => {
 
     const rulesLink = page.getByRole('link', { name: 'Server admin → Rule systems' });
     await expect(rulesLink).toHaveAttribute('href', '/admin/rules?returnTo=%2F%3FnewCampaign%3D1');
-    await expect(page.getByRole('button', { name: /None \/ homebrew/ })).toBeVisible();
+    await expect(page.getByRole('radio', { name: /None \/ homebrew/ })).toBeVisible();
     await expect(page.getByText('Before you create with None / homebrew')).toBeVisible();
     await expect(page.getByText('Combat math:', { exact: true })).toBeVisible();
     await expect(page.getByText('Encounter generation:', { exact: true })).toBeVisible();
@@ -141,7 +141,7 @@ test.describe('New campaign empty-pack guidance (#508)', () => {
     await expect(page.getByText('Ask a server admin to install a rule system', { exact: false })).toBeVisible();
     await expect(page.getByText('Suggested request:', { exact: false })).toBeVisible();
     await expect(page.getByRole('link', { name: 'Server admin → Rule systems' })).toHaveCount(0);
-    await expect(page.getByRole('button', { name: /None \/ homebrew/ })).toBeVisible();
+    await expect(page.getByRole('radio', { name: /None \/ homebrew/ })).toBeVisible();
 
     await context.close();
   });
