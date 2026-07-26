@@ -3002,6 +3002,43 @@ function migrateAiDmTranscriptEventsTable572(sqlite: Database.Database): void {
   `);
 }
 
+/**
+ * Issue #580 — per-intent idempotency records for non-idempotent encounter mutations
+ * (HP deltas, turn advancement). Purely additive: a new table plus its indexes, so the
+ * whole migration is `CREATE ... IF NOT EXISTS` and is safe to re-run. The `PRAGMA
+ * table_info` probe below is belt-and-braces for the one case IF NOT EXISTS cannot
+ * cover — an install that somehow carries an EARLIER shape of the table (there is none
+ * shipped, but the ordinal after this one must not have to guess) — and re-creates it.
+ * Dropping is safe: the table holds only short-lived replay records, never durable
+ * campaign state, so the worst case of losing it is that an in-flight retry re-applies.
+ */
+function migrateEncounterOpIdempotency580(sqlite: Database.Database): void {
+  const existing = sqlite.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='encounter_op_idempotency'`).all();
+  if (existing.length > 0) {
+    const cols = sqlite.prepare(`PRAGMA table_info(encounter_op_idempotency)`).all() as Array<{ name: string }>;
+    const names = new Set(cols.map((c) => c.name));
+    const expected = ['actor_id', 'operation', 'key', 'encounter_id', 'campaign_id', 'fingerprint', 'response_json', 'response_role', 'created_at'];
+    if (expected.every((c) => names.has(c))) return;
+    sqlite.exec(`DROP TABLE encounter_op_idempotency`);
+  }
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS encounter_op_idempotency (
+      actor_id TEXT NOT NULL,
+      operation TEXT NOT NULL,
+      key TEXT NOT NULL,
+      encounter_id INTEGER NOT NULL REFERENCES encounters(id) ON DELETE CASCADE,
+      campaign_id INTEGER NOT NULL,
+      fingerprint TEXT NOT NULL,
+      response_json TEXT,
+      response_role TEXT,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (actor_id, operation, key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_encounter_op_idempotency_created ON encounter_op_idempotency(created_at);
+    CREATE INDEX IF NOT EXISTS idx_encounter_op_idempotency_encounter ON encounter_op_idempotency(encounter_id);
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
   { name: '0001_users_oidc', run: migrateUsersTableForOidc },
   { name: '0002_campaigns_rule_system', run: migrateCampaignsTableForRuleSystem },
@@ -3118,13 +3155,13 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // after all of them, so the scheduling lifecycle migration takes the next genuinely
   // free ordinal rather than collide.
   { name: '0111_scheduling_lifecycle_504', run: migrateSchedulingLifecycle504 },
-  // Main ends at 0110. 0111–0112 are claimed by #504/#559/#601 and 0113–0114 by #501 and
-  // two other in-flight branches, none of which have merged yet — so the AI-DM transcript
-  // skips ahead to the first genuinely unclaimed ordinal. runMigrations keys on the full
-  // name string, so a collision would not break at runtime; the numbering is the
-  // convention, and two branches recording the same name against different DDL is exactly
-  // the confusion it exists to prevent.
+  // 0112-0113 are held by the merge coordinator for other in-flight work, and 0114 went
+  // to #501; 0115 is this branch's central allocation. The gap above 0111 is deliberate,
+  // not a miscount. Dedup is by the FULL name rather than the ordinal, so the issue-number
+  // suffix is what actually guarantees each runs exactly once even if a sibling branch
+  // lands a colliding ordinal first.
   { name: '0115_ai_dm_transcript_events_572', run: migrateAiDmTranscriptEventsTable572 },
+  { name: '0116_encounter_op_idempotency_580', run: migrateEncounterOpIdempotency580 },
 ];
 
 /**

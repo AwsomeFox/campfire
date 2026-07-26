@@ -4,7 +4,7 @@ import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
 import { ActiveEffect, AoeTemplate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, STARFINDER_ADAPTER_ID, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, defaultCombatantStatblock, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
 import { z as zod } from 'zod';
-import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
+import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaigns, characters, combatants, encounterEvents, encounters, locations, npcs, quests, ruleEntries, rulePacks, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -54,6 +54,15 @@ import { ATTACHMENT_STATE_COMMITTED } from '../attachments/attachment.constants'
 import { AttachmentsService } from '../attachments/attachments.service';
 import { CampaignLibraryService } from '../campaign-library/campaign-library.service';
 import { canWriteBackHp, hpSyncSliceOf, hpSyncSlicesEqual } from './hp-sync';
+import {
+  backfillEncounterOpResponse,
+  encounterOpFingerprint,
+  EncounterOpRaceMarker,
+  findPriorEncounterOp,
+  readEncounterOpAfterRace,
+  recordEncounterOp,
+  type EncounterOpClaim,
+} from './encounter-idempotency';
 
 type EncounterCreateInput = z.infer<typeof EncounterCreate>;
 type EncounterGenerateInput = z.infer<typeof EncounterGenerate>;
@@ -3145,158 +3154,213 @@ export class EncountersService {
     // state, not a stale pre-await read (issue #747, mirroring the HP snapshots).
     let beforeConditions: Set<string> = new Set();
     let afterConditions: Set<string> = new Set();
-    this.db.transaction((tx) => {
-      const [fresh] = tx.select().from(combatants).where(eq(combatants.id, combatantId)).limit(1).all();
-      beforeHp = fresh.hpCurrent;
-      beforeTemp = fresh.hpTemp;
-      beforeDeath = fresh.deathState;
-      _beforeSucc = fresh.deathSaveSuccesses;
-      _beforeFail = fresh.deathSaveFailures;
-      const writeSet: Partial<typeof combatants.$inferInsert> = { ...staticUpdate };
-      if (conditionFieldsTouched) {
-        // Rebase every condition mutation against the FRESH row (issue #747 / #423).
-        // Legacy string deltas and structured instance deltas share this path so a
-        // removeConditions patch cannot leave stale conditionInstances behind, and an
-        // addConditionInstance patch actually persists without needing a legacy field.
-        const legacyConditions = fromJsonText<string[]>(fresh.conditions, []);
-        let instances = parseConditionInstances(fresh.conditionInstances, legacyConditions);
-        beforeConditions = new Set(deriveConditionNames(instances));
 
-        if (patch.conditionInstances !== undefined) {
-          instances = [...patch.conditionInstances];
-        } else {
-          if (patch.addConditionInstance !== undefined) {
-            // Add a single instance (idempotent: replace if id already present).
-            const addIdx = instances.findIndex((i) => i.id === patch.addConditionInstance!.id);
-            if (addIdx >= 0) instances[addIdx] = patch.addConditionInstance;
-            else instances.push(patch.addConditionInstance);
+    // Issue #580 — per-intent idempotency. `hpDelta`/`spDelta`/`rpDelta`/`deathSaveRoll`
+    // are RELATIVE writes: a retry after a lost response applies the damage a second
+    // time. When the caller minted a key at the click, the claim below is written inside
+    // this same transaction as the HP write, so claim and effect are inseparable, and a
+    // retry replays the exact combatant the first attempt committed.
+    const opClaim: EncounterOpClaim | null = patch.idempotencyKey
+      ? {
+          actorId: user.id,
+          operation: 'combatant.update',
+          key: patch.idempotencyKey,
+          encounterId,
+          campaignId: encounterRow.campaignId,
+          // Fingerprint the payload minus the key itself, plus the target combatant: the
+          // same key resent for a DIFFERENT patch is a client bug, and replaying the
+          // first response for it would hide the bug rather than surface it.
+          fingerprint: encounterOpFingerprint({ combatantId, ...patch, idempotencyKey: undefined }),
+        }
+      : null;
+    let replayedCombatant: Combatant | null = null;
+
+    try {
+      this.db.transaction((tx) => {
+        if (opClaim) {
+          const prior = findPriorEncounterOp(tx, opClaim, Date.now());
+          if (prior) {
+            // Already applied. Return the ORIGINAL committed combatant — the retrying
+            // client does not know the outcome, so the committed HP is the whole point.
+            // (A missing body cannot happen here: the combatant response is stored inside
+            // this transaction, never backfilled. Fall back defensively anyway.)
+            replayedCombatant = (prior.response as Combatant | null) ?? null;
+            if (replayedCombatant) return;
           }
-          if (patch.updateConditionInstance !== undefined) {
-            // Update a single instance by id; ignore if not present (no-op).
-            const upd = patch.updateConditionInstance;
-            const updIdx = instances.findIndex((i) => i.id === upd.id);
-            if (updIdx >= 0) instances[updIdx] = upd;
-          }
-          if (patch.removeConditionInstanceId !== undefined) {
-            // Remove only the targeted instance — not all instances with the same name.
-            instances = instances.filter((i) => i.id !== patch.removeConditionInstanceId);
-          }
-          if (patch.removeConditions !== undefined) {
-            const removedNames = new Set(patch.removeConditions.map((c) => c.trim()).filter(Boolean));
-            instances = instances.filter((i) => !removedNames.has(i.name));
-          }
-          if (patch.addConditions !== undefined) {
-            const existingNames = new Set(instances.map((i) => i.name));
-            for (const rawName of patch.addConditions) {
-              const legacy = legacyConditionInstance(rawName);
-              if (!legacy) continue;
-              if (existingNames.has(legacy.name)) continue;
-              existingNames.add(legacy.name);
-              instances.push(legacy);
+        }
+        const [fresh] = tx.select().from(combatants).where(eq(combatants.id, combatantId)).limit(1).all();
+        beforeHp = fresh.hpCurrent;
+        beforeTemp = fresh.hpTemp;
+        beforeDeath = fresh.deathState;
+        _beforeSucc = fresh.deathSaveSuccesses;
+        _beforeFail = fresh.deathSaveFailures;
+        const writeSet: Partial<typeof combatants.$inferInsert> = { ...staticUpdate };
+        if (conditionFieldsTouched) {
+          // Rebase every condition mutation against the FRESH row (issue #747 / #423).
+          // Legacy string deltas and structured instance deltas share this path so a
+          // removeConditions patch cannot leave stale conditionInstances behind, and an
+          // addConditionInstance patch actually persists without needing a legacy field.
+          const legacyConditions = fromJsonText<string[]>(fresh.conditions, []);
+          let instances = parseConditionInstances(fresh.conditionInstances, legacyConditions);
+          beforeConditions = new Set(deriveConditionNames(instances));
+
+          if (patch.conditionInstances !== undefined) {
+            instances = [...patch.conditionInstances];
+          } else {
+            if (patch.addConditionInstance !== undefined) {
+              // Add a single instance (idempotent: replace if id already present).
+              const addIdx = instances.findIndex((i) => i.id === patch.addConditionInstance!.id);
+              if (addIdx >= 0) instances[addIdx] = patch.addConditionInstance;
+              else instances.push(patch.addConditionInstance);
+            }
+            if (patch.updateConditionInstance !== undefined) {
+              // Update a single instance by id; ignore if not present (no-op).
+              const upd = patch.updateConditionInstance;
+              const updIdx = instances.findIndex((i) => i.id === upd.id);
+              if (updIdx >= 0) instances[updIdx] = upd;
+            }
+            if (patch.removeConditionInstanceId !== undefined) {
+              // Remove only the targeted instance — not all instances with the same name.
+              instances = instances.filter((i) => i.id !== patch.removeConditionInstanceId);
+            }
+            if (patch.removeConditions !== undefined) {
+              const removedNames = new Set(patch.removeConditions.map((c) => c.trim()).filter(Boolean));
+              instances = instances.filter((i) => !removedNames.has(i.name));
+            }
+            if (patch.addConditions !== undefined) {
+              const existingNames = new Set(instances.map((i) => i.name));
+              for (const rawName of patch.addConditions) {
+                const legacy = legacyConditionInstance(rawName);
+                if (!legacy) continue;
+                if (existingNames.has(legacy.name)) continue;
+                existingNames.add(legacy.name);
+                instances.push(legacy);
+              }
             }
           }
+
+          instances = instances.slice(0, 50);
+          const derived = deriveConditionNames(instances);
+          afterConditions = new Set(derived);
+          writeSet.conditionInstances = toJsonText(instances);
+          writeSet.conditions = toJsonText(derived);
         }
+        if (patch.eac !== undefined && isDm) writeSet.eac = patch.eac;
+        if (patch.kac !== undefined && isDm) writeSet.kac = patch.kac;
+        if (patch.spSet !== undefined) writeSet.spCurrent = patch.spSet;
+        else if (patch.spDelta !== undefined) writeSet.spCurrent = Math.max(0, Math.min(fresh.spMax, fresh.spCurrent + patch.spDelta));
+        if (patch.rpSet !== undefined) writeSet.rpCurrent = patch.rpSet;
+        else if (patch.rpDelta !== undefined) writeSet.rpCurrent = Math.max(0, Math.min(fresh.rpMax, fresh.rpCurrent + patch.rpDelta));
+        if (patch.deathState !== undefined) writeSet.deathState = patch.deathState;
 
-        instances = instances.slice(0, 50);
-        const derived = deriveConditionNames(instances);
-        afterConditions = new Set(derived);
-        writeSet.conditionInstances = toJsonText(instances);
-        writeSet.conditions = toJsonText(derived);
-      }
-      if (patch.eac !== undefined && isDm) writeSet.eac = patch.eac;
-      if (patch.kac !== undefined && isDm) writeSet.kac = patch.kac;
-      if (patch.spSet !== undefined) writeSet.spCurrent = patch.spSet;
-      else if (patch.spDelta !== undefined) writeSet.spCurrent = Math.max(0, Math.min(fresh.spMax, fresh.spCurrent + patch.spDelta));
-      if (patch.rpSet !== undefined) writeSet.rpCurrent = patch.rpSet;
-      else if (patch.rpDelta !== undefined) writeSet.rpCurrent = Math.max(0, Math.min(fresh.rpMax, fresh.rpCurrent + patch.rpDelta));
-      if (patch.deathState !== undefined) writeSet.deathState = patch.deathState;
+        if (recomputeHp) {
+          const effectiveHpMax = hpMaxChanged ? Math.max(1, patch.hpMax!) : fresh.hpMax;
+          const state: CombatantHpState = {
+            kind: fresh.kind as CombatantHpState['kind'],
+            hpCurrent: fresh.hpCurrent,
+            hpMax: effectiveHpMax,
+            hpTemp: fresh.hpTemp,
+            deathState: fresh.deathState as CombatantHpState['deathState'],
+            deathSaveSuccesses: fresh.deathSaveSuccesses,
+            deathSaveFailures: fresh.deathSaveFailures,
+          };
+          const result = applyCombatantHp(state, {
+            hpDelta: patch.hpDelta,
+            hpSet: patch.hpSet,
+            hpTemp: patch.hpTemp,
+            deathSaveSuccesses: patch.deathSaveSuccesses,
+            deathSaveFailures: patch.deathSaveFailures,
+            deathSaveRoll: patch.deathSaveRoll,
+          });
 
-      if (recomputeHp) {
-        const effectiveHpMax = hpMaxChanged ? Math.max(1, patch.hpMax!) : fresh.hpMax;
-        const state: CombatantHpState = {
-          kind: fresh.kind as CombatantHpState['kind'],
-          hpCurrent: fresh.hpCurrent,
-          hpMax: effectiveHpMax,
-          hpTemp: fresh.hpTemp,
-          deathState: fresh.deathState as CombatantHpState['deathState'],
-          deathSaveSuccesses: fresh.deathSaveSuccesses,
-          deathSaveFailures: fresh.deathSaveFailures,
-        };
-        const result = applyCombatantHp(state, {
-          hpDelta: patch.hpDelta,
-          hpSet: patch.hpSet,
-          hpTemp: patch.hpTemp,
-          deathSaveSuccesses: patch.deathSaveSuccesses,
-          deathSaveFailures: patch.deathSaveFailures,
-          deathSaveRoll: patch.deathSaveRoll,
-        });
+          // If Starfinder adapter or SP present, damage flows through temp HP -> SP -> HP
+          if (adapter.id === STARFINDER_ADAPTER_ID && patch.hpDelta !== undefined && patch.hpDelta < 0) {
+            const sfResult = applyStarfinderDamage(
+              {
+                hpCurrent: fresh.hpCurrent,
+                hpMax: effectiveHpMax,
+                spCurrent: fresh.spCurrent,
+                spMax: fresh.spMax,
+                rpCurrent: fresh.rpCurrent,
+                rpMax: fresh.rpMax,
+                hpTemp: fresh.hpTemp,
+                deathState: fresh.deathState as any,
+              },
+              -patch.hpDelta,
+            );
+            writeSet.spCurrent = sfResult.spCurrent;
+            writeSet.rpCurrent = sfResult.rpCurrent;
+            result.hpCurrent = sfResult.hpCurrent;
+            result.hpTemp = sfResult.hpTemp;
+            result.deathState = sfResult.deathState;
+          }
 
-        // If Starfinder adapter or SP present, damage flows through temp HP -> SP -> HP
-        if (adapter.id === STARFINDER_ADAPTER_ID && patch.hpDelta !== undefined && patch.hpDelta < 0) {
-          const sfResult = applyStarfinderDamage(
-            {
-              hpCurrent: fresh.hpCurrent,
-              hpMax: effectiveHpMax,
-              spCurrent: fresh.spCurrent,
-              spMax: fresh.spMax,
-              rpCurrent: fresh.rpCurrent,
-              rpMax: fresh.rpMax,
-              hpTemp: fresh.hpTemp,
-              deathState: fresh.deathState as any,
-            },
-            -patch.hpDelta,
-          );
-          writeSet.spCurrent = sfResult.spCurrent;
-          writeSet.rpCurrent = sfResult.rpCurrent;
-          result.hpCurrent = sfResult.hpCurrent;
-          result.hpTemp = sfResult.hpTemp;
-          result.deathState = sfResult.deathState;
+          if (hpMaxChanged) writeSet.hpMax = effectiveHpMax;
+          writeSet.hpCurrent = result.hpCurrent;
+          writeSet.hpTemp = result.hpTemp;
+          writeSet.deathState = result.deathState;
+          writeSet.deathSaveSuccesses = result.deathSaveSuccesses;
+          writeSet.deathSaveFailures = result.deathSaveFailures;
         }
-
-        if (hpMaxChanged) writeSet.hpMax = effectiveHpMax;
-        writeSet.hpCurrent = result.hpCurrent;
-        writeSet.hpTemp = result.hpTemp;
-        writeSet.deathState = result.deathState;
-        writeSet.deathSaveSuccesses = result.deathSaveSuccesses;
-        writeSet.deathSaveFailures = result.deathSaveFailures;
-      }
-      const [updated] = tx.update(combatants).set(writeSet).where(eq(combatants.id, combatantId)).returning().all();
-      row = updated;
-      afterHp = updated.hpCurrent;
-      afterTemp = updated.hpTemp;
-      afterDeath = updated.deathState;
-      afterSucc = updated.deathSaveSuccesses;
-      afterFail = updated.deathSaveFailures;
-      if (conditionFieldsTouched) {
-        afterConditions = new Set(fromJsonText<string[]>(updated.conditions, []));
-      }
-      if (mirrorSheet) {
-        const mirroredAt = nowIso();
-        const sheetSet: Partial<typeof characters.$inferInsert> = { updatedAt: mirroredAt };
-        if (recomputeHp || spFieldsTouched || deathStateTouched) {
-          sheetSet.hpCurrent = updated.hpCurrent;
-          sheetSet.hpTemp = updated.hpTemp;
-          sheetSet.spCurrent = updated.spCurrent;
-          sheetSet.spMax = updated.spMax;
-          sheetSet.rpCurrent = updated.rpCurrent;
-          sheetSet.rpMax = updated.rpMax;
-          sheetSet.deathState = updated.deathState;
-          sheetSet.deathSaveSuccesses = updated.deathSaveSuccesses;
-          sheetSet.deathSaveFailures = updated.deathSaveFailures;
-        }
+        const [updated] = tx.update(combatants).set(writeSet).where(eq(combatants.id, combatantId)).returning().all();
+        row = updated;
+        afterHp = updated.hpCurrent;
+        afterTemp = updated.hpTemp;
+        afterDeath = updated.deathState;
+        afterSucc = updated.deathSaveSuccesses;
+        afterFail = updated.deathSaveFailures;
         if (conditionFieldsTouched) {
-          sheetSet.conditions = updated.conditions;
+          afterConditions = new Set(fromJsonText<string[]>(updated.conditions, []));
         }
-        tx.update(characters)
-          .set(sheetSet)
-          .where(eq(characters.id, existing.characterId!))
-          .run();
-        tx.update(combatants)
-          .set({ sheetSyncedUpdatedAt: mirroredAt })
-          .where(eq(combatants.id, combatantId))
-          .run();
+        if (mirrorSheet) {
+          const mirroredAt = nowIso();
+          const sheetSet: Partial<typeof characters.$inferInsert> = { updatedAt: mirroredAt };
+          if (recomputeHp || spFieldsTouched || deathStateTouched) {
+            sheetSet.hpCurrent = updated.hpCurrent;
+            sheetSet.hpTemp = updated.hpTemp;
+            sheetSet.spCurrent = updated.spCurrent;
+            sheetSet.spMax = updated.spMax;
+            sheetSet.rpCurrent = updated.rpCurrent;
+            sheetSet.rpMax = updated.rpMax;
+            sheetSet.deathState = updated.deathState;
+            sheetSet.deathSaveSuccesses = updated.deathSaveSuccesses;
+            sheetSet.deathSaveFailures = updated.deathSaveFailures;
+          }
+          if (conditionFieldsTouched) {
+            sheetSet.conditions = updated.conditions;
+          }
+          tx.update(characters)
+            .set(sheetSet)
+            .where(eq(characters.id, existing.characterId!))
+            .run();
+          tx.update(combatants)
+            .set({ sheetSyncedUpdatedAt: mirroredAt })
+            .where(eq(combatants.id, combatantId))
+            .run();
+        }
+
+        // The claim lands LAST but in the SAME transaction as everything above, carrying the
+        // exact response body this call will return. Both commit or neither does — there is
+        // no instant at which the effect exists without its key (double-apply on retry) or
+        // the key exists without its effect (a retry blocked from ever applying).
+        if (opClaim) {
+          recordEncounterOp(tx, opClaim, nowIso(), { body: combatantToDomain(row), role });
+        }
+      });
+    } catch (err) {
+      if (err instanceof EncounterOpRaceMarker) {
+        // Two concurrent attempts of the SAME intent: ours rolled back, theirs committed.
+        // Replay their response so exactly one apply survives (issue #580).
+        const prior = await readEncounterOpAfterRace(this.db, err.claim);
+        if (prior.response) return prior.response as Combatant;
+        return this.getCombatantRowOrThrow(encounterId, combatantId).then(combatantToDomain);
       }
-    });
+      throw err;
+    }
+
+    // An idempotent replay stops here: no second audit row, no duplicate combat-log
+    // events, no second SSE nudge — the first attempt already produced all of those.
+    if (replayedCombatant) return replayedCombatant;
 
     // #74: don't audit-log pure HP ticks. A single combat generates hundreds of
     // ±1 HP updates (every hit, heal, temp-hp adjust); auditing each one was the
@@ -3347,6 +3411,15 @@ export class EncountersService {
     const actorName = actor?.name ?? null;
     const actorCombatantId = actor?.id ?? null;
     const targetCombatantId = combatantId;
+    // Issue #580: stamp the operation id onto the events this write produces. "Was that
+    // 8 damage one hit or a retry that landed twice?" is exactly the question the log
+    // could not previously answer — two identical lines a second apart looked the same
+    // whether they were two swings or one swing double-applied. With the id present,
+    // duplicate lines sharing an operationId would be a bug signature, and its absence
+    // across two lines proves two distinct intents.
+    const opMeta: EncounterEventMetadata | undefined = patch.idempotencyKey
+      ? { operationId: patch.idempotencyKey }
+      : undefined;
 
     // HP damage/heal — only when an HP change was actually requested (not a pure temp-HP
     // grant or a death-save toggle). Compare the TOTAL pool (hp + temp) so temp-HP
@@ -3360,6 +3433,7 @@ export class EncountersService {
           actorId: actorCombatantId,
           targetId: targetCombatantId,
           detail: `took ${-poolDelta} damage`,
+          metadata: opMeta,
         });
       } else if (poolDelta > 0) {
         await this.appendEvent(encounterId, round, 'heal', {
@@ -3368,6 +3442,7 @@ export class EncountersService {
           actorId: actorCombatantId,
           targetId: targetCombatantId,
           detail: `healed ${poolDelta} HP`,
+          metadata: opMeta,
         });
       }
     }
@@ -3801,14 +3876,36 @@ export class EncountersService {
     return this.getWithCombatantsOrThrow(encounterId, role);
   }
 
-  async nextTurn(encounterId: number, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {
+  /**
+   * DM/AI "Next turn" (issues #49, #413, #580).
+   *
+   * Two distinct failures used to share one gap here, and they need different fixes:
+   *   - a RETRY of one intent (the response was lost; TanStack resends) must not advance
+   *     twice — that is `idempotencyKey`, which replays the original response;
+   *   - a RACE between two DM devices (two genuine intents arriving together) must not
+   *     advance twice either — that is `expectedCurrentCombatantId`, a compare-and-swap
+   *     against the live turn pointer, which 409s the loser instead of skipping a
+   *     combatant's turn.
+   * An idempotency key alone would let the race through (distinct keys, both fresh); CAS
+   * alone would 409 a legitimate retry that had in fact already succeeded. Both are opt-in
+   * so the classic bodyless call (and the MCP tool) keeps its historic behavior.
+   */
+  async nextTurn(
+    encounterId: number,
+    input: EncounterNextTurnInput,
+    user: RequestUser,
+    role: Role,
+  ): Promise<EncounterWithCombatants> {
     const encounterRow = await this.getRowOrThrow(encounterId);
     if (encounterRow.status !== 'running') {
       throw new BadRequestException('Encounter is not running');
     }
-    // DM/AI "Next turn" — no expected-id guard (preserves the classic control); the
-    // serialized advance below still resolves start/end-of-turn effects (issue #413).
-    return this.advanceCurrentTurn(encounterRow, user, role, { auditAction: 'encounter.next_turn' });
+    return this.advanceCurrentTurn(encounterRow, user, role, {
+      auditAction: 'encounter.next_turn',
+      expectedCurrentCombatantId: input.expectedCurrentCombatantId ?? undefined,
+      requestedExpectedCurrentCombatantId: input.expectedCurrentCombatantId ?? null,
+      idempotencyKey: input.idempotencyKey,
+    });
   }
 
   /**
@@ -3886,7 +3983,9 @@ export class EncountersService {
     return this.advanceCurrentTurn(encounterRow, user, role, {
       auditAction: 'encounter.end_turn',
       expectedCurrentCombatantId: expected,
+      requestedExpectedCurrentCombatantId: input.expectedCurrentCombatantId ?? null,
       endedByPlayer: !isDm,
+      idempotencyKey: input.idempotencyKey,
     });
   }
 
@@ -3905,10 +4004,41 @@ export class EncountersService {
     encounterRow: typeof encounters.$inferSelect,
     user: RequestUser,
     role: Role,
-    opts: { auditAction: string; expectedCurrentCombatantId?: number; endedByPlayer?: boolean },
+    opts: {
+      auditAction: string;
+      expectedCurrentCombatantId?: number;
+      /** The expectation as the CLIENT sent it (null/undefined when omitted) — see fingerprint below. */
+      requestedExpectedCurrentCombatantId?: number | null;
+      endedByPlayer?: boolean;
+      idempotencyKey?: string;
+    },
   ): Promise<EncounterWithCombatants> {
     const encounterId = encounterRow.id;
     const adapter = await this.adapterForCampaign(encounterRow.campaignId);
+
+    // Issue #580 — per-intent idempotency for the advance itself. Scoped by actor so two
+    // DMs cannot collide on a shared key, and by encounter/campaign so a key minted at one
+    // table can never be replayed against another.
+    const opClaim: EncounterOpClaim | null = opts.idempotencyKey
+      ? {
+          actorId: user.id,
+          operation: 'turn.advance',
+          key: opts.idempotencyKey,
+          encounterId,
+          campaignId: encounterRow.campaignId,
+          // Fingerprint the REQUEST, not the resolved expectation. `endTurn` defaults an
+          // omitted `expectedCurrentCombatantId` to whoever currently holds the turn —
+          // which, on the retry of an advance that already committed, is a DIFFERENT
+          // combatant. Hashing the resolved value would make that retry look like a
+          // different intent and 409 as key reuse, precisely when it most needs to replay.
+          fingerprint: encounterOpFingerprint({
+            auditAction: opts.auditAction,
+            expectedCurrentCombatantId: opts.requestedExpectedCurrentCombatantId ?? null,
+          }),
+        }
+      : null;
+    let replayedEncounter: EncounterWithCombatants | null = null;
+    let replayedWithoutBody = false;
 
     // Captured inside the tx for post-commit logging.
     let newRound = encounterRow.round;
@@ -3925,144 +4055,187 @@ export class EncountersService {
     let escalationLogDetail: string | undefined;
     let escalationValue = encounterRow.escalationDie ?? 0;
 
-    this.db.transaction((tx) => {
-      const [fresh] = tx.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all();
-      if (!fresh || (fresh.status as EncounterStatus) !== 'running') {
-        throw new BadRequestException('Encounter is not running');
-      }
-      endedRound = fresh.round;
-      const freshCurrentId = fresh.currentCombatantId;
-      const freshPhase = (fresh.turnPhase as EncounterTurnPhase) ?? 'combatant';
-      if (
-        opts.expectedCurrentCombatantId !== undefined &&
-        (freshPhase !== 'combatant' || freshCurrentId !== opts.expectedCurrentCombatantId)
-      ) {
-        // Someone advanced between the caller's read and this write — refuse rather than
-        // skip a second combatant's turn or advance from the lair slot (double-advance prevention, issue #413).
-        throw new ConflictException({
-          code: 'TURN_ALREADY_ADVANCED',
-          message: 'The turn already advanced — refresh the encounter before ending the turn again.',
-          currentCombatantId: freshCurrentId,
-        });
-      }
-
-      const rows = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all();
-      const sorted = this.sortCombatantsWithAdapter(rows.map(combatantToDomain), 'running', adapter);
-      const statblocks = new Map<number, ReturnType<RuleSystemAdapter['mapStatblock']>>();
-      const ruleEntryIds = [...new Set(sorted.map((c) => c.ruleEntryId).filter((id): id is number => id !== null))];
-      if (ruleEntryIds.length > 0) {
-        const entryRows = tx
-          .select({ id: ruleEntries.id, dataJson: ruleEntries.dataJson })
-          .from(ruleEntries)
-          .where(inArray(ruleEntries.id, ruleEntryIds))
-          .all();
-        for (const entry of entryRows) {
-          const data = fromJsonText<Record<string, unknown>>(entry.dataJson ?? null, {});
-          statblocks.set(entry.id, adapter.mapStatblock(data));
+    try {
+      this.db.transaction((tx) => {
+        // Dedup FIRST, before the CAS below. Order matters: a retry of an advance that
+        // already succeeded would otherwise fail the compare-and-swap (the pointer has
+        // moved — by this very operation) and surface a spurious "someone else advanced"
+        // conflict for what was actually our own committed work.
+        if (opClaim) {
+          const prior = findPriorEncounterOp(tx, opClaim, Date.now());
+          if (prior) {
+            if (prior.response && prior.responseRole === role) {
+              replayedEncounter = prior.response as EncounterWithCombatants;
+            } else {
+              // Claim committed but its body was never backfilled (a crash in the moment
+              // between commit and backfill), or it was rendered for a different role.
+              // Either way the advance HAPPENED — fall through to fresh server truth
+              // rather than re-running it.
+              replayedWithoutBody = true;
+            }
+            return;
+          }
         }
-      }
-      const hasLairSlot = encounterHasLairSlotFromStatblocks(statblocks);
-
-      const advanced = advanceEncounterTurn(
-        sorted,
-        freshCurrentId,
-        fresh.round,
-        freshPhase,
-        hasLairSlot,
-        fresh.lairResumeCombatantId ?? null,
-      );
-      const { turnIndex, round, currentCombatantId, phase, lairResumeCombatantId, roundWrapped, skipped } = advanced;
-      newRound = round;
-      newCurrentId = currentCombatantId;
-      skippedTurns = skipped;
-      const escalation = this.nextEscalationState(adapter, fresh, round, 'round');
-      escalationValue = escalation.escalationDie;
-      escalationLogDetail = roundWrapped ? escalation.logDetail : undefined;
-
-      // Resolve effects on the ENDING combatant (the one whose turn we're leaving): tick
-      // timed effects down, drop the expired. Only meaningful on a genuine combatant advance.
-      const ending =
-        freshPhase === 'combatant' && freshCurrentId !== null ? sorted.find((c) => c.id === freshCurrentId) : undefined;
-      if (ending) {
-        endedName = ending.name;
-        const { kept, expired } = tickEffectsAtTurnEnd(ending.activeEffects);
-        if (expired.length > 0) {
-          for (const e of expired) expiredEffects.push({ combatantId: ending.id, combatantName: ending.name, effectName: e.name });
-          tx.update(combatants).set({ activeEffects: toJsonText(kept) }).where(eq(combatants.id, ending.id)).run();
-        } else if (kept.some((e, i) => e.roundsRemaining !== ending.activeEffects[i]?.roundsRemaining)) {
-          // Durations changed (decremented) even though nothing expired — persist the tick.
-          tx.update(combatants).set({ activeEffects: toJsonText(kept) }).where(eq(combatants.id, ending.id)).run();
+        const [fresh] = tx.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all();
+        if (!fresh || (fresh.status as EncounterStatus) !== 'running') {
+          throw new BadRequestException('Encounter is not running');
         }
-        const condTick = tickConditionInstancesAtTurnEnd(ending.conditionInstances ?? []);
+        endedRound = fresh.round;
+        const freshCurrentId = fresh.currentCombatantId;
+        const freshPhase = (fresh.turnPhase as EncounterTurnPhase) ?? 'combatant';
         if (
-          condTick.expired.length > 0 ||
-          condTick.kept.some((c, i) => c.roundsRemaining !== ending.conditionInstances?.[i]?.roundsRemaining)
+          opts.expectedCurrentCombatantId !== undefined &&
+          (freshPhase !== 'combatant' || freshCurrentId !== opts.expectedCurrentCombatantId)
         ) {
-          for (const c of condTick.expired) {
-            expiredConditions.push({ combatantId: ending.id, combatantName: ending.name, conditionName: c.name });
-          }
-          tx.update(combatants)
-            .set({
-              conditionInstances: toJsonText(condTick.kept),
-              conditions: toJsonText(deriveConditionNames(condTick.kept)),
-            })
-            .where(eq(combatants.id, ending.id))
-            .run();
+          // Someone advanced between the caller's read and this write — refuse rather than
+          // skip a second combatant's turn or advance from the lair slot (double-advance prevention, issue #413).
+          throw new ConflictException({
+            code: 'TURN_ALREADY_ADVANCED',
+            message: 'The turn already advanced — refresh the encounter before ending the turn again.',
+            currentCombatantId: freshCurrentId,
+          });
         }
-      } else if (freshPhase === 'lair') {
-        endedName = 'Lair';
-      }
 
-      if (roundWrapped) {
-        for (const row of rows) {
-          const domain = combatantToDomain(row);
-          if (domain.ruleEntryId === null) continue;
-          const mapped = statblocks.get(domain.ruleEntryId);
-          if (!mapped || !statblockSectionHasEntries(mapped.legendaryActions)) continue;
-          const reset = resetLegendaryUsage(domain.turnState);
-          if (reset !== domain.turnState) {
-            tx.update(combatants).set({ turnState: toJsonText(reset) }).where(eq(combatants.id, row.id)).run();
+        const rows = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all();
+        const sorted = this.sortCombatantsWithAdapter(rows.map(combatantToDomain), 'running', adapter);
+        const statblocks = new Map<number, ReturnType<RuleSystemAdapter['mapStatblock']>>();
+        const ruleEntryIds = [...new Set(sorted.map((c) => c.ruleEntryId).filter((id): id is number => id !== null))];
+        if (ruleEntryIds.length > 0) {
+          const entryRows = tx
+            .select({ id: ruleEntries.id, dataJson: ruleEntries.dataJson })
+            .from(ruleEntries)
+            .where(inArray(ruleEntries.id, ruleEntryIds))
+            .all();
+          for (const entry of entryRows) {
+            const data = fromJsonText<Record<string, unknown>>(entry.dataJson ?? null, {});
+            statblocks.set(entry.id, adapter.mapStatblock(data));
           }
         }
-      }
+        const hasLairSlot = encounterHasLairSlotFromStatblocks(statblocks);
 
-      // Reset the STARTING combatant's per-turn action economy (fresh action/bonus/reaction/
-      // movement for its new turn). Concentration persists across turns.
-      const starting = currentCombatantId === null ? undefined : sorted.find((c) => c.id === currentCombatantId);
-      if (starting) {
-        newCurrentName = starting.name;
-        const reset = resetTurnStateForStart(starting.turnState);
-        const condTick = tickConditionInstancesAtTurnStart(starting.conditionInstances ?? []);
-        const startSet: Partial<typeof combatants.$inferInsert> = { turnState: toJsonText(reset) };
-        if (
-          condTick.expired.length > 0 ||
-          condTick.kept.some((c, i) => c.roundsRemaining !== starting.conditionInstances?.[i]?.roundsRemaining)
-        ) {
-          for (const c of condTick.expired) {
-            expiredConditions.push({ combatantId: starting.id, combatantName: starting.name, conditionName: c.name });
+        const advanced = advanceEncounterTurn(
+          sorted,
+          freshCurrentId,
+          fresh.round,
+          freshPhase,
+          hasLairSlot,
+          fresh.lairResumeCombatantId ?? null,
+        );
+        const { turnIndex, round, currentCombatantId, phase, lairResumeCombatantId, roundWrapped, skipped } = advanced;
+        newRound = round;
+        newCurrentId = currentCombatantId;
+        skippedTurns = skipped;
+        const escalation = this.nextEscalationState(adapter, fresh, round, 'round');
+        escalationValue = escalation.escalationDie;
+        escalationLogDetail = roundWrapped ? escalation.logDetail : undefined;
+
+        // Resolve effects on the ENDING combatant (the one whose turn we're leaving): tick
+        // timed effects down, drop the expired. Only meaningful on a genuine combatant advance.
+        const ending =
+          freshPhase === 'combatant' && freshCurrentId !== null ? sorted.find((c) => c.id === freshCurrentId) : undefined;
+        if (ending) {
+          endedName = ending.name;
+          const { kept, expired } = tickEffectsAtTurnEnd(ending.activeEffects);
+          if (expired.length > 0) {
+            for (const e of expired) expiredEffects.push({ combatantId: ending.id, combatantName: ending.name, effectName: e.name });
+            tx.update(combatants).set({ activeEffects: toJsonText(kept) }).where(eq(combatants.id, ending.id)).run();
+          } else if (kept.some((e, i) => e.roundsRemaining !== ending.activeEffects[i]?.roundsRemaining)) {
+            // Durations changed (decremented) even though nothing expired — persist the tick.
+            tx.update(combatants).set({ activeEffects: toJsonText(kept) }).where(eq(combatants.id, ending.id)).run();
           }
-          startSet.conditionInstances = toJsonText(condTick.kept);
-          startSet.conditions = toJsonText(deriveConditionNames(condTick.kept));
+          const condTick = tickConditionInstancesAtTurnEnd(ending.conditionInstances ?? []);
+          if (
+            condTick.expired.length > 0 ||
+            condTick.kept.some((c, i) => c.roundsRemaining !== ending.conditionInstances?.[i]?.roundsRemaining)
+          ) {
+            for (const c of condTick.expired) {
+              expiredConditions.push({ combatantId: ending.id, combatantName: ending.name, conditionName: c.name });
+            }
+            tx.update(combatants)
+              .set({
+                conditionInstances: toJsonText(condTick.kept),
+                conditions: toJsonText(deriveConditionNames(condTick.kept)),
+              })
+              .where(eq(combatants.id, ending.id))
+              .run();
+          }
+        } else if (freshPhase === 'lair') {
+          endedName = 'Lair';
         }
-        tx.update(combatants).set(startSet).where(eq(combatants.id, starting.id)).run();
-      } else if (phase === 'lair') {
-        newCurrentName = 'Lair';
-      }
 
-      tx.update(encounters)
-        .set({
-          turnIndex,
-          round,
-          currentCombatantId,
-          turnPhase: phase,
-          lairResumeCombatantId,
-          escalationDie: escalation.escalationDie,
-          escalationDieHistory: escalation.escalationDieHistory ?? fresh.escalationDieHistory,
-          updatedAt: nowIso(),
-        })
-        .where(eq(encounters.id, encounterId))
-        .run();
-    });
+        if (roundWrapped) {
+          for (const row of rows) {
+            const domain = combatantToDomain(row);
+            if (domain.ruleEntryId === null) continue;
+            const mapped = statblocks.get(domain.ruleEntryId);
+            if (!mapped || !statblockSectionHasEntries(mapped.legendaryActions)) continue;
+            const reset = resetLegendaryUsage(domain.turnState);
+            if (reset !== domain.turnState) {
+              tx.update(combatants).set({ turnState: toJsonText(reset) }).where(eq(combatants.id, row.id)).run();
+            }
+          }
+        }
+
+        // Reset the STARTING combatant's per-turn action economy (fresh action/bonus/reaction/
+        // movement for its new turn). Concentration persists across turns.
+        const starting = currentCombatantId === null ? undefined : sorted.find((c) => c.id === currentCombatantId);
+        if (starting) {
+          newCurrentName = starting.name;
+          const reset = resetTurnStateForStart(starting.turnState);
+          const condTick = tickConditionInstancesAtTurnStart(starting.conditionInstances ?? []);
+          const startSet: Partial<typeof combatants.$inferInsert> = { turnState: toJsonText(reset) };
+          if (
+            condTick.expired.length > 0 ||
+            condTick.kept.some((c, i) => c.roundsRemaining !== starting.conditionInstances?.[i]?.roundsRemaining)
+          ) {
+            for (const c of condTick.expired) {
+              expiredConditions.push({ combatantId: starting.id, combatantName: starting.name, conditionName: c.name });
+            }
+            startSet.conditionInstances = toJsonText(condTick.kept);
+            startSet.conditions = toJsonText(deriveConditionNames(condTick.kept));
+          }
+          tx.update(combatants).set(startSet).where(eq(combatants.id, starting.id)).run();
+        } else if (phase === 'lair') {
+          newCurrentName = 'Lair';
+        }
+
+        tx.update(encounters)
+          .set({
+            turnIndex,
+            round,
+            currentCombatantId,
+            turnPhase: phase,
+            lairResumeCombatantId,
+            escalationDie: escalation.escalationDie,
+            escalationDieHistory: escalation.escalationDieHistory ?? fresh.escalationDieHistory,
+            updatedAt: nowIso(),
+          })
+          .where(eq(encounters.id, encounterId))
+          .run();
+
+        // Claim written in the SAME transaction as the pointer move. The response body is
+        // the whole role-redacted encounter, which is assembled asynchronously below, so it
+        // is backfilled immediately after commit instead of stored here. The atomic part is
+        // the part that must be atomic: the claim can never be missing while the advance
+        // stands (which would let a retry advance again), nor present while the advance
+        // rolled back (which would wedge the turn).
+        if (opClaim) recordEncounterOp(tx, opClaim, nowIso(), null);
+      });
+    } catch (err) {
+      if (err instanceof EncounterOpRaceMarker) {
+        // Same intent, two concurrent attempts: ours rolled back, theirs committed.
+        const prior = await readEncounterOpAfterRace(this.db, err.claim);
+        if (prior.response && prior.responseRole === role) return prior.response as EncounterWithCombatants;
+        return this.getWithCombatantsOrThrow(encounterId, role);
+      }
+      throw err;
+    }
+
+    // An idempotent replay stops here — the advance already happened, so re-appending the
+    // turn marker, re-auditing, or re-emitting would manufacture the very duplicate this
+    // exists to prevent.
+    if (replayedEncounter) return replayedEncounter;
+    if (replayedWithoutBody) return this.getWithCombatantsOrThrow(encounterId, role);
 
     // Combat-log markers for auto-skipped dead/defeated combatants (issue #610).
     for (const skipped of skippedTurns) {
@@ -4075,7 +4248,10 @@ export class EncountersService {
       });
     }
     // Combat-log turn marker (issue #61). Names live on actor/target (+ ids); detail stays
-    // name-free so #869 redaction cannot be bypassed by prose.
+    // name-free so #869 redaction cannot be bypassed by prose. The operation id (#580)
+    // makes "did the turn advance twice?" answerable from the log alone: two turn markers
+    // carrying the SAME operationId would be a double-advance, two markers with different
+    // ids are two legitimate advances.
     await this.appendEvent(encounterId, newRound, 'turn', {
       actor: newCurrentName,
       target: newCurrentName,
@@ -4087,6 +4263,7 @@ export class EncountersService {
           : newCurrentName === 'Lair'
             ? 'Lair action (initiative 20)'
             : '',
+      metadata: opts.idempotencyKey ? { operationId: opts.idempotencyKey } : undefined,
     });
     // Structured effect-expiry events (issue #413): one per expired effect on the combatant
     // whose turn just ended. Detail stays name-free (the effect name is generic content).
@@ -4121,12 +4298,21 @@ export class EncountersService {
       entityType: 'encounter',
       entityId: encounterId,
       campaignId: encounterRow.campaignId,
-      detail: `round ${newRound}`,
+      // Issue #580: the operation id in the audit trail is what lets an operator
+      // reconstruct, after the fact, whether a disputed double-advance came from two
+      // clicks or from one click retried.
+      detail: opts.idempotencyKey ? `round ${newRound} (op ${opts.idempotencyKey})` : `round ${newRound}`,
     });
 
     this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId, encounterRow.hidden);
 
-    return this.getWithCombatantsOrThrow(encounterId, role);
+    const view = await this.getWithCombatantsOrThrow(encounterId, role);
+    // Backfill the original response onto the already-committed claim (issue #580) so a
+    // retry gets the turn pointer THIS call produced, not merely "some current state".
+    // Best-effort by construction: the claim (the part that prevents a second advance) is
+    // already durable, and a replay that finds no body falls back to fresh truth.
+    if (opClaim) await backfillEncounterOpResponse(this.db, opClaim, { body: view, role });
+    return view;
   }
 
   /**

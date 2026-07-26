@@ -203,11 +203,17 @@ export const queryClient = new QueryClient({
       staleTime: 5_000,
     },
     mutations: {
-      // Same 4xx-is-terminal rule as reads.
-      retry: (failureCount, error) => {
-        if (error instanceof ApiError && error.status >= 400 && error.status < 500) return false;
-        return failureCount < 1;
-      },
+      // Issue #580: NO automatic retry by default. Reads are safe to repeat; mutations
+      // are not. This app's mutations include relative writes (HP deltas, turn advance),
+      // and a retry of one whose response was merely lost re-applies the damage or skips
+      // a combatant's turn. The old default — retry once on any network/5xx — made every
+      // endpoint retryable whether or not it could survive being replayed.
+      //
+      // Retry is now opt-IN, via useKeyedMutation (lib/keyedMutation.ts), which enables it
+      // only alongside the idempotency key that makes it safe. Opting in without a key is
+      // not expressible, which is the point: a new endpoint cannot inherit retry it has
+      // not been protected for.
+      retry: false,
     },
   },
 });
