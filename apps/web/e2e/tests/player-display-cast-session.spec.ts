@@ -117,6 +117,15 @@ test.describe('Player Display cast sessions', () => {
       encounterMapCalls.push(route.request().url());
       return route.abort();
     });
+    // Issue #604's responsive ladder hangs off a SUB-path of that route, and a
+    // Playwright `*` does not cross `/` — so the glob above would miss it. The
+    // manifest and every srcset rung authenticate from the session COOKIE, so on
+    // this DM-cookie-bearing kiosk a single rung would be served the unfogged
+    // SOURCE map. A cast display must therefore fetch no manifest at all.
+    await page.route('**/api/v1/encounters/*/map/**', (route) => {
+      encounterMapCalls.push(route.request().url());
+      return route.abort();
+    });
     await page.route(`**/api/v1/cast/${TOKEN}/encounters/${encounterId}/map*`, (route) => {
       castMapCalls.push(route.request().url());
       return route.fulfill({ status: 200, contentType: 'image/png', body: Buffer.from(TRANSPARENT_PNG_BASE64, 'base64') });
@@ -139,11 +148,21 @@ test.describe('Player Display cast sessions', () => {
     await expect.poll(() => castMapCalls.length).toBeGreaterThan(0);
     expect(encounterMapCalls).toEqual([]);
 
+    // Issue #604: the board renders through the capability URL alone. No `srcset`
+    // may be emitted here — every rung would resolve to the cookie-authenticated
+    // route, i.e. the DM's unfogged source map on a screen the table can see.
+    const castMap = page.getByRole('img', { name: 'Battle map' });
+    await expect(castMap).toBeVisible();
+    expect(await castMap.getAttribute('srcset')).toBeNull();
+    expect(await castMap.getAttribute('sizes')).toBeNull();
+    expect(await castMap.getAttribute('src')).toContain(`/cast/${TOKEN}/`);
+
     // A kiosk gets reloaded and navigated back to constantly; neither may fall back
     // to the authenticated route or to a stale cached DM payload.
     await page.reload();
     await expect(page.getByTestId('cf-scene-map-body')).toBeVisible();
     expect(encounterMapCalls).toEqual([]);
+    expect(await page.getByRole('img', { name: 'Battle map' }).getAttribute('srcset')).toBeNull();
   });
 });
 
