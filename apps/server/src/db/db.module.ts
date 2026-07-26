@@ -2331,6 +2331,35 @@ function migrateCampaignLibraryMonstersForeignKeys(sqlite: Database.Database): v
 }
 
 /**
+ * Issue #542: 13th Age initiative transparency and escalation die state.
+ * Encounters store the current escalation value, hold/override controls, and a bounded
+ * JSON history. Combatants store the initiative roll/modifier breakdown shown in the UI/log.
+ */
+function migrateArchmageEscalation542(sqlite: Database.Database): void {
+  const hasEncountersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='encounters'")
+    .get();
+  if (hasEncountersTable) {
+    const columns = sqlite.prepare('PRAGMA table_info(encounters)').all() as Array<{ name: string }>;
+    const has = (name: string): boolean => columns.some((c) => c.name === name);
+    if (!has('escalation_die')) sqlite.exec('ALTER TABLE encounters ADD COLUMN escalation_die INTEGER NOT NULL DEFAULT 0');
+    if (!has('escalation_die_held')) sqlite.exec('ALTER TABLE encounters ADD COLUMN escalation_die_held INTEGER NOT NULL DEFAULT 0');
+    if (!has('escalation_die_override')) sqlite.exec('ALTER TABLE encounters ADD COLUMN escalation_die_override INTEGER');
+    if (!has('escalation_die_history')) sqlite.exec('ALTER TABLE encounters ADD COLUMN escalation_die_history TEXT');
+  }
+
+  const hasCombatantsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'")
+    .get();
+  if (hasCombatantsTable) {
+    const columns = sqlite.prepare('PRAGMA table_info(combatants)').all() as Array<{ name: string }>;
+    if (!columns.some((c) => c.name === 'initiative_breakdown')) {
+      sqlite.exec('ALTER TABLE combatants ADD COLUMN initiative_breakdown TEXT');
+    }
+  }
+}
+
+/**
  * Issue #413: campaign turn-advancement controls. `dm_controls_turns` keeps combat
  * advancement DM-only (a player cannot end their own turn); `require_dm_turn_confirmation`
  * stages a player's end-turn for DM approval instead of advancing immediately. Both plain
@@ -2922,8 +2951,9 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0104_campaign_library_monsters', run: migrateCampaignLibraryMonstersTable },
   { name: '0105_campaign_library_monsters_fk', run: migrateCampaignLibraryMonstersForeignKeys },
   { name: '0106_guest_dm_handoff_545', run: migrateGuestDmHandoff545 },
-  // 0107 is already claimed on main by the 13th Age escalation migration (#542);
-  // this branch merges after it, so take the next free ordinal rather than collide.
+  { name: '0107_archmage_escalation_542', run: migrateArchmageEscalation542 },
+  // 0107 was claimed on main by the 13th Age escalation migration (#542); this
+  // branch merges after it, so it takes the next free ordinal rather than collide.
   { name: '0108_scheduling_lifecycle_504', run: migrateSchedulingLifecycle504 },
 ];
 

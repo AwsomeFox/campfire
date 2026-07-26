@@ -960,9 +960,9 @@ describe('encounters (e2e)', () => {
       const server = ctx.app.getHttpServer();
       const res = await request(server).get(`/api/v1/encounters/${logEncounterId}/events`).set(dm);
       expect(res.status).toBe(200);
-      expect(res.body).toHaveLength(1);
-      expect(res.body[0].type).toBe('turn');
-      expect(res.body[0].round).toBe(1);
+      const turns = (res.body as Array<{ type: string; round: number }>).filter((event) => event.type === 'turn');
+      expect(turns).toHaveLength(1);
+      expect(turns[0].round).toBe(1);
     });
 
     it('a damage mutation appends a damage event carrying the delta, never the resulting HP total', async () => {

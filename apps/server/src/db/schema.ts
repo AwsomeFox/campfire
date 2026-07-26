@@ -938,6 +938,10 @@ export const encounters = sqliteTable('encounters', {
   name: text('name').notNull(),
   status: text('status').notNull().default('preparing'),
   round: integer('round').notNull().default(0),
+  escalationDie: integer('escalation_die').notNull().default(0),
+  escalationDieHeld: integer('escalation_die_held', { mode: 'boolean' }).notNull().default(false),
+  escalationDieOverride: integer('escalation_die_override'),
+  escalationDieHistory: text('escalation_die_history'),
   turnIndex: integer('turn_index').notNull().default(0),
   // Identity-based turn pointer (issue #49) — the combatant whose turn it is,
   // independent of positional shuffling on add/remove. null when not running/empty.
@@ -1287,6 +1291,7 @@ export const combatants = sqliteTable('combatants', {
   name: text('name').notNull(),
   initiative: integer('initiative'), // null until rolled
   initMod: integer('init_mod').notNull().default(0),
+  initiativeBreakdown: text('initiative_breakdown'),
   // OSR group-initiative side label (issue #765). Combatants on the same side share one
   // d6 roll in group-mode systems. Nullable; added by migration on older DBs.
   initiativeGroup: text('initiative_group'),

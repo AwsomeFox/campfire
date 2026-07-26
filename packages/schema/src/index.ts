@@ -2691,6 +2691,8 @@ export interface RuleSystemAdapter {
     representation?: AbilityRepresentation,
     level?: number,
   ): number;
+  /** Optional extra term for systems whose character initiative adds level separately (13th Age). */
+  levelInitiativeBonus?(level: number): number;
   /**
    * OPTIONAL — resolve an initiative modifier, or `null` when it cannot be derived
    * (issue #764). Systems that implement this (PF1e) let encounter/generator callers
@@ -3691,7 +3693,10 @@ export function neutralCheckCatalog(adapter: RuleSystemAdapter, character: Check
   const FLAT_PROFICIENCY = 2;
   const out: RollCheckDefinition[] = [];
 
-  const initMod = adapter.initiativeModifier(stats, 'score', character.level);
+  const initBase = adapter.initiativeModifier(stats, 'score', character.level);
+  const initLevel = adapter.levelInitiativeBonus?.(character.level) ?? 0;
+  const initMod = initBase + initLevel;
+  const initiativeLabel = adapter.id === ARCHMAGE_ADAPTER_ID ? 'DEX' : 'initiative';
   out.push({
     id: 'initiative',
     label: 'Initiative',
@@ -3700,7 +3705,13 @@ export function neutralCheckCatalog(adapter: RuleSystemAdapter, character: Check
     proficiency: null,
     favorite: true,
     modifier: initMod,
-    breakdown: [{ label: 'initiative', value: initMod }],
+    breakdown:
+      initLevel !== 0
+        ? [
+            { label: initiativeLabel, value: initBase },
+            { label: 'level', value: initLevel },
+          ]
+        : [{ label: initiativeLabel, value: initMod }],
     die: adapter.initiativeDie > 0 ? adapter.initiativeDie : 20,
     supportsAdvantage: true,
     supportsDegrees: false,
@@ -5891,6 +5902,43 @@ export type Attachment = z.infer<typeof Attachment>;
 export const EncounterStatus = z.enum(['preparing', 'running', 'ended']);
 export type EncounterStatus = z.infer<typeof EncounterStatus>;
 
+/** One transparent component of an initiative modifier. */
+export const InitiativeBreakdownTerm = z.object({
+  label: z.string().min(1).max(80),
+  value: z.number().int(),
+});
+export type InitiativeBreakdownTerm = z.infer<typeof InitiativeBreakdownTerm>;
+
+/**
+ * Stored initiative provenance for a combatant. `roll` and `total` are null until
+ * initiative is rolled; `terms` explain the stored modifier (e.g. DEX + level for 13th Age).
+ */
+export const CombatantInitiativeBreakdown = z.object({
+  die: z.number().int().positive().max(100),
+  roll: z.number().int().nullable().default(null),
+  modifier: z.number().int(),
+  total: z.number().int().nullable().default(null),
+  terms: z.array(InitiativeBreakdownTerm).max(10).default([]),
+  formula: z.string().max(160).default(''),
+});
+export type CombatantInitiativeBreakdown = z.infer<typeof CombatantInitiativeBreakdown>;
+
+/** Why the 13th Age escalation die changed for this encounter. */
+export const EscalationDieHistorySource = z.enum(['start', 'round', 'hold', 'override', 'undo']);
+export type EscalationDieHistorySource = z.infer<typeof EscalationDieHistorySource>;
+
+/** Bounded, structured history used by UI, logs, MCP, and AI to explain escalation state. */
+export const EscalationDieHistoryEntry = z.object({
+  round: z.number().int().nonnegative(),
+  value: z.number().int().min(0).max(6),
+  source: EscalationDieHistorySource,
+  held: z.boolean().default(false),
+  override: z.number().int().min(0).max(6).nullable().default(null),
+  note: z.string().max(160).default(''),
+  at: IsoDate,
+});
+export type EscalationDieHistoryEntry = z.infer<typeof EscalationDieHistoryEntry>;
+
 // ---------- VTT: grid, token size, fog of war (issue #40, phases 2–3) ----------
 
 /**
@@ -6001,6 +6049,13 @@ export const Encounter = z.object({
   name: z.string().min(1).max(120),
   status: EncounterStatus.default('preparing'),
   round: z.number().int().nonnegative().default(0),
+  // 13th Age / Archmage Engine escalation die state (issue #542). Non-Archmage campaigns
+  // keep the inert defaults. The current value is stored rather than derived-only so DM
+  // hold/override decisions, undo, logs, MCP, and AI all observe the same state.
+  escalationDie: z.number().int().min(0).max(6).default(0),
+  escalationDieHeld: z.boolean().default(false),
+  escalationDieOverride: z.number().int().min(0).max(6).nullable().default(null),
+  escalationDieHistory: z.array(EscalationDieHistoryEntry).max(200).default([]),
   // Positional turn cursor, kept in lockstep with `currentCombatantId` as a
   // display/back-compat convenience — it is the index of the current combatant in
   // the server-sorted order. `currentCombatantId` is the AUTHORITATIVE pointer
@@ -6120,6 +6175,14 @@ export const EncounterUpdate = z.object({
   // from non-DM reads; the DM "reveals" it by patching hidden back to false.
   hidden: z.boolean().optional(),
 });
+
+/** DM control for the 13th Age escalation die: hold automatic advancement and/or override it. */
+export const EncounterEscalationUpdate = z.object({
+  held: z.boolean().optional(),
+  // null clears an override; omitted leaves the current override unchanged.
+  override: z.number().int().min(0).max(6).nullable().optional(),
+});
+export type EncounterEscalationUpdate = z.infer<typeof EncounterEscalationUpdate>;
 
 // ---------- procedural battle-map generation (issue #306) ----------
 
@@ -6945,6 +7008,7 @@ export const Combatant = z.object({
   name: z.string().min(1).max(120),
   initiative: z.number().int().nullable().default(null),
   initMod: z.number().int().default(0),
+  initiativeBreakdown: CombatantInitiativeBreakdown.nullable().default(null),
   // Initiative side/group for OSR group-initiative variants (issue #765). Combatants sharing
   // the same group name (e.g. "party", "monsters") roll one d6 for the whole side. null =
   // individual initiative (default for 5e and individual-mode OSR).
@@ -7197,6 +7261,9 @@ export const EncounterEventMetadata = z.object({
   spellLevelSpent: z.number().int().optional(),
   undoOfChainId: z.string().max(64).optional(),
   ruleSystem: z.string().max(40).optional(),
+  escalationDie: z.number().int().min(0).max(6).optional(),
+  escalationApplied: z.boolean().optional(),
+  escalationPrevented: z.boolean().optional(),
 });
 export type EncounterEventMetadata = z.infer<typeof EncounterEventMetadata>;
 
