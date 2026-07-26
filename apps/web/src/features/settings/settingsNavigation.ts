@@ -17,6 +17,7 @@ const HASH_SECTION: Readonly<Record<string, SettingsSectionId>> = {
   'campaign-general': 'campaign',
   'public-recap-sharing': 'campaign',
   'public-invites': 'campaign',
+  'cast-sessions': 'campaign',
   'gameplay-rules': 'gameplay-rules',
   'rule-system': 'gameplay-rules',
   ai: 'ai',

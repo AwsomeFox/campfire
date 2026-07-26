@@ -160,9 +160,13 @@ export function matchNetworkOnlyApi({ url, request }: WorkboxMatchOptions): bool
   if (path.startsWith('/api/v1/notifications')) return true;
   if (path.startsWith('/api/v1/mcp')) return true;
 
-  // Capability-token URLs (shared recaps, ICS feeds, invites) — #730.
+  // Capability-token URLs (shared recaps, ICS feeds, invites, Player Display cast
+  // sessions) — #730 / #547. Cast responses carry the capability in the URL and are
+  // served no-store; a shared TV must never retain them in Cache Storage where they
+  // would outlive the session's expiry or a DM revoke.
   if (path.startsWith('/api/v1/shared/')) return true;
   if (path.startsWith('/api/v1/calendar/')) return true;
+  if (path.startsWith('/api/v1/cast/')) return true;
   if (/\/calendar-feed(\/|$)/.test(path)) return true;
   if (path.startsWith('/api/v1/invites') || /\/invites(\/|$)/.test(path)) return true;
 
@@ -238,6 +242,7 @@ export function matchApiJsonCache({ url, request }: WorkboxMatchOptions): boolea
   if (path.startsWith('/api/v1/mcp')) return false;
   if (path.startsWith('/api/v1/shared/')) return false;
   if (path.startsWith('/api/v1/calendar/')) return false;
+  if (path.startsWith('/api/v1/cast/')) return false;
   if (/\/calendar-feed(\/|$)/.test(path)) return false;
   if (path.startsWith('/api/v1/invites') || /\/invites(\/|$)/.test(path)) return false;
   if (/\/ai-provider(\/|$)/.test(path)) return false;

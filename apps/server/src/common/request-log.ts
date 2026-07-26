@@ -21,6 +21,11 @@ export interface RequestLogFields {
 const FULL_MATCH_SECRET_PATTERNS: RegExp[] = [
   /\bsk-[a-zA-Z0-9_-]{10,}\b/g,
   /\bcf_pat_[a-f0-9]{48}\b/gi,
+  // Player Display cast capability (issue #547). Unlike a PAT this secret rides in
+  // the request PATH (/cast/:token/...), and `path` is a logged field — so without
+  // this the raw, still-valid cast token is written verbatim to every request log
+  // line. Issue #547 requires that unredacted material never reach logs.
+  /\bcf_cast_[a-f0-9]{48}\b/gi,
   /\bBearer\s+\S+/gi,
   /\bapi[_-]?key[=:]\s*\S+/gi,
 ];
