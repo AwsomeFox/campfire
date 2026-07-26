@@ -71,7 +71,19 @@ test.describe('glossary term help (#518) — DM', () => {
     await expect(panel.getByRole('button', { name: 'Dismiss' })).toBeFocused();
     await trigger.focus();
 
-    // Escape closes only the panel and leaves focus on the trigger.
+    // Escape pressed while focus is INSIDE the panel must still return focus to the
+    // trigger — otherwise the panel unmounts under the focused control and the user is
+    // dropped at document.body. Asserting this only after re-focusing the trigger would
+    // mask the real keyboard flow (Devin review on #1431).
+    await page.keyboard.press('Tab');
+    await expect(panel.getByRole('link', { name: 'Open glossary' })).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(panel).toHaveCount(0);
+    await expect(trigger).toBeFocused();
+
+    // And again from the trigger itself, the common case.
+    await trigger.press('Enter');
+    await expect(panel).toBeVisible();
     await page.keyboard.press('Escape');
     await expect(panel).toHaveCount(0);
     await expect(trigger).toHaveAttribute('aria-expanded', 'false');

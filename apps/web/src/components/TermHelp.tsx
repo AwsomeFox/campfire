@@ -164,6 +164,14 @@ export function TermHelp({
         event.preventDefault();
         event.stopPropagation();
         setOpen(false);
+        // Return focus to the trigger. `focusManagement: false` means useDisclosure
+        // deliberately does not do this, which is right for the common case where
+        // focus never left the trigger — but the panel's own "Open glossary" and
+        // "Dismiss" controls are the next tab stops, so a keyboard user can be
+        // INSIDE the panel when they press Escape. The panel then unmounts and focus
+        // would fall to document.body, dropping them at the top of the page
+        // (Devin review on #1431). The trigger itself stays mounted, so this is safe.
+        triggerRef?.current?.focus();
       }
     }
     function dismissOutside(event: PointerEvent) {
