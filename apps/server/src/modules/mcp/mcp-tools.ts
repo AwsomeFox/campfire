@@ -925,7 +925,11 @@ export class McpToolsService {
         // any note whose author has not opted in under the campaign's AI content policy.
         // Reading notes directly here would be a consent bypass.
         const assembly = await this.scribe.assembleSourceWithConsent(campaignId as number);
-        const assembled = assembly.source ?? { resolvedInbox: [], encounters: [], diceRolls: [] };
+        // Whatever material exists, INCLUDING encounters still `preparing`. This tool
+        // assembles a scaffold and calls no model, so the run engine's "is there enough
+        // here to be worth spending provider tokens on?" gate deliberately does not apply
+        // — dropping prepared encounters here served no consent purpose (#501 review).
+        const assembled = assembly.source;
         const source = {
           resolvedInbox: assembled.resolvedInbox.map((n) => ({
             body: n.body,

@@ -1349,6 +1349,44 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(regrant.status).toBe(200);
   });
 
+  /**
+   * Issue #501 review — routing this tool through the scribe's assembler must not inherit
+   * the RUN ENGINE's "is this worth spending provider tokens on?" gate.
+   *
+   * That gate collapses the assembly to nothing unless there is a fought encounter, a
+   * resolved note, or a dice roll. Applied here it dropped `preparing` encounters from a
+   * scaffold tool that calls no model at all — collateral from sharing one assembler, and
+   * serving no consent purpose, since encounters are DM-authored and never consent-gated.
+   */
+  it('draft_session_recap still returns encounters that are only PREPARING (#501 review)', async () => {
+    // A campaign whose sole material is an unfought encounter — nothing "recap-worthy".
+    const created = await dmAgent.post('/api/v1/campaigns').send({ name: 'Prep Only Campaign' });
+    expect(created.status).toBe(201);
+    const prepCampaignId = created.body.id as number;
+
+    const encounter = await dmAgent
+      .post(`/api/v1/campaigns/${prepCampaignId}/encounters`)
+      .send({ name: 'Planned Ambush' });
+    expect(encounter.status).toBe(201);
+    expect(encounter.body.status).toBe('preparing');
+
+    const client = await mcpClient(dmToken);
+    const result = await client.callTool({
+      name: 'draft_session_recap',
+      arguments: { campaignId: prepCampaignId },
+    });
+    expect(result.isError).toBeFalsy();
+    const draft = parseResult(result) as {
+      sourceMaterial: { encounters: Array<{ name: string; status: string }> };
+      consent: { campaignPolicy: string };
+    };
+
+    expect(draft.sourceMaterial.encounters.map((e) => e.name)).toContain('Planned Ambush');
+    // The consent block is present even on an otherwise-empty assembly, so an empty result
+    // always carries its own explanation rather than reading as a broken tool.
+    expect(draft.consent.campaignPolicy).toBeTruthy();
+  });
+
   it('draft_session_recap is dm-only (viewer PAT is denied)', async () => {
     const viewerClient = await mcpClient(viewerToken);
     const denied = await viewerClient.callTool({ name: 'draft_session_recap', arguments: { campaignId } });

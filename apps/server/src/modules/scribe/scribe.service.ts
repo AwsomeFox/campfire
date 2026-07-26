@@ -62,9 +62,28 @@ type ScribeConfigUpdateInput = z.infer<typeof ScribeConfigUpdate>;
 const SCRIBE_PROMPT_VERSION = 'scribe-recap-v2';
 
 export type ScribeAssembly = {
-  source: RecapDraftSource | null;
+  /**
+   * The assembled, consent-filtered material. Always present — "is there enough here to
+   * be worth recapping?" is a SCRIBE-RUN question (see `hasRecapMaterial`), not a property
+   * of the assembly, and collapsing it to null here previously dropped prepared encounters
+   * from the MCP scaffold tool, which spends no tokens and calls no model.
+   */
+  source: RecapDraftSource;
   consent: ScribeConsentSummary;
 };
+
+/**
+ * Whether assembled material is worth drafting a recap FROM (issue #316).
+ *
+ * A still-`preparing` encounter is prep, not play, so it cannot carry a recap on its own —
+ * but it is perfectly legitimate source material to hand an agent or a human who is
+ * writing one. This gate therefore belongs to the run engine (which would otherwise spend
+ * provider tokens narrating nothing), NOT to assembly.
+ */
+export function hasRecapMaterial(source: RecapDraftSource): boolean {
+  const fought = source.encounters.filter((e) => e.status === 'running' || e.status === 'ended');
+  return fought.length > 0 || source.resolvedInbox.length > 0 || (source.diceRolls?.length ?? 0) > 0;
+}
 
 type RunOpts = {
   dryRun?: boolean;
@@ -429,12 +448,10 @@ export class ScribeService implements OnApplicationBootstrap {
 
     const scoped = scope ? filterSourceByScope(source, scope, sessionPlayedAtById) : source;
     const filtered = await this.applyConsentGate(campaignId, scoped, egress);
-    const filteredSource = filtered.source ?? scoped;
-    const fought = filteredSource.encounters.filter((e) => e.status === 'running' || e.status === 'ended');
-    if (fought.length === 0 && filteredSource.resolvedInbox.length === 0 && (filteredSource.diceRolls?.length ?? 0) === 0) {
-      return { source: null, consent: filtered.consent };
-    }
-    return { source: filteredSource, consent: filtered.consent };
+    // Deliberately NOT collapsed to null when there is nothing "recap-worthy". Callers that
+    // would spend tokens narrating it ask `hasRecapMaterial`; the MCP scaffold tool, which
+    // spends none, gets whatever exists — including encounters that are still `preparing`.
+    return { source: filtered.source, consent: filtered.consent };
   }
 
   private async sessionPlayedAtMap(campaignId: number): Promise<Map<number, string | null>> {
@@ -556,8 +573,10 @@ export class ScribeService implements OnApplicationBootstrap {
     const egress = await this.resolveEgress(campaignId);
     const assembly = await this.assembleSourceWithConsent(campaignId, scope, egress);
     const source = assembly.source;
-    const stats = this.sourceStats(source ?? { resolvedInbox: [], encounters: [] }, scope, assembly.consent);
-    if (!source) {
+    const stats = this.sourceStats(source, scope, assembly.consent);
+    // The run engine — not assembly — decides whether there is enough to be worth spending
+    // provider tokens on. A campaign with only `preparing` encounters has nothing to recap.
+    if (!hasRecapMaterial(source)) {
       return this.record(campaignId, trigger, user, 'no_material', {
         detail: withheldConsentDetail(
           scope && isSessionScope(scope)
