@@ -60,6 +60,26 @@ import type { ModerationEvidenceIntegrity } from '@campfire/schema';
  */
 const CANONICAL_VERSION_BANNER = 'campfire.moderation.evidence.v1';
 
+/**
+ * Banner for the METADATA-only digest: everything above except `content`.
+ *
+ * Why a second digest exists. Redaction overwrites `content`, so the content digest
+ * can no longer match by construction — which means `redacted_at` would otherwise be
+ * a switch that disables integrity checking entirely. Anyone able to write the row
+ * could stamp `redacted_at` and then rewrite `authorUserId`, `targetId` or `capturedAt`
+ * freely, and every reader would see the benign verdict `redacted` instead of
+ * `tampered`. The redaction path is reachable in-app by any non-conflicted DM, so this
+ * is not a theoretical operator-only concern.
+ *
+ * The metadata digest closes that: it covers exactly the fields redaction does NOT
+ * touch, so it must still verify AFTER a redaction. `redacted` therefore comes to mean
+ * "the content was removed by a recorded redaction and nothing else changed", which is
+ * what the doc above always claimed and what makes keeping the original content hash
+ * worth doing. A distinct banner keeps the two digests in separate domains so one can
+ * never be substituted for the other.
+ */
+const METADATA_VERSION_BANNER = 'campfire.moderation.evidence.meta.v1';
+
 /** Placeholder written over `content` once a snapshot is redacted (expiry or explicit request). */
 export const MODERATION_REDACTED_CONTENT = '[redacted]';
 
@@ -101,10 +121,9 @@ function field(name: string, value: string): string {
   return `${name}:${Buffer.byteLength(value, 'utf8')}:${value}\n`;
 }
 
-/** The exact bytes fed to sha256. Exported so a test can assert the layout, not just the digest. */
-export function moderationEvidenceCanonicalPayload(payload: ModerationEvidencePayload): string {
+/** Every field except `content`, in the fixed order documented above. */
+function metadataFields(payload: ModerationEvidencePayload): string {
   return (
-    `${CANONICAL_VERSION_BANNER}\n` +
     field('campaignId', String(payload.campaignId)) +
     field('targetType', payload.targetType) +
     field('targetId', payload.targetId == null ? '' : String(payload.targetId)) +
@@ -117,9 +136,18 @@ export function moderationEvidenceCanonicalPayload(payload: ModerationEvidencePa
     field('anchorEntityId', payload.anchorEntityId == null ? '' : String(payload.anchorEntityId)) +
     field('revisionAt', payload.revisionAt) +
     field('capturedAt', payload.capturedAt) +
-    field('context', canonicalJson(payload.context)) +
-    field('content', payload.content)
+    field('context', canonicalJson(payload.context))
   );
+}
+
+/** The exact bytes fed to sha256. Exported so a test can assert the layout, not just the digest. */
+export function moderationEvidenceCanonicalPayload(payload: ModerationEvidencePayload): string {
+  return `${CANONICAL_VERSION_BANNER}\n` + metadataFields(payload) + field('content', payload.content);
+}
+
+/** The metadata-only bytes — see METADATA_VERSION_BANNER for why this digest exists. */
+export function moderationEvidenceMetadataPayload(payload: ModerationEvidencePayload): string {
+  return `${METADATA_VERSION_BANNER}\n` + metadataFields(payload);
 }
 
 /** sha256, hex. See the module doc for what is covered and why it is not keyed. */
@@ -127,21 +155,39 @@ export function moderationEvidenceHash(payload: ModerationEvidencePayload): stri
   return createHash('sha256').update(moderationEvidenceCanonicalPayload(payload), 'utf8').digest('hex');
 }
 
+/** sha256, hex, over everything but the content. Survives redaction; see the banner doc. */
+export function moderationEvidenceMetadataHash(payload: ModerationEvidencePayload): string {
+  return createHash('sha256').update(moderationEvidenceMetadataPayload(payload), 'utf8').digest('hex');
+}
+
 /**
  * Verify a stored snapshot.
  *
- * A redacted row is reported as `redacted`, NOT `tampered`: the mismatch is the
- * expected consequence of a recorded, audited redaction, and conflating the two
- * would train reviewers to ignore the alarm that matters. The original hash is
- * never rewritten on redaction — keeping it is what lets a reviewer confirm that
- * the redaction is the ONLY thing that changed, by re-verifying every other field
- * against a pre-redaction export.
+ * A redacted row is reported as `redacted`, NOT `tampered`: the content mismatch is
+ * the expected consequence of a recorded, audited redaction, and conflating the two
+ * would train reviewers to ignore the alarm that matters.
+ *
+ * But `redacted` is NOT a free pass. Redaction touches only `content`, so the
+ * metadata digest must still verify; if it does not, something other than the
+ * redaction changed and the verdict is `tampered` after all. Without that check
+ * `redacted_at` would be a one-flag way to switch integrity checking off and then
+ * rewrite the accused's identity undetected. The original content hash is still never
+ * rewritten on redaction — it is what lets a reviewer match the row against a
+ * pre-redaction export.
+ *
+ * `storedMetadataHash` is empty only for a snapshot written before the metadata
+ * digest existed; there is nothing to check against, so such a row keeps the old
+ * behaviour rather than being falsely accused of tampering.
  */
 export function verifyModerationEvidence(
   payload: ModerationEvidencePayload,
   storedHash: string,
   redactedAt: string | null,
+  storedMetadataHash = '',
 ): ModerationEvidenceIntegrity {
-  if (redactedAt != null) return 'redacted';
+  if (redactedAt != null) {
+    if (!storedMetadataHash) return 'redacted';
+    return moderationEvidenceMetadataHash(payload) === storedMetadataHash ? 'redacted' : 'tampered';
+  }
   return moderationEvidenceHash(payload) === storedHash ? 'intact' : 'tampered';
 }

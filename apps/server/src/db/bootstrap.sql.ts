@@ -478,6 +478,10 @@ CREATE TABLE IF NOT EXISTS moderation_evidence (
   content TEXT NOT NULL DEFAULT '',
   context_json TEXT NOT NULL DEFAULT '{}',
   content_hash TEXT NOT NULL,
+  -- sha256 over every field EXCEPT content. Redaction overwrites content, so
+  -- content_hash cannot match afterwards; this digest still can, which is what stops
+  -- redacted_at from being a switch that disables tamper detection for the row.
+  metadata_hash TEXT NOT NULL DEFAULT '',
   redacted_at TEXT,
   redacted_by TEXT,
   redaction_reason TEXT NOT NULL DEFAULT '',

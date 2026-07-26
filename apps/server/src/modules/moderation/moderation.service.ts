@@ -51,6 +51,7 @@ import { clampModerationListLimit, decodeModerationCursor } from './moderation-p
 import {
   MODERATION_REDACTED_CONTENT,
   moderationEvidenceHash,
+  moderationEvidenceMetadataHash,
   verifyModerationEvidence,
   type ModerationEvidencePayload,
 } from './moderation-evidence';
@@ -212,11 +213,21 @@ export class ModerationService implements OnApplicationBootstrap {
    * rows are skipped by the `redacted_at IS NULL` predicate) and safe to call from an
    * admin endpoint or a test. Returns the number of snapshots redacted.
    *
+   * Honours `autoRedactEnabled`: with the policy switched off this is a no-op, and so
+   * is the lazy on-read sweep in loadEvidence. That switch is the operator's control
+   * over automatic destruction of evidence content — a setting that is stored,
+   * reported and audited but silently ignored would be worse than not offering it,
+   * because an operator would believe they had turned scheduled redaction off. The
+   * explicit per-incident {@link redactEvidence} is deliberately NOT gated on it: that
+   * one is a deliberate human decision, not a timer.
+   *
    * Redaction preserves `content_hash` unchanged on purpose — see
-   * verifyModerationEvidence: keeping the original digest is what lets a reviewer
-   * confirm later that redaction was the ONLY thing that changed.
+   * verifyModerationEvidence: keeping the original digest, alongside the metadata
+   * digest that still verifies, is what lets a reviewer confirm later that redaction
+   * was the ONLY thing that changed.
    */
   async redactExpired(actor: { actor: string; actorRole: AuditActorRole }): Promise<number> {
+    if (!(await this.getRetentionPolicy()).autoRedactEnabled) return 0;
     const nowTs = nowIso();
     const rows = await this.db
       .select({ id: moderationEvidence.id, campaignId: moderationEvidence.campaignId })
@@ -303,6 +314,9 @@ export class ModerationService implements OnApplicationBootstrap {
       content: input.content,
     };
     const contentHash = moderationEvidenceHash(payload);
+    // Second digest over everything but the content, so a later redaction cannot turn
+    // into a blanket "integrity checking off" flag — see moderation-evidence.ts.
+    const metadataHash = moderationEvidenceMetadataHash(payload);
     const expiresAt = this.computeExpiry(tx, capturedAt);
 
     const [row] = tx
@@ -322,6 +336,7 @@ export class ModerationService implements OnApplicationBootstrap {
         content: input.content,
         contextJson: JSON.stringify(input.context),
         contentHash,
+        metadataHash,
         expiresAt,
         capturedAt,
       })
@@ -790,10 +805,21 @@ export class ModerationService implements OnApplicationBootstrap {
   ): Promise<ModerationReport> {
     const report = await this.loadReportRow(campaignId, reportId);
 
-    if (input.action === 'escalate' && role !== 'dm') {
+    if (role !== 'dm') {
+      // A non-DM may only ever touch their OWN report, and only to escalate it. The
+      // 404-before-403 ordering matters: a bare `role !== 'dm'` 403 here would make
+      // this endpoint an existence oracle for every report id in the campaign —
+      // 404 for "no such report", 403 for "exists but you may not act" — which is
+      // exactly the confirmation the conflicted-DM 404 in assertDmMayHandle exists
+      // to deny. The SUBJECT of a report is usually an ordinary member, so this is
+      // the very probe they would reach for. Non-reporters get the same 404 whether
+      // or not the report exists; only the reporter, who already knows it exists,
+      // sees a 403 for a verb that is not theirs.
       if (report.reporterUserId !== user.id) throw new NotFoundException(`Moderation report ${reportId} not found`);
+      if (input.action !== 'escalate') {
+        throw new ForbiddenException('Only a DM may act on the moderation queue; you may escalate your own report');
+      }
     } else {
-      if (role !== 'dm') throw new ForbiddenException('Only a DM may act on the moderation queue');
       this.assertDmMayHandle(report, user);
     }
     if (report.status === 'resolved' && input.action !== 'escalate') {
@@ -834,7 +860,10 @@ export class ModerationService implements OnApplicationBootstrap {
 
       case 'remove':
         this.removeTarget(report, user);
-        patch.quarantined = false; // the row is gone from normal reads by a stronger means
+        // Stays `true`: removal sets the quarantine (see removeTarget) precisely so the
+        // author cannot restore the takedown away, and the flag is what a later
+        // `rejected` resolution keys off to lift it again.
+        patch.quarantined = true;
         if (report.status === 'open') patch.status = 'acknowledged';
         detail = 'content removed at source';
         break;
@@ -1102,7 +1131,12 @@ export class ModerationService implements OnApplicationBootstrap {
     let [row] = await this.db.select().from(moderationEvidence).where(eq(moderationEvidence.id, evidenceId)).limit(1);
     if (!row) throw new NotFoundException(`Moderation evidence ${evidenceId} not found`);
 
-    if (row.redactedAt == null && row.expiresAt != null && row.expiresAt <= nowIso()) {
+    // Lazy retention: an expired snapshot is redacted on the way out rather than
+    // served because no sweep has run yet. Gated on the same autoRedactEnabled switch
+    // as redactExpired — otherwise turning scheduled redaction off would change
+    // nothing, since every read would still redact.
+    const autoRedact = this.readStoredRetention(this.db).autoRedactEnabled ?? true;
+    if (autoRedact && row.redactedAt == null && row.expiresAt != null && row.expiresAt <= nowIso()) {
       const nowTs = nowIso();
       await this.db
         .update(moderationEvidence)
@@ -1149,6 +1183,7 @@ export class ModerationService implements OnApplicationBootstrap {
       },
       row.contentHash,
       row.redactedAt,
+      row.metadataHash,
     );
     return {
       id: row.id,
@@ -1545,8 +1580,18 @@ export class ModerationService implements OnApplicationBootstrap {
   /**
    * `remove`: take the content down at source. Uses each surface's OWN removal
    * semantics rather than a hard delete — a comment is tombstoned so replies keep
-   * their parent (#503), a note is trashed (#116) — so removal stays reversible by
-   * the existing restore paths while the evidence snapshot preserves what was said.
+   * their parent (#503), a note is trashed (#116) — so removal stays reversible while
+   * the evidence snapshot preserves what was said.
+   *
+   * Removal also SETS the quarantine rather than clearing it. Soft-delete alone is
+   * reversible by the author (`POST /comments/:id/restore`, `POST /notes/:id/restore`
+   * are author-or-DM and author-only respectively), so a `remove` that cleared the
+   * flag would let the reported member undo the moderator's takedown a second later
+   * and put the content straight back in front of the person who reported it. The
+   * quarantine is what makes the removal stick: both restore paths refuse while it is
+   * set. It is lifted the same way any other quarantine is — by `unquarantine`, or
+   * automatically when the report resolves as `rejected`, which is precisely the case
+   * where the content SHOULD become restorable again.
    */
   private removeTarget(report: typeof moderationReports.$inferSelect, user: RequestUser): void {
     const targetType = report.targetType as ModerationTargetType;
@@ -1561,7 +1606,12 @@ export class ModerationService implements OnApplicationBootstrap {
         if (!row) throw new NotFoundException(`Comment ${report.targetId} not found`);
         this.captureEvidenceTx(tx, this.commentCaptureInput(row, 'pre_remove'));
         tx.update(comments)
-          .set({ deletedAt: nowTs, deletedBy: actor, quarantinedAt: null, quarantinedBy: null })
+          .set({
+            deletedAt: nowTs,
+            deletedBy: actor,
+            quarantinedAt: row.quarantinedAt ?? nowTs,
+            quarantinedBy: row.quarantinedBy ?? actor,
+          })
           .where(eq(comments.id, report.targetId!))
           .run();
         return;
@@ -1570,7 +1620,12 @@ export class ModerationService implements OnApplicationBootstrap {
       if (!row) throw new NotFoundException(`Note ${report.targetId} not found`);
       this.captureEvidenceTx(tx, this.noteCaptureInput(row, 'pre_remove'));
       tx.update(notes)
-        .set({ deletedAt: nowTs, updatedAt: nowTs, quarantinedAt: null, quarantinedBy: null })
+        .set({
+          deletedAt: nowTs,
+          updatedAt: nowTs,
+          quarantinedAt: row.quarantinedAt ?? nowTs,
+          quarantinedBy: row.quarantinedBy ?? actor,
+        })
         .where(eq(notes.id, report.targetId!))
         .run();
     });

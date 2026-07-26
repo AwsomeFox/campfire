@@ -2402,13 +2402,26 @@ function migrateArchmageEscalation542(sqlite: Database.Database): void {
  * clean no-op, matching migrateAiProviderConfigTable / migrateArchmageEscalation542.
  */
 function migrateModerationIncidents601(sqlite: Database.Database): void {
+  const columnNames = (table: string): string[] =>
+    (sqlite.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name);
+  const tableExists = (table: string): boolean =>
+    sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(table) != null;
+
   for (const table of ['comments', 'notes'] as const) {
-    const exists = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(table);
-    if (!exists) continue; // fresh DB — BOOTSTRAP_SQL already declares both columns.
-    const columns = sqlite.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
-    const has = (name: string): boolean => columns.some((c) => c.name === name);
-    if (!has('quarantined_at')) sqlite.exec(`ALTER TABLE ${table} ADD COLUMN quarantined_at TEXT`);
-    if (!has('quarantined_by')) sqlite.exec(`ALTER TABLE ${table} ADD COLUMN quarantined_by TEXT`);
+    if (!tableExists(table)) continue; // fresh DB — BOOTSTRAP_SQL already declares both columns.
+    const has = columnNames(table);
+    if (!has.includes('quarantined_at')) sqlite.exec(`ALTER TABLE ${table} ADD COLUMN quarantined_at TEXT`);
+    if (!has.includes('quarantined_by')) sqlite.exec(`ALTER TABLE ${table} ADD COLUMN quarantined_by TEXT`);
+  }
+
+  // `moderation_evidence.metadata_hash` was added after the table's first shape, so a
+  // DB created by an earlier build of this branch has the table but not the column.
+  // `CREATE TABLE IF NOT EXISTS` in BOOTSTRAP_SQL cannot add a column to an existing
+  // table, so the ALTER belongs here. Defaults to '' — verifyModerationEvidence treats
+  // an empty metadata digest as "nothing to verify against" rather than as tampering,
+  // so pre-existing snapshots keep their old verdicts instead of being falsely accused.
+  if (tableExists('moderation_evidence') && !columnNames('moderation_evidence').includes('metadata_hash')) {
+    sqlite.exec("ALTER TABLE moderation_evidence ADD COLUMN metadata_hash TEXT NOT NULL DEFAULT ''");
   }
 }
 

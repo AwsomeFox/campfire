@@ -483,9 +483,12 @@ describe('Issue #601: moderation evidence + incident workflow (e2e)', () => {
       const deleted = await abuser.delete(`/api/v1/comments/${commentId}`);
       expect(deleted.status).toBe(403);
 
-      // …and the withheld prose never reached the revision history side door.
+      // …and the revision history side door is shut outright, not merely empty: the
+      // history of a quarantined comment is refused rather than served-and-hoped-empty,
+      // because a comment edited before it was quarantined DOES have its prior prose in
+      // entity_revisions.
       const revisions = await abuser.get(`/api/v1/comments/${commentId}/revisions`);
-      expect(revisions.status).toBe(200);
+      expect(revisions.status).toBe(403);
       expect(JSON.stringify(revisions.body)).not.toContain('FROZEN CONTENT zulu');
 
       // Lifting the quarantine hands control back to the author.
@@ -570,12 +573,33 @@ describe('Issue #601: moderation evidence + incident workflow (e2e)', () => {
       expect(act.status).toBe(201);
 
       const read = await victim.get(`/api/v1/comments/${commentId}`);
-      expect(read.body.body).toBe('[deleted]');
+      expect(read.body.body).toBe('[withheld pending moderation review]');
 
       const bundle = await dmUser.get(`/api/v1/campaigns/${campaignId}/moderation/reports/${report.body.id}/export`);
       const preRemove = bundle.body.additionalEvidence.filter((e: { reason: string }) => e.reason === 'pre_remove');
       expect(preRemove).toHaveLength(1);
       expect(preRemove[0].content).toBe('REMOVE ME mike');
+    });
+
+    /**
+     * A takedown the reported member can undo is not a takedown. `remove` soft-deletes,
+     * and soft-delete is reversible by the author, so removal also sets the quarantine —
+     * which is what makes both restore paths refuse.
+     */
+    it('the reported member cannot restore content the queue removed', async () => {
+      const commentId = await postComment(abuser, 'RESTORE ME BACK mike');
+      const report = await fileReport(victim, { targetType: 'comment', targetId: commentId, reason: 'harassment' });
+
+      await dmUser
+        .post(`/api/v1/campaigns/${campaignId}/moderation/reports/${report.body.id}/actions`)
+        .send({ action: 'remove' });
+
+      const restore = await abuser.post(`/api/v1/comments/${commentId}/restore`);
+      expect(restore.status).toBe(403);
+
+      const read = await victim.get(`/api/v1/comments/${commentId}`);
+      expect(read.body.body).toBe('[withheld pending moderation review]');
+      expect(read.body.body).not.toContain('RESTORE ME BACK');
     });
 
     it('every queue action lands in the existing campaign audit log', async () => {
@@ -627,6 +651,131 @@ describe('Issue #601: moderation evidence + incident workflow (e2e)', () => {
         .post(`/api/v1/campaigns/${campaignId}/moderation/reports/${report.body.id}/actions`)
         .send({ action: 'resolve' });
       expect(res.status).toBe(400);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Quarantine has to hold on EVERY read path, not just the ones it was written
+  // for. Each test below corresponds to a route that reached the withheld prose
+  // around the toDomain / notes-filter chokepoints.
+  // -------------------------------------------------------------------------
+
+  describe('quarantine holds on every read path (#601 bullet 4)', () => {
+    /** Quarantine a fresh comment and return its id + report id. */
+    async function quarantinedComment(body: string): Promise<{ commentId: number; reportId: number }> {
+      const commentId = await postComment(abuser, body);
+      const report = await fileReport(victim, { targetType: 'comment', targetId: commentId, reason: 'harassment' });
+      const act = await dmUser
+        .post(`/api/v1/campaigns/${campaignId}/moderation/reports/${report.body.id}/actions`)
+        .send({ action: 'quarantine' });
+      expect(act.status).toBe(201);
+      return { commentId, reportId: report.body.id };
+    }
+
+    /**
+     * Revision history is a separate table behind a separate controller, so the
+     * placeholder in CommentsService.toDomain does nothing for it. An edited comment
+     * has its prior body in entity_revisions; without a guard, the generic
+     * /revisions route hands it back to any DM and lets them restore it.
+     */
+    it('does not expose a quarantined comment\'s prose through revision history', async () => {
+      const commentId = await postComment(abuser, 'REVISION LEAK papa original');
+      // Edit first, so there is a prior revision holding the original words.
+      const edit = await abuser.patch(`/api/v1/comments/${commentId}`).send({ body: 'REVISION LEAK papa second' });
+      expect(edit.status).toBe(200);
+
+      const report = await fileReport(victim, { targetType: 'comment', targetId: commentId, reason: 'harassment' });
+      await dmUser
+        .post(`/api/v1/campaigns/${campaignId}/moderation/reports/${report.body.id}/actions`)
+        .send({ action: 'quarantine' });
+
+      // Neither the comment-scoped route nor the generic revisions route may serve it.
+      const viaComment = await dmUser.get(`/api/v1/comments/${commentId}/revisions`);
+      expect(viaComment.status).toBe(403);
+      expect(JSON.stringify(viaComment.body)).not.toContain('REVISION LEAK papa');
+
+      const viaGeneric = await dmUser.get(`/api/v1/revisions/comment/${commentId}`);
+      expect(viaGeneric.status).toBe(403);
+      expect(JSON.stringify(viaGeneric.body)).not.toContain('REVISION LEAK papa');
+    });
+
+    /**
+     * The sharper half: restoring a pre-quarantine revision would write the withheld
+     * prose straight back into the live row, lifting the quarantine through a route
+     * that never touches CommentsService.
+     */
+    it('cannot restore a quarantined comment to a pre-quarantine revision', async () => {
+      const commentId = await postComment(abuser, 'RESTORE LEAK quebec original');
+      await abuser.patch(`/api/v1/comments/${commentId}`).send({ body: 'RESTORE LEAK quebec second' });
+      const revs = await dmUser.get(`/api/v1/comments/${commentId}/revisions`);
+      expect(revs.status).toBe(200);
+      const revisionId = revs.body[0].id as number;
+
+      const report = await fileReport(victim, { targetType: 'comment', targetId: commentId, reason: 'harassment' });
+      await dmUser
+        .post(`/api/v1/campaigns/${campaignId}/moderation/reports/${report.body.id}/actions`)
+        .send({ action: 'quarantine' });
+
+      const restore = await dmUser.post(`/api/v1/revisions/comment/${commentId}/${revisionId}/restore`);
+      expect(restore.status).toBe(403);
+
+      const read = await victim.get(`/api/v1/comments/${commentId}`);
+      expect(read.body.body).toBe('[withheld pending moderation review]');
+      expect(read.body.body).not.toContain('RESTORE LEAK quebec');
+    });
+
+    /**
+     * Search bypasses toDomain on both the FTS predicate and the hydration select, so
+     * it needs the filter repeated in both places — for notes as well as comments.
+     */
+    it('keeps quarantined content out of campaign search results', async () => {
+      const { commentId } = await quarantinedComment('SEARCHABLE ABUSE romeo');
+      expect(commentId).toBeGreaterThan(0);
+
+      for (const agent of [victim, bystander, dmUser]) {
+        const res = await agent.get(`/api/v1/campaigns/${campaignId}/search?q=romeo`);
+        expect(res.status).toBe(200);
+        expect(JSON.stringify(res.body)).not.toContain('SEARCHABLE ABUSE');
+      }
+    });
+
+    /**
+     * A clone copies prose into a new campaign that has none of the reports justifying
+     * the quarantine, and the copy loop does not carry the quarantine columns — so an
+     * unfiltered clone is a one-click way to launder withheld content back into view.
+     */
+    it('does not carry quarantined content into a campaign clone', async () => {
+      const { commentId } = await quarantinedComment('CLONE ME sierra abusive');
+      expect(commentId).toBeGreaterThan(0);
+
+      const clone = await dmUser.post(`/api/v1/campaigns/${campaignId}/clone`).send({ name: 'Cloned Table' });
+      expect([200, 201]).toContain(clone.status);
+      const cloneId = clone.body.id as number;
+
+      // Export is the widest read of the clone available in one call — comments,
+      // notes and revisions together — so it is the strongest single assertion that
+      // nothing withheld came across.
+      const cloned = await dmUser.get(`/api/v1/campaigns/${cloneId}/export`);
+      expect(cloned.status).toBe(200);
+      expect(JSON.stringify(cloned.body)).not.toContain('CLONE ME sierra');
+    });
+
+    /**
+     * The campaign export ships every revision row INCLUDING live tips, and a live
+     * tip's snapshot holds the entity's current prose — so an unfiltered export
+     * carries the exact body the quarantine withholds.
+     */
+    it('does not ship quarantined prose in the campaign export', async () => {
+      const commentId = await postComment(abuser, 'EXPORT LEAK tango original');
+      await abuser.patch(`/api/v1/comments/${commentId}`).send({ body: 'EXPORT LEAK tango second' });
+      const report = await fileReport(victim, { targetType: 'comment', targetId: commentId, reason: 'harassment' });
+      await dmUser
+        .post(`/api/v1/campaigns/${campaignId}/moderation/reports/${report.body.id}/actions`)
+        .send({ action: 'quarantine' });
+
+      const exported = await dmUser.get(`/api/v1/campaigns/${campaignId}/export`);
+      expect(exported.status).toBe(200);
+      expect(JSON.stringify(exported.body)).not.toContain('EXPORT LEAK tango');
     });
   });
 
@@ -788,6 +937,39 @@ describe('Issue #601: moderation evidence + incident workflow (e2e)', () => {
         .post(`/api/v1/campaigns/${campaignId}/moderation/reports/${otherReport.body.id}/actions`)
         .send({ action: 'escalate' });
       expect(notYours.status).toBe(404);
+    });
+
+    /**
+     * The actions endpoint must not become an existence oracle. If a non-DM got 404
+     * for "no such report" but 403 for "exists, but not for you", any member — the
+     * SUBJECT above all — could enumerate ids and learn that a report about them
+     * exists, which is exactly what the conflicted-DM 404 exists to deny.
+     */
+    it('does not leak whether a report exists to a member who did not file it', async () => {
+      const commentId = await postComment(abuser, 'ORACLE PROBE uniform');
+      const report = await fileReport(victim, { targetType: 'comment', targetId: commentId, reason: 'harassment' });
+      const realId = report.body.id as number;
+      const missingId = realId + 100_000;
+
+      // The subject of the report, and an uninvolved member, must not be able to tell
+      // a real report id from a nonexistent one — on ANY verb.
+      for (const agent of [abuser, bystander]) {
+        for (const action of ['acknowledge', 'quarantine', 'remove', 'escalate', 'resolve']) {
+          const real = await agent
+            .post(`/api/v1/campaigns/${campaignId}/moderation/reports/${realId}/actions`)
+            .send({ action, resolution: 'upheld' });
+          const missing = await agent
+            .post(`/api/v1/campaigns/${campaignId}/moderation/reports/${missingId}/actions`)
+            .send({ action, resolution: 'upheld' });
+          expect(real.status).toBe(404);
+          expect(missing.status).toBe(404);
+        }
+      }
+
+      // The report is untouched by all that probing.
+      const still = await dmUser.get(`/api/v1/campaigns/${campaignId}/moderation/reports/${realId}`);
+      expect(still.status).toBe(200);
+      expect(still.body.status).toBe('open');
     });
 
     it('break-glass refuses without a written justification, and is audited at BOTH scopes when used', async () => {

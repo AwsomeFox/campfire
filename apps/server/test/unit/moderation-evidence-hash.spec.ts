@@ -2,6 +2,7 @@ import {
   canonicalJson,
   moderationEvidenceCanonicalPayload,
   moderationEvidenceHash,
+  moderationEvidenceMetadataHash,
   verifyModerationEvidence,
   type ModerationEvidencePayload,
 } from '../../src/modules/moderation/moderation-evidence';
@@ -98,5 +99,45 @@ describe('#601 moderation evidence hashing', () => {
     expect(verifyModerationEvidence({ ...base, content: '[redacted]' }, hash, '2026-02-01T00:00:00.000Z')).toBe(
       'redacted',
     );
+  });
+
+  /**
+   * `redacted` must not be a way to switch integrity checking off. Redaction touches
+   * only `content`, so the metadata digest still has to verify afterwards; if it does
+   * not, something else was changed and the honest verdict is `tampered`.
+   */
+  it('still detects tampering on a REDACTED row via the metadata digest', () => {
+    const hash = moderationEvidenceHash(base);
+    const metaHash = moderationEvidenceMetadataHash(base);
+    const redactedAt = '2026-02-01T00:00:00.000Z';
+    const redacted = { ...base, content: '[redacted]' };
+
+    // Content gone, everything else intact — the expected, benign case.
+    expect(verifyModerationEvidence(redacted, hash, redactedAt, metaHash)).toBe('redacted');
+
+    // The single field most worth forging: who wrote it. Rewriting it on a redacted
+    // row must NOT read as a benign redaction.
+    expect(verifyModerationEvidence({ ...redacted, authorUserId: '999' }, hash, redactedAt, metaHash)).toBe('tampered');
+    expect(verifyModerationEvidence({ ...redacted, targetId: 4242 }, hash, redactedAt, metaHash)).toBe('tampered');
+    expect(verifyModerationEvidence({ ...redacted, capturedAt: '2020-01-01T00:00:00.000Z' }, hash, redactedAt, metaHash)).toBe(
+      'tampered',
+    );
+  });
+
+  it('treats a snapshot with no stored metadata digest as unverifiable, not tampered', () => {
+    // Rows written before the metadata digest existed have nothing to check against.
+    // Accusing them of tampering would be a false alarm, which is the failure mode the
+    // redacted/tampered split exists to avoid.
+    const hash = moderationEvidenceHash(base);
+    expect(verifyModerationEvidence({ ...base, content: '[redacted]' }, hash, '2026-02-01T00:00:00.000Z', '')).toBe(
+      'redacted',
+    );
+  });
+
+  it('keeps the content and metadata digests in separate domains', () => {
+    // A metadata digest must never be substitutable for a content digest, even for a
+    // record whose content happens to be empty.
+    const empty = { ...base, content: '' };
+    expect(moderationEvidenceMetadataHash(empty)).not.toBe(moderationEvidenceHash(empty));
   });
 });

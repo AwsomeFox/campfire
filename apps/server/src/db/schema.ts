@@ -607,6 +607,13 @@ export const moderationEvidence = sqliteTable('moderation_evidence', {
   content: text('content').notNull().default(''),
   contextJson: text('context_json').notNull().default('{}'), // JSON: visibility, inCharacter, parentId, …
   contentHash: text('content_hash').notNull(),
+  // sha256 over every field EXCEPT `content`. Redaction overwrites the content, so
+  // `content_hash` cannot match afterwards — without this second digest, stamping
+  // `redacted_at` would silently switch tamper detection off for the whole row and
+  // let the author, target or capture time be rewritten under the benign `redacted`
+  // verdict. This digest still verifies after a redaction, so `redacted` means "the
+  // content went and nothing else did". See moderation/moderation-evidence.ts.
+  metadataHash: text('metadata_hash').notNull().default(''),
   redactedAt: text('redacted_at'),
   redactedBy: text('redacted_by'),
   redactionReason: text('redaction_reason').notNull().default(''),

@@ -422,7 +422,12 @@ export class SearchService {
       OR (campaign_search_fts.entity_type = 'note' AND EXISTS (
         SELECT 1 FROM notes n
         WHERE n.id = campaign_search_fts.entity_id AND n.campaign_id = campaign_search_fts.campaign_id
-          AND n.kind = 'note' AND n.deleted_at IS NULL AND ${noteVisibility}
+          -- quarantined_at IS NULL (issue #601): same reasoning as the comment branch
+          -- below. The note visibility rule deliberately knows nothing about quarantine,
+          -- so a withheld note or whisper would otherwise come back here as a body
+          -- snippet — to the whole campaign for a party_shared note, and to the very
+          -- recipient the quarantine exists to shield for a whisper.
+          AND n.kind = 'note' AND n.deleted_at IS NULL AND n.quarantined_at IS NULL AND ${noteVisibility}
       ))
       OR (campaign_search_fts.entity_type = 'timeline' AND EXISTS (
         SELECT 1 FROM timeline_events t
@@ -608,6 +613,10 @@ export class SearchService {
         inArray(notes.id, noteIds),
         eq(notes.kind, 'note'),
         notDeleted(notes.deletedAt),
+        // Issue #601 — this hydration reads `note.body` straight off the row and the
+        // inlined canSee below knows nothing about quarantine, so the filter has to be
+        // repeated here exactly as it is for comments further down.
+        notDeleted(notes.quarantinedAt),
       ));
       const noteEntityNames = await this.resolveNoteEntityNames(campaignId, rows);
       for (const note of rows) {
