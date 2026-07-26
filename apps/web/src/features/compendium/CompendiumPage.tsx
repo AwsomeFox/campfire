@@ -13,12 +13,13 @@ import { useTranslation } from 'react-i18next';
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { api, API, translateApiError } from '../../lib/api';
-import type { RuleEntry, RulePack, RuleSearchPage } from '@campfire/schema';
+import type { RuleEntry, RulePack, RuleSearchFacet, RuleSearchPage } from '@campfire/schema';
 import { Card, ErrorNote, Skeleton } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
 import { ruleEntryIconSlug } from '../../lib/ruleEntryIcon';
 import { useCampaign, useCampaigns } from '../../app/CampaignContext';
 import { PageTitle } from '../../components/PageTitle';
+import { TermHelp } from '../../components/TermHelp';
 import {
   COMPENDIUM_CLEAR_FILTERS_LABEL,
   COMPENDIUM_LOAD_MORE_LABEL,
@@ -35,19 +36,21 @@ import {
   type CompendiumUrlType,
 } from './compendiumA11y';
 
-const TYPE_CHIPS: { key: CompendiumUrlType; label: string }[] = [
-  { key: 'all', label: 'All' },
-  { key: 'spell', label: 'Spells' },
-  { key: 'monster', label: 'Monsters' },
-  { key: 'hazard', label: 'Hazards' },
-  { key: 'item', label: 'Items' },
-  { key: 'condition', label: 'Conditions' },
-  { key: 'class', label: 'Classes' },
-  { key: 'race', label: 'Races' },
-  { key: 'feat', label: 'Feats' },
-];
+type TypeChip = { key: CompendiumUrlType; label: string; count?: number };
 
-const TYPE_CHIP_KEYS = TYPE_CHIPS.map((c) => c.key);
+const FALLBACK_TYPE_LABELS: Record<CompendiumUrlType, string> = {
+  all: 'All',
+  spell: 'Spells',
+  monster: 'Monsters',
+  hazard: 'Hazards',
+  item: 'Items',
+  condition: 'Conditions',
+  class: 'Classes',
+  race: 'Races',
+  feat: 'Feats',
+  section: 'Rules',
+  other: 'Reference',
+};
 
 function useDebounced<T>(value: T, delayMs: number): T {
   const [debounced, setDebounced] = useState(value);
@@ -122,6 +125,7 @@ export default function CompendiumPage() {
 
   const [packs, setPacks] = useState<RulePack[] | null>(null);
   const [results, setResults] = useState<RuleEntry[] | null>(null);
+  const [facets, setFacets] = useState<RuleSearchFacet[]>([]);
   const [total, setTotal] = useState<number | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const [nextCursor, setNextCursor] = useState<string | undefined>(undefined);
@@ -162,6 +166,7 @@ export default function CompendiumPage() {
     if (campaign === undefined) return;
     if (noRuleSystemChosen || noPacksInstalled) {
       setResults([]);
+      setFacets([]);
       setTotal(0);
       setHasMore(false);
       setNextCursor(undefined);
@@ -181,6 +186,7 @@ export default function CompendiumPage() {
         const page = await api.get<RuleSearchPage>(`${API}/rules/search?${params.toString()}`);
         if (cancelled || gen !== fetchGeneration.current) return;
         setResults(page.items);
+        setFacets(page.facets ?? []);
         setTotal(page.total);
         setHasMore(page.hasMore);
         setNextCursor(page.nextCursor);
@@ -205,6 +211,7 @@ export default function CompendiumPage() {
     campaign,
     urlCursor,
     reloadToken,
+    t,
   ]);
 
   async function loadMore() {
@@ -224,6 +231,7 @@ export default function CompendiumPage() {
       // Append in memory only — writing `cursor` to the URL would re-fire the
       // primary fetch and replace the accumulated list with a single page.
       setResults((prev) => [...(prev ?? []), ...page.items]);
+      setFacets(page.facets ?? []);
       setTotal(page.total);
       setHasMore(page.hasMore);
       setNextCursor(page.nextCursor);
@@ -235,11 +243,23 @@ export default function CompendiumPage() {
     }
   }
 
-  const chips = useMemo(() => TYPE_CHIPS, []);
+  const chips = useMemo<TypeChip[]>(() => {
+    const live = facets.map((facet) => ({
+      key: facet.type as CompendiumUrlType,
+      label: facet.label || FALLBACK_TYPE_LABELS[facet.type as CompendiumUrlType],
+      count: facet.count,
+    }));
+    const liveHasActiveType = type === 'all' || live.some((chip) => chip.key === type);
+    if (!liveHasActiveType) {
+      live.push({ key: type, label: FALLBACK_TYPE_LABELS[type], count: 0 });
+    }
+    const allCount = facets.reduce((sum, facet) => sum + facet.count, 0);
+    return [{ key: 'all', label: FALLBACK_TYPE_LABELS.all, count: allCount }, ...live];
+  }, [facets, type]);
   // Empty results have two very different causes: a search that found nothing vs.
   // a type filter (e.g. "Monsters") the installed pack has no entries for. The
   // copy should say which (issue #242).
-  const activeTypeLabel = TYPE_CHIPS.find((c) => c.key === type)?.label ?? '';
+  const activeTypeLabel = chips.find((c) => c.key === type)?.label ?? FALLBACK_TYPE_LABELS[type];
   const filtersActive = type !== 'all' || query.trim().length > 0 || Boolean(urlCursor);
   const chipRefs = useRef<Partial<Record<CompendiumUrlType, HTMLButtonElement | null>>>({});
 
@@ -284,16 +304,18 @@ export default function CompendiumPage() {
   function onChipKeyDown(e: KeyboardEvent<HTMLButtonElement>, key: CompendiumUrlType) {
     // Roving tabindex for the type-filter radiogroup: arrows move AND select
     // (WAI-ARIA single-select pattern), wrapping at the ends.
-    const idx = TYPE_CHIP_KEYS.indexOf(key);
+    const chipKeys = chips.map((chip) => chip.key);
+    const idx = chipKeys.indexOf(key);
+    if (idx < 0 || chipKeys.length === 0) return;
     let nextIdx: number | null = null;
-    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') nextIdx = (idx + 1) % TYPE_CHIP_KEYS.length;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') nextIdx = (idx + 1) % chipKeys.length;
     else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
-      nextIdx = (idx - 1 + TYPE_CHIP_KEYS.length) % TYPE_CHIP_KEYS.length;
+      nextIdx = (idx - 1 + chipKeys.length) % chipKeys.length;
     } else if (e.key === 'Home') nextIdx = 0;
-    else if (e.key === 'End') nextIdx = TYPE_CHIP_KEYS.length - 1;
+    else if (e.key === 'End') nextIdx = chipKeys.length - 1;
     if (nextIdx == null) return;
     e.preventDefault();
-    const next = TYPE_CHIP_KEYS[nextIdx]!;
+    const next = chipKeys[nextIdx]!;
     setType(next);
     focusChip(next);
   }
@@ -312,7 +334,10 @@ export default function CompendiumPage() {
     <div className="w-full mx-auto px-5 pt-7 pb-12 flex flex-col gap-3.5" style={{ maxWidth: 760 }}>
       <div className="flex items-start gap-2.5 flex-wrap">
         <div style={{ flex: 1, minWidth: 200 }}>
-          <PageTitle>Compendium</PageTitle>
+          <div className="flex items-center gap-2 flex-wrap">
+            <PageTitle>Compendium</PageTitle>
+            <TermHelp termId="compendium" />
+          </div>
           <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 12.5 }}>
             Everything from your installed rule systems — searchable, and one tap from play.
           </p>
@@ -371,6 +396,10 @@ export default function CompendiumPage() {
               style={{ cursor: 'pointer', border: 0, font: 'inherit', fontSize: 11, minHeight: 30 }}
             >
               {chip.label}
+              {typeof chip.count === 'number' && (
+                // Leading space keeps the accessible name "Spells (12)", not "Spells(12)".
+                <span style={{ marginLeft: 2, color: 'inherit' }}> ({chip.count})</span>
+              )}
             </button>
           );
         })}

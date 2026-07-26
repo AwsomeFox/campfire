@@ -5,13 +5,14 @@ import {
   Inject,
   Injectable,
   Logger,
+  type OnApplicationBootstrap,
 } from '@nestjs/common';
-import { and, desc, eq, gte, sql } from 'drizzle-orm';
+import { and, desc, eq, gt, gte, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import { AiDmProactiveSettings } from '@campfire/schema';
 import type { AiDmMode, AiDmSeat, AiDmSeatUpdate, AiDmTurnRequest, AiDmTurnResult, AiDmUsageHistoryEntry, AiDmUsageHistoryResponse, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { aiDmSeats, aiDmUsageHistory } from '../../db/schema';
+import { aiDmSeats, aiDmUsageHistory, settings } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { auditActor, type RequestUser } from '../../common/user.types';
 import { AuditService } from '../audit/audit.service';
@@ -25,6 +26,30 @@ type AiDmTurnRequestInput = z.infer<typeof AiDmTurnRequest>;
 /** Default per-turn output cap when the caller doesn't specify maxTokens. */
 const DEFAULT_MAX_TOKENS = 512;
 
+export interface AiDmTokenReservation {
+  campaignId: number;
+  tokensReserved: number;
+  tokenBudget: number;
+  /**
+   * Set the instant the hold is released from `tokens_reserved` — by meterTurn() or
+   * markReservationUsageUnknown(). A reservation must be settled EXACTLY once: leaving
+   * it unsettled strands campaign budget forever, settling it twice double-charges the
+   * seat (once as used, once as unknown). Both settle paths flip this flag immediately
+   * after their DB transaction commits and no-op when it is already true, so callers can
+   * safely wrap metering in a try/catch that falls back to the unknown path (#563).
+   */
+  settled: boolean;
+}
+
+function budgetRemainingFor(seat: {
+  tokenBudget: number;
+  tokensUsed: number;
+  tokensReserved: number;
+  tokensUnknown: number;
+}): number {
+  return Math.max(0, seat.tokenBudget - seat.tokensUsed - seat.tokensReserved - seat.tokensUnknown);
+}
+
 function toDomain(row: typeof aiDmSeats.$inferSelect): AiDmSeat {
   return {
     campaignId: row.campaignId,
@@ -34,6 +59,11 @@ function toDomain(row: typeof aiDmSeats.$inferSelect): AiDmSeat {
     instructions: row.instructions,
     tokenBudget: row.tokenBudget,
     tokensUsed: row.tokensUsed,
+    tokensReserved: row.tokensReserved,
+    tokensRefunded: row.tokensRefunded,
+    tokensUnknown: row.tokensUnknown,
+    tokensOverage: row.tokensOverage,
+    budgetRemaining: budgetRemainingFor(row),
     turnCount: row.turnCount,
     lastTurnAt: row.lastTurnAt,
     actionQueueDepth: row.actionQueueDepth ?? 8,
@@ -54,6 +84,11 @@ function defaultSeat(campaignId: number): AiDmSeat {
     instructions: '',
     tokenBudget: 0,
     tokensUsed: 0,
+    tokensReserved: 0,
+    tokensRefunded: 0,
+    tokensUnknown: 0,
+    tokensOverage: 0,
+    budgetRemaining: 0,
     turnCount: 0,
     lastTurnAt: null,
     proactiveSettings: {
@@ -83,7 +118,7 @@ function defaultSeat(campaignId: number): AiDmSeat {
  * Plus a per-campaign token budget that a turn is metered against.
  */
 @Injectable()
-export class AiDmService {
+export class AiDmService implements OnApplicationBootstrap {
   private readonly logger = new Logger(AiDmService.name);
 
   /**
@@ -114,6 +149,51 @@ export class AiDmService {
     private readonly providerConfig: AiProviderConfigService,
     @Inject(AI_DM_PROVIDER) private readonly provider: AiDmProvider,
   ) {}
+
+  /**
+   * Reservations live in the DB but the in-flight provider calls that own them live in
+   * memory, so a crash/restart mid-call leaves `tokens_reserved` held by nobody (#563).
+   * Nothing would ever release it and the seat's usable budget would shrink permanently.
+   * Campfire is a single-process SQLite deployment, so at bootstrap no provider call can
+   * legitimately still be in flight: every surviving hold is stale. Convert them to
+   * unknown spend rather than refunding — provider contact may well have happened and
+   * really cost tokens, and the budget gate must stay conservative (issue #563: "never
+   * clamp away actual/unknown spend"). Clean shutdowns settle their holds, so a normal
+   * restart finds nothing to do here.
+   */
+  async onApplicationBootstrap(): Promise<void> {
+    const stale = await this.db
+      .select({ campaignId: aiDmSeats.campaignId, tokensReserved: aiDmSeats.tokensReserved })
+      .from(aiDmSeats)
+      .where(gt(aiDmSeats.tokensReserved, 0));
+    if (stale.length === 0) return;
+
+    const ts = nowIso();
+    this.db.transaction((tx) => {
+      tx.update(aiDmSeats)
+        .set({
+          tokensUnknown: sql`${aiDmSeats.tokensUnknown} + ${aiDmSeats.tokensReserved}`,
+          tokensReserved: 0,
+          updatedAt: ts,
+        })
+        .where(gt(aiDmSeats.tokensReserved, 0))
+        .run();
+    });
+
+    for (const row of stale) {
+      this.logger.warn(
+        `Reclaimed a stale AI token reservation left by a previous run (campaign=${row.campaignId}, tokens=${row.tokensReserved}); recorded as unknown spend.`,
+      );
+      await this.audit.log({
+        actor: 'system',
+        actorRole: 'dm',
+        action: 'ai-dm.reservation_reclaimed',
+        entityType: 'ai-dm',
+        campaignId: row.campaignId,
+        detail: `stale reservation=${row.tokensReserved} from a previous process recorded as unknown spend`,
+      });
+    }
+  }
 
   /** Register proactive settings change callback (#1044). */
   registerProactiveSettingsCallback(
@@ -185,7 +265,9 @@ export class AiDmService {
     const { aiServerTokenCap: cap } = await this.settings.getAll();
     if (!cap || cap <= 0) return;
     const [agg] = await this.db
-      .select({ total: sql<number>`COALESCE(SUM(${aiDmSeats.tokensUsed}), 0)` })
+      .select({
+        total: sql<number>`COALESCE(SUM(${aiDmSeats.tokensUsed} + ${aiDmSeats.tokensReserved} + ${aiDmSeats.tokensUnknown}), 0)`,
+      })
       .from(aiDmSeats);
     const total = Number(agg?.total ?? 0);
     if (total >= cap) {
@@ -302,6 +384,10 @@ export class AiDmService {
         tokenBudget: input.tokenBudget ?? base.tokenBudget,
         actionQueueDepth: input.actionQueueDepth ?? base.actionQueueDepth,
         tokensUsed: 0,
+        tokensReserved: 0,
+        tokensRefunded: 0,
+        tokensUnknown: 0,
+        tokensOverage: 0,
         turnCount: 0,
         lastTurnAt: null,
         createdAt: ts,
@@ -353,7 +439,16 @@ export class AiDmService {
     if (existing) {
       await this.db
         .update(aiDmSeats)
-        .set({ tokensUsed: 0, turnCount: 0, lastTurnAt: null, updatedAt: nowIso() })
+        .set({
+          tokensUsed: 0,
+          tokensReserved: 0,
+          tokensRefunded: 0,
+          tokensUnknown: 0,
+          tokensOverage: 0,
+          turnCount: 0,
+          lastTurnAt: null,
+          updatedAt: nowIso(),
+        })
         .where(eq(aiDmSeats.campaignId, campaignId));
     }
     await this.audit.log({
@@ -364,6 +459,100 @@ export class AiDmService {
       campaignId,
     });
     return this.getSeat(campaignId);
+  }
+
+  /**
+   * Atomically reserve the worst-case tokens a provider call may spend before any
+   * provider contact (#563). The reservation consumes both the campaign budget and
+   * the server-wide cap until it is finalized by meterTurn() or
+   * markReservationUsageUnknown(). When less capacity remains than requested, the
+   * caller receives the smaller reservation and must clamp provider maxTokens to it.
+   */
+  async reserveTokenBudget(campaignId: number, requestedTokens: number): Promise<AiDmTokenReservation> {
+    const requested = Math.max(0, Math.floor(requestedTokens));
+    if (requested <= 0) {
+      throw new ForbiddenException('AI Dungeon Master token budget exhausted (0 tokens available).');
+    }
+
+    let reservation: AiDmTokenReservation | undefined;
+    this.db.transaction((tx) => {
+      const [seat] = tx.select().from(aiDmSeats).where(eq(aiDmSeats.campaignId, campaignId)).limit(1).all();
+      if (!seat) {
+        throw new ForbiddenException(
+          'The AI Dungeon Master seat is not enabled for this campaign. Configure it first: PUT /campaigns/:id/ai-dm {enabled:true, tokenBudget:N}.',
+        );
+      }
+      if (!seat.enabled) {
+        throw new ForbiddenException(
+          'The AI Dungeon Master seat is not enabled for this campaign. Configure it first: PUT /campaigns/:id/ai-dm {enabled:true, tokenBudget:N}.',
+        );
+      }
+
+      const campaignAvailable = budgetRemainingFor(seat);
+      if (campaignAvailable <= 0) {
+        throw new ForbiddenException(
+          `AI Dungeon Master token budget exhausted (${seat.tokensUsed + seat.tokensUnknown + seat.tokensReserved}/${seat.tokenBudget}). Raise tokenBudget or reset usage to continue.`,
+        );
+      }
+
+      const [capRow] = tx
+        .select({ value: settings.value })
+        .from(settings)
+        .where(eq(settings.key, 'aiServerTokenCap'))
+        .limit(1)
+        .all();
+      let serverCap = 0;
+      if (capRow?.value !== undefined) {
+        try {
+          serverCap = Number(JSON.parse(capRow.value));
+        } catch {
+          serverCap = 0;
+        }
+      }
+
+      let serverAvailable = Number.POSITIVE_INFINITY;
+      if (serverCap > 0) {
+        const [agg] = tx
+          .select({
+            total: sql<number>`COALESCE(SUM(${aiDmSeats.tokensUsed} + ${aiDmSeats.tokensReserved} + ${aiDmSeats.tokensUnknown}), 0)`,
+          })
+          .from(aiDmSeats)
+          .all();
+        const total = Number(agg?.total ?? 0);
+        serverAvailable = Math.max(0, serverCap - total);
+        if (serverAvailable <= 0) {
+          throw new ForbiddenException(
+            `Server-wide AI token cap reached (${total}/${serverCap}). A server admin must raise it in the AI console (PUT /settings/ai/caps) or reset usage to continue.`,
+          );
+        }
+      }
+
+      const tokensReserved = Math.min(requested, campaignAvailable, serverAvailable);
+      if (tokensReserved <= 0) {
+        throw new ForbiddenException('AI Dungeon Master token budget exhausted (0 tokens available).');
+      }
+
+      const [updated] = tx
+        .update(aiDmSeats)
+        .set({
+          tokensReserved: sql`${aiDmSeats.tokensReserved} + ${tokensReserved}`,
+          updatedAt: nowIso(),
+        })
+        .where(eq(aiDmSeats.campaignId, campaignId))
+        .returning()
+        .all();
+      reservation = {
+        campaignId,
+        tokensReserved,
+        tokenBudget: updated.tokenBudget,
+        settled: false,
+      };
+    });
+
+    if (!reservation) {
+      throw new ForbiddenException('AI Dungeon Master token budget exhausted (0 tokens available).');
+    }
+    return reservation;
   }
 
   /**
@@ -383,19 +572,6 @@ export class AiDmService {
       );
     }
 
-    const remaining = seat.tokenBudget - seat.tokensUsed;
-    if (remaining <= 0) {
-      throw new ForbiddenException(
-        `AI Dungeon Master token budget exhausted (${seat.tokensUsed}/${seat.tokenBudget}). Raise tokenBudget or reset usage to continue.`,
-      );
-    }
-
-    // Server-wide HARD token cap (issue #315 admin console). When set (>0), the
-    // aggregate tokens metered across EVERY seat may not exceed it — a per-campaign
-    // budget still having room doesn't override the server ceiling. Checked here so
-    // a turn is stopped with a clear reason before any (potential) provider spend.
-    await this.assertWithinServerTokenCap();
-
     // Issue #564: the executable model derives ONLY from the effective provider config
     // (allowlist-validated at execution), NEVER from the legacy `seat.model` label. When
     // a provider is configured we resolve + revalidate its model here; the legacy no-op
@@ -403,85 +579,41 @@ export class AiDmService {
     // an unconfigured provider keeps the existing scaffold behavior unchanged.
     const execModel = (await this.resolveExecutionModel(campaignId)) ?? '';
 
-    const maxTokens = Math.min(input.maxTokens ?? DEFAULT_MAX_TOKENS, remaining);
-    const result = await this.provider.generate({
-      campaignId,
-      kind: input.kind,
-      prompt: input.prompt,
-      instructions: seat.instructions,
-      model: execModel,
-      maxTokens,
-    });
-
-    const tokensUsed = Math.max(0, Math.floor(result.tokensUsed));
-    const ts = nowIso();
-
-    // Meter the turn's token cost atomically (issue #272). The old shape read
-    // seat.tokensUsed, computed newTokensUsed = tokensUsed + n in JS, then wrote it back
-    // across the provider await — two concurrent turns could each read the same
-    // tokensUsed and the second UPDATE would clobber the first, under-counting the budget
-    // (a governance cap must not rely on better-sqlite3 happening to serialize the two
-    // separate statements). We increment IN SQL inside a transaction (mirroring
-    // EncountersService.updateCombatant's read-write-in-one-tx idiom) and capture the
-    // post-update total from the same statement's RETURNING. `MIN(token_budget, ...)`
-    // preserves the old clamp so the counter never overshoots the cap — the turn landing
-    // on/over the cap still runs, but the next one 403s (remaining<=0).
-    let newTokensUsed = 0;
-    if (existing) {
-      this.db.transaction((tx) => {
-        const [updated] = tx
-          .update(aiDmSeats)
-          .set({
-            tokensUsed: sql`MIN(${aiDmSeats.tokenBudget}, ${aiDmSeats.tokensUsed} + ${tokensUsed})`,
-            turnCount: sql`${aiDmSeats.turnCount} + 1`,
-            lastTurnAt: ts,
-            updatedAt: ts,
-          })
-          .where(eq(aiDmSeats.campaignId, campaignId))
-          .returning()
-          .all();
-        newTokensUsed = updated.tokensUsed;
-      });
-    } else {
-      // enabled seat with no persisted row is impossible (defaultSeat.enabled=false),
-      // but guard anyway so an enabled-in-memory seat never silently drops metering. A
-      // single INSERT is atomic on its own, so no read-modify-write race applies here.
-      newTokensUsed = Math.min(seat.tokenBudget, seat.tokensUsed + tokensUsed);
-      await this.db.insert(aiDmSeats).values({
+    const reservation = await this.reserveTokenBudget(campaignId, input.maxTokens ?? DEFAULT_MAX_TOKENS);
+    let result: Awaited<ReturnType<AiDmProvider['generate']>>;
+    try {
+      result = await this.provider.generate({
         campaignId,
-        enabled: seat.enabled,
-        model: seat.model,
+        kind: input.kind,
+        prompt: input.prompt,
         instructions: seat.instructions,
-        tokenBudget: seat.tokenBudget,
-        tokensUsed: newTokensUsed,
-        turnCount: 1,
-        lastTurnAt: ts,
-        createdAt: ts,
-        updatedAt: ts,
+        model: execModel,
+        maxTokens: reservation.tokensReserved,
       });
+    } catch (err) {
+      await this.releaseReservationQuietly(reservation, {
+        actor: auditActor(user),
+        action: 'ai-dm.turn.unknown',
+        detail: `${input.kind} via ${this.provider.name} model=${execModel || 'default'} usage unknown after provider error`,
+        model: execModel,
+      });
+      throw err;
     }
 
-    await this.audit.log({
-      actor: auditActor(user),
-      actorRole: 'dm',
-      action: 'ai-dm.turn',
-      entityType: 'ai-dm',
-      campaignId,
-      // Issue #564: audit the EXACT model sent (resolved + allowlist-validated), not the
-      // legacy seat.model label.
-      detail: `${input.kind} via ${this.provider.name} model=${execModel || 'default'} (+${tokensUsed} tokens, ${newTokensUsed}/${seat.tokenBudget})`,
-    });
-
-    // #1060: same per-turn history contract as meterTurn — takeTurn meters
-    // independently and must not skip the history row.
-    await this.recordUsageHistory({
+    const tokensUsed = Math.max(0, Math.floor(result.tokensUsed));
+    const metered = await this.meterTurn(
       campaignId,
       tokensUsed,
-      action: 'ai-dm.turn',
-      model: execModel || existing?.model || seat.model || '',
-      actor: auditActor(user),
-      createdAt: ts,
-    });
+      {
+        actor: auditActor(user),
+        action: 'ai-dm.turn',
+        // Issue #564: audit the EXACT model sent (resolved + allowlist-validated), not the
+        // legacy seat.model label.
+        detail: `${input.kind} via ${this.provider.name} model=${execModel || 'default'} (+${tokensUsed} tokens, reserved=${reservation.tokensReserved})`,
+        model: execModel || existing?.model || seat.model || '',
+      },
+      reservation,
+    );
 
     const updatedSeat = await this.getSeat(campaignId);
     return {
@@ -490,7 +622,7 @@ export class AiDmService {
       kind: input.kind,
       tokensUsed,
       tokenBudget: seat.tokenBudget,
-      budgetRemaining: Math.max(0, seat.tokenBudget - newTokensUsed),
+      budgetRemaining: metered.budgetRemaining,
       seat: updatedSeat,
     };
   }
@@ -519,9 +651,10 @@ export class AiDmService {
         `The AI Dungeon Master is in ${seat.mode === 'co_dm' ? 'Co-DM' : 'Off'} mode. The autonomous driver runs only in Driver mode — switch the mode to Driver (PUT /campaigns/:id/ai-dm {mode:'driver'}) to run turns.`,
       );
     }
-    if (seat.tokenBudget - seat.tokensUsed <= 0) {
+    const remaining = budgetRemainingFor(seat);
+    if (remaining <= 0) {
       throw new ForbiddenException(
-        `AI Dungeon Master token budget exhausted (${seat.tokensUsed}/${seat.tokenBudget}). Raise tokenBudget or reset usage to continue.`,
+        `AI Dungeon Master token budget exhausted (${seat.tokensUsed + seat.tokensUnknown + seat.tokensReserved}/${seat.tokenBudget}). Raise tokenBudget or reset usage to continue.`,
       );
     }
     // The driver is the path that actually spends provider tokens — bound it by the server-wide
@@ -531,21 +664,70 @@ export class AiDmService {
   }
 
   /**
-   * Atomically meter ONE driver step's REAL token usage against the per-campaign
-   * budget and audit it (#312) — the same read-write-in-one-tx idiom takeTurn() uses
-   * for #272 (MIN(token_budget, ...) clamp so the counter never overshoots the cap).
-   * Returns the seat after metering + budget remaining. The driver calls this after
-   * every provider stream so a long session's budget is a HARD stop, step by step.
+   * Finalize ONE provider spend. With a reservation (#563), this refunds unused
+   * capacity, records known overage instead of clamping it away, and releases the
+   * in-flight hold. The no-reservation path remains for tests/internal callers but
+   * provider contact paths should reserve first.
+   *
+   * A reservation handed to this method is ALWAYS settled, including when metering
+   * throws: an un-released hold permanently shrinks the campaign's usable budget until
+   * an admin resets usage, so a transient failure must never strand one. Callers
+   * therefore do not need their own try/catch, and one that has a fallback to
+   * markReservationUsageUnknown() is safe — the second settle no-ops.
    */
   async meterTurn(
     campaignId: number,
     tokensUsed: number,
     audit: { actor: string; action?: string; detail?: string; model?: string },
+    reservation?: AiDmTokenReservation,
+  ): Promise<{ seat: AiDmSeat; tokensUsed: number; budgetRemaining: number }> {
+    if (reservation && reservation.campaignId !== campaignId) {
+      throw new BadRequestException('AI token reservation does not belong to this campaign');
+    }
+    try {
+      return await this.meterTurnInner(campaignId, tokensUsed, audit, reservation);
+    } catch (err) {
+      // The release transaction may or may not have committed before the throw (the
+      // audit + history writes that follow it are un-guarded DB inserts). `settled`
+      // records which: unsettled means the hold is still on the seat and must be
+      // consumed as unknown spend; settled means the spend is already booked and
+      // consuming it again would charge the same tokens twice.
+      if (reservation && !reservation.settled) {
+        try {
+          await this.markReservationUsageUnknown(reservation, {
+            actor: audit.actor,
+            action: 'ai-dm.meter_failed',
+            detail: `metering failed before the reservation was released; consumed reservation=${reservation.tokensReserved} as unknown spend`,
+            model: audit.model,
+          });
+        } catch (releaseErr) {
+          this.logger.error(
+            `Failed to release AI token reservation (campaign=${campaignId}, tokens=${reservation.tokensReserved}) after a metering error: ${
+              releaseErr instanceof Error ? releaseErr.message : String(releaseErr)
+            }`,
+          );
+        }
+      }
+      throw err;
+    }
+  }
+
+  private async meterTurnInner(
+    campaignId: number,
+    tokensUsed: number,
+    audit: { actor: string; action?: string; detail?: string; model?: string },
+    reservation?: AiDmTokenReservation,
   ): Promise<{ seat: AiDmSeat; tokensUsed: number; budgetRemaining: number }> {
     const cost = Math.max(0, Math.floor(tokensUsed));
+    const reserved = reservation?.tokensReserved ?? 0;
+    // Refund/overage are meaningful only RELATIVE to a pre-call reservation. Without one
+    // there is no baseline, so booking the whole cost as overage would fabricate an
+    // overrun for legacy/internal metering callers.
+    const refunded = reservation ? Math.max(0, reserved - cost) : 0;
+    const overage = reservation ? Math.max(0, cost - reserved) : 0;
     const ts = nowIso();
     const existing = await this.findRow(campaignId);
-    let newTokensUsed = 0;
+    let updatedRow: (typeof aiDmSeats.$inferSelect) | undefined;
     let tokenBudget = 0;
     if (existing) {
       tokenBudget = existing.tokenBudget;
@@ -553,7 +735,10 @@ export class AiDmService {
         const [updated] = tx
           .update(aiDmSeats)
           .set({
-            tokensUsed: sql`MIN(${aiDmSeats.tokenBudget}, ${aiDmSeats.tokensUsed} + ${cost})`,
+            tokensReserved: sql`MAX(0, ${aiDmSeats.tokensReserved} - ${reserved})`,
+            tokensUsed: sql`${aiDmSeats.tokensUsed} + ${cost}`,
+            tokensRefunded: sql`${aiDmSeats.tokensRefunded} + ${refunded}`,
+            tokensOverage: sql`${aiDmSeats.tokensOverage} + ${overage}`,
             turnCount: sql`${aiDmSeats.turnCount} + 1`,
             lastTurnAt: ts,
             updatedAt: ts,
@@ -561,11 +746,16 @@ export class AiDmService {
           .where(eq(aiDmSeats.campaignId, campaignId))
           .returning()
           .all();
-        newTokensUsed = updated.tokensUsed;
+        updatedRow = updated;
       });
+      // The hold is off the seat as of the commit above. Everything after this point
+      // (audit, usage history) is bookkeeping that must not re-consume it.
+      if (reservation) reservation.settled = true;
     } else {
       // assertRunnable guarantees an enabled row upstream, but stay honest if called bare.
-      newTokensUsed = cost;
+      tokenBudget = reservation?.tokenBudget ?? 0;
+      // No row to decrement means there is no hold left to strand either.
+      if (reservation) reservation.settled = true;
     }
 
     await this.audit.log({
@@ -574,7 +764,9 @@ export class AiDmService {
       action: audit.action ?? 'ai-dm.driver.turn',
       entityType: 'ai-dm',
       campaignId,
-      detail: audit.detail ?? `+${cost} tokens, ${newTokensUsed}/${tokenBudget}`,
+      detail:
+        audit.detail ??
+        `+${cost} tokens, reserved=${reserved}, refunded=${refunded}, overage=${overage}, ${updatedRow?.tokensUsed ?? cost}/${tokenBudget}`,
     });
 
     // Fall back to the seat's configured model when callers omit audit.model so
@@ -592,8 +784,82 @@ export class AiDmService {
     return {
       seat: await this.getSeat(campaignId),
       tokensUsed: cost,
-      budgetRemaining: Math.max(0, tokenBudget - newTokensUsed),
+      budgetRemaining: updatedRow ? budgetRemainingFor(updatedRow) : Math.max(0, tokenBudget - cost),
     };
+  }
+
+  /**
+   * Provider contact happened but usage is unknown (e.g. a stream failed before a
+   * usage block). Do not refund the reservation: consume it as unknown spend so
+   * future budget gates stay conservative and the UI can surface the state (#563).
+   *
+   * Idempotent: a reservation already released by meterTurn() is left alone. Callers
+   * that fall back here after a metering error cannot tell whether the release
+   * transaction committed before the error, and consuming an already-released hold
+   * would charge the same tokens twice (once as used, once as unknown).
+   */
+  async markReservationUsageUnknown(
+    reservation: AiDmTokenReservation,
+    audit: { actor: string; action?: string; detail?: string; model?: string },
+  ): Promise<{ seat: AiDmSeat; tokensUnknown: number; budgetRemaining: number }> {
+    if (reservation.settled) {
+      const seat = await this.getSeat(reservation.campaignId);
+      return { seat, tokensUnknown: 0, budgetRemaining: seat.budgetRemaining };
+    }
+    const ts = nowIso();
+    let updatedRow: (typeof aiDmSeats.$inferSelect) | undefined;
+    this.db.transaction((tx) => {
+      const [updated] = tx
+        .update(aiDmSeats)
+        .set({
+          tokensReserved: sql`MAX(0, ${aiDmSeats.tokensReserved} - ${reservation.tokensReserved})`,
+          tokensUnknown: sql`${aiDmSeats.tokensUnknown} + ${reservation.tokensReserved}`,
+          turnCount: sql`${aiDmSeats.turnCount} + 1`,
+          lastTurnAt: ts,
+          updatedAt: ts,
+        })
+        .where(eq(aiDmSeats.campaignId, reservation.campaignId))
+        .returning()
+        .all();
+      updatedRow = updated;
+    });
+    reservation.settled = true;
+
+    await this.audit.log({
+      actor: audit.actor,
+      actorRole: 'dm',
+      action: audit.action ?? 'ai-dm.usage_unknown',
+      entityType: 'ai-dm',
+      campaignId: reservation.campaignId,
+      detail: audit.detail ?? `usage unknown, consumed reservation=${reservation.tokensReserved}`,
+    });
+
+    return {
+      seat: await this.getSeat(reservation.campaignId),
+      tokensUnknown: reservation.tokensReserved,
+      budgetRemaining: updatedRow ? budgetRemainingFor(updatedRow) : 0,
+    };
+  }
+
+  /**
+   * markReservationUsageUnknown() for `catch` blocks whose job is to surface the
+   * ORIGINAL failure (a provider error, usually). Settling the hold is bookkeeping; if
+   * it fails too, log it and let the real error reach the caller instead of masking it
+   * with a database error (#563).
+   */
+  async releaseReservationQuietly(
+    reservation: AiDmTokenReservation,
+    audit: { actor: string; action?: string; detail?: string; model?: string },
+  ): Promise<void> {
+    try {
+      await this.markReservationUsageUnknown(reservation, audit);
+    } catch (err) {
+      this.logger.error(
+        `Failed to release AI token reservation (campaign=${reservation.campaignId}, tokens=${reservation.tokensReserved}): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
   }
 
   /**

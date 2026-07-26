@@ -1073,6 +1073,38 @@ export type SessionSharePolicyUpdate = z.infer<typeof SessionSharePolicyUpdate>;
 export const SessionShareMutationResult = z.object({ revoked: z.number().int().nonnegative() });
 export type SessionShareMutationResult = z.infer<typeof SessionShareMutationResult>;
 
+// Read-only Player Display cast sessions. The raw token and exit PIN are shown once
+// at creation; persisted/listed metadata never carries enough material to recreate them.
+export const CastSession = z.object({
+  id: Id,
+  campaignId: Id,
+  label: z.string(),
+  createdBy: z.string(),
+  tokenPrefix: z.string(),
+  expiresAt: IsoDate,
+  accessCount: z.number().int().nonnegative(),
+  firstAccessedAt: IsoDate.nullable(),
+  lastAccessedAt: IsoDate.nullable(),
+  ...timestamps,
+});
+export type CastSession = z.infer<typeof CastSession>;
+export const CastSessionCreate = z.object({
+  label: z.string().trim().max(120).default(''),
+  expiresAt: z.string().datetime({ offset: true }),
+});
+export type CastSessionCreate = z.infer<typeof CastSessionCreate>;
+export const CastSessionCreated = z.object({
+  token: z.string(),
+  exitPin: z.string(),
+  url: z.string(),
+  session: CastSession,
+});
+export type CastSessionCreated = z.infer<typeof CastSessionCreated>;
+export const CastSessionExit = z.object({ pin: z.string().trim().min(4).max(20) });
+export type CastSessionExit = z.infer<typeof CastSessionExit>;
+export const CastSessionMutationResult = z.object({ revoked: z.number().int().nonnegative() });
+export type CastSessionMutationResult = z.infer<typeof CastSessionMutationResult>;
+
 // Payload served by the UNauthenticated GET /shared/recaps/:token endpoint.
 // Deliberately minimal — no internal ids, no dmSecret-bearing entities, just
 // what an absent player needs to catch up on the session.
@@ -4355,12 +4387,24 @@ export const RuleSearchQuery = z.object({
   cursor: z.string().max(512).optional(),
 });
 
+export const RuleSearchFacet = z.object({
+  type: RuleEntryType,
+  label: z.string().min(1).max(80),
+  count: z.number().int().nonnegative(),
+});
+export type RuleSearchFacet = z.infer<typeof RuleSearchFacet>;
+
 /**
  * Paginated rule-search response (issue #613).
  *
  * Replaces the historical bare `RuleEntry[]` (hard-capped at 50 with no totals).
  * Always includes `total` + `hasMore` so clients never silently truncate; continue
- * with `nextCursor` when `hasMore` is true.
+ * with `nextCursor` when `hasMore` is true. `facets` reports the type categories the
+ * active pack actually contains (categories absent from the pack are omitted entirely),
+ * each carrying a live count for the current query/pack computed *before* the active
+ * type filter is applied — so a facet's count always equals what selecting it would
+ * return, and a category present in the pack but with no match for the current query is
+ * reported with `count: 0` rather than dropped from the chip row (issue #544).
  */
 export const RuleSearchPage = z.object({
   items: z.array(RuleEntry),
@@ -4368,6 +4412,7 @@ export const RuleSearchPage = z.object({
   hasMore: z.boolean(),
   nextCursor: z.string().max(512).optional(),
   limit: z.number().int().positive(),
+  facets: z.array(RuleSearchFacet).default([]),
 });
 export type RuleSearchPage = z.infer<typeof RuleSearchPage>;
 
@@ -5341,11 +5386,16 @@ export const AiDmSeat = z.object({
   enabled: z.boolean().default(false), // per-campaign on/off (in addition to the server flag)
   model: z.string().max(120).default(''), // informational label of the model/agent occupying the seat
   instructions: z.string().max(20_000).default(''), // the DM persona / house rules the connected agent should follow
-  // Per-campaign metering, in tokens. tokenBudget is a HARD cap: a turn whose cost
-  // would push tokensUsed past it is rejected (403). 0 = no budget → no turns allowed
-  // (a positive budget must be configured to run the seat).
+  // Per-campaign metering, in tokens. tokenBudget is a HARD cap enforced by
+  // reserving capacity before provider contact (#563). 0 = no budget → no turns
+  // allowed (a positive budget must be configured to run the seat).
   tokenBudget: z.number().int().nonnegative().max(1_000_000_000).default(0),
   tokensUsed: z.number().int().nonnegative().default(0),
+  tokensReserved: z.number().int().nonnegative().default(0), // active in-flight provider reservations
+  tokensRefunded: z.number().int().nonnegative().default(0), // cumulative unused reservation returned
+  tokensUnknown: z.number().int().nonnegative().default(0), // conservative spend when provider usage is unknown
+  tokensOverage: z.number().int().nonnegative().default(0), // known usage above its pre-call reservation
+  budgetRemaining: z.number().int().nonnegative().default(0), // after used + reserved + unknown
   turnCount: z.number().int().nonnegative().default(0),
   lastTurnAt: IsoDate.nullable().default(null),
   proactiveSettings: AiDmProactiveSettings.default({}),
@@ -5645,6 +5695,11 @@ export const AiUsageCampaignRow = z.object({
   model: z.string(),
   tokenBudget: z.number().int().nonnegative(), // per-campaign hard cap (0 = seat can't run)
   tokensUsed: z.number().int().nonnegative(),
+  tokensReserved: z.number().int().nonnegative().default(0),
+  tokensRefunded: z.number().int().nonnegative().default(0),
+  tokensUnknown: z.number().int().nonnegative().default(0),
+  tokensOverage: z.number().int().nonnegative().default(0),
+  budgetRemaining: z.number().int().nonnegative().default(0),
   turnCount: z.number().int().nonnegative(),
   lastTurnAt: IsoDate.nullable(),
 });
@@ -5662,6 +5717,10 @@ export type AiUsageModelRow = z.infer<typeof AiUsageModelRow>;
 // The full usage rollup (GET /settings/ai/usage) — aggregated live from seat counters.
 export const AiUsageRollup = z.object({
   totalTokensUsed: z.number().int().nonnegative(),
+  totalTokensReserved: z.number().int().nonnegative().default(0),
+  totalTokensRefunded: z.number().int().nonnegative().default(0),
+  totalTokensUnknown: z.number().int().nonnegative().default(0),
+  totalTokensOverage: z.number().int().nonnegative().default(0),
   totalTurns: z.number().int().nonnegative(),
   seatCount: z.number().int().nonnegative(), // configured seats (persisted rows)
   activeSeatCount: z.number().int().nonnegative(), // seats with enabled=true

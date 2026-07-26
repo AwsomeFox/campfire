@@ -91,7 +91,7 @@ import { CombatantStatblockEditor } from './CombatantStatblockEditor';
 import { StatBlock, hasMonsterStatblock } from '../../components/StatBlock';
 import { CharacterStatCard } from '../../components/CharacterStatCard';
 import { Card, Btn, TextInput, HpBar, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
-import { ImageUpload, MapUploadButton, encounterMapSrcSet, encounterMapUrl, uploadAttachment } from '../../components/ImageUpload';
+import { ImageUpload, MapUploadButton, castEncounterMapUrl, encounterMapSrcSet, encounterMapUrl, uploadAttachment } from '../../components/ImageUpload';
 import { useDerivativeManifest } from '../../components/useAttachmentDerivatives';
 import { GetAMapPanel } from '../../components/GetAMapPanel';
 import { MapConceptGlossary, MapPurposePreview } from '../../components/mapOnboarding';
@@ -106,6 +106,7 @@ import { EncounterAiDriverPanel } from '../ai-dm/EncounterAiDriverPanel';
 import { AiDmPresenceTag, AiDmToolActivityRow } from '../ai-dm/AiDmActivityChip';
 import { resolveToolActivity, toolResource } from '../ai-dm/toolActivity';
 import { GameIcon } from '../../components/GameIcon';
+import { TermHelp } from '../../components/TermHelp';
 import { useDisclosure } from '../../components/useDisclosure';
 import {
   advanceCombatLogAnnouncements,
@@ -1809,14 +1810,19 @@ export default function RunSessionPage() {
         </button>
         <div className="flex-1" />
         {isDm && (
-          <Btn
-            ghost
-            className="!min-h-0 !py-1.5 text-xs"
-            onClick={() => navigate(`/c/${cid}/screen`)}
-            title="Open the player display — initiative + revealed info, no secrets"
-          >
-            <GameIcon slug="tv" size={13} className="inline align-text-bottom mr-1" />Cast
-          </Btn>
+          <>
+            {/* No aria-label / title here: the visible word "Cast" is the
+                accessible name, and the adjacent TermHelp carries the
+                explanation without a hover-only tooltip (issue #518). */}
+            <Btn
+              ghost
+              className="!min-h-0 !py-1.5 text-xs"
+              onClick={() => navigate(`/c/${cid}/screen`)}
+            >
+              <GameIcon slug="tv" size={13} className="inline align-text-bottom mr-1" />Cast
+            </Btn>
+            <TermHelp termId="cast" />
+          </>
         )}
         {canDmWrite && (
           <div className="flex gap-2 flex-wrap">
@@ -2619,6 +2625,7 @@ export function BattleMap({
   onError,
   onAoeHitLayoutChange,
   projection = 'session',
+  castToken = null,
   ruleSystem,
 }: {
   encounter: EncounterWithCombatants;
@@ -2649,6 +2656,13 @@ export function BattleMap({
   onAoeHitLayoutChange?: (layout: AoeHitLayout | null) => void;
   /** `cast` = read-only table projection on Player Display (issue #484). */
   projection?: 'session' | 'cast';
+  /**
+   * Shared-device cast capability (issue #547). When set, map pixels are fetched
+   * from the public cast endpoint instead of the cookie-authenticated
+   * /encounters/:id/map — otherwise a TV that still holds the DM's session cookie
+   * would be served the unfogged source map.
+   */
+  castToken?: string | null;
   /** Active campaign rule system — selects grid distance rules (issue #467). */
   ruleSystem: string | null;
 }) {
@@ -2791,23 +2805,37 @@ export function BattleMap({
   // The encounter-scoped route is the VTT secrecy boundary (issue #463): DMs receive
   // the source, while players receive a server-rendered image containing only revealed
   // pixels. mapAttachmentId is used only as the presence bit, never as a player image URL.
-  const mapImageUrl = encounter.mapAttachmentId != null ? encounterMapUrl(encounter.id, encounter.updatedAt) : null;
+  // A cast display (issue #547) has no session of its own, so it must read pixels
+  // through its capability rather than the cookie-authenticated encounter route.
+  const mapImageUrl =
+    encounter.mapAttachmentId == null
+      ? null
+      : castToken
+        ? castEncounterMapUrl(castToken, encounter.id, encounter.updatedAt)
+        : encounterMapUrl(encounter.id, encounter.updatedAt);
   // Issue #604 — responsive battle map. The board used to load at full resolution on
   // every device; the derivative ladder lets the browser pick a rung that fits the
   // surface. Both the manifest and every srcset URL go through the ROLE-SAFE
   // /encounters/:id/map route, never an attachment route, so the #463 fog boundary is
   // untouched and players get responsive delivery too. `src` stays the full-size
   // role-safe URL, so the board still renders while rungs process or if they failed.
+  //
+  // BOTH are disabled on a cast display (#547). Those URLs authenticate from the session
+  // COOKIE, so on a shared TV still holding the DM's cookie a srcset rung would be served
+  // the UNFOGGED SOURCE map — reintroducing precisely the leak the cast capability exists
+  // to close. A cast display therefore keeps plain `src` through its capability URL and
+  // simply forgoes responsive rungs; correctness outranks bytes on the one surface where
+  // getting this wrong shows players the DM's hidden map.
   const mapDerivatives = useDerivativeManifest(
-    encounter.mapAttachmentId != null ? `${API}/encounters/${encounter.id}/map/derivatives` : null,
+    encounter.mapAttachmentId != null && !castToken ? `${API}/encounters/${encounter.id}/map/derivatives` : null,
     // Regeneration is a DM action on the underlying attachment; players get the
     // status text without a button.
-    effectiveCanDmWrite && encounter.mapAttachmentId != null
+    effectiveCanDmWrite && encounter.mapAttachmentId != null && !castToken
       ? `${API}/attachments/${encounter.mapAttachmentId}/derivatives/retry`
       : null,
   );
   const mapSrcSet =
-    encounter.mapAttachmentId != null
+    encounter.mapAttachmentId != null && !castToken
       ? encounterMapSrcSet(encounter.id, encounter.updatedAt, mapDerivatives.manifest)
       : undefined;
   // Issue #418: fog-redacted tokens keep null coords but set tokenHiddenByFog — do not
