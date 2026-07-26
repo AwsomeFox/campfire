@@ -337,6 +337,45 @@ export async function startFakeOpen5eMultiDoc(): Promise<FakeOpen5e> {
   };
 }
 
+/**
+ * Fake Open5e server whose SECTIONS CARRY DIFFERENT LICENSES: spells come from the OGL
+ * SRD 5.1 document, every other section from the CC-BY SRD 5.2 document. The importer
+ * derives a pack's license from the entries it actually fetched, so this is what makes a
+ * PARTIAL section add observable: install `spells` and the pack is OGL; add `monsters`
+ * later and a naive re-import would relabel the whole pack CC-BY, dropping the terms that
+ * still govern the retained spells. Start two instances to also vary `sourceUrl` (each
+ * binds its own ephemeral port), simulating an operator adding sections from a mirror.
+ */
+export async function startFakeOpen5eMixedLicense(): Promise<FakeOpen5e> {
+  const app = express();
+  const oglSpells = SPELLS.map((s) => ({ ...s, document: SRD_51_DOC }));
+
+  app.get('/v2/spells/', (_req, res) => res.json(page(oglSpells)));
+  app.get('/v2/creatures/', (_req, res) => res.json(page(CREATURES)));
+  app.get('/v2/magicitems/', (_req, res) => res.json(page(MAGIC_ITEMS)));
+  app.get('/v2/conditions/', (_req, res) => res.json(page(CONDITIONS)));
+  app.get('/v2/classes/', (_req, res) => res.json(page(CLASSES)));
+  app.get('/v2/species/', (_req, res) => res.json(page(SPECIES)));
+  app.get('/v2/feats/', (_req, res) => res.json(page(FEATS)));
+
+  const server: Server = await new Promise((resolve) => {
+    const s = app.listen(0, () => resolve(s));
+  });
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('failed to bind fake Open5e server');
+  const baseUrl = `http://127.0.0.1:${address.port}/v2`;
+
+  return {
+    baseUrl,
+    server,
+    close() {
+      return new Promise((resolve, reject) => {
+        server.close((err) => (err ? reject(err) : resolve()));
+      });
+    },
+  };
+}
+
 export interface FakeOpen5eWithBadPagination extends FakeOpen5e {
   evilBaseUrl: string;
   evilWasHit(): boolean;

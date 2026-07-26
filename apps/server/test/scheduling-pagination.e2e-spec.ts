@@ -88,8 +88,8 @@ describe('sessions & schedule pagination (e2e, issue #612)', () => {
     expect(past.body.total).toBeGreaterThanOrEqual(1);
     expect(past.body.items[0].id).toBe(pastNight.body.id);
 
-    await request(server).delete(`/api/v1/schedule/${liveNight.body.id}`).set(dm);
-    await request(server).delete(`/api/v1/schedule/${pastNight.body.id}`).set(dm);
+    await request(server).delete(`/api/v1/schedule/${liveNight.body.id}`).set(dm).send({});
+    await request(server).delete(`/api/v1/schedule/${pastNight.body.id}`).set(dm).send({});
   });
 
   it('GET /schedule/next uses LIMIT 1 and matches upcoming split across DST spring-forward', async () => {
@@ -111,7 +111,7 @@ describe('sessions & schedule pagination (e2e, issue #612)', () => {
       const upcoming = await request(server).get(`/api/v1/campaigns/${campaignId}/schedule/upcoming`).set(player);
       expect(upcoming.body.some((s: { id: number }) => s.id === created.body.id)).toBe(true);
 
-      await request(server).delete(`/api/v1/schedule/${created.body.id}`).set(dm);
+      await request(server).delete(`/api/v1/schedule/${created.body.id}`).set(dm).send({});
     } finally {
       if (prevTz === undefined) delete process.env.TZ;
       else process.env.TZ = prevTz;
@@ -141,6 +141,6 @@ describe('sessions & schedule pagination (e2e, issue #612)', () => {
       ]),
     );
 
-    await request(server).delete(`/api/v1/schedule/${scheduleId}`).set(dm);
+    await request(server).delete(`/api/v1/schedule/${scheduleId}`).set(dm).send({});
   });
 });

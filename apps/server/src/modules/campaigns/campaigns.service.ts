@@ -2053,6 +2053,21 @@ export class CampaignsService {
       // early — no cross-refs to other entity types. RSVP userIds are install-local,
       // so reassign to the importer while preserving userName/status/note provenance.
       for (const s of scheduledSessionRows) {
+        // Issue #504: the lifecycle status round-trips too. Dropping it would import a
+        // cancelled night back as a LIVE one — re-listed under Upcoming, re-armed for
+        // reminders, and re-published to the ICS feed. `cancelledBy` is an install-local
+        // user id (like the RSVP userIds below) so it is not carried across installs;
+        // `session_id` stays null because schedules are inserted before sessions and the
+        // exported id belongs to the source install.
+        //
+        // `completed` is imported AS completed, deliberately, even though its sessionId
+        // cannot cross an install boundary. Reviewed and declined the alternative of
+        // downgrading it to `scheduled`: completed is historical truth (the night was
+        // played), so downgrading would make a played night look unplayed, and for a
+        // future-dated row would resurrect it into Upcoming — exactly the bug the
+        // cancelled case above fixes. A "Completed" tag with no recap link is mildly
+        // lossy but honest. Please don't re-litigate without re-reading this.
+        const importedStatus = s.status === 'cancelled' || s.status === 'completed' ? s.status : 'scheduled';
         const [row] = tx
           .insert(scheduledSessions)
           .values({
@@ -2062,6 +2077,11 @@ export class CampaignsService {
             title: str(s.title),
             location: str(s.location),
             notes: str(s.notes),
+            status: importedStatus,
+            cancelledAt: importedStatus === 'cancelled' && typeof s.cancelledAt === 'string' ? s.cancelledAt : null,
+            cancelledBy: null,
+            cancellationReason: importedStatus === 'cancelled' ? str(s.cancellationReason) : '',
+            sessionId: null,
             createdAt: ts,
             updatedAt: ts,
           })

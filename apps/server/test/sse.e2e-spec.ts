@@ -389,7 +389,7 @@ describe('campaign events SSE (e2e, dev auth)', () => {
       expect.objectContaining({ userId: 'dev:p-1', status: 'yes' }),
     ]);
 
-    const cancelled = await request(server).delete(`/api/v1/schedule/${scheduleId}`).set(dm);
+    const cancelled = await request(server).delete(`/api/v1/schedule/${scheduleId}`).set(dm).send({});
     expect(cancelled.status).toBe(200);
     await expectScheduleUpdate(scheduleId);
     const afterCancel = await request(server).get(`/api/v1/campaigns/${campaignId}/summary`).set(player);

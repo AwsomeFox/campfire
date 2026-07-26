@@ -61,6 +61,6 @@ test.describe('schedule notification client helpers (issue #820)', () => {
   test('missing snapshot still yields a generic cancelled detail', () => {
     const copy = cancelledScheduleDetailCopy(null);
     expect(copy.heading).toBe('Game night cancelled');
-    expect(copy.body).toMatch(/removed from the calendar/i);
+    expect(copy.body).toMatch(/RSVP history is preserved/i);
   });
 });

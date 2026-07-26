@@ -77,6 +77,8 @@ import {
   CommentCreate,
   CommentUpdate,
   ScheduledSessionCreate,
+  ScheduledSessionCancel,
+  ScheduledSessionDuplicate,
   ScheduledSessionUpdate,
   SessionZeroUpdate,
   RsvpSetBody,
@@ -1663,8 +1665,9 @@ export class McpToolsService {
     this.tool(
       server,
       'list_scheduled_sessions',
-      'List a campaign\'s scheduled (planned, future) game nights, soonest-first, each with member RSVPs. Requires ' +
-        'membership. Distinct from get_session_recaps, which is the log of sessions that already happened.',
+      'List a campaign\'s scheduled-session records, soonest-first, each with member RSVPs. Includes retained ' +
+        'cancelled/completed history rows; use status to distinguish live planned nights. Requires membership. ' +
+        'Distinct from get_session_recaps, which is the log of sessions that already happened.',
       { campaignId: CampaignIdArg },
       async ({ campaignId }) => {
         await this.access.requireMember(user, campaignId as number);
@@ -4537,7 +4540,8 @@ export class McpToolsService {
       user,
       'update_scheduled_session',
       'DM only: update a scheduled game night\'s time/duration/title/location/notes. Meaningful changes ' +
-        '(time, duration, venue/VTT link, notes) re-notify the party once with a field summary; title-only edits stay silent.',
+        '(time, duration, venue/VTT link, notes) re-notify the party once with a field summary; title-only edits stay silent. ' +
+        'A cancelled night is rejected — restore_scheduled_session first, so the party is never notified about a game that is not happening.',
       { scheduleId: Id.describe('Scheduled session id — from list_scheduled_sessions'), expectedUpdatedAt: ExpectedUpdatedAt, ...ScheduledSessionUpdate.shape },
       async ({ scheduleId, expectedUpdatedAt, ...fields }) => {
         const row = await this.scheduling.getRowOrThrow(scheduleId as number);
@@ -4551,13 +4555,41 @@ export class McpToolsService {
       server,
       user,
       'cancel_scheduled_session',
-      'DM only: cancel a scheduled game night, deleting the schedule entry and all its RSVPs, and notifying the party.',
-      { scheduleId: Id.describe('Scheduled session id — from list_scheduled_sessions') },
+      'DM only: cancel a scheduled game night. Retains the schedule row and RSVPs, stamps cancellation metadata, ' +
+        'updates the ICS feed, and notifies the party.',
+      { scheduleId: Id.describe('Scheduled session id — from list_scheduled_sessions'), ...ScheduledSessionCancel.shape },
+      async ({ scheduleId, ...fields }) => {
+        const row = await this.scheduling.getRowOrThrow(scheduleId as number);
+        const validated = ScheduledSessionCancel.parse(fields);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.scheduling.remove(scheduleId as number, user, role, validated);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'restore_scheduled_session',
+      'DM only: restore a cancelled scheduled game night. Clears cancellation metadata and returns it to live schedule projections.',
+      { scheduleId: Id.describe('Cancelled scheduled session id — from list_scheduled_sessions') },
       async ({ scheduleId }) => {
         const row = await this.scheduling.getRowOrThrow(scheduleId as number);
         const role = await this.access.requireRole(user, row.campaignId, 'dm');
-        await this.scheduling.remove(scheduleId as number, user, role);
-        return { ok: true, scheduleId };
+        return this.scheduling.restore(scheduleId as number, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'duplicate_scheduled_session',
+      'DM only: duplicate/reschedule a scheduled game night into a new live schedule row. Optional fields override the copied time/details; RSVPs are not copied.',
+      { scheduleId: Id.describe('Scheduled session id — from list_scheduled_sessions'), ...ScheduledSessionDuplicate.shape },
+      async ({ scheduleId, ...fields }) => {
+        const row = await this.scheduling.getRowOrThrow(scheduleId as number);
+        const validated = ScheduledSessionDuplicate.parse(fields);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.scheduling.duplicate(scheduleId as number, validated, user, role);
       },
     );
 

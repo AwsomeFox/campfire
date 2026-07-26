@@ -2911,6 +2911,35 @@ function migrateGuestDmHandoff545(sqlite: Database.Database): void {
 }
 
 /**
+ * Issue #504: scheduled sessions are no longer deleted when cancelled. Add a
+ * lifecycle status, cancellation metadata, and nullable schedule↔play-log links.
+ */
+function migrateSchedulingLifecycle504(sqlite: Database.Database): void {
+  const hasScheduledSessions = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='scheduled_sessions'")
+    .get();
+  if (hasScheduledSessions) {
+    const scheduleCols = sqlite.prepare('PRAGMA table_info(scheduled_sessions)').all() as Array<{ name: string }>;
+    const has = (name: string) => scheduleCols.some((c) => c.name === name);
+    if (!has('status')) sqlite.exec("ALTER TABLE scheduled_sessions ADD COLUMN status TEXT NOT NULL DEFAULT 'scheduled'");
+    if (!has('cancelled_at')) sqlite.exec('ALTER TABLE scheduled_sessions ADD COLUMN cancelled_at TEXT');
+    if (!has('cancelled_by')) sqlite.exec('ALTER TABLE scheduled_sessions ADD COLUMN cancelled_by TEXT');
+    if (!has('cancellation_reason')) sqlite.exec("ALTER TABLE scheduled_sessions ADD COLUMN cancellation_reason TEXT NOT NULL DEFAULT ''");
+    if (!has('session_id')) sqlite.exec('ALTER TABLE scheduled_sessions ADD COLUMN session_id INTEGER');
+  }
+
+  const hasSessions = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'")
+    .get();
+  if (hasSessions) {
+    const sessionCols = sqlite.prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>;
+    if (!sessionCols.some((c) => c.name === 'scheduled_session_id')) {
+      sqlite.exec('ALTER TABLE sessions ADD COLUMN scheduled_session_id INTEGER');
+    }
+  }
+}
+
+/**
  * Issue #547 — expiring, read-only Player Display cast sessions. These are
  * capability tokens for shared TVs/kiosks, stored hashed like recap shares.
  */
@@ -3047,12 +3076,17 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0109_cast_sessions_547', run: migrateCastSessionsTable },
   // 0108/0109 both landed on main while this branch was open; derivatives take 0110.
   { name: '0110_attachment_derivatives_604', run: migrateAttachmentDerivativesTable604 },
-  // The 0111-0113 gap is deliberate: those ordinals are contested across several
-  // in-flight branches (#504 holds 0111; #559 holds 0111+0112 as an adjacent
-  // create+backfill pair that must stay together; #601 holds 0112), so this branch jumps
-  // clear of the band rather than renumber twice. Ordinals are presentational —
-  // `runMigrations` keys on the full NAME string and applies in array order — so a gap is
-  // harmless where a duplicate name would not be.
+  // 0108/0109 were claimed on main by the AI token-reservation (#563) and cast-session
+  // (#547) migrations, and 0110 by attachment derivatives (#604); this branch merges
+  // after all of them, so the scheduling lifecycle migration takes the next genuinely
+  // free ordinal rather than collide.
+  { name: '0111_scheduling_lifecycle_504', run: migrateSchedulingLifecycle504 },
+  // The 0112-0113 gap is deliberate: both are contested across still-open branches
+  // (#559 holds 0112 as half of an adjacent create+backfill pair that must stay together;
+  // #601 holds 0112 too), so this branch jumps clear of the band rather than renumber
+  // again each time one of them lands. Ordinals are presentational — `runMigrations` keys
+  // on the full NAME string and applies in array order — so a gap is harmless, where a
+  // duplicate name would not be.
   { name: '0114_ai_consent_provenance_501', run: migrateAiConsentAndProvenance501 },
 ];
 

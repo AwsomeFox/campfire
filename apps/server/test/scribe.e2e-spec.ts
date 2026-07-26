@@ -535,6 +535,37 @@ describe('AI scribe — post-session sweep (e2e)', () => {
     expect(forced.body.sourcePreview?.scheduledSessionId).toBe(scheduledSessionId);
   });
 
+  it('rejects a manual run pointed at a schedule that is not draftable (#504)', async () => {
+    // The draftable filter (effectively-'scheduled' rows only) used to make an
+    // explicitly-requested cancelled/completed/unknown id resolve to NO scope at all,
+    // so the run silently drafted over the wrong window and reported success.
+    await harness.enableExperimental();
+    const campaignId = await harness.createCampaign('Scribe Scope Errors');
+    await harness.configureSeat(campaignId, { enabled: true, tokenBudget: 5000 });
+
+    const past = new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString();
+    const sched = await request(harness.server)
+      .post(`${API}/campaigns/${campaignId}/schedule`)
+      .set(dm)
+      .send({ scheduledAt: past, durationMinutes: 60, title: 'Called off' });
+    expect(sched.status).toBe(201);
+    await request(harness.server).delete(`${API}/schedule/${sched.body.id}`).set(dm).send({}).expect(200);
+
+    const cancelled = await request(harness.server)
+      .post(`${API}/campaigns/${campaignId}/scribe/run`)
+      .set(dm)
+      .send({ scheduledSessionId: sched.body.id });
+    expect(cancelled.status).toBe(400);
+    expect(cancelled.body.message).toContain('cancelled');
+
+    const unknown = await request(harness.server)
+      .post(`${API}/campaigns/${campaignId}/scribe/run`)
+      .set(dm)
+      .send({ scheduledSessionId: 999999 });
+    expect(unknown.status).toBe(400);
+    expect(unknown.body.message).toContain('not found');
+  });
+
   it('sweep() runs cron-enabled campaigns with cursor-scoped material', async () => {
     await harness.enableExperimental();
     const campaignId = await ownedCampaign('Scribe Cron Sweep');

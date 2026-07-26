@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import { and, asc, desc, eq, inArray, isNull } from 'drizzle-orm';
 import type { z } from 'zod';
@@ -43,6 +43,7 @@ import { AiDmService, type AiDmTokenReservation } from '../ai-dm/ai-dm.service';
 import { createAiProvider, type AiProvider, type AiProviderConfig } from '../ai-dm/providers';
 import { AI_DM_PROVIDER, type AiDmProvider } from '../ai-dm/ai-dm.provider';
 import { buildRecapDraft, type RecapDraftSource } from '../sessions/sessions.service';
+import { scheduleLiveSql } from '../sessions/scheduling-queries';
 import { SupportPreferencesService } from '../session-zero/support-preferences.service';
 import {
   filterSourceByScope,
@@ -927,7 +928,15 @@ export class ScribeService implements OnApplicationBootstrap {
     return results;
   }
 
-  /** Oldest ended scheduled session without a prior post_session job (#499). */
+  /**
+   * Oldest ended scheduled session without a prior post_session job (#499).
+   *
+   * Only EFFECTIVELY-scheduled nights are draftable (#504): a cancelled night was never
+   * played, and a completed one already has the recap this run would draft. That is
+   * exactly scheduleLiveSql(), which is also what the Upcoming/Past projections use —
+   * so a night whose recap was trashed (stored `completed`, effectively `scheduled`
+   * again) becomes draftable again, matching what the DM sees in the Schedule tab.
+   */
   private async findNextEndedScheduledSession(
     campaignId: number,
     now: Date,
@@ -935,7 +944,7 @@ export class ScribeService implements OnApplicationBootstrap {
     const rows = await this.db
       .select()
       .from(scheduledSessions)
-      .where(eq(scheduledSessions.campaignId, campaignId))
+      .where(and(eq(scheduledSessions.campaignId, campaignId), scheduleLiveSql()))
       .orderBy(asc(scheduledSessions.scheduledAt), asc(scheduledSessions.id));
 
     const processed = await this.db
@@ -982,6 +991,15 @@ export class ScribeService implements OnApplicationBootstrap {
     return { sinceAt: config.sourceCursorAt, sinceMs };
   }
 
+  /**
+   * Scope for a run. An EXPLICIT `scheduledSessionId` is a caller's instruction, so an
+   * unusable one is an error, not a shrug (#504): before the draftable filter existed
+   * every schedule id resolved, and afterwards an unknown/cancelled/completed id fell
+   * silently through to the cron cursor (or to no scope at all) and drafted a recap
+   * over the wrong window — a "successful" run the DM never asked for. Both bad ids now
+   * fail loudly with the reason. The filter is scheduleLiveSql(), i.e. EFFECTIVE status,
+   * so a night whose recap is in the Trash is draftable again just as it is upcoming again.
+   */
   private async resolveRunScope(
     campaignId: number,
     trigger: ScribeTrigger,
@@ -991,7 +1009,7 @@ export class ScribeService implements OnApplicationBootstrap {
       const rows = await this.db
         .select()
         .from(scheduledSessions)
-        .where(eq(scheduledSessions.campaignId, campaignId))
+        .where(and(eq(scheduledSessions.campaignId, campaignId), scheduleLiveSql()))
         .orderBy(asc(scheduledSessions.scheduledAt), asc(scheduledSessions.id));
       const idx = rows.findIndex((r) => r.id === scheduledSessionId);
       const row = rows[idx];
@@ -1001,6 +1019,17 @@ export class ScribeService implements OnApplicationBootstrap {
           nextSessionStartAt: next?.scheduledAt ?? null,
         });
       }
+      const [raw] = await this.db
+        .select({ status: scheduledSessions.status })
+        .from(scheduledSessions)
+        .where(and(eq(scheduledSessions.campaignId, campaignId), eq(scheduledSessions.id, scheduledSessionId)))
+        .limit(1);
+      if (!raw) {
+        throw new BadRequestException(`Scheduled session ${scheduledSessionId} not found in this campaign`);
+      }
+      throw new BadRequestException(
+        `Scheduled session ${scheduledSessionId} is ${raw.status} — only scheduled game nights can be drafted from`,
+      );
     }
     if (trigger === 'cron') return this.cursorScopeFromConfig(await this.getConfig(campaignId));
     return undefined;

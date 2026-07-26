@@ -45,6 +45,7 @@ function buildService(entities: {
   attachments?: any[];
   auditEntries?: any[];
   auditTruncated?: number;
+  scheduledSessions?: any[];
 }): ExportService {
   const noop = async () => [];
   const auditEntries = entities.auditEntries ?? [];
@@ -64,7 +65,9 @@ function buildService(entities: {
     { listForCampaign: async () => entities.npcs ?? [] } as any,
     { listForCampaign: async () => entities.locations ?? [] } as any,
     { listRecapsForCampaign: async () => entities.sessions ?? [], listAttendanceForCampaign: async () => [] } as any,
-    { listForCampaign: async () => [] } as any,
+    // scheduling — the archive reads listForExport, deliberately the RAW rows (#504);
+    // exposing only that method keeps the stub honest if the call site ever changes back.
+    { listForExport: async () => entities.scheduledSessions ?? [] } as any,
     { listForCampaign: async () => entities.characters ?? [] } as any,
     // Pagination (#608): export walks the full set via listAllForCampaign.
     { listAllForCampaign: async () => entities.notes ?? [] } as any,
@@ -393,6 +396,47 @@ describe('buildMarkdownZip — collisions + Unicode + determinism (issue #863)',
     // The literal pipe is escaped and the newline collapsed, so the row keeps 5 columns.
     expect(row).toContain('evil\\|name second');
     expect(row.split(' | ').length).toBe(5);
+  });
+
+  it('embeds the RAW scheduled-session rows in campaign.json, completed status and all (#504)', async () => {
+    // The archive reads SchedulingService.listForExport, NOT the link-reconciled read
+    // every API projection uses: a recap that merely happens to be in the Trash at
+    // export time must not permanently downgrade a completed night to 'scheduled' in
+    // the portable copy. (The read-vs-export divergence itself is pinned end-to-end by
+    // "exports the RAW schedule row even while its linked recap is trashed" in
+    // schedule.e2e-spec.ts, against the real service; this pins that the archive writer
+    // passes those rows through verbatim rather than re-deriving anything.)
+    const service = buildService({
+      npcs: [{ id: 1, name: 'Bob' }],
+      scheduledSessions: [
+        {
+          id: 7,
+          campaignId: 1,
+          scheduledAt: '2099-01-02T18:00:00.000Z',
+          durationMinutes: 240,
+          title: 'Played, recap trashed',
+          location: '',
+          notes: '',
+          status: 'completed',
+          cancelledAt: null,
+          cancelledBy: null,
+          cancellationReason: '',
+          sessionId: 42,
+          createdAt: '2098-01-01T00:00:00.000Z',
+          updatedAt: '2098-01-01T00:00:00.000Z',
+          rsvps: [],
+        },
+      ],
+    });
+    const { buffer } = await service.buildMarkdownZip(1, USER);
+    const zip = await JSZip.loadAsync(buffer);
+    const campaignJson = JSON.parse(await zip.file('campaign.json')!.async('string'));
+    expect(campaignJson.scheduledSessions).toEqual([
+      expect.objectContaining({ id: 7, status: 'completed', sessionId: 42 }),
+    ]);
+
+    const manifest = JSON.parse(await zip.file('archive-manifest.json')!.async('string'));
+    expect(manifest.counts.scheduledSessions).toBe(1);
   });
 
   it('includes typed ids, relationships, actions, and map/grid/fog/token snapshots', async () => {

@@ -4,6 +4,8 @@ import {
   SessionUpdate,
   SessionAttendanceSet,
   ScheduledSessionCreate,
+  ScheduledSessionCancel,
+  ScheduledSessionDuplicate,
   ScheduledSessionUpdate,
   RsvpSetBody,
   hasAnyRsvpSetField,
@@ -26,6 +28,10 @@ export class SessionUpdateDto extends createZodDto(SessionUpdate.extend({ expect
 export class SessionAttendanceSetDto extends createZodDto(SessionAttendanceSet.strict()) {}
 export class ScheduledSessionCreateDto extends createZodDto(ScheduledSessionCreate.strict()) {}
 export class ScheduledSessionUpdateDto extends createZodDto(ScheduledSessionUpdate.extend({ expectedUpdatedAt: ExpectedUpdatedAt }).strict()) {}
+export class ScheduledSessionCancelDto extends createZodDto(ScheduledSessionCancel.strict().default({})) {}
+// `.default({})` matches the cancel DTO above: every field is optional, so a bodyless
+// POST is valid, and it makes the controller's `body ?? {}` fallback actually reachable.
+export class ScheduledSessionDuplicateDto extends createZodDto(ScheduledSessionDuplicate.strict().default({})) {}
 export class RsvpSetDto extends createZodDto(
   RsvpSetBody.strict().refine(hasAnyRsvpSetField, {
     message: RSVP_SET_REQUIRED_MESSAGE,
