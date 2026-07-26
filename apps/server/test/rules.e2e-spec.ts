@@ -163,6 +163,17 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
       expect.objectContaining({ type: 'item', label: 'Items', count: 1 }),
     ]));
     expect(searchFacets(facetRes.body).some((f: { type: string }) => f.type === 'section' || f.type === 'other')).toBe(false);
+    // The chip row must add up to the list it labels: with no type filter, the facet
+    // counts sum to the same `total` the search reports.
+    expect(
+      searchFacets(facetRes.body).reduce((sum: number, f: { count: number }) => sum + f.count, 0),
+    ).toBe(facetRes.body.total);
+    // A campaign pointed at a rule system with nothing installed gets an empty facet row
+    // rather than a hardcoded 5e-shaped one.
+    const missingPackRes = await request(server).get('/api/v1/rules/search').query({ pack: 'not-installed' }).set(dm);
+    expect(missingPackRes.status).toBe(200);
+    expect(searchFacets(missingPackRes.body)).toEqual([]);
+    expect(missingPackRes.body.total).toBe(0);
 
     // search: type filter narrows to monsters only
     const monsterSearchRes = await request(server).get('/api/v1/rules/search').query({ q: 'fixture sentinel', type: 'monster' }).set(dm);
@@ -591,6 +602,23 @@ describe('rules / rule packs — generic upload (issue #19)', () => {
         expect.objectContaining({ type: 'other', label: 'Reference', count: 1 }),
       ]));
       expect((await facetsFor('prose-rules')).some((f: { type: string }) => f.type === 'monster')).toBe(false);
+
+      // A text query narrows the COUNTS but not the chip SET: `other` is still offered
+      // (at 0) so the reader can pivot without clearing the search, and the order stays
+      // canonical. Counts sum to the unfiltered `total` the same list reports.
+      expect(await facetsFor('prose-rules', { q: 'Downtime' })).toEqual([
+        expect.objectContaining({ type: 'section', label: 'Rules', count: 1 }),
+        expect.objectContaining({ type: 'other', label: 'Reference', count: 0 }),
+      ]);
+      const proseQueryRes = await request(server)
+        .get('/api/v1/rules/search')
+        .query({ pack: 'prose-rules', q: 'Downtime' })
+        .set(uploader);
+      expect(proseQueryRes.status).toBe(200);
+      expect(proseQueryRes.body.total).toBe(1);
+      expect(
+        searchFacets(proseQueryRes.body).reduce((sum: number, f: { count: number }) => sum + f.count, 0),
+      ).toBe(proseQueryRes.body.total);
 
       const otherRes = await request(server).get('/api/v1/rules/search').query({ pack: 'prose-rules', type: 'other' }).set(uploader);
       expect(otherRes.status).toBe(200);

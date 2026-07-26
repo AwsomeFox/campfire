@@ -393,9 +393,8 @@ export default function CompendiumPage() {
             >
               {chip.label}
               {typeof chip.count === 'number' && (
-                <span style={{ marginLeft: 4, color: 'inherit' }}>
-                  ({chip.count})
-                </span>
+                // Leading space keeps the accessible name "Spells (12)", not "Spells(12)".
+                <span style={{ marginLeft: 2, color: 'inherit' }}> ({chip.count})</span>
               )}
             </button>
           );

@@ -306,6 +306,29 @@ function ruleFacetLabel(type: RuleEntryType, packSlug?: string): string {
   return DEFAULT_FACET_LABELS[type];
 }
 
+/**
+ * Build the Compendium facet list for a search (issue #544).
+ *
+ * The facet *set* comes from `packTypeCounts` — the categories that actually exist in
+ * the active pack — so the chip row is stable while the user types and categories the
+ * pack has no entries for stay hidden. The facet *counts* come from `matchTypeCounts`
+ * — the current query/pack scope with the active type filter deliberately excluded —
+ * so a chip's count always equals what selecting that chip would return. A category
+ * that exists in the pack but has no match for the current query is reported with
+ * `count: 0` rather than dropped, so the user can still pivot to it mid-search.
+ */
+function buildRuleFacets(
+  packTypeCounts: Map<string, number>,
+  matchTypeCounts: Map<string, number>,
+  packSlug?: string,
+): RuleSearchFacet[] {
+  return RULE_FACET_ORDER.filter((type) => (packTypeCounts.get(type) ?? 0) > 0).map((type) => ({
+    type,
+    label: ruleFacetLabel(type, packSlug),
+    count: matchTypeCounts.get(type) ?? 0,
+  }));
+}
+
 @Injectable()
 export class RulesService implements OnModuleInit {
   private readonly runningJobs = new Map<string, { cancelled: boolean }>();
@@ -1794,13 +1817,13 @@ export class RulesService implements OnModuleInit {
       : undefined;
     const conditions = [...baseConditions, keyset].filter((c): c is NonNullable<typeof c> => c !== undefined);
 
-    const facetConditions = [
-      opts.packId !== undefined ? eq(ruleEntries.packId, opts.packId) : undefined,
-    ].filter((c): c is NonNullable<typeof c> => c !== undefined);
-    const [total, facets] = await Promise.all([
+    // Browse has no query, so the pack scope IS the result scope: one grouped count
+    // serves both "which categories exist in this pack" and "how many match".
+    const [total, packTypeCounts] = await Promise.all([
       this.countEntries(baseConditions),
-      this.countEntryFacets(facetConditions, opts.packSlug),
+      this.groupEntryCounts(this.packScopeConditions(opts.packId)),
     ]);
+    const facets = buildRuleFacets(packTypeCounts, packTypeCounts, opts.packSlug);
     const rows = await this.db
       .select()
       .from(ruleEntries)
@@ -1851,14 +1874,16 @@ export class RulesService implements OnModuleInit {
       : undefined;
     const conditions = [...baseConditions, keyset].filter((c): c is NonNullable<typeof c> => c !== undefined);
 
-    const facetConditions = [
+    const matchConditions = [
       sql`rule_entries_fts MATCH ${opts.ftsQuery}`,
       opts.packId !== undefined ? eq(ruleEntries.packId, opts.packId) : undefined,
     ].filter((c): c is NonNullable<typeof c> => c !== undefined);
-    const [total, facets] = await Promise.all([
+    const [total, packTypeCounts, matchTypeCounts] = await Promise.all([
       this.countFts(baseConditions),
-      this.countFtsFacets(facetConditions, opts.packSlug),
+      this.groupEntryCounts(this.packScopeConditions(opts.packId)),
+      this.groupFtsCounts(matchConditions),
     ]);
+    const facets = buildRuleFacets(packTypeCounts, matchTypeCounts, opts.packSlug);
     const rows = await this.db
       .select({ entry: ruleEntries, ftsRank: sql<number>`rule_entries_fts.rank` })
       .from(ruleEntries)
@@ -1910,14 +1935,16 @@ export class RulesService implements OnModuleInit {
       : undefined;
     const conditions = [...baseConditions, keyset].filter((c): c is NonNullable<typeof c> => c !== undefined);
 
-    const facetConditions = [
+    const matchConditions = [
       sql`(${ruleEntries.name} LIKE ${like} OR ${ruleEntries.summary} LIKE ${like} OR ${ruleEntries.body} LIKE ${like})`,
       opts.packId !== undefined ? eq(ruleEntries.packId, opts.packId) : undefined,
     ].filter((c): c is NonNullable<typeof c> => c !== undefined);
-    const [total, facets] = await Promise.all([
+    const [total, packTypeCounts, matchTypeCounts] = await Promise.all([
       this.countEntries(baseConditions),
-      this.countEntryFacets(facetConditions, opts.packSlug),
+      this.groupEntryCounts(this.packScopeConditions(opts.packId)),
+      this.groupEntryCounts(matchConditions),
     ]);
+    const facets = buildRuleFacets(packTypeCounts, matchTypeCounts, opts.packSlug);
     const rows = await this.db
       .select()
       .from(ruleEntries)
@@ -1950,16 +1977,20 @@ export class RulesService implements OnModuleInit {
     return Number(row?.n ?? 0);
   }
 
-  private async countEntryFacets(
+  /** Conditions that scope a query to the active pack only (no query/type filter). */
+  private packScopeConditions(packId?: number): Array<ReturnType<typeof eq>> {
+    return packId === undefined ? [] : [eq(ruleEntries.packId, packId)];
+  }
+
+  private async groupEntryCounts(
     conditions: Array<ReturnType<typeof sql> | ReturnType<typeof eq>>,
-    packSlug?: string,
-  ): Promise<RuleSearchFacet[]> {
+  ): Promise<Map<string, number>> {
     const rows = await this.db
       .select({ type: ruleEntries.type, count: sql<number>`count(*)` })
       .from(ruleEntries)
       .where(conditions.length ? and(...conditions) : undefined)
       .groupBy(ruleEntries.type);
-    return this.facetRowsToDomain(rows, packSlug);
+    return new Map(rows.map((r) => [r.type, Number(r.count)]));
   }
 
   private async countFts(conditions: Array<ReturnType<typeof sql> | ReturnType<typeof eq>>): Promise<number> {
@@ -1971,32 +2002,15 @@ export class RulesService implements OnModuleInit {
     return Number(row?.n ?? 0);
   }
 
-  private async countFtsFacets(
+  private async groupFtsCounts(
     conditions: Array<ReturnType<typeof sql> | ReturnType<typeof eq>>,
-    packSlug?: string,
-  ): Promise<RuleSearchFacet[]> {
+  ): Promise<Map<string, number>> {
     const rows = await this.db
       .select({ type: ruleEntries.type, count: sql<number>`count(*)` })
       .from(ruleEntries)
       .innerJoin(sql`rule_entries_fts`, sql`rule_entries_fts.rowid = ${ruleEntries.id}`)
       .where(and(...conditions))
       .groupBy(ruleEntries.type);
-    return this.facetRowsToDomain(rows, packSlug);
-  }
-
-  private facetRowsToDomain(
-    rows: Array<{ type: string; count: number }>,
-    packSlug?: string,
-  ): RuleSearchFacet[] {
-    return rows
-      .map((row) => ({
-        type: row.type as RuleEntryType,
-        label: ruleFacetLabel(row.type as RuleEntryType, packSlug),
-        count: Number(row.count),
-      }))
-      .filter((facet): facet is RuleSearchFacet => (
-        RULE_FACET_ORDER.includes(facet.type) && facet.count > 0
-      ))
-      .sort((a, b) => RULE_FACET_ORDER.indexOf(a.type) - RULE_FACET_ORDER.indexOf(b.type));
+    return new Map(rows.map((r) => [r.type, Number(r.count)]));
   }
 }

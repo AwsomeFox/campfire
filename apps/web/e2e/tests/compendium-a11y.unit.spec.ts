@@ -75,6 +75,16 @@ test.describe('compendium URL filter params (issue #647)', () => {
     expect(filterChange.get(COMPENDIUM_URL_Q)).toBe('goblin');
     expect(filterChange.get(COMPENDIUM_URL_TYPE)).toBe('section');
     expect(filterChange.get(COMPENDIUM_URL_CURSOR)).toBeNull();
+
+    // 5e-shaped types round-trip identically (issue #544 added section/other, it did
+    // not change the existing ones).
+    const monsterChange = applyCompendiumSearchParams(withCursor, {
+      q: 'goblin',
+      type: 'monster',
+      cursor: null,
+    });
+    expect(monsterChange.get(COMPENDIUM_URL_TYPE)).toBe('monster');
+    expect(monsterChange.get(COMPENDIUM_URL_CURSOR)).toBeNull();
   });
 
   test('effective search query skips debounce when URL q changes externally', () => {
@@ -172,6 +182,18 @@ test.describe('compendium results status (issue #647)', () => {
         typeLabel: 'Rules',
       }),
     ).toMatch(/no rules/i);
+
+    // Source-native labels flow straight through from the server facet (issue #544):
+    // a PF2e pack calls monsters "Creatures", and the live region must say so.
+    expect(
+      compendiumResultsStatus({
+        loading: false,
+        resultCount: 0,
+        query: '',
+        typeKey: 'monster',
+        typeLabel: 'Creatures',
+      }),
+    ).toMatch(/no creatures/i);
 
     expect(
       compendiumResultsStatus({
