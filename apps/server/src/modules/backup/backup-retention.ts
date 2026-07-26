@@ -85,13 +85,22 @@ export function parseBackupMinFreeBytes(
   return parseOptionalPositiveInteger(raw, DEFAULT_BACKUP_MIN_FREE_BYTES, 'BACKUP_MIN_FREE_BYTES') ?? 0;
 }
 
-export function estimateNextBackupBytes(lastSize: number | null | undefined, fallbackBytes = 0): number {
+type BackupEstimateFallback = number | (() => number);
+
+export function estimateNextBackupBytes(
+  lastSize: number | null | undefined,
+  fallbackBytes: BackupEstimateFallback = 0,
+): number {
   const basis =
     typeof lastSize === 'number' && Number.isFinite(lastSize) && lastSize > 0
       ? lastSize
-      : Math.max(0, fallbackBytes);
+      : Math.max(0, resolveEstimateFallbackBytes(fallbackBytes));
   if (basis <= 0) return 0;
   return Math.ceil(Math.max(basis * BACKUP_ESTIMATE_GROWTH_FACTOR, basis + BACKUP_ESTIMATE_MIN_GROWTH_BYTES));
+}
+
+function resolveEstimateFallbackBytes(fallbackBytes: BackupEstimateFallback): number {
+  return typeof fallbackBytes === 'function' ? fallbackBytes() : fallbackBytes;
 }
 
 export function planBackupRetention(

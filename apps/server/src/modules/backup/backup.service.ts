@@ -489,7 +489,7 @@ export class BackupService implements OnApplicationBootstrap {
       const dir = this.backupDir();
       estimatedBytes = estimateNextBackupBytes(
         previous?.lastSize ?? null,
-        this.estimateFallbackBackupBytes(),
+        () => this.estimateFallbackBackupBytes(),
       );
       disk = this.probeDisk(dir, minFreeBytes, estimatedBytes);
       fs.mkdirSync(dir, { recursive: true });
@@ -836,7 +836,7 @@ export class BackupService implements OnApplicationBootstrap {
     const reserveBytes = parseBackupMinFreeBytes();
     const estimatedNextBytes = estimateNextBackupBytes(
       cadence?.lastSize ?? null,
-      this.estimateFallbackBackupBytes(),
+      () => this.estimateFallbackBackupBytes(),
     );
     const disk = this.probeDisk(dir, reserveBytes, estimatedNextBytes);
     const metrics = this.normalizeMetrics(cadence?.metrics);

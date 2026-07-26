@@ -182,4 +182,17 @@ describe('backup retention env parsing and estimates', () => {
     expect(estimateNextBackupBytes(null, 10)).toBe(1024 * 1024 + 10);
     expect(parseBackupMinFreeBytes('0')).toBe(0);
   });
+
+  it('only evaluates the fallback estimate when the last successful size is missing', () => {
+    let fallbackCalls = 0;
+    const fallback = () => {
+      fallbackCalls += 1;
+      return 10;
+    };
+
+    expect(estimateNextBackupBytes(100 * 1024 * 1024, fallback)).toBe(115 * 1024 * 1024);
+    expect(fallbackCalls).toBe(0);
+    expect(estimateNextBackupBytes(null, fallback)).toBe(1024 * 1024 + 10);
+    expect(fallbackCalls).toBe(1);
+  });
 });
