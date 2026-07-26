@@ -13,14 +13,16 @@
  * clear reason when a server admin hasn't enabled the feature, and Driver mode 409s
  * unless a budget + provider are set. We surface those server messages verbatim.
  */
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useLocation } from 'react-router-dom';
+import { useQueryClient } from '@tanstack/react-query';
 import type { AiDmMode, AiDmSeat, AiProviderEffectiveView, Campaign, NarrationLanguage } from '@campfire/schema';
 import { NARRATION_LANGUAGE_OPTIONS } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
 import { SkeletonCard } from '../../components/ui';
 import { AI_DM_BUDGET_INPUT_ID, AI_DM_BUDGET_SECTION_ID } from './aiDmBudgetIds';
 import { ProviderForm } from './ProviderForm';
+import { queryKeys } from '../../lib/query';
 import { useAuth } from '../../app/auth';
 import { AiSetupChecklist } from '../ai-dm/AiSetupChecklist';
 
@@ -60,6 +62,13 @@ export default function AiDmCard({
   onCampaignSaved: (c: Campaign) => void;
 }) {
   const { isAdmin } = useAuth();
+  const queryClient = useQueryClient();
+  // Every section below writes state the readiness checklist derives from (mode, budget,
+  // provider), but they keep their result in local component state. Without an explicit
+  // invalidation the co-located checklist would keep rendering the pre-save answer (#519).
+  const refreshReadiness = useCallback(() => {
+    void queryClient.invalidateQueries({ queryKey: queryKeys.aiDmReadiness(campaignId) });
+  }, [queryClient, campaignId]);
   const [seat, setSeat] = useState<AiDmSeat | null>(null);
   const [effective, setEffective] = useState<AiProviderEffectiveView | null>(null);
   const [loading, setLoading] = useState(true);
@@ -136,14 +145,23 @@ export default function AiDmCard({
       </p>
 
       <AiSetupChecklist campaignId={campaignId} isAdmin={isAdmin} className="cf-inset p-3" />
-      <ModeSection campaignId={campaignId} seat={seat} onChanged={(s) => setSeat(s)} />
+      <ModeSection campaignId={campaignId} seat={seat} onChanged={(s) => { setSeat(s); refreshReadiness(); }} />
       <NarrationLanguageSection
         campaignId={campaignId}
         campaign={campaign}
         onSaved={onCampaignSaved}
       />
-      <EffectiveProviderSection campaignId={campaignId} effective={effective} onChanged={() => void loadEffective()} />
-      <BudgetSection campaignId={campaignId} seat={seat} usagePct={usagePct} onChanged={(s) => setSeat(s)} />
+      <EffectiveProviderSection
+        campaignId={campaignId}
+        effective={effective}
+        onChanged={() => { void loadEffective(); refreshReadiness(); }}
+      />
+      <BudgetSection
+        campaignId={campaignId}
+        seat={seat}
+        usagePct={usagePct}
+        onChanged={(s) => { setSeat(s); refreshReadiness(); }}
+      />
       <InstructionsSection campaignId={campaignId} seat={seat} onChanged={(s) => setSeat(s)} />
     </div>
   );

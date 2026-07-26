@@ -23,7 +23,7 @@ import { useTranslation } from 'react-i18next';
 import { useQuery } from '@tanstack/react-query';
 import type { AiDmReadiness } from '@campfire/schema';
 import { api, API } from '../../lib/api';
-import { useAiDmSeat } from '../../lib/query';
+import { queryKeys, useAiDmSeat } from '../../lib/query';
 import { classifyAiGate } from './aiGate';
 import { CopyControl } from '../../components/CopyControl';
 import { GameIcon } from '../../components/GameIcon';
@@ -35,7 +35,8 @@ interface Step {
   title: string;
   body: string;
   done: boolean | null;
-  actor: 'admin' | 'dm';
+  /** Who has to act. `table` = the players (e.g. support-note consent), not the DM. */
+  actor: 'admin' | 'dm' | 'table';
   fix?: { label: string; to: string };
   /** Extra node rendered under an unmet step (e.g. the copyable admin request). */
   extra?: React.ReactNode;
@@ -59,7 +60,7 @@ export function AiSetupChecklist({
   const { t } = useTranslation();
 
   const readinessQuery = useQuery({
-    queryKey: ['campaign', campaignId, 'ai-dm', 'readiness'],
+    queryKey: queryKeys.aiDmReadiness(campaignId),
     queryFn: () => api.get<AiDmReadiness>(`${API}/campaigns/${campaignId}/ai-dm/readiness`),
   });
   const readiness = readinessQuery.data ?? null;
@@ -75,11 +76,21 @@ export function AiSetupChecklist({
   const mode = readiness.mode;
   const readinessSteps: Step[] = readiness.checks.map((check): Step => ({
     key: check.key,
-    title: check.title,
+    // Titles and CTA labels are stable per check KEY, so they stay localized here. The
+    // `detail` is the server's live diagnostic (counts, model names, allowlist reasons)
+    // and is passed through as-is — it has no client-side equivalent.
+    title: t(`aiOnboarding.checklist.checkTitles.${check.key}`, { defaultValue: check.title }),
     body: check.detail,
     done: check.status === 'unknown' ? null : check.ok,
-    actor: check.actor === 'admin' ? 'admin' : 'dm',
-    fix: check.fixHref && !check.ok ? { label: fixLabel(check.key), to: check.fixHref } : undefined,
+    actor: check.actor,
+    fix: check.fixHref && !check.ok
+      ? {
+          label: t(`aiOnboarding.checklist.fixLabels.${check.key}`, {
+            defaultValue: t('aiOnboarding.checklist.fixLabels.fallback'),
+          }),
+          to: check.fixHref,
+        }
+      : undefined,
     extra: check.key === 'serverFlag' && !isAdmin && !check.ok
       ? <CopyRequest text={t('aiOnboarding.checklist.steps.flag.copyRequest')} />
       : undefined,
@@ -143,18 +154,14 @@ export function AiSetupChecklist({
   );
 }
 
-function fixLabel(key: string): string {
-  if (key === 'serverFlag') return 'Open AI console';
-  if (key === 'budget') return 'Set a budget';
-  if (key === 'writeMode') return 'Switch write mode';
-  if (key === 'rulesContent') return 'Open session zero';
-  if (key === 'supportConsent') return 'Review support consent';
-  return 'Fix this';
-}
-
 function StepRow({ step }: { step: Step }) {
   const { t } = useTranslation();
-  const actorLabel = step.actor === 'admin' ? t('aiOnboarding.checklist.actorAdmin') : t('aiOnboarding.checklist.actorDm');
+  const actorLabel =
+    step.actor === 'admin'
+      ? t('aiOnboarding.checklist.actorAdmin')
+      : step.actor === 'table'
+        ? t('aiOnboarding.checklist.actorTable')
+        : t('aiOnboarding.checklist.actorDm');
   const marker = step.done === true ? '✓' : step.done === null ? '•' : '○';
   const markerColor = step.done === true ? 'var(--color-accent)' : 'var(--color-neutral-600)';
   return (

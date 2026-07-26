@@ -39,6 +39,19 @@ type AiDmTurnRequestInput = z.infer<typeof AiDmTurnRequest>;
 /** Default per-turn output cap when the caller doesn't specify maxTokens. */
 const DEFAULT_MAX_TOKENS = 512;
 
+/**
+ * Readiness cost-estimate shape (#519) used only when a campaign has NO metered turns to
+ * average yet: a typical assembled prompt plus one bounded narration reply. Once real turns
+ * exist, {@link AiDmService.recentTurnTokenAverage} replaces this with observed usage.
+ */
+const DEFAULT_ESTIMATED_PROMPT_TOKENS = 750;
+const DEFAULT_ESTIMATED_COMPLETION_TOKENS = 1024;
+/** Share of a turn's tokens attributed to completion when only a total is known. */
+const DEFAULT_COMPLETION_SHARE =
+  DEFAULT_ESTIMATED_COMPLETION_TOKENS / (DEFAULT_ESTIMATED_PROMPT_TOKENS + DEFAULT_ESTIMATED_COMPLETION_TOKENS);
+/** How many recent metered turns the readiness estimate averages over. */
+const READINESS_USAGE_SAMPLE = 20;
+
 function toDomain(row: typeof aiDmSeats.$inferSelect): AiDmSeat {
   return {
     campaignId: row.campaignId,
@@ -198,17 +211,44 @@ export class AiDmService {
    * it, so the driver (the path that actually burns provider tokens) ignored the cap.
    */
   async assertWithinServerTokenCap(): Promise<void> {
+    const status = await this.serverTokenCapStatus();
+    if (!status.withinCap) {
+      throw new ForbiddenException(
+        `Server-wide AI token cap reached (${status.total}/${status.cap}). A server admin must raise it in the AI console (PUT /settings/ai/caps) or reset usage to continue.`,
+      );
+    }
+  }
+
+  /**
+   * Mean tokens per metered turn over this campaign's most recent turns, or `null` when it
+   * has none yet. Powers the readiness cost estimate (#519) so the number a DM sees before a
+   * run reflects what THIS table actually spends rather than a fixed guess.
+   */
+  private async recentTurnTokenAverage(campaignId: number): Promise<number | null> {
+    const rows = await this.db
+      .select({ tokensUsed: aiDmUsageHistory.tokensUsed })
+      .from(aiDmUsageHistory)
+      .where(eq(aiDmUsageHistory.campaignId, campaignId))
+      .orderBy(desc(aiDmUsageHistory.id))
+      .limit(READINESS_USAGE_SAMPLE);
+    const samples = rows.map((row) => Number(row.tokensUsed)).filter((n) => Number.isFinite(n) && n > 0);
+    if (samples.length === 0) return null;
+    return Math.round(samples.reduce((sum, n) => sum + n, 0) / samples.length);
+  }
+
+  /**
+   * Non-throwing read of the same ceiling {@link assertWithinServerTokenCap} enforces, so
+   * the readiness model (#519) can REPORT the cap instead of showing a green checklist that
+   * the very next turn 403s on. Both share this one query so the two can never diverge.
+   */
+  private async serverTokenCapStatus(): Promise<{ cap: number; total: number; withinCap: boolean }> {
     const { aiServerTokenCap: cap } = await this.settings.getAll();
-    if (!cap || cap <= 0) return;
+    if (!cap || cap <= 0) return { cap: 0, total: 0, withinCap: true };
     const [agg] = await this.db
       .select({ total: sql<number>`COALESCE(SUM(${aiDmSeats.tokensUsed}), 0)` })
       .from(aiDmSeats);
     const total = Number(agg?.total ?? 0);
-    if (total >= cap) {
-      throw new ForbiddenException(
-        `Server-wide AI token cap reached (${total}/${cap}). A server admin must raise it in the AI console (PUT /settings/ai/caps) or reset usage to continue.`,
-      );
-    }
+    return { cap, total, withinCap: total < cap };
   }
 
   /**
@@ -266,11 +306,13 @@ export class AiDmService {
     opts: { isAdmin: boolean },
   ): Promise<AiDmReadiness> {
     const seat = await this.getSeat(campaignId);
-    const [settings, providerView, charter, consent] = await Promise.all([
+    const [settings, providerView, charter, consent, serverCap, recentUsage] = await Promise.all([
       this.settings.getAll(),
       this.providerConfig.getEffectiveView(campaignId),
       this.sessionZero.get(campaignId),
       this.supportPreferences.aiConsentCounts(campaignId),
+      this.serverTokenCapStatus(),
+      this.recentTurnTokenAverage(campaignId),
     ]);
     const provider = providerView as AiDmReadiness['provider'];
     const budgetRemaining = Math.max(0, seat.tokenBudget - seat.tokensUsed);
@@ -294,10 +336,28 @@ export class AiDmService {
     });
 
     push({
+      key: 'serverCap',
+      ok: serverCap.withinCap,
+      status: serverCap.withinCap ? 'ok' : 'blocked',
+      actor: 'admin',
+      title: 'Server-wide token cap',
+      detail: serverCap.cap <= 0
+        ? 'No server-wide AI token cap is set.'
+        : serverCap.withinCap
+          ? `${serverCap.total.toLocaleString()} / ${serverCap.cap.toLocaleString()} server-wide tokens used.`
+          : `The server-wide AI token cap is reached (${serverCap.total.toLocaleString()}/${serverCap.cap.toLocaleString()}). A server admin must raise it or reset usage.`,
+      requiredForDriver: true,
+      fixHref: opts.isAdmin ? '/admin/ai' : null,
+    });
+
+    push({
       key: 'provider',
       ok: provider.configured && provider.ready,
       status: provider.configured && provider.ready ? 'ok' : 'blocked',
-      actor: provider.configured ? 'admin' : 'dm',
+      // The deep link always points at CAMPAIGN settings, where a DM can add (or fix) a
+      // campaign override — so the DM is the actor unless the effective config is the
+      // server default, which only an admin can repair in place.
+      actor: provider.configured && provider.source === 'server' ? 'admin' : 'dm',
       title: 'Provider and credential',
       detail: provider.configured
         ? provider.ready
@@ -419,11 +479,20 @@ export class AiDmService {
     const driverChecks = checks.filter((check) => check.requiredForDriver);
     const driverOk = driverChecks.every((check) => check.ok);
     const firstBlocked = driverChecks.find((check) => !check.ok);
-    const estimatedCompletionTokens = Math.min(1024, Math.max(0, budgetRemaining));
-    const estimatedPromptTokens = budgetRemaining > 0 ? 750 : 0;
+    // Per-turn estimate. When this campaign has metered turns on record we use their mean
+    // (real data beats a guess); otherwise we fall back to a conservative default shape.
+    // It is deliberately NOT clamped to the remaining budget: a run that would overrun the
+    // budget must still show its true expected size — `budgetRemaining` reports the ceiling
+    // separately, and the budget check above is what actually blocks the run.
+    const estimatedTotalTokens = recentUsage ?? DEFAULT_ESTIMATED_PROMPT_TOKENS + DEFAULT_ESTIMATED_COMPLETION_TOKENS;
+    const estimatedCompletionTokens = Math.round(estimatedTotalTokens * DEFAULT_COMPLETION_SHARE);
+    const estimatedPromptTokens = estimatedTotalTokens - estimatedCompletionTokens;
     return {
       campaignId,
-      ok: checks.every((check) => check.status !== 'blocked'),
+      // A check that is not `ok` never counts as ready — including one whose status is
+      // `unknown` because the caller cannot see it (the server flag, for a non-admin DM).
+      // Only `warning` checks (advisory, never blocking) may be false and still be ready.
+      ok: checks.every((check) => check.ok || check.status === 'warning'),
       driverOk,
       mode: seat.mode,
       provider,
@@ -434,7 +503,9 @@ export class AiDmService {
         estimatedCompletionTokens,
         estimatedTotalTokens: estimatedPromptTokens + estimatedCompletionTokens,
         estimatedUsd: null,
-        note: 'Best-effort per-turn estimate before sending to the provider. Actual usage depends on context, tools, and model pricing.',
+        note: recentUsage
+          ? 'Per-turn estimate from this campaign’s recent metered turns. Actual usage depends on context, tools, and model pricing.'
+          : 'Best-effort per-turn estimate before sending to the provider — this campaign has no metered turns yet. Actual usage depends on context, tools, and model pricing.',
       },
       driverUnavailableReason: firstBlocked?.detail ?? null,
     };

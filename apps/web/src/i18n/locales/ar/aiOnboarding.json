@@ -2,7 +2,7 @@
   "aiOnboarding": {
     "checklist": {
       "title": "Set up the AI Dungeon Master",
-      "intro": "Four steps take a campaign from no AI to a working AI DM. Each step below reads its real state and links straight to the control that changes it.",
+      "intro": "These steps take a campaign from no AI to a working AI DM. Each step below reads its real state and links straight to the control that changes it.",
       "progress": "{{done}} of {{total}} steps done",
       "allDoneTitle": "The AI DM is ready",
       "allDoneDriver": "The AI holds the DM seat and acts directly — it narrates, rolls dice, applies HP and conditions, and runs the session within the budget you set. Players join at the Table tab.",
@@ -11,6 +11,7 @@
       "unavailable": "Readiness could not be loaded. Try again from campaign settings.",
       "actorAdmin": "Server admin",
       "actorDm": "You (the DM)",
+      "actorTable": "Your table",
       "completedBy": "Done by {{actor}}",
       "todoBy": "Needs {{actor}}",
       "costTitle": "Estimated cost before the next run",
@@ -21,6 +22,31 @@
       "fixMode": "Choose a mode",
       "fixBudget": "Set a budget",
       "openTable": "Open the Table",
+      "checkTitles": {
+        "serverFlag": "Server AI enabled",
+        "serverCap": "Server-wide token cap",
+        "provider": "Provider and credential",
+        "model": "Executable model",
+        "budget": "Budget available",
+        "writeMode": "Write mode",
+        "rulesContent": "Rules and table content",
+        "supportConsent": "Participant support consent",
+        "secretPolicy": "Secret and privacy policy",
+        "driverTools": "Driver tool capability"
+      },
+      "fixLabels": {
+        "fallback": "Fix this",
+        "serverFlag": "Open AI console",
+        "serverCap": "Open AI console",
+        "provider": "Configure provider",
+        "model": "Choose an allowed model",
+        "budget": "Set a budget",
+        "writeMode": "Use a direct-write session",
+        "rulesContent": "Open session zero",
+        "supportConsent": "Review support consent",
+        "secretPolicy": "Review provider privacy",
+        "driverTools": "Choose a tool-calling provider"
+      },
       "steps": {
         "flag": {
           "title": "Server AI enabled",
@@ -53,6 +79,12 @@
           "notYet": "Once Driver mode is on, a Table tab appears for every member — that's where the session is played."
         }
       }
+    },
+    "runCost": {
+      "label": "Estimated next AI turn:",
+      "summary": "up to {{tokens}} tokens ({{prompt}} prompt + {{completion}} completion).",
+      "usdUnknown": "USD varies by provider/model.",
+      "usdKnown": "About {{usd}}."
     },
     "dashboard": {
       "hintTitle": "Try the AI Dungeon Master",

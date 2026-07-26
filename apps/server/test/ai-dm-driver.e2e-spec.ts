@@ -56,7 +56,10 @@ describe('ai-dm driver runtime — session loop + streamed narration + tool exec
         expect.objectContaining({ key: 'budget', status: 'blocked', requiredForDriver: true }),
       ]),
     );
-    expect(initial.body.estimatedCost.estimatedTotalTokens).toBeGreaterThanOrEqual(0);
+    expect(initial.body.estimatedCost.estimatedTotalTokens).toBeGreaterThan(0);
+    // A blocked driver must SAY why (acceptance criterion: never a bare unavailable button).
+    expect(typeof initial.body.driverUnavailableReason).toBe('string');
+    expect(initial.body.driverUnavailableReason.length).toBeGreaterThan(0);
 
     const testOnly = await request(h.server)
       .post(`/api/v1/campaigns/${campaignId}/ai-provider/test`)
@@ -91,6 +94,35 @@ describe('ai-dm driver runtime — session loop + streamed narration + tool exec
         estimatedTotalTokens: expect.any(Number),
       }),
     );
+  });
+
+  it('#519 readiness is DM-only and never leaks provider key material', async () => {
+    const campaignId = await h.createCampaign('AI Readiness 519 access');
+    // The harness stores a REAL (fake) API key on the campaign provider row — the readiness
+    // read must expose the provider's shape without any of its credential.
+    await h.configureProvider(campaignId);
+
+    for (const actor of [player, viewer]) {
+      const res = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/readiness`).set(actor);
+      expect(res.status).toBe(403);
+      expect(JSON.stringify(res.body)).not.toContain('sk-test-key');
+    }
+
+    const res = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/readiness`).set(dm);
+    expect(res.status).toBe(200);
+    expect(res.body.provider).toEqual(
+      expect.objectContaining({ configured: true, providerType: 'mock', model: 'mock-1', ready: true }),
+    );
+    // Whole-body secret sweep: neither the key, its last-4, nor any key-bearing field name
+    // may appear anywhere in the readiness payload (checks[].detail included).
+    const body = JSON.stringify(res.body);
+    expect(body).not.toContain('sk-test-key-1234');
+    expect(body).not.toContain('1234');
+    for (const forbidden of ['apiKey', 'encryptedApiKey', 'keyLast4', 'baseUrl']) {
+      expect(body).not.toContain(forbidden);
+    }
+    // The DM's own steering prompt is likewise not part of the readiness surface.
+    expect(body).not.toContain('instructions');
   });
 
   it('#312 driver: a scripted tool call executes a real campfire tool and feeds the result back', async () => {

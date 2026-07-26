@@ -103,7 +103,7 @@ export default function AiTablePage() {
   const sessionQuery = useAiDmSession(campaignId);
   const session = sessionQuery.data;
   const readinessQuery = useQuery({
-    queryKey: ['campaign', campaignId, 'ai-dm', 'readiness'],
+    queryKey: campaignId !== undefined ? queryKeys.aiDmReadiness(campaignId) : ['ai-dm', 'readiness', 'disabled'],
     queryFn: () => api.get<AiDmReadiness>(`${API}/campaigns/${campaignId}/ai-dm/readiness`),
     enabled: campaignId !== undefined && isDriver && isDm,
   });
@@ -767,13 +767,15 @@ export default function AiTablePage() {
         <form onSubmit={onSubmit} className="flex flex-col gap-2" data-testid="ai-table-composer">
           {isDm && readiness && (
             <div className="cf-inset p-2 text-[11px] text-secondary" data-testid="ai-run-cost-estimate">
-              <span className="font-semibold text-[var(--color-neutral-300)]">Estimated next AI turn:</span>{' '}
-              up to {readiness.estimatedCost.estimatedTotalTokens.toLocaleString()} tokens
-              ({readiness.estimatedCost.estimatedPromptTokens.toLocaleString()} prompt +{' '}
-              {readiness.estimatedCost.estimatedCompletionTokens.toLocaleString()} completion)
+              <span className="font-semibold text-[var(--color-neutral-300)]">{t('aiOnboarding.runCost.label')}</span>{' '}
+              {t('aiOnboarding.runCost.summary', {
+                tokens: readiness.estimatedCost.estimatedTotalTokens.toLocaleString(),
+                prompt: readiness.estimatedCost.estimatedPromptTokens.toLocaleString(),
+                completion: readiness.estimatedCost.estimatedCompletionTokens.toLocaleString(),
+              })}{' '}
               {readiness.estimatedCost.estimatedUsd === null
-                ? '; USD varies by provider/model.'
-                : `; about $${readiness.estimatedCost.estimatedUsd.toFixed(4)}.`}
+                ? t('aiOnboarding.runCost.usdUnknown')
+                : t('aiOnboarding.runCost.usdKnown', { usd: `$${readiness.estimatedCost.estimatedUsd.toFixed(4)}` })}
             </div>
           )}
           {isDm && (

@@ -5400,6 +5400,7 @@ export type AiDmUsageHistoryResponse = z.infer<typeof AiDmUsageHistoryResponse>;
 
 export const AiDmReadinessCheckKey = z.enum([
   'serverFlag',
+  'serverCap',
   'provider',
   'model',
   'budget',
