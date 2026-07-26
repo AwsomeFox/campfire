@@ -113,6 +113,22 @@ export class SupportPreferencesService {
       .sort((a, b) => a.participantName.localeCompare(b.participantName));
   }
 
+  /** Count-only readiness metadata; never returns participant support text. */
+  async aiConsentCounts(campaignId: number): Promise<{ total: number; consented: number; tableConsented: number }> {
+    const rows = await this.db
+      .select({
+        aiUseConsent: participantSupportPreferences.aiUseConsent,
+        visibility: participantSupportPreferences.visibility,
+      })
+      .from(participantSupportPreferences)
+      .where(eq(participantSupportPreferences.campaignId, campaignId));
+    return {
+      total: rows.length,
+      consented: rows.filter((row) => row.aiUseConsent).length,
+      tableConsented: rows.filter((row) => row.aiUseConsent && row.visibility === 'table').length,
+    };
+  }
+
   /**
    * Model-facing read for narration broadcast to the whole table. Consent alone is
    * insufficient here: facilitator-only text must never influence public output.

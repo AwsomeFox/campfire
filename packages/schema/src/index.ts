@@ -5519,6 +5519,112 @@ export const AiDmUsageHistoryResponse = z.object({
 });
 export type AiDmUsageHistoryResponse = z.infer<typeof AiDmUsageHistoryResponse>;
 
+export const AiDmReadinessCheckKey = z.enum([
+  'serverFlag',
+  'serverCap',
+  'provider',
+  'model',
+  'mode',
+  'budget',
+  'writeMode',
+  'rulesContent',
+  'supportConsent',
+  'secretPolicy',
+  'driverTools',
+]);
+export type AiDmReadinessCheckKey = z.infer<typeof AiDmReadinessCheckKey>;
+
+export const AiDmReadinessCheck = z.object({
+  key: AiDmReadinessCheckKey,
+  ok: z.boolean(),
+  status: z.enum(['ok', 'warning', 'blocked', 'unknown']),
+  actor: z.enum(['admin', 'dm', 'table']),
+  title: z.string(),
+  detail: z.string(),
+  /**
+   * Machine-readable id for {@link detail}. The server renders `detail` in English for
+   * API consumers and logs; localized clients look up
+   * `aiOnboarding.checklist.checkDetails.<detailKey>` (interpolating {@link detailParams})
+   * and fall back to `detail` when they do not know the id, so a server that grows a new
+   * variant never blanks a checklist row on an older client (issue #629 keeps every
+   * user-facing string translatable).
+   */
+  detailKey: z.string(),
+  /** Interpolation values for {@link detailKey} — counts, model names, provider ids. */
+  detailParams: z.record(z.string(), z.union([z.string(), z.number()])).default({}),
+  requiredForDriver: z.boolean().default(false),
+  fixHref: z.string().nullable().default(null),
+});
+export type AiDmReadinessCheck = z.infer<typeof AiDmReadinessCheck>;
+
+export const AiDmEstimatedCost = z.object({
+  estimatedPromptTokens: z.number().int().nonnegative(),
+  estimatedCompletionTokens: z.number().int().nonnegative(),
+  estimatedTotalTokens: z.number().int().nonnegative(),
+  estimatedUsd: z.number().nonnegative().nullable().default(null),
+  note: z.string(),
+});
+export type AiDmEstimatedCost = z.infer<typeof AiDmEstimatedCost>;
+
+export const AiDmReadiness = z.object({
+  campaignId: Id,
+  ok: z.boolean(),
+  driverOk: z.boolean(),
+  mode: AiDmMode,
+  provider: z.lazy(() => AiProviderEffectiveView),
+  budgetRemaining: z.number().int().nonnegative(),
+  checks: z.array(AiDmReadinessCheck),
+  estimatedCost: AiDmEstimatedCost,
+  driverUnavailableReason: z.string().nullable().default(null),
+});
+export type AiDmReadiness = z.infer<typeof AiDmReadiness>;
+
+/**
+ * A readiness check BLOCKS the AI when it is not `ok` and not merely advisory.
+ * `warning` checks (session-zero content, participant consent counts) are suggestions a DM
+ * may ignore; every other status gates. This is the same rule the server applies when it
+ * computes `AiDmReadiness.ok`, exported so a client cannot re-derive it differently.
+ */
+export function aiDmReadinessCheckBlocks(check: Pick<AiDmReadinessCheck, 'ok' | 'status'>): boolean {
+  return !check.ok && check.status !== 'warning';
+}
+
+/**
+ * Is the AI DM actually ready to do something for this table?
+ *
+ * The mode is part of the answer, not a detail: a campaign can have the server flag, a
+ * provider, a model and a budget and still have the seat switched OFF, in which case the AI
+ * does nothing. Reporting "ready" there is a lie, so each mode owns its own readiness:
+ *   - `driver` — `driverOk`, which mirrors `AiDmService.assertRunnable` (every driver-required
+ *     check passes AND the seat is armed in driver mode), AND `ok`. `driverOk` alone would
+ *     ignore any BLOCKING check that is not driver-specific, letting the banner fire while
+ *     the progress tally is still short — the contradiction {@link aiDmReadinessProgress}
+ *     exists to prevent. `driverOk ⊆ ok` in practice, so this only closes the hole.
+ *   - `co_dm`  — `ok`, i.e. every blocking check passes (propose-only needs no driver extras).
+ *   - `off`    — never ready; picking a mode is the remaining work.
+ */
+export function aiDmSetupComplete(readiness: Pick<AiDmReadiness, 'ok' | 'driverOk' | 'mode'>): boolean {
+  if (readiness.mode === 'driver') return readiness.driverOk && readiness.ok;
+  if (readiness.mode === 'co_dm') return readiness.ok;
+  return false;
+}
+
+/**
+ * Checklist progress, counted over BLOCKING checks only.
+ *
+ * The total must be reachable exactly when {@link aiDmSetupComplete} is true, or the UI says
+ * two contradictory things about one state — a runnable table reading "10 of 11" beside a
+ * green "the AI DM is ready" banner, because an advisory `warning` check (a campaign with no
+ * session-zero content) can never be ticked off. Advisory checks are still rendered; they
+ * just do not count against a total that gates the ready claim.
+ */
+export function aiDmReadinessProgress(
+  readiness: Pick<AiDmReadiness, 'checks'>,
+): { done: number; total: number } {
+  const gating = readiness.checks.filter((check) => check.status !== 'warning');
+  return { done: gating.filter((check) => check.ok).length, total: gating.length };
+}
+
 // ── Co-DM authoring: draft content for the approval queue (issue #313) ────────
 // The AI acts as a co-DM that DRAFTS content the human DM reviews. A `draft`
 // request is turned by the configured provider into structured entity content and
@@ -6002,6 +6108,61 @@ export const Attachment = z.object({
   ...timestamps,
 });
 export type Attachment = z.infer<typeof Attachment>;
+
+// ---------- responsive image derivatives (issue #604) ----------
+//
+// World and encounter maps used to be delivered as the untouched original on every
+// load, and the only downscaling the server could do ran synchronously on the
+// request thread for a narrow subset of PNGs. Derivatives are now generated ONCE,
+// in the background, and recorded durably — so the client needs a contract for
+// "which sizes exist, which are still being made, and which failed" in order to
+// build an accurate srcset and to show processing / stale / error states instead
+// of silently rendering a full-size image.
+
+/** Rungs of the responsive ladder, smallest first. Longest edge in px: 512/1280/2560. */
+export const DerivativeVariant = z.enum(['thumb', 'md', 'lg']);
+export type DerivativeVariant = z.infer<typeof DerivativeVariant>;
+
+/**
+ * Per-rung lifecycle.
+ *  - pending: planned, the background worker has not produced it yet.
+ *  - ready:   bytes exist on disk and may be served.
+ *  - failed:  generation raised repeatedly; the DM can retry.
+ *  - skipped: the source is already at/below this rung, so materialising it would
+ *             cost disk for no byte saving. Serving falls back to a smaller ready
+ *             rung, or to the original.
+ */
+export const DerivativeState = z.enum(['pending', 'ready', 'failed', 'skipped']);
+export type DerivativeState = z.infer<typeof DerivativeState>;
+
+export const AttachmentDerivative = z.object({
+  variant: DerivativeVariant,
+  state: DerivativeState,
+  // Real pixel dimensions of a ready rung (0 otherwise). The client emits these as
+  // `w` descriptors rather than assuming the rung's max-dim cap, which would be
+  // wrong for every non-square image.
+  width: z.number().int().nonnegative(),
+  height: z.number().int().nonnegative(),
+  bytes: z.number().int().nonnegative(),
+  format: z.string().max(40),
+  attempts: z.number().int().nonnegative(),
+  lastError: z.string(),
+  /** True when this rung was generated from source bytes that have since changed. */
+  stale: z.boolean(),
+});
+export type AttachmentDerivative = z.infer<typeof AttachmentDerivative>;
+
+export const AttachmentDerivativeManifest = z.object({
+  attachmentId: Id,
+  // Top-level state the UI renders: every rung settled and at least one usable
+  // ('ready'), still generating ('processing'), generation errored ('failed'), or
+  // the attachment has no ladder at all — a PDF, or an image whose header could not
+  // be read ('unsupported').
+  status: z.enum(['ready', 'processing', 'failed', 'unsupported']),
+  stale: z.boolean(),
+  derivatives: z.array(AttachmentDerivative),
+});
+export type AttachmentDerivativeManifest = z.infer<typeof AttachmentDerivativeManifest>;
 
 // ---------- encounters (combat tracker) ----------
 export const EncounterStatus = z.enum(['preparing', 'running', 'ended']);
