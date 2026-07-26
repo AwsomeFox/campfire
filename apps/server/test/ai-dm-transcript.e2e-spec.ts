@@ -36,6 +36,11 @@ function kinds(events: AiDmTranscriptEvent[]): string[] {
   return events.map((e) => e.kind);
 }
 
+/** How many events carry seq 0 — must always be zero (see the seq-1 assertion below). */
+function events0(events: AiDmTranscriptEvent[]): number {
+  return events.filter((e) => e.seq === 0).length;
+}
+
 describe('ai-dm authoritative table transcript (#572)', () => {
   let h: AiEvalHarness;
 
@@ -158,6 +163,12 @@ describe('ai-dm authoritative table transcript (#572)', () => {
     // Each campaign's sequence is dense and starts at 1 — a global row id would have
     // interleaved B's writes into A's numbering and leaked cross-campaign write volume.
     expect(pageA.map((e) => e.seq)).toEqual(pageA.map((_, i) => i + 1));
+    // The FIRST event of a campaign is seq 1, never 0. The web reducer relies on this: it
+    // reserves 0 as the sentinel that sorts pre-join seed context above the session's own
+    // events, so a server-assigned 0 would silently interleave real events into that band.
+    expect(pageA[0].seq).toBe(1);
+    expect(pageB[0].seq).toBe(1);
+    expect(events0(pageA)).toBe(0);
     expect(pageB.map((e) => e.seq)).toEqual(pageB.map((_, i) => i + 1));
     // Strictly increasing, ascending, no duplicates.
     for (let i = 1; i < pageA.length; i += 1) expect(pageA[i].seq).toBeGreaterThan(pageA[i - 1].seq);

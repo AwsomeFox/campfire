@@ -268,13 +268,33 @@ function push(entries: TranscriptEntry[], entry: TranscriptEntry): TranscriptEnt
 }
 
 /**
+ * Ordering sentinel for pre-join seed context (#572): the joined-mid-session divider, the
+ * seeded scene label, and the `lastNarration` bubble.
+ *
+ * Those entries have no server row and therefore no real `seq`, but they are HISTORY, not
+ * live activity — they must sit above everything the session goes on to record. Treating
+ * them like the other seq-less entries sorted them to the tail, pinning the marker that
+ * introduces the log underneath every line it introduces, permanently.
+ *
+ * 0 is safe as a sentinel rather than a value the server could collide with: the server
+ * assigns `(MAX(seq) ?? 0) + 1`, so the first row of a campaign is seq 1, and the wire
+ * schema declares `seq` as `z.number().int().positive()` — 0 is not representable on the
+ * wire at all. Note that entries are partitioned on `=== undefined`, never truthiness, so
+ * a 0 here sorts as a number instead of being mistaken for "no seq".
+ */
+export const SEED_SEQ = 0;
+
+/**
  * Total order over merged entries (#572).
  *
  * Server-backed entries sort by `seq`, the authoritative per-campaign sequence — NOT by
- * timestamp, which cannot order two actions taken in the same millisecond. Purely local
- * entries (an optimistic echo whose server event has not landed yet, the still-open DM
- * bubble) have no `seq` and stay at the tail in arrival order, which is exactly where the
- * newest activity belongs. Stable: entries that compare equal keep their relative order.
+ * timestamp, which cannot order two actions taken in the same millisecond. Pre-join seed
+ * context carries {@link SEED_SEQ} so it leads the log.
+ *
+ * Entries with NO `seq` are the genuinely live ones — an optimistic echo whose server event
+ * has not landed yet, and the still-open DM bubble — and stay at the tail in arrival order,
+ * which is exactly where the newest activity belongs. Stable: entries that compare equal
+ * keep their relative order, so the divider/scene/lastNarration triple holds its shape.
  */
 function orderBySeq(entries: TranscriptEntry[]): TranscriptEntry[] {
   const sequenced: TranscriptEntry[] = [];
@@ -283,6 +303,19 @@ function orderBySeq(entries: TranscriptEntry[]): TranscriptEntry[] {
   sequenced.sort((a, b) => (a.seq as number) - (b.seq as number));
   const merged = [...sequenced, ...pending];
   return merged.length > MAX_TRANSCRIPT_ENTRIES ? merged.slice(merged.length - MAX_TRANSCRIPT_ENTRIES) : merged;
+}
+
+/**
+ * The ordering anchor when folding a server event into an existing DM bubble (#572).
+ *
+ * Normally the bubble keeps its FIRST event's seq so it cannot drift below its own turn's
+ * tool chips. The one value it must not keep is {@link SEED_SEQ}: that marks pre-join
+ * history, and a bubble carrying it would pin live narration above the entire log. The seed
+ * bubble is created `done`, so `foldTargetIndex` cannot currently select it — this is
+ * insurance against that becoming untrue, since the failure would be silent and baffling.
+ */
+function foldAnchorSeq(bubble: DmEntry, eventSeq: number): number {
+  return bubble.seq === undefined || bubble.seq === SEED_SEQ ? eventSeq : bubble.seq;
 }
 
 /** Index of the entry with this id, or -1. */
@@ -611,7 +644,7 @@ function applyServerEvent(state: TranscriptState, event: AiDmTranscriptEvent): T
         // turn's tool chips and render "what the AI did" above "what the AI said" — in the
         // one feature whose point is an ordered log. Anchoring also matches the pre-#572
         // live behaviour, where the bubble opened at turn.start and chips appended below.
-        seq: bubble.seq ?? event.seq,
+        seq: foldAnchorSeq(bubble, event.seq),
         eventIds: [...(bubble.eventIds ?? []), event.eventId],
       };
       return { ...base, entries: orderBySeq(next) };
@@ -650,7 +683,7 @@ function applyServerEvent(state: TranscriptState, event: AiDmTranscriptEvent): T
         meta,
         // turn.ended is the LAST event of a turn; adopting its seq would sort the bubble
         // below every tool chip the turn produced. Keep the anchor (see the narration fold).
-        seq: bubble.seq ?? event.seq,
+        seq: foldAnchorSeq(bubble, event.seq),
       };
       return { ...base, entries: orderBySeq(next) };
     }
@@ -772,11 +805,13 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
 
     case 'seed': {
       const at = action.at ?? new Date().toISOString();
+      // SEED_SEQ marks these as pre-join history so they lead the log rather than sinking
+      // below the session's own events (see the constant for why 0 cannot collide).
       const entries: TranscriptEntry[] = [
-        { id: makeId(), kind: 'system', variant: 'divider', at },
+        { id: makeId(), kind: 'system', variant: 'divider', seq: SEED_SEQ, at },
       ];
       if (action.scene) {
-        entries.push({ id: makeId(), kind: 'system', variant: 'scene', text: action.scene, at });
+        entries.push({ id: makeId(), kind: 'system', variant: 'scene', text: action.scene, seq: SEED_SEQ, at });
       }
       if (action.lastNarration) {
         entries.push({
@@ -785,6 +820,7 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
           committed: [action.lastNarration],
           live: '',
           status: 'done',
+          seq: SEED_SEQ,
           at,
         });
       }

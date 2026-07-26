@@ -8,6 +8,7 @@ import {
   transcriptReducer,
   type DmEntry,
   type PlayerEntry,
+  type SystemEntry,
   type TranscriptState,
 } from '../../src/features/ai-dm/transcript';
 
@@ -344,4 +345,62 @@ test('the authoritative page and the live-activity provider cache under separate
   expect(transcriptStorageKey(7, 'activity')).not.toBe(transcriptStorageKey(7, 'table'));
   // Distinct per campaign as well, so two tables never share a cache either.
   expect(transcriptStorageKey(7, 'activity')).not.toBe(transcriptStorageKey(8, 'activity'));
+});
+
+
+test('joined-mid-session seed context stays ABOVE later server events', () => {
+  // A brand-new driver session where the DM set a scene before the first turn: a client
+  // that loads first seeds [divider, scene] from thin session state. Those entries have no
+  // server row, so no seq — but they are pre-join HISTORY, not live activity. Sorting all
+  // seq-less entries to the tail pinned the "joined mid-session" marker beneath every line
+  // it is supposed to introduce, for the rest of the session.
+  const seeded = transcriptReducer(transcriptReducer(emptyTranscript, { type: 'authoritative' }), {
+    type: 'seed',
+    scene: 'The bolted door',
+    lastNarration: 'Rust flakes away under your thumb.',
+    at,
+  });
+  expect(seeded.entries.map((e) => e.kind)).toEqual(['system', 'system', 'dm']);
+
+  const live = apply(
+    seeded,
+    serverEvent({ kind: 'player.action', seq: 1, eventId: 'p1', actorName: 'Runa', payload: { text: 'I shoulder the door.' } }),
+    serverEvent({ kind: 'narration', seq: 2, eventId: 'n1', turnId: 't1', payload: { text: 'It gives.' } }),
+  );
+
+  // Seed context first, in its own order, then the session's events by seq.
+  expect(live.entries.map((e) => e.kind)).toEqual(['system', 'system', 'dm', 'player', 'dm']);
+  const divider = live.entries[0] as SystemEntry;
+  const scene = live.entries[1] as SystemEntry;
+  expect(divider.variant).toBe('divider');
+  expect(scene.variant).toBe('scene');
+  expect(dmEntryText(live.entries[2] as DmEntry)).toBe('Rust flakes away under your thumb.');
+  expect((live.entries[3] as PlayerEntry).text).toBe('I shoulder the door.');
+});
+
+test('the optimistic echo and the open streaming bubble stay at the TAIL', () => {
+  // The other half of the seed fix: seq-less entries that are genuinely the newest thing
+  // must not be dragged up with the historical ones.
+  const withHistory = apply(
+    transcriptReducer(emptyTranscript, { type: 'authoritative' }),
+    serverEvent({ kind: 'player.action', seq: 1, eventId: 'p1', actorName: 'Bram', payload: { text: 'I wait.' } }),
+    serverEvent({ kind: 'narration', seq: 2, eventId: 'n1', turnId: 't1', payload: { text: 'Nothing stirs.' } }),
+  );
+
+  // A local echo whose server event has not landed yet belongs last.
+  const echoed = transcriptReducer(withHistory, {
+    type: 'localPlayer',
+    memberName: 'Runa',
+    text: 'I shoulder the door.',
+    clientRef: 'ref-tail',
+  });
+  expect(echoed.entries[echoed.entries.length - 1].kind).toBe('player');
+  expect((echoed.entries[echoed.entries.length - 1] as PlayerEntry).text).toBe('I shoulder the door.');
+
+  // …and so does the bubble the live token stream just opened.
+  const streaming = transcriptReducer(echoed, { type: 'stream', event: { type: 'turn.start', campaignId: 1, at } });
+  const tail = streaming.entries[streaming.entries.length - 1] as DmEntry;
+  expect(tail.kind).toBe('dm');
+  expect(tail.status).toBe('streaming');
+  expect(tail.seq).toBeUndefined();
 });
