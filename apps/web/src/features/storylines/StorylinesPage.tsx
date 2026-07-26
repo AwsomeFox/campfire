@@ -36,6 +36,7 @@ import { entityDomId, entityTargetProps, entityHref } from '../../lib/entityLink
 import { Markdown } from '../../components/Markdown';
 import { DraftWithAiButton } from '../ai-dm/DraftWithAiButton';
 import { PageTitle } from '../../components/PageTitle';
+import { TermHelp } from '../../components/TermHelp';
 import { useUnsavedWork } from '../../lib/useUnsavedWork';
 import {
   StorylineContentEditor,
@@ -362,9 +363,10 @@ export default function StorylinesPage() {
 
   return (
     <div className="max-w-4xl mx-auto px-4 mt-5 pb-20 md:pb-10" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', minWidth: 0 }}>
         <PageTitle>Storylines</PageTitle>
-        <span className="tag tag-outline" style={{ fontSize: 10 }} title="Visible only to the DM">
+        <TermHelp termId="storylines" />
+        <span className="tag tag-outline" style={{ fontSize: 10 }}>
           DM only
         </span>
         <div style={{ flex: 1 }} />

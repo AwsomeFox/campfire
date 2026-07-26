@@ -23,6 +23,7 @@ import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Card, Chip, Btn, TextArea, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
 import { GameIcon } from '../../components/GameIcon';
+import { TermHelp } from '../../components/TermHelp';
 import { firstGrapheme } from '../../lib/avatarText';
 import { ENTITY_ICON } from '../../lib/uiIcons';
 import { entityHref as targetHref, entityTargetProps } from '../../lib/entityLinks';
@@ -266,7 +267,10 @@ export default function InboxPage() {
 
   return (
     <div className="max-w-3xl mx-auto px-4 mt-5 space-y-3 pb-20 md:pb-10" style={{ maxWidth: 760 }}>
-      <h1 className="text-xl font-extrabold text-white m-0">{t('notes.inboxTitle')}</h1>
+      <div className="flex items-center gap-2 flex-wrap">
+        <h1 className="text-xl font-extrabold text-white m-0">{t('notes.inboxTitle')}</h1>
+        <TermHelp termId="scribe" />
+      </div>
       <p className="text-muted text-xs m-0">
         {t('notes.inboxIntro')}
       </p>

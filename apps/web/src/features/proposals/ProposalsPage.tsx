@@ -13,6 +13,7 @@ import { Card, Chip, Btn, TextInput, EmptyState, Skeleton, ErrorNote } from '../
 import { GameIcon } from '../../components/GameIcon';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { useAnnounce } from '../../components/Announcer';
+import { TermHelp } from '../../components/TermHelp';
 import { ENTITY_ICON } from '../../lib/uiIcons';
 import { proposalTargetHref } from '../../lib/entityLinks';
 import {
@@ -224,12 +225,15 @@ export default function ProposalsPage() {
 
   return (
     <div className="max-w-3xl mx-auto px-4 mt-5 space-y-3 pb-20 md:pb-10" style={{ maxWidth: 760 }}>
-      <h1 className="text-xl font-extrabold text-white m-0">Proposals</h1>
+      <div className="flex items-center gap-2 flex-wrap">
+        <h1 className="text-xl font-extrabold text-white m-0">Proposals</h1>
+        <TermHelp termId="proposals" />
+      </div>
       <p className="text-muted text-xs m-0">
         AI and collaborator edits land here as pending changes. Nothing touches canon until you approve it.
       </p>
       <p className="text-muted text-xs m-0">
-        AI scribe = any MCP-capable assistant (like Claude) connected with an API token — set up in{' '}
+        AI scribe <TermHelp termId="scribe" /> = any MCP-capable assistant (like Claude) connected with an API token — set up in{' '}
         <Link to="/tokens" className="text-purple-400 hover:underline">API tokens</Link>.
       </p>
 

@@ -69,6 +69,12 @@ export const router = createBrowserRouter(
     element: lazyPage(() => import('../features/sessions/SharedRecapPage')),
   },
   {
+    // Public read-only Player Display cast link. The URL carries an expiring cast
+    // capability; the page fetches only server-redacted cast endpoints.
+    path: '/cast/:campaignId/:token',
+    element: lazyPage(() => import('../features/screen/PlayerDisplayPage')),
+  },
+  {
     element: <AuthedLayout />,
     children: [
       {
@@ -246,6 +252,10 @@ export const router = createBrowserRouter(
           {
             path: '/preferences',
             element: lazyPage(() => import('../features/preferences/PreferencesPage')),
+          },
+          {
+            path: '/glossary',
+            element: lazyPage(() => import('../features/glossary/GlossaryPage')),
           },
           {
             // Open-content attributions (issue #302) — game-icons.net CC-BY credits.

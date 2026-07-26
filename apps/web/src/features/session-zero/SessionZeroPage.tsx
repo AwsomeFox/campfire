@@ -38,6 +38,7 @@ import {
 } from '../../components/formFieldLabels';
 import { Skeleton, ErrorNote, EmptyState, Btn } from '../../components/ui';
 import { PageTitle } from '../../components/PageTitle';
+import { TermHelp } from '../../components/TermHelp';
 import { StaleWriteConflict, type ConflictField } from '../../components/StaleWriteConflict';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 
@@ -306,6 +307,7 @@ export default function SessionZeroPage() {
     <div className="max-w-4xl mx-auto px-4 mt-5 pb-20 md:pb-10" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         <PageTitle>Session Zero</PageTitle>
+        <TermHelp termId="sessionZero" />
         <div style={{ flex: 1 }} />
         {canDmWrite && !editing && !loading && (
           <Btn onClick={startEdit} style={{ fontSize: 13 }}>
