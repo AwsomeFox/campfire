@@ -23,6 +23,7 @@ import { fromJsonText, toJsonText } from '../../common/json';
 import { nextUpdatedAt } from '../../common/stale-write';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
+import { ModerationService, type ModerationTx } from '../moderation/moderation.service';
 
 /**
  * Prose revision history + optimistic-concurrency guard (issue #157 / #813 / #513).
@@ -45,6 +46,13 @@ import type { RequestUser } from '../../common/user.types';
  * entity service — the recording direction is one-way (entity service → RevisionsService),
  * so there is no cycle. A restore skips entity-specific side effects (e.g. recap_posted
  * notifications) on purpose: re-applying old text is not a fresh post.
+ *
+ * Issue #601 adds the one exception that direct write makes necessary: because a
+ * restore bypasses CommentsService/NotesService, it also bypasses their pre-mutation
+ * abuse-evidence hooks, so this service injects ModerationService and fires the hook
+ * itself. ModerationService depends on neither this service nor any entity service
+ * (its two visibility rules live in `common/`), so the edge stays acyclic. The same
+ * dependency enforces the quarantine gate on reading and restoring history.
  *
  * Restore itself is one synchronous better-sqlite3 transaction (issue #513): the
  * pre-restore snapshot, entity prose update, new revision tip, and audit row either
@@ -122,7 +130,13 @@ export function revisionActorProvenance(user: RequestUser): {
 
 @Injectable()
 export class RevisionsService {
-  constructor(@Inject(DB) private readonly db: DrizzleDb) {}
+  constructor(
+    @Inject(DB) private readonly db: DrizzleDb,
+    // Issue #601: a restore mutates the live prose, so it must trip the same
+    // pre-mutation evidence hook as an ordinary edit. The dependency runs one way
+    // (revisions -> moderation); ModerationService never injects this service back.
+    private readonly moderation: ModerationService,
+  ) {}
 
   /**
    * Optimistic-concurrency guard (tier 1). When `expectedUpdatedAt` is supplied and it
@@ -442,6 +456,23 @@ export class RevisionsService {
       // 404, matching NotesService.getRow: a quarantined note reads as nonexistent
       // on every path, so its history must not confirm otherwise.
       if (row?.quarantinedAt != null) throw new NotFoundException(`note ${entityId} not found`);
+    }
+  }
+
+  /**
+   * Pre-mutation abuse-evidence capture for a restore (issue #601). A no-op unless the
+   * target is a comment or note that some unresolved report already names — the same
+   * "only snapshot what is needed" bound the CommentsService/NotesService hooks apply.
+   */
+  private snapshotModeratedTargetTx(tx: ModerationTx, entityType: RevisionEntityType, entityId: number): void {
+    if (entityType === 'comment') {
+      const [row] = tx.select().from(comments).where(eq(comments.id, entityId)).limit(1).all();
+      if (row) this.moderation.snapshotCommentIfWatched(tx, row, 'pre_edit');
+      return;
+    }
+    if (entityType === 'note') {
+      const [row] = tx.select().from(notes).where(eq(notes.id, entityId)).limit(1).all();
+      if (row) this.moderation.snapshotNoteIfWatched(tx, row, 'pre_edit');
     }
   }
 
@@ -916,6 +947,16 @@ export class RevisionsService {
       const target = this.loadTarget(tx, entityType, entityId);
       if (!target) throw new NotFoundException(`${entityType} ${entityId} not found`);
       this.assertNotStale(target, opts?.expectedUpdatedAt);
+
+      // Issue #601 — a restore REWRITES the live prose, so for a comment or note it is
+      // a mutation like any other and must trip the same pre-mutation evidence hook.
+      // Without this, restore is the one edit path that escapes it: CommentsService and
+      // NotesService capture on update/remove, but a restore reaches writeProseCas
+      // through this service without passing through either. That would leave a hole in
+      // the guarantee snapshotCommentIfWatched states plainly — that once an incident is
+      // open, no further mutation of its subject goes unrecorded. Captured inside this
+      // same synchronous transaction, so it carries the identical race guarantee.
+      this.snapshotModeratedTargetTx(tx, entityType, entityId);
 
       // Capture the current content as a closed version FIRST so restore is reversible, then
       // open a new tip for the restored prose. Only record when it actually differs — a

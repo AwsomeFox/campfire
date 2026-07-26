@@ -725,6 +725,40 @@ describe('Issue #601: moderation evidence + incident workflow (e2e)', () => {
     });
 
     /**
+     * A restore REWRITES the live prose without passing through CommentsService, so it
+     * is the one edit path that could escape the pre-mutation evidence hook. Once an
+     * incident is open, no further mutation of its subject may go unrecorded.
+     */
+    it('captures evidence when a watched comment is mutated by a revision restore', async () => {
+      const commentId = await postComment(abuser, 'RESTORE HOOK xray original');
+      const edit = await abuser.patch(`/api/v1/comments/${commentId}`).send({ body: 'RESTORE HOOK xray second' });
+      expect(edit.status).toBe(200);
+      const revs = await dmUser.get(`/api/v1/comments/${commentId}/revisions`);
+      expect(revs.status).toBe(200);
+      const revisionId = revs.body[0].id as number;
+
+      // Report it, but do NOT quarantine — a restore on a reported-but-not-withheld
+      // comment is exactly the mutation the hook exists to record.
+      const report = await fileReport(victim, { targetType: 'comment', targetId: commentId, reason: 'harassment' });
+      const reportId = report.body.id;
+
+      const before = await dmUser.get(`/api/v1/campaigns/${campaignId}/moderation/reports/${reportId}/export`);
+      const countBefore = before.body.additionalEvidence.length;
+
+      // The author's own route (the generic /revisions one is dm-gated for comments).
+      const restore = await abuser.post(`/api/v1/comments/${commentId}/revisions/${revisionId}/restore`);
+      expect(restore.status).toBe(201);
+
+      const after = await dmUser.get(`/api/v1/campaigns/${campaignId}/moderation/reports/${reportId}/export`);
+      expect(after.body.additionalEvidence.length).toBe(countBefore + 1);
+      const captured = after.body.additionalEvidence[after.body.additionalEvidence.length - 1];
+      // The snapshot records what the restore was about to overwrite.
+      expect(captured.content).toBe('RESTORE HOOK xray second');
+      expect(captured.reason).toBe('pre_edit');
+      expect(captured.integrity).toBe('intact');
+    });
+
+    /**
      * Search bypasses toDomain on both the FTS predicate and the hydration select, so
      * it needs the filter repeated in both places — for notes as well as comments.
      */
