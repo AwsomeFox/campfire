@@ -376,8 +376,9 @@ export class SessionsService {
   async create(campaignId: number, input: SessionCreateInput, user: RequestUser, role: Role): Promise<Session> {
     const ts = nowIso();
     const recap = input.recap ?? '';
-    if (input.scheduledSessionId != null) {
-      const schedule = await this.scheduling.getRowOrThrow(input.scheduledSessionId);
+    const requestedScheduledSessionId = input.scheduledSessionId ?? null;
+    if (requestedScheduledSessionId != null) {
+      const schedule = await this.scheduling.getRowOrThrow(requestedScheduledSessionId);
       if (schedule.campaignId !== campaignId) {
         throw new BadRequestException('Scheduled session must belong to the same campaign as the session');
       }
@@ -418,7 +419,7 @@ export class SessionsService {
         const number = max + 1;
         const [inserted] = tx
           .insert(sessions)
-          .values({ campaignId, number, title: input.title ?? '', playedAt: input.playedAt ?? null, recap, dmSecret: input.dmSecret ?? '', scheduledSessionId: input.scheduledSessionId ?? null, createdAt: ts, updatedAt: ts })
+          .values({ campaignId, number, title: input.title ?? '', playedAt: input.playedAt ?? null, recap, dmSecret: input.dmSecret ?? '', scheduledSessionId: null, createdAt: ts, updatedAt: ts })
           .returning()
           .all();
         return { row: inserted, deduped: false };
@@ -433,13 +434,13 @@ export class SessionsService {
       if (conflict) throw new ConflictException(`Session number ${input.number} already exists in this campaign`);
       const [inserted] = tx
         .insert(sessions)
-        .values({ campaignId, number: input.number, title: input.title ?? '', playedAt: input.playedAt ?? null, recap, dmSecret: input.dmSecret ?? '', scheduledSessionId: input.scheduledSessionId ?? null, createdAt: ts, updatedAt: ts })
+        .values({ campaignId, number: input.number, title: input.title ?? '', playedAt: input.playedAt ?? null, recap, dmSecret: input.dmSecret ?? '', scheduledSessionId: null, createdAt: ts, updatedAt: ts })
         .returning()
         .all();
       return { row: inserted, deduped: false };
     });
 
-    const row = result.row;
+    let row = result.row;
 
     // A deduped retry is a no-op: the row (and its recap_posted notification and
     // audit entry) already exists from the first call — return it untouched.
@@ -471,8 +472,9 @@ export class SessionsService {
       campaignId,
     });
 
-    if (row.scheduledSessionId != null) {
-      await this.scheduling.linkSession(row.scheduledSessionId, row.id, user, role);
+    if (requestedScheduledSessionId != null) {
+      await this.scheduling.linkSession(requestedScheduledSessionId, row.id, user, role);
+      row = await this.getRowOrThrow(row.id);
     }
 
     if (row.recap.trim() !== '') {
@@ -511,8 +513,9 @@ export class SessionsService {
     if (input.number !== undefined) {
       await this.assertNumberAvailable(existing.campaignId, input.number, id);
     }
-    if (input.scheduledSessionId != null && input.scheduledSessionId !== existing.scheduledSessionId) {
-      const schedule = await this.scheduling.getRowOrThrow(input.scheduledSessionId);
+    const shouldLinkSchedule = input.scheduledSessionId != null && input.scheduledSessionId !== existing.scheduledSessionId;
+    if (shouldLinkSchedule) {
+      const schedule = await this.scheduling.getRowOrThrow(input.scheduledSessionId!);
       if (schedule.campaignId !== existing.campaignId) {
         throw new BadRequestException('Scheduled session must belong to the same campaign as the session');
       }
@@ -532,9 +535,11 @@ export class SessionsService {
         user,
       });
     }
-    const [row] = await this.db
+    const { scheduledSessionId, ...restInput } = input;
+    const updatePatch = shouldLinkSchedule ? restInput : input;
+    let [row] = await this.db
       .update(sessions)
-      .set({ ...input, updatedAt: nowIso() })
+      .set({ ...updatePatch, updatedAt: nowIso() })
       .where(eq(sessions.id, id))
       .returning();
 
@@ -552,8 +557,9 @@ export class SessionsService {
       detail: JSON.stringify(auditableSessionPatch(input)),
     });
 
-    if (row.scheduledSessionId != null && row.scheduledSessionId !== existing.scheduledSessionId) {
-      await this.scheduling.linkSession(row.scheduledSessionId, row.id, user, role);
+    if (shouldLinkSchedule) {
+      await this.scheduling.linkSession(scheduledSessionId!, row.id, user, role);
+      row = await this.getRowOrThrow(id);
     }
 
     // recap_posted fires only on the empty -> non-empty transition (posting the

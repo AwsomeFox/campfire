@@ -324,6 +324,50 @@ describe('session scheduling (e2e)', () => {
     expect(upcoming.body.some((s: { id: number }) => s.id === scheduled.body.id)).toBe(false);
   });
 
+  it('does not leave a session pointing at a new schedule when update-time linking fails', async () => {
+    const server = ctx.app.getHttpServer();
+    const originalSchedule = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/schedule`)
+      .set(dm)
+      .send({ scheduledAt: '2099-11-03T18:00:00Z', title: 'Original linked night' });
+    expect(originalSchedule.status).toBe(201);
+    const recap = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/sessions`)
+      .set(dm)
+      .send({
+        title: 'Already linked recap',
+        playedAt: '2099-11-03',
+        recap: 'This recap is already linked.',
+        scheduledSessionId: originalSchedule.body.id,
+      });
+    expect(recap.status).toBe(201);
+    expect(recap.body.scheduledSessionId).toBe(originalSchedule.body.id);
+
+    const replacementSchedule = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/schedule`)
+      .set(dm)
+      .send({ scheduledAt: '2099-11-10T18:00:00Z', title: 'Replacement night' });
+    expect(replacementSchedule.status).toBe(201);
+
+    const relink = await request(server)
+      .patch(`/api/v1/sessions/${recap.body.id}`)
+      .set(dm)
+      .send({ scheduledSessionId: replacementSchedule.body.id });
+    expect(relink.status).toBe(400);
+
+    const unchangedRecap = await request(server).get(`/api/v1/sessions/${recap.body.id}`).set(dm);
+    expect(unchangedRecap.status).toBe(200);
+    expect(unchangedRecap.body.scheduledSessionId).toBe(originalSchedule.body.id);
+
+    const untouchedReplacement = await request(server).get(`/api/v1/schedule/${replacementSchedule.body.id}`).set(player);
+    expect(untouchedReplacement.status).toBe(200);
+    expect(untouchedReplacement.body).toMatchObject({
+      id: replacementSchedule.body.id,
+      status: 'scheduled',
+      sessionId: null,
+    });
+  });
+
   describe('in-progress schedule window (issue #818)', () => {
     let liveCampaignId: number;
 

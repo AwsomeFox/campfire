@@ -60,6 +60,7 @@ type ScheduledSessionUpdateInput = z.infer<typeof ScheduledSessionUpdate>;
 type ScheduledSessionCancelInput = z.infer<typeof ScheduledSessionCancel>;
 type ScheduledSessionDuplicateInput = z.infer<typeof ScheduledSessionDuplicate>;
 type RsvpSetInput = z.infer<typeof RsvpSet>;
+type SyncDb = DrizzleDb | Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
 
 function toDomain(row: typeof scheduledSessions.$inferSelect): ScheduledSession {
   return {
@@ -332,6 +333,12 @@ export class SchedulingService {
     return row;
   }
 
+  private getRowOrThrowTx(tx: SyncDb, id: number) {
+    const [row] = tx.select().from(scheduledSessions).where(eq(scheduledSessions.id, id)).limit(1).all();
+    if (!row) throw new NotFoundException(`Scheduled session ${id} not found`);
+    return row;
+  }
+
   async getWithRsvps(id: number): Promise<ScheduledSessionWithRsvps> {
     const row = await this.getRowOrThrow(id);
     const rsvpRows = await this.db.select().from(sessionRsvps).where(eq(sessionRsvps.scheduledSessionId, id));
@@ -568,60 +575,67 @@ export class SchedulingService {
   }
 
   async linkSession(scheduleId: number, sessionId: number, user: RequestUser, role: Role): Promise<ScheduledSessionWithRsvps> {
-    const schedule = await this.getRowOrThrow(scheduleId);
-    if (schedule.status === 'cancelled') throw new BadRequestException('Cancelled scheduled sessions cannot be completed');
-    if (schedule.status === 'completed' && schedule.sessionId !== sessionId) {
-      throw new BadRequestException('Scheduled session is already linked to a different session');
-    }
-    const [session] = await this.db.select().from(sessions).where(eq(sessions.id, sessionId)).limit(1);
-    if (!session || session.deletedAt != null) throw new NotFoundException(`Session ${sessionId} not found`);
-    if (session.campaignId !== schedule.campaignId) {
-      throw new BadRequestException('Session must belong to the same campaign as the scheduled session');
-    }
-    if (schedule.status === 'completed' && schedule.sessionId === sessionId) {
+    const outcome = this.db.transaction((tx) => {
+      const schedule = this.getRowOrThrowTx(tx, scheduleId);
+      if (schedule.status === 'cancelled') throw new BadRequestException('Cancelled scheduled sessions cannot be completed');
+      if (schedule.status === 'completed' && schedule.sessionId !== sessionId) {
+        throw new BadRequestException('Scheduled session is already linked to a different session');
+      }
+      const [session] = tx.select().from(sessions).where(eq(sessions.id, sessionId)).limit(1).all();
+      if (!session || session.deletedAt != null) throw new NotFoundException(`Session ${sessionId} not found`);
+      if (session.campaignId !== schedule.campaignId) {
+        throw new BadRequestException('Session must belong to the same campaign as the scheduled session');
+      }
+      if (schedule.status === 'completed' && schedule.sessionId === sessionId) {
+        return { campaignId: schedule.campaignId, linked: false, wasPreviouslyCompleted: true };
+      }
+      if (session.scheduledSessionId != null && session.scheduledSessionId !== scheduleId) {
+        throw new BadRequestException('Session is already linked to a different scheduled session');
+      }
+      const [otherSchedule] = tx
+        .select({ id: scheduledSessions.id })
+        .from(scheduledSessions)
+        .where(and(eq(scheduledSessions.sessionId, sessionId), ne(scheduledSessions.id, scheduleId)))
+        .limit(1)
+        .all();
+      if (otherSchedule) {
+        throw new BadRequestException('Session is already linked to a different scheduled session');
+      }
+      const ts = nowIso();
+      tx.update(scheduledSessions)
+        .set({ status: 'completed', sessionId, updatedAt: ts })
+        .where(eq(scheduledSessions.id, scheduleId))
+        .run();
+      tx.update(sessions)
+        .set({ scheduledSessionId: scheduleId, updatedAt: ts })
+        .where(eq(sessions.id, sessionId))
+        .run();
+      return { campaignId: schedule.campaignId, linked: true, wasPreviouslyCompleted: schedule.status === 'completed' };
+    });
+    if (!outcome.linked) {
       return this.getWithRsvps(scheduleId);
     }
-    if (session.scheduledSessionId != null && session.scheduledSessionId !== scheduleId) {
-      throw new BadRequestException('Session is already linked to a different scheduled session');
-    }
-    const [otherSchedule] = await this.db
-      .select({ id: scheduledSessions.id })
-      .from(scheduledSessions)
-      .where(and(eq(scheduledSessions.sessionId, sessionId), ne(scheduledSessions.id, scheduleId)))
-      .limit(1);
-    if (otherSchedule) {
-      throw new BadRequestException('Session is already linked to a different scheduled session');
-    }
-    const ts = nowIso();
-    await this.db
-      .update(scheduledSessions)
-      .set({ status: 'completed', sessionId, updatedAt: ts })
-      .where(eq(scheduledSessions.id, scheduleId));
-    await this.db
-      .update(sessions)
-      .set({ scheduledSessionId: scheduleId, updatedAt: ts })
-      .where(eq(sessions.id, sessionId));
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
       action: 'schedule.link',
       entityType: 'session',
       entityId: scheduleId,
-      campaignId: schedule.campaignId,
+      campaignId: outcome.campaignId,
       detail: `session=${sessionId}`,
     });
-    if (schedule.status !== 'completed') {
+    if (!outcome.wasPreviouslyCompleted) {
       await this.audit.log({
         actor: auditActor(user),
         actorRole: role,
         action: 'schedule.complete',
         entityType: 'session',
         entityId: scheduleId,
-        campaignId: schedule.campaignId,
+        campaignId: outcome.campaignId,
         detail: `session=${sessionId}`,
       });
     }
-    this.emitScheduleUpdated(schedule.campaignId, scheduleId);
+    this.emitScheduleUpdated(outcome.campaignId, scheduleId);
     return this.getWithRsvps(scheduleId);
   }
 
