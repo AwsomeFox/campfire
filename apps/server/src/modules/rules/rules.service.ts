@@ -312,6 +312,24 @@ function packManifestHash(
 }
 
 /**
+ * The subset of every importer's per-section result that the completeness gate reads.
+ * `truncated` is optional so a source with no pagination (and therefore no page cap) doesn't
+ * have to carry a field that is structurally always false.
+ */
+type SectionFetchResult = { entries: readonly unknown[]; skippedCount: number; truncated?: boolean };
+
+/**
+ * Audit/detail fragment naming sections whose pagination stopped at the per-section page cap.
+ * Reported SEPARATELY from the skip count — a truncated section dropped no rows, it just never
+ * reached the end of the source — and it is the reason a re-import may decline to delete
+ * entries missing from the manifest, so an operator reading the audit trail can see why.
+ */
+function truncationNote(sectionResults: ReadonlyArray<SectionFetchResult>): string {
+  const count = sectionResults.filter((r) => r.truncated).length;
+  return count > 0 ? `, ${count} section(s) truncated at page cap` : '';
+}
+
+/**
  * Decides whether a fetched manifest may be treated as the COMPLETE upstream set, which
  * is the only condition under which `removeMissing` (delete installed rows absent from the
  * fetch) is safe.
@@ -320,10 +338,15 @@ function packManifestHash(
  *   - a per-section entry cap truncates large sections. This is not hypothetical: Open5e's
  *     creatures (~3.5k) and magicitems (~2.3k) both exceed MAX_ENTRIES_PER_SECTION (2000)
  *     on every single run, so a full Open5e manifest is *always* truncated.
- *   - a single malformed row is skipped rather than failing the import, a refused
- *     cross-origin `next` link stops pagination early, and the per-section page cap breaks
- *     out of the loop — all of these return what was collected so far and report
- *     `skippedCount > 0`.
+ *   - a single malformed row is skipped rather than failing the import, and a refused
+ *     cross-origin `next` link stops pagination early — both return what was collected so
+ *     far and report `skippedCount > 0`.
+ *   - the per-section page cap breaks out of the pagination loop, reported as `truncated`.
+ *     That is a SEPARATE signal from `skippedCount` because no row was dropped: an operator
+ *     reading "skipped N rows" after a page-cap stop would be told something untrue. A
+ *     section can hit the page cap while landing under the entry cap (heavy same-name
+ *     de-duplication collapses many fetched rows into few entries), so the entry-cap check
+ *     below does not subsume it.
  *   - the caller may have requested only a subset of sections.
  *
  * Deleting installed entries because they fell outside a truncation window would report
@@ -340,12 +363,12 @@ function packManifestHash(
 function manifestIsComplete(
   requestedSections: readonly string[],
   allSections: readonly string[],
-  sectionResults: ReadonlyArray<{ entries: readonly unknown[]; skippedCount: number }>,
+  sectionResults: ReadonlyArray<SectionFetchResult>,
   perSectionCap: number,
 ): boolean {
   const requested = new Set<string>(requestedSections);
   if (!allSections.every((section) => requested.has(section))) return false;
-  return sectionResults.every((r) => r.skippedCount === 0 && r.entries.length < perSectionCap);
+  return sectionResults.every((r) => r.skippedCount === 0 && !r.truncated && r.entries.length < perSectionCap);
 }
 
 /**
@@ -357,7 +380,7 @@ function manifestIsComplete(
 function completeManifestOptions(
   requestedSections: readonly string[],
   allSections: readonly string[],
-  sectionResults: ReadonlyArray<{ entries: readonly unknown[]; skippedCount: number }>,
+  sectionResults: ReadonlyArray<SectionFetchResult>,
   perSectionCap: number,
 ): { removeMissing: boolean; rewritePackProvenance: boolean } {
   const complete = manifestIsComplete(requestedSections, allSections, sectionResults, perSectionCap);
@@ -1254,7 +1277,7 @@ export class RulesService implements OnModuleInit {
       { slug, name: 'Open5e SRD', version: nowIso().slice(0, 10), license, sourceUrl: baseUrl, sectionLabels: sections },
       allEntries,
       user,
-      `(cap ${MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
+      `(cap ${MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped${truncationNote(sectionResults)})`,
       completeManifestOptions(sections, ALL_OPEN5E_SECTIONS, sectionResults, MAX_ENTRIES_PER_SECTION),
     );
   }
@@ -1298,7 +1321,7 @@ export class RulesService implements OnModuleInit {
       { slug: PF2E_PACK_SLUG, name: PF2E_PACK_NAME, version: nowIso().slice(0, 10), license, sourceUrl: baseUrl, sectionLabels: sections },
       allEntries,
       user,
-      `(cap ${PF2E_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
+      `(cap ${PF2E_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped${truncationNote(sectionResults)})`,
       completeManifestOptions(sections, ALL_PF2E_SECTIONS, sectionResults, PF2E_MAX_ENTRIES_PER_SECTION),
     );
   }
@@ -1333,7 +1356,7 @@ export class RulesService implements OnModuleInit {
       { slug: SF2E_PACK_SLUG, name: SF2E_PACK_NAME, version: nowIso().slice(0, 10), license, sourceUrl: baseUrl, sectionLabels: sections },
       allEntries,
       user,
-      `(cap ${PF2E_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
+      `(cap ${PF2E_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped${truncationNote(sectionResults)})`,
       completeManifestOptions(sections, ALL_PF2E_SECTIONS, sectionResults, PF2E_MAX_ENTRIES_PER_SECTION),
     );
   }
@@ -1386,7 +1409,7 @@ export class RulesService implements OnModuleInit {
       { slug, name: 'Open Legend SRD', version: nowIso().slice(0, 10), license, sourceUrl: baseUrl, sectionLabels: sections },
       allEntries,
       user,
-      `(cap ${OL_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
+      `(cap ${OL_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped${truncationNote(sectionResults)})`,
       completeManifestOptions(sections, ALL_OPEN_LEGEND_SECTIONS, sectionResults, OL_MAX_ENTRIES_PER_SECTION),
     );
   }
@@ -1429,7 +1452,7 @@ export class RulesService implements OnModuleInit {
       { slug: PF1E_PACK_SLUG, name: PF1E_PACK_NAME, version: nowIso().slice(0, 10), license, sourceUrl: baseUrl, sectionLabels: sections },
       allEntries,
       user,
-      `(cap ${PF1E_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
+      `(cap ${PF1E_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped${truncationNote(sectionResults)})`,
       completeManifestOptions(sections, ALL_PF1E_SECTIONS, sectionResults, PF1E_MAX_ENTRIES_PER_SECTION),
     );
   }
@@ -1478,7 +1501,7 @@ export class RulesService implements OnModuleInit {
       },
       allEntries,
       user,
-      `(cap ${STARFINDER_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
+      `(cap ${STARFINDER_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped${truncationNote(sectionResults)})`,
       completeManifestOptions(sections, ALL_STARFINDER_SECTIONS, sectionResults, STARFINDER_MAX_ENTRIES_PER_SECTION),
     );
   }
@@ -1567,7 +1590,7 @@ export class RulesService implements OnModuleInit {
       },
       allEntries,
       user,
-      `(cap ${OSR_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
+      `(cap ${OSR_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped${truncationNote(sectionResults)})`,
       completeManifestOptions(sections, ALL_OSR_SECTIONS, sectionResults, OSR_MAX_ENTRIES_PER_SECTION),
     );
   }
@@ -1904,13 +1927,14 @@ export class RulesService implements OnModuleInit {
     // current size, not where the content came from. This is also what the pre-#500
     // addEntriesToExistingPack did — the #500 work traded that preservation for provenance
     // updates, which is right for a full upstream refresh and wrong for a partial add.
-    const nextName = options.rewritePackProvenance ? meta.name : packRow.name;
-    const nextSourceUrl = options.rewritePackProvenance ? meta.sourceUrl : packRow.sourceUrl;
-    const nextLicense = options.rewritePackProvenance
-      ? meta.license
-      : unionLicenseLabels(packRow.license, meta.license);
+    //
+    // The computation itself lives INSIDE applySync's transaction — see the recompute site.
 
     let updatedPack = packRow;
+    // The pack row as it stood at the START of the attempt that actually committed. The audit
+    // trail diffs against this, not against the `packRow` snapshot taken before the
+    // transaction, so a retry reports what it really changed.
+    let packBeforeSync = packRow;
     let preview: RulePackUpdatePreview = {
       added: 0,
       changed: 0,
@@ -1925,8 +1949,29 @@ export class RulesService implements OnModuleInit {
     // add/change/remove classification and the writes derived from it can never straddle
     // another writer's commit. A throw anywhere rolls the entire update back — the pack
     // stays wholly on the old manifest rather than becoming a half-old/half-new mixture.
-    const applySync = (): { pack: typeof rulePacks.$inferSelect; preview: RulePackUpdatePreview } =>
+    const applySync = (): {
+      pack: typeof rulePacks.$inferSelect;
+      before: typeof rulePacks.$inferSelect;
+      preview: RulePackUpdatePreview;
+    } =>
       this.db.transaction((tx) => {
+        // Re-read the pack row INSIDE the transaction, and derive the provenance to write from
+        // THAT row — never from the `packRow` snapshot the caller took before the transaction.
+        // applySync is re-invoked wholesale when it loses a UNIQUE race, and the losing attempt
+        // rolled back while the winner COMMITTED: by the time the retry runs, another writer may
+        // have changed this pack's license. Computing the union from the pre-transaction
+        // snapshot would silently overwrite that writer's terms with a stale label — precisely
+        // the "lose license terms" failure this whole block exists to prevent. Keeping the read
+        // and the derivation here means every attempt starts from freshly committed state.
+        // Do not hoist these out of the transaction.
+        const [currentPack] = tx.select().from(rulePacks).where(eq(rulePacks.id, packRow.id)).all();
+        const before = currentPack ?? packRow;
+        const nextName = options.rewritePackProvenance ? meta.name : before.name;
+        const nextSourceUrl = options.rewritePackProvenance ? meta.sourceUrl : before.sourceUrl;
+        const nextLicense = options.rewritePackProvenance
+          ? meta.license
+          : unionLicenseLabels(before.license, meta.license);
+
         const existingRows = tx.select().from(ruleEntries).where(eq(ruleEntries.packId, packRow.id)).all();
         const existingByKey = new Map(existingRows.map((r) => [`${r.type}::${r.slug}`, r]));
         const fetchedByKey = new Map(fetchedEntries.map((entry) => [`${entry.type}::${entry.slug}`, entry]));
@@ -2014,6 +2059,7 @@ export class RulesService implements OnModuleInit {
 
         return {
           pack: row,
+          before,
           preview: {
             added: toAdd.length,
             changed: toChange.length,
@@ -2028,6 +2074,7 @@ export class RulesService implements OnModuleInit {
     try {
       const result = applySync();
       updatedPack = result.pack;
+      packBeforeSync = result.before;
       preview = result.preview;
     } catch (err) {
       if (!isUniqueConstraintError(err)) throw err;
@@ -2045,6 +2092,7 @@ export class RulesService implements OnModuleInit {
       try {
         const retried = applySync();
         updatedPack = retried.pack;
+        packBeforeSync = retried.before;
         preview = retried.preview;
       } catch (retryErr) {
         if (!isUniqueConstraintError(retryErr)) throw retryErr;
@@ -2076,15 +2124,16 @@ export class RulesService implements OnModuleInit {
     // A license or source change is exactly the kind of thing an operator must be able to
     // discover after the fact — issue #500 asks for provenance/license changes to be AUDITED,
     // not silently swallowed — so record the before→after explicitly rather than leaving the
-    // new value to be inferred from whatever the pack row happens to say now. These compare
-    // against what was actually WRITTEN (next*), not against the raw manifest, so a partial
-    // add that deliberately preserved the pack's provenance reports no change instead of
-    // claiming one the pack row doesn't reflect.
+    // new value to be inferred from whatever the pack row happens to say now. This diffs the
+    // pack row as the COMMITTING attempt found it against the row that attempt actually wrote,
+    // both read inside that transaction — so a partial add that deliberately preserved
+    // provenance reports no change, and a retry reports what it really changed rather than a
+    // diff against a snapshot taken before a racing writer committed.
     const provenanceChanges = [
-      ['license', packRow.license, nextLicense],
-      ['sourceUrl', packRow.sourceUrl, nextSourceUrl],
-      ['name', packRow.name, nextName],
-      ['version', packRow.version, meta.version],
+      ['license', packBeforeSync.license, updatedPack.license],
+      ['sourceUrl', packBeforeSync.sourceUrl, updatedPack.sourceUrl],
+      ['name', packBeforeSync.name, updatedPack.name],
+      ['version', packBeforeSync.version, updatedPack.version],
     ]
       .filter(([, before, after]) => before !== after)
       .map(([field, before, after]) => `${field}:"${before}"->"${after}"`);

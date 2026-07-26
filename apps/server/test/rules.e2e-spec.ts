@@ -2,8 +2,8 @@ import request from 'supertest';
 import type { Server } from 'node:http';
 import { eq } from 'drizzle-orm';
 import { createTestApp, createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
-import { DB, type DrizzleDb } from '../src/db/db.module';
-import { auditLog, campaigns, ruleEntries } from '../src/db/schema';
+import { DB, DB_HOLDER, type DbHolder, type DrizzleDb } from '../src/db/db.module';
+import { auditLog, campaigns, ruleEntries, rulePacks } from '../src/db/schema';
 import {
   startFakeOpen5e,
   startFakeOpen5eWithBadPagination,
@@ -1474,6 +1474,77 @@ describe('rules / rule packs — a partial section add must not narrow pack prov
     expect(partialAudit).toContain('license:"Open Game License v1.0a"->"Open Game License v1.0a, Creative Commons Attribution 4.0"');
     expect(partialAudit).not.toContain('sourceUrl:"');
     expect(partialAudit).not.toContain('name:"');
+
+    await request(server).delete(`/api/v1/rules/packs/${packId}`).set(dmHeaders);
+  });
+
+  /**
+   * The update runs in one synchronous better-sqlite3 transaction and is retried once if it
+   * loses a UNIQUE race. The losing attempt rolls back, but the WINNER committed — so the retry
+   * has to recompute the pack's provenance from freshly committed state. Deriving it from the
+   * snapshot taken before the first attempt would union against a stale license and silently
+   * overwrite the winner's terms, which is the exact failure this code exists to prevent.
+   *
+   * better-sqlite3 is synchronous, so a genuine second writer cannot commit midway through our
+   * transaction from this thread. The interleaving is staged instead: the first transaction
+   * attempt commits a competing license change out-of-band and then throws the UNIQUE error,
+   * leaving the database in precisely the state the retry would find in production.
+   */
+  it('a unique-constraint retry recomputes provenance from freshly committed state, not a stale snapshot', async () => {
+    const server = ctx.app.getHttpServer();
+    const db = ctx.app.get<DrizzleDb>(DB);
+
+    const first = await installOpen5e(server, dmHeaders, { source: 'open5e', url: origin.baseUrl, sections: ['spells'] });
+    const packId = first.pack.id;
+    expect(first.pack.license).toBe('Open Game License v1.0a');
+
+    // The injected DB is a get-only Proxy that forwards to the live orm (DbHolder swaps the
+    // handle out under a restore), so the stub has to be installed on the orm behind it —
+    // assigning through the proxy would write a property the get trap never consults.
+    const orm = (ctx.app.get<DbHolder>(DB_HOLDER) as unknown as { orm: DrizzleDb }).orm;
+    const original = Object.getOwnPropertyDescriptor(orm, 'transaction');
+    const realTransaction = orm.transaction.bind(orm);
+    let attempts = 0;
+    (orm as unknown as { transaction: unknown }).transaction = (fn: never) => {
+      attempts += 1;
+      if (attempts === 1) {
+        // A competing writer commits a license correction, then our attempt loses the race.
+        db.update(rulePacks).set({ license: 'ORC License' }).where(eq(rulePacks.id, packId)).run();
+        throw Object.assign(
+          new Error('UNIQUE constraint failed: rule_entries.pack_id, rule_entries.type, rule_entries.slug'),
+          { code: 'SQLITE_CONSTRAINT_UNIQUE' },
+        );
+      }
+      return realTransaction(fn);
+    };
+
+    try {
+      const second = await installOpen5e(server, dmHeaders, { source: 'open5e', url: mirror.baseUrl, sections: ['monsters'] });
+      expect(attempts).toBe(2); // lost once, retried once
+      expect(second.outcome).toBe('updated');
+      expect(second.added).toBe(2);
+      // The retry unions against what the winner COMMITTED. A stale snapshot would have
+      // produced "Open Game License v1.0a, Creative Commons Attribution 4.0", throwing the
+      // competing writer's ORC term away.
+      expect(second.pack.license).toContain('ORC License');
+      expect(second.pack.license).toContain('Creative Commons Attribution 4.0');
+      expect(second.pack.license).not.toContain('Open Game License v1.0a');
+
+      // The audit trail diffs against the row the committing attempt actually found, so it
+      // reports the real before→after rather than one anchored to the pre-race snapshot.
+      const auditDetails = db
+        .select()
+        .from(auditLog)
+        .where(eq(auditLog.entityId, packId))
+        .all()
+        .map((row) => row.detail);
+      expect(
+        auditDetails.some((d) => d.includes('license:"ORC License"->"ORC License, Creative Commons Attribution 4.0"')),
+      ).toBe(true);
+    } finally {
+      if (original) Object.defineProperty(orm, 'transaction', original);
+      else delete (orm as unknown as { transaction?: unknown }).transaction;
+    }
 
     await request(server).delete(`/api/v1/rules/packs/${packId}`).set(dmHeaders);
   });

@@ -105,6 +105,14 @@ export interface StarfinderSectionResult {
   skippedCount: number;
   /** Same-name rows collapsed to one canonical entry per (name,type) across documents. */
   dedupedCount: number;
+  /**
+   * True when pagination stopped EARLY at the per-section page cap rather than reaching the
+   * end of the source. Deliberately separate from `skippedCount`: no row was dropped here, so
+   * folding it into the skip count would tell an operator rows were discarded when none were.
+   * rules.service's manifestIsComplete() consults both — a truncated fetch is not a provable
+   * full manifest and must not authorise deleting installed rows.
+   */
+  truncated: boolean;
 }
 
 interface StarfinderPage {
@@ -531,6 +539,7 @@ export async function fetchStarfinderSection(
   const mapper = SECTION_MAPPER[section];
   const byName = new Map<string, { entry: ImportedEntry; rank: number }>();
   let skippedCount = 0;
+  let truncated = false;
   let dedupedCount = 0;
   let pagesFetched = 0;
   let url: string | null = `${baseUrl.replace(/\/$/, '')}/${path}/?limit=${PAGE_LIMIT}`;
@@ -540,12 +549,10 @@ export async function fetchStarfinderSection(
       logger.warn(
         `[starfinder-importer] section "${section}": hit page cap (${MAX_PAGES_PER_SECTION} pages) after ${byName.size} entries — stopping pagination`,
       );
-      // Counted as a skip so the truncation is VISIBLE to the caller: rules.service's
-      // manifestIsComplete() treats skippedCount === 0 as part of its proof that the fetch
-      // is the complete upstream set before it authorises deleting installed rows. Stopping
-      // early here means we may have left entries behind, exactly like the cross-origin
-      // `next` refusal below, and must not be mistaken for a clean full fetch.
-      skippedCount += 1;
+      // Truncation, NOT a dropped row: tracked on its own flag so the skip count keeps meaning
+      // "rows discarded" while rules.service's manifestIsComplete() still sees that this fetch
+      // may have left entries behind and must not authorise deletion.
+      truncated = true;
       break;
     }
     pagesFetched += 1;
@@ -611,7 +618,7 @@ export async function fetchStarfinderSection(
     logger.warn(`[starfinder-importer] section "${section}": imported ${entries.length} entries, skipped ${skippedCount} row(s)`);
   }
 
-  return { entries, skippedCount, dedupedCount };
+  return { entries, skippedCount, dedupedCount, truncated };
 }
 
 export function entryTypeForSection(section: StarfinderSection): RuleEntryType {
