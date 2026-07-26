@@ -19,36 +19,72 @@ import type { DrizzleDb } from '../../src/db/db.module';
 
 /**
  * Minimal stand-in for the drizzle/better-sqlite3 handle AiDmTranscriptService.record() uses:
- * a synchronous `transaction`, a chainable `select(...).from(...).where(...).all()` returning the
- * current MAX(seq), and chainable `insert(...).values(...).run()` / `delete(...).where(...).run()`.
- * Deliberately not a mock of the service itself — the point is to exercise its real seq assignment
- * and visibility handling. Note that record() swallows its own errors by design, so a db double
- * that threw would make this spec silently vacuous; this one must actually work.
+ * a synchronous `transaction`, a chainable `select(...).from(...).where(...)` read, and chainable
+ * `insert(...).values(...).run()` / `delete(...).where(...).run()`.
+ *
+ * Deliberately not a mock of the service itself — the point is to exercise its real seq
+ * assignment and visibility handling.
+ *
+ * It models drizzle's SQLite terminals FAITHFULLY, which matters more than it looks:
+ *   - `.all()` returns the row ARRAY,
+ *   - `.get()` returns a SINGLE ROW or `undefined`.
+ * A double that returned the array from both would keep passing today and then silently hand
+ * an array to code that switched to `.get()` — the spec would go vacuous (or fail for an
+ * unrelated reason) exactly when someone made a correct change. Same instinct as the note
+ * below about throwing: record() swallows its own errors by design, so a double that merely
+ * "passes" can hide the very thing this spec exists to prove. Model the real thing.
+ *
+ * Scope is deliberately narrow: only what record() actually issues. Anything outside that —
+ * notably the top-level delete behind purge(), whose `where` predicate this double cannot
+ * interpret — throws rather than returning a plausible-looking value, so a future spec that
+ * wanders past the modelled surface fails loudly instead of passing on fiction.
  */
 function makeInMemoryDb(): { db: DrizzleDb; rows: Array<Record<string, unknown>> } {
   const rows: Array<Record<string, unknown>> = [];
-  const chain = (terminal: () => unknown): any => {
+
+  /** A chainable builder whose terminals mirror drizzle's: all() → rows, get() → row | undefined. */
+  const read = (resultRows: () => Array<Record<string, unknown>>): any => {
     const node: any = {
       from: () => node,
       where: () => node,
-      values: (v: Record<string, unknown>) => {
-        rows.push(v);
-        return node;
-      },
-      all: () => terminal(),
-      run: () => terminal(),
-      get: () => terminal(),
+      limit: () => node,
+      orderBy: () => node,
+      all: () => resultRows(),
+      get: () => resultRows()[0],
     };
     return node;
   };
-  const tx = {
-    select: () => chain(() => [{ value: rows.length === 0 ? null : Math.max(...rows.map((r) => Number(r.seq))) }]),
-    insert: () => chain(() => undefined),
-    delete: () => chain(() => undefined),
+
+  /** A chainable write builder; run() reports better-sqlite3's RunResult shape. */
+  const write = (onValues?: (v: Record<string, unknown>) => void): any => {
+    let changes = 0;
+    const node: any = {
+      where: () => node,
+      values: (v: Record<string, unknown>) => {
+        onValues?.(v);
+        changes = 1;
+        return node;
+      },
+      run: () => ({ changes }),
+    };
+    return node;
   };
+
+  const tx = {
+    // SELECT MAX(seq) — one row whose `value` is NULL until the campaign has events, exactly
+    // as SQLite returns it for an aggregate over an empty set.
+    select: () => read(() => [{ value: rows.length === 0 ? null : Math.max(...rows.map((r) => Number(r.seq))) }]),
+    insert: () => write((v) => rows.push(v)),
+    // The retention prune. Its `where` is an opaque drizzle predicate this double cannot
+    // evaluate, and the spec never writes enough events to trigger it, so it is a no-op.
+    delete: () => write(),
+  };
+
   const db = {
     transaction: <T>(fn: (t: typeof tx) => T): T => fn(tx),
-    delete: () => chain(() => ({ changes: 0 })),
+    delete: () => {
+      throw new Error('makeInMemoryDb does not model purge()’s top-level delete — add real coverage instead of faking it');
+    },
   };
   return { db: db as unknown as DrizzleDb, rows };
 }

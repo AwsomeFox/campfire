@@ -183,12 +183,16 @@ export class AiDmTranscriptService {
     let row: AiDmTranscriptEvent;
     try {
       row = this.db.transaction((tx) => {
-        const [{ value: highest } = { value: null as number | null }] = tx
+        // Single-row read: SELECT MAX(...) always yields exactly one row (`value` NULL when
+        // the campaign has no events yet), so `.get()` states the intent and matches the
+        // repo convention for scalar reads inside a transaction. The `?.` still guards the
+        // no-row case rather than assuming SQLite's shape.
+        const highest = tx
           .select({ value: max(aiDmTranscriptEvents.seq) })
           .from(aiDmTranscriptEvents)
           .where(eq(aiDmTranscriptEvents.campaignId, input.campaignId))
-          .all();
-        const seq = (highest ?? 0) + 1;
+          .get();
+        const seq = (highest?.value ?? 0) + 1;
 
         tx.insert(aiDmTranscriptEvents)
           .values({
