@@ -10,7 +10,11 @@ interface TestWindow extends Window {
 
 async function watchAnnouncements(page: Page) {
   await page.evaluate(() => {
-    const live = document.querySelector<HTMLElement>('.sr-only[aria-live="polite"]');
+    // Prefer the app-root announcer test id — other polite sr-only regions (dialogs,
+    // pickers) can otherwise steal the first querySelector match.
+    const live =
+      document.querySelector<HTMLElement>('[data-testid="app-announcer-polite"]')
+      ?? document.querySelector<HTMLElement>('.sr-only[aria-live="polite"][aria-atomic="true"]');
     if (!live) throw new Error('Polite app announcer was not found');
     const target = window as TestWindow;
     target.__diceObserver?.disconnect();
@@ -68,15 +72,20 @@ test.describe('shared dice log accessibility — remote clients (#590)', () => {
   test('local submit does not double-announce when the poll returns the same roll', async ({ page }) => {
     const { campaignId } = seed();
     await page.goto(`/c/${campaignId}`);
-    await watchAnnouncements(page);
     const log = page.getByTestId('shared-dice-log');
     await expect(log).toBeVisible();
-
+    // CatchUpPanel (and similar) also speak into the polite region — watch only
+    // after the dashboard has settled so those do not satisfy the poll first.
+    await expect(page.getByTestId('shared-dice-log')).toBeVisible();
     await page.getByTestId('shared-dice-log').scrollIntoViewIfNeeded();
     await page.locator('details.dice-advanced summary').click();
     await page.getByLabel('Dice expression').fill('1d20');
+    await watchAnnouncements(page);
     await page.locator('details.dice-advanced').getByRole('button', { name: 'Roll' }).click();
-    await expect.poll(async () => (await announcements(page)).length).toBeGreaterThan(0);
+    // Wait specifically for a dice announcement — not catch-up / other polite chatter.
+    await expect
+      .poll(async () => (await announcements(page)).some((message) => /Rolled|rolled/i.test(message)))
+      .toBe(true);
     const afterRoll = await announcements(page);
     const totalLine = afterRoll.find((message) => /Rolled|rolled/i.test(message)) ?? '';
     expect(totalLine.length).toBeGreaterThan(0);

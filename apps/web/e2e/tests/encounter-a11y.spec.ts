@@ -11,12 +11,14 @@ test.use({ storageState: stateFor('dm') });
 const ADD_TAB_IDS = [
   'add-combatant-tab-manual',
   'add-combatant-tab-compendium',
+  'add-combatant-tab-library',
   'add-combatant-tab-party',
   'add-combatant-tab-npc',
 ] as const;
 const ADD_PANEL_IDS = [
   'add-combatant-panel-manual',
   'add-combatant-panel-compendium',
+  'add-combatant-panel-library',
   'add-combatant-panel-party',
   'add-combatant-panel-npc',
 ] as const;
@@ -57,8 +59,9 @@ test.describe('Encounter accessibility (#476)', () => {
     await expect(tablist).toHaveAttribute('aria-label', 'Add combatant');
 
     const tabs = tablist.getByRole('tab');
-    await expect(tabs).toHaveCount(4);
-    await expect(tabs).toHaveText(['Manual', 'Compendium', 'Party', 'NPC']);
+    // Issue #425 added the campaign Library tab between Compendium and Party.
+    await expect(tabs).toHaveCount(5);
+    await expect(tabs).toHaveText(['Manual', 'Compendium', 'Library', 'Party', 'NPC']);
 
     await expect(page.locator('#add-combatant-tab-manual')).toHaveAttribute('aria-selected', 'true');
     await expect(page.locator('#add-combatant-tab-manual')).toHaveAttribute('tabindex', '0');

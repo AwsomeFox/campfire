@@ -374,16 +374,13 @@ test.describe('map pin keyboard positioning', () => {
       expect(start).toBeTruthy();
       if (!start) return;
 
-      const fromX = start.x + start.width / 2;
-      const fromY = start.y + start.height / 2;
-      // Drag toward the lower-right quadrant (~70%, ~70%)
-      const toX = box.x + box.width * 0.7;
-      const toY = box.y + box.height * 0.7;
-
-      await page.mouse.move(fromX, fromY);
-      await page.mouse.down();
-      await page.mouse.move(toX, toY, { steps: 8 });
-      await page.mouse.up();
+      // RegionMap listens for pointer events (#808). Drive the drag through the
+      // pin handle with Playwright's dragTo so pointerdown/move/up stay coherent.
+      // Target the lower-right quadrant (~70%, ~70%).
+      await pin.dragTo(surface, {
+        sourcePosition: { x: start.width / 2, y: start.height / 2 },
+        targetPosition: { x: box.width * 0.7, y: box.height * 0.7 },
+      });
 
       // Drag should leave the pin away from the 20/20 seed toward the lower-right.
       await expect

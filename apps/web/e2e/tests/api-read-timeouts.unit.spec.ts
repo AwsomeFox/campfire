@@ -34,6 +34,12 @@ function installLocalStorage(): void {
     configurable: true,
     value: { getItem: () => null },
   });
+  // Unit workers may lack a real browser online bit; transient network errors
+  // only map to "stale" when the client believes it is online (#581).
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true,
+    value: { onLine: true },
+  });
 }
 
 function abortAwareFetch(hang: boolean): typeof fetch {
@@ -163,6 +169,149 @@ test.describe('fetchWithBudget (#581)', () => {
       }
       expect(err).toMatchObject({ name: 'AbortError' });
       expect(isReadTimeout(err)).toBe(false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test('stalled response body aborts read with TimeoutError', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (_url, init) => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          // Headers resolve immediately; body never produces bytes.
+          init?.signal?.addEventListener(
+            'abort',
+            () => controller.error(new DOMException('Aborted', 'AbortError')),
+            { once: true },
+          );
+        },
+      });
+      return Promise.resolve(
+        new Response(stream, {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+    };
+    try {
+      const res = await fetchWithBudget(
+        '/api/v1/campaigns/1/summary',
+        { method: 'GET' },
+        'read',
+        { connectMs: 50, headersMs: 50, overallMs: 30 } as unknown as typeof API_READ_BUDGET,
+      );
+      let err: unknown;
+      try {
+        await res.text();
+        throw new Error('should throw');
+      } catch (e) {
+        err = e;
+      }
+      expect(err).toBeInstanceOf(ApiReadTimeoutError);
+      expect(err).toMatchObject({ name: 'TimeoutError', phase: 'overall' });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test('stalled mutation response body is ambiguous, not a clean failure', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (_url, init) => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          init?.signal?.addEventListener(
+            'abort',
+            () => controller.error(new DOMException('Aborted', 'AbortError')),
+            { once: true },
+          );
+        },
+      });
+      return Promise.resolve(
+        new Response(stream, {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+    };
+    try {
+      const res = await fetchWithBudget(
+        '/api/v1/campaigns/1',
+        { method: 'PATCH', body: '{}' },
+        'write',
+        { connectMs: 50, overallMs: 30 } as unknown as typeof API_WRITE_BUDGET,
+      );
+      await expect(res.text()).rejects.toBeInstanceOf(ApiAmbiguousMutationError);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test('wrapped bodies drop content-encoding so decoded streams are not re-decompressed', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Encoding': 'gzip',
+          'Content-Length': '999',
+        },
+      });
+    try {
+      const res = await fetchWithBudget('/api/v1/campaigns/1', { method: 'PATCH', body: '{}' }, 'write', API_WRITE_BUDGET);
+      expect(res.headers.get('Content-Encoding')).toBeNull();
+      expect(res.headers.get('Content-Length')).toBeNull();
+      expect(JSON.parse(await res.text())).toEqual({ ok: true });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test('Content-Length 0 responses do not wrap or leak the overall timer', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () =>
+      new Response('', {
+        status: 200,
+        headers: { 'Content-Length': '0' },
+      });
+    try {
+      const res = await fetchWithBudget(
+        '/api/v1/campaigns/1/noop',
+        { method: 'GET' },
+        'read',
+        API_READ_BUDGET,
+      );
+      expect(res.headers.get('Content-Length')).toBe('0');
+      expect(await res.text()).toBe('');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test('204/null-body statuses are returned unwrapped (Response cannot carry a stream)', async () => {
+    const originalFetch = globalThis.fetch;
+    // Chromium exposes a non-null empty body on 204; reconstructing with a stream
+    // throws "Response with null body status cannot have body".
+    globalThis.fetch = async () => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.close();
+        },
+      });
+      const res = new Response(stream, { status: 200, statusText: 'No Content' });
+      Object.defineProperty(res, 'status', { value: 204 });
+      return res;
+    };
+    try {
+      const res = await fetchWithBudget(
+        '/api/v1/users/1/password',
+        { method: 'POST', body: '{}' },
+        'write',
+        API_WRITE_BUDGET,
+      );
+      expect(res.status).toBe(204);
+      expect(res.body).not.toBeNull();
     } finally {
       globalThis.fetch = originalFetch;
     }

@@ -163,10 +163,21 @@ export function AnnounceProvider({ children }: { children: ReactNode }) {
     <AnnounceContext.Provider value={announce}>
       <ClearContext.Provider value={clear}>
         {children}
-        <div aria-live="polite" aria-atomic="true" className="sr-only">
+        <div
+          data-testid="app-announcer-polite"
+          aria-live="polite"
+          aria-atomic="true"
+          className="sr-only"
+        >
           {polite}
         </div>
-        <div role="alert" aria-live="assertive" aria-atomic="true" className="sr-only">
+        <div
+          data-testid="app-announcer-assertive"
+          role="alert"
+          aria-live="assertive"
+          aria-atomic="true"
+          className="sr-only"
+        >
           {assertive}
         </div>
       </ClearContext.Provider>
