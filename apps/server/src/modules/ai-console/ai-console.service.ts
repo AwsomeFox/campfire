@@ -95,6 +95,10 @@ export class AiConsoleService {
         model: aiDmSeats.model,
         tokenBudget: aiDmSeats.tokenBudget,
         tokensUsed: aiDmSeats.tokensUsed,
+        tokensReserved: aiDmSeats.tokensReserved,
+        tokensRefunded: aiDmSeats.tokensRefunded,
+        tokensUnknown: aiDmSeats.tokensUnknown,
+        tokensOverage: aiDmSeats.tokensOverage,
         turnCount: aiDmSeats.turnCount,
         lastTurnAt: aiDmSeats.lastTurnAt,
       })
@@ -110,6 +114,11 @@ export class AiConsoleService {
       model: r.model,
       tokenBudget: r.tokenBudget,
       tokensUsed: r.tokensUsed,
+      tokensReserved: r.tokensReserved,
+      tokensRefunded: r.tokensRefunded,
+      tokensUnknown: r.tokensUnknown,
+      tokensOverage: r.tokensOverage,
+      budgetRemaining: Math.max(0, r.tokenBudget - r.tokensUsed - r.tokensReserved - r.tokensUnknown),
       turnCount: r.turnCount,
       lastTurnAt: r.lastTurnAt ?? null,
     }));
@@ -126,17 +135,26 @@ export class AiConsoleService {
     const byModel = [...modelMap.values()].sort((a, b) => b.tokensUsed - a.tokensUsed);
 
     const totalTokensUsed = rows.reduce((s, r) => s + r.tokensUsed, 0);
+    const totalTokensReserved = rows.reduce((s, r) => s + r.tokensReserved, 0);
+    const totalTokensRefunded = rows.reduce((s, r) => s + r.tokensRefunded, 0);
+    const totalTokensUnknown = rows.reduce((s, r) => s + r.tokensUnknown, 0);
+    const totalTokensOverage = rows.reduce((s, r) => s + r.tokensOverage, 0);
     const totalTurns = rows.reduce((s, r) => s + r.turnCount, 0);
     const settings = await this.settings.getAll();
     const serverTokenCap = settings.aiServerTokenCap;
 
     return {
       totalTokensUsed,
+      totalTokensReserved,
+      totalTokensRefunded,
+      totalTokensUnknown,
+      totalTokensOverage,
       totalTurns,
       seatCount: rows.length,
       activeSeatCount: rows.filter((r) => r.enabled).length,
       serverTokenCap,
-      serverBudgetRemaining: serverTokenCap > 0 ? Math.max(0, serverTokenCap - totalTokensUsed) : null,
+      serverBudgetRemaining:
+        serverTokenCap > 0 ? Math.max(0, serverTokenCap - totalTokensUsed - totalTokensReserved - totalTokensUnknown) : null,
       byCampaign,
       byModel,
     };

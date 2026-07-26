@@ -20,6 +20,7 @@ import { api, ApiError, API } from '../../lib/api';
 import { SkeletonCard } from '../../components/ui';
 import { AI_DM_BUDGET_INPUT_ID, AI_DM_BUDGET_SECTION_ID } from './aiDmBudgetIds';
 import { ProviderForm } from './ProviderForm';
+import { TermHelp } from '../../components/TermHelp';
 
 const AI_DM_INSTRUCTIONS_SECTION_ID = 'ai-dm-instructions';
 const AI_DM_INSTRUCTIONS_INPUT_ID = 'ai-dm-instructions-input';
@@ -109,7 +110,8 @@ export default function AiDmCard({
 
   if (!seat) return null;
 
-  const usagePct = seat.tokenBudget > 0 ? Math.min(100, Math.round((seat.tokensUsed / seat.tokenBudget) * 100)) : 0;
+  const committedTokens = seat.tokensUsed + seat.tokensReserved + seat.tokensUnknown;
+  const usagePct = seat.tokenBudget > 0 ? Math.min(100, Math.round((committedTokens / seat.tokenBudget) * 100)) : 0;
 
   return (
     <div
@@ -263,26 +265,38 @@ function ModeSection({
   return (
     <Section title="Operating mode" id="ai-dm-mode">
       <div className="flex flex-col gap-2">
-        {MODES.map((m) => (
-          <label
-            key={m.value}
-            className="flex gap-2"
-            style={{ cursor: saving ? 'wait' : 'pointer', alignItems: 'flex-start' }}
-          >
-            <input
-              type="radio"
-              name="ai-dm-mode"
-              checked={seat.mode === m.value}
-              disabled={!!saving}
-              onChange={() => void pick(m.value)}
-              style={{ marginTop: 2 }}
-            />
-            <span className="flex flex-col">
-              <span style={{ fontSize: 13, fontWeight: 600 }}>{m.label}</span>
-              <span className="text-muted" style={{ fontSize: 11.5 }}>{m.blurb}</span>
-            </span>
-          </label>
-        ))}
+        {MODES.map((m) => {
+          const inputId = `ai-dm-mode-${m.value}`;
+          return (
+            <div key={m.value} className="flex gap-2" style={{ alignItems: 'flex-start' }}>
+              <input
+                id={inputId}
+                type="radio"
+                name="ai-dm-mode"
+                checked={seat.mode === m.value}
+                disabled={!!saving}
+                onChange={() => void pick(m.value)}
+                style={{ marginTop: 2 }}
+              />
+              <span className="flex flex-col">
+                <span className="inline-flex items-center gap-1 flex-wrap" style={{ fontSize: 13, fontWeight: 600 }}>
+                  <label htmlFor={inputId} style={{ cursor: saving ? 'wait' : 'pointer' }}>
+                    {m.label}
+                  </label>
+                  {m.value === 'co_dm' && <TermHelp termId="coDm" />}
+                  {m.value === 'driver' && <TermHelp termId="driver" />}
+                </span>
+                <label
+                  htmlFor={inputId}
+                  className="text-muted"
+                  style={{ cursor: saving ? 'wait' : 'pointer', fontSize: 11.5 }}
+                >
+                  {m.blurb}
+                </label>
+              </span>
+            </div>
+          );
+        })}
       </div>
       {error && <p className="text-sm" style={{ color: '#f87171' }}>{error}</p>}
     </Section>
@@ -436,11 +450,23 @@ function BudgetSection({
           />
         </div>
         <span className="text-muted" style={{ fontSize: 11 }}>
-          {seat.tokensUsed.toLocaleString()} / {seat.tokenBudget.toLocaleString()} tokens used
+          {seat.tokensUsed.toLocaleString()} used
+          {' · '}
+          {seat.tokensReserved.toLocaleString()} reserved
+          {' · '}
+          {seat.tokensUnknown.toLocaleString()} unknown
+          {' · '}
+          {seat.budgetRemaining.toLocaleString()} / {seat.tokenBudget.toLocaleString()} remaining
           {' · '}
           {seat.turnCount} turn{seat.turnCount === 1 ? '' : 's'}
           {seat.lastTurnAt ? ` · last ${new Date(seat.lastTurnAt).toLocaleString()}` : ''}
         </span>
+        {(seat.tokensRefunded > 0 || seat.tokensOverage > 0) && (
+          <span className="text-muted" style={{ fontSize: 11 }}>
+            {seat.tokensRefunded.toLocaleString()} refunded
+            {seat.tokensOverage > 0 ? ` · ${seat.tokensOverage.toLocaleString()} overage recorded` : ''}
+          </span>
+        )}
       </div>
       {error && <p className="text-sm" style={{ color: '#f87171' }}>{error}</p>}
       <div className="flex gap-2 items-center">

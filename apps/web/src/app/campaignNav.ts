@@ -1,4 +1,5 @@
 import type { TFunction } from 'i18next';
+import type { GlossaryTermId } from '../features/glossary/glossaryTerms';
 
 export type NavItem = {
   key: string;
@@ -6,6 +7,7 @@ export type NavItem = {
   to?: string;
   soon?: boolean;
   badge?: number;
+  termId?: GlossaryTermId;
 };
 
 export type NavGroupKey = 'play' | 'prepare' | 'world' | 'records' | 'manage';
@@ -59,9 +61,9 @@ export function buildCampaignNavGroups(
       label: t(GROUP_LABEL_KEYS.prepare),
       items: [
         { key: 'quests', label: t('nav.quests'), to: `${base}/quests` },
-        { key: 'session-zero', label: t('nav.sessionZero'), to: `${base}/session-zero` },
-        ...(isDm ? [{ key: 'storylines', label: t('nav.storylines'), to: `${base}/storylines` }] : []),
-        { key: 'compendium', label: t('nav.compendium'), to: `${base}/compendium` },
+        { key: 'session-zero', label: t('nav.sessionZero'), to: `${base}/session-zero`, termId: 'sessionZero' },
+        ...(isDm ? [{ key: 'storylines', label: t('nav.storylines'), to: `${base}/storylines`, termId: 'storylines' as const }] : []),
+        { key: 'compendium', label: t('nav.compendium'), to: `${base}/compendium`, termId: 'compendium' },
       ],
     },
     {
@@ -86,8 +88,8 @@ export function buildCampaignNavGroups(
   const manageItems: NavItem[] = isDm
     ? [
         { key: 'settings', label: t('nav.settings'), to: `${base}/settings` },
-        { key: 'inbox', label: t('nav.scribeInbox'), to: `${base}/inbox`, badge: inboxCount },
-        { key: 'proposals', label: t('nav.proposals'), to: `${base}/proposals`, badge: pendingProposals },
+        { key: 'inbox', label: t('nav.scribeInbox'), to: `${base}/inbox`, badge: inboxCount, termId: 'scribe' },
+        { key: 'proposals', label: t('nav.proposals'), to: `${base}/proposals`, badge: pendingProposals, termId: 'proposals' },
         { key: 'trash', label: t('nav.trash'), to: `${base}/trash`, badge: trashCount },
         { key: 'members', label: t('nav.members'), to: `${base}/members` },
         // Issue #601 — the DM's abuse-report queue. Sits in Manage next to Members
@@ -96,7 +98,7 @@ export function buildCampaignNavGroups(
         { key: 'audit', label: 'Audit log', to: `${base}/audit` },
       ]
     : [
-        { key: 'proposals', label: t('nav.myProposals'), to: `${base}/proposals` },
+        { key: 'proposals', label: t('nav.myProposals'), to: `${base}/proposals`, termId: 'proposals' },
         // Non-DMs get the same route, which shows only the reports they filed —
         // someone who reported abuse must be able to check whether anything happened.
         { key: 'moderation', label: t('nav.myReports'), to: `${base}/moderation` },
