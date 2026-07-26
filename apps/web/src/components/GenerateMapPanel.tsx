@@ -22,6 +22,7 @@ import type { GenerateMapParams, GeneratedMapPreview, MapKind, MapSize, MapTheme
 import { api, API, ApiError } from '../lib/api';
 import { Btn } from './ui';
 import { useDisclosure } from './useDisclosure';
+import { MapPurposePreview, type MapPurpose } from './mapOnboarding';
 
 const KINDS: { value: MapKind; label: string }[] = [
   { value: 'dungeon', label: 'Dungeon' },
@@ -53,11 +54,17 @@ function previewAlt(p: GeneratedMapPreview): string {
 
 export function GenerateMapPanel({
   campaignId,
+  purpose = 'encounter',
+  surfacePurpose = purpose,
+  useDisabledReason,
   onUse,
   onError,
   onCancel,
 }: {
   campaignId: number;
+  purpose?: MapPurpose;
+  surfacePurpose?: MapPurpose;
+  useDisabledReason?: string | null;
   /**
    * Attach the currently-previewed map by replaying its exact params + seed through the
    * persisting endpoint (POST /encounters/:id/generate-map for an encounter, or
@@ -230,6 +237,8 @@ export function GenerateMapPanel({
           first-party, offline & reproducible — preview before you attach
         </span>
       </div>
+
+      <MapPurposePreview purpose={purpose} surfacePurpose={surfacePurpose} mode="preview" />
 
       {/* Parameters — kind / size / complexity / theme, and an advanced seed. */}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'flex-end' }}>
@@ -407,8 +416,9 @@ export function GenerateMapPanel({
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
         <Btn
           data-testid="generate-map-use"
-          disabled={!preview || busy}
+          disabled={!preview || busy || !!useDisabledReason}
           onClick={() => void attachSelectedMap()}
+          title={useDisabledReason ?? 'Attach the previewed map to this surface'}
         >
           {using ? 'Attaching…' : 'Use this map'}
         </Btn>
@@ -438,6 +448,11 @@ export function GenerateMapPanel({
           </Btn>
         )}
       </div>
+      {useDisabledReason && (
+        <p className="text-amber-300/90" style={{ fontSize: 11, margin: 0 }} data-testid="generate-map-route-required">
+          {useDisabledReason}
+        </p>
+      )}
     </div>
   );
 }

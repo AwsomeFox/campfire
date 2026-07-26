@@ -92,6 +92,7 @@ import { CharacterStatCard } from '../../components/CharacterStatCard';
 import { Card, Btn, TextInput, HpBar, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { ImageUpload, MapUploadButton, encounterMapUrl, uploadAttachment } from '../../components/ImageUpload';
 import { GetAMapPanel } from '../../components/GetAMapPanel';
+import { MapConceptGlossary, MapPurposePreview } from '../../components/mapOnboarding';
 import { NotFoundState } from '../../components/NotFoundState';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
@@ -3465,6 +3466,10 @@ export function BattleMap({
 
       {!isCast && effectiveCanDmWrite && !mapImageUrl && (
         <div style={{ padding: '8px 14px' }}>
+          <MapConceptGlossary compact />
+          <div style={{ marginTop: 8 }}>
+            <MapPurposePreview purpose="encounter" surfacePurpose="encounter" mode="upload" />
+          </div>
           <ImageUpload
             campaignId={campaignId}
             kind="map"
@@ -3478,6 +3483,7 @@ export function BattleMap({
               wired to the atomic generate-and-attach path via onGenerate. */}
           <GetAMapPanel
             campaignId={campaignId}
+            surfacePurpose="encounter"
             onImported={(id) => (onImportMap ? onImportMap(id) : onSetMap(id))}
             onGenerate={onGenerateMap}
             onError={onError}
@@ -3518,6 +3524,7 @@ export function BattleMap({
                 <li><strong>Set fog</strong> — toggle <em>Fog</em> on, then use the <em>Reveal</em> tool to show only what the party can see.</li>
                 <li><strong>Place tokens</strong> — drop each combatant from the <em>Unplaced</em> tray onto the map.</li>
               </ol>
+              <MapPurposePreview purpose="encounter" surfacePurpose="encounter" mode="preview" />
             </div>
           )}
 
@@ -3582,6 +3589,16 @@ export function BattleMap({
               </button>
             )}
           </div>
+          )}
+
+          {!isCast && effectiveCanDmWrite && (
+            <p
+              className="text-muted"
+              data-testid="map-player-preview-note"
+              style={{ padding: '6px 14px 0', margin: 0, fontSize: 11 }}
+            >
+              Player preview: Cast and player map views use the player-safe fog projection; revealed handouts use the raw file instead.
+            </p>
           )}
 
           {/* Selected token editor — numeric position/size controls for switch and voice users (issue #419). */}
@@ -3933,6 +3950,20 @@ export function BattleMap({
               >
                 Hide all
               </button>
+              <div
+                data-testid="map-fog-player-preview"
+                className="cf-inset"
+                style={{ flexBasis: '100%', padding: '8px 10px', fontSize: 11 }}
+              >
+                <strong style={{ display: 'block', fontSize: 12 }}>Player fog preview</strong>
+                <p className="text-muted" style={{ margin: '2px 0 0' }}>
+                  {fogOn
+                    ? `Cast/player view shows ${fog?.revealed.length ?? 0} revealed fog region${(fog?.revealed.length ?? 0) === 1 ? '' : 's'}; ${hiddenByFog.length} token${hiddenByFog.length === 1 ? '' : 's'} currently stay hidden by fog.`
+                    : 'Fog is off: players and Cast see the full encounter map image with visible placed tokens.'}
+                  {' '}
+                  Handout reveal is different: it exposes the raw uploaded file with no fog layer.
+                </p>
+              </div>
             </div>
           )}
 
