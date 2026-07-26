@@ -363,7 +363,7 @@ export default function StorylinesPage() {
 
   return (
     <div className="max-w-4xl mx-auto px-4 mt-5 pb-20 md:pb-10" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', minWidth: 0 }}>
         <PageTitle>Storylines</PageTitle>
         <TermHelp termId="storylines" />
         <span className="tag tag-outline" style={{ fontSize: 10 }}>

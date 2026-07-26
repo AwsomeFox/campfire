@@ -71,7 +71,7 @@ test.describe('issue #885 - session expiry reauth', () => {
     await page.goto(deepLink);
     await expect(page.getByRole('heading', { name: 'Ambush at the Ember Hearth' })).toBeVisible();
 
-    const actionBtn = page.getByRole('button', { name: /Next turn|Roll initiative|Start|Reopen|End/i }).first();
+    const actionBtn = page.getByRole('button', { name: /^(Next turn|Roll initiative|Start|Reopen|End)$/i }).first();
     await expect(actionBtn).toBeVisible();
     await expireProtectedApi(page);
     await actionBtn.click({ force: true });
