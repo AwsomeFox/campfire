@@ -917,10 +917,33 @@ function YourMembershipCard({
   const { refresh: refreshCampaigns } = useCampaigns();
   const [confirming, setConfirming] = useState(false);
   const [leaving, setLeaving] = useState(false);
+  const [savingConsent, setSavingConsent] = useState(false);
+  const [aiExternalUseConsent, setAiExternalUseConsent] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const myMember = myUserId != null ? members.find((m) => m.userId === myUserId) : undefined;
+  useEffect(() => {
+    if (myMember) setAiExternalUseConsent(myMember.aiExternalUseConsent);
+  }, [myMember]);
   if (!myMember) return null;
+
+  async function saveAiConsent(next: boolean) {
+    setSavingConsent(true);
+    setError(null);
+    const previous = aiExternalUseConsent;
+    setAiExternalUseConsent(next);
+    try {
+      const updated = await api.patch<CampaignMember>(`${API}/campaigns/${campaignId}/members/me/ai-consent`, {
+        aiExternalUseConsent: next,
+      });
+      setAiExternalUseConsent(updated.aiExternalUseConsent);
+    } catch (err) {
+      setAiExternalUseConsent(previous);
+      setError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
+    } finally {
+      setSavingConsent(false);
+    }
+  }
 
   async function leave() {
     if (!myMember) return;
@@ -944,6 +967,22 @@ function YourMembershipCard({
         Take a copy of what's yours, or leave the table. Your export includes only the characters you own, the
         notes you wrote and the proposals you submitted — not the DM's secrets or anyone else's private data.
       </p>
+      <label className="flex items-start gap-2 cursor-pointer cf-inset p-3">
+        <input
+          type="checkbox"
+          className="mt-0.5"
+          checked={aiExternalUseConsent}
+          disabled={savingConsent}
+          onChange={(event) => void saveAiConsent(event.target.checked)}
+        />
+        <span>
+          <span className="block text-[12.5px] font-semibold text-white">Allow external AI use of my authored source notes</span>
+          <span className="block text-[11px] text-secondary">
+            When the campaign permits external AI, the scribe may include resolved inbox notes you authored. Private notes and
+            opted-out members' notes are excluded.
+          </span>
+        </span>
+      </label>
       {error && <p className="text-xs text-rose-400 m-0">{error}</p>}
       <div className="flex gap-2 flex-wrap items-center">
         <a
@@ -1230,6 +1269,12 @@ function MemberRow({
           {member.displayName || member.username}
           {member.primaryOwner && <span className="text-[10px] text-amber-300">protected owner</span>}
           {member.disabled && <span className="text-[10px] text-rose-400">disabled</span>}
+          <span
+            className={`text-[10px] ${member.aiExternalUseConsent ? 'text-emerald-300' : 'text-secondary'}`}
+            title="Member-controlled consent for external AI use of their authored source notes"
+          >
+            AI source {member.aiExternalUseConsent ? 'allowed' : 'opted out'}
+          </span>
         </p>
         <p className="text-muted text-[11px] m-0">{character?.name || 'no character linked'}</p>
       </div>

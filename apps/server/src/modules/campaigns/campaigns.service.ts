@@ -14,6 +14,7 @@ import {
   CampaignPurge,
   CampaignUpdate,
   CAMPAIGN_CLONE_PREVIEW_FORMAT_VERSION,
+  AiExternalContentPolicy,
   NarrationLanguage,
 } from '@campfire/schema';
 import type { Campaign, CampaignClonePreview, CampaignSummary, Role, TrashedEntity, CampaignImportPreflight, OnUnresolvedCompendium } from '@campfire/schema';
@@ -268,6 +269,7 @@ function toDomain(row: typeof campaigns.$inferSelect): Campaign {
     publicRecapSharingEnabled: row.publicRecapSharingEnabled,
     publicInvitesEnabled: row.publicInvitesEnabled,
     narrationLanguage: (row.narrationLanguage ?? 'en') as Campaign['narrationLanguage'],
+    aiExternalContentPolicy: (row.aiExternalContentPolicy ?? 'member_consent') as Campaign['aiExternalContentPolicy'],
     sessionCount: row.sessionCount,
     ruleSystem: row.ruleSystem,
     mapAttachmentId: row.mapAttachmentId,
@@ -521,6 +523,7 @@ export class CampaignsService {
         // DM both unarchives and deliberately re-enables invites (#857).
         publicInvitesEnabled: (input.status ?? 'active') === 'active',
         narrationLanguage: input.narrationLanguage ?? 'en',
+        aiExternalContentPolicy: input.aiExternalContentPolicy ?? 'member_consent',
         sessionCount: 0,
         ruleSystem: input.ruleSystem ?? '',
         mapAttachmentId: input.mapAttachmentId ?? null,
@@ -1085,6 +1088,7 @@ export class CampaignsService {
           publicRecapSharingEnabled: source.publicRecapSharingEnabled,
           publicInvitesEnabled: source.publicInvitesEnabled,
           narrationLanguage: source.narrationLanguage ?? 'en',
+          aiExternalContentPolicy: source.aiExternalContentPolicy ?? 'member_consent',
           sessionCount: template ? 0 : source.sessionCount,
           ruleSystem: source.ruleSystem,
           mapAttachmentId: null, // remapped below once attachment rows exist (#435)
@@ -1847,6 +1851,10 @@ export class CampaignsService {
     }
     const narrationLanguageParsed = NarrationLanguage.safeParse(campaignSrc.narrationLanguage);
     const narrationLanguage = narrationLanguageParsed.success ? narrationLanguageParsed.data : 'en';
+    const aiExternalContentPolicyParsed = AiExternalContentPolicy.safeParse(campaignSrc.aiExternalContentPolicy);
+    const aiExternalContentPolicy = aiExternalContentPolicyParsed.success
+      ? aiExternalContentPolicyParsed.data
+      : 'member_consent';
 
     const locationRows = asArr(doc.locations);
     const npcRows = asArr(doc.npcs);
@@ -1998,6 +2006,7 @@ export class CampaignsService {
           publicRecapSharingEnabled: campaignSrc.publicRecapSharingEnabled !== false,
           publicInvitesEnabled: campaignSrc.publicInvitesEnabled !== false,
           narrationLanguage,
+          aiExternalContentPolicy,
           sessionCount: Math.max(0, intOr(campaignSrc.sessionCount, 0)),
           ruleSystem,
           mapAttachmentId: null, // remapped below once attachment rows have fresh ids

@@ -16,12 +16,13 @@ import {
   FactionCreate,
   EncounterGenerate,
   GenerateMapParams,
+  AI_EXTERNAL_PROVIDER_PRIVACY,
   normalizeMapTheme,
   buildNarrationLanguageContract,
   resolveNarrationLanguage,
   StoryBeatProposalCreate,
 } from '@campfire/schema';
-import type { CoDmDraftRequest, CoDmDraftResult, CoDmDraftTarget, NarrationLanguage, Proposal, Role } from '@campfire/schema';
+import type { AiGenerationProvenance, CoDmDraftRequest, CoDmDraftResult, CoDmDraftTarget, NarrationLanguage, Proposal, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { aiDmSeats, campaigns, storyArcs } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -38,6 +39,7 @@ type CoDmDraftRequestInput = z.infer<typeof CoDmDraftRequest>;
 
 /** Upper bound on a draft turn's output, before the remaining-budget clamp. */
 const DRAFT_MAX_TOKENS = 4096;
+const CO_DM_PROMPT_VERSION = 'co-dm-draft-v2';
 
 /** Which proposal entity type each co-DM target files under. */
 const TARGET_ENTITY_TYPE: Record<CoDmDraftTarget, ProposableEntityType> = {
@@ -154,9 +156,14 @@ export class CoDmService {
     let narration: string;
     let tokensUsed: number;
     let resolvedModel: string;
+    let providerName: string;
+    let providerType: string | null = null;
+    let endpointScope: AiGenerationProvenance['endpoint']['scope'] = 'injected';
+    let endpointBaseUrl: string | null = null;
 
     if (config) {
       const aiProvider: AiProvider = createAiProvider(config);
+      const effective = await this.providerConfig.getEffectiveView(campaignId);
       const result = await aiProvider.generate({
         system: instructions,
         messages: [{ role: 'user', content: input.prompt }],
@@ -165,7 +172,11 @@ export class CoDmService {
       });
       narration = result.text;
       tokensUsed = result.usage.totalTokens;
-      resolvedModel = config.model;
+      resolvedModel = result.model || config.model;
+      providerName = aiProvider.name;
+      providerType = config.providerType;
+      endpointScope = effective.source ?? 'none';
+      endpointBaseUrl = config.baseUrl ?? null;
     } else {
       const result = await this.provider.generate({
         campaignId,
@@ -178,6 +189,9 @@ export class CoDmService {
       narration = result.narration;
       tokensUsed = result.tokensUsed;
       resolvedModel = execModel;
+      providerName = this.provider.name;
+      providerType = null;
+      endpointScope = providerName === 'noop' ? 'none' : 'injected';
     }
 
     // Turn the provider text into validated proposal payloads for the target's entity type.
@@ -192,10 +206,21 @@ export class CoDmService {
     // is DISPLAY-ONLY: it never drives execution (execModel above is '' in this branch, and
     // the no-op provider ignores it).
     const modelLabel = resolvedModel || seat.model || 'unconfigured';
+    const generationProvenance = this.buildGenerationProvenance({
+      target: input.target,
+      prompt: input.prompt,
+      instructions,
+      provider: providerName,
+      providerType,
+      model: modelLabel,
+      endpointScope,
+      endpointBaseUrl,
+    });
     const attribution = {
       proposer: `AI DM (${modelLabel})`,
       proposerUserId: `ai-dm:${campaignId}`,
       proposerToken: null,
+      generationProvenance,
     };
 
     const proposals: Proposal[] = [];
@@ -212,12 +237,12 @@ export class CoDmService {
       action: 'ai-dm.draft',
       entityType: 'ai-dm',
       campaignId,
-      detail: `${input.target} → ${proposals.length} ${entityType} proposal(s) via ${this.provider.name} (+${tokensUsed} tokens)`,
+      detail: `${input.target} → ${proposals.length} ${entityType} proposal(s) via ${providerName} (+${tokensUsed} tokens)`,
     });
 
     return {
       target: input.target,
-      provider: this.provider.name,
+      provider: providerName,
       // Issue #564: report the EXACT model that served the draft (resolved + allowlisted)
       // when a provider is configured. When NO provider is configured (the legacy no-op
       // seam — execModel is ''), fall back to the legacy seat.model label so the response
@@ -255,6 +280,40 @@ export class CoDmService {
       total = updated ? updated.tokensUsed : tokenBudget;
     });
     return total;
+  }
+
+  private buildGenerationProvenance(input: {
+    target: CoDmDraftTarget;
+    prompt: string;
+    instructions: string;
+    provider: string;
+    providerType: string | null;
+    model: string;
+    endpointScope: AiGenerationProvenance['endpoint']['scope'];
+    endpointBaseUrl?: string | null;
+  }): AiGenerationProvenance {
+    const promptHash = crypto
+      .createHash('sha256')
+      .update(JSON.stringify({
+        promptVersion: CO_DM_PROMPT_VERSION,
+        target: input.target,
+        instructions: input.instructions,
+        prompt: input.prompt,
+      }))
+      .digest('hex');
+    return {
+      source: 'co_dm',
+      provider: input.provider,
+      providerType: input.providerType,
+      model: input.model,
+      endpoint: { scope: input.endpointScope, baseUrl: input.endpointBaseUrl ?? null },
+      sourceIds: { target: input.target },
+      sourceHash: crypto.createHash('sha256').update(input.prompt).digest('hex'),
+      promptVersion: CO_DM_PROMPT_VERSION,
+      promptHash,
+      retentionNotice: AI_EXTERNAL_PROVIDER_PRIVACY.retentionNote,
+      createdAt: nowIso(),
+    };
   }
 
   /** Persona + a target-specific instruction to reply with strict JSON the server can parse. */

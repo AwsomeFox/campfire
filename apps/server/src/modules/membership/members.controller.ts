@@ -4,7 +4,7 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from './campaign-access.service';
 import { MembersService } from './members.service';
-import { GuestDmGrantCreateDto, MemberCreateDto, MemberUpdateDto } from './members.dto';
+import { GuestDmGrantCreateDto, MemberAiConsentUpdateDto, MemberCreateDto, MemberUpdateDto } from './members.dto';
 
 @ApiTags('members')
 @Controller('campaigns/:campaignId/members')
@@ -82,6 +82,22 @@ export class MembersController {
   ) {
     await this.access.requireMember(user, campaignId);
     return this.members.handBackGuestDmGrant(campaignId, grantId, user);
+  }
+
+  @Patch('me/ai-consent')
+  @ApiOperation({
+    summary: 'Update your external AI content consent',
+    description:
+      'Campaign membership required. Controls whether this member\'s authored source material may be included in prompts sent to external AI providers when the campaign policy allows it.',
+  })
+  @ApiResponse({ status: 200, description: 'Updated membership.' })
+  async updateOwnAiConsent(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @Body() body: MemberAiConsentUpdateDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    await this.access.requireMember(user, campaignId);
+    return this.members.updateOwnAiConsent(campaignId, body, user);
   }
 
   @Patch(':memberId')

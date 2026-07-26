@@ -3,6 +3,8 @@ import { createHash } from 'node:crypto';
 import { and, asc, desc, eq, inArray, isNull } from 'drizzle-orm';
 import type { z } from 'zod';
 import type {
+  AiExternalContentPolicy,
+  AiGenerationProvenance,
   Note,
   NarrationLanguage,
   Role,
@@ -15,12 +17,13 @@ import type {
   ScribeSourceStats,
   ScribeTrigger,
 } from '@campfire/schema';
-import { buildNarrationLanguageContract, resolveNarrationLanguage } from '@campfire/schema';
+import { AI_EXTERNAL_PROVIDER_PRIVACY, buildNarrationLanguageContract, resolveNarrationLanguage } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import {
   aiDmSeats,
   aiScribeConfigs,
   aiScribeJobs,
+  campaignMembers,
   campaigns,
   encounters,
   proposals,
@@ -51,8 +54,16 @@ import {
   type ScribeSessionScope,
   type ScribeSourceScope,
 } from './scribe-scope';
+import { filterSourceForExternalAiConsent, type ScribeConsentSummary } from './scribe-consent';
 
 type ScribeConfigUpdateInput = z.infer<typeof ScribeConfigUpdate>;
+
+const SCRIBE_PROMPT_VERSION = 'scribe-recap-v2';
+
+type ScribeAssembly = {
+  source: RecapDraftSource | null;
+  consent: ScribeConsentSummary;
+};
 
 type RunOpts = {
   dryRun?: boolean;
@@ -110,6 +121,15 @@ function parseSourceStats(raw: string | null | undefined): ScribeSourceStats | n
   }
 }
 
+function parseGenerationProvenance(raw: string | null | undefined): AiGenerationProvenance | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as AiGenerationProvenance;
+  } catch {
+    return null;
+  }
+}
+
 function jobToDomain(row: typeof aiScribeJobs.$inferSelect): ScribeJob {
   return {
     id: row.id,
@@ -124,6 +144,7 @@ function jobToDomain(row: typeof aiScribeJobs.$inferSelect): ScribeJob {
     sourceHash: row.sourceHash ?? null,
     scheduledSessionId: row.scheduledSessionId ?? null,
     sourceStats: parseSourceStats(row.sourceStats),
+    generationProvenance: parseGenerationProvenance(row.generationProvenance),
     createdBy: row.createdBy,
     createdAt: row.createdAt,
   };
@@ -233,6 +254,36 @@ export class ScribeService implements OnApplicationBootstrap {
    * then filtered (on-demand default).
    */
   async assembleSource(campaignId: number, scope?: ScribeSourceScope): Promise<RecapDraftSource | null> {
+    return (await this.assembleSourceWithConsent(campaignId, scope)).source;
+  }
+
+  private async aiContentPolicy(campaignId: number): Promise<AiExternalContentPolicy> {
+    const [row] = await this.db
+      .select({ aiExternalContentPolicy: campaigns.aiExternalContentPolicy })
+      .from(campaigns)
+      .where(eq(campaigns.id, campaignId))
+      .limit(1);
+    return (row?.aiExternalContentPolicy ?? 'member_consent') as AiExternalContentPolicy;
+  }
+
+  private async consentingMemberIds(campaignId: number): Promise<Set<string>> {
+    const rows = await this.db
+      .select({ userId: campaignMembers.userId })
+      .from(campaignMembers)
+      .where(and(eq(campaignMembers.campaignId, campaignId), eq(campaignMembers.aiExternalUseConsent, true)));
+    return new Set(rows.map((row) => String(row.userId)));
+  }
+
+  private async applyExternalAiConsent(
+    campaignId: number,
+    source: RecapDraftSource,
+  ): Promise<ScribeAssembly> {
+    const policy = await this.aiContentPolicy(campaignId);
+    const consented = policy === 'member_consent' ? await this.consentingMemberIds(campaignId) : new Set<string>();
+    return filterSourceForExternalAiConsent(source, policy, consented);
+  }
+
+  private async assembleSourceWithConsent(campaignId: number, scope?: ScribeSourceScope): Promise<ScribeAssembly> {
     const resolvedInbox = await this.notes.listAllInbox(campaignId, true);
     const encounterList = await this.encounters.listForCampaign(campaignId);
     const encountersWithCombatants = await Promise.all(encounterList.map((e) => this.encounters.getWithCombatantsOrThrow(e.id)));
@@ -260,6 +311,9 @@ export class ScribeService implements OnApplicationBootstrap {
 
     const source: RecapDraftSource = {
       resolvedInbox: resolvedInbox.map((n: Note) => ({
+        id: n.id,
+        authorUserId: n.authorUserId,
+        visibility: n.visibility,
         body: n.body,
         resolvedNote: n.resolvedNote,
         entityName: n.entityName,
@@ -268,6 +322,7 @@ export class ScribeService implements OnApplicationBootstrap {
       encounters: encountersWithCombatants.map((e) => {
         const meta = encounterMeta.get(e.id);
         return {
+          id: e.id,
           name: e.name,
           status: e.status,
           combatants: e.combatants,
@@ -278,6 +333,7 @@ export class ScribeService implements OnApplicationBootstrap {
         };
       }),
       diceRolls: (await this.rolls.listForCampaign(campaignId, DEFAULT_DICE_ROLLS_RETENTION)).map((r) => ({
+        id: r.id,
         label: r.label,
         actor: r.actor,
         rollerName: r.rollerName,
@@ -291,9 +347,13 @@ export class ScribeService implements OnApplicationBootstrap {
     };
 
     const scoped = scope ? filterSourceByScope(source, scope, sessionPlayedAtById) : source;
-    const fought = scoped.encounters.filter((e) => e.status === 'running' || e.status === 'ended');
-    if (fought.length === 0 && scoped.resolvedInbox.length === 0 && (scoped.diceRolls?.length ?? 0) === 0) return null;
-    return scoped;
+    const filtered = await this.applyExternalAiConsent(campaignId, scoped);
+    const filteredSource = filtered.source ?? scoped;
+    const fought = filteredSource.encounters.filter((e) => e.status === 'running' || e.status === 'ended');
+    if (fought.length === 0 && filteredSource.resolvedInbox.length === 0 && (filteredSource.diceRolls?.length ?? 0) === 0) {
+      return { source: null, consent: filtered.consent };
+    }
+    return { source: filteredSource, consent: filtered.consent };
   }
 
   private async sessionPlayedAtMap(campaignId: number): Promise<Map<number, string | null>> {
@@ -302,6 +362,62 @@ export class ScribeService implements OnApplicationBootstrap {
       .from(sessions)
       .where(and(eq(sessions.campaignId, campaignId), isNull(sessions.deletedAt)));
     return new Map(rows.map((r) => [r.id, r.playedAt ?? null]));
+  }
+
+  private sourceStats(source: RecapDraftSource, scope: ScribeSourceScope | undefined, consent: ScribeConsentSummary): ScribeSourceStats {
+    return {
+      ...sourceStatsFrom(source, scope),
+      excludedInboxByConsent: consent.excludedInboxByConsent,
+      excludedInboxPrivate: consent.excludedInboxPrivate,
+    };
+  }
+
+  private sourceIds(source: RecapDraftSource, scope?: ScribeSourceScope): AiGenerationProvenance['sourceIds'] {
+    return {
+      inboxNotes: source.resolvedInbox.map((note) => note.id).filter((id): id is number => typeof id === 'number'),
+      encounters: source.encounters.map((encounter) => encounter.id).filter((id): id is number => typeof id === 'number'),
+      diceRolls: (source.diceRolls ?? []).map((roll) => roll.id).filter((id): id is number => typeof id === 'number'),
+      ...(scope && isSessionScope(scope) ? { scheduledSessionId: scope.scheduledSessionId } : {}),
+      ...(scope && !isSessionScope(scope) ? { sinceAt: scope.sinceAt } : {}),
+    };
+  }
+
+  private promptHash(system: string, userPrompt: string): string {
+    return createHash('sha256')
+      .update(JSON.stringify({ promptVersion: SCRIBE_PROMPT_VERSION, system, userPrompt }))
+      .digest('hex');
+  }
+
+  private buildGenerationProvenance(input: {
+    source: RecapDraftSource;
+    scope?: ScribeSourceScope;
+    sourceHash: string;
+    system: string;
+    userPrompt: string;
+    provider: string;
+    providerType: string | null;
+    model: string;
+    endpointScope: AiGenerationProvenance['endpoint']['scope'];
+    endpointBaseUrl?: string | null;
+    consent: ScribeConsentSummary;
+  }): AiGenerationProvenance {
+    return {
+      source: 'ai_scribe',
+      provider: input.provider,
+      providerType: input.providerType,
+      model: input.model,
+      endpoint: {
+        scope: input.endpointScope,
+        baseUrl: input.endpointBaseUrl ?? null,
+      },
+      sourceIds: this.sourceIds(input.source, input.scope),
+      sourceHash: input.sourceHash,
+      promptVersion: SCRIBE_PROMPT_VERSION,
+      promptHash: this.promptHash(input.system, input.userPrompt),
+      consent: input.consent,
+      retentionNotice: AI_EXTERNAL_PROVIDER_PRIVACY.retentionNote,
+      createdAt: nowIso(),
+    };
   }
 
   // ── the run engine ──────────────────────────────────────────────────────────
@@ -333,8 +449,9 @@ export class ScribeService implements OnApplicationBootstrap {
       return this.record(campaignId, trigger, user, 'disabled', { detail: 'AI DM seat not enabled', scope });
     }
 
-    const source = await this.assembleSource(campaignId, scope);
-    const stats = source ? sourceStatsFrom(source, scope) : sourceStatsFrom({ resolvedInbox: [], encounters: [] }, scope);
+    const assembly = await this.assembleSourceWithConsent(campaignId, scope);
+    const source = assembly.source;
+    const stats = this.sourceStats(source ?? { resolvedInbox: [], encounters: [] }, scope, assembly.consent);
     if (!source) {
       return this.record(campaignId, trigger, user, 'no_material', {
         detail: scope && isSessionScope(scope)
@@ -405,7 +522,7 @@ export class ScribeService implements OnApplicationBootstrap {
     }
 
     type SpendResult =
-      | { ok: true; text: string; tokensUsed: number; providerName: string }
+      | { ok: true; text: string; tokensUsed: number; providerName: string; generationProvenance: AiGenerationProvenance }
       | {
           ok: false;
           status: 'over_budget' | 'failed';
@@ -449,12 +566,17 @@ export class ScribeService implements OnApplicationBootstrap {
       let text: string;
       let tokensUsed: number;
       let providerName: string;
+      let providerType: string | null = null;
+      let model = seatAfterLock.model || '';
+      let endpointScope: AiGenerationProvenance['endpoint']['scope'] = 'injected';
+      let endpointBaseUrl: string | null = null;
+      let system = '';
       try {
         const aiSupports = await this.supportPreferences.listForAi(campaignId);
         const supportGuidance = aiSupports.length > 0
           ? `\n\nParticipant-authorized practical supports (apply respectfully; do not infer diagnoses):\n${JSON.stringify(aiSupports)}`
           : '';
-        const system =
+        system =
           (seatAfterLock.instructions ? `${seatAfterLock.instructions}\n\n` : '') +
           'You are the campaign scribe. Write a concise, in-voice session recap from the source material below. ' +
           'Return only the finished recap prose (markdown allowed); do not include the raw source-notes appendix.' +
@@ -463,6 +585,7 @@ export class ScribeService implements OnApplicationBootstrap {
           buildNarrationLanguageContract(narrationResolved.language, narrationResolved.provenance);
         if (config) {
           const provider: AiProvider = createAiProvider({ ...config, params: { ...config.params, maxTokens } });
+          const effective = await this.providerConfig.getEffectiveView(campaignId);
           const result = await provider.generate({
             system,
             messages: [{ role: 'user', content: draft }],
@@ -472,6 +595,10 @@ export class ScribeService implements OnApplicationBootstrap {
           text = result.text;
           tokensUsed = result.usage.totalTokens;
           providerName = provider.name;
+          providerType = config.providerType;
+          model = result.model || config.model;
+          endpointScope = effective.source ?? 'none';
+          endpointBaseUrl = config.baseUrl ?? null;
         } else {
           const result = await this.fallbackProvider.generate({
             campaignId,
@@ -484,6 +611,9 @@ export class ScribeService implements OnApplicationBootstrap {
           text = result.narration;
           tokensUsed = result.tokensUsed;
           providerName = this.fallbackProvider.name;
+          providerType = null;
+          model = seatAfterLock.model || '';
+          endpointScope = providerName === 'noop' ? 'none' : 'injected';
         }
       } catch (err) {
         return {
@@ -521,7 +651,25 @@ export class ScribeService implements OnApplicationBootstrap {
         };
       }
 
-      return { ok: true, text, tokensUsed, providerName };
+      return {
+        ok: true,
+        text,
+        tokensUsed,
+        providerName,
+        generationProvenance: this.buildGenerationProvenance({
+          source,
+          scope,
+          sourceHash,
+          system,
+          userPrompt: draft,
+          provider: providerName,
+          providerType,
+          model,
+          endpointScope,
+          endpointBaseUrl,
+          consent: assembly.consent,
+        }),
+      };
     });
 
     if (!spend.ok) {
@@ -535,7 +683,7 @@ export class ScribeService implements OnApplicationBootstrap {
         ...(spend.providerName !== undefined ? { provider: spend.providerName } : {}),
       });
     }
-    const { text, tokensUsed, providerName } = spend;
+    const { text, tokensUsed, providerName, generationProvenance } = spend;
 
     if (dryRun) {
       const job = await this.record(campaignId, trigger, user, 'succeeded', {
@@ -543,6 +691,7 @@ export class ScribeService implements OnApplicationBootstrap {
         sourceHash,
         tokensUsed,
         provider: providerName,
+        generationProvenance,
         scope,
         sourceStats: stats,
       });
@@ -562,7 +711,12 @@ export class ScribeService implements OnApplicationBootstrap {
       { recap: text, title },
       user,
       'dm' as Role,
-      { proposer: `AI Scribe (${providerName})`, proposerUserId: `ai-dm:${campaignId}`, proposerToken: null },
+      {
+        proposer: `AI Scribe (${providerName})`,
+        proposerUserId: `ai-dm:${campaignId}`,
+        proposerToken: null,
+        generationProvenance,
+      },
     );
 
     await this.audit.log({
@@ -583,6 +737,7 @@ export class ScribeService implements OnApplicationBootstrap {
       proposalCount: 1,
       tokensUsed,
       provider: providerName,
+      generationProvenance,
       scope,
       sourceStats: stats,
     });
@@ -736,6 +891,7 @@ export class ScribeService implements OnApplicationBootstrap {
       proposalCount?: number;
       tokensUsed?: number;
       provider?: string;
+      generationProvenance?: AiGenerationProvenance;
       scope?: ScribeSourceScope;
       sourceStats?: ScribeSourceStats;
       sourcePreview?: ScribeSourcePreview;
@@ -759,6 +915,7 @@ export class ScribeService implements OnApplicationBootstrap {
         detail: extra.detail ?? '',
         scheduledSessionId: scheduledSessionId ?? null,
         sourceStats: extra.sourceStats ? JSON.stringify(extra.sourceStats) : null,
+        generationProvenance: extra.generationProvenance ? JSON.stringify(extra.generationProvenance) : null,
         createdBy: auditActor(user),
         createdAt: nowIso(),
       })

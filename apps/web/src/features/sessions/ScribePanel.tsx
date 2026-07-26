@@ -129,6 +129,13 @@ export function ScribePanel({ campaignId, isDm }: { campaignId: number; isDm: bo
   if (seatPhase === 'ready-hidden') return null;
 
   async function run(dryRun: boolean) {
+    if (!dryRun) {
+      const ok = window.confirm(
+        'The AI scribe may send allowed campaign source material to the configured AI provider. ' +
+          "Only resolved inbox notes from members who opted in are included; private and opted-out notes are excluded. Continue?",
+      );
+      if (!ok) return;
+    }
     setBusy(dryRun ? 'preview' : preview ? 'filing' : 'run');
     setOutcome(null);
     try {
@@ -204,6 +211,10 @@ export function ScribePanel({ campaignId, isDm }: { campaignId: number; isDm: bo
           <p className="text-[11.5px] text-secondary m-0">
             Drafts a session recap from resolved inbox notes and encounters that were run, and files it as a{' '}
             <strong>pending proposal</strong> for you to review — nothing is ever published automatically.
+          </p>
+          <p className="text-[11px] text-amber-200 m-0">
+            External-send notice: when a provider is configured, generation sends the prompt to that endpoint.
+            Member-authored inbox notes are included only when the campaign policy allows it and that member has opted in.
           </p>
 
           {loadError && <ErrorNote message={loadError} onRetry={load} />}

@@ -382,6 +382,34 @@ function migrateProposalsTableForBaseSnapshot(sqlite: Database.Database): void {
 }
 
 /**
+ * Issue #501: AI consent + generation provenance.
+ *
+ * Adds the campaign-level external-source policy, per-member consent, and JSON
+ * provenance blobs for AI-authored proposals / scribe jobs. Defaults are fail-closed:
+ * upgraded members have not consented until they opt in, and manual/legacy artifacts
+ * keep NULL provenance.
+ */
+function migrateAiConsentAndProvenance501(sqlite: Database.Database): void {
+  const hasTable = (name: string) =>
+    !!sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(name);
+  const hasColumn = (table: string, column: string) =>
+    (sqlite.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).some((c) => c.name === column);
+
+  if (hasTable('campaigns') && !hasColumn('campaigns', 'ai_external_content_policy')) {
+    sqlite.exec("ALTER TABLE campaigns ADD COLUMN ai_external_content_policy TEXT NOT NULL DEFAULT 'member_consent'");
+  }
+  if (hasTable('campaign_members') && !hasColumn('campaign_members', 'ai_external_use_consent')) {
+    sqlite.exec('ALTER TABLE campaign_members ADD COLUMN ai_external_use_consent INTEGER NOT NULL DEFAULT 0');
+  }
+  if (hasTable('proposals') && !hasColumn('proposals', 'generation_provenance')) {
+    sqlite.exec('ALTER TABLE proposals ADD COLUMN generation_provenance TEXT');
+  }
+  if (hasTable('ai_scribe_jobs') && !hasColumn('ai_scribe_jobs', 'generation_provenance')) {
+    sqlite.exec('ALTER TABLE ai_scribe_jobs ADD COLUMN generation_provenance TEXT');
+  }
+}
+
+/**
  * Migration for DBs created before character-sheet depth (issue #1):
  * `characters.save_proficiencies` / `skills` / `actions` / `spell_slots`
  * didn't exist. Plain defaulted ADD COLUMNs — no table rebuild needed, same
@@ -2893,6 +2921,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0104_campaign_library_monsters', run: migrateCampaignLibraryMonstersTable },
   { name: '0105_campaign_library_monsters_fk', run: migrateCampaignLibraryMonstersForeignKeys },
   { name: '0106_guest_dm_handoff_545', run: migrateGuestDmHandoff545 },
+  { name: '0107_ai_consent_provenance_501', run: migrateAiConsentAndProvenance501 },
 ];
 
 /**
