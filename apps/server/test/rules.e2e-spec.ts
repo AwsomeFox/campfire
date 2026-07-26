@@ -2,13 +2,14 @@ import request from 'supertest';
 import type { Server } from 'node:http';
 import { eq } from 'drizzle-orm';
 import { createTestApp, createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
-import { DB, type DrizzleDb } from '../src/db/db.module';
-import { ruleEntries } from '../src/db/schema';
+import { DB, DB_HOLDER, type DbHolder, type DrizzleDb } from '../src/db/db.module';
+import { auditLog, campaigns, ruleEntries, rulePacks } from '../src/db/schema';
 import {
   startFakeOpen5e,
   startFakeOpen5eWithBadPagination,
   startFakeOpen5eFlaky,
   startFakeOpen5eMultiDoc,
+  startFakeOpen5eMixedLicense,
   type FakeOpen5e,
   type FakeOpen5eWithBadPagination,
   type FakeOpen5eFlaky,
@@ -145,6 +146,15 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
     expect(reJob.outcome).toBe('updated');
     expect(reJob.added).toBe(0);
     expect(reJob.skippedExisting).toBe(2 + 2 + 1 + 4 + 2 + 2 + 1);
+    expect(reJob.changed).toBe(1);
+    expect(reJob.removed).toBe(0);
+    expect(reJob.preview).toMatchObject({
+      added: 0,
+      changed: 1,
+      removed: 0,
+      unchanged: (2 + 2 + 1 + 4 + 2 + 2 + 1) - 1,
+    });
+    expect(reJob.preview.sourceHash).toMatch(/^[a-f0-9]{64}$/);
     expect(reJob.pack.entryCount).toBe(2 + 2 + 1 + 4 + 2 + 2 + 1); // unchanged
 
     // search: free text finds the fireball spell
@@ -344,6 +354,89 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
     expect(searchItems(searchRes.body)).toEqual([]); // creatures weren't imported
 
     await request(server).delete(`/api/v1/rules/packs/${job.pack.id}`).set(dm);
+  });
+
+  // Issue #500 guard: an update may only DELETE installed entries when the fetch it is
+  // comparing against is the complete upstream set. `sections` comes off the request body
+  // and is not de-duplicated by the schema, so a repeated section can reach the importer
+  // with the same array LENGTH as the full section list while covering only one section.
+  // Authorising removal off that length would wipe every other section out of the pack.
+  it('a repeated-section install never removes the sections it did not fetch (issue #500)', async () => {
+    const server = ctx.app.getHttpServer();
+    const total = 2 + 2 + 1 + 4 + 2 + 2 + 1;
+
+    const full = await installOpen5e(server, dm, { source: 'open5e', url: fake.baseUrl });
+    expect(full.status).toBe('completed');
+    expect(full.pack.entryCount).toBe(total);
+
+    // Seven copies of one section: same length as ALL_OPEN5E_SECTIONS, one section covered.
+    const repeated = await installOpen5e(server, dm, {
+      source: 'open5e',
+      url: fake.baseUrl,
+      sections: ['conditions', 'conditions', 'conditions', 'conditions', 'conditions', 'conditions', 'conditions'],
+    });
+    expect(repeated.status).toBe('completed');
+    expect(repeated.outcome).toBe('updated');
+    expect(repeated.removed).toBe(0);
+    expect(repeated.preview.removed).toBe(0);
+    expect(repeated.pack.entryCount).toBe(total);
+
+    // The un-fetched sections are still there and still searchable.
+    const goblinRes = await request(server).get('/api/v1/rules/search').query({ q: 'goblin' }).set(dm);
+    expect(searchItems(goblinRes.body).length).toBeGreaterThan(0);
+    const fireballRes = await request(server).get('/api/v1/rules/search').query({ q: 'fireball' }).set(dm);
+    expect(searchItems(fireballRes.body).some((e: { name: string }) => e.name === 'Fireball')).toBe(true);
+
+    await request(server).delete(`/api/v1/rules/packs/${repeated.pack.id}`).set(dm);
+  });
+
+  // The counterpart to the truncated-fetch guard: when the fetch IS demonstrably complete
+  // (every section requested, nothing skipped, no section at its cap), an entry that is no
+  // longer upstream must actually be REMOVED — otherwise a pack accumulates content that
+  // upstream has retracted. This is also how a slug rename resolves: remove-old + add-new.
+  it('a complete upstream manifest removes entries upstream no longer has (issue #500)', async () => {
+    const server = ctx.app.getHttpServer();
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const total = 2 + 2 + 1 + 4 + 2 + 2 + 1;
+
+    const first = await installOpen5e(server, dm, { source: 'open5e', url: fake.baseUrl });
+    expect(first.status).toBe('completed');
+    expect(first.pack.entryCount).toBe(total);
+
+    // An entry a previous import landed that this (complete) manifest no longer contains —
+    // i.e. genuinely retracted upstream, or the old half of a slug rename.
+    const now = new Date().toISOString();
+    const [stale] = db.insert(ruleEntries)
+      .values({
+        packId: first.pack.id,
+        slug: 'srd-retracted-spell',
+        name: 'Retracted Spell',
+        type: 'spell',
+        summary: 'Upstream pulled this.',
+        body: 'Gone from the source.',
+        dataJson: '{}',
+        source: 'SRD',
+        license: 'CC-BY-4.0',
+        attribution: '',
+        author: '',
+        sourceUrl: '',
+        iconSlug: '',
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning()
+      .all();
+
+    const second = await installOpen5e(server, dm, { source: 'open5e', url: fake.baseUrl });
+    expect(second.status).toBe('completed');
+    expect(second.outcome).toBe('updated');
+    expect(second.removed).toBe(1);
+    expect(second.preview.removed).toBe(1);
+    expect(second.pack.entryCount).toBe(total);
+
+    expect(db.select().from(ruleEntries).where(eq(ruleEntries.id, stale.id)).all()).toHaveLength(0);
+
+    await request(server).delete(`/api/v1/rules/packs/${second.pack.id}`).set(dm);
   });
 
   it('install classes, races, and feats sections (issue #2) — mapped to class/race/feat entry types', async () => {
@@ -676,19 +769,128 @@ describe('rules / rule packs — generic upload (issue #19)', () => {
     expect(firstJob.outcome).toBe('created');
     expect(firstJob.pack.entryCount).toBe(3);
 
-    // Second upload: 2 of the 3 entries already exist; one is new.
+    // Second upload is deliberately NOT a superset: it keeps 2 of the 3 existing entries,
+    // adds one new one, and OMITS pf2e-fighter. An upload is additive — it carries no
+    // authority to delete, because an omission almost always means the operator uploaded a
+    // partial file, not that they intend a deletion (issue #500 is scoped to upstream
+    // source updates, where the fetched manifest IS authoritative). Asserting the omitted
+    // entry survives is what actually pins this test's name; a superset second upload would
+    // pass whether uploads were additive or full-replace.
     const secondRes = await uploadPack({
       ...pf2ePack,
       entries: [
-        ...pf2ePack.entries,
+        pf2ePack.entries[0], // pf2e-fireball
+        pf2ePack.entries[1], // pf2e-goblin
         { slug: 'pf2e-shield', name: 'Shield', type: 'item', summary: 'A sturdy shield.' },
       ],
     });
     const secondJob = await pollJob(server, uploader, secondRes.body.id);
     expect(secondJob.outcome).toBe('updated');
     expect(secondJob.added).toBe(1);
-    expect(secondJob.skippedExisting).toBe(3);
+    expect(secondJob.removed).toBe(0);
+    expect(secondJob.preview.removed).toBe(0);
+    expect(secondJob.skippedExisting).toBe(2);
+    expect(secondJob.pack.entryCount).toBe(4); // 3 original + shield — fighter was NOT dropped
+
+    const fighterRes = await request(server).get('/api/v1/rules/search').query({ q: 'fighter', pack: 'pf2e-srd' }).set(uploader);
+    expect(searchItems(fighterRes.body).some((e: { slug: string }) => e.slug === 'pf2e-fighter')).toBe(true);
+
+    await request(server).delete(`/api/v1/rules/packs/${secondJob.pack.id}`).set(uploader);
+  });
+
+  it('re-uploading applies upstream corrections in place, preserving overrides and auditing the re-license', async () => {
+    const server = ctx.app.getHttpServer();
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const slug = 'pf2e-sync-srd';
+    const initialPack = { ...pf2ePack, pack: { ...pf2ePack.pack, slug } };
+
+    const firstRes = await uploadPack(initialPack);
+    const firstJob = await pollJob(server, uploader, firstRes.body.id);
+    expect(firstJob.outcome).toBe('created');
+    expect(firstJob.pack.entryCount).toBe(3);
+
+    const fireballRes = await request(server).get('/api/v1/rules/search').query({ q: 'fireball', pack: slug }).set(uploader);
+    const fireball = searchItems(fireballRes.body).find((e: { slug: string }) => e.slug === 'pf2e-fireball');
+    expect(fireball).toBeTruthy();
+    const iconRes = await request(server)
+      .patch(`/api/v1/rules/entries/${fireball.id}`)
+      .set(uploader)
+      .send({ iconSlug: 'fire-ray' });
+    expect(iconRes.status).toBe(200);
+
+    const now = new Date().toISOString();
+    const [campaign] = db.insert(campaigns)
+      .values({
+        name: 'Rule Sync Campaign',
+        description: '',
+        status: 'active',
+        dangerLevel: 'low',
+        sessionCount: 0,
+        ruleSystem: slug,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning()
+      .all();
+
+    const secondRes = await uploadPack({
+      ...initialPack,
+      // Upstream re-licensed this release. The new license must land on the pack AND be
+      // recoverable from the audit trail (issue #500: audit provenance/license changes).
+      pack: { ...initialPack.pack, version: '2024.2', license: 'CC-BY-4.0' },
+      entries: [
+        {
+          slug: 'pf2e-fireball',
+          name: 'Fireball',
+          type: 'spell',
+          summary: 'A corrected roaring blast of flame.',
+          body: 'Corrected fire erupts from a point you choose.',
+        },
+        { slug: 'pf2e-goblin', name: 'Goblin Warrior', type: 'monster', summary: 'CR -1', dataJson: JSON.stringify({ hp: 6 }) },
+        { slug: 'pf2e-shield', name: 'Shield', type: 'item', summary: 'A sturdy shield.' },
+      ],
+    });
+    const secondJob = await pollJob(server, uploader, secondRes.body.id);
+    expect(secondJob.outcome).toBe('updated');
+    expect(secondJob.added).toBe(1);
+    // Fireball changed its text; Goblin's text is identical but the pack re-license changes
+    // its INHERITED license, which is part of the entry's provenance and so a real change.
+    // pf2e-fighter is omitted from this upload and must survive — uploads are additive.
+    expect(secondJob.changed).toBe(2);
+    expect(secondJob.removed).toBe(0);
+    expect(secondJob.skippedExisting).toBe(2);
+    expect(secondJob.preview).toMatchObject({ added: 1, changed: 2, removed: 0, unchanged: 0, sourceVersion: '2024.2' });
+    expect(secondJob.preview.sourceHash).toMatch(/^[a-f0-9]{64}$/);
     expect(secondJob.pack.entryCount).toBe(4);
+    expect(secondJob.pack.version).toBe('2024.2');
+
+    const refreshedRes = await request(server).get('/api/v1/rules/search').query({ q: 'corrected roaring', pack: slug }).set(uploader);
+    const refreshed = searchItems(refreshedRes.body).find((e: { slug: string }) => e.slug === 'pf2e-fireball');
+    expect(refreshed.id).toBe(fireball.id);
+    expect(refreshed.iconSlug).toBe('fire-ray');
+    expect(refreshed.summary).toBe('A corrected roaring blast of flame.');
+
+    const keptRes = await request(server).get('/api/v1/rules/search').query({ q: 'fighter', pack: slug }).set(uploader);
+    expect(searchItems(keptRes.body).some((e: { slug: string }) => e.slug === 'pf2e-fighter')).toBe(true);
+    const addedRes = await request(server).get('/api/v1/rules/search').query({ q: 'shield', pack: slug }).set(uploader);
+    expect(searchItems(addedRes.body).some((e: { slug: string }) => e.slug === 'pf2e-shield')).toBe(true);
+
+    // The re-license reaches the entries that inherit it, not just the pack row.
+    const goblinRes = await request(server).get('/api/v1/rules/search').query({ q: 'goblin', pack: slug }).set(uploader);
+    const goblin = searchItems(goblinRes.body).find((e: { slug: string }) => e.slug === 'pf2e-goblin');
+    expect(goblin.license).toBe('CC-BY-4.0');
+
+    const [campaignAfterSync] = db.select().from(campaigns).where(eq(campaigns.id, campaign.id)).all();
+    expect(campaignAfterSync.ruleSystem).toBe(slug);
+
+    const auditRows = db.select().from(auditLog).where(eq(auditLog.entityId, secondJob.pack.id)).all();
+    const updateAudit = auditRows.find((row) => row.detail.includes('+1 ~2 -0') && row.detail.includes('manifest='));
+    expect(updateAudit?.detail).toContain('source=https://example.com/pf2e');
+    expect(updateAudit?.detail).toContain('version=2024.2');
+    // The re-license is recorded as an explicit before->after, not just left on the pack row.
+    expect(updateAudit?.detail).toContain('license:"ORC License"->"CC-BY-4.0"');
+    expect(updateAudit?.detail).toContain('version:"2024.1"->"2024.2"');
+    expect(secondJob.pack.license).toBe('CC-BY-4.0');
 
     await request(server).delete(`/api/v1/rules/packs/${secondJob.pack.id}`).set(uploader);
   });
@@ -1035,6 +1237,57 @@ describe('rules / rule packs — Open5e importer hardening (e2e, fake server wit
 
     await request(server).delete(`/api/v1/rules/packs/${job.pack.id}`).set(hardeningDm);
   });
+
+  // Issue #500 guard: an update deletes installed entries that are absent from the fetched
+  // manifest, so it must first be sure the fetch IS the complete upstream set. This fake
+  // reproduces the two ways a section comes back short without erroring — a skipped
+  // malformed row and a refused cross-origin `next` link. Treating that truncation as
+  // "upstream deleted these" would destroy installed content and null out the combatants
+  // pointing at it, which is the pack corruption #500 exists to prevent.
+  it('an incomplete fetch (skipped rows / refused pagination) never removes installed entries (issue #500)', async () => {
+    const server = ctx.app.getHttpServer();
+    const db = ctx.app.get<DrizzleDb>(DB);
+
+    const first = await installOpen5e(server, hardeningDm, { source: 'open5e', url: fake.baseUrl });
+    expect(first.status).toBe('completed');
+    expect(first.pack.entryCount).toBe(1); // only the one well-formed spell survives the fake
+
+    // Stand in for an entry a previous, complete import landed — one this truncated fetch
+    // cannot see. It must survive the update rather than be reported as removed upstream.
+    const now = new Date().toISOString();
+    const [survivor] = db.insert(ruleEntries)
+      .values({
+        packId: first.pack.id,
+        slug: 'srd-lightning-bolt',
+        name: 'Lightning Bolt',
+        type: 'spell',
+        summary: 'From an earlier complete import.',
+        body: 'A stroke of lightning.',
+        dataJson: '{}',
+        source: 'SRD',
+        license: 'CC-BY-4.0',
+        attribution: '',
+        author: '',
+        sourceUrl: '',
+        iconSlug: '',
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning()
+      .all();
+
+    const second = await installOpen5e(server, hardeningDm, { source: 'open5e', url: fake.baseUrl });
+    expect(second.status).toBe('completed');
+    expect(second.outcome).toBe('updated');
+    expect(second.removed).toBe(0);
+    expect(second.preview.removed).toBe(0);
+
+    const stillThere = db.select().from(ruleEntries).where(eq(ruleEntries.id, survivor.id)).all();
+    expect(stillThere).toHaveLength(1);
+    expect(stillThere[0].name).toBe('Lightning Bolt');
+
+    await request(server).delete(`/api/v1/rules/packs/${second.pack.id}`).set(hardeningDm);
+  });
 });
 
 /**
@@ -1124,6 +1377,174 @@ describe('rules / rule packs — incremental install (e2e, fake Open5e server)',
     expect(reinstallConditions.added).toBe(0);
     expect(reinstallConditions.skippedExisting).toBe(4);
     expect(reinstallConditions.pack.entryCount).toBe(6); // unchanged by the no-op reinstall
+
+    await request(server).delete(`/api/v1/rules/packs/${packId}`).set(dmHeaders);
+  });
+});
+
+/**
+ * Issue #500 follow-up: the update path rewrites the pack row's provenance columns from the
+ * incoming manifest, but that manifest only covers the sections fetched by THIS call — and
+ * the admin UI's "Add sections to <pack>" flow makes partial adds a first-class action. A
+ * partial add must NOT narrow the pack's license/source onto the newly-fetched sections:
+ * pack.license is the documented fallback for entries whose own license is blank, the label
+ * the AI source line prints, and what compendium export records as a dependency's license,
+ * so narrowing it silently mis-licenses every retained entry.
+ *
+ * A COMPLETE re-import is the opposite case and must still move (and audit) provenance —
+ * that's the #500 behaviour this must not regress.
+ */
+describe('rules / rule packs — a partial section add must not narrow pack provenance (issue #500)', () => {
+  let ctx: TestAppContext;
+  let origin: FakeOpen5e;
+  let mirror: FakeOpen5e;
+  const dmHeaders = { 'x-dev-role': 'dm', 'x-dev-user': 'provenance-dm' };
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    // Two upstreams serving the same mixed-license catalogue on different origins, so the
+    // second install varies BOTH the license set and the sourceUrl.
+    origin = await startFakeOpen5eMixedLicense();
+    mirror = await startFakeOpen5eMixedLicense();
+  });
+
+  afterAll(async () => {
+    await origin.close();
+    await mirror.close();
+    await closeTestApp(ctx);
+  });
+
+  it('adding a differently-licensed section keeps the pack license/source covering the first section', async () => {
+    const server = ctx.app.getHttpServer();
+
+    // 1. Install ONLY spells, which this upstream serves under the OGL SRD 5.1 document.
+    const spellsJob = await installOpen5e(server, dmHeaders, { source: 'open5e', url: origin.baseUrl, sections: ['spells'] });
+    expect(spellsJob.outcome).toBe('created');
+    expect(spellsJob.pack.license).toBe('Open Game License v1.0a');
+    expect(spellsJob.pack.sourceUrl).toBe(origin.baseUrl);
+    const packId = spellsJob.pack.id;
+
+    // 2. Later, add ONLY monsters — CC-BY content, fetched from a mirror. Before the fix the
+    //    pack row was rewritten wholesale from this monsters-only manifest: license became
+    //    "Creative Commons Attribution 4.0" and sourceUrl became the mirror, dropping the OGL
+    //    terms that still govern the retained spells.
+    const monstersJob = await installOpen5e(server, dmHeaders, { source: 'open5e', url: mirror.baseUrl, sections: ['monsters'] });
+    expect(monstersJob.outcome).toBe('updated');
+    expect(monstersJob.pack.id).toBe(packId);
+    expect(monstersJob.added).toBe(2);
+    expect(monstersJob.removed).toBe(0);
+
+    // The pack label still COVERS the retained spells, and now also covers the new monsters.
+    expect(monstersJob.pack.license).toContain('Open Game License v1.0a');
+    expect(monstersJob.pack.license).toContain('Creative Commons Attribution 4.0');
+    // Name + source stay on the pack's established provenance — a partial add is not a
+    // re-homing of the pack.
+    expect(monstersJob.pack.sourceUrl).toBe(origin.baseUrl);
+    expect(monstersJob.pack.name).toBe('Open5e SRD');
+    // ...but the counters that describe THIS install still move.
+    expect(monstersJob.pack.entryCount).toBe(2 + 2);
+
+    // The retained spells keep their own OGL license, and the pack they inherit from agrees.
+    const spellRes = await request(server).get('/api/v1/rules/search').query({ q: 'fireball', type: 'spell' }).set(dmHeaders);
+    const fireball = searchItems(spellRes.body).find((e: { name: string }) => e.name === 'Fireball');
+    expect(fireball.license).toBe('Open Game License v1.0a');
+
+    // 3. A COMPLETE re-import (every section, nothing skipped or truncated) IS authoritative:
+    //    provenance moves to the mirror and the change is audited (issue #500's requirement).
+    const fullJob = await installOpen5e(server, dmHeaders, { source: 'open5e', url: mirror.baseUrl });
+    expect(fullJob.outcome).toBe('updated');
+    expect(fullJob.pack.sourceUrl).toBe(mirror.baseUrl);
+    expect(fullJob.pack.license).toContain('Open Game License v1.0a');
+    expect(fullJob.pack.license).toContain('Creative Commons Attribution 4.0');
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const auditDetails = db
+      .select()
+      .from(auditLog)
+      .where(eq(auditLog.entityId, packId))
+      .all()
+      .map((row) => row.detail);
+    // The complete re-import audits the re-homing...
+    expect(auditDetails.some((d) => d.includes(`sourceUrl:"${origin.baseUrl}"->"${mirror.baseUrl}"`))).toBe(true);
+    // ...and the partial add records the license UNION it actually applied while reporting no
+    // name/source change, because it deliberately preserved those. The audit must describe the
+    // pack row as it now stands, never a rewrite the row didn't take.
+    const partialAudit = auditDetails.find((d) => d.includes('+2 ~0 -0'));
+    expect(partialAudit).toBeDefined();
+    expect(partialAudit).toContain('license:"Open Game License v1.0a"->"Open Game License v1.0a, Creative Commons Attribution 4.0"');
+    expect(partialAudit).not.toContain('sourceUrl:"');
+    expect(partialAudit).not.toContain('name:"');
+
+    await request(server).delete(`/api/v1/rules/packs/${packId}`).set(dmHeaders);
+  });
+
+  /**
+   * The update runs in one synchronous better-sqlite3 transaction and is retried once if it
+   * loses a UNIQUE race. The losing attempt rolls back, but the WINNER committed — so the retry
+   * has to recompute the pack's provenance from freshly committed state. Deriving it from the
+   * snapshot taken before the first attempt would union against a stale license and silently
+   * overwrite the winner's terms, which is the exact failure this code exists to prevent.
+   *
+   * better-sqlite3 is synchronous, so a genuine second writer cannot commit midway through our
+   * transaction from this thread. The interleaving is staged instead: the first transaction
+   * attempt commits a competing license change out-of-band and then throws the UNIQUE error,
+   * leaving the database in precisely the state the retry would find in production.
+   */
+  it('a unique-constraint retry recomputes provenance from freshly committed state, not a stale snapshot', async () => {
+    const server = ctx.app.getHttpServer();
+    const db = ctx.app.get<DrizzleDb>(DB);
+
+    const first = await installOpen5e(server, dmHeaders, { source: 'open5e', url: origin.baseUrl, sections: ['spells'] });
+    const packId = first.pack.id;
+    expect(first.pack.license).toBe('Open Game License v1.0a');
+
+    // The injected DB is a get-only Proxy that forwards to the live orm (DbHolder swaps the
+    // handle out under a restore), so the stub has to be installed on the orm behind it —
+    // assigning through the proxy would write a property the get trap never consults.
+    const orm = (ctx.app.get<DbHolder>(DB_HOLDER) as unknown as { orm: DrizzleDb }).orm;
+    const original = Object.getOwnPropertyDescriptor(orm, 'transaction');
+    const realTransaction = orm.transaction.bind(orm);
+    let attempts = 0;
+    (orm as unknown as { transaction: unknown }).transaction = (fn: never) => {
+      attempts += 1;
+      if (attempts === 1) {
+        // A competing writer commits a license correction, then our attempt loses the race.
+        db.update(rulePacks).set({ license: 'ORC License' }).where(eq(rulePacks.id, packId)).run();
+        throw Object.assign(
+          new Error('UNIQUE constraint failed: rule_entries.pack_id, rule_entries.type, rule_entries.slug'),
+          { code: 'SQLITE_CONSTRAINT_UNIQUE' },
+        );
+      }
+      return realTransaction(fn);
+    };
+
+    try {
+      const second = await installOpen5e(server, dmHeaders, { source: 'open5e', url: mirror.baseUrl, sections: ['monsters'] });
+      expect(attempts).toBe(2); // lost once, retried once
+      expect(second.outcome).toBe('updated');
+      expect(second.added).toBe(2);
+      // The retry unions against what the winner COMMITTED. A stale snapshot would have
+      // produced "Open Game License v1.0a, Creative Commons Attribution 4.0", throwing the
+      // competing writer's ORC term away.
+      expect(second.pack.license).toContain('ORC License');
+      expect(second.pack.license).toContain('Creative Commons Attribution 4.0');
+      expect(second.pack.license).not.toContain('Open Game License v1.0a');
+
+      // The audit trail diffs against the row the committing attempt actually found, so it
+      // reports the real before→after rather than one anchored to the pre-race snapshot.
+      const auditDetails = db
+        .select()
+        .from(auditLog)
+        .where(eq(auditLog.entityId, packId))
+        .all()
+        .map((row) => row.detail);
+      expect(
+        auditDetails.some((d) => d.includes('license:"ORC License"->"ORC License, Creative Commons Attribution 4.0"')),
+      ).toBe(true);
+    } finally {
+      if (original) Object.defineProperty(orm, 'transaction', original);
+      else delete (orm as unknown as { transaction?: unknown }).transaction;
+    }
 
     await request(server).delete(`/api/v1/rules/packs/${packId}`).set(dmHeaders);
   });
@@ -1577,6 +1998,68 @@ describe('rules / rule packs — sibling importer install wiring (e2e, fake upst
       expect(typeof bySource[s].note).toBe('string');
       expect(bySource[s].note.length).toBeGreaterThan(0);
       expect(typeof bySource[s].license).toBe('string');
+    }
+  });
+});
+
+/**
+ * Issue #500's removal half deletes installed entries absent from a "complete" fetch. That
+ * inference is only sound if the importer cannot LOSE a real row without saying so, and the
+ * 13th Age importer can: it parses HTML, and parseMonster returns null both for a genuine
+ * prose heading and for a monster whose statblock markup drifted. collect() skips a null with
+ * a bare `continue` that doesn't increment skippedCount, so a drifted monster disappears from
+ * a manifest whose completeness signals all still read clean.
+ *
+ * Every gate in manifestIsComplete is deliberately satisfied here — both sections requested,
+ * nothing counted as skipped, nothing truncated, everything far under the cap — so the only
+ * thing standing between the drift and a deleted monster is the source-level opt-out.
+ */
+describe('rules / rule packs — a source that can silently drop rows never prunes (issue #500)', () => {
+  let ctx: TestAppContext;
+  const dmHeaders = { 'x-dev-role': 'dm', 'x-dev-user': 'drift-dm' };
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('a drifted 13th Age statblock does not delete the installed monster', async () => {
+    const server = ctx.app.getHttpServer();
+    const { startFakeArchmageDrifting } = await import('./fake-archmage');
+    const fake = await startFakeArchmageDrifting();
+    try {
+      const sections = ['monsters', 'conditions'];
+      const first = await installOpen5e(server, dmHeaders, { source: 'archmage', url: fake.baseUrl, sections });
+      expect(first.outcome).toBe('created');
+      expect(first.pack.entryCount).toBe(2 + 3); // Bear + Dire Bear, and 3 conditions
+      const packId = first.pack.id;
+
+      // Upstream re-themes its statblock tables: Dire Bear's defence labels are spelled out,
+      // so parseMonster no longer recognises it. The monster is still on the page.
+      fake.drift();
+
+      const second = await installOpen5e(server, dmHeaders, { source: 'archmage', url: fake.baseUrl, sections });
+      expect(second.outcome).toBe('updated');
+      // The re-import genuinely did not see Dire Bear...
+      expect(second.added).toBe(0);
+      // ...and must not conclude it was removed upstream.
+      expect(second.removed).toBe(0);
+      expect(second.pack.entryCount).toBe(5);
+
+      const search = await request(server).get('/api/v1/rules/search').query({ q: 'dire bear', type: 'monster' }).set(dmHeaders);
+      expect(searchItems(search.body).some((e: { name: string }) => e.name === 'Dire Bear')).toBe(true);
+
+      // Bear still parses, so the drift really was partial — this is not a fetch that failed
+      // wholesale and got rejected before reaching the sync.
+      const bear = await request(server).get('/api/v1/rules/search').query({ q: 'bear', type: 'monster' }).set(dmHeaders);
+      expect(searchItems(bear.body).some((e: { name: string }) => e.name === 'Bear')).toBe(true);
+
+      await request(server).delete(`/api/v1/rules/packs/${packId}`).set(dmHeaders);
+    } finally {
+      await fake.close();
     }
   });
 });

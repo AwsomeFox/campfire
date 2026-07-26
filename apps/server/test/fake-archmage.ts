@@ -105,10 +105,70 @@ const COMBAT_HTML = `<!doctype html><html><body>
 </div>
 </body></html>`;
 
+/**
+ * The Dire Bear statblock after an upstream markup drift: the defence labels cell now spells
+ * the names out ("Armor Class" / "Physical Defense" / …) instead of the `AC PD MD HP`
+ * abbreviations parseMonster requires. Everything else about the block is unchanged and the
+ * monster is still very much present on the page — this is the shape of change a CMS
+ * re-theme produces. parseMonster returns null for it, which is indistinguishable from the
+ * null it returns for a genuine prose heading, so the entry vanishes from the manifest with
+ * skippedCount still 0. Bear is left intact so the drift is partial, as a real one would be.
+ */
+const DRIFTED_MONSTERS_HTML = MONSTERS_HTML.replace(
+  `<td>
+<p><b>AC</b></p>
+<p><b>PD</b></p>
+<p><b>MD</b></p>
+<p><b>HP</b></p>
+</td>
+<td>
+<p><b>19</b></p>`,
+  `<td>
+<p><b>Armor Class</b></p>
+<p><b>Physical Defense</b></p>
+<p><b>Mental Defense</b></p>
+<p><b>Hit Points</b></p>
+</td>
+<td>
+<p><b>19</b></p>`,
+);
+
 export interface FakeArchmage {
   baseUrl: string;
   server: Server;
   close(): Promise<void>;
+}
+
+/** A fake whose monsters page can be switched to drifted markup partway through a test. */
+export interface FakeArchmageDrifting extends FakeArchmage {
+  /** Switch /monsters/ to the drifted markup, so Dire Bear stops parsing. */
+  drift(): void;
+}
+
+export async function startFakeArchmageDrifting(): Promise<FakeArchmageDrifting> {
+  const app = express();
+  let drifted = false;
+  app.get('/monsters/', (_req, res) => res.type('html').send(drifted ? DRIFTED_MONSTERS_HTML : MONSTERS_HTML));
+  app.get('/combat-rules/', (_req, res) => res.type('html').send(COMBAT_HTML));
+
+  const server: Server = await new Promise((resolve) => {
+    const s = app.listen(0, () => resolve(s));
+  });
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('failed to bind fake 13th Age server');
+
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    server,
+    drift() {
+      drifted = true;
+    },
+    close() {
+      return new Promise((resolve, reject) => {
+        server.close((err) => (err ? reject(err) : resolve()));
+      });
+    },
+  };
 }
 
 export async function startFakeArchmage(): Promise<FakeArchmage> {

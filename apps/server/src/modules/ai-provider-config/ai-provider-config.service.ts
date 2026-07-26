@@ -561,14 +561,24 @@ export class AiProviderConfigService {
    * decrypted config the model was validated against (no second resolve that could
    * diverge). Throws `BadRequestException` when the resolved model is not on the
    * (non-empty) server allowlist. `null` when no provider is configured at all.
+   *
+   * `resolveDns` (default true) controls ONLY the rebinding half of the baseUrl gate; the
+   * literal host policy always runs. Callers that will actually CONTACT the provider leave
+   * it on. Pure REPORTING callers — the #519 readiness GET, which a DM's settings UI may
+   * poll and which sends nothing outbound — pass false, so a read can never amplify into a
+   * DNS lookup per poll against the host's resolver. That is safe because this resolution
+   * is not the security boundary: `createAiProviderGuardedFetch` re-resolves and PINS the
+   * addresses on every outbound request, so a rebind between here and the request is caught
+   * there regardless of what this pre-flight saw.
    */
   async resolveExecutionModel(
     campaignId: number,
+    opts: { resolveDns?: boolean } = {},
   ): Promise<{ model: string; config: AiProviderConfig } | null> {
     const config = await this.resolveEffectiveConfig(campaignId);
     if (!config) return null;
     // Fail closed on a previously-stored blocked host (issues #1064, #570).
-    await this.assertBaseUrlPermitted(config.baseUrl, true);
+    await this.assertBaseUrlPermitted(config.baseUrl, opts.resolveDns ?? true);
     const allow = await this.getServerAllowedModels();
     if (allow.length > 0 && !allow.includes(config.model)) {
       throw new BadRequestException(
