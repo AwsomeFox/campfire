@@ -20,6 +20,7 @@ import { api, ApiError, API } from '../../lib/api';
 import { SkeletonCard } from '../../components/ui';
 import { AI_DM_BUDGET_INPUT_ID, AI_DM_BUDGET_SECTION_ID } from './aiDmBudgetIds';
 import { ProviderForm } from './ProviderForm';
+import { TermHelp } from '../../components/TermHelp';
 
 const AI_DM_INSTRUCTIONS_SECTION_ID = 'ai-dm-instructions';
 const AI_DM_INSTRUCTIONS_INPUT_ID = 'ai-dm-instructions-input';
@@ -278,7 +279,11 @@ function ModeSection({
               style={{ marginTop: 2 }}
             />
             <span className="flex flex-col">
-              <span style={{ fontSize: 13, fontWeight: 600 }}>{m.label}</span>
+              <span className="inline-flex items-center gap-1 flex-wrap" style={{ fontSize: 13, fontWeight: 600 }}>
+                {m.label}
+                {m.value === 'co_dm' && <TermHelp termId="coDm" />}
+                {m.value === 'driver' && <TermHelp termId="driver" />}
+              </span>
               <span className="text-muted" style={{ fontSize: 11.5 }}>{m.blurb}</span>
             </span>
           </label>

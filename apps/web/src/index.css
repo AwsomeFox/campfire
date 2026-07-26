@@ -256,6 +256,111 @@ body {
 .text-disabled { color: var(--color-text-disabled); }
 .text-decorative { color: var(--color-text-decorative); }
 
+.cf-term-help {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+}
+
+.cf-term-help__trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--color-divider);
+  background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+  color: var(--color-accent-200);
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.cf-term-help__trigger:hover,
+.cf-term-help__trigger:focus-visible {
+  background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+  border-color: color-mix(in srgb, var(--color-accent) 55%, var(--color-divider));
+}
+
+.cf-term-help__panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  width: min(280px, calc(100vw - 24px));
+  z-index: var(--cf-layer-dialog);
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 12px;
+  text-align: left;
+  white-space: normal;
+}
+
+.cf-term-help--start .cf-term-help__panel {
+  left: 0;
+}
+
+.cf-term-help--end .cf-term-help__panel {
+  right: 0;
+}
+
+.cf-term-help__title {
+  color: #fff;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.cf-term-help__body {
+  color: var(--color-neutral-300);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.cf-term-help__meta {
+  display: grid;
+  gap: 3px;
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.cf-term-help__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 2px;
+}
+
+.cf-term-help__link,
+.cf-term-help__dismiss {
+  color: var(--color-accent-200);
+  font-size: 12px;
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.cf-term-help__dismiss {
+  border: 0;
+  background: transparent;
+  padding: 0;
+}
+
+@media (max-width: 40rem) {
+  .cf-term-help__panel {
+    position: fixed;
+    inset-inline: 12px;
+    top: 72px;
+    width: auto;
+    max-height: calc(100dvh - 96px);
+    overflow: auto;
+  }
+}
+
 
 /* Login information architecture (#862): one source order at every size —
    compact value statement, applicable authentication, then the full pitch. */

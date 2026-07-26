@@ -11,6 +11,7 @@ import { CampaignMetadataFields, isCampaignMetadataDirty } from '../../component
 import { AiModeBadge } from '../ai-dm/AiModeBadge';
 import { GameIcon } from '../../components/GameIcon';
 import { CampaignCover } from '../../components/CampaignCover';
+import { TermHelp } from '../../components/TermHelp';
 
 const DANGER_LABEL: Record<DangerLevel, string> = {
   low: 'Low',
@@ -167,10 +168,11 @@ export function StatusHeader({
               to={`/c/${campaignId}/screen`}
               className="btn btn-ghost"
               style={{ fontSize: 12, textDecoration: 'none' }}
-              title="Open the player display — a secret-free view to cast to a TV"
+              aria-label="Open Cast player or TV display"
             >
               <GameIcon slug="tv" size={14} className="inline align-text-bottom mr-1" />Cast
             </Link>
+            <TermHelp termId="cast" />
             {canDmWrite && (
             <Btn ghost style={{ fontSize: 12 }} title="DM only" onClick={startEdit}>
               ✎ Edit
