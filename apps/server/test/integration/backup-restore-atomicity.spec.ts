@@ -7,6 +7,8 @@ import { AuditService } from '../../src/modules/audit/audit.service';
 import { BackupService, RESTORE_CONFIRM_TOKEN } from '../../src/modules/backup/backup.service';
 import { AiProviderConfigService } from '../../src/modules/ai-provider-config/ai-provider-config.service';
 import { AttachmentsService } from '../../src/modules/attachments/attachments.service';
+// Issue #604: AttachmentsService now delegates responsive derivative generation.
+import { AttachmentDerivativesService } from '../../src/modules/attachments/attachment-derivatives.service';
 import { FsDeletionService } from '../../src/modules/attachments/fs-deletion.service';
 import {
   __setRestoreApplyFaultInjector,
@@ -82,7 +84,7 @@ describe('backup restore atomicity (#497, real SQLite + filesystem)', () => {
       holder,
       audit,
       new SettingsService(db),
-      new AttachmentsService(db, audit, new FsDeletionService(db, audit)),
+      new AttachmentsService(db, audit, new FsDeletionService(db, audit), new AttachmentDerivativesService(db)),
       aiProviderConfig,
     );
   }

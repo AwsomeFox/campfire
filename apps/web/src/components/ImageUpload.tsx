@@ -15,7 +15,8 @@
  * object URL to avoid a blob leak. See imageUploadState.ts for the pure model.
  */
 import { useCallback, useEffect, useReducer, useRef, type DragEvent } from 'react';
-import type { Attachment, AttachmentKind } from '@campfire/schema';
+import type { Attachment, AttachmentDerivativeManifest, AttachmentKind } from '@campfire/schema';
+import { buildSrcSet } from './attachmentSrcSet';
 import { API, ApiError } from '../lib/api';
 import { noteUnauthorizedResponse } from '../lib/sessionExpiry';
 import { Btn } from './ui';
@@ -113,6 +114,33 @@ export function attachmentFileUrl(
 export function encounterMapUrl(encounterId: number, revision: string): string {
   return `${API}/encounters/${encounterId}/map?revision=${encodeURIComponent(revision)}`;
 }
+
+/**
+ * Responsive `srcset` for a plain attachment (issue #604) — the dashboard world map.
+ *
+ * The `w` descriptors come from the manifest's REAL pixel widths, never from a rung's
+ * max-dim cap: a 4000×1000 map's `md` rung is 1280×320, so "1280w" would be right —
+ * but a 1000×4000 map's `md` rung is 320×1280, and claiming 1280w there would make
+ * the browser pick a rung four times too small for the slot.
+ *
+ * Returns undefined when there is nothing useful to offer (no ready rung yet, or
+ * every rung was skipped because the source is already small) — pass it straight to
+ * `srcSet` and React omits the attribute, leaving plain `src` behaviour.
+ *
+ * The descriptor maths itself lives in the pure ./attachmentSrcSet module so it can
+ * be unit-tested without importing this component file; only the URL shape (which
+ * needs attachmentFileUrl's `?v=` handling) is supplied here.
+ */
+export function attachmentSrcSet(
+  attachmentId: number,
+  manifest: AttachmentDerivativeManifest | null,
+  version?: { hidden: boolean; updatedAt: string },
+): string | undefined {
+  return buildSrcSet(manifest, (variant) => attachmentFileUrl(attachmentId, version, { size: variant }));
+}
+
+/** Re-exported so map call sites keep importing every URL helper from one place. */
+export { encounterMapSrcSet } from './attachmentSrcSet';
 
 /**
  * Cast-capability map endpoint (issue #547). An <img> cannot send an Authorization

@@ -83,6 +83,15 @@
       "panelLabel": "AI Driver controls",
       "transcriptLabel": "Driver transcript",
       "openTable": "Open full table"
+    },
+    "map": {
+      "derivatives": {
+        "processing": "Preparing faster map sizes — showing the full-size board for now.",
+        "stale": "Showing an optimised copy made before this map last changed.",
+        "failed": "Couldn't prepare optimised sizes for this map — it is still shown at full size.",
+        "retry": "Refresh sizes",
+        "retrying": "Refreshing…"
+      }
     }
   }
 }

@@ -101,7 +101,9 @@ import { CombatantStatblockEditor } from './CombatantStatblockEditor';
 import { StatBlock, hasMonsterStatblock } from '../../components/StatBlock';
 import { CharacterStatCard } from '../../components/CharacterStatCard';
 import { Card, Btn, TextInput, HpBar, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
-import { ImageUpload, MapUploadButton, castEncounterMapUrl, encounterMapUrl, uploadAttachment } from '../../components/ImageUpload';
+import { ImageUpload, MapUploadButton, castEncounterMapUrl, encounterMapSrcSet, encounterMapUrl, uploadAttachment } from '../../components/ImageUpload';
+import { useDerivativeManifest } from '../../components/useAttachmentDerivatives';
+import { planEncounterMapResponsive } from '../../components/attachmentSrcSet';
 import { GetAMapPanel } from '../../components/GetAMapPanel';
 import { MapConceptGlossary, MapPurposePreview } from '../../components/mapOnboarding';
 import { NotFoundState } from '../../components/NotFoundState';
@@ -2960,6 +2962,30 @@ export function BattleMap({
       : castToken
         ? castEncounterMapUrl(castToken, encounter.id, encounter.updatedAt)
         : encounterMapUrl(encounter.id, encounter.updatedAt);
+  // Issue #604 — responsive battle map. The board used to load at full resolution on
+  // every device; the derivative ladder lets the browser pick a rung that fits the
+  // surface. Both the manifest and every srcset URL go through the ROLE-SAFE
+  // /encounters/:id/map route, never an attachment route, so the #463 fog boundary is
+  // untouched and players get responsive delivery too. `src` stays the full-size
+  // role-safe URL, so the board still renders while rungs process or if they failed.
+  //
+  // BOTH are disabled on a cast display (#547) — see planEncounterMapResponsive, which
+  // owns that rule as a single pure decision so the three things it gates (manifest
+  // fetch, retry, srcset) can never drift apart. In short: those URLs authenticate from
+  // the session COOKIE, so on a shared TV still holding the DM's cookie a srcset rung
+  // would be served the UNFOGGED SOURCE map — reintroducing precisely the leak the cast
+  // capability exists to close. A cast display keeps plain `src` through its capability
+  // URL and simply forgoes responsive rungs.
+  const mapResponsive = planEncounterMapResponsive({
+    encounterId: encounter.id,
+    mapAttachmentId: encounter.mapAttachmentId,
+    castToken,
+    canDmWrite: effectiveCanDmWrite,
+  });
+  const mapDerivatives = useDerivativeManifest(mapResponsive.manifestUrl, mapResponsive.retryUrl);
+  const mapSrcSet = mapResponsive.responsive
+    ? encounterMapSrcSet(encounter.id, encounter.updatedAt, mapDerivatives.manifest)
+    : undefined;
   // Issue #418: fog-redacted tokens keep null coords but set tokenHiddenByFog — do not
   // treat them as Unplaced (that offered a no-op place-at-center for the owner).
   const { placed, unplaced, hiddenByFog } = partitionMapTokens(encounter.combatants);
@@ -3899,6 +3925,38 @@ export function BattleMap({
 
       {mapImageUrl && (
         <>
+          {/* Derivative lifecycle for the battle map (issue #604). The board always
+              renders — this row only explains a heavy first load, flags a stale copy,
+              or reports a generation failure. Everyone sees the explanation; only a
+              DM-writer gets the regenerate button (it acts on the attachment). */}
+          {(mapDerivatives.processing || mapDerivatives.stale || mapDerivatives.error) && (
+            <div
+              data-testid="battle-map-derivative-status"
+              role="status"
+              className="text-muted"
+              style={{ padding: '8px 14px 0', fontSize: 'var(--type-meta)', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}
+            >
+              <span>
+                {mapDerivatives.error
+                  ? t('encounters:map.derivatives.failed')
+                  : mapDerivatives.processing
+                    ? t('encounters:map.derivatives.processing')
+                    : t('encounters:map.derivatives.stale')}
+              </span>
+              {effectiveCanDmWrite && (mapDerivatives.error || mapDerivatives.stale) && (
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  style={{ fontSize: 11, minHeight: 0, padding: '2px 8px' }}
+                  disabled={mapDerivatives.retrying}
+                  onClick={() => void mapDerivatives.retry()}
+                >
+                  {mapDerivatives.retrying ? t('encounters:map.derivatives.retrying') : t('encounters:map.derivatives.retry')}
+                </button>
+              )}
+            </div>
+          )}
+
           {/* Post-attach guidance (issue #409): after a generated map is attached it stays
               hidden (DM-only) with an aligned grid — walk the DM through the next steps so
               the map is table-ready. Dismissible; only shown right after an attach. */}
@@ -4497,6 +4555,8 @@ export function BattleMap({
             >
             <img
               src={mapImageUrl}
+              srcSet={mapSrcSet}
+              sizes={mapSrcSet ? '100vw' : undefined}
               alt="Battle map"
               className="absolute inset-0 w-full h-full object-contain"
               style={{ background: 'rgba(15,23,42,.4)' }}

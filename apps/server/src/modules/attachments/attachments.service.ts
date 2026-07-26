@@ -29,37 +29,52 @@ import { uploadsRoot } from './uploads-path';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { persistedFogConcealsPixels } from '../../common/fog';
-import { generatePngThumbnail } from './thumbnail';
 import { sanitizeAttachmentFilename } from './filename';
 import {
   ATTACHMENT_STATE_COMMITTED,
   ATTACHMENT_STATE_RESERVED,
 } from './attachment.constants';
+import {
+  ALLOWED_MIME_TO_EXT,
+  GENERATED_MIME_TO_EXT,
+  STAGE_SUFFIX,
+  attachmentFilePath,
+  derivativeFilePath,
+} from './attachment-paths';
+import {
+  AttachmentDerivativesService,
+  type DerivativeManifest,
+} from './attachment-derivatives.service';
+import {
+  DERIVATIVE_EXT,
+  DERIVATIVE_MIME,
+  DERIVATIVE_VARIANT_NAMES,
+  ImageLimitError,
+  isDerivableMime,
+  probeImageWithinLimits,
+  type ImageProbe,
+  type RequestedSize,
+} from './image-derivatives';
 
-/** image/png|jpeg|webp and application/pdf — matches the multer fileFilter in attachments.controller.ts. */
-export const ALLOWED_MIME_TO_EXT: Record<string, string> = {
-  'image/png': 'png',
-  'image/jpeg': 'jpg',
-  'image/webp': 'webp',
-  'application/pdf': 'pdf',
-};
 export const MAX_UPLOAD_BYTES = 32 * 1024 * 1024; // 32MB
 
 /**
- * Mime → extension for SERVER-GENERATED attachments only (issue #306). Kept separate
- * from the ALLOWED_MIME_TO_EXT upload allowlist above: uploads stay png/jpeg/webp
- * (raster, magic-byte sniffed), while the procedural map generator produces SVG whose
- * bytes the server itself authors (no untrusted upload, so no sniff needed). filePath()
- * consults both maps so a generated .svg map resolves to the right on-disk name.
+ * The mime→extension maps moved to the leaf module attachment-paths.ts (issue #604)
+ * so AttachmentDerivativesService — which AttachmentsService now depends on — can
+ * share them without a module cycle. Re-exported here unchanged because every
+ * existing importer (export, campaigns, diagnostics, attachment-copy, the
+ * controller) reads them from this module.
  */
-export const GENERATED_MIME_TO_EXT: Record<string, string> = {
-  'image/svg+xml': 'svg',
-};
+export { ALLOWED_MIME_TO_EXT, GENERATED_MIME_TO_EXT };
+
+/** `<id>.<variant>.png.stage` — a derivative write interrupted mid-flight (#604). */
+const DERIVATIVE_STAGE_RE = new RegExp(
+  `^\\d+\\.(${DERIVATIVE_VARIANT_NAMES.join('|')})\\.${DERIVATIVE_EXT}\\${STAGE_SUFFIX}$`,
+);
 
 const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const RESERVED = ATTACHMENT_STATE_RESERVED;
 const COMMITTED = ATTACHMENT_STATE_COMMITTED;
-const STAGE_SUFFIX = '.stage';
 
 export { ATTACHMENT_STATE_COMMITTED, ATTACHMENT_STATE_RESERVED } from './attachment.constants';
 
@@ -134,6 +149,13 @@ export class AttachmentsService implements OnApplicationBootstrap {
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
     private readonly fsDeletion: FsDeletionService,
+    /**
+     * Issue #604. Injected one-way (derivatives never import this service) so the
+     * O(pixels) work has a home that is not the request path. Every method used
+     * from here is either a plan/kick (returns immediately) or a single indexed
+     * SELECT (resolveBest / manifest).
+     */
+    private readonly derivatives: AttachmentDerivativesService,
   ) {}
 
   /**
@@ -200,13 +222,17 @@ export class AttachmentsService implements OnApplicationBootstrap {
 
   /** Absolute path a stored attachment's bytes live at, given its DB row. */
   filePath(row: { campaignId: number; id: number; mime: string }): string {
-    const ext = ALLOWED_MIME_TO_EXT[row.mime] ?? GENERATED_MIME_TO_EXT[row.mime] ?? 'bin';
-    return path.join(uploadsRoot(), String(row.campaignId), `${row.id}.${ext}`);
+    return attachmentFilePath(row);
   }
 
-  /** Absolute path a generated thumbnail (always PNG) is cached at on disk. */
-  private thumbPath(row: { campaignId: number; id: number }): string {
-    return path.join(uploadsRoot(), String(row.campaignId), `${row.id}.thumb.png`);
+  /**
+   * Absolute paths of every responsive derivative this attachment could own
+   * (issue #604). Used by delete/rollback so a removed attachment never strands
+   * its ladder on disk. Paths are returned whether or not the file exists — the
+   * deletion queue treats a missing path as an already-satisfied erasure.
+   */
+  private derivativePaths(row: { campaignId: number; id: number }): string[] {
+    return this.derivatives.derivativePathsFor(row);
   }
 
   /** Same-filesystem stage path so link(stage, final) + unlink(stage) can publish. */
@@ -266,33 +292,88 @@ export class AttachmentsService implements OnApplicationBootstrap {
   }
 
   /**
-   * Resolve the file to serve for a GET, honouring the `?size=thumb` variant.
-   * Returns the on-disk path plus the metadata needed to set response headers.
+   * Resolve the file to serve for a GET, honouring the `?size=` responsive
+   * variant (issue #604).
    *
-   * For `thumb`, a downscaled PNG is generated once and cached on disk next to the
-   * original. When a thumbnail can't be produced (source already small, or a
-   * non-PNG / unsupported PNG — see thumbnail.ts) the original bytes are served
-   * instead: correct, just without the byte savings for those formats.
+   * THIS METHOD NEVER DECODES AN IMAGE. Before #604 it called a synchronous PNG
+   * decoder on the request thread the first time a thumbnail was requested, and
+   * fell back to the multi-MB ORIGINAL for every format that decoder did not
+   * support — the two halves of the map-performance defect. Now it is a single
+   * indexed lookup against the durable `attachment_derivatives` ladder:
+   *
+   *   - a ready rung at (or below) the requested size wins;
+   *   - otherwise the ORIGINAL is served, and `derivative` reports why. That
+   *     fallback is a DOCUMENTED LAST RESORT for exactly three cases: the ladder
+   *     is still `pending` (first seconds after upload), every rung was `skipped`
+   *     because the source is already small, or generation `failed`. It is no
+   *     longer the default outcome for JPEG/WebP/SVG.
+   *
+   * The returned `derivative` field is echoed as the `X-Campfire-Derivative`
+   * response header so clients (and the e2e suite) can tell a real derivative
+   * from a fallback without inspecting pixels.
    */
   resolveFile(
     row: { campaignId: number; id: number; mime: string; filename: string; size: number },
-    variant: 'original' | 'thumb',
-  ): { path: string; mime: string; size: number; etag: string } {
+    variant: RequestedSize,
+  ): { path: string; mime: string; size: number; etag: string; derivative: string } {
     const originalPath = this.filePath(row);
 
-    if (variant === 'thumb' && row.mime.startsWith('image/')) {
-      const thumb = this.thumbPath(row);
-      if (!fs.existsSync(thumb)) {
-        const generated = generatePngThumbnail(fs.readFileSync(originalPath));
-        if (generated) fs.writeFileSync(thumb, generated);
+    if (variant !== 'original' && isDerivableMime(row.mime)) {
+      const best = this.derivatives.resolveBest(row.id, variant);
+      if (best) {
+        const derivativePath = derivativeFilePath(row, best.variant);
+        // Trust the row only as far as the bytes still exist: an operator-side
+        // `rm` or a half-restored volume must degrade to the original rather
+        // than 500 on a missing path inside the stream.
+        if (fs.existsSync(derivativePath)) {
+          return {
+            path: derivativePath,
+            mime: DERIVATIVE_MIME,
+            size: fs.statSync(derivativePath).size,
+            etag: this.etagForPath(derivativePath),
+            derivative: best.variant,
+          };
+        }
       }
-      if (fs.existsSync(thumb)) {
-        return { path: thumb, mime: 'image/png', size: fs.statSync(thumb).size, etag: this.etagForPath(thumb) };
-      }
-      // Fall through: no thumbnail available, serve the original.
     }
 
-    return { path: originalPath, mime: row.mime, size: row.size, etag: this.etagForPath(originalPath) };
+    return {
+      path: originalPath,
+      mime: row.mime,
+      size: row.size,
+      etag: this.etagForPath(originalPath),
+      derivative: variant === 'original' ? 'original' : 'original-fallback',
+    };
+  }
+
+  /**
+   * Responsive-delivery manifest for an attachment (issue #604): which rungs are
+   * ready (with their real pixel dimensions, so the client can emit an accurate
+   * `srcset`), which are still processing, and which failed. Also flags STALE
+   * rungs by comparing each rung's recorded source hash against the current
+   * bytes — see AttachmentDerivativesService.manifest for why that can happen.
+   */
+  derivativeManifest(row: { campaignId: number; id: number; mime: string }): DerivativeManifest {
+    let sourceEtag: string | undefined;
+    try {
+      // etagForPath is memoised per path, so this is a hash only on the first
+      // call for this attachment in this process — not per manifest request.
+      sourceEtag = this.etagForPath(this.filePath(row)).replaceAll('"', '');
+    } catch {
+      // Missing/unreadable original: staleness is simply unknown, and the
+      // manifest still reports pending/failed rungs honestly.
+      sourceEtag = undefined;
+    }
+    return this.derivatives.manifest(row.id, sourceEtag);
+  }
+
+  /**
+   * DM-triggered recovery for a failed/stale ladder (issue #604). Re-plans from
+   * the current source header and kicks the background drain; returns the fresh
+   * manifest so the UI can flip straight to "processing" without a poll.
+   */
+  async retryDerivatives(row: { campaignId: number; id: number; mime: string }): Promise<DerivativeManifest> {
+    return this.derivatives.retry(row);
   }
 
   async getRowOrThrow(id: number) {
@@ -485,6 +566,14 @@ export class AttachmentsService implements OnApplicationBootstrap {
       throw new BadRequestException('PDF uploads are only allowed for handout attachments (kind=image)');
     }
 
+    // Issue #604 — decompression-bomb defence, BEFORE anything commits to a
+    // decode. MAX_UPLOAD_BYTES does not bound pixels: a maximally-compressible
+    // PNG reaches gigapixels in a few hundred KB, and the old code would then
+    // inflate exactly that on a request thread the first time a thumbnail was
+    // asked for. probeImageWithinLimits reads only the container header, so this
+    // costs microseconds on the happy path and rejects the bomb outright.
+    const probe = await this.validateImageLimits(file.buffer, file.mimetype);
+
     return this.createAndPublish(
       campaignId,
       kind,
@@ -492,7 +581,32 @@ export class AttachmentsService implements OnApplicationBootstrap {
       user,
       role,
       'attachment.upload',
+      undefined,
+      probe,
     );
+  }
+
+  /**
+   * Enforce the #604 image caps for an UNTRUSTED upload. Returns the probe so the
+   * derivative planner does not repeat the header read, or undefined for a
+   * non-image (PDF) upload.
+   *
+   * Status mapping is deliberate: a bomb is "your payload is too large for us to
+   * process" (413, same family as the quota/size rejections a DM already
+   * understands), while a corrupt or absurdly-shaped image is a malformed request
+   * (400).
+   */
+  private async validateImageLimits(bytes: Buffer, mime: string): Promise<ImageProbe | undefined> {
+    if (!isDerivableMime(mime)) return undefined;
+    try {
+      return await probeImageWithinLimits(bytes);
+    } catch (err) {
+      if (err instanceof ImageLimitError) {
+        if (err.reason === 'pixels') throw new PayloadTooLargeException(err.message);
+        throw new BadRequestException(err.message);
+      }
+      throw err;
+    }
   }
 
   /**
@@ -518,6 +632,15 @@ export class AttachmentsService implements OnApplicationBootstrap {
     auditDetail?: string,
     auditAction: string = 'attachment.generate',
   ): Promise<Attachment> {
+    // Issue #604: "generated" does not always mean "authored by us". The curated
+    // external-map import (maps.service → 'map.import') routes an UNTRUSTED raster
+    // upload through here, so the same header-only bomb check the multipart path
+    // runs must apply. SVG is exempt: those bytes really are server-authored by the
+    // procedural generator, and a probe failure there would break map generation on
+    // a sharp build without SVG support rather than protect anything.
+    const probe =
+      file.mime === 'image/svg+xml' ? undefined : await this.validateImageLimits(file.bytes, file.mime);
+
     return this.createAndPublish(
       campaignId,
       kind,
@@ -526,6 +649,7 @@ export class AttachmentsService implements OnApplicationBootstrap {
       role,
       auditAction,
       auditDetail,
+      probe,
     );
   }
 
@@ -553,11 +677,19 @@ export class AttachmentsService implements OnApplicationBootstrap {
     role: Role,
     auditAction: string = 'attachment.upload',
     auditDetail?: string,
+    /** Header probe from upload validation, threaded through to avoid a re-read (#604). */
+    probe?: ImageProbe,
   ): Promise<Attachment> {
     const row = await this.reserveQuota(campaignId, kind, file, user);
     try {
       this.stageAndPublish(row, file.bytes);
       const committed = this.commitPublication(row, user, role, auditAction, auditDetail);
+      // Issue #604: plan the responsive ladder only AFTER the publication is
+      // committed, so an interrupted upload (rolled back, never resumed) cannot
+      // leave derivative rows pointing at bytes that no longer exist. Planning
+      // is a handful of INSERTs; the actual rendering happens on the background
+      // drain, so the upload response is not delayed by image work.
+      await this.planDerivativesQuietly(committed, probe);
       return toDomain(committed);
     } catch (err) {
       try {
@@ -570,6 +702,31 @@ export class AttachmentsService implements OnApplicationBootstrap {
         );
       }
       throw err;
+    }
+  }
+
+  /**
+   * Plan the responsive ladder for a just-committed attachment (issue #604).
+   *
+   * Failures here are logged, not propagated: the attachment IS published and its
+   * original is servable, so turning a planning hiccup into a failed upload would
+   * be strictly worse for the DM. The consequence is visible rather than hidden —
+   * the attachment's manifest reports `unsupported`/`failed`, the map surface
+   * shows its error state with a Retry, and the boot backfill re-adopts any
+   * attachment that ended up with no ladder at all.
+   */
+  private async planDerivativesQuietly(
+    row: { id: number; campaignId: number; mime: string },
+    probe?: ImageProbe,
+  ): Promise<void> {
+    try {
+      await this.derivatives.planForAttachment(row, probe);
+    } catch (err) {
+      this.logger.error(
+        `Could not plan responsive derivatives for attachment ${row.id}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
     }
   }
 
@@ -808,10 +965,19 @@ export class AttachmentsService implements OnApplicationBootstrap {
 
     const finalPath = this.filePath(row);
     const dir = path.dirname(finalPath);
-    for (const candidate of [this.stagePath(row), finalPath, this.thumbPath(row)]) {
+    // Issue #604: a rolled-back reservation never had derivatives planned (planning
+    // happens after commit), but a retried upload can reuse an id whose ladder
+    // files are still on disk from a previous life — scrub every rung's final and
+    // stage name so a stale derivative can never be served for new bytes.
+    const derivativeArtifacts = this.derivativePaths(row).flatMap((candidate) => [
+      candidate,
+      `${candidate}${STAGE_SUFFIX}`,
+    ]);
+    for (const candidate of [this.stagePath(row), finalPath, ...derivativeArtifacts]) {
       fs.rmSync(candidate, { force: true });
       this.etagCache.delete(candidate);
     }
+    this.derivatives.forgetAttachment(row.id);
     if (fs.existsSync(dir)) this.fsyncDirectory(dir);
     this.db
       .delete(attachments)
@@ -862,6 +1028,25 @@ export class AttachmentsService implements OnApplicationBootstrap {
       let removed = false;
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
         if (!entry.isFile()) continue;
+        // Issue #604: a derivative stage (`<id>.<variant>.png.stage`) is left by a
+        // crash mid-derivative-write. Unlike a publication stage it is NEVER
+        // resumable and never tied to a reservation — the ladder row is the durable
+        // record, and the drain simply regenerates — so it is always removed. Its
+        // two-dot name would otherwise slip past the single-dot publication pattern
+        // below and linger until an admin ran orphan cleanup.
+        if (DERIVATIVE_STAGE_RE.test(entry.name)) {
+          try {
+            fs.rmSync(path.join(dir, entry.name), { force: true });
+            removed = true;
+          } catch (err) {
+            this.logger.error(
+              `Could not remove staged derivative artifact ${path.join(dir, entry.name)}: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          }
+          continue;
+        }
         // Final names are `<id>.<ext>`; staged names are `<id>.<ext>.stage`.
         const match = /^(\d+)\.[^.]+\.stage$/.exec(entry.name);
         if (!match) continue;
@@ -923,11 +1108,16 @@ export class AttachmentsService implements OnApplicationBootstrap {
     await this.fsDeletion.auditRequested(auditCtx);
 
     const filePath = this.filePath(existing);
-    const thumbPath = this.thumbPath(existing);
+    // Issue #604: every responsive rung is an upload artifact too, so it goes
+    // through the SAME verified-erasure queue as the original rather than a
+    // best-effort unlink. The ladder rows themselves are dropped by the ON DELETE
+    // CASCADE on attachment_derivatives (belt-and-braces forgetAttachment below
+    // covers a DB whose FK enforcement is off).
+    const derivativePaths = this.derivativePaths(existing);
     // Reserve FS cleanup rows as `held` BEFORE metadata commit so a crash cannot
     // orphan bytes without a durable retry record — drain skips `held` until
     // metadata is gone (orchestrator / #727).
-    const planned = await this.fsDeletion.reserveUploadPaths([filePath, thumbPath], auditCtx);
+    const planned = await this.fsDeletion.reserveUploadPaths([filePath, ...derivativePaths], auditCtx);
 
     const portraitSuffix = `%/attachments/${id}/file`;
     this.db.transaction((tx) => {
@@ -942,8 +1132,9 @@ export class AttachmentsService implements OnApplicationBootstrap {
 
     await this.fsDeletion.auditMetadataComplete(auditCtx, existing.kind);
 
+    this.derivatives.forgetAttachment(id);
     this.etagCache.delete(filePath);
-    this.etagCache.delete(thumbPath);
+    for (const derivativePath of derivativePaths) this.etagCache.delete(derivativePath);
 
     return this.fsDeletion.completeReservedUploadPaths(planned, auditCtx);
   }
@@ -1281,9 +1472,14 @@ export class AttachmentsService implements OnApplicationBootstrap {
       const id = Number(stageMatch[1]);
       return Number.isInteger(id) && id > 0 && reservedIds.has(id);
     }
-    const thumbMatch = /^(\d+)\.thumb\.png$/.exec(name);
-    if (thumbMatch) {
-      const id = Number(thumbMatch[1]);
+    // Issue #604: `<id>.<variant>.png` for every ladder rung, which subsumes the
+    // pre-#604 `<id>.thumb.png` name (`thumb` is still the smallest rung, so old
+    // files stay owned across an upgrade rather than being reaped as orphans).
+    const derivativeMatch = new RegExp(`^(\\d+)\\.(${DERIVATIVE_VARIANT_NAMES.join('|')})\\.${DERIVATIVE_EXT}$`).exec(
+      name,
+    );
+    if (derivativeMatch) {
+      const id = Number(derivativeMatch[1]);
       return Number.isInteger(id) && id > 0 && validIds.has(id);
     }
     const normalMatch = /^(\d+)\.[a-z0-9]+$/.exec(name);

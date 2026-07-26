@@ -17,6 +17,16 @@ const player = { 'x-dev-role': 'player', 'x-dev-user': 'p-1' };
 const otherPlayer = { 'x-dev-role': 'player', 'x-dev-user': 'p-2' };
 const viewer = { 'x-dev-role': 'viewer', 'x-dev-user': 'v-1' };
 
+/**
+ * Smallest real PNG payload (1x1, 8-bit RGB). Needed since #604: uploads are
+ * validated against the image HEADER, so a fixture must actually decode.
+ */
+const MINIMAL_PNG_1X1 = Buffer.from(
+  '89504e470d0a1a0a0000000d49484452000000010000000108020000009077' +
+    '53de0000000c4944415408d763f8ffff3f0005fe02fea1399e1e0000000049454e44ae426082',
+  'hex',
+);
+
 describe('encounters (e2e)', () => {
   let ctx: TestAppContext;
   let campaignId: number;
@@ -784,7 +794,11 @@ describe('encounters (e2e)', () => {
         .post(`/api/v1/campaigns/${endedCampaignId}/attachments`)
         .set(dm)
         .field('kind', 'map')
-        .attach('file', Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), {
+        // Issue #604: a bare PNG signature is no longer accepted — the upload path
+        // now reads the image header (to reject decompression bombs before anything
+        // decodes them), so a fixture must be a real, decodable image. This test is
+        // about ended-encounter immutability, not about admitting header-only bytes.
+        .attach('file', MINIMAL_PNG_1X1, {
           filename: 'battle.png',
           contentType: 'image/png',
         });
