@@ -1518,6 +1518,30 @@ function migrateAiDmUsageHistoryTable(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before durable AI Driver controls (issue #559): the
+ * `ai_driver_control_state` table didn't exist. New table, one row per campaign.
+ */
+function migrateAiDriverControlStateTable(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS ai_driver_control_state (
+      campaign_id INTEGER PRIMARY KEY REFERENCES campaigns(id) ON DELETE CASCADE,
+      status TEXT NOT NULL DEFAULT 'idle',
+      state TEXT NOT NULL DEFAULT 'running',
+      scene TEXT,
+      last_narration TEXT,
+      last_turn_at TEXT,
+      turn_count INTEGER NOT NULL DEFAULT 0,
+      stuck TEXT,
+      acting_dm TEXT,
+      vote TEXT,
+      takeover_requested_by TEXT,
+      last_input TEXT,
+      updated_at TEXT NOT NULL
+    );
+  `);
+}
+
+/**
  * Migration for DBs created before DM-initiated check requests (issue #415): the
  * `check_requests` table didn't exist. Same "new table" pattern as migrateAiScribeTables —
  * CREATE TABLE / CREATE INDEX IF NOT EXISTS, recorded so upgraded hosts get the table (and its
@@ -2893,6 +2917,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0104_campaign_library_monsters', run: migrateCampaignLibraryMonstersTable },
   { name: '0105_campaign_library_monsters_fk', run: migrateCampaignLibraryMonstersForeignKeys },
   { name: '0106_guest_dm_handoff_545', run: migrateGuestDmHandoff545 },
+  { name: '0107_ai_driver_control_state_559', run: migrateAiDriverControlStateTable },
 ];
 
 /**

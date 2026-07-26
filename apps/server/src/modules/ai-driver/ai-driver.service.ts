@@ -1,7 +1,11 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
+import { eq } from 'drizzle-orm';
 import { buildMcpEnvelope } from '../../common/api-error.envelope';
 import { auditActor, roleAtLeast, type RequestUser } from '../../common/user.types';
 import { nowIso } from '../../common/time';
+import { fromJsonText, toJsonText } from '../../common/json';
+import { DB, type DrizzleDb } from '../../db/db.module';
+import { aiDriverControlState } from '../../db/schema';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService, excerpt } from '../notifications/notifications.service';
 import { AiDmService } from '../ai-dm/ai-dm.service';
@@ -346,6 +350,75 @@ interface ActionQueueEntry {
   resolve: (result: any) => void;
   reject: (error: any) => void;
   queuedAt: number;
+}
+
+type AiDriverControlStateRow = typeof aiDriverControlState.$inferSelect;
+
+const SESSION_STATUSES: ReadonlySet<string> = new Set<AiDmSessionStatus>(['idle', 'running', 'paused']);
+const LADDER_STATES: ReadonlySet<string> = new Set<AiDmLadderState>([
+  'running',
+  'awaiting_players',
+  'paused',
+  'human_control',
+]);
+const STUCK_REASONS: ReadonlySet<string> = new Set<AiDmStuckReason>([
+  'tool_error',
+  'budget_exhausted',
+  'max_steps',
+  'no_narration',
+  'loop',
+  'dispute',
+  'provider_error',
+]);
+
+function recordOf(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function stringOrNull(value: unknown): string | null {
+  return typeof value === 'string' ? value : null;
+}
+
+function isStoredStuckInfo(value: unknown): value is AiDmStuckInfo {
+  const rec = recordOf(value);
+  return !!rec
+    && typeof rec.reason === 'string'
+    && STUCK_REASONS.has(rec.reason)
+    && typeof rec.detail === 'string'
+    && typeof rec.since === 'string'
+    && Number.isInteger(rec.turn);
+}
+
+function isStoredActingDmGrant(value: unknown): value is AiDmActingDmGrant {
+  const rec = recordOf(value);
+  return !!rec
+    && typeof rec.memberId === 'string'
+    && typeof rec.grantedBy === 'string'
+    && typeof rec.grantedAt === 'string'
+    && (rec.note === null || typeof rec.note === 'string');
+}
+
+function isStoredTableVote(value: unknown): value is AiDmTableVote {
+  const rec = recordOf(value);
+  const ballots = recordOf(rec?.ballots);
+  return !!rec
+    && (rec.kind === 'override' || rec.kind === 'pause')
+    && typeof rec.id === 'string'
+    && typeof rec.openedBy === 'string'
+    && typeof rec.openedAt === 'string'
+    && !!ballots
+    && Object.values(ballots).every((v) => typeof v === 'boolean')
+    && Number.isInteger(rec.threshold)
+    && Number.isInteger(rec.eligibleVoters)
+    && typeof rec.expiresAt === 'string'
+    && typeof rec.resolved === 'boolean'
+    && (rec.outcome === 'passed' || rec.outcome === 'failed' || rec.outcome === null);
+}
+
+function persistedStatusFor(session: AiDmSessionState): AiDmSessionStatus {
+  if (session.state === 'paused' || session.state === 'human_control' || session.status === 'paused') return 'paused';
+  // Active generations are process-local. After restart the control state should accept a new turn.
+  return 'idle';
 }
 
 /**
@@ -910,7 +983,7 @@ interface ActiveGeneration {
 @Injectable()
 export class AiDriverService {
   private readonly logger = new Logger(AiDriverService.name);
-  /** In-memory per-campaign session state (single-instance deploy, like CampaignEventsService). */
+  /** Per-campaign session cache; restart-safe control fields are hydrated from ai_driver_control_state (#559). */
   private readonly sessions = new Map<number, AiDmSessionState>();
   /** Abort handles for each campaign's active generation (#558). */
   private readonly activeGenerations = new Map<number, ActiveGeneration>();
@@ -933,13 +1006,104 @@ export class AiDriverService {
     private readonly encounters: EncountersService,
     private readonly members: MembersService,
     private readonly characters: CharactersService,
+    @Inject(DB) private readonly db?: DrizzleDb,
   ) {
     // Mode-switch teardown without an AiDm→AiDriver DI edge (forwardRef blows the stack here).
     this.aiDm.registerDriverSessionTeardown((campaignId) => this.teardownSession(campaignId));
   }
 
   getSession(campaignId: number): AiDmSessionState {
-    return this.sessions.get(campaignId) ?? this.freshSession(campaignId);
+    return this.ensureSession(campaignId);
+  }
+
+  private loadPersistedControlState(campaignId: number): AiDmSessionState {
+    const fresh = this.freshSession(campaignId);
+    if (!this.db) return fresh;
+
+    const row = this.db
+      .select()
+      .from(aiDriverControlState)
+      .where(eq(aiDriverControlState.campaignId, campaignId))
+      .limit(1)
+      .get() as AiDriverControlStateRow | undefined;
+    if (!row) return fresh;
+
+    const storedState = LADDER_STATES.has(row.state) ? row.state as AiDmLadderState : 'running';
+    fresh.state = storedState;
+    fresh.status = SESSION_STATUSES.has(row.status) ? row.status as AiDmSessionStatus : 'idle';
+    if (fresh.status === 'running') fresh.status = 'idle';
+    fresh.scene = row.scene ?? null;
+    fresh.lastNarration = row.lastNarration ?? null;
+    fresh.lastTurnAt = row.lastTurnAt ?? null;
+    fresh.turnCount = Math.max(0, row.turnCount ?? 0);
+    const stuck = fromJsonText<unknown>(row.stuck, null);
+    fresh.stuck = isStoredStuckInfo(stuck) ? stuck : null;
+    const actingDm = fromJsonText<unknown>(row.actingDm, null);
+    fresh.actingDm = isStoredActingDmGrant(actingDm) ? actingDm : null;
+    const vote = fromJsonText<unknown>(row.vote, null);
+    fresh.vote = isStoredTableVote(vote) ? vote : null;
+    if (fresh.vote) {
+      const seq = Number(/^vote-(\d+)$/.exec(fresh.vote.id)?.[1] ?? 0);
+      if (seq > this.voteSeq) this.voteSeq = seq;
+    }
+    fresh.takeoverRequestedBy = row.takeoverRequestedBy ?? null;
+
+    if (row.lastInput) this.lastInputs.set(campaignId, row.lastInput);
+    if (fresh.state === 'awaiting_players' && !fresh.stuck) fresh.state = 'running';
+    if (fresh.state === 'human_control' && !fresh.actingDm) fresh.state = 'running';
+    if (fresh.status === 'paused' && fresh.state === 'running') fresh.state = 'paused';
+    if (fresh.state === 'paused' || fresh.state === 'human_control') fresh.status = 'paused';
+    else fresh.status = 'idle';
+    fresh.levers = this.leversFor(fresh);
+    return fresh;
+  }
+
+  private persistControlState(session: AiDmSessionState): void {
+    if (!this.db || session.detached) return;
+
+    const ts = nowIso();
+    const values = {
+      campaignId: session.campaignId,
+      status: persistedStatusFor(session),
+      state: session.state,
+      scene: stringOrNull(session.scene),
+      lastNarration: stringOrNull(session.lastNarration),
+      lastTurnAt: stringOrNull(session.lastTurnAt),
+      turnCount: Math.max(0, session.turnCount ?? 0),
+      stuck: session.stuck ? toJsonText(session.stuck) : null,
+      actingDm: session.actingDm ? toJsonText(session.actingDm) : null,
+      vote: session.vote ? toJsonText(session.vote) : null,
+      takeoverRequestedBy: stringOrNull(session.takeoverRequestedBy),
+      lastInput: this.lastInputs.get(session.campaignId) ?? null,
+      updatedAt: ts,
+    };
+
+    this.db
+      .insert(aiDriverControlState)
+      .values(values)
+      .onConflictDoUpdate({
+        target: aiDriverControlState.campaignId,
+        set: {
+          status: values.status,
+          state: values.state,
+          scene: values.scene,
+          lastNarration: values.lastNarration,
+          lastTurnAt: values.lastTurnAt,
+          turnCount: values.turnCount,
+          stuck: values.stuck,
+          actingDm: values.actingDm,
+          vote: values.vote,
+          takeoverRequestedBy: values.takeoverRequestedBy,
+          lastInput: values.lastInput,
+          updatedAt: values.updatedAt,
+        },
+      })
+      .run();
+  }
+
+  private deletePersistedControlState(campaignId: number): void {
+    if (!this.db) return;
+    this.db.delete(aiDriverControlState).where(eq(aiDriverControlState.campaignId, campaignId)).run();
   }
 
   /**
@@ -966,6 +1130,7 @@ export class AiDriverService {
     const fresh = this.freshSession(campaignId);
     this.sessions.set(campaignId, fresh);
     this.lastInputs.delete(campaignId);
+    this.deletePersistedControlState(campaignId);
     this.stream.emit({ type: 'state', campaignId, state: fresh.state });
     return fresh;
   }
@@ -1074,6 +1239,7 @@ export class AiDriverService {
       session.state = session.stuck ? 'awaiting_players' : 'running';
     }
     session.levers = this.leversFor(session);
+    this.persistControlState(session);
     this.stream.emit({ type: 'state', campaignId, state: session.state });
     return session;
   }
@@ -1125,7 +1291,7 @@ export class AiDriverService {
   private ensureSession(campaignId: number): AiDmSessionState {
     let s = this.sessions.get(campaignId);
     if (!s) {
-      s = this.freshSession(campaignId);
+      s = this.loadPersistedControlState(campaignId);
       this.sessions.set(campaignId, s);
     }
     return s;
@@ -1250,6 +1416,7 @@ export class AiDriverService {
 
     // Remember the input so the retry / nudge / flag levers can replay this turn (#314).
     this.lastInputs.set(campaignId, input);
+    this.persistControlState(session);
     const prevNarration = session.lastNarration;
 
     // Resolve the provider AND the executable model through the execution-time choke
@@ -1260,6 +1427,7 @@ export class AiDriverService {
     if (!execution) {
       // Release the reserved slot (compare-and-set): only if nothing else grabbed the seat meanwhile.
       if (session.status === 'running') session.status = 'idle';
+      this.persistControlState(session);
       throw new ServiceUnavailableException(
         'No AI provider is configured. A server admin or the DM must set one via the AI provider config (issue #310).',
       );
@@ -1330,6 +1498,7 @@ export class AiDriverService {
 
     // status is already 'running' (reserved synchronously above, #381).
     if (opts.scene !== undefined) session.scene = opts.scene;
+    this.persistControlState(session);
     resetDriverTurnCounters(session);
     this.stream.emit({
       type: 'turn.start',
@@ -1609,6 +1778,7 @@ export class AiDriverService {
         session.lastNarration = finalNarration || session.lastNarration;
         session.lastTurnAt = nowIso();
         session.turnCount += 1;
+        this.persistControlState(session);
       }
     }
 
@@ -2274,6 +2444,7 @@ export class AiDriverService {
     session.status = 'paused';
     session.state = 'paused';
     session.levers = this.leversFor(session);
+    this.persistControlState(session);
     await this.audit.log({
       actor,
       actorRole: 'dm',
@@ -2308,6 +2479,7 @@ export class AiDriverService {
     // human freeze outranks whatever this turn concluded. Bail without touching state.
     if (session.state === 'paused' || session.state === 'human_control') {
       session.levers = this.leversFor(session);
+      this.persistControlState(session);
       return;
     }
     const reason = classifyStuck(ctx);
@@ -2316,6 +2488,7 @@ export class AiDriverService {
       session.state = 'awaiting_players';
       session.stuck = { reason, detail, since: nowIso(), turn: session.turnCount };
       session.levers = this.leversFor(session);
+      this.persistControlState(session);
       this.stream.emit({ type: 'stuck', campaignId, reason, detail, state: session.state, levers: session.levers });
       await this.audit.log({
         actor: `ai-dm-seat:${campaignId}`,
@@ -2333,6 +2506,7 @@ export class AiDriverService {
     session.stuck = null;
     session.state = 'running';
     session.levers = this.leversFor(session);
+    this.persistControlState(session);
     if (wasStuck) this.stream.emit({ type: 'recovered', campaignId, state: session.state });
   }
 
@@ -2359,9 +2533,9 @@ export class AiDriverService {
 
   // ===================================================================================
   // Secret-read approval gate (#557): a DM files a narrowly-scoped, single-use approval
-  // letting the autonomous seat read ONE secret entity under the DM principal. Mirrors the
-  // in-memory, per-campaign pattern of the table vote (#382); not a persisted review queue
-  // (a one-shot narrate-time read is not the same lifecycle as a canon proposal).
+  // letting the autonomous seat read ONE secret entity under the DM principal. This remains
+  // an in-process, narrate-time capability; it is not the restart-safe control state from #559
+  // and is not a persisted review queue (unlike canon proposals).
   // ===================================================================================
 
   /** The active (unconsumed) secret-read approvals for a campaign (issue #557). */
@@ -2728,6 +2902,7 @@ export class AiDriverService {
       expiresAt: new Date(Date.now() + VOTE_TTL_MS).toISOString(),
     };
     session.levers = this.leversFor(session);
+    this.persistControlState(session);
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -2755,6 +2930,7 @@ export class AiDriverService {
     const vote = session.vote;
     if (!vote || vote.resolved) throw new ConflictException('No open table vote to cast on.');
     vote.ballots[user.id] = choice;
+    this.persistControlState(session);
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -2812,6 +2988,7 @@ export class AiDriverService {
       }
     }
     session.levers = this.leversFor(session);
+    this.persistControlState(session);
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -2841,6 +3018,7 @@ export class AiDriverService {
       vote.resolved = true;
       vote.outcome = 'failed';
       session.levers = this.leversFor(session);
+      this.persistControlState(session);
       this.stream.emit({ type: 'vote', campaignId: session.campaignId, action: 'resolved', kind: vote.kind, outcome: 'failed' });
     }
   }
@@ -2850,6 +3028,7 @@ export class AiDriverService {
     const session = this.ensureSession(campaignId);
     session.takeoverRequestedBy = user.id;
     session.levers = this.leversFor(session);
+    this.persistControlState(session);
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -2903,6 +3082,7 @@ export class AiDriverService {
     session.stuck = null; // human control supersedes the stuck ladder (#560)
     session.takeoverRequestedBy = null;
     session.levers = this.leversFor(session);
+    this.persistControlState(session);
     await this.audit.log({
       actor: auditActor(granter),
       actorRole: role,
@@ -2946,6 +3126,7 @@ export class AiDriverService {
     session.status = 'idle';
     session.state = 'running';
     session.levers = this.leversFor(session);
+    this.persistControlState(session);
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
