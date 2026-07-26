@@ -98,6 +98,70 @@ function armTimer(
   return () => globalThis.clearTimeout(handle);
 }
 
+function readTimeoutPhase(firedPhase: TimerPhase | null): ReadTimeoutPhase {
+  return firedPhase === 'connect' || firedPhase === 'headers' || firedPhase === 'overall'
+    ? firedPhase
+    : 'overall';
+}
+
+/**
+ * Keep the overall budget armed until the caller finishes reading the body.
+ * Headers alone must not clear the round-trip timer (reads and mutations).
+ */
+function wrapBodyWithOverallBudget(
+  res: Response,
+  opts: {
+    kind: ApiBudgetKind;
+    init: RequestInit;
+    budgetController: AbortController;
+    firedPhase: () => TimerPhase | null;
+    release: () => void;
+  },
+): Response {
+  const reader = res.body!.getReader();
+
+  const stream = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read();
+        if (done) {
+          opts.release();
+          controller.close();
+          return;
+        }
+        controller.enqueue(value);
+      } catch (err) {
+        opts.release();
+        // fetchWithBudget already returned — classify body-phase aborts here so
+        // callers still see TimeoutError / AmbiguousMutationError vs caller AbortError.
+        if (opts.init.signal?.aborted) {
+          controller.error(err);
+          return;
+        }
+        if (opts.budgetController.signal.aborted) {
+          if (opts.kind === 'read') {
+            controller.error(new ApiReadTimeoutError(readTimeoutPhase(opts.firedPhase())));
+          } else {
+            controller.error(new ApiAmbiguousMutationError());
+          }
+          return;
+        }
+        controller.error(err);
+      }
+    },
+    cancel(reason) {
+      opts.release();
+      return reader.cancel(reason);
+    },
+  });
+
+  return new Response(stream, {
+    status: res.status,
+    statusText: res.statusText,
+    headers: res.headers,
+  });
+}
+
 /**
  * `fetch` with layered budgets. Caller `signal` aborts win over budget aborts.
  */
@@ -125,7 +189,7 @@ export async function fetchWithBudget(
     clearOverall = armTimer(readBudget.overallMs, 'overall', budgetController, onFire);
   } else if (kind === 'write') {
     const writeBudget = budget as typeof API_WRITE_BUDGET;
-    // fetch exposes no connect/first-byte hook — overallMs bounds the full mutation.
+    // overallMs bounds the full mutation including response body consumption.
     clearOverall = armTimer(writeBudget.overallMs, 'write-overall', budgetController, onFire);
   } else if (kind === 'upload') {
     const uploadBudget = budget as typeof API_UPLOAD_BUDGET;
@@ -143,17 +207,20 @@ export async function fetchWithBudget(
 
   try {
     const res = await fetch(url, { ...init, signal: budgetController.signal });
-    // Headers arrived — drop connect/headers timers. For reads, keep overallMs
-    // until the body is consumed so a stalled body cannot hang forever.
+    // Headers arrived — drop connect/headers timers. Keep overallMs until the
+    // body is consumed so a stalled body cannot hang forever.
     for (const clear of clearEarlyTimers) clear();
     clearEarlyTimers.length = 0;
 
-    if (kind !== 'read' || res.body == null) {
+    // Streams only bound connect. Empty / missing bodies need no wrap — and
+    // Content-Length: 0 responses are often returned without reading the body
+    // (api.ts), so wrapping would leak the overall timer + abort listener.
+    const contentLength = res.headers.get('Content-Length');
+    if (kind === 'stream' || res.body == null || contentLength === '0') {
       clearAll();
       return res;
     }
 
-    const reader = res.body.getReader();
     let released = false;
     const release = () => {
       if (released) return;
@@ -162,45 +229,12 @@ export async function fetchWithBudget(
       unlinkCaller();
     };
 
-    const stream = new ReadableStream<Uint8Array>({
-      async pull(controller) {
-        try {
-          const { done, value } = await reader.read();
-          if (done) {
-            release();
-            controller.close();
-            return;
-          }
-          controller.enqueue(value);
-        } catch (err) {
-          release();
-          // fetchWithBudget already returned — classify body-phase aborts here so
-          // callers still see TimeoutError vs caller AbortError.
-          if (init.signal?.aborted) {
-            controller.error(err);
-            return;
-          }
-          if (budgetController.signal.aborted) {
-            const phase: ReadTimeoutPhase =
-              firedPhase === 'connect' || firedPhase === 'headers' || firedPhase === 'overall'
-                ? firedPhase
-                : 'overall';
-            controller.error(new ApiReadTimeoutError(phase));
-            return;
-          }
-          controller.error(err);
-        }
-      },
-      cancel(reason) {
-        release();
-        return reader.cancel(reason);
-      },
-    });
-
-    return new Response(stream, {
-      status: res.status,
-      statusText: res.statusText,
-      headers: res.headers,
+    return wrapBodyWithOverallBudget(res, {
+      kind,
+      init,
+      budgetController,
+      firedPhase: () => firedPhase,
+      release,
     });
   } catch (error) {
     clearAll();
@@ -208,11 +242,7 @@ export async function fetchWithBudget(
     if (!budgetController.signal.aborted) throw error;
 
     if (kind === 'read') {
-      const phase: ReadTimeoutPhase =
-        firedPhase === 'connect' || firedPhase === 'headers' || firedPhase === 'overall'
-          ? firedPhase
-          : 'overall';
-      throw new ApiReadTimeoutError(phase);
+      throw new ApiReadTimeoutError(readTimeoutPhase(firedPhase));
     }
     throw new ApiAmbiguousMutationError();
   }

@@ -23,18 +23,46 @@ test.describe('dashboard load policy (#581 follow-up)', () => {
     });
   });
 
-  test('stranded skeletons (no summary, no error, not pending) offer Retry', () => {
+  test('stranded skeletons offer Retry only after a load was attempted', () => {
     expect(
-      shouldShowSkeletonRetry({ hasSummary: false, error: null, loadPending: false }),
+      shouldShowSkeletonRetry({
+        hasSummary: false,
+        error: null,
+        loadPending: false,
+        loadAttempted: false,
+      }),
+    ).toBe(false);
+    expect(
+      shouldShowSkeletonRetry({
+        hasSummary: false,
+        error: null,
+        loadPending: false,
+        loadAttempted: true,
+      }),
     ).toBe(true);
     expect(
-      shouldShowSkeletonRetry({ hasSummary: false, error: null, loadPending: true }),
+      shouldShowSkeletonRetry({
+        hasSummary: false,
+        error: null,
+        loadPending: true,
+        loadAttempted: true,
+      }),
     ).toBe(false);
     expect(
-      shouldShowSkeletonRetry({ hasSummary: false, error: 'failed', loadPending: false }),
+      shouldShowSkeletonRetry({
+        hasSummary: false,
+        error: 'failed',
+        loadPending: false,
+        loadAttempted: true,
+      }),
     ).toBe(false);
     expect(
-      shouldShowSkeletonRetry({ hasSummary: true, error: null, loadPending: false }),
+      shouldShowSkeletonRetry({
+        hasSummary: true,
+        error: null,
+        loadPending: false,
+        loadAttempted: true,
+      }),
     ).toBe(false);
   });
 });

@@ -23,13 +23,22 @@ export function failureAfterCancel(campaignId: number): { campaignId: number; me
 }
 
 /**
- * True when skeletons are on screen with no pending request and no error —
- * a stranded state that must offer Retry.
+ * True when skeletons are on screen after a load attempt finished with no
+ * projection and no error — a stranded state that must offer Retry.
+ *
+ * `loadAttempted` prevents a first-paint flash before the mount effect runs
+ * `load()` (loadPending still false on the initial render).
  */
 export function shouldShowSkeletonRetry(input: {
   hasSummary: boolean;
   error: string | null;
   loadPending: boolean;
+  loadAttempted: boolean;
 }): boolean {
-  return !input.hasSummary && input.error == null && !input.loadPending;
+  return (
+    input.loadAttempted
+    && !input.hasSummary
+    && input.error == null
+    && !input.loadPending
+  );
 }

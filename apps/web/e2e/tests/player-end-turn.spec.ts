@@ -58,14 +58,21 @@ test.describe('player end turn (issue #487)', () => {
       ).json();
 
       // Create auto-adds every active party PC; /start rejects any null initiative.
+      // Pin turn order so End my turn yields the dummy next (not another PC).
       const rollInitRes = await dm.post(`/api/v1/encounters/${enc.id}/roll-initiative`);
       expect(rollInitRes.ok(), `roll initiative: ${await rollInitRes.text()}`).toBeTruthy();
-      await dm.patch(`/api/v1/encounters/${enc.id}/combatants/${heroCombatant.id}`, {
-        data: { initiative: 99 },
-      });
-      await dm.patch(`/api/v1/encounters/${enc.id}/combatants/${dummy.id}`, {
-        data: { initiative: 1 },
-      });
+      const roster = await (await dm.get(`/api/v1/encounters/${enc.id}`)).json() as {
+        combatants: Array<{ id: number }>;
+      };
+      for (const c of roster.combatants) {
+        let initiative = 0;
+        if (c.id === heroCombatant.id) initiative = 99;
+        else if (c.id === dummy.id) initiative = 50;
+        const patchRes = await dm.patch(`/api/v1/encounters/${enc.id}/combatants/${c.id}`, {
+          data: { initiative },
+        });
+        expect(patchRes.ok(), `set initiative for ${c.id}: ${await patchRes.text()}`).toBeTruthy();
+      }
       const startRes = await dm.post(`/api/v1/encounters/${enc.id}/start`);
       expect(startRes.ok(), `start encounter: ${await startRes.text()}`).toBeTruthy();
 

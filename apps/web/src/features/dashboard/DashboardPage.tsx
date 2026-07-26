@@ -59,6 +59,9 @@ export default function DashboardPage() {
   const [summaryStale, setSummaryStale] = useState(false);
   const [loadPending, setLoadPending] = useState(false);
   const [revalidating, setRevalidating] = useState(false);
+  // Distinguishes "mount hasn't kicked off load yet" from "a load finished with
+  // nothing to show" so the stranded Retry banner does not flash on first paint.
+  const [loadAttempted, setLoadAttempted] = useState(false);
   const loadAbortRef = useRef<AbortController | null>(null);
   const [eventStatus, setEventStatus] = useState<CampaignEventsStatus>('connecting');
   const requestSequence = useRef(0);
@@ -120,6 +123,7 @@ export default function DashboardPage() {
         if (hasProjection) setSummaryStale(true);
       }
     } finally {
+      setLoadAttempted(true);
       if (loadAbortRef.current === controller) {
         loadAbortRef.current = null;
         setLoadPending(false);
@@ -133,6 +137,7 @@ export default function DashboardPage() {
     loadAbortRef.current = null;
     setLoadPending(false);
     setRevalidating(false);
+    setLoadAttempted(true);
     // Cancel with no projection used to leave bare skeletons and no Retry.
     if (projectionRef.current?.campaignId !== activeCampaignId.current) {
       setFailure(failureAfterCancel(activeCampaignId.current));
@@ -143,6 +148,7 @@ export default function DashboardPage() {
     if (Number.isFinite(id)) {
       setEventStatus('connecting');
       setSummaryStale(false);
+      setLoadAttempted(false);
       void load();
     }
     return () => {
@@ -208,6 +214,7 @@ export default function DashboardPage() {
       hasSummary: false,
       error,
       loadPending,
+      loadAttempted,
     });
     return (
       <div className="max-w-7xl mx-auto px-4 mt-5 space-y-5">

@@ -215,6 +215,59 @@ test.describe('fetchWithBudget (#581)', () => {
     }
   });
 
+  test('stalled mutation response body is ambiguous, not a clean failure', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (_url, init) => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          init?.signal?.addEventListener(
+            'abort',
+            () => controller.error(new DOMException('Aborted', 'AbortError')),
+            { once: true },
+          );
+        },
+      });
+      return Promise.resolve(
+        new Response(stream, {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+    };
+    try {
+      const res = await fetchWithBudget(
+        '/api/v1/campaigns/1',
+        { method: 'PATCH', body: '{}' },
+        'write',
+        { connectMs: 50, overallMs: 30 } as unknown as typeof API_WRITE_BUDGET,
+      );
+      await expect(res.text()).rejects.toBeInstanceOf(ApiAmbiguousMutationError);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test('Content-Length 0 responses do not wrap or leak the overall timer', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () =>
+      new Response('', {
+        status: 200,
+        headers: { 'Content-Length': '0' },
+      });
+    try {
+      const res = await fetchWithBudget(
+        '/api/v1/campaigns/1/noop',
+        { method: 'GET' },
+        'read',
+        API_READ_BUDGET,
+      );
+      expect(res.headers.get('Content-Length')).toBe('0');
+      expect(await res.text()).toBe('');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test('DNS / refusal surfaces as transient network errors', async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = async () => {
