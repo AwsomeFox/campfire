@@ -636,7 +636,7 @@ export class ScribeService implements OnApplicationBootstrap {
     const rows = await this.db
       .select()
       .from(scheduledSessions)
-      .where(eq(scheduledSessions.campaignId, campaignId))
+      .where(and(eq(scheduledSessions.campaignId, campaignId), eq(scheduledSessions.status, 'scheduled')))
       .orderBy(asc(scheduledSessions.scheduledAt), asc(scheduledSessions.id));
 
     const processed = await this.db
@@ -692,7 +692,7 @@ export class ScribeService implements OnApplicationBootstrap {
       const rows = await this.db
         .select()
         .from(scheduledSessions)
-        .where(eq(scheduledSessions.campaignId, campaignId))
+        .where(and(eq(scheduledSessions.campaignId, campaignId), eq(scheduledSessions.status, 'scheduled')))
         .orderBy(asc(scheduledSessions.scheduledAt), asc(scheduledSessions.id));
       const idx = rows.findIndex((r) => r.id === scheduledSessionId);
       const row = rows[idx];

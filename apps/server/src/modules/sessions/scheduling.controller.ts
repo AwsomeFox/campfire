@@ -11,7 +11,13 @@ import { parsePageParams } from '../../common/pagination';
 import { SCHEDULE_PAST_MAX_LIMIT } from '@campfire/schema';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { SchedulingService } from './scheduling.service';
-import { ScheduledSessionCreateDto, ScheduledSessionUpdateDto, RsvpSetDto } from './sessions.dto';
+import {
+  ScheduledSessionCancelDto,
+  ScheduledSessionCreateDto,
+  ScheduledSessionDuplicateDto,
+  ScheduledSessionUpdateDto,
+  RsvpSetDto,
+} from './sessions.dto';
 
 /**
  * Session scheduling (issue #13): the "next session" concept. Planned game
@@ -133,12 +139,51 @@ export class ScheduleController {
   }
 
   @Delete(':id')
-  @ApiOperation({ summary: 'Cancel a scheduled session', description: 'dm role required. Deletes the schedule entry and its RSVPs, and notifies the party (issue #820).' })
-  @ApiResponse({ status: 200, description: 'Deleted.' })
-  async remove(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser): Promise<void> {
+  @ApiOperation({ summary: 'Cancel a scheduled session', description: 'dm role required. Marks the schedule cancelled, retains RSVPs/history, and notifies the party.' })
+  @ApiResponse({ status: 200, description: 'Cancelled scheduled session with retained RSVPs.' })
+  async remove(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: ScheduledSessionCancelDto,
+    @CurrentUser() user: RequestUser,
+  ): Promise<ScheduledSessionWithRsvps> {
     const row = await this.scheduling.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
-    return this.scheduling.remove(id, user, role);
+    return this.scheduling.remove(id, user, role, body ?? {});
+  }
+
+  @Post(':id/restore')
+  @ApiOperation({ summary: 'Restore a cancelled scheduled session', description: 'dm role required. Clears cancellation metadata and returns the schedule to live/upcoming projections.' })
+  @ApiResponse({ status: 201, description: 'Restored scheduled session.' })
+  async restore(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser): Promise<ScheduledSessionWithRsvps> {
+    const row = await this.scheduling.getRowOrThrow(id);
+    const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    return this.scheduling.restore(id, user, role);
+  }
+
+  @Post(':id/duplicate')
+  @ApiOperation({ summary: 'Duplicate or reschedule a scheduled session', description: 'dm role required. Copies a schedule into a new live row; optional fields override the copied time/details. RSVPs are not copied.' })
+  @ApiResponse({ status: 201, description: 'Duplicated scheduled session.' })
+  async duplicate(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: ScheduledSessionDuplicateDto,
+    @CurrentUser() user: RequestUser,
+  ): Promise<ScheduledSessionWithRsvps> {
+    const row = await this.scheduling.getRowOrThrow(id);
+    const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    return this.scheduling.duplicate(id, body ?? {}, user, role);
+  }
+
+  @Post(':id/link/:sessionId')
+  @ApiOperation({ summary: 'Link a schedule to the played session recap', description: 'dm role required. Marks the schedule completed and stores the durable schedule/session relationship.' })
+  @ApiResponse({ status: 201, description: 'Completed scheduled session.' })
+  async linkSession(
+    @Param('id', ParseIntPipe) id: number,
+    @Param('sessionId', ParseIntPipe) sessionId: number,
+    @CurrentUser() user: RequestUser,
+  ): Promise<ScheduledSessionWithRsvps> {
+    const row = await this.scheduling.getRowOrThrow(id);
+    const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    return this.scheduling.linkSession(id, sessionId, user, role);
   }
 
   @Put(':id/rsvp')

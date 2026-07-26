@@ -333,6 +333,9 @@ export const sessions = sqliteTable('sessions', {
   recap: text('recap').notNull().default(''),
   // Nullable in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
   dmSecret: text('dm_secret').notNull().default(''),
+  // Optional durable link back to the planned schedule row this recap/play log completed (#504).
+  // Nullable in older DBs pre-migration; see db/db.module.ts migrateSchedulingLifecycle504().
+  scheduledSessionId: integer('scheduled_session_id'),
   // Soft-delete / trash timestamp (issue #116) — see campaigns.deletedAt.
   deletedAt: text('deleted_at'),
   createdAt: text('created_at').notNull(),
@@ -382,6 +385,11 @@ export const scheduledSessions = sqliteTable('scheduled_sessions', {
   title: text('title').notNull().default(''),
   location: text('location').notNull().default(''),
   notes: text('notes').notNull().default(''),
+  status: text('status').notNull().default('scheduled'),
+  cancelledAt: text('cancelled_at'),
+  cancelledBy: text('cancelled_by'),
+  cancellationReason: text('cancellation_reason').notNull().default(''),
+  sessionId: integer('session_id'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });

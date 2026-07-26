@@ -218,6 +218,32 @@ export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: 
   const [next, ...later] = upcoming;
   const hasLive = inProgress.length > 0 || Boolean(next);
 
+  async function restoreSchedule(id: number) {
+    await api.post<ScheduledSessionWithRsvps>(`${API}/schedule/${id}/restore`);
+    void load();
+  }
+
+  async function duplicateSchedule(schedule: ScheduledSessionWithRsvps) {
+    const when = window.prompt(
+      'New date/time for the duplicated session',
+      isoToDatetimeLocalInputValue(schedule.scheduledAt),
+    );
+    if (when == null) return;
+    const parsed = Date.parse(when);
+    if (Number.isNaN(parsed)) {
+      setError('Pick a valid date and time to duplicate this session.');
+      return;
+    }
+    await api.post<ScheduledSessionWithRsvps>(`${API}/schedule/${schedule.id}/duplicate`, {
+      scheduledAt: new Date(parsed).toISOString(),
+      durationMinutes: schedule.durationMinutes,
+      title: schedule.title,
+      location: schedule.location,
+      notes: schedule.notes,
+    });
+    void load();
+  }
+
   if (loading) {
     return (
       <Card>
@@ -343,10 +369,37 @@ export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: 
         <div className="space-y-1">
           <h2 className="text-sm font-bold text-white m-0">Past</h2>
           {pastSchedules.map((s) => (
-            <p key={s.id} className="text-muted text-xs m-0" {...entityTargetProps('scheduled_session', s.id)}>
-              {formatWhen(s.scheduledAt)}
-              {s.title ? ` — ${s.title}` : ''}
-            </p>
+            <div
+              key={s.id}
+              className="text-muted text-xs m-0 flex items-center gap-2 flex-wrap"
+              {...entityTargetProps('scheduled_session', s.id)}
+            >
+              <span>
+                {formatWhen(s.scheduledAt)}
+                {s.title ? ` — ${s.title}` : ''}
+              </span>
+              {s.status !== 'scheduled' && (
+                <span className="tag">{s.status === 'cancelled' ? 'Cancelled' : 'Completed'}</span>
+              )}
+              {s.status === 'cancelled' && s.cancellationReason && (
+                <span>Reason: {s.cancellationReason}</span>
+              )}
+              {s.sessionId && (
+                <Link to={`/c/${campaignId}/sessions?session=${s.sessionId}`} className="underline">
+                  Recap
+                </Link>
+              )}
+              {canDmWrite && s.status === 'cancelled' && (
+                <Btn ghost className="!min-h-0 !py-1 text-xs" onClick={() => void restoreSchedule(s.id)}>
+                  Restore
+                </Btn>
+              )}
+              {canDmWrite && (
+                <Btn ghost className="!min-h-0 !py-1 text-xs" onClick={() => void duplicateSchedule(s)}>
+                  Duplicate
+                </Btn>
+              )}
+            </div>
           ))}
           {pastHasMore && (
             <Btn
@@ -391,6 +444,7 @@ function ScheduleItem({
   const rsvpStatusId = `schedule-rsvp-status-${schedule.id}`;
   const [editing, setEditing] = useState(false);
   const [confirmingCancel, setConfirmingCancel] = useState(false);
+  const [cancellationReason, setCancellationReason] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -497,7 +551,8 @@ function ScheduleItem({
     setBusy(true);
     setError(null);
     try {
-      await api.delete(`${API}/schedule/${schedule.id}`);
+      const reason = cancellationReason.trim();
+      await api.delete(`${API}/schedule/${schedule.id}`, reason ? { json: { reason } } : undefined);
       onChange();
     } catch {
       setError(t('sessions.errors.cancelSession'));
@@ -735,11 +790,31 @@ function ScheduleItem({
       {confirmingCancel && (
         <ConfirmDialog
           title="Cancel this session?"
-          body="The scheduled session and everyone's RSVPs will be removed."
+          body={
+            <div className="space-y-2">
+              <p className="m-0">
+                The schedule will be marked cancelled. RSVPs and attendance history stay attached for audit and restore.
+              </p>
+              <label className="block text-xs font-bold text-secondary uppercase tracking-wide" htmlFor={`cancel-reason-${schedule.id}`}>
+                Reason (optional)
+              </label>
+              <textarea
+                id={`cancel-reason-${schedule.id}`}
+                className="input w-full min-h-[70px]"
+                value={cancellationReason}
+                maxLength={1000}
+                onChange={(event) => setCancellationReason(event.target.value)}
+                disabled={busy}
+              />
+            </div>
+          }
           confirmLabel="Cancel session"
           busy={busy}
           onConfirm={cancel}
-          onCancel={() => setConfirmingCancel(false)}
+          onCancel={() => {
+            setConfirmingCancel(false);
+            setCancellationReason('');
+          }}
         />
       )}
     </Card>

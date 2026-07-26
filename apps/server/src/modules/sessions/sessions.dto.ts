@@ -4,6 +4,8 @@ import {
   SessionUpdate,
   SessionAttendanceSet,
   ScheduledSessionCreate,
+  ScheduledSessionCancel,
+  ScheduledSessionDuplicate,
   ScheduledSessionUpdate,
   RsvpSetBody,
   hasAnyRsvpSetField,
@@ -26,6 +28,8 @@ export class SessionUpdateDto extends createZodDto(SessionUpdate.extend({ expect
 export class SessionAttendanceSetDto extends createZodDto(SessionAttendanceSet.strict()) {}
 export class ScheduledSessionCreateDto extends createZodDto(ScheduledSessionCreate.strict()) {}
 export class ScheduledSessionUpdateDto extends createZodDto(ScheduledSessionUpdate.extend({ expectedUpdatedAt: ExpectedUpdatedAt }).strict()) {}
+export class ScheduledSessionCancelDto extends createZodDto(ScheduledSessionCancel.strict()) {}
+export class ScheduledSessionDuplicateDto extends createZodDto(ScheduledSessionDuplicate.strict()) {}
 export class RsvpSetDto extends createZodDto(
   RsvpSetBody.strict().refine(hasAnyRsvpSetField, {
     message: RSVP_SET_REQUIRED_MESSAGE,

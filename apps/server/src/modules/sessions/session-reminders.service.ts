@@ -71,7 +71,11 @@ export class SessionRemindersService implements OnApplicationBootstrap {
     const upcoming = await this.db
       .select()
       .from(scheduledSessions)
-      .where(and(gt(scheduledSessions.scheduledAt, nowStr), lte(scheduledSessions.scheduledAt, horizonStr)));
+      .where(and(
+        eq(scheduledSessions.status, 'scheduled'),
+        gt(scheduledSessions.scheduledAt, nowStr),
+        lte(scheduledSessions.scheduledAt, horizonStr),
+      ));
 
     if (upcoming.length === 0) return { reminders: 0, nudges: 0 };
 

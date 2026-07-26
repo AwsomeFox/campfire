@@ -202,9 +202,126 @@ describe('session scheduling (e2e)', () => {
 
     const del = await request(server).delete(`/api/v1/schedule/${id}`).set(dm);
     expect(del.status).toBe(200);
+    expect(del.body).toMatchObject({ id, status: 'cancelled' });
 
     const list = await request(server).get(`/api/v1/campaigns/${campaignId}/schedule`).set(dm);
-    expect(list.body.some((s: { id: number }) => s.id === id)).toBe(false);
+    expect(list.body).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id, status: 'cancelled' }),
+      ]),
+    );
+    const upcoming = await request(server).get(`/api/v1/campaigns/${campaignId}/schedule/upcoming`).set(dm);
+    expect(upcoming.body.some((s: { id: number }) => s.id === id)).toBe(false);
+  });
+
+  it('cancel retains RSVPs, records metadata, and restore returns the row to upcoming', async () => {
+    const server = ctx.app.getHttpServer();
+    const created = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/schedule`)
+      .set(dm)
+      .send({ scheduledAt: '2099-10-01T18:00:00Z', title: 'Keep the RSVPs' });
+    const id = created.body.id;
+
+    await request(server).put(`/api/v1/schedule/${id}/rsvp`).set(player).send({ status: 'yes', note: 'can still make it' }).expect(200);
+    await request(server).put(`/api/v1/schedule/${id}/rsvp`).set(dm).send({ status: 'maybe' }).expect(200);
+
+    const cancelled = await request(server)
+      .delete(`/api/v1/schedule/${id}`)
+      .set(dm)
+      .send({ reason: 'DM is travelling' });
+    expect(cancelled.status).toBe(200);
+    expect(cancelled.body).toMatchObject({
+      id,
+      status: 'cancelled',
+      cancelledBy: 'dev:dm-1',
+      cancellationReason: 'DM is travelling',
+    });
+    expect(cancelled.body.cancelledAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(cancelled.body.rsvps).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ userId: 'dev:player-1', status: 'yes', note: 'can still make it' }),
+        expect.objectContaining({ userId: 'dev:dm-1', status: 'maybe' }),
+      ]),
+    );
+
+    const get = await request(server).get(`/api/v1/schedule/${id}`).set(player);
+    expect(get.status).toBe(200);
+    expect(get.body.rsvps).toHaveLength(2);
+
+    const rsvpAfterCancel = await request(server).put(`/api/v1/schedule/${id}/rsvp`).set(player).send({ status: 'no' });
+    expect(rsvpAfterCancel.status).toBe(400);
+
+    const upcoming = await request(server).get(`/api/v1/campaigns/${campaignId}/schedule/upcoming`).set(player);
+    expect(upcoming.body.some((s: { id: number }) => s.id === id)).toBe(false);
+
+    const past = await request(server).get(`/api/v1/campaigns/${campaignId}/schedule/past`).set(player);
+    expect(past.body.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id, status: 'cancelled', rsvps: expect.any(Array) }),
+      ]),
+    );
+
+    const duplicate = await request(server)
+      .post(`/api/v1/schedule/${id}/duplicate`)
+      .set(dm)
+      .send({ scheduledAt: '2099-10-08T18:00:00Z', title: 'Rescheduled night' });
+    expect(duplicate.status).toBe(201);
+    expect(duplicate.body).toMatchObject({
+      status: 'scheduled',
+      scheduledAt: '2099-10-08T18:00:00.000Z',
+      title: 'Rescheduled night',
+      rsvps: [],
+    });
+
+    const restored = await request(server).post(`/api/v1/schedule/${id}/restore`).set(dm);
+    expect(restored.status).toBe(201);
+    expect(restored.body).toMatchObject({
+      id,
+      status: 'scheduled',
+      cancelledAt: null,
+      cancelledBy: null,
+      cancellationReason: '',
+    });
+    expect(restored.body.rsvps).toHaveLength(2);
+
+    const upcomingAfterRestore = await request(server).get(`/api/v1/campaigns/${campaignId}/schedule/upcoming`).set(player);
+    expect(upcomingAfterRestore.body).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id, status: 'scheduled', rsvps: expect.any(Array) }),
+      ]),
+    );
+  });
+
+  it('creating a recap with scheduledSessionId completes and links the schedule', async () => {
+    const server = ctx.app.getHttpServer();
+    const scheduled = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/schedule`)
+      .set(dm)
+      .send({ scheduledAt: '2099-11-01T18:00:00Z', title: 'Played night' });
+    expect(scheduled.status).toBe(201);
+
+    const recap = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/sessions`)
+      .set(dm)
+      .send({
+        title: 'Played night recap',
+        playedAt: '2099-11-01',
+        recap: 'We played the linked night.',
+        scheduledSessionId: scheduled.body.id,
+      });
+    expect(recap.status).toBe(201);
+    expect(recap.body.scheduledSessionId).toBe(scheduled.body.id);
+
+    const linked = await request(server).get(`/api/v1/schedule/${scheduled.body.id}`).set(player);
+    expect(linked.status).toBe(200);
+    expect(linked.body).toMatchObject({
+      id: scheduled.body.id,
+      status: 'completed',
+      sessionId: recap.body.id,
+    });
+
+    const upcoming = await request(server).get(`/api/v1/campaigns/${campaignId}/schedule/upcoming`).set(player);
+    expect(upcoming.body.some((s: { id: number }) => s.id === scheduled.body.id)).toBe(false);
   });
 
   describe('in-progress schedule window (issue #818)', () => {
@@ -430,6 +547,29 @@ describe('session scheduling (e2e)', () => {
       expect(res.text).toContain('SUMMARY:Fire\\, brimstone\\; doom');
 
       await request(server).delete(`/api/v1/schedule/${created.body.id}`).set(dm);
+    });
+
+    it('keeps the same ICS UID and marks cancelled schedules as STATUS:CANCELLED', async () => {
+      const server = ctx.app.getHttpServer();
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/schedule`)
+        .set(dm)
+        .send({ scheduledAt: '2099-09-03T18:00:00Z', title: 'Calendar cancellation' });
+      expect(created.status).toBe(201);
+      const uid = `UID:campfire-c${campaignId}-s${created.body.id}@campfire`;
+
+      const before = await request(server).get(`/api/v1/calendar/${token}.ics`);
+      expect(before.status).toBe(200);
+      expect(before.text).toContain(uid);
+      expect(before.text).not.toContain(`${uid}\r\nSTATUS:CANCELLED`);
+
+      const cancelled = await request(server).delete(`/api/v1/schedule/${created.body.id}`).set(dm);
+      expect(cancelled.status).toBe(200);
+
+      const after = await request(server).get(`/api/v1/calendar/${token}.ics`);
+      expect(after.status).toBe(200);
+      expect(after.text).toContain(uid);
+      expect(after.text).toContain('STATUS:CANCELLED');
     });
 
     it('serves parser-valid Unicode content folded to at most 75 UTF-8 octets', async () => {

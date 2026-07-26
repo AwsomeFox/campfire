@@ -272,6 +272,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   played_at TEXT,
   recap TEXT NOT NULL DEFAULT '',
   dm_secret TEXT NOT NULL DEFAULT '',
+  scheduled_session_id INTEGER REFERENCES scheduled_sessions(id) ON DELETE SET NULL,
   deleted_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -310,6 +311,11 @@ CREATE TABLE IF NOT EXISTS scheduled_sessions (
   title TEXT NOT NULL DEFAULT '',
   location TEXT NOT NULL DEFAULT '',
   notes TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'scheduled',
+  cancelled_at TEXT,
+  cancelled_by TEXT,
+  cancellation_reason TEXT NOT NULL DEFAULT '',
+  session_id INTEGER REFERENCES sessions(id) ON DELETE SET NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );

@@ -11,6 +11,11 @@ export function scheduleNotEndedSql(nowIso: string): SQL {
   return sql`${scheduleEndJulianSql()} > julianday(${nowIso})`;
 }
 
+/** True for rows that should remain visible in live/upcoming projections. */
+export function scheduleLiveSql(): SQL {
+  return sql`${scheduledSessions.status} = 'scheduled'`;
+}
+
 /** True once scheduledAt + durationMinutes has passed. */
 export function scheduleEndedSql(nowIso: string): SQL {
   return sql`${scheduleEndJulianSql()} <= julianday(${nowIso})`;

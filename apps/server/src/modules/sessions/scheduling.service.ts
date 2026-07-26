@@ -1,8 +1,10 @@
 import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, asc, desc, eq, inArray, count } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, count, ne, or } from 'drizzle-orm';
 import type { z } from 'zod';
 import {
   ScheduledSessionCreate,
+  ScheduledSessionCancel,
+  ScheduledSessionDuplicate,
   ScheduledSessionUpdate,
   RsvpSet,
   diffScheduleNotificationFields,
@@ -17,7 +19,7 @@ import type { ScheduledSession, ScheduledSessionWithRsvps, ScheduledSessionListP
 import { SCHEDULE_PAST_DEFAULT_LIMIT, SCHEDULE_PAST_MAX_LIMIT } from '@campfire/schema';
 import { applyPage } from '../../common/pagination';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { scheduledSessions, sessionRsvps, campaigns } from '../../db/schema';
+import { scheduledSessions, sessionRsvps, campaigns, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { generateIcsFeedToken, looksLikeIcsFeedToken } from '../../common/crypto';
 import { resolveIcsFeedTokenTtlDays } from '../../common/throttle.constants';
@@ -33,6 +35,7 @@ import { buildCampaignIcs } from './ics.util';
 import {
   scheduleEndedSql,
   scheduleInProgressSql,
+  scheduleLiveSql,
   scheduleNotEndedSql,
   scheduleUpcomingOnlySql,
 } from './scheduling-queries';
@@ -54,6 +57,8 @@ function icsTokenIsExpired(expiresAt: string | null): boolean {
 
 type ScheduledSessionCreateInput = z.infer<typeof ScheduledSessionCreate>;
 type ScheduledSessionUpdateInput = z.infer<typeof ScheduledSessionUpdate>;
+type ScheduledSessionCancelInput = z.infer<typeof ScheduledSessionCancel>;
+type ScheduledSessionDuplicateInput = z.infer<typeof ScheduledSessionDuplicate>;
 type RsvpSetInput = z.infer<typeof RsvpSet>;
 
 function toDomain(row: typeof scheduledSessions.$inferSelect): ScheduledSession {
@@ -65,6 +70,11 @@ function toDomain(row: typeof scheduledSessions.$inferSelect): ScheduledSession 
     title: row.title,
     location: row.location,
     notes: row.notes,
+    status: row.status as ScheduledSession['status'],
+    cancelledAt: row.cancelledAt,
+    cancelledBy: row.cancelledBy,
+    cancellationReason: row.cancellationReason,
+    sessionId: row.sessionId,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -196,7 +206,7 @@ export class SchedulingService {
     const rows = await this.db
       .select()
       .from(scheduledSessions)
-      .where(and(eq(scheduledSessions.campaignId, campaignId), scheduleNotEndedSql(nowIso)))
+      .where(and(eq(scheduledSessions.campaignId, campaignId), scheduleLiveSql(), scheduleNotEndedSql(nowIso)))
       .orderBy(asc(scheduledSessions.scheduledAt));
     return this.attachRsvps(rows);
   }
@@ -215,7 +225,14 @@ export class SchedulingService {
         : SCHEDULE_PAST_DEFAULT_LIMIT;
     const offset = page?.offset !== undefined ? Math.max(0, Math.floor(page.offset)) : 0;
     const nowIso = new Date(nowMs).toISOString();
-    const where = and(eq(scheduledSessions.campaignId, campaignId), scheduleEndedSql(nowIso));
+    const where = and(
+      eq(scheduledSessions.campaignId, campaignId),
+      or(
+        scheduleEndedSql(nowIso),
+        eq(scheduledSessions.status, 'cancelled'),
+        eq(scheduledSessions.status, 'completed'),
+      ),
+    );
 
     const [{ value: total }] = await this.db.select({ value: count() }).from(scheduledSessions).where(where);
 
@@ -289,13 +306,13 @@ export class SchedulingService {
       this.db
         .select()
         .from(scheduledSessions)
-        .where(and(eq(scheduledSessions.campaignId, campaignId), scheduleInProgressSql(nowIso)))
+        .where(and(eq(scheduledSessions.campaignId, campaignId), scheduleLiveSql(), scheduleInProgressSql(nowIso)))
         .orderBy(asc(scheduledSessions.scheduledAt))
         .limit(1),
       this.db
         .select()
         .from(scheduledSessions)
-        .where(and(eq(scheduledSessions.campaignId, campaignId), scheduleUpcomingOnlySql(nowIso)))
+        .where(and(eq(scheduledSessions.campaignId, campaignId), scheduleLiveSql(), scheduleUpcomingOnlySql(nowIso)))
         .orderBy(asc(scheduledSessions.scheduledAt))
         .limit(1),
     ]);
@@ -438,21 +455,36 @@ export class SchedulingService {
     return this.getWithRsvps(id);
   }
 
-  async remove(id: number, user: RequestUser, role: Role): Promise<void> {
+  async remove(id: number, user: RequestUser, role: Role, input: ScheduledSessionCancelInput = {}): Promise<ScheduledSessionWithRsvps> {
     const existing = await this.getRowOrThrow(id);
-    await this.db.delete(sessionRsvps).where(eq(sessionRsvps.scheduledSessionId, id));
-    await this.db.delete(scheduledSessions).where(eq(scheduledSessions.id, id));
+    if (existing.status === 'cancelled') return this.getWithRsvps(id);
+    if (existing.status === 'completed') {
+      throw new BadRequestException('Completed scheduled sessions cannot be cancelled');
+    }
+    const ts = nowIso();
+    const reason = (input.reason ?? '').trim();
+    await this.db
+      .update(scheduledSessions)
+      .set({
+        status: 'cancelled',
+        cancelledAt: ts,
+        cancelledBy: user.id,
+        cancellationReason: reason,
+        updatedAt: ts,
+      })
+      .where(eq(scheduledSessions.id, id));
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
-      action: 'schedule.delete',
+      action: 'schedule.cancel',
       entityType: 'session',
       entityId: id,
       campaignId: existing.campaignId,
+      detail: reason,
     });
     this.emitScheduleUpdated(existing.campaignId, id);
-    // Issue #820: cancellation is a lifecycle event — notify with a snapshot of
-    // the removed night so the bell can still show a localized cancelled detail.
+    // Cancellation is a lifecycle event: keep the row/RSVPs, but notify with a
+    // snapshot so members and calendar clients can update their copies.
     await this.notifyScheduleLifecycle(
       existing.campaignId,
       user,
@@ -464,6 +496,133 @@ export class SchedulingService {
         changeType: 'cancelled',
       }),
     );
+    return this.getWithRsvps(id);
+  }
+
+  async restore(id: number, user: RequestUser, role: Role): Promise<ScheduledSessionWithRsvps> {
+    const existing = await this.getRowOrThrow(id);
+    if (existing.status !== 'cancelled') throw new NotFoundException(`Scheduled session ${id} is not cancelled`);
+    const ts = nowIso();
+    await this.db
+      .update(scheduledSessions)
+      .set({
+        status: 'scheduled',
+        cancelledAt: null,
+        cancelledBy: null,
+        cancellationReason: '',
+        updatedAt: ts,
+      })
+      .where(eq(scheduledSessions.id, id));
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'schedule.restore',
+      entityType: 'session',
+      entityId: id,
+      campaignId: existing.campaignId,
+    });
+    this.emitScheduleUpdated(existing.campaignId, id);
+    await this.notifyScheduleLifecycle(
+      existing.campaignId,
+      user,
+      this.scheduleNotificationData({
+        scheduleId: existing.id,
+        scheduledAt: existing.scheduledAt,
+        durationMinutes: existing.durationMinutes,
+        title: existing.title,
+        changeType: 'updated',
+      }),
+    );
+    return this.getWithRsvps(id);
+  }
+
+  async duplicate(
+    id: number,
+    input: ScheduledSessionDuplicateInput,
+    user: RequestUser,
+    role: Role,
+  ): Promise<ScheduledSessionWithRsvps> {
+    const existing = await this.getRowOrThrow(id);
+    const created = await this.create(
+      existing.campaignId,
+      {
+        scheduledAt: input.scheduledAt ?? existing.scheduledAt,
+        durationMinutes: input.durationMinutes ?? existing.durationMinutes,
+        title: input.title ?? existing.title,
+        location: input.location ?? existing.location,
+        notes: input.notes ?? existing.notes,
+      },
+      user,
+      role,
+    );
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'schedule.duplicate',
+      entityType: 'session',
+      entityId: created.id,
+      campaignId: existing.campaignId,
+      detail: `from=${id}`,
+    });
+    return created;
+  }
+
+  async linkSession(scheduleId: number, sessionId: number, user: RequestUser, role: Role): Promise<ScheduledSessionWithRsvps> {
+    const schedule = await this.getRowOrThrow(scheduleId);
+    if (schedule.status === 'cancelled') throw new BadRequestException('Cancelled scheduled sessions cannot be completed');
+    if (schedule.status === 'completed' && schedule.sessionId !== sessionId) {
+      throw new BadRequestException('Scheduled session is already linked to a different session');
+    }
+    const [session] = await this.db.select().from(sessions).where(eq(sessions.id, sessionId)).limit(1);
+    if (!session || session.deletedAt != null) throw new NotFoundException(`Session ${sessionId} not found`);
+    if (session.campaignId !== schedule.campaignId) {
+      throw new BadRequestException('Session must belong to the same campaign as the scheduled session');
+    }
+    if (schedule.status === 'completed' && schedule.sessionId === sessionId) {
+      return this.getWithRsvps(scheduleId);
+    }
+    if (session.scheduledSessionId != null && session.scheduledSessionId !== scheduleId) {
+      throw new BadRequestException('Session is already linked to a different scheduled session');
+    }
+    const [otherSchedule] = await this.db
+      .select({ id: scheduledSessions.id })
+      .from(scheduledSessions)
+      .where(and(eq(scheduledSessions.sessionId, sessionId), ne(scheduledSessions.id, scheduleId)))
+      .limit(1);
+    if (otherSchedule) {
+      throw new BadRequestException('Session is already linked to a different scheduled session');
+    }
+    const ts = nowIso();
+    await this.db
+      .update(scheduledSessions)
+      .set({ status: 'completed', sessionId, updatedAt: ts })
+      .where(eq(scheduledSessions.id, scheduleId));
+    await this.db
+      .update(sessions)
+      .set({ scheduledSessionId: scheduleId, updatedAt: ts })
+      .where(eq(sessions.id, sessionId));
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'schedule.link',
+      entityType: 'session',
+      entityId: scheduleId,
+      campaignId: schedule.campaignId,
+      detail: `session=${sessionId}`,
+    });
+    if (schedule.status !== 'completed') {
+      await this.audit.log({
+        actor: auditActor(user),
+        actorRole: role,
+        action: 'schedule.complete',
+        entityType: 'session',
+        entityId: scheduleId,
+        campaignId: schedule.campaignId,
+        detail: `session=${sessionId}`,
+      });
+    }
+    this.emitScheduleUpdated(schedule.campaignId, scheduleId);
+    return this.getWithRsvps(scheduleId);
   }
 
   // ----- RSVPs (availability) -----
@@ -471,6 +630,9 @@ export class SchedulingService {
   /** Upsert the calling member's own availability for a scheduled session. */
   async setRsvp(scheduleId: number, input: RsvpSetInput, user: RequestUser, role: Role): Promise<ScheduledSessionWithRsvps> {
     const schedule = await this.getRowOrThrow(scheduleId);
+    if (schedule.status !== 'scheduled') {
+      throw new BadRequestException('RSVPs can only be changed for scheduled sessions');
+    }
     const ts = nowIso();
     const [existing] = await this.db
       .select()

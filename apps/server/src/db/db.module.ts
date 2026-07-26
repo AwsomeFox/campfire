@@ -2787,6 +2787,35 @@ function migrateGuestDmHandoff545(sqlite: Database.Database): void {
   `);
 }
 
+/**
+ * Issue #504: scheduled sessions are no longer deleted when cancelled. Add a
+ * lifecycle status, cancellation metadata, and nullable schedule↔play-log links.
+ */
+function migrateSchedulingLifecycle504(sqlite: Database.Database): void {
+  const hasScheduledSessions = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='scheduled_sessions'")
+    .get();
+  if (hasScheduledSessions) {
+    const scheduleCols = sqlite.prepare('PRAGMA table_info(scheduled_sessions)').all() as Array<{ name: string }>;
+    const has = (name: string) => scheduleCols.some((c) => c.name === name);
+    if (!has('status')) sqlite.exec("ALTER TABLE scheduled_sessions ADD COLUMN status TEXT NOT NULL DEFAULT 'scheduled'");
+    if (!has('cancelled_at')) sqlite.exec('ALTER TABLE scheduled_sessions ADD COLUMN cancelled_at TEXT');
+    if (!has('cancelled_by')) sqlite.exec('ALTER TABLE scheduled_sessions ADD COLUMN cancelled_by TEXT');
+    if (!has('cancellation_reason')) sqlite.exec("ALTER TABLE scheduled_sessions ADD COLUMN cancellation_reason TEXT NOT NULL DEFAULT ''");
+    if (!has('session_id')) sqlite.exec('ALTER TABLE scheduled_sessions ADD COLUMN session_id INTEGER');
+  }
+
+  const hasSessions = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'")
+    .get();
+  if (hasSessions) {
+    const sessionCols = sqlite.prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>;
+    if (!sessionCols.some((c) => c.name === 'scheduled_session_id')) {
+      sqlite.exec('ALTER TABLE sessions ADD COLUMN scheduled_session_id INTEGER');
+    }
+  }
+}
+
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
   { name: '0001_users_oidc', run: migrateUsersTableForOidc },
   { name: '0002_campaigns_rule_system', run: migrateCampaignsTableForRuleSystem },
@@ -2893,6 +2922,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0104_campaign_library_monsters', run: migrateCampaignLibraryMonstersTable },
   { name: '0105_campaign_library_monsters_fk', run: migrateCampaignLibraryMonstersForeignKeys },
   { name: '0106_guest_dm_handoff_545', run: migrateGuestDmHandoff545 },
+  { name: '0107_scheduling_lifecycle_504', run: migrateSchedulingLifecycle504 },
 ];
 
 /**

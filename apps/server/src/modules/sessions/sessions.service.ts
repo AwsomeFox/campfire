@@ -16,6 +16,7 @@ import { NotificationsService, excerpt } from '../notifications/notifications.se
 import { RevisionsService } from '../revisions/revisions.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
+import { SchedulingService } from './scheduling.service';
 
 type SessionCreateInput = z.infer<typeof SessionCreate>;
 type SessionUpdateInput = z.infer<typeof SessionUpdate>;
@@ -38,6 +39,7 @@ export function toDomain(row: typeof sessions.$inferSelect): Session {
     playedAt: row.playedAt,
     recap: row.recap,
     dmSecret: row.dmSecret,
+    scheduledSessionId: row.scheduledSessionId,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -156,6 +158,7 @@ export class SessionsService {
     private readonly audit: AuditService,
     private readonly notifications: NotificationsService,
     private readonly revisions: RevisionsService,
+    private readonly scheduling: SchedulingService,
   ) {}
 
   /**
@@ -176,6 +179,7 @@ export class SessionsService {
         // substr caps what SQLite reads/returns; excerpt() then flattens+trims to ~200 chars.
         recapExcerpt: sql<string>`substr(${sessions.recap}, 1, 400)`,
         dmSecret: sessions.dmSecret,
+        scheduledSessionId: sessions.scheduledSessionId,
         createdAt: sessions.createdAt,
         updatedAt: sessions.updatedAt,
       })
@@ -193,6 +197,7 @@ export class SessionsService {
       playedAt: r.playedAt,
       recapExcerpt: excerpt(r.recapExcerpt ?? ''),
       dmSecret: r.dmSecret,
+      scheduledSessionId: r.scheduledSessionId,
       createdAt: r.createdAt,
       updatedAt: r.updatedAt,
     }));
@@ -223,6 +228,7 @@ export class SessionsService {
         playedAt: sessions.playedAt,
         recapExcerpt: sql<string>`substr(${sessions.recap}, 1, 400)`,
         dmSecret: sessions.dmSecret,
+        scheduledSessionId: sessions.scheduledSessionId,
         createdAt: sessions.createdAt,
         updatedAt: sessions.updatedAt,
       })
@@ -240,6 +246,7 @@ export class SessionsService {
       playedAt: r.playedAt,
       recapExcerpt: excerpt(r.recapExcerpt ?? ''),
       dmSecret: r.dmSecret,
+      scheduledSessionId: r.scheduledSessionId,
       createdAt: r.createdAt,
       updatedAt: r.updatedAt,
     }));
@@ -369,6 +376,15 @@ export class SessionsService {
   async create(campaignId: number, input: SessionCreateInput, user: RequestUser, role: Role): Promise<Session> {
     const ts = nowIso();
     const recap = input.recap ?? '';
+    if (input.scheduledSessionId != null) {
+      const schedule = await this.scheduling.getRowOrThrow(input.scheduledSessionId);
+      if (schedule.campaignId !== campaignId) {
+        throw new BadRequestException('Scheduled session must belong to the same campaign as the session');
+      }
+      if (schedule.status !== 'scheduled') {
+        throw new BadRequestException('Only scheduled sessions can be completed by a recap');
+      }
+    }
 
     // Number assignment and the insert happen in one synchronous better-sqlite3
     // transaction so the campaign-unique guard is airtight:
@@ -402,7 +418,7 @@ export class SessionsService {
         const number = max + 1;
         const [inserted] = tx
           .insert(sessions)
-          .values({ campaignId, number, title: input.title ?? '', playedAt: input.playedAt ?? null, recap, dmSecret: input.dmSecret ?? '', createdAt: ts, updatedAt: ts })
+          .values({ campaignId, number, title: input.title ?? '', playedAt: input.playedAt ?? null, recap, dmSecret: input.dmSecret ?? '', scheduledSessionId: input.scheduledSessionId ?? null, createdAt: ts, updatedAt: ts })
           .returning()
           .all();
         return { row: inserted, deduped: false };
@@ -417,7 +433,7 @@ export class SessionsService {
       if (conflict) throw new ConflictException(`Session number ${input.number} already exists in this campaign`);
       const [inserted] = tx
         .insert(sessions)
-        .values({ campaignId, number: input.number, title: input.title ?? '', playedAt: input.playedAt ?? null, recap, dmSecret: input.dmSecret ?? '', createdAt: ts, updatedAt: ts })
+        .values({ campaignId, number: input.number, title: input.title ?? '', playedAt: input.playedAt ?? null, recap, dmSecret: input.dmSecret ?? '', scheduledSessionId: input.scheduledSessionId ?? null, createdAt: ts, updatedAt: ts })
         .returning()
         .all();
       return { row: inserted, deduped: false };
@@ -455,6 +471,10 @@ export class SessionsService {
       campaignId,
     });
 
+    if (row.scheduledSessionId != null) {
+      await this.scheduling.linkSession(row.scheduledSessionId, row.id, user, role);
+    }
+
     if (row.recap.trim() !== '') {
       await this.notifications.notifyCampaign(campaignId, user, {
         type: 'recap_posted',
@@ -491,6 +511,15 @@ export class SessionsService {
     if (input.number !== undefined) {
       await this.assertNumberAvailable(existing.campaignId, input.number, id);
     }
+    if (input.scheduledSessionId != null && input.scheduledSessionId !== existing.scheduledSessionId) {
+      const schedule = await this.scheduling.getRowOrThrow(input.scheduledSessionId);
+      if (schedule.campaignId !== existing.campaignId) {
+        throw new BadRequestException('Scheduled session must belong to the same campaign as the session');
+      }
+      if (schedule.status !== 'scheduled') {
+        throw new BadRequestException('Only scheduled sessions can be completed by a recap');
+      }
+    }
     // Commit an immutable prose version when the recap actually changes (#157/#813):
     // close the prior tip (real author preserved) and open a tip for the new prose.
     if (input.recap !== undefined && input.recap !== existing.recap) {
@@ -522,6 +551,10 @@ export class SessionsService {
       // the delta reader only needs to know recap changed, then fetch the session.
       detail: JSON.stringify(auditableSessionPatch(input)),
     });
+
+    if (row.scheduledSessionId != null && row.scheduledSessionId !== existing.scheduledSessionId) {
+      await this.scheduling.linkSession(row.scheduledSessionId, row.id, user, role);
+    }
 
     // recap_posted fires only on the empty -> non-empty transition (posting the
     // recap), never on subsequent edits — no notification spam per typo fix.
