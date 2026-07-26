@@ -159,6 +159,11 @@ running on 8080 — maps to the container's internal 8080).
 | `BACKUP_INTERVAL_HOURS` | `24` | Hours between scheduled backups (only when `BACKUP_SCHEDULE_ENABLED=1`) |
 | `BACKUP_DIR` | `$DATA_DIR/backups` | Where scheduled backup archives are written (only when `BACKUP_SCHEDULE_ENABLED=1`) |
 | `BACKUP_KEY_PASSPHRASE` | *(unset)* | When set (≥12 characters), scheduled backups wrap the auto-generated `ai-config.key` in an encrypted envelope inside the archive (#496). Interactive downloads use `POST /api/v1/backup/download` with the same passphrase in the JSON body. |
+| `BACKUP_KEEP_COUNT` | `14` | Scheduled-backup retention: keep this many newest verified archives (`0` disables count pruning) |
+| `BACKUP_KEEP_DAYS` | `30` | Scheduled-backup retention: prune verified archives older than this many days (`0` disables age pruning) |
+| `BACKUP_MAX_TOTAL_BYTES` | *(unset)* | Optional scheduled-backup retention cap across archives in `BACKUP_DIR`; oldest verified, unprotected archives are pruned first |
+| `BACKUP_MIN_FREE_BYTES` | `536870912` | Free-space reserve for scheduled backups. If free space minus the next archive estimate would fall below this, the run is skipped and alerted |
+| `BACKUP_PROTECT_LAST_GOOD` | `true` | Protect the most recent verified scheduled archive from retention pruning |
 
 `WEB_DIST` and `NODE_ENV` are already baked into the image (`NODE_ENV=production`,
 `WEB_DIST=/app/web-dist`) — you shouldn't need to set either.
@@ -185,6 +190,22 @@ so copying that volume is still the simplest backup. On top of that, Campfire ex
 have the server write a fresh archive to `BACKUP_DIR` (default `$DATA_DIR/backups`) every
 `BACKUP_INTERVAL_HOURS` (default 24). These are the same archives the download endpoint
 produces — copy them off-box for real disaster recovery.
+
+Scheduled archives are retained by a verified-only policy: by default Campfire keeps the
+newest 14 verified archives and prunes verified archives older than 30 days. You can also
+set `BACKUP_MAX_TOTAL_BYTES` to enforce a directory size cap. Retention never deletes an
+archive that fails manifest/reconciliation verification, the most recent last-known-good
+archive (unless `BACKUP_PROTECT_LAST_GOOD=0`), or an operator-marked archive with a
+sidecar marker next to the zip (`.pin` / `.keep` for local pinning, `.offsite` for an
+off-box protected copy). Pruning runs only after a new scheduled archive has been written
+and verified.
+
+Before writing a scheduled archive, Campfire estimates the next archive size from the last
+successful backup (or current DB/uploads size on first run) and checks the backup volume
+with `statfs`. If `free - estimate < BACKUP_MIN_FREE_BYTES`, the run is skipped before any
+archive is written, the cadence row records `lastError`, and the next attempt uses
+exponential backoff. The server-admin backup card surfaces disk free/reserve, retention
+policy/metrics, and alerts.
 
 `BACKUP_INTERVAL_HOURS` is strictly validated: an unset, empty, non-numeric, zero, negative,
 or `NaN`/`Infinity` value falls back to the documented 24h default rather than silently
