@@ -1,5 +1,5 @@
 import { createZodDto } from 'nestjs-zod';
-import { EncounterCreate, EncounterGenerate, EncounterPreviewRequest, EncounterCommit, EncounterUpdate, EncounterEscalationUpdate, EncounterReopen, CombatantCreate, CombatantUpdate, CombatantTurnStatePatch, EncounterEndTurn, RollRequest, ActionRollRequest, ManualRollRequest, MapPing, ExpectedUpdatedAt, ActionResolveRequest, ActionResolution, ActionUndoToken } from '@campfire/schema';
+import { EncounterCreate, EncounterGenerate, EncounterPreviewRequest, EncounterCommit, EncounterUpdate, EncounterEscalationUpdate, EncounterReopen, CombatantCreate, CombatantUpdate, CombatantTurnStatePatch, EncounterEndTurn, EncounterNextTurn, RollRequest, ActionRollRequest, ManualRollRequest, MapPing, ExpectedUpdatedAt, ActionResolveRequest, ActionResolution, ActionUndoToken } from '@campfire/schema';
 
 export class EncounterCreateDto extends createZodDto(EncounterCreate.strict()) {}
 // Encounter generator request (issue #304). .strict() so an unknown/misspelled key 400s
@@ -40,6 +40,10 @@ export class EncounterReopenDto extends createZodDto(EncounterReopen.strict()) {
 // Issue #413: player/DM end-turn body (optimistic double-advance guard) and
 // the per-combatant turn-state declaration patch (action economy, movement, effects, delay/ready).
 export class EncounterEndTurnDto extends createZodDto(EncounterEndTurn.strict()) {}
+// Issue #580: next-turn gained a body — an `idempotencyKey` (retry dedup) and an
+// `expectedCurrentCombatantId` (cross-device CAS). Both optional, so the historic
+// bodyless POST still validates and behaves exactly as before.
+export class EncounterNextTurnDto extends createZodDto(EncounterNextTurn.strict()) {}
 export class CombatantTurnStatePatchDto extends createZodDto(CombatantTurnStatePatch.strict()) {}
 // Issue #414: structured action resolver. Resolve (with optional atomic commit), apply a
 // previewed resolution (DM confirm path), and undo an applied resolution. Not .strict() on

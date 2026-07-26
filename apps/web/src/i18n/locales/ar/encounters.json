@@ -28,6 +28,10 @@
       "noCombatantsHintDmNoParty": "Add combatants below — this campaign has no active party to auto-add.",
       "noCombatantsHintPlayer": "Waiting on the DM."
     },
+    "reconcile": {
+      "checking": "جارٍ التحقق من الحالة المحفوظة — نتأكد ممّا إذا كان التغيير قد حُفظ قبل أن تتصرّف مجددًا.",
+      "done": "تم التحقق. الحالة المعروضة تطابق الخادم الآن."
+    },
     "errors": {
       "load": "تعذّر تحميل encounters.",
       "create": "تعذّر الإنشاء the encounter.",

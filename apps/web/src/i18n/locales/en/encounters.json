@@ -28,6 +28,10 @@
       "noCombatantsHintDmNoParty": "Add combatants below — this campaign has no active party to auto-add.",
       "noCombatantsHintPlayer": "Waiting on the DM."
     },
+    "reconcile": {
+      "checking": "Checking committed state — confirming whether that change was saved before you act again.",
+      "done": "Checked. Displayed state now matches the server."
+    },
     "errors": {
       "load": "Couldn't load encounters.",
       "create": "Couldn't create the encounter.",

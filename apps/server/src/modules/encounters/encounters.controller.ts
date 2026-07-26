@@ -6,7 +6,7 @@ import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { contentDispositionHeader } from '../attachments/filename';
 import { EncountersService } from './encounters.service';
-import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterEscalationUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, RollRequestDto, ActionRollRequestDto, ManualRollRequestDto, MapPingDto, ActionResolveRequestDto, ActionResolutionDto, ActionUndoTokenDto } from './encounters.dto';
+import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterEscalationUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, EncounterNextTurnDto, RollRequestDto, ActionRollRequestDto, ManualRollRequestDto, MapPingDto, ActionResolveRequestDto, ActionResolutionDto, ActionUndoTokenDto } from './encounters.dto';
 import { EncounterMapService } from './encounter-map.service';
 import { ActionResolverService } from './action-resolver.service';
 import type { Request, Response } from 'express';
@@ -489,13 +489,23 @@ export class EncountersController {
   }
 
   @Post(':id/next-turn')
-  @ApiOperation({ summary: 'Advance to the next turn', description: 'dm role required. Wraps turnIndex to 0 and increments round when past the last combatant.' })
-  @ApiResponse({ status: 201, description: 'Encounter with advanced round/turnIndex.' })
+  @ApiOperation({
+    summary: 'Advance to the next turn',
+    description:
+      'dm role required. Wraps turnIndex to 0 and increments round when past the last combatant. ' +
+      'Issue #580 — the body is optional but strongly recommended for interactive clients: ' +
+      '`idempotencyKey` (a client-minted id for ONE logical click) makes a retry after a lost ' +
+      'response replay the original result instead of advancing twice, and ' +
+      '`expectedCurrentCombatantId` compare-and-swaps against the live turn pointer so a second ' +
+      'device advancing simultaneously gets a 409 rather than silently skipping a combatant.',
+  })
+  @ApiResponse({ status: 201, description: 'Encounter with advanced round/turnIndex (or the replayed original response for a retried idempotencyKey).' })
   @ApiResponse({ status: 400, description: 'Encounter is not running.' })
-  async nextTurn(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+  @ApiResponse({ status: 409, description: 'The turn already advanced (expectedCurrentCombatantId CAS), or the idempotencyKey was reused for a different action.' })
+  async nextTurn(@Param('id', ParseIntPipe) id: number, @Body() body: EncounterNextTurnDto, @CurrentUser() user: RequestUser) {
     const row = await this.encounters.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
-    return this.encounters.nextTurn(id, user, role);
+    return this.encounters.nextTurn(id, body ?? {}, user, role);
   }
 
   @Post(':id/escalation')

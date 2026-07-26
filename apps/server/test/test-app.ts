@@ -31,6 +31,14 @@ export interface CreateTestAppOptions {
   overrides?: TestAppOverride[];
   /** Re-open an existing test data directory (used by interruption/recovery specs). */
   dataDir?: string;
+  /**
+   * Express middleware installed BEFORE `app.init()` — i.e. ahead of the Nest router.
+   * Used by the mutation-idempotency fault-injection suite (#580) to simulate a response
+   * that is lost, or replaced by a gateway error, AFTER the handler has already committed.
+   * Must run before init to sit in front of the routes; adding it afterwards would append
+   * it behind the router where it never executes.
+   */
+  middleware?: Array<(req: unknown, res: unknown, next: () => void) => void>;
 }
 
 /**
@@ -60,6 +68,10 @@ export async function createTestApp(options: CreateTestAppOptions = {}): Promise
 
   const app = moduleRef.createNestApplication();
   app.use(cookieParser());
+  for (const mw of options.middleware ?? []) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    app.use(mw as any);
+  }
   app.setGlobalPrefix('api/v1', {
     exclude: [
       'healthz',
