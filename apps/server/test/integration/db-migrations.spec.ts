@@ -360,7 +360,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(MIGRATION_NAMES).toContain('0102_ai_scribe_session_scope_499');
       // 0112 (#559): durable AI Driver control state is created as a NEW table on an old-shaped
       // DB, so pause/takeover/vote/stuck survive a restart after an in-place upgrade.
-      expect(MIGRATION_NAMES).toContain('0112_ai_driver_control_state_559');
+      expect(MIGRATION_NAMES).toContain('0111_ai_driver_control_state_559');
       expect(columnNames(sqlite, 'ai_driver_control_state')).toEqual(
         expect.arrayContaining([
           'campaign_id', 'status', 'state', 'scene', 'last_narration', 'last_turn_at',
@@ -1013,7 +1013,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
 
   /**
    * Issue #559. `ai_driver_control_state` gained `announced_recovery` after the create-table
-   * migration had already shipped under the name `0112_ai_driver_control_state_559`. Because
+   * migration had already shipped under an earlier name and a column-less shape. Because
    * runMigrations skips any migration whose name is recorded in `__migrations`, a probe living
    * INSIDE the create-table migration would never run on the DBs that actually need it — the
    * column would stay missing, every drizzle read/write on the table would throw, and the
@@ -1047,9 +1047,9 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
           updated_at TEXT NOT NULL
         );
       `);
-      rewound.prepare('DELETE FROM __migrations WHERE name = ?').run('0113_ai_driver_control_state_announced_recovery_559');
+      rewound.prepare('DELETE FROM __migrations WHERE name = ?').run('0112_ai_driver_control_state_announced_recovery_559');
       expect(
-        rewound.prepare('SELECT name FROM __migrations WHERE name = ?').get('0112_ai_driver_control_state_559'),
+        rewound.prepare('SELECT name FROM __migrations WHERE name = ?').get('0111_ai_driver_control_state_559'),
       ).toBeTruthy();
       expect(columnNames(rewound, 'ai_driver_control_state')).not.toContain('announced_recovery');
     } finally {
@@ -1058,7 +1058,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
 
     const upgraded = openDatabase(dataDir);
     try {
-      expect(MIGRATION_NAMES).toContain('0113_ai_driver_control_state_announced_recovery_559');
+      expect(MIGRATION_NAMES).toContain('0112_ai_driver_control_state_announced_recovery_559');
       expect(columnNames(upgraded.sqlite, 'ai_driver_control_state')).toContain('announced_recovery');
     } finally {
       upgraded.sqlite.close();

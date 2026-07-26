@@ -731,6 +731,35 @@ CREATE TABLE IF NOT EXISTS attachments (
   updated_at TEXT NOT NULL
 );
 
+-- Durable responsive derivatives for image attachments (issue #604). One row per
+-- (attachment, ladder rung); the bytes live next to the original at
+-- <campaign>/<id>.<variant>.png. Rows exist so a derivative is generated ONCE,
+-- off the request path, and survives a restart: a 'pending' row is the work item
+-- the background drain picks up, 'ready' is servable, 'failed' is retryable by the
+-- DM, and 'skipped' records "the source is already smaller than this rung" so we
+-- never regenerate a decision we already made. ON DELETE CASCADE keeps the ladder
+-- from outliving its attachment; the on-disk files are queued through
+-- fs_deletion_queue like any other upload artifact.
+CREATE TABLE IF NOT EXISTS attachment_derivatives (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  attachment_id INTEGER NOT NULL REFERENCES attachments(id) ON DELETE CASCADE,
+  campaign_id INTEGER NOT NULL,
+  variant TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'pending',
+  format TEXT NOT NULL DEFAULT '',
+  width INTEGER NOT NULL DEFAULT 0,
+  height INTEGER NOT NULL DEFAULT 0,
+  bytes INTEGER NOT NULL DEFAULT 0,
+  checksum TEXT NOT NULL DEFAULT '',
+  source_etag TEXT NOT NULL DEFAULT '',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (attachment_id, variant)
+);
+CREATE INDEX IF NOT EXISTS idx_attachment_derivatives_state ON attachment_derivatives(state);
+
 -- Filesystem cleanup retry queue (issue #727). Rows describe upload paths whose DB
 -- metadata was removed but bytes could not be verified erased. No FKs so entries
 -- survive campaign purge.

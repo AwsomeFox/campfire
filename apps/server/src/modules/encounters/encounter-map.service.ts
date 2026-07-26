@@ -1,8 +1,9 @@
 import fs from 'node:fs';
 import { Injectable, Logger, NotFoundException, UnprocessableEntityException } from '@nestjs/common';
-import type { Encounter, FogRect, Role } from '@campfire/schema';
+import type { AttachmentDerivativeManifest, Encounter, FogRect, Role } from '@campfire/schema';
 import { fogConcealsPixels } from '../../common/fog';
 import { AttachmentsService } from '../attachments/attachments.service';
+import type { RequestedSize } from '../attachments/image-derivatives';
 import { renderFogSafeMap } from './fog-map.renderer';
 
 export interface EncounterMapView {
@@ -11,6 +12,13 @@ export interface EncounterMapView {
   etag: string;
   filename: string;
   protected: boolean;
+  /**
+   * Which responsive rung these bytes actually are (issue #604): a ladder name,
+   * 'original', or 'original-fallback' when a derivative was asked for but none was
+   * ready. Surfaced as X-Campfire-Derivative so the run view can show a
+   * processing/error state instead of assuming it received a small image.
+   */
+  derivative: string;
 }
 
 interface CachedMapView extends EncounterMapView {
@@ -47,10 +55,32 @@ export class EncounterMapService {
 
   constructor(private readonly attachments: AttachmentsService) {}
 
+  /**
+   * Responsive-ladder manifest for an encounter's battle map (issue #604).
+   *
+   * Routed through the encounter (not the attachment) on purpose: a player may
+   * never touch /attachments/:id/... for a fog-protected map (#463), yet they still
+   * need each rung's real pixel dimensions to build a correct `srcset` for the
+   * fogged image they ARE allowed to see. Only sizes are disclosed here — no bytes,
+   * no filename, nothing about hidden state — and the fogged render has exactly the
+   * same dimensions as the source, so this reveals nothing a player would not learn
+   * from the image they already receive.
+   */
+  async derivativeManifest(encounter: Encounter): Promise<AttachmentDerivativeManifest> {
+    if (encounter.mapAttachmentId == null) {
+      throw new NotFoundException(`Encounter ${encounter.id} has no battle map`);
+    }
+    const row = await this.attachments.getRowOrThrow(encounter.mapAttachmentId);
+    if (row.campaignId !== encounter.campaignId) {
+      throw new NotFoundException(`Encounter ${encounter.id} battle map not found`);
+    }
+    return this.attachments.derivativeManifest(row);
+  }
+
   async resolve(
     encounter: Encounter,
     role: Role,
-    variant: 'original' | 'thumb',
+    variant: RequestedSize,
     persistedFogInvalid = false,
   ): Promise<EncounterMapView> {
     if (encounter.mapAttachmentId == null) {
@@ -81,7 +111,14 @@ export class EncounterMapService {
       const file = this.attachments.resolveFile(row, variant);
       try {
         const bytes = await fs.promises.readFile(file.path);
-        return { bytes, mime: file.mime, etag: file.etag, filename: row.filename, protected: false };
+        return {
+          bytes,
+          mime: file.mime,
+          etag: file.etag,
+          filename: row.filename,
+          protected: false,
+          derivative: file.derivative,
+        };
       } catch {
         throw new NotFoundException(`Encounter ${encounter.id} battle map file is missing`);
       }
@@ -128,7 +165,7 @@ export class EncounterMapService {
     key: string,
     sourcePath: string,
     revealed: FogRect[],
-    variant: 'original' | 'thumb',
+    variant: RequestedSize,
     filename: string,
     encounterId: number,
     mapAttachmentId: number,
@@ -146,7 +183,7 @@ export class EncounterMapService {
     key: string,
     source: Buffer,
     revealed: FogRect[],
-    variant: 'original' | 'thumb',
+    variant: RequestedSize,
     filename: string,
     encounterId: number,
     mapAttachmentId: number,
@@ -160,6 +197,9 @@ export class EncounterMapService {
         etag: rendered.etag,
         filename: `fogged-${filename.replace(/\.[^.]+$/, '')}.png`,
         protected: true,
+        // A fog-protected view is rendered live at the requested rung (issue #604),
+        // so it is always exactly the size that was asked for — never a fallback.
+        derivative: variant,
       };
       this.remember(result);
       return result;

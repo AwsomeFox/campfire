@@ -2,21 +2,105 @@
   "aiOnboarding": {
     "checklist": {
       "title": "Set up the AI Dungeon Master",
-      "intro": "Four steps take a campaign from no AI to a working AI DM. Each step below reads its real state and links straight to the control that changes it.",
+      "intro": "These steps take a campaign from no AI to a working AI DM. Each step below reads its real state and links straight to the control that changes it.",
       "progress": "{{done}} of {{total}} steps done",
       "allDoneTitle": "The AI DM is ready",
       "allDoneDriver": "The AI holds the DM seat and acts directly — it narrates, rolls dice, applies HP and conditions, and runs the session within the budget you set. Players join at the Table tab.",
       "allDoneCoDm": "The AI is co-DMing — it only proposes, and nothing lands in canon until a human DM approves it.",
       "loading": "Checking setup…",
+      "unavailable": "Readiness could not be loaded. Try again from campaign settings.",
       "actorAdmin": "Server admin",
       "actorDm": "You (the DM)",
+      "actorTable": "Your table",
       "completedBy": "Done by {{actor}}",
       "todoBy": "Needs {{actor}}",
+      "costTitle": "Estimated cost before the next run",
+      "costBody": "Plan for up to {{tokens}} tokens (about {{prompt}} prompt + {{completion}} completion). USD estimate: {{usd}}.",
+      "costUnknownUsd": "unknown for this provider/model",
       "fixServerAi": "Open AI console",
       "fixProvider": "Configure provider",
       "fixMode": "Choose a mode",
       "fixBudget": "Set a budget",
       "openTable": "Open the Table",
+      "checkTitles": {
+        "serverFlag": "Server AI enabled",
+        "serverCap": "Server-wide token cap",
+        "provider": "Provider and credential",
+        "model": "Executable model",
+        "mode": "Operating mode",
+        "budget": "Budget available",
+        "writeMode": "Write mode",
+        "rulesContent": "Rules and table content",
+        "supportConsent": "Participant support consent",
+        "secretPolicy": "Secret and privacy policy",
+        "driverTools": "Driver tool capability"
+      },
+      "fixLabels": {
+        "fallback": "Fix this",
+        "serverFlag": "Open AI console",
+        "serverCap": "Open AI console",
+        "provider": "Configure provider",
+        "model": "Choose an allowed model",
+        "mode": "Choose a mode",
+        "budget": "Set a budget",
+        "writeMode": "Use a direct-write session",
+        "rulesContent": "Open session zero",
+        "supportConsent": "Review support consent",
+        "secretPolicy": "Review provider privacy",
+        "driverTools": "Choose a tool-calling provider"
+      },
+      "checkDetails": {
+        "serverFlag": {
+          "on": "The server-wide AI switch is on.",
+          "offAdmin": "Turn on the server-wide AI switch before promoting AI actions.",
+          "offMember": "A server admin must enable experimental AI before this campaign can run AI actions."
+        },
+        "serverCap": {
+          "none": "No server-wide AI token cap is set.",
+          "within": "{{total}} / {{cap}} server-wide tokens used.",
+          "reached": "The server-wide AI token cap is reached ({{total}}/{{cap}}). A server admin must raise it or reset usage."
+        },
+        "provider": {
+          "ready": "Using {{providerType}} / {{model}} from {{source}} with {{credentialSource}} credentials.",
+          "noCredential": "A provider is configured, but no usable credential is available.",
+          "unconfigured": "Configure a campaign provider or ask a server admin to set a server default."
+        },
+        "model": {
+          "allowed": "Execution model {{model}} passes the server allowlist.",
+          "selected": "Model {{model}} is selected.",
+          "choose": "Choose the model that will execute AI requests.",
+          "rejected": "{{reason}}"
+        },
+        "mode": {
+          "off": "The AI DM is off for this campaign. Pick Co-DM (it only proposes) or Driver (it holds the DM seat) to switch it on.",
+          "coDm": "Co-DM mode is selected — the AI only proposes, and a human DM approves every change.",
+          "driver": "Driver mode is selected — the AI holds the DM seat and acts directly."
+        },
+        "budget": {
+          "available": "{{used}} / {{budget}} tokens used; {{remaining}} remain.",
+          "unset": "Set a positive hard token budget before Driver can run."
+        },
+        "writeMode": {
+          "direct": "This session can make direct DM-approved writes when the selected AI mode allows them.",
+          "readOnly": "This token is read-only; use a direct-write DM session before starting Driver.",
+          "proposalOnly": "This token is proposal-only; use a direct-write DM session before starting Driver."
+        },
+        "rulesContent": {
+          "present": "Session-zero safety, house-rule, or tone guidance is available to the AI.",
+          "missing": "Add session-zero lines, veils, safety tools, house rules, or tone guidance so AI output has table boundaries."
+        },
+        "supportConsent": {
+          "none": "No participant support notes are on file.",
+          "counts": "{{consented}} of {{total}} support notes allow AI use; {{tableConsented}} can influence public narration."
+        },
+        "secretPolicy": {
+          "body": "Provider keys stay write-only/redacted, participant support text is opt-in for AI, and Driver uses player-scoped reads unless a DM-approved secret is explicitly needed."
+        },
+        "driverTools": {
+          "ok": "{{providerType}} supports tool calls for live Driver play.",
+          "missing": "Driver requires a provider with tool-calling support."
+        }
+      },
       "steps": {
         "flag": {
           "title": "Server AI enabled",
@@ -49,6 +133,12 @@
           "notYet": "Once Driver mode is on, a Table tab appears for every member — that's where the session is played."
         }
       }
+    },
+    "runCost": {
+      "label": "Estimated next AI turn:",
+      "summary": "up to {{tokens}} tokens ({{prompt}} prompt + {{completion}} completion).",
+      "usdUnknown": "USD varies by provider/model.",
+      "usdKnown": "About {{usd}}."
     },
     "dashboard": {
       "hintTitle": "Try the AI Dungeon Master",
@@ -93,6 +183,14 @@
       "needProvider": {
         "title": "Driver mode needs a provider",
         "body": "Driver mode requires a configured AI provider with an API key. Set one, then switch the mode to Driver."
+      },
+      "needModel": {
+        "title": "Driver mode needs an executable model",
+        "body": "The selected AI model must pass the server allowlist and provider policy before Driver can run."
+      },
+      "needDriverTools": {
+        "title": "Driver mode needs tool calls",
+        "body": "Driver mode requires a provider that supports tool/function calls so it can use Campfire tools safely."
       },
       "paused": {
         "title": "The AI DM is paused",

@@ -14,7 +14,7 @@ import { makeTempDataDir } from './fixtures';
  * feature is that state written by one process is readable by the next, so the "restart" here
  * closes the SQLite handle and calls `openDatabase` again on the SAME data dir, then builds a
  * brand-new AiDriverService over the reopened connection. That exercises the actual
- * `ai_driver_control_state` DDL (BOOTSTRAP_SQL + the 0112 migration), the actual drizzle
+ * `ai_driver_control_state` DDL (BOOTSTRAP_SQL + the 0111 migration), the actual drizzle
  * upsert/select SQL, and the actual column names — none of which a hand-rolled mock can catch.
  * Reopening also proves the migration is idempotent against an already-migrated file.
  *
