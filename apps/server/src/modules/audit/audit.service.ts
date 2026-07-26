@@ -582,13 +582,13 @@ export class AuditService implements OnApplicationBootstrap {
         return finished;
       }
 
-      if (retentionDays <= 0) {
-        return this.finishPruneJob(jobBase, { status: 'succeeded' });
+      const legalHold = await this.getLegalHold();
+      if (legalHold.global) {
+        throw new ConflictException('Global audit legal hold is enabled; pruning is blocked');
       }
 
-      const legalHold = await this.getLegalHold();
-      if (legalHold.global && preview.eligibleCount === 0 && preview.heldCount > 0) {
-        throw new ConflictException('Global audit legal hold is enabled; pruning is blocked');
+      if (retentionDays <= 0) {
+        return this.finishPruneJob(jobBase, { status: 'succeeded' });
       }
 
       if (policy.requireRecentBackupHours > 0 && !opts.force) {

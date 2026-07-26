@@ -52,15 +52,49 @@ export function AuditLogCard() {
     void load();
   }, [load]);
 
+  function parseNumberDraft(label: string, value: string): number | null {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) {
+      setError(`${label} must be a valid number.`);
+      return null;
+    }
+    return parsed;
+  }
+
+  function parseRetentionDaysDraft(): number | null {
+    const days = parseNumberDraft('Retention days', daysDraft);
+    if (days === null) return null;
+    if (!Number.isInteger(days)) {
+      setError('Retention days must be a whole number.');
+      return null;
+    }
+    return days;
+  }
+
+  function parseBackupHoursDraft(): number | null {
+    const hours = parseNumberDraft('Recent backup hours', backupHoursDraft);
+    if (hours === null) return null;
+    if (!Number.isInteger(hours) || hours < 0) {
+      setError('Recent backup hours must be a non-negative whole number.');
+      return null;
+    }
+    return hours;
+  }
+
   async function savePolicy() {
+    const days = parseRetentionDaysDraft();
+    if (days === null) return;
+    const backupHours = parseBackupHoursDraft();
+    if (backupHours === null) return;
+
     setBusy('policy');
     setError(null);
     try {
       await api.patch(`${API}/admin/audit/retention`, {
-        days: Number(daysDraft),
+        days,
         autoPruneEnabled: autoPruneDraft,
         requireArchiveBeforePrune: archiveDraft,
-        requireRecentBackupHours: Number(backupHoursDraft),
+        requireRecentBackupHours: backupHours,
       });
       await load();
     } catch (err) {
@@ -88,14 +122,18 @@ export function AuditLogCard() {
   }
 
   async function previewPrune() {
+    const retentionDays = parseRetentionDaysDraft();
+    if (retentionDays === null) return;
+
     setBusy('preview');
     setError(null);
     try {
       const job = await api.post<AuditPruneJob>(`${API}/admin/audit/retention/preview`, {
-        retentionDays: Number(daysDraft),
+        retentionDays,
       });
       setLastPreview(job);
       await load();
+      setDaysDraft(String(job.retentionDays));
     } catch (err) {
       setError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     } finally {
@@ -104,13 +142,16 @@ export function AuditLogCard() {
   }
 
   async function pruneNow() {
+    const retentionDays = parseRetentionDaysDraft();
+    if (retentionDays === null) return;
     if (!window.confirm('Archive and permanently delete eligible audit rows? Review the dry-run counts first.')) return;
     setBusy('prune');
     setError(null);
     try {
-      const job = await api.post<AuditPruneJob>(`${API}/admin/audit/retention/prune`, { confirm: true, retentionDays: Number(daysDraft) });
+      const job = await api.post<AuditPruneJob>(`${API}/admin/audit/retention/prune`, { confirm: true, retentionDays });
       setLastPreview(job);
       await load();
+      setDaysDraft(String(job.retentionDays));
     } catch (err) {
       setError(translateApiError(err, t, { fallbackKey: 'errors.saveFailed' }));
     } finally {

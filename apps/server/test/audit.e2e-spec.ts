@@ -227,6 +227,24 @@ describe('audit log (e2e)', () => {
     await request(server).put('/api/v1/admin/audit/legal-hold').set(dm).send({ global: false, campaignIds: [] });
   });
 
+  it('#502 — global legal hold blocks prune even when no rows are currently held', async () => {
+    const server = ctx.app.getHttpServer();
+    const holdRes = await request(server)
+      .put('/api/v1/admin/audit/legal-hold')
+      .set(dm)
+      .send({ global: true, campaignIds: [] });
+    expect(holdRes.status).toBe(200);
+
+    const denied = await request(server)
+      .post('/api/v1/admin/audit/retention/prune')
+      .set(dm)
+      .send({ confirm: true, retentionDays: 365 });
+    expect(denied.status).toBe(409);
+    expect(denied.body.message).toMatch(/Global audit legal hold is enabled/);
+
+    await request(server).put('/api/v1/admin/audit/legal-hold').set(dm).send({ global: false, campaignIds: [] });
+  });
+
   it('#502 — prune requires a recent backup when policy demands it', async () => {
     const server = ctx.app.getHttpServer();
     const policy = await request(server)
