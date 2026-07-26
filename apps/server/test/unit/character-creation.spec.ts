@@ -1,10 +1,12 @@
 import {
   blankCharacterCreate,
+  abilityKeysForAdapter,
   characterCompletionChecklist,
   characterCreateFromTemplate,
   findStarterTemplate,
   isCharacterSheetComplete,
   isMinimalCharacterCreate,
+  listRuleSystemAdapters,
   resolveCharacterCreateStatus,
   starterTemplatesForAdapter,
 } from '@campfire/schema';
@@ -42,6 +44,17 @@ describe('character-creation (issue #719)', () => {
       const fighter = findStarterTemplate(Dnd5eAdapter, '5e-fighter')!;
       expect(fighter.breakdown.length).toBeGreaterThan(0);
       expect(fighter.breakdown.some((line) => /AC|HP|proficiency/i.test(line))).toBe(true);
+    });
+
+    it('builds classless Open Legend templates with every native attribute', () => {
+      const keys = abilityKeysForAdapter(OpenLegendAdapter);
+      expect(keys).toHaveLength(18);
+      expect(keys).toContain('AGILITY');
+      expect(keys).toContain('ENERGY');
+      for (const template of starterTemplatesForAdapter(OpenLegendAdapter)) {
+        expect(template.className).toBe('');
+        expect(Object.keys(template.stats).sort()).toEqual([...keys].sort());
+      }
     });
   });
 
@@ -84,10 +97,27 @@ describe('character-creation (issue #719)', () => {
       );
     });
 
+    it('does not require a class for classless Open Legend characters', () => {
+      const template = findStarterTemplate(OpenLegendAdapter, 'ol-warrior')!;
+      const sheet = characterCreateFromTemplate(template, { name: 'Kara', level: 1 });
+      expect(sheet.className).toBe('');
+      expect(isCharacterSheetComplete(sheet, OpenLegendAdapter)).toBe(true);
+      expect(characterCompletionChecklist(sheet as never, OpenLegendAdapter).some((i) => i.id === 'class')).toBe(false);
+    });
+
     it('marks template sheets complete when all essentials are set', () => {
       const template = findStarterTemplate(Dnd5eAdapter, '5e-fighter')!;
       const sheet = characterCreateFromTemplate(template, { name: 'Bryn', level: 1 });
       expect(isCharacterSheetComplete(sheet, Dnd5eAdapter)).toBe(true);
+    });
+  });
+
+  describe('adapter-owned sheet topology', () => {
+    it('is declared by every registered adapter', () => {
+      for (const adapter of listRuleSystemAdapters()) {
+        expect(adapter.characterSheet?.abilityFields.length).toBeGreaterThan(0);
+        expect(adapter.characterSheet?.classField).toBeDefined();
+      }
     });
   });
 });

@@ -286,6 +286,13 @@ function CharacterCard({
   }
 
   const xpQualifiedLevel = xpProgressionSupported(adapter) ? levelForXpForAdapter(adapter, character.xp) : character.level;
+  const classField = adapter.characterSheet?.classField ?? { label: 'Class', placeholder: 'Class', required: true, visible: true };
+  const classSummary = classField.visible && character.className.trim()
+    ? `${character.className} · `
+    : classField.visible
+      ? `${classField.label} not set · `
+      : '';
+  const summary = `${classSummary}Lv ${character.level}${ownerLabel ? ` · ${ownerLabel}` : ''}`;
 
   // The card stays a single click target to the sheet, but the quick-HP steppers
   // and the kebab menu are siblings of the Link (not nested inside it) — nesting
@@ -313,8 +320,8 @@ function CharacterCard({
                 <p className="font-bold text-white text-[15px] truncate cf-name-reveal" title={character.name} aria-label={character.name}>{character.name}</p>
                 {!isActive && <StatusTag status={character.status} className="shrink-0" />}
               </div>
-              <p className="text-[11.5px] text-secondary truncate cf-name-reveal" title={`${character.className || 'Unknown class'} · Lv ${character.level}${ownerLabel ? ` · ${ownerLabel}` : ''}`} aria-label={`${character.className || 'Unknown class'} · Lv ${character.level}${ownerLabel ? ` · ${ownerLabel}` : ''}`}>
-                {character.className || 'Unknown class'} · Lv {character.level}
+              <p className="text-[11.5px] text-secondary truncate cf-name-reveal" title={summary} aria-label={summary}>
+                {classSummary}Lv {character.level}
                 {ownerLabel && ` · ${ownerLabel}`}
               </p>
             </div>

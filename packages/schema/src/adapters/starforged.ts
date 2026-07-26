@@ -97,6 +97,21 @@ export const StarforgedAdapter: RuleSystemAdapter = {
   // Neutral labels (Rating / Defense / …) — never the 5e "Challenge" / "Armor Class" copy the
   // unknown-slug fallback would otherwise have produced (issue #763).
   presentation: STARFORGED_STATBLOCK_PRESENTATION,
+  characterSheet: {
+    abilityFields: [
+      { key: 'EDGE', label: 'Edge' },
+      { key: 'HEART', label: 'Heart' },
+      { key: 'IRON', label: 'Iron' },
+      { key: 'SHADOW', label: 'Shadow' },
+      { key: 'WITS', label: 'Wits' },
+    ],
+    classField: { label: 'Concept', placeholder: 'Concept', required: false, visible: false },
+    supportsSavingThrowEditor: false,
+    supportsSkillEditor: false,
+    supportsSpellSlotEditor: false,
+    genericModeDescription:
+      'Starforged sheets use native stats, impacts, assets/actions, resources, and notes; Campfire does not expose 5e classes, saves, skills, or spell slots for this narrative ruleset.',
+  },
   // Starforged stats (0–4) are used directly; there is no 5e score→modifier curve. Identity
   // (truncated) — mirrors Open Legend's "the attribute IS its modifier" treatment.
   abilityModifier(score: number): number {

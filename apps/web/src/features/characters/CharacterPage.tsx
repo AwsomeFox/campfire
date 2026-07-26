@@ -29,7 +29,7 @@ import { CharacterSheetNav } from './CharacterSheetNav';
 import { CHARACTER_SHEET_SECTION_LABEL, characterSheetSectionId } from './characterSheetTabs';
 import { useCharacterSheetTab } from './useCharacterSheetTab';
 import type { Attachment, Character, CharacterAction, CampaignMember, CharacterStatus, SkillRank } from '@campfire/schema';
-import { xpProgressForCharacter, ruleSystemAdapter, type RuleSystemAdapter } from '@campfire/schema';
+import { abilityLabelForAdapter, xpProgressForCharacter, ruleSystemAdapter, type RuleSystemAdapter } from '@campfire/schema';
 import { CHARACTER_STATUSES, STATUS_LABEL, StatusTag } from './status';
 import { api, API, ApiError } from '../../lib/api';
 import {
@@ -88,12 +88,12 @@ import { initials } from './avatar';
 import { GameIcon } from '../../components/GameIcon';
 import { entityTargetProps } from '../../lib/entityLinks';
 import {
-  ABILITY_KEYS,
   type Ability,
   SKILLS,
   SPELL_LEVELS,
   profBonus,
   abilityScore,
+  abilityFieldsForCharacter,
   modOf,
   signed,
   d20Expr,
@@ -239,6 +239,18 @@ export default function CharacterPage() {
   const myUserId = me?.user.id;
   const isOwner = character.ownerUserId != null && myUserId != null && character.ownerUserId === String(myUserId);
   const canEdit = canDmWrite || (canPlayerWrite && isOwner);
+  const abilityFields = abilityFieldsForCharacter(adapter, character);
+  const classField = adapter.characterSheet?.classField ?? { label: 'Class', placeholder: 'Class', required: true, visible: true };
+  const classSummary = classField.visible && character.className.trim()
+    ? `${character.className} · `
+    : classField.visible
+      ? `${classField.label} not set · `
+      : '';
+  const defenseLabel = adapter.presentation?.defense.short ?? adapter.presentation?.defense.full ?? 'AC';
+  const defenseTitle = adapter.presentation?.defense.full ?? 'Defense';
+  const showSavingThrowEditor = adapter.characterSheet?.supportsSavingThrowEditor ?? true;
+  const showSkillEditor = adapter.characterSheet?.supportsSkillEditor ?? true;
+  const showSpellSlotEditor = adapter.characterSheet?.supportsSpellSlotEditor ?? true;
 
   async function savePortrait(attachment: Attachment) {
     setActionError(null);
@@ -317,7 +329,7 @@ export default function CharacterPage() {
             {character.status !== 'active' && <StatusTag status={character.status} />}
           </div>
           <p className="text-sm text-slate-400">
-            {character.className || 'Unknown class'} · Level {character.level} · played by{' '}
+            {classSummary}Level {character.level} · played by{' '}
             {character.ownerUserId ? ownerLabel(character.ownerUserId) : 'DM'}
           </p>
         </div>
@@ -346,6 +358,7 @@ export default function CharacterPage() {
         <Card className="space-y-3">
           <SheetEditForm
             character={character}
+            adapter={adapter}
             onCancel={() => setEditingSheet(false)}
             onSaved={() => {
               setEditingSheet(false);
@@ -387,12 +400,12 @@ export default function CharacterPage() {
           <Card className="space-y-3">
             <p className="card-kicker">Ability scores</p>
             <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(84px, 1fr))' }}>
-              {ABILITY_KEYS.map((k) => {
-                const score = abilityScore(character, k);
+              {abilityFields.map(({ key, label }) => {
+                const score = abilityScore(character, key);
                 const mod = score === null ? null : adapter.abilityModifier(score);
                 return (
-                  <div key={k} className="cf-inset text-center py-2.5 px-1.5">
-                    <p className="text-[length:var(--type-label)] tracking-wide text-secondary">{k}</p>
+                  <div key={key} className="cf-inset text-center py-2.5 px-1.5">
+                    <p className="text-[length:var(--type-label)] tracking-wide text-secondary">{label}</p>
                     <p className="text-xl font-heading my-0.5">{score ?? '—'}</p>
                     <p className="text-[length:var(--type-meta)]" style={{ color: 'var(--color-accent-300)' }}>
                       {mod === null ? '—' : signed(mod)}
@@ -416,7 +429,7 @@ export default function CharacterPage() {
                 {character.eac != null || character.kac != null ? (
                   <span>EAC <strong className="text-white">{character.eac ?? '—'}</strong> · KAC <strong className="text-white">{character.kac ?? '—'}</strong></span>
                 ) : (
-                  <span>AC {character.ac ?? '—'}</span>
+                  <span title={defenseTitle}>{defenseLabel} {character.ac ?? '—'}</span>
                 )}
               </div>
             </div>
@@ -484,29 +497,40 @@ export default function CharacterPage() {
           <ActionsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} roller={roller} />
         </section>
 
-        <section
-          id={characterSheetSectionId('saves')}
-          aria-label={CHARACTER_SHEET_SECTION_LABEL.saves}
-          className="scroll-mt-24"
-        >
-          <SavingThrowsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} adapter={adapter} roller={roller} />
-        </section>
+        {showSavingThrowEditor && (
+          <section
+            id={characterSheetSectionId('saves')}
+            aria-label={CHARACTER_SHEET_SECTION_LABEL.saves}
+            className="scroll-mt-24"
+          >
+            <SavingThrowsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} adapter={adapter} roller={roller} />
+          </section>
+        )}
 
-        <section
-          id={characterSheetSectionId('skills')}
-          aria-label={CHARACTER_SHEET_SECTION_LABEL.skills}
-          className="scroll-mt-24"
-        >
-          <SkillsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} adapter={adapter} roller={roller} />
-        </section>
+        {showSkillEditor && (
+          <section
+            id={characterSheetSectionId('skills')}
+            aria-label={CHARACTER_SHEET_SECTION_LABEL.skills}
+            className="scroll-mt-24"
+          >
+            <SkillsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} adapter={adapter} roller={roller} />
+          </section>
+        )}
 
-        <section
-          id={characterSheetSectionId('slots')}
-          aria-label={CHARACTER_SHEET_SECTION_LABEL.slots}
-          className="scroll-mt-24"
-        >
-          <SpellSlotsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} />
-        </section>
+        {showSpellSlotEditor ? (
+          <section
+            id={characterSheetSectionId('slots')}
+            aria-label={CHARACTER_SHEET_SECTION_LABEL.slots}
+            className="scroll-mt-24"
+          >
+            <SpellSlotsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} />
+          </section>
+        ) : adapter.characterSheet?.genericModeDescription ? (
+          <Card className="space-y-1.5">
+            <p className="card-kicker mb-0">Rules-native sheet mode</p>
+            <p className="text-xs text-secondary">{adapter.characterSheet.genericModeDescription}</p>
+          </Card>
+        ) : null}
       </div>
 
       <div
@@ -637,17 +661,19 @@ export default function CharacterPage() {
 
 function SheetEditForm({
   character,
+  adapter,
   onCancel,
   onSaved,
   onError,
 }: {
   character: Character;
+  adapter: RuleSystemAdapter;
   onCancel: () => void;
   onSaved: () => void;
   onError: (msg: string | null) => void;
 }) {
   const { me } = useAuth();
-  const baseline = useMemo(() => characterSheetDraftFrom(character), [character.id, character.updatedAt]);
+  const baseline = useMemo(() => characterSheetDraftFrom(character, adapter), [adapter, character]);
   const [name, setName] = useState(baseline.name);
   const [species, setSpecies] = useState(baseline.species);
   const [className, setClassName] = useState(baseline.className);
@@ -664,6 +690,10 @@ function SheetEditForm({
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const formatLocale = useFormattingLocale();
   const clearPersistedDraftRef = useRef<() => void>(() => {});
+  const classField = adapter.characterSheet?.classField ?? { label: 'Class', placeholder: 'Class', required: true, visible: true };
+  const classFieldVisible = classField.visible;
+  const defenseLabel = adapter.presentation?.defense.short ?? adapter.presentation?.defense.full ?? CHARACTER_AC_LABEL;
+  const statFields = Object.keys(stats).map((key) => ({ key, label: abilityLabelForAdapter(adapter, key) }));
 
   const draft = snapshotCharacterSheetDraft({
     name,
@@ -681,7 +711,8 @@ function SheetEditForm({
   const save = useCallback(async (): Promise<boolean> => {
     if (!name.trim()) return false;
     const errs: Record<string, string> = {};
-    const levelParsed = parseLocalizedInteger(level, formatLocale, { min: 1, max: 20 });
+    const levelMax = Number.isFinite(adapter.maxLevel) ? adapter.maxLevel : undefined;
+    const levelParsed = parseLocalizedInteger(level, formatLocale, levelMax ? { min: 1, max: levelMax } : { min: 1 });
     if (!levelParsed.ok) errs.level = levelParsed.error;
     let acValue: number | null = null;
     if (ac.trim() !== '') {
@@ -692,8 +723,8 @@ function SheetEditForm({
     const hpMaxParsed = parseLocalizedInteger(hpMax, formatLocale, { min: 1 });
     if (!hpMaxParsed.ok) errs.hpMax = hpMaxParsed.error;
     const statNums: Record<string, number> = {};
-    for (const k of ABILITY_KEYS) {
-      const parsed = parseLocalizedInteger(stats[k], formatLocale);
+    for (const [k, value] of Object.entries(stats)) {
+      const parsed = parseLocalizedInteger(value, formatLocale);
       if (!parsed.ok) errs[k] = parsed.error;
       else statNums[k] = parsed.value;
     }
@@ -710,13 +741,13 @@ function SheetEditForm({
       await api.patch(`${API}/characters/${character.id}`, {
         name: name.trim(),
         species: species.trim(),
-        className: className.trim(),
+        className: classFieldVisible ? className.trim() : '',
         background: background.trim(),
         level: levelNum,
         ac: acValue,
         hpMax: hpMaxNum,
         status,
-        stats: statNums,
+        stats: { ...character.stats, ...statNums },
       });
       clearPersistedDraftRef.current();
       onSaved();
@@ -731,7 +762,10 @@ function SheetEditForm({
     ac,
     background,
     character.id,
+    character.stats,
     className,
+    classFieldVisible,
+    adapter,
     formatLocale,
     hpMax,
     level,
@@ -785,7 +819,7 @@ function SheetEditForm({
         placeholder="Name"
         required
       />
-      <div className="grid grid-cols-2 gap-2.5">
+      <div className={classField.visible ? 'grid grid-cols-2 gap-2.5' : 'grid grid-cols-1 gap-2.5'}>
         <Field
           idPrefix={CHARACTER_EDIT_PREFIX}
           name={CHARACTER_FIELD.species}
@@ -796,16 +830,18 @@ function SheetEditForm({
           placeholder="Species"
           optional
         />
-        <Field
-          idPrefix={CHARACTER_EDIT_PREFIX}
-          name={CHARACTER_FIELD.className}
-          label={CHARACTER_CLASS_LABEL}
-          labelClassName={cardLabel}
-          value={className}
-          onChange={(e) => setClassName(e.target.value)}
-          placeholder="Class"
-          optional
-        />
+        {classField.visible && (
+          <Field
+            idPrefix={CHARACTER_EDIT_PREFIX}
+            name={CHARACTER_FIELD.className}
+            label={classField.label || CHARACTER_CLASS_LABEL}
+            labelClassName={cardLabel}
+            value={className}
+            onChange={(e) => setClassName(e.target.value)}
+            placeholder={classField.placeholder}
+            optional={!classField.required}
+          />
+        )}
       </div>
       <div className="grid grid-cols-3 gap-2.5">
         <Field
@@ -829,7 +865,7 @@ function SheetEditForm({
           type="text"
           inputMode="numeric"
           min={1}
-          max={20}
+          max={Number.isFinite(adapter.maxLevel) ? adapter.maxLevel : undefined}
           value={level}
           error={fieldErrors.level || null}
           onChange={(e) => {
@@ -841,7 +877,7 @@ function SheetEditForm({
         <Field
           idPrefix={CHARACTER_EDIT_PREFIX}
           name={CHARACTER_FIELD.ac}
-          label={CHARACTER_AC_LABEL}
+          label={defenseLabel}
           labelClassName={cardLabel}
           type="text"
           inputMode="numeric"
@@ -851,7 +887,7 @@ function SheetEditForm({
             setAc(e.target.value);
             setFieldErrors((fe) => ({ ...fe, ac: '' }));
           }}
-          placeholder="AC"
+          placeholder={defenseLabel}
           optional
         />
       </div>
@@ -892,20 +928,20 @@ function SheetEditForm({
         </Field>
       </div>
       <div className="grid grid-cols-3 gap-2.5">
-        {ABILITY_KEYS.map((k) => (
+        {statFields.map(({ key, label }) => (
           <Field
-            key={k}
+            key={key}
             idPrefix={CHARACTER_EDIT_PREFIX}
-            name={k}
-            label={k}
+            name={key}
+            label={label}
             labelClassName={cardLabel}
             type="text"
             inputMode="numeric"
-            value={stats[k]}
-            error={fieldErrors[k] || null}
+            value={stats[key]}
+            error={fieldErrors[key] || null}
             onChange={(e) => {
-              setStats((s) => ({ ...s, [k]: e.target.value }));
-              setFieldErrors((fe) => ({ ...fe, [k]: '' }));
+              setStats((s) => ({ ...s, [key]: e.target.value }));
+              setFieldErrors((fe) => ({ ...fe, [key]: '' }));
             }}
           />
         ))}
@@ -1221,7 +1257,7 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
   // single roll so the desktop keyboard shortcut keeps working (resolveRollMode).
   const [mode, setMode] = useState<RollMode>('flat');
   const pb = profBonus(character.level);
-  const profs = new Set(character.saveProficiencies);
+  const profs = new Set<string>(character.saveProficiencies);
 
   async function toggle(k: Ability) {
     if (!canEdit || busy) return;
@@ -1256,7 +1292,7 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
         aria-label="Saving throw roll mode"
       />
       <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(84px, 1fr))' }}>
-        {ABILITY_KEYS.map((k) => {
+        {abilityFieldsForCharacter(adapter, character).map(({ key: k }) => {
           const proficient = profs.has(k);
           const mod = (modOf(adapter, character, k) ?? 0) + (proficient ? pb : 0);
           return (

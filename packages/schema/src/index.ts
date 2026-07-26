@@ -2564,6 +2564,52 @@ export function gridDistanceForAdapter(adapter: Pick<RuleSystemAdapter, 'gridDis
   return adapter.gridDistanceRule ?? DEFAULT_GRID_DISTANCE_RULE;
 }
 
+/** One editable character-sheet attribute/ability owned by a rules adapter (issue #540). */
+export interface CharacterSheetAbilityField {
+  readonly key: string;
+  readonly label: string;
+}
+
+/** Optional character-sheet topology owned by a rules adapter (issue #540). */
+export interface CharacterSheetClassField {
+  readonly label: string;
+  readonly placeholder: string;
+  readonly required: boolean;
+  readonly visible: boolean;
+}
+
+export interface CharacterSheetTopology {
+  readonly abilityFields: readonly CharacterSheetAbilityField[];
+  readonly classField: CharacterSheetClassField;
+  /**
+   * False for systems whose sheet should not expose Campfire's legacy 5e save editor.
+   * Their roll catalog can still surface native checks.
+   */
+  readonly supportsSavingThrowEditor: boolean;
+  /** False for systems whose sheet should not expose the fixed 5e skill list. */
+  readonly supportsSkillEditor: boolean;
+  /** False for systems whose sheet should not expose 5e spell-slot pips. */
+  readonly supportsSpellSlotEditor: boolean;
+  /** Honest copy shown when the sheet falls back to generic notes/actions/resources. */
+  readonly genericModeDescription?: string;
+}
+
+export const STANDARD_D20_ABILITY_FIELDS: readonly CharacterSheetAbilityField[] = [
+  { key: 'STR', label: 'STR' },
+  { key: 'DEX', label: 'DEX' },
+  { key: 'CON', label: 'CON' },
+  { key: 'INT', label: 'INT' },
+  { key: 'WIS', label: 'WIS' },
+  { key: 'CHA', label: 'CHA' },
+] as const;
+
+export const STANDARD_CLASS_FIELD: CharacterSheetClassField = {
+  label: 'Class',
+  placeholder: 'Class',
+  required: true,
+  visible: true,
+};
+
 export interface RuleSystemAdapter {
   /** Stable adapter id — typically a family id (e.g. 'dnd5e'); OSR variants use their pack slug. */
   readonly id: string;
@@ -2576,6 +2622,8 @@ export interface RuleSystemAdapter {
    * {@link NEUTRAL_STATBLOCK_PRESENTATION} when omitted.
    */
   readonly presentation?: StatblockPresentation;
+  /** Adapter-owned character-sheet field topology (issue #540). */
+  readonly characterSheet?: CharacterSheetTopology;
   /** Ability-score → modifier (5e: floor((score - 10) / 2)). Character sheets always use this. */
   abilityModifier(score: number): number;
   /** Die size for an initiative roll (5e: d20). Keeps the d20 assumption out of the generic roller. */
@@ -2812,6 +2860,13 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
   id: DND5E_ADAPTER_ID,
   label: 'D&D 5e',
   presentation: DND5E_STATBLOCK_PRESENTATION,
+  characterSheet: {
+    abilityFields: STANDARD_D20_ABILITY_FIELDS,
+    classField: STANDARD_CLASS_FIELD,
+    supportsSavingThrowEditor: true,
+    supportsSkillEditor: true,
+    supportsSpellSlotEditor: true,
+  },
   hasDeathSaves: true,
   abilityModifier(score: number): number {
     return Math.floor((score - 10) / 2);
@@ -3017,6 +3072,28 @@ export const OPEN_LEGEND_BANES_BOONS = [
 ] as const;
 export type BaneOrBoonName = (typeof OPEN_LEGEND_BANES_BOONS)[number];
 
+/** Open Legend's full native attribute list, stored on characters as uppercase keys. */
+export const OPEN_LEGEND_ATTRIBUTE_FIELDS: readonly CharacterSheetAbilityField[] = [
+  { key: 'AGILITY', label: 'Agility' },
+  { key: 'FORTITUDE', label: 'Fortitude' },
+  { key: 'MIGHT', label: 'Might' },
+  { key: 'LEARNING', label: 'Learning' },
+  { key: 'LOGIC', label: 'Logic' },
+  { key: 'PERCEPTION', label: 'Perception' },
+  { key: 'WILL', label: 'Will' },
+  { key: 'DECEPTION', label: 'Deception' },
+  { key: 'PERSUASION', label: 'Persuasion' },
+  { key: 'PRESENCE', label: 'Presence' },
+  { key: 'ALTERATION', label: 'Alteration' },
+  { key: 'CREATION', label: 'Creation' },
+  { key: 'ENERGY', label: 'Energy' },
+  { key: 'ENTROPY', label: 'Entropy' },
+  { key: 'INFLUENCE', label: 'Influence' },
+  { key: 'MOVEMENT', label: 'Movement' },
+  { key: 'PRESCIENCE', label: 'Prescience' },
+  { key: 'PROTECTION', label: 'Protection' },
+] as const;
+
 /**
  * Open Legend action-dice table (official Core Rules / SRD — openlegend/core-rules
  * `core/SRD.md`, "Action Dice"): an attribute score maps to the dice rolled and summed for any
@@ -3074,6 +3151,20 @@ export const OpenLegendAdapter: RuleSystemAdapter = {
   id: OPEN_LEGEND_ADAPTER_ID,
   label: 'Open Legend',
   presentation: OPEN_LEGEND_STATBLOCK_PRESENTATION,
+  characterSheet: {
+    abilityFields: OPEN_LEGEND_ATTRIBUTE_FIELDS,
+    classField: {
+      label: 'Concept',
+      placeholder: 'Concept',
+      required: false,
+      visible: false,
+    },
+    supportsSavingThrowEditor: false,
+    supportsSkillEditor: false,
+    supportsSpellSlotEditor: false,
+    genericModeDescription:
+      'Open Legend sheets use native attributes, Guard, actions, banes/boons, resources, and notes; Campfire does not expose 5e saves, skills, or spell slots for this ruleset.',
+  },
   // Open Legend attributes are used directly (no floor((score-10)/2) offset) — an attribute
   // both indexes the dice table and, where a flat value is wanted, IS that value.
   abilityModifier(score: number): number {
@@ -3824,6 +3915,15 @@ export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
   id: PF2E_ADAPTER_ID,
   label: 'Pathfinder 2e',
   presentation: PF2E_STATBLOCK_PRESENTATION,
+  characterSheet: {
+    abilityFields: STANDARD_D20_ABILITY_FIELDS,
+    classField: STANDARD_CLASS_FIELD,
+    supportsSavingThrowEditor: true,
+    supportsSkillEditor: true,
+    supportsSpellSlotEditor: false,
+    genericModeDescription:
+      'Pathfinder 2e uses adapter-owned roll catalog math; Campfire maps its current class, ability, save, skill, and resource fields onto that ruleset.',
+  },
   // Character ability SCORES still use the same floor((score-10)/2) mapping as 5e.
   // Creature statblocks store modifiers separately (`abilityRepresentation: 'modifier'`).
   abilityModifier(score: number): number {

@@ -245,6 +245,20 @@ export const Pathfinder1eAdapter: RuleSystemAdapter = {
   id: PF1E_ADAPTER_ID,
   label: 'Pathfinder 1e',
   presentation: PF1E_STATBLOCK_PRESENTATION,
+  characterSheet: {
+    abilityFields: [
+      { key: 'STR', label: 'STR' },
+      { key: 'DEX', label: 'DEX' },
+      { key: 'CON', label: 'CON' },
+      { key: 'INT', label: 'INT' },
+      { key: 'WIS', label: 'WIS' },
+      { key: 'CHA', label: 'CHA' },
+    ],
+    classField: { label: 'Class', placeholder: 'Class', required: true, visible: true },
+    supportsSavingThrowEditor: true,
+    supportsSkillEditor: true,
+    supportsSpellSlotEditor: true,
+  },
   abilityModifier: pf1eAbilityModifier,
   // PF1e initiative is a d20 roll + a flat Init bonus. Monsters store that bonus on the
   // statblock (DEX + feats like Improved Initiative already baked in); characters without
