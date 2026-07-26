@@ -14,7 +14,7 @@ async function clearIssueSchedules(request: APIRequestContext, campaignId: numbe
     'list issue #785 schedules',
   );
   for (const schedule of schedules.filter((item) => item.title.startsWith('E2E785 '))) {
-    await json<unknown>(await request.delete(`/api/v1/schedule/${schedule.id}`), 'remove prior issue #785 schedule');
+    await json<unknown>(await request.delete(`/api/v1/schedule/${schedule.id}`, { data: {} }), 'remove prior issue #785 schedule');
   }
 }
 

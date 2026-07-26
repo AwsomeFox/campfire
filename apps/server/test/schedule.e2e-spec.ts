@@ -197,10 +197,10 @@ describe('session scheduling (e2e)', () => {
     expect(patch.body.title).toBe('Confirmed');
     expect(patch.body.durationMinutes).toBe(180);
 
-    const playerDelete = await request(server).delete(`/api/v1/schedule/${id}`).set(player);
+    const playerDelete = await request(server).delete(`/api/v1/schedule/${id}`).set(player).send({});
     expect(playerDelete.status).toBe(403);
 
-    const del = await request(server).delete(`/api/v1/schedule/${id}`).set(dm);
+    const del = await request(server).delete(`/api/v1/schedule/${id}`).set(dm).send({});
     expect(del.status).toBe(200);
     expect(del.body).toMatchObject({ id, status: 'cancelled' });
 
@@ -212,6 +212,26 @@ describe('session scheduling (e2e)', () => {
     );
     const upcoming = await request(server).get(`/api/v1/campaigns/${campaignId}/schedule/upcoming`).set(dm);
     expect(upcoming.body.some((s: { id: number }) => s.id === id)).toBe(false);
+  });
+
+  it('accepts omitted and empty cancel bodies and treats repeat cancel as idempotent', async () => {
+    const server = ctx.app.getHttpServer();
+    const created = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/schedule`)
+      .set(dm)
+      .send({ scheduledAt: '2099-08-15T18:00:00Z', title: 'Optional cancel body' });
+    expect(created.status).toBe(201);
+    const id = created.body.id;
+
+    const withoutBody = await request(server).delete(`/api/v1/schedule/${id}`).set(dm);
+    expect(withoutBody.status).toBe(200);
+    expect(withoutBody.body).toMatchObject({ id, status: 'cancelled', cancellationReason: '' });
+    expect(withoutBody.body.cancelledAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+
+    const repeated = await request(server).delete(`/api/v1/schedule/${id}`).set(dm).send({});
+    expect(repeated.status).toBe(200);
+    expect(repeated.body).toMatchObject({ id, status: 'cancelled', cancellationReason: '' });
+    expect(repeated.body.cancelledAt).toBe(withoutBody.body.cancelledAt);
   });
 
   it('cancel retains RSVPs, records metadata, and restore returns the row to upcoming', async () => {
@@ -396,7 +416,7 @@ describe('session scheduling (e2e)', () => {
         .send({ scheduledAt: '2099-01-02T18:00:00Z', durationMinutes: 1440, title: 'Max length' });
       expect(maxOk.status).toBe(201);
       expect(maxOk.body.durationMinutes).toBe(1440);
-      await request(server).delete(`/api/v1/schedule/${maxOk.body.id}`).set(dm);
+      await request(server).delete(`/api/v1/schedule/${maxOk.body.id}`).set(dm).send({});
     });
 
     it('GET /schedule/next and summary keep an in-progress game; Next stays available separately', async () => {
@@ -458,9 +478,9 @@ describe('session scheduling (e2e)', () => {
       expect(summaryOverlap.body.inProgressSession.id).toBe(live.body.id);
       expect(summaryOverlap.body.nextSession.id).toBe(later.body.id);
 
-      await request(server).delete(`/api/v1/schedule/${overlap.body.id}`).set(dm);
-      await request(server).delete(`/api/v1/schedule/${later.body.id}`).set(dm);
-      await request(server).delete(`/api/v1/schedule/${live.body.id}`).set(dm);
+      await request(server).delete(`/api/v1/schedule/${overlap.body.id}`).set(dm).send({});
+      await request(server).delete(`/api/v1/schedule/${later.body.id}`).set(dm).send({});
+      await request(server).delete(`/api/v1/schedule/${live.body.id}`).set(dm).send({});
     });
 
     it('mid-session duration edit and end-now move the live projection (cache invalidation path)', async () => {
@@ -494,7 +514,7 @@ describe('session scheduling (e2e)', () => {
       // Nest serializes a null controller return as an empty body object.
       expect(nextGone.body?.id ?? null).toBeNull();
 
-      await request(server).delete(`/api/v1/schedule/${id}`).set(dm);
+      await request(server).delete(`/api/v1/schedule/${id}`).set(dm).send({});
     });
 
     it('same-day events: ended earlier slot is past; later slot is next', async () => {
@@ -525,8 +545,8 @@ describe('session scheduling (e2e)', () => {
       expect(summary.body.inProgressSession).toBeNull();
       expect(summary.body.nextSession.id).toBe(evening.body.id);
 
-      await request(server).delete(`/api/v1/schedule/${morning.body.id}`).set(dm);
-      await request(server).delete(`/api/v1/schedule/${evening.body.id}`).set(dm);
+      await request(server).delete(`/api/v1/schedule/${morning.body.id}`).set(dm).send({});
+      await request(server).delete(`/api/v1/schedule/${evening.body.id}`).set(dm).send({});
     });
   });
 
@@ -590,7 +610,7 @@ describe('session scheduling (e2e)', () => {
       const res = await request(server).get(`/api/v1/calendar/${token}.ics`);
       expect(res.text).toContain('SUMMARY:Fire\\, brimstone\\; doom');
 
-      await request(server).delete(`/api/v1/schedule/${created.body.id}`).set(dm);
+      await request(server).delete(`/api/v1/schedule/${created.body.id}`).set(dm).send({});
     });
 
     it('keeps the same ICS UID and marks cancelled schedules as STATUS:CANCELLED', async () => {
@@ -607,7 +627,7 @@ describe('session scheduling (e2e)', () => {
       expect(before.text).toContain(uid);
       expect(before.text).not.toContain(`${uid}\r\nSTATUS:CANCELLED`);
 
-      const cancelled = await request(server).delete(`/api/v1/schedule/${created.body.id}`).set(dm);
+      const cancelled = await request(server).delete(`/api/v1/schedule/${created.body.id}`).set(dm).send({});
       expect(cancelled.status).toBe(200);
 
       const after = await request(server).get(`/api/v1/calendar/${token}.ics`);
@@ -643,7 +663,7 @@ describe('session scheduling (e2e)', () => {
       expect(event!.getFirstPropertyValue('location')).toBe(location);
       expect(event!.getFirstPropertyValue('description')).toBe(notes);
 
-      await request(server).delete(`/api/v1/schedule/${created.body.id}`).set(dm);
+      await request(server).delete(`/api/v1/schedule/${created.body.id}`).set(dm).send({});
     });
 
     it('unknown or malformed tokens 404', async () => {
