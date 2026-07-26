@@ -83,6 +83,38 @@ describe('membership + effective roles (e2e, real cookie sessions)', () => {
     expect(roles).toEqual(['dm', 'player']);
   });
 
+  /**
+   * Issue #501 — AI consent is a personal preference in a way a role is not, so the roster
+   * discloses it only to the DM (who needs it to understand why a recap withheld material)
+   * and to the member themselves (who needs it to render their own consent control).
+   */
+  it('discloses AI consent to the dm for every member', async () => {
+    const res = await userA.get(`/api/v1/campaigns/${campaignId}/members`);
+    expect(res.status).toBe(200);
+    expect(res.body.length).toBeGreaterThan(1);
+    for (const member of res.body) {
+      expect(typeof member.aiExternalUseConsent).toBe('boolean');
+    }
+  });
+
+  it("hides other members' AI consent from a player, but not their own", async () => {
+    // B opts in, so their own value is a distinguishable `true`, not the shared default.
+    const consent = await userB
+      .patch(`/api/v1/campaigns/${campaignId}/members/me/ai-consent`)
+      .send({ aiExternalUseConsent: true });
+    expect(consent.status).toBe(200);
+
+    const res = await userB.get(`/api/v1/campaigns/${campaignId}/members`);
+    expect(res.status).toBe(200);
+
+    const self = res.body.find((m: { userId: number }) => m.userId === userBId);
+    const other = res.body.find((m: { userId: number }) => m.userId === userAId);
+    expect(self.aiExternalUseConsent).toBe(true);
+    // `null` means "not disclosed to you" — deliberately not `false`, which would be a lie
+    // that reads as an explicit opt-out by that member.
+    expect(other.aiExternalUseConsent).toBeNull();
+  });
+
   it('removing the last dm is refused (409)', async () => {
     const membersRes = await userA.get(`/api/v1/campaigns/${campaignId}/members`);
     const dmMember = membersRes.body.find((m: { role: string }) => m.role === 'dm');

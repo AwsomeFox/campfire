@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, ForbiddenException, Inject, Inj
 import { and, count, eq } from 'drizzle-orm';
 import type { z } from 'zod';
 import { GuestDmGrantCreate, MemberAiConsentUpdate, MemberCreate, MemberUpdate } from '@campfire/schema';
-import type { CampaignMember, GuestDmGrant, GuestDmGrantScope } from '@campfire/schema';
+import type { CampaignMember, GuestDmGrant, GuestDmGrantScope, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import {
   campaignGuestDmGrants,
@@ -87,6 +87,28 @@ export class MembersService {
       createdAt: r.createdAt,
       updatedAt: r.updatedAt,
     }));
+  }
+
+  /**
+   * Hide other members' AI-consent state from a non-DM viewer (issue #501).
+   *
+   * `listForCampaign` is also an INTERNAL read (member mutations, guest-DM handoff), so
+   * this is an explicit projection applied at the API boundary rather than a change to the
+   * query — internal callers must keep seeing the true value.
+   *
+   * The DM needs every member's state to understand why a recap withheld material, and a
+   * member needs their own to render their consent control. Nobody else does, and consent
+   * is a personal preference in a way that a role is not.
+   */
+  redactOthersAiConsent(
+    members: CampaignMember[],
+    viewerRole: Role,
+    viewerUserId: string,
+  ): CampaignMember[] {
+    if (viewerRole === 'dm') return members;
+    return members.map((member) =>
+      String(member.userId) === viewerUserId ? member : { ...member, aiExternalUseConsent: null },
+    );
   }
 
   async getRowOrThrow(campaignId: number, memberId: number) {

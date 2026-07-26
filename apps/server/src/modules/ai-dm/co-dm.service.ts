@@ -34,6 +34,7 @@ import { AiDmService } from './ai-dm.service';
 import { AI_DM_PROVIDER, type AiDmProvider } from './ai-dm.provider';
 import { createAiProvider, type AiProvider } from './providers';
 import { AiProviderConfigService } from '../ai-provider-config/ai-provider-config.service';
+import { provenanceEndpointBaseUrl } from '../../common/ai-provenance-endpoint';
 
 type CoDmDraftRequestInput = z.infer<typeof CoDmDraftRequest>;
 
@@ -169,7 +170,10 @@ export class CoDmService {
         providerName = aiProvider.name;
         providerType = config.providerType;
         endpointScope = effective.source ?? 'none';
-        endpointBaseUrl = config.baseUrl ?? null;
+        // Never persist the SERVER row's baseUrl — co-DM drafts are filed as DM-readable
+        // proposals, and the admin-managed server endpoint is deliberately hidden from
+        // campaign DMs (#501 review).
+        endpointBaseUrl = provenanceEndpointBaseUrl(endpointScope, config.baseUrl);
       } else {
         const result = await this.provider.generate({
           campaignId,

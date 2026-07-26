@@ -166,8 +166,15 @@ fail-closed default, since nobody can retroactively consent on a player's behalf
   consent"* rather than failing silently — visible in the scribe panel and in the run's
   job history.
 - With **no provider configured** — the default self-hosted install, using the shipped
-  no-op provider — **nothing changes**. Consent gates external use only, and that path
-  sends nothing off the server.
+  no-op provider — **nothing changes** for scribe recaps. Consent gates external use only,
+  and that path sends nothing off the server.
+- **Connected MCP agents are always treated as external.** The `draft_session_recap` tool
+  hands raw note bodies to whatever agent called it, and Campfire cannot see what that
+  agent is, so it applies the consent gate unconditionally. A DM using a local MCP client
+  will get an empty inbox in that tool's source material until members opt in; the tool's
+  `consent` block reports what was withheld and why.
+- Members no longer see each other's consent state on the roster. The DM still sees
+  everyone's (needed to explain a withheld recap), and each member still sees their own.
 
 **What members and DMs need to do**
 

@@ -246,3 +246,56 @@ describe('co-DM authoring — gating (e2e)', () => {
     expect(res.status).toBe(403);
   });
 });
+
+/**
+ * Issue #501 review — the co-DM path writes the same durable provenance the scribe does,
+ * onto proposals any campaign DM can read. The admin-managed SERVER-default endpoint is
+ * deliberately hidden from campaign DMs by `getEffectiveView`, so it must never be
+ * recorded there. The scope is kept; only the URL is dropped.
+ */
+describe('co-DM authoring — server-scope endpoint URL never lands in provenance (e2e, #501)', () => {
+  let h: AiEvalHarness;
+  let campaignId: number;
+  const SERVER_BASE_URL = 'http://localhost:11434/campfire-internal-gateway';
+
+  beforeAll(async () => {
+    h = await createAiEvalHarness({ model: 'eval-model' });
+    await h.enableExperimental();
+    campaignId = await h.createCampaign('Co-DM Server Endpoint Provenance');
+    await h.configureSeat(campaignId, { model: 'eval-model', tokenBudget: 1_000_000 });
+
+    // SERVER-default provider (admin-managed), deliberately NOT a per-campaign override —
+    // a campaign baseUrl is DM-configured and stays readable to them.
+    const server = await request(h.server)
+      .put('/api/v1/settings/ai-provider')
+      .set(dm)
+      .send({ providerType: 'mock', model: 'mock-1', apiKey: 'sk-server-key-1234', baseUrl: SERVER_BASE_URL });
+    expect(server.status).toBe(200);
+  });
+
+  afterAll(async () => {
+    await h.close();
+  });
+
+  it('records endpoint.scope=server but a null baseUrl on the filed proposal', async () => {
+    // A STORED provider config is served by a provider the factory builds per call, not by
+    // the harness's injected instance, so `h.script(...)` does not reach it. The factory
+    // mock echoes the last user message, and the draft parser extracts a balanced JSON
+    // span from it — so put the draft JSON in the prompt to drive the configured path.
+    const res = await request(h.server)
+      .post(api(campaignId))
+      .set(dm)
+      .send({ target: 'npc', prompt: JSON.stringify({ name: 'Gatewarden Vell', role: 'Guard' }) });
+
+    expect(res.status).toBe(201);
+    const provenance = res.body.proposals[0].generationProvenance;
+    expect(provenance).toBeTruthy();
+    expect(provenance.endpoint.scope).toBe('server');
+    expect(provenance.endpoint.baseUrl).toBeNull();
+
+    // Durable too — a read-time redaction would leave it in the row for a later export.
+    const proposals = await request(h.server).get(`/api/v1/campaigns/${campaignId}/proposals`).set(dm);
+    expect(proposals.status).toBe(200);
+    expect(JSON.stringify(proposals.body)).not.toContain('campfire-internal-gateway');
+  });
+});

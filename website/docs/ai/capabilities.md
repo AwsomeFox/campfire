@@ -177,3 +177,12 @@ and source IDs produced it, and whether the generation was an external send at a
 records rather than authored prose. The one member-identifying field a roll carries, the
 roller's display name, *is* redacted for a roller who has not consented; the in-fiction
 character name is campaign canon and is kept.
+
+**Who can see a member's consent state.** The DM sees every member's, because they need it
+to understand why a recap withheld material. Each member sees their own. Other players do
+not — consent is a personal preference in a way that a role is not.
+
+**Provenance never records the server-default endpoint URL.** The admin-managed server
+provider config is hidden from campaign DMs by design, and recap provenance is DM-readable,
+so only the endpoint *scope* (`server`) is stored for it. A per-campaign endpoint URL is
+kept, since the DM configured it and can already read it back.

@@ -30,6 +30,7 @@ import {
   sessions,
 } from '../../db/schema';
 import { nowIso } from '../../common/time';
+import { provenanceEndpointBaseUrl } from '../../common/ai-provenance-endpoint';
 import { auditActor, type RequestUser } from '../../common/user.types';
 import { AuditService } from '../audit/audit.service';
 import { SettingsService } from '../settings/settings.service';
@@ -723,7 +724,10 @@ export class ScribeService implements OnApplicationBootstrap {
           providerType = config.providerType;
           model = result.model || config.model;
           endpointScope = effective.source ?? 'none';
-          endpointBaseUrl = config.baseUrl ?? null;
+          // Never persist the SERVER row's baseUrl — scribe jobs and filed proposals are
+          // DM-readable, and the admin-managed server endpoint is deliberately hidden from
+          // campaign DMs (#501 review).
+          endpointBaseUrl = provenanceEndpointBaseUrl(endpointScope, config.baseUrl);
         } else {
           const result = await this.fallbackProvider.generate({
             campaignId,

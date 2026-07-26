@@ -16,10 +16,15 @@ export class MembersController {
 
   @Get()
   @ApiOperation({ summary: 'List campaign members', description: 'Requires campaign membership.' })
-  @ApiResponse({ status: 200, description: 'Members with denormalized username/displayName.' })
+  @ApiResponse({
+    status: 200,
+    description:
+      'Members with denormalized username/displayName. `aiExternalUseConsent` is null for other members unless the caller is the dm (#501).',
+  })
   async list(@Param('campaignId', ParseIntPipe) campaignId: number, @CurrentUser() user: RequestUser) {
-    await this.access.requireMember(user, campaignId);
-    return this.members.listForCampaign(campaignId);
+    const role = await this.access.requireMember(user, campaignId);
+    const members = await this.members.listForCampaign(campaignId);
+    return this.members.redactOthersAiConsent(members, role, user.id);
   }
 
   @Post()

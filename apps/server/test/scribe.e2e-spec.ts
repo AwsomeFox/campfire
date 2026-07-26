@@ -717,6 +717,62 @@ describe('AI scribe — external AI consent, persisted account (e2e, #501)', () 
 });
 
 /**
+ * Issue #501 review — the SERVER-scope endpoint URL must not reach provenance.
+ *
+ * `getEffectiveView` deliberately withholds the admin-managed server-default provider
+ * config from campaign DMs: it returns type/model/source/readiness and NOT `baseUrl`.
+ * Generation provenance is persisted on scribe jobs and filed proposals, both readable by
+ * any campaign DM and rendered verbatim in the proposals UI — so writing the server row's
+ * `baseUrl` there would reach around that boundary and disclose internal topology.
+ *
+ * The scope IS kept: "this ran against the server default" is the provenance-bearing part.
+ */
+describe('AI scribe — server-scope endpoint URL never lands in provenance (e2e, #501)', () => {
+  let harness: AiEvalHarness;
+  const SERVER_BASE_URL = 'http://localhost:11434/campfire-internal-gateway';
+
+  beforeAll(async () => {
+    harness = await createAiEvalHarness();
+    owner = await createPersistedOwner(harness, 'scribe-server-endpoint-owner');
+  });
+  afterAll(async () => {
+    await harness.close();
+  });
+
+  it('records endpoint.scope=server but a null baseUrl', async () => {
+    await harness.enableExperimental();
+    const campaignId = await ownedCampaign('Scribe Server Endpoint Provenance');
+    await harness.configureSeat(campaignId, { enabled: true, tokenBudget: 5000 });
+
+    // SERVER-default provider (admin-managed), with an endpoint a DM must not learn.
+    // Deliberately NOT a per-campaign override — a campaign baseUrl is DM-configured and
+    // stays readable to them.
+    const server = await request(harness.server)
+      .put(`${API}/settings/ai-provider`)
+      .set(dm)
+      .send({ providerType: 'mock', model: 'mock-1', apiKey: 'sk-server-key-1234', baseUrl: SERVER_BASE_URL });
+    expect(server.status).toBe(200);
+
+    await seedResolvedInbox(harness, campaignId, 'The caravan reached the gate.');
+    const run = await request(harness.server).post(`${API}/campaigns/${campaignId}/scribe/run`).set(dm).send({});
+    expect(run.status).toBe(201);
+    expect(run.body.job.status).toBe('succeeded');
+
+    const provenance = run.body.job.generationProvenance;
+    expect(provenance).toBeTruthy();
+    expect(provenance.endpoint.scope).toBe('server');
+    // The whole point: scope survives, the URL does not.
+    expect(provenance.endpoint.baseUrl).toBeNull();
+
+    // And it is absent from the DURABLE row too, not merely from this response — a
+    // read-time redaction would leave it in the DB for exports/backups to leak later.
+    const jobs = await request(harness.server).get(`${API}/campaigns/${campaignId}/scribe/jobs`).set(dm);
+    expect(jobs.status).toBe(200);
+    expect(JSON.stringify(jobs.body)).not.toContain('campfire-internal-gateway');
+  });
+});
+
+/**
  * Issue #501 — the LOCAL generation path.
  *
  * #501 is scoped to external use: "Scribing can send player-authored notes to EXTERNAL

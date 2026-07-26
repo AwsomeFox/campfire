@@ -4793,7 +4793,12 @@ export const CampaignMember = z.object({
   // Issue #501: this member's explicit consent for their authored campaign source
   // material to be included in prompts sent to external AI providers. DMs cannot
   // widen this on behalf of another member; the self-consent endpoint owns writes.
-  aiExternalUseConsent: z.boolean().default(false),
+  //
+  // `null` means "not disclosed to you". Consent is a personal preference in a way that a
+  // role is not, so the roster reveals it only to the DM — who needs it to understand why
+  // material was withheld from a recap — and to the member themselves. A player has no
+  // need to learn which of their tablemates declined AI processing.
+  aiExternalUseConsent: z.boolean().nullable().default(false),
   // The protected campaign owner/creator seat. Ordinary DM and temporary guest
   // authority cannot demote/remove this seat; see MembersService (#545).
   primaryOwner: z.boolean().default(false),
