@@ -23,10 +23,13 @@ function write(rel, content) {
 function replace(rel, pairs) {
   let content = read(rel);
   for (const [from, to] of pairs) {
-    if (!content.includes(from)) {
+    if (content.includes(from)) {
+      content = content.replace(from, to);
+      continue;
+    }
+    if (!content.includes(to)) {
       throw new Error(`generate-mcp-catalog-surfaces: ${rel} missing expected fragment: ${from}`);
     }
-    content = content.replace(from, to);
   }
   write(rel, content);
 }
