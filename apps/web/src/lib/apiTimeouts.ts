@@ -155,10 +155,17 @@ function wrapBodyWithOverallBudget(
     },
   });
 
+  // The original body is already decoded by fetch. Copying Content-Encoding /
+  // Content-Length onto a re-wrapped stream can make the next read attempt to
+  // decompress plain bytes (or disagree about length) and fail mutations.
+  const headers = new Headers(res.headers);
+  headers.delete('content-encoding');
+  headers.delete('content-length');
+
   return new Response(stream, {
     status: res.status,
     statusText: res.statusText,
-    headers: res.headers,
+    headers,
   });
 }
 

@@ -247,6 +247,27 @@ test.describe('fetchWithBudget (#581)', () => {
     }
   });
 
+  test('wrapped bodies drop content-encoding so decoded streams are not re-decompressed', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Encoding': 'gzip',
+          'Content-Length': '999',
+        },
+      });
+    try {
+      const res = await fetchWithBudget('/api/v1/campaigns/1', { method: 'PATCH', body: '{}' }, 'write', API_WRITE_BUDGET);
+      expect(res.headers.get('Content-Encoding')).toBeNull();
+      expect(res.headers.get('Content-Length')).toBeNull();
+      expect(JSON.parse(await res.text())).toEqual({ ok: true });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test('Content-Length 0 responses do not wrap or leak the overall timer', async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = async () =>
