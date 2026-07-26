@@ -63,6 +63,14 @@ const TRUST_SURFACES: ReadonlyArray<{ name: string; text: string; mentionsBoth: 
     mentionsBoth: true,
   },
   {
+    // The readiness checklist renders the server-side `mode` check through this key (#519),
+    // so the copy a DM with an off seat actually sees carries the same both-modes honesty
+    // as the step copy above.
+    name: 'readiness mode check (off)',
+    text: ai.checklist.checkDetails.mode.off,
+    mentionsBoth: true,
+  },
+  {
     name: 'onboarding allDone Co-DM',
     text: ai.checklist.allDoneCoDm,
     mentionsBoth: false,
@@ -132,6 +140,7 @@ test.describe('AI trust copy — Co-DM proposals vs Driver direct authority (#75
   test('Co-DM copy never claims direct action on the table', () => {
     const coDmSurfaces = [
       ai.checklist.steps.mode.doneCoDm,
+      ai.checklist.checkDetails.mode.coDm,
       ai.checklist.allDoneCoDm,
       table.table.coDmHint,
       AI_DM_CARD_MODES.find((m) => m.value === ('co_dm' as AiDmMode))?.blurb ?? '',
@@ -153,6 +162,7 @@ test.describe('AI trust copy — Co-DM proposals vs Driver direct authority (#75
       { name: 'settings card Driver blurb', text: AI_DM_CARD_MODES.find((m) => m.value === ('driver' as AiDmMode))?.blurb ?? '' },
       { name: 'allDone Driver', text: ai.checklist.allDoneDriver },
       { name: 'mode doneDriver', text: ai.checklist.steps.mode.doneDriver },
+      { name: 'readiness mode check (driver)', text: ai.checklist.checkDetails.mode.driver },
       { name: 'badge driverAria', text: ai.badge.driverAria },
     ];
     // Driver must read as the AI acting AS the DM — holding the seat / running the table —

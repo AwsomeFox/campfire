@@ -3077,10 +3077,13 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0109_cast_sessions_547', run: migrateCastSessionsTable },
   // 0108/0109 both landed on main while this branch was open; derivatives take 0110.
   { name: '0110_attachment_derivatives_604', run: migrateAttachmentDerivativesTable604 },
-  // 0111–0113 are claimed by other in-flight branches that have not merged yet; the AI-DM
-  // transcript skips ahead to the first genuinely free ordinal so no two branches ever
-  // record the same migration name against different DDL.
-  { name: '0114_ai_dm_transcript_events_572', run: migrateAiDmTranscriptEventsTable572 },
+  // Main ends at 0110. 0111–0112 are claimed by #504/#559/#601 and 0113–0114 by #501 and
+  // two other in-flight branches, none of which have merged yet — so the AI-DM transcript
+  // skips ahead to the first genuinely unclaimed ordinal. runMigrations keys on the full
+  // name string, so a collision would not break at runtime; the numbering is the
+  // convention, and two branches recording the same name against different DDL is exactly
+  // the confusion it exists to prevent.
+  { name: '0115_ai_dm_transcript_events_572', run: migrateAiDmTranscriptEventsTable572 },
 ];
 
 /**

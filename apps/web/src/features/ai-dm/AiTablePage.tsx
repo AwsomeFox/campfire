@@ -30,6 +30,7 @@ import { useTranslation } from 'react-i18next';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   AI_DM_TRANSCRIPT_LIST_MAX_LIMIT,
+  type AiDmReadiness,
   type AiDmTranscriptPage,
   type Character,
   type Encounter,
@@ -110,6 +111,12 @@ export default function AiTablePage() {
 
   const sessionQuery = useAiDmSession(campaignId);
   const session = sessionQuery.data;
+  const readinessQuery = useQuery({
+    queryKey: campaignId !== undefined ? queryKeys.aiDmReadiness(campaignId) : ['ai-dm', 'readiness', 'disabled'],
+    queryFn: () => api.get<AiDmReadiness>(`${API}/campaigns/${campaignId}/ai-dm/readiness`),
+    enabled: campaignId !== undefined && isDriver && isDm,
+  });
+  const readiness = readinessQuery.data ?? null;
 
   // The transcript VIEW MODEL (see transcript.ts). The authoritative log lives on the
   // server since #572; localStorage is only a paint cache so a reload has something on
@@ -872,6 +879,19 @@ export default function AiTablePage() {
       {/* Composer */}
       {canCompose ? (
         <form onSubmit={onSubmit} className="flex flex-col gap-2" data-testid="ai-table-composer">
+          {isDm && readiness && (
+            <div className="cf-inset p-2 text-[11px] text-secondary" data-testid="ai-run-cost-estimate">
+              <span className="font-semibold text-[var(--color-neutral-300)]">{t('aiOnboarding.runCost.label')}</span>{' '}
+              {t('aiOnboarding.runCost.summary', {
+                tokens: readiness.estimatedCost.estimatedTotalTokens.toLocaleString(),
+                prompt: readiness.estimatedCost.estimatedPromptTokens.toLocaleString(),
+                completion: readiness.estimatedCost.estimatedCompletionTokens.toLocaleString(),
+              })}{' '}
+              {readiness.estimatedCost.estimatedUsd === null
+                ? t('aiOnboarding.runCost.usdUnknown')
+                : t('aiOnboarding.runCost.usdKnown', { usd: `$${readiness.estimatedCost.estimatedUsd.toFixed(4)}` })}
+            </div>
+          )}
           {isDm && (
             <Field
               idPrefix={AI_TABLE_PREFIX}
