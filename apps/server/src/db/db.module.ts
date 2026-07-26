@@ -3061,10 +3061,13 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0109_cast_sessions_547', run: migrateCastSessionsTable },
   // 0108/0109 both landed on main while this branch was open; derivatives take 0110.
   { name: '0110_attachment_derivatives_604', run: migrateAttachmentDerivativesTable604 },
-  // 0111 is claimed by another in-flight branch (#501), so this migration takes 0112 —
-  // the first ordinal nothing else holds. Sitting above 0111 means that branch's merge
-  // order cannot renumber this one out from under an already-migrated database.
-  { name: '0112_moderation_incidents_601', run: migrateModerationIncidents601 },
+  // The 0111-0116 gap is deliberate: those ordinals are centrally allocated to other
+  // in-flight branches (0111/0112 → #1442, 0114 → #501, 0115 → #572, 0116 → #580), so
+  // this migration takes 0117 rather than computing "next free" for itself — seven
+  // parallel branches all computing that independently is how they collide. The gap
+  // costs nothing: runMigrations keys on the full NAME, so ordinals need only be
+  // unique and ordered, never contiguous.
+  { name: '0117_moderation_incidents_601', run: migrateModerationIncidents601 },
 ];
 
 /**
