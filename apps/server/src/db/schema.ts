@@ -1404,3 +1404,80 @@ export const encounterEvents = sqliteTable('encounter_events', {
   metadataJson: text('metadata_json'),
   createdAt: text('created_at').notNull(),
 });
+
+// ---------- campaign modules (issue #585) ----------
+// A distributable package of campaign prep with a stable UUID, semver, authors,
+// license, origin and dependency contract. `campaign_module_installs` is the identity
+// + lineage row for one installed module in one campaign; everything in it lives in its
+// own column, so renaming the campaign (or the module) cannot sever the lineage.
+// DDL: db/bootstrap.sql.ts CAMPAIGN_MODULES_DDL, applied to upgraded DBs by
+// migrateCampaignModules585() in db/db.module.ts.
+export const campaignModuleInstalls = sqliteTable('campaign_module_installs', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  campaignId: integer('campaign_id').notNull(), // FK->campaigns ON DELETE CASCADE (bootstrap/migration)
+  /** The package UUID. UNIQUE per campaign — one install of a given module per campaign. */
+  moduleId: text('module_id').notNull(),
+  name: text('name').notNull(),
+  /** Strict semver, validated on install/update. */
+  version: text('version').notNull(),
+  description: text('description').notNull().default(''),
+  license: text('license').notNull().default(''),
+  sourceUrl: text('source_url').notNull().default(''),
+  authorsJson: text('authors_json').notNull().default('[]'),
+  compatibilityJson: text('compatibility_json').notNull().default('{}'),
+  dependenciesJson: text('dependencies_json').notNull().default('[]'),
+  /** The manifest exactly as installed — the identity baseline an update diffs against. */
+  manifestJson: text('manifest_json').notNull().default('{}'),
+  // ----- lineage (persisted independently of any name) -----
+  originKind: text('origin_kind').notNull().default('install'), // ModuleOriginKind
+  originSourceUrl: text('origin_source_url').notNull().default(''),
+  upstreamModuleId: text('upstream_module_id'),
+  upstreamVersion: text('upstream_version'),
+  forkedAt: text('forked_at'),
+  /** Once detached the install stops accepting upstream updates; lineage is kept as history. */
+  detached: integer('detached', { mode: 'boolean' }).notNull().default(false),
+  detachedAt: text('detached_at'),
+  installedAt: text('installed_at').notNull(),
+  installedBy: text('installed_by').notNull().default(''),
+  updatedAt: text('updated_at').notNull(),
+});
+
+// Per-artifact BASELINE: the upstream content as it was installed, plus the local row it
+// was materialized into and any overlay retained across a previous update. baselineHash is
+// the BASE leg of the three-way compare — without it "locally edited" and "upstream
+// changed" are indistinguishable.
+export const campaignModuleArtifacts = sqliteTable('campaign_module_artifacts', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  installId: integer('install_id').notNull(), // FK->campaign_module_installs ON DELETE CASCADE
+  campaignId: integer('campaign_id').notNull(), // FK->campaigns ON DELETE CASCADE
+  kind: text('kind').notNull(), // ModuleArtifactKind
+  /** Publisher-assigned stable key — survives local id remapping and renames. */
+  artifactKey: text('artifact_key').notNull(),
+  name: text('name').notNull().default(''),
+  /** Local row id in the kind's table, or NULL when the table deleted it. */
+  entityId: integer('entity_id'),
+  baselineHash: text('baseline_hash').notNull(),
+  baselineJson: text('baseline_json').notNull().default('{}'),
+  /** Fields where the campaign still diverges from the baseline, retained across updates. */
+  overlayJson: text('overlay_json'),
+  installedVersion: text('installed_version').notNull().default(''),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+// Pre-apply restore point. `stateJson` carries the install row, every artifact baseline
+// row, and the live entity content, so rollback can restore edits, un-create additions
+// and resurrect upstream deletions in one synchronous transaction.
+export const campaignModuleSnapshots = sqliteTable('campaign_module_snapshots', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  installId: integer('install_id').notNull(), // FK->campaign_module_installs ON DELETE CASCADE
+  campaignId: integer('campaign_id').notNull(), // FK->campaigns ON DELETE CASCADE
+  reason: text('reason').notNull().default('update'), // 'install' | 'update' | 'fork'
+  fromVersion: text('from_version').notNull().default(''),
+  toVersion: text('to_version').notNull().default(''),
+  artifactCount: integer('artifact_count').notNull().default(0),
+  stateJson: text('state_json').notNull().default('{}'),
+  createdAt: text('created_at').notNull(),
+  createdBy: text('created_by').notNull().default(''),
+  rolledBackAt: text('rolled_back_at'),
+});

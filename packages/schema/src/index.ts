@@ -73,6 +73,12 @@ export const IsoDate = z.string(); // ISO-8601, server-assigned
 
 export * from './encounter-aftermath';
 
+// Campaign modules — package identity, lineage, three-way updates, overlays and
+// rollback (issue #585) — plus the semver helpers their compatibility/dependency
+// ranges are evaluated with.
+export * from './semver';
+export * from './campaign-module';
+
 const timestamps = {
   createdAt: IsoDate,
   updatedAt: IsoDate,

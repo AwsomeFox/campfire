@@ -4,7 +4,7 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import { drizzle, type BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { APP_VERSION } from '../common/build-metadata';
-import { BOOTSTRAP_SQL, CAMPAIGN_SEARCH_FTS_SQL, RULE_ENTRIES_FTS_SQL } from './bootstrap.sql';
+import { BOOTSTRAP_SQL, CAMPAIGN_MODULES_DDL, CAMPAIGN_SEARCH_FTS_SQL, RULE_ENTRIES_FTS_SQL } from './bootstrap.sql';
 import { assertDataMount } from './boot-guard';
 import * as schema from './schema';
 
@@ -2868,6 +2868,40 @@ function migrateCastSessionsTable(sqlite: Database.Database): void {
   `);
 }
 
+/**
+ * Issue #585 — campaign module package identity, install/fork lineage, per-artifact
+ * baselines and pre-apply snapshots.
+ *
+ * Executes the SAME `CAMPAIGN_MODULES_DDL` text that BOOTSTRAP_SQL interpolates, so a
+ * fresh DB and an upgraded DB get an identical shape by construction rather than by two
+ * hand-kept copies. Every statement is `IF NOT EXISTS`, which makes this idempotent on
+ * its own and safe in either order relative to bootstrap (migrations run first).
+ *
+ * No sqlite_master probe is needed to decide whether to run — but we DO probe before the
+ * back-compat guard below, because an early build of this branch could have created the
+ * installs table without the fork-lineage columns.
+ */
+function migrateCampaignModules585(sqlite: Database.Database): void {
+  sqlite.exec(CAMPAIGN_MODULES_DDL);
+  const hasInstalls = !!sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaign_module_installs'")
+    .get();
+  if (!hasInstalls) return;
+  const columns = new Set(
+    (sqlite.pragma('table_info(campaign_module_installs)') as Array<{ name: string }>).map((c) => c.name),
+  );
+  const addColumn = (name: string, ddl: string) => {
+    if (!columns.has(name)) sqlite.exec(`ALTER TABLE campaign_module_installs ADD COLUMN ${ddl}`);
+  };
+  addColumn('origin_kind', "origin_kind TEXT NOT NULL DEFAULT 'install'");
+  addColumn('origin_source_url', "origin_source_url TEXT NOT NULL DEFAULT ''");
+  addColumn('upstream_module_id', 'upstream_module_id TEXT');
+  addColumn('upstream_version', 'upstream_version TEXT');
+  addColumn('forked_at', 'forked_at TEXT');
+  addColumn('detached', 'detached INTEGER NOT NULL DEFAULT 0');
+  addColumn('detached_at', 'detached_at TEXT');
+}
+
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
   { name: '0001_users_oidc', run: migrateUsersTableForOidc },
   { name: '0002_campaigns_rule_system', run: migrateCampaignsTableForRuleSystem },
@@ -2979,6 +3013,10 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // 0108 was taken on main by the AI token-reservation migration (#563); this branch
   // merges after it, so cast sessions take the next free ordinal.
   { name: '0109_cast_sessions_547', run: migrateCastSessionsTable },
+  // 0110-0113 are claimed by branches still in flight (attachment derivatives #604 and
+  // siblings), so campaign modules take the first ordinal beyond them. Ordinals are never
+  // reused or renumbered — a gap here is cheaper than two branches colliding on a name.
+  { name: '0114_campaign_modules_585', run: migrateCampaignModules585 },
 ];
 
 /**

@@ -31,6 +31,9 @@ import {
   combatants,
   proposals,
   campaignMembers,
+  campaignModuleArtifacts,
+  campaignModuleInstalls,
+  campaignModuleSnapshots,
   campaignGuestDmGrants,
   apiTokens,
   attachments,
@@ -3183,6 +3186,12 @@ export class CampaignsService {
         }
 
         // ---- everything keyed directly off campaign_id.
+        // Issue #585 — campaign module install/lineage rows and their per-artifact
+        // baselines/snapshots. Deleted BEFORE the entities they reference so the
+        // hand-rolled cascade leaves no orphaned baseline behind on a pre-#69 DB.
+        tx.delete(campaignModuleSnapshots).where(eq(campaignModuleSnapshots.campaignId, id)).run();
+        tx.delete(campaignModuleArtifacts).where(eq(campaignModuleArtifacts.campaignId, id)).run();
+        tx.delete(campaignModuleInstalls).where(eq(campaignModuleInstalls.campaignId, id)).run();
         tx.delete(quests).where(eq(quests.campaignId, id)).run();
         tx.delete(storyBeats).where(eq(storyBeats.campaignId, id)).run();
         tx.delete(storyArcs).where(eq(storyArcs.campaignId, id)).run();
