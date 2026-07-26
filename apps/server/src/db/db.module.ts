@@ -3058,13 +3058,13 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0109_cast_sessions_547', run: migrateCastSessionsTable },
   // 0108/0109 both landed on main while this branch was open; derivatives take 0110.
   { name: '0110_attachment_derivatives_604', run: migrateAttachmentDerivativesTable604 },
-  // 0111 is the first genuinely free ordinal in the merged array: main's highest is 0110
-  // (attachment derivatives, #604). This deliberately does NOT skip ahead to 0114 — two
-  // other in-flight PRs (#585, #572) each independently claimed 0114, and a third claimant
-  // would only deepen the pile-up. Dedup is by the FULL name, not the ordinal, so the
-  // issue-number suffix is what actually guarantees this migration runs exactly once even
-  // if a sibling branch lands the same ordinal first.
-  { name: '0111_encounter_op_idempotency_580', run: migrateEncounterOpIdempotency580 },
+  // 0116 is assigned to this branch by the merge coordinator, who is holding 0111-0113
+  // for other in-flight work and reassigned the contested 0114/0115 to #501 and #572.
+  // Main's own highest is 0110 (attachment derivatives, #604); the gap is deliberate,
+  // not a miscount. Dedup is by the FULL name rather than the ordinal, so the issue-number
+  // suffix is what actually guarantees this runs exactly once even if a sibling branch
+  // lands a colliding ordinal first.
+  { name: '0116_encounter_op_idempotency_580', run: migrateEncounterOpIdempotency580 },
 ];
 
 /**
