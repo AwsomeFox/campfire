@@ -1020,7 +1020,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
    * best-effort try/catch around persistence would swallow it, silently disabling restart-safety.
    * The backfill therefore has its own ordinal (0113), which this exercises directly.
    */
-  it('backfills announced_recovery on a DB that recorded 0112 against a column-less CREATE', () => {
+  it('backfills announced_recovery on a DB that recorded the CREATE before the column existed', () => {
     dataDir = makeTempDataDir();
     const first = openDatabase(dataDir);
     first.sqlite.close();
