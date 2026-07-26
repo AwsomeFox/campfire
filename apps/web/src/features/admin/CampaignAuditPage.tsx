@@ -9,7 +9,7 @@ import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import type { AuditEntry, AuditListPage, CampaignMember } from '@campfire/schema';
 import { AUDIT_LIST_DEFAULT_LIMIT } from '@campfire/schema';
-import { api, API, translateApiError } from '../../lib/api';
+import { api, API, getWithHeaders, translateApiError } from '../../lib/api';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Btn, Card, EmptyState, ErrorNote, Skeleton } from '../../components/ui';
 import { VirtualList } from '../../components/VirtualList';
@@ -121,6 +121,7 @@ export default function CampaignAuditPage() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [retention, setRetention] = useState<{ days: number | null; autoPrune: boolean } | null>(null);
   const fetchGeneration = useRef(0);
   const highlightId = Number(searchParams.get('entry'));
 
@@ -144,8 +145,13 @@ export default function CampaignAuditPage() {
         setError(null);
       }
       try {
-        const page = await api.get<AuditListPage>(buildAuditUrl(cid, activeFilters, cursor));
+        const { data: page, headers } = await getWithHeaders<AuditListPage>(buildAuditUrl(cid, activeFilters, cursor));
         if (gen !== fetchGeneration.current) return;
+        const days = headers.get('X-Audit-Retention-Days');
+        setRetention({
+          days: days === 'unlimited' ? null : days != null && Number.isFinite(Number(days)) ? Number(days) : null,
+          autoPrune: headers.get('X-Audit-Auto-Prune') === '1',
+        });
         setItems((prev) => (append ? [...prev, ...page.items] : page.items));
         setTotal(page.total);
         setHasMore(page.hasMore);
@@ -253,6 +259,17 @@ export default function CampaignAuditPage() {
           ← Members
         </Link>
       </div>
+
+      <Card className="space-y-1 border-amber-500/30 bg-amber-500/5">
+        <p className="text-xs font-semibold text-amber-200 m-0">Audit retention disclosure</p>
+        <p className="text-[11px] text-slate-300 m-0">
+          {retention
+            ? retention.days === null
+              ? `Audit history is configured to be kept indefinitely. Auto-prune is ${retention.autoPrune ? 'enabled' : 'off'}.`
+              : `Audit history defaults to ${retention.days} days. Auto-prune is ${retention.autoPrune ? 'enabled' : 'off'}; server admins can preview, archive, and prune from Admin -> Audit log.`
+            : 'Loading the current audit retention policy...'}
+        </p>
+      </Card>
 
       <Card className="space-y-3">
         <h2 className="font-bold text-white text-sm border-b border-slate-700 pb-2">Filters</h2>

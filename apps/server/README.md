@@ -1078,7 +1078,19 @@ and discloses the ceiling in the dice-log UI and the
 
 | Env var | Required | Default | Notes |
 | --- | --- | --- | --- |
-| `DICE_ROLLS_RETENTION` | no | `1000` | Max dice rolls kept per campaign before the oldest are pruned by the hourly background sweep. `0` or a negative value disables pruning entirely (keep all history — e.g. for tables that ship the DB off-box). The audit log has an analogous `AUDIT_RETENTION_DAYS`. The GET feed's page size (`?limit=`) is independent of this durable ceiling. |
+| `DICE_ROLLS_RETENTION` | no | `1000` | Max dice rolls kept per campaign before the oldest are pruned by the hourly background sweep. `0` or a negative value disables pruning entirely (keep all history — e.g. for tables that ship the DB off-box). The GET feed's page size (`?limit=`) is independent of this durable ceiling. |
+| `AUDIT_RETENTION_DAYS` | no | `365` | Disclosed audit retention window. `0` or a negative value disables audit pruning entirely. Startup never deletes audit rows. |
+| `AUDIT_AUTO_PRUNE` | no | `0` | Set to `1`/`true` to enable the daily audit retention sweep. When unset, admins must use Admin -> Audit log to dry-run, archive, and prune explicitly. |
+| `AUDIT_ARCHIVE_DIR` | no | `BACKUP_DIR` or `DATA_DIR/audit-archives` | Directory for JSONL archives written before audit prune deletes eligible rows. |
+
+Audit retention is managed from `GET/PATCH /admin/audit/retention`,
+`POST /admin/audit/retention/preview`, `POST /admin/audit/retention/prune`,
+and `PUT /admin/audit/legal-hold`. The effective policy is also disclosed on
+audit reads via `X-Audit-Retention-Days` and `X-Audit-Auto-Prune`. Prune jobs
+persist their last status/metrics in settings, archive eligible rows before
+delete by default, can require a recent scheduled backup (`requireRecentBackupHours`),
+and audit policy/hold/prune actions as `audit.retention.update`,
+`audit.legal_hold.update`, `audit.prune.preview`, and `audit.prune`.
 
 ## Prod hardening
 

@@ -7727,6 +7727,73 @@ export const AuditListPage = z.object({
 });
 export type AuditListPage = z.infer<typeof AuditListPage>;
 
+export const AuditRetentionPolicy = z.object({
+  days: z.number().int(),
+  defaultDays: z.number().int().positive(),
+  autoPruneEnabled: z.boolean(),
+  requireArchiveBeforePrune: z.boolean(),
+  requireRecentBackupHours: z.number().int().nonnegative(),
+  source: z.object({
+    days: z.enum(['default', 'env', 'settings']),
+    autoPruneEnabled: z.enum(['default', 'env', 'settings']),
+  }),
+  archiveDir: z.string().max(1000),
+});
+export type AuditRetentionPolicy = z.infer<typeof AuditRetentionPolicy>;
+
+export const AuditRetentionPolicyUpdate = z.object({
+  days: z.number().int().optional(),
+  autoPruneEnabled: z.boolean().optional(),
+  requireArchiveBeforePrune: z.boolean().optional(),
+  requireRecentBackupHours: z.number().int().nonnegative().optional(),
+});
+export type AuditRetentionPolicyUpdate = z.infer<typeof AuditRetentionPolicyUpdate>;
+
+export const AuditLegalHold = z.object({
+  global: z.boolean().default(false),
+  campaignIds: z.array(Id).default([]),
+});
+export type AuditLegalHold = z.infer<typeof AuditLegalHold>;
+
+export const AuditPrunePreview = z.object({
+  cutoffIso: IsoDate,
+  retentionDays: z.number().int(),
+  eligibleCount: z.number().int().nonnegative(),
+  heldCount: z.number().int().nonnegative(),
+  oldestEligibleAt: IsoDate.nullable(),
+  newestEligibleAt: IsoDate.nullable(),
+});
+export type AuditPrunePreview = z.infer<typeof AuditPrunePreview>;
+
+export const AuditPruneJobStatus = z.enum(['running', 'succeeded', 'failed']);
+export type AuditPruneJobStatus = z.infer<typeof AuditPruneJobStatus>;
+
+export const AuditPruneJob = z.object({
+  id: z.string().max(80),
+  status: AuditPruneJobStatus,
+  mode: z.enum(['dryRun', 'prune']),
+  startedAt: IsoDate,
+  finishedAt: IsoDate.nullable(),
+  cutoffIso: IsoDate,
+  retentionDays: z.number().int(),
+  eligibleCount: z.number().int().nonnegative(),
+  heldCount: z.number().int().nonnegative(),
+  archivedPath: z.string().max(1000).nullable(),
+  archiveChecksum: z.string().max(128).nullable(),
+  deletedCount: z.number().int().nonnegative(),
+  error: z.string().max(2000).nullable(),
+  backupLastSuccessAt: IsoDate.nullable(),
+  actor: z.string().max(200).nullable(),
+});
+export type AuditPruneJob = z.infer<typeof AuditPruneJob>;
+
+export const AuditRetentionStatus = z.object({
+  policy: AuditRetentionPolicy,
+  legalHold: AuditLegalHold,
+  lastJob: AuditPruneJob.nullable(),
+});
+export type AuditRetentionStatus = z.infer<typeof AuditRetentionStatus>;
+
 // ---------- admin observability (issue #22) ----------
 // Server-wide operational snapshot for the admin console (GET /admin/metrics,
 // @ServerRoles('admin')). Everything here is cheap to compute — COUNT(*) per

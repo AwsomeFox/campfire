@@ -1,4 +1,5 @@
-import { Controller, Get, Query } from '@nestjs/common';
+import { Controller, Get, Query, Res } from '@nestjs/common';
+import type { Response } from 'express';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import { ServerRoles } from '../../common/decorators/server-roles.decorator';
 import { parsePageParams } from '../../common/pagination';
@@ -32,7 +33,13 @@ export class ServerAuditController {
       'When set, search ALL audit rows (any campaign) stamped with this correlation id instead of the server-admin-only slice (issue #684).',
   })
   @ApiResponse({ status: 200, description: 'Server-admin audit entries, most-recent-first.' })
-  list(@Query('limit') limit?: string, @Query('offset') offset?: string, @Query('requestId') requestId?: string) {
+  async list(
+    @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
+    @Query('requestId') requestId?: string,
+    @Res({ passthrough: true }) res?: Response,
+  ) {
+    if (res) await this.audit.setRetentionHeaders(res);
     const page = parsePageParams({ limit, offset }, AUDIT_MAX_LIMIT);
     return this.audit.listServerAdmin(page.limit ?? AUDIT_DEFAULT_LIMIT, page.offset ?? 0, requestId);
   }

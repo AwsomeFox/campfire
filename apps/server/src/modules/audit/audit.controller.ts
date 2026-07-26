@@ -1,4 +1,5 @@
-import { BadRequestException, Controller, Get, Param, ParseIntPipe, Query } from '@nestjs/common';
+import { BadRequestException, Controller, Get, Param, ParseIntPipe, Query, Res } from '@nestjs/common';
+import type { Response } from 'express';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
@@ -70,9 +71,11 @@ export class AuditController {
     @Query('sinceTs') sinceTs?: string,
     @Query('untilTs') untilTs?: string,
     @Query('requestId') requestId?: string,
+    @Res({ passthrough: true }) res?: Response,
   ) {
     // allowArchived: reading the audit log of an archived (read-only) campaign is fine.
     await this.access.requireRole(user, id, 'dm', { allowArchived: true });
+    if (res) await this.audit.setRetentionHeaders(res);
 
     const filters = {
       action,
