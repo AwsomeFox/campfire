@@ -2397,10 +2397,11 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
 
   it('list_attachments / get_attachment return metadata; a hidden attachment is DM-only (issue #76)', async () => {
     const dmClient = await mcpClient(dmToken);
-    // Upload a DM-only 'map' (defaults hidden=true) via REST multipart.
-    // Valid 8-byte PNG signature (content sniff checks only these) + filler bytes; the
-    // metadata tools never read the bytes back, so a well-formed header is enough.
-    const pngBytes = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(64)]);
+    // Upload a DM-only 'map' (defaults hidden=true) via REST multipart. Issue #604:
+    // the upload path now reads the image header (to reject decompression bombs
+    // before anything decodes them), so a signature-plus-filler blob is rejected —
+    // use the real minimal PNG this suite already defines.
+    const pngBytes = TINY_PNG;
     const uploadRes = await dmAgent
       .post(`/api/v1/campaigns/${campaignId}/attachments`)
       .field('kind', 'map')

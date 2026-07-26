@@ -61,6 +61,55 @@ Total upload bytes, a per-campaign breakdown with **quotas** and over-quota flag
 real on-disk total, and an orphan summary (rows-without-file, files-without-row) for
 cleanup.
 
+### Map derivatives — capacity behaviour
+
+Campfire stores a small ladder of downscaled copies ("derivatives") next to every
+uploaded image, so a world map or battle map is delivered at a size that fits the
+viewer's screen instead of at full resolution every time. Three things are worth
+knowing as an operator.
+
+**Upload limits.** An uploaded image is validated from its header *before* anything
+decodes it:
+
+| Limit | Value | What it means |
+| --- | --- | --- |
+| Longest edge | 16,384 px | Larger is rejected (`400`). No mainstream browser can composite a longer edge. |
+| Total pixels | 40,000,000 (~40 MP) | Larger is rejected (`413`). Full 8K (7680 × 4320 = 33.2 MP) sits comfortably inside it. |
+| File size | 32 MB | Unchanged; enforced by the upload handler. |
+
+The pixel cap is a decompression-bomb defence, not a file-size proxy: a highly
+compressible PNG can declare gigapixels in a few hundred kilobytes. Because the
+check reads only the container header, a rejected bomb never allocates memory for
+its pixels. A DM who legitimately needs a larger map must downscale it before
+uploading.
+
+**Disk.** Three rungs are generated — 512 px, 1280 px and 2560 px on the longest
+edge, always PNG. A rung is **skipped** when the source is already at or below it,
+so a 400 px portrait costs nothing extra. As a rule of thumb, a large map's
+derivatives add roughly **40–70% on top of the original** (the 2560 px rung
+dominates; a JPEG source can even exceed its own original, because derivatives are
+lossless PNG). Derivatives count toward the on-disk total reported in the storage
+console but **not** toward a campaign's storage quota, which measures uploaded
+originals only. Budget accordingly: a 10 GB library of large maps should be planned
+as roughly 15–17 GB on disk.
+
+**Backlog.** Generation runs in the background — one image at a time, in batches, on
+a single worker. Peak memory is bounded by one decoded frame (40 MP × 4 bytes ≈
+160 MB) plus encoder scratch, so a burst of uploads queues rather than piling up in
+memory. While an image's rungs are still pending, a request for a smaller size is
+answered with the **original**, and the response carries
+`X-Campfire-Derivative: original-fallback`; the DM sees a "preparing faster map
+sizes" note on the map itself. A restart does not lose queued work: the ladder lives
+in the database, pending rungs resume on the next boot, and images that predate this
+feature are adopted a few hundred per boot until the backlog clears.
+
+**When generation fails.** A rung retries automatically three times, then parks as
+`failed` with the underlying error — and the map keeps rendering from its original
+throughout. The DM can re-run generation from the map surface ("Refresh sizes"),
+which re-plans the ladder from the current source bytes; that is also the fix for a
+derivative left **stale** by a restore that replaced an image in place. Nothing
+about a failed ladder blocks viewing, uploading, exporting or backups.
+
 ## Audit (Admin → Audit)
 
 A server-wide trail of admin actions not tied to any one campaign (account creation,

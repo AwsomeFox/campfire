@@ -5,6 +5,7 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { contentDispositionHeader } from '../attachments/filename';
+import { DERIVATIVE_VARIANT_NAMES, isDerivativeVariantName } from '../attachments/image-derivatives';
 import { EncountersService } from './encounters.service';
 import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterEscalationUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, RollRequestDto, ActionRollRequestDto, ManualRollRequestDto, MapPingDto, ActionResolveRequestDto, ActionResolutionDto, ActionUndoTokenDto } from './encounters.dto';
 import { EncounterMapService } from './encounter-map.service';
@@ -221,6 +222,30 @@ export class EncountersController {
     return this.encounters.getWithCombatantsOrThrow(id, role, user.id);
   }
 
+  /**
+   * Responsive-ladder manifest for this encounter's battle map (issue #604).
+   *
+   * Deliberately encounter-scoped: the run view needs each rung's real pixel width
+   * to emit an accurate `srcset`, but a player must never be able to read an
+   * attachment route for a fog-protected map (#463). Only dimensions/state are
+   * returned — never bytes — and every URL the client mints from them still goes
+   * through GET :id/map, which re-applies the role/fog rules per request.
+   */
+  @Get(':id/map/derivatives')
+  @ApiOperation({
+    summary: 'Responsive derivative status for an encounter battle map',
+    description:
+      'Requires campaign membership. Returns per-rung state and the real pixel dimensions of ready rungs so the client ' +
+      'can build a srcset for GET :id/map?size=… . Discloses no bytes and no attachment metadata (issue #604).',
+  })
+  @ApiResponse({ status: 200, description: 'Derivative manifest for the encounter map.' })
+  @ApiResponse({ status: 404, description: 'Encounter has no battle map, or the caller is not a member.' })
+  async mapDerivatives(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireMember(user, row.campaignId);
+    return this.encounterMaps.derivativeManifest(this.encounters.encounterForMapOrThrow(row, role));
+  }
+
   @Get(':id/map')
   @ApiOperation({
     summary: 'Get the role-safe battle-map image for an encounter',
@@ -229,7 +254,7 @@ export class EncountersController {
       'opaque server-rendered PNG containing only revealed regions; the source attachment remains inaccessible. ' +
       'Responses are private/no-store and byte ranges are rejected so role or fog revisions cannot leak through caches.',
   })
-  @ApiQuery({ name: 'size', required: false, enum: ['thumb'], description: 'Omit for full resolution; `thumb` caps the longest edge at 512px.' })
+  @ApiQuery({ name: 'size', required: false, enum: [...DERIVATIVE_VARIANT_NAMES], description: 'Omit for full resolution; `thumb` (512px), `md` (1280px) or `lg` (2560px) cap the longest edge (issue #604).' })
   @ApiQuery({ name: 'revision', required: false, type: String, description: 'Opaque client cache-buster derived from encounter.updatedAt; ignored by the server.' })
   @ApiResponse({ status: 200, description: 'Role-safe image bytes.' })
   @ApiResponse({ status: 404, description: 'Encounter/map is absent, hidden from the caller, or its bytes are missing.' })
@@ -242,8 +267,13 @@ export class EncountersController {
     @Res() res: Response,
     @Query('size') size?: string,
   ): Promise<void> {
-    if (size !== undefined && size !== 'thumb') {
-      throw new BadRequestException("Unsupported size — allowed: 'thumb' (or omit for the original)");
+    // Issue #604: the battle map serves the same responsive ladder as every other
+    // attachment, so a phone does not download a 2560px board. Validation mirrors
+    // the attachment bytes route exactly.
+    if (size !== undefined && !isDerivativeVariantName(size)) {
+      throw new BadRequestException(
+        `Unsupported size — allowed: ${DERIVATIVE_VARIANT_NAMES.map((v) => `'${v}'`).join(', ')} (or omit for the original)`,
+      );
     }
     const row = await this.encounters.getRowOrThrow(id);
     const role = await this.access.requireMember(user, row.campaignId);
@@ -276,7 +306,7 @@ export class EncountersController {
     const view = await this.encounterMaps.resolve(
       encounter,
       role,
-      size === 'thumb' ? 'thumb' : 'original',
+      size !== undefined && isDerivativeVariantName(size) ? size : 'original',
       persistedFogInvalid,
     );
     res
@@ -294,6 +324,10 @@ export class EncountersController {
         'Accept-Ranges': 'none',
         Vary: 'Cookie, Authorization, x-dev-role, x-dev-user',
         'X-Campfire-Map-View': view.protected ? 'fog-protected' : 'fully-revealed',
+        // Issue #604: which responsive rung these bytes are. 'original-fallback'
+        // tells the run view its derivatives are still processing (or failed), so
+        // it can show that state rather than silently serving a full-size board.
+        'X-Campfire-Derivative': view.derivative,
       })
       .end(view.bytes);
   }

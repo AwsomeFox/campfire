@@ -42,8 +42,15 @@ export type OpenLegendSection = 'boons' | 'banes' | 'feats';
 /** The three sections that exist as open data in the core-rules repo (see file header). */
 export const ALL_OPEN_LEGEND_SECTIONS: OpenLegendSection[] = ['boons', 'banes', 'feats'];
 
-/** Path (relative to the base) of each section's data file in the core-rules repo. */
-const SECTION_TO_PATH: Record<OpenLegendSection, string> = {
+/**
+ * Path (relative to the base) of each section's data file in the core-rules repo.
+ *
+ * EXPORTED (issue #568) so the nightly live-source smoke
+ * (test/rules-live-smoke.e2e-spec.ts) probes the paths this importer ACTUALLY requests
+ * instead of a hand-copied list in the test — a duplicated list stops noticing drift the
+ * moment the two copies diverge, which is the exact failure mode #568 is about.
+ */
+export const OPEN_LEGEND_SECTION_TO_PATH: Record<OpenLegendSection, string> = {
   boons: 'boons/boons.yml',
   banes: 'banes/banes.yml',
   feats: 'feats/feats.yml',
@@ -301,7 +308,7 @@ function isSameOrigin(origin: string, candidate: string): boolean {
 
 /** First URL to fetch for a section — the section's data file relative to the base. */
 function sectionUrl(baseUrl: string, section: OpenLegendSection): string {
-  return `${baseUrl.replace(/\/$/, '')}/${SECTION_TO_PATH[section]}`;
+  return `${baseUrl.replace(/\/$/, '')}/${OPEN_LEGEND_SECTION_TO_PATH[section]}`;
 }
 
 /**

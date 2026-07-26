@@ -124,10 +124,19 @@ jobs:
         run: npm ci
       - name: Compatibility build (schema + server + web)
         run: npm run build
+      # Issue #569: `test:pwa` is exactly `vite-build-strict.mjs &&
+      # check-pwa-dist.mjs`. CI runs those two halves as separate steps so the
+      # web build is never repeated — the strict build is the step above, and
+      # this is the dist contract checked against it. Running it here means the
+      # 22.x build output (previously produced and thrown away unchecked) has to
+      # satisfy the same manifest / service worker / icon contract as 24.x, and
+      # it does so inside the required gate with no browser and so no flake.
+      - run: npm run test:pwa:dist -w apps/web
 
   # Node 24 build-output gate: validates the PWA dist contract (manifest,
   # service worker, icons) against the shared web build produced by `build`,
-  # without rebuilding.
+  # without rebuilding. Together with the `build` job's strict web build this is
+  # the second half of `test:pwa` on 24.x (see build-test-22 for the split).
   build-test-24:
     name: build-test (24.x)
     needs: build
@@ -255,9 +264,73 @@ jobs:
           path: apps/web/playwright-report/
           if-no-files-found: ignore
 
+  # Runtime PWA gate (issue #569). `build-test-*` proves the built FILES satisfy
+  # the PWA contract; this proves a real Chromium actually registers the worker
+  # we ship, precaches the shell, serves it with the network cut, and offers the
+  # install CTA — the install/offline promise the dist check cannot make.
+  #
+  # Why a dedicated job rather than relying on the e2e-web shard that also picks
+  # this spec up: main currently fails dozens of unrelated Playwright tests, so a
+  # PWA regression buried in an already-red shard is invisible. A named check
+  # makes it legible on the PR, and keeps it independently promotable to the
+  # required set once it has a stability record.
+  #
+  # Why NOT in the required `ci` gate yet: it is a browser test that waits on
+  # service-worker activation, and the required check blocks every PR in the
+  # repo. It runs alongside e2e-web for signal; the zero-flake half of `test:pwa`
+  # (the dist contract) is what sits in the required gate today.
+  pwa-web:
+    name: pwa-web
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          cache: npm
+      - name: Restore node_modules
+        id: modcache
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            apps/*/node_modules
+            packages/*/node_modules
+          key: node-modules-24x-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.ImageVersion }}-${{ hashFiles('package-lock.json') }}
+      - name: Install
+        if: steps.modcache.outputs.cache-hit != 'true'
+        run: npm ci
+      - name: Download dist
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: .
+      - run: npm run test:e2e:typecheck -w apps/web
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.ImageVersion }}-${{ hashFiles('package-lock.json') }}
+      - run: npx playwright install --with-deps chromium
+      # The service worker only exists against the REAL built SPA served by the
+      # REAL server on one origin, so this reuses the primary project's seeded
+      # webServer (apps/web/e2e/server.mjs) and runs just the PWA spec.
+      - name: Run PWA install + offline suite
+        run: npm run test:pwa:e2e -w apps/web
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-pwa
+          path: apps/web/playwright-report/
+          if-no-files-found: ignore
+
   # Aggregate required status check for the branch ruleset (context name: "ci").
-  # Depends on the green required gates only. e2e-web still runs independently
-  # for signal; main currently fails dozens of unrelated Playwright tests.
+  # Depends on the green required gates only. e2e-web and pwa-web still run
+  # independently for signal; main currently fails dozens of unrelated Playwright
+  # tests, and a browser check in the required set would block every PR on a
+  # service-worker timing race.
   ci:
     name: ci
     if: always()
