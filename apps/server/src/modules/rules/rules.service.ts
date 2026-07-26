@@ -284,6 +284,43 @@ function packManifestHash(
 }
 
 /**
+ * Decides whether a fetched manifest may be treated as the COMPLETE upstream set, which
+ * is the only condition under which `removeMissing` (delete installed rows absent from the
+ * fetch) is safe.
+ *
+ * Every HTTP importer can legitimately return a SHORT section without throwing:
+ *   - a per-section entry cap truncates large sections. This is not hypothetical: Open5e's
+ *     creatures (~3.5k) and magicitems (~2.3k) both exceed MAX_ENTRIES_PER_SECTION (2000)
+ *     on every single run, so a full Open5e manifest is *always* truncated.
+ *   - a single malformed row is skipped rather than failing the import, a refused
+ *     cross-origin `next` link stops pagination early, and the per-section page cap breaks
+ *     out of the loop — all of these return what was collected so far and report
+ *     `skippedCount > 0`.
+ *   - the caller may have requested only a subset of sections.
+ *
+ * Deleting installed entries because they fell outside a truncation window would report
+ * them as "removed upstream", drop them from the pack, and null out every combatant that
+ * referenced them — the silent pack corruption issue #500 exists to prevent. So removal is
+ * enabled only when every section of the source was requested, nothing was skipped, and no
+ * section came back sitting at its cap.
+ *
+ * Note the section check is a set-cover, not a length comparison: `sections` comes straight
+ * off the request body and is not de-duplicated by the schema, so seven copies of "spells"
+ * would satisfy `sections.length === ALL_OPEN5E_SECTIONS.length` and authorise deleting
+ * every monster, item, condition, class, race and feat in the installed pack.
+ */
+function manifestIsComplete(
+  requestedSections: readonly string[],
+  allSections: readonly string[],
+  sectionResults: ReadonlyArray<{ entries: readonly unknown[]; skippedCount: number }>,
+  perSectionCap: number,
+): boolean {
+  const requested = new Set<string>(requestedSections);
+  if (!allSections.every((section) => requested.has(section))) return false;
+  return sectionResults.every((r) => r.skippedCount === 0 && r.entries.length < perSectionCap);
+}
+
+/**
  * ORDER BY expression that ranks name matches ahead of summary/body matches
  * (issue #33: searching "poisoned" must return "Poisoned" before "Petrified",
  * whose body merely mentions the Poisoned condition). Buckets, best first:
@@ -1059,7 +1096,7 @@ export class RulesService implements OnModuleInit {
       allEntries,
       user,
       `(cap ${MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
-      { removeMissing: sections.length === ALL_OPEN5E_SECTIONS.length },
+      { removeMissing: manifestIsComplete(sections, ALL_OPEN5E_SECTIONS, sectionResults, MAX_ENTRIES_PER_SECTION) },
     );
   }
 
@@ -1103,7 +1140,7 @@ export class RulesService implements OnModuleInit {
       allEntries,
       user,
       `(cap ${PF2E_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
-      { removeMissing: sections.length === ALL_PF2E_SECTIONS.length },
+      { removeMissing: manifestIsComplete(sections, ALL_PF2E_SECTIONS, sectionResults, PF2E_MAX_ENTRIES_PER_SECTION) },
     );
   }
 
@@ -1138,7 +1175,7 @@ export class RulesService implements OnModuleInit {
       allEntries,
       user,
       `(cap ${PF2E_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
-      { removeMissing: sections.length === ALL_PF2E_SECTIONS.length },
+      { removeMissing: manifestIsComplete(sections, ALL_PF2E_SECTIONS, sectionResults, PF2E_MAX_ENTRIES_PER_SECTION) },
     );
   }
 
@@ -1191,7 +1228,7 @@ export class RulesService implements OnModuleInit {
       allEntries,
       user,
       `(cap ${OL_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
-      { removeMissing: sections.length === ALL_OPEN_LEGEND_SECTIONS.length },
+      { removeMissing: manifestIsComplete(sections, ALL_OPEN_LEGEND_SECTIONS, sectionResults, OL_MAX_ENTRIES_PER_SECTION) },
     );
   }
 
@@ -1234,7 +1271,7 @@ export class RulesService implements OnModuleInit {
       allEntries,
       user,
       `(cap ${PF1E_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
-      { removeMissing: sections.length === ALL_PF1E_SECTIONS.length },
+      { removeMissing: manifestIsComplete(sections, ALL_PF1E_SECTIONS, sectionResults, PF1E_MAX_ENTRIES_PER_SECTION) },
     );
   }
 
@@ -1283,7 +1320,7 @@ export class RulesService implements OnModuleInit {
       allEntries,
       user,
       `(cap ${STARFINDER_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
-      { removeMissing: sections.length === ALL_STARFINDER_SECTIONS.length },
+      { removeMissing: manifestIsComplete(sections, ALL_STARFINDER_SECTIONS, sectionResults, STARFINDER_MAX_ENTRIES_PER_SECTION) },
     );
   }
 
@@ -1325,7 +1362,7 @@ export class RulesService implements OnModuleInit {
       allEntries,
       user,
       `(cap ${ARCHMAGE_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
-      { removeMissing: sections.length === ALL_ARCHMAGE_SECTIONS.length },
+      { removeMissing: manifestIsComplete(sections, ALL_ARCHMAGE_SECTIONS, sectionResults, ARCHMAGE_MAX_ENTRIES_PER_SECTION) },
     );
   }
 
@@ -1372,7 +1409,7 @@ export class RulesService implements OnModuleInit {
       allEntries,
       user,
       `(cap ${OSR_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
-      { removeMissing: sections.length === ALL_OSR_SECTIONS.length },
+      { removeMissing: manifestIsComplete(sections, ALL_OSR_SECTIONS, sectionResults, OSR_MAX_ENTRIES_PER_SECTION) },
     );
   }
 
@@ -1425,7 +1462,10 @@ export class RulesService implements OnModuleInit {
       allEntries,
       user,
       `(${totalSkipped} skipped)`,
-      { removeMissing: true },
+      // Cepheus always requests every book, but the mdBook parser still skips chapters/blocks
+      // it cannot read; a short parse must not be mistaken for upstream deletions. No
+      // per-section entry cap applies here (chapters are split, never truncated away).
+      { removeMissing: manifestIsComplete(sections, ALL_CEPHEUS_SECTIONS, sectionResults, Number.POSITIVE_INFINITY) },
     );
   }
 
@@ -1453,10 +1493,12 @@ export class RulesService implements OnModuleInit {
     const doc = await fetchDataswornDocument(url);
     let totalSkipped = 0;
     const allEntries: ImportedEntry[] = [];
+    const sectionResults: Array<{ entries: ImportedEntry[]; skippedCount: number }> = [];
     for (const section of sections) {
       const result = mapDataswornSection(doc, section);
       totalSkipped += result.skippedCount;
       allEntries.push(...result.entries);
+      sectionResults.push(result);
       onSectionDone?.(section, result.entries.length);
     }
     if (allEntries.length === 0) {
@@ -1475,7 +1517,7 @@ export class RulesService implements OnModuleInit {
       allEntries,
       user,
       `(cap ${DATASWORN_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
-      { removeMissing: sections.length === ALL_DATASWORN_SECTIONS.length },
+      { removeMissing: manifestIsComplete(sections, ALL_DATASWORN_SECTIONS, sectionResults, DATASWORN_MAX_ENTRIES_PER_SECTION) },
     );
   }
 
@@ -1541,7 +1583,15 @@ export class RulesService implements OnModuleInit {
       entries,
       user,
       `upload (${entries.length} entries)`,
-      { removeMissing: true },
+      // Uploads are ADDITIVE: a re-upload adds new entries and applies corrections to
+      // existing ones, but never deletes entries absent from the file. Issue #500 is scoped
+      // to UPSTREAM source updates, where the fetched manifest is authoritative and absence
+      // genuinely means "removed upstream". A hand-uploaded file carries no such authority —
+      // absence almost always means the operator uploaded a partial pack, not that they
+      // intend a deletion. Turning that into "delete everything not in this file" would be
+      // an unrequested destructive change with no opt-out. If full-replace uploads are ever
+      // wanted, they need an explicit opt-in flag on RulePackUpload that defaults to off.
+      { removeMissing: false },
     );
   }
 
@@ -1681,8 +1731,13 @@ export class RulesService implements OnModuleInit {
       sourceVersion: meta.version,
     };
 
-    try {
-      const result = this.db.transaction((tx) => {
+    // The whole compare-and-apply runs inside ONE synchronous better-sqlite3 transaction:
+    // the pack's current rows are re-read here (not before the transaction), so the
+    // add/change/remove classification and the writes derived from it can never straddle
+    // another writer's commit. A throw anywhere rolls the entire update back — the pack
+    // stays wholly on the old manifest rather than becoming a half-old/half-new mixture.
+    const applySync = (): { pack: typeof rulePacks.$inferSelect; preview: RulePackUpdatePreview } =>
+      this.db.transaction((tx) => {
         const existingRows = tx.select().from(ruleEntries).where(eq(ruleEntries.packId, packRow.id)).all();
         const existingByKey = new Map(existingRows.map((r) => [`${r.type}::${r.slug}`, r]));
         const fetchedByKey = new Map(fetchedEntries.map((entry) => [`${entry.type}::${entry.slug}`, entry]));
@@ -1780,41 +1835,67 @@ export class RulesService implements OnModuleInit {
           } satisfies RulePackUpdatePreview,
         };
       });
+
+    try {
+      const result = applySync();
       updatedPack = result.pack;
       preview = result.preview;
     } catch (err) {
       if (!isUniqueConstraintError(err)) throw err;
-      // Another concurrent sync inserted one of the same (slug,type) rows first. The
-      // transaction rolled back; surface a clean updated result against the now-current pack.
-      const [freshPack] = await this.db.select().from(rulePacks).where(eq(rulePacks.id, packRow.id)).limit(1);
-      updatedPack = freshPack ?? packRow;
-      preview = {
-        added: 0,
-        changed: 0,
-        removed: 0,
-        unchanged: fetchedEntries.length,
-        sourceHash,
-        sourceVersion: meta.version,
-      };
-      await this.audit.log({
-        actor: auditActor(user),
-        actorRole: auditActorRole(user),
-        action: 'rulepack.install',
-        entityType: 'rule_pack',
-        entityId: updatedPack.id,
-        detail: `rule pack update lost a race for "${packRow.slug}" (sections ${meta.sectionLabels.join(',')}); source=${meta.sourceUrl || 'upload'} version=${meta.version} manifest=${sourceHash.slice(0, 12)}`,
-      });
-      return {
-        ...packToDomain(updatedPack),
-        added: 0,
-        skippedExisting: fetchedEntries.length,
-        changed: 0,
-        removed: 0,
-        sourceHash,
-        sourceVersion: meta.version,
-        preview,
-      };
+      // Another writer inserted one of the same (type, slug) rows between our read and our
+      // write, so the transaction rolled back and NOTHING was applied. Retry once: the retry
+      // re-reads the pack's rows inside its own transaction, sees the racer's row, and
+      // classifies it as changed/unchanged instead of an insert — so it converges.
+      //
+      // The pre-#500 code returned "0 added" here, which was true then because that path only
+      // ever added rows. Reporting the same shape now would claim `unchanged: <every entry>`
+      // for an update that silently dropped every upstream correction — precisely the
+      // "undocumented mixture of old and new" #500 exists to stop. So the retry is what makes
+      // the success report honest, and if it still loses we report zero work done (and say so
+      // in the audit trail) rather than inventing an "everything was already current" result.
+      try {
+        const retried = applySync();
+        updatedPack = retried.pack;
+        preview = retried.preview;
+      } catch (retryErr) {
+        if (!isUniqueConstraintError(retryErr)) throw retryErr;
+        const [freshPack] = await this.db.select().from(rulePacks).where(eq(rulePacks.id, packRow.id)).limit(1);
+        updatedPack = freshPack ?? packRow;
+        preview = { added: 0, changed: 0, removed: 0, unchanged: 0, sourceHash, sourceVersion: meta.version };
+        await this.audit.log({
+          actor: auditActor(user),
+          actorRole: auditActorRole(user),
+          action: 'rulepack.install',
+          entityType: 'rule_pack',
+          entityId: updatedPack.id,
+          detail: `rule pack update for "${packRow.slug}" lost a write race twice and applied NOTHING (pack left on its previous manifest; re-run to apply) — sections=${meta.sectionLabels.join(',')} source=${meta.sourceUrl || 'upload'} version=${meta.version} manifest=${sourceHash.slice(0, 12)}`,
+        });
+        return {
+          ...packToDomain(updatedPack),
+          added: 0,
+          skippedExisting: 0,
+          changed: 0,
+          removed: 0,
+          sourceHash,
+          sourceVersion: meta.version,
+          preview,
+        };
+      }
     }
+
+    // An update rewrites the pack's own provenance columns (name/license/sourceUrl) from the
+    // incoming manifest. A license or source change is exactly the kind of thing an operator
+    // must be able to discover after the fact — issue #500 asks for provenance/license changes
+    // to be AUDITED, not silently swallowed — so record the before→after explicitly rather than
+    // leaving the new value to be inferred from whatever the pack row happens to say now.
+    const provenanceChanges = [
+      ['license', packRow.license, meta.license],
+      ['sourceUrl', packRow.sourceUrl, meta.sourceUrl],
+      ['name', packRow.name, meta.name],
+      ['version', packRow.version, meta.version],
+    ]
+      .filter(([, before, after]) => before !== after)
+      .map(([field, before, after]) => `${field}:"${before}"->"${after}"`);
 
     await this.audit.log({
       actor: auditActor(user),
@@ -1822,7 +1903,10 @@ export class RulesService implements OnModuleInit {
       action: 'rulepack.install',
       entityType: 'rule_pack',
       entityId: updatedPack.id,
-      detail: `rule pack update for "${packRow.slug}": +${preview.added} ~${preview.changed} -${preview.removed} unchanged=${preview.unchanged} sections=${meta.sectionLabels.join(',')} source=${meta.sourceUrl || 'upload'} version=${meta.version} manifest=${sourceHash.slice(0, 12)}`,
+      detail:
+        `rule pack update for "${packRow.slug}": +${preview.added} ~${preview.changed} -${preview.removed} unchanged=${preview.unchanged}` +
+        ` sections=${meta.sectionLabels.join(',')} source=${meta.sourceUrl || 'upload'} version=${meta.version} manifest=${sourceHash.slice(0, 12)}` +
+        (provenanceChanges.length > 0 ? ` provenance-changed[${provenanceChanges.join(' ')}]` : ''),
     });
 
     return {
