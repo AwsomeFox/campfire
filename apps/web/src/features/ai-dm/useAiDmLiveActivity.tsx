@@ -32,6 +32,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import type { AiDmMode } from '@campfire/schema';
 import { useAiDmSeat, useAiDmSession, invalidateAiDm } from '../../lib/query';
 import { useAiDmStream, type AiDmStreamEvent } from '../../lib/useAiDmStream';
+import { usePendingHydrate } from './usePendingHydrate';
 import { invalidateForToolEvent, resolveToolActivity, toolResource, type ToolChip, type ToolStreamEvent } from './toolActivity';
 import {
   transcriptReducer,
@@ -128,7 +129,7 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
    * destroying the cached transcript for every surface sharing the store. Skip exactly one
    * pass so the seed decision is made against the hydrated state.
    */
-  const pendingHydrateRef = useRef(false);
+  const pendingHydrate = usePendingHydrate();
 
   // Reset activity + transcript when campaign or driver mode changes.
   const prevKeyRef = useRef<string>('');
@@ -138,7 +139,7 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
       prevKeyRef.current = key;
       setState((s) => ({ ...INITIAL_STATE, mode: s.mode }));
       seededRef.current = false;
-      pendingHydrateRef.current = true;
+      pendingHydrate.mark();
       if (campaignId !== undefined) {
         dispatchTranscript({ type: 'hydrate', state: enabled ? loadTranscript(campaignId, 'activity') : emptyTranscript });
       } else {
@@ -165,11 +166,8 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
     }
     if (seededRef.current) return;
     // A hydrate is queued but not yet applied — deciding "empty, so seed" here would
-    // overwrite the scrollback that hydrate is about to restore (see pendingHydrateRef).
-    if (pendingHydrateRef.current) {
-      pendingHydrateRef.current = false;
-      return;
-    }
+    // overwrite the scrollback that hydrate is about to restore.
+    if (pendingHydrate.consume()) return;
     if (!seatQuery.isFetched || !sessionQuery.isFetched) return;
     if (session?.scene || session?.lastNarration) {
       dispatchTranscript({ type: 'seed', scene: session.scene, lastNarration: session.lastNarration });

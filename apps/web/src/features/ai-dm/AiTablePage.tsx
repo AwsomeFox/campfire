@@ -57,6 +57,7 @@ import {
   emptyTranscript,
 } from './transcript';
 import { invalidateForToolEvent } from './toolActivity';
+import { usePendingHydrate } from './usePendingHydrate';
 import {
   advanceNarrationLog,
   announceableEntryIds,
@@ -247,6 +248,7 @@ export default function AiTablePage() {
 
   const transcriptLoadedFor = useRef<number | undefined>(undefined);
   const [transcriptFetched, setTranscriptFetched] = useState(false);
+  const pendingHydrate = usePendingHydrate();
   useEffect(() => {
     if (campaignId === undefined || !isDriver) return;
     if (transcriptLoadedFor.current === campaignId) return;
@@ -269,6 +271,11 @@ export default function AiTablePage() {
       lastSeqRef.current = 0;
       dispatch({ type: 'hydrate', state: loadTranscript(campaignId) });
       seededRef.current = false;
+      // The seed effect runs LATER IN THIS SAME COMMIT and would still see the previous
+      // campaign's entries — its `entries.length > 0` branch would latch `seededRef` back
+      // to true, and the new table (whose own transcript is empty) would then never seed
+      // its scene / lastNarration join context at all. Skip that one stale pass.
+      pendingHydrate.mark();
     }
     transcriptCampaignRef.current = campaignId;
     // Opt this surface into authoritative mode BEFORE the first fetch: from here on the
@@ -290,6 +297,9 @@ export default function AiTablePage() {
   const narrationLogCursorRef = useRef<NarrationLogCursor | null>(null);
   const pendingPreLiveIdsRef = useRef<Set<string>>(new Set());
   useEffect(() => {
+    // A campaign switch queued a hydrate this commit cannot see yet; every branch below
+    // reads `transcript.entries`, so this pass's view belongs to the PREVIOUS table.
+    if (pendingHydrate.consume()) return;
     if (transcript.entries.length > 0) {
       // Hydrated history (or seed applied on the previous commit): no further seed.
       if (!seededRef.current) seededRef.current = true;
