@@ -2921,7 +2921,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0104_campaign_library_monsters', run: migrateCampaignLibraryMonstersTable },
   { name: '0105_campaign_library_monsters_fk', run: migrateCampaignLibraryMonstersForeignKeys },
   { name: '0106_guest_dm_handoff_545', run: migrateGuestDmHandoff545 },
-  { name: '0107_ai_consent_provenance_501', run: migrateAiConsentAndProvenance501 },
+  { name: '0108_ai_consent_provenance_501', run: migrateAiConsentAndProvenance501 },
 ];
 
 /**

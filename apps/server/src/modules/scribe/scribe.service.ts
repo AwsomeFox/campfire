@@ -4,7 +4,6 @@ import { and, asc, desc, eq, inArray, isNull } from 'drizzle-orm';
 import type { z } from 'zod';
 import type {
   AiExternalContentPolicy,
-  AiGenerationProvenance,
   Note,
   NarrationLanguage,
   Role,
@@ -17,7 +16,7 @@ import type {
   ScribeSourceStats,
   ScribeTrigger,
 } from '@campfire/schema';
-import { AI_EXTERNAL_PROVIDER_PRIVACY, buildNarrationLanguageContract, resolveNarrationLanguage } from '@campfire/schema';
+import { AI_EXTERNAL_PROVIDER_PRIVACY, AiGenerationProvenance, buildNarrationLanguageContract, resolveNarrationLanguage } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import {
   aiDmSeats,
@@ -60,7 +59,7 @@ type ScribeConfigUpdateInput = z.infer<typeof ScribeConfigUpdate>;
 
 const SCRIBE_PROMPT_VERSION = 'scribe-recap-v2';
 
-type ScribeAssembly = {
+export type ScribeAssembly = {
   source: RecapDraftSource | null;
   consent: ScribeConsentSummary;
 };
@@ -124,7 +123,11 @@ function parseSourceStats(raw: string | null | undefined): ScribeSourceStats | n
 function parseGenerationProvenance(raw: string | null | undefined): AiGenerationProvenance | null {
   if (!raw) return null;
   try {
-    return JSON.parse(raw) as AiGenerationProvenance;
+    // Validate rather than blind-cast: a shape-drifted blob from an older build (or a
+    // hand-edited DB) must not surface as a malformed `generationProvenance` in the API
+    // response and break clients. Unparseable ⇒ null, same as "no provenance recorded".
+    const parsed = AiGenerationProvenance.safeParse(JSON.parse(raw));
+    return parsed.success ? parsed.data : null;
   } catch {
     return null;
   }
@@ -283,7 +286,15 @@ export class ScribeService implements OnApplicationBootstrap {
     return filterSourceForExternalAiConsent(source, policy, consented);
   }
 
-  private async assembleSourceWithConsent(campaignId: number, scope?: ScribeSourceScope): Promise<ScribeAssembly> {
+  /**
+   * Assemble the recap source AND the consent decision that produced it (#501).
+   *
+   * Public because the scribe run engine is not the only egress path: the MCP
+   * `draft_session_recap` tool hands this same material straight to a connected
+   * agent (which IS an external model), so it must go through the identical
+   * consent filter rather than reading notes directly.
+   */
+  async assembleSourceWithConsent(campaignId: number, scope?: ScribeSourceScope): Promise<ScribeAssembly> {
     const resolvedInbox = await this.notes.listAllInbox(campaignId, true);
     const encounterList = await this.encounters.listForCampaign(campaignId);
     const encountersWithCombatants = await Promise.all(encounterList.map((e) => this.encounters.getWithCombatantsOrThrow(e.id)));

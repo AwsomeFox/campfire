@@ -3,6 +3,15 @@ import type { RecapDraftSource } from '../sessions/sessions.service';
 
 export type ScribeConsentSummary = NonNullable<AiGenerationProvenance['consent']>;
 
+/**
+ * The ONLY note visibilities whose bodies may ever be considered for an external send
+ * (issue #501). This is an explicit allow-list, not a deny-list, so an unknown/absent
+ * visibility — a future enum member, a legacy row, a hand-built source in a test — is
+ * treated as private and dropped rather than silently leaking. `private` and `whisper`
+ * are author/recipient-only channels and are never eligible, whatever the author consented to.
+ */
+const EXTERNALLY_SHAREABLE_VISIBILITIES: ReadonlySet<string> = new Set(['dm_shared', 'party_shared']);
+
 export function emptyScribeConsent(policy: AiExternalContentPolicy = 'member_consent'): ScribeConsentSummary {
   return {
     campaignPolicy: policy,
@@ -25,7 +34,7 @@ export function filterSourceForExternalAiConsent(
   let excludedInboxPrivate = 0;
 
   const resolvedInbox = source.resolvedInbox.filter((note) => {
-    if (note.visibility !== 'dm_shared') {
+    if (!EXTERNALLY_SHAREABLE_VISIBILITIES.has(note.visibility ?? '')) {
       excludedInboxPrivate += 1;
       if (note.authorUserId) excludedAuthorUserIds.add(note.authorUserId);
       return false;

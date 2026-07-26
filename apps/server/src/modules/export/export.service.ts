@@ -641,6 +641,14 @@ export class ExportService {
       },
       aiSeat: { kind: 'markdown-file', path: 'ai.md' },
       aiScribeConfig: { kind: 'markdown-file', path: 'ai.md' },
+      aiScribeJobs: {
+        kind: 'embedded',
+        path: 'campaign.json',
+        // Issue #501: the scribe job log carries generationProvenance (provider/model/
+        // endpoint/source ids/prompt hash/consent). It is machine-only — exported so
+        // provenance survives export, not rendered to markdown.
+        note: 'AI scribe job log with generation provenance; machine copy in campaign.json.',
+      },
       proposals: { kind: 'markdown-folder', path: 'proposals/' },
       encounters: { kind: 'markdown-folder', path: 'encounters/' },
       factions: { kind: 'markdown-folder', path: 'factions/' },

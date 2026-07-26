@@ -1,6 +1,7 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, desc, eq, isNull } from 'drizzle-orm';
-import type { AiGenerationProvenance, EntityType, Proposal, ProposalAction, Role } from '@campfire/schema';
+import { AiGenerationProvenance } from '@campfire/schema';
+import type { EntityType, Proposal, ProposalAction, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { proposals, quests, npcs, locations, sessions, characters, factions, storyBeats, auditLog } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -53,9 +54,11 @@ export function toDomain(row: typeof proposals.$inferSelect): Proposal {
     proposer: row.proposer,
     proposerUserId: row.proposerUserId ?? '',
     proposerToken: row.proposerToken ?? null,
-    generationProvenance: row.generationProvenance == null
-      ? null
-      : fromJsonText<AiGenerationProvenance | null>(row.generationProvenance, null),
+    // Validated on read (#501): a shape-drifted or hand-edited blob degrades to "no
+    // provenance recorded" instead of emitting a malformed object in the API response.
+    generationProvenance: AiGenerationProvenance.nullable()
+      .catch(null)
+      .parse(fromJsonText<unknown>(row.generationProvenance, null)),
     status: row.status as Proposal['status'],
     resolvedBy: row.resolvedBy,
     note: row.note,

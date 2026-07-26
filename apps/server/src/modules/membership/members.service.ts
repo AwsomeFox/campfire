@@ -126,7 +126,10 @@ export class MembersService {
       detail: JSON.stringify({ aiExternalUseConsent: input.aiExternalUseConsent }),
     });
 
-    const [full] = (await this.listForCampaign(campaignId)).filter((member) => member.id === row.id);
+    const full = (await this.listForCampaign(campaignId)).find((member) => member.id === row.id);
+    // The row was updated inside this request so it should always be present; if a
+    // concurrent delete raced us, 404 rather than returning `undefined` as a 200 body.
+    if (!full) throw new NotFoundException('Membership not found');
     return full;
   }
 

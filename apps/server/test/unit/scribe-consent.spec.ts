@@ -66,6 +66,71 @@ describe('scribe external-AI consent filtering (#501)', () => {
     });
   });
 
+  it('includes a consenting author\'s party_shared note — shared-with-the-table is not private', () => {
+    const withParty = source();
+    withParty.resolvedInbox.push({
+      id: 4,
+      authorUserId: '10',
+      visibility: 'party_shared',
+      body: 'Party-shared note',
+      resolvedNote: '',
+      entityName: null,
+    });
+
+    const result = filterSourceForExternalAiConsent(withParty, 'member_consent', new Set(['10']));
+
+    expect(result.source.resolvedInbox.map((note) => note.id)).toEqual([1, 4]);
+    expect(result.consent.excludedInboxPrivate).toBe(1); // only the `private` note
+  });
+
+  it('never sends whisper notes, even when their author opted in', () => {
+    const withWhisper = source();
+    withWhisper.resolvedInbox.push({
+      id: 5,
+      authorUserId: '10',
+      visibility: 'whisper',
+      body: 'Secret channel note',
+      resolvedNote: '',
+      entityName: null,
+    });
+
+    const result = filterSourceForExternalAiConsent(withWhisper, 'member_consent', new Set(['10']));
+
+    expect(result.source.resolvedInbox.map((note) => note.id)).toEqual([1]);
+    expect(result.consent.excludedInboxPrivate).toBe(2); // the `private` note + the whisper
+  });
+
+  it('fails closed on an unknown or absent visibility rather than sending it', () => {
+    const odd = source();
+    // A future enum member / legacy row / hand-built source: not on the allow-list.
+    odd.resolvedInbox.push({
+      id: 6,
+      authorUserId: '10',
+      visibility: 'some_future_visibility' as never,
+      body: 'Unknown visibility',
+      resolvedNote: '',
+      entityName: null,
+    });
+    odd.resolvedInbox.push({ id: 7, authorUserId: '10', body: 'No visibility field', resolvedNote: '', entityName: null });
+
+    const result = filterSourceForExternalAiConsent(odd, 'member_consent', new Set(['10']));
+
+    expect(result.source.resolvedInbox.map((note) => note.id)).toEqual([1]);
+    expect(result.consent.excludedInboxPrivate).toBe(3);
+  });
+
+  it('excludes a note with no resolvable author even when the campaign policy allows sending', () => {
+    const anon = source();
+    anon.resolvedInbox = [
+      { id: 8, authorUserId: '', visibility: 'dm_shared', body: 'Authorless', resolvedNote: '', entityName: null },
+    ];
+
+    const result = filterSourceForExternalAiConsent(anon, 'member_consent', new Set(['10']));
+
+    expect(result.source.resolvedInbox).toEqual([]);
+    expect(result.consent.excludedInboxByConsent).toBe(1);
+  });
+
   it('excludes every inbox note when the campaign policy disables external source use', () => {
     const result = filterSourceForExternalAiConsent(source(), 'disabled', new Set(['10', '11']));
 

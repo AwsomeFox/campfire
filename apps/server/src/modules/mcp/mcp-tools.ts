@@ -140,7 +140,9 @@ import { ScribeService } from '../scribe/scribe.service';
 import { filterHidden } from '../../common/redact';
 import { UsersService } from '../users/users.service';
 import { RevisionsService } from '../revisions/revisions.service';
-import { RollsService, DEFAULT_DICE_ROLLS_RETENTION } from '../rolls/rolls.service';
+// Dice-roll retention is applied inside ScribeService.assembleSourceWithConsent, which
+// draft_session_recap now delegates to for consent filtering (#501) — no direct use here.
+import { RollsService } from '../rolls/rolls.service';
 import { InvitesService } from '../membership/invites.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { BulkNotificationSchema } from '../notifications/notifications.dto';
@@ -914,26 +916,26 @@ export class McpToolsService {
       { campaignId: CampaignIdArg },
       async ({ campaignId }) => {
         await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
-        const resolvedInbox = await this.notes.listAllInbox(campaignId as number, true);
-        const encounterList = await this.encounters.listForCampaign(campaignId as number);
-        const encounters = await Promise.all(
-          encounterList.map((e) => this.encounters.getWithCombatantsOrThrow(e.id)),
-        );
-        // Combat-log events only matter for encounters that were run (issue #1068). DM-only tool
-        // → full DM view (no role redaction).
-        const foughtEncounterIds = new Set(
-          encounterList.filter((e) => e.status === 'running' || e.status === 'ended').map((e) => e.id),
-        );
-        const events = await Promise.all(
-          encounterList.map((e) =>
-            foughtEncounterIds.has(e.id) ? this.encounters.listEvents(e.id) : Promise.resolve([]),
-          ),
-        );
-        const eventsByEncounter = new Map(encounterList.map((e, i) => [e.id, events[i]]));
+        // Issue #501: the connected MCP client IS an external model. This tool hands it raw
+        // member-authored note bodies, so it MUST use the same server-side consent filter as
+        // the scribe run engine — assembleSourceWithConsent drops private/whisper notes and
+        // any note whose author has not opted in under the campaign's AI content policy.
+        // Reading notes directly here would be a consent bypass.
+        const assembly = await this.scribe.assembleSourceWithConsent(campaignId as number);
+        const assembled = assembly.source ?? { resolvedInbox: [], encounters: [], diceRolls: [] };
         const source = {
-          resolvedInbox: resolvedInbox.map((n) => ({ body: n.body, resolvedNote: n.resolvedNote, entityName: n.entityName })),
-          encounters: encounters.map((e) => ({ name: e.name, status: e.status, combatants: e.combatants, events: eventsByEncounter.get(e.id) ?? [] })),
-          diceRolls: (await this.rolls.listForCampaign(campaignId as number, DEFAULT_DICE_ROLLS_RETENTION)).map((r) => ({
+          resolvedInbox: assembled.resolvedInbox.map((n) => ({
+            body: n.body,
+            resolvedNote: n.resolvedNote,
+            entityName: n.entityName,
+          })),
+          encounters: assembled.encounters.map((e) => ({
+            name: e.name,
+            status: e.status,
+            combatants: e.combatants,
+            events: e.events ?? [],
+          })),
+          diceRolls: (assembled.diceRolls ?? []).map((r) => ({
             label: r.label,
             actor: r.actor,
             rollerName: r.rollerName,
@@ -949,9 +951,13 @@ export class McpToolsService {
           template: RECAP_TEMPLATE,
           draft: buildRecapDraft(source),
           sourceMaterial: source,
+          // Surfaced so the DM/agent can see WHY material is missing rather than assuming
+          // the table had a quiet session (#501).
+          consent: assembly.consent,
           guidance:
             'Rewrite `draft` into a finished recap in the DM\'s voice, then call add_session_recap (or update_session ' +
-            'for an existing session). Delete the "Threads resolved this session" and "Dice log highlights" source appendices before publishing.',
+            'for an existing session). Delete the "Threads resolved this session" and "Dice log highlights" source appendices before publishing. ' +
+            'Inbox notes are filtered by the campaign AI content policy and per-member consent (see `consent`); excluded material must not be requested by other means.',
         };
       },
     );

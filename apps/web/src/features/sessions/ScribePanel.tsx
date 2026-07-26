@@ -129,13 +129,16 @@ export function ScribePanel({ campaignId, isDm }: { campaignId: number; isDm: bo
   if (seatPhase === 'ready-hidden') return null;
 
   async function run(dryRun: boolean) {
-    if (!dryRun) {
-      const ok = window.confirm(
-        'The AI scribe may send allowed campaign source material to the configured AI provider. ' +
-          "Only resolved inbox notes from members who opted in are included; private and opted-out notes are excluded. Continue?",
-      );
-      if (!ok) return;
-    }
+    // Preview is NOT a local dry run: the server still calls the provider to produce the
+    // draft and only skips FILING the proposal. The external-send impact is identical, so
+    // both paths must be confirmed (#501).
+    const ok = window.confirm(
+      (dryRun
+        ? 'Previewing still sends the prompt to the configured AI provider — it only skips filing the proposal. '
+        : 'The AI scribe sends allowed campaign source material to the configured AI provider. ') +
+        'Only resolved inbox notes from members who opted in are included; private and opted-out notes are excluded. Continue?',
+    );
+    if (!ok) return;
     setBusy(dryRun ? 'preview' : preview ? 'filing' : 'run');
     setOutcome(null);
     try {
