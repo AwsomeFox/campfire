@@ -900,12 +900,22 @@ constraint violation mid-import never leaves a pack with a wrong
 
 `db.module.ts` **probes** for the SQLite `fts5` extension at boot by
 attempting the real `CREATE VIRTUAL TABLE ... USING fts5(...)` DDL from
-`bootstrap.sql.ts`'s `RULE_ENTRIES_FTS_SQL` (content table `rule_entries`
-itself, `content_rowid='id'`, kept in sync via `AFTER INSERT/UPDATE/DELETE`
-triggers) — not by checking a version string, since availability depends on
-how the specific `better-sqlite3` native build was compiled, which a version
-number doesn't reliably tell you. The result is exposed as a DI token
-(`RULE_ENTRIES_FTS_AVAILABLE` in `db.module.ts`) that `RulesService` injects.
+`bootstrap.sql.ts` — not by checking a version string, since availability
+depends on how the specific `better-sqlite3` native build was compiled, which
+a version number doesn't reliably tell you.
+
+Two FTS surfaces use this pattern:
+
+- **Rules compendium search** uses `RULE_ENTRIES_FTS_SQL` (content table
+  `rule_entries` itself, `content_rowid='id'`, kept in sync via
+  `AFTER INSERT/UPDATE/DELETE` triggers). The result is exposed as
+  `RULE_ENTRIES_FTS_AVAILABLE` for `RulesService`.
+- **Campaign search** uses `CAMPAIGN_SEARCH_FTS_SQL`, a denormalized
+  `campaign_search_fts` table populated from quests, NPCs, factions,
+  locations, characters, sessions, notes, timeline events, inventory items,
+  comments, story arcs/beats, encounters, and scheduled sessions. Boot-time
+  backfill refreshes existing rows, and triggers keep the index synced after
+  writes. `SearchService` injects `CAMPAIGN_SEARCH_FTS_AVAILABLE`.
 
 - **FTS5 available** (the common case — better-sqlite3's bundled SQLite ships
   it): `search()` runs an `fts5 MATCH` query, tokenized with a trailing `*`
@@ -916,6 +926,16 @@ number doesn't reliably tell you. The result is exposed as a DI token
   practice for a self-hosted single-table-per-pack corpus. This path is
   covered by the same importer/mapper code — only the query strategy
   differs — so `type`/`pack` filtering behaves identically either way.
+
+For campaign search, the FTS path performs `MATCH + LIMIT` first, then hydrates
+only the bounded candidate IDs from source tables to build snippets from
+original text. SQL visibility predicates preserve the existing role model:
+hidden quests/NPCs/factions/encounters, unexplored locations, private notes,
+and DM-only story prep are filtered before hydration. Non-DM searches query
+only public FTS columns, so `dm_secret` text is never matched for players or
+viewers; DMs search those columns and still receive normal `dmSecret` snippets.
+If campaign FTS setup fails, `SearchService` falls back to the pre-FTS
+role-filtered service scans for correctness.
 
 ### `Campaign.ruleSystem` (additive schema field)
 

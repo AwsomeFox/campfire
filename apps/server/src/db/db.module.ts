@@ -4,7 +4,7 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import { drizzle, type BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { APP_VERSION } from '../common/build-metadata';
-import { BOOTSTRAP_SQL, RULE_ENTRIES_FTS_SQL } from './bootstrap.sql';
+import { BOOTSTRAP_SQL, CAMPAIGN_SEARCH_FTS_SQL, RULE_ENTRIES_FTS_SQL } from './bootstrap.sql';
 import { assertDataMount } from './boot-guard';
 import * as schema from './schema';
 
@@ -72,6 +72,8 @@ export const DB_HOLDER = Symbol('DB_HOLDER');
 
 /** Injection token for whether the FTS5 extension is available on this SQLite build (see RulesService). */
 export const RULE_ENTRIES_FTS_AVAILABLE = Symbol('RULE_ENTRIES_FTS_AVAILABLE');
+/** Injection token for whether campaign-wide FTS search is available (see SearchService). */
+export const CAMPAIGN_SEARCH_FTS_AVAILABLE = Symbol('CAMPAIGN_SEARCH_FTS_AVAILABLE');
 
 /**
  * fts5 ships with better-sqlite3's bundled SQLite by default, but this is not
@@ -85,6 +87,16 @@ function setupRuleEntriesFts(sqlite: Database.Database): boolean {
     sqlite.exec(RULE_ENTRIES_FTS_SQL);
     return true;
   } catch {
+    return false;
+  }
+}
+
+function setupCampaignSearchFts(sqlite: Database.Database): boolean {
+  try {
+    sqlite.exec(CAMPAIGN_SEARCH_FTS_SQL);
+    return true;
+  } catch (err) {
+    dbLog.warn(`campaign search FTS setup failed; falling back to LIKE/full scan search: ${err instanceof Error ? err.message : String(err)}`);
     return false;
   }
 }
@@ -3042,6 +3054,7 @@ export function openDatabase(dataDir: string): {
   sqlite: Database.Database;
   orm: DrizzleDb;
   ftsAvailable: boolean;
+  campaignSearchFtsAvailable: boolean;
 } {
   fs.mkdirSync(dataDir, { recursive: true });
 
@@ -3081,6 +3094,7 @@ export function openDatabase(dataDir: string): {
   // reach existing DBs: e.g. #74's idx_audit_campaign_id_desc / idx_audit_created_at
   // are picked up on the next boot with no bespoke ALTER migration needed.
   const ftsAvailable = setupRuleEntriesFts(sqlite);
+  const campaignSearchFtsAvailable = setupCampaignSearchFts(sqlite);
 
   // Enable foreign-key enforcement for every subsequent write on this connection
   // (issue #69). Fresh DBs created from BOOTSTRAP_SQL now carry the declared
@@ -3095,7 +3109,7 @@ export function openDatabase(dataDir: string): {
   // Startup diagnostic (issue #235): surface any pre-existing dangling references. Read-only.
   logForeignKeyViolations(sqlite);
 
-  return { sqlite, orm: drizzle(sqlite, { schema }), ftsAvailable };
+  return { sqlite, orm: drizzle(sqlite, { schema }), ftsAvailable, campaignSearchFtsAvailable };
 }
 
 /**
@@ -3112,6 +3126,7 @@ export class DbHolder implements OnApplicationShutdown {
   private orm: DrizzleDb;
   private closed = false;
   readonly ftsAvailable: boolean;
+  readonly campaignSearchFtsAvailable: boolean;
 
   /** Stable object handed to every DB consumer; forwards to the current `orm`. */
   readonly proxy: DrizzleDb;
@@ -3121,6 +3136,7 @@ export class DbHolder implements OnApplicationShutdown {
     this.sqlite = opened.sqlite;
     this.orm = opened.orm;
     this.ftsAvailable = opened.ftsAvailable;
+    this.campaignSearchFtsAvailable = opened.campaignSearchFtsAvailable;
 
     this.proxy = new Proxy({} as DrizzleDb, {
       get: (_target, prop) => {
@@ -3204,7 +3220,8 @@ export class DbHolder implements OnApplicationShutdown {
     { provide: DB_HOLDER, useClass: DbHolder },
     { provide: DB, useFactory: (holder: DbHolder) => holder.proxy, inject: [DB_HOLDER] },
     { provide: RULE_ENTRIES_FTS_AVAILABLE, useFactory: (holder: DbHolder) => holder.ftsAvailable, inject: [DB_HOLDER] },
+    { provide: CAMPAIGN_SEARCH_FTS_AVAILABLE, useFactory: (holder: DbHolder) => holder.campaignSearchFtsAvailable, inject: [DB_HOLDER] },
   ],
-  exports: [DB, DB_HOLDER, RULE_ENTRIES_FTS_AVAILABLE],
+  exports: [DB, DB_HOLDER, RULE_ENTRIES_FTS_AVAILABLE, CAMPAIGN_SEARCH_FTS_AVAILABLE],
 })
 export class DbModule {}
