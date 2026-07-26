@@ -56,6 +56,7 @@ import {
   StoryBeatUpdate,
   StoryBranchUpdate,
   RollRequest,
+  ActionRollRequest,
   CheckRollRequest,
   CheckRequestCreate,
   RulePackInstall,
@@ -3413,6 +3414,36 @@ export class McpToolsService {
         return this.encounters.rollDiceForCampaign(
           campaignId as number,
           { expr: expr as string, label: label as string | undefined, dc: dc as number | undefined },
+          user,
+          role,
+        );
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'roll_action_dice',
+      'Roll an adapter-native action dice pool for a campaign (Open Legend). Pass the native attribute score; ' +
+        'the server resolves the campaign rule-system adapter, expands the score to an exploding pool, rolls with ' +
+        'server crypto RNG, and records ONE campaign-shared dice-log event with pool, explosions, disadvantage, and total.',
+      {
+        campaignId: CampaignIdArg,
+        score: ActionRollRequest.shape.score,
+        attribute: ActionRollRequest.shape.attribute,
+        label: ActionRollRequest.shape.label,
+        dc: ActionRollRequest.shape.dc,
+      },
+      async ({ campaignId, score, attribute, label, dc }) => {
+        const role = await this.access.requireMember(user, campaignId as number, { write: true });
+        return this.encounters.rollActionDiceForCampaign(
+          campaignId as number,
+          {
+            score: score as number,
+            attribute: attribute as string | undefined,
+            label: label as string | undefined,
+            dc: dc as number | undefined,
+          },
           user,
           role,
         );

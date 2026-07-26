@@ -18,6 +18,20 @@ export interface DiceRollAnnouncementAdvance {
   appendedRolls: DiceRoll[];
 }
 
+function formatRollBreakdownForSpeech(roll: DiceRoll): string {
+  const explodingTerms = roll.terms?.filter((term) => term.rolls && (term.exploded || term.discarded));
+  if (!explodingTerms || explodingTerms.length === 0) return roll.rolls.join(', ');
+  return roll.terms!
+    .filter((term) => term.rolls && term.rolls.length > 0)
+    .map((term) => {
+      const faces = term.rolls!.join(', ');
+      const prefix = term.discarded ? 'discarded ' : '';
+      const explosion = term.exploded ? ' exploded' : '';
+      return `${prefix}${term.term}${explosion}: ${faces}`;
+    })
+    .join('; ');
+}
+
 /**
  * Advances an ID-based cursor without re-announcing refetched history. A null cursor
  * establishes the initial baseline (opening the feed never reads past rolls aloud).
@@ -72,7 +86,7 @@ export function formatDiceRollAnnouncement(roll: DiceRoll, t: TFunction): string
     label: roll.label ? `${roll.label} ` : '',
     expr: roll.expr,
     total: roll.total,
-    rolls: roll.rolls.join(', '),
+    rolls: formatRollBreakdownForSpeech(roll),
     kept: keptSaid,
     check: checkSaid,
     flourish,

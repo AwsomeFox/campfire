@@ -98,6 +98,27 @@ test.describe('shared dice log accessibility (#590)', () => {
     expect(spoken).toMatch(/DC 15/i);
   });
 
+  test('remote announcement speaks Open Legend explosion chains and discarded disadvantage dice', () => {
+    const spoken = formatDiceRollAnnouncement(
+      roll({
+        id: 6,
+        expr: 'Open Legend action score 0',
+        label: 'Agility: Action dice (d20!)',
+        total: 5,
+        rolls: [5, 20, 1],
+        kept: [5],
+        terms: [
+          { term: 'd20!', sides: 20, value: 5, rolls: [5] },
+          { term: 'discarded d20!', sides: 20, value: 0, rolls: [20, 1], kept: [], exploded: true, discarded: true },
+        ],
+      }),
+      mockT as never,
+    );
+    expect(spoken).toMatch(/Open Legend action score 0/);
+    expect(spoken).toMatch(/discarded d20! exploded: 20, 1/);
+    expect(spoken).toMatch(/kept 5/);
+  });
+
   test('batch formatter preserves chronological order for reconnect bursts', () => {
     const newer = roll({ id: 5, expr: '1d4', total: 3, rolls: [3] });
     const older = roll({ id: 4, expr: '1d6', total: 6, rolls: [6] });

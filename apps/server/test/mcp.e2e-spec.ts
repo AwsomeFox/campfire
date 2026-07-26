@@ -1,10 +1,14 @@
 import request from 'supertest';
+import { eq } from 'drizzle-orm';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
 import { startFakeOpen5e, type FakeOpen5e } from './fake-open5e';
 import { startFakeDdb, PUBLIC_DDB_CHARACTER_ID, type FakeDdb } from './fake-ddb';
 import { MCP_CATALOG_COUNTS, MCP_TOOL_NAMES } from '../src/modules/mcp/mcp-catalog';
+import { OPEN_LEGEND_PACK_SLUG } from '@campfire/schema';
+import { DB, type DrizzleDb } from '../src/db/db.module';
+import { campaigns } from '../src/db/schema';
 
 interface TextContent {
   type: 'text';
@@ -1318,6 +1322,32 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(rolled.rolls).toHaveLength(1);
     expect(rolled.total).toBeGreaterThanOrEqual(2);
     expect(rolled.total).toBeLessThanOrEqual(21);
+  });
+
+  it('roll_action_dice rolls Open Legend action dice via dm PAT', async () => {
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'MCP Open Legend' });
+    expect(campRes.status).toBe(201);
+    const openLegendId = campRes.body.id;
+    await db.update(campaigns).set({ ruleSystem: OPEN_LEGEND_PACK_SLUG }).where(eq(campaigns.id, openLegendId));
+
+    const client = await mcpClient(dmToken);
+    const result = await client.callTool({
+      name: 'roll_action_dice',
+      arguments: { campaignId: openLegendId, score: 5, attribute: 'Might' },
+    });
+    expect(result.isError).toBeFalsy();
+    const rolled = parseResult(result) as {
+      id: number;
+      expr: string;
+      total: number;
+      rolls: number[];
+      terms: Array<{ sides?: number; value: number; rolls?: number[] }>;
+    };
+    expect(rolled.expr).toBe('Open Legend action score 5');
+    expect(rolled.terms.map((t) => t.sides)).toEqual([20, 6, 6]);
+    expect(rolled.terms.reduce((sum, t) => sum + t.value, 0)).toBe(rolled.total);
+    expect(rolled.rolls).toEqual(rolled.terms.flatMap((t) => t.rolls ?? []));
   });
 
   it('#1040 saving_throw resolves from character stats, persists dice log, and audits', async () => {

@@ -7435,6 +7435,17 @@ export const RollRequest = z.object({
 });
 export type RollRequest = z.infer<typeof RollRequest>;
 
+// Open Legend (and future exploding-pool adapters) action-roll request. The client sends
+// ONLY the native attribute score; the server resolves the campaign adapter, maps score -> pool,
+// rolls with crypto RNG, and persists one shared dice-log event.
+export const ActionRollRequest = z.object({
+  score: z.number().int().min(0).max(99).describe('Native attribute score to roll. Score 0 is disadvantage.'),
+  attribute: z.string().trim().min(1).max(80).optional().describe('Optional attribute name for the roll label.'),
+  label: z.string().max(120).optional(),
+  dc: z.number().int().min(1).max(99).optional(),
+});
+export type ActionRollRequest = z.infer<typeof ActionRollRequest>;
+
 /** Honest provenance for a dice-log entry (issue #673). */
 export const DiceRollSource = z.enum(['rolled', 'manual']);
 export type DiceRollSource = z.infer<typeof DiceRollSource>;
@@ -7466,6 +7477,11 @@ export const RollResultTerm = z.object({
   // Die terms only: the subset of this term's `rolls` that counted (present when a
   // keep/drop clause applied to THIS term). Absent otherwise.
   kept: z.array(z.number().int()).optional(),
+  // Exploding/action-pool metadata (issue #541): side count and flags survive the dice-log
+  // round-trip so REST/MCP/web/AI all show the same pool and explosion chain.
+  sides: z.number().int().positive().optional(),
+  exploded: z.boolean().optional(),
+  discarded: z.boolean().optional(),
 });
 export type RollResultTerm = z.infer<typeof RollResultTerm>;
 export const RollResult = z.object({

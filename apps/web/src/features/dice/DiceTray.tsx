@@ -23,7 +23,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import type { DiceRoll } from '@campfire/schema';
+import { openLegendAttributeDicePool, type ActionRollRequest, type DiceRoll } from '@campfire/schema';
 import { Btn, TextInput } from '../../components/ui';
 import { useDialog } from '../../components/useDialog';
 import { useAnnounce } from '../../components/Announcer';
@@ -45,6 +45,27 @@ import {
 const DICE_FACES = [4, 6, 8, 10, 12, 20, 100] as const;
 const MAX_COUNT = 20; // server's per-group cap
 const MAX_MOD = 99; // tray-side clamp; server allows up to 999 via the advanced box
+const MAX_ACTION_SCORE = 10; // Open Legend's published PC/NPC action-dice table.
+const OPEN_LEGEND_ATTRIBUTES = [
+  'Might',
+  'Agility',
+  'Fortitude',
+  'Learning',
+  'Logic',
+  'Perception',
+  'Will',
+  'Deception',
+  'Persuasion',
+  'Presence',
+  'Alteration',
+  'Creation',
+  'Energy',
+  'Entropy',
+  'Influence',
+  'Movement',
+  'Prescience',
+  'Protection',
+] as const;
 
 // Undo window for a deleted preset (issue #690). The preset is staged for this
 // long before the delete is considered committed; Undo restores it.
@@ -53,6 +74,9 @@ const DELETE_UNDO_MS = 7000;
 interface DiceTrayProps {
   /** Submit one built expression; returns the persisted roll (or null on failure). */
   onSubmitExpr: (expr: string) => Promise<DiceRoll | null>;
+  /** Submit one native action roll; present only for attribute-dice-pool adapters. */
+  onSubmitActionRoll?: (payload: ActionRollRequest) => Promise<DiceRoll | null>;
+  supportsActionDice?: boolean;
   rolling: boolean;
   campaignId: number;
   compact?: boolean;
@@ -92,6 +116,12 @@ function previewText(pool: Pool, modifier: number, advMode: AdvMode): string {
   return entries.map(([sides, count]) => `${count}d${sides}`).join(' + ') + (formatMod(modifier) ? ` ${formatMod(modifier)}` : '');
 }
 
+function actionPoolPreview(score: number): string {
+  const pool = openLegendAttributeDicePool(score);
+  const dice = pool.dice.map((sides) => `d${sides}!`).join(' + ');
+  return pool.disadvantage ? `${dice} (${pool.score} · disadvantage)` : `${dice} (${pool.score})`;
+}
+
 const STATIC_PRESETS: { labelKey: string; pool: Pool }[] = [
   { labelKey: 'presetAttack', pool: { 20: 1 } },
   { labelKey: 'presetSave', pool: { 20: 1 } },
@@ -127,12 +157,21 @@ interface PendingDelete {
   previousList: SavedPreset[];
 }
 
-export function DiceTray({ onSubmitExpr, rolling, campaignId, compact = false }: DiceTrayProps) {
+export function DiceTray({
+  onSubmitExpr,
+  onSubmitActionRoll,
+  supportsActionDice = false,
+  rolling,
+  campaignId,
+  compact = false,
+}: DiceTrayProps) {
   const { t } = useTranslation();
   const announce = useAnnounce();
   const [pool, setPool] = useState<Pool>({});
   const [modifier, setModifier] = useState(0);
   const [advMode, setAdvMode] = useState<AdvMode>('flat');
+  const [actionAttribute, setActionAttribute] = useState<string>(OPEN_LEGEND_ATTRIBUTES[0]);
+  const [actionScore, setActionScore] = useState(1);
   const [savedPresets, setSavedPresets] = useState<SavedPreset[]>(() => loadPresets(campaignId));
   // Local "big result" feedback. For advantage/disadvantage the server now returns the
   // kept die (result.kept) and a total that already reflects the keep + modifier.
@@ -174,6 +213,7 @@ export function DiceTray({ onSubmitExpr, rolling, campaignId, compact = false }:
   const advAvailable = entries.length === 0 || isLoneD20;
   const exprs = buildExprs(pool, modifier, advMode);
   const canRoll = exprs.length > 0 && !rolling;
+  const canActionRoll = supportsActionDice && onSubmitActionRoll !== undefined && !rolling;
 
   const addDie = useCallback((sides: number) => {
     setFeedback(null);
@@ -223,6 +263,19 @@ export function DiceTray({ onSubmitExpr, rolling, campaignId, compact = false }:
     if (p.modifier !== undefined) setModifier(p.modifier);
     setAdvMode(p.advMode ?? 'flat');
   }, []);
+
+  const doActionRoll = useCallback(async () => {
+    if (!onSubmitActionRoll) return;
+    const result = await onSubmitActionRoll({ score: actionScore, attribute: actionAttribute });
+    if (result) {
+      setFeedback({
+        label: result.label ?? t('dice.actionDiceFeedback'),
+        total: result.total,
+        rolls: result.rolls,
+        kept: result.kept,
+      });
+    }
+  }, [actionAttribute, actionScore, onSubmitActionRoll, t]);
 
   /**
    * Persist the next preset list to localStorage and update React state. Returns
@@ -372,6 +425,81 @@ export function DiceTray({ onSubmitExpr, rolling, campaignId, compact = false }:
 
   return (
     <div className="space-y-2.5">
+      {supportsActionDice && (
+        <div
+          style={{
+            display: 'grid',
+            gap: 8,
+            padding: '8px',
+            border: '1px solid var(--color-divider)',
+            borderRadius: 'var(--radius-md, 8px)',
+          }}
+        >
+          <div style={{ display: 'flex', gap: 8, alignItems: 'end', flexWrap: 'wrap' }}>
+            <label className="field" style={{ flex: '1 1 150px', minWidth: 140 }}>
+              <span>{t('dice.actionAttribute')}</span>
+              <select
+                value={actionAttribute}
+                onChange={(e) => setActionAttribute(e.target.value)}
+                className="input"
+                aria-label={t('dice.actionAttribute')}
+                style={{ width: '100%', minHeight: 36 }}
+              >
+                {OPEN_LEGEND_ATTRIBUTES.map((attr) => (
+                  <option key={attr} value={attr}>
+                    {attr}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="field" style={{ flex: '0 0 auto' }}>
+              <span>{t('dice.actionScore')}</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <button
+                  type="button"
+                  onClick={() => setActionScore((s) => Math.max(0, s - 1))}
+                  aria-label={t('dice.decreaseActionScore')}
+                  className="cf-btn cf-btn-ghost"
+                  style={{ minHeight: 36, minWidth: 36, padding: 0, fontSize: 18 }}
+                >
+                  −
+                </button>
+                <span
+                  aria-live="polite"
+                  style={{ fontFamily: 'var(--font-heading)', fontSize: 16, minWidth: 24, textAlign: 'center' }}
+                >
+                  {actionScore}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setActionScore((s) => Math.min(MAX_ACTION_SCORE, s + 1))}
+                  aria-label={t('dice.increaseActionScore')}
+                  className="cf-btn cf-btn-ghost"
+                  style={{ minHeight: 36, minWidth: 36, padding: 0, fontSize: 18 }}
+                >
+                  +
+                </button>
+              </div>
+            </div>
+            <Btn
+              type="button"
+              onClick={() => void doActionRoll()}
+              disabled={!canActionRoll}
+              style={{ flex: compact ? '1 1 100%' : '0 0 auto', minHeight: compact ? 40 : 44 }}
+            >
+              {rolling ? t('dice.rolling') : t('dice.rollActionDice')}
+            </Btn>
+          </div>
+          <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
+            {t('dice.actionDicePreview', {
+              attribute: actionAttribute,
+              score: actionScore,
+              pool: actionPoolPreview(actionScore),
+            })}
+          </p>
+        </div>
+      )}
+
       {/* Die buttons */}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
         {DICE_FACES.map((sides) => (
@@ -395,7 +523,7 @@ export function DiceTray({ onSubmitExpr, rolling, campaignId, compact = false }:
       </div>
 
       {/* Advantage / Disadvantage (d20) */}
-      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+      {!supportsActionDice && <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
         <button
           type="button"
           onClick={() => toggleAdv('adv')}
@@ -428,7 +556,7 @@ export function DiceTray({ onSubmitExpr, rolling, campaignId, compact = false }:
         >
           {t('dice.disadvantage')}
         </button>
-      </div>
+      </div>}
 
       {/* Modifier stepper */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -560,7 +688,7 @@ export function DiceTray({ onSubmitExpr, rolling, campaignId, compact = false }:
 
       {/* Presets */}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
-        {STATIC_PRESETS.map((p) => (
+        {!supportsActionDice && STATIC_PRESETS.map((p) => (
           <button
             key={p.labelKey}
             type="button"
