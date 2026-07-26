@@ -100,6 +100,52 @@ describe('planBackupRetention (issue #505)', () => {
     ]);
     expect(plan.prunableBytes).toBe(400);
   });
+
+  it('does not double-count archives already selected for pruning when enforcing size caps', () => {
+    const plan = planBackupRetention(
+      [
+        candidate('newest.zip', 0, { bytes: 400 }),
+        candidate('middle.zip', 5, { bytes: 400 }),
+        candidate('oldest.zip', 10, { bytes: 400 }),
+      ],
+      policy({ keepCount: 2, maxTotalBytes: 800 }),
+      now,
+    );
+
+    expect(plan.prune).toEqual([
+      expect.objectContaining({ name: 'oldest.zip', reasons: ['count'] }),
+    ]);
+    expect(plan.keep.map((entry) => entry.name)).toEqual(['newest.zip', 'middle.zip']);
+  });
+
+  it('allows the newest verified archive to be pruned when last-good protection is disabled', () => {
+    const plan = planBackupRetention(
+      [
+        candidate('newest.zip', 0, { bytes: 700, lastKnownGood: true }),
+        candidate('pinned-older.zip', 10, { bytes: 400, pinned: true }),
+      ],
+      policy({ maxTotalBytes: 400, protectLastGood: false }),
+      now,
+    );
+
+    expect(plan.prune).toEqual([
+      expect.objectContaining({ name: 'newest.zip', reasons: ['size'] }),
+    ]);
+    expect(plan.keep.find((entry) => entry.name === 'pinned-older.zip')?.reasons).toContain('pinned');
+  });
+
+  it('keeps one verified archive as a safety floor when policy would otherwise prune all backups', () => {
+    const plan = planBackupRetention(
+      [candidate('only.zip', 90, { bytes: 1_000, lastKnownGood: true })],
+      policy({ keepDays: 30, maxTotalBytes: 1, protectLastGood: false }),
+      now,
+    );
+
+    expect(plan.prune).toEqual([]);
+    expect(plan.keep).toEqual([
+      expect.objectContaining({ name: 'only.zip', reasons: ['only-verified'] }),
+    ]);
+  });
 });
 
 describe('backup retention env parsing and estimates', () => {

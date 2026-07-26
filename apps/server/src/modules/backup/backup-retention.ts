@@ -107,12 +107,15 @@ export function planBackupRetention(
     .map((candidate) => ({
       ...candidate,
       newestVerified: candidate.verified && candidate.name === newestVerifiedName,
-      protected: isProtected(candidate, policy) || (candidate.verified && candidate.name === newestVerifiedName),
+      protected:
+        isProtected(candidate, policy) ||
+        (policy.protectLastGood && candidate.verified && candidate.name === newestVerifiedName),
       reasons: [] as string[],
     }));
 
   const pruneNames = new Set<string>();
   const pruneReasons = new Map<string, string[]>();
+  const safetyKeptNames = new Set<string>();
   const markPrune = (candidate: { name: string }, reason: string) => {
     pruneNames.add(candidate.name);
     const reasons = pruneReasons.get(candidate.name) ?? [];
@@ -138,13 +141,25 @@ export function planBackupRetention(
   }
 
   if (policy.maxTotalBytes !== null) {
-    let projectedBytes = normalized.reduce((sum, candidate) => sum + candidate.bytes, 0);
+    let projectedBytes = normalized
+      .filter((candidate) => !pruneNames.has(candidate.name))
+      .reduce((sum, candidate) => sum + candidate.bytes, 0);
     for (const candidate of eligible.slice().sort(oldestFirst)) {
       if (projectedBytes <= policy.maxTotalBytes) break;
       if (!pruneNames.has(candidate.name)) {
         markPrune(candidate, 'size');
         projectedBytes -= candidate.bytes;
       }
+    }
+  }
+
+  if (!allowsZeroVerifiedBackups(policy)) {
+    const keptVerifiedCount = verified.filter((candidate) => !pruneNames.has(candidate.name)).length;
+    if (keptVerifiedCount === 0 && verified.length > 0) {
+      const safetyKept = verified[0];
+      pruneNames.delete(safetyKept.name);
+      pruneReasons.delete(safetyKept.name);
+      safetyKeptNames.add(safetyKept.name);
     }
   }
 
@@ -167,6 +182,8 @@ export function planBackupRetention(
         reasons:
           protectedReasons.length > 0
             ? protectedReasons
+            : safetyKeptNames.has(candidate.name)
+              ? ['only-verified']
             : candidate.verified
               ? ['retained']
               : ['unverified'],
@@ -190,6 +207,10 @@ function isProtected(candidate: BackupRetentionCandidate, policy: BackupRetentio
   );
 }
 
+function allowsZeroVerifiedBackups(policy: BackupRetentionPolicy): boolean {
+  return policy.keepCount === 0 && policy.protectLastGood === false;
+}
+
 function protectionReasons(
   candidate: BackupRetentionCandidate & { newestVerified?: boolean },
   policy: BackupRetentionPolicy,
@@ -198,7 +219,7 @@ function protectionReasons(
   if (candidate.pinned) reasons.push('pinned');
   if (candidate.offsite) reasons.push('offsite');
   if (policy.protectLastGood && candidate.lastKnownGood) reasons.push('last-known-good');
-  if (candidate.newestVerified) reasons.push('newest-verified');
+  if (policy.protectLastGood && candidate.newestVerified) reasons.push('newest-verified');
   return reasons;
 }
 

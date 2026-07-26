@@ -446,7 +446,7 @@ export function ServerBackupWorkflowCard() {
                   </dd>
                 </div>
                 <div>
-                  <dt className="text-[10px] uppercase tracking-widest text-secondary">Failures</dt>
+                  <dt className="text-[10px] uppercase tracking-widest text-secondary">Failures / skips</dt>
                   <dd className="font-semibold text-white">
                     {(status.cadence.consecutiveFailures ?? 0).toLocaleString()} consecutive
                     {status.cadence.metrics
@@ -496,8 +496,8 @@ export function ServerBackupWorkflowCard() {
             )}
             {status.alerts.length > 0 && (
               <div className="space-y-1" role="alert">
-                {status.alerts.map((alert) => (
-                  <p key={alert} className="text-amber-400">
+                {status.alerts.map((alert, index) => (
+                  <p key={`${index}:${alert}`} className="text-amber-400">
                     {alert}
                   </p>
                 ))}

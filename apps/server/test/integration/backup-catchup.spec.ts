@@ -275,6 +275,26 @@ describe('scheduled backup catch-up (issue #732, real SQLite + settings row)', (
     expect(cadence!.lastError).toMatch(/low disk space/i);
     expect(cadence!.consecutiveFailures).toBe(1);
     expect(cadence!.metrics?.failureCount).toBe(1);
+    const status = await service.getStatus();
+    expect(status.alerts).toContainEqual(expect.stringMatching(/^Last scheduled backup skipped: low disk space/i));
+    expect(status.alerts).not.toContainEqual(expect.stringMatching(/^Last scheduled backup failed: .*low disk space/i));
+  });
+
+  it('clears the scheduled-running guard when fallback size estimation throws', async () => {
+    holder = new DbHolder();
+    const service = makeService();
+    const harness = service as unknown as {
+      estimateFallbackBackupBytes: () => number;
+      runScheduledBackup: (intervalMs: number) => Promise<void>;
+      scheduledRunning: boolean;
+    };
+    jest.spyOn(harness, 'estimateFallbackBackupBytes').mockImplementation(() => {
+      throw new Error('estimate exploded');
+    });
+
+    await expect(harness.runScheduledBackup(HOUR_MS)).rejects.toThrow('estimate exploded');
+    expect(harness.scheduledRunning).toBe(false);
+    await expect(harness.runScheduledBackup(HOUR_MS)).rejects.toThrow('estimate exploded');
   });
 
   it('prunes old verified archives after a new verified scheduled backup, but keeps partial archives', async () => {

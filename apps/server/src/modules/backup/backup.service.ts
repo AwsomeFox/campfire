@@ -214,6 +214,14 @@ function directoryBytes(root: string): number {
   return listFilesRecursive(root).reduce((sum, rel) => sum + safeFileBytes(path.join(root, rel)), 0);
 }
 
+function lastScheduledAttemptAlert(lastError: string): string {
+  const lowDiskSkipPrefix = 'Scheduled backup skipped: low disk space';
+  if (lastError.toLowerCase().startsWith(lowDiskSkipPrefix.toLowerCase())) {
+    return `Last scheduled backup skipped: ${lastError.slice('Scheduled backup skipped: '.length)}`;
+  }
+  return `Last scheduled backup failed: ${lastError}`;
+}
+
 function looksLikeSqlite(buf: Buffer): boolean {
   return buf.length >= SQLITE_MAGIC.length && buf.subarray(0, SQLITE_MAGIC.length).equals(SQLITE_MAGIC);
 }
@@ -471,16 +479,19 @@ export class BackupService implements OnApplicationBootstrap {
     }
     this.scheduledRunning = true;
     const attemptAt = nowIso();
-    const previous = await this.readCadence();
-    const retentionPolicy = parseBackupRetentionPolicy();
-    const minFreeBytes = parseBackupMinFreeBytes();
-    const dir = this.backupDir();
-    const estimatedBytes = estimateNextBackupBytes(
-      previous?.lastSize ?? null,
-      this.estimateFallbackBackupBytes(),
-    );
-    let disk = this.probeDisk(dir, minFreeBytes, estimatedBytes);
+    let previous: BackupCadenceState | null = null;
+    let disk: BackupDiskStatus | null = null;
+    let estimatedBytes = 0;
     try {
+      previous = await this.readCadence();
+      const retentionPolicy = parseBackupRetentionPolicy();
+      const minFreeBytes = parseBackupMinFreeBytes();
+      const dir = this.backupDir();
+      estimatedBytes = estimateNextBackupBytes(
+        previous?.lastSize ?? null,
+        this.estimateFallbackBackupBytes(),
+      );
+      disk = this.probeDisk(dir, minFreeBytes, estimatedBytes);
       fs.mkdirSync(dir, { recursive: true });
       disk = this.probeDisk(dir, minFreeBytes, estimatedBytes);
       if (disk && disk.lowSpace) {
@@ -787,7 +798,7 @@ export class BackupService implements OnApplicationBootstrap {
   }): string[] {
     const alerts: string[] = [];
     if (input.cadence?.lastError) {
-      alerts.push(`Last scheduled backup failed: ${input.cadence.lastError}`);
+      alerts.push(lastScheduledAttemptAlert(input.cadence.lastError));
     }
     if (input.disk?.lowSpace) {
       alerts.push(
