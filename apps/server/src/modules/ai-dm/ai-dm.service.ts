@@ -9,7 +9,18 @@ import {
 import { and, desc, eq, gte, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import { AiDmProactiveSettings } from '@campfire/schema';
-import type { AiDmMode, AiDmSeat, AiDmSeatUpdate, AiDmTurnRequest, AiDmTurnResult, AiDmUsageHistoryEntry, AiDmUsageHistoryResponse, Role } from '@campfire/schema';
+import type {
+  AiDmMode,
+  AiDmReadiness,
+  AiDmReadinessCheck,
+  AiDmSeat,
+  AiDmSeatUpdate,
+  AiDmTurnRequest,
+  AiDmTurnResult,
+  AiDmUsageHistoryEntry,
+  AiDmUsageHistoryResponse,
+  Role,
+} from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { aiDmSeats, aiDmUsageHistory } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -18,6 +29,9 @@ import { AuditService } from '../audit/audit.service';
 import { SettingsService } from '../settings/settings.service';
 import { AiProviderConfigService } from '../ai-provider-config/ai-provider-config.service';
 import { AI_DM_PROVIDER, type AiDmProvider } from './ai-dm.provider';
+import { SessionZeroService } from '../session-zero/session-zero.service';
+import { SupportPreferencesService } from '../session-zero/support-preferences.service';
+import { providerCapabilities } from './providers';
 
 type AiDmSeatUpdateInput = z.infer<typeof AiDmSeatUpdate>;
 type AiDmTurnRequestInput = z.infer<typeof AiDmTurnRequest>;
@@ -112,6 +126,8 @@ export class AiDmService {
     private readonly audit: AuditService,
     private readonly settings: SettingsService,
     private readonly providerConfig: AiProviderConfigService,
+    private readonly sessionZero: SessionZeroService,
+    private readonly supportPreferences: SupportPreferencesService,
     @Inject(AI_DM_PROVIDER) private readonly provider: AiDmProvider,
   ) {}
 
@@ -240,6 +256,191 @@ export class AiDmService {
   }
 
   /**
+   * Central AI onboarding readiness model (#519). This is intentionally read-only
+   * and non-secret: it summarizes whether the table is ready to promote AI actions
+   * without returning provider keys, participant support text, or DM instructions.
+   */
+  async getReadiness(
+    campaignId: number,
+    user: RequestUser,
+    opts: { isAdmin: boolean },
+  ): Promise<AiDmReadiness> {
+    const seat = await this.getSeat(campaignId);
+    const [settings, providerView, charter, consent] = await Promise.all([
+      this.settings.getAll(),
+      this.providerConfig.getEffectiveView(campaignId),
+      this.sessionZero.get(campaignId),
+      this.supportPreferences.aiConsentCounts(campaignId),
+    ]);
+    const provider = providerView as AiDmReadiness['provider'];
+    const budgetRemaining = Math.max(0, seat.tokenBudget - seat.tokensUsed);
+    const fix = (hash: string) => `/c/${campaignId}/settings#${hash}`;
+    const checks: AiDmReadinessCheck[] = [];
+    const push = (check: AiDmReadinessCheck) => checks.push(check);
+
+    push({
+      key: 'serverFlag',
+      ok: !!settings.experimentalAiDm,
+      status: settings.experimentalAiDm ? 'ok' : opts.isAdmin ? 'blocked' : 'unknown',
+      actor: 'admin',
+      title: 'Server AI enabled',
+      detail: settings.experimentalAiDm
+        ? 'The server-wide AI switch is on.'
+        : opts.isAdmin
+          ? 'Turn on the server-wide AI switch before promoting AI actions.'
+          : 'A server admin must enable experimental AI before this campaign can run AI actions.',
+      requiredForDriver: true,
+      fixHref: opts.isAdmin ? '/admin/ai' : null,
+    });
+
+    push({
+      key: 'provider',
+      ok: provider.configured && provider.ready,
+      status: provider.configured && provider.ready ? 'ok' : 'blocked',
+      actor: provider.configured ? 'admin' : 'dm',
+      title: 'Provider and credential',
+      detail: provider.configured
+        ? provider.ready
+          ? `Using ${provider.providerType ?? 'provider'} / ${provider.model ?? 'model'} from ${provider.source ?? 'configuration'} with ${provider.credentialSource} credentials.`
+          : 'A provider is configured, but no usable credential is available.'
+        : 'Configure a campaign provider or ask a server admin to set a server default.',
+      requiredForDriver: true,
+      fixHref: fix('ai-dm-provider'),
+    });
+
+    let modelOk = provider.configured && provider.ready;
+    let modelDetail = provider.model
+      ? `Model ${provider.model} is selected.`
+      : 'Choose the model that will execute AI requests.';
+    try {
+      const execution = await this.providerConfig.resolveExecutionModel(campaignId);
+      modelOk = !!execution;
+      if (execution) modelDetail = `Execution model ${execution.model} passes the server allowlist.`;
+    } catch (err) {
+      modelOk = false;
+      modelDetail = err instanceof Error ? err.message : 'The selected model is not executable.';
+    }
+    push({
+      key: 'model',
+      ok: modelOk,
+      status: modelOk ? 'ok' : 'blocked',
+      actor: 'dm',
+      title: 'Executable model',
+      detail: modelDetail,
+      requiredForDriver: true,
+      fixHref: fix('ai-dm-provider'),
+    });
+
+    push({
+      key: 'budget',
+      ok: seat.tokenBudget > 0 && budgetRemaining > 0,
+      status: seat.tokenBudget > 0 && budgetRemaining > 0 ? 'ok' : 'blocked',
+      actor: 'dm',
+      title: 'Budget available',
+      detail: seat.tokenBudget > 0
+        ? `${seat.tokensUsed.toLocaleString()} / ${seat.tokenBudget.toLocaleString()} tokens used; ${budgetRemaining.toLocaleString()} remain.`
+        : 'Set a positive hard token budget before Driver can run.',
+      requiredForDriver: true,
+      fixHref: fix('ai-dm-budget'),
+    });
+
+    const writeScope = user.tokenContext?.writeScope ?? 'direct';
+    push({
+      key: 'writeMode',
+      ok: writeScope === 'direct',
+      status: writeScope === 'direct' ? 'ok' : 'blocked',
+      actor: 'dm',
+      title: 'Write mode',
+      detail: writeScope === 'direct'
+        ? 'This session can make direct DM-approved writes when the selected AI mode allows them.'
+        : `This token is ${writeScope === 'none' ? 'read-only' : 'proposal-only'}; use a direct-write DM session before starting Driver.`,
+      requiredForDriver: true,
+      fixHref: null,
+    });
+
+    const contentCount =
+      charter.lines.length +
+      charter.veils.length +
+      charter.safetyTools.length +
+      (charter.houseRules.trim() ? 1 : 0) +
+      (charter.toneAndExpectations.trim() ? 1 : 0);
+    push({
+      key: 'rulesContent',
+      ok: contentCount > 0,
+      status: contentCount > 0 ? 'ok' : 'warning',
+      actor: 'dm',
+      title: 'Rules and table content',
+      detail: contentCount > 0
+        ? 'Session-zero safety, house-rule, or tone guidance is available to the AI.'
+        : 'Add session-zero lines, veils, safety tools, house rules, or tone guidance so AI output has table boundaries.',
+      requiredForDriver: false,
+      fixHref: `/c/${campaignId}/session-zero`,
+    });
+
+    push({
+      key: 'supportConsent',
+      ok: consent.total === 0 || consent.consented > 0,
+      status: consent.total === 0 || consent.consented > 0 ? 'ok' : 'warning',
+      actor: 'table',
+      title: 'Participant support consent',
+      detail: consent.total === 0
+        ? 'No participant support notes are on file.'
+        : `${consent.consented} of ${consent.total} support notes allow AI use; ${consent.tableConsented} can influence public narration.`,
+      requiredForDriver: false,
+      fixHref: `/c/${campaignId}/session-zero#support-preferences`,
+    });
+
+    push({
+      key: 'secretPolicy',
+      ok: true,
+      status: 'ok',
+      actor: 'dm',
+      title: 'Secret and privacy policy',
+      detail:
+        'Provider keys stay write-only/redacted, participant support text is opt-in for AI, and Driver uses player-scoped reads unless a DM-approved secret is explicitly needed.',
+      requiredForDriver: false,
+      fixHref: fix('ai-dm-provider'),
+    });
+
+    const caps = provider.providerType ? providerCapabilities(provider.providerType) : null;
+    push({
+      key: 'driverTools',
+      ok: !!caps?.toolCalling,
+      status: caps?.toolCalling ? 'ok' : 'blocked',
+      actor: 'dm',
+      title: 'Driver tool capability',
+      detail: caps?.toolCalling
+        ? `${provider.providerType} supports tool calls for live Driver play.`
+        : 'Driver requires a provider with tool-calling support.',
+      requiredForDriver: true,
+      fixHref: fix('ai-dm-provider'),
+    });
+
+    const driverChecks = checks.filter((check) => check.requiredForDriver);
+    const driverOk = driverChecks.every((check) => check.ok);
+    const firstBlocked = driverChecks.find((check) => !check.ok);
+    const estimatedCompletionTokens = Math.min(1024, Math.max(0, budgetRemaining));
+    const estimatedPromptTokens = budgetRemaining > 0 ? 750 : 0;
+    return {
+      campaignId,
+      ok: checks.every((check) => check.status !== 'blocked'),
+      driverOk,
+      mode: seat.mode,
+      provider,
+      budgetRemaining,
+      checks,
+      estimatedCost: {
+        estimatedPromptTokens,
+        estimatedCompletionTokens,
+        estimatedTotalTokens: estimatedPromptTokens + estimatedCompletionTokens,
+        estimatedUsd: null,
+        note: 'Best-effort per-turn estimate before sending to the provider. Actual usage depends on context, tools, and model pricing.',
+      },
+      driverUnavailableReason: firstBlocked?.detail ?? null,
+    };
+  }
+
+  /**
    * Driver mode (issue #311) hands the DM seat to the AI, so it carries hard
    * preconditions beyond the server experimental flag (already asserted by every
    * configure): a POSITIVE token budget AND a configured provider (a campaign
@@ -253,10 +454,21 @@ export class AiDmService {
         'Driver mode requires a positive token budget. Set a budget first, then switch the mode to Driver.',
       );
     }
-    const effective = await this.providerConfig.resolveEffectiveConfig(campaignId);
-    if (!effective) {
+    const effective = await this.providerConfig.getEffectiveView(campaignId);
+    if (!effective.configured || !effective.ready) {
       throw new ConflictException(
         'Driver mode requires a configured AI provider. Set a provider (or a server default) with an API key, then switch the mode to Driver.',
+      );
+    }
+    const execution = await this.providerConfig.resolveExecutionModel(campaignId);
+    if (!execution) {
+      throw new ConflictException(
+        'Driver mode requires an executable AI model. Set a provider model that passes the server allowlist, then switch the mode to Driver.',
+      );
+    }
+    if (!providerCapabilities(execution.config.providerType).toolCalling) {
+      throw new ConflictException(
+        `Driver mode requires a provider with tool-calling support. ${execution.config.providerType} cannot run the live Driver seat.`,
       );
     }
   }
@@ -522,6 +734,23 @@ export class AiDmService {
     if (seat.tokenBudget - seat.tokensUsed <= 0) {
       throw new ForbiddenException(
         `AI Dungeon Master token budget exhausted (${seat.tokensUsed}/${seat.tokenBudget}). Raise tokenBudget or reset usage to continue.`,
+      );
+    }
+    const effective = await this.providerConfig.getEffectiveView(campaignId);
+    if (!effective.configured || !effective.ready) {
+      throw new ForbiddenException(
+        'Driver mode requires a configured AI provider. Set a provider (or a server default) with an API key, then switch the mode to Driver.',
+      );
+    }
+    const execution = await this.providerConfig.resolveExecutionModel(campaignId);
+    if (!execution) {
+      throw new ForbiddenException(
+        'Driver mode requires an executable AI model. Set a provider model that passes the server allowlist, then switch the mode to Driver.',
+      );
+    }
+    if (!providerCapabilities(execution.config.providerType).toolCalling) {
+      throw new ForbiddenException(
+        `Driver mode requires a provider with tool-calling support. ${execution.config.providerType} cannot run the live Driver seat.`,
       );
     }
     // The driver is the path that actually spends provider tokens — bound it by the server-wide

@@ -5398,6 +5398,53 @@ export const AiDmUsageHistoryResponse = z.object({
 });
 export type AiDmUsageHistoryResponse = z.infer<typeof AiDmUsageHistoryResponse>;
 
+export const AiDmReadinessCheckKey = z.enum([
+  'serverFlag',
+  'provider',
+  'model',
+  'budget',
+  'writeMode',
+  'rulesContent',
+  'supportConsent',
+  'secretPolicy',
+  'driverTools',
+]);
+export type AiDmReadinessCheckKey = z.infer<typeof AiDmReadinessCheckKey>;
+
+export const AiDmReadinessCheck = z.object({
+  key: AiDmReadinessCheckKey,
+  ok: z.boolean(),
+  status: z.enum(['ok', 'warning', 'blocked', 'unknown']),
+  actor: z.enum(['admin', 'dm', 'table']),
+  title: z.string(),
+  detail: z.string(),
+  requiredForDriver: z.boolean().default(false),
+  fixHref: z.string().nullable().default(null),
+});
+export type AiDmReadinessCheck = z.infer<typeof AiDmReadinessCheck>;
+
+export const AiDmEstimatedCost = z.object({
+  estimatedPromptTokens: z.number().int().nonnegative(),
+  estimatedCompletionTokens: z.number().int().nonnegative(),
+  estimatedTotalTokens: z.number().int().nonnegative(),
+  estimatedUsd: z.number().nonnegative().nullable().default(null),
+  note: z.string(),
+});
+export type AiDmEstimatedCost = z.infer<typeof AiDmEstimatedCost>;
+
+export const AiDmReadiness = z.object({
+  campaignId: Id,
+  ok: z.boolean(),
+  driverOk: z.boolean(),
+  mode: AiDmMode,
+  provider: z.lazy(() => AiProviderEffectiveView),
+  budgetRemaining: z.number().int().nonnegative(),
+  checks: z.array(AiDmReadinessCheck),
+  estimatedCost: AiDmEstimatedCost,
+  driverUnavailableReason: z.string().nullable().default(null),
+});
+export type AiDmReadiness = z.infer<typeof AiDmReadiness>;
+
 // ── Co-DM authoring: draft content for the approval queue (issue #313) ────────
 // The AI acts as a co-DM that DRAFTS content the human DM reviews. A `draft`
 // request is turned by the configured provider into structured entity content and

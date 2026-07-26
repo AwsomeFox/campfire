@@ -44,6 +44,55 @@ describe('ai-dm driver runtime — session loop + streamed narration + tool exec
     await h.close();
   });
 
+  it('#519 readiness: blocked -> safe provider test -> fixed -> driver green with cost estimate', async () => {
+    const campaignId = await h.createCampaign('AI Readiness 519');
+
+    const initial = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/readiness`).set(dm);
+    expect(initial.status).toBe(200);
+    expect(initial.body.driverOk).toBe(false);
+    expect(initial.body.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ key: 'provider', status: 'blocked', requiredForDriver: true }),
+        expect.objectContaining({ key: 'budget', status: 'blocked', requiredForDriver: true }),
+      ]),
+    );
+    expect(initial.body.estimatedCost.estimatedTotalTokens).toBeGreaterThanOrEqual(0);
+
+    const testOnly = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/ai-provider/test`)
+      .set(dm)
+      .send({ providerType: 'mock', model: 'mock-1', apiKey: '' });
+    expect(testOnly.status).toBe(201);
+    expect(testOnly.body).toEqual(expect.objectContaining({ ok: true, credentialSource: 'not-required' }));
+
+    const afterTest = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/readiness`).set(dm);
+    expect(afterTest.status).toBe(200);
+    expect(afterTest.body.checks).toEqual(
+      expect.arrayContaining([expect.objectContaining({ key: 'provider', status: 'blocked' })]),
+    );
+
+    await h.configureProvider(campaignId);
+    const mode = await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 20_000 });
+    expect(mode.status).toBe(200);
+
+    const ready = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/readiness`).set(dm);
+    expect(ready.status).toBe(200);
+    expect(ready.body.driverOk).toBe(true);
+    expect(ready.body.driverUnavailableReason).toBeNull();
+    expect(ready.body.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ key: 'driverTools', status: 'ok', requiredForDriver: true }),
+        expect.objectContaining({ key: 'secretPolicy', status: 'ok' }),
+      ]),
+    );
+    expect(ready.body.estimatedCost).toEqual(
+      expect.objectContaining({
+        estimatedCompletionTokens: 1024,
+        estimatedTotalTokens: expect.any(Number),
+      }),
+    );
+  });
+
   it('#312 driver: a scripted tool call executes a real campfire tool and feeds the result back', async () => {
     const campaignId = await h.createCampaign('Driver ToolLoop');
     await h.configureSeat(campaignId, { mode: 'driver', instructions: 'Be terse.', tokenBudget: 100_000 });

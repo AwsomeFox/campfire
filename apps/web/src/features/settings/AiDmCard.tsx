@@ -14,12 +14,15 @@
  * unless a budget + provider are set. We surface those server messages verbatim.
  */
 import { useEffect, useState } from 'react';
+import { useLocation } from 'react-router-dom';
 import type { AiDmMode, AiDmSeat, AiProviderEffectiveView, Campaign, NarrationLanguage } from '@campfire/schema';
 import { NARRATION_LANGUAGE_OPTIONS } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
 import { SkeletonCard } from '../../components/ui';
 import { AI_DM_BUDGET_INPUT_ID, AI_DM_BUDGET_SECTION_ID } from './aiDmBudgetIds';
 import { ProviderForm } from './ProviderForm';
+import { useAuth } from '../../app/auth';
+import { AiSetupChecklist } from '../ai-dm/AiSetupChecklist';
 
 const AI_DM_INSTRUCTIONS_SECTION_ID = 'ai-dm-instructions';
 const AI_DM_INSTRUCTIONS_INPUT_ID = 'ai-dm-instructions-input';
@@ -56,6 +59,7 @@ export default function AiDmCard({
   campaign: Campaign;
   onCampaignSaved: (c: Campaign) => void;
 }) {
+  const { isAdmin } = useAuth();
   const [seat, setSeat] = useState<AiDmSeat | null>(null);
   const [effective, setEffective] = useState<AiProviderEffectiveView | null>(null);
   const [loading, setLoading] = useState(true);
@@ -131,6 +135,7 @@ export default function AiDmCard({
         the settings that vary per table — mode, budget, and steering.
       </p>
 
+      <AiSetupChecklist campaignId={campaignId} isAdmin={isAdmin} className="cf-inset p-3" />
       <ModeSection campaignId={campaignId} seat={seat} onChanged={(s) => setSeat(s)} />
       <NarrationLanguageSection
         campaignId={campaignId}
@@ -307,7 +312,12 @@ function EffectiveProviderSection({
   effective: AiProviderEffectiveView | null;
   onChanged: () => void;
 }) {
-  const [showOverride, setShowOverride] = useState(false);
+  const location = useLocation();
+  const [showOverride, setShowOverride] = useState(() => location.hash === '#ai-dm-provider');
+
+  useEffect(() => {
+    if (location.hash === '#ai-dm-provider') setShowOverride(true);
+  }, [location.hash]);
 
   const sourceLabel = effective?.source === 'campaign' ? 'campaign override' : 'server default';
   const sourceTag = effective?.source === 'campaign' ? 'tag-accent' : 'tag-accent-2';

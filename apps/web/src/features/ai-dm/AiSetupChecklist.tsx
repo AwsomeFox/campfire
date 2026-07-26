@@ -21,7 +21,7 @@ import { useId, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useQuery } from '@tanstack/react-query';
-import type { AiConsoleOverview, AiProviderEffectiveView } from '@campfire/schema';
+import type { AiDmReadiness } from '@campfire/schema';
 import { api, API } from '../../lib/api';
 import { useAiDmSeat } from '../../lib/query';
 import { classifyAiGate } from './aiGate';
@@ -58,85 +58,33 @@ export function AiSetupChecklist({
 }) {
   const { t } = useTranslation();
 
-  // Real state source ①: the seat (GET /campaigns/:id/ai-dm) — mode / tokenBudget.
-  const seatQuery = useAiDmSeat(campaignId);
-  const seat = seatQuery.data;
-
-  // Real state source ②: the effective provider indicator. `ready` accounts for
-  // campaign/server stored keys, environment fallback, and keyless mock providers.
-  const providerQuery = useQuery({
-    queryKey: ['campaign', campaignId, 'ai-provider', 'effective'],
-    queryFn: () => api.get<AiProviderEffectiveView>(`${API}/campaigns/${campaignId}/ai-provider/effective`),
+  const readinessQuery = useQuery({
+    queryKey: ['campaign', campaignId, 'ai-dm', 'readiness'],
+    queryFn: () => api.get<AiDmReadiness>(`${API}/campaigns/${campaignId}/ai-dm/readiness`),
   });
-  const provider = providerQuery.data ?? null;
+  const readiness = readinessQuery.data ?? null;
 
-  // Real state source ③ (admin only): the server flag lives on the admin AI console
-  // (GET /settings/ai → killSwitchEnabled = experimentalAiDm). Non-admins can't read it,
-  // so the flag step stays a "ask your admin" note for them.
-  const flagQuery = useQuery({
-    queryKey: ['ai-console', 'overview'],
-    queryFn: () => api.get<AiConsoleOverview>(`${API}/settings/ai`),
-    enabled: isAdmin,
-  });
-  const flagOn = flagQuery.data?.killSwitchEnabled ?? null;
-
-  if (seatQuery.isLoading) {
+  if (readinessQuery.isLoading) {
     return <p className="text-xs text-secondary">{t('aiOnboarding.checklist.loading')}</p>;
   }
 
-  const mode = seat?.mode ?? 'off';
-  const budget = seat?.tokenBudget ?? 0;
+  if (!readiness) {
+    return <p className="text-xs text-secondary">{t('aiOnboarding.checklist.unavailable')}</p>;
+  }
 
-  const steps: Step[] = [
-    {
-      key: 'flag',
-      title: t('aiOnboarding.checklist.steps.flag.title'),
-      body: isAdmin
-        ? flagOn
-          ? t('aiOnboarding.checklist.steps.flag.onAdmin')
-          : t('aiOnboarding.checklist.steps.flag.offAdmin')
-        : t('aiOnboarding.checklist.steps.flag.askAdmin'),
-      done: isAdmin ? flagOn : null,
-      actor: 'admin',
-      fix: isAdmin && !flagOn ? { label: t('aiOnboarding.checklist.fixServerAi'), to: '/admin/ai' } : undefined,
-      extra: !isAdmin ? <CopyRequest text={t('aiOnboarding.checklist.steps.flag.copyRequest')} /> : undefined,
-    },
-    {
-      key: 'provider',
-      title: t('aiOnboarding.checklist.steps.provider.title'),
-      body: provider?.ready
-        ? t('aiOnboarding.checklist.steps.provider.done', { model: provider.model || provider.providerType })
-        : t('aiOnboarding.checklist.steps.provider.todo'),
-      done: !!provider?.ready,
-      actor: 'dm',
-      fix: provider?.ready
-        ? undefined
-        : { label: t('aiOnboarding.checklist.fixProvider'), to: `/c/${campaignId}/settings#ai-dm-provider` },
-    },
-    {
-      key: 'mode',
-      title: t('aiOnboarding.checklist.steps.mode.title'),
-      body:
-        mode === 'co_dm'
-          ? t('aiOnboarding.checklist.steps.mode.doneCoDm')
-          : mode === 'driver'
-            ? t('aiOnboarding.checklist.steps.mode.doneDriver')
-            : t('aiOnboarding.checklist.steps.mode.todo'),
-      done: mode !== 'off',
-      actor: 'dm',
-      fix: mode !== 'off' ? undefined : { label: t('aiOnboarding.checklist.fixMode'), to: `/c/${campaignId}/settings#ai-dm-mode` },
-    },
-    {
-      key: 'budget',
-      title: t('aiOnboarding.checklist.steps.budget.title'),
-      body:
-        budget > 0
-          ? t('aiOnboarding.checklist.steps.budget.done', { budget: budget.toLocaleString() })
-          : t('aiOnboarding.checklist.steps.budget.todo'),
-      done: budget > 0,
-      actor: 'dm',
-      fix: budget > 0 ? undefined : { label: t('aiOnboarding.checklist.fixBudget'), to: `/c/${campaignId}/settings#ai-dm-budget` },
-    },
+  const mode = readiness.mode;
+  const readinessSteps: Step[] = readiness.checks.map((check): Step => ({
+    key: check.key,
+    title: check.title,
+    body: check.detail,
+    done: check.status === 'unknown' ? null : check.ok,
+    actor: check.actor === 'admin' ? 'admin' : 'dm',
+    fix: check.fixHref && !check.ok ? { label: fixLabel(check.key), to: check.fixHref } : undefined,
+    extra: check.key === 'serverFlag' && !isAdmin && !check.ok
+      ? <CopyRequest text={t('aiOnboarding.checklist.steps.flag.copyRequest')} />
+      : undefined,
+  }));
+  const steps: Step[] = readinessSteps.concat([
     {
       key: 'table',
       title: t('aiOnboarding.checklist.steps.table.title'),
@@ -145,14 +93,14 @@ export function AiSetupChecklist({
       actor: 'dm',
       fix: mode === 'driver' ? { label: t('aiOnboarding.checklist.openTable'), to: `/c/${campaignId}/table` } : undefined,
     },
-  ];
+  ]);
 
   const gating = steps.filter((s) => s.key !== 'table');
   const doneCount = gating.filter((s) => s.done === true).length;
-  const allDone = doneCount === gating.length;
+  const allDone = readiness.driverOk || (readiness.ok && mode === 'co_dm');
 
   return (
-    <div className={`text-left space-y-3 ${className}`}>
+    <div id="ai-dm-readiness" className={`text-left space-y-3 settings-anchor ${className}`} tabIndex={-1}>
       <div>
         <p className="font-bold text-[var(--color-text)]">{t('aiOnboarding.checklist.title')}</p>
         <p className="text-xs text-[var(--color-neutral-400)] mt-0.5">{t('aiOnboarding.checklist.intro')}</p>
@@ -167,6 +115,19 @@ export function AiSetupChecklist({
         </div>
       )}
 
+      <div className="cf-inset p-3 text-xs text-[var(--color-neutral-300)]">
+        <p className="font-semibold text-[var(--color-neutral-200)] m-0">{t('aiOnboarding.checklist.costTitle')}</p>
+        <p className="m-0 mt-1">
+          {t('aiOnboarding.checklist.costBody', {
+            tokens: readiness.estimatedCost.estimatedTotalTokens.toLocaleString(),
+            prompt: readiness.estimatedCost.estimatedPromptTokens.toLocaleString(),
+            completion: readiness.estimatedCost.estimatedCompletionTokens.toLocaleString(),
+            usd: readiness.estimatedCost.estimatedUsd === null ? t('aiOnboarding.checklist.costUnknownUsd') : `$${readiness.estimatedCost.estimatedUsd.toFixed(4)}`,
+          })}
+        </p>
+        <p className="m-0 mt-1 text-[11px] text-secondary">{readiness.estimatedCost.note}</p>
+      </div>
+
       <p className="text-[11px] text-secondary">
         {t('aiOnboarding.checklist.progress', { done: doneCount, total: gating.length })}
       </p>
@@ -180,6 +141,15 @@ export function AiSetupChecklist({
       <AiTransparencyNote />
     </div>
   );
+}
+
+function fixLabel(key: string): string {
+  if (key === 'serverFlag') return 'Open AI console';
+  if (key === 'budget') return 'Set a budget';
+  if (key === 'writeMode') return 'Switch write mode';
+  if (key === 'rulesContent') return 'Open session zero';
+  if (key === 'supportConsent') return 'Review support consent';
+  return 'Fix this';
 }
 
 function StepRow({ step }: { step: Step }) {

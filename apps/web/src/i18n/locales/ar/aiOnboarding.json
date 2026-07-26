@@ -8,10 +8,14 @@
       "allDoneDriver": "The AI holds the DM seat and acts directly — it narrates, rolls dice, applies HP and conditions, and runs the session within the budget you set. Players join at the Table tab.",
       "allDoneCoDm": "The AI is co-DMing — it only proposes, and nothing lands in canon until a human DM approves it.",
       "loading": "Checking setup…",
+      "unavailable": "Readiness could not be loaded. Try again from campaign settings.",
       "actorAdmin": "Server admin",
       "actorDm": "You (the DM)",
       "completedBy": "Done by {{actor}}",
       "todoBy": "Needs {{actor}}",
+      "costTitle": "Estimated cost before the next run",
+      "costBody": "Plan for up to {{tokens}} tokens (about {{prompt}} prompt + {{completion}} completion). USD estimate: {{usd}}.",
+      "costUnknownUsd": "unknown for this provider/model",
       "fixServerAi": "Open AI console",
       "fixProvider": "Configure provider",
       "fixMode": "Choose a mode",
@@ -93,6 +97,14 @@
       "needProvider": {
         "title": "Driver mode needs a provider",
         "body": "Driver mode requires a configured AI provider with an API key. Set one, then switch the mode to Driver."
+      },
+      "needModel": {
+        "title": "Driver mode needs an executable model",
+        "body": "The selected AI model must pass the server allowlist and provider policy before Driver can run."
+      },
+      "needDriverTools": {
+        "title": "Driver mode needs tool calls",
+        "body": "Driver mode requires a provider that supports tool/function calls so it can use Campfire tools safely."
       },
       "paused": {
         "title": "The AI DM is paused",
