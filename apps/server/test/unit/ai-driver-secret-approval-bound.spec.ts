@@ -66,9 +66,10 @@ describe('AiDriverService — secret-read approvals are bounded (#1059)', () => 
     const aiDm = { registerDriverSessionTeardown: jest.fn() };
     const { db, rows } = makeInMemoryDb();
     const transcript = new AiDmTranscriptService(db, stream as unknown as ConstructorParameters<typeof AiDmTranscriptService>[1]);
-    // Only aiDm (constructor teardown hook), audit, and stream are touched by the approval
-    // lifecycle; the remaining deps are unused here. Casts are pinned to ConstructorParameters
-    // so a signature change surfaces as a compile error rather than a silent `never`.
+    // Only aiDm (constructor teardown hook), audit, stream, and transcript are touched by the
+    // approval lifecycle; the remaining deps are unused here. Casts are pinned to
+    // ConstructorParameters so a signature change surfaces as a compile error rather than a
+    // silent `never` — which is exactly how the 13th parameter (transcript) was caught.
     const svc = new AiDriverService(
       aiDm as unknown as Ctor[0],
       undefined as unknown as Ctor[1], // mcpTools
