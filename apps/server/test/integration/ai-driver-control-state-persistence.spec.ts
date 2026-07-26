@@ -284,6 +284,30 @@ describe('AI driver control state persistence across restart (#559, real SQLite)
     expect(auditActions(restarted)).not.toContain('ai-dm.driver.control_state.recovered');
   });
 
+  it('two concurrent open-vote requests cannot clobber (and persist over) each other', async () => {
+    const first = firstBoot();
+    // `memberRoles` is the only await inside openVote, so hold it open to interleave both calls
+    // exactly the way two simultaneous POST /vote {action:open} requests would.
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    first.notifications.memberRoles.mockImplementation(async () => {
+      await gate;
+      return new Map<number, string>([[1, 'player'], [2, 'player']]);
+    });
+
+    const a = first.service.openVote(campaignId, player, 'pause', 'player');
+    const b = first.service.openVote(campaignId, other, 'override', 'player');
+    release();
+    const settled = await Promise.allSettled([a, b]);
+
+    expect(settled.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    expect(settled.filter((r) => r.status === 'rejected')).toHaveLength(1);
+    // Exactly one vote exists, and the row on disk agrees with the in-memory winner.
+    const live = first.service.getSession(campaignId).vote!;
+    expect(live.resolved).toBe(false);
+    expect(rawRow()).toMatchObject({ vote: expect.stringContaining(`"id":"${live.id}"`) });
+  });
+
   it('a persistence failure never propagates out of a control lever', () => {
     const first = firstBoot();
     open!.sqlite.exec('DROP TABLE ai_driver_control_state');

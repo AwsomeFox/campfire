@@ -354,22 +354,33 @@ interface ActionQueueEntry {
 
 type AiDriverControlStateRow = typeof aiDriverControlState.$inferSelect;
 
-const SESSION_STATUSES: ReadonlySet<string> = new Set<AiDmSessionStatus>(['idle', 'running', 'paused']);
-const LADDER_STATES: ReadonlySet<string> = new Set<AiDmLadderState>([
-  'running',
-  'awaiting_players',
-  'paused',
-  'human_control',
-]);
-const STUCK_REASONS: ReadonlySet<string> = new Set<AiDmStuckReason>([
-  'tool_error',
-  'budget_exhausted',
-  'max_steps',
-  'no_narration',
-  'loop',
-  'dispute',
-  'provider_error',
-]);
+/**
+ * Hydration allowlists for the persisted enums (#559). These are keyed off an EXHAUSTIVE
+ * `Record<Union, true>` on purpose: `new Set<Union>([...])` happily accepts a subset, so a
+ * future member added to `AiDmStuckReason` / `AiDmLadderState` / `AiDmSessionStatus` would be
+ * silently discarded on restart (a stuck seat would come back healthy). With a Record, omitting
+ * a member is a compile error instead of a data-loss bug.
+ */
+function allowlist<T extends string>(members: Record<T, true>): ReadonlySet<string> {
+  return new Set(Object.keys(members));
+}
+
+const SESSION_STATUSES = allowlist<AiDmSessionStatus>({ idle: true, running: true, paused: true });
+const LADDER_STATES = allowlist<AiDmLadderState>({
+  running: true,
+  awaiting_players: true,
+  paused: true,
+  human_control: true,
+});
+const STUCK_REASONS = allowlist<AiDmStuckReason>({
+  tool_error: true,
+  budget_exhausted: true,
+  max_steps: true,
+  no_narration: true,
+  loop: true,
+  dispute: true,
+  provider_error: true,
+});
 
 function recordOf(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
@@ -3045,6 +3056,14 @@ export class AiDriverService {
       throw new ConflictException('A table vote is already open. Resolve it before opening another.');
     }
     const eligible = this.eligibleVoterCount(await this.notifications.memberRoles(campaignId));
+    // Re-check AFTER the await (#559): `memberRoles` is the only suspension point between the
+    // guard above and the write below, so two concurrent `action:open` requests could both clear
+    // the guard and the second would overwrite — and now also PERSIST — a vote the table had
+    // already started casting ballots on, silently discarding them. Recheck before writing.
+    this.expireStaleVote(session);
+    if (session.vote && !session.vote.resolved) {
+      throw new ConflictException('A table vote is already open. Resolve it before opening another.');
+    }
     const threshold = Math.max(1, Math.floor(eligible / 2) + 1);
     session.vote = {
       id: `vote-${++this.voteSeq}`,
