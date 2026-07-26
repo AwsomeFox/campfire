@@ -362,6 +362,13 @@ export interface RunTurnOptions {
    * duplicate row. Never set by a client — the DTO does not accept it.
    */
   dequeued?: boolean;
+  /**
+   * INTERNAL (#572): this turn is a stuck-ladder lever REPLAYING an earlier action rather
+   * than a new one. `input` here is model machinery — the replayed action still carrying
+   * its #317 speaker prefix, plus injected framing like the dispute block — and must never
+   * reach the shared table log. The lever records its own clean `control` event instead.
+   */
+  lever?: 'nudge' | 'flag';
 }
 
 interface ActionQueueEntry {
@@ -1085,6 +1092,12 @@ export class AiDriverService {
     // A proactive turn has no player behind it — the AI acted on its own (#1044). Recording
     // one would attribute the system's prompt to a human at the table.
     if (opts.proactive) return;
+    // A retry / dispute REPLAYS an action that is already in the transcript; it is not a new
+    // one. Recording it again would both duplicate the line and — because `input` on these
+    // paths is the model prompt, not what anyone typed — publish the speaker prefix and the
+    // injected dispute framing to every player at the table. The lever writes its own
+    // `control` event carrying only the player-authored text.
+    if (opts.lever) return;
     this.transcript.record({
       campaignId,
       kind: 'player.action',
@@ -2842,7 +2855,15 @@ export class AiDriverService {
       campaignId,
       detail: hint ? `nudge with hint by ${user.id}` : `retry by ${user.id}`,
     });
-    return this.runTurn(campaignId, user, input);
+    // #572: the table sees that someone asked the DM to try again, and the hint they gave —
+    // never the replayed prompt. A retry is a lever on the existing action, not a new one,
+    // so no second `player.action` line is written for it.
+    this.recordControl(
+      campaignId,
+      { control: 'retry', ...(hint ? { hint } : {}) },
+      user,
+    );
+    return this.runTurn(campaignId, user, input, { lever: 'nudge' });
   }
 
   /**
@@ -2889,7 +2910,11 @@ export class AiDriverService {
       detail: `dispute by ${user.id}: ${excerpt(objection, 160)}`,
     });
     await this.notify(campaignId, user, 'A ruling was disputed', `${excerpt(objection, 160)} — the AI is re-deciding.`);
-    return this.runTurn(campaignId, user, input);
+    // #572: the objection is player-authored and belongs in the shared log; the surrounding
+    // "[A player DISPUTES that ruling…]" instruction block is machinery for the model and
+    // must not be. Recorded as a control line rather than a duplicate player action.
+    this.recordControl(campaignId, { control: 'dispute', objection }, user);
+    return this.runTurn(campaignId, user, input, { lever: 'flag' });
   }
 
   /**

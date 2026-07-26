@@ -4,6 +4,7 @@ import { parseAiDmStreamEvent } from '../../src/lib/useAiDmStream';
 import {
   dmEntryText,
   emptyTranscript,
+  transcriptStorageKey,
   transcriptReducer,
   type DmEntry,
   type PlayerEntry,
@@ -329,4 +330,18 @@ test('a new turn never fuses into a previous turn’s still-open bubble', () => 
 
   // The player action stays between the two turns it actually fell between.
   expect(state.entries.map((e) => e.kind)).toEqual(['dm', 'player', 'dm']);
+});
+
+
+test('the authoritative page and the live-activity provider cache under separate keys', () => {
+  // Both are mounted at once on the Table route: AiTablePage writes the authoritative
+  // format (dm:<turnId> ids, every entry carrying a seq) while the Layout-level activity
+  // provider writes the legacy format (random ids, no seq). Sharing one key made the last
+  // writer before a reload win — and a legacy snapshot hydrated by the authoritative page
+  // cannot be merged by eventId, so each narration line rendered twice.
+  expect(transcriptStorageKey(7)).toBe('cf.aiDm.transcript.v2.7');
+  expect(transcriptStorageKey(7, 'table')).toBe(transcriptStorageKey(7));
+  expect(transcriptStorageKey(7, 'activity')).not.toBe(transcriptStorageKey(7, 'table'));
+  // Distinct per campaign as well, so two tables never share a cache either.
+  expect(transcriptStorageKey(7, 'activity')).not.toBe(transcriptStorageKey(8, 'activity'));
 });

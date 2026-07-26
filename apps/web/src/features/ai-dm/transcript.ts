@@ -31,16 +31,33 @@ import type { AiDmStreamEvent } from '../../lib/useAiDmStream';
 export const MAX_TRANSCRIPT_ENTRIES = 200;
 
 /**
+ * Which surface owns a cached transcript (#572).
+ *
+ * Two surfaces are mounted at once on the Table route: the page itself, which reads the
+ * server's AUTHORITATIVE transcript (`dm:<turnId>` bubble ids, every entry carrying a
+ * `seq`), and the Layout-level live-activity provider, which is non-authoritative and folds
+ * the legacy signal frames into bubbles with client-minted random ids and no `seq`. Those
+ * two formats are not interchangeable: a legacy snapshot loaded by the authoritative page
+ * cannot be matched by `eventId` or `dm:<turnId>`, so the same narration would render in
+ * two coexisting bubbles.
+ *
+ * They therefore get separate keys. Namespacing is preferred over having either surface
+ * detect the other's writes, because it is the only option that does not require the two to
+ * know about each other — whichever one is mounted, it reads back exactly what it wrote.
+ */
+export type TranscriptStorageScope = 'table' | 'activity';
+
+/**
  * localStorage key for a campaign's cached transcript.
  *
  * Since #572 this is a PAINT CACHE, not the source of truth — the server transcript is
  * refetched on mount and reconciled over it. The `v2` generation deliberately orphans
  * caches written before #572: those entries carry client-minted random ids that would
  * duplicate against the server's stable `eventId`s instead of merging with them.
- * (Namespacing this key per user is issue #573 and is NOT solved here.)
+ * (Namespacing this key per USER is issue #573 and is NOT solved here.)
  */
-export function transcriptStorageKey(campaignId: number): string {
-  return `cf.aiDm.transcript.v2.${campaignId}`;
+export function transcriptStorageKey(campaignId: number, scope: TranscriptStorageScope = 'table'): string {
+  return scope === 'table' ? `cf.aiDm.transcript.v2.${campaignId}` : `cf.aiDm.transcript.v2.${scope}.${campaignId}`;
 }
 
 // ---- Entry shapes ---------------------------------------------------------
@@ -822,10 +839,10 @@ function hasStorage(): boolean {
 }
 
 /** Load a campaign's persisted transcript, or the empty state on miss/parse error. */
-export function loadTranscript(campaignId: number): TranscriptState {
+export function loadTranscript(campaignId: number, scope: TranscriptStorageScope = 'table'): TranscriptState {
   if (!hasStorage()) return emptyTranscript;
   try {
-    const raw = window.localStorage.getItem(transcriptStorageKey(campaignId));
+    const raw = window.localStorage.getItem(transcriptStorageKey(campaignId, scope));
     if (!raw) return emptyTranscript;
     const parsed: unknown = JSON.parse(raw);
     if (parsed && typeof parsed === 'object' && Array.isArray((parsed as TranscriptState).entries)) {
@@ -848,25 +865,29 @@ export function loadTranscript(campaignId: number): TranscriptState {
  * another surface was about to load. Clearing is an explicit operation
  * ({@link clearTranscript}), never a side effect of a mount race.
  */
-export function saveTranscript(campaignId: number, state: TranscriptState): void {
+export function saveTranscript(
+  campaignId: number,
+  state: TranscriptState,
+  scope: TranscriptStorageScope = 'table',
+): void {
   if (!hasStorage()) return;
-  if (state.entries.length === 0 && loadTranscript(campaignId).entries.length > 0) return;
+  if (state.entries.length === 0 && loadTranscript(campaignId, scope).entries.length > 0) return;
   try {
     const bounded =
       state.entries.length > MAX_TRANSCRIPT_ENTRIES
         ? { entries: state.entries.slice(state.entries.length - MAX_TRANSCRIPT_ENTRIES) }
         : state;
-    window.localStorage.setItem(transcriptStorageKey(campaignId), JSON.stringify(bounded));
+    window.localStorage.setItem(transcriptStorageKey(campaignId, scope), JSON.stringify(bounded));
   } catch {
     /* quota / privacy mode — transcript is best-effort, not authoritative */
   }
 }
 
 /** Remove a campaign's persisted transcript. */
-export function clearTranscript(campaignId: number): void {
+export function clearTranscript(campaignId: number, scope: TranscriptStorageScope = 'table'): void {
   if (!hasStorage()) return;
   try {
-    window.localStorage.removeItem(transcriptStorageKey(campaignId));
+    window.localStorage.removeItem(transcriptStorageKey(campaignId, scope));
   } catch {
     /* ignore */
   }

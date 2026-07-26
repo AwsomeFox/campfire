@@ -109,7 +109,12 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
   const [transcript, dispatchTranscript] = useReducer(
     transcriptReducer,
     campaignId,
-    (id) => (id !== undefined ? loadTranscript(id) : emptyTranscript),
+    // 'activity' scope (#572): this provider is NON-authoritative — it folds the legacy
+    // signal frames into bubbles with random ids and no `seq`. AiTablePage is mounted inside
+    // the same Layout and writes the authoritative format. Sharing one key made the last
+    // writer before a reload win, and a legacy snapshot hydrated by the authoritative page
+    // cannot be merged by eventId, so every narration line rendered twice.
+    (id) => (id !== undefined ? loadTranscript(id, 'activity') : emptyTranscript),
   );
 
   const seededRef = useRef(false);
@@ -135,7 +140,7 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
       seededRef.current = false;
       pendingHydrateRef.current = true;
       if (campaignId !== undefined) {
-        dispatchTranscript({ type: 'hydrate', state: enabled ? loadTranscript(campaignId) : emptyTranscript });
+        dispatchTranscript({ type: 'hydrate', state: enabled ? loadTranscript(campaignId, 'activity') : emptyTranscript });
       } else {
         dispatchTranscript({ type: 'reset' });
       }
@@ -148,7 +153,7 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
 
   useEffect(() => {
     if (!enabled || campaignId === undefined) return;
-    saveTranscript(campaignId, transcript);
+    saveTranscript(campaignId, transcript, 'activity');
   }, [campaignId, enabled, transcript]);
 
   // Seed join-context from thin session state when local transcript is empty.

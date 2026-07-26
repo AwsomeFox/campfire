@@ -299,6 +299,47 @@ describe('ai-dm authoritative table transcript (#572)', () => {
     expect(forDm.payload.encounterHidden).toBeUndefined();
   });
 
+  it('never publishes the model’s internal prompt when a player retries or disputes', async () => {
+    const campaignId = await driverCampaign('Transcript Levers');
+    h.script({ text: 'The bolt holds fast.', usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 } });
+    await request(h.server)
+      .post(`${API}/campaigns/${campaignId}/ai-dm/message`)
+      .set(player)
+      .send({ input: '[Runa, played by Ada] I shoulder the door.', displayText: 'I shoulder the door.', characterName: 'Runa' });
+
+    // Retry and dispute REPLAY that action: the model input they build carries the #317
+    // speaker prefix and, for a dispute, an injected instruction block. None of that is
+    // something the table was ever meant to read.
+    h.script({ text: 'Still it holds.', usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 } });
+    expect((await h.lever(campaignId, 'nudge', { hint: 'try the hinges' }, player)).status).toBe(201);
+    h.script({ text: 'The hinges give.', usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 } });
+    expect((await h.lever(campaignId, 'flag', { objection: 'a locked door should not be unbeatable' }, player)).status).toBe(201);
+
+    const events = (await listTranscript(h, campaignId, dm, { limit: 200 })).body.items as AiDmTranscriptEvent[];
+
+    // Exactly ONE player action: the original. A replay is a lever on it, not a new action.
+    const actions = events.filter((e) => e.kind === 'player.action');
+    expect(actions).toHaveLength(1);
+    expect(actions[0].payload.text).toBe('I shoulder the door.');
+
+    // Nothing anywhere in the transcript carries the speaker prefix or the dispute framing.
+    const serialized = JSON.stringify(events);
+    expect(serialized).not.toContain('played by Ada');
+    expect(serialized).not.toContain('DISPUTES');
+    expect(serialized).not.toContain('Table hint for the DM');
+    expect(serialized).not.toContain('Your last ruling was');
+
+    // The levers ARE visible — as control lines carrying only player-authored text.
+    const retry = events.find((e) => e.kind === 'control' && e.payload.control === 'retry');
+    expect(retry).toBeDefined();
+    expect(retry!.payload.hint).toBe('try the hinges');
+    expect(retry!.actorUserId).toBeTruthy();
+
+    const dispute = events.find((e) => e.kind === 'control' && e.payload.control === 'dispute');
+    expect(dispute).toBeDefined();
+    expect(dispute!.payload.objection).toBe('a locked door should not be unbeatable');
+  });
+
   it('records votes and control changes so a late joiner sees why the table is where it is', async () => {
     const campaignId = await driverCampaign('Transcript Control');
 
