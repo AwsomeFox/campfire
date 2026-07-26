@@ -19,7 +19,7 @@ import type { ScheduledSession, ScheduledSessionWithRsvps, ScheduledSessionListP
 import { SCHEDULE_PAST_DEFAULT_LIMIT, SCHEDULE_PAST_MAX_LIMIT } from '@campfire/schema';
 import { applyPage } from '../../common/pagination';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { scheduledSessions, sessionRsvps, campaigns, sessions } from '../../db/schema';
+import { scheduledSessions, sessionRsvps, campaigns, sessions, notificationReminders } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { generateIcsFeedToken, looksLikeIcsFeedToken } from '../../common/crypto';
@@ -237,10 +237,28 @@ export class SchedulingService {
    *
    * So both are hidden at READ time only. SQLite still holds `status='completed'` and
    * `session_id`, so restoring the session reconciles the row with no write at all.
-   * `cancelled` is never link-derived, so it is passed through untouched.
+   * `cancelled` is never link-derived, so its STATUS is passed through untouched — but
+   * a cancelled night never advertises a recap link either (see below).
    */
   private projectLink(row: typeof scheduledSessions.$inferSelect, liveLinkedIds: Set<number>): ScheduledSession {
     const domain = toDomain(row);
+    // A cancelled night is not a played night, so it must not render a "Recap" link.
+    //
+    // Reachable since remove() started using the EFFECTIVE status (#504): a future
+    // `completed` row whose recap is trashed reads as `scheduled`, so the DM can cancel
+    // it — and cancel deliberately leaves `session_id` alone. Untrash the recap later
+    // and the raw row is `cancelled` WITH a live link, which the Schedule tab would
+    // render as a "Cancelled" tag beside a working "Recap" link.
+    //
+    // Fixed at READ time rather than by clearing the link on cancel. Clearing it would
+    // have to clear the recap's reciprocal `scheduled_session_id` too (otherwise it is
+    // the one-directional dangling link this file works hard to avoid), which means
+    // cancelling a night would silently and permanently destroy a recap↔night
+    // association nobody asked to remove — trading a cosmetic contradiction for real
+    // data loss, and breaking the invariant the whole fix rests on: the stored link
+    // survives so untrashing heals the row with no repair write. Restoring the
+    // SCHEDULE brings the link straight back, because nothing was thrown away.
+    if (domain.status === 'cancelled') return { ...domain, sessionId: null };
     if (domain.sessionId == null || liveLinkedIds.has(domain.sessionId)) return domain;
     return {
       ...domain,
@@ -649,16 +667,36 @@ export class SchedulingService {
     const { row: existing, status: effectiveStatus } = await this.getRowWithEffectiveStatus(id);
     if (effectiveStatus !== 'cancelled') throw new NotFoundException(`Scheduled session ${id} is not cancelled`);
     const ts = nowIso();
-    await this.db
-      .update(scheduledSessions)
-      .set({
-        status: 'scheduled',
-        cancelledAt: null,
-        cancelledBy: null,
-        cancellationReason: '',
-        updatedAt: ts,
-      })
-      .where(eq(scheduledSessions.id, id));
+    // Un-cancelling and re-arming the reminders are one change, so they commit or roll
+    // back together — a half-applied restore would put the night back on the calendar
+    // with its reminders permanently suppressed, and nothing would ever report it.
+    //
+    // The `notification_reminders` ledger is the sweep's dedup guard: a surviving
+    // (schedule, user, kind) row makes emitOnce()'s claim lose, silently. The sweep only
+    // purges the ledger for nights that have already STARTED, so a night cancelled and
+    // restored while still inside the 24h lead window kept its rows and never reminded
+    // anyone again. Before #504 this sequence did not exist — cancel hard-deleted the
+    // row (and cascaded the ledger with it) — so restore is where the fix belongs.
+    //
+    // Purging on restore rather than on cancel is deliberate: while a night is
+    // cancelled the ledger is a useful record of what the party was already told, and
+    // restore is the exact moment the night becomes eligible to remind again. Restore
+    // starts a new incarnation of the night, so it starts with a clean ledger.
+    this.db.transaction((tx) => {
+      tx.update(scheduledSessions)
+        .set({
+          status: 'scheduled',
+          cancelledAt: null,
+          cancelledBy: null,
+          cancellationReason: '',
+          updatedAt: ts,
+        })
+        .where(eq(scheduledSessions.id, id))
+        .run();
+      tx.delete(notificationReminders)
+        .where(eq(notificationReminders.scheduledSessionId, id))
+        .run();
+    });
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,

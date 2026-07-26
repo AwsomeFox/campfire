@@ -673,6 +673,61 @@ describe('session scheduling (e2e)', () => {
     expect(upcomingAfter.body.map((s: { id: number }) => s.id)).not.toContain(scheduleId);
   });
 
+  it('never shows a recap link on a cancelled night, but keeps the stored link intact', async () => {
+    // State chain reachable only since remove() started reading the EFFECTIVE status:
+    // a future `completed` row whose recap is trashed reads as 'scheduled', so the DM
+    // can cancel it — and cancel deliberately leaves session_id alone so the Trash
+    // stays reversible. Untrash the recap and the raw row is `cancelled` WITH a live
+    // link, which would render a "Cancelled" tag beside a working "Recap" link.
+    const server = ctx.app.getHttpServer();
+    const scheduled = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/schedule`)
+      .set(dm)
+      .send({ scheduledAt: '2099-12-05T18:00:00Z', title: 'Cancelled, recap restored' });
+    expect(scheduled.status).toBe(201);
+    const scheduleId = scheduled.body.id;
+
+    const recap = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/sessions`)
+      .set(dm)
+      .send({
+        title: 'Recap that comes back',
+        playedAt: '2099-12-05',
+        recap: 'Trashed, then restored.',
+        scheduledSessionId: scheduleId,
+      });
+    expect(recap.status).toBe(201);
+    const sessionId = recap.body.id;
+
+    await request(server).delete(`/api/v1/sessions/${sessionId}`).set(dm).expect(200);
+    await request(server).delete(`/api/v1/schedule/${scheduleId}`).set(dm).send({ reason: 'off' }).expect(200);
+
+    // The recap comes back out of the Trash while the night stays cancelled.
+    await request(server).post(`/api/v1/sessions/${sessionId}/restore`).set(dm).expect(201);
+
+    const cancelled = await request(server).get(`/api/v1/schedule/${scheduleId}`).set(player);
+    expect(cancelled.status).toBe(200);
+    expect(cancelled.body).toMatchObject({ id: scheduleId, status: 'cancelled', sessionId: null });
+
+    const past = await request(server).get(`/api/v1/campaigns/${campaignId}/schedule/past`).set(player);
+    expect(past.body.items.find((s: { id: number }) => s.id === scheduleId)).toMatchObject({
+      status: 'cancelled',
+      sessionId: null,
+    });
+
+    // Hidden at READ time only — nothing was thrown away. The export still records the
+    // stored link, and restoring the SCHEDULE brings it back with no repair write.
+    const exported = await request(server).get(`/api/v1/campaigns/${campaignId}/export`).set(dm);
+    expect(exported.body.scheduledSessions.find((s: { id: number }) => s.id === scheduleId)).toMatchObject({
+      status: 'cancelled',
+      sessionId,
+    });
+
+    const restored = await request(server).post(`/api/v1/schedule/${scheduleId}/restore`).set(dm);
+    expect(restored.status).toBe(201);
+    expect(restored.body).toMatchObject({ id: scheduleId, status: 'scheduled', sessionId });
+  });
+
   it('rejects an edit to a cancelled night rather than notifying the party about it', async () => {
     // update() had no status guard at all: a DM could PATCH the time of a called-off
     // game and the party would get a "rescheduled" push for a night that is not
