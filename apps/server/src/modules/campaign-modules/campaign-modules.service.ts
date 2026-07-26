@@ -1213,6 +1213,12 @@ export class CampaignModulesService {
             keptLocalCount += 1;
           }
           // Either way the module no longer ships it, so it stops being a module artifact.
+          // Note the consequence for a kept row: if a later version RE-adds the same key it
+          // arrives as `added_upstream` and is created fresh alongside the table's copy.
+          // That is deliberate — once the publisher dropped an artifact the table had edited,
+          // the surviving row is the table's, and silently re-adopting it would resurrect
+          // exactly the "upstream quietly overwrote my work" failure this feature exists to
+          // prevent. Rollback restores the artifact row from the snapshot either way.
           tx.delete(campaignModuleArtifacts).where(eq(campaignModuleArtifacts.id, row.id)).run();
           continue;
         }
