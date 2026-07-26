@@ -15,7 +15,7 @@
  *     click. A key minted inside a fetch wrapper would differ per attempt and protect
  *     nothing.
  *
- *  2. **The claim commits with the effect.** {@link claimEncounterOp} /
+ *  2. **The claim commits with the effect.** {@link findPriorEncounterOp} and
  *     {@link recordEncounterOp} are called INSIDE the caller's synchronous better-sqlite3
  *     transaction, never before or after it. A separate "have I seen this key" write would
  *     leave a crash window that yields either a phantom block (key stored, damage never
@@ -50,9 +50,10 @@ export const ENCOUNTER_OP_IDEMPOTENCY_TTL_MS = 6 * 60 * 60 * 1000;
 /** The non-idempotent encounter operations that carry keys. */
 export type EncounterOperation = 'combatant.update' | 'turn.advance';
 
-// The drizzle transaction handle (and the DB itself) are structurally identical for the
-// handful of calls made here; typing them precisely would drag the whole schema generic
-// through every helper for no safety gain, since every call site is in this file.
+// The drizzle transaction handle and the DB handle are structurally identical for the
+// handful of statements issued here (one table, three shapes). Typing them precisely means
+// threading the full schema generic through every helper — a lot of noise for no safety
+// gain, since the queries below are hand-written and never vary by caller.
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type AnyTx = any;
 /* eslint-enable @typescript-eslint/no-explicit-any */
@@ -109,7 +110,7 @@ function stableStringify(value: unknown): string {
   return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`).join(',')}}`;
 }
 
-/** A prior claim found by {@link claimEncounterOp}. */
+/** A prior claim found by {@link findPriorEncounterOp}. */
 export interface EncounterOpPrior {
   /** The stored original response, already parsed — null when it was never backfilled. */
   response: unknown | null;
