@@ -20,6 +20,7 @@ function combatant(id: number, initiative: number | null): Combatant {
     name: `C${id}`,
     initiative,
     initMod: 0,
+    initiativeBreakdown: null,
     initiativeGroup: null,
     hpCurrent: 10,
     hpMax: 10,
