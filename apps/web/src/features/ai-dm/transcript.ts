@@ -223,6 +223,27 @@ function openBubbleIndex(entries: TranscriptEntry[]): number {
   return -1;
 }
 
+/**
+ * Where an authoritative event for `turnId` should fold (#572), or -1 to open a new bubble.
+ *
+ * Prefers the bubble already keyed to this turn. Failing that it may adopt the bubble the
+ * LIVE stream opened at `turn.start`, which has a generated id because the client does not
+ * learn the turn id until the first durable event arrives.
+ *
+ * It must NOT adopt a bubble already claimed by a different turn. A `dm:<turnId>` id means
+ * claimed, and a claimed bubble can still be `streaming` — a REST replay carries narration
+ * before the matching `turn.ended`, and a cancelled turn may never get one at all. Without
+ * this guard the next turn's narration merged into the previous turn's bubble, silently
+ * fusing two turns into one and dragging its ordering anchor back to the older turn.
+ */
+function foldTargetIndex(entries: TranscriptEntry[], id: string): number {
+  const keyed = indexOfId(entries, id);
+  if (keyed !== -1) return keyed;
+  const open = openBubbleIndex(entries);
+  if (open === -1) return -1;
+  return (entries[open] as DmEntry).id.startsWith('dm:') ? -1 : open;
+}
+
 /** Append an entry, enforcing the bounded cap by dropping the oldest. */
 function push(entries: TranscriptEntry[], entry: TranscriptEntry): TranscriptEntry[] {
   const next = [...entries, entry];
@@ -539,9 +560,9 @@ function applyServerEvent(state: TranscriptState, event: AiDmTranscriptEvent): T
       if (!text) return base;
       const id = bubbleId ?? `dm:${event.eventId}`;
       // Adopt the bubble the live token stream already opened, so the typing effect and the
-      // authoritative text are the same bubble rather than two stacked ones.
-      let idx = indexOfId(entries, id);
-      if (idx === -1) idx = openBubbleIndex(entries);
+      // authoritative text are the same bubble rather than two stacked ones — but never a
+      // bubble that already belongs to another turn (see foldTargetIndex).
+      const idx = foldTargetIndex(entries, id);
       if (idx === -1) {
         return {
           ...base,
@@ -567,7 +588,13 @@ function applyServerEvent(state: TranscriptState, event: AiDmTranscriptEvent): T
         id,
         committed: [...bubble.committed, text],
         live: '',
-        seq: event.seq,
+        // ANCHOR the bubble at its FIRST event, never the latest. A bubble spans a whole
+        // turn, but the server records each narration step BEFORE the tools that step
+        // invoked; advancing the bubble's seq on every fold would push it past its own
+        // turn's tool chips and render "what the AI did" above "what the AI said" — in the
+        // one feature whose point is an ordered log. Anchoring also matches the pre-#572
+        // live behaviour, where the bubble opened at turn.start and chips appended below.
+        seq: bubble.seq ?? event.seq,
         eventIds: [...(bubble.eventIds ?? []), event.eventId],
       };
       return { ...base, entries: orderBySeq(next) };
@@ -575,8 +602,7 @@ function applyServerEvent(state: TranscriptState, event: AiDmTranscriptEvent): T
 
     case 'turn.ended': {
       const id = bubbleId ?? `dm:${event.eventId}`;
-      let idx = indexOfId(entries, id);
-      if (idx === -1) idx = openBubbleIndex(entries);
+      const idx = foldTargetIndex(entries, id);
       const meta: DmTurnMeta = {
         stopReason: asText(event.payload.stopReason),
         steps: typeof event.payload.steps === 'number' ? event.payload.steps : 0,
@@ -605,7 +631,9 @@ function applyServerEvent(state: TranscriptState, event: AiDmTranscriptEvent): T
         live: '',
         status: 'done',
         meta,
-        seq: event.seq,
+        // turn.ended is the LAST event of a turn; adopting its seq would sort the bubble
+        // below every tool chip the turn produced. Keep the anchor (see the narration fold).
+        seq: bubble.seq ?? event.seq,
       };
       return { ...base, entries: orderBySeq(next) };
     }

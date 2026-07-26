@@ -5512,7 +5512,10 @@ export type AiDmUsageHistoryResponse = z.infer<typeof AiDmUsageHistoryResponse>;
 // wall-clock timestamp (two actions in the same millisecond have no total order) and
 // deliberately NOT the global row id (which interleaves across campaigns and would leak
 // server-wide write volume). It is the pagination cursor AND the reconnect watermark:
-// "I have through seq N, give me the rest" has exactly one gap-free answer.
+// "I have through seq N, give me the rest" has exactly one answer, gap-free within the
+// retained window (retention is bounded — see AI_DM_TRANSCRIPT_RETENTION_MAX_EVENTS — so
+// a client offline past the pruned edge is served what still exists, not events already
+// deleted).
 export const AiDmTranscriptEventKind = z.enum([
   'player.action',   // an accepted player submission — the gap #572 is about
   'narration',       // one aggregated narration step (never a raw narration.delta)

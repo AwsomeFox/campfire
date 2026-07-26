@@ -105,6 +105,42 @@ describe('ai-dm authoritative table transcript (#572)', () => {
     );
   });
 
+  it('orders a turn narration-before-its-tools, so a client can render cause before effect', async () => {
+    const campaignId = await driverCampaign('Transcript Turn Ordering');
+    // One turn: the model narrates, calls a tool, then narrates the outcome.
+    h.script(
+      {
+        text: 'You test your luck…',
+        toolCalls: [{ id: 'call_roll', name: 'roll_dice', arguments: { campaignId, expr: '2d6' } }],
+        usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+      },
+      { text: 'The lock clicks open.', usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 } },
+    );
+    const sent = await h.sendMessage(campaignId, { input: 'I pick the lock.' });
+    expect(sent.status).toBe(201);
+
+    const events = (await listTranscript(h, campaignId, dm, { limit: 200 })).body.items as AiDmTranscriptEvent[];
+    const firstNarration = events.find((e) => e.kind === 'narration');
+    const tool = events.find((e) => e.kind === 'tool');
+    const ended = events.find((e) => e.kind === 'turn.ended');
+    expect(firstNarration).toBeDefined();
+    expect(tool).toBeDefined();
+    expect(ended).toBeDefined();
+
+    // This is the ordering contract the client's DM-bubble anchoring depends on: a
+    // narration step is recorded BEFORE the tools that step invoked, and turn.ended last.
+    // If the server ever reordered these, the table would render what the AI did above
+    // what it said — so pin it here, in the gated suite, not only in the reducer spec.
+    expect(firstNarration!.seq).toBeLessThan(tool!.seq);
+    expect(tool!.seq).toBeLessThan(ended!.seq);
+    // All three belong to the same turn, which is what lets the client group them.
+    expect(tool!.turnId).toBe(firstNarration!.turnId);
+    expect(ended!.turnId).toBe(firstNarration!.turnId);
+    // And the player action that started it precedes the whole turn.
+    const action = events.find((e) => e.kind === 'player.action')!;
+    expect(action.seq).toBeLessThan(firstNarration!.seq);
+  });
+
   it('assigns a strictly increasing per-campaign seq that does not interleave across campaigns', async () => {
     const a = await driverCampaign('Transcript Seq A');
     const b = await driverCampaign('Transcript Seq B');

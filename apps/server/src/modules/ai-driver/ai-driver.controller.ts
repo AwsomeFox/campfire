@@ -468,7 +468,8 @@ export class AiDriverController {
       'Requires campaign membership. Returns ONE ordered transcript every player at the table shares — accepted ' +
       'player actions, narration steps, tool summaries, cancellations, votes and control changes — each with a stable ' +
       '`eventId` and a per-campaign `seq`. `seq` is the ordering key AND the cursor: pass `after=<seq>` after a ' +
-      'reconnect to replay exactly the events you missed (oldest-first, gap-free), or omit it for the newest page ' +
+      'reconnect to replay exactly the events you missed (oldest-first, and gap-free as long as your watermark is ' +
+      'still inside the retained window — see the retention cap), or omit it for the newest page ' +
       'and follow `nextCursor` to scroll further back. Role redaction is applied HERE: DM-only events are withheld ' +
       'from players and viewers, and a hidden encounter id inside a tool payload is stripped for non-DMs.',
   })

@@ -2946,6 +2946,15 @@ function migrateCastSessionsTable(sqlite: Database.Database): void {
  * the global row id as the cursor); a dev database created from that build must gain the
  * columns and a backfilled per-campaign `seq` rather than silently failing every insert.
  * `seq` is backfilled in (campaign_id, id) order — exactly the order the rows were written.
+ *
+ * The ALTER branch is BRANCH-LOCAL DEV SALVAGE, not a production upgrade path: the table
+ * is new in this change, so no released database can have the old shape. One cosmetic
+ * consequence is worth knowing about — a fresh database gets `seq INTEGER NOT NULL` from
+ * the CREATE above, while a salvaged dev database gets a NULLABLE `seq`, because SQLite
+ * cannot ADD a NOT NULL column without a default. It is harmless (the service always
+ * supplies `seq`, and UNIQUE (campaign_id, seq) is what actually guards the sequence), and
+ * rewriting the table to tighten the constraint would cost a 12-column copy/drop/rename
+ * for dev databases only. Noted rather than fixed, deliberately.
  */
 function migrateAiDmTranscriptEventsTable572(sqlite: Database.Database): void {
   sqlite.exec(`

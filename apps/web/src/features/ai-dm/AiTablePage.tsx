@@ -187,9 +187,23 @@ export default function AiTablePage() {
   const memberName = me?.user.displayName || me?.user.username || t('table.you');
   const characterName = myCharacter?.name;
 
-  // Persist the transcript on every change (bounded inside saveTranscript).
+  /**
+   * Which campaign the reducer state currently holds. Seeded from the first render, since
+   * that is what the lazy initializer loaded, and re-pointed by the campaign-switch reset
+   * below. Needed because a table -> table param change reuses this component instance, so
+   * for one render `campaignId` is already the NEW table while `transcript` still holds the
+   * OLD one's entries.
+   */
+  const transcriptCampaignRef = useRef<number | undefined>(campaignId);
+
+  // Persist the transcript cache on every change (bounded inside saveTranscript).
   useEffect(() => {
-    if (campaignId !== undefined) saveTranscript(campaignId, transcript);
+    // Never write one campaign's entries under another's key. This effect is declared
+    // BEFORE the campaign-switch reset, so on the switch render it would otherwise persist
+    // the previous table's transcript to the new campaign's cache — which the reset would
+    // then read straight back, laundering the leak through localStorage.
+    if (campaignId === undefined || transcriptCampaignRef.current !== campaignId) return;
+    saveTranscript(campaignId, transcript);
   }, [campaignId, transcript]);
 
   /**
@@ -236,8 +250,27 @@ export default function AiTablePage() {
   useEffect(() => {
     if (campaignId === undefined || !isDriver) return;
     if (transcriptLoadedFor.current === campaignId) return;
+    const previous = transcriptLoadedFor.current;
     transcriptLoadedFor.current = campaignId;
     setTranscriptFetched(false);
+    // TABLE -> TABLE campaign switch. `/c/:campaignId/table` is one unkeyed route element,
+    // so React reuses this component instance when only the param changes — the reducer's
+    // lazy initializer does NOT re-run. That transition is reachable: the always-mounted
+    // notifications bell lists cross-campaign items and navigates straight to
+    // `/c/<other>/table` for an ai_dm_alert. Without this reset, the previous campaign's
+    // entries survive, the new campaign's authoritative events MERGE into them, and the
+    // save effect then persists the old table's transcript under the new campaign's cache
+    // key. A transcript is exactly the wrong thing to leak between tables.
+    //
+    // A reset dispatch rather than `key={campaignId}` on the route: remounting would also
+    // discard scroll/follow position and re-run the whole seed + screen-reader settle
+    // sequence, and this is the narrower, local fix.
+    if (previous !== undefined) {
+      lastSeqRef.current = 0;
+      dispatch({ type: 'hydrate', state: loadTranscript(campaignId) });
+      seededRef.current = false;
+    }
+    transcriptCampaignRef.current = campaignId;
     // Opt this surface into authoritative mode BEFORE the first fetch: from here on the
     // durable `transcript` frames are the transcript, and the thin signal frames that now
     // have durable counterparts are ignored so nothing renders twice.

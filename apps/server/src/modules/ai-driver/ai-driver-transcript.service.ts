@@ -37,9 +37,21 @@ import { AiDmStreamService } from './ai-driver-stream.service';
  *    row id IS totally ordered, but it interleaves across campaigns, so a per-campaign
  *    cursor built on it would leak server-wide write volume and produce a jagged sequence
  *    no client can reason about. `seq` is the ordering key, the pagination cursor, and the
- *    reconnect watermark all at once: "I have through seq N" has exactly one gap-free
- *    answer. UNIQUE (campaign_id, seq) turns any double-assignment into a loud failure
- *    instead of silent transcript corruption.
+ *    reconnect watermark all at once: "I have through seq N" has exactly one answer, and
+ *    it is gap-free WITHIN THE RETAINED WINDOW (see RETENTION below — a client offline
+ *    long enough for its watermark to fall behind the pruned edge cannot be served events
+ *    that no longer exist). UNIQUE (campaign_id, seq) turns any double-assignment into a
+ *    loud failure instead of silent transcript corruption.
+ *
+ *    SINGLE-PROCESS ASSUMPTION. Assigning `seq` as MAX(seq)+1 is collision-free because
+ *    better-sqlite3 runs the transaction synchronously to completion with no JS yield, so
+ *    two record() calls cannot interleave inside one Node process — the same single-
+ *    instance assumption the driver's in-memory session map and SSE Subject already make.
+ *    Under a hypothetical multi-process deployment sharing one database file, two writers
+ *    could read the same MAX(seq); the UNIQUE index would then reject the loser, and the
+ *    best-effort catch below would log and drop that one transcript row rather than
+ *    corrupt the sequence. Loud and lossy beats silent and wrong, but a multi-instance
+ *    deployment would need a real allocator here.
  *
  * 2. DEDUP — `clientRef`, a token the SENDING client mints and POSTs with its action,
  *    echoed back verbatim on the persisted event. The sender replaces its optimistic entry
@@ -58,6 +70,12 @@ import { AiDmStreamService } from './ai-driver-stream.service';
  * oldest are pruned in the same transaction as each insert, so the table is self-bounding
  * with no sweeper job. Rows cascade-delete with the campaign, and a DM can purge on demand
  * (DELETE /campaigns/:id/ai-dm/transcript) or export first (GET .../transcript/export).
+ *
+ * This bounds the recovery guarantee: a client whose watermark falls below the pruned edge
+ * (offline across more than the cap's worth of events in one campaign) will be served the
+ * retained window and silently skip the pruned middle, because those events are genuinely
+ * deleted. Detecting that case would need a server-side signal — a client cannot infer it
+ * from seq continuity, since role redaction legitimately removes seqs from a player's view.
  */
 
 /** Backward-scrollback cursor: "older than this seq", newest-first keyset paging. */

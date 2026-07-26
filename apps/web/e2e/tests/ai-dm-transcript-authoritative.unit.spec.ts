@@ -263,3 +263,70 @@ test('a surface that has NOT opted in ignores transcript frames and keeps the le
   expect(optedIn.lastSeq).toBe(1);
   expect(dmEntryText(optedIn.entries.filter((e): e is DmEntry => e.kind === 'dm')[0])).toBe('A bolt slides back.');
 });
+
+
+test('a turn’s tool chips sort BELOW the narration that caused them, not above it', () => {
+  // The server records each narration step before the tools that step invoked, and
+  // turn.ended last: narration@2, tool@3, turn.ended@4. The DM bubble absorbs the whole
+  // turn, so if it adopted the LATEST folded seq it would become 4 and sort under tool@3 —
+  // showing a player what the AI did before what it said, in the one feature whose point is
+  // an ordered log. The bubble must stay anchored at its first event.
+  const state = apply(
+    emptyTranscript,
+    serverEvent({ kind: 'player.action', seq: 1, eventId: 'p1', actorName: 'Runa', payload: { text: 'I pick the lock.' } }),
+    serverEvent({ kind: 'narration', seq: 2, eventId: 'n1', turnId: 't1', payload: { text: 'You test your luck…' } }),
+    serverEvent({ kind: 'tool', seq: 3, eventId: 'tl1', turnId: 't1', payload: { name: 'roll_dice', isError: false, proposed: false } }),
+    serverEvent({ kind: 'turn.ended', seq: 4, eventId: 'e1', turnId: 't1', payload: { stopReason: 'complete', steps: 1, tokensUsed: 12, budgetRemaining: 88 } }),
+  );
+
+  const kinds = state.entries.map((e) => e.kind);
+  expect(kinds).toEqual(['player', 'dm', 'tool']);
+
+  const bubble = state.entries.find((e): e is DmEntry => e.kind === 'dm')!;
+  const chip = state.entries.find((e) => e.kind === 'tool')!;
+  expect(bubble.seq).toBe(2); // anchored at the narration, NOT bumped to turn.ended's 4
+  expect(state.entries.indexOf(bubble)).toBeLessThan(state.entries.indexOf(chip));
+  // The turn still closes properly — anchoring the order must not cost the meta row.
+  expect(bubble.meta?.stopReason).toBe('complete');
+  // …and the watermark still advances to the newest event, so reconnect is unaffected.
+  expect(state.lastSeq).toBe(4);
+});
+
+test('the anchor survives a multi-step turn arriving out of order', () => {
+  // Same turn, delivered newest-first (as a REST page reversal or a racing frame might).
+  const state = apply(
+    emptyTranscript,
+    serverEvent({ kind: 'turn.ended', seq: 5, eventId: 'e2', turnId: 't2', payload: { stopReason: 'complete', steps: 2, tokensUsed: 30, budgetRemaining: 70 } }),
+    serverEvent({ kind: 'tool', seq: 4, eventId: 'tl2', turnId: 't2', payload: { name: 'update_encounter', isError: false, proposed: false } }),
+    serverEvent({ kind: 'narration', seq: 3, eventId: 'n2', turnId: 't2', payload: { text: 'The lock clicks open.' } }),
+  );
+  const bubble = state.entries.find((e): e is DmEntry => e.kind === 'dm')!;
+  const chip = state.entries.find((e) => e.kind === 'tool')!;
+  // The bubble was created by turn.ended (seq 5) before its narration arrived; once the
+  // narration folds in, ordering must reflect the earliest event of the turn.
+  expect(state.entries.indexOf(bubble)).toBeLessThan(state.entries.indexOf(chip));
+  expect(dmEntryText(bubble)).toBe('The lock clicks open.');
+});
+
+
+test('a new turn never fuses into a previous turn’s still-open bubble', () => {
+  // A REST replay carries narration before its turn.ended, and a cancelled turn may never
+  // get one — so a bubble can legitimately still be `streaming` when the NEXT turn's
+  // narration arrives. It must open its own bubble rather than merging into the old one,
+  // which would fuse two turns' text and drag the ordering anchor back to the older turn.
+  const state = apply(
+    emptyTranscript,
+    serverEvent({ kind: 'narration', seq: 1, eventId: 'n1', turnId: 't0', payload: { text: 'The corridor is quiet.' } }),
+    serverEvent({ kind: 'player.action', seq: 2, eventId: 'p1', actorName: 'Bram', payload: { text: 'I sprint for the stair.' } }),
+    serverEvent({ kind: 'narration', seq: 3, eventId: 'n2', turnId: 't2', payload: { text: 'Boots hammer the flagstones.' } }),
+  );
+
+  const bubbles = state.entries.filter((e): e is DmEntry => e.kind === 'dm');
+  expect(bubbles).toHaveLength(2);
+  expect(bubbles.map((b) => b.id)).toEqual(['dm:t0', 'dm:t2']);
+  expect(dmEntryText(bubbles[0])).toBe('The corridor is quiet.');
+  expect(dmEntryText(bubbles[1])).toBe('Boots hammer the flagstones.');
+
+  // The player action stays between the two turns it actually fell between.
+  expect(state.entries.map((e) => e.kind)).toEqual(['dm', 'player', 'dm']);
+});
