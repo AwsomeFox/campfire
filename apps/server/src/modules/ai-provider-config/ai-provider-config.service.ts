@@ -469,20 +469,48 @@ export class AiProviderConfigService {
    * shipped there.
    */
   async resolveEffectiveConfig(campaignId: number): Promise<AiProviderConfig | null> {
+    return (await this.resolveEffectiveConfigWithEndpointScope(campaignId)).config;
+  }
+
+  /**
+   * `resolveEffectiveConfig` plus WHICH SCOPE actually supplied the endpoint (issue #501).
+   *
+   * Callers recording durable provenance must not use `getEffectiveView().source` for
+   * this. That field answers "does a campaign override row exist?" — it is `'campaign'`
+   * whenever any override exists, keyed or not. The question provenance needs answered is
+   * "whose URL is this?", and the two only coincide when the override carries its own key.
+   *
+   * A KEYLESS campaign override inherits the SERVER row's `baseUrl` + `providerType` (the
+   * #373 invariant binding the endpoint to whoever owns the key), so its endpoint is
+   * server-owned even though a campaign row exists. Reporting that as `'campaign'` both
+   * mis-states the provenance and — because the campaign view never shows a DM the
+   * inherited server URL — discloses an endpoint they cannot otherwise obtain.
+   *
+   * `endpointScope` is null exactly when `config` is null (no provider row at all).
+   */
+  async resolveEffectiveConfigWithEndpointScope(
+    campaignId: number,
+  ): Promise<{ config: AiProviderConfig | null; endpointScope: 'campaign' | 'server' | null }> {
     const server = await this.serverRow();
     const camp = await this.campaignRow(campaignId);
     const primary = camp ?? server;
-    if (!primary) return null;
+    if (!primary) return { config: null, endpointScope: null };
+
+    /** The endpoint belongs to whichever row supplied the baseUrl below. */
+    const primaryScope: 'campaign' | 'server' = camp ? 'campaign' : 'server';
 
     // The scope that supplies the key also supplies the endpoint + providerType.
     // When the primary scope has its own key, key+endpoint+type are self-consistent.
     if (primary.encryptedApiKey) {
       return {
-        providerType: primary.providerType as AiProviderType,
-        model: primary.model,
-        apiKey: decryptSecret(primary.encryptedApiKey, this.key),
-        baseUrl: primary.baseUrl ?? undefined,
-        params: safeJson(primary.params, {}),
+        config: {
+          providerType: primary.providerType as AiProviderType,
+          model: primary.model,
+          apiKey: decryptSecret(primary.encryptedApiKey, this.key),
+          baseUrl: primary.baseUrl ?? undefined,
+          params: safeJson(primary.params, {}),
+        },
+        endpointScope: primaryScope,
       };
     }
 
@@ -492,11 +520,15 @@ export class AiProviderConfigService {
     // a credential destination.
     if (camp && server?.encryptedApiKey) {
       return {
-        providerType: server.providerType as AiProviderType,
-        model: primary.model,
-        apiKey: decryptSecret(server.encryptedApiKey, this.key),
-        baseUrl: server.baseUrl ?? undefined,
-        params: safeJson(primary.params, {}),
+        config: {
+          providerType: server.providerType as AiProviderType,
+          model: primary.model,
+          apiKey: decryptSecret(server.encryptedApiKey, this.key),
+          baseUrl: server.baseUrl ?? undefined,
+          params: safeJson(primary.params, {}),
+        },
+        // The endpoint came from the SERVER row, not the campaign override.
+        endpointScope: 'server',
       };
     }
 
@@ -507,11 +539,15 @@ export class AiProviderConfigService {
     const serverEnvironmentKey = server ? environmentApiKey(server.providerType) : undefined;
     if (camp && serverEnvironmentKey) {
       return {
-        providerType: server!.providerType as AiProviderType,
-        model: primary.model,
-        apiKey: serverEnvironmentKey,
-        baseUrl: server!.baseUrl ?? undefined,
-        params: safeJson(primary.params, {}),
+        config: {
+          providerType: server!.providerType as AiProviderType,
+          model: primary.model,
+          apiKey: serverEnvironmentKey,
+          baseUrl: server!.baseUrl ?? undefined,
+          params: safeJson(primary.params, {}),
+        },
+        // Again the SERVER row's endpoint, inherited with the environment credential.
+        endpointScope: 'server',
       };
     }
 
@@ -521,11 +557,14 @@ export class AiProviderConfigService {
       const environmentKey = environmentApiKey(primary.providerType);
       if (environmentKey) {
         return {
-          providerType: primary.providerType as AiProviderType,
-          model: primary.model,
-          apiKey: environmentKey,
-          baseUrl: primary.baseUrl ?? undefined,
-          params: safeJson(primary.params, {}),
+          config: {
+            providerType: primary.providerType as AiProviderType,
+            model: primary.model,
+            apiKey: environmentKey,
+            baseUrl: primary.baseUrl ?? undefined,
+            params: safeJson(primary.params, {}),
+          },
+          endpointScope: 'server',
         };
       }
     }
@@ -534,11 +573,14 @@ export class AiProviderConfigService {
     // override on a server default that itself has no key). Return the primary scope's
     // own endpoint/type — no server key is in play, so there is nothing to leak.
     return {
-      providerType: primary.providerType as AiProviderType,
-      model: primary.model,
-      apiKey: undefined,
-      baseUrl: primary.baseUrl ?? undefined,
-      params: safeJson(primary.params, {}),
+      config: {
+        providerType: primary.providerType as AiProviderType,
+        model: primary.model,
+        apiKey: undefined,
+        baseUrl: primary.baseUrl ?? undefined,
+        params: safeJson(primary.params, {}),
+      },
+      endpointScope: primaryScope,
     };
   }
 

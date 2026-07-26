@@ -140,7 +140,11 @@ export class CoDmService {
       count,
       await this.resolveLanguageContract(campaignId, input.narrationLanguage),
     );
-    const config = await this.providerConfig.resolveEffectiveConfig(campaignId);
+    // `endpointScope` here is the scope that OWNS the resolved endpoint, not merely
+    // whether a campaign override row exists — a keyless override executes against the
+    // SERVER endpoint (#501).
+    const { config, endpointScope: resolvedEndpointScope } =
+      await this.providerConfig.resolveEffectiveConfigWithEndpointScope(campaignId);
     const reservation = await this.aiDm.reserveTokenBudget(campaignId, DRAFT_MAX_TOKENS);
 
     let narration = '';
@@ -157,7 +161,6 @@ export class CoDmService {
     try {
       if (config) {
         const aiProvider: AiProvider = createAiProvider(config);
-        const effective = await this.providerConfig.getEffectiveView(campaignId);
         const result = await aiProvider.generate({
           system: instructions,
           messages: [{ role: 'user', content: input.prompt }],
@@ -169,7 +172,10 @@ export class CoDmService {
         resolvedModel = result.model || config.model;
         providerName = aiProvider.name;
         providerType = config.providerType;
-        endpointScope = effective.source ?? 'none';
+        // The scope that OWNS the endpoint, so a keyless campaign override running against
+        // the server endpoint is recorded as 'server' — both truthful and the condition
+        // the baseUrl gate below keys off (#501 review).
+        endpointScope = resolvedEndpointScope ?? 'none';
         // Never persist the SERVER row's baseUrl — co-DM drafts are filed as DM-readable
         // proposals, and the admin-managed server endpoint is deliberately hidden from
         // campaign DMs (#501 review).

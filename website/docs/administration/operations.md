@@ -175,6 +175,10 @@ fail-closed default, since nobody can retroactively consent on a player's behalf
   `consent` block reports what was withheld and why.
 - Members no longer see each other's consent state on the roster. The DM still sees
   everyone's (needed to explain a withheld recap), and each member still sees their own.
+- **The first scribe run after upgrading re-drafts rather than skipping.** The assembled
+  source material changed shape, so its idempotency hash differs from the one recorded
+  before the upgrade and a run over otherwise-unchanged material will not report
+  *"identical source already drafted"*. This is one-time; subsequent runs skip as usual.
 
 **What members and DMs need to do**
 

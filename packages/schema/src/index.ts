@@ -5220,6 +5220,12 @@ export const AiGenerationProvenance = z.object({
      *
      * Defaults to `true`: fail-closed for an unrecognised blob, and historically accurate
      * for rows written before the flag existed (the filter always ran, sends were external).
+     *
+     * Known edge: this records the egress resolved at ASSEMBLY time. If the provider row is
+     * removed between assembly and generation, the run falls back to the local seam while
+     * this stays `true` — an over-report. That drift direction is deliberately tolerated;
+     * the reverse (assembled local, then sent externally) is refused outright by the
+     * ordering interlock in `ScribeService.run`.
      */
     externalSend: z.boolean().default(true),
     includedAuthorUserIds: z.array(z.string()).default([]),

@@ -765,6 +765,15 @@ describe('AI scribe — server-scope endpoint URL never lands in provenance (e2e
   beforeAll(async () => {
     harness = await createAiEvalHarness();
     owner = await createPersistedOwner(harness, 'scribe-server-endpoint-owner');
+    await harness.enableExperimental();
+
+    // SERVER-default provider (admin-managed), with an endpoint a DM must not learn.
+    // Set here rather than inside a case so each case stands alone under `-t` filtering.
+    const server = await request(harness.server)
+      .put(`${API}/settings/ai-provider`)
+      .set(dm)
+      .send({ providerType: 'mock', model: 'mock-1', apiKey: 'sk-server-key-1234', baseUrl: SERVER_BASE_URL });
+    expect(server.status).toBe(200);
   });
   afterAll(async () => {
     await harness.close();
@@ -772,17 +781,9 @@ describe('AI scribe — server-scope endpoint URL never lands in provenance (e2e
 
   it('records endpoint.scope=server but a null baseUrl', async () => {
     await harness.enableExperimental();
+    // No per-campaign override at all — the run inherits the server default outright.
     const campaignId = await ownedCampaign('Scribe Server Endpoint Provenance');
     await harness.configureSeat(campaignId, { enabled: true, tokenBudget: 5000 });
-
-    // SERVER-default provider (admin-managed), with an endpoint a DM must not learn.
-    // Deliberately NOT a per-campaign override — a campaign baseUrl is DM-configured and
-    // stays readable to them.
-    const server = await request(harness.server)
-      .put(`${API}/settings/ai-provider`)
-      .set(dm)
-      .send({ providerType: 'mock', model: 'mock-1', apiKey: 'sk-server-key-1234', baseUrl: SERVER_BASE_URL });
-    expect(server.status).toBe(200);
 
     await seedResolvedInbox(harness, campaignId, 'The caravan reached the gate.');
     const run = await request(harness.server).post(`${API}/campaigns/${campaignId}/scribe/run`).set(dm).send({});
@@ -799,6 +800,44 @@ describe('AI scribe — server-scope endpoint URL never lands in provenance (e2e
     // read-time redaction would leave it in the DB for exports/backups to leak later.
     const jobs = await request(harness.server).get(`${API}/campaigns/${campaignId}/scribe/jobs`).set(dm);
     expect(jobs.status).toBe(200);
+    expect(JSON.stringify(jobs.body)).not.toContain('campfire-internal-gateway');
+  });
+
+  /**
+   * The configuration that defeated the FIRST version of this fix.
+   *
+   * A KEYLESS campaign override inherits the SERVER row's baseUrl + providerType (the #373
+   * invariant binding the endpoint to whoever owns the key) — but `getEffectiveView().source`
+   * still reports `'campaign'`, because it answers "does a campaign row exist?" rather than
+   * "whose endpoint is this?". Keying the redaction off that kept the server URL.
+   *
+   * The DM cannot obtain this URL any other way: the campaign provider view shows only the
+   * campaign row's own baseUrl, never the inherited server one.
+   */
+  it('reports scope=server for a KEYLESS campaign override, which runs on the server endpoint', async () => {
+    await harness.enableExperimental();
+    const campaignId = await ownedCampaign('Scribe Keyless Override Provenance');
+    await harness.configureSeat(campaignId, { enabled: true, tokenBudget: 5000 });
+
+    // The server default (key + internal endpoint) comes from beforeAll. Add a campaign
+    // override carrying a model but NO key of its own.
+    const override = await request(harness.server)
+      .put(`${API}/campaigns/${campaignId}/ai-provider`)
+      .set(dm)
+      .send({ providerType: 'mock', model: 'mock-1' });
+    expect(override.status).toBe(200);
+
+    await seedResolvedInbox(harness, campaignId, 'The gatehouse keys went missing.');
+    const run = await request(harness.server).post(`${API}/campaigns/${campaignId}/scribe/run`).set(dm).send({});
+    expect(run.status).toBe(201);
+    expect(run.body.job.status).toBe('succeeded');
+
+    const provenance = run.body.job.generationProvenance;
+    // Truthful as well as safe: the draft really did execute against the SERVER endpoint.
+    expect(provenance.endpoint.scope).toBe('server');
+    expect(provenance.endpoint.baseUrl).toBeNull();
+
+    const jobs = await request(harness.server).get(`${API}/campaigns/${campaignId}/scribe/jobs`).set(dm);
     expect(JSON.stringify(jobs.body)).not.toContain('campfire-internal-gateway');
   });
 });

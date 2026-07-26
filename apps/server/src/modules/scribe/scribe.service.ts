@@ -686,8 +686,12 @@ export class ScribeService implements OnApplicationBootstrap {
       // reserving and settling must be on a path that releases it. Resolving the config
       // outside would strand the reservation if decrypting/reading it threw (#563).
       let config: AiProviderConfig | null = null;
+      // Which scope OWNS the resolved endpoint — not merely whether a campaign row
+      // exists. A keyless campaign override executes against the SERVER endpoint (#501).
+      let resolvedEndpointScope: 'campaign' | 'server' | null = null;
       try {
-        config = await this.providerConfig.resolveEffectiveConfig(campaignId);
+        ({ config, endpointScope: resolvedEndpointScope } =
+          await this.providerConfig.resolveEffectiveConfigWithEndpointScope(campaignId));
         const aiSupports = await this.supportPreferences.listForAi(campaignId);
         const supportGuidance = aiSupports.length > 0
           ? `\n\nParticipant-authorized practical supports (apply respectfully; do not infer diagnoses):\n${JSON.stringify(aiSupports)}`
@@ -712,7 +716,6 @@ export class ScribeService implements OnApplicationBootstrap {
             );
           }
           const provider: AiProvider = createAiProvider({ ...config, params: { ...config.params, maxTokens } });
-          const effective = await this.providerConfig.getEffectiveView(campaignId);
           const result = await provider.generate({
             system,
             messages: [{ role: 'user', content: draft }],
@@ -724,7 +727,10 @@ export class ScribeService implements OnApplicationBootstrap {
           providerName = provider.name;
           providerType = config.providerType;
           model = result.model || config.model;
-          endpointScope = effective.source ?? 'none';
+          // The scope that OWNS the endpoint, so a keyless campaign override that runs
+          // against the server endpoint is recorded as 'server' — both truthful and the
+          // condition the baseUrl gate below keys off (#501 review).
+          endpointScope = resolvedEndpointScope ?? 'none';
           // Never persist the SERVER row's baseUrl — scribe jobs and filed proposals are
           // DM-readable, and the admin-managed server endpoint is deliberately hidden from
           // campaign DMs (#501 review).

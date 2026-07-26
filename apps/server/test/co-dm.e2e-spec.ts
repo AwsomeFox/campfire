@@ -298,4 +298,31 @@ describe('co-DM authoring — server-scope endpoint URL never lands in provenanc
     expect(proposals.status).toBe(200);
     expect(JSON.stringify(proposals.body)).not.toContain('campfire-internal-gateway');
   });
+
+  /**
+   * The configuration that defeated the FIRST version of this fix: a KEYLESS campaign
+   * override inherits the SERVER endpoint (#373), yet `getEffectiveView().source` reports
+   * `'campaign'` merely because a campaign row exists. The scope must come from whoever
+   * actually supplied the endpoint.
+   */
+  it('reports scope=server for a KEYLESS campaign override, which runs on the server endpoint', async () => {
+    const override = await request(h.server)
+      .put(`/api/v1/campaigns/${campaignId}/ai-provider`)
+      .set(dm)
+      .send({ providerType: 'mock', model: 'mock-1' });
+    expect(override.status).toBe(200);
+
+    const res = await request(h.server)
+      .post(api(campaignId))
+      .set(dm)
+      .send({ target: 'npc', prompt: JSON.stringify({ name: 'Warden Ilse', role: 'Guard' }) });
+
+    expect(res.status).toBe(201);
+    const provenance = res.body.proposals[0].generationProvenance;
+    expect(provenance.endpoint.scope).toBe('server');
+    expect(provenance.endpoint.baseUrl).toBeNull();
+
+    const proposals = await request(h.server).get(`/api/v1/campaigns/${campaignId}/proposals`).set(dm);
+    expect(JSON.stringify(proposals.body)).not.toContain('campfire-internal-gateway');
+  });
 });
