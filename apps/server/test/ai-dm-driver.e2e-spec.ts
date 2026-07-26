@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import request from 'supertest';
 import { createAiEvalHarness, dm, player, viewer, type AiEvalHarness } from './ai-eval-harness';
 import { mcpToolsToAiSchemas } from '../src/modules/ai-dm/providers/tool-registry';
@@ -42,6 +44,168 @@ describe('ai-dm driver runtime — session loop + streamed narration + tool exec
 
   afterAll(async () => {
     await h.close();
+  });
+
+  it('#519 readiness: blocked -> safe provider test -> fixed -> driver green with cost estimate', async () => {
+    const campaignId = await h.createCampaign('AI Readiness 519');
+
+    const initial = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/readiness`).set(dm);
+    expect(initial.status).toBe(200);
+    expect(initial.body.driverOk).toBe(false);
+    expect(initial.body.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ key: 'provider', status: 'blocked', requiredForDriver: true }),
+        expect.objectContaining({ key: 'budget', status: 'blocked', requiredForDriver: true }),
+      ]),
+    );
+    expect(initial.body.estimatedCost.estimatedTotalTokens).toBeGreaterThan(0);
+    // A blocked driver must SAY why (acceptance criterion: never a bare unavailable button).
+    expect(typeof initial.body.driverUnavailableReason).toBe('string');
+    expect(initial.body.driverUnavailableReason.length).toBeGreaterThan(0);
+
+    const testOnly = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/ai-provider/test`)
+      .set(dm)
+      .send({ providerType: 'mock', model: 'mock-1', apiKey: '' });
+    expect(testOnly.status).toBe(201);
+    expect(testOnly.body).toEqual(expect.objectContaining({ ok: true, credentialSource: 'not-required' }));
+
+    const afterTest = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/readiness`).set(dm);
+    expect(afterTest.status).toBe(200);
+    expect(afterTest.body.checks).toEqual(
+      expect.arrayContaining([expect.objectContaining({ key: 'provider', status: 'blocked' })]),
+    );
+
+    await h.configureProvider(campaignId);
+    const mode = await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 20_000 });
+    expect(mode.status).toBe(200);
+
+    const ready = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/readiness`).set(dm);
+    expect(ready.status).toBe(200);
+    expect(ready.body.driverOk).toBe(true);
+    expect(ready.body.driverUnavailableReason).toBeNull();
+    expect(ready.body.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ key: 'driverTools', status: 'ok', requiredForDriver: true }),
+        expect.objectContaining({ key: 'secretPolicy', status: 'ok' }),
+      ]),
+    );
+    expect(ready.body.estimatedCost).toEqual(
+      expect.objectContaining({
+        estimatedCompletionTokens: 1024,
+        estimatedTotalTokens: expect.any(Number),
+      }),
+    );
+  });
+
+  it('#519 readiness never reports driver-ready while the seat mode is off', async () => {
+    // Regression: `driverOk` was computed from the configuration checks alone, none of which
+    // look at seat.mode/seat.enabled. A table with provider + model + budget all green but the
+    // AI switched OFF therefore reported driverOk:true — and the setup checklist painted a
+    // "The AI DM is ready … the AI is co-DMing" banner over an AI that does nothing, while
+    // `assertRunnable` would 403 the very next turn.
+    const campaignId = await h.createCampaign('AI Readiness 519 mode off');
+    await h.configureProvider(campaignId);
+    // Arm every driver prerequisite, then switch the operating mode back off.
+    const armed = await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 20_000 });
+    expect(armed.status).toBe(200);
+    const ready = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/readiness`).set(dm);
+    expect(ready.body.driverOk).toBe(true);
+
+    const off = await h.configureSeat(campaignId, { mode: 'off', tokenBudget: 20_000 });
+    expect(off.status).toBe(200);
+
+    const res = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/readiness`).set(dm);
+    expect(res.status).toBe(200);
+    expect(res.body.mode).toBe('off');
+    // Every configuration check still passes …
+    for (const check of res.body.checks) {
+      if (check.requiredForDriver) expect({ key: check.key, ok: check.ok }).toEqual({ key: check.key, ok: true });
+    }
+    // … but the seat is not runnable, and readiness says so on both aggregates.
+    expect(res.body.driverOk).toBe(false);
+    expect(res.body.ok).toBe(false);
+    expect(typeof res.body.driverUnavailableReason).toBe('string');
+    expect(res.body.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ key: 'mode', ok: false, status: 'blocked', detailKey: 'mode.off' }),
+      ]),
+    );
+    // The mode step deep-links to the control that fixes it.
+    const modeCheck = res.body.checks.find((c: { key: string }) => c.key === 'mode');
+    expect(modeCheck.fixHref).toBe(`/c/${campaignId}/settings#ai-dm-mode`);
+
+    // Co-DM arms the seat for propose-only work: the mode check clears, but the DRIVER
+    // aggregate stays false because `assertRunnable` accepts driver mode only.
+    const coDm = await h.configureSeat(campaignId, { mode: 'co_dm', tokenBudget: 20_000 });
+    expect(coDm.status).toBe(200);
+    const asCoDm = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/readiness`).set(dm);
+    expect(asCoDm.body.ok).toBe(true);
+    expect(asCoDm.body.driverOk).toBe(false);
+    expect(asCoDm.body.checks).toEqual(
+      expect.arrayContaining([expect.objectContaining({ key: 'mode', ok: true, detailKey: 'mode.coDm' })]),
+    );
+  });
+
+  it('#519 every readiness check carries a translatable detailKey the web catalog knows', async () => {
+    // #629 makes every user-facing string translatable. The checklist renders each check's
+    // body from `aiOnboarding.checklist.checkDetails.<detailKey>`, so a check whose id is
+    // missing from the English catalog would silently fall back to the server's English.
+    const campaignId = await h.createCampaign('AI Readiness 519 i18n');
+    await h.configureProvider(campaignId);
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 20_000 });
+    const res = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/readiness`).set(dm);
+    expect(res.status).toBe(200);
+
+    const catalog = JSON.parse(
+      readFileSync(resolve(__dirname, '../../web/src/i18n/locales/en/aiOnboarding.json'), 'utf8'),
+    ) as {
+      aiOnboarding: {
+        checklist: { checkDetails: Record<string, Record<string, string>>; checkTitles: Record<string, string> };
+      };
+    };
+    const { checkDetails, checkTitles } = catalog.aiOnboarding.checklist;
+
+    for (const check of res.body.checks as { key: string; detailKey: string; detailParams: unknown }[]) {
+      expect(typeof check.detailKey).toBe('string');
+      expect(check.detailKey.length).toBeGreaterThan(0);
+      expect(check.detailParams).toBeDefined();
+      const [group, variant] = check.detailKey.split('.');
+      expect({ detailKey: check.detailKey, known: !!checkDetails[group]?.[variant] }).toEqual({
+        detailKey: check.detailKey,
+        known: true,
+      });
+      expect({ key: check.key, titled: !!checkTitles[check.key] }).toEqual({ key: check.key, titled: true });
+    }
+  });
+
+  it('#519 readiness is DM-only and never leaks provider key material', async () => {
+    const campaignId = await h.createCampaign('AI Readiness 519 access');
+    // The harness stores a REAL (fake) API key on the campaign provider row — the readiness
+    // read must expose the provider's shape without any of its credential.
+    await h.configureProvider(campaignId);
+
+    for (const actor of [player, viewer]) {
+      const res = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/readiness`).set(actor);
+      expect(res.status).toBe(403);
+      expect(JSON.stringify(res.body)).not.toContain('sk-test-key');
+    }
+
+    const res = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/readiness`).set(dm);
+    expect(res.status).toBe(200);
+    expect(res.body.provider).toEqual(
+      expect.objectContaining({ configured: true, providerType: 'mock', model: 'mock-1', ready: true }),
+    );
+    // Whole-body secret sweep: neither the key, its last-4, nor any key-bearing field name
+    // may appear anywhere in the readiness payload (checks[].detail included).
+    const body = JSON.stringify(res.body);
+    expect(body).not.toContain('sk-test-key-1234');
+    expect(body).not.toContain('1234');
+    for (const forbidden of ['apiKey', 'encryptedApiKey', 'keyLast4', 'baseUrl']) {
+      expect(body).not.toContain(forbidden);
+    }
+    // The DM's own steering prompt is likewise not part of the readiness surface.
+    expect(body).not.toContain('instructions');
   });
 
   it('#312 driver: a scripted tool call executes a real campfire tool and feeds the result back', async () => {

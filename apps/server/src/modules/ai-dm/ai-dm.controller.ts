@@ -2,10 +2,10 @@ import { Body, Controller, DefaultValuePipe, Get, Param, ParseIntPipe, Post, Put
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
-import type { RequestUser } from '../../common/user.types';
+import { hasServerAdminPower, type RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { AiDmService } from './ai-dm.service';
-import { AiDmSeatUpdateDto, AiDmTurnRequestDto } from './ai-dm.dto';
+import { AiDmReadinessDto, AiDmSeatUpdateDto, AiDmTurnRequestDto } from './ai-dm.dto';
 
 /**
  * Experimental server-side AI Dungeon Master (issue #28), scoped under a campaign.
@@ -35,6 +35,18 @@ export class AiDmController {
   async get(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const role = await this.access.requireMember(user, id);
     return this.aiDm.getSeatForRole(id, role);
+  }
+
+  @Get('readiness')
+  @ApiOperation({
+    summary: 'Get AI readiness before promoting AI actions',
+    description:
+      'DM only. Returns a non-secret readiness checklist covering provider/model/budget/write mode, privacy and consent prerequisites, Driver tool support, and a best-effort per-turn cost estimate.',
+  })
+  @ApiResponse({ status: 200, description: 'The central AI readiness checklist.', type: AiDmReadinessDto })
+  async readiness(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    await this.access.requireRole(user, id, 'dm', { allowArchived: true });
+    return this.aiDm.getReadiness(id, user, { isAdmin: hasServerAdminPower(user) });
   }
 
   @Put()

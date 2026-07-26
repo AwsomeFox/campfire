@@ -131,6 +131,8 @@ export default function CampaignSettingsPage() {
 
     let observer: MutationObserver | undefined;
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    const settleTimeouts: ReturnType<typeof setTimeout>[] = [];
+    let settleScrollsScheduled = false;
     const stopObserving = () => {
       observer?.disconnect();
       observer = undefined;
@@ -138,13 +140,61 @@ export default function CampaignSettingsPage() {
         clearTimeout(timeoutId);
         timeoutId = undefined;
       }
+      while (settleTimeouts.length > 0) {
+        // `handle`, not `id`: the outer `id` is the campaign id this effect is keyed on.
+        const handle = settleTimeouts.pop();
+        if (handle !== undefined) clearTimeout(handle);
+      }
     };
-    const focusTarget = () => {
+    // The settle passes exist because AI subsections render after an async seat load and
+    // shift the target, so the SCROLL offset genuinely needs re-applying. Focus does not:
+    // re-calling focus() on each pass (and, before this, on every DOM mutation inside the
+    // 1.2s window) yanked focus back out of whatever the user had begun interacting with
+    // after the jump — stealing focus from someone who has started typing is an
+    // accessibility defect, not a cosmetic one.
+    //
+    // So focus is applied once per target NODE. The FIRST focus is unconditional — that is
+    // the deep link doing the job it was navigated for, and it must win over whatever the
+    // page happened to focus while loading. A later focus only happens when a re-render has
+    // REPLACED the element (the new node needs the focus the old one was carrying), and then
+    // only if focus is not already parked somewhere the user put it. Scroll correction is
+    // unconditional throughout: repositioning is never disruptive the way focus is.
+    let focusedNode: HTMLElement | null = null;
+    const scrollTarget = () => {
       const target = document.getElementById(targetId);
       if (!(target instanceof HTMLElement)) return false;
-      target.focus({ preventScroll: true });
+      if (focusedNode !== target) {
+        const active = document.activeElement;
+        const userHoldsFocus =
+          !!focusedNode && !!active && active !== document.body && active !== target && !target.contains(active);
+        if (!userHoldsFocus) {
+          focusedNode = target;
+          target.focus({ preventScroll: true });
+        }
+      }
       target.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
-      stopObserving();
+      return true;
+    };
+    const scheduleSettledScrolls = () => {
+      if (settleScrollsScheduled) return;
+      settleScrollsScheduled = true;
+      requestAnimationFrame(scrollTarget);
+      [100, 500, 1_000].forEach((delay) => {
+        settleTimeouts.push(setTimeout(scrollTarget, delay));
+      });
+    };
+    const focusTarget = () => {
+      if (!scrollTarget()) return false;
+      // Settle on the FIRST hit: the target exists, so there is nothing left for the
+      // observer to wait for. Leaving it connected meant every subsequent mutation in the
+      // window re-ran this. The scheduled passes below own the remaining layout shifts.
+      observer?.disconnect();
+      observer = undefined;
+      if (timeoutId !== undefined) {
+        clearTimeout(timeoutId);
+        timeoutId = undefined;
+      }
+      scheduleSettledScrolls();
       return true;
     };
 
