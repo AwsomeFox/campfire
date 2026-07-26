@@ -17,6 +17,44 @@ import { seed, stateFor } from './seed';
  * accessible names / radiogroup behaviour on the rendered page.
  */
 
+type StubEntry = { type?: string; name?: string; summary?: string };
+
+/** Default facet labels the server returns for a pack with no source-native overrides. */
+const STUB_FACET_LABELS: Record<string, string> = {
+  spell: 'Spells',
+  monster: 'Monsters',
+  hazard: 'Hazards',
+  item: 'Items',
+  condition: 'Conditions',
+  class: 'Classes',
+  race: 'Races',
+  feat: 'Feats',
+  section: 'Rules',
+  other: 'Reference',
+};
+const STUB_FACET_ORDER = Object.keys(STUB_FACET_LABELS);
+
+function matchesQuery(e: StubEntry, q: string): boolean {
+  if (!q) return true;
+  return (
+    (e.name ?? '').toLowerCase().includes(q) || (e.summary ?? '').toLowerCase().includes(q)
+  );
+}
+
+/**
+ * Mirrors the server's facet contract (issue #544): the facet SET is every type the
+ * active pack actually contains (absent categories are omitted), and each COUNT is the
+ * query-scoped match total computed BEFORE the active type filter — so a category with
+ * no match for the current query is still offered, with count 0.
+ */
+function stubFacets(entries: StubEntry[], q: string) {
+  return STUB_FACET_ORDER.filter((type) => entries.some((e) => e.type === type)).map((type) => ({
+    type,
+    label: STUB_FACET_LABELS[type],
+    count: entries.filter((e) => e.type === type && matchesQuery(e, q)).length,
+  }));
+}
+
 async function stubCompendiumBrowse(page: Page, entries: unknown[]) {
   await page.route('**/api/v1/campaigns', async (route) => {
     if (route.request().method() !== 'GET') return route.continue();
@@ -53,17 +91,20 @@ async function stubCompendiumBrowse(page: Page, entries: unknown[]) {
     const url = new URL(route.request().url());
     const type = url.searchParams.get('type');
     const q = (url.searchParams.get('q') ?? '').toLowerCase();
-    let filtered = entries as Array<{ type?: string; name?: string; summary?: string }>;
+    const all = entries as StubEntry[];
+    let filtered = all;
     if (type) filtered = filtered.filter((e) => e.type === type);
-    if (q) {
-      filtered = filtered.filter(
-        (e) =>
-          (e.name ?? '').toLowerCase().includes(q) || (e.summary ?? '').toLowerCase().includes(q),
-      );
-    }
+    if (q) filtered = filtered.filter((e) => matchesQuery(e, q));
     // Issue #613: search returns a page object, not a bare array.
+    // Issue #544: it also carries the live type facets the chip row is built from.
     await route.fulfill({
-      json: { items: filtered, total: filtered.length, hasMore: false, limit: 50 },
+      json: {
+        items: filtered,
+        total: filtered.length,
+        hasMore: false,
+        limit: 50,
+        facets: stubFacets(all, q),
+      },
     });
   });
 }
@@ -85,6 +126,28 @@ const FIXTURE_ENTRIES = [
     name: 'Goblin',
     type: 'monster',
     summary: 'A small humanoid',
+    packSlug: 'e2e-compendium-a11y',
+    body: '',
+    dataJson: '',
+  },
+  // Issue #544: prose `section` / `other` entries must surface as Rules / Reference
+  // chips instead of being buried in All.
+  {
+    id: 6_470_003,
+    slug: 'resting',
+    name: 'Resting',
+    type: 'section',
+    summary: 'A prose rules chapter',
+    packSlug: 'e2e-compendium-a11y',
+    body: '',
+    dataJson: '',
+  },
+  {
+    id: 6_470_004,
+    slug: 'bibliography',
+    name: 'Bibliography',
+    type: 'other',
+    summary: 'Source-native reference material',
     packSlug: 'e2e-compendium-a11y',
     body: '',
     dataJson: '',
@@ -116,6 +179,18 @@ test.describe('Compendium accessibility (issue #647)', () => {
       'false',
     );
 
+    // Issue #544: chips are derived from the active pack's live entries. Prose
+    // `section`/`other` surface as Rules/Reference, every chip carries its live count,
+    // and categories the pack has no entries for are not offered at all.
+    await expect(filters.getByRole('radio', { name: 'All (4)' })).toBeVisible();
+    await expect(filters.getByRole('radio', { name: 'Spells (1)' })).toBeVisible();
+    await expect(filters.getByRole('radio', { name: 'Monsters (1)' })).toBeVisible();
+    await expect(filters.getByRole('radio', { name: 'Rules (1)' })).toBeVisible();
+    await expect(filters.getByRole('radio', { name: 'Reference (1)' })).toBeVisible();
+    await expect(filters.getByRole('radio', { name: 'Classes' })).toHaveCount(0);
+    await expect(filters.getByRole('radio', { name: 'Races' })).toHaveCount(0);
+    await expect(filters.getByRole('radio', { name: 'Conditions' })).toHaveCount(0);
+
     await filters.getByRole('radio', { name: 'Spells' }).click();
     await expect(filters.getByRole('radio', { name: 'Spells' })).toHaveAttribute(
       'aria-checked',
@@ -129,6 +204,12 @@ test.describe('Compendium accessibility (issue #647)', () => {
     // Clear filters resets both type selection and any typed query — including URL params.
     await search.fill('fire');
     await expect.poll(() => new URL(page.url()).searchParams.get('q')).toBe('fire');
+    // Counts follow the query, but the chip SET follows the pack: a category the query
+    // matches nothing in stays offered at count 0 so the user can pivot mid-search
+    // instead of the chip vanishing under them (issue #544).
+    await expect(filters.getByRole('radio', { name: 'Spells (1)' })).toBeVisible();
+    await expect(filters.getByRole('radio', { name: 'Monsters (0)' })).toBeVisible();
+    await expect(filters.getByRole('radio', { name: 'Rules (0)' })).toBeVisible();
     await expect(page.getByRole('button', { name: COMPENDIUM_CLEAR_FILTERS_LABEL })).toBeVisible();
     await page.getByRole('button', { name: COMPENDIUM_CLEAR_FILTERS_LABEL }).click();
     await expect(search).toHaveValue('');
@@ -150,6 +231,10 @@ test.describe('Compendium accessibility (issue #647)', () => {
     await page.goto(`/c/${campaignId}/compendium`);
 
     const filters = page.getByRole('radiogroup', { name: COMPENDIUM_TYPE_FILTER_LABEL });
+    // Chips are derived from the server's facets (issue #544), so the row hydrates a
+    // tick after "All". Wait for it before driving roving tabindex from the keyboard —
+    // arrowing a one-chip row is a legitimate no-op, not the behaviour under test.
+    await expect(filters.getByRole('radio', { name: 'Spells (1)' })).toBeVisible();
     await filters.getByRole('radio', { name: 'All' }).focus();
     await page.keyboard.press('ArrowRight');
     await expect(filters.getByRole('radio', { name: 'Spells' })).toHaveAttribute(
@@ -214,16 +299,17 @@ test.describe('Compendium accessibility (issue #647)', () => {
       searchFetches.push(url.searchParams.get('q'));
       const type = url.searchParams.get('type');
       const q = (url.searchParams.get('q') ?? '').toLowerCase();
-      let filtered = FIXTURE_ENTRIES as Array<{ type?: string; name?: string; summary?: string }>;
+      let filtered = FIXTURE_ENTRIES as StubEntry[];
       if (type) filtered = filtered.filter((e) => e.type === type);
-      if (q) {
-        filtered = filtered.filter(
-          (e) =>
-            (e.name ?? '').toLowerCase().includes(q) || (e.summary ?? '').toLowerCase().includes(q),
-        );
-      }
+      if (q) filtered = filtered.filter((e) => matchesQuery(e, q));
       await route.fulfill({
-        json: { items: filtered, total: filtered.length, hasMore: false, limit: 50 },
+        json: {
+          items: filtered,
+          total: filtered.length,
+          hasMore: false,
+          limit: 50,
+          facets: stubFacets(FIXTURE_ENTRIES as StubEntry[], q),
+        },
       });
     });
 
@@ -281,6 +367,7 @@ test.describe('Compendium accessibility (issue #647)', () => {
     await page.route('**/api/v1/rules/search**', async (route) => {
       const url = new URL(route.request().url());
       const cursor = url.searchParams.get('cursor');
+      const facets = [{ type: 'spell', label: 'Spells', count: 51 }];
       if (!cursor) {
         await route.fulfill({
           json: {
@@ -289,12 +376,13 @@ test.describe('Compendium accessibility (issue #647)', () => {
             hasMore: true,
             nextCursor: 'cursor-page-2',
             limit: 50,
+            facets,
           },
         });
         return;
       }
       await route.fulfill({
-        json: { items: page2, total: 51, hasMore: false, limit: 50 },
+        json: { items: page2, total: 51, hasMore: false, limit: 50, facets },
       });
     });
 

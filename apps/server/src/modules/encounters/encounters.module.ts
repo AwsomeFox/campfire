@@ -15,6 +15,9 @@ import { CampaignEncountersController, CampaignRollController, EncountersControl
   imports: [AuditModule, RoleAccessModule, EventsModule, RollsModule, RevisionsModule, AttachmentsModule, CampaignLibraryModule],
   controllers: [CampaignEncountersController, CampaignRollController, EncountersController],
   providers: [EncountersService, EncounterMapService, ActionResolverService],
-  exports: [EncountersService, ActionResolverService],
+  // EncounterMapService is exported so the public cast capability (issue #547) can
+  // serve the SAME fog-rendered, viewer-role map bytes without going through the
+  // membership-authenticated /encounters/:id/map route.
+  exports: [EncountersService, EncounterMapService, ActionResolverService],
 })
 export class EncountersModule {}

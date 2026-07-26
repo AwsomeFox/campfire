@@ -36,8 +36,8 @@ import { EncountersService } from '../encounters/encounters.service';
 import { RollsService, DEFAULT_DICE_ROLLS_RETENTION } from '../rolls/rolls.service';
 import { ProposalRecordsService } from '../proposals/proposal-records.service';
 import { AiProviderConfigService } from '../ai-provider-config/ai-provider-config.service';
-import { AiDmService } from '../ai-dm/ai-dm.service';
-import { createAiProvider, type AiProvider } from '../ai-dm/providers';
+import { AiDmService, type AiDmTokenReservation } from '../ai-dm/ai-dm.service';
+import { createAiProvider, type AiProvider, type AiProviderConfig } from '../ai-dm/providers';
 import { AI_DM_PROVIDER, type AiDmProvider } from '../ai-dm/ai-dm.provider';
 import { buildRecapDraft, type RecapDraftSource } from '../sessions/sessions.service';
 import { SupportPreferencesService } from '../session-zero/support-preferences.service';
@@ -382,10 +382,13 @@ export class ScribeService implements OnApplicationBootstrap {
       }
     }
 
-    const remaining = seat.tokenBudget - seat.tokensUsed;
+    const remaining = Math.max(0, seat.tokenBudget - seat.tokensUsed - seat.tokensReserved - seat.tokensUnknown);
     if (remaining <= 0) {
       return this.record(campaignId, trigger, user, 'over_budget', {
-        detail: `budget exhausted (${seat.tokensUsed}/${seat.tokenBudget})`,
+        // Report the committed total the gate actually enforces (used + in-flight
+        // reservations + unknown spend), not tokensUsed alone — otherwise a seat blocked
+        // by in-flight reservations reads as "0/1000 exhausted" (#563 review).
+        detail: `budget exhausted (${seat.tokensUsed + seat.tokensReserved + seat.tokensUnknown}/${seat.tokenBudget})`,
         sourceHash,
         scope,
         sourceStats: stats,
@@ -423,33 +426,38 @@ export class ScribeService implements OnApplicationBootstrap {
 
     const spend: SpendResult = await this.aiDm.withSpendLock(campaignId, async () => {
       const seatAfterLock = await this.aiDm.getSeat(campaignId);
-      const remainingAfterLock = seatAfterLock.tokenBudget - seatAfterLock.tokensUsed;
+      const remainingAfterLock = seatAfterLock.budgetRemaining;
       if (remainingAfterLock <= 0) {
         return {
           ok: false,
           status: 'over_budget',
-          detail: `budget exhausted after lock acquisition (${seatAfterLock.tokensUsed}/${seatAfterLock.tokenBudget})`,
+          detail: `budget exhausted after lock acquisition (${seatAfterLock.tokenBudget - seatAfterLock.budgetRemaining}/${seatAfterLock.tokenBudget})`,
         };
       }
 
+      const budgetPerRun = (await this.getConfig(campaignId)).budgetPerRun;
+      let reservation: AiDmTokenReservation;
       try {
-        await this.aiDm.assertWithinServerTokenCap();
+        reservation = await this.aiDm.reserveTokenBudget(campaignId, budgetPerRun);
       } catch (err) {
         return {
           ok: false,
           status: 'over_budget',
-          detail: err instanceof Error ? err.message : 'server-wide AI token cap reached',
+          detail: err instanceof Error ? err.message : 'AI token budget exhausted',
         };
       }
 
-      const config = await this.providerConfig.resolveEffectiveConfig(campaignId);
-      const budgetPerRun = (await this.getConfig(campaignId)).budgetPerRun;
-      const maxTokens = Math.min(budgetPerRun, remainingAfterLock);
+      const maxTokens = reservation.tokensReserved;
 
-      let text: string;
-      let tokensUsed: number;
-      let providerName: string;
+      let text = '';
+      let tokensUsed = 0;
+      let providerName = '';
+      // Resolved INSIDE the try: the hold is live from here on, so every step between
+      // reserving and settling must be on a path that releases it. Resolving the config
+      // outside would strand the reservation if decrypting/reading it threw (#563).
+      let config: AiProviderConfig | null = null;
       try {
+        config = await this.providerConfig.resolveEffectiveConfig(campaignId);
         const aiSupports = await this.supportPreferences.listForAi(campaignId);
         const supportGuidance = aiSupports.length > 0
           ? `\n\nParticipant-authorized practical supports (apply respectfully; do not infer diagnoses):\n${JSON.stringify(aiSupports)}`
@@ -486,6 +494,11 @@ export class ScribeService implements OnApplicationBootstrap {
           providerName = this.fallbackProvider.name;
         }
       } catch (err) {
+        await this.aiDm.releaseReservationQuietly(reservation, {
+          actor: auditActor(user),
+          action: 'scribe.usage_unknown',
+          detail: `${trigger} provider error; usage unknown`,
+        });
         return {
           ok: false,
           status: 'failed',
@@ -499,9 +512,19 @@ export class ScribeService implements OnApplicationBootstrap {
         await this.aiDm.meterTurn(campaignId, tokensUsed, {
           actor: auditActor(user),
           action: 'scribe.meter',
-          detail: `${trigger} metering (+${tokensUsed} tokens)`,
-        });
+          detail: `${trigger} metering (+${tokensUsed} tokens, reserved=${reservation.tokensReserved})`,
+          model: config?.model ?? seatAfterLock.model,
+        }, reservation);
       } catch (err) {
+        // meterTurn settles the reservation itself, even when it throws, so this is a
+        // belt-and-braces settle for a stubbed/legacy meterTurn. It no-ops when the hold
+        // was already released — consuming it twice would charge the tokens as BOTH used
+        // and unknown (#563 review).
+        await this.aiDm.releaseReservationQuietly(reservation, {
+          actor: auditActor(user),
+          action: 'scribe.usage_unknown',
+          detail: `${trigger} metering failed; usage unknown`,
+        });
         return {
           ok: false,
           status: 'failed',

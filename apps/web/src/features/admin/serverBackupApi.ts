@@ -15,6 +15,21 @@ export interface BackupCadenceState {
   lastSize: number | null;
   lastChecksum: string | null;
   lastError: string;
+  lastArchiveName?: string | null;
+  lastVerifiedAt?: string | null;
+  consecutiveFailures?: number;
+  metrics?: BackupCadenceMetrics;
+}
+
+export interface BackupCadenceMetrics {
+  successCount: number;
+  failureCount: number;
+  pruneCount: number;
+  prunedBytes: number;
+  lastFreeBytes: number | null;
+  lastEstimatedBytes: number | null;
+  lastPruneAt: string | null;
+  lastPruneError: string;
 }
 
 export interface BackupInspectAttachmentChecksum {
@@ -63,6 +78,29 @@ export interface BackupStatus {
   intervalHours: number;
   backupDir: string;
   cadence: BackupCadenceState | null;
+  disk: {
+    freeBytes: number;
+    totalBytes: number;
+    reserveBytes: number;
+    estimatedNextBytes: number;
+    lowSpace: boolean;
+  } | null;
+  retention: {
+    policy: {
+      keepCount: number | null;
+      keepDays: number | null;
+      maxTotalBytes: number | null;
+      protectLastGood: boolean;
+    };
+    archiveCount: number;
+    totalBytes: number;
+    protectedLastGoodName: string | null;
+    pruneCount: number;
+    prunedBytes: number;
+    lastPruneAt: string | null;
+    lastPruneError: string;
+  };
+  alerts: string[];
   onDisk: BackupOnDiskEntry[];
 }
 

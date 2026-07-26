@@ -293,6 +293,24 @@ CREATE TABLE IF NOT EXISTS session_shares (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS cast_sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  label TEXT NOT NULL DEFAULT '',
+  created_by TEXT NOT NULL DEFAULT '',
+  token_hash TEXT NOT NULL UNIQUE,
+  token_prefix TEXT NOT NULL,
+  exit_pin_hash TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  access_count INTEGER NOT NULL DEFAULT 0,
+  first_accessed_at TEXT,
+  last_accessed_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_cast_sessions_campaign ON cast_sessions(campaign_id);
+CREATE INDEX IF NOT EXISTS idx_cast_sessions_expires_at ON cast_sessions(expires_at);
+
 CREATE TABLE IF NOT EXISTS session_attendees (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -736,6 +754,10 @@ CREATE TABLE IF NOT EXISTS encounters (
   name TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'preparing',
   round INTEGER NOT NULL DEFAULT 0,
+  escalation_die INTEGER NOT NULL DEFAULT 0,
+  escalation_die_held INTEGER NOT NULL DEFAULT 0,
+  escalation_die_override INTEGER,
+  escalation_die_history TEXT,
   turn_index INTEGER NOT NULL DEFAULT 0,
   current_combatant_id INTEGER REFERENCES combatants(id) ON DELETE SET NULL,
   turn_phase TEXT NOT NULL DEFAULT 'combatant',
@@ -924,6 +946,10 @@ CREATE TABLE IF NOT EXISTS ai_dm_seats (
   instructions TEXT NOT NULL DEFAULT '',
   token_budget INTEGER NOT NULL DEFAULT 0,
   tokens_used INTEGER NOT NULL DEFAULT 0,
+  tokens_reserved INTEGER NOT NULL DEFAULT 0,
+  tokens_refunded INTEGER NOT NULL DEFAULT 0,
+  tokens_unknown INTEGER NOT NULL DEFAULT 0,
+  tokens_overage INTEGER NOT NULL DEFAULT 0,
   turn_count INTEGER NOT NULL DEFAULT 0,
   last_turn_at TEXT,
   proactive_settings TEXT DEFAULT '{}',
@@ -1013,6 +1039,7 @@ CREATE TABLE IF NOT EXISTS combatants (
   name TEXT NOT NULL,
   initiative INTEGER,
   init_mod INTEGER NOT NULL DEFAULT 0,
+  initiative_breakdown TEXT,
   initiative_group TEXT,
   hp_current INTEGER NOT NULL DEFAULT 10,
   hp_max INTEGER NOT NULL DEFAULT 10,

@@ -11,14 +11,28 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import type { Campaign, CampaignCloneMode, CampaignClonePreview, CampaignInvite, DangerLevel, RulePack } from '@campfire/schema';
+import type {
+  Campaign,
+  CampaignCloneMode,
+  CampaignClonePreview,
+  CampaignInvite,
+  CastSession,
+  CastSessionCreated,
+  DangerLevel,
+  RulePack,
+} from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { adminRulesHref } from '../../lib/adminNavigation';
 import { useCampaigns } from '../../app/CampaignContext';
 import { Card, ErrorNote, Skeleton } from '../../components/ui';
 import { CampaignMetadataFields, isCampaignMetadataDirty } from '../../components/CampaignMetadataFields';
-import { mechanicsForPackSlug, ruleSystemAdapterLabel } from '../../lib/rules';
+import {
+  capabilityStatusLabel,
+  mechanicsForPackSlug,
+  rulesetCapabilitiesForSelection,
+  ruleSystemAdapterLabel,
+} from '../../lib/rules';
 import { scrollBehavior } from '../../lib/prefersReducedMotion';
 import AiDmCard from './AiDmCard';
 import {
@@ -247,6 +261,7 @@ export default function CampaignSettingsPage() {
                   await refreshCampaigns();
                 }}
               />
+              <CastSessionsCard key={`cast-${campaign.id}`} campaign={campaign} />
             </SettingsCategory>
 
             <SettingsCategory
@@ -611,6 +626,195 @@ function PublicInvitesCard({ campaign, onChanged }: { campaign: Campaign; onChan
           confirmLabel="Revoke all links"
           busy={busy}
           onCancel={() => setConfirming(null)}
+          onConfirm={() => void revokeAll()}
+        />
+      )}
+    </div>
+  );
+}
+
+function CastSessionsCard({ campaign }: { campaign: Campaign }) {
+  const [sessions, setSessions] = useState<CastSession[]>([]);
+  const [label, setLabel] = useState('');
+  const [durationHours, setDurationHours] = useState(8);
+  const [created, setCreated] = useState<CastSessionCreated | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [confirmRevokeAll, setConfirmRevokeAll] = useState(false);
+
+  const load = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      setSessions(await api.get<CastSession[]>(`${API}/campaigns/${campaign.id}/cast-sessions`));
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't load cast sessions.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [campaign.id]);
+
+  async function create() {
+    setBusy(true);
+    setError(null);
+    setMessage(null);
+    setCreated(null);
+    try {
+      const expiresAt = new Date(Date.now() + durationHours * 60 * 60 * 1000).toISOString();
+      const result = await api.post<CastSessionCreated>(`${API}/campaigns/${campaign.id}/cast-sessions`, {
+        label,
+        expiresAt,
+      });
+      setCreated(result);
+      setLabel('');
+      setSessions((current) => [result.session, ...current]);
+      setMessage('Cast session created. Copy the URL and PIN now; the PIN is shown only once.');
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't create a cast session.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function revoke(id: number) {
+    setBusy(true);
+    setError(null);
+    setMessage(null);
+    try {
+      await api.delete(`${API}/campaigns/${campaign.id}/cast-sessions/${id}`);
+      setSessions((current) => current.filter((session) => session.id !== id));
+      setMessage('Cast session revoked.');
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't revoke the cast session.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function revokeAll() {
+    setBusy(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const result = await api.delete<{ revoked: number }>(`${API}/campaigns/${campaign.id}/cast-sessions`);
+      setSessions([]);
+      setCreated(null);
+      setConfirmRevokeAll(false);
+      setMessage(`Revoked ${result.revoked} cast ${result.revoked === 1 ? 'session' : 'sessions'}.`);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't revoke cast sessions.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const castUrl = created ? new URL(created.url, window.location.origin).href : null;
+
+  return (
+    <div
+      id="cast-sessions"
+      className="card elev-sm settings-anchor"
+      tabIndex={-1}
+      data-testid="cast-sessions-settings"
+      aria-labelledby="cast-sessions-heading"
+    >
+      <div className="flex items-center gap-2 flex-wrap">
+        <span id="cast-sessions-heading" className="card-kicker" style={{ margin: 0 }}>Player Display cast sessions</span>
+        <span className="tag tag-accent">server-redacted</span>
+      </div>
+      <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
+        Create an expiring read-only URL for a shared TV. Cast links can read only the Player Display projection and
+        need the exit PIN before the UI leaves kiosk mode.
+      </p>
+      <div className="grid md:grid-cols-[1fr_160px_auto] gap-2 items-end">
+        <div className="field">
+          <label htmlFor="cast-session-label">Label</label>
+          <input
+            id="cast-session-label"
+            className="input"
+            value={label}
+            maxLength={120}
+            placeholder="Table TV, OBS, living room"
+            onChange={(event) => setLabel(event.target.value)}
+          />
+        </div>
+        <div className="field">
+          <label htmlFor="cast-session-duration">Expires in</label>
+          <select
+            id="cast-session-duration"
+            className="input"
+            value={durationHours}
+            onChange={(event) => setDurationHours(Number(event.target.value))}
+          >
+            <option value={4}>4 hours</option>
+            <option value={8}>8 hours</option>
+            <option value={24}>24 hours</option>
+          </select>
+        </div>
+        <button className="btn btn-primary" disabled={busy || campaign.status !== 'active'} aria-busy={busy || undefined} onClick={() => void create()}>
+          Create cast link
+        </button>
+      </div>
+      {campaign.status !== 'active' && (
+        <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>Unarchive the campaign before creating cast sessions.</p>
+      )}
+      {created && castUrl && (
+        <div className="rounded border border-[var(--color-divider)] p-3 space-y-2" role="status">
+          <p className="m-0 text-sm font-semibold text-emerald-300">Copy these now — they are shown only once.</p>
+          <div className="field">
+            <label htmlFor="cast-created-url">Cast URL</label>
+            <input id="cast-created-url" className="input" readOnly value={castUrl} onFocus={(event) => event.currentTarget.select()} />
+          </div>
+          <div className="field" style={{ maxWidth: 220 }}>
+            <label htmlFor="cast-created-pin">Exit PIN</label>
+            <input id="cast-created-pin" className="input" readOnly value={created.exitPin} onFocus={(event) => event.currentTarget.select()} />
+          </div>
+        </div>
+      )}
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <span className="text-sm text-muted">
+          {loading ? 'Loading cast sessions…' : `${sessions.length} active cast ${sessions.length === 1 ? 'session' : 'sessions'}`}
+        </span>
+        <button className="btn btn-danger" disabled={busy || sessions.length === 0} onClick={() => setConfirmRevokeAll(true)}>
+          Revoke all
+        </button>
+      </div>
+      {sessions.length > 0 && (
+        <ul className="space-y-2 m-0 p-0" style={{ listStyle: 'none' }}>
+          {sessions.map((session) => (
+            <li
+              key={session.id}
+              className="rounded border border-[var(--color-divider)] p-3 flex flex-col md:flex-row md:items-center md:justify-between gap-2"
+            >
+              <div>
+                <p className="m-0 text-sm font-semibold">{session.label || 'Unlabelled cast session'}</p>
+                <p className="m-0 text-xs text-muted">
+                  {session.tokenPrefix} · expires {new Date(session.expiresAt).toLocaleString()} · {session.accessCount} reads
+                </p>
+              </div>
+              <button className="btn btn-danger" disabled={busy} onClick={() => void revoke(session.id)}>
+                Revoke
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {message && <p className="text-sm text-emerald-300 m-0" role="status">{message}</p>}
+      {error && <p className="text-sm text-red-400 m-0" role="alert">{error}</p>}
+      {confirmRevokeAll && (
+        <ConfirmDialog
+          title="Revoke every cast session?"
+          body="Every active Player Display cast URL for this campaign will stop working immediately."
+          confirmLabel="Revoke all cast sessions"
+          busy={busy}
+          onCancel={() => setConfirmRevokeAll(false)}
           onConfirm={() => void revokeAll()}
         />
       )}
@@ -1162,14 +1366,17 @@ function RuleSystemCard({
   // resolves to the D&D 5e adapter for combat — surface that plainly rather than a bare slug.
   const dangling = !!currentSlug && !!packs && !currentPack;
   const currentMechanics = currentSlug ? mechanicsForPackSlug(currentSlug) : undefined;
+  const currentProfile = packs ? rulesetCapabilitiesForSelection(currentSlug, packs) : null;
 
   // The pending switch — what mechanically changes if the admin applies `selected` (#348).
   const dirty = selected !== currentSlug;
   const targetPack = packs?.find((p) => p.slug === selected);
   const targetLabel = selected ? targetPack?.name ?? selected : 'None / homebrew';
-  const targetMechanics = selected
-    ? mechanicsForPackSlug(selected) ?? `Falls back to ${ruleSystemAdapterLabel(selected)} combat math.`
-    : 'No installed rules — dice, sheets and notes still work; combat uses D&D 5e defaults.';
+  const targetProfile = packs ? rulesetCapabilitiesForSelection(selected, packs) : null;
+  const targetMechanics = targetProfile?.mechanicsSummary ??
+    (selected
+      ? mechanicsForPackSlug(selected) ?? `Falls back to ${ruleSystemAdapterLabel(selected)} combat math.`
+      : 'No installed rules text. Combat math falls back to D&D 5e defaults; this does not select a 5e rules pack.');
 
   return (
     <div
@@ -1204,12 +1411,18 @@ function RuleSystemCard({
         )}
       </div>
       <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
-        Powers the compendium, character math, statblocks and AI rules lookups. Packs install server-wide from open
-        sources; switching systems keeps existing sheets and combatant stats and only re-interprets them.
+        Powers the compendium, character math, statblocks, encounter generation, difficulty and AI rules lookups.
+        None / homebrew is allowed, but it has no rules compendium and uses disclosed fallback combat behavior.
+        Switching keeps existing sheets and combatant stats and only re-interprets them.
       </p>
       {currentPack && currentMechanics && (
         <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
           <strong>Current rules:</strong> {currentMechanics}
+        </p>
+      )}
+      {!currentSlug && currentProfile && (
+        <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
+          <strong>Current rules:</strong> {currentProfile.mechanicsSummary}
         </p>
       )}
       {dangling && (
@@ -1257,6 +1470,31 @@ function RuleSystemCard({
             Existing encounters and combatants keep their stored numbers — only the interpretation (initiative,
             DC model, condition list, degrees of success) changes at read time. Nothing is recalculated or lost.
           </p>
+          {targetProfile && (
+            <>
+              <ul className="text-muted" style={{ margin: 0, paddingLeft: '1rem' }}>
+                {targetProfile.migrationPreview.map((line) => (
+                  <li key={line}>{line}</li>
+                ))}
+              </ul>
+              <ul className="flex flex-col gap-1" style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+                {targetProfile.capabilities.map((capability) => (
+                  <li key={capability.key} className="flex gap-2">
+                    <span
+                      className="tag tag-neutral"
+                      style={{ fontSize: 10, height: 'fit-content', minWidth: 72, justifyContent: 'center' }}
+                    >
+                      {capabilityStatusLabel(capability.status)}
+                    </span>
+                    <span className="text-muted">
+                      <strong style={{ color: 'var(--color-text)' }}>{capability.label}:</strong>{' '}
+                      {capability.summary}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
           <div className="flex gap-2 items-center" style={{ marginTop: 4 }}>
             <button className="btn btn-primary" style={{ fontSize: 12.5 }} disabled={saving} onClick={applyRuleSystem}>
               {saving ? 'Applying…' : 'Apply change'}
@@ -1274,8 +1512,18 @@ function RuleSystemCard({
       )}
       {packs && packs.length === 0 && (
         <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
-          No rule packs are installed on this server yet.
-          {isAdmin ? ' Install one from Server admin → Rule systems.' : ' Ask a server admin to install one.'}
+          No rule packs are installed on this server yet. This campaign can stay None / homebrew.
+          {isAdmin ? (
+            <>
+              {' '}Install one from{' '}
+              <Link to={adminRulesHref(`/c/${campaignId}/settings`)} style={{ color: 'var(--color-text)', textDecoration: 'underline' }}>
+                Server admin → Rule systems
+              </Link>
+              .
+            </>
+          ) : (
+            ' Ask a server admin to install one from Server admin → Rule systems.'
+          )}
         </p>
       )}
       {error && <p className="text-sm" style={{ color: '#f87171' }}>{error}</p>}

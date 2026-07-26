@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, ForbiddenException, Inject, Inj
 import { and, eq, gt, inArray, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
-import { ActiveEffect, AoeTemplate, CombatantCreate, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, EncounterCommit, EncounterCreate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, STARFINDER_ADAPTER_ID, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, defaultCombatantStatblock, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
+import { ActiveEffect, AoeTemplate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, STARFINDER_ADAPTER_ID, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, defaultCombatantStatblock, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
 import { z as zod } from 'zod';
 import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -60,6 +60,7 @@ type EncounterGenerateInput = z.infer<typeof EncounterGenerate>;
 type EncounterPreviewInput = z.infer<typeof EncounterPreviewRequest>;
 type EncounterCommitInput = z.infer<typeof EncounterCommit>;
 type EncounterUpdateInput = z.infer<typeof EncounterUpdate>;
+type EncounterEscalationUpdateInput = z.infer<typeof EncounterEscalationUpdate>;
 type EncounterReopenInput = z.infer<typeof EncounterReopen>;
 type CombatantCreateInput = z.infer<typeof CombatantCreate>;
 type CombatantUpdateInput = z.infer<typeof CombatantUpdate>;
@@ -114,6 +115,106 @@ function parseCombatantStatblock(text: string | null): CombatantStatblock | null
   return parsed.success ? parsed.data : null;
 }
 
+function parseInitiativeBreakdown(text: string | null): CombatantInitiativeBreakdown | null {
+  if (text == null) return null;
+  const parsed = CombatantInitiativeBreakdown.safeParse(fromJsonText<unknown>(text, null));
+  return parsed.success ? parsed.data : null;
+}
+
+function parseEscalationHistory(text: string | null): EscalationDieHistoryEntry[] {
+  if (text == null) return [];
+  const parsed = zod.array(EscalationDieHistoryEntry).safeParse(fromJsonText<unknown>(text, []));
+  return parsed.success ? parsed.data : [];
+}
+
+function isArchmageAdapter(adapter: RuleSystemAdapter): boolean {
+  return adapter.id === ARCHMAGE_ADAPTER_ID;
+}
+
+function archmageEscalationDieForRound(adapter: RuleSystemAdapter, round: number): number {
+  const fn = (adapter as RuleSystemAdapter & { escalationDieForRound?: (round: number) => number }).escalationDieForRound;
+  return typeof fn === 'function' ? fn.call(adapter, round) : 0;
+}
+
+function adapterLevelInitiativeBonus(adapter: RuleSystemAdapter, level: number): number {
+  const fn = (adapter as RuleSystemAdapter & { levelInitiativeBonus?: (level: number) => number }).levelInitiativeBonus;
+  return typeof fn === 'function' ? fn.call(adapter, level) : 0;
+}
+
+function num(v: unknown): number | null {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  if (typeof v === 'string') {
+    const n = Number(v.replace(/^\+/, '').trim());
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+function initiativeFormula(
+  die: number,
+  terms: Array<{ label: string; value: number }>,
+  roll: number | null = null,
+  total: number | null = null,
+): string {
+  const dieText = roll === null ? `d${die}` : `d${die} ${roll}`;
+  const termText = terms.map((t) => `${t.label} ${t.value >= 0 ? '+' : ''}${t.value}`).join(' ');
+  const totalText = total === null ? '' : ` = ${total}`;
+  return `${dieText}${termText ? ` ${termText}` : ''}${totalText}`.trim();
+}
+
+function characterInitiativeBreakdown(
+  adapter: RuleSystemAdapter,
+  stats: Record<string, number>,
+  level: number,
+): CombatantInitiativeBreakdown {
+  const base = adapter.initiativeModifier(stats, 'score', level);
+  const terms = isArchmageAdapter(adapter)
+    ? [
+        { label: 'DEX', value: base },
+        { label: 'level', value: adapterLevelInitiativeBonus(adapter, level) },
+      ]
+    : [{ label: 'initiative', value: base }];
+  const modifier = terms.reduce((sum, t) => sum + t.value, 0);
+  return CombatantInitiativeBreakdown.parse({
+    die: adapter.initiativeDie > 0 ? adapter.initiativeDie : 20,
+    roll: null,
+    modifier,
+    total: null,
+    terms,
+    formula: initiativeFormula(adapter.initiativeDie > 0 ? adapter.initiativeDie : 20, terms),
+  });
+}
+
+function monsterInitiativeBreakdown(
+  adapter: RuleSystemAdapter,
+  data: Record<string, unknown>,
+  fallbackModifier: number,
+): CombatantInitiativeBreakdown {
+  const flatArchmage = isArchmageAdapter(adapter) ? num(data.initiative ?? data.init) : null;
+  const modifier = flatArchmage ?? fallbackModifier;
+  const terms = [{ label: flatArchmage !== null ? 'monster initiative' : 'initiative', value: modifier }];
+  return CombatantInitiativeBreakdown.parse({
+    die: adapter.initiativeDie > 0 ? adapter.initiativeDie : 20,
+    roll: null,
+    modifier,
+    total: null,
+    terms,
+    formula: initiativeFormula(adapter.initiativeDie > 0 ? adapter.initiativeDie : 20, terms),
+  });
+}
+
+function manualInitiativeBreakdown(adapter: RuleSystemAdapter, modifier: number): CombatantInitiativeBreakdown {
+  const terms = [{ label: 'manual', value: modifier }];
+  return CombatantInitiativeBreakdown.parse({
+    die: adapter.initiativeDie > 0 ? adapter.initiativeDie : 20,
+    roll: null,
+    modifier,
+    total: null,
+    terms,
+    formula: initiativeFormula(adapter.initiativeDie > 0 ? adapter.initiativeDie : 20, terms),
+  });
+}
+
 function encounterToDomain(row: typeof encounters.$inferSelect): Encounter {
   return {
     id: row.id,
@@ -121,6 +222,10 @@ function encounterToDomain(row: typeof encounters.$inferSelect): Encounter {
     name: row.name,
     status: row.status as EncounterStatus,
     round: row.round,
+    escalationDie: row.escalationDie ?? 0,
+    escalationDieHeld: row.escalationDieHeld ?? false,
+    escalationDieOverride: row.escalationDieOverride ?? null,
+    escalationDieHistory: parseEscalationHistory(row.escalationDieHistory),
     turnIndex: row.turnIndex,
     currentCombatantId: row.currentCombatantId,
     turnPhase: (row.turnPhase as EncounterTurnPhase) ?? 'combatant',
@@ -161,6 +266,7 @@ function combatantToDomain(row: typeof combatants.$inferSelect): Combatant {
     name: row.name,
     initiative: row.initiative,
     initMod: row.initMod,
+    initiativeBreakdown: parseInitiativeBreakdown(row.initiativeBreakdown),
     initiativeGroup: row.initiativeGroup ?? null,
     hpCurrent: row.hpCurrent,
     hpMax: row.hpMax,
@@ -191,6 +297,31 @@ function combatantToDomain(row: typeof combatants.$inferSelect): Combatant {
   };
 }
 
+/** Stable structured wrapper for one legacy string condition (issue #423 migration bridge). */
+function legacyConditionInstance(rawName: string): ConditionInstance | null {
+  const name = rawName.trim();
+  if (!name) return null;
+  // Bound the generated id to the schema max(40) and keep it stable.
+  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 33);
+  return {
+    id: `legacy_${slug || 'condition'}`.slice(0, 40),
+    name,
+    ruleEntryId: null,
+    source: null,
+    sourceCombatantId: null,
+    durationRounds: null,
+    roundsRemaining: null,
+    timing: 'none',
+    saveTiming: 'none',
+    saveDc: null,
+    saveAbility: null,
+    isConcentration: false,
+    stacks: 1,
+    notes: '',
+    custom: false,
+  };
+}
+
 /** Parse stored condition instances JSON or synthesize default instances from legacy conditions array (issue #423). */
 function parseConditionInstances(text: string | null, stringConditions: string[] = []): ConditionInstance[] {
   let instances: ConditionInstance[] = [];
@@ -206,25 +337,8 @@ function parseConditionInstances(text: string | null, stringConditions: string[]
       const key = name.toLowerCase();
       if (!existingNames.has(key)) {
         existingNames.add(key);
-        // Bound the generated id to the schema max(40) and keep it stable.
-        const slug = key.replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 33);
-        instances.push({
-          id: `legacy_${slug}`.slice(0, 40),
-          name,
-          ruleEntryId: null,
-          source: null,
-          sourceCombatantId: null,
-          durationRounds: null,
-          roundsRemaining: null,
-          timing: 'none',
-          saveTiming: 'none',
-          saveDc: null,
-          saveAbility: null,
-          isConcentration: false,
-          stacks: 1,
-          notes: '',
-          custom: false,
-        });
+        const legacy = legacyConditionInstance(name);
+        if (legacy) instances.push(legacy);
       }
     }
   }
@@ -582,6 +696,68 @@ export class EncountersService {
   ): Combatant[] {
     if (status !== 'running') return sortCombatants(rows, status);
     return sortCombatants(rows, status, (a, b) => adapter.initiativeTiebreak(a, b));
+  }
+
+  private escalationEntry(
+    round: number,
+    value: number,
+    source: EscalationDieHistoryEntry['source'],
+    held: boolean,
+    override: number | null,
+    note: string,
+  ): EscalationDieHistoryEntry {
+    return EscalationDieHistoryEntry.parse({
+      round,
+      value,
+      source,
+      held,
+      override,
+      note,
+      at: nowIso(),
+    });
+  }
+
+  private appendEscalationHistory(
+    currentText: string | null,
+    entry: EscalationDieHistoryEntry,
+  ): string {
+    return toJsonText([...parseEscalationHistory(currentText), entry].slice(-200));
+  }
+
+  private nextEscalationState(
+    adapter: RuleSystemAdapter,
+    current: {
+      round: number;
+      escalationDie: number | null;
+      escalationDieHeld: boolean | null;
+      escalationDieOverride: number | null;
+      escalationDieHistory: string | null;
+    },
+    nextRound: number,
+    source: EscalationDieHistoryEntry['source'],
+  ): {
+    escalationDie: number;
+    escalationDieHistory?: string;
+    logDetail?: string;
+  } {
+    if (!isArchmageAdapter(adapter)) return { escalationDie: 0 };
+    const held = current.escalationDieHeld ?? false;
+    const override = current.escalationDieOverride ?? null;
+    const previous = current.escalationDie ?? 0;
+    const value = override ?? (held ? previous : archmageEscalationDieForRound(adapter, nextRound));
+    const note =
+      override !== null
+        ? `override to +${value}`
+        : held
+          ? `held at +${value}`
+          : `round ${nextRound} default +${value}`;
+    const entry = this.escalationEntry(nextRound, value, source, held, override, note);
+    const changed = value !== previous || nextRound !== current.round || source === 'start' || source === 'override' || source === 'undo';
+    return {
+      escalationDie: value,
+      escalationDieHistory: changed ? this.appendEscalationHistory(current.escalationDieHistory, entry) : undefined,
+      logDetail: changed ? `escalation die ${note}` : undefined,
+    };
   }
 
   async listCombatantRows(encounterId: number) {
@@ -1562,9 +1738,7 @@ export class EncountersService {
       if (partyRows.length > 0 && adapter) {
         const combatantValues = partyRows.map((character, index) => {
           const stats = normalizeStats(fromJsonText<Record<string, number>>(character.stats, {}));
-          // Pass character level so PF2e (and similar) can include the proficiency/level
-          // term on the Perception/WIS initiative fallback (issue #491). 5e ignores it.
-          const initMod = adapter.initiativeModifier(stats, 'score', character.level);
+          const init = characterInitiativeBreakdown(adapter, stats, character.level);
           // Issue #711: seed the combatant's death/temp-HP slice from the persistent
           // sheet so a stable-but-unconscious PC (carried over from a prior fight via
           // /end reconciliation) re-enters the next encounter still down, not silently
@@ -1575,7 +1749,8 @@ export class EncountersService {
             characterId: character.id,
             name: character.name,
             initiative: null,
-            initMod,
+            initMod: init.modifier,
+            initiativeBreakdown: toJsonText(init),
             hpCurrent: character.hpCurrent,
             hpMax: character.hpMax,
             hpTemp: character.hpTemp,
@@ -2238,6 +2413,7 @@ export class EncountersService {
       name: string;
       hpMax: number;
       initMod: number;
+      initiativeBreakdown: CombatantInitiativeBreakdown;
       ruleEntryId: number;
       count: number;
     }
@@ -2256,7 +2432,9 @@ export class EncountersService {
       } else {
         initMod = adapter.initiativeModifier(mapped.abilityScores, mapped.abilityRepresentation);
       }
-      return { slotId: s.slotId, name: entry.name, hpMax: hp, initMod, ruleEntryId: s.ruleEntryId, count: s.count };
+      const initiativeBreakdown = monsterInitiativeBreakdown(adapter, data, initMod);
+      initMod = initiativeBreakdown.modifier;
+      return { slotId: s.slotId, name: entry.name, hpMax: hp, initMod, initiativeBreakdown, ruleEntryId: s.ruleEntryId, count: s.count };
     });
 
     // Optional battle map: validate the attachment belongs to this campaign and is an image/map.
@@ -2315,14 +2493,15 @@ export class EncountersService {
       if (partyRows.length > 0) {
         const partyValues = partyRows.map((character) => {
           const stats = normalizeStats(fromJsonText<Record<string, number>>(character.stats, {}));
-          const initMod = adapter.initiativeModifier(stats, 'score', character.level);
+          const init = characterInitiativeBreakdown(adapter, stats, character.level);
           return {
             encounterId: row.id,
             kind: 'character' as const,
             characterId: character.id,
             name: character.name,
             initiative: null,
-            initMod,
+            initMod: init.modifier,
+            initiativeBreakdown: toJsonText(init),
             hpCurrent: character.hpCurrent,
             hpMax: character.hpMax,
             hpTemp: character.hpTemp,
@@ -2358,6 +2537,7 @@ export class EncountersService {
             name: n,
             initiative: null,
             initMod: m.initMod,
+            initiativeBreakdown: toJsonText(m.initiativeBreakdown),
             hpCurrent: m.hpMax,
             hpMax: m.hpMax,
             conditions: '[]',
@@ -2471,6 +2651,7 @@ export class EncountersService {
     let name = input.name;
     let hpMax = input.hpMax;
     let initMod = input.initMod ?? 0;
+    let initBreakdown = manualInitiativeBreakdown(adapter, initMod);
     const initModel = initiativeModelForAdapter(adapter);
     const initiativeGroup =
       input.initiativeGroup !== undefined
@@ -2596,8 +2777,8 @@ export class EncountersService {
       kac = character.kac;
       if (input.initMod === undefined) {
         const stats = normalizeStats(fromJsonText<Record<string, number>>(character.stats, {}));
-        // Character level feeds PF2e trained-Perception proficiency (issue #491).
-        initMod = adapter.initiativeModifier(stats, 'score', character.level);
+        initBreakdown = characterInitiativeBreakdown(adapter, stats, character.level);
+        initMod = initBreakdown.modifier;
       }
     } else if (input.ruleEntryId !== undefined) {
       // Any explicitly-supplied ruleEntryId (not just kind='monster') must resolve to a
@@ -2652,6 +2833,8 @@ export class EncountersService {
         } else {
           initMod = adapter.initiativeModifier(mapped.abilityScores, mapped.abilityRepresentation);
         }
+        initBreakdown = monsterInitiativeBreakdown(adapter, data, initMod);
+        initMod = initBreakdown.modifier;
       }
     }
 
@@ -2716,6 +2899,7 @@ export class EncountersService {
             name: n,
             initiative: null,
             initMod,
+            initiativeBreakdown: toJsonText(initBreakdown),
             initiativeGroup,
             hpCurrent,
             hpMax,
@@ -2895,6 +3079,7 @@ export class EncountersService {
       patch.removeConditionInstanceId !== undefined ||
       patch.updateConditionInstance !== undefined ||
       patch.conditionInstances !== undefined;
+    const conditionFieldsTouched = conditionsTouched || conditionInstancesTouched;
 
     const spFieldsTouched =
       patch.spSet !== undefined ||
@@ -2906,8 +3091,7 @@ export class EncountersService {
     if (
       Object.keys(staticUpdate).length === 0 &&
       !recomputeHp &&
-      !conditionsTouched &&
-      !conditionInstancesTouched &&
+      !conditionFieldsTouched &&
       !spFieldsTouched &&
       !deathStateTouched &&
       patch.statblock === undefined
@@ -2941,7 +3125,7 @@ export class EncountersService {
       existing.kind === 'character' &&
       existing.characterId !== null &&
       encounterRow.status !== 'ended' &&
-      (recomputeHp || conditionsTouched || conditionInstancesTouched || spFieldsTouched || deathStateTouched);
+      (recomputeHp || conditionFieldsTouched || spFieldsTouched || deathStateTouched);
     let row!: typeof combatants.$inferSelect;
     // Captured inside the transaction (off the fresh committed read + the write result)
     // so the combat-log events appended after commit reflect the real before/after HP
@@ -2969,60 +3153,55 @@ export class EncountersService {
       _beforeSucc = fresh.deathSaveSuccesses;
       _beforeFail = fresh.deathSaveFailures;
       const writeSet: Partial<typeof combatants.$inferInsert> = { ...staticUpdate };
-      if (conditionsTouched) {
-        if (
-          patch.removeConditionInstanceId !== undefined ||
-          patch.conditionInstances !== undefined ||
-          patch.addConditionInstance !== undefined ||
-          patch.updateConditionInstance !== undefined
-        ) {
-          // Instance-level condition writes (issue #423): apply a single
-          // add/update/remove delta against the fresh instances, or replace the
-          // whole array, then derive the legacy string[] conditions array.
-          let instances = parseConditionInstances(fresh.conditionInstances, []);
-          beforeConditions = new Set(fromJsonText<string[]>(fresh.conditions, []));
-          if (patch.conditionInstances !== undefined) {
-            instances = [...patch.conditionInstances];
-          } else {
-            if (patch.addConditionInstance !== undefined) {
-              // Add a single instance (idempotent: replace if id already present).
-              const addIdx = instances.findIndex((i) => i.id === patch.addConditionInstance!.id);
-              if (addIdx >= 0) instances[addIdx] = patch.addConditionInstance;
-              else instances.push(patch.addConditionInstance);
-            }
-            if (patch.updateConditionInstance !== undefined) {
-              // Update a single instance by id; ignore if not present (no-op).
-              const upd = patch.updateConditionInstance;
-              const updIdx = instances.findIndex((i) => i.id === upd.id);
-              if (updIdx >= 0) instances[updIdx] = upd;
-            }
-            if (patch.removeConditionInstanceId !== undefined) {
-              // Remove only the targeted instance — not all instances.
-              instances = instances.filter((i) => i.id !== patch.removeConditionInstanceId);
+      if (conditionFieldsTouched) {
+        // Rebase every condition mutation against the FRESH row (issue #747 / #423).
+        // Legacy string deltas and structured instance deltas share this path so a
+        // removeConditions patch cannot leave stale conditionInstances behind, and an
+        // addConditionInstance patch actually persists without needing a legacy field.
+        const legacyConditions = fromJsonText<string[]>(fresh.conditions, []);
+        let instances = parseConditionInstances(fresh.conditionInstances, legacyConditions);
+        beforeConditions = new Set(deriveConditionNames(instances));
+
+        if (patch.conditionInstances !== undefined) {
+          instances = [...patch.conditionInstances];
+        } else {
+          if (patch.addConditionInstance !== undefined) {
+            // Add a single instance (idempotent: replace if id already present).
+            const addIdx = instances.findIndex((i) => i.id === patch.addConditionInstance!.id);
+            if (addIdx >= 0) instances[addIdx] = patch.addConditionInstance;
+            else instances.push(patch.addConditionInstance);
+          }
+          if (patch.updateConditionInstance !== undefined) {
+            // Update a single instance by id; ignore if not present (no-op).
+            const upd = patch.updateConditionInstance;
+            const updIdx = instances.findIndex((i) => i.id === upd.id);
+            if (updIdx >= 0) instances[updIdx] = upd;
+          }
+          if (patch.removeConditionInstanceId !== undefined) {
+            // Remove only the targeted instance — not all instances with the same name.
+            instances = instances.filter((i) => i.id !== patch.removeConditionInstanceId);
+          }
+          if (patch.removeConditions !== undefined) {
+            const removedNames = new Set(patch.removeConditions.map((c) => c.trim()).filter(Boolean));
+            instances = instances.filter((i) => !removedNames.has(i.name));
+          }
+          if (patch.addConditions !== undefined) {
+            const existingNames = new Set(instances.map((i) => i.name));
+            for (const rawName of patch.addConditions) {
+              const legacy = legacyConditionInstance(rawName);
+              if (!legacy) continue;
+              if (existingNames.has(legacy.name)) continue;
+              existingNames.add(legacy.name);
+              instances.push(legacy);
             }
           }
-          const derived = deriveConditionNames(instances);
-          afterConditions = new Set(derived);
-          writeSet.conditionInstances = toJsonText(instances);
-          writeSet.conditions = toJsonText(derived);
-        } else {
-          // Rebase the add/remove deltas against the FRESH row's conditions (issue
-          // #747). A stale whole-array write — derived outside the tx from the
-          // pre-await read — let two concurrent callers clobber each other: caller A
-          // adds 'poisoned' while caller B removes 'prone', and whichever wrote
-          // second replaced the array entirely, dropping the other's change. By
-          // reading `fresh.conditions` inside the serialized transaction and applying
-          // both deltas as set union/difference, concurrent changes compose — the
-          // same read-from-fresh pattern the HP path uses. Retries (re-adding an
-          // already-present or re-removing an absent condition) are idempotent: the
-          // set ops are no-ops and `afterConditions` equals `beforeConditions`.
-          const current = new Set(fromJsonText<string[]>(fresh.conditions, []));
-          beforeConditions = new Set(current);
-          for (const c of patch.removeConditions ?? []) current.delete(c);
-          for (const c of patch.addConditions ?? []) current.add(c);
-          afterConditions = new Set(current);
-          writeSet.conditions = toJsonText([...current]);
         }
+
+        instances = instances.slice(0, 50);
+        const derived = deriveConditionNames(instances);
+        afterConditions = new Set(derived);
+        writeSet.conditionInstances = toJsonText(instances);
+        writeSet.conditions = toJsonText(derived);
       }
       if (patch.eac !== undefined && isDm) writeSet.eac = patch.eac;
       if (patch.kac !== undefined && isDm) writeSet.kac = patch.kac;
@@ -3088,7 +3267,7 @@ export class EncountersService {
       afterDeath = updated.deathState;
       afterSucc = updated.deathSaveSuccesses;
       afterFail = updated.deathSaveFailures;
-      if (conditionsTouched) {
+      if (conditionFieldsTouched) {
         afterConditions = new Set(fromJsonText<string[]>(updated.conditions, []));
       }
       if (mirrorSheet) {
@@ -3105,7 +3284,7 @@ export class EncountersService {
           sheetSet.deathSaveSuccesses = updated.deathSaveSuccesses;
           sheetSet.deathSaveFailures = updated.deathSaveFailures;
         }
-        if (conditionsTouched) {
+        if (conditionFieldsTouched) {
           sheetSet.conditions = updated.conditions;
         }
         tx.update(characters)
@@ -3126,7 +3305,7 @@ export class EncountersService {
     // identity edits (rename / hpMax / initMod, issue #114) — which are rare and
     // worth a trail. An update that ONLY touched HP/death-save fields is skipped.
     const changedNonHp =
-      conditionsTouched ||
+      conditionFieldsTouched ||
       staticUpdate.initiative !== undefined ||
       staticUpdate.name !== undefined ||
       staticUpdate.initMod !== undefined ||
@@ -3270,7 +3449,7 @@ export class EncountersService {
     // caller). Logging the symmetric difference of the two committed sets means a
     // retry that landed nothing new logs nothing, while a real concurrent change
     // still logs exactly the conditions this caller's delta flipped.
-    if (conditionsTouched) {
+    if (conditionFieldsTouched) {
       for (const c of afterConditions) {
         if (!beforeConditions.has(c)) {
           await this.appendEvent(encounterId, round, 'condition', {
@@ -3376,10 +3555,24 @@ export class EncountersService {
       );
       const turnIndex = turnIndexFor(sortedAfter, newCurrentId);
       const round = wrappedToNextRound ? encounterRow.round + 1 : encounterRow.round;
+      const escalation = this.nextEscalationState(runningAdapter, encounterRow, round, 'round');
       await this.db
         .update(encounters)
-        .set({ currentCombatantId: newCurrentId, turnIndex, round, updatedAt: nowIso() })
+        .set({
+          currentCombatantId: newCurrentId,
+          turnIndex,
+          round,
+          escalationDie: escalation.escalationDie,
+          escalationDieHistory: escalation.escalationDieHistory ?? encounterRow.escalationDieHistory,
+          updatedAt: nowIso(),
+        })
         .where(eq(encounters.id, encounterId));
+      if (wrappedToNextRound && escalation.logDetail) {
+        await this.appendEvent(encounterId, round, 'override', {
+          detail: escalation.logDetail,
+          metadata: { escalationDie: escalation.escalationDie },
+        });
+      }
     }
 
     await this.audit.log({
@@ -3404,7 +3597,7 @@ export class EncountersService {
     const rows = await this.listCombatantRows(encounterId);
     const unrolled = rows.filter((row) => row.initiative === null);
 
-    let rolled: Array<{ id: number; initiative: number }>;
+    let rolled: Array<{ id: number; initiative: number; breakdown: CombatantInitiativeBreakdown; name: string }>;
     if (initModel.mode === 'group') {
       // Group initiative (issue #765): one d6 per side; all combatants on a side share the roll.
       const groupRolls = new Map<string, number>();
@@ -3416,13 +3609,33 @@ export class EncountersService {
           groupRolls.set(group, rollInitiative(0, adapter.initiativeDie));
         }
         const base = groupRolls.get(group)!;
-        return { id: row.id, initiative: base };
+        const existing = parseInitiativeBreakdown(row.initiativeBreakdown) ?? manualInitiativeBreakdown(adapter, 0);
+        const breakdown = CombatantInitiativeBreakdown.parse({
+          ...existing,
+          die: adapter.initiativeDie,
+          roll: base,
+          modifier: 0,
+          total: base,
+          terms: [{ label: group, value: 0 }],
+          formula: initiativeFormula(adapter.initiativeDie, [{ label: group, value: 0 }], base, base),
+        });
+        return { id: row.id, initiative: base, breakdown, name: row.name };
       });
     } else {
-      rolled = unrolled.map((row) => ({
-        id: row.id,
-        initiative: rollInitiative(row.initMod, adapter.initiativeDie),
-      }));
+      rolled = unrolled.map((row) => {
+        const initiative = rollInitiative(row.initMod, adapter.initiativeDie);
+        const natural = initiative - row.initMod;
+        const existing = parseInitiativeBreakdown(row.initiativeBreakdown) ?? manualInitiativeBreakdown(adapter, row.initMod);
+        const breakdown = CombatantInitiativeBreakdown.parse({
+          ...existing,
+          die: adapter.initiativeDie,
+          roll: natural,
+          modifier: row.initMod,
+          total: initiative,
+          formula: initiativeFormula(adapter.initiativeDie, existing.terms, natural, initiative),
+        });
+        return { id: row.id, initiative, breakdown, name: row.name };
+      });
     }
 
     // Fully-rolled roster (issue #702): nothing to write, nothing meaningful to audit.
@@ -3438,9 +3651,16 @@ export class EncountersService {
       rolled.map((r) => sql`WHEN ${r.id} THEN ${r.initiative}`),
       sql` `,
     );
+    const breakdownCases = sql.join(
+      rolled.map((r) => sql`WHEN ${r.id} THEN ${toJsonText(r.breakdown)}`),
+      sql` `,
+    );
     await this.db
       .update(combatants)
-      .set({ initiative: sql`CASE ${combatants.id} ${cases} END` })
+      .set({
+        initiative: sql`CASE ${combatants.id} ${cases} END`,
+        initiativeBreakdown: sql`CASE ${combatants.id} ${breakdownCases} END`,
+      })
       .where(
         inArray(
           combatants.id,
@@ -3471,6 +3691,14 @@ export class EncountersService {
       campaignId: encounterRow.campaignId,
       detail: `${rolled.length}`,
     });
+
+    for (const r of rolled) {
+      await this.appendEvent(encounterId, encounterRow.round, 'roll', {
+        target: r.name,
+        targetId: r.id,
+        detail: `initiative ${r.breakdown.formula}`,
+      });
+    }
 
     this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId, encounterRow.hidden);
 
@@ -3517,6 +3745,7 @@ export class EncountersService {
     // sees the winner's committed row and surfaces a 409 with the winner's name + link.
     const campaignId = encounterRow.campaignId;
     const ts = nowIso();
+    const escalation = this.nextEscalationState(adapter, encounterRow, 1, 'start');
     this.db.transaction((tx) => {
       this.assertNoOtherLiveEncounter(campaignId, encounterId, tx);
       tx.update(encounters)
@@ -3527,6 +3756,8 @@ export class EncountersService {
           currentCombatantId,
           turnPhase,
           lairResumeCombatantId,
+          escalationDie: escalation.escalationDie,
+          escalationDieHistory: escalation.escalationDieHistory ?? encounterRow.escalationDieHistory,
           updatedAt: ts,
         })
         .where(eq(encounters.id, encounterId))
@@ -3549,6 +3780,12 @@ export class EncountersService {
       targetId: first?.id ?? null,
       detail: turnPhase === 'lair' ? 'Lair action (initiative 20)' : 'Combat started',
     });
+    if (escalation.logDetail) {
+      await this.appendEvent(encounterId, 1, 'override', {
+        detail: escalation.logDetail,
+        metadata: { escalationDie: escalation.escalationDie },
+      });
+    }
 
     await this.audit.log({
       actor: auditActor(user),
@@ -3685,6 +3922,8 @@ export class EncountersService {
     let skippedTurns: Array<{ id: number; name: string; round: number }> = [];
     const expiredEffects: Array<{ combatantId: number; combatantName: string; effectName: string }> = [];
     const expiredConditions: Array<{ combatantId: number; combatantName: string; conditionName: string }> = [];
+    let escalationLogDetail: string | undefined;
+    let escalationValue = encounterRow.escalationDie ?? 0;
 
     this.db.transaction((tx) => {
       const [fresh] = tx.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all();
@@ -3736,6 +3975,9 @@ export class EncountersService {
       newRound = round;
       newCurrentId = currentCombatantId;
       skippedTurns = skipped;
+      const escalation = this.nextEscalationState(adapter, fresh, round, 'round');
+      escalationValue = escalation.escalationDie;
+      escalationLogDetail = roundWrapped ? escalation.logDetail : undefined;
 
       // Resolve effects on the ENDING combatant (the one whose turn we're leaving): tick
       // timed effects down, drop the expired. Only meaningful on a genuine combatant advance.
@@ -3814,6 +4056,8 @@ export class EncountersService {
           currentCombatantId,
           turnPhase: phase,
           lairResumeCombatantId,
+          escalationDie: escalation.escalationDie,
+          escalationDieHistory: escalation.escalationDieHistory ?? fresh.escalationDieHistory,
           updatedAt: nowIso(),
         })
         .where(eq(encounters.id, encounterId))
@@ -3863,6 +4107,12 @@ export class EncountersService {
         detail: `condition expired: ${ex.conditionName}`,
       });
     }
+    if (escalationLogDetail) {
+      await this.appendEvent(encounterId, newRound, 'override', {
+        detail: escalationLogDetail,
+        metadata: { escalationDie: escalationValue },
+      });
+    }
 
     await this.audit.log({
       actor: auditActor(user),
@@ -3896,6 +4146,8 @@ export class EncountersService {
     let newRound = encounterRow.round;
     let newCurrentId: number | null = null;
     let newCurrentName: string | null = null;
+    let escalationLogDetail: string | undefined;
+    let escalationValue = encounterRow.escalationDie ?? 0;
 
     this.db.transaction((tx) => {
       const [fresh] = tx.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all();
@@ -3929,6 +4181,9 @@ export class EncountersService {
       );
       newRound = round;
       newCurrentId = currentCombatantId;
+      const escalation = this.nextEscalationState(adapter, fresh, round, 'undo');
+      escalationValue = escalation.escalationDie;
+      escalationLogDetail = escalation.logDetail;
 
       if (roundWrapped) {
         for (const row of rows) {
@@ -3960,6 +4215,8 @@ export class EncountersService {
           currentCombatantId,
           turnPhase: phase,
           lairResumeCombatantId,
+          escalationDie: escalation.escalationDie,
+          escalationDieHistory: escalation.escalationDieHistory ?? fresh.escalationDieHistory,
           updatedAt: nowIso(),
         })
         .where(eq(encounters.id, encounterId))
@@ -3972,6 +4229,12 @@ export class EncountersService {
       targetId: newCurrentId,
       detail: 'turn advance undone',
     });
+    if (escalationLogDetail) {
+      await this.appendEvent(encounterId, newRound, 'override', {
+        detail: escalationLogDetail,
+        metadata: { escalationDie: escalationValue },
+      });
+    }
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -3980,6 +4243,62 @@ export class EncountersService {
       entityId: encounterId,
       campaignId: encounterRow.campaignId,
       detail: `round ${newRound}`,
+    });
+    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId, encounterRow.hidden);
+    return this.getWithCombatantsOrThrow(encounterId, role);
+  }
+
+  async updateEscalationDie(
+    encounterId: number,
+    input: EncounterEscalationUpdateInput,
+    user: RequestUser,
+    role: Role,
+  ): Promise<EncounterWithCombatants> {
+    const encounterRow = await this.getRowOrThrow(encounterId);
+    this.assertMutable(encounterRow);
+    const adapter = await this.adapterForCampaign(encounterRow.campaignId);
+    if (!isArchmageAdapter(adapter)) {
+      throw new BadRequestException('Escalation die controls are only available for 13th Age encounters');
+    }
+
+    const held = input.held ?? (encounterRow.escalationDieHeld ?? false);
+    const override = input.override !== undefined ? input.override : (encounterRow.escalationDieOverride ?? null);
+    const previous = encounterRow.escalationDie ?? 0;
+    const value = override ?? (held ? previous : archmageEscalationDieForRound(adapter, encounterRow.round));
+    const source: EscalationDieHistoryEntry['source'] = input.override !== undefined ? 'override' : 'hold';
+    const note =
+      override !== null
+        ? `override to +${value}`
+        : held
+          ? `held at +${value}`
+          : `automatic round ${encounterRow.round} default +${value}`;
+    const entry = this.escalationEntry(encounterRow.round, value, source, held, override, note);
+    const history = this.appendEscalationHistory(encounterRow.escalationDieHistory, entry);
+    const ts = nowIso();
+
+    await this.db
+      .update(encounters)
+      .set({
+        escalationDie: value,
+        escalationDieHeld: held,
+        escalationDieOverride: override,
+        escalationDieHistory: history,
+        updatedAt: ts,
+      })
+      .where(eq(encounters.id, encounterId));
+
+    await this.appendEvent(encounterId, encounterRow.round, 'override', {
+      detail: `escalation die ${note}`,
+      metadata: { escalationDie: value },
+    });
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'encounter.escalation_die.update',
+      entityType: 'encounter',
+      entityId: encounterId,
+      campaignId: encounterRow.campaignId,
+      detail: JSON.stringify(input),
     });
     this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId, encounterRow.hidden);
     return this.getWithCombatantsOrThrow(encounterId, role);
