@@ -1411,12 +1411,24 @@ export class AiDriverService {
               tools: toolSchemas,
             });
           } catch (err) {
-            const unknownMetered = await this.aiDm.markReservationUsageUnknown(reservation, {
-              actor,
-              action: 'ai-dm.driver.usage_unknown',
-              detail: `step ${stepNumber} provider exception model=${execModel} usage unknown by ${triggeredBy.id}`,
-              model: execModel,
-            });
+            // Settling the hold is bookkeeping; the provider error is what the caller
+            // needs to see. Never let a failed settle replace it (#563).
+            let unknownMetered: { seat: AiDmSeat; budgetRemaining: number };
+            try {
+              unknownMetered = await this.aiDm.markReservationUsageUnknown(reservation, {
+                actor,
+                action: 'ai-dm.driver.usage_unknown',
+                detail: `step ${stepNumber} provider exception model=${execModel} usage unknown by ${triggeredBy.id}`,
+                model: execModel,
+              });
+            } catch (releaseErr) {
+              this.logger.error(
+                `Failed to release AI token reservation (campaign=${campaignId}, tokens=${reservation.tokensReserved}) after a provider exception: ${
+                  releaseErr instanceof Error ? releaseErr.message : String(releaseErr)
+                }`,
+              );
+              unknownMetered = { seat: currentSeat, budgetRemaining: currentRemaining };
+            }
             const error =
               err instanceof AiProviderError
                 ? err

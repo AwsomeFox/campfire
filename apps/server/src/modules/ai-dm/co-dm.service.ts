@@ -169,7 +169,7 @@ export class CoDmService {
         resolvedModel = execModel;
       }
     } catch (err) {
-      await this.aiDm.markReservationUsageUnknown(reservation, {
+      await this.aiDm.releaseReservationQuietly(reservation, {
         actor: auditActor(user),
         action: 'ai-dm.draft.unknown',
         detail: `${input.target} draft usage unknown after provider error`,

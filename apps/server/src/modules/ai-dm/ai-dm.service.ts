@@ -5,8 +5,9 @@ import {
   Inject,
   Injectable,
   Logger,
+  type OnApplicationBootstrap,
 } from '@nestjs/common';
-import { and, desc, eq, gte, sql } from 'drizzle-orm';
+import { and, desc, eq, gt, gte, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import { AiDmProactiveSettings } from '@campfire/schema';
 import type { AiDmMode, AiDmSeat, AiDmSeatUpdate, AiDmTurnRequest, AiDmTurnResult, AiDmUsageHistoryEntry, AiDmUsageHistoryResponse, Role } from '@campfire/schema';
@@ -29,6 +30,15 @@ export interface AiDmTokenReservation {
   campaignId: number;
   tokensReserved: number;
   tokenBudget: number;
+  /**
+   * Set the instant the hold is released from `tokens_reserved` — by meterTurn() or
+   * markReservationUsageUnknown(). A reservation must be settled EXACTLY once: leaving
+   * it unsettled strands campaign budget forever, settling it twice double-charges the
+   * seat (once as used, once as unknown). Both settle paths flip this flag immediately
+   * after their DB transaction commits and no-op when it is already true, so callers can
+   * safely wrap metering in a try/catch that falls back to the unknown path (#563).
+   */
+  settled: boolean;
 }
 
 function budgetRemainingFor(seat: {
@@ -108,7 +118,7 @@ function defaultSeat(campaignId: number): AiDmSeat {
  * Plus a per-campaign token budget that a turn is metered against.
  */
 @Injectable()
-export class AiDmService {
+export class AiDmService implements OnApplicationBootstrap {
   private readonly logger = new Logger(AiDmService.name);
 
   /**
@@ -139,6 +149,51 @@ export class AiDmService {
     private readonly providerConfig: AiProviderConfigService,
     @Inject(AI_DM_PROVIDER) private readonly provider: AiDmProvider,
   ) {}
+
+  /**
+   * Reservations live in the DB but the in-flight provider calls that own them live in
+   * memory, so a crash/restart mid-call leaves `tokens_reserved` held by nobody (#563).
+   * Nothing would ever release it and the seat's usable budget would shrink permanently.
+   * Campfire is a single-process SQLite deployment, so at bootstrap no provider call can
+   * legitimately still be in flight: every surviving hold is stale. Convert them to
+   * unknown spend rather than refunding — provider contact may well have happened and
+   * really cost tokens, and the budget gate must stay conservative (issue #563: "never
+   * clamp away actual/unknown spend"). Clean shutdowns settle their holds, so a normal
+   * restart finds nothing to do here.
+   */
+  async onApplicationBootstrap(): Promise<void> {
+    const stale = await this.db
+      .select({ campaignId: aiDmSeats.campaignId, tokensReserved: aiDmSeats.tokensReserved })
+      .from(aiDmSeats)
+      .where(gt(aiDmSeats.tokensReserved, 0));
+    if (stale.length === 0) return;
+
+    const ts = nowIso();
+    this.db.transaction((tx) => {
+      tx.update(aiDmSeats)
+        .set({
+          tokensUnknown: sql`${aiDmSeats.tokensUnknown} + ${aiDmSeats.tokensReserved}`,
+          tokensReserved: 0,
+          updatedAt: ts,
+        })
+        .where(gt(aiDmSeats.tokensReserved, 0))
+        .run();
+    });
+
+    for (const row of stale) {
+      this.logger.warn(
+        `Reclaimed a stale AI token reservation left by a previous run (campaign=${row.campaignId}, tokens=${row.tokensReserved}); recorded as unknown spend.`,
+      );
+      await this.audit.log({
+        actor: 'system',
+        actorRole: 'dm',
+        action: 'ai-dm.reservation_reclaimed',
+        entityType: 'ai-dm',
+        campaignId: row.campaignId,
+        detail: `stale reservation=${row.tokensReserved} from a previous process recorded as unknown spend`,
+      });
+    }
+  }
 
   /** Register proactive settings change callback (#1044). */
   registerProactiveSettingsCallback(
@@ -490,6 +545,7 @@ export class AiDmService {
         campaignId,
         tokensReserved,
         tokenBudget: updated.tokenBudget,
+        settled: false,
       };
     });
 
@@ -535,7 +591,7 @@ export class AiDmService {
         maxTokens: reservation.tokensReserved,
       });
     } catch (err) {
-      await this.markReservationUsageUnknown(reservation, {
+      await this.releaseReservationQuietly(reservation, {
         actor: auditActor(user),
         action: 'ai-dm.turn.unknown',
         detail: `${input.kind} via ${this.provider.name} model=${execModel || 'default'} usage unknown after provider error`,
@@ -612,6 +668,12 @@ export class AiDmService {
    * capacity, records known overage instead of clamping it away, and releases the
    * in-flight hold. The no-reservation path remains for tests/internal callers but
    * provider contact paths should reserve first.
+   *
+   * A reservation handed to this method is ALWAYS settled, including when metering
+   * throws: an un-released hold permanently shrinks the campaign's usable budget until
+   * an admin resets usage, so a transient failure must never strand one. Callers
+   * therefore do not need their own try/catch, and one that has a fallback to
+   * markReservationUsageUnknown() is safe — the second settle no-ops.
    */
   async meterTurn(
     campaignId: number,
@@ -622,10 +684,47 @@ export class AiDmService {
     if (reservation && reservation.campaignId !== campaignId) {
       throw new BadRequestException('AI token reservation does not belong to this campaign');
     }
+    try {
+      return await this.meterTurnInner(campaignId, tokensUsed, audit, reservation);
+    } catch (err) {
+      // The release transaction may or may not have committed before the throw (the
+      // audit + history writes that follow it are un-guarded DB inserts). `settled`
+      // records which: unsettled means the hold is still on the seat and must be
+      // consumed as unknown spend; settled means the spend is already booked and
+      // consuming it again would charge the same tokens twice.
+      if (reservation && !reservation.settled) {
+        try {
+          await this.markReservationUsageUnknown(reservation, {
+            actor: audit.actor,
+            action: 'ai-dm.meter_failed',
+            detail: `metering failed before the reservation was released; consumed reservation=${reservation.tokensReserved} as unknown spend`,
+            model: audit.model,
+          });
+        } catch (releaseErr) {
+          this.logger.error(
+            `Failed to release AI token reservation (campaign=${campaignId}, tokens=${reservation.tokensReserved}) after a metering error: ${
+              releaseErr instanceof Error ? releaseErr.message : String(releaseErr)
+            }`,
+          );
+        }
+      }
+      throw err;
+    }
+  }
+
+  private async meterTurnInner(
+    campaignId: number,
+    tokensUsed: number,
+    audit: { actor: string; action?: string; detail?: string; model?: string },
+    reservation?: AiDmTokenReservation,
+  ): Promise<{ seat: AiDmSeat; tokensUsed: number; budgetRemaining: number }> {
     const cost = Math.max(0, Math.floor(tokensUsed));
     const reserved = reservation?.tokensReserved ?? 0;
-    const refunded = Math.max(0, reserved - cost);
-    const overage = Math.max(0, cost - reserved);
+    // Refund/overage are meaningful only RELATIVE to a pre-call reservation. Without one
+    // there is no baseline, so booking the whole cost as overage would fabricate an
+    // overrun for legacy/internal metering callers.
+    const refunded = reservation ? Math.max(0, reserved - cost) : 0;
+    const overage = reservation ? Math.max(0, cost - reserved) : 0;
     const ts = nowIso();
     const existing = await this.findRow(campaignId);
     let updatedRow: (typeof aiDmSeats.$inferSelect) | undefined;
@@ -649,9 +748,14 @@ export class AiDmService {
           .all();
         updatedRow = updated;
       });
+      // The hold is off the seat as of the commit above. Everything after this point
+      // (audit, usage history) is bookkeeping that must not re-consume it.
+      if (reservation) reservation.settled = true;
     } else {
       // assertRunnable guarantees an enabled row upstream, but stay honest if called bare.
       tokenBudget = reservation?.tokenBudget ?? 0;
+      // No row to decrement means there is no hold left to strand either.
+      if (reservation) reservation.settled = true;
     }
 
     await this.audit.log({
@@ -688,11 +792,20 @@ export class AiDmService {
    * Provider contact happened but usage is unknown (e.g. a stream failed before a
    * usage block). Do not refund the reservation: consume it as unknown spend so
    * future budget gates stay conservative and the UI can surface the state (#563).
+   *
+   * Idempotent: a reservation already released by meterTurn() is left alone. Callers
+   * that fall back here after a metering error cannot tell whether the release
+   * transaction committed before the error, and consuming an already-released hold
+   * would charge the same tokens twice (once as used, once as unknown).
    */
   async markReservationUsageUnknown(
     reservation: AiDmTokenReservation,
     audit: { actor: string; action?: string; detail?: string; model?: string },
   ): Promise<{ seat: AiDmSeat; tokensUnknown: number; budgetRemaining: number }> {
+    if (reservation.settled) {
+      const seat = await this.getSeat(reservation.campaignId);
+      return { seat, tokensUnknown: 0, budgetRemaining: seat.budgetRemaining };
+    }
     const ts = nowIso();
     let updatedRow: (typeof aiDmSeats.$inferSelect) | undefined;
     this.db.transaction((tx) => {
@@ -710,6 +823,7 @@ export class AiDmService {
         .all();
       updatedRow = updated;
     });
+    reservation.settled = true;
 
     await this.audit.log({
       actor: audit.actor,
@@ -725,6 +839,27 @@ export class AiDmService {
       tokensUnknown: reservation.tokensReserved,
       budgetRemaining: updatedRow ? budgetRemainingFor(updatedRow) : 0,
     };
+  }
+
+  /**
+   * markReservationUsageUnknown() for `catch` blocks whose job is to surface the
+   * ORIGINAL failure (a provider error, usually). Settling the hold is bookkeeping; if
+   * it fails too, log it and let the real error reach the caller instead of masking it
+   * with a database error (#563).
+   */
+  async releaseReservationQuietly(
+    reservation: AiDmTokenReservation,
+    audit: { actor: string; action?: string; detail?: string; model?: string },
+  ): Promise<void> {
+    try {
+      await this.markReservationUsageUnknown(reservation, audit);
+    } catch (err) {
+      this.logger.error(
+        `Failed to release AI token reservation (campaign=${reservation.campaignId}, tokens=${reservation.tokensReserved}): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
   }
 
   /**
