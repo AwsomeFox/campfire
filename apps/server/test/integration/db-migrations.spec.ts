@@ -358,6 +358,17 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(MIGRATION_NAMES).toContain('0095_campaign_catch_up_cursors');
       expect(MIGRATION_NAMES).toContain('0098_encounters_aftermath_dismissed');
       expect(MIGRATION_NAMES).toContain('0102_ai_scribe_session_scope_499');
+      // #559: durable AI Driver control state is created as a NEW table on an old-shaped
+      // DB, so pause/takeover/vote/stuck survive a restart after an in-place upgrade.
+      expect(MIGRATION_NAMES).toContain('0118_ai_driver_control_state_559');
+      expect(columnNames(sqlite, 'ai_driver_control_state')).toEqual(
+        expect.arrayContaining([
+          'campaign_id', 'status', 'state', 'scene', 'last_narration', 'last_turn_at',
+          'turn_count', 'stuck', 'acting_dm', 'vote', 'takeover_requested_by', 'last_input',
+          'announced_recovery', 'updated_at',
+        ]),
+      );
+      expect(countRows(sqlite, 'ai_driver_control_state')).toBe(0);
       expect(
         sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ai_dm_usage_history'").get(),
       ).toBeTruthy();
@@ -997,6 +1008,72 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(MIGRATION_NAMES).toContain('0059_public_invites_disabled_inactive');
     } finally {
       second.sqlite.close();
+    }
+  });
+
+  /**
+   * Issue #559. `ai_driver_control_state` gained `announced_recovery` after the create-table
+   * migration had already shipped under an earlier name and a column-less shape. Because
+   * runMigrations skips any migration whose name is recorded in `__migrations`, a probe living
+   * INSIDE the create-table migration would never run on the DBs that actually need it — the
+   * column would stay missing, every drizzle read/write on the table would throw, and the
+   * best-effort try/catch around persistence would swallow it, silently disabling restart-safety.
+   * The backfill therefore has its own separate, never-before-recorded migration name, which this
+   * exercises directly. Ordinals are deliberately not named here — this pair has been renumbered
+   * several times as main moved, and a comment citing a name that no longer exists is exactly what
+   * would mislead someone into reusing one.
+   */
+  it('backfills announced_recovery on a DB that recorded the CREATE before the column existed', () => {
+    dataDir = makeTempDataDir();
+    const first = openDatabase(dataDir);
+    first.sqlite.close();
+
+    // Rewind to the pre-column shape: drop the table, recreate it WITHOUT announced_recovery,
+    // and leave the CREATE recorded while removing the backfill — exactly a DB from the build
+    // that shipped the create-table migration before the column existed.
+    const rewound = new Database(dbFilePath(dataDir));
+    try {
+      rewound.exec('DROP TABLE ai_driver_control_state');
+      rewound.exec(`
+        CREATE TABLE ai_driver_control_state (
+          campaign_id INTEGER PRIMARY KEY REFERENCES campaigns(id) ON DELETE CASCADE,
+          status TEXT NOT NULL DEFAULT 'idle',
+          state TEXT NOT NULL DEFAULT 'running',
+          scene TEXT,
+          last_narration TEXT,
+          last_turn_at TEXT,
+          turn_count INTEGER NOT NULL DEFAULT 0,
+          stuck TEXT,
+          acting_dm TEXT,
+          vote TEXT,
+          takeover_requested_by TEXT,
+          last_input TEXT,
+          updated_at TEXT NOT NULL
+        );
+      `);
+      rewound.prepare('DELETE FROM __migrations WHERE name = ?').run('0119_ai_driver_control_state_announced_recovery_559');
+      expect(
+        rewound.prepare('SELECT name FROM __migrations WHERE name = ?').get('0118_ai_driver_control_state_559'),
+      ).toBeTruthy();
+      expect(columnNames(rewound, 'ai_driver_control_state')).not.toContain('announced_recovery');
+    } finally {
+      rewound.close();
+    }
+
+    const upgraded = openDatabase(dataDir);
+    try {
+      expect(MIGRATION_NAMES).toContain('0119_ai_driver_control_state_announced_recovery_559');
+      expect(columnNames(upgraded.sqlite, 'ai_driver_control_state')).toContain('announced_recovery');
+    } finally {
+      upgraded.sqlite.close();
+    }
+
+    // And re-running on the already-backfilled file is a no-op, not a duplicate-column error.
+    const again = openDatabase(dataDir);
+    try {
+      expect(columnNames(again.sqlite, 'ai_driver_control_state')).toContain('announced_recovery');
+    } finally {
+      again.sqlite.close();
     }
   });
 });
