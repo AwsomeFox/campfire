@@ -13,9 +13,10 @@ import type { Character, RuleSystemAdapter } from '@campfire/schema';
 // and the encounter card all read. Re-exported here under the historical names so existing
 // import sites keep working while the math lives in exactly one place.
 import { DND5E_ABILITY_KEYS, DND5E_SKILLS, dnd5eProficiencyBonus } from '@campfire/schema';
+import { abilityKeysForAdapter, abilityLabelForAdapter } from '@campfire/schema';
 
 export const ABILITY_KEYS = DND5E_ABILITY_KEYS;
-export type Ability = (typeof ABILITY_KEYS)[number];
+export type Ability = string;
 
 /** SRD 5e skill list with governing abilities (from the shared schema catalog). */
 export const SKILLS: ReadonlyArray<{ name: string; ability: Ability }> = DND5E_SKILLS;
@@ -37,11 +38,29 @@ export function profBonus(level: number): number {
  * Returns `null` when the ability was never set — draft/incomplete sheets must not
  * silently display 10 (issue #719). Callers show "—" for null.
  */
-export function abilityScore(character: Character, ability: Ability): number | null {
+export function abilityScore(character: Character, ability: string): number | null {
   const stats = character.stats;
-  const raw = stats[ability] ?? stats[ability.toLowerCase()];
+  const raw = stats[ability] ?? stats[ability.toUpperCase()] ?? stats[ability.toLowerCase()];
   if (raw === undefined || raw === null) return null;
   return raw;
+}
+
+/** Adapter-owned sheet attributes plus any native/custom stats already stored on the character. */
+export function abilityFieldsForCharacter(
+  adapter: RuleSystemAdapter,
+  character: Pick<Character, 'stats'>,
+): Array<{ key: string; label: string }> {
+  const keys: string[] = [];
+  const seen = new Set<string>();
+  const add = (key: string) => {
+    const normalized = key.toUpperCase();
+    if (seen.has(normalized)) return;
+    seen.add(normalized);
+    keys.push(normalized);
+  };
+  for (const key of abilityKeysForAdapter(adapter)) add(key);
+  for (const key of Object.keys(character.stats ?? {})) add(key);
+  return keys.map((key) => ({ key, label: abilityLabelForAdapter(adapter, key) }));
 }
 
 /** Modifier for a set ability score; returns null when the score is unset. */

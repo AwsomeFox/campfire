@@ -27,6 +27,7 @@ import {
   characterSheetDraftsEqual,
   isCharacterSheetDirty,
 } from '../../src/features/characters/characterSheetFormState';
+import { Dnd5eAdapter, OpenLegendAdapter } from '@campfire/schema';
 import type { Character } from '@campfire/schema';
 
 class MemoryStorage implements Storage {
@@ -181,8 +182,26 @@ test.describe('recap editor dirty detection (issue #641)', () => {
 
 test.describe('character sheet dirty detection (issue #641)', () => {
   test('sheet draft snapshot round-trips from a character record', () => {
-    const baseline = characterSheetDraftFrom(character());
+    const baseline = characterSheetDraftFrom(character(), Dnd5eAdapter);
     expect(isCharacterSheetDirty({ ...baseline, level: '4' }, baseline)).toBe(true);
-    expect(characterSheetDraftsEqual(baseline, characterSheetDraftFrom(character()))).toBe(true);
+    expect(characterSheetDraftsEqual(baseline, characterSheetDraftFrom(character(), Dnd5eAdapter))).toBe(true);
+  });
+
+  test('Open Legend drafts include adapter-native and custom stats', () => {
+    const ol = character({
+      className: '',
+      stats: {
+        AGILITY: 4,
+        MIGHT: 5,
+        ENERGY: 3,
+        CUSTOM_NATIVE: 7,
+      },
+    });
+    const baseline = characterSheetDraftFrom(ol, OpenLegendAdapter);
+    expect(baseline.className).toBe('');
+    expect(baseline.stats.AGILITY).toBe('4');
+    expect(baseline.stats.ENERGY).toBe('3');
+    expect(baseline.stats.CUSTOM_NATIVE).toBe('7');
+    expect(Object.keys(baseline.stats)).toContain('PRESCIENCE');
   });
 });

@@ -43,6 +43,7 @@ export function NewCharacterForm({
   const levelNum = Math.max(1, Math.min(levelCap, Number(level) || 1));
   const templatesAtLevel = useMemo(() => starterTemplatesForAdapter(adapter, levelNum), [adapter, levelNum]);
   const selectedTemplate = findStarterTemplate(adapter, templateId, levelNum) ?? templatesAtLevel[0];
+  const classField = adapter.characterSheet?.classField ?? { label: 'Class', placeholder: 'Class', required: true, visible: true };
 
   async function importFromDdb() {
     const ref = ddbRef.trim();
@@ -179,18 +180,20 @@ export function NewCharacterForm({
           maxLength={120}
           autoFocus
         />
-        <div className="grid grid-cols-2 gap-3">
+        <div className={classField.visible ? 'grid grid-cols-2 gap-3' : 'grid grid-cols-1 gap-3'}>
           <TextInput aria-label="Species" placeholder="Species" value={species} onChange={(e) => setSpecies(e.target.value)} />
-          {path === 'blank' ? (
-            <TextInput aria-label="Class" placeholder="Class" value={className} onChange={(e) => setClassName(e.target.value)} />
-          ) : (
-            <TextInput
-              aria-label="Class"
-              placeholder="Class"
-              value={selectedTemplate?.className ?? className}
-              onChange={(e) => setClassName(e.target.value)}
-              readOnly={Boolean(selectedTemplate)}
-            />
+          {classField.visible && (
+            path === 'blank' ? (
+              <TextInput aria-label={classField.label} placeholder={classField.placeholder} value={className} onChange={(e) => setClassName(e.target.value)} />
+            ) : (
+              <TextInput
+                aria-label={classField.label}
+                placeholder={classField.placeholder}
+                value={selectedTemplate?.className ?? className}
+                onChange={(e) => setClassName(e.target.value)}
+                readOnly={Boolean(selectedTemplate)}
+              />
+            )
           )}
         </div>
         <div className="grid grid-cols-2 gap-3">

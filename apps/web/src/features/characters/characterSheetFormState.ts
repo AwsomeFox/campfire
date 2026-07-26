@@ -1,8 +1,8 @@
 /**
  * Character sheet editor draft helpers (issue #641).
  */
-import type { Character, CharacterStatus } from '@campfire/schema';
-import { ABILITY_KEYS, abilityScore } from '../../lib/characterStats';
+import type { Character, CharacterStatus, RuleSystemAdapter } from '@campfire/schema';
+import { abilityFieldsForCharacter, abilityScore } from '../../lib/characterStats';
 import { recordsEqual } from '../../lib/protectedFormState';
 
 export type CharacterSheetDraft = {
@@ -17,9 +17,9 @@ export type CharacterSheetDraft = {
   stats: Record<string, string>;
 };
 
-export function characterSheetDraftFrom(character: Character): CharacterSheetDraft {
+export function characterSheetDraftFrom(character: Character, adapter: RuleSystemAdapter): CharacterSheetDraft {
   const stats: Record<string, string> = {};
-  for (const key of ABILITY_KEYS) {
+  for (const { key } of abilityFieldsForCharacter(adapter, character)) {
     const score = abilityScore(character, key);
     stats[key] = score === null ? '' : String(score);
   }

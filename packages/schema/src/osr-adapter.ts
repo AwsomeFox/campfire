@@ -377,6 +377,22 @@ export function createOsrVariantAdapter(profile: OsrMechanicsProfile): RuleSyste
     id: profile.slug,
     label: profile.label,
     presentation: OSR_STATBLOCK_PRESENTATION,
+    characterSheet: {
+      abilityFields: [
+        { key: 'STR', label: 'STR' },
+        { key: 'DEX', label: 'DEX' },
+        { key: 'CON', label: 'CON' },
+        { key: 'INT', label: 'INT' },
+        { key: 'WIS', label: 'WIS' },
+        { key: 'CHA', label: 'CHA' },
+      ],
+      classField: { label: 'Class', placeholder: 'Class', required: true, visible: true },
+      supportsSavingThrowEditor: true,
+      supportsSkillEditor: false,
+      supportsSpellSlotEditor: false,
+      genericModeDescription:
+        'OSR sheets use native ability math and concise actions/resources; Campfire does not expose the fixed 5e skill list or spell-slot pips for this ruleset.',
+    },
     abilityModifier: abilityFn,
     initiativeDie: profile.initiativeDie,
     maxLevel: Infinity,

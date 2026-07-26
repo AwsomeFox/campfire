@@ -26,9 +26,9 @@ import {
   STARFINDER_ADAPTER_ID,
 } from '@campfire/schema';
 import {
-  ABILITY_KEYS,
   SPELL_LEVELS,
   abilityScore,
+  abilityFieldsForCharacter,
   signed,
   toHitExpr,
   damageExpr,
@@ -224,12 +224,12 @@ export function CharacterStatCard({
 
           {/* Ability scores — click for an ability check when interactive (server-resolved) */}
           <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
-            {ABILITY_KEYS.map((k) => {
+            {abilityFieldsForCharacter(adapter, character).map(({ key: k, label }) => {
               const score = abilityScore(character, k);
               const mod = score === null ? null : adapter.abilityModifier(score);
               const value = score === null ? '—' : `${score} (${signed(mod!)})`;
               const def = catalog.find((c) => c.id === `ability:${k}`);
-              if (!interactive || !def) return <StatChip key={k} label={k} value={value} />;
+              if (!interactive || !def) return <StatChip key={k} label={label} value={value} />;
               return (
                 <button
                   key={k}
@@ -242,7 +242,7 @@ export function CharacterStatCard({
                   onClick={(e) => rollCheck(def, e)}
                   style={{ background: 'transparent', border: 0, padding: 0, cursor: 'pointer' }}
                 >
-                  <StatChip label={k} value={value} />
+                  <StatChip label={label} value={value} />
                 </button>
               );
             })}

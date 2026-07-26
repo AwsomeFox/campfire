@@ -298,6 +298,15 @@ export const STARFINDER_STATBLOCK_PRESENTATION: StatblockPresentation = {
   creatureType: { full: 'Type' },
 };
 
+const STARFINDER_CHARACTER_ABILITY_FIELDS = [
+  { key: 'STR', label: 'STR' },
+  { key: 'DEX', label: 'DEX' },
+  { key: 'CON', label: 'CON' },
+  { key: 'INT', label: 'INT' },
+  { key: 'WIS', label: 'WIS' },
+  { key: 'CHA', label: 'CHA' },
+] as const;
+
 /** Starfinder 1e cumulative XP thresholds (Core Rulebook — same curve as PF1e, issue #441). */
 const STARFINDER_XP_THRESHOLDS = [
   0, 1_000, 3_000, 6_000, 10_000, 15_000, 21_000, 28_000, 36_000, 45_000, 55_000, 66_000, 78_000, 91_000,
@@ -321,6 +330,15 @@ export const StarfinderAdapter: StarfinderRuleSystemAdapter = {
   id: STARFINDER_ADAPTER_ID,
   label: 'Starfinder 1e',
   presentation: STARFINDER_STATBLOCK_PRESENTATION,
+  characterSheet: {
+    abilityFields: STARFINDER_CHARACTER_ABILITY_FIELDS,
+    classField: { label: 'Class', placeholder: 'Class', required: true, visible: true },
+    supportsSavingThrowEditor: true,
+    supportsSkillEditor: true,
+    supportsSpellSlotEditor: false,
+    genericModeDescription:
+      'Starfinder sheets use adapter-owned stamina, resolve, EAC/KAC, actions, and resources; 5e spell slots are not shown.',
+  },
   // Same d20 ability-modifier formula as 5e/PF1e.
   abilityModifier(score: number): number {
     return Math.floor((score - 10) / 2);

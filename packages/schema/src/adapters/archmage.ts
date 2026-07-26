@@ -123,6 +123,22 @@ export const Archmage13aAdapter: Archmage13aRuleSystemAdapter = {
   id: ARCHMAGE_ADAPTER_ID,
   label: '13th Age',
   presentation: ARCHMAGE_STATBLOCK_PRESENTATION,
+  characterSheet: {
+    abilityFields: [
+      { key: 'STR', label: 'STR' },
+      { key: 'DEX', label: 'DEX' },
+      { key: 'CON', label: 'CON' },
+      { key: 'INT', label: 'INT' },
+      { key: 'WIS', label: 'WIS' },
+      { key: 'CHA', label: 'CHA' },
+    ],
+    classField: { label: 'Class', placeholder: 'Class', required: true, visible: true },
+    supportsSavingThrowEditor: true,
+    supportsSkillEditor: true,
+    supportsSpellSlotEditor: false,
+    genericModeDescription:
+      '13th Age sheets use native level, defenses, actions, and escalation-die support; 5e spell slots are not shown.',
+  },
   // Same ability-score → modifier curve as 5e: floor((score - 10) / 2).
   abilityModifier(score: number): number {
     return Math.floor((score - 10) / 2);

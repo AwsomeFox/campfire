@@ -734,7 +734,12 @@ export class CharactersService {
     if (input.xp !== undefined) update.xp = input.xp;
     if (input.background !== undefined) update.background = input.background;
     if (input.status !== undefined) update.status = input.status;
-    if (input.stats !== undefined) update.stats = toJsonText(normalizeStats(input.stats));
+    if (input.stats !== undefined) {
+      update.stats = toJsonText({
+        ...normalizeStats(fromJsonText<Record<string, number>>(existing.stats, {})),
+        ...normalizeStats(input.stats),
+      });
+    }
     if (input.ac !== undefined) update.ac = clampAc(input.ac);
     if (input.eac !== undefined) update.eac = clampAc(input.eac);
     if (input.kac !== undefined) update.kac = clampAc(input.kac);

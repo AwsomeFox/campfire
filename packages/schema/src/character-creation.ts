@@ -9,8 +9,28 @@ import type { Character, CharacterAction, RuleSystemAdapter, SkillRank } from '.
 const DND5E_ADAPTER_ID = 'dnd5e';
 const OPEN_LEGEND_ADAPTER_ID = 'open-legend';
 const PF2E_ADAPTER_ID = 'pf2e';
-const STARFINDER_ADAPTER_ID = 'starfinder';
+const STARFINDER_ADAPTER_ID = 'starfinder-1e';
 const DND5E_ABILITY_KEYS = ['STR', 'DEX', 'CON', 'INT', 'WIS', 'CHA'] as const;
+const OPEN_LEGEND_ABILITY_KEYS = [
+  'AGILITY',
+  'FORTITUDE',
+  'MIGHT',
+  'LEARNING',
+  'LOGIC',
+  'PERCEPTION',
+  'WILL',
+  'DECEPTION',
+  'PERSUASION',
+  'PRESENCE',
+  'ALTERATION',
+  'CREATION',
+  'ENERGY',
+  'ENTROPY',
+  'INFLUENCE',
+  'MOVEMENT',
+  'PRESCIENCE',
+  'PROTECTION',
+] as const;
 
 function dnd5eProficiencyBonus(level: number): number {
   return Math.floor((level - 1) / 4) + 2;
@@ -45,14 +65,20 @@ export interface CharacterChecklistItem {
 
 /** Ability keys the sheet expects for a given adapter family. */
 export function abilityKeysForAdapter(adapter: RuleSystemAdapter): readonly string[] {
-  switch (adapter.id) {
-    case OPEN_LEGEND_ADAPTER_ID:
-      return ['MIGHT', 'AGILITY', 'FORTITUDE', 'LEARNING', 'LOGIC', 'PERCEPTION', 'WILL'];
-    case STARFINDER_ADAPTER_ID:
-      return ['STR', 'DEX', 'CON', 'INT', 'WIS', 'CHA'];
-    default:
-      return DND5E_ABILITY_KEYS;
-  }
+  return adapter.characterSheet?.abilityFields.map((field) => field.key) ?? DND5E_ABILITY_KEYS;
+}
+
+export function abilityLabelForAdapter(adapter: RuleSystemAdapter, key: string): string {
+  return adapter.characterSheet?.abilityFields.find((field) => field.key === key)?.label ?? key;
+}
+
+function classFieldForAdapter(adapter: RuleSystemAdapter) {
+  return adapter.characterSheet?.classField ?? { label: 'Class', placeholder: 'Class', required: true, visible: true };
+}
+
+export function classRequiredForAdapter(adapter: RuleSystemAdapter): boolean {
+  const field = classFieldForAdapter(adapter);
+  return field.visible && field.required;
 }
 
 function hasDefense(
@@ -82,7 +108,7 @@ export function isCharacterSheetComplete(
   adapter: RuleSystemAdapter,
 ): boolean {
   if (!character.name?.trim()) return false;
-  if (!character.className?.trim()) return false;
+  if (classRequiredForAdapter(adapter) && !character.className?.trim()) return false;
   if (character.hpMax < 1) return false;
   if (!hasDefense(character, adapter)) return false;
   return hasAbilityScores(character, adapter);
@@ -103,8 +129,9 @@ export function characterCompletionChecklist(
   adapter: RuleSystemAdapter,
 ): CharacterChecklistItem[] {
   const defenseLabel = checklistDefenseLabel(adapter);
+  const classField = classFieldForAdapter(adapter);
 
-  return [
+  const items: CharacterChecklistItem[] = [
     {
       id: 'name',
       label: 'Character name',
@@ -112,15 +139,9 @@ export function characterCompletionChecklist(
       done: Boolean(character.name?.trim()),
     },
     {
-      id: 'class',
-      label: 'Class or role',
-      description: 'What kind of character are they — fighter, wizard, operative, etc.?',
-      done: Boolean(character.className?.trim()),
-    },
-    {
       id: 'abilities',
-      label: 'Ability scores',
-      description: `Set each ${adapter.label} ability so rolls use your numbers, not placeholders.`,
+      label: adapter.presentation?.abilities.full ?? 'Ability scores',
+      description: `Set each ${adapter.label} ${adapter.presentation?.abilities.full.toLowerCase() ?? 'ability'} so rolls use your numbers, not placeholders.`,
       done: hasAbilityScores(character, adapter),
     },
     {
@@ -142,6 +163,15 @@ export function characterCompletionChecklist(
       done: (character.actions?.length ?? 0) > 0,
     },
   ];
+  if (classField.visible && classField.required) {
+    items.splice(1, 0, {
+      id: 'class',
+      label: classField.label,
+      description: 'What kind of character are they — fighter, wizard, operative, etc.?',
+      done: Boolean(character.className?.trim()),
+    });
+  }
+  return items;
 }
 
 /** True when a create payload only carries identity fields — no combat numbers yet. */
@@ -366,14 +396,16 @@ function pf2eTemplates(level: number): CharacterStarterTemplate[] {
 }
 
 function openLegendTemplates(): CharacterStarterTemplate[] {
-  const warriorStats = { MIGHT: 5, AGILITY: 4, FORTITUDE: 5, LEARNING: 2, LOGIC: 2, PERCEPTION: 3, WILL: 3 };
-  const mageStats = { MIGHT: 2, AGILITY: 3, FORTITUDE: 3, LEARNING: 5, LOGIC: 5, PERCEPTION: 3, WILL: 4 };
+  const nativeStats = (scores: Partial<Record<(typeof OPEN_LEGEND_ABILITY_KEYS)[number], number>>) =>
+    Object.fromEntries(OPEN_LEGEND_ABILITY_KEYS.map((key) => [key, scores[key] ?? 0])) as Record<string, number>;
+  const warriorStats = nativeStats({ MIGHT: 5, AGILITY: 4, FORTITUDE: 5, LEARNING: 2, LOGIC: 2, PERCEPTION: 3, WILL: 3, MOVEMENT: 2, PRESENCE: 1 });
+  const mageStats = nativeStats({ MIGHT: 2, AGILITY: 3, FORTITUDE: 3, LEARNING: 5, LOGIC: 5, PERCEPTION: 3, WILL: 4, ENERGY: 5, CREATION: 3, PROTECTION: 2 });
   return [
     {
       id: 'ol-warrior',
-      label: 'Warrior (physical hero)',
-      description: 'High Might and Fortitude for melee pools; Guard defense from armor training.',
-      className: 'Warrior',
+      label: 'Physical hero',
+      description: 'Classless Open Legend template with high Might and Fortitude for melee pools; Guard defense from armor training.',
+      className: '',
       stats: warriorStats,
       ac: 18,
       hpMax: 28,
@@ -397,9 +429,9 @@ function openLegendTemplates(): CharacterStarterTemplate[] {
     },
     {
       id: 'ol-mage',
-      label: 'Mage (arcane hero)',
-      description: 'High Learning and Logic for invocation pools; lighter Guard from cloth defenses.',
-      className: 'Mage',
+      label: 'Arcane hero',
+      description: 'Classless Open Legend template with high Learning, Logic, and Energy for invocation pools.',
+      className: '',
       stats: mageStats,
       ac: 14,
       hpMax: 20,
