@@ -5935,6 +5935,61 @@ export const Attachment = z.object({
 });
 export type Attachment = z.infer<typeof Attachment>;
 
+// ---------- responsive image derivatives (issue #604) ----------
+//
+// World and encounter maps used to be delivered as the untouched original on every
+// load, and the only downscaling the server could do ran synchronously on the
+// request thread for a narrow subset of PNGs. Derivatives are now generated ONCE,
+// in the background, and recorded durably — so the client needs a contract for
+// "which sizes exist, which are still being made, and which failed" in order to
+// build an accurate srcset and to show processing / stale / error states instead
+// of silently rendering a full-size image.
+
+/** Rungs of the responsive ladder, smallest first. Longest edge in px: 512/1280/2560. */
+export const DerivativeVariant = z.enum(['thumb', 'md', 'lg']);
+export type DerivativeVariant = z.infer<typeof DerivativeVariant>;
+
+/**
+ * Per-rung lifecycle.
+ *  - pending: planned, the background worker has not produced it yet.
+ *  - ready:   bytes exist on disk and may be served.
+ *  - failed:  generation raised repeatedly; the DM can retry.
+ *  - skipped: the source is already at/below this rung, so materialising it would
+ *             cost disk for no byte saving. Serving falls back to a smaller ready
+ *             rung, or to the original.
+ */
+export const DerivativeState = z.enum(['pending', 'ready', 'failed', 'skipped']);
+export type DerivativeState = z.infer<typeof DerivativeState>;
+
+export const AttachmentDerivative = z.object({
+  variant: DerivativeVariant,
+  state: DerivativeState,
+  // Real pixel dimensions of a ready rung (0 otherwise). The client emits these as
+  // `w` descriptors rather than assuming the rung's max-dim cap, which would be
+  // wrong for every non-square image.
+  width: z.number().int().nonnegative(),
+  height: z.number().int().nonnegative(),
+  bytes: z.number().int().nonnegative(),
+  format: z.string().max(40),
+  attempts: z.number().int().nonnegative(),
+  lastError: z.string(),
+  /** True when this rung was generated from source bytes that have since changed. */
+  stale: z.boolean(),
+});
+export type AttachmentDerivative = z.infer<typeof AttachmentDerivative>;
+
+export const AttachmentDerivativeManifest = z.object({
+  attachmentId: Id,
+  // Top-level state the UI renders: every rung settled and at least one usable
+  // ('ready'), still generating ('processing'), generation errored ('failed'), or
+  // the attachment has no ladder at all — a PDF, or an image whose header could not
+  // be read ('unsupported').
+  status: z.enum(['ready', 'processing', 'failed', 'unsupported']),
+  stale: z.boolean(),
+  derivatives: z.array(AttachmentDerivative),
+});
+export type AttachmentDerivativeManifest = z.infer<typeof AttachmentDerivativeManifest>;
+
 // ---------- encounters (combat tracker) ----------
 export const EncounterStatus = z.enum(['preparing', 'running', 'ended']);
 export type EncounterStatus = z.infer<typeof EncounterStatus>;
