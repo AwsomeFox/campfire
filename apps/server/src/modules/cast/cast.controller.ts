@@ -1,5 +1,7 @@
-import { Body, Controller, Delete, Get, Header, Param, ParseIntPipe, Post, Query } from '@nestjs/common';
-import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { BadRequestException, Body, Controller, Delete, Get, Header, Param, ParseIntPipe, Post, Query, Req, Res } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
+import type { Request, Response } from 'express';
+import { ApiOperation, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
 import type {
   CastSession,
   CastSessionCreated,
@@ -10,10 +12,21 @@ import type {
 } from '@campfire/schema';
 import { Public } from '../../common/decorators/public.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { contentDispositionHeader } from '../attachments/filename';
+import { THROTTLE_AUTH, AUTH_THROTTLE_LIMIT, AUTH_THROTTLE_TTL_MS } from '../../common/throttle.constants';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { CastService } from './cast.service';
 import { CastSessionCreateDto, CastSessionExitDto } from './cast.dto';
+
+/**
+ * The exit-PIN check runs a full scrypt verify on an UNauthenticated route against
+ * a 6-digit secret. Both halves of that (CPU-per-request DoS and PIN brute force)
+ * are exactly what the strict auth bucket exists for — the loose 300/min default is
+ * not enough. ThrottlerGuard keys counters per route+IP, so reusing the `auth`
+ * throttler here never interferes with the login/setup counters.
+ */
+const CAST_EXIT_THROTTLE = Throttle({ [THROTTLE_AUTH]: { limit: AUTH_THROTTLE_LIMIT, ttl: AUTH_THROTTLE_TTL_MS } });
 
 @ApiTags('cast')
 @Controller('campaigns/:campaignId/cast-sessions')
@@ -118,12 +131,82 @@ export class PublicCastController {
     return this.cast.encounter(token, encounterId);
   }
 
+  /**
+   * Battle-map pixels for the cast display (issue #547).
+   *
+   * An <img> cannot carry an Authorization header, so the cast page cannot reuse
+   * GET /encounters/:id/map — that route authenticates from the session cookie,
+   * which on a shared TV still holding the DM's cookie would return the *unfogged
+   * source map*. Serving the bytes off the capability instead pins the viewer role
+   * server-side, so the fog renderer always runs.
+   */
   @Public()
+  @Get('encounters/:encounterId/map')
+  @ApiOperation({
+    summary: 'Get the fog-rendered battle-map image for a cast encounter',
+    description:
+      'Public capability endpoint. Always projected as `viewer`: when fog conceals pixels the response is an opaque ' +
+      'server-rendered PNG of the revealed regions only, and the source attachment is never reachable. Responses are ' +
+      'private/no-store and byte ranges are rejected so fog revisions cannot leak through caches.',
+  })
+  @ApiQuery({ name: 'size', required: false, enum: ['thumb'], description: 'Omit for full resolution; `thumb` caps the longest edge at 512px.' })
+  @ApiQuery({ name: 'revision', required: false, type: String, description: 'Opaque client cache-buster; ignored by the server.' })
+  @ApiResponse({ status: 200, description: 'Viewer-safe image bytes.' })
+  @ApiResponse({ status: 404, description: 'Cast session, encounter, or map is absent — or the encounter is not running.' })
+  @ApiResponse({ status: 416, description: 'Range requests are not supported on fog-specific map views.' })
+  async map(
+    @Param('token') token: string,
+    @Param('encounterId', ParseIntPipe) encounterId: number,
+    @Req() req: Request,
+    @Res() res: Response,
+    @Query('size') size?: string,
+  ): Promise<void> {
+    if (size !== undefined && size !== 'thumb') {
+      throw new BadRequestException("Unsupported size — allowed: 'thumb' (or omit for the original)");
+    }
+    if (req.headers.range !== undefined) {
+      res
+        .status(416)
+        .set({
+          'Accept-Ranges': 'none',
+          'Cache-Control': 'private, no-store',
+          'Referrer-Policy': 'no-referrer',
+          'Content-Range': 'bytes */0',
+          Vary: 'Cookie, Authorization, x-dev-role, x-dev-user',
+        })
+        .end();
+      return;
+    }
+    const view = await this.cast.encounterMap(token, encounterId, size === 'thumb' ? 'thumb' : 'original');
+    res
+      .status(200)
+      .set({
+        'Content-Type': view.mime,
+        'Content-Length': String(view.bytes.length),
+        'Content-Disposition': contentDispositionHeader(view.filename, 'inline'),
+        ETag: view.etag,
+        'Cache-Control': 'private, no-store, max-age=0',
+        'Referrer-Policy': 'no-referrer',
+        Pragma: 'no-cache',
+        Expires: '0',
+        'Accept-Ranges': 'none',
+        Vary: 'Cookie, Authorization, x-dev-role, x-dev-user',
+        'X-Campfire-Map-View': view.protected ? 'fog-protected' : 'fully-revealed',
+      })
+      .end(view.bytes);
+  }
+
+  @Public()
+  @CAST_EXIT_THROTTLE
   @Header('Cache-Control', 'private, no-store')
   @Header('Referrer-Policy', 'no-referrer')
   @Post('exit')
-  @ApiOperation({ summary: 'Verify the cast exit PIN', description: 'Public capability endpoint used by the kiosk exit affordance.' })
+  @ApiOperation({
+    summary: 'Verify the cast exit PIN',
+    description: 'Public capability endpoint used by the kiosk exit affordance. Rate limited per IP like the auth routes.',
+  })
   @ApiResponse({ status: 201, description: 'PIN accepted.' })
+  @ApiResponse({ status: 429, description: 'Too many exit-PIN attempts from this IP.' })
   async exit(@Param('token') token: string, @Body() body: CastSessionExitDto): Promise<{ ok: true }> {
     return this.cast.verifyExitPin(token, body.pin);
   }

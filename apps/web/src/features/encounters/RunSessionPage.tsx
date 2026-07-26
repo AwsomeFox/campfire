@@ -90,7 +90,7 @@ import { CombatantStatblockEditor } from './CombatantStatblockEditor';
 import { StatBlock, hasMonsterStatblock } from '../../components/StatBlock';
 import { CharacterStatCard } from '../../components/CharacterStatCard';
 import { Card, Btn, TextInput, HpBar, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
-import { ImageUpload, MapUploadButton, encounterMapUrl, uploadAttachment } from '../../components/ImageUpload';
+import { ImageUpload, MapUploadButton, castEncounterMapUrl, encounterMapUrl, uploadAttachment } from '../../components/ImageUpload';
 import { GetAMapPanel } from '../../components/GetAMapPanel';
 import { NotFoundState } from '../../components/NotFoundState';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
@@ -2380,6 +2380,7 @@ export function BattleMap({
   onError,
   onAoeHitLayoutChange,
   projection = 'session',
+  castToken = null,
   ruleSystem,
 }: {
   encounter: EncounterWithCombatants;
@@ -2410,6 +2411,13 @@ export function BattleMap({
   onAoeHitLayoutChange?: (layout: AoeHitLayout | null) => void;
   /** `cast` = read-only table projection on Player Display (issue #484). */
   projection?: 'session' | 'cast';
+  /**
+   * Shared-device cast capability (issue #547). When set, map pixels are fetched
+   * from the public cast endpoint instead of the cookie-authenticated
+   * /encounters/:id/map — otherwise a TV that still holds the DM's session cookie
+   * would be served the unfogged source map.
+   */
+  castToken?: string | null;
   /** Active campaign rule system — selects grid distance rules (issue #467). */
   ruleSystem: string | null;
 }) {
@@ -2552,7 +2560,14 @@ export function BattleMap({
   // The encounter-scoped route is the VTT secrecy boundary (issue #463): DMs receive
   // the source, while players receive a server-rendered image containing only revealed
   // pixels. mapAttachmentId is used only as the presence bit, never as a player image URL.
-  const mapImageUrl = encounter.mapAttachmentId != null ? encounterMapUrl(encounter.id, encounter.updatedAt) : null;
+  // A cast display (issue #547) has no session of its own, so it must read pixels
+  // through its capability rather than the cookie-authenticated encounter route.
+  const mapImageUrl =
+    encounter.mapAttachmentId == null
+      ? null
+      : castToken
+        ? castEncounterMapUrl(castToken, encounter.id, encounter.updatedAt)
+        : encounterMapUrl(encounter.id, encounter.updatedAt);
   // Issue #418: fog-redacted tokens keep null coords but set tokenHiddenByFog — do not
   // treat them as Unplaced (that offered a no-op place-at-center for the owner).
   const { placed, unplaced, hiddenByFog } = partitionMapTokens(encounter.combatants);

@@ -25,13 +25,23 @@ import {
 } from '../../common/crypto';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
+import { parseFogState } from '../../common/fog';
 import { AuditService } from '../audit/audit.service';
 import { CampaignsService } from '../campaigns/campaigns.service';
 import { EncountersService } from '../encounters/encounters.service';
+import { EncounterMapService, type EncounterMapView } from '../encounters/encounter-map.service';
 
 const CAST_VIEWER_ROLE: Role = 'viewer';
 const UNIFORM_NOT_FOUND = 'Cast session not found or expired';
 const DUMMY_CAST_TOKEN = `cf_cast_${'0'.repeat(48)}`;
+
+/**
+ * Hard ceiling on a cast credential's lifetime. Issue #547 asks for
+ * "one-time/expiring" credentials; without a cap, a client (or a hand-rolled
+ * API call) could mint a cast URL valid for years, which is indistinguishable
+ * from a permanent public link to the campaign's player-safe projection.
+ */
+const MAX_CAST_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 function toDomain(row: typeof castSessions.$inferSelect): CastSession {
   return {
@@ -54,6 +64,9 @@ function normalizeFutureExpiry(expiresAt: string): string {
   if (!Number.isFinite(timestamp) || timestamp <= Date.now()) {
     throw new BadRequestException('expiresAt must be in the future');
   }
+  if (timestamp - Date.now() > MAX_CAST_TTL_MS) {
+    throw new BadRequestException('expiresAt must be within 30 days');
+  }
   return new Date(timestamp).toISOString();
 }
 
@@ -64,6 +77,7 @@ export class CastService {
     private readonly audit: AuditService,
     private readonly campaignsService: CampaignsService,
     private readonly encountersService: EncountersService,
+    private readonly encounterMaps: EncounterMapService,
   ) {}
 
   async listForCampaign(campaignId: number): Promise<CastSession[]> {
@@ -185,17 +199,22 @@ export class CastService {
       throw new NotFoundException(UNIFORM_NOT_FOUND);
     }
 
-    this.db
+    // Do the read-modify-write entirely in SQL: two concurrent cast polls must not
+    // both observe firstAccessedAt = NULL and race a later timestamp into the column.
+    // RETURNING gives us the row the DB actually committed, so the value we hand back
+    // can never diverge from storage (Copilot review on #1438).
+    const updated = this.db
       .update(castSessions)
       .set({
         accessCount: sql`${castSessions.accessCount} + 1`,
-        firstAccessedAt: row.firstAccessedAt ?? ts,
+        firstAccessedAt: sql`coalesce(${castSessions.firstAccessedAt}, ${ts})`,
         lastAccessedAt: ts,
         updatedAt: ts,
       })
       .where(eq(castSessions.id, row.id))
-      .run();
-    return { ...row, accessCount: row.accessCount + 1, firstAccessedAt: row.firstAccessedAt ?? ts, lastAccessedAt: ts, updatedAt: ts };
+      .returning()
+      .get();
+    return updated ?? row;
   }
 
   async summary(token: string): Promise<CampaignSummary> {
@@ -208,11 +227,45 @@ export class CastService {
     return this.encountersService.listForCampaign(cast.campaignId, 'running', CAST_VIEWER_ROLE);
   }
 
+  /**
+   * Resolve an encounter row a cast capability is allowed to read. Mirrors the
+   * running-only contract the cast LIST endpoint enforces: the Player Display only
+   * ever shows the live fight, so a cast URL must not be able to pull rosters for
+   * still-being-prepped or already-ended encounters by id (Devin review on #1438).
+   */
+  private async castEncounterRowOrThrow(cast: typeof castSessions.$inferSelect, encounterId: number) {
+    const row = await this.encountersService.getRowOrThrow(encounterId);
+    if (row.campaignId !== cast.campaignId || row.status !== 'running') {
+      throw new NotFoundException(`Encounter ${encounterId} not found`);
+    }
+    return row;
+  }
+
   async encounter(token: string, encounterId: number): Promise<EncounterWithCombatants> {
     const cast = this.resolveActive(token);
-    const row = await this.encountersService.getRowOrThrow(encounterId);
-    if (row.campaignId !== cast.campaignId) throw new NotFoundException(`Encounter ${encounterId} not found`);
+    await this.castEncounterRowOrThrow(cast, encounterId);
     return this.encountersService.getWithCombatantsOrThrow(encounterId, CAST_VIEWER_ROLE);
+  }
+
+  /**
+   * Battle-map pixels for the cast display.
+   *
+   * Without this the cast page's <img> would have to point at
+   * GET /encounters/:id/map, which authenticates from the session COOKIE. On the
+   * exact device issue #547 is about — a shared TV that still holds the DM's
+   * cookie — that request resolves as role `dm` and hands the TV the *unfogged
+   * source map*. Serving the bytes through the capability instead pins the role to
+   * `viewer`, so the fog renderer always runs and the source attachment is never
+   * reachable from a cast client.
+   */
+  async encounterMap(token: string, encounterId: number, variant: 'original' | 'thumb'): Promise<EncounterMapView> {
+    const cast = this.resolveActive(token);
+    const row = await this.castEncounterRowOrThrow(cast, encounterId);
+    const encounter = this.encountersService.encounterForMapOrThrow(row, CAST_VIEWER_ROLE);
+    // Same fail-closed rule as the authenticated map route: a non-null but
+    // unparsable fog blob renders an all-concealed view rather than the source.
+    const persistedFogInvalid = row.fog !== null && parseFogState(row.fog) === null;
+    return this.encounterMaps.resolve(encounter, CAST_VIEWER_ROLE, variant, persistedFogInvalid);
   }
 
   async verifyExitPin(token: string, pin: string): Promise<{ ok: true }> {

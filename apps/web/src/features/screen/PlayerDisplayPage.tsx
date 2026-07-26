@@ -22,6 +22,7 @@ import {
   type CSSProperties,
   type ReactNode,
 } from 'react';
+import { createPortal } from 'react-dom';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import type {
   CampaignSummary,
@@ -40,6 +41,7 @@ import {
   useAnnounce,
 } from '../../components/Announcer';
 import { GameIcon } from '../../components/GameIcon';
+import { useDialog } from '../../components/useDialog';
 import { NpcDispositionBadge, QuestStatusBadge } from '../../components/EntitySemanticBadges';
 import { BattleMap } from '../encounters/RunSessionPage';
 import { useAuth } from '../../app/auth';
@@ -877,38 +879,6 @@ export default function PlayerDisplayPage() {
           {wakeLock.message}
         </p>
       )}
-      {exitPromptOpen && isCastMode && (
-        <div className="cf-exit-pin" role="dialog" aria-modal="true" aria-labelledby="cf-exit-pin-title">
-          <form
-            onSubmit={(event) => {
-              event.preventDefault();
-              void verifyCastExit();
-            }}
-          >
-            <h2 id="cf-exit-pin-title">Exit kiosk mode?</h2>
-            <p>Enter the cast exit PIN, then sign in again before returning to DM controls.</p>
-            <label htmlFor="cf-exit-pin-input">Exit PIN</label>
-            <input
-              id="cf-exit-pin-input"
-              className="input"
-              inputMode="numeric"
-              autoComplete="off"
-              value={exitPin}
-              onChange={(event) => setExitPin(event.target.value)}
-              autoFocus
-            />
-            {exitError && <p role="alert" className="cf-exit-pin-error">{exitError}</p>}
-            <div className="cf-exit-pin-actions">
-              <button type="button" className="btn btn-ghost" disabled={exitPending} onClick={() => setExitPromptOpen(false)}>
-                Stay on display
-              </button>
-              <button type="submit" className="btn btn-primary" disabled={exitPending || exitPin.trim().length === 0} aria-busy={exitPending}>
-                Verify and sign in
-              </button>
-            </div>
-          </form>
-        </div>
-      )}
     </div>
   );
   const renderScreen = (content: ReactNode, centered = false) => (
@@ -916,6 +886,16 @@ export default function PlayerDisplayPage() {
       <style>{SCREEN_CSS}</style>
       {operatorControls}
       {content}
+      {exitPromptOpen && isCastMode && (
+        <CastExitPinDialog
+          pin={exitPin}
+          onPinChange={setExitPin}
+          error={exitError}
+          pending={exitPending}
+          onCancel={() => setExitPromptOpen(false)}
+          onSubmit={() => void verifyCastExit()}
+        />
+      )}
     </main>
   );
 
@@ -1026,6 +1006,7 @@ export default function PlayerDisplayPage() {
           <section className="cf-scene cf-scene-map" data-testid="cf-scene-map-body" aria-label="Map">
             <BattleMap
               projection="cast"
+              castToken={isCastMode ? castToken : null}
               encounter={safeEncounterForCast(encounter)}
               campaignId={cid}
               isDm={false}
@@ -1093,6 +1074,82 @@ export default function PlayerDisplayPage() {
         </div>
       </div>
     </div>,
+  );
+}
+
+/**
+ * Kiosk-exit PIN prompt (issue #547).
+ *
+ * Portalled to <body> rather than rendered inside `.cf-screen-control-stack`: that
+ * container auto-hides after CONTROLS_HIDE_MS (opacity:0 + pointer-events:none, plus
+ * an `inert` attribute), so a dialog nested in it could be stranded invisible and
+ * non-interactive the moment focus left the input — e.g. after a backdrop click.
+ * Goes through useDialog for the app-standard Escape-to-close, focus trap, focus
+ * restore, and inert background.
+ */
+function CastExitPinDialog({
+  pin,
+  onPinChange,
+  error,
+  pending,
+  onCancel,
+  onSubmit,
+}: {
+  pin: string;
+  onPinChange: (value: string) => void;
+  error: string | null;
+  pending: boolean;
+  onCancel: () => void;
+  onSubmit: () => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useDialog<HTMLDivElement>({
+    onClose: onCancel,
+    disabled: pending,
+    inertBackground: true,
+    initialFocusRef: inputRef,
+  });
+  return createPortal(
+    <div
+      ref={dialogRef}
+      className="cf-exit-pin"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="cf-exit-pin-title"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !pending) onCancel();
+      }}
+    >
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          onSubmit();
+        }}
+      >
+        <h2 id="cf-exit-pin-title">Exit kiosk mode?</h2>
+        <p>Enter the cast exit PIN, then sign in again before returning to DM controls.</p>
+        <label htmlFor="cf-exit-pin-input">Exit PIN</label>
+        <input
+          id="cf-exit-pin-input"
+          ref={inputRef}
+          className="input"
+          inputMode="numeric"
+          autoComplete="off"
+          value={pin}
+          onChange={(event) => onPinChange(event.target.value)}
+        />
+        {error && <p role="alert" className="cf-exit-pin-error">{error}</p>}
+        <div className="cf-exit-pin-actions">
+          <button type="button" className="btn btn-ghost" disabled={pending} onClick={onCancel}>
+            Stay on display
+          </button>
+          <button type="submit" className="btn btn-primary" disabled={pending || pin.trim().length === 0} aria-busy={pending}>
+            Verify and sign in
+          </button>
+        </div>
+      </form>
+    </div>,
+    document.body,
   );
 }
 

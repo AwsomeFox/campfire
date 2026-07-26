@@ -9,6 +9,25 @@ describe('request-log (#684)', () => {
     expect(redacted).not.toMatch(/\d<redacted>/);
   });
 
+  it('redacts Player Display cast capability tokens carried in the request path (#547)', () => {
+    const token = `cf_cast_${'ab'.repeat(24)}`;
+    const line = formatRequestLog({
+      requestId: 'r1',
+      transport: 'rest',
+      result: 'ok',
+      latencyMs: 3,
+      method: 'GET',
+      path: `/api/v1/cast/${token}/summary`,
+      status: 200,
+    });
+    expect(line).not.toContain(token);
+    expect(line).not.toContain('cf_cast_');
+    expect(line).toContain('<redacted>');
+    // The map + exit sub-paths ride the same capability and must redact too.
+    expect(redactLogSecrets(`/api/v1/cast/${token}/encounters/7/map?revision=x`)).not.toContain('cf_cast_');
+    expect(redactLogSecrets(`POST /api/v1/cast/${token}/exit`)).not.toContain('cf_cast_');
+  });
+
   it('redacts OIDC callback query params from request paths', () => {
     const raw =
       'path=/api/v1/auth/oidc/callback?state=abc&error=access_denied&error_description=PROVIDER_PRIVATE_CANCELLATION_DETAIL&code=secret-code';
