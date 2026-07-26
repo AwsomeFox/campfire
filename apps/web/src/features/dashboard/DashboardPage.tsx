@@ -97,6 +97,9 @@ export default function DashboardPage() {
       // reschedules replace every detail and cancellation replaces each with null.
       setProjection({ campaignId: id, data });
       setSummaryStale(false);
+      // Background catch-up/poll never clears failure up-front; drop a prior
+      // error banner once we have a fresh projection (SSE recovery self-heals).
+      setFailure((current) => (current?.campaignId === id ? null : current));
       // Keep the sidebar/topbar/Home tiles in sync — StatusHeader can rename the
       // campaign from here, and CampaignContext is the shared source for its name.
       void refreshCampaigns();
