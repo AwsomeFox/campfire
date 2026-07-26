@@ -13,7 +13,13 @@ import type {
 import { Public } from '../../common/decorators/public.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { contentDispositionHeader } from '../attachments/filename';
-import { THROTTLE_AUTH, AUTH_THROTTLE_LIMIT, AUTH_THROTTLE_TTL_MS } from '../../common/throttle.constants';
+import {
+  THROTTLE_AUTH,
+  AUTH_THROTTLE_LIMIT,
+  AUTH_THROTTLE_TTL_MS,
+  THROTTLE_SHARE,
+  SHARE_THROTTLE_TTL_MS,
+} from '../../common/throttle.constants';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { CastService } from './cast.service';
@@ -27,6 +33,23 @@ import { CastSessionCreateDto, CastSessionExitDto } from './cast.dto';
  * throttler here never interferes with the login/setup counters.
  */
 const CAST_EXIT_THROTTLE = Throttle({ [THROTTLE_AUTH]: { limit: AUTH_THROTTLE_LIMIT, ttl: AUTH_THROTTLE_TTL_MS } });
+
+/**
+ * Map bytes are the one cast response that can cost real CPU: a fog re-render runs
+ * whenever the revealed set changes and misses `EncounterMapService`'s render cache.
+ * The global `default` bucket already bounds this route at 300/min; this tightens it
+ * to a rate a kiosk cannot legitimately exceed while still leaving a wide margin.
+ *
+ * Deliberately NOT the strict auth bucket (10/min): the cast `<img>` URL is keyed on
+ * `encounter.updatedAt` and served `no-store`, so every HP change or turn advance during
+ * a fight mints a new URL and forces a refetch. A busy combat round can legitimately
+ * exceed ten map fetches a minute, and throttling those would blank the TV mid-fight —
+ * turning a DoS guard into a self-inflicted outage on the exact surface this feature
+ * exists to serve. 120/min is ~2/s sustained: far above any real display, far below
+ * what a render loop would need to hurt the server.
+ */
+const CAST_MAP_THROTTLE_LIMIT = 120;
+const CAST_MAP_THROTTLE = Throttle({ [THROTTLE_SHARE]: { limit: CAST_MAP_THROTTLE_LIMIT, ttl: SHARE_THROTTLE_TTL_MS } });
 
 @ApiTags('cast')
 @Controller('campaigns/:campaignId/cast-sessions')
@@ -115,12 +138,17 @@ export class PublicCastController {
   @ApiResponse({ status: 200, description: 'Viewer-safe running encounter list.' })
   @ApiResponse({ status: 404, description: 'Cast session is invalid, revoked, or expired.' })
   async encounters(@Param('token') token: string, @Query('status') status?: string): Promise<Encounter[]> {
-    // Validate the capability BEFORE short-circuiting an unsupported status: returning
-    // `200 []` for a bogus token told a stale shared-TV link its request had succeeded,
-    // which contradicts the uniform 404 this endpoint's own docstring promises and that
-    // every other cast endpoint delivers (Devin review on #1438).
-    this.cast.assertActive(token);
-    if (status !== undefined && status !== 'running') return [];
+    // An unsupported status used to short-circuit `200 []` WITHOUT validating the token,
+    // telling a stale shared-TV link its request had succeeded and contradicting the
+    // uniform 404 this endpoint's docstring promises. Validate only on that branch:
+    // `runningEncounters` already resolves the capability itself, and resolveActive()
+    // bumps access_count and writes the access timestamps, so validating up front would
+    // double-count every kiosk poll and issue two UPDATEs per refresh (Devin review on
+    // #1438 — first for the missing 404, then for the double write my first fix caused).
+    if (status !== undefined && status !== 'running') {
+      this.cast.assertActive(token);
+      return [];
+    }
     return this.cast.runningEncounters(token);
   }
 
@@ -147,6 +175,7 @@ export class PublicCastController {
    * server-side, so the fog renderer always runs.
    */
   @Public()
+  @CAST_MAP_THROTTLE
   @Get('encounters/:encounterId/map')
   @ApiOperation({
     summary: 'Get the fog-rendered battle-map image for a cast encounter',
@@ -160,6 +189,7 @@ export class PublicCastController {
   @ApiResponse({ status: 200, description: 'Viewer-safe image bytes.' })
   @ApiResponse({ status: 404, description: 'Cast session, encounter, or map is absent — or the encounter is not running.' })
   @ApiResponse({ status: 416, description: 'Range requests are not supported on fog-specific map views.' })
+  @ApiResponse({ status: 429, description: 'Too many map requests from this client.' })
   async map(
     @Param('token') token: string,
     @Param('encounterId', ParseIntPipe) encounterId: number,

@@ -228,6 +228,16 @@ describe('Player Display cast sessions (e2e)', () => {
     const ended = await request(server).get(`/api/v1/cast/${created.body.token}/encounters`).query({ status: 'ended' });
     expect(ended.status).toBe(200);
     expect(ended.body).toEqual([]);
+
+    // Validating the capability must not ALSO resolve it on the running path: the kiosk
+    // polls this endpoint continuously, and resolveActive() bumps access_count, so a
+    // second resolve per request would double-count reads and double-write the row.
+    const before = (await request(server).get(`/api/v1/campaigns/${campaignId}/cast-sessions`).set(dm)).body
+      .find((s: { id: number }) => s.id === created.body.session.id).accessCount;
+    await request(server).get(`/api/v1/cast/${created.body.token}/encounters`);
+    const after = (await request(server).get(`/api/v1/campaigns/${campaignId}/cast-sessions`).set(dm)).body
+      .find((s: { id: number }) => s.id === created.body.session.id).accessCount;
+    expect(after - before).toBe(1);
   });
 
   it('scopes cast encounter reads to the RUNNING fight only', async () => {
