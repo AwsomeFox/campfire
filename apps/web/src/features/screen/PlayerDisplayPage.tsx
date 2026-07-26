@@ -2,11 +2,9 @@
  * Player Display — the cast-to-TV / "present" mode (issue #60).
  *
  * A read-only, full-bleed, secret-free view a DM can throw on a TV at the table.
- * It reuses the DM's normal authenticated reads (campaign summary + the live
- * encounter) but runs every payload through features/screen/playerSafe.ts, which
- * re-derives the *player* projection on the client — dropping dmSecret bodies,
- * `hidden` prep entities (issue #42), `unexplored` locations, and exact monster
- * HP (banded per issue #43). Nothing DM-only is ever rendered here.
+ * Authenticated DMs can preview it from /c/:campaignId/screen. Shared devices use
+ * /cast/:campaignId/:token, which fetches only server-redacted cast endpoints with
+ * cookies omitted, so unredacted DM payloads never reach the cast client.
  *
  * Route: /c/:campaignId/screen — mounted OUTSIDE the app chrome (Layout) so it
  * fills the screen with no sidebar/tabbar, but INSIDE AuthedLayout (members only).
@@ -32,7 +30,7 @@ import type {
   HpBand,
   MapPing,
 } from '@campfire/schema';
-import { api, API } from '../../lib/api';
+import { api, API, ApiError } from '../../lib/api';
 import { useCampaignEvents, type CampaignEventsStatus } from '../../lib/useCampaignEvents';
 import { usePollWhileVisible } from '../../lib/usePollWhileVisible';
 import {
@@ -71,6 +69,7 @@ import {
   type PlayerDisplayProjection,
 } from './playerDisplayLoad';
 import { useWakeLock } from './useWakeLock';
+import { loginHrefWithReturn } from '../../lib/safeInternalPath';
 import {
   DEFAULT_SCENE,
   initiativeWindow,
@@ -180,20 +179,48 @@ const displayFetchers: PlayerDisplayFetchers = {
     api.get<EncounterWithCombatants>(`${API}/encounters/${encounterId}`, { signal }),
 };
 
+async function castRequest<T>(token: string, path: string, init?: RequestInit & { json?: unknown }): Promise<T> {
+  const headers = new Headers(init?.headers);
+  headers.set('Authorization', `Bearer ${token}`);
+  if (init?.json !== undefined) headers.set('Content-Type', 'application/json');
+  const res = await fetch(path, {
+    ...init,
+    credentials: 'omit',
+    headers,
+    body: init?.json !== undefined ? JSON.stringify(init.json) : init?.body,
+  });
+  if (!res.ok) {
+    let message = res.statusText;
+    try {
+      const body = await res.json();
+      message = Array.isArray(body.message) ? body.message.join('; ') : (body.message ?? message);
+    } catch {
+      /* non-json error body */
+    }
+    throw new ApiError(res.status, message);
+  }
+  if (res.status === 204 || res.status === 205 || res.headers.get('Content-Length') === '0') {
+    return undefined as T;
+  }
+  const text = await res.text();
+  return (text === '' ? undefined : JSON.parse(text)) as T;
+}
+
 export default function PlayerDisplayPage() {
-  const { campaignId } = useParams<{ campaignId: string }>();
+  const { campaignId, token: castToken } = useParams<{ campaignId: string; token?: string }>();
   const cid = Number(campaignId);
   const navigate = useNavigate();
   const announce = useAnnounce();
   const { roleIn, staleIdentity } = useAuth();
-  const role = roleIn(cid);
+  const isCastMode = typeof castToken === 'string' && castToken.length > 0;
+  const role = isCastMode ? null : roleIn(cid);
 
   // Minimal AI-DM narration ticker (#344 point 5 — optional/cuttable, kept lightweight).
   // This page renders OUTSIDE app/Layout.tsx (issue #60's no-chrome cast view), so it
   // can't reach that mounted subscription's context; it opens its own, gated the same
   // way (Driver mode only). Since /screen and the campaign-chrome routes are siblings —
   // never both mounted in the same tab — this never creates a second live connection.
-  const liveActivity = useAiDmLiveActivityState(Number.isFinite(cid) ? cid : undefined);
+  const liveActivity = useAiDmLiveActivityState(Number.isFinite(cid) && !isCastMode ? cid : undefined);
 
   // Key projection/failure by campaignId so a client-side :campaignId swap cannot
   // flash the prior campaign's (secret-free but still wrong) cast state.
@@ -209,6 +236,10 @@ export default function PlayerDisplayPage() {
   const [isFullscreen, setIsFullscreen] = useState(fullscreenActive);
   const [fullscreenPending, setFullscreenPending] = useState(false);
   const [fullscreenNotice, setFullscreenNotice] = useState<FullscreenNotice | null>(null);
+  const [exitPromptOpen, setExitPromptOpen] = useState(false);
+  const [exitPin, setExitPin] = useState('');
+  const [exitError, setExitError] = useState<string | null>(null);
+  const [exitPending, setExitPending] = useState(false);
   /** Producer opt-in: show dead/retired/inactive PCs under Party with status labels (#824). */
   const [includeAlumni, setIncludeAlumni] = useState(false);
   /** Active broadcast scene (issue #823) — the DM cockpit selects it; the public
@@ -229,6 +260,18 @@ export default function PlayerDisplayPage() {
   const controlsRef = useRef<HTMLDivElement | null>(null);
   const loadSequencerRef = useRef(new PlayerDisplayLoadSequencer());
 
+  const activeFetchers = useMemo<PlayerDisplayFetchers>(() => {
+    if (!isCastMode || !castToken) return displayFetchers;
+    return {
+      getSummary: (_campaignId, signal) =>
+        castRequest<CampaignSummary>(castToken, `${API}/cast/${castToken}/summary`, { signal }),
+      getRunningEncounters: (_campaignId, signal) =>
+        castRequest<Encounter[]>(castToken, `${API}/cast/${castToken}/encounters?status=running`, { signal }),
+      getEncounter: (encounterId, signal) =>
+        castRequest<EncounterWithCombatants>(castToken, `${API}/cast/${castToken}/encounters/${encounterId}`, { signal }),
+    };
+  }, [castToken, isCastMode]);
+
   const summary = projection?.campaignId === cid ? projection.summary : null;
   const encounter = projection?.campaignId === cid ? projection.encounter : null;
   const error = failure?.campaignId === cid ? failure.message : null;
@@ -239,7 +282,7 @@ export default function PlayerDisplayPage() {
   const load = useCallback(async () => {
     if (!Number.isFinite(cid)) return;
     const hadProjection = projectionRef.current?.campaignId === cid;
-    const result = await runPlayerDisplayLoad(loadSequencerRef.current, cid, displayFetchers, {
+    const result = await runPlayerDisplayLoad(loadSequencerRef.current, cid, activeFetchers, {
       hadProjection,
     });
     if (result.kind === 'ignored') return;
@@ -268,7 +311,7 @@ export default function PlayerDisplayPage() {
     setFailure({ campaignId: cid, message: result.message });
     setDisplayStale(false);
     setLoading(false);
-  }, [cid]);
+  }, [activeFetchers, cid]);
 
   useEffect(() => {
     const sequencer = loadSequencerRef.current;
@@ -308,7 +351,7 @@ export default function PlayerDisplayPage() {
   // Snappy combat updates: refetch the moment the DM starts/advances/ends an encounter.
   // Poll + SSE share the same sequencer, so overlapping bursts cannot reorder commits.
   // Ping events render locally without a full refetch (issue #484).
-  useCampaignEvents(Number.isFinite(cid) ? cid : undefined, {
+  useCampaignEvents(Number.isFinite(cid) && !isCastMode ? cid : undefined, {
     onEvent: useCallback(
       (event) => {
         if (
@@ -399,7 +442,7 @@ export default function PlayerDisplayPage() {
     return () => clearInterval(timer);
   }, [rotating]);
 
-  const syncState = playerDisplaySyncState({ staleIdentity, displayStale, eventStatus });
+  const syncState = playerDisplaySyncState({ staleIdentity: isCastMode ? false : staleIdentity, displayStale, eventStatus });
   const syncMessage = summary ? playerDisplaySyncMessage(syncState) : null;
 
   // The ARIA live region is a single node mounted at the app root (Announcer),
@@ -620,7 +663,12 @@ export default function PlayerDisplayPage() {
         return;
       }
 
-      navigate(Number.isFinite(cid) ? `/c/${cid}` : '/');
+      if (isCastMode) {
+        setExitPromptOpen(true);
+        setExitError(null);
+      } else {
+        navigate(Number.isFinite(cid) ? `/c/${cid}` : '/');
+      }
     }
 
     window.addEventListener('pointermove', ping, { passive: true });
@@ -640,7 +688,7 @@ export default function PlayerDisplayPage() {
       window.removeEventListener('focusout', ping);
       clearHideTimer();
     };
-  }, [cid, navigate]);
+  }, [cid, isCastMode, navigate]);
 
   const toggleFullscreen = useCallback(async () => {
     if (!fullscreenAvailable()) {
@@ -690,6 +738,30 @@ export default function PlayerDisplayPage() {
     else node.setAttribute('inert', '');
   }, [keepControlsVisible]);
   const exitPath = Number.isFinite(cid) ? `/c/${cid}` : '/';
+  const requestExit = useCallback(() => {
+    if (isCastMode) {
+      setExitPromptOpen(true);
+      setExitError(null);
+      return;
+    }
+    navigate(exitPath);
+  }, [exitPath, isCastMode, navigate]);
+  const verifyCastExit = useCallback(async () => {
+    if (!castToken) return;
+    setExitPending(true);
+    setExitError(null);
+    try {
+      await castRequest<{ ok: true }>(castToken, `${API}/cast/${castToken}/exit`, {
+        method: 'POST',
+        json: { pin: exitPin },
+      });
+      navigate(loginHrefWithReturn(exitPath));
+    } catch (err) {
+      setExitError(err instanceof ApiError ? err.message : "Couldn't verify the cast exit PIN.");
+    } finally {
+      setExitPending(false);
+    }
+  }, [castToken, exitPath, exitPin, navigate]);
   const operatorControls = (
     <div
       ref={controlsRef}
@@ -700,11 +772,11 @@ export default function PlayerDisplayPage() {
         <button
           type="button"
           className="btn btn-ghost"
-          onClick={() => navigate(exitPath)}
-          aria-label="Exit player display"
-          title="Exit the display"
+          onClick={requestExit}
+          aria-label={isCastMode ? 'Exit kiosk' : 'Exit player display'}
+          title={isCastMode ? 'Exit kiosk' : 'Exit the display'}
         >
-          <span aria-hidden="true">✕</span> Exit
+          <span aria-hidden="true">✕</span> {isCastMode ? 'Exit kiosk' : 'Exit'}
         </button>
         {role === 'dm' && scene === 'party' && (
           <label className="cf-screen-alumni-toggle" title="Show dead, retired, and inactive PCs on the Party scene">
@@ -805,6 +877,38 @@ export default function PlayerDisplayPage() {
           {wakeLock.message}
         </p>
       )}
+      {exitPromptOpen && isCastMode && (
+        <div className="cf-exit-pin" role="dialog" aria-modal="true" aria-labelledby="cf-exit-pin-title">
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              void verifyCastExit();
+            }}
+          >
+            <h2 id="cf-exit-pin-title">Exit kiosk mode?</h2>
+            <p>Enter the cast exit PIN, then sign in again before returning to DM controls.</p>
+            <label htmlFor="cf-exit-pin-input">Exit PIN</label>
+            <input
+              id="cf-exit-pin-input"
+              className="input"
+              inputMode="numeric"
+              autoComplete="off"
+              value={exitPin}
+              onChange={(event) => setExitPin(event.target.value)}
+              autoFocus
+            />
+            {exitError && <p role="alert" className="cf-exit-pin-error">{exitError}</p>}
+            <div className="cf-exit-pin-actions">
+              <button type="button" className="btn btn-ghost" disabled={exitPending} onClick={() => setExitPromptOpen(false)}>
+                Stay on display
+              </button>
+              <button type="submit" className="btn btn-primary" disabled={exitPending || exitPin.trim().length === 0} aria-busy={exitPending}>
+                Verify and sign in
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   );
   const renderScreen = (content: ReactNode, centered = false) => (
@@ -818,7 +922,7 @@ export default function PlayerDisplayPage() {
   if (!Number.isFinite(cid)) {
     return renderScreen(<CenteredMessage icon="tv" title="No campaign selected." />, true);
   }
-  if (role == null && !loading) {
+  if (!isCastMode && role == null && !loading) {
     return renderScreen(
       <CenteredMessage icon="padlock" title="You don't have access to this campaign.">
         <Link to="/" className="btn btn-primary" style={{ marginTop: 12 }}>
@@ -1524,6 +1628,30 @@ const SCREEN_CSS = `
   line-height: 1.4;
   box-shadow: 0 8px 24px color-mix(in srgb, #000 38%, transparent);
 }
+.cf-exit-pin {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: color-mix(in srgb, #000 72%, transparent);
+}
+.cf-exit-pin form {
+  width: min(420px, 100%);
+  border: 1px solid var(--color-divider);
+  border-radius: var(--radius-lg, 16px);
+  background: var(--color-surface);
+  color: var(--color-text);
+  padding: 20px;
+  box-shadow: 0 18px 48px color-mix(in srgb, #000 55%, transparent);
+}
+.cf-exit-pin h2 { margin: 0 0 8px; font-family: var(--font-heading); font-size: 22px; }
+.cf-exit-pin p { margin: 0 0 14px; color: var(--color-neutral-300); font-size: 14px; }
+.cf-exit-pin label { display: block; margin-bottom: 6px; font-size: 13px; font-weight: 700; }
+.cf-exit-pin input { width: 100%; margin-bottom: 12px; }
+.cf-exit-pin-error { color: #fca5a5 !important; }
+.cf-exit-pin-actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
 
 /* Fixed-aspect letterboxed stage. */
 .cf-stage-wrap {

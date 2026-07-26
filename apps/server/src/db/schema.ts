@@ -372,6 +372,24 @@ export const sessionShares = sqliteTable('session_shares', {
   updatedAt: text('updated_at').notNull(),
 });
 
+// Expiring read-only Player Display cast sessions (issue #547).
+// Raw cast tokens and exit PINs are shown once; the DB stores only sha256 hashes.
+export const castSessions = sqliteTable('cast_sessions', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  campaignId: integer('campaign_id').notNull(),
+  label: text('label').notNull().default(''),
+  createdBy: text('created_by').notNull().default(''),
+  tokenHash: text('token_hash').notNull().unique(),
+  tokenPrefix: text('token_prefix').notNull(),
+  exitPinHash: text('exit_pin_hash').notNull(),
+  expiresAt: text('expires_at').notNull(),
+  accessCount: integer('access_count').notNull().default(0),
+  firstAccessedAt: text('first_accessed_at'),
+  lastAccessedAt: text('last_accessed_at'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
 // Planned (future) game nights — distinct from `sessions` above, which are play
 // logs of sessions that already happened. See modules/sessions/scheduling.
 export const scheduledSessions = sqliteTable('scheduled_sessions', {

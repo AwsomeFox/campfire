@@ -1073,6 +1073,38 @@ export type SessionSharePolicyUpdate = z.infer<typeof SessionSharePolicyUpdate>;
 export const SessionShareMutationResult = z.object({ revoked: z.number().int().nonnegative() });
 export type SessionShareMutationResult = z.infer<typeof SessionShareMutationResult>;
 
+// Read-only Player Display cast sessions. The raw token and exit PIN are shown once
+// at creation; persisted/listed metadata never carries enough material to recreate them.
+export const CastSession = z.object({
+  id: Id,
+  campaignId: Id,
+  label: z.string(),
+  createdBy: z.string(),
+  tokenPrefix: z.string(),
+  expiresAt: IsoDate,
+  accessCount: z.number().int().nonnegative(),
+  firstAccessedAt: IsoDate.nullable(),
+  lastAccessedAt: IsoDate.nullable(),
+  ...timestamps,
+});
+export type CastSession = z.infer<typeof CastSession>;
+export const CastSessionCreate = z.object({
+  label: z.string().trim().max(120).default(''),
+  expiresAt: z.string().datetime({ offset: true }),
+});
+export type CastSessionCreate = z.infer<typeof CastSessionCreate>;
+export const CastSessionCreated = z.object({
+  token: z.string(),
+  exitPin: z.string(),
+  url: z.string(),
+  session: CastSession,
+});
+export type CastSessionCreated = z.infer<typeof CastSessionCreated>;
+export const CastSessionExit = z.object({ pin: z.string().trim().min(4).max(20) });
+export type CastSessionExit = z.infer<typeof CastSessionExit>;
+export const CastSessionMutationResult = z.object({ revoked: z.number().int().nonnegative() });
+export type CastSessionMutationResult = z.infer<typeof CastSessionMutationResult>;
+
 // Payload served by the UNauthenticated GET /shared/recaps/:token endpoint.
 // Deliberately minimal — no internal ids, no dmSecret-bearing entities, just
 // what an absent player needs to catch up on the session.

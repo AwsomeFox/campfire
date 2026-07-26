@@ -2787,6 +2787,32 @@ function migrateGuestDmHandoff545(sqlite: Database.Database): void {
   `);
 }
 
+/**
+ * Issue #547 — expiring, read-only Player Display cast sessions. These are
+ * capability tokens for shared TVs/kiosks, stored hashed like recap shares.
+ */
+function migrateCastSessionsTable(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS cast_sessions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+      label TEXT NOT NULL DEFAULT '',
+      created_by TEXT NOT NULL DEFAULT '',
+      token_hash TEXT NOT NULL UNIQUE,
+      token_prefix TEXT NOT NULL,
+      exit_pin_hash TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      access_count INTEGER NOT NULL DEFAULT 0,
+      first_accessed_at TEXT,
+      last_accessed_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_cast_sessions_campaign ON cast_sessions(campaign_id);
+    CREATE INDEX IF NOT EXISTS idx_cast_sessions_expires_at ON cast_sessions(expires_at);
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
   { name: '0001_users_oidc', run: migrateUsersTableForOidc },
   { name: '0002_campaigns_rule_system', run: migrateCampaignsTableForRuleSystem },
@@ -2893,6 +2919,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0104_campaign_library_monsters', run: migrateCampaignLibraryMonstersTable },
   { name: '0105_campaign_library_monsters_fk', run: migrateCampaignLibraryMonstersForeignKeys },
   { name: '0106_guest_dm_handoff_545', run: migrateGuestDmHandoff545 },
+  { name: '0107_cast_sessions_547', run: migrateCastSessionsTable },
 ];
 
 /**

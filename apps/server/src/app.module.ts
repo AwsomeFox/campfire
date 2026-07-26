@@ -63,6 +63,7 @@ import { CatchUpModule } from './modules/catch-up/catch-up.module';
 import { SessionZeroModule } from './modules/session-zero/session-zero.module';
 import { RevisionsModule } from './modules/revisions/revisions.module';
 import { RequestContextActorGuard } from './common/guards/request-context-actor.guard';
+import { CastModule } from './modules/cast/cast.module';
 
 /**
  * Single-image production packaging: the compiled web SPA can be served directly by
@@ -185,6 +186,7 @@ function serveStaticImports(): DynamicModule[] {
     CatchUpModule,
     SessionZeroModule,
     RevisionsModule,
+    CastModule,
   ],
   providers: [
     { provide: APP_PIPE, useClass: ZodValidationPipe },

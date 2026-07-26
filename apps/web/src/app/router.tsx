@@ -69,6 +69,12 @@ export const router = createBrowserRouter(
     element: lazyPage(() => import('../features/sessions/SharedRecapPage')),
   },
   {
+    // Public read-only Player Display cast link. The URL carries an expiring cast
+    // capability; the page fetches only server-redacted cast endpoints.
+    path: '/cast/:campaignId/:token',
+    element: lazyPage(() => import('../features/screen/PlayerDisplayPage')),
+  },
+  {
     element: <AuthedLayout />,
     children: [
       {
