@@ -17,6 +17,8 @@ import { shareInFlightRef } from '../../lib/shareInFlight';
 import { Btn, Chip, ErrorNote, Skeleton } from '../../components/ui';
 import { ImageUpload, attachmentFileUrl } from '../../components/ImageUpload';
 import { GameIcon } from '../../components/GameIcon';
+import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { MapConceptGlossary, MapPurposePreview } from '../../components/mapOnboarding';
 
 export function HandoutsCard({ campaignId }: { campaignId: number }) {
   const { isDm, canDmWrite } = useCampaignAccess();
@@ -24,6 +26,7 @@ export function HandoutsCard({ campaignId }: { campaignId: number }) {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<number | null>(null);
+  const [pendingReveal, setPendingReveal] = useState<Attachment | null>(null);
   // Concurrent load()/Retry callers share one promise so `await load()` never
   // resolves before the in-flight attachments fetch settles (#691).
   const loadInFlight = useRef<Promise<void> | null>(null);
@@ -59,7 +62,7 @@ export function HandoutsCard({ campaignId }: { campaignId: number }) {
     void load();
   }, [load, campaignId]);
 
-  async function toggleReveal(a: Attachment) {
+  async function commitVisibilityToggle(a: Attachment) {
     setBusyId(a.id);
     setError(null);
     try {
@@ -70,6 +73,14 @@ export function HandoutsCard({ campaignId }: { campaignId: number }) {
     } finally {
       setBusyId(null);
     }
+  }
+
+  function toggleReveal(a: Attachment) {
+    if (a.hidden) {
+      setPendingReveal(a);
+      return;
+    }
+    void commitVisibilityToggle(a);
   }
 
   // Players/viewers don't manage portraits here — only shared visual handouts.
@@ -86,6 +97,12 @@ export function HandoutsCard({ campaignId }: { campaignId: number }) {
       {error && (
         <div style={{ padding: '0 14px 8px' }}>
           <ErrorNote message={error} pending={loading} onRetry={load} />
+        </div>
+      )}
+      {isDm && (
+        <div style={{ padding: '0 14px 10px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <MapConceptGlossary compact />
+          <MapPurposePreview purpose="handout" surfacePurpose="handout" mode="upload" />
         </div>
       )}
 
@@ -179,6 +196,7 @@ export function HandoutsCard({ campaignId }: { campaignId: number }) {
                     className="!min-h-0 !py-1 text-[11px]"
                     disabled={busyId === a.id}
                     onClick={() => void toggleReveal(a)}
+                    title={a.hidden ? 'Warn before revealing the raw handout file' : undefined}
                   >
                     {busyId === a.id ? '…' : a.hidden ? 'Reveal' : 'Hide'}
                   </Btn>
@@ -200,6 +218,29 @@ export function HandoutsCard({ campaignId }: { campaignId: number }) {
             </div>
           )}
         </div>
+      )}
+      {pendingReveal && (
+        <ConfirmDialog
+          title="Reveal raw handout?"
+          body={
+            <div className="space-y-3 text-sm text-slate-300" data-testid="handout-reveal-warning">
+              <p className="m-0">
+                <strong className="text-slate-100">{pendingReveal.filename}</strong>
+              </p>
+              <MapPurposePreview purpose="handout" surfacePurpose="handout" mode="reveal" />
+              <p className="m-0 text-xs text-amber-300/90 border border-amber-500/30 bg-amber-500/10 rounded px-2.5 py-2">
+                Revealing a handout exposes the raw image or PDF to players. Encounter fog,
+                hidden tokens, AoE filtering, and Cast player-safe projection do not protect
+                this file.
+              </p>
+            </div>
+          }
+          confirmLabel="Reveal raw file"
+          pendingLabel="Revealing…"
+          busy={busyId === pendingReveal.id}
+          onConfirm={() => void commitVisibilityToggle(pendingReveal).then(() => setPendingReveal(null))}
+          onCancel={() => setPendingReveal(null)}
+        />
       )}
     </div>
   );

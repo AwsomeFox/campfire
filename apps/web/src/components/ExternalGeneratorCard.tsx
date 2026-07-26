@@ -28,6 +28,7 @@ import {
   describeExportProblem,
   formatBytes,
 } from './externalGeneratorAcquisition';
+import { MapPurposePreview, type MapPurpose } from './mapOnboarding';
 
 /**
  * Source-specific export guidance. Keyed by MapSource.id with a sensible fallback, so the
@@ -76,6 +77,9 @@ export function ExternalGeneratorCard({
   campaignId,
   source,
   acquisitionActive,
+  purpose = 'encounter',
+  surfacePurpose = purpose,
+  importDisabledReason,
   onOpenGenerator,
   onCancelAcquisition,
   onImported,
@@ -86,6 +90,9 @@ export function ExternalGeneratorCard({
   source: MapSource;
   /** True when this is the generator the DM opened and hasn't finished importing from. */
   acquisitionActive: boolean;
+  purpose?: MapPurpose;
+  surfacePurpose?: MapPurpose;
+  importDisabledReason?: string | null;
   /** Record the round trip (persist) + reveal the return checklist. */
   onOpenGenerator: () => void;
   /** Abandon the round trip ("I'll do this later") — clears the persisted marker. */
@@ -186,7 +193,7 @@ export function ExternalGeneratorCard({
     setTitle('');
   }
 
-  const canImport = file != null && problem == null && !busy;
+  const canImport = file != null && problem == null && !busy && !importDisabledReason;
 
   async function submit() {
     if (!file || problem) return;
@@ -238,6 +245,7 @@ export function ExternalGeneratorCard({
       <p className="text-muted" style={{ fontSize: 11, margin: '0 0 6px' }}>
         {hint ? `${hint} ` : ''}{GENERIC_EXPORT_LINE}
       </p>
+      <MapPurposePreview purpose={purpose} surfacePurpose={surfacePurpose} mode="upload" />
 
       {!acquisitionActive ? (
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
@@ -283,6 +291,11 @@ export function ExternalGeneratorCard({
             <li>Come back here and drop the file below (or click to choose it).</li>
             <li>Preview it, then import — you’ll calibrate the grid after it attaches.</li>
           </ol>
+          {importDisabledReason && (
+            <p className="text-amber-300/90" style={{ fontSize: 11, margin: 0 }} data-testid={`generator-route-required-${source.id}`}>
+              {importDisabledReason}
+            </p>
+          )}
 
           {/* Drop / pick the exported file — the same card, no separate dropzone elsewhere. */}
           <div
@@ -376,6 +389,7 @@ export function ExternalGeneratorCard({
               data-testid={`generator-import-${source.id}`}
               disabled={!canImport}
               onClick={() => void submit()}
+              title={importDisabledReason ?? undefined}
             >
               {busy ? 'Importing…' : 'Import map'}
             </Btn>
