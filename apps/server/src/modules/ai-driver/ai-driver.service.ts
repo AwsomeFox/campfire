@@ -417,9 +417,34 @@ function isStoredTableVote(value: unknown): value is AiDmTableVote {
 
 function persistedStatusFor(session: AiDmSessionState): AiDmSessionStatus {
   if (session.state === 'paused' || session.state === 'human_control' || session.status === 'paused') return 'paused';
-  // Active generations are process-local. After restart the control state should accept a new turn.
-  return 'idle';
+  // A turn in flight is written as `running` on purpose: it is the ONLY durable marker that the
+  // process died mid-generation. Hydration treats a stored `running` as an interrupted turn and
+  // parks the seat paused, so recovery needs an explicit, audited resume rather than silently
+  // accepting new input against a half-finished turn (#559 acceptance criteria).
+  return session.status === 'running' ? 'running' : 'idle';
 }
+
+/** Why a hydrated session came back in a non-default shape — announced to the table on recovery (#559). */
+type ControlStateRecovery = 'interrupted_turn' | 'paused' | 'human_control' | 'stuck' | 'open_vote';
+
+interface HydratedControlState {
+  session: AiDmSessionState;
+  /** Non-null when the table should be told what came back; drives the recovery audit + notice. */
+  recovery: ControlStateRecovery | null;
+  /** True when hydration reconciled the row (interrupted turn, lapsed vote, impossible ladder). */
+  dirty: boolean;
+}
+
+/** The synthetic actor for recovery notifications: no human triggered a restart. */
+const RECOVERY_ACTOR: RequestUser = { id: 'ai-dm-recovery', name: 'Campfire', serverRole: 'user' };
+
+const RECOVERY_SUMMARY: Record<ControlStateRecovery, string> = {
+  interrupted_turn: 'A restart interrupted an AI DM turn mid-generation. The seat is paused until a DM resumes it.',
+  paused: 'The AI DM seat came back paused — the pause in effect before the restart was preserved.',
+  human_control: 'A human still holds the AI DM seat after the restart. Hand back to release it.',
+  stuck: 'The AI DM seat came back stuck, awaiting the table. The recovery levers are available.',
+  open_vote: 'A table vote was still open when the server restarted and has been restored.',
+};
 
 /**
  * Grounding / anti-hallucination preamble prepended to every driver system prompt.
@@ -1016,22 +1041,36 @@ export class AiDriverService {
     return this.ensureSession(campaignId);
   }
 
-  private loadPersistedControlState(campaignId: number): AiDmSessionState {
+  private loadPersistedControlState(campaignId: number): HydratedControlState {
     const fresh = this.freshSession(campaignId);
-    if (!this.db) return fresh;
+    if (!this.db) return { session: fresh, recovery: null, dirty: false };
 
-    const row = this.db
-      .select()
-      .from(aiDriverControlState)
-      .where(eq(aiDriverControlState.campaignId, campaignId))
-      .limit(1)
-      .get() as AiDriverControlStateRow | undefined;
-    if (!row) return fresh;
+    // Reading the control state is best-effort in exactly the way writing it is: `ensureSession`
+    // sits under EVERY driver endpoint (including the read-only GET /session), so a failed read
+    // must degrade to a fresh in-memory session rather than 500 the whole seat.
+    let row: AiDriverControlStateRow | undefined;
+    try {
+      row = this.db
+        .select()
+        .from(aiDriverControlState)
+        .where(eq(aiDriverControlState.campaignId, campaignId))
+        .limit(1)
+        .get() as AiDriverControlStateRow | undefined;
+    } catch (err) {
+      this.logger.error(`Failed to load AI driver control state for campaign ${campaignId}`, err);
+      return { session: fresh, recovery: null, dirty: false };
+    }
+    if (!row) return { session: fresh, recovery: null, dirty: false };
 
     const storedState = LADDER_STATES.has(row.state) ? row.state as AiDmLadderState : 'running';
     fresh.state = storedState;
+    // A stored `running` status means the process died while a turn was generating (#559). The
+    // turn itself is unrecoverable — it lived in process memory — so the seat is *uncertain*, and
+    // an uncertain seat must come back frozen rather than pretending the turn simply never ran.
+    const interruptedTurn = row.status === 'running';
+    let voteExpiredOnLoad = false;
     fresh.status = SESSION_STATUSES.has(row.status) ? row.status as AiDmSessionStatus : 'idle';
-    if (fresh.status === 'running') fresh.status = 'idle';
+    if (fresh.status === 'running') fresh.status = 'paused';
     fresh.scene = row.scene ?? null;
     fresh.lastNarration = row.lastNarration ?? null;
     fresh.lastTurnAt = row.lastTurnAt ?? null;
@@ -1045,6 +1084,14 @@ export class AiDriverService {
     if (fresh.vote) {
       const seq = Number(/^vote-(\d+)$/.exec(fresh.vote.id)?.[1] ?? 0);
       if (seq > this.voteSeq) this.voteSeq = seq;
+      // Downtime still burns the vote's TTL (#382/#559): a ballot window that lapsed while the
+      // server was down must come back FAILED, not as a live vote the table can still be counted
+      // into. Restoring it open would resurrect an expired decision and block every future vote
+      // until someone happened to touch a vote endpoint.
+      if (!fresh.vote.resolved && Date.parse(fresh.vote.expiresAt) <= Date.now()) {
+        fresh.vote = { ...fresh.vote, resolved: true, outcome: 'failed' };
+        voteExpiredOnLoad = true;
+      }
     }
     fresh.takeoverRequestedBy = row.takeoverRequestedBy ?? null;
 
@@ -1054,8 +1101,51 @@ export class AiDriverService {
     if (fresh.status === 'paused' && fresh.state === 'running') fresh.state = 'paused';
     if (fresh.state === 'paused' || fresh.state === 'human_control') fresh.status = 'paused';
     else fresh.status = 'idle';
+    // An interrupted turn outranks whatever ladder state the row carried: freeze the seat. The
+    // stuck info (if any) is kept, so an explicit resume drops back to `awaiting_players` with
+    // the recovery levers intact rather than losing the ladder.
+    if (interruptedTurn) {
+      fresh.state = 'paused';
+      fresh.status = 'paused';
+    }
     fresh.levers = this.leversFor(fresh);
-    return fresh;
+
+    let recovery: ControlStateRecovery | null = null;
+    if (interruptedTurn) recovery = 'interrupted_turn';
+    else if (fresh.state === 'human_control') recovery = 'human_control';
+    else if (fresh.state === 'paused') recovery = 'paused';
+    else if (fresh.stuck) recovery = 'stuck';
+    else if (fresh.vote && !fresh.vote.resolved) recovery = 'open_vote';
+
+    // Anything reconciliation changed relative to the row must be written back, or the next
+    // restart re-derives it from the same stale bytes — an expired vote in particular would look
+    // freshly open again to any reader that goes straight to the table.
+    const dirty = interruptedTurn
+      || voteExpiredOnLoad
+      || fresh.state !== storedState
+      || fresh.status !== row.status;
+    return { session: fresh, recovery, dirty };
+  }
+
+  /**
+   * Announce a recovered control state to the table (#559): persist the reconciled shape so the
+   * row on disk matches what the seat now believes, wake open stream clients, audit the recovery,
+   * and notify the campaign. Everything here is best-effort — a failure to announce must never
+   * stop the session from being served.
+   */
+  private announceRecoveredState(session: AiDmSessionState, recovery: ControlStateRecovery): void {
+    this.stream.emit({ type: 'state', campaignId: session.campaignId, state: session.state });
+    void this.audit
+      .log({
+        actor: `ai-dm-seat:${session.campaignId}`,
+        actorRole: 'dm',
+        action: 'ai-dm.driver.control_state.recovered',
+        entityType: 'ai-dm',
+        campaignId: session.campaignId,
+        detail: `recovered ${recovery} after restart — state=${session.state} status=${session.status}`,
+      })
+      .catch((err) => this.logger.error(`Driver recovery audit failed for campaign ${session.campaignId}`, err));
+    void this.notify(session.campaignId, RECOVERY_ACTOR, 'AI DM state recovered', RECOVERY_SUMMARY[recovery]);
   }
 
   private persistControlState(session: AiDmSessionState): void {
@@ -1078,32 +1168,44 @@ export class AiDriverService {
       updatedAt: ts,
     };
 
-    this.db
-      .insert(aiDriverControlState)
-      .values(values)
-      .onConflictDoUpdate({
-        target: aiDriverControlState.campaignId,
-        set: {
-          status: values.status,
-          state: values.state,
-          scene: values.scene,
-          lastNarration: values.lastNarration,
-          lastTurnAt: values.lastTurnAt,
-          turnCount: values.turnCount,
-          stuck: values.stuck,
-          actingDm: values.actingDm,
-          vote: values.vote,
-          takeoverRequestedBy: values.takeoverRequestedBy,
-          lastInput: values.lastInput,
-          updatedAt: values.updatedAt,
-        },
-      })
-      .run();
+    // Durability is best-effort, exactly like `notify` and `meterTurn`. This runs from inside the
+    // `runTurn` finally block, where an escaping throw would skip `turn.end` + `drainQueue` and
+    // leave every SSE client's composer locked forever. A SQLITE_BUSY / disk-full here must cost
+    // restart-safety for one write, never the live turn.
+    try {
+      this.db
+        .insert(aiDriverControlState)
+        .values(values)
+        .onConflictDoUpdate({
+          target: aiDriverControlState.campaignId,
+          set: {
+            status: values.status,
+            state: values.state,
+            scene: values.scene,
+            lastNarration: values.lastNarration,
+            lastTurnAt: values.lastTurnAt,
+            turnCount: values.turnCount,
+            stuck: values.stuck,
+            actingDm: values.actingDm,
+            vote: values.vote,
+            takeoverRequestedBy: values.takeoverRequestedBy,
+            lastInput: values.lastInput,
+            updatedAt: values.updatedAt,
+          },
+        })
+        .run();
+    } catch (err) {
+      this.logger.error(`Failed to persist AI driver control state for campaign ${session.campaignId}`, err);
+    }
   }
 
   private deletePersistedControlState(campaignId: number): void {
     if (!this.db) return;
-    this.db.delete(aiDriverControlState).where(eq(aiDriverControlState.campaignId, campaignId)).run();
+    try {
+      this.db.delete(aiDriverControlState).where(eq(aiDriverControlState.campaignId, campaignId)).run();
+    } catch (err) {
+      this.logger.error(`Failed to clear AI driver control state for campaign ${campaignId}`, err);
+    }
   }
 
   /**
@@ -1291,8 +1393,13 @@ export class AiDriverService {
   private ensureSession(campaignId: number): AiDmSessionState {
     let s = this.sessions.get(campaignId);
     if (!s) {
-      s = this.loadPersistedControlState(campaignId);
+      const { session, recovery, dirty } = this.loadPersistedControlState(campaignId);
+      s = session;
+      // Publish BEFORE persisting/announcing: both re-enter this service, and the map entry must
+      // already be the canonical object so nothing hydrates a second time.
       this.sessions.set(campaignId, s);
+      if (dirty) this.persistControlState(s);
+      if (recovery) this.announceRecoveredState(s, recovery);
     }
     return s;
   }
