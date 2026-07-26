@@ -358,7 +358,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(MIGRATION_NAMES).toContain('0095_campaign_catch_up_cursors');
       expect(MIGRATION_NAMES).toContain('0098_encounters_aftermath_dismissed');
       expect(MIGRATION_NAMES).toContain('0102_ai_scribe_session_scope_499');
-      // 0112 (#559): durable AI Driver control state is created as a NEW table on an old-shaped
+      // #559: durable AI Driver control state is created as a NEW table on an old-shaped
       // DB, so pause/takeover/vote/stuck survive a restart after an in-place upgrade.
       expect(MIGRATION_NAMES).toContain('0111_ai_driver_control_state_559');
       expect(columnNames(sqlite, 'ai_driver_control_state')).toEqual(
@@ -1018,7 +1018,10 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
    * INSIDE the create-table migration would never run on the DBs that actually need it — the
    * column would stay missing, every drizzle read/write on the table would throw, and the
    * best-effort try/catch around persistence would swallow it, silently disabling restart-safety.
-   * The backfill therefore has its own ordinal (0113), which this exercises directly.
+   * The backfill therefore has its own separate, never-before-recorded migration name, which this
+   * exercises directly. Ordinals are deliberately not named here — this pair has been renumbered
+   * several times as main moved, and a comment citing a name that no longer exists is exactly what
+   * would mislead someone into reusing one.
    */
   it('backfills announced_recovery on a DB that recorded the CREATE before the column existed', () => {
     dataDir = makeTempDataDir();
@@ -1026,7 +1029,8 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     first.sqlite.close();
 
     // Rewind to the pre-column shape: drop the table, recreate it WITHOUT announced_recovery,
-    // and leave 0112 recorded while removing 0113 — exactly a DB from the earlier build.
+    // and leave the CREATE recorded while removing the backfill — exactly a DB from the build
+    // that shipped the create-table migration before the column existed.
     const rewound = new Database(dbFilePath(dataDir));
     try {
       rewound.exec('DROP TABLE ai_driver_control_state');

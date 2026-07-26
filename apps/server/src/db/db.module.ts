@@ -1580,10 +1580,12 @@ function migrateAiDriverControlStateTable(sqlite: Database.Database): void {
  * with no visible symptom. An additive column change gets its own never-before-recorded name so
  * it runs independently of whether the CREATE was already recorded.
  *
- * That reachability is not hypothetical: this migration pair was renumbered repeatedly while #559
- * was in review (the create shipped as 0107, then 0108, then 0112, now 0111), so DBs exist that
- * recorded the create under an older name and a column-less shape. Do NOT fold these two back
- * into one migration, and do NOT reuse a name either has already shipped under.
+ * That reachability is not hypothetical: this migration pair was renumbered several times while
+ * #559 was in review as main took the ordinals underneath it, so DBs exist that recorded the
+ * create under an older name and a column-less shape. Two rules follow, and they outlive whatever
+ * ordinals the pair currently sits on: do NOT fold these two back into one migration, and do NOT
+ * reuse any name either has previously shipped under — a name already in `__migrations` is a
+ * migration that will never run again.
  */
 function migrateAiDriverControlStateAnnouncedRecovery(sqlite: Database.Database): void {
   const hasTable = sqlite
