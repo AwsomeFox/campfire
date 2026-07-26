@@ -2002,6 +2002,68 @@ describe('rules / rule packs — sibling importer install wiring (e2e, fake upst
   });
 });
 
+/**
+ * Issue #500's removal half deletes installed entries absent from a "complete" fetch. That
+ * inference is only sound if the importer cannot LOSE a real row without saying so, and the
+ * 13th Age importer can: it parses HTML, and parseMonster returns null both for a genuine
+ * prose heading and for a monster whose statblock markup drifted. collect() skips a null with
+ * a bare `continue` that doesn't increment skippedCount, so a drifted monster disappears from
+ * a manifest whose completeness signals all still read clean.
+ *
+ * Every gate in manifestIsComplete is deliberately satisfied here — both sections requested,
+ * nothing counted as skipped, nothing truncated, everything far under the cap — so the only
+ * thing standing between the drift and a deleted monster is the source-level opt-out.
+ */
+describe('rules / rule packs — a source that can silently drop rows never prunes (issue #500)', () => {
+  let ctx: TestAppContext;
+  const dmHeaders = { 'x-dev-role': 'dm', 'x-dev-user': 'drift-dm' };
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('a drifted 13th Age statblock does not delete the installed monster', async () => {
+    const server = ctx.app.getHttpServer();
+    const { startFakeArchmageDrifting } = await import('./fake-archmage');
+    const fake = await startFakeArchmageDrifting();
+    try {
+      const sections = ['monsters', 'conditions'];
+      const first = await installOpen5e(server, dmHeaders, { source: 'archmage', url: fake.baseUrl, sections });
+      expect(first.outcome).toBe('created');
+      expect(first.pack.entryCount).toBe(2 + 3); // Bear + Dire Bear, and 3 conditions
+      const packId = first.pack.id;
+
+      // Upstream re-themes its statblock tables: Dire Bear's defence labels are spelled out,
+      // so parseMonster no longer recognises it. The monster is still on the page.
+      fake.drift();
+
+      const second = await installOpen5e(server, dmHeaders, { source: 'archmage', url: fake.baseUrl, sections });
+      expect(second.outcome).toBe('updated');
+      // The re-import genuinely did not see Dire Bear...
+      expect(second.added).toBe(0);
+      // ...and must not conclude it was removed upstream.
+      expect(second.removed).toBe(0);
+      expect(second.pack.entryCount).toBe(5);
+
+      const search = await request(server).get('/api/v1/rules/search').query({ q: 'dire bear', type: 'monster' }).set(dmHeaders);
+      expect(searchItems(search.body).some((e: { name: string }) => e.name === 'Dire Bear')).toBe(true);
+
+      // Bear still parses, so the drift really was partial — this is not a fetch that failed
+      // wholesale and got rejected before reaching the sync.
+      const bear = await request(server).get('/api/v1/rules/search').query({ q: 'bear', type: 'monster' }).set(dmHeaders);
+      expect(searchItems(bear.body).some((e: { name: string }) => e.name === 'Bear')).toBe(true);
+
+      await request(server).delete(`/api/v1/rules/packs/${packId}`).set(dmHeaders);
+    } finally {
+      await fake.close();
+    }
+  });
+});
+
 describe('rules / rule packs — Starfinder 2e install (e2e, fake AoN server)', () => {
   let ctx: TestAppContext;
   let pf2e: import('./fake-pf2e').FakePf2e;

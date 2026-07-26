@@ -376,15 +376,29 @@ function manifestIsComplete(
  * AND rewriting the pack's own provenance columns require the SAME proof — that this fetch is
  * the complete pack, not one section of it — so they are derived from one `manifestIsComplete`
  * call rather than being kept in sync by hand at ten call sites.
+ *
+ * `dropsAreCounted` is a SECOND, independent precondition for removal, and it is a property of
+ * the importer rather than of any one fetch. `manifestIsComplete` can only prove "we kept
+ * everything the source gave us"; concluding "therefore an installed entry missing from this
+ * fetch was removed upstream" additionally requires that the importer cannot lose a REAL row
+ * without saying so. An importer that silently drops a row it failed to recognise produces a
+ * clean, complete-looking manifest with a genuine entry missing from it — and removal would
+ * then delete that entry and sever its combatant references. Sources that can't make that
+ * guarantee pass `dropsAreCounted: false` and stay purely additive no matter how complete the
+ * fetch looks. See the per-source audit at the call sites.
  */
 function completeManifestOptions(
   requestedSections: readonly string[],
   allSections: readonly string[],
   sectionResults: ReadonlyArray<SectionFetchResult>,
   perSectionCap: number,
+  { dropsAreCounted = true }: { dropsAreCounted?: boolean } = {},
 ): { removeMissing: boolean; rewritePackProvenance: boolean } {
   const complete = manifestIsComplete(requestedSections, allSections, sectionResults, perSectionCap);
-  return { removeMissing: complete, rewritePackProvenance: complete };
+  // Provenance is deliberately NOT gated on dropsAreCounted: rewriting the pack's license and
+  // source from a complete fetch is non-destructive and stays correct even if an entry that
+  // failed to parse went missing from this run.
+  return { removeMissing: complete && dropsAreCounted, rewritePackProvenance: complete };
 }
 
 /**
@@ -1322,6 +1336,12 @@ export class RulesService implements OnModuleInit {
       allEntries,
       user,
       `(cap ${PF2E_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped${truncationNote(sectionResults)})`,
+      // PF2e/SF2e DO keep removal: every row the AoN walk drops — off-type hit, adventure
+      // source, mapper throw, missing name — increments skippedCount, so a real entry can
+      // never go missing from a manifest that still looks complete. Note that in practice this
+      // arms rarely: the live AoN index routinely returns adventure-sourced rows, which are
+      // counted as skips, so a real full import usually reports skippedCount > 0 and declines
+      // to remove. That is conservative in the right direction and is not relied upon.
       completeManifestOptions(sections, ALL_PF2E_SECTIONS, sectionResults, PF2E_MAX_ENTRIES_PER_SECTION),
     );
   }
@@ -1544,7 +1564,21 @@ export class RulesService implements OnModuleInit {
       allEntries,
       user,
       `(cap ${ARCHMAGE_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
-      completeManifestOptions(sections, ALL_ARCHMAGE_SECTIONS, sectionResults, ARCHMAGE_MAX_ENTRIES_PER_SECTION),
+      // 13th Age NEVER removes, however complete the fetch looks. Alone among the importers it
+      // parses HTML, and it cannot tell "this <h3> is prose" from "this <h3> is a monster whose
+      // statblock markup drifted": parseMonster returns null for both (no table, or a table
+      // that no longer matches the level + `AC PD MD HP` signature), and collect() skips a null
+      // with a bare `continue` that does NOT increment skippedCount — because counting prose
+      // headings as skips would be wrong too. So an upstream markup change silently drops a
+      // real monster while every completeness signal stays clean, and removal would delete the
+      // installed copy and null out every combatant referencing it. Fail closed: the cost is a
+      // stale entry an operator can delete by hand, versus silent data loss.
+      //
+      // Do not re-enable this without first making the importer distinguish a drifted statblock
+      // from a prose heading and count the former — see the follow-up issue linked in PR #1441.
+      completeManifestOptions(sections, ALL_ARCHMAGE_SECTIONS, sectionResults, ARCHMAGE_MAX_ENTRIES_PER_SECTION, {
+        dropsAreCounted: false,
+      }),
     );
   }
 
@@ -1699,7 +1733,22 @@ export class RulesService implements OnModuleInit {
       allEntries,
       user,
       `(cap ${DATASWORN_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
-      completeManifestOptions(sections, ALL_DATASWORN_SECTIONS, sectionResults, DATASWORN_MAX_ENTRIES_PER_SECTION),
+      // Datasworn never removes either, for a narrower version of the 13th Age reason. Its
+      // per-OBJECT accounting is complete (every unmapped object increments skippedCount), but
+      // its CONTAINER walk is not: a collection/category that isn't a record, or one whose
+      // `contents` key is missing, is skipped with a bare `continue`. A schema drift in the
+      // upstream JSON would therefore drop a whole collection of real oracles/moves with
+      // skippedCount still 0.
+      //
+      // It is worth stating that today this changes nothing operationally: a real Starforged
+      // file routinely nests sub-collections inside `contents`, and flattenOracleTables counts
+      // each of those as a skip, so any import including `oracles` already has skippedCount > 0
+      // and could never have removed anything. That safety is ACCIDENTAL — it evaporates the
+      // moment an operator imports without the oracles section — so it is made explicit here
+      // rather than left resting on the shape of one upstream file.
+      completeManifestOptions(sections, ALL_DATASWORN_SECTIONS, sectionResults, DATASWORN_MAX_ENTRIES_PER_SECTION, {
+        dropsAreCounted: false,
+      }),
     );
   }
 
