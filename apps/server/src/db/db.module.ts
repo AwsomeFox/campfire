@@ -1544,6 +1544,61 @@ function migrateAiDmUsageHistoryTable(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before durable AI Driver controls (issue #559): the
+ * `ai_driver_control_state` table didn't exist. New table, one row per campaign.
+ */
+function migrateAiDriverControlStateTable(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS ai_driver_control_state (
+      campaign_id INTEGER PRIMARY KEY REFERENCES campaigns(id) ON DELETE CASCADE,
+      status TEXT NOT NULL DEFAULT 'idle',
+      state TEXT NOT NULL DEFAULT 'running',
+      scene TEXT,
+      last_narration TEXT,
+      last_turn_at TEXT,
+      turn_count INTEGER NOT NULL DEFAULT 0,
+      stuck TEXT,
+      acting_dm TEXT,
+      vote TEXT,
+      takeover_requested_by TEXT,
+      last_input TEXT,
+      announced_recovery TEXT,
+      updated_at TEXT NOT NULL
+    );
+  `);
+}
+
+/**
+ * Backfill `announced_recovery` on `ai_driver_control_state` (issue #559).
+ *
+ * Deliberately its OWN migration rather than a probe bolted inside the create-table migration.
+ * `runMigrations` skips any migration whose NAME is already recorded in `__migrations`, so a probe
+ * living inside `migrateAiDriverControlStateTable` would never run on exactly the DBs that need
+ * it — one that recorded the create against an earlier build whose CREATE lacked the column. The
+ * column would stay missing, every drizzle read/write against the table would throw, and the
+ * best-effort try/catch around persistence would swallow it, silently disabling restart-safety
+ * with no visible symptom. An additive column change gets its own never-before-recorded name so
+ * it runs independently of whether the CREATE was already recorded.
+ *
+ * That reachability is not hypothetical: this migration pair was renumbered several times while
+ * #559 was in review as main took the ordinals underneath it, so DBs exist that recorded the
+ * create under an older name and a column-less shape. Two rules follow, and they outlive whatever
+ * ordinals the pair currently sits on: do NOT fold these two back into one migration, and do NOT
+ * reuse any name either has previously shipped under — a name already in `__migrations` is a
+ * migration that will never run again.
+ */
+function migrateAiDriverControlStateAnnouncedRecovery(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ai_driver_control_state'")
+    .get();
+  if (!hasTable) return;
+  const cols = sqlite.prepare('PRAGMA table_info(ai_driver_control_state)').all() as Array<{ name: string }>;
+  if (!cols.some((c) => c.name === 'announced_recovery')) {
+    sqlite.exec('ALTER TABLE ai_driver_control_state ADD COLUMN announced_recovery TEXT');
+  }
+}
+
+/**
  * Migration for DBs created before DM-initiated check requests (issue #415): the
  * `check_requests` table didn't exist. Same "new table" pattern as migrateAiScribeTables —
  * CREATE TABLE / CREATE INDEX IF NOT EXISTS, recorded so upgraded hosts get the table (and its
@@ -3162,6 +3217,18 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // lands a colliding ordinal first.
   { name: '0115_ai_dm_transcript_events_572', run: migrateAiDmTranscriptEventsTable572 },
   { name: '0116_encounter_op_idempotency_580', run: migrateEncounterOpIdempotency580 },
+  // #559 deliberately skips past the contested 0112-0117 band rather than taking the next free
+  // ordinal: this pair has already been renumbered three times by other branches landing first,
+  // and 0114-0117 are spoken for by #501/#572/#580/#601, any of which may merge before this.
+  //
+  // Two invariants, both load-bearing:
+  //   1. These two stay ADJACENT and IN THIS ORDER — create table, then add the column.
+  //   2. Both names must be NEVER-BEFORE-RECORDED. runMigrations skips by exact name string, so
+  //      reusing a name any DB already recorded silently skips the migration and the column is
+  //      never added. This pair has previously shipped as 0107/0108/0111/0112 (create) and
+  //      0112/0113 (backfill); 0118/0119 collide with none of them.
+  { name: '0118_ai_driver_control_state_559', run: migrateAiDriverControlStateTable },
+  { name: '0119_ai_driver_control_state_announced_recovery_559', run: migrateAiDriverControlStateAnnouncedRecovery },
 ];
 
 /**
