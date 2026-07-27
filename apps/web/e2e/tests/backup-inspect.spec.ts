@@ -234,19 +234,24 @@ test.describe('server backup workflow UI (issues #514 / #444)', () => {
 
   test('writes to a File System Access destination without browser buffering', async ({ page }) => {
     await page.addInitScript(() => {
-      (window as Window & { __backupWrites?: number }).__backupWrites = 0;
+      (window as Window & { __backupWrites?: number; __pickerReceiverIsWindow?: boolean }).__backupWrites = 0;
       Object.defineProperty(window, 'showSaveFilePicker', {
         configurable: true,
-        value: async () => ({
-          name: 'chosen-backup.zip',
-          createWritable: async () => ({
-            write: async () => {
-              (window as Window & { __backupWrites?: number }).__backupWrites! += 1;
-            },
-            close: async () => undefined,
-            abort: async () => undefined,
-          }),
-        }),
+        value: function (this: Window) {
+          const testWindow = window as Window & { __backupWrites?: number; __pickerReceiverIsWindow?: boolean };
+          testWindow.__pickerReceiverIsWindow = this === window;
+          if (this !== window) throw new TypeError('Illegal invocation');
+          return Promise.resolve({
+            name: 'chosen-backup.zip',
+            createWritable: async () => ({
+              write: async () => {
+                testWindow.__backupWrites! += 1;
+              },
+              close: async () => undefined,
+              abort: async () => undefined,
+            }),
+          });
+        },
       });
     });
     await page.route('**/api/v1/backup/status', (route) => route.fulfill({ status: 200, json: MOCK_STATUS }));
@@ -262,6 +267,10 @@ test.describe('server backup workflow UI (issues #514 / #444)', () => {
     const card = page.locator('.server-backup-workflow-card');
     await card.getByRole('button', { name: 'Create & download backup' }).click();
     await expect(card.getByText(/Saved chosen-backup\.zip .*directly to the selected file/i)).toBeVisible();
+    await expect.poll(() =>
+      page.evaluate(() =>
+        (window as Window & { __pickerReceiverIsWindow?: boolean }).__pickerReceiverIsWindow),
+    ).toBe(true);
     await expect.poll(() => page.evaluate(() => (window as Window & { __backupWrites?: number }).__backupWrites)).toBeGreaterThan(0);
   });
 

@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { PassThrough } from 'node:stream';
 import zlib from 'node:zlib';
 import { BadRequestException } from '@nestjs/common';
 import { BackupArchiveReader, type BackupArchiveReaderLimits } from '../../src/modules/backup/backup-archive-reader';
@@ -98,5 +99,33 @@ describe('BackupArchiveReader', () => {
     await expect(BackupArchiveReader.open(file, undefined, { ...low, maxCompressedBytes: 1 })).rejects.toThrow(
       '1 byte compressed size limit',
     );
+  });
+
+  it('closes a stream opened after its cancellation signal fired', async () => {
+    let opened: ((error: Error | null, stream?: PassThrough) => void) | undefined;
+    const fakeZip = {
+      openReadStream: jest.fn((_entry: unknown, callback: (error: Error | null, stream?: PassThrough) => void) => {
+        opened = callback;
+      }),
+      close: jest.fn(),
+    };
+    const reader = new (BackupArchiveReader as unknown as new (
+      zip: typeof fakeZip,
+      entries: readonly unknown[],
+      limits: BackupArchiveReaderLimits,
+    ) => BackupArchiveReader)(fakeZip, [], {
+      ...low,
+      maxCompressedBytes: 1024,
+      maxEntries: 3,
+      maxEntryUncompressedBytes: 8,
+      maxTotalUncompressedBytes: 12,
+    });
+    const controller = new AbortController();
+    const pending = reader.readBuffer({ fileName: 'delayed' } as never, 8, controller.signal);
+    controller.abort();
+    const source = new PassThrough();
+    opened!(null, source);
+    await expect(pending).rejects.toBeInstanceOf(BadRequestException);
+    expect(source.destroyed).toBe(true);
   });
 });
