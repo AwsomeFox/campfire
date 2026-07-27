@@ -138,8 +138,8 @@ type AttachmentByteDecision = {
 type MarkdownZipWriter = {
   file(path: string, content: string | Buffer): void;
   /** Deliberately distinct from `file`: streaming exports hand archiver a pathname. */
-  attachment?(path: string, content: Buffer): void;
-  stageAttachment?(content: Buffer): { path: string; checksum: string };
+  attachment?(path: string, content: Buffer): Promise<void>;
+  stageAttachment?(content: Buffer): Promise<{ path: string; checksum: string }>;
   /** Stages a live source before any archive entries are appended. */
   stageLiveAttachment?(source: string): Promise<{ path: string; checksum: string }>;
   attachmentPath?(
@@ -462,7 +462,7 @@ export class ExportService {
       inspectAttachmentBytes?: boolean;
       format?: 'json' | 'mdzip';
       attachmentPaths?: boolean;
-      stageAttachmentBytes?: (content: Buffer) => { path: string; checksum: string };
+      stageAttachmentBytes?: (content: Buffer) => Promise<{ path: string; checksum: string }>;
       retainAttachmentBytes?: boolean;
     } = {},
   ): Promise<ProfileExportResult & { projection: ExportProjection; attachmentBytes: Map<number, AttachmentByteDecision> }> {
@@ -473,7 +473,7 @@ export class ExportService {
     const { scannable } = partitionIdentifiers(collectPrivateIdentifiers(raw));
     const format = opts.format ?? 'json';
     const attachmentBytes = opts.inspectAttachmentBytes
-      ? this.planAttachmentBytes(
+      ? await this.planAttachmentBytes(
           campaignId,
           raw,
           policy,
@@ -612,15 +612,15 @@ export class ExportService {
    *  3. the sanitized bytes STILL contain a known private identifier, which means
    *     something we do not parse is carrying it — drop the file, do not guess.
    */
-  private planAttachmentBytes(
+  private async planAttachmentBytes(
     campaignId: number,
     raw: Record<string, unknown>,
     policy: ResolvedExportPolicy,
     identifiers: string[],
     preferPaths = false,
-    stageAttachmentBytes?: (content: Buffer) => { path: string; checksum: string },
+    stageAttachmentBytes?: (content: Buffer) => Promise<{ path: string; checksum: string }>,
     retainBytes = true,
-  ): Map<number, AttachmentByteDecision> {
+  ): Promise<Map<number, AttachmentByteDecision>> {
     const decisions = new Map<number, AttachmentByteDecision>();
     const rows = Array.isArray(raw.attachments) ? (raw.attachments as Array<{ id: number; mime: string; filename: string }>) : [];
     for (const row of rows) {
@@ -665,7 +665,7 @@ export class ExportService {
         continue;
       }
       if (stageAttachmentBytes) {
-        const staged = stageAttachmentBytes(result.bytes);
+        const staged = await stageAttachmentBytes(result.bytes);
         decisions.set(row.id, {
           id: row.id,
           bytes: null,
@@ -882,14 +882,14 @@ export class ExportService {
       const result = await this.writeMarkdownZip(
         {
           file: (entryPath, content) => archive.append(content, { name: entryPath }),
-          attachment: (entryPath, content) => {
+          attachment: async (entryPath, content) => {
             const staged = path.join(stagingDir, `${stageNumber++}.attachment`);
-            fs.writeFileSync(staged, content, { flag: 'wx' });
+            await fs.promises.writeFile(staged, content, { flag: 'wx' });
             archive.file(staged, { name: entryPath });
           },
-          stageAttachment: (content) => {
+          stageAttachment: async (content) => {
             const staged = path.join(stagingDir, `${stageNumber++}.attachment`);
-            fs.writeFileSync(staged, content, { flag: 'wx' });
+            await fs.promises.writeFile(staged, content, { flag: 'wx' });
             return { path: staged, checksum: sha256Hex(content) };
           },
           stageLiveAttachment: async (source) => {
@@ -1247,7 +1247,7 @@ export class ExportService {
           );
           fileChecksums[a.file] = staged.checksum;
         } else if (decision.bytes) {
-          if (writer.attachment) writer.attachment(a.file, decision.bytes);
+          if (writer.attachment) await writer.attachment(a.file, decision.bytes);
           else writer.file(a.file, decision.bytes);
           fileChecksums[a.file] = sha256Hex(decision.bytes);
         }

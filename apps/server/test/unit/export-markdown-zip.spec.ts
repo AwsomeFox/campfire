@@ -138,14 +138,14 @@ function serviceWithCollisions(): ExportService {
 }
 
 describe('buildMarkdownZip — filename collisions (issues #530 / #863)', () => {
-  it('stages sanitized streaming attachments instead of retaining their buffers', () => {
+  it('stages sanitized streaming attachments instead of retaining their buffers', async () => {
     const service = serviceWithCollisions();
     const bytes = Buffer.from('%PDF-without-private-identifiers');
     (service as any).attachments.exportPathIfPresent = jest.fn(() => '/live/source.pdf');
     (service as any).attachments.readBytesIfPresent = jest.fn(() => bytes);
-    const stage = jest.fn(() => ({ path: '/staged/sanitized.pdf', checksum: 'abc123' }));
+    const stage = jest.fn(async () => ({ path: '/staged/sanitized.pdf', checksum: 'abc123' }));
 
-    const decisions = (service as any).planAttachmentBytes(
+    const decisions = await (service as any).planAttachmentBytes(
       1,
       { attachments: [{ id: 7, mime: 'application/pdf', filename: 'source.pdf' }] },
       resolveExportPolicy('handoff'),
@@ -162,7 +162,7 @@ describe('buildMarkdownZip — filename collisions (issues #530 / #863)', () => 
     });
   });
 
-  it('releases inspected preview attachment buffers while preserving their inventory', () => {
+  it('releases inspected preview attachment buffers while preserving their inventory', async () => {
     const service = serviceWithCollisions();
     const attachments = [
       { id: 7, mime: 'application/pdf', filename: 'first.pdf' },
@@ -174,7 +174,7 @@ describe('buildMarkdownZip — filename collisions (issues #530 / #863)', () => 
     (service as any).attachments.readBytesIfPresent = readBytes;
     const policy = resolveExportPolicy('handoff');
 
-    const decisions = (service as any).planAttachmentBytes(
+    const decisions = await (service as any).planAttachmentBytes(
       1,
       { attachments },
       policy,
