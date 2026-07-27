@@ -6,8 +6,8 @@
       "url": "https://github.com/AwsomeFox/campfire/pull/1616",
       "headBranch": "fix/issue-606-clean",
       "baseBranch": "main",
-      "updatedAt": "2026-07-27T20:28:00Z",
-      "notes": "Added to tracked on babysitting-25f0. MERGEABLE; 0 behind main; no review threads at open. CI in progress (run 30302656251)."
+      "updatedAt": "2026-07-27T20:37:00Z",
+      "notes": "Head 71794885. Addressed 4 review threads (floor DC, monster check redaction, .get(), column select). Threads resolved. Waiting on CI run 30303222865."
     }
   ]
 }
