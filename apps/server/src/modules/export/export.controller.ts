@@ -1,4 +1,4 @@
-import { Controller, Get, Param, ParseIntPipe, Query, Res } from '@nestjs/common';
+import { BadRequestException, Controller, Get, Param, ParseIntPipe, Query, Res } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import type { Response } from 'express';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -6,6 +6,26 @@ import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { CampaignsService } from '../campaigns/campaigns.service';
 import { ExportService } from './export.service';
+import {
+  DEFAULT_EXPORT_PROFILE,
+  EXPORT_PROFILES,
+  isExportProfile,
+  type ExportProfile,
+  type ExportProfileOptions,
+} from './export-profiles';
+
+/** `?flag=1|true|yes` — absent or anything else is false (the redaction-safe default). */
+function boolQuery(value: string | undefined): boolean {
+  return value === '1' || value === 'true' || value === 'yes';
+}
+
+function parseProfile(value: string | undefined): ExportProfile {
+  if (value == null || value === '') return DEFAULT_EXPORT_PROFILE;
+  if (!isExportProfile(value)) {
+    throw new BadRequestException(`Unknown export profile '${value}'. Expected one of: ${EXPORT_PROFILES.join(', ')}.`);
+  }
+  return value;
+}
 
 @ApiTags('export')
 @Controller('campaigns/:campaignId/export')
@@ -16,26 +36,90 @@ export class ExportController {
     private readonly campaigns: CampaignsService,
   ) {}
 
+  /**
+   * Pre-export inventory (issue #586). A DM must be able to see WHAT WILL BE IN THE
+   * FILE before the file exists — which modules travel, how many rows each profile
+   * drops, which fields the allowlist withholds, what happens to attachments, and
+   * what the redaction explicitly does not protect against.
+   */
+  @Get('preview')
+  @ApiOperation({
+    summary: 'Preview what an export profile would include and redact',
+    description:
+      'dm role required. Returns the pre-export inventory for the selected profile: per-module included/redacted row ' +
+      'counts, the fields the allowlist withholds, attachment handling (filename neutralization, metadata stripping, ' +
+      'withheld bytes), the identifier scan result, and the honest limitations of the redaction. No campaign content is ' +
+      'returned — only counts and policy.',
+  })
+  @ApiQuery({ name: 'profile', required: false, enum: EXPORT_PROFILES })
+  @ApiQuery({ name: 'format', required: false, enum: ['json', 'mdzip'] })
+  @ApiQuery({ name: 'dmSecrets', required: false, description: 'publish profile only — include dmSecret prose and the unrevealed staging flag.' })
+  @ApiQuery({ name: 'playedState', required: false, description: 'publish profile only — include recaps, played dates and live combat state.' })
+  @ApiQuery({ name: 'playerContent', required: false, description: 'publish profile only — include characters, comments, party notes and inventory.' })
+  @ApiResponse({ status: 200, description: 'Pre-export inventory (application/json).' })
+  async preview(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @Query('profile') profile: string | undefined,
+    @Query('format') format: string | undefined,
+    @Query('dmSecrets') dmSecrets: string | undefined,
+    @Query('playedState') playedState: string | undefined,
+    @Query('playerContent') playerContent: string | undefined,
+    @CurrentUser() user: RequestUser,
+  ) {
+    await this.access.requireRole(user, campaignId, 'dm', { allowArchived: true });
+    const options: ExportProfileOptions = {
+      includeDmSecrets: boolQuery(dmSecrets),
+      includePlayedState: boolQuery(playedState),
+      includePlayerContent: boolQuery(playerContent),
+    };
+    return this.exportService.buildExportInventory(
+      campaignId,
+      user,
+      parseProfile(profile),
+      options,
+      format === 'mdzip' ? 'mdzip' : 'json',
+    );
+  }
+
   @Get()
   @ApiOperation({
     summary: 'Export a campaign',
     description:
-      'dm role required. Returns the full campaign portability JSON (campaign, quests, npcs, locations, ' +
-      'characters, sessions, notes, comments, members, encounters, attachments metadata, factions, storyArcs, ' +
-      'timelineEvents, timelineCalendar, sessionZero, inventory, treasury, revisions, proposals) plus audit ' +
-      'history with auditMeta disclosure — not a full-server backup (see auditNote in the JSON). Use format=mdzip for a markdown zip.',
+      "dm role required. `profile` selects what travels (issue #586). 'backup' (default) is the full DM backup — " +
+      'campaign, quests, npcs, locations, characters, sessions, notes, comments, members, encounters, attachment ' +
+      'metadata, factions, storyArcs, timelineEvents, timelineCalendar, sessionZero, inventory, treasury, revisions, ' +
+      'proposals plus audit history with auditMeta disclosure (not a full-server backup — see auditNote). ' +
+      "'handoff' keeps the world, DM secrets and play state but drops member identities and operational history. " +
+      "'publish' produces a redistributable module: member identities, audit, proposals, private/whisper notes, RSVPs, " +
+      'attendance, the dice log and credentials are excluded, and DM secrets / played state / player-authored content ' +
+      'are opt-in via dmSecrets, playedState and playerContent. Every response carries a machine-readable `redaction` ' +
+      'block; call GET /export/preview first for the pre-export inventory. Use format=mdzip for a markdown zip.',
   })
   @ApiQuery({ name: 'format', required: false, enum: ['json', 'mdzip'], description: "'mdzip' for a markdown-per-entity zip; omitted/anything else defaults to a single JSON document." })
+  @ApiQuery({ name: 'profile', required: false, enum: EXPORT_PROFILES, description: "Redaction profile; defaults to 'backup' (unredacted)." })
+  @ApiQuery({ name: 'dmSecrets', required: false, description: 'publish profile only — include dmSecret prose and the unrevealed staging flag.' })
+  @ApiQuery({ name: 'playedState', required: false, description: 'publish profile only — include recaps, played dates and live combat state.' })
+  @ApiQuery({ name: 'playerContent', required: false, description: 'publish profile only — include characters, comments, party notes and inventory.' })
   @ApiResponse({ status: 200, description: 'File download (application/json or application/zip, with Content-Disposition attachment).' })
   async export(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @Query('format') format: string | undefined,
+    @Query('profile') profileQuery: string | undefined,
+    @Query('dmSecrets') dmSecrets: string | undefined,
+    @Query('playedState') playedState: string | undefined,
+    @Query('playerContent') playerContent: string | undefined,
     @CurrentUser() user: RequestUser,
     @Res() res: Response,
   ): Promise<void> {
     // allowArchived: exporting an archived (read-only) campaign is a primary archive use case.
     await this.access.requireRole(user, campaignId, 'dm', { allowArchived: true });
     const campaign = await this.campaigns.getOrThrow(campaignId);
+    const profile = parseProfile(profileQuery);
+    const options: ExportProfileOptions = {
+      includeDmSecrets: boolQuery(dmSecrets),
+      includePlayedState: boolQuery(playedState),
+      includePlayerContent: boolQuery(playerContent),
+    };
 
     if (format === 'mdzip') {
       // Issue #530: buildMarkdownZip now returns { buffer, warnings }. The HTTP
@@ -44,8 +128,8 @@ export class ExportController {
       // warnings.txt (when non-empty) for a human to read. The returned array is
       // also available to any programmatic caller that wants to surface collisions
       // in a UI; surfacing it in this controller is a documented follow-up.
-      const { buffer: zipBuffer } = await this.exportService.buildMarkdownZip(campaignId, user);
-      const filename = this.exportService.exportFilename(campaign.name, 'zip');
+      const { buffer: zipBuffer } = await this.exportService.buildMarkdownZip(campaignId, user, { profile, options });
+      const filename = this.exportService.exportFilename(campaign.name, 'zip', profile);
       res
         .status(200)
         .set({
@@ -53,13 +137,15 @@ export class ExportController {
           'Content-Disposition': `attachment; filename="${filename}"`,
           // Issue #730: exports must not enter HTTP or PWA caches.
           'Cache-Control': 'private, no-store',
+          // Issue #586: the redaction profile is visible without opening the archive.
+          'X-Campfire-Export-Profile': profile,
         })
         .end(zipBuffer);
       return;
     }
 
-    const data = await this.exportService.buildExport(campaignId, user);
-    const filename = this.exportService.exportFilename(campaign.name, 'json');
+    const { data } = await this.exportService.buildProfileExport(campaignId, user, profile, options, { format: 'json' });
+    const filename = this.exportService.exportFilename(campaign.name, 'json', profile);
     res
       .status(200)
       .set({
@@ -67,6 +153,7 @@ export class ExportController {
         'Content-Disposition': `attachment; filename="${filename}"`,
         // Issue #730: exports must not enter HTTP or PWA caches.
         'Cache-Control': 'private, no-store',
+        'X-Campfire-Export-Profile': profile,
       })
       .send(JSON.stringify(data));
   }
