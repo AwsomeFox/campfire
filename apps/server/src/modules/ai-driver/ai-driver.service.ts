@@ -2003,6 +2003,29 @@ export class AiDriverService {
     });
   }
 
+  /**
+   * #1052 review — BOTH TRAILING PARAMETERS ARE REQUIRED, and `tokensUsageUnknown` deliberately
+   * has no default.
+   *
+   * The write side of the usage-unknown accumulator is already sealed: `markUsageUnknown` only
+   * ORs and `usageUnknown()` only reads, so `tokensUsageUnknown = spend.usageUnknown` is now a
+   * compile error rather than a silent clobber. That secured every WRITE — and it did nothing
+   * for the exit that never performed the READ. The `session.detached` early return stopped at
+   * `budgetRemaining`, took the old `= false` default, and published a turn as exactly measured
+   * while `markReservationUsageUnknown` had charged the seat an amount nobody could measure.
+   *
+   * The general shape, which is why this is a signature change and not a one-line fix: A DEFAULT
+   * THAT MEANS THE REASSURING THING TURNS AN OMISSION INTO A POSITIVE CLAIM. `false` here does
+   * not mean "no information about measurement"; it means "this total is exact" — asserted by a
+   * call site that never considered the question. An exit that forgets is still silent, which is
+   * the same failure mode one level over. So the accumulated flag is not something a terminal
+   * exit can decline to mention: the invariant is "EVERY terminal event carries the accumulated
+   * flag", and it is now the compiler that enforces it rather than whoever reads this comment.
+   *
+   * `providerError` is required for the same reason and only incidentally: a required parameter
+   * cannot follow an optional one, and callers with no provider error pass `undefined` — which
+   * is at least an explicit statement that there was none.
+   */
   private emitTurnEnd(
     campaignId: number,
     stopReason: AiDmStopReason,
@@ -2010,8 +2033,8 @@ export class AiDriverService {
     steps: number,
     tokensUsed: number,
     budgetRemaining: number,
-    providerError?: AiProviderError,
-    tokensUsageUnknown = false,
+    providerError: AiProviderError | undefined,
+    tokensUsageUnknown: boolean,
   ): void {
     if (stopReason === 'provider_error') {
       this.stream.emit({
@@ -3028,7 +3051,12 @@ export class AiDriverService {
     // Detached mid-turn: skip stuck detection (would mutate/emit against a dead object) and
     // just signal turn.end so open stream clients close the orphaned bubble cleanly.
     if (session.detached) {
-      this.emitTurnEnd(campaignId, 'aborted', finalNarration, steps, totalTokens, budgetRemaining);
+      // #1052 review — `usageUnknown()`, not silence. A turn can be detached by a mode switch
+      // AFTER an attempt was abandoned with unmeasured usage (that attempt's reservation was
+      // consumed via `markReservationUsageUnknown`, so the seat really was charged an amount
+      // nobody counted). Being detached says nothing about whether the spend was measured, and
+      // omitting the argument used to claim it was.
+      this.emitTurnEnd(campaignId, 'aborted', finalNarration, steps, totalTokens, budgetRemaining, undefined, usageUnknown());
       return {
         narration: finalNarration,
         stopReason: 'aborted',

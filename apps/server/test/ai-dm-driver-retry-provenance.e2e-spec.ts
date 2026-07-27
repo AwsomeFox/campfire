@@ -1,7 +1,9 @@
-import { createAiEvalHarness, type AiEvalHarness } from './ai-eval-harness';
+import request from 'supertest';
+import { createAiEvalHarness, dm, type AiEvalHarness } from './ai-eval-harness';
 import { AiDmStreamService, type AiDmStreamEvent } from '../src/modules/ai-driver/ai-driver-stream.service';
 import { setRetrySleepForTests } from '../src/modules/ai-driver/ai-driver.service';
 import { AiProviderError } from '../src/modules/ai-dm/providers/errors';
+import type { AiDmTranscriptEvent } from '@campfire/schema';
 
 /**
  * #1052 review — provenance and usage precision after a failover.
@@ -54,6 +56,21 @@ describe('ai-dm driver — failover provenance + usage precision (#1052 review)'
   }
   const turnEnd = (events: AiDmStreamEvent[]) =>
     events.find((e): e is Extract<AiDmStreamEvent, { type: 'turn.end' }> => e.type === 'turn.end');
+  /**
+   * The durable half of the same claim. `turn.end` is the live frame; this row is what a DM
+   * who reads the turn back tomorrow sees, and the two are written by the same call — so a
+   * defect at the call site shows up in both, and a test that checks only one of them is
+   * checking half the surface. `AiDmTurnRunResult` carries no usage-precision field at all,
+   * so asserting on the returned body would test nothing.
+   */
+  async function endedRow(campaignId: number): Promise<AiDmTranscriptEvent | undefined> {
+    const res = await request(h.server)
+      .get(`/api/v1/campaigns/${campaignId}/ai-dm/transcript`)
+      .set(dm)
+      .query({ limit: 200 });
+    expect(res.status).toBe(200);
+    return (res.body.items as AiDmTranscriptEvent[]).find((e) => e.kind === 'turn.ended');
+  }
 
   it('attributes terminal FALLBACK narration to the fallback, not the primary', async () => {
     const campaignId = await armed('Terminal Fallback Provenance');
@@ -158,5 +175,56 @@ describe('ai-dm driver — failover provenance + usage precision (#1052 review)'
     // Asserted on `turn.end`, which is the frame the table and the durable `turn.ended`
     // transcript row are both built from — i.e. where the false claim of precision was visible.
     expect(turnEnd(events)?.tokensUsageUnknown).toBe(true);
+  });
+
+  it('keeps the unmeasured label when a mode switch DETACHES the session during retry backoff', async () => {
+    const campaignId = await armed('Detached During Backoff');
+    // The reachable sequence, in order:
+    //  1. Attempt 1 throws BEFORE its usage frame with nothing broadcast → its reservation is
+    //     consumed via `markReservationUsageUnknown` (an unmeasured charge against the seat)
+    //     and, because nothing reached the table, a retry is allowed.
+    //  2. The DM switches the seat out of Driver DURING the backoff. `teardownSession` detaches
+    //     this session object, so the post-sleep authority check terminates the retry as
+    //     `stopped` and the turn leaves through the `session.detached` EARLY RETURN — a
+    //     different exit from the one the accumulator's other consumers use.
+    // Attempt 2 is scripted but must never run; if it does, the detach did not land in the
+    // backoff window and this test is not exercising what it claims.
+    h.script(
+      { throwError: transient(), throwAfterChunks: 0 },
+      { text: 'The torch steadies.', usage: { promptTokens: 20, completionTokens: 5, totalTokens: 25 } },
+    );
+    let switchedMode = false;
+    setRetrySleepForTests(async () => {
+      if (switchedMode) return;
+      switchedMode = true;
+      const off = await h.configureSeat(campaignId, { mode: 'off' });
+      expect(off.status).toBe(200);
+    });
+
+    let res: Awaited<ReturnType<typeof h.sendMessage>>;
+    let events: AiDmStreamEvent[];
+    try {
+      ({ result: res, events } = await withStream(campaignId, () =>
+        h.sendMessage(campaignId, { input: 'I light the torch.' }),
+      ));
+    } finally {
+      setRetrySleepForTests(async () => {});
+    }
+
+    expect(switchedMode).toBe(true);
+    expect(res.status).toBe(201);
+    // Proves the turn really left by the detached early return rather than the normal exit.
+    expect(res.body.stopReason).toBe('aborted');
+
+    // The seat was charged an amount nobody could measure, and then the turn ended on a path
+    // that reported no opinion about measurement at all. Silence is not neutral here: the
+    // omitted argument took `emitTurnEnd`'s `= false` default, which is the positive claim
+    // "this total is exact" — made by a call site that never considered the question.
+    expect(turnEnd(events)?.tokensUsageUnknown).toBe(true);
+    // Both surfaces, because both are written by the offending call and both are where a DM
+    // would read the token total.
+    const ended = await endedRow(campaignId);
+    expect(ended).toBeDefined();
+    expect(ended!.payload.tokensUsageUnknown).toBe(true);
   });
 });
