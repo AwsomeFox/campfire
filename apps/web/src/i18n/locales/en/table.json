@@ -29,6 +29,8 @@
     "narrationLogLabel": "Narration announcements",
     "jumpToLatest": "Jump to latest",
     "jumpToLatestUnread": "Jump to latest ({{count}} new)",
+    "rememberTranscript": "Remember this transcript on this device",
+    "rememberTranscriptHelp": "Off by default. The table's history lives on the server and reloads with the page, so keeping a copy here only makes it paint sooner — and that copy records what everyone said and what you asked. Leave it off on a shared device. Turning it off erases the stored copy; so does signing out.",
 
     "composerPlaceholder": "Describe what you do…",
     "composerPlaceholderCombat": "Combat is live — describe your action…",
