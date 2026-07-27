@@ -785,7 +785,6 @@ export function applyCombatantHp(state: CombatantHpState, patch: CombatantHpPatc
   const isCharacter = state.kind === 'character';
   let { hpCurrent, hpTemp, deathState, deathSaveSuccesses: succ, deathSaveFailures: fail } = state;
   const { hpMax } = state;
-  const poolBefore = hpCurrent + hpTemp;
 
   // 1. explicit sets (DM overrides / recording a rolled death save).
   if (patch.hpTemp !== undefined) hpTemp = Math.max(0, patch.hpTemp);
@@ -820,7 +819,7 @@ export function applyCombatantHp(state: CombatantHpState, patch: CombatantHpPatc
   // 3. death-state recompute.
   if (!isCharacter) {
     // Monsters never track death saves — 0 HP is simply "down" (isDown / hpBand).
-    const damage = patch.hpDelta !== undefined && patch.hpDelta < 0 ? Math.min(-patch.hpDelta, poolBefore) : 0;
+    const damage = patch.hpDelta !== undefined && patch.hpDelta < 0 ? -patch.hpDelta : 0;
     return {
       hpCurrent,
       hpTemp,
@@ -875,7 +874,7 @@ export function applyCombatantHp(state: CombatantHpState, patch: CombatantHpPatc
       deathState = 'dying';
     }
   }
-  const damage = patch.hpDelta !== undefined && patch.hpDelta < 0 ? Math.min(-patch.hpDelta, poolBefore) : 0;
+  const damage = patch.hpDelta !== undefined && patch.hpDelta < 0 ? -patch.hpDelta : 0;
   return {
     hpCurrent,
     hpTemp,

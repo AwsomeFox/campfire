@@ -3294,6 +3294,8 @@ export class EncountersService {
 
         if (recomputeHp) {
           const effectiveHpMax = hpMaxChanged ? Math.max(1, patch.hpMax!) : fresh.hpMax;
+          const shouldCheckConcentration =
+            adapter.id === DND5E_ADAPTER_ID && patch.hpDelta !== undefined && patch.hpDelta < 0;
           const state: CombatantHpState = {
             kind: fresh.kind as CombatantHpState['kind'],
             hpCurrent: fresh.hpCurrent,
@@ -3303,7 +3305,7 @@ export class EncountersService {
             deathSaveSuccesses: fresh.deathSaveSuccesses,
             deathSaveFailures: fresh.deathSaveFailures,
             isConcentrating:
-              adapter.id === DND5E_ADAPTER_ID &&
+              shouldCheckConcentration &&
               (fromJsonText<{ concentration?: string | null }>(fresh.turnState, {}).concentration != null ||
                 tx
                   .select()
@@ -3324,7 +3326,7 @@ export class EncountersService {
             deathSaveFailures: patch.deathSaveFailures,
             deathSaveRoll: patch.deathSaveRoll,
           });
-          concentrationCheck = adapter.id === DND5E_ADAPTER_ID && patch.hpDelta !== undefined && patch.hpDelta < 0 ? result.concentrationCheck : null;
+          concentrationCheck = shouldCheckConcentration ? result.concentrationCheck : null;
 
           // If Starfinder adapter or SP present, damage flows through temp HP -> SP -> HP
           if (adapter.id === STARFINDER_ADAPTER_ID && patch.hpDelta !== undefined && patch.hpDelta < 0) {

@@ -446,6 +446,14 @@ describe('encounters — applyCombatantHp (issue #57 5e HP model)', () => {
       expect(r.concentrationCheck).toEqual({ damage: 25, dc: 13 });
     });
 
+    it('uses the full effective hit for an overkill concentration check', () => {
+      const r = applyCombatantHp(
+        charState({ isConcentrating: true, hpCurrent: 5, hpMax: 5 }),
+        { hpDelta: -25 },
+      );
+      expect(r.concentrationCheck).toEqual({ damage: 25, dc: 13 });
+    });
+
     it('does not flag healing or damage for a combatant without concentration', () => {
       expect(applyCombatantHp(charState({ isConcentrating: true }), { hpDelta: 5 }).concentrationCheck).toBeNull();
       expect(applyCombatantHp(charState(), { hpDelta: -25 }).concentrationCheck).toBeNull();
