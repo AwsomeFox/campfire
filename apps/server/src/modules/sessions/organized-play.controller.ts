@@ -8,7 +8,7 @@ import type {
   ScheduleConflictReport,
   ScheduleTemplate,
   ScheduleTemplateApplyResult,
-  ScheduledSession,
+  OccurrenceWriteResult,
   SeriesException,
   SessionSeries,
   SessionSeriesWithOccurrences,
@@ -266,7 +266,7 @@ export class OrganizedPlayController {
     @Param('id', ParseIntPipe) id: number,
     @Body() body: OccurrenceRescheduleDto,
     @CurrentUser() user: RequestUser,
-  ): Promise<{ occurrence: ScheduledSession; conflicts: ScheduleConflictReport['conflicts'] }> {
+  ): Promise<OccurrenceWriteResult> {
     const row = await this.organizedPlay.getOccurrenceRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
     try {
@@ -287,7 +287,7 @@ export class OrganizedPlayController {
     @Param('id', ParseIntPipe) id: number,
     @Body() body: OccurrenceReassignDto,
     @CurrentUser() user: RequestUser,
-  ): Promise<{ occurrence: ScheduledSession; conflicts: ScheduleConflictReport['conflicts'] }> {
+  ): Promise<OccurrenceWriteResult> {
     const row = await this.organizedPlay.getOccurrenceRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
     try {

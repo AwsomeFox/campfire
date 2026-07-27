@@ -1381,6 +1381,7 @@ export const ScheduledSessionRestore = z.object({
   reason: z.string().max(1000).optional(),
 });
 export type ScheduledSessionRestore = z.infer<typeof ScheduledSessionRestore>;
+
 export const ScheduledSessionDuplicate = z.object({
   scheduledAt: IsoDateTime.optional(),
   durationMinutes: z.number().int().min(15).max(24 * 60).optional(),
@@ -1666,6 +1667,37 @@ export const ScheduleConflict = z.object({
   title: z.string().max(200).nullable().default(null),
 });
 export type ScheduleConflict = z.infer<typeof ScheduleConflict>;
+/**
+ * Restore RESPONSE (#588) — a restored night plus what forcing it overrode.
+ *
+ * `conflicts` is REQUIRED, not optional and not defaulted, and that is the
+ * point: `restore` accepts `force`, and the rule this feature states is that an
+ * override the caller cannot tell they took is not an override. Every other
+ * force-taking booking path already returned its redacted list; restore returned
+ * a bare `ScheduledSessionWithRsvps`, so a forced restore that double-booked a
+ * room succeeded in silence. Making the field required means a restore path that
+ * forgets to report does not compile.
+ *
+ * Empty on an unforced restore that hit nothing — the caller overrode nothing.
+ */
+export const ScheduledSessionRestored = ScheduledSessionWithRsvps.extend({
+  conflicts: z.array(ScheduleConflict),
+});
+export type ScheduledSessionRestored = z.infer<typeof ScheduledSessionRestored>;
+
+/**
+ * Response of the two per-occurrence booking writes (reschedule / reassign).
+ *
+ * Named rather than left as an inline `{ occurrence, conflicts }` so that the
+ * "a force-taking write reports what it overrode" rule is checkable by
+ * machine — see force-reports-conflicts.spec.ts. `conflicts` is required here
+ * for the same reason it is on ScheduledSessionRestored.
+ */
+export const OccurrenceWriteResult = z.object({
+  occurrence: ScheduledSession,
+  conflicts: z.array(ScheduleConflict),
+});
+export type OccurrenceWriteResult = z.infer<typeof OccurrenceWriteResult>;
 
 export const SessionSeriesWithOccurrences = SessionSeries.extend({
   occurrences: z.array(ScheduledSession),

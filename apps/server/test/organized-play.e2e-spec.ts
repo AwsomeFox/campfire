@@ -1869,6 +1869,142 @@ describe('organized play (e2e)', () => {
     expect(ordinary.body.occurrence.scheduledAt).toBe('2099-03-15T06:30:00.000Z');
   });
 
+  /**
+   * The override set was read with an `await`ed select BEFORE the write
+   * transaction opened, so a per-occurrence customization committing in that gap
+   * was invisible to the fan-out and got rewritten to the series default — the
+   * exact outcome the set exists to prevent.
+   *
+   * Driven through the service so the interleaving is deterministic: every
+   * `await` before a synchronous better-sqlite3 transaction is a yield.
+   */
+  it('does not wipe a per-occurrence re-seat that lands while a series edit is in flight', async () => {
+    const service = ctx.app.get(OrganizedPlayService);
+    const actor = { id: 'dev:op-dm', name: 'OP DM', roles: [] as string[] };
+    const series = await api()
+      .post(`/api/v1/campaigns/${campaignId}/series`)
+      .set(dm)
+      .send({ title: 'Race Fanout', timezone: 'UTC', startDate: '2099-06-02', startTime: '18:00', freq: 'weekly', count: 2, capacity: 6 });
+    expect(series.status).toBe(201);
+    const target = series.body.occurrences[0];
+
+    // Both requests in flight at once: the re-seat files a `reassign` override
+    // while the series-wide edit is between reading that set and writing.
+    await Promise.all([
+      service.updateSeries(series.body.id, { title: 'Race Fanout (v2)', capacity: 9 } as never, actor as never, 'dm'),
+      service.reassignOccurrence(target.id, { capacity: 2 } as never, actor as never, 'dm'),
+    ]);
+
+    const after = await api().get(`/api/v1/campaigns/${campaignId}/series/${series.body.id}`).set(dm);
+    const byId = new Map(after.body.occurrences.map((o: { id: number }) => [o.id, o]));
+    // Whichever order they land in, the coordinator's explicit per-occurrence
+    // capacity must survive: it is either applied after the fan-out, or seen by
+    // the fan-out as an override and skipped. It must never be reset to 9.
+    expect((byId.get(target.id) as { capacity: number }).capacity).toBe(2);
+    // The override is on the ledger either way.
+    expect(
+      (await api().get(`/api/v1/organized-play/occurrences/${target.id}/exceptions`).set(dm)).body.map((e: { kind: string }) => e.kind),
+    ).toEqual(['reassign']);
+  });
+
+  it('a reschedule that moves nothing files no override and pushes no SEQUENCE', async () => {
+    // The twin of the no-op reassign case. The ledger is append-only and
+    // updateSeries reads every `reschedule` entry as a permanent override, so a
+    // client retry resending the current instant would detach this night from
+    // its series forever.
+    const series = await api()
+      .post(`/api/v1/campaigns/${campaignId}/series`)
+      .set(dm)
+      .send({ title: 'No-op Move', timezone: 'UTC', startDate: '2099-06-16', startTime: '18:00', freq: 'weekly', count: 2 });
+    expect(series.status).toBe(201);
+    const occ = series.body.occurrences[0];
+
+    const retry = await api()
+      .post(`/api/v1/organized-play/occurrences/${occ.id}/reschedule`)
+      .set(dm)
+      .send({ scheduledAt: occ.scheduledAt, reason: 'client retry' });
+    expect(retry.status).toBe(201);
+    expect(retry.body.occurrence.icsSequence).toBe(occ.icsSequence);
+    expect((await api().get(`/api/v1/organized-play/occurrences/${occ.id}/exceptions`).set(dm)).body).toEqual([]);
+
+    // Still reachable by the series, which is what the override would have cost.
+    const edited = await api().patch(`/api/v1/campaigns/${campaignId}/series/${series.body.id}`).set(dm).send({ title: 'No-op Move (v2)' });
+    const byId = new Map(edited.body.occurrences.map((o: { id: number }) => [o.id, o]));
+    expect(byId.get(occ.id)).toMatchObject({ title: 'No-op Move (v2)' });
+
+    // A REAL move still files its entry and bumps SEQUENCE. Re-read the sequence
+    // first: the series rename above legitimately bumped it.
+    const beforeMove = (await api().get(`/api/v1/schedule/${occ.id}`).set(dm)).body.icsSequence as number;
+    const moved = await api()
+      .post(`/api/v1/organized-play/occurrences/${occ.id}/reschedule`)
+      .set(dm)
+      .send({ scheduledAt: '2099-06-17T18:00:00.000Z' });
+    expect(moved.status).toBe(201);
+    expect(moved.body.occurrence.icsSequence).toBe(beforeMove + 1);
+    expect((await api().get(`/api/v1/organized-play/occurrences/${occ.id}/exceptions`).set(dm)).body.map((e: { kind: string }) => e.kind)).toEqual([
+      'reschedule',
+    ]);
+  });
+
+  it('a no-op room clear does not destroy a venue-only series, which nothing could restore', async () => {
+    // SessionSeriesUpdate exposes no `venueId`, so a cleared venue cannot be put
+    // back through the API at all — the series and every future occurrence would
+    // drop off venue-filtered calendars permanently.
+    const series = await api()
+      .post(`/api/v1/campaigns/${campaignId}/series`)
+      .set(dm)
+      .send({ title: 'Venue Only', timezone: 'UTC', startDate: '2099-06-23', startTime: '18:00', freq: 'weekly', count: 2, venueId });
+    expect(series.status).toBe(201);
+    expect(series.body.venueId).toBe(venueId);
+    expect(series.body.roomId).toBeNull();
+
+    // A client resending its current state: roomId is already null.
+    const noop = await api().patch(`/api/v1/campaigns/${campaignId}/series/${series.body.id}`).set(dm).send({ roomId: null });
+    expect(noop.status).toBe(200);
+    expect(noop.body.venueId).toBe(venueId);
+    expect(noop.body.occurrences.every((o: { venueId: number | null }) => o.venueId === venueId)).toBe(true);
+
+    // Clearing a REAL room likewise keeps the venue: "no particular table" is not
+    // the same statement as "not at this venue".
+    const seated = await api().patch(`/api/v1/campaigns/${campaignId}/series/${series.body.id}`).set(dm).send({ roomId: blueRoomId, force: true });
+    expect(seated.body.roomId).toBe(blueRoomId);
+    const cleared = await api().patch(`/api/v1/campaigns/${campaignId}/series/${series.body.id}`).set(dm).send({ roomId: null });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.roomId).toBeNull();
+    expect(cleared.body.venueId).toBe(venueId);
+  });
+
+  it('a forced restore reports what it overbooked, like every other force path', async () => {
+    const restoreRoomRes = await api().post(`/api/v1/organized-play/venues/${venueId}/rooms`).set(dm).send({ name: 'Force Report Room' });
+    // Asserted, not assumed: a duplicate room name 400s, and an undefined roomId
+    // would silently make both bookings resource-less and the probe vacuous.
+    expect(restoreRoomRes.status).toBe(201);
+    const restoreRoom = restoreRoomRes.body;
+    const night = await api()
+      .post(`/api/v1/campaigns/${campaignId}/series`)
+      .set(dm)
+      .send({ title: 'Restore Reports', timezone: 'UTC', startDate: '2099-06-30', startTime: '18:00', freq: 'weekly', count: 1, roomId: restoreRoom.id });
+    expect(night.status).toBe(201);
+    const occ = night.body.occurrences[0];
+
+    // Cancel RELEASES the room…
+    expect((await api().delete(`/api/v1/schedule/${occ.id}`).set(dm).send({ reason: 'flood' })).status).toBe(200);
+    // …another campaign legitimately takes it…
+    const rival = await api()
+      .post(`/api/v1/campaigns/${otherCampaignId}/series`)
+      .set(dm)
+      .send({ title: 'Rival Table', timezone: 'UTC', startDate: '2099-06-30', startTime: '18:00', freq: 'weekly', count: 1, roomId: restoreRoom.id });
+    expect(rival.status).toBe(201);
+
+    // …so an unforced restore is refused, and a forced one must SAY what it took.
+    expect((await api().post(`/api/v1/schedule/${occ.id}/restore`).set(dm).send({})).status).toBe(409);
+    const forced = await api().post(`/api/v1/schedule/${occ.id}/restore`).set(dm).send({ force: true, reason: 'flood receded' });
+    expect(forced.status).toBe(201);
+    expect(Array.isArray(forced.body.conflicts)).toBe(true);
+    expect(forced.body.conflicts.length).toBeGreaterThan(0);
+    expect(forced.body.conflicts.some((c: { kind: string }) => c.kind === 'room')).toBe(true);
+  });
+
   it('does not push a fresh SEQUENCE for a room change, which the feed never renders', async () => {
     const seqRoom = (await api().post(`/api/v1/organized-play/venues/${venueId}/rooms`).set(dm).send({ name: 'Sequence Room' })).body;
     const series = await api()

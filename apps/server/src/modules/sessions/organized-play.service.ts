@@ -22,6 +22,7 @@ import {
   type CoordinatorCalendarEntry,
   type OccurrenceAttendance,
   type OccurrenceReassign,
+  type OccurrenceWriteResult,
   type OccurrenceReschedule,
   type PlayRoom,
   type PlayRoomCreate,
@@ -38,7 +39,6 @@ import {
   type ScheduleTemplateApply,
   type ScheduleTemplateApplyResult,
   type ScheduleTemplateCreate,
-  type ScheduledSession,
   type SeriesException,
   type SessionSeries,
   type SessionSeriesCreate,
@@ -47,7 +47,6 @@ import {
 } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import {
-  campaigns,
   playRooms,
   playVenues,
   scheduleTemplates,
@@ -77,14 +76,17 @@ import {
 } from './scheduling-queries';
 // The booking probe lives in its own leaf module so SchedulingService can run the
 // identical check when a restore re-acquires a released room/DM (see #588).
-import { SeriesConflictSignal, endInstant, findConflictRows, type RawConflict } from './schedule-conflicts';
-
-/** Which campaigns the caller may see identifying detail for. */
-type AccessScope = number[] | 'all';
-
-function canSee(scope: AccessScope, campaignId: number): boolean {
-  return scope === 'all' || scope.includes(campaignId);
-}
+import {
+  SeriesConflictSignal,
+  canSee,
+  endInstant,
+  findConflictRows,
+  lookupConflictNames,
+  redactConflicts,
+  type AccessScope,
+  type ConflictNames,
+  type RawConflict,
+} from './schedule-conflicts';
 
 const MAX_CALENDAR_WINDOW_DAYS = 366;
 
@@ -97,6 +99,27 @@ const METADATA_OVERRIDE_KINDS = ['reschedule', 'reassign'] as const;
 
 type SeriesRow = typeof sessionSeries.$inferSelect;
 type ScheduleRow = typeof scheduledSessions.$inferSelect;
+
+/**
+ * Does this write actually change the row?
+ *
+ * THE single answer both per-occurrence endpoints use before appending to the
+ * append-only exception ledger, deliberately generic over "the columns this
+ * write touches" so the two cannot drift. `reassignOccurrence` grew its own
+ * version of this check first; `rescheduleOccurrence` did not get one, and the
+ * result was the identical defect one function away — which is exactly the
+ * two-expressions-of-one-rule failure this branch keeps paying for.
+ *
+ * It matters because the ledger is APPEND-ONLY and `updateSeries` reads every
+ * `reschedule`/`reassign` entry as a permanent per-occurrence override. An entry
+ * written for a request that changed nothing — a client retry resending the
+ * current instant, a double-clicked button — can never be withdrawn, and freezes
+ * that night out of every later series title, notes, room, DM, capacity and
+ * event-key change, forever.
+ */
+function changesOccurrence(existing: ScheduleRow, next: Partial<ScheduleRow>): boolean {
+  return (Object.keys(next) as Array<keyof ScheduleRow>).some((key) => existing[key] !== next[key]);
+}
 
 function venueToDomain(row: typeof playVenues.$inferSelect): PlayVenue {
   return {
@@ -677,56 +700,18 @@ export class OrganizedPlayService {
    * id and the title are dropped, and `visible: false` says so explicitly rather
    * than leaving the client to guess whether a null means redacted or absent.
    */
-  private redactConflicts(
-    raws: RawConflict[],
-    scope: AccessScope,
-    names: { campaigns: Map<number, string>; rooms: Map<number, { name: string; venueName: string }> },
-  ): ScheduleConflict[] {
-    return raws
-      .map((raw): ScheduleConflict => {
-        const visible = canSee(scope, raw.campaignId);
-        const room = raw.roomId != null ? names.rooms.get(raw.roomId) : undefined;
-        return {
-          kind: raw.kind,
-          visible,
-          startsAt: raw.startsAt,
-          endsAt: raw.endsAt,
-          roomId: raw.roomId,
-          roomName: room?.name ?? '',
-          venueName: room?.venueName ?? '',
-          subjectUserId: raw.subjectUserId,
-          campaignId: visible ? raw.campaignId : null,
-          campaignName: visible ? (names.campaigns.get(raw.campaignId) ?? null) : null,
-          scheduleId: visible ? raw.scheduleId : null,
-          title: visible ? raw.title : null,
-        };
-      })
-      .sort((a, b) => a.startsAt.localeCompare(b.startsAt) || a.kind.localeCompare(b.kind));
+  /**
+   * Thin delegates to the shared redaction in ./schedule-conflicts, for the same
+   * reason findConflictRows is one: SchedulingService.restore must produce an
+   * identically-redacted list, and a second copy is how two views of one privacy
+   * rule start disagreeing.
+   */
+  private redactConflicts(raws: RawConflict[], scope: AccessScope, names: ConflictNames): ScheduleConflict[] {
+    return redactConflicts(raws, scope, names);
   }
 
-  /** Campaign + room display names for the ids referenced by these conflicts. */
-  private async lookupNames(campaignIds: number[], roomIds: number[]): Promise<{
-    campaigns: Map<number, string>;
-    rooms: Map<number, { name: string; venueName: string }>;
-  }> {
-    const uniqueCampaigns = [...new Set(campaignIds)];
-    const uniqueRooms = [...new Set(roomIds)];
-    const [campaignRows, roomRows] = await Promise.all([
-      uniqueCampaigns.length === 0
-        ? Promise.resolve([])
-        : this.db.select({ id: campaigns.id, name: campaigns.name }).from(campaigns).where(inArray(campaigns.id, uniqueCampaigns)),
-      uniqueRooms.length === 0
-        ? Promise.resolve([])
-        : this.db
-            .select({ id: playRooms.id, name: playRooms.name, venueName: playVenues.name })
-            .from(playRooms)
-            .innerJoin(playVenues, eq(playVenues.id, playRooms.venueId))
-            .where(inArray(playRooms.id, uniqueRooms)),
-    ]);
-    return {
-      campaigns: new Map(campaignRows.map((r) => [r.id, r.name])),
-      rooms: new Map(roomRows.map((r) => [r.id, { name: r.name, venueName: r.venueName }])),
-    };
+  private async lookupNames(campaignIds: number[], roomIds: number[]): Promise<ConflictNames> {
+    return lookupConflictNames(this.db, campaignIds, roomIds);
   }
 
   /** Resolve a conflict query's window, accepting either an instant or a wall clock. */
@@ -1106,6 +1091,33 @@ export class OrganizedPlayService {
   }
 
   /**
+   * The venue a booking should hold after its room changes — the ONE expression
+   * of that rule, shared by the series fan-out and both per-occurrence paths.
+   *
+   * CLEARING THE ROOM DOES NOT CLEAR THE VENUE. A room supplies its own venue, so
+   * naming a room resolves it; naming NO room says "no particular table", which
+   * is not the same statement as "not at this venue any more". Keeping the venue
+   * is also the only non-destructive reading, and destructiveness is the whole
+   * point here: `SessionSeriesUpdate` and `OccurrenceReassign` expose no
+   * `venueId` field at all, so a cleared venue CANNOT BE PUT BACK through the
+   * API. There is no recovery path, only recreating the series.
+   *
+   * The series PATCH reached that state from a request that changed nothing. It
+   * keyed on `input.roomId === undefined`, so a venue-only series (venue set,
+   * room already null) PATCHed with an explicit `roomId: null` — a client
+   * resending its current state — resolved `(null, null)` to `null` and silently
+   * dropped the venue from the series and every future occurrence, removing them
+   * from every venue-filtered calendar. The per-occurrence paths never fired on
+   * that case because they compare against `existing.roomId` rather than against
+   * `undefined`, but they cleared the venue on a genuine room clear for the same
+   * reason, so all three now go through here.
+   */
+  private async venueAfterRoomChange(nextRoomId: number | null, currentVenueId: number | null): Promise<number | null> {
+    if (nextRoomId == null) return currentVenueId;
+    return this.resolveVenueId(null, nextRoomId);
+  }
+
+  /**
    * Series-level metadata edit. Fans out to FUTURE occurrences only, and only to
    * those with no per-occurrence exception of their own: a table the coordinator
    * has already moved or re-seated must not be silently pulled back to the series
@@ -1120,7 +1132,8 @@ export class OrganizedPlayService {
   ): Promise<SessionSeriesWithOccurrences> {
     const existing = await this.getSeriesRowOrThrow(id);
     if (input.roomId !== undefined && input.roomId !== null) await this.getRoomOrThrow(input.roomId);
-    const venueId = input.roomId === undefined ? existing.venueId : await this.resolveVenueId(null, input.roomId);
+    const venueId =
+      input.roomId === undefined ? existing.venueId : await this.venueAfterRoomChange(input.roomId, existing.venueId);
     const ts = nowIso();
     const nowStr = new Date(nowMs).toISOString();
 
@@ -1132,17 +1145,6 @@ export class OrganizedPlayService {
     // of every later series edit permanently, leaving it with a stale title,
     // room, DM and event keys forever — the opposite of the documented contract,
     // and invisible until someone compared two occurrences by hand.
-    const overriddenIds = new Set(
-      (
-        await this.db
-          .select({ occurrenceId: seriesExceptions.occurrenceId })
-          .from(seriesExceptions)
-          .where(and(eq(seriesExceptions.seriesId, id), inArray(seriesExceptions.kind, [...METADATA_OVERRIDE_KINDS])))
-      )
-        .map((r) => r.occurrenceId)
-        .filter((v): v is number => v != null),
-    );
-
     // Which shared resources this edit actually moves. Everything else in the
     // body (title, notes, capacity, event/season keys) holds no booking, so it
     // cannot collide with anything and needs no probe.
@@ -1166,6 +1168,24 @@ export class OrganizedPlayService {
     let forcedBatch: ScheduleConflict[] = [];
     let notifyRows: ScheduleRow[] = [];
     this.db.transaction((tx) => {
+      // Read INSIDE the transaction, like every other read this fan-out's
+      // correctness depends on. better-sqlite3 is synchronous, so nothing can
+      // interleave once this callback runs — but an `await`ed read before it is a
+      // yield, and a `reassignOccurrence`/`rescheduleOccurrence` committing in
+      // that gap would not appear in the set. Its occurrence would then be
+      // treated as un-overridden and have the customization the coordinator just
+      // saved silently rewritten to the series default: precisely the outcome
+      // this set exists to prevent. Same fix, same reason, as the count and
+      // occurrence indexes in extendSeries.
+      const overriddenIds = new Set(
+        tx
+          .select({ occurrenceId: seriesExceptions.occurrenceId })
+          .from(seriesExceptions)
+          .where(and(eq(seriesExceptions.seriesId, id), inArray(seriesExceptions.kind, [...METADATA_OVERRIDE_KINDS])))
+          .all()
+          .map((r) => r.occurrenceId)
+          .filter((v): v is number => v != null),
+      );
       const future = tx
         .select()
         .from(scheduledSessions)
@@ -1518,7 +1538,7 @@ export class OrganizedPlayService {
     input: OccurrenceReschedule,
     user: RequestUser,
     role: Role,
-  ): Promise<{ occurrence: ScheduledSession; conflicts: ScheduleConflict[] }> {
+  ): Promise<OccurrenceWriteResult> {
     const existing = await this.getOccurrenceRowOrThrow(id);
     if (existing.status === 'cancelled') {
       throw new BadRequestException('Cancelled scheduled sessions cannot be rescheduled — restore it first');
@@ -1549,7 +1569,7 @@ export class OrganizedPlayService {
     }
     const durationMinutes = input.durationMinutes ?? existing.durationMinutes;
     const roomId = input.roomId === undefined ? existing.roomId : input.roomId;
-    const venueId = roomId === existing.roomId ? existing.venueId : await this.resolveVenueId(null, roomId);
+    const venueId = roomId === existing.roomId ? existing.venueId : await this.venueAfterRoomChange(roomId, existing.venueId);
     const scope = await this.roles.accessibleCampaignIds(user);
     const ts = nowIso();
 
@@ -1574,6 +1594,11 @@ export class OrganizedPlayService {
       });
       if (conflicts.length > 0 && !input.force) throw new SeriesConflictSignal(conflicts);
       rawConflicts = conflicts;
+      // Did this request MOVE anything? Same predicate reassignOccurrence uses,
+      // over the columns this endpoint writes. A retry that resends the current
+      // instant must not file an override it can never withdraw, and must not
+      // push subscribers a fresh SEQUENCE for an unchanged VEVENT.
+      const moved = changesOccurrence(existing, { scheduledAt, durationMinutes, timezone, localStart, roomId, venueId });
       tx.update(scheduledSessions)
         .set({
           scheduledAt,
@@ -1584,13 +1609,15 @@ export class OrganizedPlayService {
           venueId,
           // Set once, then preserved: the FIRST materialized instant is the
           // lineage anchor, so a twice-moved night still points at where it began.
+          // Stamped even on a no-op, which REPAIRS a legacy row adopted into a
+          // series with no anchor rather than leaving it without one.
           originalScheduledAt: existing.originalScheduledAt ?? existing.scheduledAt,
-          icsSequence: existing.icsSequence + 1,
+          ...(moved ? { icsSequence: existing.icsSequence + 1 } : {}),
           updatedAt: ts,
         })
         .where(eq(scheduledSessions.id, id))
         .run();
-      if (existing.seriesId != null) {
+      if (existing.seriesId != null && moved) {
         tx.insert(seriesExceptions)
           .values({
             seriesId: existing.seriesId,
@@ -1659,13 +1686,13 @@ export class OrganizedPlayService {
     input: OccurrenceReassign,
     user: RequestUser,
     role: Role,
-  ): Promise<{ occurrence: ScheduledSession; conflicts: ScheduleConflict[] }> {
+  ): Promise<OccurrenceWriteResult> {
     const existing = await this.getOccurrenceRowOrThrow(id);
     if (existing.status === 'cancelled') {
       throw new BadRequestException('Cancelled scheduled sessions cannot be reassigned — restore it first');
     }
     const roomId = input.roomId === undefined ? existing.roomId : input.roomId;
-    const venueId = roomId === existing.roomId ? existing.venueId : await this.resolveVenueId(null, roomId);
+    const venueId = roomId === existing.roomId ? existing.venueId : await this.venueAfterRoomChange(roomId, existing.venueId);
     const assignedDmUserId = input.assignedDmUserId ?? existing.assignedDmUserId;
     const capacity = input.capacity ?? existing.capacity;
     const scope = await this.roles.accessibleCampaignIds(user);
@@ -1702,7 +1729,7 @@ export class OrganizedPlayService {
       // — the exact no-op-must-not-bump rule `calendarFieldChanged` states on the
       // one-off path, and the rule the series fan-out follows too. If a room ever
       // starts rendering into LOCATION, all three predicates change together.
-      const reseated = roomId !== existing.roomId || assignedDmUserId !== existing.assignedDmUserId || capacity !== existing.capacity;
+      const reseated = changesOccurrence(existing, { roomId, venueId, assignedDmUserId, capacity });
       tx.update(scheduledSessions)
         .set({
           roomId,

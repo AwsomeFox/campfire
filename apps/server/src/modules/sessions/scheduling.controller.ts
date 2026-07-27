@@ -2,7 +2,7 @@ import { Body, Controller, Delete, Get, Param, ParseIntPipe, Patch, Post, Put, Q
 import { ApiTags, ApiOperation, ApiParam, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import type { Response } from 'express';
-import type { CalendarFeed, ScheduledSessionListPage, ScheduledSessionWithRsvps } from '@campfire/schema';
+import type { CalendarFeed, ScheduledSessionListPage, ScheduledSessionRestored, ScheduledSessionWithRsvps } from '@campfire/schema';
 import { Public } from '../../common/decorators/public.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
@@ -176,7 +176,7 @@ export class ScheduleController {
     @Param('id', ParseIntPipe) id: number,
     @Body() body: ScheduledSessionRestoreDto,
     @CurrentUser() user: RequestUser,
-  ): Promise<ScheduledSessionWithRsvps> {
+  ): Promise<ScheduledSessionRestored> {
     const row = await this.scheduling.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
     try {

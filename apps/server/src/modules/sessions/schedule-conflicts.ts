@@ -1,6 +1,7 @@
 import { and, eq, inArray, ne } from 'drizzle-orm';
 import type { ScheduleConflict } from '@campfire/schema';
-import { scheduledSessions, sessionRsvps } from '../../db/schema';
+import { campaigns, playRooms, playVenues, scheduledSessions, sessionRsvps } from '../../db/schema';
+import type { DrizzleDb } from '../../db/db.module';
 import type { SyncDb } from './scheduling.service';
 import { scheduleLiveSql, scheduleOrganizedPlaySql, scheduleOverlapsSql } from './scheduling-queries';
 
@@ -15,6 +16,80 @@ import { scheduleLiveSql, scheduleOrganizedPlaySql, scheduleOverlapsSql } from '
  * the two import each other. Nothing here touches service state, so a leaf module
  * is also the honest shape: these are functions of (db, window, resources).
  */
+
+/** Which campaigns the caller may see identifying detail for. */
+export type AccessScope = number[] | 'all';
+
+export function canSee(scope: AccessScope, campaignId: number): boolean {
+  return scope === 'all' || scope.includes(campaignId);
+}
+
+export type ConflictNames = {
+  campaigns: Map<number, string>;
+  rooms: Map<number, { name: string; venueName: string }>;
+};
+
+/** Campaign + room display names for the ids referenced by these conflicts. */
+export async function lookupConflictNames(db: DrizzleDb, campaignIds: number[], roomIds: number[]): Promise<ConflictNames> {
+  const uniqueCampaigns = [...new Set(campaignIds)];
+  const uniqueRooms = [...new Set(roomIds)];
+  const [campaignRows, roomRows] = await Promise.all([
+    uniqueCampaigns.length === 0
+      ? Promise.resolve([])
+      : db.select({ id: campaigns.id, name: campaigns.name }).from(campaigns).where(inArray(campaigns.id, uniqueCampaigns)),
+    uniqueRooms.length === 0
+      ? Promise.resolve([])
+      : db
+          .select({ id: playRooms.id, name: playRooms.name, venueName: playVenues.name })
+          .from(playRooms)
+          .innerJoin(playVenues, eq(playVenues.id, playRooms.venueId))
+          .where(inArray(playRooms.id, uniqueRooms)),
+  ]);
+  return {
+    campaigns: new Map(campaignRows.map((r) => [r.id, r.name])),
+    rooms: new Map(roomRows.map((r) => [r.id, { name: r.name, venueName: r.venueName }])),
+  };
+}
+
+/**
+ * Apply the privacy rule to raw conflicts.
+ *
+ * A coordinator must be told "that room is taken from 19:00 to 23:00" even when
+ * the booking belongs to a campaign they cannot read — otherwise the shared room
+ * calendar is useless. They must NOT be told whose game it is. So the window, the
+ * resource and the colliding subject id (which the CALLER supplied in the first
+ * place) survive; the campaign, its name, the schedule id and the title are
+ * dropped, and `visible: false` says so explicitly rather than leaving the client
+ * to guess whether a null means redacted or absent.
+ *
+ * Lives in this leaf module, beside the probe that produces `RawConflict`, for
+ * the same reason the probe does: SchedulingService needs it too. `restore()`
+ * takes `force` and must report what it overrode, and a RawConflict must never
+ * reach a caller unredacted — so the one place that turns raw into caller-safe
+ * has to be reachable from both services without them importing each other.
+ */
+export function redactConflicts(raws: RawConflict[], scope: AccessScope, names: ConflictNames): ScheduleConflict[] {
+  return raws
+    .map((raw): ScheduleConflict => {
+      const visible = canSee(scope, raw.campaignId);
+      const room = raw.roomId != null ? names.rooms.get(raw.roomId) : undefined;
+      return {
+        kind: raw.kind,
+        visible,
+        startsAt: raw.startsAt,
+        endsAt: raw.endsAt,
+        roomId: raw.roomId,
+        roomName: room?.name ?? '',
+        venueName: room?.venueName ?? '',
+        subjectUserId: raw.subjectUserId,
+        campaignId: visible ? raw.campaignId : null,
+        campaignName: visible ? (names.campaigns.get(raw.campaignId) ?? null) : null,
+        scheduleId: visible ? raw.scheduleId : null,
+        title: visible ? raw.title : null,
+      };
+    })
+    .sort((a, b) => a.startsAt.localeCompare(b.startsAt) || a.kind.localeCompare(b.kind));
+}
 
 /** End of a booking window. Half-open: `[startsAt, endsAt)`. */
 export function endInstant(startIso: string, durationMinutes: number): string {

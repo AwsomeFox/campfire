@@ -17,7 +17,7 @@ import {
   utcToLocalDateTime,
   type ScheduleNotificationData,
 } from '@campfire/schema';
-import type { ScheduledSession, ScheduledSessionWithRsvps, ScheduledSessionListPage, SessionRsvp, CalendarFeed, Role, PageParams } from '@campfire/schema';
+import type { ScheduledSession, ScheduledSessionRestored, ScheduledSessionWithRsvps, ScheduledSessionListPage, SessionRsvp, CalendarFeed, Role, PageParams } from '@campfire/schema';
 import { SCHEDULE_PAST_DEFAULT_LIMIT, SCHEDULE_PAST_MAX_LIMIT } from '@campfire/schema';
 import { applyPage } from '../../common/pagination';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -31,6 +31,7 @@ import { nextUpdatedAt, staleWrite } from '../../common/stale-write';
 import { AuditService } from '../audit/audit.service';
 import { RevisionsService } from '../revisions/revisions.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { RoleResolver } from '../membership/role-resolver.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
@@ -44,7 +45,15 @@ import {
 } from './scheduling-queries';
 // #588: restoring a cancelled night re-acquires the room/DM the cancellation
 // released, so it runs the same booking probe as the organized-play endpoints.
-import { SeriesConflictSignal, endInstant, findConflictRows, holdsBookableResource } from './schedule-conflicts';
+import {
+  SeriesConflictSignal,
+  endInstant,
+  findConflictRows,
+  holdsBookableResource,
+  lookupConflictNames,
+  redactConflicts,
+  type RawConflict,
+} from './schedule-conflicts';
 
 const PAST_LIST_MAX = SCHEDULE_PAST_MAX_LIMIT;
 
@@ -209,6 +218,9 @@ export class SchedulingService {
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
     private readonly notifications: NotificationsService,
+    // #588: restore() reports what forcing it overrode, and the list is redacted
+    // per caller — which needs the caller's campaign scope.
+    private readonly roles: RoleResolver,
     private readonly events: CampaignEventsService,
     private readonly revisions: RevisionsService,
   ) {}
@@ -875,7 +887,7 @@ export class SchedulingService {
     return this.getWithRsvps(id);
   }
 
-  async restore(id: number, user: RequestUser, role: Role, force = false, reason = ''): Promise<ScheduledSessionWithRsvps> {
+  async restore(id: number, user: RequestUser, role: Role, force = false, reason = ''): Promise<ScheduledSessionRestored> {
     // Effective status here too, so every write guard in this file reads the same
     // projection the API returns. ('cancelled' is never link-derived, so this one is
     // equivalent to the raw column today — it is written this way so the next guard
@@ -898,6 +910,7 @@ export class SchedulingService {
     // cancelled the ledger is a useful record of what the party was already told, and
     // restore is the exact moment the night becomes eligible to remind again. Restore
     // starts a new incarnation of the night, so it starts with a clean ledger.
+    let forced: RawConflict[] = [];
     this.db.transaction((tx) => {
       // #588: a restore is a BOOKING, not merely a status flip.
       //
@@ -924,6 +937,11 @@ export class SchedulingService {
         excludeScheduleId: id,
       });
       if (conflicts.length > 0 && !force) throw new SeriesConflictSignal(conflicts);
+      // What forcing this restore overrode. Reported rather than discarded: the
+      // rule this feature states is that an override the caller cannot tell they
+      // took is not an override, and restore was the one force-taking path still
+      // returning a payload with nowhere to say so.
+      forced = conflicts;
       tx.update(scheduledSessions)
         .set({
           status: 'scheduled',
@@ -981,7 +999,16 @@ export class SchedulingService {
         changeType: 'updated',
       }),
     );
-    return this.getWithRsvps(id);
+    // Redacted per caller through the same leaf-module helpers OrganizedPlayService
+    // uses, so a forced restore cannot reveal more about another campaign's
+    // booking than the conflict probe would.
+    const scope = await this.roles.accessibleCampaignIds(user);
+    const names = await lookupConflictNames(
+      this.db,
+      forced.map((r) => r.campaignId),
+      forced.flatMap((r) => (r.roomId != null ? [r.roomId] : [])),
+    );
+    return { ...(await this.getWithRsvps(id)), conflicts: redactConflicts(forced, scope, names) };
   }
 
   async duplicate(
