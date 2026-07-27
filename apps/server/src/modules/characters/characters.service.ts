@@ -33,7 +33,7 @@ import { auditLog, campaigns, characters, checkRequests, combatants, encounters 
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { fromJsonText, toJsonText } from '../../common/json';
-import { conditionWriteSetFromNames } from '../../common/conditions';
+import { conditionWriteSetFromNames, sheetConditionWriteSetFromNames } from '../../common/conditions';
 import { redactSecret, redactSecrets } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
@@ -674,7 +674,7 @@ export class CharactersService {
         spMax: input.spMax ?? 0,
         rpCurrent: input.rpCurrent ?? 0,
         rpMax: input.rpMax ?? 0,
-        conditions: toJsonText(input.conditions ?? []),
+        ...sheetConditionWriteSetFromNames(input.conditions ?? [], null),
         saveProficiencies: toJsonText(input.saveProficiencies ?? []),
         skills: toJsonText(input.skills ?? {}),
         actions: toJsonText(input.actions ?? []),
@@ -767,7 +767,9 @@ export class CharactersService {
       const rawHpCurrent = input.hpCurrent !== undefined ? input.hpCurrent : existing.hpCurrent;
       update.hpCurrent = clampHpCurrent(rawHpCurrent, finalHpMax);
     }
-    if (input.conditions !== undefined) update.conditions = toJsonText(input.conditions);
+    if (input.conditions !== undefined) {
+      Object.assign(update, sheetConditionWriteSetFromNames(input.conditions, existing.conditionInstances));
+    }
     if (input.saveProficiencies !== undefined) update.saveProficiencies = toJsonText(input.saveProficiencies);
     if (input.skills !== undefined) update.skills = toJsonText(input.skills);
     if (input.actions !== undefined) update.actions = toJsonText(input.actions);
@@ -1180,7 +1182,7 @@ export class CharactersService {
 
     const [row] = await this.db
       .update(characters)
-      .set({ conditions: toJsonText([...current]), updatedAt: nowIso() })
+      .set({ ...sheetConditionWriteSetFromNames([...current], existing.conditionInstances), updatedAt: nowIso() })
       .where(eq(characters.id, id))
       .returning();
 

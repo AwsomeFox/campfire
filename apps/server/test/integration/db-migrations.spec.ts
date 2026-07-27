@@ -1350,4 +1350,45 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       again.sqlite.close();
     }
   });
+
+  it('0132 adds characters.condition_instances and leaves bare legacy strings readable (#1047)', () => {
+    dataDir = makeTempDataDir();
+    const first = openDatabase(dataDir);
+    first.sqlite.close();
+
+    // Rewind to the pre-#1047 shape: characters WITHOUT condition_instances, holding the
+    // bare strings every existing install has, and the migration un-recorded.
+    const rewound = new Database(dbFilePath(dataDir));
+    const ts = '2026-01-01T00:00:00.000Z';
+    try {
+      rewound.pragma('foreign_keys = OFF');
+      rewound.exec('ALTER TABLE characters DROP COLUMN condition_instances');
+      rewound
+        .prepare(
+          `INSERT INTO characters (id, campaign_id, name, hp_current, hp_max, conditions, status, created_at, updated_at)
+           VALUES (901, 1, 'Legacy PC', 10, 10, ?, 'active', ?, ?)`,
+        )
+        .run(JSON.stringify(['poisoned', 'exhaustion']), ts, ts);
+      rewound.prepare('DELETE FROM __migrations WHERE name = ?').run('0132_character_condition_instances_1047');
+      expect(columnNames(rewound, 'characters')).not.toContain('condition_instances');
+    } finally {
+      rewound.close();
+    }
+
+    const again = openDatabase(dataDir);
+    try {
+      expect(columnNames(again.sqlite, 'characters')).toContain('condition_instances');
+
+      // Deliberately NOT backfilled — the reader derives instances from the legacy names,
+      // so a rewrite of every character row on upgrade would be redundant data to keep in
+      // step forever. The legacy column must be untouched.
+      const row = again.sqlite
+        .prepare('SELECT conditions, condition_instances FROM characters WHERE id = 901')
+        .get() as { conditions: string; condition_instances: string | null };
+      expect(row.condition_instances).toBeNull();
+      expect(JSON.parse(row.conditions)).toEqual(['poisoned', 'exhaustion']);
+    } finally {
+      again.sqlite.close();
+    }
+  });
 });

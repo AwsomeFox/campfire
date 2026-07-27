@@ -178,6 +178,9 @@ CREATE TABLE IF NOT EXISTS characters (
   death_save_successes INTEGER NOT NULL DEFAULT 0,
   death_save_failures INTEGER NOT NULL DEFAULT 0,
   conditions TEXT NOT NULL DEFAULT '[]',
+  -- Issue #1047: sheet-scoped ConditionInstance[] JSON; NULL means derive from the legacy
+  -- conditions names. No backticks in this file: it is one big TS template literal.
+  condition_instances TEXT,
   save_proficiencies TEXT NOT NULL DEFAULT '[]',
   skills TEXT NOT NULL DEFAULT '{}',
   actions TEXT NOT NULL DEFAULT '[]',
