@@ -589,6 +589,18 @@ describe('Issue #600: session-zero consent lifecycle (e2e)', () => {
       expect(granted.body.status).toBe('granted');
       expect(granted.body.decidedAt).toBeTruthy();
 
+      const versionId = (await dm.get(`${API}/campaigns/${campaignId}/session-zero/versions`)).body[0].id;
+      const reopen = await player.post(`${API}/campaigns/${campaignId}/session-zero/guardian-consents`).send({
+        versionId,
+        guardianName: M.guardianName,
+        guardianEmail: M.guardianEmail,
+        guardianRelationship: 'parent',
+        minorAttested: true,
+      });
+      expect(reopen.status).toBe(201);
+      expect(reopen.body.status).toBe('granted');
+      expect(reopen.body.decidedAt).toBe(granted.body.decidedAt);
+
       const withdrawn = await dm
         .post(`${API}/campaigns/${campaignId}/session-zero/guardian-consents/${consentId}/decision`)
         .send({ status: 'withdrawn', note: 'They changed their mind.' });

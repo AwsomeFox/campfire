@@ -696,25 +696,37 @@ export class SessionZeroConsentService {
         guardianRelationship: input.guardianRelationship,
         minorAttested: true,
         versionId: version.id,
-        status: 'pending',
-        decisionNote: '',
-        decidedAt: null,
         userName: subject.userName,
         updatedAt: ts,
+        ...(existing &&
+        existing.status !== 'pending' &&
+        existing.versionId === version.id
+          ? {
+              status: existing.status,
+              decisionNote: existing.decisionNote,
+              decidedAt: existing.decidedAt,
+            }
+          : {
+              status: 'pending' as const,
+              decisionNote: '',
+              decidedAt: null,
+            }),
       };
       if (existing) {
-        return tx
+        const updated = tx
           .update(sessionZeroGuardianConsents)
           .set(values)
           .where(eq(sessionZeroGuardianConsents.id, existing.id))
           .returning()
           .get();
+        return { row: updated, auditStatus: values.status };
       }
-      return tx
+      const inserted = tx
         .insert(sessionZeroGuardianConsents)
         .values({ campaignId, userId: subject.userId, ...values, createdAt: ts })
         .returning()
         .get();
+      return { row: inserted, auditStatus: 'pending' as const };
     });
 
     await this.audit.log({
@@ -722,13 +734,13 @@ export class SessionZeroConsentService {
       actorRole: 'dm',
       action: 'session_zero.guardian.request',
       entityType: 'session_zero_guardian_consent',
-      entityId: row.id,
+      entityId: row.row.id,
       campaignId,
       // No guardian contact details in the audit detail — the trail records that consent
       // was sought, not a second copy of a third party's email address.
-      detail: `version=${version.version}, status=pending`,
+      detail: `version=${version.version}, status=${row.auditStatus}`,
     });
-    return toGuardian(row, version.version);
+    return toGuardian(row.row, version.version);
   }
 
   async decideGuardianConsent(
