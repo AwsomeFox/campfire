@@ -820,4 +820,338 @@ describe('organized play (e2e)', () => {
     expect(night.body.roomId).toBeNull();
     expect(night.body.status).toBe('scheduled');
   });
+
+  it('deleting a room also clears it from template slots, so the template still applies', async () => {
+    const venue = await api().post('/api/v1/organized-play/venues').set(dm).send({ name: 'Slot Repair Hall', timezone: 'UTC' });
+    const doomed = await api().post(`/api/v1/organized-play/venues/${venue.body.id}/rooms`).set(dm).send({ name: 'Doomed' });
+    const kept = await api().post(`/api/v1/organized-play/venues/${venue.body.id}/rooms`).set(dm).send({ name: 'Kept' });
+
+    const template = await api()
+      .post('/api/v1/organized-play/templates')
+      .set(dm)
+      .send({
+        name: 'Two Table Block',
+        timezone: 'UTC',
+        venueId: venue.body.id,
+        count: 1,
+        slots: [
+          { weekday: 1, startTime: '18:00', roomId: doomed.body.id, title: 'Table A' },
+          { weekday: 1, startTime: '18:00', roomId: kept.body.id, title: 'Table B' },
+        ],
+      });
+    expect(template.status).toBe(201);
+
+    expect((await api().delete(`/api/v1/organized-play/rooms/${doomed.body.id}`).set(dm)).status).toBe(200);
+
+    // The relational updates cannot reach a room id embedded in slots_json, so
+    // the deletion has to reconcile the JSON too. Left stale, the reference below
+    // would 404 on getRoomOrThrow on EVERY later apply, permanently — there is no
+    // template-update endpoint to repair it.
+    const listed = (await api().get('/api/v1/organized-play/templates').set(dm)).body.find(
+      (t: { id: number }) => t.id === template.body.id,
+    );
+    expect(listed.slots[0].roomId).toBeNull();
+    expect(listed.slots[1].roomId).toBe(kept.body.id); // untouched
+
+    const applied = await api()
+      .post(`/api/v1/organized-play/templates/${template.body.id}/apply`)
+      .set(dm)
+      .send({ campaignId, startDate: '2100-01-04' });
+    expect(applied.status).toBe(201);
+    expect(applied.body.series).toHaveLength(2);
+    const tableA = applied.body.series.find((s: { title: string }) => s.title === 'Table A');
+    expect(tableA.roomId).toBeNull(); // bookable with no room, exactly like the freed bookings above
+  });
+
+  it('rejects a non-numeric venueId/roomId calendar filter instead of coercing it to NaN', async () => {
+    const window = 'from=2099-01-01T00:00:00Z&to=2099-02-01T00:00:00Z';
+    // `Number('abc')` is NaN, which reached the service as a filter matching
+    // nothing — an empty calendar the caller could not tell apart from a real one.
+    expect((await api().get(`/api/v1/organized-play/calendar?${window}&venueId=abc`).set(dm)).status).toBe(400);
+    expect((await api().get(`/api/v1/organized-play/calendar?${window}&roomId=12.5`).set(dm)).status).toBe(400);
+    expect((await api().get(`/api/v1/organized-play/calendar?${window}&venueId=0`).set(dm)).status).toBe(400);
+    // Absent and empty both mean "no filter" and stay 200.
+    expect((await api().get(`/api/v1/organized-play/calendar?${window}&roomId=`).set(dm)).status).toBe(200);
+    expect((await api().get(`/api/v1/organized-play/calendar?${window}&venueId=${venueId}`).set(dm)).status).toBe(200);
+  });
+
+  // ----- the legacy one-off endpoints must not bypass the organized-play guards -----
+
+  it('the legacy schedule PATCH refuses to MOVE a series occurrence, but still edits its prose', async () => {
+    const series = await api()
+      .post(`/api/v1/campaigns/${campaignId}/series`)
+      .set(dm)
+      .send({
+        title: 'Legacy Patch Guard',
+        timezone: 'UTC',
+        startDate: '2099-06-02',
+        startTime: '18:00',
+        durationMinutes: 180,
+        freq: 'weekly',
+        count: 1,
+        roomId: blueRoomId,
+        assignedDmUserId: 'dev:legacy-dm',
+      });
+    expect(series.status).toBe(201);
+    const occ = series.body.occurrences[0];
+
+    // PATCH /schedule/:id runs no findConflictRows probe and writes no ledger
+    // entry, so letting it slide the window while the row still holds its room
+    // and its assigned DM would defeat both halves of the guarantee at once.
+    const moved = await api().patch(`/api/v1/schedule/${occ.id}`).set(dm).send({ scheduledAt: '2099-06-03T18:00:00Z' });
+    expect(moved.status).toBe(400);
+    expect(moved.body.message).toContain('reschedule');
+    // Growing the window can collide with whatever holds the room next.
+    expect((await api().patch(`/api/v1/schedule/${occ.id}`).set(dm).send({ durationMinutes: 600 })).status).toBe(400);
+
+    // Nothing moved, and no ledger entry was invented for the rejected attempt.
+    const after = await api().get(`/api/v1/schedule/${occ.id}`).set(dm);
+    expect(after.body.scheduledAt).toBe(occ.scheduledAt);
+    expect(after.body.durationMinutes).toBe(180);
+    expect((await api().get(`/api/v1/organized-play/occurrences/${occ.id}/exceptions`).set(dm)).body).toEqual([]);
+
+    // Re-sending the instant the row already holds is not a move, so it passes —
+    // the guard compares the STORED value, so the full-object edit form still works.
+    expect((await api().patch(`/api/v1/schedule/${occ.id}`).set(dm).send({ scheduledAt: occ.scheduledAt })).status).toBe(200);
+    // SHRINKING is always allowed: the window strictly contracts, so it can
+    // introduce no overlap, and it is exactly how mid-session "End session"
+    // (#818) works on a row that happens to belong to a series.
+    const shrunk = await api().patch(`/api/v1/schedule/${occ.id}`).set(dm).send({ durationMinutes: 60 });
+    expect(shrunk.status).toBe(200);
+    expect(shrunk.body.durationMinutes).toBe(60);
+    // Prose holds no shared resource and cannot collide, so it stays editable here.
+    const renamed = await api().patch(`/api/v1/schedule/${occ.id}`).set(dm).send({ title: 'Renamed in place', notes: 'bring dice' });
+    expect(renamed.status).toBe(200);
+    expect(renamed.body).toMatchObject({ title: 'Renamed in place', notes: 'bring dice' });
+
+    // The dedicated endpoint is the way through, and it records the lineage.
+    const viaReschedule = await api()
+      .post(`/api/v1/organized-play/occurrences/${occ.id}/reschedule`)
+      .set(dm)
+      .send({ scheduledAt: '2099-06-03T18:00:00Z' });
+    expect(viaReschedule.status).toBe(201);
+    expect((await api().get(`/api/v1/organized-play/occurrences/${occ.id}/exceptions`).set(dm)).body).toHaveLength(1);
+
+    // A one-off night holds no series and is untouched by the guard.
+    const oneOff = await api().post(`/api/v1/campaigns/${campaignId}/schedule`).set(dm).send({ scheduledAt: '2099-06-10T18:00:00Z' });
+    expect((await api().patch(`/api/v1/schedule/${oneOff.body.id}`).set(dm).send({ scheduledAt: '2099-06-11T18:00:00Z' })).status).toBe(200);
+  });
+
+  it('rejects an invalid explicit timezone on a one-off night instead of silently ignoring it', async () => {
+    // `organizedPlayScheduleFields.timezone` is a plain bounded string, so this
+    // body reaches the service; three other paths reject the same value, and
+    // "accepted but ignored" is a write the client has no way to detect.
+    const bad = await api()
+      .post(`/api/v1/campaigns/${campaignId}/schedule`)
+      .set(dm)
+      .send({ scheduledAt: '2099-07-05T18:00:00Z', timezone: 'Mars/Base' });
+    expect(bad.status).toBe(400);
+    expect(bad.body.message).toContain('Mars/Base');
+
+    // '' still means "no explicit zone" — legacy rows depend on it.
+    const noZone = await api()
+      .post(`/api/v1/campaigns/${campaignId}/schedule`)
+      .set(dm)
+      .send({ scheduledAt: '2099-07-06T18:00:00Z', timezone: '' });
+    expect(noZone.status).toBe(201);
+    expect(noZone.body).toMatchObject({ timezone: '', localStart: '' });
+
+    // Omitting the field entirely behaves identically.
+    const omitted = await api().post(`/api/v1/campaigns/${campaignId}/schedule`).set(dm).send({ scheduledAt: '2099-07-07T18:00:00Z' });
+    expect(omitted.status).toBe(201);
+    expect(omitted.body).toMatchObject({ timezone: '', localStart: '' });
+  });
+
+  it('a notes-only edit bumps SEQUENCE, because notes render as DESCRIPTION in the feed', async () => {
+    const night = await api()
+      .post(`/api/v1/campaigns/${campaignId}/schedule`)
+      .set(dm)
+      .send({ scheduledAt: '2099-07-01T18:00:00Z', title: 'Seq Night', notes: 'first draft' });
+    expect(night.status).toBe(201);
+    const seq0 = (await api().get(`/api/v1/schedule/${night.body.id}`).set(dm)).body.icsSequence;
+
+    // LAST-MODIFIED does still advance on this edit, so a lenient client picked
+    // the new DESCRIPTION up regardless; a client that gates revisions on
+    // SEQUENCE (RFC 5545 §3.8.7.4 permits it) kept the stale one forever.
+    const edited = await api().patch(`/api/v1/schedule/${night.body.id}`).set(dm).send({ notes: 'actually, bring snacks' });
+    expect(edited.status).toBe(200);
+    expect(edited.body.icsSequence).toBe(seq0 + 1);
+
+    // A no-op re-send must NOT push a fresh revision at every subscriber.
+    const noop = await api().patch(`/api/v1/schedule/${night.body.id}`).set(dm).send({ notes: 'actually, bring snacks' });
+    expect(noop.body.icsSequence).toBe(seq0 + 1);
+  });
+
+  // ----- exception ledger integrity -----
+
+  it('cancelling ONE occurrence appends a cancel entry, so a later restore is not an orphan', async () => {
+    const series = await api()
+      .post(`/api/v1/campaigns/${campaignId}/series`)
+      .set(dm)
+      .send({ title: 'Skip One', timezone: 'UTC', startDate: '2099-08-04', startTime: '18:00', freq: 'weekly', count: 3 });
+    expect(series.status).toBe(201);
+    const occ = series.body.occurrences[1];
+
+    // DELETE /schedule/:id is the ONLY exposed way to cancel a single occurrence,
+    // so without an entry here a skipped night carried no recorded reason at all.
+    const cancelled = await api().delete(`/api/v1/schedule/${occ.id}`).set(dm).send({ reason: 'DM has flu' });
+    expect(cancelled.status).toBe(200);
+    const ledger = (await api().get(`/api/v1/organized-play/occurrences/${occ.id}/exceptions`).set(dm)).body;
+    expect(ledger).toHaveLength(1);
+    expect(ledger[0]).toMatchObject({
+      kind: 'cancel',
+      reason: 'DM has flu',
+      fromScheduledAt: occ.scheduledAt,
+      toScheduledAt: null,
+      recurrenceLocalDate: '2099-08-11',
+    });
+
+    const restored = await api().post(`/api/v1/schedule/${occ.id}/restore`).set(dm).send({});
+    expect(restored.status).toBe(201);
+    const after = (await api().get(`/api/v1/organized-play/occurrences/${occ.id}/exceptions`).set(dm)).body;
+    // Append-only, and the restore now has the cancel it explains sitting in
+    // front of it under the same recurrence id.
+    expect(after.map((e: { kind: string }) => e.kind)).toEqual(['cancel', 'restore']);
+    expect(after.every((e: { recurrenceLocalDate: string }) => e.recurrenceLocalDate === '2099-08-11')).toBe(true);
+
+    // A one-off night has no series, so it writes no ledger entry at all.
+    const oneOff = await api().post(`/api/v1/campaigns/${campaignId}/schedule`).set(dm).send({ scheduledAt: '2099-08-25T18:00:00Z' });
+    expect((await api().delete(`/api/v1/schedule/${oneOff.body.id}`).set(dm).send({ reason: 'no' })).status).toBe(200);
+    expect((await api().get(`/api/v1/organized-play/occurrences/${oneOff.body.id}/exceptions`).set(dm)).body).toEqual([]);
+  });
+
+  it('a twice-moved occurrence files every ledger entry under ONE recurrence id', async () => {
+    const series = await api()
+      .post(`/api/v1/campaigns/${campaignId}/series`)
+      .set(dm)
+      .send({ title: 'Moved Twice', timezone: 'America/New_York', startDate: '2099-08-18', startTime: '19:00', freq: 'weekly', count: 2 });
+    expect(series.status).toBe(201);
+    const occ = series.body.occurrences[0]; // materialized on 2099-08-18 local
+
+    expect(
+      (await api().post(`/api/v1/organized-play/occurrences/${occ.id}/reschedule`).set(dm).send({ localStart: '2099-08-20T19:00' })).status,
+    ).toBe(201);
+    expect(
+      (await api().post(`/api/v1/organized-play/occurrences/${occ.id}/reschedule`).set(dm).send({ localStart: '2099-08-21T19:00' })).status,
+    ).toBe(201);
+    expect((await api().post(`/api/v1/organized-play/occurrences/${occ.id}/reassign`).set(dm).send({ capacity: 3 })).status).toBe(201);
+
+    const ledger = (await api().get(`/api/v1/organized-play/occurrences/${occ.id}/exceptions`).set(dm)).body;
+    expect(ledger).toHaveLength(3);
+    // Derived from `original_scheduled_at`, never from the (now moved) wall
+    // clock: one logical occurrence keeps one recurrence id however often it
+    // moves, which is the only way the ledger can line its entries up.
+    expect(ledger.map((e: { recurrenceLocalDate: string }) => e.recurrenceLocalDate)).toEqual(['2099-08-18', '2099-08-18', '2099-08-18']);
+  });
+
+  // ----- conflict checks the bulk paths were missing -----
+
+  it('a series metadata edit that re-books a room runs the conflict check and honours force', async () => {
+    const bulkRoom = (await api().post(`/api/v1/organized-play/venues/${venueId}/rooms`).set(dm).send({ name: 'Bulk Room' })).body;
+
+    // The incumbent, in a different campaign, holding Bulk Room on the second week.
+    const incumbent = await api()
+      .post(`/api/v1/campaigns/${otherCampaignId}/series`)
+      .set(dm)
+      .send({ title: 'Incumbent', timezone: 'UTC', startDate: '2099-10-13', startTime: '18:00', freq: 'weekly', count: 1, roomId: bulkRoom.id });
+    expect(incumbent.status).toBe(201);
+
+    // A roomless series whose second occurrence lands on the same slot.
+    const mine = await api()
+      .post(`/api/v1/campaigns/${campaignId}/series`)
+      .set(dm)
+      .send({ title: 'Fanned Out', timezone: 'UTC', startDate: '2099-10-06', startTime: '18:00', freq: 'weekly', count: 2 });
+    expect(mine.status).toBe(201);
+
+    // A plain metadata PATCH is a BULK reassignment when it carries roomId: it
+    // books the room on every future unoverridden occurrence at once. Before this
+    // it was the one endpoint that could do that with no probe, no 409 and no
+    // way for the caller to learn it had double-booked anyone.
+    const rejected = await api().patch(`/api/v1/campaigns/${campaignId}/series/${mine.body.id}`).set(dm).send({ roomId: bulkRoom.id });
+    expect(rejected.status).toBe(409);
+    expect(rejected.body.code).toBe('SCHEDULE_CONFLICT');
+    expect(rejected.body.conflicts.some((c: { kind: string }) => c.kind === 'room')).toBe(true);
+
+    // Rolled back whole: not even the series-level metadata was written.
+    const untouched = await api().get(`/api/v1/campaigns/${campaignId}/series/${mine.body.id}`).set(dm);
+    expect(untouched.body.roomId).toBeNull();
+    expect(untouched.body.occurrences.every((o: { roomId: number | null }) => o.roomId === null)).toBe(true);
+
+    // Same override the per-occurrence siblings offer, spelled the same way.
+    const forced = await api()
+      .patch(`/api/v1/campaigns/${campaignId}/series/${mine.body.id}`)
+      .set(dm)
+      .send({ roomId: bulkRoom.id, force: true });
+    expect(forced.status).toBe(200);
+    expect(forced.body.roomId).toBe(bulkRoom.id);
+    expect(forced.body.occurrences.every((o: { roomId: number | null }) => o.roomId === bulkRoom.id)).toBe(true);
+
+    // A metadata-only edit holds no booking, so it never probes and never 409s.
+    const prose = await api().patch(`/api/v1/campaigns/${campaignId}/series/${mine.body.id}`).set(dm).send({ title: 'Fanned Out (v2)' });
+    expect(prose.status).toBe(200);
+  });
+
+  it('a series notes edit bumps SEQUENCE on the occurrences it rewrites', async () => {
+    const series = await api()
+      .post(`/api/v1/campaigns/${campaignId}/series`)
+      .set(dm)
+      .send({ title: 'Notes Fanout', timezone: 'UTC', startDate: '2099-10-20', startTime: '18:00', freq: 'weekly', count: 2, notes: 'v1' });
+    expect(series.status).toBe(201);
+    const before = series.body.occurrences.map((o: { id: number; icsSequence: number }) => [o.id, o.icsSequence]);
+
+    // `notes` is written to every affected occurrence and renders as DESCRIPTION,
+    // so it belongs in the `renders` predicate exactly as title and location do.
+    const edited = await api().patch(`/api/v1/campaigns/${campaignId}/series/${series.body.id}`).set(dm).send({ notes: 'v2 — new venue rules' });
+    expect(edited.status).toBe(200);
+    const after = new Map(edited.body.occurrences.map((o: { id: number; icsSequence: number; notes: string }) => [o.id, o]));
+    for (const [id, seq] of before) {
+      expect(after.get(id)).toMatchObject({ notes: 'v2 — new venue rules', icsSequence: seq + 1 });
+    }
+
+    // Unchanged notes are still a no-op.
+    const noop = await api().patch(`/api/v1/campaigns/${campaignId}/series/${series.body.id}`).set(dm).send({ notes: 'v2 — new venue rules' });
+    for (const [id, seq] of before) {
+      expect(noop.body.occurrences.find((o: { id: number }) => o.id === id).icsSequence).toBe(seq + 1);
+    }
+  });
+
+  it('an extension that would double-book ITSELF across a DST transition is rejected', async () => {
+    const dstRoom = (await api().post(`/api/v1/organized-play/venues/${venueId}/rooms`).set(dm).send({ name: 'DST Room' })).body;
+
+    // Daily 24-hour tables: back-to-back while the local day really is 24 hours,
+    // so the series creates cleanly.
+    const series = await api()
+      .post(`/api/v1/campaigns/${campaignId}/series`)
+      .set(dm)
+      .send({
+        title: 'Marathon',
+        timezone: 'America/New_York',
+        startDate: '2099-03-05',
+        startTime: '19:00',
+        durationMinutes: 1440,
+        freq: 'daily',
+        count: 2,
+        roomId: dstRoom.id,
+      });
+    expect(series.status).toBe(201);
+
+    // Extending across the 2099-03-08 spring-forward makes that local day 23
+    // hours, so the 07:00 and 08:00 tables overlap by an hour. NEITHER row is in
+    // the database during the probe, so only an intra-batch check can see it —
+    // create and applyTemplate already ran one, extend did not.
+    const rejected = await api().post(`/api/v1/campaigns/${campaignId}/series/${series.body.id}/extend`).set(dm).send({ addCount: 4 });
+    expect(rejected.status).toBe(409);
+    expect(rejected.body.code).toBe('SCHEDULE_CONFLICT');
+    expect(rejected.body.conflicts.some((c: { kind: string }) => c.kind === 'room')).toBe(true);
+
+    // Nothing was materialized: the rejection rolls the whole extension back.
+    const stillTwo = await api().get(`/api/v1/campaigns/${campaignId}/series/${series.body.id}`).set(dm);
+    expect(stillTwo.body.occurrences).toHaveLength(2);
+    expect(stillTwo.body.count).toBe(2);
+
+    // The coordinator can still overbook deliberately.
+    const forced = await api().post(`/api/v1/campaigns/${campaignId}/series/${series.body.id}/extend`).set(dm).send({ addCount: 4, force: true });
+    expect(forced.status).toBe(201);
+    expect(forced.body.occurrences).toHaveLength(6);
+  });
 });

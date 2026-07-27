@@ -58,6 +58,33 @@ function icsTokenIsExpired(expiresAt: string | null): boolean {
   return new Date(expiresAt).getTime() < Date.now();
 }
 
+/**
+ * The RFC 5545 RECURRENCE-ID analogue for one occurrence: the local date it was
+ * ORIGINALLY materialized on — never the date it currently sits on (#588).
+ *
+ * `local_start` is the MOVED wall clock once an occurrence has been rescheduled,
+ * so deriving the recurrence id from it gave one logical occurrence a different
+ * id in every ledger entry written after its first move. Lining those entries up
+ * is the entire job of the ledger, so the id has to come from an anchor that does
+ * not move: `original_scheduled_at` is stamped once at materialization and
+ * preserved across every later reschedule. For an occurrence that has never
+ * moved the two agree exactly, so entries written before this change still line
+ * up with entries written after it.
+ */
+export function recurrenceLocalDateFor(row: {
+  originalScheduledAt: string | null;
+  scheduledAt: string;
+  timezone: string;
+  localStart: string;
+}): string {
+  const anchor = row.originalScheduledAt ?? row.scheduledAt;
+  if (row.timezone) return utcToLocalDateTime(anchor, row.timezone).slice(0, 10);
+  // No explicit zone (a legacy row adopted into a series): fall back to the
+  // stored wall clock, then to the UTC date, so the column is never blank when
+  // a date is derivable at all.
+  return row.localStart.slice(0, 10) || anchor.slice(0, 10);
+}
+
 /** ScheduledSessionCreate's duration bounds — a NEW live night is at least 15 minutes. */
 const CREATE_MIN_DURATION_MINUTES = 15;
 const CREATE_MAX_DURATION_MINUTES = 24 * 60;
@@ -521,7 +548,18 @@ export class SchedulingService {
     // two can never contradict each other. Recurring series are the opposite way
     // round (wall clock authoritative, instant derived) because only a wall clock
     // survives a DST transition; see OrganizedPlayService.
-    const timezone = input.timezone && isValidIanaTimeZone(input.timezone) ? input.timezone : '';
+    //
+    // An explicit zone that is not a real IANA zone is REJECTED, not dropped.
+    // `organizedPlayScheduleFields.timezone` is a plain bounded string — the
+    // validating `IanaTimeZone` schema guards the series endpoints, not this one,
+    // and `timezone` is absent from ORGANIZED_PLAY_OMIT — so silently storing ''
+    // accepted a body that OrganizedPlayService.assertTimezone and the series
+    // schemas both reject, and gave the client no way to detect that its zone had
+    // been ignored. '' still means "no explicit zone"; legacy rows depend on it.
+    if (input.timezone && !isValidIanaTimeZone(input.timezone)) {
+      throw new BadRequestException(`Unknown IANA time zone: ${input.timezone}`);
+    }
+    const timezone = input.timezone ?? '';
     const localStart = timezone ? utcToLocalDateTime(scheduledAt, timezone) : '';
     // The UID must exist before the row is readable, and it needs the row id, so
     // insert + stamp commit together. The string is byte-identical to the UID the
@@ -596,6 +634,38 @@ export class SchedulingService {
     }
     const patch = { ...input };
     if (patch.scheduledAt !== undefined) patch.scheduledAt = this.normalizeScheduledAt(patch.scheduledAt);
+    // Issue #588: this is the LEGACY one-off editor and it knows nothing about
+    // rooms, DMs or the exception ledger. Sliding a materialized series
+    // occurrence's window through it would move the row while it still holds its
+    // room and its assigned DM — with no findConflictRows probe and no ledger
+    // entry — which is precisely the double-booking the organized-play endpoints
+    // exist to prevent. Room and DM cannot be reached from this body at all
+    // (ORGANIZED_PLAY_OMIT), so the WINDOW is the whole hazard. Reject the moves
+    // and name the endpoint that does them safely, rather than re-implementing
+    // the conflict check here — which would then need its own `force` override
+    // and 409 shape, i.e. the reschedule endpoint again.
+    //
+    // Exactly two changes can introduce an overlap: moving the start instant, and
+    // GROWING the duration. Shrinking it cannot — the window strictly contracts,
+    // so every collision that would exist afterwards already existed before — and
+    // shrinking is how mid-session "End session" works (#818), which is reachable
+    // on an occurrence because occurrences are ordinary rows in the Schedule tab.
+    // Rejecting a shrink would break a running game to prevent nothing.
+    //
+    // Comparison is against the STORED value, not mere presence of the key, so a
+    // full-object PATCH from the edit form that re-sends the unchanged instant is
+    // a no-op and passes. Title/location/notes hold no shared resource and stay
+    // editable here.
+    const widensWindow =
+      (patch.scheduledAt !== undefined && patch.scheduledAt !== existing.scheduledAt)
+      || (patch.durationMinutes !== undefined && patch.durationMinutes > existing.durationMinutes);
+    if (existing.seriesId != null && widensWindow) {
+      throw new BadRequestException(
+        'Occurrences of a recurring series cannot be moved or lengthened here — use POST '
+          + '/organized-play/occurrences/:id/reschedule, which runs the booking conflict check and records the '
+          + 'move in the exception ledger',
+      );
+    }
     const next = {
       scheduledAt: patch.scheduledAt ?? existing.scheduledAt,
       durationMinutes: patch.durationMinutes ?? existing.durationMinutes,
@@ -607,11 +677,19 @@ export class SchedulingService {
     // renders actually changed, and keep the local wall clock in step with the
     // instant when the row carries an explicit zone. Only on a real change — a
     // no-op PATCH must not push a fresh SEQUENCE at every subscriber.
+    //
+    // `notes` is in this list because it is emitted as DESCRIPTION (ics.util.ts),
+    // and the rule here is "anything that renders into the feed bumps SEQUENCE" —
+    // title→SUMMARY and location→LOCATION are already here for exactly that
+    // reason. LAST-MODIFIED does still advance on a notes-only edit, so a lenient
+    // client picked the new description up regardless; a client that gates
+    // revisions on SEQUENCE, as RFC 5545 §3.8.7.4 allows, kept the stale one.
     const calendarFieldChanged =
       next.scheduledAt !== existing.scheduledAt
       || next.durationMinutes !== existing.durationMinutes
       || next.title !== existing.title
-      || next.location !== existing.location;
+      || next.location !== existing.location
+      || next.notes !== existing.notes;
     const localStartPatch =
       next.scheduledAt !== existing.scheduledAt && existing.timezone
         ? { localStart: utcToLocalDateTime(next.scheduledAt, existing.timezone) }
@@ -685,19 +763,46 @@ export class SchedulingService {
     }
     const ts = nowIso();
     const reason = (input.reason ?? '').trim();
-    await this.db
-      .update(scheduledSessions)
-      .set({
-        status: 'cancelled',
-        cancelledAt: ts,
-        cancelledBy: user.id,
-        cancellationReason: reason,
-        // #588: a cancellation is published as STATUS:CANCELLED under the SAME
-        // UID, so it needs a higher SEQUENCE or subscribers keep the live copy.
-        icsSequence: existing.icsSequence + 1,
-        updatedAt: ts,
-      })
-      .where(eq(scheduledSessions.id, id));
+    // Cancelling the row and appending its ledger entry are one change, so they
+    // commit or roll back together — restore() already pairs its un-cancel with a
+    // `restore` entry the same way.
+    this.db.transaction((tx) => {
+      tx.update(scheduledSessions)
+        .set({
+          status: 'cancelled',
+          cancelledAt: ts,
+          cancelledBy: user.id,
+          cancellationReason: reason,
+          // #588: a cancellation is published as STATUS:CANCELLED under the SAME
+          // UID, so it needs a higher SEQUENCE or subscribers keep the live copy.
+          icsSequence: existing.icsSequence + 1,
+          updatedAt: ts,
+        })
+        .where(eq(scheduledSessions.id, id))
+        .run();
+      // #588: `DELETE /schedule/:id` is the ONLY exposed way to cancel a single
+      // occurrence of a series — cancelSeries cancels the whole tail — so this is
+      // where an occurrence's `cancel` has to be appended. Without it the
+      // append-only ledger could hold a `restore` with no preceding `cancel`
+      // (restore() writes one unconditionally), and a night the coordinator
+      // skipped carried no recorded reason at all.
+      if (existing.seriesId != null) {
+        tx.insert(seriesExceptions)
+          .values({
+            seriesId: existing.seriesId,
+            occurrenceId: id,
+            recurrenceLocalDate: recurrenceLocalDateFor(existing),
+            kind: 'cancel',
+            fromScheduledAt: existing.scheduledAt,
+            toScheduledAt: null,
+            toLocalStart: '',
+            reason,
+            actorUserId: user.id,
+            createdAt: ts,
+          })
+          .run();
+      }
+    });
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -773,7 +878,7 @@ export class SchedulingService {
           .values({
             seriesId: existing.seriesId,
             occurrenceId: id,
-            recurrenceLocalDate: existing.localStart.slice(0, 10),
+            recurrenceLocalDate: recurrenceLocalDateFor(existing),
             kind: 'restore',
             fromScheduledAt: existing.scheduledAt,
             toScheduledAt: existing.scheduledAt,

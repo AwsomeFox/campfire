@@ -58,7 +58,7 @@ import { AuditService } from '../audit/audit.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
 import { RoleResolver } from '../membership/role-resolver.service';
 import { seriesIcsUid } from './ics.util';
-import { scheduledSessionToDomain, type SyncDb } from './scheduling.service';
+import { recurrenceLocalDateFor, scheduledSessionToDomain, type SyncDb } from './scheduling.service';
 import {
   scheduleEffectiveStatusSql,
   scheduleLiveSql,
@@ -360,9 +360,42 @@ export class OrganizedPlayService {
 
   async deleteRoom(id: number, user: RequestUser): Promise<{ deleted: true }> {
     const existing = await this.getRoomOrThrow(id);
+    const ts = nowIso();
     this.db.transaction((tx) => {
       tx.update(scheduledSessions).set({ roomId: null }).where(eq(scheduledSessions.roomId, existing.id)).run();
       tx.update(sessionSeries).set({ roomId: null }).where(eq(sessionSeries.roomId, existing.id)).run();
+      // #588: a template keeps its slots as JSON, so the two relational updates
+      // above cannot reach the room ids embedded in `slots_json`. Left behind, a
+      // stale id makes every later applyTemplate 404 on getRoomOrThrow —
+      // permanently, because there is no template-update endpoint to repair it,
+      // and the only remedy would be deleting and recreating the template.
+      // Clearing the reference leaves the slot bookable with no room, which is
+      // the same state this deletion already leaves bookings and series in.
+      for (const row of tx.select().from(scheduleTemplates).all()) {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(row.slotsJson);
+        } catch {
+          // Unparseable JSON holds no reachable reference to this room, and
+          // templateToDomain already degrades it to zero slots. Leave it alone
+          // rather than overwriting a row we cannot read.
+          continue;
+        }
+        if (!Array.isArray(parsed)) continue;
+        let changed = false;
+        const slots = parsed.map((slot) => {
+          if (slot !== null && typeof slot === 'object' && (slot as { roomId?: unknown }).roomId === existing.id) {
+            changed = true;
+            return { ...(slot as Record<string, unknown>), roomId: null };
+          }
+          return slot;
+        });
+        if (!changed) continue;
+        tx.update(scheduleTemplates)
+          .set({ slotsJson: JSON.stringify(slots), updatedAt: ts })
+          .where(eq(scheduleTemplates.id, row.id))
+          .run();
+      }
       tx.delete(playRooms).where(eq(playRooms.id, existing.id)).run();
     });
     await this.audit.log({
@@ -886,7 +919,13 @@ export class OrganizedPlayService {
    * has already moved or re-seated must not be silently pulled back to the series
    * default. Past occurrences are history and are never rewritten.
    */
-  async updateSeries(id: number, input: SessionSeriesUpdate, user: RequestUser, role: Role, nowMs: number = Date.now()): Promise<SessionSeriesWithOccurrences> {
+  async updateSeries(
+    id: number,
+    input: SessionSeriesUpdate & { force?: boolean },
+    user: RequestUser,
+    role: Role,
+    nowMs: number = Date.now(),
+  ): Promise<SessionSeriesWithOccurrences> {
     const existing = await this.getSeriesRowOrThrow(id);
     if (input.roomId !== undefined && input.roomId !== null) await this.getRoomOrThrow(input.roomId);
     const venueId = input.roomId === undefined ? existing.venueId : await this.resolveVenueId(null, input.roomId);
@@ -899,7 +938,60 @@ export class OrganizedPlayService {
         .filter((v): v is number => v != null),
     );
 
+    // Which shared resources this edit actually moves. Everything else in the
+    // body (title, notes, capacity, event/season keys) holds no booking, so it
+    // cannot collide with anything and needs no probe.
+    const nextRoomId = input.roomId === undefined ? existing.roomId : input.roomId;
+    const nextDm = input.assignedDmUserId === undefined ? existing.assignedDmUserId : input.assignedDmUserId;
+    const roomChanged = nextRoomId !== existing.roomId;
+    const dmChanged = nextDm !== existing.assignedDmUserId;
+
     this.db.transaction((tx) => {
+      const future = tx
+        .select()
+        .from(scheduledSessions)
+        .where(and(eq(scheduledSessions.seriesId, id), sql`${scheduledSessions.scheduledAt} > ${nowStr}`))
+        .all();
+      const affected = future.filter((occ) => !overriddenIds.has(occ.id));
+
+      // #588: a metadata PATCH that carries `roomId` or `assignedDmUserId` is a
+      // BULK reassignment wearing a metadata edit's clothes — one request moves
+      // every future unoverridden occurrence onto the new resource at once. It is
+      // given the same probe, the same `force` override and the same 409 as its
+      // per-occurrence siblings (reschedule/reassign) DELIBERATELY, and this
+      // comment exists so the next reader does not have to re-derive why:
+      // without it the cheapest endpoint in the module was also the only one that
+      // could create cross-campaign double-bookings, it could create many of them
+      // in a single call, and nothing in the 200 response told the caller it had
+      // happened. A coordinator override is a legitimate thing to want here; an
+      // override the caller cannot tell they took is not.
+      //
+      // In one transaction with the writes below, so the probe's answer still
+      // holds when the rows are claimed — the same structural guarantee
+      // createSeries and rescheduleOccurrence rest on.
+      if (roomChanged || dmChanged) {
+        const conflicts: RawConflict[] = [];
+        for (const occ of affected) {
+          conflicts.push(
+            ...this.findConflictRows(tx, {
+              startsAt: occ.scheduledAt,
+              endsAt: endInstant(occ.scheduledAt, occ.durationMinutes),
+              // Only the resources actually CHANGING are probed: re-confirming a
+              // room the occurrence already holds would report its own
+              // neighbours as if this edit had caused them (reassignOccurrence
+              // makes the same distinction, for the same reason).
+              roomId: roomChanged ? nextRoomId : null,
+              assignedDmUserId: dmChanged ? nextDm : '',
+              memberUserIds: [],
+              excludeScheduleId: occ.id,
+            }),
+          );
+        }
+        // Rolls the whole transaction back: a rejected fan-out writes nothing,
+        // not even the series-level metadata.
+        if (conflicts.length > 0 && !input.force) throw new SeriesConflictSignal(conflicts);
+      }
+
       tx.update(sessionSeries)
         .set({
           ...(input.title !== undefined ? { title: input.title } : {}),
@@ -915,16 +1007,15 @@ export class OrganizedPlayService {
         .where(eq(sessionSeries.id, id))
         .run();
 
-      const future = tx
-        .select()
-        .from(scheduledSessions)
-        .where(and(eq(scheduledSessions.seriesId, id), sql`${scheduledSessions.scheduledAt} > ${nowStr}`))
-        .all();
-      for (const occ of future) {
-        if (overriddenIds.has(occ.id)) continue;
+      for (const occ of affected) {
+        // `notes` renders as DESCRIPTION in the feed and is written three lines
+        // below, so it belongs in this predicate exactly as title and location do
+        // (see calendarFieldChanged in SchedulingService.update for the same rule
+        // on the one-off path).
         const renders =
           (input.title !== undefined && input.title !== occ.title)
           || (input.location !== undefined && input.location !== occ.location)
+          || (input.notes !== undefined && input.notes !== occ.notes)
           || (input.roomId !== undefined && input.roomId !== occ.roomId);
         tx.update(scheduledSessions)
           .set({
@@ -986,6 +1077,24 @@ export class OrganizedPlayService {
     const fresh = all.filter((o) => !existingIndexes.has(o.index));
     if (fresh.length === 0) throw new BadRequestException('Recurrence produced no new occurrences (untilDate reached?)');
 
+    // The same self-collision hazard createSeries and applyTemplate guard against,
+    // and for the identical reason: NOTHING in `fresh` is stored yet, so the
+    // per-row probe inside the transaction below cannot see the batch against
+    // itself. An extension whose duration exceeds its recurrence step (a daily
+    // 25-hour marathon), or one that straddles a spring-forward transition,
+    // would otherwise double-book its own room and its own DM and pass every
+    // database probe on the way through.
+    const batchConflicts = this.intraBatchConflicts(
+      fresh.map((occ) => ({
+        startsAt: occ.scheduledAt,
+        endsAt: endInstant(occ.scheduledAt, occ.durationMinutes),
+        roomId: existing.roomId,
+        dm: existing.assignedDmUserId,
+        campaignId: existing.campaignId,
+        title: existing.title,
+      })),
+    );
+
     const ts = nowIso();
     this.db.transaction((tx) => {
       const conflicts: RawConflict[] = [];
@@ -1000,7 +1109,9 @@ export class OrganizedPlayService {
           }),
         );
       }
-      if (conflicts.length > 0 && !force) throw new SeriesConflictSignal(conflicts);
+      if ((conflicts.length > 0 || batchConflicts.length > 0) && !force) {
+        throw new SeriesConflictSignal(conflicts, batchConflicts);
+      }
       tx.update(sessionSeries).set({ count: nextCount, updatedAt: ts }).where(eq(sessionSeries.id, id)).run();
       for (const occ of fresh) this.insertOccurrence(tx, { ...existing, count: nextCount }, occ, ts);
     });
@@ -1053,7 +1164,7 @@ export class OrganizedPlayService {
           .values({
             seriesId: id,
             occurrenceId: occ.id,
-            recurrenceLocalDate: occ.localStart.slice(0, 10),
+            recurrenceLocalDate: recurrenceLocalDateFor(occ),
             kind: 'cancel',
             fromScheduledAt: occ.scheduledAt,
             toScheduledAt: null,
@@ -1154,7 +1265,11 @@ export class OrganizedPlayService {
           .values({
             seriesId: existing.seriesId,
             occurrenceId: id,
-            recurrenceLocalDate: existing.localStart.slice(0, 10),
+            // The ORIGINAL local date, not the one this row currently sits on:
+            // otherwise a twice-moved occurrence files its two entries under two
+            // different recurrence ids and the ledger cannot line them up. See
+            // recurrenceLocalDateFor.
+            recurrenceLocalDate: recurrenceLocalDateFor(existing),
             kind: 'reschedule',
             fromScheduledAt: existing.scheduledAt,
             toScheduledAt: scheduledAt,
@@ -1238,7 +1353,7 @@ export class OrganizedPlayService {
           .values({
             seriesId: existing.seriesId,
             occurrenceId: id,
-            recurrenceLocalDate: existing.localStart.slice(0, 10),
+            recurrenceLocalDate: recurrenceLocalDateFor(existing),
             kind: 'reassign',
             fromScheduledAt: existing.scheduledAt,
             toScheduledAt: existing.scheduledAt,

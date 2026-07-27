@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, ParseIntPipe, Patch, Post, Query } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, Param, ParseIntPipe, Patch, Post, Query } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiQuery, ApiResponse } from '@nestjs/swagger';
 import type {
   CoordinatorCalendar,
@@ -54,6 +54,19 @@ import {
  *   - Everything that writes to a campaign's schedule goes through the ordinary
  *     campaign role check (`dm`), exactly like POST /campaigns/:id/schedule.
  */
+/**
+ * Parse an optional numeric query parameter, rejecting garbage instead of
+ * coercing it. `Number('abc')` is NaN, and an unguarded NaN reached the service
+ * as a filter that matches nothing — a silent empty calendar rather than an
+ * error the caller can act on. Same shape as audit.controller's parseOptionalInt.
+ */
+function parseOptionalId(raw: string | undefined, name: string): number | undefined {
+  if (raw === undefined || raw === '') return undefined;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1) throw new BadRequestException(`\`${name}\` must be a positive integer`);
+  return n;
+}
+
 @ApiTags('sessions')
 @Controller('organized-play')
 export class OrganizedPlayController {
@@ -171,8 +184,8 @@ export class OrganizedPlayController {
     return this.organizedPlay.coordinatorCalendar(user, {
       from: from ?? '',
       to: to ?? '',
-      venueId: venueId != null && venueId !== '' ? Number(venueId) : undefined,
-      roomId: roomId != null && roomId !== '' ? Number(roomId) : undefined,
+      venueId: parseOptionalId(venueId, 'venueId'),
+      roomId: parseOptionalId(roomId, 'roomId'),
       eventId: eventId || undefined,
       seasonId: seasonId || undefined,
     });
@@ -371,9 +384,12 @@ export class CampaignSeriesController {
     summary: 'Update series metadata',
     description:
       'dm role required. Fans out to FUTURE occurrences that carry no per-occurrence exception; a night the coordinator has already '
-      + 'moved or re-seated keeps its override, and past occurrences are never rewritten. The recurrence rule itself is immutable.',
+      + 'moved or re-seated keeps its override, and past occurrences are never rewritten. The recurrence rule itself is immutable. '
+      + 'A body carrying `roomId` or `assignedDmUserId` re-books every affected occurrence onto that resource, so it runs the same '
+      + 'conflict check as the per-occurrence endpoints and rejects with 409 SCHEDULE_CONFLICT unless `force`.',
   })
   @ApiResponse({ status: 200, description: 'Updated series.' })
+  @ApiResponse({ status: 409, description: 'SCHEDULE_CONFLICT with the (redacted) conflict list.' })
   async update(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @Param('id', ParseIntPipe) id: number,
@@ -383,7 +399,11 @@ export class CampaignSeriesController {
     const role = await this.access.requireRole(user, campaignId, 'dm');
     const row = await this.organizedPlay.getSeriesRowOrThrow(id);
     await this.access.requireRole(user, row.campaignId, 'dm');
-    return this.organizedPlay.updateSeries(id, body, user, role);
+    try {
+      return await this.organizedPlay.updateSeries(id, body, user, role);
+    } catch (err) {
+      return await this.organizedPlay.toConflictResponse(err, user);
+    }
   }
 
   @Post(':id/extend')

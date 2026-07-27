@@ -65,7 +65,12 @@ export class PlayRoomUpdateDto extends createZodDto(PlayRoomUpdate.strict()) {}
 export class SessionSeriesCreateDto extends createZodDto(
   SessionSeriesCreate.extend({ force: z.boolean().default(false) }).strict(),
 ) {}
-export class SessionSeriesUpdateDto extends createZodDto(SessionSeriesUpdate.strict()) {}
+// `force` here too: a series PATCH carrying roomId/assignedDmUserId fans that
+// resource out to every future unoverridden occurrence, so it books rooms in
+// bulk and needs the same coordinator override as its per-occurrence siblings.
+export class SessionSeriesUpdateDto extends createZodDto(
+  SessionSeriesUpdate.extend({ force: z.boolean().default(false) }).strict(),
+) {}
 export class SessionSeriesExtendDto extends createZodDto(
   SessionSeriesExtend.extend({ force: z.boolean().default(false) }).strict(),
 ) {}
