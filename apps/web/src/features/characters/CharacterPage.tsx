@@ -335,13 +335,23 @@ export default function CharacterPage() {
         </div>
         {isOwner && <Chip variant="dm">You can edit</Chip>}
         <div className="flex items-center gap-1 ml-auto">
+          <Btn
+            ghost
+            type="button"
+            className="cf-print-hide !min-h-0 !py-1.5 text-xs"
+            onClick={() => window.print()}
+          >
+            Print
+          </Btn>
           {canEdit && !editingSheet && (
-            <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setEditingSheet(true)}>
+            <Btn ghost className="cf-print-hide !min-h-0 !py-1.5 text-xs" onClick={() => setEditingSheet(true)}>
               ✎ Edit sheet
             </Btn>
           )}
           {canEdit && (
-            <CharacterTrashMenu characterName={character.name} busy={trashing} onTrash={trash} />
+            <span className="cf-print-hide">
+              <CharacterTrashMenu characterName={character.name} busy={trashing} onTrash={trash} />
+            </span>
           )}
         </div>
       </div>

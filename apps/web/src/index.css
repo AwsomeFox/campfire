@@ -6,6 +6,61 @@
    after Tailwind/generated rules triggers Vite's CSS optimizer warning and can drop the font. */
 @import "./nocturne.css";
 
+/* Print only the readable page content. The app is intentionally optimized for
+   an interactive dark UI, so print uses an explicit paper palette and removes
+   fixed navigation, transient overlays, and marked action controls. */
+@page {
+  margin: 1.5cm;
+}
+
+@media print {
+  :root {
+    color-scheme: light;
+  }
+
+  html,
+  body {
+    background: #fff !important;
+    color: #000 !important;
+  }
+
+  .cf-ember-layer,
+  .cf-tabbar,
+  aside,
+  .cf-authed-shell > div > header,
+  [role="dialog"][aria-label="Notifications"],
+  .cf-undo-snackbar,
+  .cf-print-hide {
+    display: none !important;
+  }
+
+  .cf-authed-shell,
+  .reading-surface,
+  .cf-card {
+    background: #fff !important;
+    box-shadow: none !important;
+    color: #000 !important;
+  }
+
+  .cf-prose,
+  .cf-prose *,
+  .reading-surface,
+  .reading-surface * {
+    color: #000 !important;
+  }
+
+  .cf-prose a {
+    text-decoration: underline;
+  }
+
+  .cf-card,
+  .cf-prose pre,
+  .cf-prose blockquote,
+  .cf-prose table {
+    break-inside: avoid;
+  }
+}
+
 /*
   Campfire design tokens — ported from the Nocturne design system
   (design/claude-design/_ds/nocturne-.../styles.css). Keep the --cf-* variable
