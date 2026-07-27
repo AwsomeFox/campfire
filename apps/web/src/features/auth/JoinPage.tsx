@@ -34,6 +34,16 @@ const ROLE_BLURB: Record<InvitePreview['role'], string> = {
 };
 
 /**
+ * Issue #600: join/accept both use HTTP 409 for "already a member" / "username taken"
+ * AND for a stale charter version. The charter conflict message is stable server copy
+ * from `assertCharterAcknowledged` — match on it so the UI does not mis-route the user
+ * into the campaign or claim their username is taken.
+ */
+function isStaleCharterConflict(err: ApiError): boolean {
+  return /session-zero charter you must acknowledge/i.test(err.message);
+}
+
+/**
  * Issue #597: the join page must say what the seat can DO before you accept it, not
  * just name its role. "Viewer" was not an answer — and until #597 the server did not
  * behave the way the word implied. Rendered straight from the server's
@@ -160,6 +170,8 @@ export function JoinPage() {
   }, [loadPreview]);
 
   const alreadyMember = Boolean(preview && me?.memberships.some((m) => m.campaignId === preview.campaignId));
+  const needsCharterConsent = Boolean(preview?.charter && !alreadyMember);
+  const charterConsentMissing = needsCharterConsent && !charterAccepted;
   // Carry `/join/:code` through local/OIDC login so existing users resume the
   // invite preview instead of losing the link (issue #478).
   const loginHref = loginHrefWithReturn(`/join/${code}`);
@@ -181,8 +193,20 @@ export function JoinPage() {
     }
   }
 
+  /** Preview went stale while the form was open — reload it and require a fresh tick. */
+  async function handleStaleCharterConflict() {
+    setCharterAccepted(false);
+    setDeclined(false);
+    await loadPreview();
+    setError({
+      kind: 'form',
+      message: t('sessionZero.join.charterChanged'),
+    });
+  }
+
   async function joinAsCurrentUser() {
     if (!preview) return;
+    if (charterConsentMissing) return;
     setError(null);
     setSubmitting(true);
     try {
@@ -192,7 +216,10 @@ export function JoinPage() {
       await refresh();
       navigate(`/c/${preview.campaignId}`, { replace: true });
     } catch (err) {
-      if (err instanceof ApiError && err.status === 409) {
+      if (err instanceof ApiError && err.status === 409 && isStaleCharterConflict(err)) {
+        await handleStaleCharterConflict();
+      } else if (err instanceof ApiError && err.status === 409) {
+        // Genuine already-a-member conflict — land them in the campaign.
         navigate(`/c/${preview.campaignId}`, { replace: true });
       } else {
         setError({
@@ -208,6 +235,7 @@ export function JoinPage() {
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     if (!preview) return;
+    if (charterConsentMissing) return;
     setError(null);
 
     const clientError = validateNewAccountFields({ username, password, confirm });
@@ -227,7 +255,9 @@ export function JoinPage() {
       await refresh();
       navigate(`/c/${preview.campaignId}`, { replace: true });
     } catch (err) {
-      if (err instanceof ApiError && err.status === 409) {
+      if (err instanceof ApiError && err.status === 409 && isStaleCharterConflict(err)) {
+        await handleStaleCharterConflict();
+      } else if (err instanceof ApiError && err.status === 409) {
         setError({
           kind: 'fields',
           fields: {
@@ -250,8 +280,6 @@ export function JoinPage() {
 
   const fieldErrors = error?.kind === 'fields' ? error.fields : {};
   const formError = error?.kind === 'form' ? error.message : null;
-  const needsCharterConsent = Boolean(preview?.charter && !alreadyMember);
-  const charterConsentMissing = needsCharterConsent && !charterAccepted;
   return (
     <div
       className="min-h-screen grid place-items-center p-6"
