@@ -1,0 +1,13 @@
+{
+  "tracked": [
+    {
+      "pr": 1562,
+      "status": "babysitting",
+      "url": "https://github.com/AwsomeFox/campfire/pull/1562",
+      "headBranch": "fix/issue-600",
+      "baseBranch": "main",
+      "updatedAt": "2026-07-27T17:55:00Z",
+      "notes": "Added to tracked on synchronize of 6dff398. MERGEABLE; open Devin threads (consentStatus sticky + decline throttle) fixed in 6dff398 — resolving. Waiting on required CI."
+    }
+  ]
+}
