@@ -2440,7 +2440,8 @@ export default function RunSessionPage() {
                 const check = pendingConcentrationChecks[0];
                 void combatantTurnState
                   .mutateAsync({ combatantId: check.combatantId, patch: { concentration: null } })
-                  .then(() => setPendingConcentrationChecks((pending) => pending.slice(1)));
+                  .then(() => setPendingConcentrationChecks((pending) => pending.slice(1)))
+                  .catch(() => undefined);
               }}
             >
               Failed — end concentration

@@ -3326,7 +3326,7 @@ export class EncountersService {
             deathSaveFailures: patch.deathSaveFailures,
           deathSaveRoll: patch.deathSaveRoll,
         });
-        concentrationCheck = result.concentrationCheck;
+        concentrationCheck = adapter.id === 'dnd5e' && patch.hpDelta !== undefined && patch.hpDelta < 0 ? result.concentrationCheck : null;
 
           // If Starfinder adapter or SP present, damage flows through temp HP -> SP -> HP
           if (adapter.id === STARFINDER_ADAPTER_ID && patch.hpDelta !== undefined && patch.hpDelta < 0) {

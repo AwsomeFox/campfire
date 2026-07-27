@@ -450,6 +450,12 @@ describe('encounters — applyCombatantHp (issue #57 5e HP model)', () => {
       expect(applyCombatantHp(charState({ isConcentrating: true }), { hpDelta: 5 }).concentrationCheck).toBeNull();
       expect(applyCombatantHp(charState(), { hpDelta: -25 }).concentrationCheck).toBeNull();
     });
+
+    it('does not treat administrative HP or temporary-HP edits as damage', () => {
+      const concentrating = charState({ isConcentrating: true, hpCurrent: 20, hpTemp: 5 });
+      expect(applyCombatantHp(concentrating, { hpSet: 1 }).concentrationCheck).toBeNull();
+      expect(applyCombatantHp(concentrating, { hpTemp: 0 }).concentrationCheck).toBeNull();
+    });
   });
 
   describe('death saves + dying/stable/dead transitions', () => {
