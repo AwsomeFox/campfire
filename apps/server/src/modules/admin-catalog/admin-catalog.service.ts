@@ -32,6 +32,7 @@ import {
   users,
 } from '../../db/schema';
 import { AuditService } from '../audit/audit.service';
+import { CampaignEventsService } from '../events/campaign-events.service';
 import { SettingsService } from '../settings/settings.service';
 import { auditActor, auditActorRole, type RequestUser } from '../../common/user.types';
 import { nowIso } from '../../common/time';
@@ -105,6 +106,7 @@ export class AdminCatalogService {
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
+    private readonly events: CampaignEventsService,
     private readonly settings: SettingsService,
   ) {}
 
@@ -469,6 +471,21 @@ export class AdminCatalogService {
 
     plan.apply();
 
+    // Live-update notifications for the write that just committed. Guarded for the same
+    // reason the audit write below is: this runs AFTER the change is durable, so a
+    // failing emit must not relabel committed work as `failed` and send an operator to
+    // retry it. A missed event costs a stale browser until the next reload; a false
+    // `failed` costs a double-applied lifecycle change.
+    try {
+      plan.afterCommit?.();
+    } catch (err) {
+      this.logger.error(
+        `campaign.catalog.${req.operation} applied to campaign ${campaignId} but its ` +
+          `post-commit notification failed`,
+        err instanceof Error ? err.stack : String(err),
+      );
+    }
+
     // THE WRITE HAS COMMITTED. Everything below is record-keeping, and record-keeping
     // must not be able to relabel a committed change as a failure. If this audit write
     // throws, the campaign really has been archived/paused/requoted — reporting the
@@ -517,7 +534,21 @@ export class AdminCatalogService {
     },
     req: CampaignCatalogBulkRequest,
     actor: Actor,
-  ): Promise<null | string | { summary: { field: string; before: string; after: string }; apply: () => void }> {
+  ): Promise<
+    | null
+    | string
+    | {
+        summary: { field: string; before: string; after: string };
+        apply: () => void;
+        /**
+         * Side effects that must happen AFTER the transaction commits — currently the
+         * live-update events the owning services emit for the same writes. Kept off
+         * `apply()` on purpose: emitting inside the transaction would announce a change
+         * that a rollback then un-does.
+         */
+        afterCommit?: () => void;
+      }
+  > {
     const ts = nowIso();
     const id = row.id;
 
@@ -628,11 +659,21 @@ export class AdminCatalogService {
         if (target.disabled) return `user ${toUserId} is disabled`;
 
         const existing = await this.db
-          .select({ id: campaignMembers.id, userId: campaignMembers.userId, primaryOwner: campaignMembers.primaryOwner })
+          .select({
+            id: campaignMembers.id,
+            userId: campaignMembers.userId,
+            primaryOwner: campaignMembers.primaryOwner,
+            role: campaignMembers.role,
+          })
           .from(campaignMembers)
           .where(eq(campaignMembers.campaignId, id));
         const currentOwner = existing.find((m) => m.primaryOwner);
         if (currentOwner?.userId === toUserId) return null;
+
+        const existingSeat = existing.find((m) => m.userId === toUserId);
+        // The seat id the event carries. Known up front when a seat already exists;
+        // filled in from the INSERT when one does not, which is why it is a `let`.
+        let eventMemberId = existingSeat?.id ?? 0;
 
         return {
           summary: {
@@ -648,14 +689,14 @@ export class AdminCatalogService {
                 .set({ primaryOwner: false, updatedAt: ts })
                 .where(eq(campaignMembers.campaignId, id))
                 .run();
-              const seat = existing.find((m) => m.userId === toUserId);
-              if (seat) {
+              if (existingSeat) {
                 tx.update(campaignMembers)
                   .set({ role: 'dm', primaryOwner: true, updatedAt: ts })
-                  .where(eq(campaignMembers.id, seat.id))
+                  .where(eq(campaignMembers.id, existingSeat.id))
                   .run();
               } else {
-                tx.insert(campaignMembers)
+                const inserted = tx
+                  .insert(campaignMembers)
                   .values({
                     campaignId: id,
                     userId: toUserId,
@@ -664,10 +705,44 @@ export class AdminCatalogService {
                     createdAt: ts,
                     updatedAt: ts,
                   })
-                  .run();
+                  .returning({ id: campaignMembers.id })
+                  .all();
+                eventMemberId = inserted[0]?.id ?? 0;
               }
             });
           },
+          // TELL THE NEW OWNER'S OPEN BROWSERS, THE WAY MembersService DOES.
+          //
+          // `MembersService.update` emits `membership.updated` on a role change so the
+          // affected member's tabs invalidate their cached /me memberships immediately
+          // (issue #437) — promote gains DM nav, demote drops forbidden controls. This
+          // path writes the seat directly and emitted nothing, so a user promoted to
+          // owner kept rendering player-only navigation and could not reach DM settings
+          // until they happened to reload.
+          //
+          // Same sibling-pair root cause as the `set_policy` finding: the bulk path
+          // writing a column that another service owns. There the state itself was
+          // illegitimate, so the fix was to make it inexpressible; here the state is
+          // perfectly legitimate and only the announcement was missing, so the fix is to
+          // announce it.
+          //
+          // Emitted when the seat did not already carry `dm`, which covers both the
+          // promotion of an existing player seat and a newly inserted one. An existing
+          // dm seat merely gaining `primaryOwner` is deliberately silent — the member's
+          // ROLE is unchanged, nothing in the cached /me differs, and MembersService is
+          // equally quiet in that case.
+          afterCommit:
+            existingSeat?.role === 'dm'
+              ? undefined
+              : () => {
+                  this.events.emit({
+                    type: 'membership.updated',
+                    campaignId: id,
+                    userId: String(toUserId),
+                    memberId: eventMemberId,
+                    role: 'dm',
+                  });
+                },
         };
       }
 
@@ -1079,8 +1154,15 @@ export class AdminCatalogService {
       // SAME rule `resolvePrimaryDms` applies (is_primary_owner first, then oldest seat); if
       // either changes both must, and the e2e regression pins their agreement rather than
       // trusting this comment to keep them in step.
+      // The INNER JOIN on `users` is not decoration. `resolvePrimaryDms` joins users to
+      // build the column, so a dm seat whose user row is missing produces NO primaryDm
+      // at all. Without the same join here, such a campaign matched the filter while
+      // displaying a null primary DM — the two definitions disagreeing on a real case
+      // rather than a hypothetical one. Mirroring the join makes "no user row" mean the
+      // same thing on both sides.
       clauses.push(
         sql`(SELECT m.user_id FROM campaign_members m
+          INNER JOIN users u ON u.id = m.user_id
           WHERE m.campaign_id = ${campaigns.id} AND m.role = 'dm'
           ORDER BY m.is_primary_owner DESC, m.id ASC
           LIMIT 1) = ${query.primaryDmUserId}`,

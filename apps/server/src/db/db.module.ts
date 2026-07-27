@@ -3422,6 +3422,20 @@ function migrateCampaignModules585(sqlite: Database.Database): void {
  *     expected column set, and DROP/recreate only if an earlier partial shape is found.
  *     A pre-existing table carrying all expected columns is left completely alone.
  *
+ *     ONE WAY THIS TABLE IS NOT LIKE ITS MODEL. The DROP/recreate convention is borrowed
+ *     from migrateAiDriverGroundingClaims577, but that table holds derived, audit-style
+ *     claims that can be recomputed; this one holds DM CONSENT DECISIONS — who was asked
+ *     to hand over a campaign's contents, why, and what the DM answered. Recreating it
+ *     DESTROYS that record, and nothing can reconstruct it.
+ *
+ *     The branch is unreachable in practice: only a partial pre-release install of this
+ *     same feature can leave a `campaign_export_requests` with the wrong shape, and such
+ *     a table has no real decisions in it. So the convention is kept rather than traded
+ *     for a column-by-column rebuild that would exist solely for a state no shipped
+ *     version can be in. But the analogy is doing less work than it looks like it is:
+ *     if this table ever needs a shape change AFTER release, that migration must
+ *     preserve the rows rather than inherit this branch.
+ *
  * Fresh DBs never take either path — BOOTSTRAP_SQL already declares both correctly. The
  * classic failure for this convention is bootstrap.sql and the migration drifting apart,
  * leaving an upgraded install with a subtly different table than a fresh one;

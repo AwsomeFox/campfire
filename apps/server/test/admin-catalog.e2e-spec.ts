@@ -3,6 +3,7 @@ import Database from 'better-sqlite3';
 import request from 'supertest';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
 import { AuditService } from '../src/modules/audit/audit.service';
+import { CampaignEventsService } from '../src/modules/events/campaign-events.service';
 import { AdminCatalogService } from '../src/modules/admin-catalog/admin-catalog.service';
 import type { RequestUser } from '../src/common/user.types';
 
@@ -444,6 +445,41 @@ describe('Issue #587: campaign catalog paging, filtering and bulk lifecycle (e2e
       );
       expect(owners).toHaveLength(1);
       expect(owners[0].userId).toBe(dmBId);
+    });
+
+    it("announces the promotion so the new owner's open tabs stop showing player nav", async () => {
+      // `MembersService.update` emits `membership.updated` on a role change so the
+      // affected member's browsers invalidate their cached /me memberships immediately
+      // (issue #437). The bulk path writes the seat directly and emitted nothing, so a
+      // user promoted to owner kept rendering player-only navigation and could not reach
+      // DM settings until they happened to reload.
+      const target = aIds[0];
+      const events = ctx.app.get(CampaignEventsService);
+      const seen: Array<{ type: string; campaignId: number; userId?: string; role?: string }> = [];
+      const spy = jest
+        .spyOn(events, 'emit')
+        .mockImplementation((event) =>
+          void seen.push(event as unknown as { type: string; campaignId: number }),
+        );
+      try {
+        const res = await bulk({
+          operation: 'reassign_owner',
+          campaignIds: [target],
+          toUserId: dmBId,
+          dryRun: false,
+          reason: 'promotion announcement drill',
+        });
+        expect(res.status).toBe(201);
+        expect(res.body.applied).toBe(1);
+      } finally {
+        spy.mockRestore();
+      }
+
+      const promotion = seen.find((e) => e.type === 'membership.updated' && e.campaignId === target);
+      expect(promotion).toBeDefined();
+      // Addressed to the promoted user, carrying the role their cached /me must learn.
+      expect(promotion!.userId).toBe(String(dmBId));
+      expect(promotion!.role).toBe('dm');
     });
 
     it('sets and clears a storage quota, and reports overQuota', async () => {
