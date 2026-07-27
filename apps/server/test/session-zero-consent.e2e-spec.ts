@@ -144,6 +144,27 @@ describe('Issue #600: session-zero consent lifecycle (e2e)', () => {
       expect(res.body).toMatchObject({ version: 2, material: false });
     });
 
+    it('makes the opening charter effective once every required participant acknowledges', async () => {
+      // The unit resolver and the AI-binding path agree: a published-but-unacked first
+      // version is NOT effective (and must not fall back to the mutable draft). Acknowledge
+      // v2 here so the material-gate tests below start from a licensed table on v2.
+      const versions = await dm.get(`${API}/campaigns/${campaignId}/session-zero/versions`);
+      expect(versions.status).toBe(200);
+      const v2 = versions.body.find((v: { version: number }) => v.version === 2);
+      expect(v2).toBeDefined();
+
+      for (const agent of [dm, player]) {
+        const ack = await agent
+          .post(`${API}/campaigns/${campaignId}/session-zero/consent`)
+          .send({ versionId: v2.id, state: 'acknowledged' });
+        expect(ack.status).toBe(201);
+      }
+
+      const status = await consentStatus(dm);
+      expect(status.effectiveVersion?.version).toBe(2);
+      expect(status.awaitingRenewal).toBe(false);
+    });
+
     it('publishes a REMOVAL as material', async () => {
       await setDraft({ lines: [M.line, 'Animal cruelty'] }); // M.line2 withdrawn
       const res = await publish('dropped a line');
@@ -280,6 +301,54 @@ describe('Issue #600: session-zero consent lifecycle (e2e)', () => {
       expect(charter.charterSource).toBe('draft');
       expect(charter.charterVersion).toBe(0);
       expect(charter.lines).toContain('Draft only line');
+    });
+
+    it('does not fall back to the mutable draft when a charter is published but not yet licensed', async () => {
+      const fresh = await dm.post(`${API}/campaigns`).send({ name: 'Published Unbound' });
+      expect(fresh.status).toBe(201);
+      const freshId = fresh.body.id as number;
+      await dm.put(`${API}/campaigns/${freshId}/session-zero`).send({
+        lines: ['Draft line the AI must not see unbound'],
+        veils: [M.veil],
+        safetyTools: [M.tool],
+      });
+      const published = await dm.post(`${API}/campaigns/${freshId}/session-zero/versions`).send({ changeSummary: 'v1' });
+      expect(published.status).toBe(201);
+
+      // Loosen the draft AFTER publish — the exact failure mode this guards against.
+      await dm.put(`${API}/campaigns/${freshId}/session-zero`).send({
+        lines: ['Draft line the AI must not see unbound'],
+        veils: [],
+        safetyTools: [M.tool],
+      });
+
+      const charter = await ctx.app.get(McpToolsService).effectiveSessionZero(freshId);
+      expect(charter.charterSource).toBe('none');
+      expect(charter.charterVersion).toBe(0);
+      expect(charter.lines).toEqual([]);
+      expect(charter.veils).toEqual([]);
+    });
+
+    it('keeps the AI on the last agreed charter when a new player is seated without acknowledging', async () => {
+      // Table is on accepted v3 (consent-gate tests above re-acked after the decline).
+      // Seating a brand-new player via POST /members must not collapse the AI onto the
+      // mutable draft (which currently has veils: [] from the v4 publish).
+      const newbie = await newUser('sz-newbie', 'newbie-password-1');
+      const seat = await dm
+        .post(`${API}/campaigns/${campaignId}/members`)
+        .send({ userId: newbie.id, role: 'player' });
+      expect(seat.status).toBe(201);
+
+      const status = await consentStatus(dm);
+      // UI gate correctly shows the newcomer as outstanding against latest.
+      expect(status.outstanding.some((o: { userId: string }) => o.userId === String(newbie.id))).toBe(true);
+
+      const charter = await ctx.app.get(McpToolsService).effectiveSessionZero(campaignId);
+      expect(charter.charterSource).toBe('accepted');
+      // Sticky agreement: still the last version the existing table licensed (v3), which
+      // still carries the veil the draft has since withdrawn.
+      expect(charter.charterVersion).toBe(3);
+      expect(charter.veils).toContain(M.veil);
     });
   });
 

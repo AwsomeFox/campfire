@@ -307,22 +307,50 @@ export class SessionZeroConsentService {
    * The charter the AI is bound by: the accepted EFFECTIVE version, never the draft and
    * never an unacknowledged newer version.
    *
-   * Returns null when a campaign has published nothing, in which case callers fall back
-   * to the draft — that keeps every pre-#600 campaign behaving exactly as it did, since
-   * a table that never published has nothing to have consented to.
+   * Three outcomes — callers MUST distinguish them:
+   *   - `never_published`: no version rows. Fall back to the DM's draft (pre-#600 behaviour).
+   *   - `accepted`: a version everybody required has cleared; bind the AI to that text.
+   *   - `unbound`: versions exist but none is licensed. Do NOT fall back to the draft —
+   *     the draft is mutable and may have withdrawn protections nobody consented to remove.
+   *     Withhold instead (empty boundaries + `charterSource: 'none'`).
+   *
+   * Sticky agreement: when the full required set has not cleared a gate (e.g. a brand-new
+   * player was seated via POST /members with no acknowledgment yet), we still serve the
+   * last version agreed by everyone who HAS participated in consent. Seating someone must
+   * not silently unbind the AI from a charter the rest of the table already accepted.
    */
-  async effectiveCharter(campaignId: number): Promise<(CharterFields & { version: number }) | null> {
+  async effectiveCharter(campaignId: number): Promise<
+    | { status: 'never_published' }
+    | { status: 'accepted'; charter: CharterFields & { version: number } }
+    | { status: 'unbound' }
+  > {
     const versions = await this.listVersions(campaignId);
-    if (versions.length === 0) return null;
+    if (versions.length === 0) return { status: 'never_published' };
+
     const required = await this.requiredAcknowledgers(campaignId);
     const table = await this.ackTable(versions.map((v) => v.id));
-    const effective = resolveEffectiveVersion(
-      versions,
-      required.map((r) => r.userId),
-      (versionId) => table.get(versionId) ?? new Map(),
+    const acksFor = (versionId: number) => table.get(versionId) ?? new Map<string, CharterAcknowledgmentState>();
+    const requiredIds = required.map((r) => r.userId);
+
+    const effective = resolveEffectiveVersion(versions, requiredIds, acksFor);
+    if (effective) {
+      return { status: 'accepted', charter: { ...charterOf(effective), version: effective.version } };
+    }
+
+    // Full required set did not clear a gate. Prefer the last version still agreed by
+    // everyone who has already answered — newcomers with zero acknowledgments must not
+    // collapse a consented table onto the mutable draft.
+    const participantsWithAcks = requiredIds.filter((userId) =>
+      versions.some((v) => acksFor(v.id).has(userId)),
     );
-    if (!effective) return null;
-    return { ...charterOf(effective), version: effective.version };
+    if (participantsWithAcks.length > 0) {
+      const sticky = resolveEffectiveVersion(versions, participantsWithAcks, acksFor);
+      if (sticky) {
+        return { status: 'accepted', charter: { ...charterOf(sticky), version: sticky.version } };
+      }
+    }
+
+    return { status: 'unbound' };
   }
 
   async acknowledge(

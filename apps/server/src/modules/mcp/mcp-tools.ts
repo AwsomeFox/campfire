@@ -436,21 +436,38 @@ export class McpToolsService {
    * the co-DM, Scribe and any external MCP client all read the charter through this tool,
    * so binding it at the tool means none of them can drift onto the draft independently.
    *
-   * Falls back to the DM's draft only when a campaign has published nothing at all —
+   * Falls back to the DM's draft ONLY when a campaign has published nothing at all —
    * such a table has no consent record to honour, and this keeps every pre-#600 campaign
-   * behaving exactly as it did. When a newer version is awaiting acknowledgment, the
-   * model keeps operating under the last version everybody agreed to, which is the safe
-   * direction: an unacknowledged version is typically one that WITHDREW a protection.
+   * behaving exactly as it did. When versions exist but none is currently licensed
+   * (publish→before-first-ack, or every prior acknowledger left), the model gets empty
+   * boundaries with `charterSource: 'none'` — never the mutable draft, which may have
+   * withdrawn protections nobody consented to remove. When a newer version is awaiting
+   * acknowledgment, the model keeps operating under the last version everybody agreed
+   * to, which is the safe direction.
    */
   // Public so the #600 e2e can assert the exact code path the AI reads through, rather
   // than re-deriving the answer beside it and proving only that the test agrees with
   // itself. Callers other than get_session_zero should not use it — go through the tool.
   async effectiveSessionZero(campaignId: number) {
     const draft = await this.sessionZero.get(campaignId);
-    const accepted = await this.sessionZeroConsent.effectiveCharter(campaignId);
-    if (!accepted) {
+    const result = await this.sessionZeroConsent.effectiveCharter(campaignId);
+    if (result.status === 'never_published') {
       return { ...draft, charterVersion: 0, charterSource: 'draft' as const };
     }
+    if (result.status === 'unbound') {
+      // Published but not licensed for live AI. Empty boundaries beat the mutable draft.
+      return {
+        ...draft,
+        lines: [],
+        veils: [],
+        safetyTools: [],
+        houseRules: '',
+        toneAndExpectations: '',
+        charterVersion: 0,
+        charterSource: 'none' as const,
+      };
+    }
+    const accepted = result.charter;
     return {
       ...draft,
       lines: accepted.lines,
@@ -787,7 +804,8 @@ export class McpToolsService {
         'content expectations. Any AI running or assisting at this table MUST respect these boundaries. Read-only over ' +
         'MCP; a campaign that never ran session zero returns empty fields. Returns the ACCEPTED charter version ' +
         '(issue #600) — the one participants actually agreed to — not the DM’s unpublished draft and not a newer ' +
-        'version still awaiting acknowledgment. `charterVersion` and `charterSource` say which you got.',
+        'version still awaiting acknowledgment. `charterSource` is `accepted`, `draft` (never published), or `none` ' +
+        '(published but not yet licensed — empty boundaries, never the mutable draft).',
       { campaignId: CampaignIdArg },
       async ({ campaignId }) => {
         await this.access.requireMember(user, campaignId as number);
