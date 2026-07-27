@@ -775,7 +775,9 @@ export class BackupService implements OnApplicationBootstrap {
         totalBytes,
         reserveBytes,
         estimatedNextBytes,
-        lowSpace: reserveBytes > 0 && freeBytes - estimatedNextBytes < reserveBytes,
+        lowSpace:
+          freeBytes < estimatedNextBytes ||
+          (reserveBytes > 0 && freeBytes - estimatedNextBytes < reserveBytes),
       };
     } catch {
       return null;
@@ -1114,7 +1116,10 @@ export class BackupService implements OnApplicationBootstrap {
       assertBackupNotCancelled(options?.signal);
       const dataDir = resolveDataDir();
       const estimatedBytes = this.estimateFallbackBackupBytes();
-      const tempDisk = this.probeDisk(os.tmpdir(), parseBackupMinFreeBytes(), estimatedBytes);
+      // Interactive downloads only need their temporary staging footprint to fit.
+      // BACKUP_MIN_FREE_BYTES protects the scheduled BACKUP_DIR after publishing
+      // an archive and must not reserve the same margin in an unrelated temp mount.
+      const tempDisk = this.probeDisk(os.tmpdir(), 0, estimatedBytes);
       if (tempDisk?.lowSpace) {
         throw new ServiceUnavailableException(
           `Backup staging skipped: low temporary disk space ` +

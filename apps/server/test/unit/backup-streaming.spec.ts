@@ -137,6 +137,67 @@ describe('backup streaming writer (#603)', () => {
     expect(Buffer.concat(chunks).subarray(0, 4).toString()).toBe('PK\u0003\u0004');
   });
 
+  it('allows interactive staging when free space exactly matches the estimate despite the scheduled reserve', async () => {
+    const previousMinFree = process.env.BACKUP_MIN_FREE_BYTES;
+    process.env.BACKUP_MIN_FREE_BYTES = String(Number.MAX_SAFE_INTEGER);
+    const estimatedBytes = 1024;
+    const svc = service();
+    const estimate = jest.spyOn(svc as any, 'estimateFallbackBackupBytes').mockReturnValue(estimatedBytes);
+    const probeDisk = jest.spyOn(svc as any, 'probeDisk');
+    const statfs = jest.spyOn(fs, 'statfsSync').mockReturnValue({
+      type: 0,
+      bsize: 1,
+      blocks: estimatedBytes * 2,
+      bfree: estimatedBytes,
+      bavail: estimatedBytes,
+      files: 0,
+      ffree: 0,
+    });
+    const output = new PassThrough();
+    output.resume();
+    try {
+      await expect(svc.buildBackup(undefined, output)).resolves.toBeUndefined();
+      expect(probeDisk).toHaveBeenCalledWith(os.tmpdir(), 0, estimatedBytes);
+    } finally {
+      statfs.mockRestore();
+      probeDisk.mockRestore();
+      estimate.mockRestore();
+      if (previousMinFree === undefined) delete process.env.BACKUP_MIN_FREE_BYTES;
+      else process.env.BACKUP_MIN_FREE_BYTES = previousMinFree;
+    }
+  });
+
+  it('rejects interactive staging when free space is below the estimate', async () => {
+    const previousMinFree = process.env.BACKUP_MIN_FREE_BYTES;
+    process.env.BACKUP_MIN_FREE_BYTES = String(Number.MAX_SAFE_INTEGER);
+    const estimatedBytes = 1024;
+    const freeBytes = estimatedBytes - 1;
+    const svc = service();
+    const estimate = jest.spyOn(svc as any, 'estimateFallbackBackupBytes').mockReturnValue(estimatedBytes);
+    const probeDisk = jest.spyOn(svc as any, 'probeDisk');
+    const statfs = jest.spyOn(fs, 'statfsSync').mockReturnValue({
+      type: 0,
+      bsize: 1,
+      blocks: estimatedBytes * 2,
+      bfree: freeBytes,
+      bavail: freeBytes,
+      files: 0,
+      ffree: 0,
+    });
+    const output = new PassThrough();
+    output.resume();
+    try {
+      await expect(svc.buildBackup(undefined, output)).rejects.toThrow('low temporary disk space');
+      expect(probeDisk).toHaveBeenCalledWith(os.tmpdir(), 0, estimatedBytes);
+    } finally {
+      statfs.mockRestore();
+      probeDisk.mockRestore();
+      estimate.mockRestore();
+      if (previousMinFree === undefined) delete process.env.BACKUP_MIN_FREE_BYTES;
+      else process.env.BACKUP_MIN_FREE_BYTES = previousMinFree;
+    }
+  });
+
   it('preserves archive-reader failures while loading the manifest', async () => {
     const readError = new Error('manifest entry exceeds configured limit');
     const zip = {
