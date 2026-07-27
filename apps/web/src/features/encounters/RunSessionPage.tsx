@@ -1550,9 +1550,10 @@ export default function RunSessionPage() {
               isDm,
             ),
           );
-          if (response.concentrationCheck && concentrationQueueEncounterRef.current === requestEncounterId) {
+          const check = response.concentrationCheck;
+          if (check && concentrationQueueEncounterRef.current === requestEncounterId) {
             setPendingConcentrationChecks((pending) =>
-              appendConcentrationCheck(pending, { combatantId, name: response.name, ...response.concentrationCheck }),
+              appendConcentrationCheck(pending, { combatantId, name: response.name, ...check }),
             );
           }
         }
