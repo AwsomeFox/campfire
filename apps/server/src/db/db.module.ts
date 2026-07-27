@@ -3543,6 +3543,8 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // the next free ordinal. runMigrations dedupes on the FULL name string, so the `_577` suffix
   // is what guarantees this runs exactly once even if a sibling branch lands a colliding ordinal.
   { name: '0121_ai_driver_grounding_claims_577', run: migrateAiDriverGroundingClaims577 },
+  // 0123/0124 are CENTRALLY ALLOCATED to this branch by the merge coordinator.
+  // 0112-0122 are held by other in-flight branches, so the gap above is deliberate
   // and these are NOT "the next free ordinal" — do not renumber them to close it.
   // runMigrations dedupes on the FULL name, so the `_588` suffix is what actually
   // guarantees run-once even if a sibling branch lands a colliding ordinal first.
