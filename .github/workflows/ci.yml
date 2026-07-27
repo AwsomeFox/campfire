@@ -68,6 +68,24 @@ jobs:
 
   # Lint + typecheck + version-sync gate. Independent of `build` so it fails
   # fast. `npm run typecheck` builds schema then runs `tsc --noEmit` everywhere.
+  #
+  # Issue #1535: "everywhere" used to mean shipped sources only — the server's
+  # `test/` tree and the web Playwright tree were type-checked by nothing this
+  # aggregate gate required. A test-only compile error (typically a service
+  # constructor gaining or reordering a parameter while hand-constructed specs
+  # kept the old call) therefore slipped past `lint` and surfaced ~20 min later
+  # in `coverage` as "N suites failed, 0 tests failed", which reads like a
+  # coverage-threshold miss. Both trees are now inside `npm run typecheck`, so
+  # the script means the same thing locally and here:
+  #   - apps/server typecheck now uses tsconfig.jest.json (src + test, with
+  #     @campfire/schema mapped to source) instead of tsconfig.json (src only).
+  #     Not an extra pass: the file set is a superset, and the src-only/dist-
+  #     resolution combination it replaces is exactly what `nest build` does in
+  #     the `build` and `build-test-22` jobs. `--rootDir ../..` is required
+  #     because tsconfig.json pins rootDir to `src`, which the mapped schema
+  #     sources and `test/` both sit outside of (TS6059).
+  #   - apps/web typecheck now chains `test:e2e:typecheck`. That step also runs
+  #     in `e2e-web`/`pwa-web`, but neither is in the `ci` aggregate's needs.
   lint:
     runs-on: ubuntu-latest
     steps:
