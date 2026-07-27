@@ -65,6 +65,9 @@ import {
   scheduleOrganizedPlaySql,
   scheduleOverlapsSql,
 } from './scheduling-queries';
+// The booking probe lives in its own leaf module so SchedulingService can run the
+// identical check when a restore re-acquires a released room/DM (see #588).
+import { SeriesConflictSignal, endInstant, findConflictRows, type RawConflict } from './schedule-conflicts';
 
 /** Which campaigns the caller may see identifying detail for. */
 type AccessScope = number[] | 'all';
@@ -74,6 +77,13 @@ function canSee(scope: AccessScope, campaignId: number): boolean {
 }
 
 const MAX_CALENDAR_WINDOW_DAYS = 366;
+
+/**
+ * Exception kinds that constitute a per-occurrence METADATA override, i.e. the
+ * ones a series-level fan-out must leave alone. `cancel`/`restore` are lifecycle
+ * events and are deliberately absent — see updateSeries.
+ */
+const METADATA_OVERRIDE_KINDS = ['reschedule', 'reassign'] as const;
 
 type SeriesRow = typeof sessionSeries.$inferSelect;
 type ScheduleRow = typeof scheduledSessions.$inferSelect;
@@ -145,24 +155,6 @@ function exceptionToDomain(row: typeof seriesExceptions.$inferSelect): SeriesExc
     createdAt: row.createdAt,
   };
 }
-
-function endInstant(startIso: string, durationMinutes: number): string {
-  const start = Date.parse(startIso);
-  const minutes = Number.isFinite(durationMinutes) ? Math.max(0, durationMinutes) : 0;
-  return new Date(start + minutes * 60_000).toISOString();
-}
-
-/** The raw (unredacted) shape a conflict query returns before privacy is applied. */
-type RawConflict = {
-  kind: ScheduleConflict['kind'];
-  scheduleId: number;
-  campaignId: number;
-  title: string;
-  startsAt: string;
-  endsAt: string;
-  roomId: number | null;
-  subjectUserId: string;
-};
 
 /**
  * Organized-play scheduling (issue #588).
@@ -281,11 +273,20 @@ export class OrganizedPlayService {
    */
   async deleteVenue(id: number, user: RequestUser): Promise<{ deleted: true }> {
     const existing = await this.getVenueOrThrow(id);
+    const ts = nowIso();
     this.db.transaction((tx) => {
       const roomIds = tx.select({ id: playRooms.id }).from(playRooms).where(eq(playRooms.venueId, existing.id)).all().map((r) => r.id);
       if (roomIds.length > 0) {
         tx.update(scheduledSessions).set({ roomId: null }).where(inArray(scheduledSessions.roomId, roomIds)).run();
         tx.update(sessionSeries).set({ roomId: null }).where(inArray(sessionSeries.roomId, roomIds)).run();
+        // These rooms are about to cascade away, so their ids have to leave
+        // slots_json too. Clearing scheduleTemplates.venueId below does NOT cover
+        // it: createTemplate validates only that a slot's room EXISTS, never that
+        // it belongs to the template's venue, so a template pointed at venue A can
+        // legitimately hold slots booking rooms in venue B. Deleting B would then
+        // strand those ids and 404 every later apply — the same permanent breakage
+        // deleteRoom guards against, reached by a different route.
+        this.clearTemplateSlotRooms(tx, roomIds, ts);
       }
       tx.update(scheduledSessions).set({ venueId: null }).where(eq(scheduledSessions.venueId, existing.id)).run();
       tx.update(sessionSeries).set({ venueId: null }).where(eq(sessionSeries.venueId, existing.id)).run();
@@ -364,38 +365,7 @@ export class OrganizedPlayService {
     this.db.transaction((tx) => {
       tx.update(scheduledSessions).set({ roomId: null }).where(eq(scheduledSessions.roomId, existing.id)).run();
       tx.update(sessionSeries).set({ roomId: null }).where(eq(sessionSeries.roomId, existing.id)).run();
-      // #588: a template keeps its slots as JSON, so the two relational updates
-      // above cannot reach the room ids embedded in `slots_json`. Left behind, a
-      // stale id makes every later applyTemplate 404 on getRoomOrThrow —
-      // permanently, because there is no template-update endpoint to repair it,
-      // and the only remedy would be deleting and recreating the template.
-      // Clearing the reference leaves the slot bookable with no room, which is
-      // the same state this deletion already leaves bookings and series in.
-      for (const row of tx.select().from(scheduleTemplates).all()) {
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(row.slotsJson);
-        } catch {
-          // Unparseable JSON holds no reachable reference to this room, and
-          // templateToDomain already degrades it to zero slots. Leave it alone
-          // rather than overwriting a row we cannot read.
-          continue;
-        }
-        if (!Array.isArray(parsed)) continue;
-        let changed = false;
-        const slots = parsed.map((slot) => {
-          if (slot !== null && typeof slot === 'object' && (slot as { roomId?: unknown }).roomId === existing.id) {
-            changed = true;
-            return { ...(slot as Record<string, unknown>), roomId: null };
-          }
-          return slot;
-        });
-        if (!changed) continue;
-        tx.update(scheduleTemplates)
-          .set({ slotsJson: JSON.stringify(slots), updatedAt: ts })
-          .where(eq(scheduleTemplates.id, row.id))
-          .run();
-      }
+      this.clearTemplateSlotRooms(tx, [existing.id], ts);
       tx.delete(playRooms).where(eq(playRooms.id, existing.id)).run();
     });
     await this.audit.log({
@@ -406,6 +376,55 @@ export class OrganizedPlayService {
       entityId: id,
     });
     return { deleted: true };
+  }
+
+  /**
+   * Remove `roomIds` from every schedule template's `slots_json`.
+   *
+   * A template keeps its slots as JSON, so the relational `UPDATE`s that clear
+   * `room_id` on bookings and series cannot reach the ids embedded there. Left
+   * behind, a stale id makes every later applyTemplate 404 on getRoomOrThrow —
+   * PERMANENTLY, because there is no template-update endpoint to repair it and
+   * the only remedy would be deleting and recreating the template. Clearing the
+   * reference leaves the slot bookable with no room, which is the same state a
+   * room deletion already leaves bookings and series in.
+   *
+   * Shared by deleteRoom and deleteVenue (which cascade-deletes its rooms) so the
+   * two cannot drift: a second copy of this is how the next path that removes
+   * rooms ends up silently missing it.
+   *
+   * Sync, and takes the caller's `tx`: the scrub has to commit or roll back with
+   * the delete that makes it necessary.
+   */
+  private clearTemplateSlotRooms(tx: SyncDb, roomIds: number[], ts: string): void {
+    if (roomIds.length === 0) return;
+    const doomed = new Set(roomIds);
+    for (const row of tx.select().from(scheduleTemplates).all()) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(row.slotsJson);
+      } catch {
+        // Unparseable JSON holds no reachable reference to these rooms, and
+        // templateToDomain already degrades it to zero slots. Leave it alone
+        // rather than overwriting a row we cannot read.
+        continue;
+      }
+      if (!Array.isArray(parsed)) continue;
+      let changed = false;
+      const slots = parsed.map((slot) => {
+        const roomId = slot !== null && typeof slot === 'object' ? (slot as { roomId?: unknown }).roomId : undefined;
+        if (typeof roomId === 'number' && doomed.has(roomId)) {
+          changed = true;
+          return { ...(slot as Record<string, unknown>), roomId: null };
+        }
+        return slot;
+      });
+      if (!changed) continue;
+      tx.update(scheduleTemplates)
+        .set({ slotsJson: JSON.stringify(slots), updatedAt: ts })
+        .where(eq(scheduleTemplates.id, row.id))
+        .run();
+    }
   }
 
   private async getVenueOrThrow(id: number): Promise<typeof playVenues.$inferSelect> {
@@ -429,18 +448,12 @@ export class OrganizedPlayService {
   // ----- conflict detection -----
 
   /**
-   * Every booking that collides with the proposed window, as RAW rows.
+   * Thin delegate to the shared probe in ./schedule-conflicts.
    *
-   * SYNCHRONOUS on purpose, and takes the caller's `db`/`tx` handle: the whole
-   * point of a booking check is that it holds between "is the room free?" and
-   * "the room is now mine". Running it inside the same better-sqlite3
-   * transaction as the write makes that a structural guarantee rather than a
-   * hopeful ordering — see createSeries()/rescheduleOccurrence(), which both
-   * check and insert inside one `db.transaction(...)`.
-   *
-   * Only rows in the shared organized-play pool are considered
-   * (scheduleOrganizedPlaySql): a private home game holds no shared resource, so
-   * it can neither be collided with nor be revealed by this query.
+   * Kept as an instance method rather than calling the free function at each
+   * site: every booking path in this file goes through one seam, which is what
+   * the atomicity test spies on to assert the probe really does run inside the
+   * write transaction rather than merely near it.
    */
   private findConflictRows(
     db: SyncDb,
@@ -453,64 +466,7 @@ export class OrganizedPlayService {
       excludeScheduleId?: number;
     },
   ): RawConflict[] {
-    const base = [scheduleLiveSql(), scheduleOrganizedPlaySql(), scheduleOverlapsSql(q.startsAt, q.endsAt)];
-    if (q.excludeScheduleId != null) base.push(ne(scheduledSessions.id, q.excludeScheduleId));
-
-    const select = {
-      id: scheduledSessions.id,
-      campaignId: scheduledSessions.campaignId,
-      title: scheduledSessions.title,
-      scheduledAt: scheduledSessions.scheduledAt,
-      durationMinutes: scheduledSessions.durationMinutes,
-      roomId: scheduledSessions.roomId,
-      assignedDmUserId: scheduledSessions.assignedDmUserId,
-    };
-
-    const out: RawConflict[] = [];
-    const push = (kind: ScheduleConflict['kind'], row: { id: number; campaignId: number; title: string; scheduledAt: string; durationMinutes: number; roomId: number | null }, subjectUserId: string): void => {
-      out.push({
-        kind,
-        scheduleId: row.id,
-        campaignId: row.campaignId,
-        title: row.title,
-        startsAt: row.scheduledAt,
-        endsAt: endInstant(row.scheduledAt, row.durationMinutes),
-        roomId: row.roomId,
-        subjectUserId,
-      });
-    };
-
-    if (q.roomId != null) {
-      const rows = db
-        .select(select)
-        .from(scheduledSessions)
-        .where(and(...base, eq(scheduledSessions.roomId, q.roomId)))
-        .all();
-      for (const row of rows) push('room', row, '');
-    }
-
-    if (q.assignedDmUserId) {
-      const rows = db
-        .select(select)
-        .from(scheduledSessions)
-        .where(and(...base, eq(scheduledSessions.assignedDmUserId, q.assignedDmUserId)))
-        .all();
-      for (const row of rows) push('dm', row, q.assignedDmUserId);
-    }
-
-    const members = [...new Set(q.memberUserIds.filter((id) => id.trim() !== ''))];
-    if (members.length > 0) {
-      // A member is "seated" when they have said yes; a maybe/no is not a booking.
-      const rows = db
-        .select({ ...select, userId: sessionRsvps.userId })
-        .from(scheduledSessions)
-        .innerJoin(sessionRsvps, eq(sessionRsvps.scheduledSessionId, scheduledSessions.id))
-        .where(and(...base, eq(sessionRsvps.status, 'yes'), inArray(sessionRsvps.userId, members)))
-        .all();
-      for (const row of rows) push('member', row, row.userId);
-    }
-
-    return out;
+    return findConflictRows(db, q);
   }
 
   /**
@@ -932,8 +888,21 @@ export class OrganizedPlayService {
     const ts = nowIso();
     const nowStr = new Date(nowMs).toISOString();
 
+    // "Overridden" means the coordinator made a per-occurrence decision ABOUT
+    // METADATA that this fan-out must not silently undo — a move or a re-seat.
+    // Filtering by kind is load-bearing, not tidiness: the ledger also records
+    // `cancel` and `restore`, and a cancel-then-restore is a lifecycle event, not
+    // a metadata decision. Counting those as overrides froze the occurrence out
+    // of every later series edit permanently, leaving it with a stale title,
+    // room, DM and event keys forever — the opposite of the documented contract,
+    // and invisible until someone compared two occurrences by hand.
     const overriddenIds = new Set(
-      (await this.db.select({ occurrenceId: seriesExceptions.occurrenceId }).from(seriesExceptions).where(eq(seriesExceptions.seriesId, id)))
+      (
+        await this.db
+          .select({ occurrenceId: seriesExceptions.occurrenceId })
+          .from(seriesExceptions)
+          .where(and(eq(seriesExceptions.seriesId, id), inArray(seriesExceptions.kind, [...METADATA_OVERRIDE_KINDS])))
+      )
         .map((r) => r.occurrenceId)
         .filter((v): v is number => v != null),
     );
@@ -970,6 +939,23 @@ export class OrganizedPlayService {
       // holds when the rows are claimed — the same structural guarantee
       // createSeries and rescheduleOccurrence rest on.
       if (roomChanged || dmChanged) {
+        // The batch against ITSELF, for the same reason createSeries, extendSeries
+        // and applyTemplate all do it: a stored-row probe cannot see this change.
+        // Each occurrence's probe excludes its own id, and its siblings still hold
+        // the OLD resource in the database while the probe runs — so if two future
+        // occurrences of this series overlap (duration longer than the recurrence
+        // step), moving them all onto one room double-books it with no row
+        // anywhere that could report it.
+        const batchConflicts = this.intraBatchConflicts(
+          affected.map((occ) => ({
+            startsAt: occ.scheduledAt,
+            endsAt: endInstant(occ.scheduledAt, occ.durationMinutes),
+            roomId: nextRoomId,
+            dm: nextDm,
+            campaignId: occ.campaignId,
+            title: occ.title,
+          })),
+        );
         const conflicts: RawConflict[] = [];
         for (const occ of affected) {
           conflicts.push(
@@ -989,7 +975,9 @@ export class OrganizedPlayService {
         }
         // Rolls the whole transaction back: a rejected fan-out writes nothing,
         // not even the series-level metadata.
-        if (conflicts.length > 0 && !input.force) throw new SeriesConflictSignal(conflicts);
+        if ((conflicts.length > 0 || batchConflicts.length > 0) && !input.force) {
+          throw new SeriesConflictSignal(conflicts, batchConflicts);
+        }
       }
 
       tx.update(sessionSeries)
@@ -1825,22 +1813,6 @@ export class OrganizedPlayService {
       err.conflicts.flatMap((r) => (r.roomId != null ? [r.roomId] : [])),
     );
     throw this.conflictException([...this.redactConflicts(err.conflicts, scope, names), ...err.direct]);
-  }
-}
-
-/**
- * Internal marker thrown inside a booking transaction so better-sqlite3 rolls
- * the whole attempt back before anything is written. Never leaves the module:
- * the controller layer converts it to a redacted 409 via toConflictResponse().
- */
-export class SeriesConflictSignal extends Error {
-  constructor(
-    readonly conflicts: RawConflict[],
-    /** Already-visible conflicts within the request's own batch (see intraBatchConflicts). */
-    readonly direct: ScheduleConflict[] = [],
-  ) {
-    super('schedule conflict');
-    this.name = 'SeriesConflictSignal';
   }
 }
 

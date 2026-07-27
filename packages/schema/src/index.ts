@@ -1337,10 +1337,35 @@ export const ScheduledSessionUpdate = z.object({
   location: z.string().max(200).optional(),
   notes: z.string().max(5000).optional(),
 });
+// `timezone` is deliberately absent (#588), so a one-off's zone is set at creation
+// and never corrected here. On a one-off the INSTANT is authoritative and the zone
+// is display metadata that `localStart` is derived from — a wrong zone therefore
+// mislabels the wall clock but never moves the game, and PATCHing `scheduledAt`
+// re-derives `localStart` from the stored zone, so the row stays self-consistent
+// either way. A series occurrence is the opposite (wall clock authoritative), and
+// its zone belongs to the series, which is why the reschedule endpoint owns it.
+// The cost of this is real but bounded: correcting a zone typo means recreating
+// the row. If that becomes a live complaint, the fix is a dedicated endpoint that
+// re-derives `localStart` — not a field here, which would silently rewrite a
+// derived column through a path that does no organized-play validation.
 export const ScheduledSessionCancel = z.object({
   reason: z.string().max(1000).optional(),
 });
 export type ScheduledSessionCancel = z.infer<typeof ScheduledSessionCancel>;
+/**
+ * Restore body (#588). Fully optional: every pre-existing caller posts no body.
+ *
+ * `force` exists because a restore RE-ACQUIRES the room and DM its cancellation
+ * released — while the night was cancelled, another campaign may legitimately have
+ * booked them — so restore rejects with 409 SCHEDULE_CONFLICT like every other
+ * booking path and needs the same coordinator override. Carried in a body rather
+ * than a query param to match `ScheduledSessionCancel` on `DELETE /schedule/:id`:
+ * the same shape of optional lifecycle payload on the same controller.
+ */
+export const ScheduledSessionRestore = z.object({
+  force: z.boolean().default(false),
+});
+export type ScheduledSessionRestore = z.infer<typeof ScheduledSessionRestore>;
 export const ScheduledSessionDuplicate = z.object({
   scheduledAt: IsoDateTime.optional(),
   durationMinutes: z.number().int().min(15).max(24 * 60).optional(),

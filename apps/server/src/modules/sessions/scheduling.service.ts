@@ -42,6 +42,9 @@ import {
   schedulePastSql,
   scheduleUpcomingOnlySql,
 } from './scheduling-queries';
+// #588: restoring a cancelled night re-acquires the room/DM the cancellation
+// released, so it runs the same booking probe as the organized-play endpoints.
+import { SeriesConflictSignal, endInstant, findConflictRows } from './schedule-conflicts';
 
 const PAST_LIST_MAX = SCHEDULE_PAST_MAX_LIMIT;
 
@@ -829,7 +832,7 @@ export class SchedulingService {
     return this.getWithRsvps(id);
   }
 
-  async restore(id: number, user: RequestUser, role: Role): Promise<ScheduledSessionWithRsvps> {
+  async restore(id: number, user: RequestUser, role: Role, force = false): Promise<ScheduledSessionWithRsvps> {
     // Effective status here too, so every write guard in this file reads the same
     // projection the API returns. ('cancelled' is never link-derived, so this one is
     // equivalent to the raw column today — it is written this way so the next guard
@@ -853,6 +856,31 @@ export class SchedulingService {
     // restore is the exact moment the night becomes eligible to remind again. Restore
     // starts a new incarnation of the night, so it starts with a clean ledger.
     this.db.transaction((tx) => {
+      // #588: a restore is a BOOKING, not merely a status flip.
+      //
+      // Cancelling RELEASES the resource — a cancelled row keeps its `room_id`
+      // and `assigned_dm_user_id`, but `scheduleLiveSql()` excludes it from
+      // conflict detection, so while it is cancelled another campaign can
+      // legitimately take that room or that DM and the server correctly tells
+      // them it is free. Flipping the row back to `scheduled` with no probe
+      // silently recreates exactly the double-booking this feature exists to
+      // prevent, and tells neither party. It is the mirror image of the cancel
+      // side: whatever cancelling gives up, restoring has to ask for again.
+      //
+      // Probed inside the write transaction like every other booking path, so the
+      // answer still holds at the moment the row reclaims the resource.
+      const conflicts = findConflictRows(tx, {
+        startsAt: existing.scheduledAt,
+        endsAt: endInstant(existing.scheduledAt, existing.durationMinutes),
+        roomId: existing.roomId,
+        assignedDmUserId: existing.assignedDmUserId,
+        memberUserIds: [],
+        // Cancelled rows are already outside the live filter so this row cannot
+        // match its own probe; excluded explicitly anyway so the guarantee does
+        // not depend on that filter never changing.
+        excludeScheduleId: id,
+      });
+      if (conflicts.length > 0 && !force) throw new SeriesConflictSignal(conflicts);
       tx.update(scheduledSessions)
         .set({
           status: 'scheduled',

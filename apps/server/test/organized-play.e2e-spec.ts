@@ -1115,6 +1115,158 @@ describe('organized play (e2e)', () => {
     }
   });
 
+  it('restoring a cancelled occurrence re-books its room and refuses a taken one', async () => {
+    const room = (await api().post(`/api/v1/organized-play/venues/${venueId}/rooms`).set(dm).send({ name: 'Restore Room' })).body;
+    const mine = await api()
+      .post(`/api/v1/campaigns/${campaignId}/series`)
+      .set(dm)
+      .send({ title: 'Cancel Me', timezone: 'UTC', startDate: '2099-04-07', startTime: '18:00', durationMinutes: 180, freq: 'weekly', count: 1, roomId: room.id });
+    expect(mine.status).toBe(201);
+    const occ = mine.body.occurrences[0];
+
+    // Cancelling RELEASES the room: the rival booking below is legitimate, and the
+    // server correctly reports the slot as free while the night is cancelled.
+    expect((await api().delete(`/api/v1/schedule/${occ.id}`).set(dm).send({ reason: 'DM away' })).status).toBe(200);
+    const probe = await api()
+      .post('/api/v1/organized-play/conflicts')
+      .set(dm)
+      .send({ scheduledAt: occ.scheduledAt, durationMinutes: 180, roomId: room.id });
+    expect(probe.body.conflicts).toEqual([]);
+
+    const rival = await api()
+      .post(`/api/v1/campaigns/${otherCampaignId}/series`)
+      .set(dm)
+      .send({ title: 'Took The Room', timezone: 'UTC', startDate: '2099-04-07', startTime: '18:00', durationMinutes: 180, freq: 'weekly', count: 1, roomId: room.id });
+    expect(rival.status).toBe(201);
+
+    // …so restoring has to ASK FOR THE ROOM BACK. Flipping the status without a
+    // probe silently recreates the double-booking and tells neither party.
+    const blocked = await api().post(`/api/v1/schedule/${occ.id}/restore`).set(dm).send({});
+    expect(blocked.status).toBe(409);
+    expect(blocked.body.code).toBe('SCHEDULE_CONFLICT');
+    expect(blocked.body.conflicts.some((c: { kind: string }) => c.kind === 'room')).toBe(true);
+    // Rolled back: still cancelled, and no `restore` was appended to the ledger.
+    const after = await api().get(`/api/v1/schedule/${occ.id}`).set(dm);
+    expect(after.body.status).toBe('cancelled');
+    const ledger = (await api().get(`/api/v1/organized-play/occurrences/${occ.id}/exceptions`).set(dm)).body;
+    expect(ledger.map((e: { kind: string }) => e.kind)).toEqual(['cancel']);
+
+    // The coordinator can still overbook deliberately, same as its siblings.
+    const forced = await api().post(`/api/v1/schedule/${occ.id}/restore`).set(dm).send({ force: true });
+    expect(forced.status).toBe(201);
+    expect(forced.body.status).toBe('scheduled');
+
+    // A night holding no shared resource restores with NO BODY AT ALL — the
+    // pre-#588 call shape has to keep working.
+    const oneOff = await api().post(`/api/v1/campaigns/${campaignId}/schedule`).set(dm).send({ scheduledAt: '2099-04-21T18:00:00Z' });
+    expect((await api().delete(`/api/v1/schedule/${oneOff.body.id}`).set(dm).send({ reason: 'x' })).status).toBe(200);
+    expect((await api().post(`/api/v1/schedule/${oneOff.body.id}/restore`).set(dm)).status).toBe(201);
+  });
+
+  it('a cancel-then-restore is NOT a metadata override, so later series edits still reach it', async () => {
+    const series = await api()
+      .post(`/api/v1/campaigns/${campaignId}/series`)
+      .set(dm)
+      .send({ title: 'Lifecycle', timezone: 'UTC', startDate: '2099-05-05', startTime: '18:00', freq: 'weekly', count: 3, notes: 'v1' });
+    expect(series.status).toBe(201);
+    const skipped = series.body.occurrences[1];
+    const untouched = series.body.occurrences[2];
+
+    expect((await api().delete(`/api/v1/schedule/${skipped.id}`).set(dm).send({ reason: 'holiday' })).status).toBe(200);
+    expect((await api().post(`/api/v1/schedule/${skipped.id}/restore`).set(dm).send({})).status).toBe(201);
+    // Its ledger now holds cancel + restore — lifecycle entries, not a decision
+    // about metadata.
+    expect(
+      (await api().get(`/api/v1/organized-play/occurrences/${skipped.id}/exceptions`).set(dm)).body.map((e: { kind: string }) => e.kind),
+    ).toEqual(['cancel', 'restore']);
+
+    const edited = await api()
+      .patch(`/api/v1/campaigns/${campaignId}/series/${series.body.id}`)
+      .set(dm)
+      .send({ title: 'Lifecycle (renamed)', capacity: 5 });
+    expect(edited.status).toBe(200);
+
+    const byId = new Map(edited.body.occurrences.map((o: { id: number }) => [o.id, o]));
+    // The restored night must receive the edit: treating its lifecycle entries as
+    // an override would freeze it out of every later series edit permanently,
+    // leaving it with a stale title, room, DM and event keys forever.
+    expect(byId.get(skipped.id)).toMatchObject({ title: 'Lifecycle (renamed)', capacity: 5 });
+    expect(byId.get(untouched.id)).toMatchObject({ title: 'Lifecycle (renamed)', capacity: 5 });
+
+    // A genuinely re-seated occurrence still keeps its override.
+    expect((await api().post(`/api/v1/organized-play/occurrences/${untouched.id}/reassign`).set(dm).send({ capacity: 2 })).status).toBe(201);
+    const second = await api().patch(`/api/v1/campaigns/${campaignId}/series/${series.body.id}`).set(dm).send({ capacity: 9 });
+    expect(second.status).toBe(200);
+    const afterSecond = new Map(second.body.occurrences.map((o: { id: number }) => [o.id, o]));
+    expect(afterSecond.get(untouched.id)).toMatchObject({ capacity: 2 }); // override respected
+    expect(afterSecond.get(skipped.id)).toMatchObject({ capacity: 9 }); // lifecycle-only, still fanned to
+  });
+
+  it('deleting a VENUE clears its rooms from template slots too', async () => {
+    // deleteVenue cascade-deletes its rooms, so it carries the same hazard
+    // deleteRoom guards against — and createTemplate only checks that a slot room
+    // EXISTS, never that it belongs to the template's own venue, so a template can
+    // legitimately book rooms in a venue that is later deleted.
+    const templateVenue = await api().post('/api/v1/organized-play/venues').set(dm).send({ name: 'Template Home', timezone: 'UTC' });
+    const doomedVenue = await api().post('/api/v1/organized-play/venues').set(dm).send({ name: 'Doomed Annexe', timezone: 'UTC' });
+    const annexeRoom = (await api().post(`/api/v1/organized-play/venues/${doomedVenue.body.id}/rooms`).set(dm).send({ name: 'Annexe Table' })).body;
+
+    const template = await api()
+      .post('/api/v1/organized-play/templates')
+      .set(dm)
+      .send({
+        name: 'Cross Venue Block',
+        timezone: 'UTC',
+        venueId: templateVenue.body.id,
+        count: 1,
+        slots: [{ weekday: 2, startTime: '18:00', roomId: annexeRoom.id, title: 'Annexe Slot' }],
+      });
+    expect(template.status).toBe(201);
+
+    expect((await api().delete(`/api/v1/organized-play/venues/${doomedVenue.body.id}`).set(dm)).status).toBe(200);
+
+    const listed = (await api().get('/api/v1/organized-play/templates').set(dm)).body.find(
+      (t: { id: number }) => t.id === template.body.id,
+    );
+    expect(listed.slots[0].roomId).toBeNull();
+
+    const applied = await api()
+      .post(`/api/v1/organized-play/templates/${template.body.id}/apply`)
+      .set(dm)
+      .send({ campaignId, startDate: '2100-02-01' });
+    expect(applied.status).toBe(201);
+    expect(applied.body.series[0].roomId).toBeNull();
+  });
+
+  it('a series room change that would double-book the series against ITSELF is rejected', async () => {
+    const selfRoom = (await api().post(`/api/v1/organized-play/venues/${venueId}/rooms`).set(dm).send({ name: 'Self Clash Room' })).body;
+    // Roomless daily 25-hour tables: overlapping with each other, but holding no
+    // shared resource, so creating them collides with nothing.
+    const series = await api()
+      .post(`/api/v1/campaigns/${campaignId}/series`)
+      .set(dm)
+      .send({ title: 'Overlapping Marathon', timezone: 'UTC', startDate: '2099-09-20', startTime: '18:00', durationMinutes: 1440, freq: 'daily', count: 3 });
+    expect(series.status).toBe(201);
+
+    // Assigning them all to ONE room double-books it. No stored-row probe can see
+    // this: each occurrence's probe excludes its own id, and its siblings still
+    // hold the old null room while the probe runs — only the intra-batch check
+    // catches it, which is the same guard create/extend/apply already run.
+    const rejected = await api().patch(`/api/v1/campaigns/${campaignId}/series/${series.body.id}`).set(dm).send({ roomId: selfRoom.id });
+    expect(rejected.status).toBe(409);
+    expect(rejected.body.code).toBe('SCHEDULE_CONFLICT');
+    expect(rejected.body.conflicts.some((c: { kind: string }) => c.kind === 'room')).toBe(true);
+
+    const untouched = await api().get(`/api/v1/campaigns/${campaignId}/series/${series.body.id}`).set(dm);
+    expect(untouched.body.occurrences.every((o: { roomId: number | null }) => o.roomId === null)).toBe(true);
+
+    const forced = await api()
+      .patch(`/api/v1/campaigns/${campaignId}/series/${series.body.id}`)
+      .set(dm)
+      .send({ roomId: selfRoom.id, force: true });
+    expect(forced.status).toBe(200);
+  });
+
   it('an extension that would double-book ITSELF across a DST transition is rejected', async () => {
     const dstRoom = (await api().post(`/api/v1/organized-play/venues/${venueId}/rooms`).set(dm).send({ name: 'DST Room' })).body;
 

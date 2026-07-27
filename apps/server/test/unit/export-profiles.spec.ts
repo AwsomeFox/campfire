@@ -216,6 +216,26 @@ describe('allowlist projection (#586)', () => {
     expect(identifiers).toEqual(expect.arrayContaining(['ada', 'Ada Lovelace', '42']));
     expect(identifiers).not.toContain('Hero');
   });
+
+  it('collects the organized-play assigned DM and sweeps it out of free text (#588)', () => {
+    // `assignedDmUserId` is an account id in the same space as `cancelledBy` and
+    // `Note.authorUserId`. It arrived with the organized-play columns AFTER this
+    // collector was written, so it is exactly the kind of field that starts
+    // leaving the install without anyone noticing it skipped the sweep.
+    const raw = rawPayload();
+    (raw.scheduledSessions as Array<Record<string, unknown>>)[0].assignedDmUserId = 'dev:grace-hopper';
+    // A DM typing the running DM's account id into publishable prose is what the
+    // sweep exists for: no field allowlist can catch it, because a quest body is
+    // content a published module must carry.
+    (raw.quests as Array<Record<string, unknown>>)[0].body = 'Ask dev:grace-hopper about the vault key';
+
+    expect(collectPrivateIdentifiers(raw)).toContain('dev:grace-hopper');
+
+    const out = projectExport(raw, resolveExportPolicy('publish'));
+    expect(out.scannedIdentifiers).toContain('dev:grace-hopper');
+    expect(JSON.stringify(out.data)).not.toContain('grace-hopper');
+    expect((out.data.quests as Array<Record<string, unknown>>)[0].body).toContain('[redacted]');
+  });
 });
 
 describe('pseudonymization (#586)', () => {
