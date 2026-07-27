@@ -12,6 +12,7 @@ import { TimelineModule } from '../timeline/timeline.module';
 import { CommentsModule } from '../comments/comments.module';
 import { AttachmentsModule } from '../attachments/attachments.module';
 import { EventsModule } from '../events/events.module';
+import { AiDmModule } from '../ai-dm/ai-dm.module';
 import { CampaignsService } from './campaigns.service';
 import { CampaignsController } from './campaigns.controller';
 
@@ -30,6 +31,9 @@ import { CampaignsController } from './campaigns.controller';
     CommentsModule,
     AttachmentsModule,
     EventsModule,
+    // #1049: clone/import write the AI seat row directly, then call
+    // AiDmService.syncProactiveWatcher so the in-memory proactive watcher learns about it.
+    AiDmModule,
   ],
   controllers: [CampaignsController],
   providers: [CampaignsService],
