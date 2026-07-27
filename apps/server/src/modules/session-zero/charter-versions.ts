@@ -159,9 +159,11 @@ export type AckLookup = (versionId: number) => Map<string, CharterAcknowledgment
  *    additions-are-free rule actually free. A table that keeps adding lines never has to
  *    stop and re-consent.
  *
- * Returns `null` when even the first version is material-and-unacknowledged — a campaign
- * whose opening charter nobody has agreed to yet has no effective version, and callers
- * treat that as "not licensed for live AI or play".
+ * Returns `null` when even the first version is unacknowledged — a campaign whose opening
+ * charter nobody has agreed to yet has no effective version, and callers treat that as
+ * "not licensed for live AI or play". The first publish is stored with `material: false`
+ * (nothing was withdrawn from a prior version), but consent is still required before it
+ * becomes effective; only subsequent non-material versions may pass through without it.
  *
  * `required` is the set of participants whose agreement counts. `discuss` and `declined`
  * both fail to clear the gate: a participant who wants to talk about a line before
@@ -177,7 +179,8 @@ export function resolveEffectiveVersion(
   let effective: SessionZeroCharterVersion | null = null;
 
   for (const version of ascending) {
-    if (version.material && !isFullyAcknowledged(version.id, required, acksFor)) {
+    const needsAcknowledgment = effective === null || version.material;
+    if (needsAcknowledgment && !isFullyAcknowledged(version.id, required, acksFor)) {
       // Stop here: this version, and therefore everything built on top of it, is not
       // consented to. Whatever we had before it remains what the table is playing under.
       break;

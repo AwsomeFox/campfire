@@ -5033,7 +5033,7 @@ export class McpToolsService {
       },
       async (campaignId) => {
         await this.access.requireMember(user, campaignId);
-        return this.sessionZero.get(campaignId);
+        return this.effectiveSessionZero(campaignId as number);
       },
     );
 

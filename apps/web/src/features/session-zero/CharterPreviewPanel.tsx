@@ -25,8 +25,8 @@ function List({ title, items, empty }: { title: string; items: string[]; empty: 
         </p>
       ) : (
         <ul style={{ margin: 0, paddingInlineStart: 18, fontSize: 13 }}>
-          {items.map((item) => (
-            <li key={item}>{item}</li>
+          {items.map((item, index) => (
+            <li key={index}>{item}</li>
           ))}
         </ul>
       )}

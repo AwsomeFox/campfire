@@ -9,6 +9,7 @@
  */
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import type { InvitePreview } from '@campfire/schema';
 import { api, ApiError, API, isTransientError } from '../../lib/api';
 import { loginHrefWithReturn } from '../../lib/safeInternalPath';
@@ -79,6 +80,7 @@ function InvitePermissions({ permissions }: { permissions: InvitePreview['permis
 }
 
 export function JoinPage() {
+  const { t } = useTranslation();
   const { code = '' } = useParams<{ code: string }>();
   const { me, ready, refresh } = useAuth();
   const navigate = useNavigate();
@@ -220,6 +222,7 @@ export function JoinPage() {
         username,
         password,
         displayName: displayName.trim() || undefined,
+        acknowledgeVersion: preview.charter ? preview.charter.version : undefined,
       });
       await refresh();
       navigate(`/c/${preview.campaignId}`, { replace: true });
@@ -247,6 +250,8 @@ export function JoinPage() {
 
   const fieldErrors = error?.kind === 'fields' ? error.fields : {};
   const formError = error?.kind === 'form' ? error.message : null;
+  const needsCharterConsent = Boolean(preview?.charter && !alreadyMember);
+  const charterConsentMissing = needsCharterConsent && !charterAccepted;
   return (
     <div
       className="min-h-screen grid place-items-center p-6"
@@ -330,21 +335,23 @@ export function JoinPage() {
                       onChange={(e) => setCharterAccepted(e.target.checked)}
                       style={{ marginTop: 3 }}
                     />
-                    <span>I have read the table&rsquo;s boundaries and agree to play within them.</span>
+                    <span>{t('sessionZero.join.charterAgree')}</span>
                   </label>
-                  {declined ? (
-                    <p className="text-muted" style={{ margin: 0, fontSize: 13 }}>
-                      Your decline has been recorded and the DM can see it. You have not joined.
-                    </p>
-                  ) : (
-                    <button
-                      type="button"
-                      className="btn"
-                      disabled={submitting}
-                      onClick={declineInvite}
-                    >
-                      Decline
-                    </button>
+                  {me && (
+                    declined ? (
+                      <p className="text-muted" style={{ margin: 0, fontSize: 13 }}>
+                        {t('sessionZero.join.declinedMessage')}
+                      </p>
+                    ) : (
+                      <button
+                        type="button"
+                        className="btn"
+                        disabled={submitting}
+                        onClick={declineInvite}
+                      >
+                        {t('sessionZero.join.decline')}
+                      </button>
+                    )
                   )}
                 </div>
               )}
@@ -375,7 +382,7 @@ export function JoinPage() {
                       type="button"
                       className="btn btn-primary btn-block"
                       style={{ minHeight: 44 }}
-                      disabled={submitting}
+                      disabled={submitting || charterConsentMissing}
                       onClick={joinAsCurrentUser}
                     >
                       {submitting
@@ -475,7 +482,12 @@ export function JoinPage() {
                     </p>
                   )}
 
-                  <button type="submit" className="btn btn-primary btn-block" style={{ minHeight: 44 }} disabled={submitting}>
+                  <button
+                    type="submit"
+                    className="btn btn-primary btn-block"
+                    style={{ minHeight: 44 }}
+                    disabled={submitting || charterConsentMissing}
+                  >
                     {submitting ? 'Pulling up a chair…' : 'Create account & join'}
                   </button>
                   <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>

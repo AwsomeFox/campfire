@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, asc, desc, eq, inArray } from 'drizzle-orm';
 import type {
   CharterAcknowledgmentState,
@@ -129,25 +129,35 @@ export class SessionZeroConsentService {
     // One transaction: the version row and its number are allocated together, so two
     // concurrent publishes cannot both claim the same version (UNIQUE(campaign_id,
     // version) is the backstop).
-    const inserted = this.db.transaction((tx) =>
-      tx
-        .insert(sessionZeroCharterVersions)
-        .values({
-          campaignId,
-          version: nextVersion,
-          lines: toJsonText(draft.lines),
-          veils: toJsonText(draft.veils),
-          safetyTools: toJsonText(draft.safetyTools),
-          houseRules: draft.houseRules,
-          toneAndExpectations: draft.toneAndExpectations,
-          material,
-          changeSummary: input.changeSummary.slice(0, 2000),
-          publishedBy: auditActor(user),
-          publishedAt: ts,
-        })
-        .returning()
-        .get(),
-    );
+    let inserted: VersionRow;
+    try {
+      inserted = this.db.transaction((tx) =>
+        tx
+          .insert(sessionZeroCharterVersions)
+          .values({
+            campaignId,
+            version: nextVersion,
+            lines: toJsonText(draft.lines),
+            veils: toJsonText(draft.veils),
+            safetyTools: toJsonText(draft.safetyTools),
+            houseRules: draft.houseRules,
+            toneAndExpectations: draft.toneAndExpectations,
+            material,
+            changeSummary: input.changeSummary.slice(0, 2000),
+            publishedBy: auditActor(user),
+            publishedAt: ts,
+          })
+          .returning()
+          .get(),
+      );
+    } catch (err) {
+      if (err instanceof Error && /UNIQUE constraint failed/i.test(err.message)) {
+        throw new ConflictException(
+          'Another charter version was published concurrently — reload and try again.',
+        );
+      }
+      throw err;
+    }
 
     await this.audit.log({
       actor: auditActor(user),
@@ -251,11 +261,21 @@ export class SessionZeroConsentService {
     );
 
     const nameOf = new Map(required.map((r) => [r.userId, r.userName]));
-    const outstanding = outstandingAcknowledgers(
+    const outstandingEntries = outstandingAcknowledgers(
       latest.id,
       required.map((r) => r.userId),
       acksFor,
     ).map((entry) => ({ userId: entry.userId, userName: nameOf.get(entry.userId) ?? '', state: entry.state }));
+
+    const isFacilitator =
+      user !== null &&
+      (await this.db
+        .select({ role: campaignMembers.role })
+        .from(campaignMembers)
+        .where(and(eq(campaignMembers.campaignId, campaignId), eq(campaignMembers.userId, Number(user.id))))
+        .limit(1)
+        .get())?.role === 'dm';
+    const outstanding = isFacilitator ? outstandingEntries : [];
 
     let mine: SessionZeroAcknowledgment | null = null;
     if (user) {
@@ -440,6 +460,31 @@ export class SessionZeroConsentService {
       .orderBy(desc(sessionZeroCharterVersions.version))
       .limit(1);
     return row ? toVersion(row) : null;
+  }
+
+  /**
+   * Re-validate the charter gate inside a membership transaction so a publish that lands
+   * after the outer preview read cannot seat someone against a stale version.
+   */
+  assertCharterAcknowledgedTx(
+    tx: Parameters<Parameters<DrizzleDb['transaction']>[0]>[0],
+    campaignId: number,
+    acknowledgeVersion?: number,
+  ): SessionZeroCharterVersion | null {
+    const latest = tx
+      .select()
+      .from(sessionZeroCharterVersions)
+      .where(eq(sessionZeroCharterVersions.campaignId, campaignId))
+      .orderBy(desc(sessionZeroCharterVersions.version))
+      .limit(1)
+      .get();
+    if (!latest) return null;
+    if (acknowledgeVersion !== latest.version) {
+      throw new ConflictException(
+        'This table has a session-zero charter you must acknowledge before joining. Reload the invite to see the current version.',
+      );
+    }
+    return toVersion(latest);
   }
 
   async setPreviewPolicy(campaignId: number, previewPolicy: CharterPreviewPolicy, user: RequestUser): Promise<void> {

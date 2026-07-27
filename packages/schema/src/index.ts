@@ -6243,7 +6243,7 @@ export const InvitePreview = z.object({
   charter: CharterPreview.nullable().default(null),
   /**
    * True when the campaign has a published charter, so POST /invites/:code/join and
-   * /accept require `acknowledgeVersionId`. False for campaigns that never published —
+   * /accept require `acknowledgeVersion`. False for campaigns that never published —
    * their join flow is unchanged, which is what keeps this backwards compatible.
    */
   consentRequired: z.boolean().default(false),

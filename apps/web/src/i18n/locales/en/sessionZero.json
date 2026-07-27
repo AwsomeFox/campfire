@@ -64,6 +64,11 @@
       "aiDisabled": "This table does not send member-authored material to external AI providers.",
       "aiMemberConsent": "This table may send member-authored material to external AI providers, but only for members who separately opt in."
     },
+    "join": {
+      "charterAgree": "I have read the table's boundaries and agree to play within them.",
+      "decline": "Decline",
+      "declinedMessage": "Your decline has been recorded and the DM can see it. You have not joined."
+    },
     "consent": {
       "heading": "Charter versions & consent",
       "noVersionsDm": "No version published yet. Publish the draft so the table can acknowledge it, and so AI is bound by an agreed version.",

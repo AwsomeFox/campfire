@@ -129,34 +129,48 @@ describe('#600 charter versioning', () => {
 
     const required = ['u1', 'u2'];
 
+    it('is null before anyone acknowledges the first version, even when it is non-material', () => {
+      const v1 = version(10, 1, false);
+      expect(resolveEffectiveVersion([v1], required, lookup({}))).toBeNull();
+    });
+
     it('is null before anyone acknowledges the first material version', () => {
       const v1 = version(10, 1, true);
       expect(resolveEffectiveVersion([v1], required, lookup({}))).toBeNull();
     });
 
-    it('advances to a non-material version without any acknowledgment', () => {
+    it('advances to a non-material follow-up version without any acknowledgment once v1 is agreed', () => {
       // Additions are free: a table that keeps adding lines never has to stop and
-      // re-consent.
+      // re-consent — but only after the opening charter is acknowledged.
       const v1 = version(10, 1, false);
       const v2 = version(11, 2, false);
-      expect(resolveEffectiveVersion([v1, v2], required, lookup({}))?.version).toBe(2);
+      const acked = lookup({ 10: { u1: 'acknowledged', u2: 'acknowledged' } });
+      expect(resolveEffectiveVersion([v1, v2], required, acked)?.version).toBe(2);
     });
 
     it('stops at a material version until EVERY required participant acknowledges', () => {
       const v1 = version(10, 1, false);
       const v2 = version(11, 2, true);
-      const partial = lookup({ 11: { u1: 'acknowledged' } });
+      const v1Acked = lookup({ 10: { u1: 'acknowledged', u2: 'acknowledged' } });
+      const partial = lookup({ 10: { u1: 'acknowledged', u2: 'acknowledged' }, 11: { u1: 'acknowledged' } });
       expect(resolveEffectiveVersion([v1, v2], required, partial)?.version).toBe(1);
 
-      const complete = lookup({ 11: { u1: 'acknowledged', u2: 'acknowledged' } });
+      const complete = lookup({
+        10: { u1: 'acknowledged', u2: 'acknowledged' },
+        11: { u1: 'acknowledged', u2: 'acknowledged' },
+      });
       expect(resolveEffectiveVersion([v1, v2], required, complete)?.version).toBe(2);
+      expect(resolveEffectiveVersion([v1, v2], required, v1Acked)?.version).toBe(1);
     });
 
     it('treats discuss and declined as NOT clearing the gate', () => {
       const v1 = version(10, 1, false);
       const v2 = version(11, 2, true);
       for (const state of ['discuss', 'declined'] as CharterAcknowledgmentState[]) {
-        const acks = lookup({ 11: { u1: 'acknowledged', u2: state } });
+        const acks = lookup({
+          10: { u1: 'acknowledged', u2: 'acknowledged' },
+          11: { u1: 'acknowledged', u2: state },
+        });
         expect(resolveEffectiveVersion([v1, v2], required, acks)?.version).toBe(1);
       }
     });
@@ -164,14 +178,19 @@ describe('#600 charter versioning', () => {
     it('does NOT let a cosmetic follow-up publish launder an unacknowledged withdrawal', () => {
       // THE transitivity case. v2 removed a line and nobody re-acknowledged. v3's own
       // diff is innocuous — but v3 still contains v2's removal, so the table must stay
-      // on v1. A naive "was the NEWEST version material?" check would wrongly return v3.
+      // on v1 once v1 is agreed. A naive "was the NEWEST version material?" check would
+      // wrongly return v3.
       const v1 = version(10, 1, false);
       const v2 = version(11, 2, true);
       const v3 = version(12, 3, false);
-      expect(resolveEffectiveVersion([v1, v2, v3], required, lookup({}))?.version).toBe(1);
+      const v1Acked = lookup({ 10: { u1: 'acknowledged', u2: 'acknowledged' } });
+      expect(resolveEffectiveVersion([v1, v2, v3], required, v1Acked)?.version).toBe(1);
 
       // Once v2 is acknowledged, v3 rides along on its own non-material status.
-      const acked = lookup({ 11: { u1: 'acknowledged', u2: 'acknowledged' } });
+      const acked = lookup({
+        10: { u1: 'acknowledged', u2: 'acknowledged' },
+        11: { u1: 'acknowledged', u2: 'acknowledged' },
+      });
       expect(resolveEffectiveVersion([v1, v2, v3], required, acked)?.version).toBe(3);
     });
 
@@ -179,7 +198,10 @@ describe('#600 charter versioning', () => {
       const v1 = version(10, 1, false);
       const v2 = version(11, 2, true);
       const v3 = version(12, 3, false);
-      const acked = lookup({ 11: { u1: 'acknowledged', u2: 'acknowledged' } });
+      const acked = lookup({
+        10: { u1: 'acknowledged', u2: 'acknowledged' },
+        11: { u1: 'acknowledged', u2: 'acknowledged' },
+      });
       expect(resolveEffectiveVersion([v3, v1, v2], required, acked)?.version).toBe(3);
     });
 

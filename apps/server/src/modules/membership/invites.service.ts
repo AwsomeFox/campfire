@@ -443,7 +443,7 @@ export class InvitesService {
 
     // Issue #600: same gate as join(), applied before the account is created so a
     // refused acceptance does not leave a stranded user row.
-    const gatedVersion = await this.assertCharterAcknowledged(early.campaign.id, input.acknowledgeVersion);
+    await this.assertCharterAcknowledged(early.campaign.id, input.acknowledgeVersion);
 
     const passwordHash = hashPassword(input.password);
     const ts = nowIso();
@@ -473,6 +473,11 @@ export class InvitesService {
           .limit(1)
           .get();
         this.assertJoinableOrThrow(campaign);
+        const charterVersion = this.consent.assertCharterAcknowledgedTx(
+          tx,
+          campaign.id,
+          input.acknowledgeVersion,
+        );
 
         const taken = tx.select({ id: users.id }).from(users).where(eq(users.username, input.username)).limit(1).get();
         if (taken) throw new ConflictException('Username already taken');
@@ -492,7 +497,13 @@ export class InvitesService {
           .get();
 
         this.seatMembershipTx(tx, current, user.id, ts, { rejectIfMember: false });
-        return { userId: user.id, campaignId: campaign.id, inviteId: current.id, role: current.role as InviteRole };
+        return {
+          userId: user.id,
+          campaignId: campaign.id,
+          inviteId: current.id,
+          role: current.role as InviteRole,
+          charterVersion,
+        };
       },
       { behavior: 'immediate' },
     );
@@ -508,11 +519,11 @@ export class InvitesService {
     });
 
     // Issue #600: record the acknowledgment against the brand-new account, now that it
-    // has an id to attach to. The gate itself was enforced before the transaction.
-    if (gatedVersion !== null) {
+    // has an id to attach to. The gate itself was enforced before and inside the transaction.
+    if (seated.charterVersion !== null) {
       await this.consent.recordAcknowledgment(
         seated.campaignId,
-        gatedVersion,
+        seated.charterVersion,
         { id: String(seated.userId), name: input.displayName || input.username, serverRole: 'user' },
         'acknowledged',
         '',
@@ -542,7 +553,7 @@ export class InvitesService {
     // concurrent accept/join can't slip a membership in between this read and the
     // insert below (the UNIQUE(campaign_id, user_id) index is the final backstop,
     // but surfacing a clean 409 here avoids relying on a raw constraint error).
-    await this.addMembership(invite, userId, { rejectIfMember: true });
+    await this.addMembership(invite, userId, { rejectIfMember: true, acknowledgeVersion });
 
     // Recorded after the seat exists: the acknowledgment is a fact about a member, and
     // writing it for somebody whose join then failed would leave a consent record with
@@ -590,7 +601,7 @@ export class InvitesService {
   private addMembership(
     invite: typeof campaignInvites.$inferSelect,
     userId: number,
-    opts: { rejectIfMember?: boolean } = {},
+    opts: { rejectIfMember?: boolean; acknowledgeVersion?: number } = {},
   ): void {
     const ts = nowIso();
     this.db.transaction(
@@ -618,6 +629,7 @@ export class InvitesService {
           .limit(1)
           .get();
         this.assertJoinableOrThrow(campaign);
+        this.consent.assertCharterAcknowledgedTx(tx, campaign.id, opts.acknowledgeVersion);
 
         this.seatMembershipTx(tx, current, userId, ts, opts);
       },
