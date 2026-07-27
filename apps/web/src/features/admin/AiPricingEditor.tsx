@@ -19,6 +19,7 @@
  *      behind a proxy says nothing about what that proxy charges.
  */
 import { useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { AiPricingView } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { Btn } from '../../components/ui';
@@ -45,29 +46,42 @@ function toRows(view: AiPricingView): Row[] {
   }));
 }
 
+/**
+ * Validation findings as translation KEYS plus params, never as prose.
+ *
+ * The messages are built at the render site so they localize; returning English here would put
+ * user-facing strings in a pure function where no `t` exists, which is how untranslated copy
+ * usually gets in.
+ */
+interface RowError {
+  key: string;
+  params: Record<string, string | number>;
+}
+
 /** A row is saveable when it names a model and both prices parse as non-negative numbers. */
-function rowErrors(rows: Row[]): string[] {
-  const errors: string[] = [];
+function rowErrors(rows: Row[]): RowError[] {
+  const errors: RowError[] = [];
   const seen = new Set<string>();
   rows.forEach((r, i) => {
-    const where = `Row ${i + 1}`;
-    if (!r.providerType.trim()) errors.push(`${where}: choose a provider.`);
-    if (!r.model.trim()) errors.push(`${where}: enter a model ID.`);
-    for (const [label, raw] of [['input', r.input], ['output', r.output]] as const) {
-      const n = Number(raw);
-      if (raw.trim() === '' || !Number.isFinite(n) || n < 0) {
-        errors.push(`${where}: ${label} price must be a number of dollars per million tokens (0 or more).`);
+    const n = i + 1;
+    if (!r.providerType.trim()) errors.push({ key: 'admin.pricing.errProvider', params: { n } });
+    if (!r.model.trim()) errors.push({ key: 'admin.pricing.errModel', params: { n } });
+    for (const [field, raw] of [['fieldInput', r.input], ['fieldOutput', r.output]] as const) {
+      const v = Number(raw);
+      if (raw.trim() === '' || !Number.isFinite(v) || v < 0) {
+        errors.push({ key: 'admin.pricing.errPrice', params: { n, field } });
       }
     }
     // The natural key. Two rows for the same target would make resolution order-dependent.
     const key = `${r.providerType.trim().toLowerCase()}|${r.model.trim().toLowerCase()}|${r.baseUrl.trim().toLowerCase()}`;
-    if (seen.has(key)) errors.push(`${where}: duplicate provider + model + endpoint.`);
+    if (seen.has(key)) errors.push({ key: 'admin.pricing.errDuplicate', params: { n } });
     seen.add(key);
   });
   return errors;
 }
 
 export function AiPricingEditor({ onError }: { onError: (msg: string | null) => void }) {
+  const { t } = useTranslation();
   const [view, setView] = useState<AiPricingView | null>(null);
   const [rows, setRows] = useState<Row[]>([]);
   const [saving, setSaving] = useState(false);
@@ -151,7 +165,7 @@ export function AiPricingEditor({ onError }: { onError: (msg: string | null) => 
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch (err) {
-      onError(err instanceof ApiError ? err.message : "Couldn't save model pricing.");
+      onError(err instanceof ApiError && err.message ? err.message : t('admin.pricing.saveFailed'));
     } finally {
       setSaving(false);
     }
@@ -162,34 +176,32 @@ export function AiPricingEditor({ onError }: { onError: (msg: string | null) => 
   return (
     <div className="cf-inset p-3.5 space-y-2 min-w-0" data-testid="ai-model-pricing">
       <div className="flex items-center justify-between gap-2 flex-wrap">
-        <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">Model pricing</p>
+        <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">{t('admin.pricing.heading')}</p>
         <p role="status" aria-live="polite" className="text-[11px] text-slate-400">
-          <span className="font-semibold text-slate-300">Effective state:</span>{' '}
+          <span className="font-semibold text-slate-300">{t('admin.pricing.effectiveLabel')}</span>{' '}
+          {/* Deliberately not i18next's `count` plural machinery: Arabic has six plural
+              categories, and a catalog missing one of them renders the raw key. Two explicit
+              keys say the same thing and cannot fail that way. */}
           {rows.length === 0
-            ? 'No pricing — every campaign shows “cannot estimate cost”.'
-            : `${rows.length} priced model${rows.length === 1 ? '' : 's'}.`}
+            ? t('admin.pricing.effectiveNone')
+            : rows.length === 1
+              ? t('admin.pricing.effectiveOne')
+              : t('admin.pricing.effectiveSome', { n: rows.length })}
         </p>
       </div>
-      <p className="text-[11px] text-slate-400">
-        Turns token budgets into dollar estimates for DMs. A model with no entry here shows an explicit
-        “Campfire cannot estimate cost — monitor your provider’s billing” instead of a figure, which is the
-        intended behaviour: a wrong number is worse than none. Prices are USD per <strong>million</strong> tokens.
-      </p>
-      <p className="text-[11px] text-slate-400">
-        Leave <strong>Base URL</strong> blank for the provider’s own endpoint. If a campaign points at a proxy or a
-        self-hosted server, enter that URL explicitly — a model name behind a proxy does not imply the vendor’s price.
-      </p>
+      <p className="text-[11px] text-slate-400">{t('admin.pricing.intro')}</p>
+      <p className="text-[11px] text-slate-400">{t('admin.pricing.endpointNote')}</p>
 
       <div className="overflow-x-auto">
         <table className="w-full text-[11px] min-w-[640px]">
           <thead className="text-slate-400">
             <tr>
-              <th className="text-left font-semibold py-1">Provider</th>
-              <th className="text-left font-semibold py-1">Model ID</th>
-              <th className="text-left font-semibold py-1">Base URL (blank = default)</th>
-              <th className="text-left font-semibold py-1">$ / M input</th>
-              <th className="text-left font-semibold py-1">$ / M output</th>
-              <th className="sr-only">Actions</th>
+              <th className="text-left font-semibold py-1">{t('admin.pricing.colProvider')}</th>
+              <th className="text-left font-semibold py-1">{t('admin.pricing.colModel')}</th>
+              <th className="text-left font-semibold py-1">{t('admin.pricing.colBaseUrl')}</th>
+              <th className="text-left font-semibold py-1">{t('admin.pricing.colInput')}</th>
+              <th className="text-left font-semibold py-1">{t('admin.pricing.colOutput')}</th>
+              <th className="sr-only">{t('admin.pricing.colActions')}</th>
             </tr>
           </thead>
           <tbody>
@@ -198,7 +210,7 @@ export function AiPricingEditor({ onError }: { onError: (msg: string | null) => 
                 <td className="py-0.5 pr-1">
                   <input
                     className="cf-input !min-h-0 py-1 text-[11px] w-full"
-                    aria-label={`Row ${i + 1} provider`}
+                    aria-label={t('admin.pricing.rowProvider', { n: i + 1 })}
                     value={r.providerType}
                     onChange={(e) => update(i, { providerType: e.target.value })}
                   />
@@ -206,7 +218,7 @@ export function AiPricingEditor({ onError }: { onError: (msg: string | null) => 
                 <td className="py-0.5 pr-1">
                   <input
                     className="cf-input !min-h-0 py-1 text-[11px] w-full font-mono"
-                    aria-label={`Row ${i + 1} model ID`}
+                    aria-label={t('admin.pricing.rowModel', { n: i + 1 })}
                     value={r.model}
                     onChange={(e) => update(i, { model: e.target.value })}
                   />
@@ -214,8 +226,8 @@ export function AiPricingEditor({ onError }: { onError: (msg: string | null) => 
                 <td className="py-0.5 pr-1">
                   <input
                     className="cf-input !min-h-0 py-1 text-[11px] w-full font-mono"
-                    aria-label={`Row ${i + 1} base URL`}
-                    placeholder="(provider default)"
+                    aria-label={t('admin.pricing.rowBaseUrl', { n: i + 1 })}
+                    placeholder={t('admin.pricing.baseUrlPlaceholder')}
                     value={r.baseUrl}
                     onChange={(e) => update(i, { baseUrl: e.target.value })}
                   />
@@ -223,7 +235,7 @@ export function AiPricingEditor({ onError }: { onError: (msg: string | null) => 
                 <td className="py-0.5 pr-1">
                   <input
                     className="cf-input !min-h-0 py-1 text-[11px] w-24"
-                    aria-label={`Row ${i + 1} input price per million tokens`}
+                    aria-label={t('admin.pricing.rowInput', { n: i + 1 })}
                     inputMode="decimal"
                     value={r.input}
                     onChange={(e) => update(i, { input: e.target.value })}
@@ -232,7 +244,7 @@ export function AiPricingEditor({ onError }: { onError: (msg: string | null) => 
                 <td className="py-0.5 pr-1">
                   <input
                     className="cf-input !min-h-0 py-1 text-[11px] w-24"
-                    aria-label={`Row ${i + 1} output price per million tokens`}
+                    aria-label={t('admin.pricing.rowOutput', { n: i + 1 })}
                     inputMode="decimal"
                     value={r.output}
                     onChange={(e) => update(i, { output: e.target.value })}
@@ -242,13 +254,13 @@ export function AiPricingEditor({ onError }: { onError: (msg: string | null) => 
                   <button
                     type="button"
                     className="text-[11px] text-rose-400 underline"
-                    aria-label={`Remove row ${i + 1}`}
+                    aria-label={t('admin.pricing.rowRemove', { n: i + 1 })}
                     onClick={() => {
                       setRows((prev) => prev.filter((_, idx) => idx !== i));
                       setSaved(false);
                     }}
                   >
-                    Remove
+                    {t('admin.pricing.remove')}
                   </button>
                 </td>
               </tr>
@@ -259,10 +271,12 @@ export function AiPricingEditor({ onError }: { onError: (msg: string | null) => 
 
       {hasErrors && (
         <div role="alert" className="text-[11px] text-rose-400 min-w-0">
-          <p className="font-semibold">Fix the following before saving:</p>
+          <p className="font-semibold">{t('admin.pricing.fixErrors')}</p>
           <ul className="list-disc pl-5 space-y-0.5">
             {errors.map((e) => (
-              <li key={e} className="break-words">{e}</li>
+              <li key={`${e.key}:${JSON.stringify(e.params)}`} className="break-words">
+                {t(e.key, { ...e.params, field: e.params.field ? t(`admin.pricing.${e.params.field}`) : undefined })}
+              </li>
             ))}
           </ul>
         </div>
@@ -280,14 +294,14 @@ export function AiPricingEditor({ onError }: { onError: (msg: string | null) => 
             setSaved(false);
           }}
         >
-          Add a model
+          {t('admin.pricing.addModel')}
         </Btn>
 
         {providerOptions.length > 0 && (
           <>
             <select
               className="cf-input !min-h-0 py-1.5 text-xs"
-              aria-label="Provider to prefill reference prices for"
+              aria-label={t('admin.pricing.prefillLabel')}
               value={prefillProvider}
               onChange={(e) => setPrefillProvider(e.target.value)}
             >
@@ -296,24 +310,22 @@ export function AiPricingEditor({ onError }: { onError: (msg: string | null) => 
               ))}
             </select>
             <Btn className="!min-h-0 !py-1.5 text-xs" ghost onClick={prefill}>
-              Prefill from reference list
+              {t('admin.pricing.prefill')}
             </Btn>
           </>
         )}
 
-        {saved && <span className="text-xs text-emerald-400">Saved.</span>}
+        {saved && <span className="text-xs text-emerald-400">{t('admin.pricing.saved')}</span>}
         <Btn className="!min-h-0 !py-1.5 text-xs ml-auto" onClick={() => void save()} disabled={saving || hasErrors}>
-          {saving ? 'Saving…' : 'Save pricing'}
+          {saving ? t('admin.pricing.saving') : t('admin.pricing.save')}
         </Btn>
       </div>
 
       {/* Staleness, stated at the moment of prefill rather than buried. These figures are as
           good as the day someone last checked them, and saying so is the only honest option. */}
       <p className="text-[11px] text-slate-400">
-        Campfire’s reference figures were last verified on <strong>{view.referenceAsOf}</strong>. They are a
-        starting point, not a quote — vendors change prices without notice, so confirm them against your provider’s
-        billing page before relying on the estimates.
-        {view.updatedAt && <> Your pricing was last saved {new Date(view.updatedAt).toLocaleDateString()}.</>}
+        {t('admin.pricing.referenceAsOf', { date: view.referenceAsOf })}
+        {view.updatedAt && <> {t('admin.pricing.lastSaved', { date: new Date(view.updatedAt).toLocaleDateString() })}</>}
       </p>
     </div>
   );
