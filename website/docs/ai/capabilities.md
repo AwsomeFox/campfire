@@ -16,9 +16,9 @@ An AI with a DM-scoped token can run a campaign end to end — verified end-to-e
   between beats) so an assistant can draft and rearrange where the story might fork.
 - **Rules** — install a rule pack, search it, and cite entries.
 - **Characters** — create and update sheets, adjust HP and conditions.
-- **Combat** — create an encounter, add monsters from the compendium, roll
-  initiative, deal damage, apply conditions, advance turns, and end it (HP writes
-  back to sheets).
+- **Combat** — create an encounter (private DM prep by default), add monsters from
+  the compendium, roll initiative, deal damage, apply conditions, advance turns,
+  and end it (HP writes back to sheets).
 - **Session flow** — write recaps, read and resolve the scribe inbox.
 - **Dice** — roll for checks and saves.
 - **Export** — pull the whole campaign as JSON.
@@ -70,10 +70,41 @@ The seat has three modes, set in the web UI:
   **proposal queue** for the DM to approve or reject; it never writes canon directly.
 - **Driver** — the AI **holds the seat and runs the live session**, calling the
   play tools itself. Even here, **canon writes are still forced through proposals**;
-  the driver is **tool-scoped to live-play tools** (dice, initiative, encounter and
-  turn flow, HP/conditions, XP, loot and treasury grants, map reveal, notes) and is **refused** cross-campaign
+  the driver is **tool-scoped to live-play tools** (dice, initiative, encounter
+  authoring and turn flow, HP/conditions, XP, loot and treasury grants, map reveal, notes) and is **refused** cross-campaign
   calls and any admin/destructive tool (deletes, `update_campaign`,
   `uninstall_rule_pack`, `withdraw_proposal`).
+
+### Encounter authoring, and its two limits
+
+A Driver can **originate a fight**, not just run one you built: it calls
+`create_encounter`, adds the combatants, and begins the encounter in a single
+flow, so "roll a wandering monster and start it" works without you stopping to
+build the tracker by hand.
+
+This is a **direct** capability rather than a proposal, and that is deliberate. A
+proposal is a draft that does not exist until you approve it — the AI's very next
+call would have no encounter to add monsters to, so routing encounter creation
+through the queue would not slow the flow down, it would break it. An encounter
+is play state, closer to a dice roll than to canon; new NPCs, quests and
+locations remain proposal-only.
+
+Two limits bound it, and both are enforced by the server rather than by asking
+the model nicely:
+
+- **Every encounter the AI creates is DM-only prep.** It cannot choose to make
+  one visible, and it cannot reveal an existing one — `hidden` is not writable by
+  the seat at all. Its roster and difficulty stay withheld from players until
+  **you** reveal it from the encounter list. This matters because the Driver
+  takes its instructions from player chat: without the limit, "what are we about
+  to fight?" would be a way to make the AI publish your prep.
+- **It may only reshape what it made.** The AI can rename or re-link an encounter
+  it created during this session. Encounters *you* prepared are yours — it is
+  told to ask rather than edit them, and the server refuses the write if it
+  tries.
+
+AI-created encounters appear in your encounter list immediately, badged
+**Hidden**, and every call is recorded in the campaign audit log.
 
 ### Configured in the web UI
 
@@ -145,6 +176,35 @@ what it covered, the table gets a notification and a live signal, and the reset 
 the table log so someone who reconnects later still sees it. Losing the state is acceptable;
 losing it without telling anyone is not — a DM should never have to *discover* that an approval
 they granted is gone, or that the AI is waiting on a confirmation that no longer exists.
+
+### Approving what the AI asks to do
+
+Some actions the AI proposes do not run straight away — they wait for the DM. `begin_encounter`
+always does, and so do the irreversible ones (ending a fight, removing a combatant, awarding XP,
+levelling a character, moving treasury or inventory).
+
+**Waiting actions appear on the AI Table, at the top, as soon as they are queued.** Each one is
+shown as a decision rather than a function call — "Deal 7 damage to Thorne", not
+`update_character_hp` — with the full arguments one click away. Approve runs it; Reject discards
+it. Names come only from what your browser already loaded, so an entity you cannot see shows as
+an id rather than a name.
+
+**The turn does not stop while one waits.** The AI is told the action is pending and carries on
+narrating, so the scene keeps moving. That is what makes several waiting actions the normal case
+rather than an unusual one — under collaborative handoff a single combat turn can queue four —
+and why the panel is a list.
+
+**If you are not on the AI Table, you still get told.** A pending action raises a notification for
+the campaign's DMs, which is delivered immediately and cannot be muted or batched into a digest.
+Players are not notified: they cannot act on it, and the queue is DM-only.
+
+!!! note "Waiting actions do not expire on a timer"
+    A pending action waits until you answer it. There is deliberately no countdown: nothing is
+    blocked while it waits, so a timer would not release anything — it would only add a third way
+    for a decision to disappear. The two ways one *can* disappear are both recorded in the audit
+    log rather than happening quietly: a server restart discards them, and the queue drops the
+    oldest once it reaches its cap. Check the campaign audit log if an action you expected to
+    approve is no longer listed.
 
 ### The scheduled AI scribe
 
