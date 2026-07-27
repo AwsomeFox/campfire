@@ -612,6 +612,12 @@ export const CONDITIONS = [
 ] as const;
 export type ConditionName = (typeof CONDITIONS)[number];
 
+/** Canonical 5e damage-type vocabulary for rule-aware encounter damage (issue #605). */
+export const DND5E_DAMAGE_TYPES = [
+  'acid', 'bludgeoning', 'cold', 'fire', 'force', 'lightning', 'necrotic',
+  'piercing', 'poison', 'psychic', 'radiant', 'slashing', 'thunder',
+] as const;
+
 /**
  * Case-insensitive membership check against a rule-system condition vocabulary
  * (issue #495). Trims the candidate; empty strings never match.
@@ -2969,6 +2975,8 @@ export interface RuleSystemAdapter {
   initiativeTiebreak(a: InitiativeTiebreakCombatant, b: InitiativeTiebreakCombatant): number;
   /** The condition vocabulary offered in the combat UI (5e: the run-session chip list). */
   readonly conditions: readonly string[];
+  /** Optional typed-damage vocabulary offered by this system's encounter controls (issue #605). */
+  readonly damageTypes?: readonly string[];
   /**
    * OPTIONAL — the action-economy model for this system's turn workspace (issue #413):
    * the ordered slots (action / bonus / reaction / movement, or PF2e's three actions,
@@ -3224,6 +3232,7 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
   // source of truth), not a separate hand-maintained subset. This is what every 5e
   // surface — character sheet, encounter tracker, compendium — offers as suggestions.
   conditions: CONDITIONS,
+  damageTypes: DND5E_DAMAGE_TYPES,
   // 5e turn workspace (issue #413): action / bonus action / reaction / movement.
   actionEconomy: DND5E_ACTION_ECONOMY,
   // 5e square-grid ruler: Euclidean by default; DMs may prefer alternating-diagonal counting.
@@ -8146,8 +8155,21 @@ export const CombatantCreate = z.object({
   // Add from a saved campaign-library monster (snapshot copied server-side).
   libraryMonsterId: Id.optional(),
 });
+/** How a target's saving throw changes a manually-applied damage roll. */
+export const DamageSaveOutcome = z.enum(['full', 'half']);
+export type DamageSaveOutcome = z.infer<typeof DamageSaveOutcome>;
+
 export const CombatantUpdate = z.object({
   hpDelta: z.number().int().optional(),
+  // Direct encounter damage metadata (issue #605).  These fields are meaningful only
+  // for negative hpDelta values; the server derives the final delta from the target's
+  // statblock defences so REST, MCP, and the encounter UI use one rules path.
+  damageType: z.string().trim().max(24).optional(),
+  saveOutcome: DamageSaveOutcome.optional(),
+  isCrit: z.boolean().optional(),
+  // The dice-only portion of hpDelta.  On a critical hit the engine adds this once,
+  // leaving the flat modifier untouched (5e's "double dice, not modifier" rule).
+  damageDice: z.number().int().min(0).optional(),
   hpSet: z.number().int().nonnegative().optional(),
   spDelta: z.number().int().optional(),
   spSet: z.number().int().nonnegative().optional(),

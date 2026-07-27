@@ -355,6 +355,63 @@ describe('encounters (e2e)', () => {
       expect(res.body.hpCurrent).toBe(15);
     });
 
+    it('applies direct 5e damage type, save-half, immunity, vulnerability, and crit dice math (issue #605)', async () => {
+      const server = ctx.app.getHttpServer();
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const ts = new Date().toISOString();
+      const source = await db.select({ packId: ruleEntries.packId }).from(ruleEntries).where(eq(ruleEntries.id, ruleEntryId)).get();
+      expect(source).toBeDefined();
+      const [entry] = await db
+        .insert(ruleEntries)
+        .values({
+          packId: source!.packId,
+          slug: `defended-target-${Date.now()}`,
+          name: 'Defended target',
+          type: 'monster',
+          summary: '',
+          body: '',
+          dataJson: JSON.stringify({
+            hitPoints: 100,
+            damage_resistances: ['fire'],
+            damage_vulnerabilities: ['cold'],
+            damage_immunities: ['poison'],
+          }),
+          createdAt: ts,
+          updatedAt: ts,
+        })
+        .returning();
+      const add = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', ruleEntryId: entry.id });
+      expect(add.status).toBe(201);
+      const targetId = add.body.id;
+
+      // 18 → saved half 9 → fire resistance 4 (round down each step).
+      let res = await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${targetId}`).set(dm)
+        .send({ hpDelta: -18, damageType: 'fire', saveOutcome: 'half' });
+      expect(res.status).toBe(200);
+      expect(res.body.hpCurrent).toBe(96);
+
+      res = await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${targetId}`).set(dm)
+        .send({ hpDelta: -6, damageType: 'cold' });
+      expect(res.body.hpCurrent).toBe(84); // vulnerability doubles 6 → 12
+
+      res = await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${targetId}`).set(dm)
+        .send({ hpDelta: -20, damageType: 'poison' });
+      expect(res.body.hpCurrent).toBe(84); // immunity wins
+      const events = await request(server).get(`/api/v1/encounters/${encounterId}/events`).set(dm);
+      expect(events.body.some((event: { detail: string }) => /took 0 damage.*immune/.test(event.detail))).toBe(true);
+
+      res = await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${targetId}`).set(dm)
+        .send({ hpDelta: -8, damageType: 'slashing', isCrit: true, damageDice: 5 });
+      expect(res.body.hpCurrent).toBe(71); // (5 dice × 2) + 3 flat modifier
+
+      const invalid = await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${targetId}`).set(dm)
+        .send({ hpDelta: -8, isCrit: true });
+      expect(invalid.status).toBe(400);
+    });
+
     // Issue #495: players may only add conditions from the active rule vocabulary;
     // arbitrary free-text ("god_mode") must 400. MCP update_combatant shares this path.
     it('owning player cannot inject an arbitrary free-text condition (issue #495)', async () => {

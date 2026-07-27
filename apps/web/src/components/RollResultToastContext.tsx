@@ -20,7 +20,7 @@ function RollResultToastChrome() {
   return null;
 }
 
-type ApplyDamageHandler = (amount: number, label: string) => void;
+type ApplyDamageHandler = (amount: number, label: string, diceTotal?: number) => void;
 
 export interface ShowRollOptions {
   /** Encounter apply-damage handler captured at roll time (character-card rolls). */
@@ -146,7 +146,12 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
     if (!handler) return;
     if (rollApplyHandler == null && !looksLikeDamageRoll(roll)) return;
     const label = roll.label || roll.expr;
-    handler(Math.max(0, roll.total), label);
+    // `terms` separates dice from flat modifiers for compound expressions.  Preserve
+    // that subtotal so the encounter can apply 5e crits by doubling dice only.
+    const diceTotal = roll.terms
+      ? roll.terms.reduce((sum, term) => sum + (term.rolls ? (term.kept ?? term.rolls).reduce((a, b) => a + b, 0) : 0), 0)
+      : (roll.kept ?? roll.rolls).reduce((sum, value) => sum + value, 0);
+    handler(Math.max(0, roll.total), label, Math.max(0, diceTotal));
     dismiss();
   }, [roll, rollApplyHandler, dismiss]);
 

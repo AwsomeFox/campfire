@@ -2,9 +2,9 @@ import { BadRequestException, ConflictException, ForbiddenException, Inject, Inj
 import { and, eq, gt, inArray, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
-import { ActiveEffect, AoeTemplate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, STARFINDER_ADAPTER_ID, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, defaultCombatantStatblock, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
+import { ActiveEffect, AoeTemplate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, defaultCombatantStatblock, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
 import { z as zod } from 'zod';
-import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
+import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaigns, characters, combatants, encounterEvents, encounters, locations, npcs, quests, ruleEntries, rulePacks, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -678,6 +678,26 @@ export class EncountersService {
   private async adapterForCampaign(campaignId: number): Promise<RuleSystemAdapter> {
     const [row] = await this.db.select({ ruleSystem: campaigns.ruleSystem }).from(campaigns).where(eq(campaigns.id, campaignId)).limit(1);
     return ruleSystemAdapter(row?.ruleSystem);
+  }
+
+  /** Statblock-derived damage defences for direct tracker damage (issue #605). */
+  private targetDamageDefenses(row: typeof combatants.$inferSelect): TargetDefenses {
+    if (row.ruleEntryId === null) return { resistances: [], vulnerabilities: [], immunities: [] };
+    const entry = this.db.select({ dataJson: ruleEntries.dataJson }).from(ruleEntries).where(eq(ruleEntries.id, row.ruleEntryId)).get();
+    const data = entry ? fromJsonText<Record<string, unknown>>(entry.dataJson, {}) : {};
+    const readList = (...keys: string[]): string[] => {
+      for (const key of keys) {
+        const value = data[key];
+        if (Array.isArray(value)) return value.map(String).map((v) => v.trim()).filter(Boolean);
+        if (typeof value === 'string' && value.trim()) return value.split(/[,;]/).map((v) => v.trim()).filter(Boolean);
+      }
+      return [];
+    };
+    return {
+      resistances: readList('damage_resistances', 'damageResistances', 'resistances'),
+      vulnerabilities: readList('damage_vulnerabilities', 'damageVulnerabilities', 'vulnerabilities'),
+      immunities: readList('damage_immunities', 'damageImmunities', 'immunities'),
+    };
   }
 
   /** Batch-load compendium statblocks for boss-action detection (issue #618). */
@@ -3071,6 +3091,17 @@ export class EncountersService {
     }
 
     const adapter = await this.adapterForCampaign(encounterRow.campaignId);
+    const damageMetadataTouched =
+      patch.damageType !== undefined || patch.saveOutcome !== undefined || patch.isCrit !== undefined || patch.damageDice !== undefined;
+    if (damageMetadataTouched && (patch.hpDelta === undefined || patch.hpDelta >= 0)) {
+      throw new BadRequestException('Damage type, save outcome, and critical metadata require a negative hpDelta');
+    }
+    if (patch.isCrit && patch.damageDice === undefined) {
+      throw new BadRequestException('Critical damage requires the dice-only damage subtotal');
+    }
+    if (patch.damageDice !== undefined && patch.hpDelta !== undefined && patch.damageDice > -patch.hpDelta) {
+      throw new BadRequestException('damageDice cannot exceed the rolled damage total');
+    }
     if (!isDm && patch.addConditions !== undefined && patch.addConditions.length > 0) {
       const unknown = patch.addConditions.filter((c) => !isKnownCondition(adapter.conditions, c));
       if (unknown.length > 0) {
@@ -3188,6 +3219,9 @@ export class EncountersService {
     let afterDeath = 'none';
     let afterSucc = 0;
     let afterFail = 0;
+    // Kept for the combat log so a DM can see the final rule-adjusted result (including
+    // immunity, which has a zero HP delta and would otherwise leave no visible feedback).
+    let directDamageSummary: string | null = null;
     // Condition snapshots captured inside the tx (off the fresh row + the write
     // result) so combat-log events derive from the actual committed before/after
     // state, not a stale pre-await read (issue #747, mirroring the HP snapshots).
@@ -3302,8 +3336,28 @@ export class EncountersService {
             deathSaveSuccesses: fresh.deathSaveSuccesses,
             deathSaveFailures: fresh.deathSaveFailures,
           };
+          const effectiveHpDelta = (() => {
+            if (patch.hpDelta === undefined || patch.hpDelta >= 0) return patch.hpDelta;
+            // A crit adds the rolled dice once more; flat modifiers remain single-counted.
+            const criticalTotal = -patch.hpDelta + (patch.isCrit ? patch.damageDice ?? 0 : 0);
+            const { final, applied } = applyDamageModifiers(
+              criticalTotal,
+              patch.damageType ?? '',
+              this.targetDamageDefenses(fresh),
+              { half: patch.saveOutcome === 'half' },
+            );
+            if (damageMetadataTouched) {
+              const type = patch.damageType?.trim() || 'untyped';
+              const parts = [`${criticalTotal} ${type}`];
+              if (patch.isCrit) parts.push('critical');
+              if (patch.saveOutcome === 'half') parts.push('saved for half');
+              if (applied !== 'normal') parts.push(applied === 'halved' ? 'halved' : applied);
+              directDamageSummary = parts.join(', ');
+            }
+            return -final;
+          })();
           const result = applyCombatantHp(state, {
-            hpDelta: patch.hpDelta,
+            hpDelta: effectiveHpDelta,
             hpSet: patch.hpSet,
             hpTemp: patch.hpTemp,
             deathSaveSuccesses: patch.deathSaveSuccesses,
@@ -3312,7 +3366,7 @@ export class EncountersService {
           });
 
           // If Starfinder adapter or SP present, damage flows through temp HP -> SP -> HP
-          if (adapter.id === STARFINDER_ADAPTER_ID && patch.hpDelta !== undefined && patch.hpDelta < 0) {
+          if (adapter.id === STARFINDER_ADAPTER_ID && effectiveHpDelta !== undefined && effectiveHpDelta < 0) {
             const sfResult = applyStarfinderDamage(
               {
                 hpCurrent: fresh.hpCurrent,
@@ -3324,7 +3378,7 @@ export class EncountersService {
                 hpTemp: fresh.hpTemp,
                 deathState: fresh.deathState as any,
               },
-              -patch.hpDelta,
+              -effectiveHpDelta,
             );
             writeSet.spCurrent = sfResult.spCurrent;
             writeSet.rpCurrent = sfResult.rpCurrent;
@@ -3472,13 +3526,13 @@ export class EncountersService {
     // absorption shows as the real change; record only the magnitude.
     if (patch.hpDelta !== undefined || patch.hpSet !== undefined) {
       const poolDelta = afterHp + afterTemp - (beforeHp + beforeTemp);
-      if (poolDelta < 0) {
+      if (poolDelta < 0 || directDamageSummary !== null) {
         await this.appendEvent(encounterId, round, 'damage', {
           actor: actorName,
           target: targetName,
           actorId: actorCombatantId,
           targetId: targetCombatantId,
-          detail: `took ${-poolDelta} damage`,
+          detail: `took ${Math.max(0, -poolDelta)} damage${directDamageSummary ? ` (${directDamageSummary})` : ''}`,
           metadata: opMeta,
         });
       } else if (poolDelta > 0) {
