@@ -107,7 +107,7 @@ export class CampaignModulesController {
     description:
       "dm role required. Writes nothing. Classifies every artifact by comparing three versions — the BASELINE recorded at install time, the LOCAL content in the campaign right now, and the UPSTREAM content in the submitted package: unchanged / upstream_changed / locally_edited / both_changed / conflict / deleted_upstream / added_upstream / deleted_locally. Conflicts are reported down to the field, so a DM sees exactly which fields both they and the publisher changed. Also reports compatibility (app semver range, rule system) and per-dependency resolution status. canApply is false when any blocking finding is present (detached install, module UUID mismatch, incompatible, unsatisfied required dependency).",
   })
-  @ApiResponse({ status: 200, description: 'The update plan.' })
+  @ApiResponse({ status: 201, description: 'The update plan.' })
   @ApiResponse({ status: 400, description: 'Invalid package or artifact hash mismatch.' })
   async previewUpdate(
     @Param('campaignId', ParseIntPipe) campaignId: number,
@@ -125,7 +125,7 @@ export class CampaignModulesController {
     description:
       "dm role required. Snapshots the current state (see POST /rollback), then applies the plan field by field: a field the publisher did not touch keeps the table's value, a field the table did not touch takes the publisher's, and a field both changed is a conflict. Conflicts are NEVER silently overwritten — onConflict defaults to 'skip', which leaves both the entity and its baseline untouched so the conflict resurfaces on the next preview; per-artifact overrides go in resolutions, keyed '<kind>:<key>'. Local edits that survive are re-recorded as overlays against the new baseline. onUpstreamDelete controls what happens to artifacts the publisher removed (a locally edited one is always kept). Pass dryRun=true for the preview without writing.",
   })
-  @ApiResponse({ status: 200, description: 'Apply result with post-apply plan.' })
+  @ApiResponse({ status: 201, description: 'Apply result with post-apply plan.' })
   @ApiResponse({ status: 400, description: 'Invalid package or artifact hash mismatch.' })
   @ApiResponse({ status: 409, description: 'Blocked — detached install, module UUID mismatch, incompatible, or a missing required dependency.' })
   async update(
@@ -144,7 +144,7 @@ export class CampaignModulesController {
     description:
       'dm role required. Restores the newest un-rolled-back snapshot in one transaction: artifact baselines and entity content go back verbatim, rows the update trashed are un-trashed, and rows the update created are trashed. Also undoes a fork (restoring the pre-fork module identity) when the newest snapshot is a fork point.',
   })
-  @ApiResponse({ status: 200, description: 'Rollback result.' })
+  @ApiResponse({ status: 201, description: 'Rollback result.' })
   @ApiResponse({ status: 404, description: 'Nothing to roll back.' })
   async rollback(
     @Param('campaignId', ParseIntPipe) campaignId: number,
@@ -230,7 +230,7 @@ export class ModuleUpdatesController {
     description:
       'Writes nothing. For each requested campaign the caller is a dm of, returns the same three-way update plan the single-campaign preview returns; campaigns that do not exist, are not the caller\'s, do not have the module installed, or whose install is detached are reported in `skipped` with a reason rather than silently omitted. Tables that forked the module are included, matched on their recorded upstream. Roll-ups (cleanCount / conflictedCount / blockedCount) let a coordinator see at a glance which tables can take the correction unattended.',
   })
-  @ApiResponse({ status: 200, description: 'Bulk preview.' })
+  @ApiResponse({ status: 201, description: 'Bulk preview.' })
   @ApiResponse({ status: 400, description: 'Invalid package or artifact hash mismatch.' })
   async preview(@Body() body: ModuleBulkPreviewDto, @CurrentUser() user: RequestUser) {
     const allowed = new Set<number>();

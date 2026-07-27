@@ -122,8 +122,14 @@ export function compareVersionStrings(a: string, b: string): number {
 
 type Comparator = { op: '<' | '<=' | '>' | '>=' | '='; version: Semver };
 
+/**
+ * The explicit "any version" wildcards. The empty string is deliberately NOT one of
+ * them: an empty comparator list matches every version, so treating empty input as a
+ * wildcard turns a malformed range into a silently permissive one. Callers that mean
+ * "any version" must say so with `*`.
+ */
 function anyVersionToken(token: string): boolean {
-  return token === '' || token === '*' || token === 'x' || token === 'X';
+  return token === '*' || token === 'x' || token === 'X';
 }
 
 /** Expand one range token into the comparators it implies, or null when unparseable. */
@@ -161,15 +167,27 @@ export type SemverRange = {
   alternatives: Comparator[][];
 };
 
-/** Parse a range expression, or null when any token is unparseable. */
+/**
+ * Parse a range expression, or null when any token is unparseable.
+ *
+ * An empty alternative is a parse ERROR, not a wildcard. An empty conjunction matches
+ * every version, so if `''`, `'   '`, `'||'`, `'>=1.0.0 ||'` or `'|| 1.0.0'` parsed
+ * successfully they would each satisfy any version at all — a typo in a manifest's
+ * compatibility or dependency range would quietly become "compatible with everything"
+ * and stop the install-time blocks from ever firing. Rejecting it makes the caller
+ * surface the malformed range instead.
+ */
 export function parseSemverRange(input: string): SemverRange | null {
   if (typeof input !== 'string') return null;
   const raw = input.trim();
+  if (raw === '') return null;
   if (anyVersionToken(raw)) return { alternatives: [[]] };
   const alternatives: Comparator[][] = [];
   for (const alt of raw.split('||')) {
+    const trimmed = alt.trim();
+    if (trimmed === '') return null;
     const conjunction: Comparator[] = [];
-    for (const token of alt.trim().split(/\s+/)) {
+    for (const token of trimmed.split(/\s+/)) {
       const parsed = parseComparatorToken(token.trim());
       if (parsed == null) return null;
       conjunction.push(...parsed);

@@ -348,6 +348,60 @@ describe('campaign modules (e2e, real cookie sessions)', () => {
     expect(snapshots.filter((s) => s.rolledBackAt != null).length).toBeGreaterThan(0);
   });
 
+  it('rolls back the NEWEST of several snapshots, and lists them oldest-first', async () => {
+    // Ordering is only load-bearing with three or more snapshots: with one or two, "newest"
+    // and "whatever the scan happened to return" coincide, so a smaller test could pass
+    // while the selection was genuinely order-dependent. Each apply below sets the quest
+    // reward to a distinct value, so the restored value names exactly which snapshot was
+    // chosen — picking any but the newest restores visibly wrong content.
+    const fresh = (await dm.post(api('/campaigns')).send({ name: 'Ordering Table' })).body.id as number;
+    const install = (
+      await dm.post(api(`/campaigns/${fresh}/modules`)).send({ package: buildPackage('1.0.0', v1Artifacts()) })
+    ).body.id as number;
+
+    const rewards = ['300gp', '400gp', '500gp', '600gp'];
+    for (const [i, reward] of rewards.entries()) {
+      const next = v1Artifacts();
+      (next[4].data as Record<string, unknown>).reward = reward;
+      const applied = await dm
+        .post(api(`/campaigns/${fresh}/modules/${install}/update`))
+        .send({ package: buildPackage(`1.${i + 1}.0`, next) });
+      expect(applied.status).toBe(201);
+    }
+
+    const questReward = async () => {
+      const quests = (await dm.get(api(`/campaigns/${fresh}/quests`))).body as Array<Record<string, unknown>>;
+      return quests.find((q) => q.title === 'Rescue the Cartographer')!.reward;
+    };
+    expect(await questReward()).toBe('600gp');
+
+    // Four applies => four snapshots, and the read endpoint documents "newest last".
+    const listed = (await dm.get(api(`/campaigns/${fresh}/modules/${install}/snapshots`))).body as Array<{
+      id: number;
+      toVersion: string;
+    }>;
+    expect(listed).toHaveLength(4);
+    expect(listed.map((s) => s.id)).toEqual([...listed.map((s) => s.id)].sort((a, b) => a - b));
+    expect(listed.map((s) => s.toVersion)).toEqual(['1.1.0', '1.2.0', '1.3.0', '1.4.0']);
+
+    // Roll back three times. Each must take the newest REMAINING snapshot, walking the
+    // rewards backwards in order rather than jumping to the oldest or to an arbitrary row.
+    for (const expected of ['500gp', '400gp', '300gp']) {
+      const rolled = await dm.post(api(`/campaigns/${fresh}/modules/${install}/rollback`)).send({});
+      expect(rolled.status).toBe(201);
+      expect(await questReward()).toBe(expected);
+    }
+
+    // Snapshots are consumed newest-first, so the one still open is the OLDEST, and the
+    // listing order itself is unchanged by rollback.
+    const after = (await dm.get(api(`/campaigns/${fresh}/modules/${install}/snapshots`))).body as Array<{
+      toVersion: string;
+      rolledBackAt: string | null;
+    }>;
+    expect(after.map((s) => s.toVersion)).toEqual(['1.1.0', '1.2.0', '1.3.0', '1.4.0']);
+    expect(after.filter((s) => s.rolledBackAt == null).map((s) => s.toVersion)).toEqual(['1.1.0']);
+  });
+
   // ------------------------------------------------------------------ added / deleted content
 
   it('creates artifacts the publisher added and honours artifacts the publisher removed', async () => {
@@ -714,6 +768,66 @@ describe('campaign modules (e2e, real cookie sessions)', () => {
     // the key — an install that reports itself locally edited forever.
     expect(res.status).toBe(400);
     expect(String(res.body.message)).toContain('does not ship it');
+  });
+
+  it('still lets an install carrying a dangling reference receive later updates', async () => {
+    // The install-time rejection above must NOT extend to the update paths. validatePackage
+    // runs on preview, apply and bulk preview too, so rejecting there would leave a table
+    // that already carries a dangling reference (shipped before the check existed, or by a
+    // fork) permanently unable to take ANY further update — including the correction that
+    // repairs the reference. The table did nothing wrong; it must not be stranded.
+    const cid = (await dm.post(api('/campaigns')).send({ name: 'Stranded Table' })).body.id as number;
+    const clean = v1Artifacts();
+    const install = (await dm.post(api(`/campaigns/${cid}/modules`)).send({ package: buildPackage('1.0.0', clean) }))
+      .body.id as number;
+
+    // A later package still carries the bad reference, and also fixes some prose.
+    const broken = v1Artifacts();
+    (broken[3].data as Record<string, unknown>).factionKey = 'not-shipped';
+    (broken[1].data as Record<string, unknown>).body = 'A drowned fortress, charted at last.';
+
+    const preview = await dm
+      .post(api(`/campaigns/${cid}/modules/${install}/update/preview`))
+      .send({ package: buildPackage('1.1.0', broken) });
+    expect(preview.status).toBe(201);
+    // Surfaced to the DM, but advisory — it must not block the update.
+    expect(preview.body.warnings).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: 'dangling_reference', blocking: false })]),
+    );
+    expect(preview.body.canApply).toBe(true);
+
+    const applied = await dm
+      .post(api(`/campaigns/${cid}/modules/${install}/update`))
+      .send({ package: buildPackage('1.1.0', broken) });
+    expect(applied.status).toBe(201);
+
+    // The content correction landed; the dangling key resolves to null rather than exploding.
+    const locations = (await dm.get(api(`/campaigns/${cid}/locations`))).body as Array<Record<string, unknown>>;
+    expect(locations.find((l) => l.name === 'The Sunken Keep')!.body).toBe('A drowned fortress, charted at last.');
+    const npcList = (await dm.get(api(`/campaigns/${cid}/npcs`))).body as Array<Record<string, unknown>>;
+    expect(npcList.find((n) => n.name === 'Vex')!.factionId).toBeNull();
+
+    // A subsequent CLEAN package still applies. The reference field itself is now a genuine
+    // three-way conflict — BASE holds the bad key, LOCAL holds the null it resolved to, and
+    // UPSTREAM holds the good key — so the default 'skip' leaves it alone, exactly as it
+    // would for any other field the table appears to have edited.
+    const repaired = v1Artifacts();
+    (repaired[1].data as Record<string, unknown>).body = 'A drowned fortress, fully charted.';
+    const fixed = await dm
+      .post(api(`/campaigns/${cid}/modules/${install}/update`))
+      .send({ package: buildPackage('1.2.0', repaired) });
+    expect(fixed.status).toBe(201);
+    const chartedLocations = (await dm.get(api(`/campaigns/${cid}/locations`))).body as Array<Record<string, unknown>>;
+    expect(chartedLocations.find((l) => l.name === 'The Sunken Keep')!.body).toBe('A drowned fortress, fully charted.');
+
+    // And the DM can repair the reference by resolving that conflict toward upstream — the
+    // ordinary mechanism, still available. The table is never stuck.
+    const resolved = await dm
+      .post(api(`/campaigns/${cid}/modules/${install}/update`))
+      .send({ package: buildPackage('1.3.0', repaired), resolutions: { 'npc:vex': 'upstream' } });
+    expect(resolved.status).toBe(201);
+    const after = (await dm.get(api(`/campaigns/${cid}/npcs`))).body as Array<Record<string, unknown>>;
+    expect(after.find((n) => n.name === 'Vex')!.factionId).not.toBeNull();
   });
 
   it('does not un-detach an install when an earlier update is rolled back', async () => {

@@ -69,6 +69,25 @@ describe('semver (issue #585)', () => {
     expect(satisfiesSemverRange('1.0.0', 'not a range')).toBe(false);
   });
 
+  it('rejects an empty range or an empty OR-alternative instead of treating it as a wildcard', () => {
+    // An empty comparator list matches EVERY version. If these parsed successfully they
+    // would each satisfy anything at all, so a typo in a manifest's compatibility or
+    // dependency range would silently become "compatible with everything" and the
+    // install-time blocks for an incompatible package or a missing required dependency
+    // would stop firing for that range. They must be parse errors, not wildcards.
+    for (const range of ['', '   ', '||', '>=1.0.0 ||', '|| 1.0.0', '>=1.0.0 || || <2.0.0']) {
+      expect(parseSemverRange(range)).toBeNull();
+      expect(satisfiesSemverRange('99.99.99', range)).toBe(false);
+      expect(satisfiesSemverRange('0.0.1', range)).toBe(false);
+    }
+    // The explicit wildcards still mean "any version" — only the empty forms changed.
+    expect(satisfiesSemverRange('99.99.99', '*')).toBe(true);
+    expect(satisfiesSemverRange('99.99.99', 'x')).toBe(true);
+    // A well-formed union is unaffected.
+    expect(satisfiesSemverRange('2.1.0', '^1.0.0 || ^2.0.0')).toBe(true);
+    expect(satisfiesSemverRange('3.0.0', '^1.0.0 || ^2.0.0')).toBe(false);
+  });
+
   it('classifies version transitions', () => {
     expect(semverTransition('1.0.0', '1.1.0')).toBe('upgrade');
     expect(semverTransition('1.1.0', '1.0.0')).toBe('downgrade');
@@ -117,6 +136,27 @@ describe('portable content projection (issue #585)', () => {
     expect(projectPortable('location', { status: 'explored' }).status).toBe('explored');
     expect(hashPortable('location', { name: 'Keep', status: '' })).toBe(
       hashPortable('location', { name: 'Keep', status: null }),
+    );
+  });
+
+  it('truncates fractional nullable coordinates so the baseline matches what SQLite stores', () => {
+    // mapX/mapY are `nullableNumber` but land in INTEGER columns. A fraction that survived
+    // projection would be hashed into the baseline, then coerced on write — so the stored
+    // row would re-project differently from its own baseline and the artifact would read
+    // `locally_edited` the instant it installed (and take the "keep the table's edit"
+    // branch on every later update). Truncating here keeps the two legs in agreement.
+    expect(projectPortable('location', { name: 'Keep', mapX: 12.7, mapY: -3.2 })).toMatchObject({
+      mapX: 12,
+      mapY: -3,
+    });
+    expect(projectPortable('location', { name: 'Keep', mapX: '8.9' }).mapX).toBe(8);
+    // null still means "no coordinate", and a whole number is untouched.
+    expect(projectPortable('location', { name: 'Keep', mapX: null }).mapX).toBeNull();
+    expect(projectPortable('location', { name: 'Keep', mapX: 12 }).mapX).toBe(12);
+    // The fractional and truncated forms therefore hash identically — which is what stops
+    // the install from immediately disagreeing with itself.
+    expect(hashPortable('location', { name: 'Keep', mapX: 12.7 })).toBe(
+      hashPortable('location', { name: 'Keep', mapX: 12 }),
     );
   });
 

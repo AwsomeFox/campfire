@@ -31,7 +31,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import { and, eq, inArray, isNull } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull } from 'drizzle-orm';
 import {
   MODULE_MANIFEST_FORMAT_VERSION,
   MODULE_UPDATE_PLAN_FORMAT_VERSION,
@@ -156,6 +156,43 @@ function parseJson<T>(raw: string | null | undefined, fallback: T): T {
   }
 }
 
+/**
+ * better-sqlite3 throws a synchronous Error with `.code` set to one of the
+ * SQLITE_CONSTRAINT_* codes on a constraint violation. We only care about UNIQUE here
+ * (campaign_module_installs' campaign_id + module_id index) — used to turn a lost race
+ * between two concurrent installs of the same module into the documented 409 rather
+ * than a raw 500. Mirrors the helper in rules.service.ts.
+ */
+function isUniqueConstraintError(err: unknown): boolean {
+  const code = (err as { code?: string } | undefined)?.code;
+  if (code === 'SQLITE_CONSTRAINT_UNIQUE' || code === 'SQLITE_CONSTRAINT_PRIMARYKEY') return true;
+  const message = err instanceof Error ? err.message : '';
+  return /UNIQUE constraint failed/i.test(message);
+}
+
+/**
+ * Every `*Key` cross-reference in the package that names an artifact the package does not
+ * ship, as human-readable messages. Fatal on install, advisory on update — see the call
+ * sites in {@link CampaignModulesService.validatePackage} and `buildPlan` for why.
+ */
+function danglingReferences(contentById: ReadonlyMap<string, PortableContent>): string[] {
+  const out: string[] = [];
+  for (const [id, content] of contentById) {
+    const kind = id.slice(0, id.indexOf(':')) as ModuleArtifactKind;
+    for (const [field, , refKind] of REFERENCE_FIELDS[kind]) {
+      const key = content[field];
+      if (typeof key !== 'string' || key === '') continue;
+      const target = artifactId(refKind, key);
+      if (!contentById.has(target)) {
+        out.push(
+          `Artifact ${id} references ${target} via ${field}, but the package does not ship it. Module cross-references must stay inside the package.`,
+        );
+      }
+    }
+  }
+  return out;
+}
+
 @Injectable()
 export class CampaignModulesService {
   constructor(
@@ -171,7 +208,7 @@ export class CampaignModulesService {
       .from(campaignModuleInstalls)
       .where(and(eq(campaignModuleInstalls.id, installId), eq(campaignModuleInstalls.campaignId, campaignId)))
       .limit(1)
-      .all()[0];
+      .get();
     if (!row) throw new NotFoundException(`Module install ${installId} not found in campaign ${campaignId}.`);
     return row;
   }
@@ -265,7 +302,7 @@ export class CampaignModulesService {
    * rejected outright, which is what makes the manifest a real integrity contract rather
    * than decoration.
    */
-  private validatePackage(pkg: ModulePackage): void {
+  private validatePackage(pkg: ModulePackage, mode: 'install' | 'update'): void {
     const manifest = pkg.manifest;
     if (!isValidSemver(manifest.version)) {
       throw new BadRequestException(
@@ -310,23 +347,22 @@ export class CampaignModulesService {
         throw new BadRequestException(`Package ships artifact ${id} that the manifest does not declare.`);
       }
     }
-    // Every cross-reference must name an artifact THIS package ships. A dangling key is
-    // rejected rather than quietly dropped: it would resolve to NULL on the row while the
-    // baseline still recorded the key, so the artifact's live projection could never match
-    // its own baseline and the install would report itself `locally_edited` forever — and
-    // would take the "the table edited this, keep it" branch on every later update.
-    for (const [id, content] of contentById) {
-      const kind = id.slice(0, id.indexOf(':')) as ModuleArtifactKind;
-      for (const [field, , refKind] of REFERENCE_FIELDS[kind]) {
-        const key = content[field];
-        if (typeof key !== 'string' || key === '') continue;
-        const target = artifactId(refKind, key);
-        if (!contentById.has(target)) {
-          throw new BadRequestException(
-            `Artifact ${id} references ${target} via ${field}, but the package does not ship it. Module cross-references must stay inside the package.`,
-          );
-        }
-      }
+    // Every cross-reference must name an artifact THIS package ships. On INSTALL a dangling
+    // key is rejected rather than quietly dropped: it would resolve to NULL on the row while
+    // the baseline still recorded the key, so the artifact's live projection could never
+    // match its own baseline and the install would report itself `locally_edited` forever —
+    // and would take the "the table edited this, keep it" branch on every later update.
+    //
+    // On UPDATE it is deliberately NOT rejected. validatePackage runs on every update path
+    // (preview, apply, bulk preview), so throwing here would leave a table that already
+    // carries a dangling reference — shipped by a bad package before this check existed —
+    // permanently unable to receive ANY further update, including the very correction that
+    // would repair the reference. Rejecting at the door is a publisher-facing error they can
+    // act on; rejecting on update strands a table that did nothing wrong. The key projects
+    // to null as it did before, and surfaces as a non-blocking plan warning (see buildPlan).
+    if (mode === 'install') {
+      const dangling = danglingReferences(contentById);
+      if (dangling.length > 0) throw new BadRequestException(dangling[0]);
     }
   }
 
@@ -638,7 +674,7 @@ export class CampaignModulesService {
 
   async install(campaignId: number, request: ModuleInstallRequest, user: RequestUser, role: Role): Promise<ModuleInstall> {
     const pkg = request.package;
-    this.validatePackage(pkg);
+    this.validatePackage(pkg, 'install');
     const manifest = pkg.manifest;
     const existing = this.db
       .select({ id: campaignModuleInstalls.id })
@@ -647,7 +683,7 @@ export class CampaignModulesService {
         and(eq(campaignModuleInstalls.campaignId, campaignId), eq(campaignModuleInstalls.moduleId, manifest.moduleId)),
       )
       .limit(1)
-      .all()[0];
+      .get();
     if (existing) {
       throw new ConflictException(
         `Module ${manifest.moduleId} is already installed in this campaign (install ${existing.id}). Use the update route to move it to a new version.`,
@@ -661,65 +697,80 @@ export class CampaignModulesService {
     // forward within a kind.
     const order: ModuleArtifactKind[] = ['faction', 'location', 'npc', 'quest'];
 
-    const installId = this.db.transaction((tx) => {
-      const [installRow] = tx
-        .insert(campaignModuleInstalls)
-        .values({
-          campaignId,
-          moduleId: manifest.moduleId,
-          name: manifest.name,
-          version: manifest.version,
-          description: manifest.description,
-          license: manifest.license,
-          sourceUrl: manifest.sourceUrl,
-          authorsJson: JSON.stringify(manifest.authors),
-          compatibilityJson: JSON.stringify(manifest.compatibility),
-          dependenciesJson: JSON.stringify(manifest.dependencies),
-          manifestJson: JSON.stringify(manifest),
-          originKind: 'install',
-          originSourceUrl: request.originSourceUrl ?? manifest.sourceUrl,
-          upstreamModuleId: null,
-          upstreamVersion: null,
-          forkedAt: null,
-          detached: false,
-          detachedAt: null,
-          installedAt: ts,
-          installedBy: auditActor(user),
-          updatedAt: ts,
-        })
-        .returning()
-        .all();
+    let installId: number;
+    try {
+      installId = this.db.transaction((tx) => {
+        const [installRow] = tx
+          .insert(campaignModuleInstalls)
+          .values({
+            campaignId,
+            moduleId: manifest.moduleId,
+            name: manifest.name,
+            version: manifest.version,
+            description: manifest.description,
+            license: manifest.license,
+            sourceUrl: manifest.sourceUrl,
+            authorsJson: JSON.stringify(manifest.authors),
+            compatibilityJson: JSON.stringify(manifest.compatibility),
+            dependenciesJson: JSON.stringify(manifest.dependencies),
+            manifestJson: JSON.stringify(manifest),
+            originKind: 'install',
+            originSourceUrl: request.originSourceUrl ?? manifest.sourceUrl,
+            upstreamModuleId: null,
+            upstreamVersion: null,
+            forkedAt: null,
+            detached: false,
+            detachedAt: null,
+            installedAt: ts,
+            installedBy: auditActor(user),
+            updatedAt: ts,
+          })
+          .returning()
+          .all();
 
-      const idByArtifact = new Map<string, number>();
-      for (const kind of order) {
-        for (const entry of contentById.values()) {
-          if (entry.kind !== kind) continue;
-          const entityId = this.insertEntity(tx, campaignId, kind, entry.content, ts);
-          idByArtifact.set(artifactId(kind, entry.key), entityId);
-          tx.insert(campaignModuleArtifacts)
-            .values({
-              installId: installRow.id,
-              campaignId,
-              kind,
-              artifactKey: entry.key,
-              name: entry.name,
-              entityId,
-              baselineHash: entry.hash,
-              baselineJson: JSON.stringify(entry.content),
-              overlayJson: null,
-              installedVersion: manifest.version,
-              createdAt: ts,
-              updatedAt: ts,
-            })
-            .run();
+        const idByArtifact = new Map<string, number>();
+        for (const kind of order) {
+          for (const entry of contentById.values()) {
+            if (entry.kind !== kind) continue;
+            const entityId = this.insertEntity(tx, campaignId, kind, entry.content, ts);
+            idByArtifact.set(artifactId(kind, entry.key), entityId);
+            tx.insert(campaignModuleArtifacts)
+              .values({
+                installId: installRow.id,
+                campaignId,
+                kind,
+                artifactKey: entry.key,
+                name: entry.name,
+                entityId,
+                baselineHash: entry.hash,
+                baselineJson: JSON.stringify(entry.content),
+                overlayJson: null,
+                installedVersion: manifest.version,
+                createdAt: ts,
+                updatedAt: ts,
+              })
+              .run();
+          }
         }
+        for (const entry of contentById.values()) {
+          const entityId = idByArtifact.get(artifactId(entry.kind, entry.key));
+          if (entityId != null) this.resolveReferences(tx, entry.kind, entityId, entry.content, idByArtifact);
+        }
+        return installRow.id;
+      });
+    } catch (err) {
+      // The `existing` probe above and this insert are not one atomic step: two concurrent
+      // installs of the same module can both find nothing and both proceed. The second then
+      // trips UNIQUE(campaign_id, module_id), which would surface as a raw SQLITE_CONSTRAINT
+      // (a 500). Map it to the same 409 the probe returns so the documented contract holds
+      // under the race, not merely in the common case.
+      if (isUniqueConstraintError(err)) {
+        throw new ConflictException(
+          `Module ${manifest.moduleId} is already installed in this campaign. Use the update route to move it to a new version.`,
+        );
       }
-      for (const entry of contentById.values()) {
-        const entityId = idByArtifact.get(artifactId(entry.kind, entry.key));
-        if (entityId != null) this.resolveReferences(tx, entry.kind, entityId, entry.content, idByArtifact);
-      }
-      return installRow.id;
-    });
+      throw err;
+    }
 
     await this.audit.log({
       actor: auditActor(user),
@@ -748,12 +799,19 @@ export class CampaignModulesService {
     return this.toInstall(this.db, this.installRow(this.db, campaignId, installId));
   }
 
+  /**
+   * Rollback points for an install, oldest first — the order the API documents. The
+   * ordering is stated explicitly rather than left to the query plan: SQLite happens to
+   * return insertion order for a bare table scan, but that is a plan detail, not a
+   * guarantee, and adding an index over this table later could silently change it.
+   */
   async snapshots(campaignId: number, installId: number): Promise<ModuleSnapshot[]> {
     this.installRow(this.db, campaignId, installId);
     return this.db
       .select()
       .from(campaignModuleSnapshots)
       .where(eq(campaignModuleSnapshots.installId, installId))
+      .orderBy(asc(campaignModuleSnapshots.id))
       .all()
       .map((row) => this.toSnapshot(row));
   }
@@ -1005,6 +1063,14 @@ export class CampaignModulesService {
     const fromVersion = matchesSelf ? install.version : (install.upstreamVersion ?? install.version);
     const { artifacts, entities, keyByEntity, objectives } = this.ownedState(db, install);
     const upstream = this.packageContent(pkg);
+
+    // Advisory, never blocking: install rejects a package with a dangling cross-reference,
+    // but an update must not — a table already carrying one would otherwise be unable to
+    // take the correction that repairs it. The key resolves to null, and the DM is told.
+    for (const message of danglingReferences(new Map([...upstream].map(([id, e]) => [id, e.content])))) {
+      warnings.push({ code: 'dangling_reference', message, blocking: false });
+    }
+
     const baselineById = new Map(artifacts.map((a) => [artifactId(a.kind as ModuleArtifactKind, a.artifactKey), a] as const));
 
     const plans: ModuleUpdateArtifactPlan[] = [];
@@ -1175,7 +1241,7 @@ export class CampaignModulesService {
   }
 
   async previewUpdate(campaignId: number, installId: number, request: ModuleUpdateRequest): Promise<ModuleUpdatePlan> {
-    this.validatePackage(request.package);
+    this.validatePackage(request.package, 'update');
     const install = this.installRow(this.db, campaignId, installId);
     return this.buildPlan(this.db, install, request.package, request);
   }
@@ -1189,7 +1255,7 @@ export class CampaignModulesService {
     user: RequestUser,
     role: Role,
   ): Promise<ModuleUpdateResult> {
-    this.validatePackage(request.package);
+    this.validatePackage(request.package, 'update');
     if (request.dryRun) {
       const install = this.installRow(this.db, campaignId, installId);
       const plan = this.buildPlan(this.db, install, request.package, request);
@@ -1509,12 +1575,16 @@ export class CampaignModulesService {
     const actor = auditActor(user);
     const outcome = this.db.transaction((tx) => {
       const install = this.installRow(tx, campaignId, installId);
-      const snapshotRows = tx
+      // "Newest un-rolled-back" is selected in SQL rather than by loading every candidate
+      // and sorting in memory. Same row either way (the previous JS sort on `id` was already
+      // deterministic), but the ordering now lives with the query and only one row is read.
+      const snapshot = tx
         .select()
         .from(campaignModuleSnapshots)
         .where(and(eq(campaignModuleSnapshots.installId, install.id), isNull(campaignModuleSnapshots.rolledBackAt)))
-        .all();
-      const snapshot = snapshotRows.sort((a, b) => b.id - a.id)[0];
+        .orderBy(desc(campaignModuleSnapshots.id))
+        .limit(1)
+        .get();
       if (!snapshot) {
         throw new NotFoundException('There is no un-rolled-back module update to restore for this install.');
       }
@@ -1741,7 +1811,7 @@ export class CampaignModulesService {
     request: ModuleBulkPreviewRequest,
     allowed: ReadonlySet<number>,
   ): Promise<ModuleBulkPreview> {
-    this.validatePackage(request.package);
+    this.validatePackage(request.package, 'update');
     const moduleId = request.package.manifest.moduleId;
     const plans: ModuleUpdatePlan[] = [];
     const skipped: ModuleBulkPreviewSkip[] = [];

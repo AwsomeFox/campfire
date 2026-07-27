@@ -155,12 +155,19 @@ function normalizeNumber(value: unknown): number {
   return 0;
 }
 
+/**
+ * Nullable sibling of {@link normalizeNumber}, and it truncates for the same reason.
+ * `mapX`/`mapY` land in INTEGER columns, so a fractional coordinate that survived
+ * projection would be coerced by SQLite on write and re-project differently from the
+ * baseline hashed from it — the artifact would read `locally_edited` the instant it
+ * installed, and take the "the table edited this, keep it" branch on every later update.
+ */
 function normalizeNullableNumber(value: unknown): number | null {
   if (value == null) return null;
-  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'number' && Number.isFinite(value)) return Math.trunc(value);
   if (typeof value === 'string' && value.trim() !== '') {
     const parsed = Number(value);
-    if (Number.isFinite(parsed)) return parsed;
+    if (Number.isFinite(parsed)) return Math.trunc(parsed);
   }
   return null;
 }
@@ -226,12 +233,12 @@ export function projectPortable(kind: ModuleArtifactKind, data: unknown): Portab
 
 /** sha256 of the projected content under the repo-wide stable-JSON encoding. */
 export function hashPortable(kind: ModuleArtifactKind, data: unknown): string {
-  return createHash('sha256').update(`${kind} ${stableStringify(projectPortable(kind, data))}`).digest('hex');
+  return createHash('sha256').update(`${kind}\0${stableStringify(projectPortable(kind, data))}`).digest('hex');
 }
 
 /** Hash an ALREADY-projected payload (skips re-projection when the caller has one). */
 export function hashProjected(kind: ModuleArtifactKind, projected: PortableContent): string {
-  return createHash('sha256').update(`${kind} ${stableStringify(projected)}`).digest('hex');
+  return createHash('sha256').update(`${kind}\0${stableStringify(projected)}`).digest('hex');
 }
 
 function fieldEquals(a: unknown, b: unknown): boolean {
