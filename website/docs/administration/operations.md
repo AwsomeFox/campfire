@@ -45,6 +45,73 @@ server-admin session or API token):
   you can verify app version, schema revision, format version, creation time, and
   contents before restoring.
 
+### Streaming, space, and cancellation
+
+Campfire serializes archive creation and restore work: if another archive operation is busy,
+wait and retry rather than starting a competing in-memory export. Downloads are streamed from
+the server, and restores are staged on disk before the live database and uploads are replaced.
+The current fixed safety limits are **1 GiB compressed archive**, **512 MiB per entry**,
+**4 GiB total uncompressed data**, and **100,000 entries**. These limits cannot be changed
+with environment variables.
+
+Leave temporary disk capacity for the received ZIP and its extracted staging directory in
+addition to the live data. Validation failures and cancellation clean up staging/partial server
+artifacts and leave the live install unchanged. Cancelling from the admin UI aborts the browser
+request; it does not guarantee that work the server has already begun can be interrupted.
+
+For downloads, the admin UI streams directly to the chosen file with the browser File System
+Access API when available, showing bytes received and total size when supplied. Browsers that
+lack it have to buffer the finished archive in browser memory; that fallback is explicitly
+limited to **512 MiB** and reported in the UI. Use `curl` or a File System Access-capable browser
+for larger archives. When cancelling a direct-to-file export, the UI asks the browser writable
+stream to discard its partial file; confirm the destination is clean if the browser reports an
+interrupted write.
+
+### Which export profiles stream
+
+Whole-server backups and campaign downloads under the **backup** profile preflight-stage
+immutable attachment copies on temporary disk before emitting any ZIP entries. The archive then
+reads those filesystem paths, keeping attachment bytes out of the server heap. Size server
+temporary disk for the staged copies. Campaign downloads stream the ZIP to the browser or other
+archive destination without retaining that final archive on server disk, so that destination needs
+the final-archive capacity; scheduled whole-server backups instead retain the final archive in
+`BACKUP_DIR`, which needs that capacity in addition to staging space.
+
+The **handoff** and **publish** profiles must strip embedded metadata (EXIF/XMP) before an
+attachment may travel, and bytes cannot be sanitized without being read. Each attachment is
+therefore read, sanitized, and written straight into the export's staging directory, so only
+one attachment is held in memory at a time rather than all of them. Peak heap for those
+profiles is bounded by the largest single attachment, not by the size of the campaign.
+
+### Restore is stricter than it used to be
+
+Restore now validates each archive against its manifest before touching live data: every
+upload's recorded size and SHA-256 must match the bytes in the archive, `uploadCount` must
+equal the number of attachment entries, and every attachment named in the manifest must be
+present. Archives that have been hand-edited, truncated by an interrupted transfer, or
+assembled by hand may therefore be rejected with a `400` where an older Campfire accepted
+them. This is deliberate — silently restoring an incomplete archive is worse than refusing
+it — but it means **you should verify existing archives now, not during a recovery**. Run
+`Inspect (dry-run)` against your most recent archives after upgrading; inspection uses the
+same validation as restore and changes nothing.
+
+Cancelling a restore is honoured up to the moment the live database and uploads are
+replaced; a cancellation observed before that boundary tears down staging and leaves the
+install untouched.
+
+### Temporary disk capacity
+
+A backup's peak temporary usage is the database snapshot **plus a full staged copy of the
+uploads tree** plus the archive being written — not just the size of the finished archive.
+Hosts with a small or `tmpfs`-backed `/tmp` should size accordingly, or point `TMPDIR` at a
+larger volume.
+
+When `BACKUP_DIR` and the staging directory are on the **same filesystem**, both allocations
+are live at once, so the scheduled-backup preflight reserves their combined peak rather than
+checking each independently. `BACKUP_MIN_FREE_BYTES` is the free space that must remain
+*after* that peak. If the two are on different filesystems each is checked against its own
+budget.
+
 ### Backup manifest compatibility
 
 Each archive includes a `manifest.json` with:
@@ -58,19 +125,15 @@ Each archive includes a `manifest.json` with:
 
 **Restore policy:**
 
-- The server accepts any format version it knows how to **migrate** forward to the
-  current layout (today: format `1` for plain archives, format `2` for archives that
-  include a passphrase-encrypted AI keyfile envelope via
-  `POST /api/v1/backup/download` or `BACKUP_KEY_PASSPHRASE`, and legacy archives with
-  no `version` field treated as format `0` and migrated).
-- If `version` is **newer** than this server understands, restore fails with `400`
-  **before** the live database or uploads are touched. When the archive includes
-  `minCampfireVersion`, the error tells you the minimum Campfire release required.
-  Older Campfire releases that only understand format `1` will reject format-`2`
-  envelope archives rather than silently restoring the DB without its credential key.
+- During the pre-1.0 period, the server accepts **format `3` only**. Archives with no
+  version or versions `0`–`2` are intentionally unsupported; export a fresh backup
+  after upgrading rather than relying on a migration path.
+- Any other format is rejected with `400` **before** the live database or uploads are
+  touched. Format `3` also requires complete attachment checksums and a clean
+  reconciliation record, so a partial archive cannot be restored.
 - Format version is independent of DB schema migrations: upgrading Campfire still runs
-  in-place migrations on boot after a restore, but you cannot restore a backup whose
-  manifest format is from a newer Campfire build until you upgrade the app.
+  in-place migrations on boot after a restore, but only a current format-`3` archive
+  can be restored.
 
 Example — download an archive with an API token:
 
