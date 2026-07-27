@@ -1,7 +1,7 @@
 # What an AI can do
 
 Once [connected](connect.md), an AI assistant reaches Campfire through its **MCP
-server** (219 tools) and REST API. What it's allowed to do is capped by two
+server** (221 tools) and REST API. What it's allowed to do is capped by two
 independent, server-enforced token dimensions — a **read scope** (dm / player /
 viewer) and a **write mode** (direct / propose / read-only) — exactly like a human
 of that role.
@@ -240,6 +240,38 @@ Players are not notified: they cannot act on it, and the queue is DM-only.
     log rather than happening quietly: a server restart discards them, and the queue drops the
     oldest once it reaches its cap. Check the campaign audit log if an action you expected to
     approve is no longer listed.
+
+### Short rests and long rests
+
+The AI DM can run a rest for the whole party in **one atomic call** rather than setting each
+character's HP, resetting each spell-slot level and clearing each condition individually.
+
+A **long rest** restores HP to full, clears temporary HP, resets death saves, restores spell
+slots, and refills every resource whose rule-system recharge cadence is short-rest, long-rest,
+refocus, or dawn. A **short rest** refills short-rest resources and optionally spends hit dice
+for healing (each die rolled plus the CON modifier).
+
+**Recovery is the rule system's to define.** Which resource comes back on which rest is read
+from the recharge cadence your rule system already declares for it, so a 13th Age or Ironsworn
+table does not silently inherit D&D 5e's recovery just because 5e is the default.
+
+!!! note "What a rest does *not* clear"
+
+    A rest removes only the conditions your rule system says a rest removes — under 5e that is
+    exhaustion, unconscious, prone and frightened. Anything else, including a homebrew status a
+    DM typed in themselves, is deliberately **left in place** and reported back, so a night's
+    sleep can never silently delete a curse or a petrification. Conditions on a character sheet
+    carry no duration or source information yet, so the safe direction is to under-clear and
+    tell you, rather than guess and erase.
+
+**Atomicity is the point.** Every named character is validated before anything is written: if
+one of them is dead, lacks the hit dice requested, or has no known hit-die size, the whole rest
+is rejected and *no* character is changed. A rest that healed half the party and then failed
+would be worse than no rest tool at all.
+
+Hit dice need an explicit die size (`d8`, `d10`, …). The class hit die is not stored on the
+character sheet, and guessing one would quietly under-heal the character with no sign it
+happened.
 
 ### The scheduled AI scribe
 
