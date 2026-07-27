@@ -5589,6 +5589,138 @@ export const AiDmProactiveSettings = z.object({
 });
 export type AiDmProactiveSettings = z.infer<typeof AiDmProactiveSettings>;
 
+/**
+ * STRUCTURED TABLE STYLE (#1049). Before this, the only way to steer the AI's voice was the
+ * freeform `instructions` textarea — which works if you already know what to write, and
+ * leaves everyone else with a blank box and no hint that pacing or NPC depth were dials at all.
+ *
+ * WHAT THESE ARE, PLAINLY: prompt text. Each chosen value adds a line of guidance to the
+ * system prompt. That is a REQUEST TO A LANGUAGE MODEL, not a control the server enforces —
+ * nothing here is checked against the narration that comes back, and a model may ignore any
+ * of it. They earn their place because a stated preference measurably shifts output, not
+ * because it guarantees anything. Do not describe them to users as rules.
+ *
+ * `'default'` on every axis means "state no preference", and renders NOTHING. An
+ * unconfigured seat therefore produces a byte-identical prompt to the one it produced before
+ * #1049 — this feature costs zero tokens until a DM opts into it.
+ *
+ * The values are closed enums rather than free text on purpose. A bounded vocabulary gives
+ * the rendered section a KNOWN WORST CASE (see {@link AI_DM_STYLE_SECTION_MAX_TOKENS}), which
+ * is what lets it share a prompt with elastic consumers without silently squeezing them.
+ * Free-text style fields would have no such bound.
+ */
+export const AiDmTone = z.enum(['default', 'gritty', 'heroic', 'whimsical', 'noir', 'cozy']);
+export type AiDmTone = z.infer<typeof AiDmTone>;
+
+export const AiDmPacing = z.enum(['default', 'brisk', 'deliberate']);
+export type AiDmPacing = z.infer<typeof AiDmPacing>;
+
+export const AiDmVerbosity = z.enum(['default', 'concise', 'vivid']);
+export type AiDmVerbosity = z.infer<typeof AiDmVerbosity>;
+
+export const AiDmCombatStyle = z.enum(['default', 'tactical', 'cinematic', 'lethal', 'forgiving']);
+export type AiDmCombatStyle = z.infer<typeof AiDmCombatStyle>;
+
+export const AiDmNpcDepth = z.enum(['default', 'light', 'deep']);
+export type AiDmNpcDepth = z.infer<typeof AiDmNpcDepth>;
+
+export const AI_DM_STYLE_PRESET_DEFAULTS = {
+  tone: 'default',
+  pacing: 'default',
+  verbosity: 'default',
+  combatStyle: 'default',
+  npcDepth: 'default',
+} as const;
+
+export const AiDmStylePresets = z
+  .object({
+    tone: AiDmTone.default('default'),
+    pacing: AiDmPacing.default('default'),
+    verbosity: AiDmVerbosity.default('default'),
+    combatStyle: AiDmCombatStyle.default('default'),
+    npcDepth: AiDmNpcDepth.default('default'),
+  })
+  .default({ ...AI_DM_STYLE_PRESET_DEFAULTS });
+export type AiDmStylePresets = z.infer<typeof AiDmStylePresets>;
+
+/**
+ * Ceiling for the rendered `## Table style` section, in the repo's ~4-chars-per-token
+ * estimate. NOT a runtime trim — the section is built from a closed enum, so its true worst
+ * case is a compile-time constant, and a unit test asserts this constant still holds.
+ *
+ * It exists so the section's cost is a REVIEWABLE NUMBER rather than an assumption. The AI
+ * Driver's system prompt is shared with elastic consumers (live world state, and the bounded
+ * conversation history of #1038), and a style block that could grow without limit would
+ * quietly crowd them out. Because this one cannot, those budgets are deliberately left
+ * untouched: making history shrink when a DM picks a tone would mean changing your table's
+ * voice silently costs the AI its memory — a far worse surprise than a couple of hundred
+ * fixed tokens.
+ *
+ * 250 with the true worst case measured at 226 (all five axes on their longest option). The
+ * headroom is for a preset or two more; a change that exceeds it fails the unit test rather
+ * than silently eating another feature's budget, which is the point of stating it at all.
+ */
+export const AI_DM_STYLE_SECTION_MAX_TOKENS = 250;
+
+/**
+ * Option lists for the seat-config dropdowns, following the `NARRATION_LANGUAGE_OPTIONS`
+ * pattern: labels live beside the enum so the form cannot drift out of sync with the values
+ * the server accepts. `default` leads every axis because it is the shipped state.
+ */
+const AI_DM_STYLE_LABELS = {
+  tone: {
+    default: 'Default (no preference)',
+    gritty: 'Gritty — consequences bite',
+    heroic: 'Heroic — competent and bright',
+    whimsical: 'Whimsical — playful and absurd',
+    noir: 'Noir — moral greys, rain-slick',
+    cozy: 'Cozy — warm and low-stakes',
+  },
+  pacing: {
+    default: 'Default (no preference)',
+    brisk: 'Brisk — cut to the moment',
+    deliberate: 'Deliberate — let scenes breathe',
+  },
+  verbosity: {
+    default: 'Default (no preference)',
+    concise: 'Concise — short beats',
+    vivid: 'Vivid — rich description',
+  },
+  combatStyle: {
+    default: 'Default (no preference)',
+    tactical: 'Tactical — positions and options',
+    cinematic: 'Cinematic — momentum and imagery',
+    lethal: 'Lethal — enemies fight to win',
+    forgiving: 'Forgiving — setbacks over death',
+  },
+  npcDepth: {
+    default: 'Default (no preference)',
+    light: 'Light — a name and a trait',
+    deep: 'Deep — voices and motives',
+  },
+} as const;
+
+function styleOptions<T extends string>(values: readonly T[], labels: Record<T, string>) {
+  return values.map((value) => ({ value, label: labels[value] }));
+}
+
+export const AI_DM_STYLE_PRESET_OPTIONS = {
+  tone: styleOptions(AiDmTone.options, AI_DM_STYLE_LABELS.tone),
+  pacing: styleOptions(AiDmPacing.options, AI_DM_STYLE_LABELS.pacing),
+  verbosity: styleOptions(AiDmVerbosity.options, AI_DM_STYLE_LABELS.verbosity),
+  combatStyle: styleOptions(AiDmCombatStyle.options, AI_DM_STYLE_LABELS.combatStyle),
+  npcDepth: styleOptions(AiDmNpcDepth.options, AI_DM_STYLE_LABELS.npcDepth),
+} as const;
+
+/** Axis order + field labels for the seat-config form, so the UI iterates instead of repeating. */
+export const AI_DM_STYLE_PRESET_AXES = [
+  { key: 'tone', label: 'Tone' },
+  { key: 'pacing', label: 'Pacing' },
+  { key: 'verbosity', label: 'Verbosity' },
+  { key: 'combatStyle', label: 'Combat style' },
+  { key: 'npcDepth', label: 'NPC depth' },
+] as const;
+
 // One AI-DM "seat" per campaign (created lazily on first configure/read).
 export const AiDmSeat = z.object({
   campaignId: Id,
@@ -5609,6 +5741,8 @@ export const AiDmSeat = z.object({
   turnCount: z.number().int().nonnegative().default(0),
   lastTurnAt: IsoDate.nullable().default(null),
   proactiveSettings: AiDmProactiveSettings.default({}),
+  /** Structured table style (#1049) — prompt guidance, not enforcement. See AiDmStylePresets. */
+  stylePresets: AiDmStylePresets.default({ ...AI_DM_STYLE_PRESET_DEFAULTS }),
   actionQueueDepth: z.number().int().min(1).max(20).default(8).optional(),
   ...timestamps,
 });
@@ -5623,6 +5757,7 @@ export const AiDmSeatUpdate = z.object({
   instructions: z.string().max(20_000).optional(),
   tokenBudget: z.number().int().min(0).max(1_000_000_000).optional(),
   proactiveSettings: AiDmProactiveSettings.optional(),
+  stylePresets: AiDmStylePresets.optional(),
   actionQueueDepth: z.number().int().min(1).max(20).default(8).optional(),
 });
 export type AiDmSeatUpdate = z.infer<typeof AiDmSeatUpdate>;

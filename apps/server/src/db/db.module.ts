@@ -1470,6 +1470,25 @@ function migrateAiDmSeatsTableForActionQueueDepth(sqlite: Database.Database): vo
   sqlite.exec('ALTER TABLE ai_dm_seats ADD COLUMN action_queue_depth INTEGER DEFAULT 8');
 }
 
+/**
+ * Issue #1049: structured table style (tone / pacing / verbosity / combat style / NPC depth)
+ * on the AI-DM seat. One JSON column rather than five scalars, matching `proactive_settings`
+ * — the block is always read and written whole, and #1070's cross-campaign reuse will want to
+ * copy it as one value. Defaults to '{}', which zod fills with the all-`default` preset,
+ * meaning an upgraded seat renders no style section at all until a DM chooses one.
+ */
+function migrateAiDmSeatsTableForStylePresets1049(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ai_dm_seats'")
+    .get();
+  if (!hasTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(ai_dm_seats)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'style_presets')) return;
+
+  sqlite.exec("ALTER TABLE ai_dm_seats ADD COLUMN style_presets TEXT DEFAULT '{}'");
+}
+
 function migrateAiDmSeatsTableForProactiveSettings(sqlite: Database.Database): void {
   const hasTable = sqlite
     .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ai_dm_seats'")
@@ -3428,6 +3447,14 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // contiguous or sorted. That is also why nothing is renumbered to look tidy: renaming a
   // migration a database has already recorded is the one edit that breaks run-once.
   { name: '0120_campaign_modules_585', run: migrateCampaignModules585 },
+  // 0134 was CENTRALLY ALLOCATED to issue #1049 by the merge coordinator; 0126-0133 are held
+  // by other in-flight branches, so the gap above is deliberate and must not be "tidied" down
+  // to the next free ordinal. As with 0121 and 0117, ordinals are presentational —
+  // `runMigrations` applies entries in ARRAY order and dedupes on the FULL name string, so the
+  // `_1049` suffix is what guarantees this runs exactly once even if a sibling branch lands a
+  // colliding number. Renaming it after a database has recorded it is the one edit that would
+  // break run-once.
+  { name: '0134_ai_seat_style_presets_1049', run: migrateAiDmSeatsTableForStylePresets1049 },
 ];
 
 /**

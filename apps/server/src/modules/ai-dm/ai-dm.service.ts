@@ -9,7 +9,7 @@ import {
 } from '@nestjs/common';
 import { and, desc, eq, gt, gte, sql } from 'drizzle-orm';
 import type { z } from 'zod';
-import { AiDmProactiveSettings } from '@campfire/schema';
+import { AI_DM_STYLE_PRESET_DEFAULTS, AiDmProactiveSettings, AiDmStylePresets } from '@campfire/schema';
 import type {
   AiDmMode,
   AiDmReadiness,
@@ -99,6 +99,9 @@ function toDomain(row: typeof aiDmSeats.$inferSelect): AiDmSeat {
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     proactiveSettings: AiDmProactiveSettings.parse(row.proactiveSettings ?? {}),
+    // #1049: '{}' on an upgraded row parses to the all-`default` preset, i.e. "no preference",
+    // so a seat that predates this feature renders no style section at all.
+    stylePresets: AiDmStylePresets.parse(row.stylePresets ?? {}),
   };
 }
 
@@ -126,6 +129,7 @@ function defaultSeat(campaignId: number): AiDmSeat {
       cooldownSeconds: 300,
       maxProactiveTokensPerHour: 5000,
     },
+    stylePresets: { ...AI_DM_STYLE_PRESET_DEFAULTS },
     actionQueueDepth: 8,
     createdAt: ts,
     updatedAt: ts,
@@ -817,6 +821,7 @@ export class AiDmService implements OnApplicationBootstrap {
         createdAt: ts,
         updatedAt: ts,
         proactiveSettings: (input.proactiveSettings ?? base.proactiveSettings) as any,
+        stylePresets: (input.stylePresets ?? base.stylePresets) as any,
       });
     } else {
       await this.db
@@ -828,6 +833,7 @@ export class AiDmService implements OnApplicationBootstrap {
           ...(input.instructions !== undefined ? { instructions: input.instructions } : {}),
           ...(input.tokenBudget !== undefined ? { tokenBudget: input.tokenBudget } : {}),
           ...(input.proactiveSettings !== undefined ? { proactiveSettings: input.proactiveSettings as any } : {}),
+          ...(input.stylePresets !== undefined ? { stylePresets: input.stylePresets as any } : {}),
           ...(input.actionQueueDepth !== undefined ? { actionQueueDepth: input.actionQueueDepth } : {}),
           updatedAt: ts,
         })

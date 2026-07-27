@@ -30,6 +30,7 @@ import { AiProviderError } from '../ai-dm/providers/errors';
 import { DEFAULT_IDLE_TIMEOUT_MS } from '../ai-dm/providers/http';
 import { AI_PROVIDER_RESOLVER, resolveProviderForExecution, type AiProviderResolver } from './ai-provider-resolver';
 import { AiDmStreamService } from './ai-driver-stream.service';
+import { renderTableStyleSection } from './driver-style';
 import { AiDmTranscriptService } from './ai-driver-transcript.service';
 import { extractToolResourceIdentity, type ToolResourceIdentity } from './ai-dm-tool-resource';
 import {
@@ -3857,6 +3858,14 @@ export class AiDriverService {
   ): Promise<string> {
     const parts: string[] = [GROUNDING_PREAMBLE, GROUNDING_CITATION_CONTRACT, UNTRUSTED_INPUT_PREAMBLE];
     if (seat.instructions) parts.push(`## DM steering\n${seat.instructions}`);
+    // #1049 — structured table style, immediately after the freeform steering it complements.
+    // Both are STANDING DM PREFERENCES about how the table is run, so they read as one block
+    // ahead of any facts; style is a different axis from the truth ordering the later sections
+    // encode, and splicing it into the middle of that sequence would muddy both. The section's
+    // own text names what outranks it (charter, live state, table corrections), so its
+    // subordination does not depend on where it happens to sit.
+    const tableStyle = renderTableStyleSection(seat.stylePresets);
+    if (tableStyle) parts.push(tableStyle);
 
     const campaign = await this.campaigns.getOrThrow(campaignId);
     const { language, provenance } = resolveNarrationLanguage(campaign.narrationLanguage, narrationLanguageOverride);
