@@ -140,7 +140,7 @@ describe('AI provider fallback slot (#1052)', () => {
     // rather than only through the GET: a read that merely stopped reporting the fallback would
     // leave the ciphertext in the database for a backup or an export to carry off later.
     expect(rows().filter((r) => r.scope === 'server')).toHaveLength(0);
-    expect(rows().some((r) => r.encryptedApiKey)).toBe(false);
+    expect(rows().some((r) => r.encrypted_api_key)).toBe(false);
   });
 
   it('deleting the FALLBACK leaves the primary alone — the dependency runs one way', async () => {

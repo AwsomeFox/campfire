@@ -2,15 +2,27 @@ import crypto, { createHash, scryptSync } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { PassThrough, Transform, type Writable } from 'node:stream';
+import { finished, pipeline } from 'node:stream/promises';
+import archiver from 'archiver';
 import {
   BadRequestException,
   Inject,
   Injectable,
   Logger,
+  ServiceUnavailableException,
   type OnApplicationBootstrap,
 } from '@nestjs/common';
 import Database from 'better-sqlite3';
-import JSZip from 'jszip';
+import {
+  BackupArchiveReader,
+  MAX_ARCHIVE_COMPRESSED_BYTES,
+  MAX_ARCHIVE_ENTRIES,
+  MAX_ARCHIVE_UNCOMPRESSED_BYTES,
+  MAX_ENTRY_UNCOMPRESSED_BYTES,
+  MAX_KEY_ENVELOPE_BYTES,
+  MAX_MANIFEST_BYTES,
+} from './backup-archive-reader';
 import { DB_HOLDER, DbHolder, dbFilePath, resolveDataDir } from '../../db/db.module';
 import { decryptSecret } from '../../common/crypto';
 import { AiProviderConfigService } from '../ai-provider-config/ai-provider-config.service';
@@ -37,14 +49,13 @@ import {
 import {
   BACKUP_APP,
   BACKUP_FORMAT_VERSION,
-  BACKUP_FORMAT_VERSION_WITH_KEY_ENVELOPE,
   BACKUP_KIND,
   BACKUP_ORPHAN_LIST_CAP,
-  BACKUP_VERSION,
   CURRENT_SCHEMA_REVISION,
-  DB_ENTRY_V1,
+  DB_ENTRY,
   manifestToInspectView,
   parseBackupManifest,
+  serializeBackupManifest,
   serverAppVersion,
   type AiKeySource,
   type BackupAttachmentRecord,
@@ -64,11 +75,9 @@ import {
   type RestoreProgressPhase,
 } from './backup-restore-apply';
 
-export { BACKUP_APP, BACKUP_KIND, BACKUP_VERSION, BACKUP_FORMAT_VERSION };
+export { BACKUP_APP, BACKUP_KIND, BACKUP_FORMAT_VERSION };
 export type { BackupManifest, BackupInspectResult };
 
-/** Canonical zip entry name for the database in format-1 archives. */
-const DB_ENTRY = DB_ENTRY_V1;
 export { DB_ENTRY };
 
 /** Zip entry names inside a backup archive. */
@@ -119,9 +128,14 @@ export interface BackupDiskStatus {
   freeBytes: number;
   totalBytes: number;
   reserveBytes: number;
+  /** Archive estimate, or the staging-plus-archive peak when both paths share a filesystem. */
   estimatedNextBytes: number;
   lowSpace: boolean;
 }
+
+type ScheduledArchiveVerification =
+  | { verified: true; checksum: string; error: '' }
+  | { verified: false; checksum: string | null; error: string };
 
 export interface BackupRetentionStatus {
   policy: BackupRetentionPolicy;
@@ -165,6 +179,15 @@ export interface BuildBackupOptions {
    *  has no keyfile to include (e.g. env-managed or no AI providers ever
    *  configured), it is silently ignored. */
   keyPassphrase?: string;
+  /** Abort archive generation (for example when an HTTP client disconnects). */
+  signal?: AbortSignal;
+  /**
+   * Invoked once, immediately before the first archive byte reaches `output`.
+   * HTTP callers use it to commit download headers only when bytes are genuinely on
+   * their way, so a failure during snapshot/reconciliation still yields a normal error
+   * response rather than a JSON body wearing `Content-Type: application/zip`.
+   */
+  onFirstByte?: () => void;
 }
 
 /** Options accepted by {@link BackupService.restore}. */
@@ -175,6 +198,8 @@ export interface RestoreOptions {
   keyPassphrase?: string;
   /** #497: optional progress callback as each restore phase completes. */
   onProgress?: (phase: RestoreProgressPhase) => void;
+  /** Cancels archive I/O and removes all restore staging before live data changes. */
+  signal?: AbortSignal;
 }
 
 /** All file paths (relative to `root`) under `root`, recursively. Returns [] if root is absent. */
@@ -210,8 +235,19 @@ function safeFileBytes(filePath: string): number {
   }
 }
 
-function directoryBytes(root: string): number {
-  return listFilesRecursive(root).reduce((sum, rel) => sum + safeFileBytes(path.join(root, rel)), 0);
+/**
+ * Read an attachment's size for capture/reconciliation. Unlike the best-effort
+ * size helper above, this preserves permission and I/O failures: only a proven
+ * ENOENT means the attachment disappeared.
+ */
+export function captureFileBytesOrNullIfMissing(filePath: string): number | null {
+  try {
+    const stat = fs.statSync(filePath);
+    return stat.isFile() ? stat.size : 0;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return null;
+    throw err;
+  }
 }
 
 function lastScheduledAttemptAlert(lastError: string): string {
@@ -226,55 +262,95 @@ function looksLikeSqlite(buf: Buffer): boolean {
   return buf.length >= SQLITE_MAGIC.length && buf.subarray(0, SQLITE_MAGIC.length).equals(SQLITE_MAGIC);
 }
 
-/** Max attempts to read an attachment file whose size is changing (#828). */
-const MAX_ATTACHMENT_RETRIES = 3;
+/** Hash a file without retaining its contents in the V8 heap. */
+async function hashFile(filePath: string): Promise<{ bytes: number; sha256: string }> {
+  const hash = createHash('sha256');
+  let bytes = 0;
+  const source = fs.createReadStream(filePath);
+  source.on('data', (chunk: string | Buffer) => {
+    const bytesChunk = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    bytes += bytesChunk.length;
+    hash.update(bytesChunk);
+  });
+  await finished(source);
+  return { bytes, sha256: hash.digest('hex') };
+}
 
-/**
- * Read a file with retry-on-size-change (#828). If the file's size differs between two
- * reads (indicating a concurrent overwrite), retry up to {@link MAX_ATTACHMENT_RETRIES}
- * times. Returns the final captured bytes and whether the size changed at any point.
- * Returns null if the file is truly absent (ENOENT after retries).
- */
-function readWithRetry(absPath: string): { bytes: Buffer; changed: boolean } | null {
-  let priorSize = -1;
-  let changed = false;
-  for (let attempt = 0; attempt < MAX_ATTACHMENT_RETRIES; attempt++) {
-    try {
-      const stat = fs.statSync(absPath);
-      const bytes = fs.readFileSync(absPath);
-      // Detect an in-flight overwrite: if the size we read differs from the previous
-      // stat, or if the current stat differs from the just-read bytes' length, the file
-      // was rewritten mid-read. Retry once more to catch a stable read.
-      if (priorSize >= 0 && stat.size !== priorSize) {
-        changed = true;
-      }
-      if (bytes.length !== stat.size) {
-        // The file grew or shrank between stat and read — retry with a fresh stat.
-        priorSize = stat.size;
-        changed = true;
-        continue;
-      }
-      return { bytes, changed };
-    } catch (err) {
-      const e = err as NodeJS.ErrnoException;
-      if (e.code === 'ENOENT') return null;
-      // Any other error (permissions etc.) is fatal for THIS file — treat as missing
-      // and let the caller record it in reconciliation. Log at the caller.
-      return null;
-    }
-  }
-  // Retries exhausted with the size still moving — capture whatever we can get now.
-  try {
-    const bytes = fs.readFileSync(absPath);
-    return { bytes, changed: true };
-  } catch {
-    return null;
+/** Keep the historical bounded retry contract for files rewritten during backup. */
+export const MAX_ATTACHMENT_RETRIES = 3;
+
+export class AttachmentCaptureChangedError extends Error {
+  constructor(readonly sourcePath: string) {
+    super(`Attachment changed during capture after ${MAX_ATTACHMENT_RETRIES} attempts: ${sourcePath}`);
   }
 }
 
-/** sha256 hex digest for a byte buffer. */
-function sha256Hex(bytes: Buffer): string {
-  return createHash('sha256').update(bytes).digest('hex');
+/** Make an immutable per-run attachment copy while calculating its manifest hash. */
+async function stageAndHashFile(
+  sourcePath: string,
+  stagedPath: string,
+  signal?: AbortSignal,
+): Promise<{ bytes: number; sha256: string }> {
+  const hash = createHash('sha256');
+  let bytes = 0;
+  const tap = new PassThrough();
+  tap.on('data', (chunk: Buffer) => { bytes += chunk.length; hash.update(chunk); });
+  fs.mkdirSync(path.dirname(stagedPath), { recursive: true });
+  await pipeline(
+    fs.createReadStream(sourcePath),
+    tap,
+    fs.createWriteStream(stagedPath, { flags: 'wx', mode: 0o600 }),
+    { signal },
+  );
+  return { bytes, sha256: hash.digest('hex') };
+}
+
+/**
+ * Stage an attachment only when an attempt observes a stable source size before
+ * and after streaming it. Failed attempts remove their partial/stale stage so
+ * archiver can never consume bytes from an unstable capture.
+ */
+export async function stageAndHashFileWithRetry(
+  sourcePath: string,
+  stagedPath: string,
+  signal?: AbortSignal,
+): Promise<{ bytes: number; sha256: string }> {
+  for (let attempt = 0; attempt < MAX_ATTACHMENT_RETRIES; attempt += 1) {
+    assertBackupNotCancelled(signal);
+    const before = captureFileBytesOrNullIfMissing(sourcePath);
+    if (before === null) {
+      const error = new Error(`Attachment disappeared during capture: ${sourcePath}`) as NodeJS.ErrnoException;
+      error.code = 'ENOENT';
+      throw error;
+    }
+    await fs.promises.rm(stagedPath, { force: true });
+    try {
+      const captured = await stageAndHashFile(sourcePath, stagedPath, signal);
+      const after = captureFileBytesOrNullIfMissing(sourcePath);
+      if (after === null) {
+        const error = new Error(`Attachment disappeared during capture: ${sourcePath}`) as NodeJS.ErrnoException;
+        error.code = 'ENOENT';
+        throw error;
+      }
+      if (before === after && captured.bytes === before) return captured;
+    } catch (err) {
+      await fs.promises.rm(stagedPath, { force: true });
+      throw err;
+    }
+    await fs.promises.rm(stagedPath, { force: true });
+    assertBackupNotCancelled(signal);
+  }
+  throw new AttachmentCaptureChangedError(sourcePath);
+}
+
+function assertBackupNotCancelled(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new Error('Backup generation cancelled');
+}
+
+function assertRestoreNotCancelled(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new BadRequestException('Restore was cancelled before it was applied');
+  }
 }
 
 /** Normalize on-disk keyfile bytes (64-hex UTF-8) or raw 32-byte material. */
@@ -342,6 +418,17 @@ function validateStagedAiCredentialDecryptability(stagedDbPath: string, key: Buf
   }
 }
 
+/**
+ * The single archive lane is already held by another whole-server operation.
+ *
+ * This is a *deferral*, not a fault: an interactive download and a scheduled run
+ * simply cannot overlap. It is a distinct type so schedule-driven callers can tell
+ * "come back shortly" apart from "this backup did not work", instead of matching on
+ * a message. Stamping contention as a failure would raise a false backup alert and
+ * push the next run out by the exponential backoff.
+ */
+export class ArchiveOperationBusyError extends ServiceUnavailableException {}
+
 @Injectable()
 export class BackupService implements OnApplicationBootstrap {
   private readonly logger = new Logger(BackupService.name);
@@ -353,6 +440,8 @@ export class BackupService implements OnApplicationBootstrap {
    * and re-checked under it, so only one scheduled run is ever in flight.
    */
   private scheduledRunning = false;
+  /** Whole-server archive creation and destructive restore share one serialized lane. */
+  private archiveOperation: 'backup' | 'restore' | null = null;
 
   constructor(
     @Inject(DB_HOLDER) private readonly holder: DbHolder,
@@ -361,6 +450,19 @@ export class BackupService implements OnApplicationBootstrap {
     private readonly attachments: AttachmentsService,
     private readonly aiProviderConfig: AiProviderConfigService,
   ) {}
+
+  private beginArchiveOperation(kind: 'backup' | 'restore'): void {
+    if (this.archiveOperation) {
+      throw new ArchiveOperationBusyError(
+        `A whole-server ${this.archiveOperation} operation is already in progress; retry shortly`,
+      );
+    }
+    this.archiveOperation = kind;
+  }
+
+  private endArchiveOperation(kind: 'backup' | 'restore'): void {
+    if (this.archiveOperation === kind) this.archiveOperation = null;
+  }
 
   /**
    * #496: Detect where the running server sourced its AI credential
@@ -484,16 +586,24 @@ export class BackupService implements OnApplicationBootstrap {
     let estimatedBytes = 0;
     try {
       previous = await this.readCadence();
+      // An interactive backup or restore owns the same archive lane. This is
+      // expected coordination, not a failed scheduled attempt. Check before
+      // disk preflight so the active operation's temporary staging cannot turn
+      // a deferral into a false low-space failure and cadence backoff.
+      if (this.archiveOperation) {
+        this.logger.warn(
+          `Scheduled backup deferred: whole-server ${this.archiveOperation} operation is already in progress`,
+        );
+        return;
+      }
       const retentionPolicy = parseBackupRetentionPolicy();
       const minFreeBytes = parseBackupMinFreeBytes();
       const dir = this.backupDir();
-      estimatedBytes = estimateNextBackupBytes(
-        previous?.lastSize ?? null,
-        () => this.estimateFallbackBackupBytes(),
-      );
-      disk = this.probeDisk(dir, minFreeBytes, estimatedBytes);
+      const diskEstimate = this.scheduledBackupDiskEstimate(dir, previous?.lastSize ?? null);
+      estimatedBytes = diskEstimate.archiveBytes;
+      disk = this.probeDisk(dir, minFreeBytes, diskEstimate.requiredBytes);
       fs.mkdirSync(dir, { recursive: true });
-      disk = this.probeDisk(dir, minFreeBytes, estimatedBytes);
+      disk = this.probeDisk(dir, minFreeBytes, diskEstimate.requiredBytes);
       if (disk && disk.lowSpace) {
         const message =
           `Scheduled backup skipped: low disk space in BACKUP_DIR ` +
@@ -502,44 +612,95 @@ export class BackupService implements OnApplicationBootstrap {
         this.logger.warn(message);
         return;
       }
+      // Retain this second check as the atomic guard against an interactive
+      // operation beginning while the disk preflight was running.
+      if (this.archiveOperation) {
+        this.logger.warn(
+          `Scheduled backup deferred: whole-server ${this.archiveOperation} operation is already in progress`,
+        );
+        return;
+      }
       // #496: Scheduled backups pick up a passphrase from BACKUP_KEY_PASSPHRASE
       // so an unattended cron produces credential-portable archives when the
       // server is running with the auto-generated keyfile. Empty / unset means
       // no envelope (backward compatible).
       const scheduledPassphrase = process.env.BACKUP_KEY_PASSPHRASE?.trim();
-      const buffer = await this.buildBackup(
-        scheduledPassphrase ? { keyPassphrase: scheduledPassphrase } : undefined,
-      );
       const stamp = attemptAt.replace(/[:.]/g, '-');
       const archiveName = scheduledBackupName(stamp);
       const filePath = path.join(dir, archiveName);
-      fs.writeFileSync(filePath, buffer);
-      const size = buffer.length;
-      const checksum = createHash('sha256').update(buffer).digest('hex');
-      const verification = await this.verifyScheduledArchive(filePath);
-      if (!verification.verified) {
-        throw new Error(`Scheduled backup failed verification after write: ${verification.error}`);
+      // Same-filesystem temporary file means a completed archive becomes visible
+      // atomically. Interrupted runs leave only a removable .partial artifact.
+      const partialPath = path.join(dir, `.${archiveName}.${crypto.randomUUID()}.partial`);
+      const partialOutput = fs.createWriteStream(partialPath, { flags: 'wx', mode: 0o600 });
+      // Handle failures that occur before buildBackup reaches pipeline(), where
+      // it would otherwise attach the stream's error handling.
+      partialOutput.on('error', () => undefined);
+      try {
+        await this.buildBackup(
+          scheduledPassphrase ? { keyPassphrase: scheduledPassphrase } : undefined,
+          partialOutput,
+        );
+        // fsync requires a writable descriptor on some platforms/filesystems.
+        const descriptor = fs.openSync(partialPath, 'r+');
+        let size: number;
+        try {
+          fs.fsyncSync(descriptor);
+          // The file is durable now. Use its descriptor metadata for cadence
+          // size instead of making a second full pass solely to count bytes.
+          size = fs.fstatSync(descriptor).size;
+        } finally { fs.closeSync(descriptor); }
+        // Verify BEFORE publishing the final name. Renaming first would leave an archive
+        // that failed verification sitting under a name indistinguishable from a good
+        // scheduled backup — the inner finally only removes `partialPath` — and an
+        // unrestorable archive that looks healthy is the worst outcome a backup can have.
+        // Verifying here also makes the atomicity note above true: a failed run leaves
+        // only the removable `.partial`.
+        const verification = await this.verifyScheduledArchive(partialPath);
+        if (!verification.verified) {
+          throw new Error(`Scheduled backup failed verification after write: ${verification.error}`);
+        }
+        // This is guaranteed by ScheduledArchiveVerification, but retain a
+        // runtime guard so a future/mock verifier cannot publish a cadence row
+        // with a null checksum.
+        if (!verification.checksum) {
+          throw new Error('Scheduled backup verification succeeded without a checksum');
+        }
+        fs.renameSync(partialPath, filePath);
+        const checksum = verification.checksum;
+        const prune = await this.pruneVerifiedScheduledBackups(dir, retentionPolicy, archiveName, checksum, filePath);
+        const nextRunAt = new Date(Date.now() + intervalMs).toISOString();
+        const metrics = this.metricsAfterSuccess(previous?.metrics, disk, estimatedBytes, prune);
+        await this.writeCadence({
+          lastAttemptAt: attemptAt,
+          lastSuccessAt: attemptAt,
+          nextRunAt,
+          lastSize: size,
+          lastChecksum: checksum,
+          lastError: '',
+          lastArchiveName: archiveName,
+          lastVerifiedAt: attemptAt,
+          consecutiveFailures: 0,
+          metrics,
+        });
+        this.logger.log(
+          `Scheduled backup written: ${filePath} (${size} bytes, sha256 ${checksum.slice(0, 16)}…); ` +
+            `pruned ${prune.count} archive(s), ${prune.bytes} bytes; next run ${nextRunAt}`,
+        );
+      } finally {
+        if (!partialOutput.destroyed && !partialOutput.writableFinished) partialOutput.destroy();
+        await finished(partialOutput, { cleanup: true }).catch(() => undefined);
+        fs.rmSync(partialPath, { force: true });
       }
-      const prune = await this.pruneVerifiedScheduledBackups(dir, retentionPolicy, archiveName, checksum);
-      const nextRunAt = new Date(Date.now() + intervalMs).toISOString();
-      const metrics = this.metricsAfterSuccess(previous?.metrics, disk, estimatedBytes, prune);
-      await this.writeCadence({
-        lastAttemptAt: attemptAt,
-        lastSuccessAt: attemptAt,
-        nextRunAt,
-        lastSize: size,
-        lastChecksum: checksum,
-        lastError: '',
-        lastArchiveName: archiveName,
-        lastVerifiedAt: attemptAt,
-        consecutiveFailures: 0,
-        metrics,
-      });
-      this.logger.log(
-        `Scheduled backup written: ${filePath} (${size} bytes, sha256 ${checksum.slice(0, 16)}…); ` +
-          `pruned ${prune.count} archive(s), ${prune.bytes} bytes; next run ${nextRunAt}`,
-      );
     } catch (err) {
+      if (err instanceof ArchiveOperationBusyError) {
+        // An interactive download or restore holds the archive lane. Recording this as
+        // a failed attempt would invent a backup alert out of a routine admin download
+        // and delay the real run by the failure backoff. Leave the cadence row — and
+        // therefore nextRunAt — untouched so the next scheduler poll simply retries
+        // once the lane frees.
+        this.logger.warn(`Scheduled backup deferred: ${err.message}`);
+        return;
+      }
       const message = err instanceof Error ? err.message : String(err);
       // Stamp the attempt even on failure so the overdue check on the next boot
       // doesn't immediately re-fire (and potentially busy-loop). lastSuccessAt
@@ -559,7 +720,43 @@ export class BackupService implements OnApplicationBootstrap {
 
   private estimateFallbackBackupBytes(): number {
     const dataDir = resolveDataDir();
-    return safeFileBytes(dbFilePath(dataDir)) + directoryBytes(uploadsRoot(dataDir));
+    // The archive stages only committed attachment rows. Do not walk uploads/:
+    // that includes orphan/staging files which are intentionally excluded and
+    // would make the preflight both pessimistic and O(all filesystem entries).
+    const row = this.holder.raw
+      .prepare(`SELECT COALESCE(SUM(size), 0) AS bytes FROM attachments WHERE state = 'committed'`)
+      .get() as { bytes?: number | string };
+    const attachmentBytes = Number(row.bytes ?? 0);
+    return safeFileBytes(dbFilePath(dataDir)) + (Number.isFinite(attachmentBytes) ? attachmentBytes : 0);
+  }
+
+  /**
+   * Space required on BACKUP_DIR's filesystem for a scheduled backup. buildBackup
+   * stages a full DB/uploads copy under os.tmpdir() while the .partial ZIP grows in
+   * BACKUP_DIR. If those paths share a filesystem, both allocations are live at
+   * once; otherwise BACKUP_DIR needs only the archive estimate. Keep status and
+   * execution on this one calculation so operator warnings match the actual guard.
+   */
+  private scheduledBackupDiskEstimate(
+    backupDir: string,
+    previousArchiveBytes: number | null,
+  ): { archiveBytes: number; requiredBytes: number } {
+    if (!this.pathsShareFilesystem(backupDir, os.tmpdir())) {
+      // A known prior archive is enough to budget BACKUP_DIR when staging lives
+      // elsewhere. Keep the fallback lazy so status/preflight do not walk every
+      // upload merely to calculate an estimate they will not use.
+      const archiveBytes = estimateNextBackupBytes(
+        previousArchiveBytes,
+        () => this.estimateFallbackBackupBytes(),
+      );
+      return { archiveBytes, requiredBytes: archiveBytes };
+    }
+
+    // Same filesystem means staging and the archive coexist, so we must measure
+    // the source bytes even when a previous archive gives us its archive estimate.
+    const stagingBytes = this.estimateFallbackBackupBytes();
+    const archiveBytes = estimateNextBackupBytes(previousArchiveBytes, stagingBytes);
+    return { archiveBytes, requiredBytes: archiveBytes + stagingBytes };
   }
 
   private probeDisk(
@@ -578,7 +775,9 @@ export class BackupService implements OnApplicationBootstrap {
         totalBytes,
         reserveBytes,
         estimatedNextBytes,
-        lowSpace: reserveBytes > 0 && freeBytes - estimatedNextBytes < reserveBytes,
+        lowSpace:
+          freeBytes < estimatedNextBytes ||
+          (reserveBytes > 0 && freeBytes - estimatedNextBytes < reserveBytes),
       };
     } catch {
       return null;
@@ -593,6 +792,17 @@ export class BackupService implements OnApplicationBootstrap {
       current = parent;
     }
     return current;
+  }
+
+  private pathsShareFilesystem(left: string, right: string): boolean {
+    const leftRoot = this.existingPathForStatfs(left);
+    const rightRoot = this.existingPathForStatfs(right);
+    if (!leftRoot || !rightRoot) return false;
+    try {
+      return fs.statSync(leftRoot).dev === fs.statSync(rightRoot).dev;
+    } catch {
+      return false;
+    }
   }
 
   private failureBackoffMs(previous: BackupCadenceState | null, intervalMs: number): number {
@@ -697,21 +907,15 @@ export class BackupService implements OnApplicationBootstrap {
     return onDisk;
   }
 
-  private async verifyScheduledArchive(
-    filePath: string,
-  ): Promise<{ verified: boolean; checksum: string | null; error: string }> {
-    let buffer: Buffer;
+  private async verifyScheduledArchive(filePath: string): Promise<ScheduledArchiveVerification> {
+    let checksum: string;
     try {
-      buffer = fs.readFileSync(filePath);
+      checksum = (await hashFile(filePath)).sha256;
     } catch (err) {
       return { verified: false, checksum: null, error: err instanceof Error ? err.message : String(err) };
     }
-    const checksum = createHash('sha256').update(buffer).digest('hex');
     try {
-      const inspect = await this.inspect(buffer);
-      if (inspect.reconciliation && !inspect.reconciliation.clean) {
-        return { verified: false, checksum, error: 'archive reconciliation is not clean' };
-      }
+      await this.inspectFile(filePath);
       return { verified: true, checksum, error: '' };
     } catch (err) {
       return { verified: false, checksum, error: err instanceof Error ? err.message : String(err) };
@@ -730,11 +934,17 @@ export class BackupService implements OnApplicationBootstrap {
     policy: BackupRetentionPolicy,
     lastArchiveName: string,
     lastChecksum: string,
+    knownVerifiedPath?: string,
   ): Promise<{ count: number; bytes: number; error: string }> {
     const files = this.listScheduledBackupFiles(dir);
     const candidates: BackupRetentionCandidate[] = [];
     for (const file of files) {
-      const verification = await this.verifyScheduledArchive(file.abs);
+      // The just-published archive was comprehensively verified while it still
+      // had its partial name. Reusing that result avoids another full archive
+      // read/decompression pass, but only for this explicit path in this run.
+      const verification = knownVerifiedPath && path.resolve(file.abs) === path.resolve(knownVerifiedPath)
+        ? { verified: true, checksum: lastChecksum, error: '' }
+        : await this.verifyScheduledArchive(file.abs);
       const markers = this.retentionMarkers(file.abs);
       candidates.push({
         name: file.name,
@@ -803,7 +1013,7 @@ export class BackupService implements OnApplicationBootstrap {
     if (input.disk?.lowSpace) {
       alerts.push(
         `Backup volume is below reserve: free ${input.disk.freeBytes}B, ` +
-          `estimated next archive ${input.disk.estimatedNextBytes}B, reserve ${input.disk.reserveBytes}B`,
+          `estimated required space ${input.disk.estimatedNextBytes}B, reserve ${input.disk.reserveBytes}B`,
       );
     }
     if (input.retention.lastPruneError) {
@@ -834,11 +1044,8 @@ export class BackupService implements OnApplicationBootstrap {
     const onDisk: BackupOnDiskEntry[] = onDiskWithPaths.map(({ name, bytes, mtime }) => ({ name, bytes, mtime }));
     const policy = parseBackupRetentionPolicy();
     const reserveBytes = parseBackupMinFreeBytes();
-    const estimatedNextBytes = estimateNextBackupBytes(
-      cadence?.lastSize ?? null,
-      () => this.estimateFallbackBackupBytes(),
-    );
-    const disk = this.probeDisk(dir, reserveBytes, estimatedNextBytes);
+    const diskEstimate = this.scheduledBackupDiskEstimate(dir, cadence?.lastSize ?? null);
+    const disk = this.probeDisk(dir, reserveBytes, diskEstimate.requiredBytes);
     const metrics = this.normalizeMetrics(cadence?.metrics);
     const totalBytes = onDisk.reduce((sum, entry) => sum + entry.bytes, 0);
     const retention: BackupRetentionStatus = {
@@ -895,19 +1102,53 @@ export class BackupService implements OnApplicationBootstrap {
    * live tree but not referenced) are NOT copied — they were the "concurrent write"
    * case the DB snapshot doesn't know about, and including them would defeat the point.
    */
-  async buildBackup(options?: BuildBackupOptions): Promise<Buffer> {
-    const dataDir = resolveDataDir();
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'campfire-backup-'));
-    const snapshotPath = path.join(tmpDir, 'campfire.db');
+  async buildBackup(options?: BuildBackupOptions): Promise<Buffer>;
+  async buildBackup(options: BuildBackupOptions | undefined, output: Writable): Promise<void>;
+  async buildBackup(options?: BuildBackupOptions, output?: Writable): Promise<Buffer | void> {
+    this.beginArchiveOperation('backup');
+    let tmpDir: string | null = null;
+    // The archiver accumulates queued sources (zip.file(...) keeps a read stream per
+    // attachment) from the moment it is created, but teardown only becomes pipeline()'s
+    // job once streaming starts. Between those two points nothing else owns it, so hold
+    // a reference the outer finally can destroy.
+    let zip: ReturnType<typeof archiver> | null = null;
     try {
+      assertBackupNotCancelled(options?.signal);
+      const dataDir = resolveDataDir();
+      const estimatedBytes = this.estimateFallbackBackupBytes();
+      // Interactive downloads only need their temporary staging footprint to fit.
+      // BACKUP_MIN_FREE_BYTES protects the scheduled BACKUP_DIR after publishing
+      // an archive and must not reserve the same margin in an unrelated temp mount.
+      const tempDisk = this.probeDisk(os.tmpdir(), 0, estimatedBytes);
+      if (tempDisk?.lowSpace) {
+        throw new ServiceUnavailableException(
+          `Backup staging skipped: low temporary disk space ` +
+            `(free ${tempDisk.freeBytes}B, estimate ${estimatedBytes}B, reserve ${tempDisk.reserveBytes}B)`,
+        );
+      }
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'campfire-backup-'));
+      const snapshotPath = path.join(tmpDir, 'campfire.db');
       // VACUUM INTO requires the target file NOT to exist (tmpDir is empty). Escape the
       // path for the SQL string literal. This is our generation boundary — every read
       // below is against this snapshot, not the live DB.
       this.holder.raw.exec(`VACUUM INTO '${snapshotPath.replace(/'/g, "''")}'`);
-      const dbBytes = fs.readFileSync(snapshotPath);
-
-      const zip = new JSZip();
-      zip.file(DB_ENTRY, dbBytes);
+      assertBackupNotCancelled(options?.signal);
+      zip = archiver('zip', { zlib: { level: 6 } });
+      // Keep a permanent sink for errors emitted asynchronously after scoped
+      // pipeline listeners are removed during teardown. Other listeners still
+      // receive the same event; this only prevents a late unhandled error from
+      // terminating the server.
+      zip.on('error', () => undefined);
+      // Keep the snapshot on disk and let the ZIP writer pull from it under
+      // output backpressure instead of materializing the database in the V8 heap.
+      const dbSize = safeFileBytes(snapshotPath);
+      if (dbSize > MAX_ENTRY_UNCOMPRESSED_BYTES) {
+        throw new ServiceUnavailableException(
+          `Backup database exceeds the ${MAX_ENTRY_UNCOMPRESSED_BYTES} byte restore entry limit`,
+        );
+      }
+      let declaredArchiveBytes = dbSize;
+      zip.file(snapshotPath, { name: DB_ENTRY });
 
       // Read committed attachment rows from the SNAPSHOT. Rows in state 'reserved' are
       // uploads that hadn't yet finished publishing at snapshot time — their bytes may
@@ -945,8 +1186,8 @@ export class BackupService implements OnApplicationBootstrap {
         // extensions the app would not have written.
         const abs = this.attachments.filePath(row);
         const rel = path.relative(uploads, abs).split(path.sep).join('/');
-        const captured = readWithRetry(abs);
-        if (captured === null) {
+        const before = captureFileBytesOrNullIfMissing(abs);
+        if (before === null) {
           // The file is truly gone (ENOENT after retries). Do NOT add the file to the
           // zip — a restore that references a missing file would fail on read; the
           // reconciliation section signals the problem loudly.
@@ -955,17 +1196,50 @@ export class BackupService implements OnApplicationBootstrap {
         }
         // Concurrent overwrite OR captured bytes disagree with the snapshot row size
         // → restored DB would be internally inconsistent with the archived file.
-        if (captured.changed || captured.bytes.length !== row.size) changed++;
-        zip.file(`${UPLOADS_PREFIX}${rel}`, captured.bytes);
+        const staged = path.join(tmpDir, 'uploads', rel);
+        let captured: { bytes: number; sha256: string };
+        try {
+          captured = await stageAndHashFileWithRetry(abs, staged, options?.signal);
+        } catch (err) {
+          // The file can be deleted between the existsSync above and the read stream
+          // opening. Letting a raw ENOENT escape here would abort mid-loop with no
+          // reconciliation report — the operator would see an opaque path error instead
+          // of "which attachments went missing". Route it to the same `missing` outcome
+          // the pre-check produces so the failure stays legible and complete.
+          if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
+            missing++;
+            continue;
+          }
+          if (err instanceof AttachmentCaptureChangedError) {
+            changed++;
+            continue;
+          }
+          throw err;
+        }
+        if (captured.bytes > MAX_ENTRY_UNCOMPRESSED_BYTES) {
+          throw new ServiceUnavailableException(
+            `Backup attachment ${rel} exceeds the ${MAX_ENTRY_UNCOMPRESSED_BYTES} byte restore entry limit`,
+          );
+        }
+        declaredArchiveBytes += captured.bytes;
+        if (declaredArchiveBytes > MAX_ARCHIVE_UNCOMPRESSED_BYTES) {
+          throw new ServiceUnavailableException(
+            `Backup contents exceed the ${MAX_ARCHIVE_UNCOMPRESSED_BYTES} byte restore archive limit`,
+          );
+        }
+        if (captured.bytes !== row.size) changed++;
+        // Do not retain attachment bytes: the ZIP producer reads this file as
+        // its downstream consumer has capacity.
+        zip.file(staged, { name: `${UPLOADS_PREFIX}${rel}` });
         capturedPaths.add(rel);
         attachmentRecords.push({
           id: row.id,
           campaignId: row.campaignId,
           path: rel,
-          size: captured.bytes.length,
+          size: captured.bytes,
           mime: row.mime,
           hidden: row.hidden === 1,
-          sha256: sha256Hex(captured.bytes),
+          sha256: captured.sha256,
         });
       }
 
@@ -1031,8 +1305,20 @@ export class BackupService implements OnApplicationBootstrap {
             probe.close();
           }
         }
-        const envelope = encryptKeyfile(keyBytes, requestedPassphrase);
-        zip.file(KEY_ENVELOPE_ENTRY, JSON.stringify(envelope, null, 2));
+        const envelope = JSON.stringify(encryptKeyfile(keyBytes, requestedPassphrase), null, 2);
+        const envelopeBytes = Buffer.byteLength(envelope);
+        if (envelopeBytes > MAX_KEY_ENVELOPE_BYTES) {
+          throw new ServiceUnavailableException(
+            `Backup key envelope exceeds the ${MAX_KEY_ENVELOPE_BYTES} byte restore entry limit`,
+          );
+        }
+        declaredArchiveBytes += envelopeBytes;
+        if (declaredArchiveBytes > MAX_ARCHIVE_UNCOMPRESSED_BYTES) {
+          throw new ServiceUnavailableException(
+            `Backup contents exceed the ${MAX_ARCHIVE_UNCOMPRESSED_BYTES} byte restore archive limit`,
+          );
+        }
+        zip.append(envelope, { name: KEY_ENVELOPE_ENTRY });
         aiKeyIncluded = true;
       } else if (requestedPassphrase && aiKeySource === 'env') {
         this.logger.warn(
@@ -1044,12 +1330,12 @@ export class BackupService implements OnApplicationBootstrap {
       const manifest: BackupManifest = {
         app: BACKUP_APP,
         kind: BACKUP_KIND,
-        version: aiKeyIncluded ? BACKUP_FORMAT_VERSION_WITH_KEY_ENVELOPE : 1,
+        version: BACKUP_FORMAT_VERSION,
         appVersion: serverAppVersion(),
         schemaVersion: CURRENT_SCHEMA_REVISION,
         createdAt: nowIso(),
         db: DB_ENTRY,
-        dbBytes: dbBytes.length,
+        dbBytes: dbSize,
         uploadCount: attachmentRecords.length,
         aiKeySource,
         aiKeyIncluded,
@@ -1057,7 +1343,21 @@ export class BackupService implements OnApplicationBootstrap {
         attachments: attachmentRecords,
         reconciliation,
       };
-      zip.file(MANIFEST_ENTRY, JSON.stringify(manifest, null, 2));
+      const manifestJson = serializeBackupManifest(manifest);
+      const manifestBytes = Buffer.byteLength(manifestJson);
+      const entryCount = 2 + attachmentRecords.length + (aiKeyIncluded ? 1 : 0);
+      if (entryCount > MAX_ARCHIVE_ENTRIES) {
+        throw new ServiceUnavailableException(
+          `Backup contents exceed the ${MAX_ARCHIVE_ENTRIES} entry restore archive limit`,
+        );
+      }
+      declaredArchiveBytes += manifestBytes;
+      if (declaredArchiveBytes > MAX_ARCHIVE_UNCOMPRESSED_BYTES) {
+        throw new ServiceUnavailableException(
+          `Backup contents exceed the ${MAX_ARCHIVE_UNCOMPRESSED_BYTES} byte restore archive limit`,
+        );
+      }
+      zip.append(manifestJson, { name: MANIFEST_ENTRY });
 
       // Fail loudly if any file was missing or changed under capture — partial /
       // inconsistent archives should never silently claim success (#828 AC). Orphans
@@ -1070,9 +1370,60 @@ export class BackupService implements OnApplicationBootstrap {
         );
       }
 
-      return await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+      const archive = zip;
+      const chunks: Buffer[] = [];
+      const sink = output ?? new PassThrough();
+      if (!output) {
+        sink.on('data', (chunk: Buffer) => chunks.push(chunk));
+      }
+      let compressedBytes = 0;
+      const onFirstByte = options?.onFirstByte;
+      const compressedLimit = new Transform({
+        transform(chunk: Buffer, _encoding, callback) {
+          if (compressedBytes === 0) onFirstByte?.();
+          compressedBytes += chunk.length;
+          if (compressedBytes > MAX_ARCHIVE_COMPRESSED_BYTES) {
+            callback(new Error(`Backup archive exceeds the ${MAX_ARCHIVE_COMPRESSED_BYTES} byte compressed restore limit`));
+            return;
+          }
+          callback(null, chunk);
+        },
+      });
+      const abort = () => archive.destroy(new Error('Backup generation cancelled'));
+      options?.signal?.addEventListener('abort', abort, { once: true });
+      // addEventListener never fires for an already-aborted signal, so a cancellation
+      // landing between archive creation and this line would otherwise leave the
+      // archive alive while the throw below unwinds.
+      if (options?.signal?.aborted) abort();
+      // pipeline() owns teardown from here; the outer finally's !destroyed guard keeps
+      // it from double-destroying an archive this call already tore down.
+      const done = pipeline(archive, compressedLimit, sink);
+      void done.catch(() => undefined);
+      try {
+        assertBackupNotCancelled(options?.signal);
+        await archive.finalize();
+        await done;
+        return output ? undefined : Buffer.concat(chunks);
+      } finally {
+        options?.signal?.removeEventListener('abort', abort);
+      }
     } finally {
-      fs.rmSync(tmpDir, { recursive: true, force: true });
+      try {
+        // Failed before streaming started: release the queued attachment read streams
+        // ourselves, otherwise they stay open for the process lifetime and can make the
+        // staging removal below fail on platforms that refuse to unlink open files.
+        // After a completed pipeline the archive is already destroyed, so this is a no-op.
+        if (zip && !zip.destroyed) zip.destroy();
+      } finally {
+        try {
+          if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+        } finally {
+          // Releasing the lane must not depend on cleanup succeeding. A single throwing
+          // rmSync would otherwise wedge the guard permanently and every subsequent
+          // backup and restore would 503 for the lifetime of the process.
+          this.endArchiveOperation('backup');
+        }
+      }
     }
   }
 
@@ -1083,37 +1434,178 @@ export class BackupService implements OnApplicationBootstrap {
    * BEFORE the live DB is touched, so a malformed upload leaves the server
    * untouched (it 400s and the running DB is never closed).
    */
-  /**
-   * Read manifest metadata and upload entry names from an archive without
-   * restoring or touching the live server (issue #514).
-   */
-  async inspect(buffer: Buffer): Promise<BackupInspectResult> {
-    const zip = await this.loadBackupZip(buffer);
-    const { manifest, sourceFormatVersion } = await this.readManifestFromZipWithSource(zip);
-    const uploads: string[] = [];
-    for (const name of Object.keys(zip.files)) {
-      const entry = zip.files[name];
-      if (entry.dir || !name.startsWith(UPLOADS_PREFIX)) continue;
-      const rel = name.slice(UPLOADS_PREFIX.length);
-      // Reject unsafe paths the same way restore() does (issue #997 fix 1).
-      if (rel === '' || rel.includes('..') || path.isAbsolute(rel)) {
-        throw new BadRequestException('Invalid backup archive — unsafe upload path');
-      }
-      uploads.push(rel);
-    }
-    uploads.sort();
-    const envelopeEntry = zip.file(KEY_ENVELOPE_ENTRY);
-    const view = manifestToInspectView(manifest, uploads, sourceFormatVersion);
-    // Cross-check manifest vs archive entry so inspect() does not claim portability
-    // when the envelope file is missing from a truncated/tampered zip.
-    return {
-      ...view,
-      aiKeyIncluded: view.aiKeyIncluded && !!envelopeEntry,
-    };
+  private expectedAttachmentChecksums(
+    manifest: BackupManifest,
+  ): Map<string, BackupAttachmentRecord> {
+    return new Map(manifest.attachments.map((attachment) => [attachment.path, attachment]));
   }
 
-  async restore(
-    buffer: Buffer,
+  private validateAttachmentChecksum(
+    expectedAttachments: Map<string, BackupAttachmentRecord>,
+    foundAttachments: Set<string>,
+    relativePath: string,
+    actual: { bytes: number; sha256: string },
+  ): void {
+    const expected = expectedAttachments.get(relativePath);
+    if (!expected) {
+      throw new BadRequestException('Invalid backup archive — upload is missing manifest attachment checksum');
+    }
+    if (expected.size !== actual.bytes || expected.sha256 !== actual.sha256) {
+      throw new BadRequestException('Invalid backup archive — upload checksum does not match manifest');
+    }
+    foundAttachments.add(relativePath);
+  }
+
+  private validateAttachmentCoverage(
+    expectedAttachments: Map<string, BackupAttachmentRecord>,
+    foundAttachments: Set<string>,
+  ): void {
+    if (foundAttachments.size !== expectedAttachments.size) {
+      throw new BadRequestException('Invalid backup archive — manifest attachment is missing');
+    }
+  }
+
+  /** Ensure v3 metadata describes the committed rows in the staged snapshot. */
+  private validateManifestAttachmentsAgainstSnapshot(manifest: BackupManifest, dbPath: string): void {
+    const byId = new Map(manifest.attachments.map((record) => [record.id, record]));
+    const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    let count = 0;
+    try {
+      try {
+        for (const row of db.prepare(
+          `SELECT id, campaign_id AS campaignId, mime, size, hidden FROM attachments WHERE state = 'committed'`,
+        ).iterate() as Iterable<{ id: number; campaignId: number; mime: string; size: number; hidden: number }>) {
+          const record = byId.get(row.id);
+          const expectedPath = path.relative(uploadsRoot(resolveDataDir()), this.attachments.filePath(row)).split(path.sep).join('/');
+          if (!record || record.campaignId !== row.campaignId || record.mime !== row.mime ||
+            record.size !== row.size || record.hidden !== (row.hidden === 1) || record.path !== expectedPath) {
+            throw new BadRequestException('Invalid backup archive — manifest attachments do not match database snapshot');
+          }
+          byId.delete(row.id);
+          count++;
+        }
+      } catch (err) {
+        // The earlier integrity probe intentionally accepts any SQLite database
+        // with a users table. A missing/older attachments schema is still an
+        // invalid v3 archive, not an internal server failure.
+        if (err instanceof Database.SqliteError) {
+          throw new BadRequestException('Invalid backup archive — database attachment schema could not be read');
+        }
+        throw err;
+      }
+    } finally { db.close(); }
+    if (count !== manifest.attachments.length || byId.size !== 0) {
+      throw new BadRequestException('Invalid backup archive — manifest attachments do not match database snapshot');
+    }
+  }
+
+  /**
+   * Validate every payload an archive promises without applying it. This is used
+   * by inspect and therefore scheduled-backup verification; entries are hashed
+   * as streams so an operator check never accumulates large upload buffers.
+   */
+  private async validateArchivePayload(
+    zip: BackupArchiveReader,
+    manifest: BackupManifest,
+    signal?: AbortSignal,
+  ): Promise<string[]> {
+    const envelopeEntry = zip.get(KEY_ENVELOPE_ENTRY);
+    if (manifest.aiKeyIncluded && !envelopeEntry) {
+      throw new BadRequestException(
+        'Invalid backup archive — manifest claims an AI key envelope but the entry is missing',
+      );
+    }
+    if (!manifest.aiKeyIncluded && envelopeEntry) {
+      throw new BadRequestException(
+        `Invalid backup archive — manifest does not include an AI key envelope but ${KEY_ENVELOPE_ENTRY} is present`,
+      );
+    }
+    if (envelopeEntry) {
+      try {
+        parseKeyEnvelopeJson((await zip.readBuffer(envelopeEntry, MAX_KEY_ENVELOPE_BYTES, signal)).toString('utf8'));
+      } catch (err) {
+        throw new BadRequestException(
+          `Invalid backup key envelope: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
+    const dbFile = zip.get(manifest.db);
+    if (!dbFile) throw new BadRequestException('Invalid backup archive — database is missing');
+
+    const stageDir = fs.mkdtempSync(path.join(os.tmpdir(), 'campfire-inspect-'));
+    try {
+      const stagedDbPath = path.join(stageDir, 'campfire.db');
+      const stagedDb = await zip.extractToFile(dbFile, stagedDbPath, signal);
+      if (manifest.dbBytes !== stagedDb.bytes) {
+        throw new BadRequestException('Invalid backup archive — database size does not match manifest');
+      }
+      const dbHeader = await fs.promises.open(stagedDbPath, 'r').then(async (handle) => {
+        try {
+          const header = Buffer.alloc(SQLITE_MAGIC.length);
+          await handle.read(header, 0, header.length, 0);
+          return header;
+        } finally {
+          await handle.close();
+        }
+      });
+      if (!looksLikeSqlite(dbHeader)) throw new BadRequestException('Invalid backup archive — database is not a SQLite file');
+      try {
+        const probe = new Database(stagedDbPath, { readonly: true, fileMustExist: true });
+        try {
+          const integrity = probe.pragma('integrity_check', { simple: true });
+          const hasUsers = probe
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+            .get();
+          if (integrity !== 'ok' || !hasUsers) {
+            throw new BadRequestException('Invalid backup archive — database failed validation');
+          }
+        } finally {
+          probe.close();
+        }
+      } catch (err) {
+        if (err instanceof BadRequestException) throw err;
+        throw new BadRequestException('Invalid backup archive — database could not be opened');
+      }
+      this.validateManifestAttachmentsAgainstSnapshot(manifest, stagedDbPath);
+
+      const expectedAttachments = this.expectedAttachmentChecksums(manifest);
+      const foundAttachments = new Set<string>();
+      const uploads: string[] = [];
+      for (const entry of zip.entries) {
+        const name = entry.fileName;
+        if (name.endsWith('/') || !name.startsWith(UPLOADS_PREFIX)) continue;
+        const rel = name.slice(UPLOADS_PREFIX.length);
+        if (rel === '' || rel.includes('..') || path.isAbsolute(rel)) {
+          throw new BadRequestException('Invalid backup archive — unsafe upload path');
+        }
+        const actual = await zip.hashEntry(entry, signal);
+        this.validateAttachmentChecksum(expectedAttachments, foundAttachments, rel, actual);
+        uploads.push(rel);
+      }
+      if (manifest.uploadCount !== uploads.length) {
+        throw new BadRequestException('Invalid backup archive — upload count does not match manifest');
+      }
+      this.validateAttachmentCoverage(expectedAttachments, foundAttachments);
+      uploads.sort();
+      return uploads;
+    } finally {
+      await fs.promises.rm(stageDir, { recursive: true, force: true });
+    }
+  }
+
+  async inspectFile(archivePath: string, signal?: AbortSignal): Promise<BackupInspectResult> {
+    const zip = await BackupArchiveReader.open(archivePath, signal);
+    try {
+      const manifest = await this.readManifestFromArchive(zip, signal);
+      const uploads = await this.validateArchivePayload(zip, manifest, signal);
+      const view = manifestToInspectView(manifest, uploads);
+      return view;
+    } finally { zip.close(); }
+  }
+
+  async restoreFile(
+    archivePath: string,
     confirm: string | undefined,
     user: RequestUser,
     options?: RestoreOptions,
@@ -1124,10 +1616,13 @@ export class BackupService implements OnApplicationBootstrap {
       );
     }
 
-    const zip = await this.loadBackupZip(buffer);
-    const manifest = await this.readManifestFromZip(zip);
+    this.beginArchiveOperation('restore');
+    try {
+      const zip = await BackupArchiveReader.open(archivePath, options?.signal);
+      try {
+        const manifest = await this.readManifestFromArchive(zip, options?.signal);
 
-    const envelopeEntry = zip.file(KEY_ENVELOPE_ENTRY);
+    const envelopeEntry = zip.get(KEY_ENVELOPE_ENTRY);
     if (manifest.aiKeyIncluded && !envelopeEntry) {
       throw new BadRequestException(
         'Invalid backup archive — manifest claims an AI key envelope but the entry is missing',
@@ -1153,7 +1648,7 @@ export class BackupService implements OnApplicationBootstrap {
       }
       let envelope;
       try {
-        envelope = parseKeyEnvelopeJson(await envelopeEntry.async('string'));
+        envelope = parseKeyEnvelopeJson((await zip.readBuffer(envelopeEntry, MAX_KEY_ENVELOPE_BYTES, options?.signal)).toString('utf8'));
       } catch (err) {
         throw new BadRequestException(
           `Invalid backup key envelope: ${err instanceof Error ? err.message : String(err)}`,
@@ -1169,19 +1664,20 @@ export class BackupService implements OnApplicationBootstrap {
     }
 
     // --- Validate DB payload ---
-    const dbFile = zip.file(manifest.db);
+    const dbFile = zip.get(manifest.db);
     if (!dbFile) throw new BadRequestException('Invalid backup archive — database is missing');
-    const dbBytes = await dbFile.async('nodebuffer');
-    if (!looksLikeSqlite(dbBytes)) {
-      throw new BadRequestException('Invalid backup archive — database is not a SQLite file');
-    }
-
     // Open the incoming DB read-only in a throwaway location to confirm it's a
     // real, non-corrupt Campfire database (right magic bytes alone aren't enough).
     const stageDir = fs.mkdtempSync(path.join(os.tmpdir(), 'campfire-restore-'));
     const stagedDbPath = path.join(stageDir, 'campfire.db');
     try {
-      fs.writeFileSync(stagedDbPath, dbBytes);
+      const stagedDb = await zip.extractToFile(dbFile, stagedDbPath, options?.signal);
+      if (manifest.dbBytes !== stagedDb.bytes) throw new BadRequestException('Invalid backup archive — database size does not match manifest');
+      const dbHeader = await fs.promises.open(stagedDbPath, 'r').then(async (handle) => {
+        try { const header = Buffer.alloc(SQLITE_MAGIC.length); await handle.read(header, 0, header.length, 0); return header; }
+        finally { await handle.close(); }
+      });
+      if (!looksLikeSqlite(dbHeader)) throw new BadRequestException('Invalid backup archive — database is not a SQLite file');
       try {
         const probe = new Database(stagedDbPath, { readonly: true, fileMustExist: true });
         try {
@@ -1199,6 +1695,8 @@ export class BackupService implements OnApplicationBootstrap {
         if (err instanceof BadRequestException) throw err;
         throw new BadRequestException('Invalid backup archive — database could not be opened');
       }
+
+      this.validateManifestAttachmentsAgainstSnapshot(manifest, stagedDbPath);
 
       if (restoredKeyBytes) {
         validateStagedAiCredentialDecryptability(
@@ -1227,21 +1725,28 @@ export class BackupService implements OnApplicationBootstrap {
 
       // --- Collect + path-check uploads, then stage them on disk (#497) ---
       const stagedUploadsDir = path.join(stageDir, 'uploads');
-      const uploadEntries: Array<{ rel: string; data: Buffer }> = [];
-      for (const name of Object.keys(zip.files)) {
-        const entry = zip.files[name];
-        if (entry.dir || !name.startsWith(UPLOADS_PREFIX)) continue;
+      const uploadEntries: Array<{ rel: string; bytes: number }> = [];
+      const expectedAttachments = this.expectedAttachmentChecksums(manifest);
+      const foundAttachments = new Set<string>();
+      for (const entry of zip.entries) {
+        const name = entry.fileName;
+        if (name.endsWith('/') || !name.startsWith(UPLOADS_PREFIX)) continue;
         const rel = name.slice(UPLOADS_PREFIX.length);
         // Zip-slip guard: reject any entry that would escape the uploads root.
         if (rel === '' || rel.includes('..') || path.isAbsolute(rel)) {
           throw new BadRequestException('Invalid backup archive — unsafe upload path');
         }
-        const data = await entry.async('nodebuffer');
-        const dest = path.join(stagedUploadsDir, rel);
-        fs.mkdirSync(path.dirname(dest), { recursive: true });
-        fs.writeFileSync(dest, data);
-        uploadEntries.push({ rel, data });
+        const uploadsRoot = path.resolve(stagedUploadsDir);
+        const dest = path.resolve(uploadsRoot, rel);
+        if (!dest.startsWith(`${uploadsRoot}${path.sep}`)) {
+          throw new BadRequestException('Invalid backup archive — unsafe upload path');
+        }
+        const extracted = await zip.extractToFile(entry, dest, options?.signal);
+        this.validateAttachmentChecksum(expectedAttachments, foundAttachments, rel, extracted);
+        uploadEntries.push({ rel, bytes: extracted.bytes });
       }
+      if (manifest.uploadCount !== uploadEntries.length) throw new BadRequestException('Invalid backup archive — upload count does not match manifest');
+      this.validateAttachmentCoverage(expectedAttachments, foundAttachments);
       if (restoredKeyBytes && envSetOnHost) {
         this.logger.warn(
           'restore: AI_CONFIG_KEY is set on this host — skipping keyfile write from the archive envelope. ' +
@@ -1250,9 +1755,20 @@ export class BackupService implements OnApplicationBootstrap {
       }
 
       // --- Apply with atomic swap + automatic rollback (#497) ---
+      // Last chance to honour a cancellation. Everything above is validation against
+      // staging; everything below replaces the live database and uploads tree. The
+      // signal is polled at each extract, but validation continues afterwards, so an
+      // abort landing in that window would otherwise carry straight through into the
+      // destructive phase. Every other failure in this path costs a temp file; this one
+      // would cost the operator their live data after they pressed cancel.
+      assertRestoreNotCancelled(options?.signal);
       const progressPhases: RestoreProgressPhase[] = ['validated', 'staging-uploads'];
       options?.onProgress?.('validated');
       options?.onProgress?.('staging-uploads');
+      // Validation and extraction are intentionally non-destructive. Recheck
+      // cancellation at the last boundary before closing the live database so
+      // an abort during staging cannot cross into the atomic replacement.
+      assertRestoreNotCancelled(options?.signal);
       let applyPhases: RestoreProgressPhase[] = [];
       this.holder.withDatabaseClosed((dataDir) => {
         options?.onProgress?.('quiescing');
@@ -1295,7 +1811,7 @@ export class BackupService implements OnApplicationBootstrap {
       const result: RestoreResult = {
         ok: true,
         restoredAt: nowIso(),
-        dbBytes: dbBytes.length,
+        dbBytes: stagedDb.bytes,
         uploadCount: uploadEntries.length,
         phases: progressPhases,
       };
@@ -1315,48 +1831,22 @@ export class BackupService implements OnApplicationBootstrap {
     } finally {
       fs.rmSync(stageDir, { recursive: true, force: true });
     }
-  }
-
-  private async loadBackupZip(buffer: Buffer): Promise<JSZip> {
-    try {
-      return await JSZip.loadAsync(buffer);
-    } catch {
-      throw new BadRequestException('Invalid backup archive — not a readable zip file');
+      } finally {
+        zip.close();
+      }
+    } finally {
+      this.endArchiveOperation('restore');
     }
   }
 
-  private async readManifestFromZip(zip: JSZip): Promise<BackupManifest> {
-    const manifestFile = zip.file(MANIFEST_ENTRY);
+  private async readManifestFromArchive(zip: BackupArchiveReader, signal?: AbortSignal): Promise<BackupManifest> {
+    const manifestFile = zip.get(MANIFEST_ENTRY);
     if (!manifestFile) throw new BadRequestException('Invalid backup archive — manifest.json is missing');
+    const manifestBytes = await zip.readBuffer(manifestFile, MAX_MANIFEST_BYTES, signal);
     let parsed: unknown;
-    try {
-      parsed = JSON.parse(await manifestFile.async('string'));
-    } catch {
-      throw new BadRequestException('Invalid backup archive — manifest.json is not valid JSON');
-    }
+    try { parsed = JSON.parse(manifestBytes.toString('utf8')); }
+    catch { throw new BadRequestException('Invalid backup archive — manifest.json is not valid JSON'); }
     return parseBackupManifest(parsed);
   }
 
-  /**
-   * Like readManifestFromZip, but also returns the raw source format version
-   * from the archive (before normalization). Used by inspect() to surface the
-   * original version to operators (issue #997 fix 3).
-   */
-  private async readManifestFromZipWithSource(zip: JSZip): Promise<{ manifest: BackupManifest; sourceFormatVersion: number }> {
-    const manifestFile = zip.file(MANIFEST_ENTRY);
-    if (!manifestFile) throw new BadRequestException('Invalid backup archive — manifest.json is missing');
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(await manifestFile.async('string'));
-    } catch {
-      throw new BadRequestException('Invalid backup archive — manifest.json is not valid JSON');
-    }
-    // Capture raw version before parseBackupManifest normalizes it.
-    const rawVersion = (parsed as Record<string, unknown>)?.version;
-    const sourceFormatVersion = typeof rawVersion === 'number' && Number.isInteger(rawVersion) && rawVersion >= 0
-      ? rawVersion
-      : 0; // missing/null → legacy format 0
-    const manifest = parseBackupManifest(parsed);
-    return { manifest, sourceFormatVersion };
-  }
 }

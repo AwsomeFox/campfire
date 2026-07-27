@@ -10,6 +10,10 @@ import {
   DRIVER_STREAM_IDLE_TIMEOUT_MS,
 } from '../src/modules/ai-driver/ai-driver.service';
 import { AiDmStreamService, type AiDmStreamEvent } from '../src/modules/ai-driver/ai-driver-stream.service';
+import {
+  NARRATION_QUARANTINE_CHARS,
+  setNarrationQuarantineCharsForTests,
+} from '../src/modules/ai-driver/driver-safety';
 import { DEFAULT_IDLE_TIMEOUT_MS } from '../src/modules/ai-dm/providers/http';
 
 /**
@@ -441,9 +445,20 @@ describe('ai-dm driver runtime — session loop + streamed narration + tool exec
     const events: AiDmStreamEvent[] = [];
     const sub = streamSvc.streamFor(campaignId).subscribe((e) => events.push(e));
 
-    h.script({ text: 'The torches gutter as the door swings wide.', streamChunks: 4 });
-    await h.sendMessage(campaignId, { input: 'We enter the crypt.' });
-    sub.unsubscribe();
+    // #598: token-by-token delivery is what this case asserts, and the safety quarantine is a
+    // TRAILING delay line — a 42-character reply is shorter than the window, so it would be
+    // released as one blob at end of stream. Switch the window off for this case: what is under
+    // test here is the delta pipeline's chunking, not the delay. The window's own effect on
+    // delivery (and its interaction with a refusal) is covered by the #598 e2e suite, and the
+    // no-blob property below still proves the pipeline forwards each provider chunk.
+    setNarrationQuarantineCharsForTests(0);
+    try {
+      h.script({ text: 'The torches gutter as the door swings wide.', streamChunks: 4 });
+      await h.sendMessage(campaignId, { input: 'We enter the crypt.' });
+    } finally {
+      setNarrationQuarantineCharsForTests(NARRATION_QUARANTINE_CHARS);
+      sub.unsubscribe();
+    }
 
     const deltas = events.filter((e) => e.type === 'narration.delta');
     expect(deltas.length).toBeGreaterThan(1); // multiple token chunks, not one blob

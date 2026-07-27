@@ -1,0 +1,161 @@
+import { EventEmitter } from 'node:events';
+import { BackupController } from '../../src/modules/backup/backup.controller';
+
+function response(): EventEmitter & {
+  writableEnded: boolean;
+  headersSent: boolean;
+  destroyed: boolean;
+  status: jest.Mock;
+  set: jest.Mock;
+  destroy: jest.Mock;
+} {
+  const res = Object.assign(new EventEmitter(), {
+    writableEnded: false,
+    headersSent: false,
+    destroyed: false,
+    status: jest.fn(),
+    set: jest.fn(),
+    destroy: jest.fn(),
+  });
+  res.status.mockReturnValue(res);
+  res.set.mockReturnValue(res);
+  res.destroy.mockImplementation(() => {
+    res.destroyed = true;
+    return res;
+  });
+  return res;
+}
+
+describe('BackupController download cancellation', () => {
+  it('does not start a backup when the request was already aborted before listeners registered', async () => {
+    const req = Object.assign(new EventEmitter(), { aborted: true });
+    const res = response();
+    const backup = {
+      backupFilename: jest.fn(() => 'backup.zip'),
+      buildBackup: jest.fn(),
+    };
+
+    await expect(new BackupController(backup as never).download(req as never, res as never)).resolves.toBeUndefined();
+    expect(backup.buildBackup).not.toHaveBeenCalled();
+  });
+
+  it('does not start a backup when the response was already destroyed before listeners registered', async () => {
+    const req = new EventEmitter();
+    const res = response();
+    res.destroyed = true;
+    const backup = {
+      backupFilename: jest.fn(() => 'backup.zip'),
+      buildBackup: jest.fn(),
+    };
+
+    await expect(new BackupController(backup as never).download(req as never, res as never)).resolves.toBeUndefined();
+    expect(backup.buildBackup).not.toHaveBeenCalled();
+  });
+
+  it('does not start a backup when the response was already ended before listeners registered', async () => {
+    const req = new EventEmitter();
+    const res = response();
+    res.writableEnded = true;
+    const backup = {
+      backupFilename: jest.fn(() => 'backup.zip'),
+      buildBackup: jest.fn(),
+    };
+
+    await expect(new BackupController(backup as never).download(req as never, res as never)).resolves.toBeUndefined();
+    expect(backup.buildBackup).not.toHaveBeenCalled();
+  });
+
+  it('starts a backup for a live request', async () => {
+    const req = new EventEmitter();
+    const res = response();
+    const backup = {
+      backupFilename: jest.fn(() => 'backup.zip'),
+      buildBackup: jest.fn(async (_options: { signal: AbortSignal }, _output: unknown) => undefined),
+    };
+
+    await expect(new BackupController(backup as never).download(req as never, res as never)).resolves.toBeUndefined();
+    expect(backup.buildBackup).toHaveBeenCalledTimes(1);
+    const [options] = backup.buildBackup.mock.calls[0]!;
+    expect(options.signal.aborted).toBe(false);
+  });
+
+  it('suppresses the expected build cancellation after the client disconnects', async () => {
+    const req = new EventEmitter();
+    const res = response();
+    const backup = {
+      backupFilename: jest.fn(() => 'backup.zip'),
+      buildBackup: jest.fn(async () => {
+        res.emit('close');
+        throw new Error('Backup generation cancelled');
+      }),
+    };
+    await expect(new BackupController(backup as never).download(req as never, res as never)).resolves.toBeUndefined();
+    expect(backup.buildBackup).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not rethrow a pipeline failure after the ZIP response is committed', async () => {
+    const req = new EventEmitter();
+    const res = response();
+    const backup = {
+      backupFilename: jest.fn(() => 'backup.zip'),
+      buildBackup: jest.fn(async () => {
+        res.headersSent = true;
+        throw new Error('Backup archive exceeds compressed restore limit');
+      }),
+    };
+    await expect(new BackupController(backup as never).download(req as never, res as never)).resolves.toBeUndefined();
+  });
+
+  it('does not hide a genuine failure merely because a cancellation signal exists', async () => {
+    const req = new EventEmitter();
+    const res = response();
+    const backup = {
+      backupFilename: jest.fn(() => 'backup.zip'),
+      buildBackup: jest.fn(async () => {
+        res.emit('close');
+        throw new Error('Backup failed reconciliation');
+      }),
+    };
+    await expect(new BackupController(backup as never).download(req as never, res as never)).rejects.toThrow(
+      'reconciliation',
+    );
+    // Headers are committed on the first archive byte, so a pre-stream failure must
+    // never have set them: there is nothing to clean up and Nest's JSON error response
+    // goes out with its own Content-Type rather than `application/zip`.
+    expect(res.set).not.toHaveBeenCalled();
+  });
+
+  it('destroys rather than rethrows when the archive fails after bytes are committed', async () => {
+    const req = new EventEmitter();
+    const res = response();
+    const backup = {
+      backupFilename: jest.fn(() => 'backup.zip'),
+      // The compressed-size ceiling is enforced mid-stream, so this is the ordinary
+      // shape of an oversized archive: headers and bytes are already on the wire.
+      buildBackup: jest.fn(async () => {
+        res.headersSent = true;
+        throw new Error('Backup archive exceeds the 1073741824 byte compressed restore limit');
+      }),
+    };
+    // Rethrowing here would have Nest write a JSON error over the in-flight ZIP,
+    // producing a body that is half archive and half error message.
+    await expect(new BackupController(backup as never).download(req as never, res as never)).resolves.toBeUndefined();
+    expect(res.destroy).toHaveBeenCalledTimes(1);
+    expect((res.destroy.mock.calls[0][0] as Error).message).toContain('compressed restore limit');
+  });
+
+  it('does not double-destroy a response the archive pipeline already tore down', async () => {
+    const req = new EventEmitter();
+    const res = response();
+    const backup = {
+      backupFilename: jest.fn(() => 'backup.zip'),
+      buildBackup: jest.fn(async () => {
+        res.headersSent = true;
+        res.destroyed = true;
+        throw new Error('Backup archive exceeds the 1073741824 byte compressed restore limit');
+      }),
+    };
+    await expect(new BackupController(backup as never).download(req as never, res as never)).resolves.toBeUndefined();
+    expect(res.destroy).not.toHaveBeenCalled();
+  });
+});

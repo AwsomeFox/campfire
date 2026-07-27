@@ -1,6 +1,7 @@
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, ServiceUnavailableException } from '@nestjs/common';
 import { APP_VERSION } from '../../common/build-metadata';
 import { MIGRATION_NAMES } from '../../db/db.module';
+import { MAX_MANIFEST_BYTES } from './backup-archive-reader';
 
 /** Marks an archive as a Campfire whole-server backup. */
 export const BACKUP_APP = 'campfire';
@@ -8,18 +9,10 @@ export const BACKUP_KIND = 'server-backup';
 
 /**
  * Current manifest format version written into new archives. Bump when the zip
- * layout or manifest schema changes; add an explicit migration for each older
- * version in {@link parseBackupManifest}.
+ * layout or manifest schema changes.  Pre-1.0 backups deliberately have no
+ * compatibility promise: readers accept this version only.
  */
-export const BACKUP_FORMAT_VERSION = 2;
-
-/** Format version written for archives that include an AI keyfile envelope (#496).
- *  Older Campfire releases only understand format 1 and will reject these archives,
- *  preventing a silent restore that leaves credentials undecryptable. */
-export const BACKUP_FORMAT_VERSION_WITH_KEY_ENVELOPE = 2;
-
-/** @deprecated Use {@link BACKUP_FORMAT_VERSION}. Kept for existing imports/tests. */
-export const BACKUP_VERSION = BACKUP_FORMAT_VERSION;
+export const BACKUP_FORMAT_VERSION = 3;
 
 /** DB migration count at backup time — a coarse schema revision for operators. */
 export const CURRENT_SCHEMA_REVISION = MIGRATION_NAMES.length;
@@ -115,28 +108,20 @@ export interface BackupManifest {
    * an older server can tell the operator which app version is required.
    */
   minCampfireVersion?: string;
-  /** AI credential encryption key posture at backup time (#496). Optional for
-   *  backward compat — older archives simply omit it and the restore side
-   *  assumes `keyfile` with no envelope. */
-  aiKeySource?: AiKeySource;
+  /** AI credential encryption key posture at backup time. */
+  aiKeySource: AiKeySource;
   /** True when an encrypted keyfile envelope (ai-config.key.env.json) is
    *  present in the archive (#496). */
-  aiKeyIncluded?: boolean;
+  aiKeyIncluded: boolean;
   /** Number of AI provider config rows with a stored encrypted API key at
    *  backup time (#496). Lets the operator quickly see the size of the
    *  credential fleet that hinges on the keyfile. Non-secret — no key
    *  material or last-4 leaks through this count. */
   aiCredentialCount?: number;
-  /**
-   * Per-attachment reconciliation records (#828). Written by archives from
-   * this Campfire release onward; older archives omit this field.
-   */
-  attachments?: BackupAttachmentRecord[];
-  /**
-   * Reconciliation summary (#828). Written by archives from this release onward;
-   * older archives omit this field (they were produced before reconciliation).
-   */
-  reconciliation?: BackupReconciliation;
+  /** Per-attachment checksum records required by the v3 archive contract. */
+  attachments: BackupAttachmentRecord[];
+  /** Reconciliation summary required by the v3 archive contract. */
+  reconciliation: BackupReconciliation;
 }
 
 /** Per-attachment checksum row surfaced by inspect (issue #444). */
@@ -162,23 +147,37 @@ export interface BackupInspectResult {
   app: string;
   kind: string;
   formatVersion: number;
-  /** The raw format version from the source archive before normalization (issue #997). */
-  sourceFormatVersion: number;
   appVersion: string | null;
   schemaVersion: number | null;
-  createdAt: string | null;
-  dbEntry: string | null;
-  dbBytes: number | null;
-  uploadCount: number | null;
+  createdAt: string;
+  dbEntry: string;
+  dbBytes: number;
+  uploadCount: number;
   uploads: string[];
   /** AI credential encryption key posture recorded at backup time (#496). */
-  aiKeySource: AiKeySource | null;
+  aiKeySource: AiKeySource;
   aiKeyIncluded: boolean;
   aiCredentialCount: number | null;
-  /** Attachment checksums from the manifest when present (#444). */
+  /** Attachment checksums from the v3 manifest (#444). */
   attachmentChecksums: BackupInspectAttachmentChecksum[];
-  /** Reconciliation summary from the manifest when present (#444). */
-  reconciliation: BackupInspectReconciliation | null;
+  /** Reconciliation summary from the v3 manifest (#444). */
+  reconciliation: BackupInspectReconciliation;
+}
+
+/** Enforce the shared writer/reader manifest entry ceiling. */
+export function assertBackupManifestBytes(bytes: number): void {
+  if (bytes > MAX_MANIFEST_BYTES) {
+    throw new ServiceUnavailableException(
+      `Backup manifest exceeds the ${MAX_MANIFEST_BYTES} byte restore manifest limit`,
+    );
+  }
+}
+
+/** Compact serialization keeps checksum metadata practical at the entry cap. */
+export function serializeBackupManifest(manifest: BackupManifest): string {
+  const json = JSON.stringify(manifest);
+  assertBackupManifestBytes(Buffer.byteLength(json));
+  return json;
 }
 
 /** Cap checksum rows returned by inspect so huge archives stay UI-safe. */
@@ -190,10 +189,68 @@ function asNonEmptyString(value: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
-/** Expected db entry path for format version 1 archives (issue #997 fix 2). */
-export const DB_ENTRY_V1 = 'db/campfire.db';
+/**
+ * Format v3 requires complete attachment checksum metadata. Every record must
+ * be safe and complete so restore validation can require exact archive coverage.
+ */
+function parseAttachmentRecords(raw: Record<string, unknown>): BackupAttachmentRecord[] {
+  if (!Object.prototype.hasOwnProperty.call(raw, 'attachments')) {
+    throw new BadRequestException('Invalid backup archive — format version 3 requires attachment checksum metadata');
+  }
+  if (!Array.isArray(raw.attachments)) {
+    throw new BadRequestException('Invalid backup archive — manifest attachments must be an array');
+  }
 
-function normalizeManifestV1(raw: Record<string, unknown>, sourceVersion = 1): BackupManifest {
+  const seenPaths = new Set<string>();
+  return raw.attachments.map((entry): BackupAttachmentRecord => {
+    if (!entry || typeof entry !== 'object') {
+      throw new BadRequestException('Invalid backup archive — manifest attachment record is invalid');
+    }
+    const record = entry as Record<string, unknown>;
+    const validPath =
+      typeof record.path === 'string' &&
+      record.path.length > 0 &&
+      !record.path.startsWith('/') &&
+      !record.path.includes('\\') &&
+      !record.path.includes('\0') &&
+      !record.path.split('/').some((part) => part === '' || part === '.' || part === '..');
+    const validSha256 = typeof record.sha256 === 'string' && /^[a-f0-9]{64}$/i.test(record.sha256);
+    if (
+      typeof record.id !== 'number' || !Number.isInteger(record.id) || record.id < 0 ||
+      typeof record.campaignId !== 'number' || !Number.isInteger(record.campaignId) || record.campaignId < 0 ||
+      !validPath ||
+      typeof record.size !== 'number' || !Number.isInteger(record.size) || record.size < 0 ||
+      !asNonEmptyString(record.mime) ||
+      typeof record.hidden !== 'boolean' ||
+      !validSha256
+    ) {
+      throw new BadRequestException('Invalid backup archive — manifest attachment record is invalid');
+    }
+    // The checks above establish these string types; keep local names so the
+    // validation boundary is also clear to TypeScript.
+    const attachmentPath = record.path as string;
+    const mime = record.mime as string;
+    const sha256 = record.sha256 as string;
+    if (seenPaths.has(attachmentPath)) {
+      throw new BadRequestException('Invalid backup archive — manifest attachment paths must be unique');
+    }
+    seenPaths.add(attachmentPath);
+    return {
+      id: record.id,
+      campaignId: record.campaignId,
+      path: attachmentPath,
+      size: record.size,
+      mime,
+      hidden: record.hidden,
+      sha256,
+    };
+  });
+}
+
+/** Expected database entry path for backup archives. */
+export const DB_ENTRY = 'db/campfire.db';
+
+function parseManifestV3(raw: Record<string, unknown>): BackupManifest {
   const createdAt = asNonEmptyString(raw.createdAt);
   const db = asNonEmptyString(raw.db);
   const dbBytes = raw.dbBytes;
@@ -202,11 +259,11 @@ function normalizeManifestV1(raw: Record<string, unknown>, sourceVersion = 1): B
     throw new BadRequestException('Invalid backup archive — manifest is missing required fields');
   }
   // Validate that db points to the canonical entry for this format (issue #997 fix 2).
-  if (db !== DB_ENTRY_V1) {
+  if (db !== DB_ENTRY) {
     // Truncate user-controlled value to avoid log/response inflation.
     const truncated = db.length > 60 ? db.slice(0, 60) + '…' : db;
     throw new BadRequestException(
-      `Invalid backup archive — manifest.db must be "${DB_ENTRY_V1}" for format version ${sourceVersion}, got "${truncated}"`,
+      `Invalid backup archive — manifest.db must be "${DB_ENTRY}" for format version ${BACKUP_FORMAT_VERSION}, got "${truncated}"`,
     );
   }
   if (typeof dbBytes !== 'number' || !Number.isFinite(dbBytes) || dbBytes < 0) {
@@ -223,11 +280,18 @@ function normalizeManifestV1(raw: Record<string, unknown>, sourceVersion = 1): B
       ? schemaVersion
       : undefined;
 
-  // #496: AI credential key posture — all optional for backward compat.
   const rawKeySource = raw.aiKeySource;
-  const aiKeySource: AiKeySource | undefined =
-    rawKeySource === 'env' || rawKeySource === 'keyfile' ? rawKeySource : undefined;
-  const aiKeyIncluded = raw.aiKeyIncluded === true ? true : undefined;
+  if (rawKeySource !== 'env' && rawKeySource !== 'keyfile') {
+    throw new BadRequestException('Invalid backup archive — format version 3 requires aiKeySource to be "env" or "keyfile"');
+  }
+  const aiKeySource: AiKeySource = rawKeySource;
+  if (typeof raw.aiKeyIncluded !== 'boolean') {
+    throw new BadRequestException('Invalid backup archive — format version 3 requires aiKeyIncluded to be a boolean');
+  }
+  const aiKeyIncluded = raw.aiKeyIncluded;
+  if (aiKeyIncluded && aiKeySource !== 'keyfile') {
+    throw new BadRequestException('Invalid backup archive — aiKeyIncluded=true requires aiKeySource="keyfile"');
+  }
   const rawCredentialCount = raw.aiCredentialCount;
   const aiCredentialCount =
     typeof rawCredentialCount === 'number' &&
@@ -236,81 +300,57 @@ function normalizeManifestV1(raw: Record<string, unknown>, sourceVersion = 1): B
       ? rawCredentialCount
       : undefined;
 
-  // #828: preserve optional reconciliation fields when re-reading a manifest.
-  const attachments = Array.isArray(raw.attachments)
-    ? (raw.attachments as unknown[])
-        .map((entry): BackupAttachmentRecord | null => {
-          if (!entry || typeof entry !== 'object') return null;
-          const rec = entry as Record<string, unknown>;
-          if (
-            typeof rec.id !== 'number' ||
-            typeof rec.campaignId !== 'number' ||
-            typeof rec.path !== 'string' ||
-            typeof rec.size !== 'number' ||
-            typeof rec.mime !== 'string' ||
-            typeof rec.sha256 !== 'string'
-          ) {
-            return null;
-          }
-          return {
-            id: rec.id,
-            campaignId: rec.campaignId,
-            path: rec.path,
-            size: rec.size,
-            mime: rec.mime,
-            hidden: rec.hidden === true,
-            sha256: rec.sha256,
-          };
-        })
-        .filter((r): r is BackupAttachmentRecord => r !== null)
-    : undefined;
-
-  let reconciliation: BackupReconciliation | undefined;
-  if (raw.reconciliation && typeof raw.reconciliation === 'object') {
-    const r = raw.reconciliation as Record<string, unknown>;
-    if (
-      typeof r.generation === 'string' &&
-      typeof r.totalAttachments === 'number' &&
-      typeof r.missing === 'number' &&
-      typeof r.changed === 'number' &&
-      Array.isArray(r.orphans) &&
-      typeof r.orphanCount === 'number'
-    ) {
-      // `clean` is derived — never trust a caller-supplied boolean that could disagree
-      // with missing/changed (e.g. missing:1 + clean:true).
-      reconciliation = {
-        generation: r.generation,
-        totalAttachments: r.totalAttachments,
-        missing: r.missing,
-        changed: r.changed,
-        orphans: (r.orphans as unknown[]).filter((x): x is string => typeof x === 'string'),
-        orphanCount: r.orphanCount,
-        clean: r.missing === 0 && r.changed === 0,
-      };
-    }
+  const attachments = parseAttachmentRecords(raw);
+  if (!raw.reconciliation || typeof raw.reconciliation !== 'object') {
+    throw new BadRequestException('Invalid backup archive — format version 3 requires reconciliation metadata');
   }
+  const r = raw.reconciliation as Record<string, unknown>;
+  const validCount = (value: unknown) => typeof value === 'number' && Number.isInteger(value) && value >= 0;
+  const totalAttachments = r.totalAttachments as number;
+  const missing = r.missing as number;
+  const changed = r.changed as number;
+  const orphanCount = r.orphanCount as number;
+  const orphans = r.orphans as unknown[];
+  const clean = r.clean as boolean;
+  if (
+    !asNonEmptyString(r.generation) || !validCount(r.totalAttachments) || !validCount(r.missing) ||
+    !validCount(r.changed) || !Array.isArray(r.orphans) || !validCount(r.orphanCount) ||
+    typeof r.clean !== 'boolean' || !orphans.every((value) => typeof value === 'string') ||
+    totalAttachments !== attachments.length || uploadCount !== attachments.length ||
+    missing !== 0 || changed !== 0 || orphanCount < orphans.length || clean !== true
+  ) {
+    throw new BadRequestException('Invalid backup archive — manifest reconciliation is invalid');
+  }
+  const reconciliation: BackupReconciliation = {
+    generation: r.generation as string,
+    totalAttachments,
+    missing,
+    changed,
+    orphans: orphans as string[],
+    orphanCount,
+    clean: missing === 0 && changed === 0,
+  };
 
   return {
     app: BACKUP_APP,
     kind: BACKUP_KIND,
-    version: sourceVersion,
+    version: BACKUP_FORMAT_VERSION,
     createdAt,
     db,
     dbBytes,
     uploadCount,
     ...(appVersion ? { appVersion } : {}),
     ...(parsedSchema !== undefined ? { schemaVersion: parsedSchema } : {}),
-    ...(aiKeySource ? { aiKeySource } : {}),
-    ...(aiKeyIncluded !== undefined ? { aiKeyIncluded } : {}),
+    aiKeySource,
+    aiKeyIncluded,
     ...(aiCredentialCount !== undefined ? { aiCredentialCount } : {}),
-    ...(attachments && attachments.length > 0 ? { attachments } : {}),
-    ...(reconciliation ? { reconciliation } : {}),
+    attachments,
+    reconciliation,
   };
 }
 
 /**
- * Validate app/kind, reject unsupported future format versions (before any DB
- * work), and migrate recognized older formats to the current shape.
+ * Validate the one supported manifest version before any DB work.
  */
 export function parseBackupManifest(raw: unknown): BackupManifest {
   if (!raw || typeof raw !== 'object') {
@@ -321,61 +361,30 @@ export function parseBackupManifest(raw: unknown): BackupManifest {
     throw new BadRequestException('Invalid backup archive — not a Campfire server backup');
   }
 
-  let formatVersion = record.version;
-  if (formatVersion === undefined || formatVersion === null) {
-    formatVersion = 0;
-  }
+  const formatVersion = record.version;
   if (typeof formatVersion !== 'number' || !Number.isInteger(formatVersion) || formatVersion < 0) {
     throw new BadRequestException('Invalid backup archive — manifest format version is missing or invalid');
   }
-
-  if (formatVersion > BACKUP_FORMAT_VERSION) {
-    const required = asNonEmptyString(record.minCampfireVersion);
-    const hint = required
-      ? `Upgrade Campfire to at least v${required} before restoring this archive.`
-      : `Upgrade Campfire to a release that supports backup format version ${formatVersion}.`;
+  if (formatVersion !== BACKUP_FORMAT_VERSION) {
     throw new BadRequestException(
-      `Invalid backup archive — manifest format version ${formatVersion} is newer than this server supports (format version ${BACKUP_FORMAT_VERSION}). ${hint}`,
+      `Invalid backup archive — manifest format version ${formatVersion} is unsupported; this pre-1.0 server accepts format version ${BACKUP_FORMAT_VERSION} only.`,
     );
   }
-
-  if (formatVersion === 0) {
-    return normalizeManifestV1({ ...record, version: 1 });
-  }
-  if (formatVersion === 1) {
-    return normalizeManifestV1(record, formatVersion);
-  }
-  if (formatVersion === 2) {
-    // Format 2 exists solely for envelope-bearing archives. Reject incomplete
-    // or repackaged v2 manifests that omit the posture markers so restore cannot
-    // silently apply the DB without its credential key (#496).
-    if (record.aiKeyIncluded !== true || record.aiKeySource !== 'keyfile') {
-      throw new BadRequestException(
-        'Invalid backup archive — format version 2 requires aiKeyIncluded=true and aiKeySource="keyfile"',
-      );
-    }
-    return normalizeManifestV1(record, formatVersion);
-  }
-
-  throw new BadRequestException(
-    `Invalid backup archive — unrecognized manifest format version ${formatVersion}`,
-  );
+  return parseManifestV3(record);
 }
 
-export function manifestToInspectView(manifest: BackupManifest, uploads: string[], sourceFormatVersion: number): BackupInspectResult {
-  const reconciliation = manifest.reconciliation
-    ? {
-        generation: manifest.reconciliation.generation,
-        totalAttachments: manifest.reconciliation.totalAttachments,
-        missing: manifest.reconciliation.missing,
-        changed: manifest.reconciliation.changed,
-        orphanCount: manifest.reconciliation.orphanCount,
-        clean: manifest.reconciliation.clean,
-        orphans: manifest.reconciliation.orphans,
-      }
-    : null;
+export function manifestToInspectView(manifest: BackupManifest, uploads: string[]): BackupInspectResult {
+  const reconciliation = {
+    generation: manifest.reconciliation.generation,
+    totalAttachments: manifest.reconciliation.totalAttachments,
+    missing: manifest.reconciliation.missing,
+    changed: manifest.reconciliation.changed,
+    orphanCount: manifest.reconciliation.orphanCount,
+    clean: manifest.reconciliation.clean,
+    orphans: manifest.reconciliation.orphans,
+  };
 
-  const attachmentChecksums = (manifest.attachments ?? [])
+  const attachmentChecksums = manifest.attachments
     .slice(0, BACKUP_INSPECT_CHECKSUM_CAP)
     .map((entry) => ({ path: entry.path, size: entry.size, sha256: entry.sha256 }));
 
@@ -383,16 +392,15 @@ export function manifestToInspectView(manifest: BackupManifest, uploads: string[
     app: manifest.app,
     kind: manifest.kind,
     formatVersion: manifest.version,
-    sourceFormatVersion,
     appVersion: manifest.appVersion ?? null,
     schemaVersion: manifest.schemaVersion ?? null,
-    createdAt: manifest.createdAt ?? null,
-    dbEntry: manifest.db ?? null,
-    dbBytes: manifest.dbBytes ?? null,
-    uploadCount: manifest.uploadCount ?? null,
+    createdAt: manifest.createdAt,
+    dbEntry: manifest.db,
+    dbBytes: manifest.dbBytes,
+    uploadCount: manifest.uploadCount,
     uploads,
-    aiKeySource: manifest.aiKeySource ?? null,
-    aiKeyIncluded: manifest.aiKeyIncluded === true,
+    aiKeySource: manifest.aiKeySource,
+    aiKeyIncluded: manifest.aiKeyIncluded,
     aiCredentialCount: manifest.aiCredentialCount ?? null,
     attachmentChecksums,
     reconciliation,

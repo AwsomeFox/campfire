@@ -224,6 +224,50 @@ the table log so someone who reconnects later still sees it. Losing the state is
 losing it without telling anyone is not — a DM should never have to *discover* that an approval
 they granted is gone, or that the AI is waiting on a confirmation that no longer exists.
 
+### When a provider refuses or filters a reply
+
+If the AI provider reports that it **stopped a reply on safety grounds** — a content
+filter tripping, the model declining, or the provider blocking the prompt outright before
+it generated anything — Campfire treats that turn as **withheld**, not as narration:
+
+- the reply is **never committed**: no DM message is posted, nothing is written to the
+  table transcript, and the text is not carried into the AI's context for the next turn;
+- **no tool runs**, even if the AI asked for one in that same reply, so a refused turn
+  cannot change HP, dice, canon, or anything else;
+- the table sees a **neutral notice** that a reply was withheld. It deliberately does not
+  say what was withheld;
+- the seat parks on the usual recovery ladder with **Retry**, **Nudge** (retry with
+  different framing), and **Continue without AI**;
+- an incident trail is recorded for the DM. **There is no in-app screen for it yet** — it
+  is readable only by a DM of the campaign, over the API, at
+  `GET /api/v1/campaigns/:campaignId/ai-dm/withheld-turns`. It records counts and
+  provenance only — how much had already streamed, how much the trailing window still had
+  in hand, how many tool calls were suppressed, which provider and model, and whose action
+  prompted it. **The withheld text itself is never stored anywhere**, and neither is a
+  fingerprint of it. Read *"already streamed"* first: it is the number that says how much
+  of the reply reached the table. The other one is capped by the size of the window, so on
+  a long refused reply it is small because most of the reply had already gone out — not
+  because little was refused.
+
+**About live streaming.** Narration streams to the table token by token, and a provider
+only reports a refusal at the *end* of a reply. Campfire holds back a short trailing
+window of narration (a couple of sentences) so the newest text is still on the server when
+that signal arrives — in practice the offending passage and the refusal arrive within a few
+frames of each other, so usually **nothing reaches the table at all**. If a reply was long
+enough that some text had already streamed, clients are told to discard it. That is a
+real mitigation with a real bound, not a guarantee: text a player already read cannot be
+unread, and the incident record tells a DM exactly how much that was.
+
+!!! warning "Local and self-hosted models are not covered by this"
+
+    This protection **relays a safety signal from your provider**. Campfire does not
+    classify content itself. A self-hosted or local model with no safety layer — Ollama,
+    llama.cpp, LM Studio, a bare vLLM endpoint, and many OpenAI-compatible proxies — will
+    simply report that it finished normally, and **nothing here will fire**. If your table
+    needs this protection, it has to come from a provider that performs the check. The
+    session-zero charter, the proposal gate on canon writes, the tool allowlist, and human
+    review all still apply either way.
+
 ### Approving what the AI asks to do
 
 Some actions the AI proposes do not run straight away — they wait for the DM. `begin_encounter`

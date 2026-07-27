@@ -33,6 +33,8 @@ import { ProposalRecordsService, type ProposableEntityType } from '../proposals/
 import { AiDmService } from './ai-dm.service';
 import { AI_DM_PROVIDER, type AiDmProvider } from './ai-dm.provider';
 import { createAiProvider, type AiProvider } from './providers';
+import { resolveProviderStepUsage } from './providers/step-usage';
+import { isWithheldFinishReason, describeWithheldTurn } from '../ai-driver/driver-safety';
 import { AiProviderConfigService } from '../ai-provider-config/ai-provider-config.service';
 import { provenanceEndpointBaseUrl } from '../../common/ai-provenance-endpoint';
 
@@ -149,6 +151,13 @@ export class CoDmService {
 
     let narration = '';
     let tokensUsed = 0;
+    // #598 review: absence of a measurement is not a measurement of zero. Set when the
+    // provider reported no usage AND produced nothing to estimate from — see the settlement
+    // below, which consumes the reservation instead of refunding it.
+    let usageUnknown = false;
+    // #598 review: the provider's terminal state. A safety refusal has to reach the DM as a
+    // refusal; the external-provider branch below is the only one that can report one.
+    let withheldNotice: string | null = null;
     let resolvedModel = '';
     // #501 provenance: which provider/model/endpoint actually produced the draft.
     // Only assigned on the success paths — a provider throw releases the reservation
@@ -167,8 +176,20 @@ export class CoDmService {
           model: config.model,
           maxTokens: reservation.tokensReserved,
         });
+        // #598 review: a safety refusal arrives with the prose already discarded by the
+        // adapter, so `text` is empty and `usage` is frequently absent too — a Gemini PROMPT
+        // block carries no candidate and no `usageMetadata` at all. Reading `totalTokens`
+        // straight through therefore metered ZERO and refunded the whole reservation, so a
+        // DM could retry a blocked draft indefinitely: the provider bills every attempt and
+        // the seat's budget gate never advances. Same fail-open the driver path fixed; this
+        // is the entry point that still had it.
+        const resolved = resolveProviderStepUsage(result.text, result, result.refusalChars ?? 0);
         narration = result.text;
-        tokensUsed = result.usage.totalTokens;
+        tokensUsed = resolved.tokens;
+        usageUnknown = resolved.unknown;
+        if (isWithheldFinishReason(result.finishReason)) {
+          withheldNotice = describeWithheldTurn(result.finishReason);
+        }
         resolvedModel = result.model || config.model;
         providerName = aiProvider.name;
         providerType = config.providerType;
@@ -207,17 +228,36 @@ export class CoDmService {
     }
 
     const clampedTokens = Math.max(0, Math.floor(tokensUsed));
-    const metered = await this.aiDm.meterTurn(
-      campaignId,
-      clampedTokens,
-      {
-        actor: auditActor(user),
-        action: 'ai-dm.draft',
-        detail: `${input.target} draft metering (+${clampedTokens} tokens, reserved=${reservation.tokensReserved})`,
-        model: resolvedModel,
-      },
-      reservation,
-    );
+    // Settle the reservation EXACTLY once, by whichever route the measurement justifies, and
+    // ALWAYS before the parse below can throw — a throw between here and settlement would
+    // strand the reservation and permanently shrink the campaign's budget (#598 review).
+    const metered = usageUnknown
+      ? await this.aiDm.markReservationUsageUnknown(reservation, {
+          actor: auditActor(user),
+          action: 'ai-dm.draft.unknown',
+          detail: `${input.target} draft reported no usage and produced nothing measurable; settling reserved=${reservation.tokensReserved} as unknown spend rather than metering zero`,
+          model: resolvedModel,
+        })
+      : await this.aiDm.meterTurn(
+          campaignId,
+          clampedTokens,
+          {
+            actor: auditActor(user),
+            action: 'ai-dm.draft',
+            detail: `${input.target} draft metering (+${clampedTokens} tokens, reserved=${reservation.tokensReserved})`,
+            model: resolvedModel,
+          },
+          reservation,
+        );
+
+    // #598 review: report a safety refusal AS a refusal. Without this the empty text fell
+    // through to `toPayloads`, which cannot find JSON in it and blames the operator's setup
+    // ("Configure a real provider…") — a wrong diagnosis for a draft the provider declined on
+    // purpose, and the one message guaranteed to send a DM off editing settings that are fine.
+    // Deliberately after settlement, so a refused draft is still paid for.
+    if (withheldNotice) {
+      throw new UnprocessableEntityException(withheldNotice);
+    }
 
     // Turn the provider text into validated proposal payloads for the target's entity type.
     const entityType = TARGET_ENTITY_TYPE[input.target];
