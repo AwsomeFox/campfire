@@ -78,6 +78,25 @@ describe('backup streaming writer (#603)', () => {
     }
   });
 
+  it('releases the archive operation lane after a pre-pipeline failure', async () => {
+    const svc = service();
+    const realStatSync = fs.statSync.bind(fs);
+    const stat = jest.spyOn(fs, 'statSync').mockImplementation(((target: fs.PathLike, ...args: unknown[]) => {
+      const actual = realStatSync(target, ...(args as []));
+      return String(target).endsWith(`${path.sep}campfire.db`)
+        ? Object.assign(Object.create(Object.getPrototypeOf(actual)), actual, { size: 512 * 1024 * 1024 + 1 })
+        : actual;
+    }) as typeof fs.statSync);
+    try {
+      await expect(svc.buildBackup(undefined, new PassThrough())).rejects.toThrow('restore entry limit');
+    } finally {
+      stat.mockRestore();
+    }
+    const output = new PassThrough();
+    output.resume();
+    await expect(svc.buildBackup(undefined, output)).resolves.toBeUndefined();
+  });
+
   it('destroys a scheduled output when backup setup fails before piping', async () => {
     const backupDir = path.join(dataDir, 'backups');
     const previous = process.env.BACKUP_DIR;

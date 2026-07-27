@@ -217,6 +217,10 @@ function contentLength(res: Response): number | null {
   return Number.isFinite(value) && value > 0 ? value : null;
 }
 
+function isAbortError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'name' in error && error.name === 'AbortError';
+}
+
 export async function downloadServerBackup(options?: {
   keyPassphrase?: string;
   signal?: AbortSignal;
@@ -226,16 +230,25 @@ export async function downloadServerBackup(options?: {
   const passphrase = options?.keyPassphrase?.trim();
   const usePost = Boolean(passphrase);
   const headers = devHeaders();
-  // This runs before the first await so browsers that require a user gesture can show
-  // the destination chooser. POST downloads cannot be handed to the browser download
+  // Pick a destination before starting the network request so browsers can preserve
+  // the user gesture. POST downloads cannot be handed to the browser download
   // manager portably, so use File System Access when it is available.
   const picker = saveFilePicker();
-  const fileHandle = picker
-    ? await picker({
+  let fileHandle: WritableFileHandle | null = null;
+  if (picker) {
+    try {
+      fileHandle = await picker({
         suggestedName: 'campfire-backup.zip',
         types: [{ description: 'Campfire backup archive', accept: { 'application/zip': ['.zip'] } }],
-      })
-    : null;
+      });
+    } catch (error) {
+      if (isAbortError(error)) {
+        options?.signal?.throwIfAborted();
+        throw new DOMException('The backup download was cancelled before it started.', 'AbortError');
+      }
+      throw error;
+    }
+  }
   const res = await fetch(usePost ? `${API}/backup/download` : `${API}/backup`, {
     method: usePost ? 'POST' : 'GET',
     credentials: 'include',

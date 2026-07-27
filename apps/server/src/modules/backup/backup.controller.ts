@@ -68,6 +68,11 @@ function requestAbort(req: Request, res: Response): { signal: AbortSignal; dispo
   };
 }
 
+function isBackupDownloadCancellation(error: unknown, signal: AbortSignal): boolean {
+  if (!signal.aborted || !(error instanceof Error)) return false;
+  return error.name === 'AbortError' || error.message === 'Backup generation cancelled';
+}
+
 @ApiTags('backup')
 @Controller('backup')
 @ServerRoles('admin')
@@ -130,6 +135,10 @@ export class BackupController {
         { ...(keyPassphrase && keyPassphrase.length > 0 ? { keyPassphrase } : {}), signal: operation.signal },
         res,
       );
+    } catch (error) {
+      // A client disconnect is expected during a streamed download. Preserve
+      // unrelated failures even if the request happened to close at the same time.
+      if (!isBackupDownloadCancellation(error, operation.signal)) throw error;
     } finally {
       operation.dispose();
     }

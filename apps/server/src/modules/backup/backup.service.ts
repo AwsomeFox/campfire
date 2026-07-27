@@ -933,6 +933,7 @@ export class BackupService implements OnApplicationBootstrap {
   async buildBackup(options?: BuildBackupOptions, output?: Writable): Promise<Buffer | void> {
     this.beginArchiveOperation('backup');
     let tmpDir: string | null = null;
+    let zip: ReturnType<typeof archiver> | null = null;
     try {
       assertBackupNotCancelled(options?.signal);
       const dataDir = resolveDataDir();
@@ -951,7 +952,7 @@ export class BackupService implements OnApplicationBootstrap {
       // below is against this snapshot, not the live DB.
       this.holder.raw.exec(`VACUUM INTO '${snapshotPath.replace(/'/g, "''")}'`);
       assertBackupNotCancelled(options?.signal);
-      const zip = archiver('zip', { zlib: { level: 6 } });
+      zip = archiver('zip', { zlib: { level: 6 } });
       // Keep the snapshot on disk and let the ZIP writer pull from it under
       // output backpressure instead of materializing the database in the V8 heap.
       const dbSize = safeFileBytes(snapshotPath);
@@ -1195,8 +1196,15 @@ export class BackupService implements OnApplicationBootstrap {
         options?.signal?.removeEventListener('abort', abort);
       }
     } finally {
-      if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
-      this.endArchiveOperation('backup');
+      try {
+        if (zip && !zip.destroyed) zip.destroy();
+      } finally {
+        try {
+          if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+        } finally {
+          this.endArchiveOperation('backup');
+        }
+      }
     }
   }
 
