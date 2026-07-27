@@ -1627,6 +1627,43 @@ function migrateAiDriverControlStateAnnouncedRecovery(sqlite: Database.Database)
 }
 
 /**
+ * Issue #1042 — two additive columns on `ai_driver_control_state` holding the AI seat's
+ * outstanding GRANTS OF AUTHORITY: unconsumed secret-read approvals (#557) and queued
+ * confirm-policy tool calls awaiting DM approval (#474).
+ *
+ * They are persisted so a restart can REVOKE THEM LOUDLY — audited, signalled, and visible in
+ * the table log — not so they can be resurrected. That distinction is the whole point of the
+ * issue: "silently revoked" is the bug, and you cannot audit the revocation of something you
+ * kept no record of. Hydration reads these, writes one audit row per discarded grant, tells the
+ * table, and clears the columns; nothing is ever restored onto the live session.
+ *
+ * A SEPARATE, never-before-recorded migration name rather than a widening of #559's
+ * `migrateAiDriverControlStateTable`, for exactly the reason that migration's own comment
+ * spells out: a database that already recorded the CREATE would never re-run it, so a column
+ * folded into it would stay missing forever — and every drizzle read of the table would then
+ * throw inside a best-effort try/catch that swallows it, silently disabling restart-safety with
+ * no visible symptom. Additive column changes get their own name so they run independently of
+ * whether the CREATE was recorded.
+ *
+ * Guarded per-column (not per-table): a database may legitimately have one column and not the
+ * other if a future branch adds a third the same way.
+ */
+function migrateAiDriverSessionPersistence1042(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ai_driver_control_state'")
+    .get();
+  if (!hasTable) return;
+  const cols = sqlite.prepare('PRAGMA table_info(ai_driver_control_state)').all() as Array<{ name: string }>;
+  const names = new Set(cols.map((c) => c.name));
+  if (!names.has('secret_read_approvals')) {
+    sqlite.exec('ALTER TABLE ai_driver_control_state ADD COLUMN secret_read_approvals TEXT');
+  }
+  if (!names.has('pending_tool_confirmations')) {
+    sqlite.exec('ALTER TABLE ai_driver_control_state ADD COLUMN pending_tool_confirmations TEXT');
+  }
+}
+
+/**
  * Migration for DBs created before DM-initiated check requests (issue #415): the
  * `check_requests` table didn't exist. Same "new table" pattern as migrateAiScribeTables —
  * CREATE TABLE / CREATE INDEX IF NOT EXISTS, recorded so upgraded hosts get the table (and its
@@ -3418,6 +3455,16 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // the next free ordinal. runMigrations dedupes on the FULL name string, so the `_577` suffix
   // is what guarantees this runs exactly once even if a sibling branch lands a colliding ordinal.
   { name: '0121_ai_driver_grounding_claims_577', run: migrateAiDriverGroundingClaims577 },
+  // 0131 was CENTRALLY ALLOCATED to issue #1042 by the merge coordinator. 0122-0130 are held by
+  // other in-flight branches (0130 → #599), so the gap is deliberate and must not be tidied down
+  // to the next free ordinal — every branch computing "next free" for itself is how they collide.
+  //
+  // This must stay AFTER 0118 (`ai_driver_control_state` CREATE) in the array: it ALTERs that
+  // table, and runMigrations executes in array order. The name is never-before-recorded, which
+  // is what actually guarantees run-once — runMigrations dedupes on the FULL string, so the
+  // `_1042` suffix survives a sibling branch landing a colliding ordinal, and renaming it later
+  // is the one edit that would silently skip it on every database that already recorded it.
+  { name: '0131_ai_driver_session_persistence_1042', run: migrateAiDriverSessionPersistence1042 },
   // Campaign modules take 0120, assigned centrally. The 0114/0115 this branch originally
   // carried were reassigned to #1443 and #1524 as those landed first; 0112/0113 are a
   // permanent gap, since the branch holding them ended up taking 0118/0119.

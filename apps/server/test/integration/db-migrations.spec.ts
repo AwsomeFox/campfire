@@ -553,6 +553,87 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     }
   });
 
+  it('0131 adds the AI-driver grant columns on a legacy control-state table (#1042)', () => {
+    expect(MIGRATION_NAMES).toContain('0131_ai_driver_session_persistence_1042');
+    // It must run AFTER 0118 creates the table — runMigrations executes in array order, and an
+    // ALTER against a table that does not exist yet would be a no-op that never retries.
+    expect(MIGRATION_NAMES.indexOf('0131_ai_driver_session_persistence_1042')).toBeGreaterThan(
+      MIGRATION_NAMES.indexOf('0118_ai_driver_control_state_559'),
+    );
+
+    const upgradedDir = makeTempDataDir();
+    dataDir = makeTempDataDir();
+    try {
+      const fresh = openDatabase(dataDir);
+      let freshCols: string[];
+      try {
+        freshCols = columnNames(fresh.sqlite, 'ai_driver_control_state');
+        expect(freshCols).toContain('secret_read_approvals');
+        expect(freshCols).toContain('pending_tool_confirmations');
+      } finally {
+        fresh.sqlite.close();
+      }
+
+      // A database carrying #559's control-state table WITHOUT the new columns — the shape every
+      // existing install has. A separate migration name is what makes this reachable at all: a
+      // column folded into 0118 would never run here, because 0118 is already recorded.
+      writeOldSchemaDb(upgradedDir);
+      const seeded = openDatabase(upgradedDir);
+      try {
+        seeded.sqlite.exec('DROP TABLE IF EXISTS ai_driver_control_state');
+        seeded.sqlite.exec(`
+          CREATE TABLE ai_driver_control_state (
+            campaign_id INTEGER PRIMARY KEY,
+            status TEXT NOT NULL DEFAULT 'idle',
+            state TEXT NOT NULL DEFAULT 'running',
+            scene TEXT, last_narration TEXT, last_turn_at TEXT,
+            turn_count INTEGER NOT NULL DEFAULT 0,
+            stuck TEXT, acting_dm TEXT, vote TEXT,
+            takeover_requested_by TEXT, last_input TEXT, announced_recovery TEXT,
+            updated_at TEXT NOT NULL
+          );
+        `);
+        seeded.sqlite
+          .prepare(
+            `INSERT INTO ai_driver_control_state (campaign_id, status, state, updated_at)
+             VALUES (1, 'paused', 'human_control', '2026-01-01T00:00:00.000Z')`,
+          )
+          .run();
+        // Mark 0131 un-run so reopening exercises the ALTER against the legacy shape.
+        seeded.sqlite.prepare('DELETE FROM __migrations WHERE name = ?').run('0131_ai_driver_session_persistence_1042');
+      } finally {
+        seeded.sqlite.close();
+      }
+
+      const upgraded = openDatabase(upgradedDir);
+      try {
+        const cols = columnNames(upgraded.sqlite, 'ai_driver_control_state');
+        expect(cols).toContain('secret_read_approvals');
+        expect(cols).toContain('pending_tool_confirmations');
+        expect([...cols].sort()).toEqual([...freshCols].sort());
+        // ADD COLUMN, never a rebuild: the existing takeover grant is still there. Losing a row
+        // to "fix" its shape would recreate the exact silent-revocation bug #1042 is about.
+        const row = upgraded.sqlite
+          .prepare('SELECT state, secret_read_approvals FROM ai_driver_control_state WHERE campaign_id = 1')
+          .get() as { state: string; secret_read_approvals: string | null } | undefined;
+        expect(row?.state).toBe('human_control');
+        expect(row?.secret_read_approvals).toBeNull();
+      } finally {
+        upgraded.sqlite.close();
+      }
+
+      // Re-running is a no-op (the per-column PRAGMA probe), not a duplicate-column error.
+      const again = openDatabase(upgradedDir);
+      try {
+        expect(countRows(again.sqlite, 'ai_driver_control_state')).toBe(1);
+      } finally {
+        again.sqlite.close();
+      }
+    } finally {
+      fs.rmSync(upgradedDir, { recursive: true, force: true });
+    }
+  });
+
   it('0070 adds notifications.data on a legacy table and preserves JSON payloads', () => {
     dataDir = makeTempDataDir();
     const seeded = openDatabase(dataDir);
