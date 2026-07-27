@@ -678,6 +678,10 @@ export class SessionZeroConsentService {
    * boolean — and nothing that encodes an age. The request DTO is `.strict()`, so an
    * integrator who sends `birthDate` gets a 400 rather than a silently dropped field
    * they believe was stored.
+   *
+   * Re-opening the same version preserves a prior granted/declined/withdrawn decision
+   * only when the guardian contact is unchanged. Naming a different guardian must reset
+   * to `pending` so an old approval cannot silently transfer to someone else.
    */
   async requestGuardianConsent(
     campaignId: number,
@@ -700,6 +704,19 @@ export class SessionZeroConsentService {
         )
         .limit(1)
         .get();
+      const sameGuardian =
+        !!existing &&
+        existing.guardianName.trim().toLowerCase() === input.guardianName.trim().toLowerCase() &&
+        existing.guardianEmail.trim().toLowerCase() === input.guardianEmail.trim().toLowerCase() &&
+        (existing.guardianRelationship ?? '').trim().toLowerCase() ===
+          (input.guardianRelationship ?? '').trim().toLowerCase();
+      const preserveDecision =
+        existing &&
+        existing.status !== 'pending' &&
+        existing.versionId === version.id &&
+        sameGuardian
+          ? existing
+          : null;
       const values = {
         guardianName: input.guardianName,
         guardianEmail: input.guardianEmail,
@@ -708,13 +725,11 @@ export class SessionZeroConsentService {
         versionId: version.id,
         userName: subject.userName,
         updatedAt: ts,
-        ...(existing &&
-        existing.status !== 'pending' &&
-        existing.versionId === version.id
+        ...(preserveDecision
           ? {
-              status: existing.status,
-              decisionNote: existing.decisionNote,
-              decidedAt: existing.decidedAt,
+              status: preserveDecision.status,
+              decisionNote: preserveDecision.decisionNote,
+              decidedAt: preserveDecision.decidedAt,
             }
           : {
               status: 'pending' as const,

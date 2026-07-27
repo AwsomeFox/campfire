@@ -627,6 +627,22 @@ describe('Issue #600: session-zero consent lifecycle (e2e)', () => {
       expect(reopen.body.status).toBe('granted');
       expect(reopen.body.decidedAt).toBe(granted.body.decidedAt);
 
+      // Naming a different guardian on the same version must not inherit the prior grant —
+      // that approval belonged to someone else and needs a fresh DM decision.
+      const swapped = await player.post(`${API}/campaigns/${campaignId}/session-zero/guardian-consents`).send({
+        versionId,
+        guardianName: 'Other Guardian',
+        guardianEmail: 'other-guardian@example.test',
+        guardianRelationship: 'aunt',
+        minorAttested: true,
+      });
+      expect(swapped.status).toBe(201);
+      expect(swapped.body.id).toBe(consentId);
+      expect(swapped.body.status).toBe('pending');
+      expect(swapped.body.decidedAt).toBeFalsy();
+      expect(swapped.body.guardianName).toBe('Other Guardian');
+      expect(swapped.body.guardianEmail).toBe('other-guardian@example.test');
+
       const withdrawn = await dm
         .post(`${API}/campaigns/${campaignId}/session-zero/guardian-consents/${consentId}/decision`)
         .send({ status: 'withdrawn', note: 'They changed their mind.' });
