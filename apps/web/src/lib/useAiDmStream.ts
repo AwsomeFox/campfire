@@ -71,6 +71,18 @@ export type AiDmStreamEvent =
   | { type: 'state'; campaignId: number; state: string; at: string }
   | { type: 'vote'; campaignId: number; action: string; kind: string; outcome?: string; at: string }
   | { type: 'takeover'; campaignId: number; action: string; memberId: string; at: string }
+  // #474 / #1558 — a confirm-policy tool call was queued for DM approval, or a DM resolved one.
+  // Thin: the client refetches GET /ai-dm/tool-confirmations for the authoritative queue. Until
+  // #1558 the web parser dropped this frame entirely (unknown types return null), so the panel
+  // that needed it could not have been driven by the stream even if it had existed.
+  | {
+      type: 'tool-confirmation';
+      campaignId: number;
+      action: 'queued' | 'approved' | 'rejected';
+      confirmationId: string;
+      tool: string;
+      at: string;
+    }
   /**
    * One durably-persisted transcript event (#572) — the authoritative multi-player table
    * log. Unlike every other frame here this one is BACKED BY A ROW: it carries a stable
@@ -148,6 +160,19 @@ export function parseAiDmStreamEvent(value: unknown): AiDmStreamEvent | null {
       if (typeof v.message !== 'string') return null;
       const reason = v.reason === 'refusal' ? 'refusal' : 'content_filter';
       return { type, campaignId: v.campaignId as number, reason, message: v.message, at: v.at as string };
+    }
+    case 'tool-confirmation': {
+      if (typeof v.confirmationId !== 'string' || typeof v.tool !== 'string') return null;
+      const action = v.action;
+      if (action !== 'queued' && action !== 'approved' && action !== 'rejected') return null;
+      return {
+        type,
+        campaignId: v.campaignId as number,
+        action,
+        confirmationId: v.confirmationId,
+        tool: v.tool,
+        at: v.at as string,
+      };
     }
     case 'tool': {
       if (typeof v.name !== 'string' || typeof v.isError !== 'boolean' || typeof v.proposed !== 'boolean') return null;

@@ -163,6 +163,10 @@ function typeIcon(type: Notification['type']): string {
       return 'scales';
     case 'ai_dm_alert':
       return 'robot-golem';
+    // #599 — the table safety hold. Its own icon, not the AI one: it fires on tables with
+    // no AI seat at all.
+    case 'safety_hold':
+      return 'stop-sign';
     default:
       return 'ringing-bell';
   }

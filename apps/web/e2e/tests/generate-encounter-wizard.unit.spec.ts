@@ -16,6 +16,7 @@ import { resolve } from 'node:path';
 
 const WIZARD = resolve(__dirname, '../../src/features/encounters/GenerateEncounterWizard.tsx');
 const LIST = resolve(__dirname, '../../src/features/encounters/EncounterListPage.tsx');
+const EN_ENCOUNTERS = resolve(__dirname, '../../src/i18n/locales/en/encounters.json');
 
 test.describe('Generate-encounter wizard surface (issue #412)', () => {
   test('the wizard exposes preview, explanation, inspection, tune, warnings, and commit', () => {
@@ -55,7 +56,14 @@ test.describe('Generate-encounter wizard surface (issue #412)', () => {
   test('the encounter list offers a "Generate encounter" entry point for the DM', () => {
     const src = readFileSync(LIST, 'utf8');
     expect(src).toMatch(/GenerateEncounterWizard/);
-    expect(src).toMatch(/Generate encounter/);
     expect(src).toMatch(/setGenerating/);
+    // The button's label is no longer an English literal in the component — it is
+    // `t('encounters.generate')`. Asserting the literal here made this test fail the
+    // moment the page was internationalised, even though the entry point never went
+    // away. Check the wiring in the component and the COPY in the en catalog, which is
+    // where the words now live; between them the original claim still holds end to end.
+    expect(src).toMatch(/t\(['"]encounters\.generate['"]\)/);
+    const en = JSON.parse(readFileSync(EN_ENCOUNTERS, 'utf8')) as { encounters?: Record<string, unknown> };
+    expect(en.encounters?.generate).toBe('Generate encounter');
   });
 });

@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { and, eq, gt, inArray, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
@@ -11,6 +11,7 @@ import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { filterHidden, isVisibleTo, resolveCreateHidden } from '../../common/redact';
 import { fromJsonText, toJsonText } from '../../common/json';
+import { conditionWriteSetFromInstances, legacyConditionInstance as sharedLegacyConditionInstance, parseConditionInstancesText, readConditionInstances, sheetConditionWriteSetFromInstances } from '../../common/conditions';
 import { fogConcealsPixels, parseFogState } from '../../common/fog';
 import { rollDice, rollInitiative, rollOpenLegendActionDice } from '../../common/dice';
 import { foldForSearch, foldedIncludes } from '../../common/text-search';
@@ -53,6 +54,7 @@ import type { CombatantHpState, GeneratorCandidate, RosterSlotPlan, RosterTuneOp
 import { ATTACHMENT_STATE_COMMITTED } from '../attachments/attachment.constants';
 import { AttachmentsService } from '../attachments/attachments.service';
 import { CampaignLibraryService } from '../campaign-library/campaign-library.service';
+import { TableSafetyService } from '../safety/table-safety.service';
 import { canWriteBackHp, hpSyncSliceOf, hpSyncSlicesEqual } from './hp-sync';
 import {
   backfillEncounterOpResponse,
@@ -308,36 +310,17 @@ function combatantToDomain(row: typeof combatants.$inferSelect): Combatant {
 
 /** Stable structured wrapper for one legacy string condition (issue #423 migration bridge). */
 function legacyConditionInstance(rawName: string): ConditionInstance | null {
-  const name = rawName.trim();
-  if (!name) return null;
-  // Bound the generated id to the schema max(40) and keep it stable.
-  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 33);
-  return {
-    id: `legacy_${slug || 'condition'}`.slice(0, 40),
-    name,
-    ruleEntryId: null,
-    source: null,
-    sourceCombatantId: null,
-    durationRounds: null,
-    roundsRemaining: null,
-    timing: 'none',
-    saveTiming: 'none',
-    saveDc: null,
-    saveAbility: null,
-    isConcentration: false,
-    stacks: 1,
-    notes: '',
-    custom: false,
-  };
+  // Single definition lives in common/conditions.ts alongside the write helpers, so the
+  // shape a legacy string materialises into cannot drift between reader and writer.
+  return sharedLegacyConditionInstance(rawName);
 }
 
 /** Parse stored condition instances JSON or synthesize default instances from legacy conditions array (issue #423). */
 function parseConditionInstances(text: string | null, stringConditions: string[] = []): ConditionInstance[] {
-  let instances: ConditionInstance[] = [];
-  if (text != null) {
-    const parsed = zod.array(ConditionInstance).safeParse(fromJsonText<unknown>(text, null));
-    if (parsed.success) instances = parsed.data;
-  }
+  // Union, not reconcile: this is the READ path, where a pre-#423 row legitimately has
+  // legacy names and no instances. The WRITE path must reconcile instead — see
+  // conditionWriteSetFromNames in common/conditions.ts.
+  const instances: ConditionInstance[] = parseConditionInstancesText(text);
   if (stringConditions.length > 0) {
     const existingNames = new Set(instances.map((i) => i.name.trim().toLowerCase()));
     for (const rawName of stringConditions) {
@@ -490,7 +473,32 @@ export class EncountersService {
     private readonly revisions: RevisionsService,
     private readonly attachmentsService: AttachmentsService,
     private readonly campaignLibrary: CampaignLibraryService,
+    /**
+     * #599 — the table safety hold. Optional and LAST in the list because several integration
+     * specs hand-construct this service positionally (test/integration/encounter-*.spec.ts);
+     * appending leaves those constructions valid and un-gated, which is the right degraded
+     * shape for a unit test of turn logic. Every use is `?.`-guarded.
+     */
+    @Optional() private readonly safety?: TableSafetyService,
   ) {}
+
+  /**
+   * Refuse to advance play while a participant's safety hold stands (issue #599).
+   *
+   * Placed in the SERVICE, not the controller, deliberately. Turn advancement is reachable from
+   * three places — the REST controller, the MCP tool surface a connected AI client drives, and
+   * the AI driver's own tool dispatch — and a gate that only covers the first is a gate an X-Card
+   * can be walked around by anything holding an MCP token.
+   *
+   * Gated: start, next-turn, end-turn, undo-turn, and applying a resolved action. NOT gated:
+   * `end`, because ending the encounter is one of the facilitator's listed recovery moves and a
+   * safety hold that traps the table inside a running fight would be worse than no hold at all;
+   * and not the editing paths (HP, conditions, notes), because a facilitator cleaning up the
+   * board while the table talks is exactly what a stop is for.
+   */
+  private assertNoSafetyHold(campaignId: number): void {
+    this.safety?.assertNotHeld(campaignId);
+  }
 
   /**
    * In-memory idempotency map for the generated-encounter commit (issue #412):
@@ -1772,7 +1780,12 @@ export class EncountersService {
             // Issue #486: seed tracker conditions from the sheet so Poisoned (etc.)
             // applied before combat is already visible in the run-session roster.
             // Merge semantics for the overlap window: see sync comment on updateCombatant.
-            conditions: character.conditions,
+            // #1047: carry the sheet's structured copy in too. No translation needed —
+            // a sheet instance already has the round-scoped fields null, so it enters as an
+            // indefinite condition, which is correct.
+            ...conditionWriteSetFromInstances(
+              readConditionInstances(character.conditionInstances, character.conditions),
+            ),
             ruleEntryId: null,
             sortOrder: index,
           };
@@ -2518,7 +2531,12 @@ export class EncountersService {
             deathSaveSuccesses: character.deathSaveSuccesses,
             deathSaveFailures: character.deathSaveFailures,
             sheetSyncedUpdatedAt: character.updatedAt,
-            conditions: character.conditions,
+            // #1047: carry the sheet's structured copy in too. No translation needed —
+            // a sheet instance already has the round-scoped fields null, so it enters as an
+            // indefinite condition, which is correct.
+            ...conditionWriteSetFromInstances(
+              readConditionInstances(character.conditionInstances, character.conditions),
+            ),
             ruleEntryId: null,
             sortOrder: sortOrder++,
           };
@@ -2682,6 +2700,7 @@ export class EncountersService {
     let characterSheetUpdatedAt: string | null = null;
     // Issue #486: sheet conditions carried into a late-join character combatant.
     let characterConditions = '[]';
+    let characterConditionInstances: string | null = null;
     // NOT pre-seeded from input.ruleEntryId — only set once the row is confirmed to exist
     // below, so a dangling id can never make it into the INSERT (was previously assigned
     // unconditionally here, so a bogus/deleted ruleEntryId silently got stored).
@@ -2777,7 +2796,11 @@ export class EncountersService {
       characterDeathSaveFailures = character.deathSaveFailures;
       characterSheetUpdatedAt = character.updatedAt;
       // Issue #486: seed from the sheet (same contract as create() auto-add).
+      // #1047: the structured copy comes with it, untranslated (see the create() path).
       characterConditions = character.conditions;
+      characterConditionInstances = toJsonText(
+        readConditionInstances(character.conditionInstances, character.conditions),
+      );
       spCurrent = character.spCurrent;
       spMax = character.spMax;
       rpCurrent = character.rpCurrent;
@@ -2933,6 +2956,7 @@ export class EncountersService {
               : {}),
             // Issue #486: character combatants inherit sheet conditions; monsters/NPCs start empty.
             conditions: characterId !== null ? characterConditions : '[]',
+            conditionInstances: characterId !== null ? characterConditionInstances : null,
             ruleEntryId,
             statblockJson,
             sortOrder: sql`(SELECT COALESCE(MAX(${combatants.sortOrder}), -1) + 1 FROM ${combatants} WHERE ${combatants.encounterId} = ${encounterId})`,
@@ -3257,8 +3281,7 @@ export class EncountersService {
           instances = instances.slice(0, 50);
           const derived = deriveConditionNames(instances);
           afterConditions = new Set(derived);
-          writeSet.conditionInstances = toJsonText(instances);
-          writeSet.conditions = toJsonText(derived);
+          Object.assign(writeSet, conditionWriteSetFromInstances(instances));
         }
         if (patch.eac !== undefined && isDm) writeSet.eac = patch.eac;
         if (patch.kac !== undefined && isDm) writeSet.kac = patch.kac;
@@ -3342,7 +3365,15 @@ export class EncountersService {
             sheetSet.deathSaveFailures = updated.deathSaveFailures;
           }
           if (conditionFieldsTouched) {
-            sheetSet.conditions = updated.conditions;
+            // #1047: the sheet gets the structured copy too, with round-scoped fields
+            // stripped. Writing only the names here would recreate the #423 desync one
+            // table over — see common/conditions.ts.
+            Object.assign(
+              sheetSet,
+              sheetConditionWriteSetFromInstances(
+                readConditionInstances(updated.conditionInstances, updated.conditions),
+              ),
+            );
           }
           tx.update(characters)
             .set(sheetSet)
@@ -3798,6 +3829,7 @@ export class EncountersService {
 
   async start(encounterId: number, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {
     const encounterRow = await this.getRowOrThrow(encounterId);
+    this.assertNoSafetyHold(encounterRow.campaignId); // #599
     if (encounterRow.status !== 'preparing') {
       // Without this guard, /start on an already-'ended' encounter revives it with a
       // stale endedAt still set (or re-starts a 'running' one, resetting round/turnIndex
@@ -3912,6 +3944,7 @@ export class EncountersService {
     role: Role,
   ): Promise<EncounterWithCombatants> {
     const encounterRow = await this.getRowOrThrow(encounterId);
+    this.assertNoSafetyHold(encounterRow.campaignId); // #599
     if (encounterRow.status !== 'running') {
       throw new BadRequestException('Encounter is not running');
     }
@@ -3942,6 +3975,7 @@ export class EncountersService {
     role: Role,
   ): Promise<EncounterWithCombatants> {
     const encounterRow = await this.getRowOrThrow(encounterId);
+    this.assertNoSafetyHold(encounterRow.campaignId); // #599
     if (encounterRow.status !== 'running') {
       throw new BadRequestException('Encounter is not running');
     }
@@ -4167,10 +4201,7 @@ export class EncountersService {
               expiredConditions.push({ combatantId: ending.id, combatantName: ending.name, conditionName: c.name });
             }
             tx.update(combatants)
-              .set({
-                conditionInstances: toJsonText(condTick.kept),
-                conditions: toJsonText(deriveConditionNames(condTick.kept)),
-              })
+              .set(conditionWriteSetFromInstances(condTick.kept))
               .where(eq(combatants.id, ending.id))
               .run();
           }
@@ -4206,8 +4237,7 @@ export class EncountersService {
             for (const c of condTick.expired) {
               expiredConditions.push({ combatantId: starting.id, combatantName: starting.name, conditionName: c.name });
             }
-            startSet.conditionInstances = toJsonText(condTick.kept);
-            startSet.conditions = toJsonText(deriveConditionNames(condTick.kept));
+            Object.assign(startSet, conditionWriteSetFromInstances(condTick.kept));
           }
           tx.update(combatants).set(startSet).where(eq(combatants.id, starting.id)).run();
         } else if (phase === 'lair') {
@@ -4340,6 +4370,7 @@ export class EncountersService {
    */
   async undoTurn(encounterId: number, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {
     const encounterRow = await this.getRowOrThrow(encounterId);
+    this.assertNoSafetyHold(encounterRow.campaignId); // #599
     if (encounterRow.status !== 'running') {
       throw new BadRequestException('Encounter is not running');
     }
@@ -4803,10 +4834,7 @@ export class EncountersService {
           const { updatedCombatants, removed } = cascadeConcentrationLoss(withInstances, combatantId);
           for (const [id, instances] of updatedCombatants) {
             tx.update(combatants)
-              .set({
-                conditionInstances: toJsonText(instances),
-                conditions: toJsonText(deriveConditionNames(instances)),
-              })
+              .set(conditionWriteSetFromInstances(instances))
               .where(eq(combatants.id, id))
               .run();
           }
@@ -4905,8 +4933,10 @@ export class EncountersService {
       deathState: string;
       deathSaveSuccesses: number;
       deathSaveFailures: number;
-      // Issue #486: conditions travel back with the HP slice on /end.
+      // Issue #486: conditions travel back with the HP slice on /end. #1047: the
+      // structured copy travels with them, stripped to sheet scope.
       conditions: string;
+      conditionInstances: string;
       status: 'active' | 'dead';
       sheetSyncedUpdatedAt: string | null;
     }> = [];
@@ -4933,7 +4963,9 @@ export class EncountersService {
         deathState: row.deathState,
         deathSaveSuccesses: row.deathSaveSuccesses,
         deathSaveFailures: row.deathSaveFailures,
-        conditions: row.conditions,
+        ...sheetConditionWriteSetFromInstances(
+          readConditionInstances(row.conditionInstances, row.conditions),
+        ),
         status: nextStatus ?? 'active',
         sheetSyncedUpdatedAt: row.sheetSyncedUpdatedAt ?? null,
       });
@@ -5051,6 +5083,7 @@ export class EncountersService {
           deathSaveSuccesses: w.deathSaveSuccesses,
           deathSaveFailures: w.deathSaveFailures,
           conditions: w.conditions,
+          conditionInstances: w.conditionInstances,
           updatedAt: ts,
         };
         if (prior !== undefined && prior.status !== w.status) {

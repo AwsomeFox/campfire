@@ -33,12 +33,15 @@ import {
   type InitiativeTiebreakCombatant,
 } from './initiative-tiebreak';
 import { ActionSpec } from './action-resolver';
+import { RestModel } from './rest';
 import { CharacterAction } from './character-action';
 import { CombatantStatblock } from './combatant-statblock';
 import { NarrationLanguage } from './narration-language';
 // Structured action resolver (issue #414): data model + pure, system-aware resolution math.
 // Re-exported so server / MCP / web import it from '@campfire/schema' alongside everything else.
 export * from './action-resolver';
+export * from './spell-slots';
+export * from './rest';
 export * from './character-action';
 export * from './combatant-statblock';
 export * from './character-creation';
@@ -1513,6 +1516,124 @@ export const SessionZeroUpdate = z.object({
 });
 export type SessionZeroUpdate = z.infer<typeof SessionZeroUpdate>;
 
+// ---------- table safety hold / X-Card (issue #599) ----------
+//
+// Session zero (above) records the safety tools a table AGREED to use as free text.
+// This is the tool itself: one immediate, unilateral, reason-free stop that any member
+// of the campaign can pull mid-play, freezing encounter advancement and the AI seat's
+// input, output, and tool dispatch until a facilitator recovers the table.
+//
+// THREE PROPERTIES ARE LOAD-BEARING AND EVERYTHING ELSE BENDS AROUND THEM.
+//
+//  1. NO GATE ON ACTIVATION. No vote, no reason field, no minimum role. `requireMember`
+//     is the only check — a viewer at the table can stop play exactly like a player can.
+//     A mechanism that asks you to justify yourself has already failed at the moment it
+//     matters, which is why there is no `reason` on the activation request: the note
+//     field lives on the facilitator's RELEASE, where a human is explaining a recovery
+//     rather than a participant explaining a need.
+//
+//  2. IDEMPOTENT, NEVER-FAILING ACTIVATION. Activating a hold that is already active
+//     succeeds and changes nothing (the FIRST activation's timestamp is what the table
+//     keeps). Two participants tapping at once both get 200 and the table pauses once.
+//     Pausing twice is harmless; a state machine that can reject a pause is not.
+//
+//  3. ASYMMETRIC RECOVERY. Anyone pauses; only a facilitator (`dm`) releases. That
+//     asymmetry — not a role check on activation — is what makes the mechanism safe to
+//     leave unguarded.
+//
+// ANONYMITY. `anonymous` (default TRUE) suppresses attribution: the server stores no
+// user id and no display name for the activation, writes the audit row under a synthetic
+// actor with the request correlation id stripped, and notifies EVERY member including
+// the activator. See the note on TableSafetyHold.activatedByName for the residual
+// exposure this does NOT close.
+export const SafetyHoldRecovery = z.enum([
+  'resume',       // pick play back up where it stopped
+  'rewind',       // undo the last beat and replay it differently
+  'veil',         // the content stays in the fiction but moves off-screen
+  'scene_change', // cut away to a different scene
+  'end',          // stop the session here
+]);
+export type SafetyHoldRecovery = z.infer<typeof SafetyHoldRecovery>;
+
+/**
+ * The table's current safety-hold state — one row per campaign, readable by every member.
+ *
+ * A released hold keeps its `releasedAt` / `recovery` / `facilitatorNote` so the table can
+ * see how the last stop was resolved; `active: false` is what ungates play.
+ */
+export const TableSafetyHold = z.object({
+  campaignId: Id,
+  /** True while play is frozen. The single field every gate reads. */
+  active: z.boolean(),
+  /** When the CURRENT hold was raised (first activation wins; re-activation does not move it). */
+  activatedAt: IsoDate.nullable(),
+  /**
+   * Display name of the participant who raised it, or null.
+   *
+   * NULL IS DELIBERATELY AMBIGUOUS — it means "anonymous" and it means "no hold", and no
+   * API distinguishes them. There is no companion `activatedByUserId` on this contract or
+   * in the database for an anonymous hold: the identity is dropped at the controller
+   * boundary and never reaches storage, so there is no projection to forget to redact.
+   *
+   * WHAT THIS DOES NOT HIDE, stated plainly because "anonymous" must not overclaim:
+   *  - The server operator. Reverse proxy access logs, the structured request log (which
+   *    carries the authenticated actor), and a debugger all see the HTTP request. Anonymity
+   *    here is anonymity from the TABLE, not from whoever runs the box.
+   *  - Deduction from table size. At a two-person table an anonymous hold the facilitator
+   *    did not raise was raised by the other person. No server-side design fixes that.
+   *  - A participant who tells the table it was them.
+   */
+  activatedByName: z.string().nullable(),
+  /** Whether the CURRENT (or most recent) hold was raised anonymously. */
+  anonymous: z.boolean(),
+  /**
+   * How many holds this campaign has recorded, ever. A count is not attributable and is
+   * what makes "we keep stopping in this arc" visible without naming anyone.
+   */
+  activationCount: z.number().int().nonnegative(),
+  releasedAt: IsoDate.nullable(),
+  /** The facilitator who released it — release is never anonymous; it is an accountable act. */
+  releasedByName: z.string().nullable(),
+  /** How the facilitator recovered the table, or null while a hold is active. */
+  recovery: SafetyHoldRecovery.nullable(),
+  /** The facilitator's optional note on the recovery. Never the participant's words. */
+  facilitatorNote: z.string().nullable(),
+  updatedAt: IsoDate,
+});
+export type TableSafetyHold = z.infer<typeof TableSafetyHold>;
+
+/**
+ * POST /campaigns/:id/safety/hold. Note what is NOT here: no reason, no severity, no
+ * target, no role. The only decision the activating participant makes is whether to
+ * attach their name, and the default is that they do not have to.
+ */
+export const TableSafetyHoldActivate = z
+  .object({
+    anonymous: z.boolean().default(true),
+  })
+  // `.strict()` is load-bearing, not hygiene: it means a client cannot smuggle a `reason` past
+  // this endpoint, so no UI can grow a "why did you stop us?" prompt against it by accident.
+  .strict();
+export type TableSafetyHoldActivate = z.infer<typeof TableSafetyHoldActivate>;
+
+/** POST /campaigns/:id/safety/release — facilitator only. */
+export const TableSafetyHoldRelease = z.object({
+  recovery: SafetyHoldRecovery,
+  /** The facilitator's own note about the recovery (audited, shown to the table). */
+  note: z.string().max(500).optional(),
+  /**
+   * Only meaningful with `recovery: 'veil'` — appended to the session-zero charter's veils
+   * so a stop that produced a new soft limit actually changes what the table (and the AI,
+   * which reads the same charter) plays going forward, instead of being a banner nobody
+   * revisits.
+   */
+  veil: z.string().min(1).max(500).optional(),
+}).strict();
+export type TableSafetyHoldRelease = z.infer<typeof TableSafetyHoldRelease>;
+
+/** Error code returned (409) by every play-advancement path while a hold is active. */
+export const TABLE_SAFETY_HOLD_ERROR_CODE = 'TABLE_SAFETY_HOLD';
+
 // ---------- participant-owned access-support preferences (issue #877) ----------
 // Practical participation support belongs to the participant who supplied it. Human
 // visibility and model use are intentionally separate decisions: facilitator-only does
@@ -1895,6 +2016,12 @@ export const NotificationType = z.enum([
   // The driver AI-DM got stuck / a recovery lever was pulled (issue #314): AI errored/looped,
   // budget exhausted, a ruling was disputed, a table vote resolved, or a human took the seat.
   'ai_dm_alert',
+  // Issue #599: a table safety hold (X-Card) was raised or resolved. Its own type rather than
+  // a reuse of ai_dm_alert because it fires on tables with no AI seat at all, and because
+  // "AI DM Alert" is the wrong thing to show someone whose table just stopped for safety.
+  // Maps to the always-on `security` category below: a safety stop must not be mutable by a
+  // notification preference or deferrable into a digest.
+  'safety_hold',
 ]);
 export type NotificationType = z.infer<typeof NotificationType>;
 
@@ -1946,7 +2073,7 @@ export const NotificationCategory = z.enum([
   'proposals', // proposal_submitted, proposal_resolved
   'inbox', // inbox_submitted
   'access', // added_to_campaign, character_reassigned — ALWAYS ON (access control)
-  'security', // ai_dm_alert — ALWAYS ON (security/recovery)
+  'security', // ai_dm_alert, safety_hold — ALWAYS ON (security/recovery)
 ]);
 export type NotificationCategory = z.infer<typeof NotificationCategory>;
 
@@ -1991,6 +2118,7 @@ export const NOTIFICATION_TYPE_CATEGORY: Record<NotificationType, NotificationCa
   proposal_resolved: 'proposals',
   inbox_submitted: 'inbox',
   ai_dm_alert: 'security',
+  safety_hold: 'security',
 };
 
 /** Resolve the category a notification type belongs to. */
@@ -2920,6 +3048,20 @@ export interface RuleSystemAdapter {
   buildCheckCatalog?(character: CheckCatalogCharacter): RollCheckDefinition[];
   /** Standard system resource vocabulary for this rule system (issue #422). */
   readonly resources?: readonly AdapterResourceDef[];
+  /**
+   * OPTIONAL — how a short/long rest recovers under this system (issue #1041).
+   *
+   * Deliberately thin, because the load-bearing part of rest customisation already exists:
+   * `AdapterResourceDef.recharge` (#422) says which rest refills which resource, and
+   * `RECHARGE_RECOVERED_BY_REST` consumes it. This adds only what that cannot express — which
+   * conditions a rest clears, the hit-die mechanic, and whether a long rest resets death saves.
+   *
+   * Omitting it is safe and meaningful: {@link NEUTRAL_REST_MODEL} clears NO conditions and
+   * supports no hit dice, so the six adapters with no rest vocabulary recover HP and their
+   * declared resources without silently inheriting D&D 5e's recovery rules just because 5e is
+   * the fallback adapter.
+   */
+  readonly restModel?: RestModel;
 }
 
 /** Standard system resource pool definition (issue #422). */
@@ -3034,7 +3176,36 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
     { key: 'actionSurge', name: 'Action Surge', recharge: 'short-rest' },
     { key: 'kiPoints', name: 'Focus / Ki Points', recharge: 'short-rest' },
     { key: 'recharge', name: 'Recharge Feature', recharge: 'turn-start' },
+    // #1073 — inspiration is a COUNTED resource, not a free-text condition, so the AI (and the
+    // sheet) can award and spend it instead of writing prose about it.
+    //
+    // `recharge: 'special'` is a real statement, not a shrug: 5e inspiration is DM-AWARDED and
+    // survives rests untouched, so every rest cadence would be wrong — a long-rest recharge
+    // would hand it out for free every night, which is precisely the opposite of how it works.
+    // `defaultMax: 1` because you either have inspiration or you do not (2014 PHB, and 2024
+    // heroic inspiration likewise); a second award while holding one is not a second point.
+    { key: 'inspiration', name: 'Inspiration', recharge: 'special', defaultMax: 1 },
   ],
+  // Rest recovery (#1041). `clearedByLongRest` is an ALLOWLIST of what a night's sleep removes,
+  // never a denylist of what is "permanent" — see the RestModel docs for why that direction is
+  // the safe one when conditions are bare strings with no metadata (#1047).
+  //
+  // These four are the 5e conditions a long rest ends on its own: exhaustion drops a level,
+  // and the three that PHB rest/unconsciousness rules resolve without an external cure. The
+  // conditions deliberately ABSENT are the ones that need a specific remedy — petrified,
+  // paralyzed, charmed, poisoned, restrained, grappled, blinded, deafened, invisible — because
+  // a rest that silently ended a Medusa's petrification would erase the DM's scene.
+  restModel: {
+    clearedByLongRest: ['Exhaustion', 'Unconscious', 'Prone', 'Frightened'],
+    clearedByShortRest: [],
+    // 5e hit dice are per-class (d6 sorcerer … d12 barbarian) and the class die is NOT stored
+    // on the sheet in this repo, so there is no honest default: `null` makes a short rest that
+    // asks to spend hit dice require an explicit `hitDie` rather than inventing an average one.
+    defaultHitDie: null,
+    // PHB: a long rest returns spent hit dice up to HALF the character's total (minimum 1).
+    longRestHitDiceFraction: 0.5,
+    longRestClearsDeathSaves: true,
+  },
   // 5e caps character level at 20 (PHB). The cap lives here, not hardcoded in `levelUp`, so a
   // non-5e system enforces its own ceiling (issue #535): 13th Age (10), an uncapped OSR game, etc.
   maxLevel: 20,
@@ -4098,6 +4269,12 @@ export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
   resources: [
     { key: 'focusPoints', name: 'Focus Points', recharge: 'refocus', defaultMax: 3 },
     { key: 'hitDice', name: 'Hit Dice / Stamina', recharge: 'long-rest' },
+    // #1073 — PF2e hero points are a DIFFERENT ECONOMY from 5e inspiration, which is why each
+    // system declares its own rather than one being modelled as the other. They accrue during
+    // a SESSION (1 at the start, more for heroic deeds), reset between sessions rather than on
+    // any rest, and spending ALL of them at once is the "avoid death" move — hence `defaultMax: 3`
+    // and, again, `recharge: 'special'` because no rest cadence describes a session boundary.
+    { key: 'heroPoints', name: 'Hero Points', recharge: 'special', defaultMax: 3 },
   ],
   // PF2e characters cap at level 20 (Core Rulebook), the same ceiling as 5e.
   maxLevel: 20,
@@ -5545,6 +5722,13 @@ export const AI_DM_MODE_CAPABILITIES: Readonly<
       { label: 'applies HP and conditions', copyKeyword: 'HP' },
       { label: 'awards XP and levels', copyKeyword: 'XP' },
       { label: 'advances combat turns', copyKeyword: 'turn' },
+      // #1022: the seat can ORIGINATE a fight, not just run one a human built. That is a
+      // materially different authority from "advances combat turns" and a DM deciding whether
+      // to enable Driver mode deserves to see it named, so it carries a real copyKeyword.
+      // What it CANNOT do is decide visibility: every encounter it creates is DM-only prep
+      // until the human DM reveals it (guardDriverLivePlayArgs), which is why the copy says
+      // "prepped" rather than implying the table sees them.
+      { label: 'creates encounters as DM-only prep', copyKeyword: 'encounter' },
       { label: 'reveals map regions', copyKeyword: 'map' },
       // Capabilities the seat has but the trust-copy summary does not enumerate by name.
       // Listed so the manifest stays a complete mirror of DRIVER_LIVE_PLAY_TOOLS; their
@@ -5675,9 +5859,93 @@ export const AiDmSeat = z.object({
   lastTurnAt: IsoDate.nullable().default(null),
   proactiveSettings: AiDmProactiveSettings.default({}),
   actionQueueDepth: z.number().int().min(1).max(20).default(8).optional(),
+  /**
+   * Which fields on THIS seat came from the server defaults rather than from a DM's own
+   * configuration (#1070). Empty for any campaign that has configured its seat, because
+   * inheritance detaches whole-seat on first configure — see AI_DM_SEAT_INHERITED_FIELDS.
+   *
+   * Read-only and derived: the server computes it per read, and the update DTO has no
+   * counterpart. It exists so a DM can see an inherited token budget BEFORE enabling the
+   * seat, which is the point at which it could start spending.
+   */
+  inheritedFields: z.array(z.string()).default([]),
   ...timestamps,
 });
 export type AiDmSeat = z.infer<typeof AiDmSeat>;
+
+/**
+ * SERVER-WIDE AI SEAT DEFAULTS (#1070).
+ *
+ * A multi-campaign DM used to reconfigure the AI seat from scratch every time: `defaultSeat`
+ * gave mode `off`, budget `0`, instructions `''`, and only the PROVIDER inherited server-wide.
+ * These are the fields a brand-new campaign picks up instead.
+ *
+ * INHERITANCE, NOT COPYING. This mirrors the provider's existing mechanism
+ * (`resolveEffectiveConfig`: `campaign ?? server`, evaluated live) rather than adding a
+ * second model. Live beats a snapshot — an admin fixing a bad default fixes every campaign
+ * that never overrode it, which a "copy config from campaign X" action cannot do. Copying was
+ * considered and declined: it would need a cross-campaign seat read that does not exist
+ * today, i.e. a new authorization surface, in exchange for a snapshot that is stale on
+ * arrival.
+ *
+ * DETACH IS WHOLE-SEAT, exactly like the provider's row-granularity override: while a
+ * campaign has no seat row it tracks these live; the first configure creates a row seeded
+ * from them, and from then on the seat is its own truth. Seeding on create is what stops
+ * detaching from silently reverting values the DM was already relying on.
+ */
+export const AiDmSeatDefaults = z.object({
+  mode: AiDmMode.default('off'),
+  instructions: z.string().max(20_000).default(''),
+  tokenBudget: z.number().int().nonnegative().max(1_000_000_000).default(0),
+  actionQueueDepth: z.number().int().min(1).max(20).default(8),
+});
+export type AiDmSeatDefaults = z.infer<typeof AiDmSeatDefaults>;
+
+/**
+ * The seat fields a new campaign inherits — an ALLOWLIST, never a denylist.
+ *
+ * Opt-in is the safe direction, and it is the whole point of the shape. A denylist ("copy
+ * everything except the credential") silently starts propagating whatever field is added
+ * next; an allowlist excludes it by default until someone deliberately classifies it. #1052
+ * established that whoever owns the key owns the destination, because a half-config borrowing
+ * another row's credential ships that credential wherever the borrowing row points. Carrying
+ * config between campaigns is that hazard from the other direction.
+ *
+ * A unit test enumerates every key of {@link AiDmSeat} and fails unless it appears in this
+ * list or in {@link AI_DM_SEAT_NON_INHERITED_FIELDS} — so a new field cannot be added without
+ * someone deciding, in writing, whether it travels.
+ */
+export const AI_DM_SEAT_INHERITED_FIELDS = ['mode', 'instructions', 'tokenBudget', 'actionQueueDepth'] as const;
+export type AiDmSeatInheritedField = (typeof AI_DM_SEAT_INHERITED_FIELDS)[number];
+
+/**
+ * Every other seat field, with the reason it does NOT travel. Present so the classification
+ * test can prove the two lists are exhaustive over {@link AiDmSeat}, and so each exclusion is
+ * a recorded decision rather than an omission.
+ *
+ * Note there is deliberately no credential here to exclude: the seat has never carried key
+ * material at all — it lives on `ai_provider_configs` and is decrypted only inside
+ * `resolveEffectiveConfig`. The classification test additionally fails if any credential-
+ * shaped field name ever appears on the seat, so that stays true by construction rather than
+ * by memory.
+ */
+export const AI_DM_SEAT_NON_INHERITED_FIELDS = {
+  campaignId: 'Identity of the row itself; inheriting it would point a seat at another campaign.',
+  enabled: 'Consent to spend. A new campaign must be switched on by a human, never by a default.',
+  model: 'An informational label derived from the effective provider, which already inherits on its own.',
+  proactiveSettings: 'Consent to spend AUTONOMOUSLY — the same reason `enabled` does not travel, and sharper.',
+  tokensUsed: 'Per-campaign meter reading — spend belongs to the campaign that spent it.',
+  tokensReserved: 'Per-campaign meter reading — in-flight capacity held by this campaign alone.',
+  tokensRefunded: 'Per-campaign meter reading — refunds settle against this campaign only.',
+  tokensUnknown: 'Per-campaign meter reading — conservative spend recorded against this campaign.',
+  tokensOverage: 'Per-campaign meter reading — overage is this campaign’s own accounting.',
+  budgetRemaining: 'Derived from this campaign’s own meter.',
+  turnCount: 'This campaign’s own play history; a fresh table has taken no turns.',
+  lastTurnAt: 'This campaign’s own play history; a fresh table has never narrated.',
+  inheritedFields: 'Derived per read; describes inheritance rather than participating in it.',
+  createdAt: 'Row metadata — when THIS seat was first written, which a new one cannot inherit.',
+  updatedAt: 'Row metadata — when THIS seat last changed, which a new one cannot inherit.',
+} as const;
 
 // Configure the seat (PUT /campaigns/:id/ai-dm, dm only). All fields optional;
 // an omitted field is left unchanged.
@@ -8348,6 +8616,12 @@ export const CampaignEventType = z.enum([
   // stream on the campaign (control signal — filtered from the data path like
   // membership.revoked). A reconnect hits requireMember and 404s.
   'campaign.trashed',
+  // Issue #599: a table safety hold (X-Card) was raised or released. Carries `active`
+  // and NOTHING else — not who, not why. Every client refetches GET /campaigns/:id/safety
+  // for the rest, exactly like the other thin ticks, and that endpoint is what enforces
+  // the anonymity rules. Putting the actor on the wire would hand every connected browser
+  // the one field the whole feature exists to withhold.
+  'safety.hold',
 ]);
 export type CampaignEventType = z.infer<typeof CampaignEventType>;
 export const CampaignEvent = z.discriminatedUnion('type', [
@@ -8462,6 +8736,14 @@ export const CampaignEvent = z.discriminatedUnion('type', [
     // SSE controllers complete every open stream; filtered from the data path.
     type: z.literal('campaign.trashed'),
     campaignId: Id,
+    at: IsoDate,
+  }),
+  z.object({
+    // Issue #599: safety hold raised (`active: true`) or released (`active: false`).
+    // Deliberately actor-free — see the note on 'safety.hold' in CampaignEventType.
+    type: z.literal('safety.hold'),
+    campaignId: Id,
+    active: z.boolean(),
     at: IsoDate,
   }),
 ]);

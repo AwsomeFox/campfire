@@ -274,9 +274,11 @@ export function EncounterAiDriverPanel({
   return (
     <Card density="default" className="flex flex-col gap-0 overflow-hidden" data-testid="encounter-ai-driver-panel">
       <div className="flex items-center gap-2 flex-wrap p-3 pb-2">
-        <button
+        <Btn
           type="button"
-          className="cf-btn cf-btn-ghost !min-h-0 !py-1.5 text-sm font-semibold flex items-center gap-2"
+          ghost
+          density="compact"
+          className="text-sm font-semibold flex items-center gap-2"
           data-testid="encounter-ai-driver-toggle"
           {...buttonProps}
         >
@@ -285,7 +287,7 @@ export function EncounterAiDriverPanel({
           <Chip variant={statusKey === 'narrating' ? 'active' : statusKey === 'paused' ? 'private' : 'available'}>
             {statusLabel}
           </Chip>
-        </button>
+        </Btn>
         <div className="flex-1" />
         <Link
           to={`/c/${campaignId}/table`}
