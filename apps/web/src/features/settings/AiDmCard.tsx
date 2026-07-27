@@ -598,9 +598,13 @@ function TableStyleSection({
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    setPresets(seat.stylePresets);
-  }, [seat.stylePresets]);
+  // Deliberately NOT re-synced from `seat`, matching InstructionsSection above.
+  // Every section on this card shares one `seat` object in the parent, so saving the
+  // mode, budget or instructions replaces it wholesale — and `stylePresets` comes back
+  // as a NEW object reference even when its values are identical. An effect keyed on
+  // that reference would fire on every sibling save and overwrite dropdown choices the
+  // DM had picked but not yet saved, with no warning. The parent doesn't mount this
+  // section until the seat has loaded, so seeding once in useState is sufficient.
 
   async function save() {
     setSaving(true);
