@@ -103,10 +103,17 @@ describe('backup restore atomicity (#497, real SQLite + filesystem)', () => {
     archive: Buffer,
     options?: { onProgress?: (phase: string) => void; signal?: AbortSignal },
   ) {
-    return service.restore(archive, RESTORE_CONFIRM_TOKEN, testUser, {
-      keyPassphrase: PASSPHRASE,
-      ...options,
-    });
+    const stageDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'campfire-restore-test-'));
+    const archivePath = path.join(stageDir, 'archive.zip');
+    try {
+      await fs.promises.writeFile(archivePath, archive, { mode: 0o600 });
+      return await service.restoreFile(archivePath, RESTORE_CONFIRM_TOKEN, testUser, {
+        keyPassphrase: PASSPHRASE,
+        ...options,
+      });
+    } finally {
+      await fs.promises.rm(stageDir, { recursive: true, force: true });
+    }
   }
 
   it('restores successfully and reports progress phases', async () => {

@@ -112,6 +112,31 @@ describe('BackupService AI keyfile envelope (#496, real SQLite)', () => {
     }
   }
 
+  async function withArchiveFile<T>(buffer: Buffer, action: (filePath: string) => Promise<T>): Promise<T> {
+    const stageDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'campfire-archive-test-'));
+    const archivePath = path.join(stageDir, 'archive.zip');
+    try {
+      await fs.promises.writeFile(archivePath, buffer, { mode: 0o600 });
+      return await action(archivePath);
+    } finally {
+      await fs.promises.rm(stageDir, { recursive: true, force: true });
+    }
+  }
+
+  async function inspectArchive(service: BackupService, buffer: Buffer) {
+    return withArchiveFile(buffer, (archivePath) => service.inspectFile(archivePath));
+  }
+
+  async function restoreArchive(
+    service: BackupService,
+    buffer: Buffer,
+    confirm: string | undefined,
+    user: RequestUser,
+    options?: Parameters<BackupService['restoreFile']>[3],
+  ) {
+    return withArchiveFile(buffer, (archivePath) => service.restoreFile(archivePath, confirm, user, options));
+  }
+
   it('records aiKeySource=keyfile when the running server uses the auto-generated keyfile', async () => {
     const service = makeService();
     const buffer = await service.buildBackup();
@@ -183,7 +208,7 @@ describe('BackupService AI keyfile envelope (#496, real SQLite)', () => {
     fs.rmSync(path.join(dataDir, 'ai-config.key'), { force: true });
     expect(fs.existsSync(path.join(dataDir, 'ai-config.key'))).toBe(false);
 
-    const result = await service.restore(buffer, RESTORE_CONFIRM_TOKEN, testUser, {
+    const result = await restoreArchive(service, buffer, RESTORE_CONFIRM_TOKEN, testUser, {
       keyPassphrase: PASSPHRASE,
     });
     expect(result.ok).toBe(true);
@@ -203,7 +228,7 @@ describe('BackupService AI keyfile envelope (#496, real SQLite)', () => {
     const buffer = await service.buildBackup({ keyPassphrase: PASSPHRASE });
 
     await expect(
-      service.restore(buffer, RESTORE_CONFIRM_TOKEN, testUser /* no options */),
+      restoreArchive(service, buffer, RESTORE_CONFIRM_TOKEN, testUser /* no options */),
     ).rejects.toThrow(/keyPassphrase/);
 
     // Keyfile stays untouched (server not restored).
@@ -221,7 +246,7 @@ describe('BackupService AI keyfile envelope (#496, real SQLite)', () => {
     fs.writeFileSync(path.join(dataDir, 'ai-config.key'), 'marker', { mode: 0o600 });
 
     await expect(
-      service.restore(buffer, RESTORE_CONFIRM_TOKEN, testUser, { keyPassphrase: 'wrong-wrong-wrong' }),
+      restoreArchive(service, buffer, RESTORE_CONFIRM_TOKEN, testUser, { keyPassphrase: 'wrong-wrong-wrong' }),
     ).rejects.toThrow(/passphrase is wrong|failed to decrypt/i);
 
     expect(fs.readFileSync(path.join(dataDir, 'ai-config.key'), 'utf8')).toBe('marker');
@@ -239,7 +264,7 @@ describe('BackupService AI keyfile envelope (#496, real SQLite)', () => {
     // when credentials exist. Archive keyfile material is 'deadbeef'.repeat(8).
     process.env.AI_CONFIG_KEY = 'b'.repeat(64);
 
-    await service.restore(buffer, RESTORE_CONFIRM_TOKEN, testUser, { keyPassphrase: PASSPHRASE });
+    await restoreArchive(service, buffer, RESTORE_CONFIRM_TOKEN, testUser, { keyPassphrase: PASSPHRASE });
 
     // The archive's keyfile should NOT be materialized — the env var takes
     // precedence and the local keyfile would just be a source of drift.
@@ -273,7 +298,7 @@ describe('BackupService AI keyfile envelope (#496, real SQLite)', () => {
     fs.rmSync(path.join(dataDir, 'ai-config.key'), { force: true });
 
     await expect(
-      service.restore(buffer, RESTORE_CONFIRM_TOKEN, testUser, { keyPassphrase: PASSPHRASE }),
+      restoreArchive(service, buffer, RESTORE_CONFIRM_TOKEN, testUser, { keyPassphrase: PASSPHRASE }),
     ).rejects.toThrow(/AI_CONFIG_KEY on this host does not match/i);
 
     // Server untouched — keyfile not written.
@@ -284,7 +309,7 @@ describe('BackupService AI keyfile envelope (#496, real SQLite)', () => {
     const service = makeService();
     const buffer = await service.buildBackup({ keyPassphrase: PASSPHRASE });
 
-    const view = await service.inspect(buffer);
+    const view = await inspectArchive(service, buffer);
     expect(view.aiKeySource).toBe('keyfile');
     expect(view.aiKeyIncluded).toBe(true);
     // credentialCount is 0 (no provider rows in the fresh fixture DB), but the
@@ -300,7 +325,7 @@ describe('BackupService AI keyfile envelope (#496, real SQLite)', () => {
     const manifest = JSON.parse(await zip.file('manifest.json')!.async('string')) as BackupManifest;
     zip.file(manifest.db, Buffer.from('SQLite format 3\0too-short'));
 
-    await expect(service.inspect(await zip.generateAsync({ type: 'nodebuffer' }))).rejects.toThrow(
+    await expect(inspectArchive(service, await zip.generateAsync({ type: 'nodebuffer' }))).rejects.toThrow(
       /database size does not match manifest/i,
     );
   });
@@ -313,10 +338,10 @@ describe('BackupService AI keyfile envelope (#496, real SQLite)', () => {
     const archive = await service.buildBackup();
     const tampered = await archiveWithDatabaseMutation(archive, sql);
 
-    await expect(service.inspect(tampered)).rejects.toThrow(
+    await expect(inspectArchive(service, tampered)).rejects.toThrow(
       /invalid backup archive — database attachment schema could not be read/i,
     );
-    await expect(service.restore(tampered, RESTORE_CONFIRM_TOKEN, testUser)).rejects.toThrow(
+    await expect(restoreArchive(service, tampered, RESTORE_CONFIRM_TOKEN, testUser)).rejects.toThrow(
       /invalid backup archive — database attachment schema could not be read/i,
     );
   });
@@ -344,7 +369,7 @@ describe('BackupService AI keyfile envelope (#496, real SQLite)', () => {
     zip.file('manifest.json', JSON.stringify(manifest, null, 2));
 
     const tampered = await zip.generateAsync({ type: 'nodebuffer' });
-    await expect(service.inspect(tampered)).rejects.toThrow(/manifest attachments do not match database snapshot/i);
+    await expect(inspectArchive(service, tampered)).rejects.toThrow(/manifest attachments do not match database snapshot/i);
 
     const scheduledPath = path.join(dataDir, 'campfire-backup-tampered.zip');
     fs.writeFileSync(scheduledPath, tampered);
@@ -378,8 +403,8 @@ describe('BackupService AI keyfile envelope (#496, real SQLite)', () => {
     zip.file('manifest.json', JSON.stringify(manifest, null, 2));
     const tampered = await zip.generateAsync({ type: 'nodebuffer' });
 
-    await expect(service.inspect(tampered)).rejects.toThrow(/manifest attachments do not match database snapshot/i);
-    await expect(service.restore(tampered, RESTORE_CONFIRM_TOKEN, testUser)).rejects.toThrow(
+    await expect(inspectArchive(service, tampered)).rejects.toThrow(/manifest attachments do not match database snapshot/i);
+    await expect(restoreArchive(service, tampered, RESTORE_CONFIRM_TOKEN, testUser)).rejects.toThrow(
       /manifest attachments do not match database snapshot/i,
     );
   });
@@ -407,8 +432,8 @@ describe('BackupService AI keyfile envelope (#496, real SQLite)', () => {
       zip.file('manifest.json', JSON.stringify(manifest, null, 2));
       const tampered = await zip.generateAsync({ type: 'nodebuffer' });
 
-      await expect(service.inspect(tampered)).rejects.toThrow(/manifest attachment (record is invalid|paths must be unique)/i);
-      await expect(service.restore(tampered, RESTORE_CONFIRM_TOKEN, testUser)).rejects.toThrow(
+      await expect(inspectArchive(service, tampered)).rejects.toThrow(/manifest attachment (record is invalid|paths must be unique)/i);
+      await expect(restoreArchive(service, tampered, RESTORE_CONFIRM_TOKEN, testUser)).rejects.toThrow(
         /manifest attachment (record is invalid|paths must be unique)/i,
       );
     }
@@ -422,8 +447,8 @@ describe('BackupService AI keyfile envelope (#496, real SQLite)', () => {
     zip.file('manifest.json', JSON.stringify(manifest, null, 2));
     const tampered = await zip.generateAsync({ type: 'nodebuffer' });
 
-    await expect(service.inspect(tampered)).rejects.toThrow(/requires attachment checksum metadata/i);
-    await expect(service.restore(tampered, RESTORE_CONFIRM_TOKEN, testUser)).rejects.toThrow(
+    await expect(inspectArchive(service, tampered)).rejects.toThrow(/requires attachment checksum metadata/i);
+    await expect(restoreArchive(service, tampered, RESTORE_CONFIRM_TOKEN, testUser)).rejects.toThrow(
       /requires attachment checksum metadata/i,
     );
   });
@@ -438,10 +463,10 @@ describe('BackupService AI keyfile envelope (#496, real SQLite)', () => {
     zip.file('manifest.json', JSON.stringify(manifest, null, 2));
     const tampered = await zip.generateAsync({ type: 'nodebuffer' });
 
-    await expect(service.inspect(tampered)).rejects.toThrow(
+    await expect(inspectArchive(service, tampered)).rejects.toThrow(
       /requires attachment checksum metadata/i,
     );
-    await expect(service.restore(tampered, RESTORE_CONFIRM_TOKEN, testUser, {
+    await expect(restoreArchive(service, tampered, RESTORE_CONFIRM_TOKEN, testUser, {
       keyPassphrase: PASSPHRASE,
     })).rejects.toThrow(/requires attachment checksum metadata/i);
   });
@@ -457,14 +482,14 @@ describe('BackupService AI keyfile envelope (#496, real SQLite)', () => {
     zip.file('manifest.json', JSON.stringify(manifest, null, 2));
     const legacy = await zip.generateAsync({ type: 'nodebuffer' });
 
-    await expect(service.inspect(legacy)).rejects.toThrow(/requires attachment checksum metadata/i);
-    await expect(service.restore(legacy, RESTORE_CONFIRM_TOKEN, testUser)).rejects.toThrow(/requires attachment checksum metadata/i);
+    await expect(inspectArchive(service, legacy)).rejects.toThrow(/requires attachment checksum metadata/i);
+    await expect(restoreArchive(service, legacy, RESTORE_CONFIRM_TOKEN, testUser)).rejects.toThrow(/requires attachment checksum metadata/i);
   });
 
   it('inspect() rejects a physically truncated archive', async () => {
     const service = makeService();
     const archive = await service.buildBackup();
-    await expect(service.inspect(archive.subarray(0, archive.length - 16))).rejects.toThrow(
+    await expect(inspectArchive(service, archive.subarray(0, archive.length - 16))).rejects.toThrow(
       /readable zip file|malformed or truncated/i,
     );
   });
@@ -475,9 +500,9 @@ describe('BackupService AI keyfile envelope (#496, real SQLite)', () => {
     const zip = await JSZip.loadAsync(buffer);
     zip.remove(KEY_ENVELOPE_ENTRY);
     const tampered = await zip.generateAsync({ type: 'nodebuffer' });
-    await expect(service.inspect(tampered)).rejects.toThrow(/manifest claims an AI key envelope/i);
+    await expect(inspectArchive(service, tampered)).rejects.toThrow(/manifest claims an AI key envelope/i);
     await expect(
-      service.restore(tampered, RESTORE_CONFIRM_TOKEN, testUser, { keyPassphrase: PASSPHRASE }),
+      restoreArchive(service, tampered, RESTORE_CONFIRM_TOKEN, testUser, { keyPassphrase: PASSPHRASE }),
     ).rejects.toThrow(/manifest claims an AI key envelope/i);
   });
 
@@ -487,7 +512,7 @@ describe('BackupService AI keyfile envelope (#496, real SQLite)', () => {
     const zip = await JSZip.loadAsync(archive);
     zip.file(KEY_ENVELOPE_ENTRY, '{}');
 
-    await expect(service.inspect(await zip.generateAsync({ type: 'nodebuffer' }))).rejects.toThrow(
+    await expect(inspectArchive(service, await zip.generateAsync({ type: 'nodebuffer' }))).rejects.toThrow(
       /Invalid backup key envelope/i,
     );
   });
@@ -498,7 +523,7 @@ describe('BackupService AI keyfile envelope (#496, real SQLite)', () => {
     const zip = await JSZip.loadAsync(archive);
     zip.file(KEY_ENVELOPE_ENTRY, '{}');
 
-    await expect(service.inspect(await zip.generateAsync({ type: 'nodebuffer' }))).rejects.toThrow(
+    await expect(inspectArchive(service, await zip.generateAsync({ type: 'nodebuffer' }))).rejects.toThrow(
       /manifest does not include an AI key envelope/i,
     );
   });
@@ -526,7 +551,7 @@ describe('BackupService AI keyfile envelope (#496, real SQLite)', () => {
     const buffer = await service.buildBackup({ keyPassphrase: PASSPHRASE });
     fs.rmSync(path.join(dataDir, 'ai-config.key'), { force: true });
 
-    const result = await service.restore(buffer, RESTORE_CONFIRM_TOKEN, testUser, { keyPassphrase: PASSPHRASE });
+    const result = await restoreArchive(service, buffer, RESTORE_CONFIRM_TOKEN, testUser, { keyPassphrase: PASSPHRASE });
     expect(result.ok).toBe(true);
 
     const restoredKey = Buffer.from(fs.readFileSync(path.join(dataDir, 'ai-config.key'), 'utf8').trim(), 'hex');

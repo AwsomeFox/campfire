@@ -1432,15 +1432,6 @@ export class BackupService implements OnApplicationBootstrap {
    * untouched (it 400s and the running DB is never closed).
    */
   /**
-   * Read manifest metadata and upload entry names from an archive without
-   * restoring or touching the live server (issue #514).
-   */
-  async inspect(buffer: Buffer): Promise<BackupInspectResult> {
-    const staged = await this.stageArchiveBuffer(buffer);
-    try { return await this.inspectFile(staged); } finally { await fs.promises.rm(path.dirname(staged), { recursive: true, force: true }); }
-  }
-
-  /**
    * Returns null only for archives that genuinely predate attachment checksum
    * metadata. The manifest parser rejects malformed and duplicate modern
    * records, so a present `attachments` field means every upload is required
@@ -1616,17 +1607,6 @@ export class BackupService implements OnApplicationBootstrap {
       const view = manifestToInspectView(manifest, uploads);
       return view;
     } finally { zip.close(); }
-  }
-
-  async restore(
-    buffer: Buffer,
-    confirm: string | undefined,
-    user: RequestUser,
-    options?: RestoreOptions,
-  ): Promise<RestoreResult> {
-    const staged = await this.stageArchiveBuffer(buffer);
-    try { return await this.restoreFile(staged, confirm, user, options); }
-    finally { await fs.promises.rm(path.dirname(staged), { recursive: true, force: true }); }
   }
 
   async restoreFile(
@@ -1861,19 +1841,6 @@ export class BackupService implements OnApplicationBootstrap {
       }
     } finally {
       this.endArchiveOperation('restore');
-    }
-  }
-
-  /** Compatibility wrapper staging legacy buffer callers without retaining it during parsing. */
-  private async stageArchiveBuffer(buffer: Buffer): Promise<string> {
-    const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'campfire-backup-upload-'));
-    const file = path.join(dir, 'archive.zip');
-    try {
-      await fs.promises.writeFile(file, buffer, { mode: 0o600 });
-      return file;
-    } catch (err) {
-      await fs.promises.rm(dir, { recursive: true, force: true });
-      throw err;
     }
   }
 
