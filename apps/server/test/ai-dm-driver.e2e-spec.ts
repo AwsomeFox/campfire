@@ -1,6 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import request from 'supertest';
+import { eq } from 'drizzle-orm';
+import { DB } from '../src/db/db.module';
+import { aiProviderConfigs } from '../src/db/schema';
 import { createAiEvalHarness, dm, player, viewer, type AiEvalHarness } from './ai-eval-harness';
 import { mcpToolsToAiSchemas } from '../src/modules/ai-dm/providers/tool-registry';
 import { AiProviderError } from '../src/modules/ai-dm/providers/errors';
@@ -96,10 +99,53 @@ describe('ai-dm driver runtime — session loop + streamed narration + tool exec
     );
     expect(ready.body.estimatedCost).toEqual(
       expect.objectContaining({
+        // No metered turns yet, so the split IS our stated assumption and is reported.
+        estimatedPromptTokens: 750,
         estimatedCompletionTokens: 1024,
-        estimatedTotalTokens: expect.any(Number),
+        estimatedTotalTokens: 1774,
+        // No pricing table on this server, so there is no money to report (#1065).
+        estimatedUsdRange: null,
       }),
     );
+  });
+
+  it('#1065 readiness survives a credential it cannot decrypt, and prices nothing', async () => {
+    // The failure this pins: readiness is the screen an operator opens to find out WHY their
+    // AI seat stopped working after AI_CONFIG_KEY was lost or rotated. Resolving the provider
+    // decrypts the stored key, which throws on a key that no longer matches. A second,
+    // unguarded resolve added for the cost basis turned that into a 500 — so the one
+    // diagnostic surface that exists for this exact situation became unavailable in it,
+    // which is strictly worse than the graceful "provider blocked" it replaced.
+    //
+    // The cost basis now reuses the config the model check already resolved INSIDE its
+    // try/catch, so there is one resolution per request and its failure is already handled.
+    const campaignId = await h.createCampaign('AI Readiness 1065 undecryptable key');
+    await h.configureProvider(campaignId);
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 20_000 });
+
+    // Corrupt the stored ciphertext in place — the observable equivalent of the server's
+    // AI config key having changed under a row that was written with the old one.
+    const db = h.ctx.app.get(DB);
+    await db
+      .update(aiProviderConfigs)
+      .set({ encryptedApiKey: 'not-a-decryptable-ciphertext' })
+      .where(eq(aiProviderConfigs.campaignId, campaignId));
+
+    const res = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/readiness`).set(dm);
+
+    // The whole point: a 200 with a usable checklist, not a 500.
+    expect(res.status).toBe(200);
+    const modelCheck = res.body.checks.find((c: { key: string }) => c.key === 'model');
+    expect(modelCheck).toEqual(expect.objectContaining({ ok: false, status: 'blocked' }));
+    expect(res.body.driverOk).toBe(false);
+
+    // And money degrades to the disclosure rather than to a number or to a crash. The reason
+    // is the specific one, not the generic `no_provider` — a provider IS configured here, and
+    // telling the operator otherwise would send them to re-enter settings already correct.
+    expect(res.body.estimatedCost.basis).toEqual({ kind: 'unknown', reason: 'provider_unresolved' });
+    expect(res.body.estimatedCost.estimatedUsdRange).toBeNull();
+    // The token estimate is independent of pricing and still renders.
+    expect(res.body.estimatedCost.estimatedTotalTokens).toBeGreaterThan(0);
   });
 
   it('#519 readiness never reports driver-ready while the seat mode is off', async () => {

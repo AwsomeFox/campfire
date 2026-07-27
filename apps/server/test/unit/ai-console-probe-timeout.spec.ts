@@ -7,6 +7,7 @@ import type { AiProviderConfigService } from '../../src/modules/ai-provider-conf
 import type { SettingsService } from '../../src/modules/settings/settings.service';
 import type { AuditService } from '../../src/modules/audit/audit.service';
 import type { AiDriverService } from '../../src/modules/ai-driver/ai-driver.service';
+import type { AiPricingService } from '../../src/modules/ai-pricing/ai-pricing.service';
 import type { DrizzleDb } from '../../src/db/db.module';
 
 const mockDriver = { cancelAllGenerations: jest.fn() } as unknown as AiDriverService;
@@ -140,6 +141,7 @@ describe('AiConsoleService.testAll — per-probe timeout (issue #1061)', () => {
       providers,
       {} as AuditService,
       mockDriver,
+      {} as AiPricingService,
     );
 
     const resultPromise = service.testAll();
@@ -195,6 +197,7 @@ describe('AiConsoleService.testAll — per-probe timeout (issue #1061)', () => {
       providers,
       {} as AuditService,
       mockDriver,
+      {} as AiPricingService,
     );
 
     const resultPromise = service.testAll();

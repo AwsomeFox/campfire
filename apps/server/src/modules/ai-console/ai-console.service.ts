@@ -8,6 +8,8 @@ import type {
   AiUsageCampaignRow,
   AiUsageModelRow,
   AiUsageRollup,
+  AiPricingUpdate,
+  AiPricingView,
 } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { aiDmSeats, aiProviderConfigs, campaigns } from '../../db/schema';
@@ -15,6 +17,8 @@ import { nowIso } from '../../common/time';
 import { auditActor, type RequestUser } from '../../common/user.types';
 import { AuditService } from '../audit/audit.service';
 import { SettingsService } from '../settings/settings.service';
+import { AiPricingService } from '../ai-pricing/ai-pricing.service';
+import { PRICING_REFERENCE, PRICING_REFERENCE_AS_OF } from '../ai-pricing/ai-pricing-reference';
 import { AiProviderConfigService } from '../ai-provider-config/ai-provider-config.service';
 import { AiDriverService } from '../ai-driver/ai-driver.service';
 
@@ -77,6 +81,7 @@ export class AiConsoleService {
     private readonly providers: AiProviderConfigService,
     private readonly audit: AuditService,
     private readonly driver: AiDriverService,
+    private readonly pricing: AiPricingService,
   ) {}
 
   // ── usage rollup (aggregated from the per-seat metering) ─────────────────────
@@ -280,6 +285,62 @@ export class AiConsoleService {
   async setAllowlist(models: string[], user: RequestUser): Promise<AiConsoleOverview> {
     await this.providers.setServerAllowedModels(models, user);
     return this.getOverview();
+  }
+
+  // ── model pricing (issue #1065) ──────────────────────────────────────────────
+
+  /**
+   * The stored price list plus the shipped reference figures.
+   *
+   * The two are returned SEPARATELY and must stay separate in the UI. `entries` is live
+   * pricing that produces dollar figures; `reference` produces nothing until an admin
+   * prefills from it and saves. Merging them server-side would recreate the exact ambiguity
+   * this design exists to remove — an operator could no longer tell which numbers they had
+   * actually vouched for.
+   */
+  async getPricing(): Promise<AiPricingView> {
+    const table = await this.pricing.loadTable();
+    return {
+      entries: table.entries,
+      updatedAt: table.updatedAt,
+      updatedBy: table.updatedBy,
+      reference: PRICING_REFERENCE.map((r) => ({ ...r })),
+      referenceAsOf: PRICING_REFERENCE_AS_OF,
+    };
+  }
+
+  /** Replace the price list. Audited — pricing decides what DMs are told about real money. */
+  async setPricing(entries: AiPricingUpdate['entries'], user: RequestUser): Promise<AiPricingView> {
+    const now = nowIso();
+    const saved = await this.pricing.saveTable(
+      entries.map((e) => ({
+        providerType: e.providerType,
+        model: e.model,
+        baseUrl: e.baseUrl ?? '',
+        inputUsdPerMTok: e.inputUsdPerMTok,
+        outputUsdPerMTok: e.outputUsdPerMTok,
+        source: e.source,
+        asOf: e.asOf,
+        updatedAt: now,
+      })),
+      // `updatedBy` deliberately stays the USER id: the pricing view shows who owns the
+      // current figures, and a token is a credential a person acted through, not an author.
+      user.id,
+    );
+    await this.audit.log({
+      // The audit log answers a different question — what performed this write — so it uses
+      // the token-aware label every other audited action in this file uses.
+      actor: auditActor(user),
+      actorRole: 'admin',
+      action: 'ai.pricing.update',
+      entityType: 'settings',
+      // Counts and provenance, not a price dump — the audit trail answers "who changed the
+      // basis of every cost estimate on this server, and when", which is the question here.
+      detail: `set AI model pricing: ${saved.entries.length} entr${saved.entries.length === 1 ? 'y' : 'ies'} (${
+        saved.entries.filter((e) => e.source === 'reference').length
+      } prefilled from the reference list)`,
+    });
+    return this.getPricing();
   }
 
   // ── provider health ("test all") ─────────────────────────────────────────────
