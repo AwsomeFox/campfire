@@ -599,8 +599,13 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
              VALUES (1, 'paused', 'human_control', '2026-01-01T00:00:00.000Z')`,
           )
           .run();
-        // Mark 0131 un-run so reopening exercises the ALTER against the legacy shape.
+        // Mark 0131 un-run so reopening exercises the ALTER against the legacy shape. 0133 goes
+        // with it: the CREATE above predates BOTH additive migrations on this table, so both must
+        // re-run for the upgraded shape to match the fresh one asserted below. Un-recording only
+        // one leaves the other's column missing and fails the comparison for a reason unrelated
+        // to what either test is actually checking.
         seeded.sqlite.prepare('DELETE FROM __migrations WHERE name = ?').run('0131_ai_driver_session_persistence_1042');
+        seeded.sqlite.prepare('DELETE FROM __migrations WHERE name = ?').run('0133_ai_session_phase_1043');
       } finally {
         seeded.sqlite.close();
       }
@@ -678,6 +683,10 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
              VALUES (1, 'paused', 'human_control', '2026-01-01T00:00:00.000Z')`,
           )
           .run();
+        // Both additive migrations on this table are un-recorded, not just 0133: the CREATE above
+        // predates both, so both must re-run for the upgraded shape to match the fresh one the
+        // assertion below compares against.
+        seeded.sqlite.prepare('DELETE FROM __migrations WHERE name = ?').run('0131_ai_driver_session_persistence_1042');
         seeded.sqlite.prepare('DELETE FROM __migrations WHERE name = ?').run('0133_ai_session_phase_1043');
       } finally {
         seeded.sqlite.close();
