@@ -2517,95 +2517,95 @@ export default function RunSessionPage() {
               </div>
             ) : (
               orderedCombatants.map((c) => (
-            <CombatantRow
-              key={c.id}
-              rowRef={(el) => setCombatantRowRef(c.id, el)}
-              encounterId={eid}
-              combatant={c}
-              isCurrentTurn={c.id === currentCombatantId}
-              canEdit={canEditCombatant(c)}
-              canEditIdentity={canDmWrite && encounter.status !== 'ended'}
-              canViewStatblock={isDm}
-              canRemove={canDmWrite}
-              canSetInitiative={canDmWrite && encounter.status !== 'ended'}
-              running={encounter.status === 'running'}
-              character={c.characterId != null ? charactersById.get(c.characterId) ?? null : null}
-              openCardByDefault={c.characterId != null && ownedCharacterIds.has(c.characterId)}
-              // Omit campaignId while sheets are stale so click-to-roll cannot use obsolete mods (#421).
-              campaignId={sheetsInteractive ? cid : undefined}
-              onRollError={surfaceActionError}
-              onApplyDamage={(amount, label, diceTotal) => onApplyDamageRolled(amount, label, diceTotal, c.id)}
-              onUseAction={
-                canEditCombatant(c) && c.characterId != null
-                  ? (actionIndex) => {
-                      const ch = charactersById.get(c.characterId!);
-                      const act = ch?.actions[actionIndex];
-                      if (!act?.spec) return;
-                      onUseActionRequested(c.id, c.name, actionIndex, act.name, act.spec);
-                    }
-                  : undefined
-              }
-              onUseMonsterAction={
-                canEditCombatant(c) && c.characterId == null && (c.kind === 'monster' || c.kind === 'npc')
-                  ? (actionIndex, actionName, spec) => onUseActionRequested(c.id, c.name, actionIndex, actionName, spec)
-                  : undefined
-              }
-              busy={pendingCombatantIds.has(c.id) || reconcileBlocks}
-              conditionSuggestions={conditionSuggestions}
-              conditionSourceOptions={canDmWrite ? orderedCombatants.map((source) => ({ id: source.id, name: source.name })) : [{ id: c.id, name: c.name }]}
-              defaultConditionSourceCombatantId={currentCombatantId ?? c.id}
-              ruleSystem={ruleSystem}
-              onHpDelta={(delta) => {
-                // Belt-and-braces with the `busy` prop above: never let a second damage
-                // intent start while the outcome of the previous one is still unknown (#580).
-                if (reconcileBlocks) return;
-                const actorId = hpLogActorId(currentCombatantId, c.id);
-                hpDelta.mutate({ combatantId: c.id, delta, actorId });
-              }}
-              onSetTempHp={(value) => patchCombatant(c.id, { hpTemp: value })}
-              onSetDeathSaves={(patch) => patchCombatant(c.id, patch)}
-              onRollDeathSave={() => rollDeathSave(c)}
-              onSetInitiative={(value) => patchCombatant(c.id, { initiative: value })}
-              onClearInitiative={() => patchCombatant(c.id, { initiative: null })}
-              onAddCondition={(cond) => patchCombatant(c.id, { addConditions: [cond] })}
-              onRemoveCondition={(cond) => patchCombatant(c.id, { removeConditions: [cond] })}
-              onRename={(name) => patchCombatant(c.id, { name })}
-              onSetHpMax={(value) => patchCombatant(c.id, { hpMax: value })}
-              onSetTokenSize={(size) => setTokenSize(c.id, size)}
-              onPatchCombatant={(patch) => patchCombatant(c.id, patch)}
-              onPatchSourceTurnState={
-                canDmWrite || c.id === currentCombatantId
-                  ? (sourceCombatantId, patch) => patchCombatantTurnState(sourceCombatantId, patch)
-                  : undefined
-              }
-              legendaryActions={c.legendaryActions}
-              onUseLegendary={
-                canDmWrite && c.legendaryActions
-                  ? () => patchCombatantTurnState(c.id, { useSlot: LEGENDARY_ACTION_SLOT })
-                  : undefined
-              }
-              onReleaseLegendary={
-                canDmWrite && c.legendaryActions && c.legendaryActions.used > 0
-                  ? () => patchCombatantTurnState(c.id, { releaseSlot: LEGENDARY_ACTION_SLOT })
-                  : undefined
-              }
-              canEndMyTurn={
-                c.id === currentCombatantId &&
-                turnWorkspace?.canEndTurn === true &&
-                turnWorkspace.isYourTurn === true
-              }
-              onEndMyTurn={
-                c.id === currentCombatantId
-                  ? () => endTurn.mutate({ expectedCurrentCombatantId: c.id })
-                  : undefined
-              }
-              onPatchTurnState={
-                canEditCombatant(c) && c.id === currentCombatantId && encounter.status === 'running'
-                  ? (patch) => patchCombatantTurnState(c.id, patch)
-                  : undefined
-              }
-              onRemove={() => setConfirmRemoveCombatantId(c.id)}
-            />
+                <CombatantRow
+                  key={c.id}
+                  rowRef={(el) => setCombatantRowRef(c.id, el)}
+                  encounterId={eid}
+                  combatant={c}
+                  isCurrentTurn={c.id === currentCombatantId}
+                  canEdit={canEditCombatant(c)}
+                  canEditIdentity={canDmWrite && encounter.status !== 'ended'}
+                  canViewStatblock={isDm}
+                  canRemove={canDmWrite}
+                  canSetInitiative={canDmWrite && encounter.status !== 'ended'}
+                  running={encounter.status === 'running'}
+                  character={c.characterId != null ? charactersById.get(c.characterId) ?? null : null}
+                  openCardByDefault={c.characterId != null && ownedCharacterIds.has(c.characterId)}
+                  // Omit campaignId while sheets are stale so click-to-roll cannot use obsolete mods (#421).
+                  campaignId={sheetsInteractive ? cid : undefined}
+                  onRollError={surfaceActionError}
+                  onApplyDamage={(amount, label, diceTotal) => onApplyDamageRolled(amount, label, diceTotal, c.id)}
+                  onUseAction={
+                    canEditCombatant(c) && c.characterId != null
+                      ? (actionIndex) => {
+                          const ch = charactersById.get(c.characterId!);
+                          const act = ch?.actions[actionIndex];
+                          if (!act?.spec) return;
+                          onUseActionRequested(c.id, c.name, actionIndex, act.name, act.spec);
+                        }
+                      : undefined
+                  }
+                  onUseMonsterAction={
+                    canEditCombatant(c) && c.characterId == null && (c.kind === 'monster' || c.kind === 'npc')
+                      ? (actionIndex, actionName, spec) => onUseActionRequested(c.id, c.name, actionIndex, actionName, spec)
+                      : undefined
+                  }
+                  busy={pendingCombatantIds.has(c.id) || reconcileBlocks}
+                  conditionSuggestions={conditionSuggestions}
+                  conditionSourceOptions={canDmWrite ? orderedCombatants.map((source) => ({ id: source.id, name: source.name })) : [{ id: c.id, name: c.name }]}
+                  defaultConditionSourceCombatantId={currentCombatantId ?? c.id}
+                  ruleSystem={ruleSystem}
+                  onHpDelta={(delta) => {
+                    // Belt-and-braces with the `busy` prop above: never let a second damage
+                    // intent start while the outcome of the previous one is still unknown (#580).
+                    if (reconcileBlocks) return;
+                    const actorId = hpLogActorId(currentCombatantId, c.id);
+                    hpDelta.mutate({ combatantId: c.id, delta, actorId });
+                  }}
+                  onSetTempHp={(value) => patchCombatant(c.id, { hpTemp: value })}
+                  onSetDeathSaves={(patch) => patchCombatant(c.id, patch)}
+                  onRollDeathSave={() => rollDeathSave(c)}
+                  onSetInitiative={(value) => patchCombatant(c.id, { initiative: value })}
+                  onClearInitiative={() => patchCombatant(c.id, { initiative: null })}
+                  onAddCondition={(cond) => patchCombatant(c.id, { addConditions: [cond] })}
+                  onRemoveCondition={(cond) => patchCombatant(c.id, { removeConditions: [cond] })}
+                  onRename={(name) => patchCombatant(c.id, { name })}
+                  onSetHpMax={(value) => patchCombatant(c.id, { hpMax: value })}
+                  onSetTokenSize={(size) => setTokenSize(c.id, size)}
+                  onPatchCombatant={(patch) => patchCombatant(c.id, patch)}
+                  onPatchSourceTurnState={
+                    canDmWrite || c.id === currentCombatantId
+                      ? (sourceCombatantId, patch) => patchCombatantTurnState(sourceCombatantId, patch)
+                      : undefined
+                  }
+                  legendaryActions={c.legendaryActions}
+                  onUseLegendary={
+                    canDmWrite && c.legendaryActions
+                      ? () => patchCombatantTurnState(c.id, { useSlot: LEGENDARY_ACTION_SLOT })
+                      : undefined
+                  }
+                  onReleaseLegendary={
+                    canDmWrite && c.legendaryActions && c.legendaryActions.used > 0
+                      ? () => patchCombatantTurnState(c.id, { releaseSlot: LEGENDARY_ACTION_SLOT })
+                      : undefined
+                  }
+                  canEndMyTurn={
+                    c.id === currentCombatantId &&
+                    turnWorkspace?.canEndTurn === true &&
+                    turnWorkspace.isYourTurn === true
+                  }
+                  onEndMyTurn={
+                    c.id === currentCombatantId
+                      ? () => endTurn.mutate({ expectedCurrentCombatantId: c.id })
+                      : undefined
+                  }
+                  onPatchTurnState={
+                    canEditCombatant(c) && c.id === currentCombatantId && encounter.status === 'running'
+                      ? (patch) => patchCombatantTurnState(c.id, patch)
+                      : undefined
+                  }
+                  onRemove={() => setConfirmRemoveCombatantId(c.id)}
+                />
               ))
             )}
           </div>
