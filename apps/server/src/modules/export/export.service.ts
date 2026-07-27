@@ -57,6 +57,7 @@ import {
 } from './export-profiles';
 import { MODULE_EXCLUSION_REASONS, collectPrivateIdentifiers, projectExport, type ExportProjection } from './export-redaction';
 import { SANITIZABLE_MIMES, stripImageMetadata } from './image-metadata';
+import { portableAiSeat } from '../ai-dm/ai-seat-portability';
 
 /** Filesystem/URL-safe ASCII slug for download filenames — lowercase, alnum + hyphens. */
 export function slugify(name: string): string {
@@ -363,15 +364,10 @@ export class ExportService {
       sessionAttendance: sessionAttendanceList,
       diceRolls: diceRollList,
       // Issue #1078: AI seat + scribe config (DM-authored steering, NOT runtime counters or provider keys).
-      aiSeat: aiSeatRow
-        ? {
-            mode: aiSeatRow.mode,
-            enabled: aiSeatRow.enabled,
-            model: aiSeatRow.model,
-            instructions: aiSeatRow.instructions,
-            tokenBudget: aiSeatRow.tokenBudget,
-          }
-        : null,
+      // #1049: the portable field set is stated once in ai-seat-portability.ts. It used to be
+      // enumerated here by hand, which is how proactiveSettings (#1044), stylePresets (#1049)
+      // and actionQueueDepth (#1045) all silently stopped travelling.
+      aiSeat: aiSeatRow ? portableAiSeat(aiSeatRow) : null,
       aiScribeConfig: aiScribeConfigRow
         ? {
             postSession: aiScribeConfigRow.postSession,
