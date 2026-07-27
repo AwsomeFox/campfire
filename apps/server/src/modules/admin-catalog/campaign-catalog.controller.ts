@@ -1,5 +1,6 @@
-import { Body, Controller, Get, Param, ParseIntPipe, Post, Put } from '@nestjs/common';
-import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { Body, Controller, Get, Param, ParseIntPipe, Post, Put, Query } from '@nestjs/common';
+import { ApiOperation, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { CAMPAIGN_CATALOG_DEFAULT_LIMIT, CAMPAIGN_CATALOG_MAX_LIMIT } from '@campfire/schema';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
@@ -9,7 +10,9 @@ import {
   CampaignCatalogPrivacyUpdateDto,
   CampaignExportRequestDecisionDto,
   CampaignExportRequestDto,
+  CampaignExportRequestPageDto,
 } from './admin-catalog.dto';
+import { nonNegativeIntQuery } from './catalog-query';
 
 /**
  * The campaign's own side of the catalog (issue #587) — the half that makes the
@@ -84,12 +87,32 @@ export class CampaignCatalogController {
     description:
       "DM only. The inbox side of the catalog's `request_export` operation: who asked, which profile, why, and what " +
       'was decided. A DM who never answers has denied by default — nothing is produced without an explicit approval ' +
-      'followed by an explicit DM-run export.',
+      'followed by an explicit DM-run export. Paged with a real `total`, and ordered pending-first so the requests ' +
+      'still waiting on this DM can never be pushed off page one by decided history.',
   })
-  @ApiResponse({ status: 200, description: 'Export requests for this campaign, newest first.', type: [CampaignExportRequestDto] })
-  async listRequests(@Param('campaignId', ParseIntPipe) campaignId: number, @CurrentUser() user: RequestUser) {
+  @ApiQuery({
+    name: 'limit',
+    required: false,
+    type: Number,
+    description: `Page size (default ${CAMPAIGN_CATALOG_DEFAULT_LIMIT}, max ${CAMPAIGN_CATALOG_MAX_LIMIT}).`,
+  })
+  @ApiQuery({ name: 'offset', required: false, type: Number, description: 'Rows to skip (default 0).' })
+  @ApiResponse({
+    status: 200,
+    description: 'A page of export requests for this campaign, pending first then newest first.',
+    type: CampaignExportRequestPageDto,
+  })
+  async listRequests(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @CurrentUser() user: RequestUser,
+    @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
+  ) {
     await this.access.requireRole(user, campaignId, 'dm', { allowArchived: true });
-    return this.catalog.listExportRequestsForCampaign(campaignId);
+    return this.catalog.listExportRequestsForCampaign(campaignId, {
+      limit: nonNegativeIntQuery(limit, 'limit'),
+      offset: nonNegativeIntQuery(offset, 'offset'),
+    });
   }
 
   @Post('export-requests/:requestId/decision')

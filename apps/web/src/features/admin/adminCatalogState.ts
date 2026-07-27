@@ -15,6 +15,7 @@ import type {
   CampaignCatalogSort,
   ExportProfile,
 } from '@campfire/schema';
+import { CAMPAIGN_CATALOG_NO_OP_REASON } from '@campfire/schema';
 import type { ChipVariant } from '../../components/chipVariants';
 
 export const CATALOG_PAGE_SIZE = 25;
@@ -334,13 +335,26 @@ export function bulkPayloadFingerprint(
 }
 
 /**
- * True when a bulk result changed nothing and the operator should be told why rather
- * than shown an empty success. A run where everything skipped is a real outcome, not a
- * failure, but presenting it as "done" is how an operator concludes an archive worked
- * when it did not.
+ * True when a bulk result changed nothing BECAUSE the campaigns were already in the
+ * requested state — the one situation in which the reassuring "nothing would change"
+ * hint is a true statement.
+ *
+ * THE COUNTS DO NOT CARRY THE CAUSE. This used to be `applied === 0 && wouldApply === 0`,
+ * which is satisfied just as well by a batch in which every single item FAILED. The hint
+ * it drives is not a count, it is a claim about why — "the selected campaigns are already
+ * in this state" — and it was printed in bold above a list of failures, telling an
+ * operator that nothing needed doing at the exact moment everything had gone wrong.
+ *
+ * So the cause is now read from the evidence for it: no failures, and every skip carrying
+ * the server's own no-op reason. An ineligible campaign, a stale preview, or a trashed
+ * row all skip for reasons that are NOT "already in this state", and none of them should
+ * be summarised as if they were; they are visible per-item, which is where a reason that
+ * differs per campaign belongs.
  */
 export function isNoOpResult(result: CampaignCatalogBulkResult): boolean {
-  return result.applied === 0 && result.wouldApply === 0;
+  if (result.applied !== 0 || result.wouldApply !== 0 || result.failed !== 0) return false;
+  const skips = result.results.filter((r) => r.outcome === 'skipped');
+  return skips.length > 0 && skips.every((r) => r.reason === CAMPAIGN_CATALOG_NO_OP_REASON);
 }
 
 /** Chip variant for a per-item bulk outcome, from the shared chip palette. */

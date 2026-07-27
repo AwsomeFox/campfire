@@ -18,6 +18,7 @@ import type {
   CampaignCloneMode,
   CampaignClonePreview,
   CampaignExportRequest,
+  CampaignExportRequestPage,
   CampaignInvite,
   CastSession,
   CastSessionCreated,
@@ -792,25 +793,49 @@ function CatalogPrivacyCard({ campaign }: { campaign: Campaign }) {
  * hands over a file, and the card says so plainly so a DM knows what they are agreeing
  * to before they agree to it.
  */
+/** Rows fetched per read of the DM's export inbox. */
+const EXPORT_REQUEST_PAGE = 25;
+
 function ExportRequestsCard({ campaign }: { campaign: Campaign }) {
   const [requests, setRequests] = useState<CampaignExportRequest[] | null>(null);
+  const [total, setTotal] = useState(0);
   const [notes, setNotes] = useState<Record<number, string>>({});
   const [busyId, setBusyId] = useState<number | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    try {
-      setRequests(
-        await api.get<CampaignExportRequest[]>(`${API}/campaigns/${campaign.id}/catalog/export-requests`),
-      );
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't load export requests.");
-    }
-  }, [campaign.id]);
+  // The inbox is paged (the endpoint orders pending first, so page one always holds
+  // everything actually waiting on this DM). `limit` here is the count already shown, so
+  // "Show earlier requests" re-reads from the top rather than accumulating pages
+  // client-side — a decision recorded in another tab then cannot leave this list showing
+  // a request as pending that is not.
+  const load = useCallback(
+    async (count = EXPORT_REQUEST_PAGE) => {
+      try {
+        const page = await api.get<CampaignExportRequestPage>(
+          `${API}/campaigns/${campaign.id}/catalog/export-requests?limit=${count}&offset=0`,
+        );
+        setRequests(page.items);
+        setTotal(page.total);
+      } catch (err) {
+        setError(err instanceof ApiError ? err.message : "Couldn't load export requests.");
+      }
+    },
+    [campaign.id],
+  );
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  async function showMore() {
+    setLoadingMore(true);
+    try {
+      await load((requests?.length ?? 0) + EXPORT_REQUEST_PAGE);
+    } finally {
+      setLoadingMore(false);
+    }
+  }
 
   async function decide(requestId: number, decision: 'approved' | 'denied') {
     setBusyId(requestId);
@@ -820,7 +845,8 @@ function ExportRequestsCard({ campaign }: { campaign: Campaign }) {
         `${API}/campaigns/${campaign.id}/catalog/export-requests/${requestId}/decision`,
         { decision, note: (notes[requestId] ?? '').trim() },
       );
-      await load();
+      // Reload the same window the DM is looking at, not just the first page.
+      await load(Math.max(EXPORT_REQUEST_PAGE, requests?.length ?? 0));
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't record that decision.");
     } finally {
@@ -917,6 +943,19 @@ function ExportRequestsCard({ campaign }: { campaign: Campaign }) {
             ))}
           </ul>
         </div>
+      )}
+
+      {requests !== null && requests.length < total && (
+        <button
+          className="btn"
+          style={{ alignSelf: 'flex-start' }}
+          disabled={loadingMore}
+          aria-busy={loadingMore || undefined}
+          data-testid="export-requests-show-more"
+          onClick={() => void showMore()}
+        >
+          Show earlier requests ({requests.length} of {total})
+        </button>
       )}
 
       {error && (

@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test';
-import type { CampaignCatalogEntry } from '@campfire/schema';
+import type { CampaignCatalogBulkResult, CampaignCatalogEntry } from '@campfire/schema';
+import { CAMPAIGN_CATALOG_NO_OP_REASON } from '@campfire/schema';
 import {
   EMPTY_BULK_ARGS,
   availableOperations,
@@ -7,6 +8,7 @@ import {
   bulkArgsError,
   bulkPayloadFingerprint,
   createLatestOnlyGate,
+  isNoOpResult,
   reconcileOperation,
   selectedEntriesFrom,
   type BulkArgs,
@@ -418,5 +420,67 @@ test.describe('a superseded catalog load cannot repaint the table', () => {
     expect(
       buildBulkPayload('archive', selectedEntriesFrom(selected).map((c) => c.id), true, 'r', args()).campaignIds,
     ).toEqual([1]);
+  });
+});
+
+
+/**
+ * The "nothing would change" hint is a claim about WHY, and the counts do not carry a
+ * why. `applied === 0 && wouldApply === 0` is satisfied just as well by a batch in which
+ * every item failed, which printed a reassuring summary directly above the failures.
+ */
+test.describe('isNoOpResult only claims a no-op it can evidence', () => {
+  const result = (
+    over: Partial<CampaignCatalogBulkResult> & { results?: CampaignCatalogBulkResult['results'] },
+  ): CampaignCatalogBulkResult =>
+    ({
+      operation: 'archive',
+      dryRun: true,
+      requested: 1,
+      wouldApply: 0,
+      applied: 0,
+      skipped: 0,
+      failed: 0,
+      results: [],
+      ...over,
+    }) as CampaignCatalogBulkResult;
+
+  const item = (outcome: string, reason: string) =>
+    ({ campaignId: 1, outcome, reason, field: '', before: '', after: '', stateVersion: 'v' }) as
+      CampaignCatalogBulkResult['results'][number];
+
+  test('is true when every item skipped because it was already in that state', () => {
+    expect(
+      isNoOpResult(
+        result({ skipped: 1, results: [item('skipped', CAMPAIGN_CATALOG_NO_OP_REASON)] }),
+      ),
+    ).toBe(true);
+  });
+
+  test('is false when the batch failed outright', () => {
+    // The regression: zero applied and zero wouldApply, because everything blew up.
+    expect(
+      isNoOpResult(result({ failed: 2, results: [item('failed', 'database is locked')] })),
+    ).toBe(false);
+  });
+
+  test('is false when the skips were for some other reason', () => {
+    for (const reason of [
+      'campaign is in the trash',
+      'changed since the preview; run the dry run again',
+      'an export request is already pending for this campaign',
+    ]) {
+      expect(isNoOpResult(result({ skipped: 1, results: [item('skipped', reason)] }))).toBe(false);
+    }
+  });
+
+  test('is false for an empty batch, which is not evidence of anything', () => {
+    expect(isNoOpResult(result({ requested: 0 }))).toBe(false);
+  });
+
+  test('is false when a real change is pending', () => {
+    expect(
+      isNoOpResult(result({ wouldApply: 1, results: [item('would_apply', '')] })),
+    ).toBe(false);
   });
 });

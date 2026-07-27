@@ -29,7 +29,7 @@ export function intQuery(raw: string | undefined, field: string): number | undef
   return Math.floor(n);
 }
 
-function nonNegativeIntQuery(raw: string | undefined, field: string): number | undefined {
+export function nonNegativeIntQuery(raw: string | undefined, field: string): number | undefined {
   const n = intQuery(raw, field);
   if (n !== undefined && n < 0) throw new BadRequestException(`\`${field}\` must be non-negative`);
   return n;

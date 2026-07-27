@@ -9958,11 +9958,21 @@ export const CampaignCatalogEntry = z.object({
   nextSessionAt: IsoDate.nullable().default(null),
   /** max(campaigns.updated_at, newest audit row for the campaign). Never an entity body. */
   lastActivityAt: IsoDate.nullable().default(null),
-  /** Sum of committed attachment sizes. Bytes only — never a filename or a mime type. */
+  /**
+   * Sum of COMMITTED attachment sizes — stored content, excluding bytes merely reserved
+   * by in-flight uploads. Bytes only, never a filename or a mime type. Deliberately a
+   * narrower measure than the one `overQuota` uses; see below.
+   */
   storageBytes: z.number().int().nonnegative().default(0),
+  /** Committed attachment rows, on the same committed-only basis as `storageBytes`. */
   attachmentCount: z.number().int().nonnegative().default(0),
   storageQuotaBytes: z.number().int().nonnegative().nullable().default(null),
-  /** True when a quota is set and storageBytes exceeds it. */
+  /**
+   * True when a quota is set and committed + RESERVED bytes exceed it — the same sum
+   * upload enforcement compares against, so this flag agrees with whether the server is
+   * currently refusing uploads for the campaign. It can therefore be true while
+   * `storageBytes` alone is under the cap, for a campaign held over by in-flight uploads.
+   */
   overQuota: z.boolean().default(false),
   publicInvitesEnabled: z.boolean().default(true),
   aiExternalContentPolicy: AiExternalContentPolicy,
@@ -10022,6 +10032,18 @@ export type CampaignCatalogBulkOperation = z.infer<typeof CampaignCatalogBulkOpe
 export const CampaignCatalogBulkOutcome = z.enum(['would_apply', 'applied', 'skipped', 'failed']);
 export type CampaignCatalogBulkOutcome = z.infer<typeof CampaignCatalogBulkOutcome>;
 
+/**
+ * The one `skipped` reason that means "nothing to do; the campaign is already like
+ * this", as opposed to the several that mean "this item was ineligible" or "the preview
+ * went stale".
+ *
+ * Exported as a shared constant because the UI needs to tell those apart and must not do
+ * it by counting: a summary that asserts WHY nothing happened has to read the per-item
+ * reasons, and a literal duplicated on the client would drift out of agreement with the
+ * server the first time the wording is touched.
+ */
+export const CAMPAIGN_CATALOG_NO_OP_REASON = 'already in the requested state';
+
 export const CampaignCatalogBulkItemResult = z.object({
   campaignId: Id,
   outcome: CampaignCatalogBulkOutcome,
@@ -10032,13 +10054,20 @@ export const CampaignCatalogBulkItemResult = z.object({
   before: z.string().max(200).default(''),
   after: z.string().max(200).default(''),
   /**
-   * The campaign's `updated_at` at the moment this verdict was computed.
+   * An OPAQUE digest of every table this operation's plan was computed from — not just
+   * the campaign row. Compare it for equality; do not parse it.
    *
    * A dry run is only a safety property if Apply performs the plan that was PREVIEWED.
    * The client can detect its own edits, but not the campaign moving underneath it — a
    * DM reactivating a completed campaign between preview and apply turns a `skipped`
    * verdict into a real archive the operator never saw. Echoing the version the plan was
    * computed from lets Apply carry it back as a precondition.
+   *
+   * It covers EVERY dependency because a guard over a proxy is worse than no guard: this
+   * was `campaigns.updated_at` alone, which no write to `campaign_members` or
+   * `campaign_export_requests` advances — so a previewed ownership handover still
+   * "matched" after someone else had installed a different owner, and Apply demoted them
+   * without re-showing the plan.
    */
   stateVersion: z.string().max(64).default(''),
 });
@@ -10085,7 +10114,9 @@ export const CampaignCatalogBulkRequest = z
     /**
      * Per-campaign preconditions carried back from a dry run.
      *
-     * Each entry pins the `stateVersion` the previewed verdict was computed from. A
+     * Each entry pins the opaque `stateVersion` the previewed verdict was computed from,
+     * which covers every table that verdict was planned from rather than the campaign row
+     * alone. A
      * campaign whose version has moved is SKIPPED with a reason rather than replanned
      * from its new state — the operator agreed to a specific plan, and silently applying
      * a different one is the failure a dry run exists to prevent. Skipping per item

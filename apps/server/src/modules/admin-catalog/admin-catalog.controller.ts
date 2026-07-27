@@ -14,7 +14,7 @@ import {
   CampaignCatalogPrivacyPolicyUpdateDto,
   CampaignExportRequestPageDto,
 } from './admin-catalog.dto';
-import { intQuery, parseCatalogQuery } from './catalog-query';
+import { intQuery, nonNegativeIntQuery, parseCatalogQuery } from './catalog-query';
 
 /**
  * Server-admin campaign catalog: a card index, not a key ring (issue #587).
@@ -118,8 +118,11 @@ export class AdminCatalogController {
   ) {
     return this.catalog.listExportRequests(user, {
       campaignId: intQuery(campaignId, 'campaignId'),
-      limit: intQuery(limit, 'limit'),
-      offset: intQuery(offset, 'offset'),
+      // Same parser the catalog listing uses. These were `intQuery`, so `?offset=-5`
+      // 400'd on /campaigns and was silently clamped to 0 here — one console, two
+      // answers to the same malformed request, and the silent one hides a client bug.
+      limit: nonNegativeIntQuery(limit, 'limit'),
+      offset: nonNegativeIntQuery(offset, 'offset'),
     });
   }
 
@@ -185,7 +188,14 @@ export class AdminCatalogController {
   @ApiQuery({ name: 'activityAfter', required: false, type: String, description: 'ISO bound on last activity.' })
   @ApiQuery({ name: 'activityBefore', required: false, type: String, description: 'ISO bound on last activity.' })
   @ApiQuery({ name: 'minStorageBytes', required: false, type: Number, description: 'Committed attachment bytes floor.' })
-  @ApiQuery({ name: 'overQuota', required: false, type: Boolean, description: 'Only campaigns past their quota.' })
+  @ApiQuery({
+    name: 'overQuota',
+    required: false,
+    type: Boolean,
+    description:
+      'Only campaigns past their quota, measured as committed + reserved bytes so it agrees with upload ' +
+      'enforcement. Note this is a wider sum than the `storageBytes` column, which is committed bytes only.',
+  })
   @ApiQuery({ name: 'trashed', required: false, type: Boolean, description: 'Show soft-deleted campaigns instead.' })
   @ApiResponse({ status: 200, description: 'One page of catalog entries.', type: CampaignCatalogPageDto })
   list(

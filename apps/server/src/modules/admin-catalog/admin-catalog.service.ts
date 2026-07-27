@@ -6,9 +6,11 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { createHash } from 'node:crypto';
 import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lte, sql, type SQL } from 'drizzle-orm';
 import type {
   CampaignCatalogBulkItemResult,
+  CampaignCatalogBulkOperation,
   CampaignCatalogBulkRequest,
   CampaignCatalogBulkResult,
   CampaignCatalogEntry,
@@ -22,7 +24,11 @@ import type {
   CampaignExportRequestPage,
   CampaignExportRequestDecision,
 } from '@campfire/schema';
-import { CAMPAIGN_CATALOG_DEFAULT_LIMIT, CAMPAIGN_CATALOG_MAX_LIMIT } from '@campfire/schema';
+import {
+  CAMPAIGN_CATALOG_DEFAULT_LIMIT,
+  CAMPAIGN_CATALOG_MAX_LIMIT,
+  CAMPAIGN_CATALOG_NO_OP_REASON,
+} from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import {
   campaignExportRequests,
@@ -74,6 +80,119 @@ export type CatalogQuery = {
 type Actor = { actor: string; actorRole: ReturnType<typeof auditActorRole> };
 
 const COMMITTED = 'committed';
+const RESERVED = 'reserved';
+
+/**
+ * The campaign columns every plan reads. Named so `PlanInput` can talk about it.
+ */
+type CampaignPlanRow = {
+  id: number;
+  status: string;
+  ruleSystem: string;
+  storageQuotaBytes: number | null;
+  publicInvitesEnabled: boolean;
+  aiExternalContentPolicy: string;
+  deletedAt: string | null;
+  updatedAt: string;
+};
+
+type CampaignSeatRow = {
+  id: number;
+  userId: number;
+  primaryOwner: boolean;
+  role: string;
+  updatedAt: string;
+};
+
+type CampaignExportRequestRow = {
+  id: number;
+  status: string;
+  updatedAt: string;
+};
+
+/**
+ * The tables a bulk operation's plan is derived from.
+ *
+ * WHY THIS EXISTS AT ALL: the precondition that licenses Apply to skip re-showing the
+ * plan has to cover every table the plan READS, not one convenient proxy for them.
+ * `campaigns.updated_at` was that proxy, and it is wrong for two of the eight operations:
+ *
+ *  - `reassign_owner` plans from `campaign_members`. Nothing that writes a seat touches
+ *    `campaigns.updated_at`, so a previewed A -> B handover still "matched" after a
+ *    second operator had already made C the owner. Apply then replanned against the new
+ *    seat table and demoted C — a write nobody previewed, waved through by a guard
+ *    reporting "unchanged".
+ *  - `request_export` plans from `campaign_export_requests`. A previewed *skip* ("already
+ *    pending") became a real INSERT once the DM denied that pending request, for the same
+ *    reason. A skip is a plan too, and this is exactly the class of silent upgrade the
+ *    guard was added to stop.
+ *
+ * A guard that reports "unchanged" while the table it guards has changed is worse than no
+ * guard, because Apply trusts it and stops asking the operator to look again.
+ *
+ * WHY DECLARED HERE RATHER THAN BUMPED AT EVERY WRITER: the alternative — advancing a
+ * campaign version from every writer of every dependent table — needs writers outside
+ * this module to participate, and its failure mode is silent (a new writer that forgets
+ * simply reintroduces the bug, invisibly). This declaration is local and its failure mode
+ * is a compile error: `PlanInput` hands each operation ONLY the rows it declares, so a
+ * plan that reaches for an undeclared table does not typecheck, and `satisfies Record<…>`
+ * makes a newly added operation with no declaration a compile error too.
+ */
+type CatalogDependency = 'campaign' | 'members' | 'exportRequests';
+
+/** The rows each dependency contributes to a plan, and the shape a planner may read. */
+type CatalogDependencyRows = {
+  campaign: CampaignPlanRow;
+  members: CampaignSeatRow[];
+  exportRequests: CampaignExportRequestRow[];
+};
+
+const OPERATION_DEPENDENCIES = {
+  archive: ['campaign'],
+  pause: ['campaign'],
+  activate: ['campaign'],
+  set_quota: ['campaign'],
+  set_policy: ['campaign'],
+  // Reads `rule_packs` too, but a pack's presence is server inventory rather than
+  // campaign state: it is not something a concurrent catalog operation edits underneath a
+  // preview, and re-planning against it can only turn a would_apply into a skip.
+  update_module: ['campaign'],
+  reassign_owner: ['campaign', 'members'],
+  request_export: ['campaign', 'exportRequests'],
+} as const satisfies Record<CampaignCatalogBulkOperation, readonly CatalogDependency[]>;
+
+/**
+ * The planner's whole view of the world, discriminated by operation so that
+ * `switch (input.operation)` narrows the available rows to exactly the declared
+ * dependencies — reading `input.members` from a case that did not declare `'members'` is
+ * a type error, not a silently unguarded read.
+ */
+type PlanInput = {
+  [Op in CampaignCatalogBulkOperation]: { operation: Op } & Pick<
+    CatalogDependencyRows,
+    (typeof OPERATION_DEPENDENCIES)[Op][number]
+  >;
+}[CampaignCatalogBulkOperation];
+
+/**
+ * Thrown by a plan's `apply()` when the write it guards turned out to be unnecessary —
+ * the condition it would have skipped on became true between the plan and the write.
+ * Reported as `skipped`, because the same condition must not produce two different
+ * verdicts depending on whether it was hit sequentially or concurrently.
+ */
+class PlanBecameNoOp extends Error {}
+
+/**
+ * A bounded, order-independent digest of a row set, for the state version.
+ *
+ * Sorted because SQLite makes no ordering promise without an ORDER BY, and a version that
+ * changed when the query planner changed its mind would force spurious re-previews.
+ * Hashed because the version round-trips to the browser and back on every item of a
+ * 200-campaign batch, and a campaign with hundreds of seats should not inflate it.
+ */
+function fingerprint(parts: string[]): string {
+  return createHash('sha1').update(parts.sort().join('\n')).digest('hex');
+}
 
 /**
  * Server-admin campaign metadata catalog (issue #587).
@@ -295,6 +414,7 @@ export class AdminCatalogService {
         packName: rulePacks.name,
         packVersion: rulePacks.version,
         storageBytes: this.storageBytesExpr(),
+        quotaUsageBytes: this.quotaUsageBytesExpr(),
         attachmentCount: this.attachmentCountExpr(),
         memberCount: this.memberCountExpr(),
         dmCount: this.dmCountExpr(),
@@ -345,6 +465,7 @@ export class AdminCatalogService {
         packName: rulePacks.name,
         packVersion: rulePacks.version,
         storageBytes: this.storageBytesExpr(),
+        quotaUsageBytes: this.quotaUsageBytesExpr(),
         attachmentCount: this.attachmentCountExpr(),
         memberCount: this.memberCountExpr(),
         dmCount: this.dmCountExpr(),
@@ -598,25 +719,14 @@ export class AdminCatalogService {
       stateVersion,
     });
 
-    const [row] = await this.db
-      .select({
-        id: campaigns.id,
-        status: campaigns.status,
-        ruleSystem: campaigns.ruleSystem,
-        storageQuotaBytes: campaigns.storageQuotaBytes,
-        publicInvitesEnabled: campaigns.publicInvitesEnabled,
-        aiExternalContentPolicy: campaigns.aiExternalContentPolicy,
-        deletedAt: campaigns.deletedAt,
-        updatedAt: campaigns.updatedAt,
-      })
-      .from(campaigns)
-      .where(eq(campaigns.id, campaignId))
-      .limit(1);
+    const loaded = await this.loadPlanInput(campaignId, req.operation);
+    if (!loaded) return skip('campaign not found');
+    const { input, stateVersion } = loaded;
+    const row = input.campaign;
 
-    if (!row) return skip('campaign not found');
     // A trashed campaign is on its way out; lifecycle edits to it would resurrect
     // confusion rather than resolve it. Restoring is a separate, deliberate act.
-    if (row.deletedAt) return skip('campaign is in the trash', row.updatedAt);
+    if (row.deletedAt) return skip('campaign is in the trash', stateVersion);
 
     // APPLY ONLY THE PLAN THAT WAS PREVIEWED.
     //
@@ -628,31 +738,44 @@ export class AdminCatalogService {
     // whose verbs rewrite ownership and privacy across up to 200 campaigns at once,
     // "what you agreed to" and "what runs" have to be the same thing.
     //
-    // The version is the campaign's `updated_at`, which moves on ANY write, so this is
-    // deliberately conservative: an unrelated edit also forces a re-preview. Refusing
-    // and asking to look again is the honest failure; silently applying a different plan
-    // is the one being removed.
+    // The version covers EVERY table this operation's plan reads (see
+    // OPERATION_DEPENDENCIES), not just `campaigns.updated_at` — a guard that watches a
+    // proxy for the state it guards licenses exactly the silent replans it exists to
+    // stop. Within each of those tables it is deliberately conservative: any write moves
+    // it, so an unrelated edit also forces a re-preview. Refusing and asking to look
+    // again is the honest failure; silently applying a different plan is the one being
+    // removed.
     //
     // SKIPPED, not failed, and not fatal to the batch — a 200-campaign run that aborts
     // because one campaign moved is its own bad outcome. Absent preconditions (an API
     // client that never previewed) leave behaviour unchanged.
     const precondition = req.preconditions?.find((p) => p.campaignId === campaignId);
-    if (precondition && precondition.stateVersion !== row.updatedAt) {
-      return skip('campaign changed since the preview; run the dry run again', row.updatedAt);
+    if (precondition && precondition.stateVersion !== stateVersion) {
+      return skip('campaign changed since the preview; run the dry run again', stateVersion);
     }
 
-    const plan = await this.planChange(row, req, actor);
+    const plan = await this.planChange(input, req, actor);
     // Both carry the version too: a no-op or ineligible verdict is still a PLAN the
     // operator saw, and it must be pinnable — the reactivated-campaign case is precisely
     // a `skipped` verdict turning into a real write.
-    if (plan === null) return skip('already in the requested state', row.updatedAt);
-    if (typeof plan === 'string') return skip(plan, row.updatedAt);
+    if (plan === null) return skip(CAMPAIGN_CATALOG_NO_OP_REASON, stateVersion);
+    if (typeof plan === 'string') return skip(plan, stateVersion);
 
     if (req.dryRun) {
-      return { campaignId, outcome: 'would_apply', reason: '', ...plan.summary, stateVersion: row.updatedAt };
+      return { campaignId, outcome: 'would_apply', reason: '', ...plan.summary, stateVersion };
     }
 
-    plan.apply();
+    try {
+      plan.apply();
+    } catch (err) {
+      // ONE CONDITION, ONE VERDICT. A duplicate `request_export` caught by the pre-check
+      // reports `skipped`; before this, the same duplicate caught by the INSERT's own
+      // `WHERE NOT EXISTS` (because it arrived concurrently) escaped as an exception and
+      // reported `failed`. Identical situation, two different words for it, and only one
+      // of them tells the operator "nothing to do here" rather than "retry this".
+      if (err instanceof PlanBecameNoOp) return skip(err.message, stateVersion);
+      throw err;
+    }
 
     // Live-update notifications for the write that just committed. Guarded for the same
     // reason the audit write below is: this runs AFTER the change is durable, so a
@@ -697,7 +820,103 @@ export class AdminCatalogService {
       auditNote = 'applied, but the audit row could not be written';
     }
 
-    return { campaignId, outcome: 'applied', reason: auditNote, ...plan.summary, stateVersion: row.updatedAt };
+    return { campaignId, outcome: 'applied', reason: auditNote, ...plan.summary, stateVersion };
+  }
+
+  /**
+   * Load exactly the rows this operation's plan is allowed to read, plus a state version
+   * computed over exactly those tables.
+   *
+   * The declaration in OPERATION_DEPENDENCIES drives both halves, so the rows a planner
+   * can see and the rows the precondition covers cannot drift apart: adding a dependency
+   * to read it also adds it to the guard, and a planner cannot read one it did not
+   * declare because the property is not on its `PlanInput` variant.
+   */
+  private async loadPlanInput(
+    campaignId: number,
+    operation: CampaignCatalogBulkOperation,
+  ): Promise<{ input: PlanInput; stateVersion: string } | null> {
+    const [campaign] = await this.db
+      .select({
+        id: campaigns.id,
+        status: campaigns.status,
+        ruleSystem: campaigns.ruleSystem,
+        storageQuotaBytes: campaigns.storageQuotaBytes,
+        publicInvitesEnabled: campaigns.publicInvitesEnabled,
+        aiExternalContentPolicy: campaigns.aiExternalContentPolicy,
+        deletedAt: campaigns.deletedAt,
+        updatedAt: campaigns.updatedAt,
+      })
+      .from(campaigns)
+      .where(eq(campaigns.id, campaignId))
+      .limit(1);
+    if (!campaign) return null;
+
+    const dependencies: readonly CatalogDependency[] = OPERATION_DEPENDENCIES[operation];
+    const rows: Partial<CatalogDependencyRows> = { campaign };
+    // Fingerprints, in declaration order, so the version string is stable across runs.
+    const parts: string[] = [];
+
+    for (const dependency of dependencies) {
+      switch (dependency) {
+        case 'campaign':
+          parts.push(`campaign=${campaign.updatedAt}`);
+          break;
+        case 'members': {
+          const members = await this.db
+            .select({
+              id: campaignMembers.id,
+              userId: campaignMembers.userId,
+              primaryOwner: campaignMembers.primaryOwner,
+              role: campaignMembers.role,
+              updatedAt: campaignMembers.updatedAt,
+            })
+            .from(campaignMembers)
+            .where(eq(campaignMembers.campaignId, campaignId));
+          rows.members = members;
+          // The SET of seats, not a max(updated_at): a seat that is DELETED changes who
+          // owns the campaign without advancing any surviving row's timestamp, and that
+          // is precisely a change the operator needs re-shown.
+          parts.push(
+            `members=${fingerprint(
+              members.map((m) => `${m.id}:${m.userId}:${m.role}:${m.primaryOwner ? 1 : 0}:${m.updatedAt}`),
+            )}`,
+          );
+          break;
+        }
+        case 'exportRequests': {
+          const requests = await this.db
+            .select({
+              id: campaignExportRequests.id,
+              status: campaignExportRequests.status,
+              updatedAt: campaignExportRequests.updatedAt,
+            })
+            .from(campaignExportRequests)
+            .where(eq(campaignExportRequests.campaignId, campaignId));
+          rows.exportRequests = requests;
+          // Status is in the fingerprint because a DM DECIDING the pending request is the
+          // mutation that turns a previewed skip into a live insert.
+          parts.push(`exports=${fingerprint(requests.map((r) => `${r.id}:${r.status}:${r.updatedAt}`))}`);
+          break;
+        }
+        default: {
+          // Exhaustiveness: a new CatalogDependency with no loader is a compile error.
+          const never: never = dependency;
+          throw new Error(`unhandled catalog dependency ${String(never)}`);
+        }
+      }
+    }
+
+    return {
+      // The only cast in the mechanism, and it is discharged by the loop above: `rows`
+      // has been populated for exactly `OPERATION_DEPENDENCIES[operation]`, which is the
+      // key set `PlanInput`'s variant for `operation` requires.
+      input: { operation, ...rows } as PlanInput,
+      // Digested rather than concatenated: the wire field is capped at 64 characters and
+      // the number of dependencies is not. Order is preserved (unlike `fingerprint`,
+      // which sorts an unordered row set) because `parts` is built in declaration order.
+      stateVersion: createHash('sha1').update(parts.join('|')).digest('hex'),
+    };
   }
 
   /**
@@ -707,14 +926,7 @@ export class AdminCatalogService {
    * `apply()` performs the whole change inside a single transaction.
    */
   private async planChange(
-    row: {
-      id: number;
-      status: string;
-      ruleSystem: string;
-      storageQuotaBytes: number | null;
-      publicInvitesEnabled: boolean;
-      aiExternalContentPolicy: string;
-    },
+    input: PlanInput,
     req: CampaignCatalogBulkRequest,
     actor: Actor,
   ): Promise<
@@ -733,6 +945,7 @@ export class AdminCatalogService {
       }
   > {
     const ts = nowIso();
+    const row = input.campaign;
     const id = row.id;
 
     const statusChange = (next: 'active' | 'paused' | 'completed') => {
@@ -777,7 +990,10 @@ export class AdminCatalogService {
       };
     };
 
-    switch (req.operation) {
+    // Switching on `input.operation` rather than `req.operation` is what makes the
+    // dependency declaration load-bearing: it narrows `input` to the variant carrying
+    // exactly the declared rows, so a case can only read tables the guard also covers.
+    switch (input.operation) {
       case 'archive':
         return statusChange('completed');
       case 'pause':
@@ -859,15 +1075,11 @@ export class AdminCatalogService {
         if (!target) return `user ${toUserId} not found`;
         if (target.disabled) return `user ${toUserId} is disabled`;
 
-        const existing = await this.db
-          .select({
-            id: campaignMembers.id,
-            userId: campaignMembers.userId,
-            primaryOwner: campaignMembers.primaryOwner,
-            role: campaignMembers.role,
-          })
-          .from(campaignMembers)
-          .where(eq(campaignMembers.campaignId, id));
+        // The seat table arrives through `input`, which is also what the precondition
+        // fingerprints. Re-reading it here would put the plan back on data the guard does
+        // not cover — the exact split that let an Apply demote an owner installed after
+        // the preview.
+        const existing = input.members;
         const currentOwner = existing.find((m) => m.primaryOwner);
         if (currentOwner?.userId === toUserId) return null;
 
@@ -999,13 +1211,11 @@ export class AdminCatalogService {
 
       case 'request_export': {
         const profile = req.exportProfile ?? 'backup';
-        const [pending] = await this.db
-          .select({ id: campaignExportRequests.id })
-          .from(campaignExportRequests)
-          .where(
-            and(eq(campaignExportRequests.campaignId, id), eq(campaignExportRequests.status, 'pending')),
-          )
-          .limit(1);
+        // Same rule as `reassign_owner`: the request table arrives through `input` so the
+        // plan and the precondition see the same rows. A DM deciding the pending request
+        // between preview and Apply now invalidates the preview instead of quietly
+        // turning a shown `skipped` into an INSERT.
+        const pending = input.exportRequests.find((r) => r.status === 'pending');
         if (pending) return 'an export request is already pending for this campaign';
         // The column is documented as "numeric user id as text when the requester was a
         // real account; '' otherwise", so test for that directly rather than excluding
@@ -1048,11 +1258,14 @@ export class AdminCatalogService {
               `);
 
               // Zero rows means another request won the race between the pre-check and
-              // here. Throwing rolls this transaction back and surfaces the item as
-              // `failed` with this reason, rather than reporting `applied` for a row
-              // that was never written.
+              // here. Throwing rolls this transaction back rather than reporting
+              // `applied` for a row that was never written — and it throws the no-op
+              // sentinel, so `applyOne` reports the SAME `skipped` verdict the sequential
+              // pre-check produces for the identical condition. Reporting `failed` here
+              // told an operator to retry an operation whose only correct outcome is to
+              // do nothing.
               if (inserted.changes === 0) {
-                throw new Error('an export request is already pending for this campaign');
+                throw new PlanBecameNoOp('an export request is already pending for this campaign');
               }
             });
           },
@@ -1163,17 +1376,46 @@ export class AdminCatalogService {
    * Deliberately NOT routed through `listExportRequests`: that method writes a
    * server-admin audit row, and a DM reading the asks addressed to their own campaign is
    * not an operator browsing the catalog. Recording it as one would put DMs in the
-   * server-admin trail and misattribute a routine act as a privileged read. Bounded by a
-   * single campaign's own history, so it needs no paging.
+   * server-admin trail and misattribute a routine act as a privileged read.
+   *
+   * PAGED, FOR THE REASON THE CROSS-CAMPAIGN LISTING IS. This returned a bare array cut
+   * off at CAMPAIGN_CATALOG_MAX_LIMIT on the argument that one campaign's history is
+   * naturally bounded — which is the same argument the admin listing made before it was
+   * found to be silently dropping pending requests. "Rarely exceeds the cap" is not a
+   * bound, and the row that falls off a DM's inbox is one nobody ever answers.
+   *
+   * PENDING FIRST, then newest-first. Ordering by id alone left the actionable rows to be
+   * displaced by decided history once a campaign accumulated enough of it; page one is
+   * now always the requests that are actually waiting on this DM.
    */
-  async listExportRequestsForCampaign(campaignId: number): Promise<CampaignExportRequest[]> {
+  async listExportRequestsForCampaign(
+    campaignId: number,
+    opts: { limit?: number; offset?: number } = {},
+  ): Promise<CampaignExportRequestPage> {
+    const limit = clampListLimit(opts.limit, CAMPAIGN_CATALOG_DEFAULT_LIMIT, CAMPAIGN_CATALOG_MAX_LIMIT);
+    const offset = Math.max(0, Math.floor(opts.offset ?? 0));
+    const where = eq(campaignExportRequests.campaignId, campaignId);
+
     const rows = await this.db
       .select()
       .from(campaignExportRequests)
-      .where(eq(campaignExportRequests.campaignId, campaignId))
-      .orderBy(desc(campaignExportRequests.id))
-      .limit(CAMPAIGN_CATALOG_MAX_LIMIT);
-    return rows.map((r) => this.toExportRequest(r));
+      .where(where)
+      .orderBy(sql`CASE WHEN ${campaignExportRequests.status} = 'pending' THEN 0 ELSE 1 END`, desc(campaignExportRequests.id))
+      .limit(limit)
+      .offset(offset);
+
+    const [{ total }] = await this.db
+      .select({ total: sql<number>`count(*)` })
+      .from(campaignExportRequests)
+      .where(where);
+
+    return {
+      items: rows.map((r) => this.toExportRequest(r)),
+      total: Number(total),
+      hasMore: offset + rows.length < Number(total),
+      limit,
+      offset,
+    };
   }
 
   /**
@@ -1390,6 +1632,25 @@ export class AdminCatalogService {
       WHERE a.campaign_id = ${campaigns.id} AND a.state = ${COMMITTED})`;
   }
 
+  /**
+   * The bytes the QUOTA is measured against: committed plus reserved.
+   *
+   * Deliberately not `storageBytesExpr`. That column answers "how much is stored", which
+   * is committed bytes and nothing else — an in-flight reservation is not stored content
+   * and showing it there would overstate what the operator can actually go and look at.
+   * But quota ENFORCEMENT in attachments.service.ts counts committed + reserved, so
+   * deriving `overQuota` (and `?overQuota=true`) from committed alone reported "under
+   * quota" for campaigns whose uploads were at that moment being rejected — the console
+   * disagreed with the server about the one fact an operator opens it to check.
+   *
+   * The two definitions now match, and the difference between the flag and the column is
+   * documented on the schema fields rather than left for a reader to infer.
+   */
+  private quotaUsageBytesExpr(): SQL<number> {
+    return sql<number>`(SELECT COALESCE(SUM(a.size), 0) FROM attachments a
+      WHERE a.campaign_id = ${campaigns.id} AND a.state IN (${COMMITTED}, ${RESERVED}))`;
+  }
+
   private memberCountExpr(): SQL<number> {
     return sql<number>`(SELECT COUNT(*) FROM campaign_members m WHERE m.campaign_id = ${campaigns.id})`;
   }
@@ -1517,7 +1778,7 @@ export class AdminCatalogService {
     if (query.minStorageBytes !== undefined) clauses.push(gte(this.storageBytesExpr(), query.minStorageBytes));
     if (query.overQuota !== undefined) {
       const over = sql`(${campaigns.storageQuotaBytes} IS NOT NULL
-        AND ${this.storageBytesExpr()} > ${campaigns.storageQuotaBytes})`;
+        AND ${this.quotaUsageBytesExpr()} > ${campaigns.storageQuotaBytes})`;
       clauses.push(query.overQuota ? over : sql`NOT ${over}`);
     }
 
@@ -1612,6 +1873,8 @@ export class AdminCatalogService {
       packName: string | null;
       packVersion: string | null;
       storageBytes: number;
+      /** Committed + reserved, the sum upload enforcement uses. Drives `overQuota` only. */
+      quotaUsageBytes: number;
       attachmentCount: number;
       memberCount: number;
       dmCount: number;
@@ -1664,7 +1927,9 @@ export class AdminCatalogService {
       storageBytes,
       attachmentCount: Number(row.attachmentCount ?? 0),
       storageQuotaBytes: row.storageQuotaBytes,
-      overQuota: row.storageQuotaBytes !== null && storageBytes > row.storageQuotaBytes,
+      // Committed + reserved, matching what upload enforcement actually compares against
+      // — see quotaUsageBytesExpr. `storageBytes` above stays committed-only.
+      overQuota: row.storageQuotaBytes !== null && Number(row.quotaUsageBytes ?? 0) > row.storageQuotaBytes,
       publicInvitesEnabled: row.publicInvitesEnabled,
       aiExternalContentPolicy: row.aiExternalContentPolicy === 'disabled' ? 'disabled' : 'member_consent',
       createdAt: row.createdAt,
