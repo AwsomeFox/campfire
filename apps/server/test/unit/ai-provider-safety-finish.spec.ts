@@ -157,6 +157,35 @@ describe('OpenAI Chat Completions — message.refusal / delta.refusal (#598)', (
     expect(result.text).toBe('The alley narrows.');
   });
 
+  it('reports the refusal LENGTH so a refusal-only turn is still billable', async () => {
+    // Discarding refusal prose (correct) also discarded the only measurement the budget
+    // estimator had, so on a provider that omits usage a refusal metered as ZERO tokens. The
+    // count escapes; the text does not. A character count leaks nothing a token count doesn't.
+    const refusal = 'I can’t help with that.';
+    const { fetchImpl } = fakeFetch(
+      jsonResponse({ model: 'm', choices: [{ finish_reason: 'stop', message: { content: null, refusal } }] }),
+    );
+    const p = new OpenAiProvider({ apiKey: 'k', model: 'm', endpointMode: 'chat_completions', fetchImpl });
+    const result = await p.generate(req);
+    expect(result.refusalChars).toBe(refusal.length);
+    // …and the prose itself is still nowhere in the result.
+    expect(JSON.stringify(result)).not.toContain('help with that');
+  });
+
+  it('streaming: accumulates refusal length across deltas', async () => {
+    const frames = [
+      `data: ${JSON.stringify({ choices: [{ delta: { refusal: 'abcd' } }] })}\n\n`,
+      `data: ${JSON.stringify({ choices: [{ delta: { refusal: 'efg' } }] })}\n\n`,
+      `data: ${JSON.stringify({ choices: [{ finish_reason: 'stop', delta: {} }] })}\n\n`,
+      'data: [DONE]\n\n',
+    ];
+    const { fetchImpl } = fakeFetch(streamResponse(frames));
+    const p = new OpenAiProvider({ apiKey: 'k', model: 'm', endpointMode: 'chat_completions', fetchImpl });
+    const events = await collect(p.stream(req));
+    const done = events.find((e) => e.type === 'done');
+    expect(done && done.type === 'done' && done.result.refusalChars).toBe(7);
+  });
+
   it('an empty-string refusal is not a refusal', async () => {
     // Some OpenAI-compatible servers emit `refusal: ""` or `null` on every message. Keying on
     // presence-of-key would withhold every turn those servers produce.

@@ -212,7 +212,8 @@ export class OpenAiProvider implements AiProvider {
     // #598 — a Chat Completions refusal, which reports `finish_reason: 'stop'`. Its text is
     // deliberately NOT folded into `text`: a refusal is not narration, and this adapter's job
     // is to report the terminal state rather than hand the driver something to broadcast.
-    const refused = typeof msg?.refusal === 'string' && msg.refusal.length > 0;
+    const refusalChars = typeof msg?.refusal === 'string' ? msg.refusal.length : 0;
+    const refused = refusalChars > 0;
     return {
       text: msg?.content ?? '',
       toolCalls,
@@ -226,12 +227,17 @@ export class OpenAiProvider implements AiProvider {
       // both declined and asked for tools can never dispatch them.
       finishReason: resolveChatFinish(choice?.finish_reason, refused, toolCalls.length),
       model: json.model ?? requestedModel,
+      // Length only — the refusal text is dropped above. See AiGenerateResult.refusalChars:
+      // without this a refusal-only turn measures as zero output and meters as zero tokens.
+      refusalChars,
     };
   }
 
   private parseResponsesResult(json: ResponsesApiResponse, requestedModel: string): AiGenerateResult {
     let text = '';
     let refused = false;
+    /** #598 — refusal LENGTH only; the prose is dropped. See AiGenerateResult.refusalChars. */
+    let refusalChars = 0;
     const toolCalls: AiToolCall[] = [];
 
     for (const item of json.output ?? []) {
@@ -241,7 +247,10 @@ export class OpenAiProvider implements AiProvider {
           // #598: a `refusal` part is the model declining. Its text is deliberately NOT
           // concatenated into `text` — a refusal is not narration, and this adapter's job is
           // to report the terminal state, not to hand the driver something to broadcast.
-          else if (part.type === 'refusal') refused = true;
+          else if (part.type === 'refusal') {
+            refused = true;
+            refusalChars += (part.refusal ?? part.text ?? '').length;
+          }
         }
       } else if (item.type === 'refusal') {
         refused = true;
@@ -268,6 +277,7 @@ export class OpenAiProvider implements AiProvider {
       // packaged with it. Resolve safety first, and only fall back to tool_calls.
       finishReason: resolveResponsesFinish(json, refused, toolCalls.length),
       model: json.model ?? requestedModel,
+      refusalChars,
     };
   }
 
@@ -454,6 +464,8 @@ class OpenAiStreamAccumulator {
   private text = '';
   /** #598 — a `delta.refusal` arrived. Sticky: nothing later re-opens that decision. */
   private refused = false;
+  /** #598 — total refusal characters seen. A COUNT; the text itself is never retained. */
+  private refusalChars = 0;
   private readonly toolAcc = new Map<number, { id?: string; name?: string; args: string }>();
   private usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
   private finishReason: AiFinishReason = 'stop';
@@ -481,7 +493,10 @@ class OpenAiStreamAccumulator {
     // #598 — a streamed refusal. Sticky, and NOT emitted as a text delta: the whole point of
     // the withhold is that refusal prose never reaches the table, so forwarding it here would
     // put it on the wire ahead of the terminal frame that says it was refused.
-    if (typeof delta.refusal === 'string' && delta.refusal.length > 0) this.refused = true;
+    if (typeof delta.refusal === 'string' && delta.refusal.length > 0) {
+      this.refused = true;
+      this.refusalChars += delta.refusal.length;
+    }
     if (typeof delta.content === 'string' && delta.content.length > 0) {
       this.text += delta.content;
       yield { type: 'text', delta: delta.content };
@@ -514,6 +529,7 @@ class OpenAiStreamAccumulator {
       // Safety-first precedence, as on the non-streaming path.
       finishReason: resolveChatFinish(undefined, this.refused, toolCalls.length, this.finishReason),
       model: this.model,
+      refusalChars: this.refusalChars,
     };
   }
 }
@@ -530,6 +546,8 @@ class ResponsesStreamAccumulator {
   private incompleteReason: string | null = null;
   /** The model emitted a refusal part/delta this response (#598). */
   private refused = false;
+  /** #598 — total refusal characters seen. A COUNT; the text itself is never retained. */
+  private refusalChars = 0;
 
   constructor(requestedModel: string) {
     this.model = requestedModel;
@@ -571,7 +589,11 @@ class ResponsesStreamAccumulator {
       // #598: the model declining. A refusal delta is NOT forwarded as a text delta — it is
       // not narration, and forwarding it would put the decline into the table's DM bubble.
       // Recording the terminal state is the whole job here.
-      case 'response.refusal.delta':
+      case 'response.refusal.delta': {
+        this.refused = true;
+        this.refusalChars += (event.delta ?? '').length;
+        break;
+      }
       case 'response.refusal.done': {
         this.refused = true;
         break;
@@ -618,6 +640,7 @@ class ResponsesStreamAccumulator {
         toolCalls.length,
       ),
       model: this.model,
+      refusalChars: this.refusalChars,
     };
   }
 }

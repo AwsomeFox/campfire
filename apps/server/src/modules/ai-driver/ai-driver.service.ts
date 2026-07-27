@@ -2482,6 +2482,12 @@ export class AiDriverService {
           // estimate reads the length the outcome carries. Without this a refused turn on a
           // usage-omitting provider would meter as 0 tokens, and a loop of refusals would
           // never move the budget gate.
+          //
+          // `generatedChars` folds in the provider's REFUSAL length too, which on a
+          // refusal-only turn is the only output there is. The adapters discard refusal prose
+          // so it can never be broadcast — and discarding it took this estimator's only
+          // measurement with it. The provider bills for that work whether or not the table
+          // ever sees it, so the length (never the text) has to survive the discard.
           const generatedChars = step.withheld ? step.withheld.generatedChars : (text || result?.text || '').length;
           if (usage === 0 && (generatedChars > 0 || (result?.toolCalls?.length ?? 0) > 0)) {
             const outputChars = generatedChars + JSON.stringify(result?.toolCalls ?? []).length;
@@ -2520,19 +2526,43 @@ export class AiDriverService {
           // which is strictly better than published text.
           if (step.withheld) {
             let metered: { seat: AiDmSeat; tokensUsed: number; budgetRemaining: number } | undefined;
+            // The seat as it stands after metering, however metering went. Falling through to
+            // the PRE-CALL snapshot on failure would report bookkeeping that did not happen —
+            // and `meterTurn` settles its reservation either way (#563): either the spend was
+            // already committed and a later audit/history write failed, or the hold was
+            // consumed as unknown spend. The database WAS charged in both cases, so reporting
+            // `currentSeat`/`currentRemaining` would tell the table zero tokens and a stale
+            // budget for a turn that really did cost something.
+            let settledSeat: AiDmSeat = currentSeat;
+            let settledRemaining = currentRemaining;
             try {
               metered = await meter();
+              settledSeat = metered.seat;
+              settledRemaining = metered.budgetRemaining;
             } catch (err) {
               this.logger.error(
                 `Failed to meter a WITHHELD AI DM turn on campaign ${campaignId} (step ${stepNumber}, ` +
                   `${usage} tokens): ${err instanceof Error ? err.message : String(err)}. The withhold stands; ` +
-                  `this step's usage is not booked.`,
+                  `re-reading the seat to report what was actually settled.`,
               );
+              // Best-effort: if even this read fails we keep the pre-call snapshot, which is
+              // stale but is the only number we have. A reporting inaccuracy must not become a
+              // second failure on a path that exists to survive the first one.
+              try {
+                const after = await this.aiDm.getSeat(campaignId);
+                settledSeat = after;
+                settledRemaining = after.budgetRemaining;
+              } catch (readErr) {
+                this.logger.warn(
+                  `Could not re-read the AI DM seat for campaign ${campaignId} after a metering failure; ` +
+                    `reporting the pre-call budget snapshot: ${readErr instanceof Error ? readErr.message : String(readErr)}`,
+                );
+              }
             }
             return {
               kind: 'withheld' as const,
-              seat: metered?.seat ?? currentSeat,
-              budgetRemaining: metered?.budgetRemaining ?? currentRemaining,
+              seat: settledSeat,
+              budgetRemaining: settledRemaining,
               metered,
               withheld: step.withheld,
               // Tool calls that arrived in the SAME response as the refusal. They are counted
@@ -3290,7 +3320,11 @@ export class AiDriverService {
           finishReason,
           quarantinedChars,
           releasedChars,
-          generatedChars: text.length,
+          // Narration the model produced PLUS the refusal prose the adapter dropped. On a
+          // refusal-only turn `text` is empty — the refusal never becomes a text delta, by
+          // design — so without the adapter's count this is 0 and the step meters as free
+          // on any provider that omits streaming usage.
+          generatedChars: text.length + (result?.refusalChars ?? 0),
         };
         // #598 — THE RETRACTION IS PUBLISHED HERE, in the same statement block that drops the
         // prose, and deliberately not by the caller.

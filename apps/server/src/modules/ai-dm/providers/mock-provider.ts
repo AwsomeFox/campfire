@@ -34,6 +34,12 @@ export interface MockResponse {
   /** Override usage; otherwise derived from prompt + reply length. */
   usage?: AiUsage;
   finishReason?: AiFinishReason;
+  /**
+   * #598 — refusal characters the provider produced, as the real adapters report them: a
+   * LENGTH, with the prose itself never surfacing as narration. Lets a test model the shape
+   * that broke budget metering — a refusal-only turn whose only output is refusal text.
+   */
+  refusalChars?: number;
   /** How many text chunks `stream()` splits `text` into (default 3). */
   streamChunks?: number;
   /** When false, omit text deltas and only emit the final `done` (simulates done-only narration). */
@@ -117,7 +123,14 @@ export class MockAiProvider implements AiProvider {
       totalTokens: mockTokenCount(promptText) + mockTokenCount(text),
     };
     const finishReason: AiFinishReason = canned.finishReason ?? (toolCalls.length > 0 ? 'tool_calls' : 'stop');
-    return { text, toolCalls, usage, finishReason, model: this.model };
+    return {
+      text,
+      toolCalls,
+      usage,
+      finishReason,
+      model: this.model,
+      ...(canned.refusalChars !== undefined ? { refusalChars: canned.refusalChars } : {}),
+    };
   }
 
   async generate(req: AiGenerateRequest, _opts?: AiGenerateOptions): Promise<AiGenerateResult> {

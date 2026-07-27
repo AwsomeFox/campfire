@@ -1887,8 +1887,13 @@ export const aiDriverWithheldTurns = sqliteTable(
     /**
      * Characters still inside the quarantine delay line when the refusal landed, and so never
      * broadcast. LENGTH ONLY — the text itself is discarded. BOUNDED BY THE WINDOW: this is
-     * "how much the delay line caught", not the length of the refused reply. See the note above
-     * the table.
+     * how much was held back AT THE CUT-OFF, not the total the model produced. See the note
+     * above the table.
+     *
+     * NOT A REASSURANCE NUMBER. A small value on a long refusal means the reply OUTRAN the
+     * window and most of it had already gone out — the opposite of "the model barely said
+     * anything". `released_chars` is what says how much reached the table, and is the field to
+     * read first.
      */
     withheldChars: integer('withheld_chars').notNull().default(0),
     /** Characters already broadcast when the refusal arrived — the residual exposure. */

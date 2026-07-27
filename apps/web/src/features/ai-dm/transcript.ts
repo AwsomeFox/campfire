@@ -853,6 +853,14 @@ function applyServerEvent(state: TranscriptState, event: AiDmTranscriptEvent): T
       // terminal state is a rung on the existing ladder, not a parallel mechanism). Give it its
       // own variant anyway — "the AI DM got stuck" is the wrong sentence for a reply that was
       // generated and deliberately not shown.
+      //
+      // COUPLING WORTH KNOWING ABOUT: on a replayed transcript this is the ONLY thing telling a
+      // withheld turn apart from a genuine stall, and it depends on `payload.reason` surviving
+      // the server's role projection. It does today. If that projection ever begins redacting
+      // `reason` for some role, every withheld turn silently reverts to reading as "the AI DM
+      // got stuck" for that role — a wording regression with no test failure and no error,
+      // because the fallback is itself a valid variant. The turn's `turn.ended` stop reason
+      // carries the same signal if a second source is ever wanted.
       const withheld = control === 'stuck' && asText(event.payload.reason) === 'content_withheld';
       const variant: SystemEntry['variant'] =
         withheld

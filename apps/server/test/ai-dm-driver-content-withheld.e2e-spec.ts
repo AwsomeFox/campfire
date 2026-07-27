@@ -300,6 +300,63 @@ describe('ai-dm driver — provider content filters / refusals are withheld turn
     }
   });
 
+  it('a refusal-only turn on a usage-omitting provider still SPENDS budget', async () => {
+    // The accounting hole the refusal fix opened. Refusal prose is discarded by the adapters
+    // so it can never be broadcast — correct — but the #1076 fallback for providers that omit
+    // streaming usage estimates cost from OUTPUT LENGTH, and with the prose gone there was no
+    // length left to read. Every refusal booked as zero tokens.
+    //
+    // The consequence is a budget gate that never advances against a provider that IS billing:
+    // a model stuck refusing would burn real money forever behind a budget that never moves.
+    // "Safely refused" and "free" are not the same outcome.
+    const campaignId = await armedCampaign('Withheld metering non-zero');
+    const before = (await h.getSeat(campaignId)).body;
+
+    h.script({
+      // A refusal-only turn: no narration at all, and no usage reported — the exact
+      // combination that measured as nothing.
+      text: '',
+      finishReason: 'refusal',
+      refusalChars: 400,
+      usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+    });
+    const res = await h.sendMessage(campaignId, { input: 'go' });
+
+    expect(res.body.stopReason).toBe('content_withheld');
+    // The turn cost something, and the seat says so.
+    expect(res.body.tokensUsed).toBeGreaterThan(0);
+    const after = (await h.getSeat(campaignId)).body;
+    expect(after.tokensUsed).toBeGreaterThan(before.tokensUsed);
+  });
+
+  it('reports the SETTLED budget after a metering rejection, not the pre-call snapshot', async () => {
+    // `meterTurn` settles its reservation even when it throws (#563): either the spend was
+    // already committed and a later audit/history write failed, or the hold is consumed as
+    // unknown spend. Either way the database was charged — so falling back to the pre-call
+    // snapshot made the response and the turn.ended frame report a budget that no longer
+    // existed. A branch that exists to handle a bookkeeping failure must not then report
+    // bookkeeping that did not happen.
+    const campaignId = await armedCampaign('Withheld metering settled');
+
+    h.script({ text: `${UNSAFE}`, finishReason: 'content_filter' });
+    const aiDm = h.ctx.app.get(AiDmService);
+    const meterSpy = jest.spyOn(aiDm, 'meterTurn').mockRejectedValueOnce(new Error('usage-history write failed'));
+
+    try {
+      const res = await h.sendMessage(campaignId, { input: 'go' });
+      expect(meterSpy).toHaveBeenCalled();
+      expect(res.body.stopReason).toBe('content_withheld');
+
+      // Whatever the seat actually holds now is what the caller must be told. Read it back and
+      // require the response to agree, rather than pinning a specific number — the point is
+      // that the report tracks the database, not that settlement took any particular shape.
+      const after = (await h.getSeat(campaignId)).body;
+      expect(res.body.budgetRemaining).toBe(after.budgetRemaining);
+    } finally {
+      meterSpy.mockRestore();
+    }
+  });
+
   it('the incident’s turn number matches the stuck record for the same turn', async () => {
     // `WithheldTurnIncident.turn` documents that it correlates with the stuck record. It did not:
     // the incident was written from inside the step loop, before the turn's `finally` bumped
