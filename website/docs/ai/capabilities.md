@@ -16,9 +16,9 @@ An AI with a DM-scoped token can run a campaign end to end — verified end-to-e
   between beats) so an assistant can draft and rearrange where the story might fork.
 - **Rules** — install a rule pack, search it, and cite entries.
 - **Characters** — create and update sheets, adjust HP and conditions.
-- **Combat** — create an encounter, add monsters from the compendium, roll
-  initiative, deal damage, apply conditions, advance turns, and end it (HP writes
-  back to sheets).
+- **Combat** — create an encounter (private DM prep by default), add monsters from
+  the compendium, roll initiative, deal damage, apply conditions, advance turns,
+  and end it (HP writes back to sheets).
 - **Session flow** — write recaps, read and resolve the scribe inbox.
 - **Dice** — roll for checks and saves.
 - **Export** — pull the whole campaign as JSON.
@@ -70,10 +70,41 @@ The seat has three modes, set in the web UI:
   **proposal queue** for the DM to approve or reject; it never writes canon directly.
 - **Driver** — the AI **holds the seat and runs the live session**, calling the
   play tools itself. Even here, **canon writes are still forced through proposals**;
-  the driver is **tool-scoped to live-play tools** (dice, initiative, encounter and
-  turn flow, HP/conditions, XP, loot and treasury grants, map reveal, notes) and is **refused** cross-campaign
+  the driver is **tool-scoped to live-play tools** (dice, initiative, encounter
+  authoring and turn flow, HP/conditions, XP, loot and treasury grants, map reveal, notes) and is **refused** cross-campaign
   calls and any admin/destructive tool (deletes, `update_campaign`,
   `uninstall_rule_pack`, `withdraw_proposal`).
+
+### Encounter authoring, and its two limits
+
+A Driver can **originate a fight**, not just run one you built: it calls
+`create_encounter`, adds the combatants, and begins the encounter in a single
+flow, so "roll a wandering monster and start it" works without you stopping to
+build the tracker by hand.
+
+This is a **direct** capability rather than a proposal, and that is deliberate. A
+proposal is a draft that does not exist until you approve it — the AI's very next
+call would have no encounter to add monsters to, so routing encounter creation
+through the queue would not slow the flow down, it would break it. An encounter
+is play state, closer to a dice roll than to canon; new NPCs, quests and
+locations remain proposal-only.
+
+Two limits bound it, and both are enforced by the server rather than by asking
+the model nicely:
+
+- **Every encounter the AI creates is DM-only prep.** It cannot choose to make
+  one visible, and it cannot reveal an existing one — `hidden` is not writable by
+  the seat at all. Its roster and difficulty stay withheld from players until
+  **you** reveal it from the encounter list. This matters because the Driver
+  takes its instructions from player chat: without the limit, "what are we about
+  to fight?" would be a way to make the AI publish your prep.
+- **It may only reshape what it made.** The AI can rename or re-link an encounter
+  it created during this session. Encounters *you* prepared are yours — it is
+  told to ask rather than edit them, and the server refuses the write if it
+  tries.
+
+AI-created encounters appear in your encounter list immediately, badged
+**Hidden**, and every call is recorded in the campaign audit log.
 
 ### Configured in the web UI
 
@@ -123,6 +154,28 @@ If a driver stalls or makes a call the table disputes, players have recovery lev
 **nudge** it (replay the turn with a hint), **flag** a ruling to force a re-decide,
 open a **table vote** (to override or pause), or **request a human takeover**. The DM
 can pause and resume the seat at any time.
+
+### What survives a server restart
+
+The seat's **state** is stored in the database, not in server memory, so a restart or a
+redeploy in the middle of a session does not quietly reset the table. A pause stays paused,
+a human takeover stays granted, the stuck ladder and its replay input survive (so **nudge**
+and **retry** still work), and an open table vote comes back with its ballots intact.
+
+Some things deliberately **do not** survive, because they are grants of authority made to a
+room the server can no longer verify once the process has gone:
+
+| Cleared by a restart | Why |
+| --- | --- |
+| **Secret-read approvals** — a DM letting the seat read one specific hidden NPC, quest, or location | The grant named one entity and was made in a room you were watching. The DM can grant it again in a second; silently carrying it forward is the option with a downside. |
+| **Tool calls awaiting your approval** | These are irreversible live-play writes nobody approved yet. They are discarded un-executed; the AI will ask again if it still needs to. |
+| **A table vote whose time ran out while the server was down** | Downtime still burns the ballot window, so the vote comes back **failed** rather than as a live decision people can still be counted into. |
+
+**None of that happens quietly.** Every cleared grant gets its own audit entry naming exactly
+what it covered, the table gets a notification and a live signal, and the reset is written into
+the table log so someone who reconnects later still sees it. Losing the state is acceptable;
+losing it without telling anyone is not — a DM should never have to *discover* that an approval
+they granted is gone, or that the AI is waiting on a confirmation that no longer exists.
 
 ### Short rests and long rests
 

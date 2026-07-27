@@ -110,17 +110,27 @@ describe('notes privacy (e2e)', () => {
   it('dm inbox list + resolve', async () => {
     const server = ctx.app.getHttpServer();
 
-    const inboxRes = await request(server)
+    // Issue #597: a viewer seat is read-only, and a DM-inbox submission notifies every
+    // DM — so it is refused unless the seat holds the interactive-guest capability. This
+    // used to succeed, which is exactly the "Viewer is documented read-only but gated on
+    // membership only" finding.
+    const viewerInbox = await request(server)
       .post(`/api/v1/campaigns/${campaignId}/inbox`)
       .set(viewer)
-      .send({ body: 'Quick capture from viewer', authorName: 'Anonymous' });
+      .send({ body: 'Quick capture from viewer' });
+    expect(viewerInbox.status).toBe(403);
+
+    const inboxRes = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/inbox`)
+      .set(authorPlayer)
+      .send({ body: 'Quick capture from a player', authorName: 'Anonymous' });
     expect(inboxRes.status).toBe(201);
     const inboxId = inboxRes.body.id;
     expect(inboxRes.body.kind).toBe('inbox');
     expect(inboxRes.body.visibility).toBe('dm_shared');
     // Punch list item 8: client-supplied `authorName` ('Anonymous') is ignored — the server
-    // always stamps the authenticated caller's own name (dev-auth mirrors x-dev-user, 'v-1').
-    expect(inboxRes.body.authorName).toBe('v-1');
+    // always stamps the authenticated caller's own name (dev-auth mirrors x-dev-user).
+    expect(inboxRes.body.authorName).toBe('author-1');
     expect(inboxRes.body.authorName).not.toBe('Anonymous');
 
     const listInbox = await request(server).get(`/api/v1/campaigns/${campaignId}/inbox`).set(dm);

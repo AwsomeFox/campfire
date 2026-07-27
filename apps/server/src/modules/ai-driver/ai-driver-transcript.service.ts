@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { BadRequestException, Inject, Injectable, Logger } from '@nestjs/common';
-import { and, asc, count, desc, eq, gt, lt, max } from 'drizzle-orm';
+import { and, asc, count, desc, eq, gt, inArray, lt, max } from 'drizzle-orm';
 import {
   AI_DM_TRANSCRIPT_LIST_DEFAULT_LIMIT,
   AI_DM_TRANSCRIPT_LIST_MAX_LIMIT,
@@ -170,6 +170,45 @@ export function projectTranscriptEventForRole(
   return { ...event, payload: reveal ? { ...restPayload, encounterId } : restPayload };
 }
 
+/**
+ * The kinds that carry NARRATIVE continuity — what was said at the table (#1038).
+ *
+ * Everything else the transcript records is operational rather than story: `tool` rows are
+ * thin "the AI called X" signals whose actual effect is already re-read fresh into the
+ * world-state prompt sections every turn, `turn.ended` is token/stop-reason bookkeeping,
+ * and `control`/`vote` are seat administration. Replaying those would spend the history
+ * budget on text that cannot help the model narrate coherently, and would teach it to
+ * imitate bookkeeping lines in its prose.
+ */
+export const AI_DM_PROMPT_HISTORY_KINDS: readonly AiDmTranscriptEventKind[] = ['player.action', 'narration'];
+
+/**
+ * The history projection used to PROMPT THE MODEL (#1038) — deliberately NOT the projection
+ * served to a player, and narrower than both of the role projections above.
+ *
+ * WHY IT IS ITS OWN PROJECTION. {@link projectTranscriptEventForRole} answers "what may this
+ * HUMAN see". This answers "what may the MODEL be told", and the two are different questions
+ * with different failure modes: too little and the AI is amnesiac (the bug #1038 reports),
+ * too much and DM-only material enters a context whose entire output streams to every player
+ * and viewer at the table.
+ *
+ * It resolves that by taking the PLAYER-VISIBLE slice, not the DM one — `visibility: 'dm'`
+ * rows are excluded even though the seat runs with DM authority. That follows the rule #387
+ * already established for the rest of this prompt: the system prompt is assembled through a
+ * player-scoped toolset precisely so "the narration that streams to every player and viewer
+ * therefore cannot contain a secret the model was never handed". History is prompt context
+ * like any other, so it obeys the same rule.
+ *
+ * Nothing narrative is lost by that choice. Today the ONLY `visibility: 'dm'` rows are
+ * secret-read approval control lines, which name a hidden entity and record access-control
+ * bookkeeping — they are not story, and {@link AI_DM_PROMPT_HISTORY_KINDS} would drop them
+ * anyway. The visibility filter is belt-and-braces so that a future DM-only NARRATION row
+ * cannot silently start leaking into player-visible prose.
+ */
+export function isPromptHistoryEvent(kind: string, visibility: AiDmTranscriptVisibility): boolean {
+  return visibility === 'all' && (AI_DM_PROMPT_HISTORY_KINDS as readonly string[]).includes(kind);
+}
+
 @Injectable()
 export class AiDmTranscriptService {
   private readonly logger = new Logger(AiDmTranscriptService.name);
@@ -282,6 +321,57 @@ export class AiDmTranscriptService {
    * player can actually see. FIELD-level redaction (a hidden encounter id inside a tool
    * payload) is then applied per row, which cannot drop a row.
    */
+  /**
+   * The newest narrative history for a campaign, oldest-first, for PROMPTING (#1038).
+   *
+   * Synchronous by design: it runs inside `runTurn`'s hot path right before the provider
+   * call, and better-sqlite3 reads are synchronous anyway — making it async would only add
+   * a scheduling hop between "reserve the turn" and "send the prompt".
+   *
+   * `beforeSeq` excludes the action being answered THIS turn, which is already persisted by
+   * the time the prompt is assembled (#572 records an accepted action before the AI replies).
+   * Without it the live message would also appear as the last line of its own history.
+   *
+   * Selection happens in SQL — the visibility and kind filters are a WHERE clause, not a
+   * post-filter — so a row this projection excludes is never even loaded, and `limit` counts
+   * only rows that could actually be used.
+   */
+  listForPrompt(campaignId: number, opts: { limit: number; beforeSeq?: number } = { limit: 0 }): AiDmTranscriptEvent[] {
+    if (opts.limit <= 0) return [];
+    const conds = [
+      eq(aiDmTranscriptEvents.campaignId, campaignId),
+      eq(aiDmTranscriptEvents.visibility, 'all'),
+      inArray(aiDmTranscriptEvents.kind, [...AI_DM_PROMPT_HISTORY_KINDS]),
+    ];
+    if (opts.beforeSeq !== undefined) conds.push(lt(aiDmTranscriptEvents.seq, opts.beforeSeq));
+    // Newest-first with a LIMIT is what makes this cheap on a long campaign; reversed here
+    // so the caller always receives chronological order.
+    const rows = this.db
+      .select()
+      .from(aiDmTranscriptEvents)
+      .where(and(...conds))
+      .orderBy(desc(aiDmTranscriptEvents.seq))
+      .limit(opts.limit)
+      .all();
+    return rows.reverse().map(toDomain);
+  }
+
+  /** How many events {@link listForPrompt} could draw on — the session's `historyLength` (#1038). */
+  promptHistoryDepth(campaignId: number): number {
+    const row = this.db
+      .select({ value: count() })
+      .from(aiDmTranscriptEvents)
+      .where(
+        and(
+          eq(aiDmTranscriptEvents.campaignId, campaignId),
+          eq(aiDmTranscriptEvents.visibility, 'all'),
+          inArray(aiDmTranscriptEvents.kind, [...AI_DM_PROMPT_HISTORY_KINDS]),
+        ),
+      )
+      .get();
+    return row?.value ?? 0;
+  }
+
   async list(
     campaignId: number,
     role: Role,

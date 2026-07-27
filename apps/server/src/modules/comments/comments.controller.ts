@@ -95,14 +95,21 @@ export class CampaignCommentsController {
   @ApiOperation({
     summary: 'Post a comment',
     description:
-      'Requires campaign membership (write) AND visibility of the anchored entity — posting on a hidden/secret entity 404s for a non-DM (issue #230). Anchored to an entity (entityType/entityId). Optional parentId for a threaded reply. An in-character post must select characterId for a live character owned by the authenticated account; the server snapshots its safe name/avatar while preserving account author provenance (issue #787).',
+      'Requires an INTERACTIVE campaign seat (issue #597) AND visibility of the anchored entity — posting on a hidden/secret entity 404s for a non-DM (issue #230). A viewer seat is read-only and is refused with 403 unless a DM has granted it the interactive-guest capability. Anchored to an entity (entityType/entityId). Optional parentId for a threaded reply. An in-character post must select characterId for a live character owned by the authenticated account; the server snapshots its safe name/avatar while preserving account author provenance (issue #787).',
   })
   @ApiResponse({ status: 201, description: 'Created comment.', type: CommentDto })
+  @ApiResponse({ status: 403, description: 'Read-only (viewer) seat without the interactive-guest capability.' })
   async create(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @Body() body: CommentCreateDto,
     @CurrentUser() user: RequestUser,
   ) {
+    // Issue #597: the read-only gate itself lives in CommentsService.create, not here.
+    // `{ write: true }` only asserts the CAMPAIGN is writable and returns a viewer
+    // unchanged — which is precisely how a documented read-only seat ended up able to
+    // comment on every thread it could see. Putting the capability check in the service
+    // means the MCP `post_comment` tool passes through the same gate; a controller-only
+    // check would have left the agent surface open.
     const role = await this.access.requireMember(user, campaignId, { write: true });
     return this.comments.create(campaignId, body, user, role);
   }
@@ -166,6 +173,8 @@ export class CommentsController {
     @CurrentUser() user: RequestUser,
   ) {
     const row = await this.comments.getRowOrThrow(id);
+    // Restoring a prior body is an edit by another name (issue #597) — the capability
+    // gate is applied inside CommentsService.restoreRevision's update path.
     const role = await this.access.requireMember(user, row.campaignId, { write: true });
     return this.comments.restoreRevision(id, revisionId, user, role);
   }

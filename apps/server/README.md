@@ -580,7 +580,11 @@ see `modules/mcp/mcp-rest-parity.ts` for the issue #683 parity matrix.
    and member/proposal/rule-pack management (rule packs additionally require
    server admin, since they're server-wide, not campaign-scoped); player can
    manage their own character, roll dice, check objectives, and post
-   notes/inbox items; viewer is read-only plus dice/notes/inbox. A PAT
+   notes/inbox items; viewer is genuinely READ-ONLY (issue #597) — it may keep
+   PRIVATE notes and roll dice, but comments, shared/whispered notes, and DM-inbox
+   posts all require the separate, DM-granted `interactiveGuest` capability on the
+   membership row. That capability is what a table uses when it wants a commenting
+   non-player without handing them `player` authority over campaign content. A PAT
    additionally *caps* the effective role to `min(token scope, real
    membership role)` and, if bound to one `campaignId`, 403s on every other
    campaign — even for server admins acting through a scoped token.

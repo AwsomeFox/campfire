@@ -226,6 +226,18 @@ test.describe('password field accessibility (issue #868)', () => {
           campaignName: 'Reveal Campaign',
           role: 'player',
           expiresAt: '2099-01-01T00:00:00.000Z',
+      permissions: {
+        role: 'player',
+        readOnly: false,
+        interactiveGuest: false,
+        canKeepPrivateNotes: true,
+        canComment: true,
+        canShareNotes: true,
+        canWhisper: true,
+        canSubmitToDmInbox: true,
+        canEditCampaignContent: true,
+        canModerate: false,
+      },
         }),
       });
     });

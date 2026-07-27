@@ -31,6 +31,52 @@ const ROLE_BLURB: Record<InvitePreview['role'], string> = {
   viewer: 'a viewer',
 };
 
+/**
+ * Issue #597: the join page must say what the seat can DO before you accept it, not
+ * just name its role. "Viewer" was not an answer — and until #597 the server did not
+ * behave the way the word implied. Rendered straight from the server's
+ * `permissions` object so the preview and the enforcement can never disagree.
+ */
+const PERMISSION_LABELS: ReadonlyArray<{ key: keyof InvitePreview['permissions']; label: string }> = [
+  { key: 'canComment', label: 'Post comments on threads' },
+  { key: 'canShareNotes', label: 'Share notes with the party or the DM' },
+  { key: 'canWhisper', label: 'Send private whispers to members' },
+  { key: 'canSubmitToDmInbox', label: 'Send items to the DM inbox' },
+  { key: 'canKeepPrivateNotes', label: 'Keep private notes only you can see' },
+  { key: 'canEditCampaignContent', label: 'Add and edit campaign content' },
+  { key: 'canModerate', label: 'Moderate the table' },
+];
+
+function InvitePermissions({ permissions }: { permissions: InvitePreview['permissions'] }) {
+  return (
+    <div className="w-full" style={{ textAlign: 'left' }}>
+      <p className="text-muted" style={{ margin: '0 0 6px', fontSize: 12, fontWeight: 600 }}>
+        {permissions.readOnly ? 'This seat is read-only. You will be able to:' : 'At this table you will be able to:'}
+      </p>
+      <ul style={{ margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 2 }}>
+        {PERMISSION_LABELS.map(({ key, label }) => (
+          <li
+            key={key}
+            className={permissions[key] ? '' : 'text-muted'}
+            style={{ fontSize: 12, display: 'flex', gap: 6, alignItems: 'baseline' }}
+          >
+            <span aria-hidden="true">{permissions[key] ? '\u2713' : '\u2717'}</span>
+            <span>
+              {label}
+              <span className="sr-only">{permissions[key] ? ' — allowed' : ' — not allowed'}</span>
+            </span>
+          </li>
+        ))}
+      </ul>
+      {permissions.readOnly && (
+        <p className="text-muted" style={{ margin: '6px 0 0', fontSize: 11 }}>
+          A DM can later grant you the interactive-guest capability if the table wants you taking part in discussion.
+        </p>
+      )}
+    </div>
+  );
+}
+
 export function JoinPage() {
   const { code = '' } = useParams<{ code: string }>();
   const { me, ready, refresh } = useAuth();
@@ -239,6 +285,8 @@ export function JoinPage() {
                     : `Joining as ${ROLE_BLURB[preview.role]}.`}
                 </p>
               </div>
+
+              {!alreadyMember && <InvitePermissions permissions={preview.permissions} />}
 
               {me ? (
                 <div className="w-full flex flex-col gap-3">
