@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 import { seed, stateFor } from './seed';
 import { transcriptStorageKey, type TranscriptEntry } from '../../src/features/ai-dm/transcript';
 import { transcriptRememberKey } from '../../src/features/ai-dm/transcriptPrivacy';
@@ -102,6 +102,32 @@ async function seedTranscriptCache(page: Page, campaignId: number, entries: Tran
 }
 
 test.describe('AI table transcript scroll (#590)', () => {
+/**
+ * Wait until the transcript's MOUNT tail-pin has fully settled (#590).
+ *
+ * `pinTranscriptToTail` suppresses scroll-unpin for two animation frames and then
+ * RE-PINS if follow is still intended. A scroll issued while that window is open is
+ * therefore either ignored outright or undone a frame later, leaving the transcript
+ * pinned, `unreadBelow` reset to 0, and no jump affordance — so any assertion about
+ * leaving the tail races the mount rather than testing the follow state machine.
+ * Settled means: no jump button, and scrollTop within 48px of the maximum.
+ */
+async function expectTailPinned(page: Page, transcript: Locator): Promise<void> {
+  await expect
+    .poll(
+      async () => {
+        const jumpCount = await page.getByTestId('transcript-jump-latest').count();
+        const { top, max } = await transcript.evaluate((node) => ({
+          top: node.scrollTop,
+          max: node.scrollHeight - node.clientHeight,
+        }));
+        return jumpCount === 0 && max > 0 && max - top <= 48;
+      },
+      { timeout: 15_000 },
+    )
+    .toBe(true);
+}
+
   test('opens at the latest line when the transcript is hydrated from storage', async ({ page }) => {
     const { campaignId } = seed();
     const entries = seedLongTranscript(campaignId);
@@ -117,14 +143,7 @@ test.describe('AI table transcript scroll (#590)', () => {
     // Wait for mount tail-pin: no jump affordance and scroll near the latest line.
     // Flex layout / font settle on CI can leave the jump button visible for a frame
     // if we assert count===0 before scrollTop catches up (#590).
-    await expect.poll(async () => {
-      const jumpCount = await page.getByTestId('transcript-jump-latest').count();
-      const { top, max } = await transcript.evaluate((node) => ({
-        top: node.scrollTop,
-        max: node.scrollHeight - node.clientHeight,
-      }));
-      return jumpCount === 0 && max > 0 && max - top <= 48;
-    }, { timeout: 15_000 }).toBe(true);
+    await expectTailPinned(page, transcript);
     await expect(transcript.getByText('Earlier table line 80')).toBeVisible();
   });
 
@@ -139,6 +158,14 @@ test.describe('AI table transcript scroll (#590)', () => {
     const transcript = page.getByRole('log', { name: 'Table transcript' });
     await expect(transcript).toHaveAttribute('aria-live', 'off');
     await expect(page.getByTestId('ai-narration-log')).toHaveAttribute('role', 'log');
+
+    // The sibling test above waits for the mount tail-pin before asserting; this one
+    // scrolled away immediately, so on a slow machine the scroll could land inside
+    // pinTranscriptToTail's two-frame suppression window and be swallowed (or undone by
+    // its trailing re-pin). Follow then stayed engaged, the send below cleared unreadBelow
+    // instead of incrementing it, and the jump-to-latest assertions failed — which is the
+    // shape this spec kept failing in on CI and recovering from on retry.
+    await expectTailPinned(page, transcript);
 
     await transcript.focus();
     await transcript.evaluate((node) => {
