@@ -296,6 +296,10 @@ describe('BackupService AI keyfile envelope (#496, real SQLite)', () => {
       hidden: false,
       sha256: '0'.repeat(64),
     }];
+    manifest.reconciliation = {
+      ...manifest.reconciliation,
+      totalAttachments: 1,
+    };
     zip.file('uploads/fixture.bin', 'abc');
     zip.file('manifest.json', JSON.stringify(manifest, null, 2));
 
@@ -319,7 +323,19 @@ describe('BackupService AI keyfile envelope (#496, real SQLite)', () => {
     const zip = await JSZip.loadAsync(archive);
     const manifest = JSON.parse(await zip.file('manifest.json')!.async('string')) as BackupManifest;
     manifest.uploadCount = 1;
-    manifest.attachments = [];
+    manifest.attachments = [{
+      id: 1,
+      campaignId: 1,
+      path: 'different.bin',
+      size: 3,
+      mime: 'application/octet-stream',
+      hidden: false,
+      sha256: 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
+    }];
+    manifest.reconciliation = {
+      ...manifest.reconciliation,
+      totalAttachments: 1,
+    };
     zip.file('uploads/fixture.bin', 'abc');
     zip.file('manifest.json', JSON.stringify(manifest, null, 2));
     const tampered = await zip.generateAsync({ type: 'nodebuffer' });
