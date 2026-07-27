@@ -5480,6 +5480,13 @@ export const AI_DM_MODE_CAPABILITIES: Readonly<
       { label: 'applies HP and conditions', copyKeyword: 'HP' },
       { label: 'awards XP and levels', copyKeyword: 'XP' },
       { label: 'advances combat turns', copyKeyword: 'turn' },
+      // #1022: the seat can ORIGINATE a fight, not just run one a human built. That is a
+      // materially different authority from "advances combat turns" and a DM deciding whether
+      // to enable Driver mode deserves to see it named, so it carries a real copyKeyword.
+      // What it CANNOT do is decide visibility: every encounter it creates is DM-only prep
+      // until the human DM reveals it (guardDriverLivePlayArgs), which is why the copy says
+      // "prepped" rather than implying the table sees them.
+      { label: 'creates encounters as DM-only prep', copyKeyword: 'encounter' },
       { label: 'reveals map regions', copyKeyword: 'map' },
       // Capabilities the seat has but the trust-copy summary does not enumerate by name.
       // Listed so the manifest stays a complete mirror of DRIVER_LIVE_PLAY_TOOLS; their
