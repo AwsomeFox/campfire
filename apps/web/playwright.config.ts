@@ -31,6 +31,9 @@ export default defineConfig({
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
   reporter: process.env.CI ? [['github'], ['list']] : [['list']],
+  // Print visual baselines are shared across host OSes; assertions carry a
+  // small font-rasterization tolerance just like the first-run visual suite.
+  snapshotPathTemplate: '{testDir}/{testFilePath}-snapshots/{arg}-{projectName}{ext}',
   timeout: 30_000,
   expect: { timeout: 10_000 },
 

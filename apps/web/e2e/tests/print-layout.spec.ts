@@ -51,6 +51,7 @@ test.describe('print layouts (#667)', () => {
       await expect(page.getByTestId('character-sheet-panel-build').getByText('Background', { exact: true }).first()).toBeVisible();
       await expect(page.locator('.reading-surface')).toHaveScreenshot('character-sheet-print.png', {
         animations: 'disabled',
+        maxDiffPixelRatio: 0.05,
       });
 
       // Print chrome must not hide document/feature asides by element name.
@@ -83,6 +84,7 @@ test.describe('print layouts (#667)', () => {
       await expect(page.getByRole('heading', { name: 'Linked encounters' })).toBeHidden();
       await expect(page.locator('[data-entity-type="session"]')).toHaveScreenshot('session-recap-print.png', {
         animations: 'disabled',
+        maxDiffPixelRatio: 0.05,
       });
 
       await page.emulateMedia({ media: 'screen' });
