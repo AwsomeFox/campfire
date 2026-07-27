@@ -6,8 +6,8 @@
       "url": "https://github.com/AwsomeFox/campfire/pull/1617",
       "headBranch": "fix/issue-670",
       "baseBranch": "main",
-      "updatedAt": "2026-07-27T20:49:40Z",
-      "notes": "Head e36ccf76. Fixed print-DOM e2e duplication + review threads (PrintOnly, resetKey, labels, allowSecrets, DmPanel). Threads resolved. Waiting CI run after push."
+      "updatedAt": "2026-07-27T20:59:57Z",
+      "notes": "Head pending. Fixed location Edit click intercept (header action cluster). Prior e2e duplication + reviews done. Waiting CI after layout fix."
     }
   ]
 }
