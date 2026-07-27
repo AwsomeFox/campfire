@@ -87,6 +87,59 @@ test('on an authoritative surface the line comes from the durable row, but the b
   expect(dmEntryText(bubble!)).toBe('');
 });
 
+const stuckWithheld = {
+  type: 'stuck',
+  campaignId: 1,
+  reason: 'content_withheld',
+  detail: 'The AI provider’s safety filter stopped this reply, so it was withheld.',
+  state: 'awaiting_players',
+  levers: ['retry', 'nudge', 'continue_without_ai'],
+  at,
+};
+
+test('a withheld turn prints ONE system line on a thin surface, not a second "got stuck" one', () => {
+  // The server emits `narration.withheld` and then, moments later, a `stuck` frame with reason
+  // `content_withheld` — a withheld turn joins the existing ladder rather than getting a
+  // parallel one. Authoritative surfaces early-return on `stuck` and render the durable row, so
+  // the table view was always right. The NON-authoritative surfaces (dashboard activity chip,
+  // encounter driver dock, player display) fold both, and printed "The AI DM got stuck" under
+  // the withheld line — blaming the table's AI for failing when it had actually declined.
+  const state = apply(emptyTranscript, turnStart, delta(UNSAFE), withheld, stuckWithheld, turnEnd);
+  const system = state.entries.filter((e): e is SystemEntry => e.kind === 'system');
+  expect(system).toHaveLength(1);
+  expect(system[0].variant).toBe('withheld');
+  expect(state.entries.some((e) => e.kind === 'system' && e.variant === 'stuck')).toBe(false);
+});
+
+test('a client that joins between the two frames still gets the line, under the withheld variant', () => {
+  // Suppressing the stuck frame outright would leave this client with no line at all. It is
+  // folded under `withheld` instead, so the wording is right no matter which frame arrives.
+  const state = apply(emptyTranscript, stuckWithheld);
+  const system = state.entries.filter((e): e is SystemEntry => e.kind === 'system');
+  expect(system).toHaveLength(1);
+  expect(system[0].variant).toBe('withheld');
+  expect(system[0].data?.reason).toBe('content_withheld');
+});
+
+test('every OTHER stuck reason still renders as stuck', () => {
+  // The dedupe is scoped to the one reason that has its own retraction frame. A genuine
+  // provider failure must keep saying so.
+  const state = apply(emptyTranscript, { ...stuckWithheld, reason: 'provider_error' });
+  const system = state.entries.filter((e): e is SystemEntry => e.kind === 'system');
+  expect(system).toHaveLength(1);
+  expect(system[0].variant).toBe('stuck');
+});
+
+test('two withheld turns in one session each get their own line', () => {
+  // The dedupe checks the TAIL entry, not the whole transcript — a second refusal later in the
+  // session must not be swallowed because an earlier one is still in the log.
+  const once = apply(emptyTranscript, turnStart, withheld, stuckWithheld, turnEnd);
+  const twice = apply(once, turnStart, withheld, stuckWithheld, turnEnd);
+  const system = twice.entries.filter((e): e is SystemEntry => e.kind === 'system');
+  expect(system).toHaveLength(2);
+  expect(system.every((e) => e.variant === 'withheld')).toBe(true);
+});
+
 test('a withheld frame with an unrecognized reason is still honoured as a retraction', () => {
   // Forward compatibility must not fail OPEN here. Dropping a frame this client cannot fully
   // model would leave the withheld deltas sitting in the bubble.

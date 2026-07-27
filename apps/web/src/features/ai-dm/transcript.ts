@@ -515,7 +515,35 @@ function applyStream(state: TranscriptState, event: AiDmStreamEvent): Transcript
         }),
       };
 
-    case 'stuck':
+    case 'stuck': {
+      // #598 — a withheld turn joins the stuck ladder, so the server emits `narration.withheld`
+      // and then, moments later on this same channel, a `stuck` frame with reason
+      // `content_withheld`. Authoritative surfaces early-return on `stuck` above and render the
+      // durable row, so the table view shows one line. These thin surfaces (dashboard activity,
+      // encounter driver dock, player display) fold both — so they printed the withheld line
+      // AND "The AI DM got stuck", and the second sentence blames the table's AI for failing
+      // when it had actually declined. That framing is the thing #598 argues against.
+      //
+      // Fold it under the WITHHELD variant, and only when the retraction did not already put
+      // that line up. Suppressing outright would leave a client that connected between the two
+      // frames with no line at all; deduping on the tail entry keeps that client covered
+      // (`stuck` arrives before `turn.end`, and neither the retraction nor anything between
+      // them pushes another entry) without ever printing the event twice.
+      if (event.reason === 'content_withheld') {
+        const last = entries[entries.length - 1];
+        if (last?.kind === 'system' && last.variant === 'withheld') return state;
+        return {
+          ...state,
+          entries: push(entries, {
+            id: makeId(),
+            kind: 'system',
+            variant: 'withheld',
+            text: event.detail,
+            data: { reason: event.reason, state: event.state },
+            at: event.at,
+          }),
+        };
+      }
       return {
         ...state,
         entries: push(entries, {
@@ -527,6 +555,7 @@ function applyStream(state: TranscriptState, event: AiDmStreamEvent): Transcript
           at: event.at,
         }),
       };
+    }
 
     case 'recovered':
       return {
