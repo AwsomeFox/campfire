@@ -137,6 +137,27 @@ describe('backup streaming writer (#603)', () => {
     expect(Buffer.concat(chunks).subarray(0, 4).toString()).toBe('PK\u0003\u0004');
   });
 
+  it('preserves archive-reader failures while loading the manifest', async () => {
+    const readError = new Error('manifest entry exceeds configured limit');
+    const zip = {
+      get: jest.fn(() => ({ fileName: 'manifest.json' })),
+      readBuffer: jest.fn().mockRejectedValue(readError),
+    };
+
+    await expect((service() as any).readManifestFromArchive(zip)).rejects.toBe(readError);
+  });
+
+  it('maps only manifest JSON parsing failures to the JSON validation error', async () => {
+    const zip = {
+      get: jest.fn(() => ({ fileName: 'manifest.json' })),
+      readBuffer: jest.fn().mockResolvedValue(Buffer.from('{not-json')),
+    };
+
+    await expect((service() as any).readManifestFromArchive(zip)).rejects.toThrow(
+      'manifest.json is not valid JSON',
+    );
+  });
+
   it('reuses buffered compatibility chunks without copying Buffers', async () => {
     const from = jest.spyOn(Buffer, 'from');
     try {

@@ -1837,8 +1837,9 @@ export class BackupService implements OnApplicationBootstrap {
   private async readManifestFromArchive(zip: BackupArchiveReader, signal?: AbortSignal): Promise<BackupManifest> {
     const manifestFile = zip.get(MANIFEST_ENTRY);
     if (!manifestFile) throw new BadRequestException('Invalid backup archive — manifest.json is missing');
+    const manifestBytes = await zip.readBuffer(manifestFile, MAX_MANIFEST_BYTES, signal);
     let parsed: unknown;
-    try { parsed = JSON.parse((await zip.readBuffer(manifestFile, MAX_MANIFEST_BYTES, signal)).toString('utf8')); }
+    try { parsed = JSON.parse(manifestBytes.toString('utf8')); }
     catch { throw new BadRequestException('Invalid backup archive — manifest.json is not valid JSON'); }
     return parseBackupManifest(parsed);
   }
