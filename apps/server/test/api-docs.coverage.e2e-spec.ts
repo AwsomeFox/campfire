@@ -5,7 +5,7 @@ import request from 'supertest';
 import { Test } from '@nestjs/testing';
 import { type INestApplication } from '@nestjs/common';
 import { ModulesContainer } from '@nestjs/core';
-import { PATH_METADATA, METHOD_METADATA } from '@nestjs/common/constants';
+import { PATH_METADATA, METHOD_METADATA, HTTP_CODE_METADATA } from '@nestjs/common/constants';
 import { AppModule } from '../src/app.module';
 import { configureApp, setupApiDocs } from '../src/main';
 
@@ -36,6 +36,17 @@ import { configureApp, setupApiDocs } from '../src/main';
  * hand list is exactly what drifts. The controllers' own decorator metadata IS the
  * authoritative route table — we read it straight from Nest's metadata via
  * PATH_METADATA / METHOD_METADATA and from Swagger's via the DECORATORS.* keys.
+ *
+ * Issue #1538 (truthfulness) extends this from "is it documented?" to "is the
+ * document TRUE?". Every check above is documentation-internal: they reconcile the
+ * spec against the route table, so a route can document a status code it can never
+ * return and still pass (four POSTs once carried @ApiResponse({ status: 200 }) while
+ * Nest returned 201, with their own e2e suites pinning 201 — the docs were simply
+ * wrong, and nothing noticed). The success status is the one a generated client
+ * always depends on and it IS mechanically derivable, so we now compare the declared
+ * success code against the handler's effective one. Asserting that every documented
+ * ERROR status is reachable is deliberately out of scope: it means driving each error
+ * path from the spec, which is a much larger exercise for far less client impact.
  *
  * Exclusions are likewise read from the source, not asserted in a comment:
  * `@ApiExcludeController()` is the documented Swagger escape hatch for routes that
@@ -80,6 +91,31 @@ interface RouteReflection {
   methodName: string;
   verb: string;
   specPath: string;
+  /** The status NestJS will actually send on the success path — see effectiveSuccessStatus(). */
+  effectiveStatus: number;
+}
+
+/**
+ * The status code NestJS actually writes when a handler resolves normally.
+ *
+ * This is the whole of Nest's rule: an explicit `@HttpCode(n)` wins, otherwise the
+ * request method decides — 201 for POST, 200 for everything else. It is the same
+ * function @nestjs/swagger uses (`getStatusCode` in explorers/api-response.explorer)
+ * to synthesize the default response entry for a handler that declares no
+ * @ApiResponse at all; the bug this guards is that declaring ANY @ApiResponse
+ * suppresses that synthesized entry, so a hand-written status silently replaces the
+ * true one in the spec.
+ *
+ * Caveat, deliberate: a handler taking full control of the response (`@Res()` without
+ * `passthrough`) writes its own status and Nest never applies @HttpCode. Those are not
+ * exempted here — an escape hatch is exactly the hole this test exists to close — so
+ * such a handler must document a status consistent with this rule (today every one of
+ * them is a GET that sends 200, which it already does).
+ */
+function effectiveSuccessStatus(handler: unknown, verb: string): number {
+  const explicit = Reflect.getMetadata(HTTP_CODE_METADATA, handler as object);
+  if (typeof explicit === 'number') return explicit;
+  return verb === 'post' ? 201 : 200;
 }
 
 /**
@@ -142,8 +178,12 @@ const hasApiTags = (metatype: unknown): boolean => {
 
 const hasApiOperation = (handler: unknown): boolean => Reflect.getMetadata(MD.apiOperation, handler as object) != null;
 
+interface OpenApiOperation {
+  responses?: Record<string, unknown>;
+}
+
 interface OpenApiDocument {
-  paths: Record<string, Record<string, unknown>>;
+  paths: Record<string, Record<string, OpenApiOperation>>;
 }
 
 async function buildAppWithSpec(): Promise<{ app: INestApplication; dataDir: string; spec: OpenApiDocument }> {
@@ -197,7 +237,13 @@ describe('OpenAPI spec / controller contract (issue #566, e2e)', () => {
 
           const verb = HTTP_VERBS[requestMethod as number];
           const specPath = withGlobalPrefix(joinControllerPath(prefix, Reflect.getMetadata(PATH_METADATA, handler)));
-          routes.push({ controllerName: metatype.name, methodName, verb, specPath });
+          routes.push({
+            controllerName: metatype.name,
+            methodName,
+            verb,
+            specPath,
+            effectiveStatus: effectiveSuccessStatus(handler, verb),
+          });
         }
       }
     }
@@ -257,6 +303,53 @@ describe('OpenAPI spec / controller contract (issue #566, e2e)', () => {
       }
     }
     expect(missing).toEqual([]);
+  });
+
+  // --- Truthfulness, not just coverage (issue #1538) --------------------------
+  // Everything above reconciles the spec against the route table. This one asks
+  // whether the spec is CORRECT: a documented success status the route can never
+  // produce is worse than an undocumented one, because a generated client codes
+  // against it. Reads the responses out of the generated document (what a client
+  // actually consumes — no controller declares class-level @ApiResponse, so every
+  // 2xx key on an operation came from that handler's own decorators) and compares
+  // them with the status Nest will really send.
+  it('every documented success status is one the route can actually return', () => {
+    const failures: string[] = [];
+
+    for (const route of routes) {
+      const operation = spec.paths[route.specPath]?.[route.verb];
+      // A missing operation is already a failure of the first assertion; don't
+      // double-report it here with a confusing status message.
+      if (!operation) continue;
+
+      const declared = Object.keys(operation.responses ?? {});
+      // Only declared responses can be wrong. A handler with no @ApiResponse gets
+      // the correct status synthesized by @nestjs/swagger, so it is true by
+      // construction and there is nothing to check.
+      if (declared.length === 0) continue;
+
+      const where = `${route.controllerName}.${route.methodName} (${route.verb.toUpperCase()} ${route.specPath})`;
+      const success2xx = declared.filter((code) => /^2\d\d$/.test(code));
+
+      if (success2xx.length === 0) {
+        // 3xx-terminal routes are legitimate: the OIDC login/callback handlers take
+        // the response object and redirect, so 302 IS their success status and no
+        // 2xx should be documented. An operation declaring ONLY error statuses,
+        // though, documents no success path at all — the spec lies by omission.
+        if (declared.some((code) => /^3\d\d$/.test(code))) continue;
+        failures.push(`${where} documents no success status at all (declared: ${declared.join(', ')})`);
+        continue;
+      }
+
+      if (!success2xx.includes(String(route.effectiveStatus))) {
+        failures.push(
+          `${where} documents success status ${success2xx.join('/')} but returns ${route.effectiveStatus}` +
+            ` — fix the @ApiResponse status, or make the runtime match with @HttpCode(${success2xx[0]}).`,
+        );
+      }
+    }
+
+    expect(failures).toEqual([]);
   });
 
   // Path-count floor + bijection (asserted above) is the durable contract guard.
