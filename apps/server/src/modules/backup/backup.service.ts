@@ -1445,6 +1445,10 @@ export class BackupService implements OnApplicationBootstrap {
       const progressPhases: RestoreProgressPhase[] = ['validated', 'staging-uploads'];
       options?.onProgress?.('validated');
       options?.onProgress?.('staging-uploads');
+      // Validation and extraction are intentionally non-destructive. Recheck
+      // cancellation at the last boundary before closing the live database so
+      // an abort during staging cannot cross into the atomic replacement.
+      assertBackupNotCancelled(options?.signal);
       let applyPhases: RestoreProgressPhase[] = [];
       this.holder.withDatabaseClosed((dataDir) => {
         options?.onProgress?.('quiescing');

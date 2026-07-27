@@ -101,7 +101,7 @@ describe('backup restore atomicity (#497, real SQLite + filesystem)', () => {
   async function restoreArchive(
     service: BackupService,
     archive: Buffer,
-    options?: { onProgress?: (phase: string) => void },
+    options?: { onProgress?: (phase: string) => void; signal?: AbortSignal },
   ) {
     return service.restore(archive, RESTORE_CONFIRM_TOKEN, testUser, {
       keyPassphrase: PASSPHRASE,
@@ -121,6 +121,22 @@ describe('backup restore atomicity (#497, real SQLite + filesystem)', () => {
     expect(phases).toContain('swapping-database');
     expect(liveMarkerCampaign()).toBe(ARCHIVE_CAMPAIGN);
     expect(liveKeyfile()).toBe(ARCHIVE_KEY);
+  });
+
+  it('honors cancellation at the final boundary before applying staged state', async () => {
+    const service = makeService();
+    const archive = await buildAlternateArchive();
+    const controller = new AbortController();
+
+    await expect(restoreArchive(service, archive, {
+      signal: controller.signal,
+      onProgress: (phase) => {
+        if (phase === 'staging-uploads') controller.abort();
+      },
+    })).rejects.toThrow('cancelled');
+
+    expect(liveMarkerCampaign()).toBe(MARKER_CAMPAIGN);
+    expect(liveKeyfile()).toBe(LIVE_KEY);
   });
 
   const faultPoints: RestoreApplyFaultPoint[] = [
