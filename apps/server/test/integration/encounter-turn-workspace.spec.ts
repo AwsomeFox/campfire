@@ -467,4 +467,213 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
     orm.update(encounters).set({ currentCombatantId: pc.id }).where(eq(encounters.id, encounter.id)).run();
     return { campaignId: campaign.id, encounterId: encounter.id, pc: pc.id, monster: monster.id };
   }
+
+  it('persists player-applied structured-action checks in the DM encounter state (issue #606)', async () => {
+    dataDir = makeTempDataDir();
+    const { orm, service, actions } = build();
+    const { encounterId, c1, c2 } = seed(orm);
+    orm
+      .update(combatants)
+      .set({
+        conditionInstances: JSON.stringify([
+          { id: 'focus', name: 'Focus', isConcentration: true, sourceCombatantId: c2 },
+        ]),
+      })
+      .where(eq(combatants.id, c1))
+      .run();
+
+    const strike = ActionSpec.parse({
+      mode: 'save',
+      save: { ability: 'DEX', dc: { kind: 'fixed', dc: 21 } },
+      targets: { count: 1, allow: 'any' },
+      outcomes: { failure: { damage: [{ flat: 12, type: 'untyped' }] } },
+    });
+    actions.resolve(
+      encounterId,
+      { actorCombatantId: c1, spec: strike, targetIds: [c2], commit: true },
+      player1,
+      'player',
+    );
+
+    const dmView = await service.getWithCombatantsOrThrow(encounterId, 'dm', dmUser.id);
+    const damaged = dmView.combatants.find((combatant) => combatant.id === c2)!;
+    expect(damaged.turnState.pendingConcentrationChecks).toEqual([
+      expect.objectContaining({ damage: 12, dc: 10 }),
+    ]);
+  });
+
+  it('authorizes and resolves the persisted queue atomically (issue #606)', async () => {
+    dataDir = makeTempDataDir();
+    const { orm, service } = build();
+    const { encounterId, c1, c2 } = seed(orm);
+    orm
+      .update(combatants)
+      .set({ conditionInstances: JSON.stringify([{ id: 'bless', name: 'Bless', isConcentration: true, sourceCombatantId: c1 }]) })
+      .where(eq(combatants.id, c2))
+      .run();
+
+    await service.updateCombatant(encounterId, c1, { hpDelta: -4, idempotencyKey: 'concentration-replay' }, dmUser, 'dm');
+    await service.updateCombatant(encounterId, c1, { hpDelta: -4, idempotencyKey: 'concentration-replay' }, dmUser, 'dm');
+    let state = (await service.getWithCombatantsOrThrow(encounterId, 'dm', dmUser.id)).combatants
+      .find((combatant) => combatant.id === c1)!.turnState;
+    expect(state.pendingConcentrationChecks).toHaveLength(1);
+    await service.updateCombatant(encounterId, c1, { hpDelta: -12 }, dmUser, 'dm');
+    state = (await service.getWithCombatantsOrThrow(encounterId, 'dm', dmUser.id)).combatants
+      .find((combatant) => combatant.id === c1)!.turnState;
+    expect(state.pendingConcentrationChecks).toHaveLength(2);
+    expect(state.pendingConcentrationChecks.map(({ damage, dc }) => ({ damage, dc }))).toEqual([
+      { damage: 4, dc: 10 },
+      { damage: 12, dc: 10 },
+    ]);
+    expect((await service.getWithCombatantsOrThrow(encounterId, 'dm', dmUser.id)).combatants.find((combatant) => combatant.id === c1)?.hpCurrent).toBe(4);
+
+    await expect(
+      service.updateCombatantTurnState(
+        encounterId,
+        c1,
+        { resolveConcentrationCheck: { id: state.pendingConcentrationChecks[0].id, outcome: 'pass' } },
+        player2,
+        'player',
+      ),
+    ).rejects.toThrow(/own character/i);
+
+    const passedCheckId = state.pendingConcentrationChecks[0].id;
+    await service.updateCombatantTurnState(
+      encounterId,
+      c1,
+      { resolveConcentrationCheck: { id: passedCheckId, outcome: 'pass' } },
+      player1,
+      'player',
+    );
+    state = (await service.getWithCombatantsOrThrow(encounterId, 'dm', dmUser.id)).combatants
+      .find((combatant) => combatant.id === c1)!.turnState;
+    expect(state.pendingConcentrationChecks).toHaveLength(1);
+    await expect(
+      service.updateCombatantTurnState(
+        encounterId,
+        c1,
+        { resolveConcentrationCheck: { id: passedCheckId, outcome: 'pass' } },
+        player1,
+        'player',
+      ),
+    ).rejects.toThrow(/no longer first/i);
+
+    await service.updateCombatantTurnState(
+      encounterId,
+      c1,
+      { resolveConcentrationCheck: { id: state.pendingConcentrationChecks[0].id, outcome: 'fail' } },
+      player1,
+      'player',
+    );
+    state = (await service.getWithCombatantsOrThrow(encounterId, 'dm', dmUser.id)).combatants
+      .find((combatant) => combatant.id === c1)!.turnState;
+    expect(state.pendingConcentrationChecks).toEqual([]);
+    expect(state.concentration).toBeNull();
+    const [target] = orm.select().from(combatants).where(eq(combatants.id, c2)).all();
+    expect(target.conditionInstances).toBe('[]');
+  });
+
+  it('drops stale checks only when concentration is explicitly replaced (issue #606)', async () => {
+    dataDir = makeTempDataDir();
+    const { orm, service } = build();
+    const { encounterId, c1 } = seed(orm);
+    orm
+      .update(combatants)
+      .set({ turnState: JSON.stringify({ concentration: 'Bless' }) })
+      .where(eq(combatants.id, c1))
+      .run();
+    await service.updateCombatant(encounterId, c1, { hpDelta: -8 }, dmUser, 'dm');
+
+    let updated = await service.updateCombatantTurnState(
+      encounterId,
+      c1,
+      { concentration: 'Bless' },
+      player1,
+      'player',
+    );
+    expect(updated.turnState.pendingConcentrationChecks).toHaveLength(1);
+
+    updated = await service.updateCombatantTurnState(
+      encounterId,
+      c1,
+      { concentration: 'Haste' },
+      player1,
+      'player',
+    );
+    expect(updated.turnState.concentration).toBe('Haste');
+    expect(updated.turnState.pendingConcentrationChecks).toEqual([]);
+  });
+
+  it('queues only post-mitigation direct typed damage (issue #606)', async () => {
+    dataDir = makeTempDataDir();
+    const { orm, service } = build();
+    const { encounterId, c1 } = seed(orm);
+    const ts = new Date().toISOString();
+    const [pack] = orm
+      .insert(rulePacks)
+      .values({ slug: 'concentration-defences', name: 'Concentration Defences', installedAt: ts })
+      .returning()
+      .all();
+    const [entry] = orm
+      .insert(ruleEntries)
+      .values({
+        packId: pack.id,
+        slug: 'resistant-caster',
+        name: 'Resistant Caster',
+        type: 'monster',
+        dataJson: JSON.stringify({ damage_resistances: ['fire'] }),
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .returning()
+      .all();
+    orm
+      .update(combatants)
+      .set({
+        hpCurrent: 100,
+        hpMax: 100,
+        ruleEntryId: entry.id,
+        turnState: JSON.stringify({ concentration: 'Wall of Fire' }),
+      })
+      .where(eq(combatants.id, c1))
+      .run();
+
+    let updated = await service.updateCombatant(
+      encounterId,
+      c1,
+      { hpDelta: -42, damageType: 'fire' },
+      dmUser,
+      'dm',
+    );
+    expect(updated.hpCurrent).toBe(79);
+    expect(updated.turnState.pendingConcentrationChecks).toEqual([
+      expect.objectContaining({ damage: 21, dc: 11 }),
+    ]);
+
+    orm
+      .update(ruleEntries)
+      .set({ dataJson: JSON.stringify({ damage_immunities: ['fire'] }) })
+      .where(eq(ruleEntries.id, entry.id))
+      .run();
+    updated = await service.updateCombatant(
+      encounterId,
+      c1,
+      { hpDelta: -20, damageType: 'fire' },
+      dmUser,
+      'dm',
+    );
+    expect(updated.hpCurrent).toBe(79);
+    expect(updated.turnState.pendingConcentrationChecks).toHaveLength(1);
+  });
+
+  it('does not apply 5e concentration checks in a non-5e campaign (issue #606)', async () => {
+    dataDir = makeTempDataDir();
+    const { orm, service } = build();
+    const { encounterId, c1, c2 } = seed(orm);
+    const encounter = orm.select().from(encounters).where(eq(encounters.id, encounterId)).get()!;
+    orm.update(campaigns).set({ ruleSystem: 'pf2e' }).where(eq(campaigns.id, encounter.campaignId)).run();
+    orm.update(combatants).set({ conditionInstances: JSON.stringify([{ id: 'focus', name: 'Focus', isConcentration: true, sourceCombatantId: c1 }]) }).where(eq(combatants.id, c2)).run();
+    const updated = await service.updateCombatant(encounterId, c1, { hpDelta: -8 }, dmUser, 'dm');
+    expect(updated.turnState.pendingConcentrationChecks).toEqual([]);
+  });
 });

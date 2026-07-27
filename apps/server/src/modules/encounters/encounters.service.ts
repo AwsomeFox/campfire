@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, ForbiddenException, Inject, Inj
 import { and, eq, gt, inArray, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
-import { ActiveEffect, AoeTemplate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
+import { ActiveEffect, AoeTemplate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
 import { z as zod } from 'zod';
 import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -30,6 +30,7 @@ import {
   deriveEncounterRosterWarnings,
   deriveEndTurnPrompts,
   deriveStartTurnPrompts,
+  enqueueConcentrationCheck,
   generateEncounterGroup,
   hpBandFor,
   initialEncounterTurnState,
@@ -3082,7 +3083,6 @@ export class EncountersService {
         throw new ForbiddenException('Only dm or the owning player may modify this combatant');
       }
     }
-
     const adapter = await this.adapterForCampaign(encounterRow.campaignId);
     const damageMetadataTouched =
       patch.damageType !== undefined || patch.saveOutcome !== undefined || patch.isCrit !== undefined || patch.damageDice !== undefined;
@@ -3332,6 +3332,9 @@ export class EncountersService {
 
         if (recomputeHp) {
           const effectiveHpMax = hpMaxChanged ? Math.max(1, patch.hpMax!) : fresh.hpMax;
+          const shouldCheckConcentration =
+            adapter.id === DND5E_ADAPTER_ID && patch.hpSet === undefined && patch.hpDelta !== undefined && patch.hpDelta < 0;
+          const turnState = parseTurnState(fresh.turnState);
           const state: CombatantHpState = {
             kind: fresh.kind as CombatantHpState['kind'],
             hpCurrent: fresh.hpCurrent,
@@ -3340,6 +3343,22 @@ export class EncountersService {
             deathState: fresh.deathState as CombatantHpState['deathState'],
             deathSaveSuccesses: fresh.deathSaveSuccesses,
             deathSaveFailures: fresh.deathSaveFailures,
+            isConcentrating:
+              shouldCheckConcentration &&
+              (turnState.concentration != null ||
+                tx
+                  .select({
+                    conditionInstances: combatants.conditionInstances,
+                    conditions: combatants.conditions,
+                  })
+                  .from(combatants)
+                  .where(eq(combatants.encounterId, encounterId))
+                  .all()
+                  .some((candidate) =>
+                    parseConditionInstances(candidate.conditionInstances, fromJsonText<string[]>(candidate.conditions, [])).some(
+                      (condition) => condition.isConcentration && condition.sourceCombatantId === combatantId,
+                    ),
+                  )),
           };
           const effectiveHpDelta = (() => {
             if (patch.hpDelta === undefined || patch.hpDelta >= 0) return patch.hpDelta;
@@ -3379,6 +3398,13 @@ export class EncountersService {
             deathSaveFailures: patch.deathSaveFailures,
             deathSaveRoll: patch.deathSaveRoll,
           });
+          if (shouldCheckConcentration && result.concentrationCheck) {
+            const queued = enqueueConcentrationCheck(turnState, {
+              id: `damage-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
+              ...result.concentrationCheck,
+            });
+            writeSet.turnState = toJsonText(queued);
+          }
 
           // If Starfinder adapter or SP present, damage flows through temp HP -> SP -> HP
           if (adapter.id === STARFINDER_ADAPTER_ID && effectiveHpDelta !== undefined && effectiveHpDelta < 0) {
@@ -4827,6 +4853,9 @@ export class EncountersService {
         throw new ForbiddenException('You may only modify the turn state of your own character.');
       }
     }
+    if (patch.resolveConcentrationCheck && patch.concentration !== undefined) {
+      throw new BadRequestException('Resolve a concentration check separately from directly setting concentration.');
+    }
 
     const logs: Array<{ detail: string }> = [];
     let row!: typeof combatants.$inferSelect;
@@ -4888,28 +4917,56 @@ export class EncountersService {
       }
       if (patch.resetMovement) turnState.movementUsedFt = 0;
       if (patch.moveFt !== undefined) turnState.movementUsedFt = Math.max(0, turnState.movementUsedFt + patch.moveFt);
+
+      const clearConcentration = (): void => {
+        turnState.concentration = null;
+        turnState.pendingConcentrationChecks = [];
+        const allRows = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all();
+        const withInstances = allRows.map((r) => ({
+          id: r.id,
+          conditionInstances: parseConditionInstances(r.conditionInstances, fromJsonText<string[]>(r.conditions, [])),
+        }));
+        const { updatedCombatants, removed } = cascadeConcentrationLoss(withInstances, combatantId);
+        for (const [id, instances] of updatedCombatants) {
+          tx.update(combatants)
+            .set(conditionWriteSetFromInstances(instances))
+            .where(eq(combatants.id, id))
+            .run();
+        }
+        for (const r of removed) {
+          logs.push({ detail: `concentration link ended: ${r.condition.name}` });
+        }
+      };
+
       if (patch.concentration !== undefined) {
-        const hadConcentration = turnState.concentration;
-        if (patch.concentration !== turnState.concentration) {
+        const concentrationChanged = patch.concentration !== turnState.concentration;
+        if (concentrationChanged) {
           logs.push({ detail: patch.concentration ? `began concentrating on ${patch.concentration}` : 'concentration ended' });
         }
+        if (concentrationChanged && patch.concentration) {
+          // These saves belong to the concentration that was active when damage landed.
+          // Replacing that effect makes every old request stale.
+          turnState.pendingConcentrationChecks = [];
+        }
         turnState.concentration = patch.concentration;
-        if (hadConcentration && !patch.concentration) {
-          const allRows = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all();
-          const withInstances = allRows.map((r) => ({
-            id: r.id,
-            conditionInstances: parseConditionInstances(r.conditionInstances, fromJsonText<string[]>(r.conditions, [])),
-          }));
-          const { updatedCombatants, removed } = cascadeConcentrationLoss(withInstances, combatantId);
-          for (const [id, instances] of updatedCombatants) {
-            tx.update(combatants)
-              .set(conditionWriteSetFromInstances(instances))
-              .where(eq(combatants.id, id))
-              .run();
-          }
-          for (const r of removed) {
-            logs.push({ detail: `concentration link ended: ${r.condition.name}` });
-          }
+        // A structured concentration source may exist even when the older
+        // turn-state display marker is absent. Clearing concentration must always
+        // clear its canonical links atomically, not depend on that marker.
+        if (!patch.concentration) {
+          clearConcentration();
+        }
+      }
+      if (patch.resolveConcentrationCheck) {
+        const pending = turnState.pendingConcentrationChecks[0];
+        if (!pending || pending.id !== patch.resolveConcentrationCheck.id) {
+          throw new ConflictException('That concentration check is no longer first in the queue. Refresh and try again.');
+        }
+        if (patch.resolveConcentrationCheck.outcome === 'pass') {
+          turnState.pendingConcentrationChecks = turnState.pendingConcentrationChecks.slice(1);
+          logs.push({ detail: `passed concentration check (DC ${pending.dc})` });
+        } else {
+          logs.push({ detail: `failed concentration check (DC ${pending.dc}); concentration ended` });
+          clearConcentration();
         }
       }
       if (patch.delaying !== undefined) {

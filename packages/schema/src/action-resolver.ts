@@ -505,6 +505,22 @@ export const ActionResolveRequest = z.object({
 });
 export type ActionResolveRequest = z.infer<typeof ActionResolveRequest>;
 
+/** A 5e concentration save required by damage that just landed on a concentrating caster. */
+export const ConcentrationCheck = z.object({
+  damage: z.number().int().positive(),
+  dc: z.number().int().min(10),
+});
+export type ConcentrationCheck = z.infer<typeof ConcentrationCheck>;
+
+/** A durable 5e concentration save request queued on the damaged combatant. */
+export const PendingConcentrationCheck = ConcentrationCheck.extend({
+  id: z.string().min(1).max(120),
+});
+export type PendingConcentrationCheck = z.infer<typeof PendingConcentrationCheck>;
+
+/** Bound persisted turn-state growth during an unresolved damage burst. */
+export const MAX_PENDING_CONCENTRATION_CHECKS = 20;
+
 /** Per-target snapshot captured before an apply, so an apply is fully reversible (undo). */
 export const ActionUndoTarget = z.object({
   combatantId: z.number().int(),
@@ -534,6 +550,10 @@ export const ActionUndoToken = z.object({
   costCount: z.number().int().min(0).default(0),
   spellLevelSpent: z.number().int().min(0).max(9).default(0),
   concentrationBefore: z.string().nullable().default(null),
+  pendingConcentrationChecksBefore: z
+    .array(PendingConcentrationCheck)
+    .max(MAX_PENDING_CONCENTRATION_CHECKS)
+    .default(() => []),
   startedConcentration: z.boolean().default(false),
 });
 export type ActionUndoToken = z.infer<typeof ActionUndoToken>;

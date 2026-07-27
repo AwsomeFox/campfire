@@ -2,6 +2,7 @@ import {
   Dnd5eAdapter,
   LEGENDARY_ACTION_SLOT,
   LAIR_INITIATIVE_COUNT,
+  MAX_PENDING_CONCENTRATION_CHECKS,
   computeDnd5eEncounterDifficulty,
   crToXp,
   encounterMultiplier,
@@ -13,6 +14,7 @@ import type {
   ActiveEffect,
   Combatant,
   CombatantKind,
+  ConcentrationCheck,
   CombatantTurnState,
   ConditionInstance,
   DeathState,
@@ -24,6 +26,7 @@ import type {
   EncounterTurnPhase,
   EncounterWarning,
   HpBand,
+  PendingConcentrationCheck,
   TurnPrompt,
 } from '@campfire/schema';
 
@@ -739,6 +742,8 @@ export interface CombatantHpState {
   deathState: DeathState;
   deathSaveSuccesses: number;
   deathSaveFailures: number;
+  /** Whether this combatant is currently maintaining a concentration effect. */
+  isConcentrating?: boolean;
 }
 
 /** The HP-affecting slice of a CombatantUpdate patch. */
@@ -754,7 +759,29 @@ export interface CombatantHpPatch {
 export type CombatantHpResult = Pick<
   CombatantHpState,
   'hpCurrent' | 'hpTemp' | 'deathState' | 'deathSaveSuccesses' | 'deathSaveFailures'
->;
+> & { concentrationCheck: ConcentrationCheck | null };
+
+/** Derive the 5e concentration save from authoritative post-mitigation damage. */
+export function concentrationCheckForDamage(
+  isConcentrating: boolean | undefined,
+  damage: number,
+): ConcentrationCheck | null {
+  return isConcentrating && damage > 0
+    ? { damage, dc: Math.max(10, Math.ceil(damage / 2)) }
+    : null;
+}
+
+/** Append one durable check idempotently while bounding persisted turn-state growth. */
+export function enqueueConcentrationCheck(
+  turnState: CombatantTurnState,
+  check: PendingConcentrationCheck,
+): CombatantTurnState {
+  const withoutDuplicate = turnState.pendingConcentrationChecks.filter((pending) => pending.id !== check.id);
+  return {
+    ...turnState,
+    pendingConcentrationChecks: [...withoutDuplicate, check].slice(-MAX_PENDING_CONCENTRATION_CHECKS),
+  };
+}
 
 /**
  * Pure 5e HP-application math (issue #57), extracted so it can be unit-tested and
@@ -816,7 +843,15 @@ export function applyCombatantHp(state: CombatantHpState, patch: CombatantHpPatc
   // 3. death-state recompute.
   if (!isCharacter) {
     // Monsters never track death saves — 0 HP is simply "down" (isDown / hpBand).
-    return { hpCurrent, hpTemp, deathState: 'none', deathSaveSuccesses: 0, deathSaveFailures: 0 };
+    const damage = patch.hpSet === undefined && patch.hpDelta !== undefined && patch.hpDelta < 0 ? -patch.hpDelta : 0;
+    return {
+      hpCurrent,
+      hpTemp,
+      deathState: 'none',
+      deathSaveSuccesses: 0,
+      deathSaveFailures: 0,
+      concentrationCheck: concentrationCheckForDamage(state.isConcentrating, damage),
+    };
   }
   if (hpCurrent > 0) {
     // Regaining any HP revives a downed character and clears the death-save slate.
@@ -863,7 +898,15 @@ export function applyCombatantHp(state: CombatantHpState, patch: CombatantHpPatc
       deathState = 'dying';
     }
   }
-  return { hpCurrent, hpTemp, deathState, deathSaveSuccesses: succ, deathSaveFailures: fail };
+  const damage = patch.hpSet === undefined && patch.hpDelta !== undefined && patch.hpDelta < 0 ? -patch.hpDelta : 0;
+  return {
+    hpCurrent,
+    hpTemp,
+    deathState,
+    deathSaveSuccesses: succ,
+    deathSaveFailures: fail,
+    concentrationCheck: concentrationCheckForDamage(state.isConcentrating, damage),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -928,8 +971,8 @@ export function retreatTurn(
  * Reset a combatant's per-turn action economy at the START of its own turn (issue #413).
  * Slots that reset at 'turn' AND those that reset at 'round' both refresh here (a 5e reaction
  * resets "at the start of your turn"), so `used` is cleared for every slot and movement is
- * zeroed. Concentration PERSISTS across turns (it only breaks on failed saves / incapacitation,
- * handled elsewhere). `delaying`/`readied` clear because the combatant is now taking its turn.
+ * zeroed. Concentration and its pending saves PERSIST across turns (they resolve explicitly);
+ * `delaying`/`readied` clear because the combatant is now taking its turn.
  * Returns a new turn-state; the input is not mutated.
  */
 export function resetTurnStateForStart(turnState: CombatantTurnState): CombatantTurnState {
@@ -940,6 +983,7 @@ export function resetTurnStateForStart(turnState: CombatantTurnState): Combatant
     used,
     movementUsedFt: 0,
     concentration: turnState.concentration,
+    pendingConcentrationChecks: turnState.pendingConcentrationChecks,
     delaying: false,
     readied: null,
   };

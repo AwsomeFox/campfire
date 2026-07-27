@@ -1,5 +1,10 @@
 import type { Combatant, EncounterEvent, EncounterStatus } from '@campfire/schema';
-import { Dnd5eAdapter, Pf2eAdapter } from '@campfire/schema';
+import {
+  CombatantTurnState,
+  Dnd5eAdapter,
+  MAX_PENDING_CONCENTRATION_CHECKS,
+  Pf2eAdapter,
+} from '@campfire/schema';
 import {
   abilityMod,
   sortCombatants,
@@ -10,6 +15,7 @@ import {
   shouldSkipTurnOnAdvance,
   hpBandFor,
   applyCombatantHp,
+  enqueueConcentrationCheck,
   parseCr,
   crToXp,
   xpThresholdsForLevel,
@@ -432,6 +438,51 @@ describe('encounters — applyCombatantHp (issue #57 5e HP model)', () => {
       const r = applyCombatantHp(charState({ hpCurrent: 10, hpTemp: 4 }), { hpDelta: 5 });
       expect(r.hpCurrent).toBe(15);
       expect(r.hpTemp).toBe(4);
+    });
+  });
+
+  describe('concentration checks (issue #606)', () => {
+    it('flags an authoritative DC 10 check when a concentrating caster takes minor damage', () => {
+      const r = applyCombatantHp(charState({ isConcentrating: true }), { hpDelta: -8 });
+      expect(r.concentrationCheck).toEqual({ damage: 8, dc: 10 });
+    });
+
+    it('uses half the actual damage, rounded up, and includes damage absorbed by temporary HP', () => {
+      const r = applyCombatantHp(charState({ isConcentrating: true, hpTemp: 5 }), { hpDelta: -25 });
+      expect(r.concentrationCheck).toEqual({ damage: 25, dc: 13 });
+    });
+
+    it('uses the full effective hit for an overkill concentration check', () => {
+      const r = applyCombatantHp(
+        charState({ isConcentrating: true, hpCurrent: 5, hpMax: 5 }),
+        { hpDelta: -25 },
+      );
+      expect(r.concentrationCheck).toEqual({ damage: 25, dc: 13 });
+    });
+
+    it('does not flag healing or damage for a combatant without concentration', () => {
+      expect(applyCombatantHp(charState({ isConcentrating: true }), { hpDelta: 5 }).concentrationCheck).toBeNull();
+      expect(applyCombatantHp(charState(), { hpDelta: -25 }).concentrationCheck).toBeNull();
+    });
+
+    it('does not treat administrative HP or temporary-HP edits as damage', () => {
+      const concentrating = charState({ isConcentrating: true, hpCurrent: 20, hpTemp: 5 });
+      expect(applyCombatantHp(concentrating, { hpSet: 1 }).concentrationCheck).toBeNull();
+      expect(applyCombatantHp(concentrating, { hpTemp: 0 }).concentrationCheck).toBeNull();
+      expect(applyCombatantHp(concentrating, { hpSet: 1, hpDelta: -20 }).concentrationCheck).toBeNull();
+    });
+
+    it('bounds and de-duplicates the durable queue', () => {
+      let state = CombatantTurnState.parse({});
+      for (let i = 0; i < MAX_PENDING_CONCENTRATION_CHECKS + 3; i += 1) {
+        state = enqueueConcentrationCheck(state, { id: `check-${i}`, damage: i + 1, dc: 10 });
+      }
+      expect(state.pendingConcentrationChecks).toHaveLength(MAX_PENDING_CONCENTRATION_CHECKS);
+      expect(state.pendingConcentrationChecks[0].id).toBe('check-3');
+
+      state = enqueueConcentrationCheck(state, { id: 'check-22', damage: 99, dc: 50 });
+      expect(state.pendingConcentrationChecks).toHaveLength(MAX_PENDING_CONCENTRATION_CHECKS);
+      expect(state.pendingConcentrationChecks.at(-1)).toEqual({ id: 'check-22', damage: 99, dc: 50 });
     });
   });
 

@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import { eq } from 'drizzle-orm';
-import { ActionResolveRequest } from '@campfire/schema';
+import { ActionResolveRequest, CombatantTurnState } from '@campfire/schema';
 import { openDatabase } from '../../src/db/db.module';
 import { campaigns, characters, combatants, encounterEvents, encounters, ruleEntries, rulePacks } from '../../src/db/schema';
 import { AuditService } from '../../src/modules/audit/audit.service';
@@ -213,6 +213,49 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(hpAfter).toBe(60 - t.totalDamage);
   });
 
+  it('returns a concentration save request for effective structured-action damage', () => {
+    const { orm, service, encounterId, actor, drake, bob: bobCombat } = seed();
+    // A structured condition on any target is the canonical source of truth for who
+    // created the concentration effect. The caster need not carry a turn-state marker.
+    orm
+      .update(combatants)
+      .set({
+        conditionInstances: JSON.stringify([
+          { id: 'bless', name: 'Bless', isConcentration: true, sourceCombatantId: drake },
+        ]),
+      })
+      .where(eq(combatants.id, bobCombat))
+      .run();
+
+    const res = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({
+        actorCombatantId: actor,
+        actionIndex: 1,
+        targetIds: [drake],
+        commit: true,
+      }),
+      alice,
+      'player',
+    );
+    const damage = res.resolution.targets[0].totalDamage;
+    const persisted = CombatantTurnState.parse(
+      JSON.parse(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.turnState ?? '{}'),
+    );
+    expect(persisted.pendingConcentrationChecks).toEqual([
+      expect.objectContaining({
+        damage,
+        dc: Math.max(10, Math.ceil(damage / 2)),
+      }),
+    ]);
+
+    service.undo(encounterId, res.undoToken!, alice, 'player');
+    const afterUndo = CombatantTurnState.parse(
+      JSON.parse(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.turnState ?? '{}'),
+    );
+    expect(afterUndo.pendingConcentrationChecks).toEqual([]);
+  });
+
   it('does not flatten a qualified Open5e display into unconditional action resistance', () => {
     const { orm, service, encounterId, actor, drake } = seed();
     const target = orm.select().from(combatants).where(eq(combatants.id, drake)).get()!;
@@ -305,10 +348,74 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(preview.applied).toBe(false);
     expect(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.hpCurrent).toBe(60); // nothing applied
     // The DM commits the previewed resolution verbatim.
+    orm
+      .update(combatants)
+      .set({ turnState: JSON.stringify({ concentration: 'Storm' }) })
+      .where(eq(combatants.id, drake))
+      .run();
     const { undoToken } = service.apply(encounterId, preview.resolution, dmUser, 'dm');
     const dmg = preview.resolution.targets[0].totalDamage;
     expect(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.hpCurrent).toBe(60 - dmg);
     expect(undoToken.targets[0].hpBefore).toBe(60);
+    const persisted = CombatantTurnState.parse(
+      JSON.parse(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.turnState ?? '{}'),
+    );
+    expect(persisted.pendingConcentrationChecks).toEqual([
+      expect.objectContaining({
+        damage: dmg,
+        dc: Math.max(10, Math.ceil(dmg / 2)),
+      }),
+    ]);
+  });
+
+  it('self-damage plus new concentration restores only the exact prior queue on undo', () => {
+    const { orm, service, encounterId, actor } = seed();
+    orm
+      .update(combatants)
+      .set({
+        turnState: JSON.stringify({
+          concentration: 'Bless',
+          pendingConcentrationChecks: [{ id: 'old-check', damage: 8, dc: 10 }],
+        }),
+      })
+      .where(eq(combatants.id, actor))
+      .run();
+
+    const applied = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({
+        actorCombatantId: actor,
+        actionName: 'Hold Person',
+        spec: {
+          mode: 'save',
+          save: { ability: 'WIS', dc: { kind: 'fixed', dc: 21 } },
+          uses: { concentration: true },
+          targets: { count: 1, allow: 'self' },
+          outcomes: { failure: { damage: [{ flat: 1, type: 'untyped' }] } },
+        },
+        targetIds: [actor],
+        commit: true,
+      }),
+      alice,
+      'player',
+    );
+
+    const state = CombatantTurnState.parse(
+      JSON.parse(orm.select().from(combatants).where(eq(combatants.id, actor)).get()!.turnState ?? '{}'),
+    );
+    expect(state.concentration).toBe('Hold Person');
+    expect(state.pendingConcentrationChecks).toEqual([]);
+    expect(orm.select().from(combatants).where(eq(combatants.id, actor)).get()!.hpCurrent).toBe(39);
+
+    service.undo(encounterId, applied.undoToken!, alice, 'player');
+    const restored = CombatantTurnState.parse(
+      JSON.parse(orm.select().from(combatants).where(eq(combatants.id, actor)).get()!.turnState ?? '{}'),
+    );
+    expect(restored.concentration).toBe('Bless');
+    expect(restored.pendingConcentrationChecks).toEqual([
+      { id: 'old-check', damage: 8, dc: 10 },
+    ]);
+    expect(orm.select().from(combatants).where(eq(combatants.id, actor)).get()!.hpCurrent).toBe(40);
   });
 
   it('refuses an unsupported action shape rather than inventing numbers', () => {
