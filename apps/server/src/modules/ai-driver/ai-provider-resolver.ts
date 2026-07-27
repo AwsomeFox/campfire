@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { AiProviderConfigService } from '../ai-provider-config/ai-provider-config.service';
 import { createAiProvider } from '../ai-dm/providers';
 import type { AiProvider } from '../ai-dm/providers/ai-provider';
@@ -113,10 +113,34 @@ export async function resolveProviderForExecution(
  * Resolve the OPTIONAL fallback for a turn (issue #1052), or null when there is none.
  *
  * Best-effort by contract. A fallback that cannot be resolved — misconfigured, host now
- * blocked, model no longer on the allowlist — must never take down a turn the PRIMARY can
- * serve perfectly well: the fallback exists to make a bad moment better, and letting its
- * misconfiguration cause the failure it was added to prevent inverts the entire feature. The
- * underlying service already logs the rejection, so this is quiet but not silent.
+ * blocked, model no longer on the allowlist, no usable credential — must never take down a
+ * turn the PRIMARY can serve perfectly well: the fallback exists to make a bad moment better,
+ * and letting its misconfiguration cause the failure it was added to prevent inverts the
+ * entire feature.
+ *
+ * #1052 review — "UNUSABLE FALLBACK" MEANS **NO FALLBACK**, NOT "TRY IT ANYWAY", and the
+ * distinction is decided here rather than left to whatever the retry loop happens to do.
+ *
+ * The case that forced the question: a campaign configures a KEYLESS fallback and no server
+ * fallback row exists. `resolveEffectiveConfig` correctly declines to hand it the server
+ * PRIMARY's credential (#373 binds a key to its own endpoint, and crossing the slots there is
+ * the exfiltration #1052 was careful not to re-open), so it yields a config with no key.
+ * `createAiProvider` then throws `auth` from `requireKey` — at CONSTRUCTION, before any
+ * provider object exists and therefore before any socket could be opened. So the doomed extra
+ * attempt some readings expect never happens: the cost is a local throw, not a round trip or a
+ * timeout, and the turn behaves as though no fallback were configured. That is the right
+ * outcome and it is deliberately kept: a fallback that cannot possibly serve a turn is not a
+ * fallback, and scheduling an attempt against it would spend the table's time to arrive at an
+ * `auth` error that says less than the primary's own failure already did.
+ *
+ * What was NOT right is that it happened in total silence. The old comment here claimed "the
+ * underlying service already logs the rejection" — true for a blocked host or a disallowed
+ * model, which `resolveFallbackExecutionModel` catches and logs, and FALSE for a missing key,
+ * whose throw comes from the factory one layer further out and landed in a bare `catch {}`.
+ * That is the failure mode worth caring about, because a fallback is invisible in the admin
+ * health readout too: `ai-console`'s `testAll` probes `role = 'primary'` only, so a broken
+ * fallback shows up in no operator-facing surface at all. A misconfiguration that is both
+ * inert and undiscoverable is the one shape nobody ever fixes, so it is logged here.
  */
 export async function resolveFallbackForExecution(
   resolver: AiProviderResolver,
@@ -125,7 +149,16 @@ export async function resolveFallbackForExecution(
   if (!resolver.resolveFallbackForExecution) return null;
   try {
     return await resolver.resolveFallbackForExecution(campaignId);
-  } catch {
+  } catch (err) {
+    // WARN, not debug: this is always a configuration mistake — someone deliberately
+    // configured a fallback and it cannot serve a turn. Never interpolate the config itself,
+    // only the provider's own message; the whole point of this table is that credentials do
+    // not reach logs.
+    new Logger('AiProviderResolver').warn(
+      `Fallback AI provider for campaign ${campaignId} could not be built, treating the turn as having NO fallback: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
     return null;
   }
 }

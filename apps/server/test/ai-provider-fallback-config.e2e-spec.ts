@@ -1,7 +1,13 @@
 import request from 'supertest';
 import Database from 'better-sqlite3';
+import { Logger } from '@nestjs/common';
 import { createTestApp, closeTestApp, createTestAppNoDevAuth, type TestAppContext } from './test-app';
 import { dbFilePath } from '../src/db/db.module';
+import {
+  AI_PROVIDER_RESOLVER,
+  resolveFallbackForExecution,
+  type AiProviderResolver,
+} from '../src/modules/ai-driver/ai-provider-resolver';
 
 /**
  * #1052 — the OPTIONAL fallback provider slot.
@@ -167,6 +173,57 @@ describe('AI provider fallback slot (#1052)', () => {
     }
   });
 
+  /**
+   * #1052 review — an UNUSABLE fallback resolves to NO fallback, and says so.
+   *
+   * The reported concern was that a keyless fallback for a key-requiring provider costs every
+   * failing turn one doomed extra attempt. It does not, and the reason is worth pinning so a
+   * later refactor cannot make it true: `createAiProvider` calls `requireKey` at CONSTRUCTION,
+   * so the failure lands while the turn is still deciding whether it has a fallback at all —
+   * before any provider object exists, and therefore before any request could be sent. No
+   * socket is opened and no timeout is waited out.
+   *
+   * What this pins is the OUTCOME (`null`, i.e. "no fallback"), not the mechanism, so it holds
+   * whether the key check stays in the factory or moves earlier. The `logs` half is separate
+   * and is the actual fix: resolving to null must not be SILENT, because a fallback appears
+   * nowhere in the admin `testAll` readout (which probes role='primary' only), leaving the log
+   * as the operator's only signal that the fallback they configured is not in play.
+   */
+  it('a KEYLESS fallback for a key-requiring provider resolves to NO fallback, and warns', async () => {
+    await request(server)
+      .put('/api/v1/settings/ai-provider')
+      .set(admin)
+      .send({ providerType: 'openai', model: 'primary-model', apiKey: 'sk-primary-0001' });
+    // A fallback row naming a key-requiring provider but carrying no credential. There is no
+    // server fallback row to inherit from, and inheriting the server PRIMARY's key is exactly
+    // what #373 forbids — so nothing can supply one.
+    await request(server)
+      .put('/api/v1/settings/ai-provider/fallback')
+      .set(admin)
+      .send({ providerType: 'anthropic', model: 'fallback-model' });
+
+    const resolver = ctx.app.get<AiProviderResolver>(AI_PROVIDER_RESOLVER);
+    const logs: string[] = [];
+    const spy = jest
+      .spyOn(Logger.prototype, 'warn')
+      .mockImplementation((msg: unknown) => void logs.push(String(msg)));
+    let resolved: unknown;
+    try {
+      resolved = await resolveFallbackForExecution(resolver, 0);
+    } finally {
+      spy.mockRestore();
+    }
+
+    // No fallback — so the retry loop never schedules an attempt against it, and a turn that
+    // exhausts the primary fails with the PRIMARY's error rather than a spurious auth error
+    // from a provider the table was never really configured to use.
+    expect(resolved).toBeNull();
+    // ...and the operator can find out. A bare `catch { return null }` swallowed this, under a
+    // comment claiming the service below had already logged — true for a blocked host or a
+    // disallowed model, and NOT true for a missing key, whose throw comes from the factory,
+    // outside that service's try/catch.
+    expect(logs.some((l) => /fallback/i.test(l))).toBe(true);
+  });
 });
 
 /**

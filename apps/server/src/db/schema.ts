@@ -1518,12 +1518,23 @@ export const aiDmTranscriptEvents = sqliteTable('ai_dm_transcript_events', {
 });
 
 // AI provider config storage (issue #310): provider selection + ENCRYPTED API key
-// at two scopes — 'server' (one row, admin default) and 'campaign' (per-campaign
-// override, DM-managed, cascades on campaign delete). `encrypted_api_key` holds an
-// aes-256-gcm ciphertext (see common/crypto.ts encryptSecret); the plaintext key is
-// NEVER stored/returned/logged/exported — reads expose only `key_last4`. Unique
-// partial indexes enforce exactly one server row and one row per campaign (see
-// db.module.ts bootstrap + migrateAiProviderConfigTable).
+// at two scopes — 'server' (admin default) and 'campaign' (per-campaign override,
+// DM-managed, cascades on campaign delete). `encrypted_api_key` holds an aes-256-gcm
+// ciphertext (see common/crypto.ts encryptSecret); the plaintext key is NEVER
+// stored/returned/logged/exported — reads expose only `key_last4`.
+//
+// #1052 — each scope holds one row PER ROLE, not one row outright. The partial unique
+// indexes are keyed on `(scope, role)` and `(campaign_id, role)`, so a scope may hold a
+// 'primary' AND a 'fallback' — which is the entire point of the optional fallback provider.
+// At most one of EACH role per scope still holds: widening the uniqueness did not remove it.
+// See db.module.ts bootstrap + migrateAiProviderConfigFallbackRole1052.
+//
+// The widening is safe on existing data, and not by luck: the OLD indexes were STRICTER
+// (one row per scope, full stop), so every row satisfying them also satisfies the new ones.
+// Migration 0135 backfills `role = 'primary'` on every pre-existing row, and because there
+// was at most one row per scope to begin with, that backfill cannot produce two rows sharing
+// a `(scope, role)` pair. Relaxing a unique index can never collide on data that already
+// satisfied the tighter one.
 export const aiProviderConfigs = sqliteTable('ai_provider_configs', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   scope: text('scope').notNull(), // 'server' | 'campaign'

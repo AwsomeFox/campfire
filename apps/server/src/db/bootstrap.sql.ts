@@ -1332,12 +1332,23 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_dm_transcript_events_event_id
   ON ai_dm_transcript_events (campaign_id, event_id);
 
 -- AI provider config: encrypted API-key + provider storage (issue #310). Two
--- scopes -- 'server' (one row, the admin-managed default) and 'campaign' (a
--- per-campaign override, DM-managed, cascading on campaign delete). The API key
--- is stored ONLY as encrypted_api_key (an aes-256-gcm ciphertext -- see
--- common/crypto.ts encryptSecret); the plaintext key is NEVER stored, returned,
--- logged, or exported. Reads expose only key_last4. The partial unique indexes
--- pin exactly one server row and at most one row per campaign.
+-- scopes -- 'server' (the admin-managed default) and 'campaign' (a per-campaign
+-- override, DM-managed, cascading on campaign delete). The API key is stored ONLY
+-- as encrypted_api_key (an aes-256-gcm ciphertext -- see common/crypto.ts
+-- encryptSecret); the plaintext key is NEVER stored, returned, logged, or
+-- exported. Reads expose only key_last4.
+--
+-- #1052 -- each scope holds one row PER ROLE, not one row outright. The partial
+-- unique indexes below are keyed on (scope, role) and (campaign_id, role), so a
+-- scope may hold a 'primary' AND a 'fallback' -- the point of the optional
+-- fallback provider. At most one of EACH role per scope still holds; widening the
+-- uniqueness did not remove it.
+--
+-- Widening is safe on existing data because the OLD indexes were STRICTER (one row
+-- per scope, full stop), so every row satisfying them also satisfies these. The
+-- 0135 migration backfills role = 'primary' on every pre-existing row, and since
+-- there was at most one row per scope to begin with, that backfill cannot produce
+-- two rows sharing a (scope, role) pair.
 CREATE TABLE IF NOT EXISTS ai_provider_configs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   scope TEXT NOT NULL,
