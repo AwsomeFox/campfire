@@ -36,6 +36,21 @@ import { z } from 'zod';
 export type ResolverDegree = 'criticalFailure' | 'failure' | 'success' | 'criticalSuccess';
 
 /**
+ * How a system turns a critical hit into damage (issue #1053). The two rules in the
+ * supported systems differ in what gets multiplied, not by how much:
+ *  - `double-dice` — roll the damage dice twice, add the flat modifier ONCE (D&D 5e).
+ *  - `double-total` — roll damage normally, then double the whole result INCLUDING the
+ *    flat modifier (Pathfinder 2e / Starfinder 2e: "double the damage after adding all
+ *    modifiers, bonuses, and penalties").
+ *
+ * `1d8+3` maxed is the whole difference: 8+8+3 = 19 under `double-dice`, (8+3)*2 = 22
+ * under `double-total`. Read via {@link criticalDamageRuleForAdapter}, never off the
+ * adapter directly, so an adapter that has not declared a rule keeps 5e behaviour rather
+ * than crashing or silently halving.
+ */
+export type CriticalDamageRule = 'double-dice' | 'double-total';
+
+/**
  * The minimal rule-system surface the resolver reads. The real `RuleSystemAdapter`
  * satisfies this structurally (every adapter has `id` + `abilityModifier`; the PF2e/SF2e
  * adapters additionally expose `degreeOfSuccess`). Declared locally so this module has no
@@ -47,6 +62,69 @@ export interface ResolverAdapter {
   abilityModifier(score: number): number;
   /** PF2e/SF2e only — present ⇒ the system reports degrees of success for checks/saves. */
   degreeOfSuccess?(total: number, dc: number, naturalRoll?: number): ResolverDegree;
+  /**
+   * OPTIONAL — this system's critical-damage rule (issue #1053). Omit it and
+   * {@link criticalDamageRuleForAdapter} returns `double-dice`, matching both 5e and the
+   * `ruleSystemAdapter` fallback, so an adapter that has never thought about crits behaves
+   * exactly as it did before this seam existed.
+   */
+  readonly criticalDamage?: CriticalDamageRule;
+  /**
+   * OPTIONAL, OPT-IN — see {@link ResolverMathProfile}. An adapter that does not declare it is
+   * treated as NOT implemented by the structured resolver, which is the safe direction.
+   */
+  readonly resolverMath?: ResolverMathProfile;
+}
+
+/**
+ * Resolve the critical-damage rule for an adapter, defaulting to 5e's `double-dice`
+ * (issue #1053). Always read the rule through this function: it is the single place the
+ * default lives, so an adapter that has not declared one is never silently given PF2e math.
+ */
+export function criticalDamageRuleForAdapter(adapter: Pick<ResolverAdapter, 'criticalDamage'>): CriticalDamageRule {
+  return adapter.criticalDamage ?? 'double-dice';
+}
+
+/**
+ * The one set of mechanics the structured resolver's own maths actually implements
+ * (issue #1053 review). Named for what it IS rather than for a system, so declaring it is a
+ * factual claim an adapter author can check rather than a badge:
+ *
+ *  - the attack roll is a single **d20** plus a flat modifier;
+ *  - it is compared against **ascending** armour class, meet-or-beat;
+ *  - proficiency is 5e's **level-based** bonus (`dnd5eProficiencyBonus`).
+ *
+ * Every one of those is load-bearing and every one is violated by some supported system:
+ * Open Legend rolls exploding **attribute dice pools**, not a d20; the OSR variants on the
+ * descending convention compare the other way round (`osrAttackHits`); PF2e/SF2e proficiency is
+ * level **plus a rank bonus**, and `ActionResolverService.proficiencyBonus` returns 0 for every
+ * non-5e adapter, so a trained PF2e save total is understated and can select the wrong
+ * degree-of-success branch. Today exactly one adapter can honestly declare this: 5e.
+ */
+export type ResolverMathProfile = 'd20-ascending-ac-5e-proficiency';
+
+/** The only {@link ResolverMathProfile} that exists today. */
+export const RESOLVER_MATH_D20_5E: ResolverMathProfile = 'd20-ascending-ac-5e-proficiency';
+
+/**
+ * Does the structured resolver implement THIS system's attack and save maths (#1053 review)?
+ *
+ * **Opt-in, and deliberately so.** An earlier revision of this gate was a blocklist of the
+ * systems known to break, whose default was "resolver is fine" — so every system nobody had
+ * audited yet was wrong until someone noticed, and three review rounds each found one more.
+ * The failure mode of getting this wrong is `resolve_action` with `commit:true` writing HP off
+ * arithmetic that is not the table's rules, so the default has to be closed: an adapter that
+ * has not declared {@link ResolverAdapter.resolverMath} is treated as unsupported, and a newly
+ * added system withholds until someone checks it rather than failing open.
+ *
+ * Note this is a claim about the resolver's **own** maths, not about the whole resolver. The
+ * adapter-owned parts (degrees of success, {@link CriticalDamageRule}) are correct for the
+ * systems that declare them; it is the d20 roll, the AC comparison and the proficiency bonus
+ * that are still 5e-shaped. Fixing those is tracked in #1598 / #1599; this predicate exists to
+ * keep callers from claiming universality until they are.
+ */
+export function resolverImplementsSystemMath(adapter: Pick<ResolverAdapter, 'resolverMath'>): boolean {
+  return adapter.resolverMath === RESOLVER_MATH_D20_5E;
 }
 
 // ---------------------------------------------------------------------------
@@ -165,10 +243,32 @@ export type TargetRule = z.infer<typeof TargetRule>;
 
 /** One typed damage component. */
 export const DamagePart = z.object({
-  // Dice expression ("2d6+3") the roller understands; empty = no dice (flat via `flat`).
+  /**
+   * DICE ONLY — "2d6", "1d8". Do NOT fold the modifier in as "2d6+3"; put it in {@link flat}.
+   *
+   * #1053: this comment previously read `Dice expression ("2d6+3")`, which directly
+   * contradicted {@link rollBranchDamage}'s contract (defined later in this file): under 5e's
+   * `double-dice` critical rule a crit re-rolls `formula` and adds `flat` ONCE. So an author
+   * (or an AI writing an inline spec, following this very example) who put the modifier in the
+   * formula got the modifier DOUBLED on every crit, silently and with no error — wrong crit
+   * damage produced by following the documentation.
+   *
+   * The split is load-bearing, not stylistic: it is the only thing that lets the resolver
+   * apply a SYSTEM's critical rule rather than one hardcoded rule. `double-dice` needs to know
+   * which part is dice; `double-total` needs to know the modifier so it can double that too.
+   * Fold them together and neither rule can be expressed correctly.
+   */
   formula: z.string().max(60).default(''),
-  // Flat damage when there's no formula (e.g. a fixed 1 point); added to a rolled formula.
-  flat: z.number().int().min(0).max(999).default(0),
+  /**
+   * The flat modifier applied alongside {@link formula} (also usable alone for fixed damage).
+   * How a critical hit treats it is the system's business — see {@link CriticalDamageRule}.
+   *
+   * #1053: this was `.min(0)`, which made a NEGATIVE modifier ("1d8-1") unrepresentable and
+   * forced every producer to smuggle the penalty back into `formula` — where a 5e crit then
+   * doubled it. Negatives are legal here; {@link rollBranchDamage} floors the resulting damage
+   * at 0 so a large penalty can never turn damage into healing.
+   */
+  flat: z.number().int().min(-999).max(999).default(0),
   // Damage type ('fire', 'slashing', …); '' = untyped (never resisted).
   type: z.string().max(24).default(''),
 });
@@ -572,6 +672,15 @@ export function computeSaveDc(
  *    vs AC and mapped: criticalSuccess→crit, success→hit, failure→miss, criticalFailure→critMiss.
  *  - Otherwise (5e / d20): a natural 20 is a crit, a natural 1 is an automatic miss (critMiss),
  *    else total ≥ AC hits.
+ *
+ * LIMIT (#1053 review): "total ≥ AC" assumes ASCENDING armour class, and the caller assumes the
+ * roll is a d20. An OSR variant on the DESCENDING convention hits on `roll >= thac0 -
+ * descendingAc` (`osrAttackHits` in osr-adapter.ts), so the comparison runs the wrong way round
+ * — against descending AC 2 nearly any positive total reads as a hit. Open Legend does not roll
+ * a d20 at all. Rather than enumerate the systems that break, ask
+ * {@link resolverImplementsSystemMath}: only an adapter that declares
+ * {@link ResolverMathProfile} is claimed to be served by this path, so an unaudited system
+ * withholds instead of failing open. Widening it is tracked in #1598.
  */
 export function classifyAttackOutcome(
   adapter: ResolverAdapter,
@@ -684,25 +793,38 @@ export function isResolvableSpec(spec: ActionSpec | null | undefined): boolean {
 }
 
 /**
- * Roll a damage branch, doubling the DICE (never the flat modifier) on a critical hit
- * (5e critical: roll the damage dice twice, add the flat once). By convention a
- * {@link DamagePart.formula} is DICE ONLY ("2d6") and {@link DamagePart.flat} is the flat
- * modifier, so a crit re-rolls the formula and adds it, leaving `flat` applied once. Uses
- * the injected roller so the math is deterministic under test.
+ * Roll a damage branch, applying the campaign system's CRITICAL rule (issues #414, #1053).
+ *
+ * This used to hardcode 5e — re-roll `formula`, add `flat` once — for every system, so a
+ * PF2e `1d8+3` critical resolved as `2d8+3` when PF2e says double the total (`(1d8+3)*2`).
+ * The rule now arrives as {@link CriticalDamageRule}, read from the adapter via
+ * {@link criticalDamageRuleForAdapter}; it defaults to `double-dice` so a caller that passes
+ * nothing (and an adapter that declares nothing) keeps the previous 5e behaviour exactly.
+ *
+ * Both rules depend on the {@link DamagePart} convention that `formula` is DICE ONLY and
+ * `flat` carries the modifier — that split is what makes "which part gets multiplied" a
+ * question the data can answer. `flat` may be negative (a damage penalty); the per-part total
+ * is floored at 0 so a penalty larger than the roll deals nothing rather than healing the
+ * target. Uses the injected roller so the math is deterministic under test.
  */
 export function rollBranchDamage(
   branch: OutcomeBranch,
   roll: ActionRollFn,
-  opts: { critical?: boolean } = {},
+  opts: { critical?: boolean; criticalRule?: CriticalDamageRule } = {},
 ): { parts: { type: string; amount: number }[] } {
+  const rule = opts.criticalRule ?? 'double-dice';
   const parts: { type: string; amount: number }[] = [];
   for (const part of branch.damage) {
     let dice = 0;
     if (part.formula.trim() !== '') {
       dice += roll(part.formula).total;
-      if (opts.critical) dice += roll(part.formula).total; // extra set of dice for the crit
+      // 5e: the crit buys an extra set of DICE only; the modifier is still added once below.
+      if (opts.critical && rule === 'double-dice') dice += roll(part.formula).total;
     }
-    parts.push({ type: part.type, amount: Math.max(0, dice + part.flat) });
+    let amount = dice + part.flat;
+    // PF2e/SF2e: double everything, modifiers and penalties included, AFTER summing.
+    if (opts.critical && rule === 'double-total') amount *= 2;
+    parts.push({ type: part.type, amount: Math.max(0, amount) });
   }
   return { parts };
 }

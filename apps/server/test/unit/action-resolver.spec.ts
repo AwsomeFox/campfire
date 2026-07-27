@@ -151,15 +151,19 @@ describe('pickOutcomeBranch — fallbacks', () => {
   });
 });
 
-describe('rollBranchDamage — crit doubles dice, not flat', () => {
+describe('rollBranchDamage — the crit rule comes from the system (#1053)', () => {
   const branch = ActionSpec.parse({ outcomes: { hit: { damage: [{ formula: '2d6', flat: 3, type: 'fire' }] } } }).outcomes.hit!;
   it('normal hit: dice + flat', () => {
     const { parts } = rollBranchDamage(branch, fixedRoller({ '2d6': 7 }));
     expect(parts).toEqual([{ type: 'fire', amount: 10 }]); // 7 + 3
   });
-  it('crit: dice rolled twice + flat once', () => {
+  it('5e crit (the default when no rule is passed): dice rolled twice + flat once', () => {
     const { parts } = rollBranchDamage(branch, fixedRoller({ '2d6': 7 }), { critical: true });
     expect(parts).toEqual([{ type: 'fire', amount: 17 }]); // 7 + 7 + 3
+  });
+  it('PF2e crit: the whole total doubles, modifier included', () => {
+    const { parts } = rollBranchDamage(branch, fixedRoller({ '2d6': 7 }), { critical: true, criticalRule: 'double-total' });
+    expect(parts).toEqual([{ type: 'fire', amount: 20 }]); // (7 + 3) * 2 — not 17
   });
 });
 

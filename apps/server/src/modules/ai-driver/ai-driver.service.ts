@@ -23,6 +23,8 @@ import {
   AI_DM_PROMPT_HISTORY_MAX_MESSAGES,
   buildNarrationLanguageContract,
   resolveNarrationLanguage,
+  resolverImplementsSystemMath,
+  ruleSystemAdapter,
   TABLE_SAFETY_HOLD_ERROR_CODE,
 } from '@campfire/schema';
 import type {
@@ -889,12 +891,48 @@ const RECOVERY_SUMMARY: Record<ControlStateRecovery, string> = {
  * after it (GROUNDING_CITATION_CONTRACT) plus the SERVER-side citation validation in
  * driver-grounding.ts, which never takes the model's word for anything.
  */
-const GROUNDING_PREAMBLE = [
+/**
+ * May this campaign be told to resolve attacks and saves server-side (#1053 review)?
+ *
+ * ONE gate for both, because both are known-wrong for at least one supported system, and one of
+ * them being an allowlist while the other stayed a blocklist would just relocate the hazard.
+ * The answer comes from the adapter's own {@link ResolverMathProfile} declaration rather than
+ * from a slug list here: a slug list is a blocklist wearing an allowlist's clothes — it still
+ * needs editing whenever a system is added, and forgetting still fails open.
+ *
+ * **Why opt-in.** The first version of this gate excluded only descending-AC OSR, on the theory
+ * that everything else was d20-ish enough. Review then found Open Legend (exploding attribute
+ * dice pools, not a d20) and PF2e action saves (`proficiencyBonus` returns 0 for every non-5e
+ * adapter, so a trained character's total is understated and a wrong degree-of-success branch
+ * can be selected and committed). Each round found one more, which is what a blocklist does.
+ * Inverted, an unaudited system withholds guidance — the failure mode becomes "the AI was not
+ * told resolve_action exists", not "the AI committed HP that never should have been lost".
+ *
+ * Today this is true for 5e alone, plus the unknown/empty/homebrew slugs `ruleSystemAdapter`
+ * deliberately resolves to the 5e adapter (5e maths is genuinely what those campaigns get).
+ * The adapter work that widens it is tracked in #1598 and #1599.
+ */
+export function resolverSpeaksCampaignSystem(ruleSystem?: string | null): boolean {
+  return resolverImplementsSystemMath(ruleSystemAdapter(ruleSystem));
+}
+
+/**
+ * Build the grounding preamble for one campaign's rule system (#1053 review).
+ *
+ * Everything except the attack / saving-throw block is system-neutral. That block is gated on
+ * {@link resolverSpeaksCampaignSystem}, because a blanket "always call resolve_action /
+ * saving_throw" is not merely unhelpful where the server's maths is not the table's — it
+ * commits wrong HP and reports wrong save results. Where the server cannot do the maths the
+ * model is told so plainly and told to defer to the human DM: less capable than the ungated
+ * text, and strictly more correct.
+ */
+export function buildGroundingPreamble(ruleSystem?: string | null): string {
+  return [
   'You are the AI Dungeon Master running a live tabletop scene. Narrate vividly but stay grounded:',
   '- Never invent rules — call lookup_rule / get_rule_entry and cite the rule you used.',
   '- Never invent NPCs, quests, locations, or party facts — read them (get_campaign_summary, get_npc, …) and cite the entity.',
   '- To change the world (a new NPC/quest/location, edits to canon), call the matching tool. Those are submitted as PROPOSALS for the human DM to approve — do not claim a canon change happened until it is applied.',
-  '- You MAY resolve live play directly: roll dice, apply HP/conditions, advance turns, reveal map regions.',
+  '- You MAY resolve live play directly: apply HP/conditions, advance turns, reveal map regions.',
   // #1022 — advertise encounter AUTHORING, not just encounter operation. Without this the model
   // does not know it can originate a fight, so it narrates an ambush it never actually creates
   // and the table ends up with prose but no combat tracker.
@@ -903,8 +941,57 @@ const GROUNDING_PREAMBLE = [
   '  until the human DM reveals them, and you cannot change that — never tell players an encounter is hidden',
   '  or describe a roster you have only prepped. You may rename or re-link an encounter YOU created this',
   '  session; encounters the human DM prepared are theirs — ask them rather than editing.',
+  // #1053 — THE ATTACK PATH.
+  //
+  // The line above used to read "…roll dice, apply HP/conditions…", and that phrasing was the
+  // whole bug the issue was filed about. It steered the model into the manual chain — read AC,
+  // `roll_dice`, `update_character_hp` — three calls in which the model holds the AC comparison,
+  // the crit rule and the damage total in its head, and can hallucinate any of them. Meanwhile
+  // `resolve_action` (#414) had done all of it server-side since before the issue was written,
+  // was already on this seat's live-play allowlist, and was simply never mentioned here.
+  //
+  // The worked example is not decoration. Every field of ActionSpec is optional with a default,
+  // so a plausible guess (`{attack: {bonus: '+5'}}`) parses fine and then fails `isResolvableSpec`
+  // for want of `mode`, and the model falls straight back to the manual chain we are trying to
+  // stop. The `formula` / `flat` split is called out for a sharper reason: it is the ONLY thing
+  // that lets the server apply a system's critical rule rather than one hardcoded rule — 5e
+  // doubles the dice and adds `flat` once, PF2e doubles the whole total. Fold the modifier into
+  // `formula` and neither rule can be computed correctly (see CriticalDamageRule, #1053).
+  //
+  // Deliberately NOT stated here: which crit rule applies. This preamble is shared by every
+  // campaign whatever its rule system, so any concrete arithmetic in it would be wrong for
+  // some table. The server reads the rule from the campaign's adapter; the model is told the
+  // rule is applied for it and is told what to report, which is the resolver's own numbers.
+  //
+  // #1053 review: the whole attack/save block below is gated. `saving_throw` (#1040) is the
+  // right SHAPE for a standalone save — it needs only a character and a DC, where resolve_action
+  // needs an encounter, an actor combatant, targets and an outcome spec — but its maths, like
+  // the resolver's d20-vs-ascending-AC and level-based proficiency, is 5e's. So the split
+  // between a standalone save and an action-embedded one is only worth teaching to a table
+  // whose rules that maths actually is.
+  '- roll_dice is for rolls with no target and no consequence — a random table, a morale roll. It does NOT apply anything. Never use it to hand-roll an attack, a save, or damage.',
+  ...(resolverSpeaksCampaignSystem(ruleSystem)
+    ? [
+        '- To resolve an ATTACK, call resolve_action — never hand-roll one. It rolls the d20 with the right modifier, compares the target’s AC, classifies hit/miss/crit under THIS campaign’s rule system, rolls damage and applies that system’s own critical rule, applies damage-type resistance/immunity, writes the result, and returns an undo token. Pass commit:true to resolve and apply in ONE call. Narrate the totals it returns — never recompute a crit yourself, and never assume one system’s crit maths applies at this table.',
+        '- resolve_action needs no pre-authored action: for a monster swing or an improvised attack pass an inline `spec`. A minimal one looks like {"mode":"attack","attack":{"bonus":"+5"},"outcomes":{"hit":{"damage":[{"formula":"1d8","flat":3,"type":"slashing"}]}}}. Put ONLY dice in `formula` and the modifier in `flat` (negative for a penalty: `1d8-1` is {"formula":"1d8","flat":-1}) — that split is what lets the server apply this system’s critical rule to the right half, so "1d8+3" as a formula gives wrong crit damage.',
+        '- For a STANDALONE saving throw ("make a DC 15 Dexterity save", a hazard or a trap, in or out of combat), call saving_throw with the character and the DC: it reads their real ability score and proficiency. Use resolve_action instead only when the save is part of an action you are resolving — a spell or effect whose outcome spec already carries the DC and its success/failure branches — because it rolls the save AND applies the branch in the same call.',
+      ]
+    : [
+        // The server's resolver maths is not this system's. Sending an attack or a save through
+        // it with commit:true would write HP off arithmetic this table does not use, so the
+        // honest instruction is to stop before the roll that decides, not to guess well.
+        '- Server-side resolution (resolve_action) and the saving_throw tool implement D&D 5e maths — one d20 plus a flat modifier, compared against ascending armour class, with a level-based proficiency bonus. This campaign uses a DIFFERENT rule system, so do NOT use them to decide whether an attack hits or whether a save succeeds: the totals would be computed the wrong way and could apply damage that never landed. Narrate the action, state the numbers from the statblock or sheet, and let the human DM make the call. Never assert a hit, a miss, or a save result yourself.',
+      ]),
   '- Respect the session-zero charter (lines/veils/safety tools) below at all times.',
-].join('\n');
+  ].join('\n');
+}
+
+/**
+ * The 5e-shaped preamble — what every campaign got before the gate above existed, and what a
+ * campaign on the 5e adapter still gets. Kept as a named export for tests and for callers with
+ * no campaign in hand; live turns build the campaign's own via {@link buildGroundingPreamble}.
+ */
+export const GROUNDING_PREAMBLE = buildGroundingPreamble(null);
 
 /**
  * Per-phase direction appended to the system prompt (#1043).
@@ -5730,7 +5817,15 @@ export class AiDriverService {
      */
     phase: AiDmSessionPhase = 'active',
   ): Promise<string> {
-    const parts: string[] = [GROUNDING_PREAMBLE, GROUNDING_CITATION_CONTRACT, UNTRUSTED_INPUT_PREAMBLE];
+    // #1053 review: the campaign is read FIRST because the grounding preamble is now gated on
+    // its rule system — the attack and standalone-save lines differ where the server-side
+    // implementations do not speak that system. Everything else about this read is unchanged.
+    const campaign = await this.campaigns.getOrThrow(campaignId);
+    const parts: string[] = [
+      buildGroundingPreamble(campaign.ruleSystem),
+      GROUNDING_CITATION_CONTRACT,
+      UNTRUSTED_INPUT_PREAMBLE,
+    ];
     if (seat.instructions) parts.push(`## DM steering\n${seat.instructions}`);
     // #1049 — structured table style, immediately after the freeform steering it complements.
     // Both are STANDING DM PREFERENCES about how the table is run, so they read as one block
@@ -5741,7 +5836,6 @@ export class AiDriverService {
     const tableStyle = renderTableStyleSection(seat.stylePresets);
     if (tableStyle) parts.push(tableStyle);
 
-    const campaign = await this.campaigns.getOrThrow(campaignId);
     const { language, provenance } = resolveNarrationLanguage(campaign.narrationLanguage, narrationLanguageOverride);
     parts.push(buildNarrationLanguageContract(language, provenance));
 

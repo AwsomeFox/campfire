@@ -32,7 +32,7 @@ import {
   sortOrderAscTiebreak,
   type InitiativeTiebreakCombatant,
 } from './initiative-tiebreak';
-import { ActionSpec } from './action-resolver';
+import { ActionSpec, RESOLVER_MATH_D20_5E, type CriticalDamageRule, type ResolverMathProfile } from './action-resolver';
 import { RestModel } from './rest';
 import { CharacterAction } from './character-action';
 import { CombatantStatblock } from './combatant-statblock';
@@ -3562,6 +3562,32 @@ export interface RuleSystemAdapter {
    * slots it doesn't have. This is the seam that keeps the turn tracker from hardcoding 5e.
    */
   readonly actionEconomy?: ActionEconomyModel;
+  /**
+   * OPTIONAL — how a critical hit multiplies damage in this system (issue #1053). The
+   * structured action resolver used to hardcode 5e's "roll the dice twice, add the modifier
+   * once" for every campaign, so a PF2e `1d8+3` crit came out as `2d8+3` instead of the
+   * `(1d8+3)*2` PF2e prescribes. Adapters whose crit rule differs from 5e's declare it here;
+   * everyone else omits it and {@link criticalDamageRuleForAdapter} returns `double-dice`,
+   * which is both 5e's rule and the pre-existing behaviour for every system.
+   *
+   * Only the systems whose rule has been confirmed are declared today — 5e (by omission) and
+   * PF2e/SF2e. The remaining adapters are unaudited and therefore left on the 5e default
+   * rather than guessed at; declaring one is a one-line change once a system's rule is confirmed.
+   */
+  readonly criticalDamage?: CriticalDamageRule;
+  /**
+   * OPTIONAL, OPT-IN — declare this only if the structured action resolver's OWN maths is this
+   * system's maths (issue #1053 review): a single d20 plus a flat modifier, compared against
+   * ascending armour class, with 5e's level-based proficiency bonus. See
+   * {@link ResolverMathProfile} for why each clause matters and which systems break which one.
+   *
+   * Omitting it means "the resolver does not speak this system", and omission is the DEFAULT on
+   * purpose. Callers ask {@link resolverImplementsSystemMath}; an adapter that has not been
+   * audited withholds rather than being assumed d20-compatible, because the cost of a wrong
+   * assumption here is `resolve_action` committing HP off the wrong arithmetic. Declaring it is
+   * a factual claim — check the three clauses against the system's rules first.
+   */
+  readonly resolverMath?: ResolverMathProfile;
   /** Map a monster rule-entry's `dataJson` to canonical statblock fields (AC/HP/CR/abilities/…). */
   mapStatblock(data: Record<string, unknown>): MonsterStatblockData;
   /** Resolve a monster's numeric max HP from its `dataJson`, or null when unavailable. */
@@ -3741,6 +3767,11 @@ export const DND5E_PACK_SLUG = 'open5e-srd';
 export const Dnd5eAdapter: RuleSystemAdapter = {
   id: DND5E_ADAPTER_ID,
   label: 'D&D 5e',
+  // The structured resolver's attack/save maths IS 5e's — d20 + flat modifier vs ascending AC,
+  // level-based proficiency — so 5e is the one adapter that can declare this today (#1053).
+  // Unknown / empty / homebrew slugs resolve to this adapter via `ruleSystemAdapter`, so they
+  // inherit the declaration, which is correct: 5e maths is exactly what those campaigns get.
+  resolverMath: RESOLVER_MATH_D20_5E,
   presentation: DND5E_STATBLOCK_PRESENTATION,
   characterSheet: {
     abilityFields: STANDARD_D20_ABILITY_FIELDS,
@@ -4952,6 +4983,11 @@ export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
   levelBasedDC: pf2eLevelBasedDC,
   simpleDC: pf2eSimpleDC,
   degreeOfSuccess: pf2eDegreeOfSuccess,
+  // PF2e crits double the TOTAL, not just the dice (issue #1053): "double the damage after
+  // adding all the modifiers, bonuses, and penalties". Inherited by the SF2e adapter below,
+  // which spreads this object. Without it the resolver applied 5e's dice-only doubling to
+  // every PF2e critical and silently under-reported the modifier.
+  criticalDamage: 'double-total',
   // PF2e roll catalog (issue #415): proficiency adds your LEVEL plus a rank bonus, and checks
   // report degrees of success — a concrete demonstration that the catalog math is adapter-owned.
   buildCheckCatalog(character: CheckCatalogCharacter): RollCheckDefinition[] {
