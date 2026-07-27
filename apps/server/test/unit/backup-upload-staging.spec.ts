@@ -5,6 +5,7 @@ import {
   BACKUP_UPLOAD_STAGE_OWNER_FILE,
   BACKUP_UPLOAD_STAGE_PREFIX,
   createPrivateUploadStageRoot,
+  defaultUploadStageProcessState,
   linuxProcessState,
   reclaimStaleUploadStageRoots,
 } from '../../src/modules/backup/backup.controller';
@@ -22,6 +23,10 @@ describe('backup upload staging root', () => {
 
   function owner(root: string, value: object): void {
     fs.writeFileSync(path.join(root, BACKUP_UPLOAD_STAGE_OWNER_FILE), JSON.stringify(value));
+  }
+
+  function errno(code: string): NodeJS.ErrnoException {
+    return Object.assign(new Error(code), { code }) as NodeJS.ErrnoException;
   }
 
   it('uses a unique private directory instead of a pre-created predictable temp path', () => {
@@ -135,6 +140,42 @@ describe('backup upload staging root', () => {
       expect(linuxProcessState(42, 'linux')).toEqual({ state: 'unknown' });
     } finally {
       read.mockRestore();
+    }
+  });
+
+  it('reclaims an ESRCH owner through the portable fallback when Linux identity is unavailable', () => {
+    const stale = createPrivateUploadStageRoot(tmpDir);
+    owner(stale, { version: 1, pid: 42 });
+    const kill = jest.spyOn(process, 'kill').mockImplementation(() => { throw errno('ESRCH'); });
+    try {
+      reclaimStaleUploadStageRoots(
+        tmpDir,
+        undefined,
+        (pid) => defaultUploadStageProcessState(pid, () => ({ state: 'unknown' })),
+      );
+      expect(fs.existsSync(stale)).toBe(false);
+    } finally {
+      kill.mockRestore();
+    }
+  });
+
+  it.each([
+    ['success', () => undefined],
+    ['EPERM', () => { throw errno('EPERM'); }],
+    ['other error', () => { throw errno('EIO'); }],
+  ])('preserves a root when portable PID probe reports %s', (_name, probe) => {
+    const root = createPrivateUploadStageRoot(tmpDir);
+    owner(root, { version: 1, pid: 42 });
+    const kill = jest.spyOn(process, 'kill').mockImplementation(probe as never);
+    try {
+      reclaimStaleUploadStageRoots(
+        tmpDir,
+        undefined,
+        (pid) => defaultUploadStageProcessState(pid, () => ({ state: 'unknown' })),
+      );
+      expect(fs.existsSync(root)).toBe(true);
+    } finally {
+      kill.mockRestore();
     }
   });
 

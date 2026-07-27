@@ -78,6 +78,27 @@ export function linuxProcessState(pid: number, platform = process.platform): Upl
   return { state: 'alive', bootId, startTicks };
 }
 
+function portableDeadProcessState(pid: number): UploadStageProcessState {
+  try {
+    process.kill(pid, 0);
+    // A live PID alone cannot prove it is the marker's process instance.
+    return { state: 'unknown' };
+  } catch (err) {
+    // EPERM and every non-ESRCH error are ambiguous and must preserve the root.
+    return (err as NodeJS.ErrnoException).code === 'ESRCH'
+      ? { state: 'dead' }
+      : { state: 'unknown' };
+  }
+}
+
+export function defaultUploadStageProcessState(
+  pid: number,
+  linuxLookup: UploadStageProcessLookup = linuxProcessState,
+): UploadStageProcessState {
+  const linux = linuxLookup(pid);
+  return linux.state === 'unknown' ? portableDeadProcessState(pid) : linux;
+}
+
 function uploadStageOwnerPath(root: string): string {
   return path.join(root, BACKUP_UPLOAD_STAGE_OWNER_FILE);
 }
@@ -111,7 +132,7 @@ function shouldReclaimUploadStageOwner(
 export function reclaimStaleUploadStageRoots(
   tmpDir = os.tmpdir(),
   currentRoot?: string,
-  lookup: UploadStageProcessLookup = linuxProcessState,
+  lookup: UploadStageProcessLookup = defaultUploadStageProcessState,
 ): void {
   const parent = path.resolve(tmpDir);
   const current = currentRoot ? path.resolve(currentRoot) : undefined;
