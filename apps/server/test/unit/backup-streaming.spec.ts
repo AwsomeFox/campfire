@@ -97,18 +97,20 @@ describe('backup streaming writer (#603)', () => {
     await expect(svc.buildBackup(undefined, output)).resolves.toBeUndefined();
   });
 
-  it('destroys a scheduled output when backup setup fails before piping', async () => {
+  it('defers a scheduled backup without creating output when the archive lane is occupied', async () => {
     const backupDir = path.join(dataDir, 'backups');
     const previous = process.env.BACKUP_DIR;
     process.env.BACKUP_DIR = backupDir;
     const svc = service();
     (svc as any).archiveOperation = 'backup';
     const createStream = jest.spyOn(fs, 'createWriteStream');
+    const writeFailure = jest.spyOn(svc as any, 'writeFailureCadence');
     try {
-      await expect((svc as any).runScheduledBackup(60 * 60 * 1000)).rejects.toThrow('already in progress');
-      const partial = createStream.mock.results.at(-1)?.value as fs.WriteStream;
-      expect(partial.destroyed).toBe(true);
+      await expect((svc as any).runScheduledBackup(60 * 60 * 1000)).resolves.toBeUndefined();
+      expect(createStream).not.toHaveBeenCalled();
+      expect(writeFailure).not.toHaveBeenCalled();
     } finally {
+      writeFailure.mockRestore();
       createStream.mockRestore();
       (svc as any).archiveOperation = null;
       if (previous === undefined) delete process.env.BACKUP_DIR;

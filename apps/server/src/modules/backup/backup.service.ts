@@ -520,6 +520,15 @@ export class BackupService implements OnApplicationBootstrap {
         this.logger.warn(message);
         return;
       }
+      // An interactive backup or restore owns the same archive lane. This is
+      // expected coordination, not a failed scheduled attempt. Leave cadence
+      // due so the next scheduler poll retries as soon as the lane is free.
+      if (this.archiveOperation) {
+        this.logger.warn(
+          `Scheduled backup deferred: whole-server ${this.archiveOperation} operation is already in progress`,
+        );
+        return;
+      }
       // #496: Scheduled backups pick up a passphrase from BACKUP_KEY_PASSPHRASE
       // so an unattended cron produces credential-portable archives when the
       // server is running with the auto-generated keyfile. Empty / unset means
