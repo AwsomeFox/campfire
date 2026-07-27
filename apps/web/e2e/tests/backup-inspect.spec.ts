@@ -135,7 +135,7 @@ test.describe('server backup workflow UI (issues #514 / #444)', () => {
     });
     await card.getByRole('button', { name: 'Inspect (dry-run)' }).click();
     await expect(card.getByRole('alert')).toContainText(/format version 42/);
-    await expect(card.getByRole('alert')).toContainText(/v99\.0\.0/);
+    await expect(card.getByRole('alert')).toContainText(/accepts format version 3 only/i);
   });
 
   test('discloses bounded memory fallback and reports successful streamed download state', async ({ page }) => {

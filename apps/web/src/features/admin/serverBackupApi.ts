@@ -249,6 +249,7 @@ export async function downloadServerBackup(options?: {
   const picker = saveFilePicker();
   let fileHandle: WritableFileHandle | null = null;
   if (picker) {
+    throwIfAborted(options?.signal);
     try {
       fileHandle = await picker({
         suggestedName: 'campfire-backup.zip',
@@ -264,6 +265,7 @@ export async function downloadServerBackup(options?: {
       }
       throw error;
     }
+    throwIfAborted(options?.signal);
   }
   const res = await fetch(usePost ? `${API}/backup/download` : `${API}/backup`, {
     method: usePost ? 'POST' : 'GET',
