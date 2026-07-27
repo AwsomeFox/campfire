@@ -307,6 +307,108 @@ describe('ai-dm driver — session lifecycle phases (#1043)', () => {
     expect(await phaseOf(campaignId)).toBe('active');
   });
 
+  /**
+   * A REFUSED LIFECYCLE TURN LEAVES NO TRACE — not just no lasting phase change (#1043).
+   *
+   * These assert on the DURABLE TRANSCRIPT and the SSE FRAMES, not on the final `phase` value,
+   * because the value was already correct before the fix: the phase was published, the gate then
+   * refused, and a compensating transition restored it. What the table was left with was a log
+   * saying a session had opened and closed again, a visible flicker on every client, and — since
+   * publication wrote to disk first — a window in which a crash left a transient phase persisted
+   * for hydration to report as an interrupted turn. A value-only assertion passes against all of
+   * that, which is exactly why these look at the record instead.
+   */
+  const phaseSignals = async (campaignId: number, run: () => Promise<unknown>) => {
+    const streamSvc = h.ctx.app.get(AiDmStreamService);
+    const frames: string[] = [];
+    const sub = streamSvc
+      .streamFor(campaignId)
+      .subscribe((e) => {
+        if (e.type === 'phase') frames.push((e as Extract<AiDmStreamEvent, { type: 'phase' }>).phase);
+      });
+    try {
+      await run();
+    } finally {
+      sub.unsubscribe();
+    }
+    const page = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/transcript`).set(dm);
+    const rows = (page.body.items as Array<{ kind: string; payload: Record<string, unknown> }>)
+      .filter((e) => e.kind === 'control' && e.payload.control === 'phase')
+      .map((e) => String(e.payload.phase));
+    return { frames, rows };
+  };
+
+  it('a lifecycle turn refused by the PAUSE gate publishes no phase frame and no phase row', async () => {
+    const campaignId = await armed('Refused Publishes Nothing');
+    await request(h.server).post(`/api/v1/campaigns/${campaignId}/ai-dm/pause`).set(dm).send({ paused: true });
+
+    const { frames, rows } = await phaseSignals(campaignId, async () => {
+      expect((await start(campaignId, player)).status).toBe(503);
+    });
+
+    expect(frames).toEqual([]);
+    expect(rows).toEqual([]);
+    expect(await phaseOf(campaignId)).toBe('active');
+  });
+
+  it('a lifecycle turn refused because the AI is mid-turn publishes no phase frame and no phase row', async () => {
+    const campaignId = await armed('Refused Mid Turn Publishes Nothing');
+    const driver = h.ctx.app.get(AiDriverService);
+    const user = {
+      id: 'dev:ai-eval-player',
+      name: 'ai-eval-player',
+      serverRole: 'user' as const,
+      devRole: 'player' as const,
+    };
+    h.script({ text: 'You search the room.', streamChunks: 6 });
+
+    // Every refusal path has to be silent, not just the pre-existing ones. Adding a rejection
+    // without moving the publication is what made this defect worse each time.
+    const { frames, rows } = await phaseSignals(campaignId, async () => {
+      const action = driver.runTurn(campaignId, user, 'I search the room');
+      const greeting = driver.startSession(campaignId, user, 'player');
+      const [, lifecycle] = await Promise.allSettled([action, greeting]);
+      expect(lifecycle.status).toBe('rejected');
+    });
+
+    expect(frames).toEqual([]);
+    expect(rows).toEqual([]);
+    expect(await phaseOf(campaignId)).toBe('active');
+  });
+
+  it('a lifecycle turn refused by a participant SAFETY HOLD leaves the phase and the log untouched', async () => {
+    const campaignId = await armed('Refused Safety Hold');
+    // #599's hold and #1043's lifecycle both gate `runTurn`; this is the seam between them.
+    const held = await request(h.server).post(`/api/v1/campaigns/${campaignId}/safety/hold`).set(player).send({});
+    expect(held.status).toBe(200);
+
+    const { frames, rows } = await phaseSignals(campaignId, async () => {
+      // A safety hold refuses everything, including a table trying to formally close the session.
+      expect((await wrapUp(campaignId, dm)).status).toBe(503);
+      expect((await start(campaignId, player)).status).toBe(503);
+    });
+
+    expect(frames).toEqual([]);
+    expect(rows).toEqual([]);
+    // The one thing a stop-everything control must never do is leave the table in a phase nobody
+    // chose — least of all `ended`, which would refuse player input after the hold is resolved.
+    expect(await phaseOf(campaignId)).toBe('active');
+  });
+
+  it('a lifecycle turn that RUNS still publishes both halves of its transition', async () => {
+    const campaignId = await armed('Accepted Publishes Both');
+    h.script({ text: 'Welcome back.', usage: { promptTokens: 4, completionTokens: 3, totalTokens: 7 } });
+
+    // The other side of the ledger: deferring publication must not lose it. A greeting that
+    // actually happens is still announced twice — into the phase, and back out of it.
+    const { frames, rows } = await phaseSignals(campaignId, async () => {
+      expect((await start(campaignId, player)).status).toBe(201);
+    });
+
+    expect(frames).toEqual(['greeting', 'active']);
+    expect(rows).toEqual(['greeting', 'active']);
+  });
+
   it('the phase block is absent from an ordinary turn', async () => {
     const campaignId = await armed('Active Prompt Unchanged');
     h.script({ text: 'The door creaks.', usage: { promptTokens: 4, completionTokens: 4, totalTokens: 8 } });

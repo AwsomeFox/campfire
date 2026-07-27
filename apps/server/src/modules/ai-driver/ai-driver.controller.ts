@@ -9,6 +9,7 @@ import {
   Post,
   Query,
   Sse,
+  UseInterceptors,
   type MessageEvent,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiQuery, ApiResponse, ApiProduces } from '@nestjs/swagger';
@@ -31,8 +32,8 @@ import { AiDriverService, toPublicAiDmSessionState } from './ai-driver.service';
 import { AiDmStreamService } from './ai-driver-stream.service';
 import { ProactiveService } from './proactive.service';
 import { DriverGroundingService } from './driver-grounding.service';
-import { projectGroundingVerdictForRole } from './driver-grounding';
 import { AiDmTranscriptService } from './ai-driver-transcript.service';
+import { GroundingProjectionInterceptor } from './grounding-projection.interceptor';
 import { projectAiDmStreamEventForRole } from './ai-driver-stream-projection';
 
 /** Player action submitted to the AI DM seat (POST /ai-dm/message). */
@@ -216,6 +217,11 @@ const HEARTBEAT_MS = 25_000;
  */
 @ApiTags('ai-dm')
 @WriteModeExempt()
+// #1043: DM-only grounding is redacted for the reading role HERE, for the whole controller,
+// rather than in each handler that happens to remember. See the interceptor for why: the
+// per-handler version held only for handlers whose author knew the rule, and start-session did
+// not. A handler in this controller cannot return an unprojected verdict.
+@UseInterceptors(GroundingProjectionInterceptor)
 @Controller('campaigns/:id/ai-dm')
 export class AiDriverController {
   constructor(
@@ -245,7 +251,7 @@ export class AiDriverController {
     @Body() body: AiDmMessageDto,
     @CurrentUser() user: RequestUser,
   ) {
-    const role = await this.access.requireRole(user, id, 'player');
+    await this.access.requireRole(user, id, 'player');
     const turn = await this.driver.runTurn(id, user, body.input, {
       scene: body.scene,
       maxSteps: body.maxSteps,
@@ -258,10 +264,14 @@ export class AiDriverController {
       characterName: body.characterName,
       displayText: body.displayText,
     });
-    // #577 — the turn result carries the grounding verdict, including the raw retrieval ledger.
-    // This endpoint is player-callable, so it is a second delivery path for DM-only ids and gets
-    // the same role projection as GET /ai-dm/grounding (#825).
-    return turn.grounding ? { ...turn, grounding: projectGroundingVerdictForRole(turn.grounding, role) } : turn;
+    // #577 — the turn result carries the grounding verdict, including the raw retrieval ledger,
+    // and this endpoint is player-callable, so it is a second delivery path for DM-only ids.
+    //
+    // #1043: that projection is no longer applied here. GroundingProjectionInterceptor covers the
+    // whole controller, and this was the ONLY handler that ever had the inline version — which is
+    // precisely why start-session could ship without it and leak. Two mechanisms for one
+    // guarantee is how the guarantee drifts, so there is deliberately only one left.
+    return turn;
   }
 
   @Get('session')

@@ -64,4 +64,24 @@ test.describe('session lifecycle phase — client wiring (#1043)', () => {
       expect(src).toMatch(/event\.type === 'phase'/);
     }
   });
+
+  test('an ended session locks the composer, and says why', () => {
+    // After a normal wrap-up the server refuses every player action with AI_DM_SESSION_ENDED, so
+    // an enabled composer is an input that CANNOT succeed — for every up-to-date client, not just
+    // one that missed a phase frame. The lock has to state its cause and leave the one-click cure
+    // in reach, or it just trades a confusing error for a confusing dead box.
+    const src = readFileSync(TABLE, 'utf8');
+    expect(src).toMatch(/const ended = phase === 'ended'/);
+    expect(src).toMatch(/locked = streaming \|\| paused \|\| humanControl \|\| awaiting \|\| ended/);
+    expect(src).toMatch(/composerLockedEnded/);
+    // Start Session is still rendered while `ended`, so the lock is never a dead end.
+    expect(src).toMatch(/phase !== 'greeting' && phase !== 'wrap_up'/);
+
+    for (const lng of ['en', 'ar']) {
+      const cat = JSON.parse(
+        readFileSync(resolve(__dirname, `../../src/i18n/locales/${lng}/table.json`), 'utf8'),
+      ) as { table: Record<string, string> };
+      expect(cat.table.composerLockedEnded).toBeTruthy();
+    }
+  });
 });

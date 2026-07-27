@@ -2431,7 +2431,26 @@ export class AiDriverService {
   ): Promise<AiDmTurnRunResult> {
     const session = this.ensureSession(campaignId);
     const previousPhase = session.phase;
-    this.setPhase(session, phase);
+    // PREFLIGHT ONLY — IN MEMORY, DELIBERATELY UNPUBLISHED (#1043).
+    //
+    // The prompt assembly reads `session.phase` to pick the direction block and decide whether to
+    // fetch the recap, so it genuinely has to move before the turn runs. What must NOT move yet is
+    // the RECORD of it. Publishing here — persisting, emitting the SSE frame, writing the durable
+    // `control: phase` transcript row — would commit an outcome before the gates that decide the
+    // outcome have run, and every gate below can still refuse: a paused seat, a human takeover, an
+    // exhausted budget, a safety hold, or a turn already in flight.
+    //
+    // Compensating afterwards is not equivalent. The `catch` could restore the VALUE, but the
+    // durable table log would still carry an opening or a wrap-up that never happened, every
+    // client would visibly flicker through a phase the table was never in, and — because the old
+    // path wrote to DISK first — a crash in the window before the restore would leave a transient
+    // phase persisted, which hydration then correctly but falsely reports as an interrupted
+    // lifecycle turn. Each new refusal path made that worse, so the fix is to stop publishing
+    // early rather than to compensate more thoroughly.
+    //
+    // `runTurn` publishes this exactly once, at the moment it reserves the turn slot — after every
+    // gate has passed. A refused request therefore leaves no frame, no row, and nothing on disk.
+    session.phase = phase;
     try {
       return await this.runTurn(campaignId, user, prompt, {
         proactive: true,
@@ -2446,7 +2465,12 @@ export class AiDriverService {
     } catch (err) {
       // The turn never ran (a gate refused it). Restore the phase the table was actually in —
       // NOT `nextPhase`, which would end a session on the strength of a request that bounced.
-      this.setPhase(session, previousPhase);
+      //
+      // In memory, and silently: the preflight above was never published, so there is nothing to
+      // compensate and no second transition to announce. If the turn DID get under way and then
+      // threw, `runTurn` has already published the transient phase, and this restore is followed
+      // by the settled transition below — the table still ends up somewhere real.
+      if (session.phase === phase) session.phase = previousPhase;
       void this.audit
         .log({
           actor: auditActor(user),
@@ -2468,15 +2492,26 @@ export class AiDriverService {
     }
   }
 
-  /** Set the lifecycle phase, persist it, and tell the table (#1043). */
+  /** Move to a phase and publish it — for a transition that has actually happened (#1043). */
   private setPhase(session: AiDmSessionState, phase: AiDmSessionPhase): void {
     if (session.phase === phase) return;
     session.phase = phase;
+    this.publishPhase(session);
+  }
+
+  /**
+   * Publish the phase the session is ALREADY in: persist it, tell the table, and record it (#1043).
+   *
+   * Split out from {@link setPhase} because the transient phases are set before the turn (the
+   * prompt assembly reads them) but must only be announced once the turn is genuinely under way.
+   * Calling this is the commitment — see the preflight note in {@link runLifecycleTurn}.
+   */
+  private publishPhase(session: AiDmSessionState): void {
     this.persistControlState(session);
-    this.stream.emit({ type: 'phase', campaignId: session.campaignId, phase });
+    this.stream.emit({ type: 'phase', campaignId: session.campaignId, phase: session.phase });
     // #572: the lifecycle belongs in the durable table log, not only in a transient banner — a
     // player who reloads mid-session should still see that the table formally opened.
-    this.recordControl(session.campaignId, { control: 'phase', phase });
+    this.recordControl(session.campaignId, { control: 'phase', phase: session.phase });
   }
 
   /**
@@ -2852,6 +2887,14 @@ export class AiDriverService {
     // Reserve the turn slot NOW, synchronously, before any further await — so a concurrent caller
     // that already cleared assertRunnable sees `running` at the guard above and is rejected.
     session.status = 'running';
+
+    // #1043: the slot is reserved and every gate has passed, so a lifecycle transition is now an
+    // OUTCOME rather than an intention — announce it here, and only here. `runLifecycleTurn` moved
+    // `session.phase` in memory before calling in (the prompt assembly reads it), deliberately
+    // without persisting, emitting or recording. This is the commit point: before it, a refusal
+    // leaves no trace anywhere; after it, the phase is real and the settled transition that
+    // follows the turn is the other half of a pair the table can see.
+    if (opts.lifecycle && session.phase === opts.lifecycle) this.publishPhase(session);
 
     // #572: the action cleared every gate (flag, seat, budget, pause, human control, queue),
     // so it is now an ACCEPTED table event — persist + broadcast it before the AI answers.

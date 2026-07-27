@@ -60,6 +60,7 @@
     "composerLockedPaused": "The AI DM is paused.",
     "composerLockedHuman": "A human has taken the DM seat.",
     "composerLockedAwaiting": "Waiting on the rest of the table…",
+    "composerLockedEnded": "This session has ended. Start a new one to keep playing.",
     "composerUnlocked": "Composer unlocked. You can send an action.",
     "narrationReady": "The table is ready.",
     "sceneFieldLabel": "Scene",

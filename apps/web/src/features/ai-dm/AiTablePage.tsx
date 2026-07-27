@@ -670,7 +670,22 @@ export default function AiTablePage() {
   // who sees this status also sees, and resolves, the queue the mode fills.
   const collaborative = session?.state === 'collaborative';
   const awaiting = session?.state === 'awaiting_players';
-  const locked = streaming || paused || humanControl || awaiting;
+  // #1043 — an ENDED session locks the composer too.
+  //
+  // This was deliberately left unlocked at first, on the reasoning that `locked` is the
+  // seat-UNAVAILABLE lock and `ended` is one click from cleared, so grey-ing it out would frame an
+  // affordance as a permission problem. That reasoning does not survive the actual consequence:
+  // after a normal wrap-up EVERY up-to-date client shows a composer whose submit the server
+  // ALWAYS rejects with AI_DM_SESSION_ENDED. An input that cannot succeed is not an affordance,
+  // it is a trap, and it springs on everyone rather than only on a client that missed a frame.
+  //
+  // The distinction that was really being drawn is preserved by `lockReason`, not by leaving the
+  // box enabled: the lock states its cause in the composer's own help text and placeholder, the
+  // phase note repeats it, and Start Session stays visible in the header — player+, so any member
+  // still clears it in one click. The seat is not what is unavailable; the session is over, and
+  // now the composer says so instead of letting you find out by being refused.
+  const ended = phase === 'ended';
+  const locked = streaming || paused || humanControl || awaiting || ended;
   const lockReason = streaming
     ? t('table.composerLockedStreaming')
     : paused
@@ -679,7 +694,9 @@ export default function AiTablePage() {
         ? t('table.composerLockedHuman')
         : awaiting
           ? t('table.composerLockedAwaiting')
-          : null;
+          : ended
+            ? t('table.composerLockedEnded')
+            : null;
 
   // #1077: SR live regions. The visible transcript mutates token-by-token, so a
   // mirror only gains finished additions (turn.end / player / system). Status
