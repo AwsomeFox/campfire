@@ -226,8 +226,37 @@ export interface ParseSseOptions {
 /**
  * Race a promise against an AbortSignal and an optional idle timer. The idle timer is
  * armed for each call (so callers reset it per chunk). Rejects with `AiProviderError`
- * (`timeout`) when the idle deadline elapses or the signal aborts for an idle reason.
+ * (`timeout`) when the idle deadline elapses or the signal aborts.
+ *
+ * TWO TIMEOUTS, DELIBERATELY CLASSIFIED DIFFERENTLY (#1052):
+ *  - THIS function's own `idleTimeoutMs` firing is a transport fault — the provider went quiet.
+ *    Retryable, by `timeout`'s default.
+ *  - A `signal` abort is classified by {@link streamAbortError} from the aborter's reason, so the
+ *    driver's idle watchdog stays retryable while a pause/kill stays not.
+ *
+ * Both deadlines are DEFAULT_IDLE_TIMEOUT_MS and the driver arms its watchdog at the same value,
+ * so in production which one fires first is a genuine race. That is exactly why they must agree
+ * about retryability rather than being two paths with two answers.
  */
+export function streamAbortError(signal: AbortSignal | undefined, provider: string): AiProviderError {
+  const reason = signal?.reason;
+  // THE ABORTER'S STRUCTURED INTENT WINS (#1052). An `AbortSignal` carries a `reason`, and when
+  // that reason is already a classified provider error the aborter has told us exactly what
+  // happened — re-describing it here would overwrite a real classification with a guess.
+  //
+  // This is what makes the driver's own idle watchdog work. It aborts with
+  // `AiProviderError('timeout', …)`, whose default retryability is TRUE, and a silent idle stall
+  // is precisely the failure step-level retry exists to recover from. Before this, every signal
+  // abort was flattened to `retryable: false` here, the retry policy's narrowing veto refused it,
+  // and the feature could not fire for its primary case.
+  if (reason instanceof AiProviderError) return reason;
+  // An unstructured abort is a CALLER STOP — a pause, a kill switch, a mode-switch teardown.
+  // Those pass a string reason or none at all, and none of them may be retried: the whole point
+  // was to stop. Not retryable is the right default precisely because it is not a guess about a
+  // fault, it is the correct answer for every abort that did not say otherwise.
+  return new AiProviderError('timeout', `${provider}: stream aborted`, { provider, retryable: false, cause: reason });
+}
+
 export function raceRead<T>(
   read: Promise<T>,
   opts: {
@@ -240,9 +269,7 @@ export function raceRead<T>(
   const { signal, idleTimeoutMs, provider, onIdle } = opts;
   if (signal?.aborted) {
     onIdle();
-    return Promise.reject(
-      new AiProviderError('timeout', `${provider}: stream aborted`, { provider, retryable: false, cause: signal.reason }),
-    );
+    return Promise.reject(streamAbortError(signal, provider));
   }
   if (idleTimeoutMs <= 0 && !signal) return read;
 
@@ -260,9 +287,7 @@ export function raceRead<T>(
 
     const onAbort = () => {
       onIdle();
-      finish(() =>
-        reject(new AiProviderError('timeout', `${provider}: stream aborted`, { provider, retryable: false, cause: signal?.reason })),
-      );
+      finish(() => reject(streamAbortError(signal, provider)));
     };
 
     if (idleTimeoutMs > 0) {

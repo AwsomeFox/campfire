@@ -164,18 +164,29 @@ export function shouldEmitTurnCancelled(stopReason: AiDmStopReason): boolean {
  */
 export function linkAbortSignals(...sources: AbortSignal[]): { signal: AbortSignal; cleanup: () => void } {
   const controller = new AbortController();
-  const onAbort = () => controller.abort();
+  // #1052 — FORWARD THE REASON. This used to call `controller.abort()` with no argument, which
+  // silently replaced whatever the aborter said with a bare AbortError. Everything downstream
+  // then had to guess, and the transport guessed "caller stop, not retryable" — so the driver's
+  // idle watchdog, which aborts WITH a classified retryable timeout, was reclassified into the
+  // one thing that cannot be retried. The composite signal is a relay; a relay that drops the
+  // message is worse than no relay, because callers reasonably assume `.reason` survived.
+  //
+  // Per-source listeners because the reason lives on the SOURCE, and cleanup has to remove the
+  // exact function it registered.
+  const links: Array<[AbortSignal, () => void]> = [];
   for (const s of sources) {
     if (s.aborted) {
-      controller.abort();
+      controller.abort(s.reason);
       break;
     }
+    const onAbort = () => controller.abort(s.reason);
+    links.push([s, onAbort]);
     s.addEventListener('abort', onAbort);
   }
   return {
     signal: controller.signal,
     cleanup: () => {
-      for (const s of sources) s.removeEventListener('abort', onAbort);
+      for (const [s, fn] of links) s.removeEventListener('abort', fn);
     },
   };
 }
@@ -2506,6 +2517,20 @@ export class AiDriverService {
                 );
                 unknownMetered = { seat: currentSeat, budgetRemaining: currentRemaining };
               }
+              // #1052 — LOAD-BEARING INVARIANT, written down here because the code that depends
+              // on it is three files away.
+              //
+              // `streamStep` re-throws ONLY for values that are not an AiProviderError (it
+              // returns `{ok:false}` for those), so everything reaching this catch wraps as
+              // kind `'unknown'`. `unknown` is `give_up` in ERROR_KIND_RETRY, so
+              // `decideStepRetry` returns early and NEVER consults the `already_broadcast`
+              // guard — which is why `broadcastChars: 0` below is honest rather than merely
+              // convenient, even though this path genuinely cannot know what reached the wire.
+              //
+              // THE FRAGILITY: if a future change ever makes a thrown value classify as
+              // something retryable, that guard starts being consulted with a hardcoded 0, and
+              // a silent retry could re-narrate over prose the table has already read. Anyone
+              // changing either this wrap or `unknown`'s disposition owns that.
               const error =
                 err instanceof AiProviderError
                   ? err
@@ -2636,6 +2661,63 @@ export class AiDriverService {
         let spend!: Awaited<ReturnType<typeof runAttempt>>;
         let attempt = 1;
         const attemptCap = maxStepAttempts(!!fallbackExecution);
+        /**
+         * #1052 — tokens already METERED by attempts this loop then discards.
+         *
+         * `spend` is reassigned per attempt and only the last one is summed into `totalTokens`,
+         * but an intermediate attempt that fails retryably WITH partial usage has already called
+         * `meterTurn` — a real DB write that decremented the seat's budget. Dropping those made
+         * `tokenBudget - budgetRemaining` exceed the reported `tokensUsed`, so the seat row and
+         * the turn result disagreed about what the table had spent. Accumulated here at the
+         * moment an attempt is abandoned, and added once after the loop.
+         */
+        let carriedTokens = 0;
+        // #1052 — identity of the attempt whose OUTPUT is the one we keep. Tracked per attempt
+        // because a failover means the last attempt is not the configured primary.
+        let servedName = provider.name;
+        let servedModel = execModel;
+        /** Replace a discarded attempt with a stop, preserving what it already accounted for. */
+        const stoppedDuringBackoff = (
+          prev: Extract<Awaited<ReturnType<typeof runAttempt>>, { kind: 'provider_error' }>,
+          reason: Exclude<GenerationAuthority, 'ok'>,
+        ) => {
+          const seat = prev.metered?.seat ?? prev.seat;
+          const remaining = prev.metered?.budgetRemaining ?? prev.budgetRemaining;
+          return {
+            kind: 'stopped' as const,
+            reason,
+            seat,
+            budgetRemaining: remaining,
+            text: prev.text,
+            // ZERO usage, not the abandoned attempt's: whatever it metered has already moved to
+            // `carriedTokens` above, and the terminal handler adds `metered.tokensUsed` on top.
+            // Repeating it here would double-bill the table for one failed attempt.
+            metered: { seat, tokensUsed: 0, budgetRemaining: remaining },
+          };
+        };
+        /**
+         * Record that a retry was abandoned because a human stopped the table (#1052).
+         *
+         * The `provider_error` branch below owns the `attempts=/gave_up=` audit line, and a turn
+         * that terminates as `stopped` never reaches it — correctly, since this was not a
+         * provider failure. But the retry attempt HAPPENED and its abandonment is the kind of
+         * thing an operator reading back a stalled session needs to see, so it gets its own row
+         * rather than inheriting a misleading one or vanishing.
+         */
+        const auditRetryStopped = (reason: Exclude<GenerationAuthority, 'ok'>, attempts: number, kind: string) => {
+          void this.audit
+            .log({
+              actor,
+              actorRole: 'dm',
+              action: 'ai-dm.driver.retry_abandoned',
+              entityType: 'ai-dm',
+              campaignId,
+              detail:
+                `step ${stepNumber} retry abandoned after a ${reason} stop control ` +
+                `[attempts=${attempts} gave_up=stopped last_error=${kind}] (triggered by ${triggeredBy.id})`,
+            })
+            .catch(() => undefined);
+        };
         // Reset per STEP: a multi-step turn must not audit step 3's failure with step 1's
         // attempt count.
         retryOutcome = { attempts: 1, gaveUp: null };
@@ -2645,16 +2727,10 @@ export class AiDriverService {
           const attemptProvider = useFallback ? fallbackExecution!.provider : provider;
           const attemptModel = useFallback ? fallbackExecution!.model : execModel;
           spend = await runAttempt(attemptProvider, attemptModel);
+          servedName = attemptProvider.name;
+          servedModel = attemptModel;
           retryOutcome = { attempts: attempt, gaveUp: null };
-          if (spend.kind !== 'provider_error' || !spend.error) {
-            // #577 provenance: record WHICH provider actually served the step, so a turn that
-            // failed over is not attributed to the primary the DM configured.
-            if (spend.kind === 'metered') {
-              servedProviderName = attemptProvider.name;
-              servedProviderModel = attemptModel;
-            }
-            break;
-          }
+          if (spend.kind !== 'provider_error' || !spend.error) break;
 
           const decision = decideStepRetry({
             error: spend.error,
@@ -2669,11 +2745,26 @@ export class AiDriverService {
             retryOutcome = { attempts: attempt, gaveUp: decision.reason };
             break;
           }
+          // This attempt is now being ABANDONED. Whatever it metered is spent whether or not we
+          // keep its result, so it moves to the carry before `spend` can be overwritten.
+          carriedTokens += spend.metered?.tokensUsed ?? 0;
+
           // A freeze / kill / detach that landed during the backoff must win over the retry;
           // re-check BEFORE sleeping and again after, so a stop control is not made to wait
           // out a provider's Retry-After.
-          if ((await this.checkGenerationAuthority(campaignId, session, generationSignal)) !== 'ok') {
-            retryOutcome = { attempts: attempt, gaveUp: 'attempts_exhausted' };
+          //
+          // #1052 — AND IT MUST WIN THE ARGUMENT ABOUT WHAT HAPPENED, not just stop the loop.
+          // These two checks used to `break` with `spend` still holding the previous attempt's
+          // `provider_error`, so an operator kill was reported as a provider failure: the turn
+          // ended `provider_error`, `detectAndTransition` parked the ladder in `awaiting_players`
+          // with a provider-error stuck state instead of emitting the real frozen/cancelled
+          // outcome, and the audit said `gave_up=attempts_exhausted` when nothing was exhausted.
+          // Terminating through the existing `stopped` path fixes all three at once.
+          const preSleepAuth = await this.checkGenerationAuthority(campaignId, session, generationSignal);
+          if (preSleepAuth !== 'ok') {
+            retryOutcome = { attempts: attempt, gaveUp: 'stopped' };
+            auditRetryStopped(preSleepAuth, attempt, spend.error.kind);
+            spend = stoppedDuringBackoff(spend, preSleepAuth);
             break;
           }
           this.logger.warn(
@@ -2682,12 +2773,30 @@ export class AiDriverService {
               `${providerForAttempt(decision.attempt, !!fallbackExecution) === 'fallback' ? ' on the FALLBACK provider' : ''}`,
           );
           await sleepMs(decision.delayMs);
-          if ((await this.checkGenerationAuthority(campaignId, session, generationSignal)) !== 'ok') {
-            retryOutcome = { attempts: attempt, gaveUp: 'attempts_exhausted' };
+          const postSleepAuth = await this.checkGenerationAuthority(campaignId, session, generationSignal);
+          if (postSleepAuth !== 'ok') {
+            retryOutcome = { attempts: attempt, gaveUp: 'stopped' };
+            auditRetryStopped(postSleepAuth, attempt, spend.error.kind);
+            spend = stoppedDuringBackoff(spend, postSleepAuth);
             break;
           }
           attempt = decision.attempt;
           retryOutcome = { attempts: attempt, gaveUp: null };
+        }
+
+        // #1052 — usage from every attempt this step abandoned. Added once, before the terminal
+        // handlers add the surviving attempt's own metered usage.
+        totalTokens += carriedTokens;
+
+        // #1052 — #577 provenance follows the RETAINED OUTPUT, not merely a successful metered
+        // attempt. When both primary attempts fail and the fallback emits visible partial
+        // narration before throwing, the policy terminates with `already_broadcast` and that
+        // fallback prose becomes `finalNarration` — so recording the primary here would file the
+        // fallback's words under a provider that never wrote them, and grounding would carry that
+        // attribution forward.
+        if (spend.kind === 'metered' || ('text' in spend && spend.text)) {
+          servedProviderName = servedName;
+          servedProviderModel = servedModel;
         }
 
 

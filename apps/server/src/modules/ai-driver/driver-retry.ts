@@ -79,19 +79,38 @@ export const ERROR_KIND_RETRY: Record<AiErrorKind, RetryDisposition> = {
 };
 
 /**
- * Error kinds that represent a SAFETY decision rather than a fault, checked ahead of
- * everything else including `AiProviderError.retryable`.
+ * Which error kinds represent a SAFETY decision rather than a fault. Checked ahead of
+ * everything else, including `AiProviderError.retryable`.
  *
- * A `Record<K, true>` again, so that adding a safety kind (e.g. if #598's `refusal`
- * distinction is ever surfaced as a request-level error too) is a compile error here
- * rather than a silent omission.
+ * EXHAUSTIVE OVER `AiErrorKind` ON PURPOSE, and it has to be spelled this way to mean anything.
+ * This was previously `Record<Extract<AiErrorKind, 'content_filter'>, true>` with a comment
+ * claiming that adding a safety kind would be a compile error here. It would not have been:
+ * `Extract` narrows the key set to exactly what is named, so a new member of `AiErrorKind`
+ * changes that type not at all and the omission stays silent. In a file whose entire job is
+ * load-bearing type boundaries, a comment claiming a guarantee that does not exist is worse
+ * than no comment — it is the reason a reviewer stops checking.
+ *
+ * Keyed over the FULL union with a boolean, the guarantee is real: add a kind to `AiErrorKind`
+ * and this object fails to compile until someone decides, explicitly, whether it is a safety
+ * refusal. That is the same shape as {@link ERROR_KIND_RETRY} directly above, and the decision
+ * is the one that must not be defaulted — a safety kind mistakenly classified as a fault gets
+ * retried, and retrying a content refusal until a provider relents is a safety bypass.
  */
-export const SAFETY_ERROR_KINDS: Record<Extract<AiErrorKind, 'content_filter'>, true> = {
+export const SAFETY_ERROR_KINDS: Record<AiErrorKind, boolean> = {
+  auth: false,
+  rate_limit: false,
+  context_length: false,
+  // The provider rejected the REQUEST on content grounds. Never retried, never failed over.
   content_filter: true,
+  transport: false,
+  timeout: false,
+  invalid_request: false,
+  server: false,
+  unknown: false,
 };
 
 export function isSafetyErrorKind(kind: AiErrorKind): boolean {
-  return Object.prototype.hasOwnProperty.call(SAFETY_ERROR_KINDS, kind);
+  return SAFETY_ERROR_KINDS[kind] === true;
 }
 
 /**
@@ -131,7 +150,15 @@ export type RetryRefusalReason =
   /** Prose already reached the table; a silent re-narration would contradict it. */
   | 'already_broadcast'
   /** No budget left to pay for another attempt. */
-  | 'budget_exhausted';
+  | 'budget_exhausted'
+  /**
+   * #1052 — a stop control (pause, kill, takeover, mode-switch detach) landed during the backoff.
+   *
+   * NOT `attempts_exhausted`, which is what this used to be recorded as. Attempts were not
+   * exhausted; a human stopped the table. Conflating them tells the audit trail something untrue
+   * about who ended the turn, and the two call for opposite responses from whoever reads it.
+   */
+  | 'stopped';
 
 export interface StepAttemptContext {
   error: AiProviderError;
