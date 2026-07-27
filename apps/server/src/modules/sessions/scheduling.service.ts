@@ -44,7 +44,7 @@ import {
 } from './scheduling-queries';
 // #588: restoring a cancelled night re-acquires the room/DM the cancellation
 // released, so it runs the same booking probe as the organized-play endpoints.
-import { SeriesConflictSignal, endInstant, findConflictRows } from './schedule-conflicts';
+import { SeriesConflictSignal, endInstant, findConflictRows, holdsBookableResource } from './schedule-conflicts';
 
 const PAST_LIST_MAX = SCHEDULE_PAST_MAX_LIMIT;
 
@@ -665,15 +665,31 @@ export class SchedulingService {
     const patch = { ...input };
     if (patch.scheduledAt !== undefined) patch.scheduledAt = this.normalizeScheduledAt(patch.scheduledAt);
     // Issue #588: this is the LEGACY one-off editor and it knows nothing about
-    // rooms, DMs or the exception ledger. Sliding a materialized series
-    // occurrence's window through it would move the row while it still holds its
-    // room and its assigned DM — with no findConflictRows probe and no ledger
-    // entry — which is precisely the double-booking the organized-play endpoints
-    // exist to prevent. Room and DM cannot be reached from this body at all
-    // (ORGANIZED_PLAY_OMIT), so the WINDOW is the whole hazard. Reject the moves
-    // and name the endpoint that does them safely, rather than re-implementing
-    // the conflict check here — which would then need its own `force` override
-    // and 409 shape, i.e. the reschedule endpoint again.
+    // rooms, DMs or the exception ledger. Sliding a row's window through it while
+    // that row still holds its room and its assigned DM — with no
+    // findConflictRows probe and no ledger entry — is precisely the double-booking
+    // the organized-play endpoints exist to prevent. Room and DM cannot be
+    // reached from this body at all (ORGANIZED_PLAY_OMIT), so the WINDOW is the
+    // whole hazard. Reject the moves and name the endpoint that does them safely,
+    // rather than re-implementing the conflict check here — which would then need
+    // its own `force` override and 409 shape, i.e. the reschedule endpoint again.
+    //
+    // TWO INDEPENDENT REASONS to refuse, and the guard tests for both, because
+    // testing `seriesId != null` alone was a PROXY for the first one and missed
+    // rows that satisfy it without belonging to a series:
+    //
+    //   - the row HOLDS A BOOKABLE RESOURCE, so moving it can collide with
+    //     another campaign. `reassignOccurrence` seats ANY occurrence — it
+    //     rejects only cancelled rows — so a plain one-off can be given a room,
+    //     which puts it in the conflict pool (`scheduleOrganizedPlaySql` matches
+    //     `room_id IS NOT NULL`), and `seriesId` is null the whole time. That row
+    //     was movable here with no probe at all. `holdsBookableResource` is
+    //     defined next to `findConflictRows` so it cannot drift from what the
+    //     probe actually collides on.
+    //   - the row BELONGS TO A SERIES, so moving it must be recorded in the
+    //     append-only exception ledger as lineage. True even for a series
+    //     occurrence holding no room and no DM, where there is nothing to
+    //     double-book but still something to record.
     //
     // Exactly two changes can introduce an overlap: moving the start instant, and
     // GROWING the duration. Shrinking it cannot — the window strictly contracts,
@@ -689,11 +705,11 @@ export class SchedulingService {
     const widensWindow =
       (patch.scheduledAt !== undefined && patch.scheduledAt !== existing.scheduledAt)
       || (patch.durationMinutes !== undefined && patch.durationMinutes > existing.durationMinutes);
-    if (existing.seriesId != null && widensWindow) {
+    if (widensWindow && (existing.seriesId != null || holdsBookableResource(existing))) {
       throw new BadRequestException(
-        'Occurrences of a recurring series cannot be moved or lengthened here — use POST '
-          + '/organized-play/occurrences/:id/reschedule, which runs the booking conflict check and records the '
-          + 'move in the exception ledger',
+        'A scheduled session that belongs to a series, or that holds a room or an assigned DM, cannot be moved or '
+          + 'lengthened here — use POST /organized-play/occurrences/:id/reschedule, which runs the booking conflict '
+          + 'check and records the move in the exception ledger',
       );
     }
     const next = {

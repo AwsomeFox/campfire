@@ -230,10 +230,38 @@ export class OrganizedPlayService {
    * per-occurrence routes pass their single row and so behave exactly like the
    * one-off path.
    *
-   * Deliberately silent for `reassignOccurrence`: room, DM and capacity are not
-   * `ScheduleNotificationChangedField`s and do not reach the party's copy of the
-   * event, so a re-seat is the organized-play analogue of the title-only edit
-   * `shouldNotifyScheduleUpdate` already declines to announce.
+   * EVERY WRITE PATH IN THIS SERVICE, AND ITS DECISION. This table is the point:
+   * the first version of this fan-out covered five of the six paths that
+   * materialize or cancel occurrences, and `applyTemplate` — the one that can
+   * create the MOST rows — was silent purely by omission and looked no different
+   * in the code from the paths that are silent on purpose. That is the same
+   * "enforced at some call sites but not their siblings" shape this branch keeps
+   * finding, reproduced one level up inside the fix for it. So each site below
+   * carries an explicit `NOTIFIES` or `NO NOTIFICATION` marker: a path with
+   * neither is a bug, and that is now visible by reading rather than by
+   * remembering.
+   *
+   *   createSeries          NOTIFIES  'created'
+   *   applyTemplate         NOTIFIES  'created'
+   *   extendSeries          NOTIFIES  'created'
+   *   updateSeries          NOTIFIES  'updated' (only when location/notes moved)
+   *   cancelSeries          NOTIFIES  'cancelled'
+   *   rescheduleOccurrence  NOTIFIES  diffed, like SchedulingService.update
+   *   reassignOccurrence    NO NOTIFICATION — room/DM/capacity are not
+   *                         `ScheduleNotificationChangedField`s and never reach
+   *                         the party's copy of the night, so a re-seat is the
+   *                         organized-play analogue of the title-only edit
+   *                         `shouldNotifyScheduleUpdate` already declines.
+   *   deleteRoom/deleteVenue  NO NOTIFICATION — these clear `room_id`/`venue_id`
+   *                         on bookings but move no night and cancel no night.
+   *                         The game still happens, at the same time; only an
+   *                         admin's resource record went away. (`venue` in the
+   *                         changed-field enum is the free-text `location`/VTT
+   *                         link, not `venue_id`.)
+   *
+   * Single-occurrence cancel and restore are NOT in this table because they live
+   * on `SchedulingService` (`DELETE`/`POST /schedule/:id/restore`) and already
+   * notify there.
    */
   private async notifyOccurrenceChange(
     campaignId: number,
@@ -338,6 +366,10 @@ export class OrganizedPlayService {
    * game night. On DBs created before FK enforcement the SET NULL is applied by
    * hand here for the same reason CampaignsService.purge() open-codes its cascade.
    */
+  // NO NOTIFICATION (this method and deleteRoom below) — see the path table on
+  // notifyOccurrenceChange. Clearing `room_id`/`venue_id` moves no night and
+  // cancels no night: the game still happens, at the same time, and only an
+  // admin's resource record went away.
   async deleteVenue(id: number, user: RequestUser): Promise<{ deleted: true }> {
     const existing = await this.getVenueOrThrow(id);
     const ts = nowIso();
@@ -953,6 +985,7 @@ export class OrganizedPlayService {
       detail: `occurrences=${occurrences.length} tz=${input.timezone}`,
     });
     this.events.emit({ type: 'schedule.updated', campaignId, scheduleId: created.id });
+    // NOTIFIES ('created'). One ping for the request, anchored on the first night.
     await this.notifyOccurrenceChange(campaignId, user, createdRows, 'created');
     return this.withForcedConflicts(await this.getSeries(created.id), forced, batchConflicts, user);
   }
@@ -1230,6 +1263,8 @@ export class OrganizedPlayService {
     // stays silent here for the same reason `shouldNotifyScheduleUpdate` keeps it
     // silent on the one-off path, and room/DM/capacity are not party-visible
     // fields at all — see notifyOccurrenceChange.
+    // NOTIFIES ('updated'), and only for the facets a member's copy of the night
+    // actually carries.
     const changedFields = diffScheduleNotificationFields(
       { scheduledAt: '', durationMinutes: 0, location: existing.location, notes: existing.notes },
       { scheduledAt: '', durationMinutes: 0, location: input.location ?? existing.location, notes: input.notes ?? existing.notes },
@@ -1270,6 +1305,10 @@ export class OrganizedPlayService {
       // the conflict probe already rests on: read and claim in one atomic step.
       const current = tx.select().from(sessionSeries).where(eq(sessionSeries.id, id)).limit(1).all()[0];
       if (!current) throw new NotFoundException(`Series ${id} not found`);
+      // Re-checked here as well as above for the same reason the count is: a
+      // cancel that landed while this request was awaiting must not have its tail
+      // silently re-materialized.
+      if (current.status !== 'active') throw new BadRequestException('Cancelled series cannot be extended');
       const nextCount = current.count + addCount;
       if (nextCount > MAX_SERIES_OCCURRENCES) {
         throw new BadRequestException(`A series may hold at most ${MAX_SERIES_OCCURRENCES} occurrences`);
@@ -1343,6 +1382,7 @@ export class OrganizedPlayService {
       detail: `added=${addedRows.length}`,
     });
     this.events.emit({ type: 'schedule.updated', campaignId: existing.campaignId, scheduleId: id });
+    // NOTIFIES ('created'): an extension puts new nights on the party's calendar.
     await this.notifyOccurrenceChange(existing.campaignId, user, addedRows, 'created');
     return this.withForcedConflicts(await this.getSeries(id), forced, batchConflicts, user);
   }
@@ -1406,6 +1446,8 @@ export class OrganizedPlayService {
       detail: `cancelled=${cancelled.length}`,
     });
     this.events.emit({ type: 'schedule.updated', campaignId: existing.campaignId, scheduleId: id });
+    // NOTIFIES ('cancelled'). The whole reason this exists: a member who is not
+    // watching the page must not turn up to a night cancelled with the series.
     await this.notifyOccurrenceChange(existing.campaignId, user, cancelled, 'cancelled');
     return this.getSeries(id);
   }
@@ -1523,7 +1565,7 @@ export class OrganizedPlayService {
       detail: `${existing.scheduledAt} -> ${scheduledAt}`,
     });
     this.events.emit({ type: 'schedule.updated', campaignId: existing.campaignId, scheduleId: id });
-    // The same diff `SchedulingService.update` runs, so a move made here and the
+    // NOTIFIES. The same diff `SchedulingService.update` runs, so a move made here and the
     // identical move made through PATCH /schedule/:id announce themselves the
     // same way. Location and notes cannot change on this route, so in practice
     // this yields 'rescheduled'.
@@ -1584,7 +1626,14 @@ export class OrganizedPlayService {
       });
       if (conflicts.length > 0 && !input.force) throw new SeriesConflictSignal(conflicts);
       rawConflicts = conflicts;
-      // NOT a SEQUENCE bump, deliberately. Nothing this endpoint writes reaches
+      // NO NOTIFICATION, deliberately — see the path table on
+      // notifyOccurrenceChange. Room, DM and capacity are not
+      // `ScheduleNotificationChangedField`s and never reach the party's copy of
+      // the night. Silent ON PURPOSE, which is exactly why it is written down: a
+      // path silent by omission looks identical at the call site to one silent
+      // by decision, and that is how applyTemplate went unnoticed.
+      //
+      // NOT a SEQUENCE bump either, for the neighbouring reason. Nothing this endpoint writes reaches
       // the ICS feed: the emitter renders SUMMARY from `title`, LOCATION from the
       // free-text `location` column and DESCRIPTION from `notes` (ics.util.ts),
       // and never the room, the DM or the capacity. A re-seat therefore produces
@@ -1946,6 +1995,7 @@ export class OrganizedPlayService {
     const ts = nowIso();
     let rawConflicts: RawConflict[] = [];
     let occurrencesCreated = 0;
+    const createdRows: ScheduleRow[] = [];
 
     const createdSeries = this.db.transaction((tx) => {
       const conflicts: RawConflict[] = [];
@@ -2000,7 +2050,7 @@ export class OrganizedPlayService {
           .returning()
           .all();
         for (const occ of plan.occurrences) {
-          this.insertOccurrence(tx, series, occ, ts);
+          createdRows.push(this.insertOccurrence(tx, series, occ, ts));
           occurrencesCreated += 1;
         }
         made.push(series);
@@ -2020,6 +2070,14 @@ export class OrganizedPlayService {
     for (const series of createdSeries) {
       this.events.emit({ type: 'schedule.updated', campaignId: input.campaignId, scheduleId: series.id });
     }
+    // NOTIFIES ('created'). Applying a template puts a whole block of game nights
+    // on the party's calendar, which is the single largest thing this service can
+    // do to a member's schedule — and it emitted only transient SSE. One
+    // notification for the request, anchored on the earliest night created, for
+    // the same reason createSeries takes one: a template application is ONE
+    // coordinator decision, and this path can materialize more rows than any
+    // other (slots x occurrences), so per-row would be worst here.
+    await this.notifyOccurrenceChange(input.campaignId, user, createdRows, 'created');
 
     const names = await this.lookupNames(
       rawConflicts.map((r) => r.campaignId),

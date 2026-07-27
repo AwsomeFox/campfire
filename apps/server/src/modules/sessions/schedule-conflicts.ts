@@ -23,6 +23,35 @@ export function endInstant(startIso: string, durationMinutes: number): string {
   return new Date(start + minutes * 60_000).toISOString();
 }
 
+/**
+ * True when this row holds a shared, ALLOCATABLE resource — a room or a running
+ * DM — and so cannot have its window moved without a booking probe.
+ *
+ * Lives here, beside `findConflictRows`, because it has to mean exactly what that
+ * probe can match on. The probe collides on `roomId` and `assignedDmUserId` and
+ * on nothing else, so those two fields are the entire hazard, and keeping the
+ * predicate in the same module as the query is what stops the two drifting.
+ *
+ * Deliberately NOT `scheduleOrganizedPlaySql()`, even though that is the obvious
+ * candidate to reuse. That predicate is BROADER — a venue id, an event key or a
+ * season key also puts a row in the coordinator's pool — and it answers a
+ * different question: "should this row be visible to organized play?", not "can
+ * moving this row double-book somebody?". A row carrying only a season key
+ * allocates nothing, and gating the move guard on the wider predicate would
+ * refuse a `PATCH` that has no hazard at all.
+ *
+ * The guard this backs used to test `seriesId != null`, which is a PROXY: series
+ * occurrences are the rows that usually hold rooms, but `reassignOccurrence`
+ * will seat any occurrence, so a plain one-off could be given a room and then
+ * slid through `PATCH /schedule/:id` with no probe and no ledger entry —
+ * recreating precisely the cross-campaign double-booking this feature exists to
+ * prevent. `restore()` was never exposed to it because it probes off
+ * `existing.roomId` directly, which is the shape this restores to the move path.
+ */
+export function holdsBookableResource(row: { roomId: number | null; assignedDmUserId: string }): boolean {
+  return row.roomId != null || row.assignedDmUserId !== '';
+}
+
 /** The raw (unredacted) shape a conflict query returns before privacy is applied. */
 export type RawConflict = {
   kind: ScheduleConflict['kind'];

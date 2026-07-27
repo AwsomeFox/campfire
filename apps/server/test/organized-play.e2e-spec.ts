@@ -1767,6 +1767,69 @@ describe('organized play (e2e)', () => {
     ]);
   });
 
+  /**
+   * The move guard's comment always described the right rule — a row that HOLDS
+   * a room or a DM must not slide without a probe — but the code tested
+   * `seriesId != null`, which is only a proxy for it. `reassignOccurrence` seats
+   * ANY occurrence (it rejects cancelled rows and nothing else), so a plain
+   * one-off can be given a room, which puts it in the conflict pool while its
+   * `seriesId` stays null the whole time.
+   */
+  it('refuses to slide a ONE-OFF that holds a room, even though it belongs to no series', async () => {
+    const guardRoom = (await api().post(`/api/v1/organized-play/venues/${venueId}/rooms`).set(dm).send({ name: 'Guard Room' })).body;
+    const night = await api()
+      .post(`/api/v1/campaigns/${campaignId}/schedule`)
+      .set(dm)
+      .send({ scheduledAt: '2099-05-04T18:00:00.000Z', title: 'One-shot at the store' });
+    expect(night.status).toBe(201);
+    expect(night.body.seriesId).toBeNull();
+
+    // Before it holds anything, the legacy editor may move it freely — the guard
+    // must not over-block an ordinary home game.
+    const freeMove = await api().patch(`/api/v1/schedule/${night.body.id}`).set(dm).send({ scheduledAt: '2099-05-04T19:00:00.000Z' });
+    expect(freeMove.status).toBe(200);
+
+    // Now seat it. This is a legitimate booking: a one-shot at a game store.
+    const seated = await api().post(`/api/v1/organized-play/occurrences/${night.body.id}/reassign`).set(dm).send({ roomId: guardRoom.id });
+    expect(seated.status).toBe(201);
+    expect(seated.body.occurrence.seriesId).toBeNull();
+    expect(seated.body.occurrence.roomId).toBe(guardRoom.id);
+
+    // …and the legacy PATCH must now refuse the move, because sliding it would
+    // re-book the room somewhere else with no conflict probe.
+    const blocked = await api().patch(`/api/v1/schedule/${night.body.id}`).set(dm).send({ scheduledAt: '2099-05-04T21:00:00.000Z' });
+    expect(blocked.status).toBe(400);
+    expect(blocked.body.message).toMatch(/organized-play\/occurrences/);
+
+    // Lengthening is the other way to widen the window, and is refused too.
+    expect((await api().patch(`/api/v1/schedule/${night.body.id}`).set(dm).send({ durationMinutes: 600 })).status).toBe(400);
+    // Shrinking still works — a contracting window cannot introduce an overlap.
+    expect((await api().patch(`/api/v1/schedule/${night.body.id}`).set(dm).send({ durationMinutes: 60 })).status).toBe(200);
+    // Prose still works.
+    expect((await api().patch(`/api/v1/schedule/${night.body.id}`).set(dm).send({ title: 'One-shot (renamed)' })).status).toBe(200);
+
+    // An assigned DM alone is equally a held resource, with no room involved.
+    const dmOnly = await api()
+      .post(`/api/v1/campaigns/${campaignId}/schedule`)
+      .set(dm)
+      .send({ scheduledAt: '2099-05-11T18:00:00.000Z', title: 'DM-only one-off' });
+    expect((await api().post(`/api/v1/organized-play/occurrences/${dmOnly.body.id}/reassign`).set(dm).send({ assignedDmUserId: 'dev:guest-dm' })).status).toBe(201);
+    expect((await api().patch(`/api/v1/schedule/${dmOnly.body.id}`).set(dm).send({ scheduledAt: '2099-05-11T20:00:00.000Z' })).status).toBe(400);
+
+    // A row carrying only an event key allocates NOTHING, so it stays movable:
+    // the guard keys on what can collide, not on the wider "is this row visible
+    // to organized play" pool predicate.
+    const keyed = await api()
+      .post(`/api/v1/campaigns/${campaignId}/schedule`)
+      .set(dm)
+      .send({ scheduledAt: '2099-05-18T18:00:00.000Z', title: 'Event-keyed only' });
+    const service = ctx.app.get(OrganizedPlayService);
+    const holder = ctx.app.get<DbHolder>(DB_HOLDER);
+    holder.raw.prepare('UPDATE scheduled_sessions SET event_id = ? WHERE id = ?').run('CCC-01', keyed.body.id);
+    expect(service).toBeDefined();
+    expect((await api().patch(`/api/v1/schedule/${keyed.body.id}`).set(dm).send({ scheduledAt: '2099-05-18T20:00:00.000Z' })).status).toBe(200);
+  });
+
   it('does not push a fresh SEQUENCE for a room change, which the feed never renders', async () => {
     const seqRoom = (await api().post(`/api/v1/organized-play/venues/${venueId}/rooms`).set(dm).send({ name: 'Sequence Room' })).body;
     const series = await api()
