@@ -144,13 +144,17 @@ export class BackupArchiveReader {
           try {
             const entryCount = entries.length + 1;
             if (entryCount > limits.maxEntries) invalid('too many entries');
-            // yauzl normalizes backslashes for compatibility. Validate its raw
-            // central-directory bytes too, so that normalization cannot hide a
-            // Windows zip-slip attempt from the restore policy.
-            const rawName = (entry as Entry & { fileNameRaw?: Buffer }).fileNameRaw?.toString('utf8') ?? entry.fileName;
-            safeEntryName(rawName);
-            if (names.has(rawName)) invalid('duplicate entry name');
-            names.add(rawName);
+            // yauzl may canonicalize a filename through Unicode metadata or
+            // backslash normalization. Its canonical name is the one used for
+            // lookup and restore, so apply both safety and uniqueness checks to
+            // that name. Inspect the raw bytes separately for characters that
+            // canonicalization must never be allowed to conceal.
+            const rawName = (entry as Entry & { fileNameRaw?: Buffer }).fileNameRaw;
+            if (rawName?.includes(0x00) || rawName?.includes(0x5c)) invalid('unsafe entry path');
+            const canonicalName = entry.fileName;
+            safeEntryName(canonicalName);
+            if (names.has(canonicalName)) invalid('duplicate entry name');
+            names.add(canonicalName);
             if ((entry.generalPurposeBitFlag & 0x1) !== 0) invalid('encrypted entries are not supported');
             if (entry.compressionMethod !== 0 && entry.compressionMethod !== 8) invalid('unsupported compression method');
             if (entry.uncompressedSize > limits.maxEntryUncompressedBytes) invalid('entry exceeds the uncompressed size limit');

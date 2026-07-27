@@ -8,7 +8,7 @@ import yauzl, { type ZipFile } from 'yauzl';
 import { BadRequestException } from '@nestjs/common';
 import { BackupArchiveReader, type BackupArchiveReaderLimits } from '../../src/modules/backup/backup-archive-reader';
 
-type FixtureEntry = { name: string; data?: Buffer; declared?: number; method?: number; flags?: number };
+type FixtureEntry = { name: string | Buffer; data?: Buffer; declared?: number; method?: number; flags?: number; extra?: Buffer };
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'backup-reader-test-'));
 const low: Partial<BackupArchiveReaderLimits> = {
   maxCompressedBytes: 1024,
@@ -24,17 +24,21 @@ function crc(data: Buffer): number {
   for (const byte of data) { value ^= byte; for (let i = 0; i < 8; i++) value = (value >>> 1) ^ ((value & 1) ? 0xedb88320 : 0); }
   return (value ^ 0xffffffff) >>> 0;
 }
+function unicodePathExtra(rawName: Buffer, unicodeName: string): Buffer {
+  const body = Buffer.concat([Buffer.from([1]), u32(crc(rawName)), Buffer.from(unicodeName)]);
+  return Buffer.concat([u16(0x7075), u16(body.length), body]);
+}
 
 /** Minimal ZIP fixture writer: central metadata can intentionally disagree with payload. */
 function zip(entries: FixtureEntry[]): string {
   const locals: Buffer[] = []; const centrals: Buffer[] = []; let offset = 0;
   for (const input of entries) {
-    const name = Buffer.from(input.name); const plain = input.data ?? Buffer.alloc(0);
+    const name = Buffer.isBuffer(input.name) ? input.name : Buffer.from(input.name); const extra = input.extra ?? Buffer.alloc(0); const plain = input.data ?? Buffer.alloc(0);
     const method = input.method ?? 0; const payload = method === 8 ? zlib.deflateRawSync(plain) : plain;
     const declared = input.declared ?? plain.length; const flags = input.flags ?? 0;
-    const local = Buffer.concat([u32(0x04034b50), u16(20), u16(flags), u16(method), u16(0), u16(0), u32(crc(plain)), u32(payload.length), u32(declared), u16(name.length), u16(0), name, payload]);
+    const local = Buffer.concat([u32(0x04034b50), u16(20), u16(flags), u16(method), u16(0), u16(0), u32(crc(plain)), u32(payload.length), u32(declared), u16(name.length), u16(extra.length), name, extra, payload]);
     locals.push(local);
-    centrals.push(Buffer.concat([u32(0x02014b50), u16(20), u16(20), u16(flags), u16(method), u16(0), u16(0), u32(crc(plain)), u32(payload.length), u32(declared), u16(name.length), u16(0), u16(0), u16(0), u16(0), u32(0), u32(offset), name]));
+    centrals.push(Buffer.concat([u32(0x02014b50), u16(20), u16(20), u16(flags), u16(method), u16(0), u16(0), u32(crc(plain)), u32(payload.length), u32(declared), u16(name.length), u16(extra.length), u16(0), u16(0), u16(0), u32(0), u32(offset), name, extra]));
     offset += local.length;
   }
   const central = Buffer.concat(centrals);
@@ -54,6 +58,20 @@ describe('BackupArchiveReader', () => {
     await rejects(zip([{ name: '../db' }]));
     await rejects(zip([{ name: 'uploads\\escape' }]));
     await rejects(zip([{ name: 'bad\0name' }]));
+  });
+
+  it('uses canonical Unicode names for duplicate checks and raw bytes for zip-slip guards', async () => {
+    const first = Buffer.from('first');
+    const second = Buffer.from('second');
+    await rejects(zip([
+      { name: first, extra: unicodePathExtra(first, 'uploads/backup.db') },
+      { name: second, extra: unicodePathExtra(second, 'uploads/backup.db') },
+    ]));
+
+    const rawBackslash = Buffer.from('raw\\path');
+    await rejects(zip([{ name: rawBackslash, extra: unicodePathExtra(rawBackslash, 'uploads/backup.db') }]));
+    const rawNul = Buffer.from([0x72, 0x61, 0x77, 0x00, 0x70, 0x61, 0x74, 0x68]);
+    await rejects(zip([{ name: rawNul, extra: unicodePathExtra(rawNul, 'uploads/backup.db') }]));
   });
 
   it('rejects empty and dot path aliases while allowing a directory trailing slash', async () => {
