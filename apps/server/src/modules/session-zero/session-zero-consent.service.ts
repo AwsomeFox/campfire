@@ -262,8 +262,9 @@ export class SessionZeroConsentService {
 
     const nameOf = new Map(required.map((r) => [r.userId, r.userName]));
     const outstandingEntries = outstandingAcknowledgers(
-      latest.id,
+      latest,
       required.map((r) => r.userId),
+      versions,
       acksFor,
     ).map((entry) => ({ userId: entry.userId, userName: nameOf.get(entry.userId) ?? '', state: entry.state }));
 

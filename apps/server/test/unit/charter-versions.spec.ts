@@ -208,15 +208,41 @@ describe('#600 charter versioning', () => {
     it('clears the gate vacuously when nobody is required (a solo table)', () => {
       const v1 = version(10, 1, true);
       expect(resolveEffectiveVersion([v1], [], lookup({}))?.version).toBe(1);
-      expect(isFullyAcknowledged(10, [], lookup({}))).toBe(true);
+      expect(isFullyAcknowledged(v1, [], [v1], lookup({}))).toBe(true);
     });
 
     it('lists exactly who is holding the gate, and what they said', () => {
+      const v2 = version(11, 2, true);
       const acks = lookup({ 11: { u1: 'acknowledged', u2: 'discuss' } });
-      expect(outstandingAcknowledgers(11, ['u1', 'u2', 'u3'], acks)).toEqual([
+      expect(outstandingAcknowledgers(v2, ['u1', 'u2', 'u3'], [v2], acks)).toEqual([
         { userId: 'u2', state: 'discuss' },
         { userId: 'u3', state: null },
       ]);
+    });
+
+    it('does not regress when a new player only acknowledges the latest version', () => {
+      // The join/renew flows record a single ack against the newest version. A new
+      // required participant who agrees to that text must not collapse the table's
+      // effective version back to null by leaving every earlier gated version "unacked".
+      const v1 = version(10, 1, false);
+      const v2 = version(11, 2, true);
+      const v3 = version(12, 3, false);
+      const acks = lookup({
+        10: { u1: 'acknowledged', u2: 'acknowledged' },
+        11: { u1: 'acknowledged', u2: 'acknowledged' },
+        12: { u3: 'acknowledged' },
+      });
+      expect(resolveEffectiveVersion([v1, v2, v3], ['u1', 'u2', 'u3'], acks)?.version).toBe(3);
+    });
+
+    it('treats an acknowledgment of a later version as covering earlier gated versions', () => {
+      const v1 = version(10, 1, false);
+      const v2 = version(11, 2, true);
+      // Everyone only acked v2 — the version they actually read — not the historical v1 row.
+      const acks = lookup({ 11: { u1: 'acknowledged', u2: 'acknowledged' } });
+      expect(resolveEffectiveVersion([v1, v2], required, acks)?.version).toBe(2);
+      expect(isFullyAcknowledged(v1, required, [v1, v2], acks)).toBe(true);
+      expect(outstandingAcknowledgers(v1, required, [v1, v2], acks)).toEqual([]);
     });
   });
 });

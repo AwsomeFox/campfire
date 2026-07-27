@@ -3670,7 +3670,11 @@ function migrateSessionZeroConsent600(sqlite: Database.Database): void {
   if (tableExists('session_zero')) {
     const columns = sqlite.prepare('PRAGMA table_info(session_zero)').all() as Array<{ name: string }>;
     if (!columns.some((c) => c.name === 'preview_policy')) {
-      sqlite.exec("ALTER TABLE session_zero ADD COLUMN preview_policy TEXT NOT NULL DEFAULT 'boundaries'");
+      // CHECK must match BOOTSTRAP_SQL: upgraded installs otherwise accept any string
+      // while fresh installs reject out-of-range values at the database level.
+      sqlite.exec(
+        "ALTER TABLE session_zero ADD COLUMN preview_policy TEXT NOT NULL DEFAULT 'boundaries' CHECK (preview_policy IN ('boundaries', 'full'))",
+      );
     }
   }
 

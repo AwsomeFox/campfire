@@ -143,6 +143,31 @@ export const EMPTY_CHARTER: CharterFields = {
 export type AckLookup = (versionId: number) => Map<string, CharterAcknowledgmentState>;
 
 /**
+ * True when `userId` has agreed to `version` — either by acknowledging that version
+ * directly, or by acknowledging any LATER version.
+ *
+ * Agreeing to version N means agreeing to that charter text, which already contains
+ * every earlier version's content (and every material change between). Join and renew
+ * flows only record an acknowledgment against the latest version the person is looking
+ * at; without this covering rule, a new player who joins a multi-version table and acks
+ * the newest charter would leave every earlier gated version "unacknowledged" for them,
+ * collapsing the table's effective version back to null and unbounding the AI from the
+ * charter the rest of the table already agreed to.
+ */
+export function hasAcknowledgedThrough(
+  userId: string,
+  version: SessionZeroCharterVersion,
+  versions: SessionZeroCharterVersion[],
+  acksFor: AckLookup,
+): boolean {
+  for (const candidate of versions) {
+    if (candidate.version < version.version) continue;
+    if (acksFor(candidate.id).get(userId) === 'acknowledged') return true;
+  }
+  return false;
+}
+
+/**
  * THE OTHER DEFINITION: which version is the table actually operating under.
  *
  * Walks versions oldest-first and stops at the first MATERIAL version that has not been
@@ -165,6 +190,10 @@ export type AckLookup = (versionId: number) => Map<string, CharterAcknowledgment
  * (nothing was withdrawn from a prior version), but consent is still required before it
  * becomes effective; only subsequent non-material versions may pass through without it.
  *
+ * An acknowledgment of version N covers every earlier gated version for that participant
+ * (see `hasAcknowledgedThrough`). That is what lets a new player join an already-consented
+ * table by agreeing to the current charter without regressing the table's effective version.
+ *
  * `required` is the set of participants whose agreement counts. `discuss` and `declined`
  * both fail to clear the gate: a participant who wants to talk about a line before
  * agreeing has not agreed, and quietly counting them as consenting is the precise failure
@@ -180,7 +209,7 @@ export function resolveEffectiveVersion(
 
   for (const version of ascending) {
     const needsAcknowledgment = effective === null || version.material;
-    if (needsAcknowledgment && !isFullyAcknowledged(version.id, required, acksFor)) {
+    if (needsAcknowledgment && !isFullyAcknowledged(version, required, ascending, acksFor)) {
       // Stop here: this version, and therefore everything built on top of it, is not
       // consented to. Whatever we had before it remains what the table is playing under.
       break;
@@ -190,21 +219,26 @@ export function resolveEffectiveVersion(
   return effective;
 }
 
-/** True when every required participant has answered `acknowledged` for this version. */
-export function isFullyAcknowledged(versionId: number, required: string[], acksFor: AckLookup): boolean {
+/** True when every required participant has cleared the gate for `version`. */
+export function isFullyAcknowledged(
+  version: SessionZeroCharterVersion,
+  required: string[],
+  versions: SessionZeroCharterVersion[],
+  acksFor: AckLookup,
+): boolean {
   if (required.length === 0) return true;
-  const acks = acksFor(versionId);
-  return required.every((userId) => acks.get(userId) === 'acknowledged');
+  return required.every((userId) => hasAcknowledgedThrough(userId, version, versions, acksFor));
 }
 
-/** Required participants who have not yet cleared the gate for `versionId`. */
+/** Required participants who have not yet cleared the gate for `version`. */
 export function outstandingAcknowledgers(
-  versionId: number,
+  version: SessionZeroCharterVersion,
   required: string[],
+  versions: SessionZeroCharterVersion[],
   acksFor: AckLookup,
 ): Array<{ userId: string; state: CharterAcknowledgmentState | null }> {
-  const acks = acksFor(versionId);
+  const direct = acksFor(version.id);
   return required
-    .map((userId) => ({ userId, state: acks.get(userId) ?? null }))
-    .filter((entry) => entry.state !== 'acknowledged');
+    .filter((userId) => !hasAcknowledgedThrough(userId, version, versions, acksFor))
+    .map((userId) => ({ userId, state: direct.get(userId) ?? null }));
 }
