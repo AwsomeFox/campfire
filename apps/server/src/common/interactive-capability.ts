@@ -41,11 +41,15 @@ import type { RequestUser } from './user.types';
  * `effectivePermissionsFor` in @campfire/schema, which encodes exactly this split and is
  * the single source the invite preview and the roster render from.
  *
- * Lives in `common/` rather than on CampaignAccessService alone so services that already
- * hold a db handle (NotesService, whose `update` needs the RESULTING visibility of a
- * patch, which the controller cannot know) can apply the identical rule without a
- * constructor change. CampaignAccessService.requireInteractive is a thin wrapper for the
- * controller call sites.
+ * WHERE IT IS ENFORCED: in CommentsService and NotesService, never in the controllers.
+ * Two reasons, both load-bearing. First, the MCP tools (`post_comment`, `add_note`,
+ * `submit_inbox_item`) call those services DIRECTLY — a controller-only gate would have
+ * left the agent surface exactly as open as the bug this issue closes. Second, for notes
+ * the answer depends on the RESULTING visibility of a patch, which the controller cannot
+ * know without re-reading the row. Living in `common/` rather than on
+ * CampaignAccessService is what lets both services apply it with the db handle they
+ * already hold, with no constructor change and no new module edge — the same pattern
+ * #601 used for `note-visibility.ts` / `anchor-visibility.ts`.
  */
 
 /** Is this seat allowed to send things that reach other members? */
