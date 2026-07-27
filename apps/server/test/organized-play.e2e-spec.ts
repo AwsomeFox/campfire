@@ -2005,6 +2005,162 @@ describe('organized play (e2e)', () => {
     expect(forced.body.conflicts.some((c: { kind: string }) => c.kind === 'room')).toBe(true);
   });
 
+  /**
+   * Two per-occurrence writes racing on the SAME occurrence.
+   *
+   * Both endpoints validated against a row read with an `await` BEFORE their
+   * transaction opened, so the later writer worked from a stale snapshot. Three
+   * distinct consequences, all asserted here rather than just "last writer wins":
+   * omitted fields were re-derived from the stale row, silently reverting a
+   * reassignment that had landed in between; the ledger recorded a
+   * `fromScheduledAt` that was never stored; and `icsSequence` was recomputed
+   * from the stale value, so two moves produced the SAME sequence and every
+   * subscribed calendar ignored the second.
+   *
+   * The interleaving is driven EXPLICITLY rather than with a bare `Promise.all`.
+   * Racing the two calls does not reproduce it: they await a different number of
+   * times before their transactions, so the one with fewer awaits always commits
+   * first, and they write disjoint columns — a version of this test built that
+   * way passed against the bug. Gating the scope lookup pins the exact order the
+   * defect needs: read the row, let the other request commit, then write.
+   */
+  const gateScopeLookup = (service: OrganizedPlayService): { release: () => void; restore: () => void } => {
+    const roles = (service as unknown as { roles: { accessibleCampaignIds: (u: unknown) => Promise<unknown> } }).roles;
+    const real = roles.accessibleCampaignIds.bind(roles);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let gated = false;
+    const spy = jest.spyOn(roles, 'accessibleCampaignIds').mockImplementation(async (u: unknown) => {
+      const scope = await real(u);
+      // Only the FIRST caller waits; the request we let overtake it runs freely.
+      if (!gated) {
+        gated = true;
+        await gate;
+      }
+      return scope as never;
+    });
+    return { release, restore: () => spy.mockRestore() };
+  };
+
+  it('does not lose a re-seat that commits while a reschedule holds a stale snapshot', async () => {
+    const service = ctx.app.get(OrganizedPlayService);
+    const actor = { id: 'dev:op-dm', name: 'OP DM', roles: [] as string[] };
+    const raceRoom = await api().post(`/api/v1/organized-play/venues/${venueId}/rooms`).set(dm).send({ name: 'Race Room' });
+    expect(raceRoom.status).toBe(201);
+    const series = await api()
+      .post(`/api/v1/campaigns/${campaignId}/series`)
+      .set(dm)
+      .send({ title: 'Occurrence Race', timezone: 'UTC', startDate: '2099-08-04', startTime: '18:00', freq: 'weekly', count: 1 });
+    expect(series.status).toBe(201);
+    const occ = series.body.occurrences[0];
+
+    const gate = gateScopeLookup(service);
+    try {
+      // The reschedule mentions no room, so it re-derives one — from the snapshot
+      // it is holding. That is the field the re-seat is about to change.
+      const move = service.rescheduleOccurrence(occ.id, { scheduledAt: '2099-08-05T18:00:00.000Z' } as never, actor as never, 'dm');
+      await new Promise((resolve) => setImmediate(resolve));
+      await service.reassignOccurrence(occ.id, { roomId: raceRoom.body.id } as never, actor as never, 'dm');
+      gate.release();
+      await move;
+    } finally {
+      gate.restore();
+    }
+
+    const after = (await api().get(`/api/v1/schedule/${occ.id}`).set(dm)).body;
+    // The re-seat SURVIVES: the later writer re-derived the room from what was
+    // actually stored, not from the row it read before the re-seat existed.
+    expect(after.roomId).toBe(raceRoom.body.id);
+    expect(after.scheduledAt).toBe('2099-08-05T18:00:00.000Z');
+
+    // Lineage is honest: every recorded `fromScheduledAt` is an instant this
+    // occurrence genuinely held.
+    const ledger = (await api().get(`/api/v1/organized-play/occurrences/${occ.id}/exceptions`).set(dm)).body as Array<{
+      fromScheduledAt: string;
+    }>;
+    const heldInstants = new Set([occ.scheduledAt, '2099-08-05T18:00:00.000Z']);
+    for (const entry of ledger) expect(heldInstants.has(entry.fromScheduledAt)).toBe(true);
+  });
+
+  it('gives two racing moves DISTINCT ICS sequences, so subscribers apply both', async () => {
+    const service = ctx.app.get(OrganizedPlayService);
+    const actor = { id: 'dev:op-dm', name: 'OP DM', roles: [] as string[] };
+    const series = await api()
+      .post(`/api/v1/campaigns/${campaignId}/series`)
+      .set(dm)
+      .send({ title: 'Sequence Race', timezone: 'UTC', startDate: '2099-08-18', startTime: '18:00', freq: 'weekly', count: 1 });
+    expect(series.status).toBe(201);
+    const occ = series.body.occurrences[0];
+    const seq0 = occ.icsSequence as number;
+
+    const gate = gateScopeLookup(service);
+    try {
+      const first = service.rescheduleOccurrence(occ.id, { scheduledAt: '2099-08-19T18:00:00.000Z' } as never, actor as never, 'dm');
+      await new Promise((resolve) => setImmediate(resolve));
+      await service.rescheduleOccurrence(occ.id, { scheduledAt: '2099-08-20T18:00:00.000Z' } as never, actor as never, 'dm');
+      gate.release();
+      await first;
+    } finally {
+      gate.restore();
+    }
+
+    // Both moves happened, so SEQUENCE must have advanced TWICE. Recomputing it
+    // from a stale snapshot made both writes produce seq0 + 1, and a calendar
+    // client that has already applied seq0 + 1 discards the second revision —
+    // leaving every subscriber on the wrong night with no way to notice.
+    const after = (await api().get(`/api/v1/schedule/${occ.id}`).set(dm)).body;
+    expect(after.icsSequence).toBe(seq0 + 2);
+  });
+
+  it('files the ledger entry that describes the change, not the endpoint that was called', async () => {
+    const kindRoom = await api().post(`/api/v1/organized-play/venues/${venueId}/rooms`).set(dm).send({ name: 'Kind Room' });
+    expect(kindRoom.status).toBe(201);
+    const series = await api()
+      .post(`/api/v1/campaigns/${campaignId}/series`)
+      .set(dm)
+      .send({ title: 'Ledger Kind', timezone: 'UTC', startDate: '2099-08-11', startTime: '18:00', freq: 'weekly', count: 1, capacity: 6 });
+    expect(series.status).toBe(201);
+    const occ = series.body.occurrences[0];
+    const seq0 = occ.icsSequence as number;
+
+    // A ROOM-ONLY edit through the reschedule endpoint. It moves no time, so it
+    // is a re-seat however it was requested — and must not bump SEQUENCE, since
+    // the room is not rendered into the feed.
+    const roomOnly = await api()
+      .post(`/api/v1/organized-play/occurrences/${occ.id}/reschedule`)
+      .set(dm)
+      .send({ scheduledAt: occ.scheduledAt, roomId: kindRoom.body.id });
+    expect(roomOnly.status).toBe(201);
+    expect(roomOnly.body.occurrence.icsSequence).toBe(seq0);
+    const first = (await api().get(`/api/v1/organized-play/occurrences/${occ.id}/exceptions`).set(dm)).body;
+    expect(first).toHaveLength(1);
+    expect(first[0].kind).toBe('reassign');
+    // …and it records WHAT changed, so an A->B->C run stays reconstructable.
+    expect(first[0]).toMatchObject({ fromRoomId: null, toRoomId: kindRoom.body.id, fromCapacity: 6, toCapacity: 6 });
+
+    // A real move is still a reschedule and still bumps.
+    const timeMove = await api()
+      .post(`/api/v1/organized-play/occurrences/${occ.id}/reschedule`)
+      .set(dm)
+      .send({ scheduledAt: '2099-08-12T18:00:00.000Z' });
+    expect(timeMove.status).toBe(201);
+    expect(timeMove.body.occurrence.icsSequence).toBe(seq0 + 1);
+    const both = (await api().get(`/api/v1/organized-play/occurrences/${occ.id}/exceptions`).set(dm)).body;
+    expect(both.map((e: { kind: string }) => e.kind)).toEqual(['reassign', 'reschedule']);
+
+    // The middle room of an A->B->C run survives in the ledger even though the
+    // occurrence itself holds only the last one.
+    const roomC = await api().post(`/api/v1/organized-play/venues/${venueId}/rooms`).set(dm).send({ name: 'Kind Room C' });
+    expect((await api().post(`/api/v1/organized-play/occurrences/${occ.id}/reassign`).set(dm).send({ roomId: roomC.body.id })).status).toBe(201);
+    const lineage = (await api().get(`/api/v1/organized-play/occurrences/${occ.id}/exceptions`).set(dm)).body as Array<{
+      fromRoomId: number | null;
+      toRoomId: number | null;
+    }>;
+    expect(lineage.map((e) => [e.fromRoomId, e.toRoomId])).toContainEqual([kindRoom.body.id, roomC.body.id]);
+  });
+
   it('does not push a fresh SEQUENCE for a room change, which the feed never renders', async () => {
     const seqRoom = (await api().post(`/api/v1/organized-play/venues/${venueId}/rooms`).set(dm).send({ name: 'Sequence Room' })).body;
     const series = await api()

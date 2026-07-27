@@ -121,6 +121,38 @@ function changesOccurrence(existing: ScheduleRow, next: Partial<ScheduleRow>): b
   return (Object.keys(next) as Array<keyof ScheduleRow>).some((key) => existing[key] !== next[key]);
 }
 
+/** Occurrence columns a calendar client renders, and therefore what "moved" means. */
+const OCCURRENCE_TIME_FIELDS = ['scheduledAt', 'durationMinutes', 'timezone', 'localStart'] as const;
+/** Occurrence columns that describe WHO/WHERE rather than WHEN. */
+const OCCURRENCE_ASSIGNMENT_FIELDS = ['roomId', 'venueId', 'assignedDmUserId', 'capacity'] as const;
+
+function pickFields<K extends keyof ScheduleRow>(next: Partial<ScheduleRow>, keys: readonly K[]): Partial<ScheduleRow> {
+  const out: Partial<ScheduleRow> = {};
+  for (const key of keys) if (key in next) out[key] = next[key];
+  return out;
+}
+
+/**
+ * Which kind of deviation this write actually is — or `null` when it is none.
+ *
+ * Derived from the SAME comparison `changesOccurrence` performs, deliberately,
+ * rather than from which endpoint was called. `rescheduleOccurrence` accepts a
+ * `roomId`, so a request that changes only the room and moves no time was being
+ * filed as `kind: 'reschedule'` — a ledger entry that mislabels what happened,
+ * on a ledger whose whole purpose is explaining what happened. Reading the kind
+ * off the actual diff means the entry describes the change rather than the route
+ * the caller happened to take.
+ *
+ * A time move outranks a re-seat when both happen: the instants are the more
+ * significant fact, and the assignment delta is recorded on the entry regardless,
+ * so nothing is lost by the precedence.
+ */
+function occurrenceExceptionKind(existing: ScheduleRow, next: Partial<ScheduleRow>): 'reschedule' | 'reassign' | null {
+  if (changesOccurrence(existing, pickFields(next, OCCURRENCE_TIME_FIELDS))) return 'reschedule';
+  if (changesOccurrence(existing, pickFields(next, OCCURRENCE_ASSIGNMENT_FIELDS))) return 'reassign';
+  return null;
+}
+
 function venueToDomain(row: typeof playVenues.$inferSelect): PlayVenue {
   return {
     id: row.id,
@@ -183,6 +215,12 @@ function exceptionToDomain(row: typeof seriesExceptions.$inferSelect): SeriesExc
     fromScheduledAt: row.fromScheduledAt,
     toScheduledAt: row.toScheduledAt,
     toLocalStart: row.toLocalStart,
+    fromRoomId: row.fromRoomId,
+    toRoomId: row.toRoomId,
+    fromAssignedDmUserId: row.fromAssignedDmUserId,
+    toAssignedDmUserId: row.toAssignedDmUserId,
+    fromCapacity: row.fromCapacity,
+    toCapacity: row.toCapacity,
     reason: row.reason,
     actorUserId: row.actorUserId,
     createdAt: row.createdAt,
@@ -906,6 +944,22 @@ export class OrganizedPlayService {
     return row;
   }
 
+  /**
+   * The occurrence row read INSIDE the caller's transaction.
+   *
+   * Both per-occurrence write paths re-read through this rather than trusting the
+   * snapshot they validated against. better-sqlite3 is synchronous, so once the
+   * transaction callback is running nothing can interleave — but each `await`
+   * before it is a yield, and these endpoints necessarily await (the room lookup
+   * that resolves a venue is async and cannot run inside a sync transaction).
+   * Re-reading here is what makes "validate, then write" atomic despite that.
+   */
+  private getOccurrenceRowInTxOrThrow(tx: SyncDb, id: number): ScheduleRow {
+    const [row] = tx.select().from(scheduledSessions).where(eq(scheduledSessions.id, id)).limit(1).all();
+    if (!row) throw new NotFoundException(`Scheduled session ${id} not found`);
+    return row;
+  }
+
   async getOccurrenceRowOrThrow(id: number): Promise<ScheduleRow> {
     const [row] = await this.db.select().from(scheduledSessions).where(eq(scheduledSessions.id, id)).limit(1);
     if (!row) throw new NotFoundException(`Scheduled session ${id} not found`);
@@ -1499,6 +1553,13 @@ export class OrganizedPlayService {
             fromScheduledAt: occ.scheduledAt,
             toScheduledAt: null,
             toLocalStart: '',
+            // Lifecycle entry: from == to, stating the seating at cancel time.
+            fromRoomId: occ.roomId,
+            toRoomId: occ.roomId,
+            fromAssignedDmUserId: occ.assignedDmUserId,
+            toAssignedDmUserId: occ.assignedDmUserId,
+            fromCapacity: occ.capacity,
+            toCapacity: occ.capacity,
             reason,
             actorUserId: user.id,
             createdAt: ts,
@@ -1539,42 +1600,66 @@ export class OrganizedPlayService {
     user: RequestUser,
     role: Role,
   ): Promise<OccurrenceWriteResult> {
-    const existing = await this.getOccurrenceRowOrThrow(id);
-    if (existing.status === 'cancelled') {
-      throw new BadRequestException('Cancelled scheduled sessions cannot be rescheduled — restore it first');
-    }
-    const timezone = input.timezone ?? existing.timezone;
+    // ---- ASYNC PHASE. Only work that cannot depend on the stored row, because
+    // everything read here can be stale by the time the transaction opens.
+    //
+    // Splitting the method this way is forced: resolving a room's venue is an
+    // async lookup and cannot run inside a synchronous better-sqlite3
+    // transaction callback. Doing the whole thing from one pre-transaction
+    // snapshot was the bug — a concurrent write landing in the gap was
+    // overwritten from stale values, filed a ledger entry whose
+    // `fromScheduledAt` never existed, and REUSED `icsSequence`, which makes
+    // subscribed calendars ignore the second move entirely.
     if (input.timezone) this.assertTimezone(input.timezone);
-    let scheduledAt: string;
-    let localStart = '';
-    if (input.localStart) {
-      if (!timezone) throw new BadRequestException('localStart requires a timezone on the occurrence or in the body');
-      // `materializeWallClock`, NOT `wallClockToUtc` + echoing the request. When
-      // the requested clock falls in a spring-forward gap the instant is shifted
-      // past the transition (New York 02:30 -> 03:30), and storing the requested
-      // 02:30 alongside the 03:30 instant makes the row describe two different
-      // times. Same helper `expandRecurrence` materializes with, so the two paths
-      // are one expression of the rule rather than two that can drift — which is
-      // how this site was missed when the recurrence path was fixed.
-      const resolved = materializeWallClock(input.localStart, timezone);
-      scheduledAt = resolved.utcIso;
-      localStart = resolved.localStart;
-    } else if (input.scheduledAt) {
-      const ms = Date.parse(input.scheduledAt);
-      if (!Number.isFinite(ms)) throw new BadRequestException('scheduledAt is not a valid date-time');
-      scheduledAt = new Date(ms).toISOString();
-      localStart = timezone ? utcToLocalDateTime(scheduledAt, timezone) : '';
-    } else {
+    if (!input.localStart && !input.scheduledAt) {
       throw new BadRequestException('scheduledAt or localStart is required');
     }
-    const durationMinutes = input.durationMinutes ?? existing.durationMinutes;
-    const roomId = input.roomId === undefined ? existing.roomId : input.roomId;
-    const venueId = roomId === existing.roomId ? existing.venueId : await this.venueAfterRoomChange(roomId, existing.venueId);
+    // Validates the room exists (404s before any write) and resolves its venue.
+    // Independent of the occurrence, so it is safe to compute out here.
+    const roomVenue = input.roomId != null ? await this.resolveVenueId(null, input.roomId) : null;
     const scope = await this.roles.accessibleCampaignIds(user);
     const ts = nowIso();
 
+    // ---- SYNC PHASE. Re-read, re-derive, validate, probe and write as one
+    // atomic step against what is ACTUALLY stored.
     let rawConflicts: RawConflict[] = [];
+    let existing!: ScheduleRow;
+    let scheduledAt!: string;
+    let durationMinutes!: number;
     this.db.transaction((tx) => {
+      existing = this.getOccurrenceRowInTxOrThrow(tx, id);
+      // Re-validated in here too: an occurrence cancelled in the gap must not be
+      // moved on the strength of a snapshot that said it was live.
+      if (existing.status === 'cancelled') {
+        throw new BadRequestException('Cancelled scheduled sessions cannot be rescheduled — restore it first');
+      }
+      const timezone = input.timezone ?? existing.timezone;
+      let localStart = '';
+      if (input.localStart) {
+        if (!timezone) throw new BadRequestException('localStart requires a timezone on the occurrence or in the body');
+        // `materializeWallClock`, NOT `wallClockToUtc` + echoing the request. When
+        // the requested clock falls in a spring-forward gap the instant is shifted
+        // past the transition (New York 02:30 -> 03:30), and storing the requested
+        // 02:30 alongside the 03:30 instant makes the row describe two different
+        // times. Same helper `expandRecurrence` materializes with, so the two paths
+        // are one expression of the rule rather than two that can drift — which is
+        // how this site was missed when the recurrence path was fixed. Pure, so it
+        // runs happily inside the transaction.
+        const resolved = materializeWallClock(input.localStart, timezone);
+        scheduledAt = resolved.utcIso;
+        localStart = resolved.localStart;
+      } else {
+        const ms = Date.parse(input.scheduledAt as string);
+        if (!Number.isFinite(ms)) throw new BadRequestException('scheduledAt is not a valid date-time');
+        scheduledAt = new Date(ms).toISOString();
+        localStart = timezone ? utcToLocalDateTime(scheduledAt, timezone) : '';
+      }
+      // Every OMITTED field is re-derived from the freshly-read row, so a field
+      // this request does not mention cannot be reverted to a stale value — that
+      // is how a concurrent room reassignment used to be silently undone.
+      durationMinutes = input.durationMinutes ?? existing.durationMinutes;
+      const roomId = input.roomId === undefined ? existing.roomId : input.roomId;
+      const venueId = roomId === existing.roomId || roomId == null ? existing.venueId : roomVenue;
       const conflicts = this.findConflictRows(tx, {
         startsAt: scheduledAt,
         endsAt: endInstant(scheduledAt, durationMinutes),
@@ -1598,7 +1683,15 @@ export class OrganizedPlayService {
       // over the columns this endpoint writes. A retry that resends the current
       // instant must not file an override it can never withdraw, and must not
       // push subscribers a fresh SEQUENCE for an unchanged VEVENT.
-      const moved = changesOccurrence(existing, { scheduledAt, durationMinutes, timezone, localStart, roomId, venueId });
+      // TWO questions, deliberately separated. `movedTime` gates the SEQUENCE bump
+      // because only the instants render into the feed (DTSTART/DTEND) — a
+      // room-only edit through this endpoint must not push subscribers a revision
+      // of an unchanged VEVENT, exactly as reassignOccurrence declines to. `kind`
+      // gates the ledger and describes what actually changed, so a room-only edit
+      // made here is filed as `reassign` rather than mislabelled a time move.
+      const next = { scheduledAt, durationMinutes, timezone, localStart, roomId, venueId };
+      const movedTime = changesOccurrence(existing, pickFields(next, OCCURRENCE_TIME_FIELDS));
+      const kind = occurrenceExceptionKind(existing, next);
       tx.update(scheduledSessions)
         .set({
           scheduledAt,
@@ -1612,12 +1705,12 @@ export class OrganizedPlayService {
           // Stamped even on a no-op, which REPAIRS a legacy row adopted into a
           // series with no anchor rather than leaving it without one.
           originalScheduledAt: existing.originalScheduledAt ?? existing.scheduledAt,
-          ...(moved ? { icsSequence: existing.icsSequence + 1 } : {}),
+          ...(movedTime ? { icsSequence: existing.icsSequence + 1 } : {}),
           updatedAt: ts,
         })
         .where(eq(scheduledSessions.id, id))
         .run();
-      if (existing.seriesId != null && moved) {
+      if (existing.seriesId != null && kind != null) {
         tx.insert(seriesExceptions)
           .values({
             seriesId: existing.seriesId,
@@ -1630,10 +1723,16 @@ export class OrganizedPlayService {
             // the row's own zone would let the id drift across the date line on
             // the next entry. See recurrenceLocalDateFor.
             recurrenceLocalDate: recurrenceLocalDateFor(existing, seriesTimezoneInTx(tx, existing.seriesId)),
-            kind: 'reschedule',
+            kind,
             fromScheduledAt: existing.scheduledAt,
             toScheduledAt: scheduledAt,
             toLocalStart: localStart,
+            fromRoomId: existing.roomId,
+            toRoomId: roomId,
+            fromAssignedDmUserId: existing.assignedDmUserId,
+            toAssignedDmUserId: existing.assignedDmUserId,
+            fromCapacity: existing.capacity,
+            toCapacity: existing.capacity,
             reason: input.reason ?? '',
             actorUserId: user.id,
             createdAt: ts,
@@ -1655,7 +1754,9 @@ export class OrganizedPlayService {
     // NOTIFIES. The same diff `SchedulingService.update` runs, so a move made here and the
     // identical move made through PATCH /schedule/:id announce themselves the
     // same way. Location and notes cannot change on this route, so in practice
-    // this yields 'rescheduled'.
+    // this yields 'rescheduled'. Diffed against the row as it was read INSIDE the
+    // transaction, so a concurrent write cannot make this announce a move that
+    // did not happen (or stay silent about one that did).
     const changedFields = diffScheduleNotificationFields(
       { scheduledAt: existing.scheduledAt, durationMinutes: existing.durationMinutes, location: existing.location, notes: existing.notes },
       { scheduledAt, durationMinutes, location: existing.location, notes: existing.notes },
@@ -1687,19 +1788,30 @@ export class OrganizedPlayService {
     user: RequestUser,
     role: Role,
   ): Promise<OccurrenceWriteResult> {
-    const existing = await this.getOccurrenceRowOrThrow(id);
-    if (existing.status === 'cancelled') {
-      throw new BadRequestException('Cancelled scheduled sessions cannot be reassigned — restore it first');
-    }
-    const roomId = input.roomId === undefined ? existing.roomId : input.roomId;
-    const venueId = roomId === existing.roomId ? existing.venueId : await this.venueAfterRoomChange(roomId, existing.venueId);
-    const assignedDmUserId = input.assignedDmUserId ?? existing.assignedDmUserId;
-    const capacity = input.capacity ?? existing.capacity;
+    // ---- ASYNC PHASE. See rescheduleOccurrence for why this split exists: the
+    // room lookup is async and cannot run inside a synchronous better-sqlite3
+    // transaction, so nothing that depends on the STORED row may be computed
+    // out here.
+    const roomVenue = input.roomId != null ? await this.resolveVenueId(null, input.roomId) : null;
     const scope = await this.roles.accessibleCampaignIds(user);
     const ts = nowIso();
 
+    // ---- SYNC PHASE. Re-read, re-derive, validate, probe and write atomically.
     let rawConflicts: RawConflict[] = [];
+    let existing!: ScheduleRow;
+    let roomId: number | null = null;
+    let assignedDmUserId = '';
     this.db.transaction((tx) => {
+      existing = this.getOccurrenceRowInTxOrThrow(tx, id);
+      if (existing.status === 'cancelled') {
+        throw new BadRequestException('Cancelled scheduled sessions cannot be reassigned — restore it first');
+      }
+      // Omitted fields re-derived from the row as actually stored, so this cannot
+      // revert a concurrent change it never saw.
+      roomId = input.roomId === undefined ? existing.roomId : input.roomId;
+      const venueId = roomId === existing.roomId || roomId == null ? existing.venueId : roomVenue;
+      assignedDmUserId = input.assignedDmUserId ?? existing.assignedDmUserId;
+      const capacity = input.capacity ?? existing.capacity;
       const conflicts = this.findConflictRows(tx, {
         startsAt: existing.scheduledAt,
         endsAt: endInstant(existing.scheduledAt, existing.durationMinutes),
@@ -1729,7 +1841,7 @@ export class OrganizedPlayService {
       // — the exact no-op-must-not-bump rule `calendarFieldChanged` states on the
       // one-off path, and the rule the series fan-out follows too. If a room ever
       // starts rendering into LOCATION, all three predicates change together.
-      const reseated = changesOccurrence(existing, { roomId, venueId, assignedDmUserId, capacity });
+      const kind = occurrenceExceptionKind(existing, { roomId, venueId, assignedDmUserId, capacity });
       tx.update(scheduledSessions)
         .set({
           roomId,
@@ -1748,16 +1860,24 @@ export class OrganizedPlayService {
       // PERMANENTLY (the ledger is append-only; there is no way to withdraw one).
       // A night could be excluded from its own series' title, notes, room, DM and
       // event keys forever because of a double-click.
-      if (existing.seriesId != null && reseated) {
+      if (existing.seriesId != null && kind != null) {
         tx.insert(seriesExceptions)
           .values({
             seriesId: existing.seriesId,
             occurrenceId: id,
             recurrenceLocalDate: recurrenceLocalDateFor(existing, seriesTimezoneInTx(tx, existing.seriesId)),
-            kind: 'reassign',
+            kind,
             fromScheduledAt: existing.scheduledAt,
             toScheduledAt: existing.scheduledAt,
             toLocalStart: existing.localStart,
+            // The delta this entry exists to record. Without it an A->B->C run of
+            // room moves loses B forever, because the row holds only C.
+            fromRoomId: existing.roomId,
+            toRoomId: roomId,
+            fromAssignedDmUserId: existing.assignedDmUserId,
+            toAssignedDmUserId: assignedDmUserId,
+            fromCapacity: existing.capacity,
+            toCapacity: capacity,
             reason: input.reason ?? '',
             actorUserId: user.id,
             createdAt: ts,

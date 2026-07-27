@@ -854,6 +854,15 @@ export class SchedulingService {
             fromScheduledAt: existing.scheduledAt,
             toScheduledAt: null,
             toLocalStart: '',
+            // A lifecycle entry changes no assignment, so from == to. Recorded
+            // rather than left at defaults so the ledger states the seating that
+            // was in force when the night was cancelled.
+            fromRoomId: existing.roomId,
+            toRoomId: existing.roomId,
+            fromAssignedDmUserId: existing.assignedDmUserId,
+            toAssignedDmUserId: existing.assignedDmUserId,
+            fromCapacity: existing.capacity,
+            toCapacity: existing.capacity,
             reason,
             actorUserId: user.id,
             createdAt: ts,
@@ -972,6 +981,13 @@ export class SchedulingService {
             fromScheduledAt: existing.scheduledAt,
             toScheduledAt: existing.scheduledAt,
             toLocalStart: existing.localStart,
+            // from == to: a restore re-acquires what the row already names.
+            fromRoomId: existing.roomId,
+            toRoomId: existing.roomId,
+            fromAssignedDmUserId: existing.assignedDmUserId,
+            toAssignedDmUserId: existing.assignedDmUserId,
+            fromCapacity: existing.capacity,
+            toCapacity: existing.capacity,
             reason,
             actorUserId: user.id,
             createdAt: ts,

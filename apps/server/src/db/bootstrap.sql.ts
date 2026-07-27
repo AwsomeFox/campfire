@@ -481,6 +481,16 @@ CREATE TABLE IF NOT EXISTS series_exceptions (
   from_scheduled_at TEXT,
   to_scheduled_at TEXT,
   to_local_start TEXT NOT NULL DEFAULT '',
+  -- #588: what the re-seat actually CHANGED. Without these the ledger records only
+  -- the instants, so an A->B->C sequence of room moves leaves B unrecoverable (the
+  -- surviving occurrence holds only C) and the append-only lineage cannot answer
+  -- the question it exists for. from_* == to_* on a cancel/restore.
+  from_room_id INTEGER,
+  to_room_id INTEGER,
+  from_assigned_dm_user_id TEXT NOT NULL DEFAULT '',
+  to_assigned_dm_user_id TEXT NOT NULL DEFAULT '',
+  from_capacity INTEGER NOT NULL DEFAULT 0,
+  to_capacity INTEGER NOT NULL DEFAULT 0,
   reason TEXT NOT NULL DEFAULT '',
   actor_user_id TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL

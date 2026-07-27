@@ -488,6 +488,14 @@ export const seriesExceptions = sqliteTable('series_exceptions', {
   fromScheduledAt: text('from_scheduled_at'),
   toScheduledAt: text('to_scheduled_at'),
   toLocalStart: text('to_local_start').notNull().default(''),
+  // #588: the assignment delta, so the append-only lineage can answer "what did
+  // this entry change?" rather than only "when".
+  fromRoomId: integer('from_room_id'),
+  toRoomId: integer('to_room_id'),
+  fromAssignedDmUserId: text('from_assigned_dm_user_id').notNull().default(''),
+  toAssignedDmUserId: text('to_assigned_dm_user_id').notNull().default(''),
+  fromCapacity: integer('from_capacity').notNull().default(0),
+  toCapacity: integer('to_capacity').notNull().default(0),
   reason: text('reason').notNull().default(''),
   actorUserId: text('actor_user_id').notNull().default(''),
   createdAt: text('created_at').notNull(),

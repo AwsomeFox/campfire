@@ -1606,6 +1606,21 @@ export const SeriesException = z.object({
   fromScheduledAt: IsoDateTime.nullable().default(null),
   toScheduledAt: IsoDateTime.nullable().default(null),
   toLocalStart: z.string().max(20).default(''),
+  /**
+   * The assignment delta this entry represents (#588).
+   *
+   * Recorded because the surviving occurrence holds only its FINAL assignment, so
+   * an A->B->C sequence of room moves loses B entirely — and a ledger that
+   * advertises "append-only exception lineage" while retaining only the instants
+   * cannot answer what any entry actually changed. Equal `from`/`to` on a
+   * cancel/restore, which states the seating in force at that moment.
+   */
+  fromRoomId: z.number().int().nullable().default(null),
+  toRoomId: z.number().int().nullable().default(null),
+  fromAssignedDmUserId: z.string().max(120).default(''),
+  toAssignedDmUserId: z.string().max(120).default(''),
+  fromCapacity: z.number().int().min(0).default(0),
+  toCapacity: z.number().int().min(0).default(0),
   reason: z.string().max(1000).default(''),
   actorUserId: z.string().max(120).default(''),
   createdAt: IsoDate,
