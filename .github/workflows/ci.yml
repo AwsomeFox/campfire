@@ -221,6 +221,48 @@ jobs:
           path: apps/server/coverage/
           if-no-files-found: warn
 
+  # Web unit tier (issue #1574): apps/web/e2e/tests/*.unit.spec.ts — 157 pure-logic specs
+  # that the default Playwright config `testIgnore`s and that, until now, NO npm script and
+  # NO workflow ran. They compiled (post-#1535 `npm run typecheck` covers the web e2e tree)
+  # and so stayed green-looking, while nothing ever executed an assertion. Turning them on
+  # surfaced 10 real failures, including four components referencing undefined CSS custom
+  # properties without a fallback — the exact class of bug this tier was written to catch.
+  #
+  # Runs the Playwright RUNNER with no browser: every spec here is Node-importable logic or
+  # a source assertion (no `page`/`browser` fixture anywhere in the tier), so there is no
+  # `playwright install` step and no navigation or service-worker timing to race. That is
+  # why this one CAN sit in the required `ci` gate where e2e-web and pwa-web deliberately
+  # do not — it is browserless, and so has no flake surface.
+  #
+  # Only packages/schema/dist is needed (36 specs import @campfire/schema), so it builds
+  # that directly rather than `needs: build`, matching `coverage`: the job starts
+  # immediately and finishes in roughly two minutes.
+  unit-web:
+    name: unit-web
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          cache: npm
+      - name: Restore node_modules
+        id: modcache
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            apps/*/node_modules
+            packages/*/node_modules
+          key: node-modules-24x-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.ImageVersion }}-${{ hashFiles('package-lock.json') }}
+      - name: Install
+        if: steps.modcache.outputs.cache-hit != 'true'
+        run: npm ci
+      - name: Build schema dependency
+        run: npm run build -w packages/schema
+      - name: Run web unit specs
+        run: npm run test:unit -w apps/web
+
   # Browser E2E (Playwright). Consumes the shared schema + server + web dist and
   # runs the suite against the real built server serving the built SPA on one
   # origin (see apps/web/e2e/server.mjs). Uses `test:e2e:nobuild` so it does NOT
@@ -352,7 +394,7 @@ jobs:
   ci:
     name: ci
     if: always()
-    needs: [lint, build, build-test-22, build-test-24, coverage]
+    needs: [lint, build, build-test-22, build-test-24, coverage, unit-web]
     runs-on: ubuntu-latest
     steps:
       - name: Required gates succeeded
@@ -362,8 +404,10 @@ jobs:
           echo "build-test-22=${{ needs.build-test-22.result }}"
           echo "build-test-24=${{ needs.build-test-24.result }}"
           echo "coverage=${{ needs.coverage.result }}"
+          echo "unit-web=${{ needs.unit-web.result }}"
           test "${{ needs.lint.result }}" = "success"
           test "${{ needs.build.result }}" = "success"
           test "${{ needs.build-test-22.result }}" = "success"
           test "${{ needs.build-test-24.result }}" = "success"
           test "${{ needs.coverage.result }}" = "success"
+          test "${{ needs.unit-web.result }}" = "success"
