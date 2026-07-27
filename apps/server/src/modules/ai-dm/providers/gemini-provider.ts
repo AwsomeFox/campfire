@@ -183,6 +183,10 @@ export class GeminiProvider implements AiProvider {
     // Default to 'stop' (parity with parseResult and the OpenAI/Anthropic stream
     // adapters) so an omitted Gemini finishReason never leaks 'unknown' downstream.
     let finishReason: AiFinishReason = 'stop';
+    // #598: a PROMPT-level block, which is a different payload shape from a candidate-level
+    // one — see `isPromptBlocked`. Sticky and terminal: once the policy layer has refused the
+    // request there is no later frame that can make the turn deliverable again.
+    let promptBlocked = false;
 
     // Idle/read timeout stays armed until the body completes or aborts (#1063).
     for await (const event of parseSse(res.body, {
@@ -198,13 +202,32 @@ export class GeminiProvider implements AiProvider {
         continue;
       }
       const candidate = chunk.candidates?.[0];
+      // #598: when Gemini blocks the PROMPT it sends no candidate at all — so the parts branch
+      // below never runs, `finishReason` kept its `stop` default, and the driver saw an
+      // ordinary empty turn (`no_narration`) instead of a withheld one. The block reason lives
+      // on `promptFeedback`, which can ride the SAME chunk as a candidate — so it is read
+      // BEFORE the parts loop, not after it, or a chunk carrying both would broadcast its text
+      // before the block was known.
+      if (isPromptBlocked(chunk)) promptBlocked = true;
       if (candidate?.content?.parts) {
         for (const part of candidate.content.parts) {
           // Handle text and functionCall independently (a part could carry both),
           // mirroring the non-streaming parse so the two paths never diverge.
           if (part.text) {
             totalText += part.text;
-            yield { type: 'text', delta: part.text };
+            // NO PATH MAY BROADCAST TEXT FOR A TURN ALREADY KNOWN TO BE WITHHELD — the
+            // invariant driver-safety.ts opens with, applied here the way the OpenAI chat
+            // accumulator applies it after a refusal. Once the block is known every later
+            // delta belongs to a refused turn, so this is not the quarantine's bounded
+            // residual: it would be text released after the very signal the window waits for.
+            //
+            // `totalText` still accumulates, deliberately. It never reaches the table; it is
+            // what the budget estimator measures, and a turn that generated tokens must still
+            // be paid for. Stop the broadcast, keep the measurement.
+            //
+            // Unreachable on today's wire — a prompt block arrives with no candidate and the
+            // stream ends there — so this is defence against a wire change, not a live leak.
+            if (!promptBlocked) yield { type: 'text', delta: part.text };
           }
           if (part.functionCall) {
             // Gemini streams each functionCall as a whole part (not JSON deltas), so
@@ -234,7 +257,9 @@ export class GeminiProvider implements AiProvider {
         text: totalText,
         toolCalls,
         usage: usage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
-        finishReason: resolveStreamFinishReason(finishReason, toolCalls.length),
+        // A prompt block outranks anything a candidate reported (and outranks the
+        // tool-call normalization): the policy layer refused the request itself.
+        finishReason: promptBlocked ? 'content_filter' : resolveStreamFinishReason(finishReason, toolCalls.length),
         model: req.model || this.opts.model,
       },
     };
@@ -242,13 +267,23 @@ export class GeminiProvider implements AiProvider {
 
   private parseResult(data: GeminiResponse, model: string): AiGenerateResult {
     const candidate = data.candidates?.[0];
+    // #598 — a PROMPT-level block: Gemini refused the request before generating, so it returns
+    // `promptFeedback.blockReason` with no candidate and no candidate `finishReason`. This used
+    // to throw `invalid_request`, which the driver reports as `provider_error` — a plumbing
+    // fault, with the plumbing sentence and the plumbing lever set in front of the table for
+    // what is actually the safety layer doing its job. It is a normal, complete, empty result
+    // carrying `content_filter`, so the withhold path records it like every other refusal.
+    if (isPromptBlocked(data)) {
+      return {
+        text: '',
+        toolCalls: [],
+        usage: data.usageMetadata ? mapUsage(data.usageMetadata) : { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        finishReason: 'content_filter',
+        model: model || this.opts.model,
+      };
+    }
     if (!candidate) {
-      const blockReason = data.promptFeedback?.blockReason;
-      throw new AiProviderError(
-        'invalid_request',
-        blockReason ? `${this.name}: content blocked (${blockReason})` : `${this.name}: no candidates in response`,
-        { provider: this.name },
-      );
+      throw new AiProviderError('invalid_request', `${this.name}: no candidates in response`, { provider: this.name });
     }
     const parts = candidate.content?.parts ?? [];
     const text = parts.map((p) => p.text ?? '').join('');
@@ -291,12 +326,37 @@ function mapFinishReason(reason: string): AiGenerateResult['finishReason'] {
     case 'STOP':
     case 'MAX_TOKENS':
       return reason.toUpperCase() === 'STOP' ? 'stop' : 'length';
+    // #598: every one of these is Gemini's policy layer stopping the generation. The newer
+    // members (PROHIBITED_CONTENT / SPII / BLOCKLIST / IMAGE_SAFETY) were falling through to
+    // `unknown`, which the driver treats as a deliverable turn — the exact fail-open this
+    // issue is about, just on a third protocol.
     case 'SAFETY':
     case 'RECITATION':
+    case 'PROHIBITED_CONTENT':
+    case 'SPII':
+    case 'BLOCKLIST':
+    case 'IMAGE_SAFETY':
       return 'content_filter';
     default:
       return 'unknown';
   }
+}
+
+/**
+ * Did Gemini block the PROMPT (#598)?
+ *
+ * A distinct payload shape from a candidate-level block: `promptFeedback.blockReason` is set,
+ * there is no candidate, and therefore no candidate `finishReason` for {@link mapFinishReason}
+ * to read. Both transports have to recognise it separately or a prompt block silently becomes
+ * a deliverable empty turn.
+ *
+ * Any non-empty `blockReason` counts, including `OTHER` and the `BLOCK_REASON_UNSPECIFIED`
+ * sentinel. The field exists ONLY to say "this was blocked" — Gemini omits it entirely
+ * otherwise — so an unrecognised value is a block whose category this adapter does not know,
+ * not a non-block. Guessing the other way is the fail-open #598 exists to close.
+ */
+function isPromptBlocked(data: GeminiResponse): boolean {
+  return typeof data.promptFeedback?.blockReason === 'string' && data.promptFeedback.blockReason.length > 0;
 }
 
 function toGeminiTool(tool: AiToolSchema): Record<string, unknown> {

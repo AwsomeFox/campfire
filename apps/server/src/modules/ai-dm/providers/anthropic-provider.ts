@@ -219,8 +219,11 @@ function mapStopReason(reason: string | null | undefined): AiFinishReason {
       return 'length';
     case 'tool_use':
       return 'tool_calls';
+    // #598: `refusal` is the MODEL declining on safety grounds. It used to be folded into
+    // `content_filter`; it is now its own terminal state so an incident record can say which
+    // of the two actually fired. Both are withheld — see ai-driver/driver-safety.ts.
     case 'refusal':
-      return 'content_filter';
+      return 'refusal';
     default:
       return reason ? 'unknown' : 'stop';
   }

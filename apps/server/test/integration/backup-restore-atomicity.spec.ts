@@ -101,12 +101,19 @@ describe('backup restore atomicity (#497, real SQLite + filesystem)', () => {
   async function restoreArchive(
     service: BackupService,
     archive: Buffer,
-    options?: { onProgress?: (phase: string) => void },
+    options?: { onProgress?: (phase: string) => void; signal?: AbortSignal },
   ) {
-    return service.restore(archive, RESTORE_CONFIRM_TOKEN, testUser, {
-      keyPassphrase: PASSPHRASE,
-      ...options,
-    });
+    const stageDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'campfire-restore-test-'));
+    const archivePath = path.join(stageDir, 'archive.zip');
+    try {
+      await fs.promises.writeFile(archivePath, archive, { mode: 0o600 });
+      return await service.restoreFile(archivePath, RESTORE_CONFIRM_TOKEN, testUser, {
+        keyPassphrase: PASSPHRASE,
+        ...options,
+      });
+    } finally {
+      await fs.promises.rm(stageDir, { recursive: true, force: true });
+    }
   }
 
   it('restores successfully and reports progress phases', async () => {
@@ -121,6 +128,22 @@ describe('backup restore atomicity (#497, real SQLite + filesystem)', () => {
     expect(phases).toContain('swapping-database');
     expect(liveMarkerCampaign()).toBe(ARCHIVE_CAMPAIGN);
     expect(liveKeyfile()).toBe(ARCHIVE_KEY);
+  });
+
+  it('honors cancellation at the final boundary before applying staged state', async () => {
+    const service = makeService();
+    const archive = await buildAlternateArchive();
+    const controller = new AbortController();
+
+    await expect(restoreArchive(service, archive, {
+      signal: controller.signal,
+      onProgress: (phase) => {
+        if (phase === 'staging-uploads') controller.abort();
+      },
+    })).rejects.toThrow('Restore was cancelled before it was applied');
+
+    expect(liveMarkerCampaign()).toBe(MARKER_CAMPAIGN);
+    expect(liveKeyfile()).toBe(LIVE_KEY);
   });
 
   const faultPoints: RestoreApplyFaultPoint[] = [
