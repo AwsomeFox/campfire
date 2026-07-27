@@ -140,4 +140,38 @@ test.describe('print layouts (#667)', () => {
       await context.close();
     }
   });
+
+  test('keeps DM secrets opt-in and page-local', async ({ browser }) => {
+    const dmContext = await browser.newContext({ storageState: stateFor('dm') });
+    const dmPage = await dmContext.newPage();
+    const { campaignId, navigation } = seed();
+    const secret = 'PRINT-ONLY DM SECRET';
+    try {
+      const patch = await dmPage.request.patch(`/api/v1/npcs/${navigation.npcId}`, { data: { dmSecret: secret } });
+      expect(patch.ok()).toBe(true);
+      await dmPage.goto(`/c/${campaignId}/npcs/${navigation.npcId}`);
+      await expect(dmPage.getByLabel('Include DM secrets')).toBeVisible();
+      await dmPage.emulateMedia({ media: 'print' });
+      await expect(dmPage.locator('.cf-print-only .cf-print-secret')).toBeHidden();
+      await dmPage.emulateMedia({ media: 'screen' });
+      await dmPage.getByLabel('Include DM secrets').check();
+      await dmPage.emulateMedia({ media: 'print' });
+      await expect(dmPage.locator('.cf-print-only .cf-print-secret')).toBeVisible();
+      await dmPage.emulateMedia({ media: 'screen' });
+      await dmPage.goto(`/c/${campaignId}/quests/${navigation.questId}`);
+      await expect.poll(() => dmPage.evaluate(() => document.documentElement.classList.contains('cf-print-include-secrets'))).toBe(false);
+    } finally {
+      await dmContext.close();
+    }
+
+    const playerContext = await browser.newContext({ storageState: stateFor('viewer') });
+    const playerPage = await playerContext.newPage();
+    try {
+      await playerPage.goto(`/c/${campaignId}/npcs/${navigation.npcId}`);
+      await expect(playerPage.getByLabel('Include DM secrets')).toHaveCount(0);
+      await expect(playerPage.getByText(secret)).toHaveCount(0);
+    } finally {
+      await playerContext.close();
+    }
+  });
 });

@@ -98,12 +98,23 @@
   .cf-print-root,
   .cf-print-root * {
     overflow: visible !important;
+    max-height: none !important;
   }
 
-  .cf-print-root [class*="sticky"],
-  .cf-print-root [class*="grid-cols"] {
+  .cf-print-root .cf-print-columns,
+  .cf-print-root .cf-print-columns > * {
+    display: block !important;
     position: static !important;
+    width: auto !important;
   }
+
+  /* Detail pages may contain controls inside rich cards; the paper view always
+     renders their adjacent read-only text, never their interactive affordances. */
+  .cf-print-root button,
+  .cf-print-root input,
+  .cf-print-root textarea,
+  .cf-print-root select,
+  .cf-print-root [role="button"] { display: none !important; }
 
   .cf-print-roster {
     width: 100%;

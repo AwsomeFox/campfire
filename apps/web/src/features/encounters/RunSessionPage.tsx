@@ -1967,7 +1967,9 @@ export default function RunSessionPage() {
               <td>{combatant.initiative ?? '—'} / {index + 1}</td>
               <td>{combatant.name}</td>
               <td>{combatant.kind}</td>
-              <td>{combatant.kac ?? combatant.eac ?? '—'}</td>
+              <td>{combatant.eac != null || combatant.kac != null
+                ? [combatant.eac != null ? `EAC ${combatant.eac}` : null, combatant.kac != null ? `KAC ${combatant.kac}` : null].filter(Boolean).join(' / ')
+                : combatant.statblock?.ac ?? '—'}</td>
               <td>{combatant.hpCurrent == null || combatant.hpMax == null ? '—' : `${combatant.hpCurrent} / ${combatant.hpMax} / ${combatant.hpTemp ?? 0}`}</td>
               <td>{[...combatant.conditions, combatant.deathState !== 'none' ? combatant.deathState : ''].filter(Boolean).join(', ') || '—'}</td>
               <td aria-label={`Notes for ${combatant.name}`} />

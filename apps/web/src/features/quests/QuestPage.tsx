@@ -464,10 +464,10 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
 
   return (
     <div className="cf-print-root max-w-6xl mx-auto px-4 mt-5 pb-20 lg:pb-10" style={{ display: 'flex', flexDirection: 'column', gap: 14 }} {...entityTargetProps('quest', quest.id)}>
-      {error && <ErrorNote message={error} onRetry={load} />}
+      {error && <div className="cf-print-hide"><ErrorNote message={error} onRetry={load} /></div>}
 
       {canDmWrite && (
-        <VisibleToPlayersBar
+        <div className="cf-print-hide"><VisibleToPlayersBar
           visible={!quest.hidden}
           onHide={async () => {
             const updated = await api.patch<Quest>(`${API}/quests/${quest.id}`, { hidden: true });
@@ -477,7 +477,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
             const updated = await api.patch<Quest>(`${API}/quests/${quest.id}`, { hidden: false });
             setQuest({ ...quest, ...updated });
           }}
-        />
+        /></div>
       )}
 
       <div className="cf-print-chrome"><DetailPageWayfinding
@@ -485,6 +485,15 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
         defaultPath={`/c/${campaignId}/quests`}
         defaultLabel={t('quests.backToQuests')}
       /></div>
+      <section className="cf-print-only cf-print-paper">
+        <h1>{quest.title}</h1>
+        <p><strong>Status:</strong> {quest.status}</p>
+        <Markdown>{quest.body || 'No description yet.'}</Markdown>
+        <h2>{t('quests.objectives')}</h2>
+        <ul>{quest.objectives.map((objective) => <li key={objective.id}>{objective.done ? 'Done — ' : 'Open — '}{objective.text}</li>)}</ul>
+        <p><strong>{t('quests.reward')}:</strong> {quest.reward || '—'} · <strong>{t('quests.givenBy')}:</strong> {giver?.name || '—'}</p>
+        {isDm && quest.dmSecret && <div className="cf-print-secret"><p>{quest.dmSecret}</p></div>}
+      </section>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         <h3 className="min-w-0 break-words" style={{ margin: 0 }}>{quest.title}</h3>
@@ -492,7 +501,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
         <PrintControl allowSecrets={isDm && Boolean(quest.dmSecret)} className="ml-auto" />
         {isDm && quest.hidden && <Chip variant="failed">{t('quests.hiddenChip')}</Chip>}
         {canDmWrite && (
-          <>
+          <div className="cf-print-hide flex items-center gap-2">
             <EntitySecrecyControls
               entityKind="quest"
               entityName={quest.title}
@@ -536,10 +545,10 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
             <Btn danger className="!min-h-0 !py-1.5 text-xs" onClick={() => setConfirmingDelete(true)}>
               {t('quests.delete')}
             </Btn>
-          </>
+          </div>
         )}
         {!isDm && role !== null && (
-          <>
+          <div className="cf-print-hide flex items-center gap-2">
             <div style={{ flex: 1 }} />
             <Btn
               ghost
@@ -549,7 +558,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
             >
               {t('quests.suggestEdit')}
             </Btn>
-          </>
+          </div>
         )}
       </div>
 
@@ -562,7 +571,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
         </Card>
       )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+      <div className="cf-print-columns grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
         <div className="lg:col-span-7" style={{ display: 'flex', flexDirection: 'column', gap: 16, minWidth: 0 }}>
           <div className="card elev-sm">
             {editingBody ? (
