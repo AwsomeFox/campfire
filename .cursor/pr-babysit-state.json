@@ -6,7 +6,8 @@
       "status": "babysitting",
       "headBranch": "fix/issue-667",
       "baseBranch": "main",
-      "updatedAt": "2026-07-27T17:03:00Z"
+      "updatedAt": "2026-07-27T17:16:22Z",
+      "note": "CI e2e-web failed on stale character-sheet print snapshot; refreshed baseline pushed to fix/issue-667"
     }
   ]
 }
