@@ -136,6 +136,10 @@ export interface BackupDiskStatus {
   lowSpace: boolean;
 }
 
+type ScheduledArchiveVerification =
+  | { verified: true; checksum: string; error: '' }
+  | { verified: false; checksum: string | null; error: string };
+
 export interface BackupRetentionStatus {
   policy: BackupRetentionPolicy;
   archiveCount: number;
@@ -609,8 +613,13 @@ export class BackupService implements OnApplicationBootstrap {
           partialOutput,
         );
         const descriptor = fs.openSync(partialPath, 'r');
-        try { fs.fsyncSync(descriptor); } finally { fs.closeSync(descriptor); }
-        const archived = await hashFile(partialPath);
+        let size: number;
+        try {
+          fs.fsyncSync(descriptor);
+          // The file is durable now. Use its descriptor metadata for cadence
+          // size instead of making a second full pass solely to count bytes.
+          size = fs.fstatSync(descriptor).size;
+        } finally { fs.closeSync(descriptor); }
         // Verify BEFORE publishing the final name. Renaming first would leave an archive
         // that failed verification sitting under a name indistinguishable from a good
         // scheduled backup — the inner finally only removes `partialPath` — and an
@@ -621,28 +630,33 @@ export class BackupService implements OnApplicationBootstrap {
         if (!verification.verified) {
           throw new Error(`Scheduled backup failed verification after write: ${verification.error}`);
         }
+        // This is guaranteed by ScheduledArchiveVerification, but retain a
+        // runtime guard so a future/mock verifier cannot publish a cadence row
+        // with a null checksum.
+        if (!verification.checksum) {
+          throw new Error('Scheduled backup verification succeeded without a checksum');
+        }
         fs.renameSync(partialPath, filePath);
-        const size = archived.bytes;
-        const checksum = archived.sha256;
-      const prune = await this.pruneVerifiedScheduledBackups(dir, retentionPolicy, archiveName, checksum, filePath);
-      const nextRunAt = new Date(Date.now() + intervalMs).toISOString();
-      const metrics = this.metricsAfterSuccess(previous?.metrics, disk, estimatedBytes, prune);
-      await this.writeCadence({
-        lastAttemptAt: attemptAt,
-        lastSuccessAt: attemptAt,
-        nextRunAt,
-        lastSize: size,
-        lastChecksum: checksum,
-        lastError: '',
-        lastArchiveName: archiveName,
-        lastVerifiedAt: attemptAt,
-        consecutiveFailures: 0,
-        metrics,
-      });
-      this.logger.log(
-        `Scheduled backup written: ${filePath} (${size} bytes, sha256 ${checksum.slice(0, 16)}…); ` +
-          `pruned ${prune.count} archive(s), ${prune.bytes} bytes; next run ${nextRunAt}`,
-      );
+        const checksum = verification.checksum;
+        const prune = await this.pruneVerifiedScheduledBackups(dir, retentionPolicy, archiveName, checksum, filePath);
+        const nextRunAt = new Date(Date.now() + intervalMs).toISOString();
+        const metrics = this.metricsAfterSuccess(previous?.metrics, disk, estimatedBytes, prune);
+        await this.writeCadence({
+          lastAttemptAt: attemptAt,
+          lastSuccessAt: attemptAt,
+          nextRunAt,
+          lastSize: size,
+          lastChecksum: checksum,
+          lastError: '',
+          lastArchiveName: archiveName,
+          lastVerifiedAt: attemptAt,
+          consecutiveFailures: 0,
+          metrics,
+        });
+        this.logger.log(
+          `Scheduled backup written: ${filePath} (${size} bytes, sha256 ${checksum.slice(0, 16)}…); ` +
+            `pruned ${prune.count} archive(s), ${prune.bytes} bytes; next run ${nextRunAt}`,
+        );
       } finally {
         if (!partialOutput.destroyed && !partialOutput.writableFinished) partialOutput.destroy();
         fs.rmSync(partialPath, { force: true });
@@ -846,9 +860,7 @@ export class BackupService implements OnApplicationBootstrap {
     return onDisk;
   }
 
-  private async verifyScheduledArchive(
-    filePath: string,
-  ): Promise<{ verified: boolean; checksum: string | null; error: string }> {
+  private async verifyScheduledArchive(filePath: string): Promise<ScheduledArchiveVerification> {
     let checksum: string;
     try {
       checksum = (await hashFile(filePath)).sha256;

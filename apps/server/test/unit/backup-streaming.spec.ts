@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
+import { createHash } from 'node:crypto';
 import { DbHolder, type DrizzleDb } from '../../src/db/db.module';
 import {
   ArchiveOperationBusyError,
@@ -373,10 +374,24 @@ describe('backup streaming writer (#603)', () => {
     const previous = process.env.BACKUP_DIR;
     process.env.BACKUP_DIR = backupDir;
     try {
-      await (service() as any).runScheduledBackup(60 * 60 * 1000);
+      const svc = service();
+      const reads = jest.spyOn(fs, 'createReadStream');
+      await (svc as any).runScheduledBackup(60 * 60 * 1000);
       const names = fs.readdirSync(backupDir);
-      expect(names.some((name) => name.endsWith('.zip'))).toBe(true);
+      const archiveName = names.find((name) => name.endsWith('.zip'));
+      expect(archiveName).toBeDefined();
       expect(names.some((name) => name.endsWith('.partial'))).toBe(false);
+      // Verification performs the one required checksum pass. Cadence size is
+      // obtained from the fsynced descriptor, not by hashing the partial again.
+      expect(reads.mock.calls.filter(([filePath]) => String(filePath).endsWith('.partial'))).toHaveLength(1);
+      reads.mockRestore();
+
+      const archivePath = path.join(backupDir, archiveName!);
+      const cadence = await (svc as any).readCadence();
+      expect(cadence.lastSize).toBe(fs.statSync(archivePath).size);
+      expect(cadence.lastChecksum).toBe(
+        createHash('sha256').update(fs.readFileSync(archivePath)).digest('hex'),
+      );
     } finally {
       if (previous === undefined) delete process.env.BACKUP_DIR;
       else process.env.BACKUP_DIR = previous;
@@ -421,6 +436,7 @@ describe('backup streaming writer (#603)', () => {
       await expect((svc as any).runScheduledBackup(60 * 60 * 1000)).rejects.toThrow('failed verification');
       expect(verify).toHaveBeenCalledTimes(1);
       expect(fs.existsSync(backupDir) ? fs.readdirSync(backupDir).filter((name) => name.endsWith('.zip')) : []).toEqual([]);
+      expect(fs.existsSync(backupDir) ? fs.readdirSync(backupDir).filter((name) => name.endsWith('.partial')) : []).toEqual([]);
     } finally {
       verify.mockRestore();
       if (previous === undefined) delete process.env.BACKUP_DIR;
