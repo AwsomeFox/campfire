@@ -158,6 +158,27 @@ describe('buildMarkdownZip — filename collisions (issues #530 / #863)', () => 
     expect(chunks).toHaveLength(0);
   });
 
+  it('leaves the destination intact when campaign projection fails before archive bytes', async () => {
+    const service = serviceWithCollisions();
+    jest.spyOn(service as any, 'buildProfileExport').mockRejectedValue(new Error('database unavailable'));
+    const output = new PassThrough();
+    await expect(service.streamMarkdownZip(output, new AbortController().signal, 1, USER)).rejects.toThrow(
+      'database unavailable',
+    );
+    expect(output.destroyed).toBe(false);
+  });
+
+  it('destroys the destination when a failure occurs after archive bytes begin flowing', async () => {
+    const service = serviceWithCollisions();
+    const controller = new AbortController();
+    const output = new PassThrough();
+    output.once('data', () => controller.abort(new Error('client disconnected after output')));
+    await expect(service.streamMarkdownZip(output, controller.signal, 1, USER)).rejects.toThrow(
+      'client disconnected after output',
+    );
+    expect(output.destroyed).toBe(true);
+  });
+
   it('produces one zip entry per source entity in every folder', async () => {
     const service = serviceWithCollisions();
     const { buffer } = await service.buildMarkdownZip(1, USER);
