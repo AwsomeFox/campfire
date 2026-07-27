@@ -6619,7 +6619,7 @@ function CombatLog({ events }: { events: EncounterEvent[] }) {
                     )}
                   </div>
                   {expandable && expanded && details.length > 0 && (
-                    <ul style={{ margin: '0 0 0 28px', padding: 0, listStyle: 'disc', color: 'var(--text-secondary)' }}>
+                    <ul style={{ margin: '0 0 0 28px', padding: 0, listStyle: 'disc', color: 'var(--color-text-secondary)' }}>
                       {details.map((line, detailIndex) => (
                         <li key={`${chainKey}-${detailIndex}`}>{line}</li>
                       ))}

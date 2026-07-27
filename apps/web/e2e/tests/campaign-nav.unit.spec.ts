@@ -34,6 +34,9 @@ test.describe('campaign nav IA (#643)', () => {
       'proposals',
       'trash',
       'members',
+      // Moderation (issue #597 — block, mute, direct silence) sits with the other
+      // per-campaign administration entries, above the audit log.
+      'moderation',
       'audit',
     ]);
   });
@@ -49,6 +52,9 @@ test.describe('campaign nav IA (#643)', () => {
     const manage = groups.find((g) => g.key === 'manage');
     expect(manage?.items).toEqual([
       { key: 'proposals', label: 'nav.myProposals', to: '/c/7/proposals', termId: 'proposals' },
+      // A player reaches the same route as "My reports" (issue #597) — their own
+      // block/mute list, not the DM's moderation queue.
+      { key: 'moderation', label: 'nav.myReports', to: '/c/7/moderation' },
       { key: 'membership', label: 'nav.yourData', to: '/c/7/members' },
     ]);
     expect(groups.find((g) => g.key === 'prepare')?.items.some((i) => i.key === 'storylines')).toBe(false);
