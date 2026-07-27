@@ -336,6 +336,11 @@ allowlist and the same base-URL host policy as the primary, so adding one is nev
 around either. A misconfigured fallback is ignored with a warning rather than being allowed
 to break a turn the primary could have served.
 
+**Deleting a provider deletes its fallback too**, at either scope, so no stored credential
+outlives the action you took to remove it. Deleting the *fallback* leaves the primary
+untouched — the dependency runs one way, since a fallback with no primary would never serve a
+turn anyway.
+
 !!! note "Retries spend tokens"
 
     A provider bills for what it generated even when the connection then dies, so every

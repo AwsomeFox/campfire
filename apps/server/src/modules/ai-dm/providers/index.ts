@@ -70,4 +70,4 @@ export { ProviderBackedAiDmProvider } from './ai-dm-bridge';
 export type { ProviderBackedAiDmOptions } from './ai-dm-bridge';
 
 export type { FetchLike, FetchResponse, RetryConfig, ParseSseOptions } from './http';
-export { DEFAULT_RETRY, DEFAULT_TIMEOUT_MS, DEFAULT_IDLE_TIMEOUT_MS, parseSse, raceRead, streamAbortError } from './http';
+export { DEFAULT_RETRY, DEFAULT_TIMEOUT_MS, DEFAULT_IDLE_TIMEOUT_MS, parseSse, raceRead, streamAbortError, streamReadError } from './http';

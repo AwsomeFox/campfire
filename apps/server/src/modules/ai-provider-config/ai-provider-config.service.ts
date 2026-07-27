@@ -448,40 +448,54 @@ export class AiProviderConfigService {
     });
   }
 
+  /**
+   * Delete the server provider — BOTH ROLES (#1052 review).
+   *
+   * This was role-scoped to `'primary'` first, reasoning that a "remove the provider" click
+   * should not silently wipe a configured backup. That was the wrong way round, for two reasons
+   * that only became visible once the whole shape was on the table.
+   *
+   * A FALLBACK WITHOUT A PRIMARY IS NOT A BACKUP. Resolution reads the primary first and gives
+   * up when there is none, so the surviving row serves no turn, answers no health probe, and is
+   * reachable by no execution path. Keeping it preserves no capability whatsoever.
+   *
+   * WHAT IT DOES PRESERVE IS A SECRET. The row carries a stored, encrypted API key, and it
+   * survived the one operation an admin performs in order to destroy exactly that. There is no
+   * fallback UI in this release, so an operator working from the web app is never shown the
+   * leftover — and re-creating a primary later silently re-arms it, on a credential the admin
+   * then in post never knowingly configured and cannot see. A secret outliving the intent to
+   * destroy it is the worse failure, and "inert at runtime" is not the axis that matters when
+   * the question is whether the key is gone.
+   *
+   * THE OTHER DIRECTION STAYS INDEPENDENT: deleting the fallback leaves the primary alone. The
+   * asymmetry is the point rather than an inconsistency — a fallback depends on a primary for
+   * its meaning, and not the reverse.
+   */
   async deleteServer(user: RequestUser): Promise<void> {
-    // #1052: role-scoped. Without the filter this would delete the fallback slot too — a
-    // "remove the server provider" click silently wiping the operator's configured backup,
-    // including its stored credential, is not what that button says it does.
-    await this.db
-      .delete(aiProviderConfigs)
-      .where(and(eq(aiProviderConfigs.scope, 'server'), eq(aiProviderConfigs.role, 'primary')));
+    await this.db.delete(aiProviderConfigs).where(eq(aiProviderConfigs.scope, 'server'));
     await this.audit.log({
       actor: auditActor(user),
       actorRole: auditActorRole(user),
       action: 'ai-provider.delete',
       entityType: 'ai-provider',
-      detail: 'server',
+      // Names both roles, so the trail shows the fallback's credential went with it rather than
+      // leaving a reader to infer that from which endpoint was called.
+      detail: 'server (primary + fallback)',
     });
   }
 
+  /** Delete a campaign's provider override — BOTH ROLES, for the reasons on {@link deleteServer}. */
   async deleteCampaign(campaignId: number, user: RequestUser): Promise<void> {
-    // #1052: role-scoped, for the same reason as deleteServer above.
     await this.db
       .delete(aiProviderConfigs)
-      .where(
-        and(
-          eq(aiProviderConfigs.scope, 'campaign'),
-          eq(aiProviderConfigs.campaignId, campaignId),
-          eq(aiProviderConfigs.role, 'primary'),
-        ),
-      );
+      .where(and(eq(aiProviderConfigs.scope, 'campaign'), eq(aiProviderConfigs.campaignId, campaignId)));
     await this.audit.log({
       actor: auditActor(user),
       actorRole: auditActorRole(user),
       action: 'ai-provider.delete',
       entityType: 'ai-provider',
       campaignId,
-      detail: 'campaign',
+      detail: 'campaign (primary + fallback)',
     });
   }
 

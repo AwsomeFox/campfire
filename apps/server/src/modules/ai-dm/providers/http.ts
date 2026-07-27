@@ -259,9 +259,41 @@ export function streamAbortError(signal: AbortSignal | undefined, provider: stri
 }
 
 /**
+ * Classify a REJECTION OF THE STREAM READ ITSELF (#1052 review).
+ *
+ * When a response body's connection resets, `reader.read()` rejects with a NATIVE error —
+ * `TypeError: terminated` under undici, an `ECONNRESET`-bearing error elsewhere. Those used to
+ * be forwarded unchanged, so nothing downstream could recognise them: `streamStep` re-throws
+ * any non-`AiProviderError`, the driver wrapped it as `unknown`, and `unknown` is `give_up` in
+ * `ERROR_KIND_RETRY`. So a body that died AFTER the headers but BEFORE the first SSE frame —
+ * the most representative instance of the failure step-level retry exists for, and provably
+ * safe to retry because no narration can have been broadcast yet — got neither the primary
+ * retry nor the configured fallback. The feature worked for every failure except its own
+ * canonical one.
+ *
+ * WHERE THE BOUNDARY IS DRAWN, AND WHY IT IS EXACTLY HERE. The only thing classified is the
+ * promise {@link raceRead} was handed, and its sole call site hands it `reader.read()` — a raw
+ * socket read that resolves to bytes. `parseSse`'s decoding and frame parsing run AFTER that
+ * await, in the loop body, so they cannot reach this function: a `TextDecoder` failure or a bug
+ * in the field parser still escapes as a native error, still wraps as `unknown`, and still
+ * refuses to retry. That is deliberate, and it is the whole reason the fix sits here rather
+ * than around the loop. "Re-issue the request because the socket died" is resilience;
+ * "re-issue the request because our own parser threw" would re-send a prompt on the table's
+ * budget to obtain the identical bytes and the identical crash.
+ *
+ * An `AiProviderError` passes through untouched, so a caller that already classified something
+ * keeps its answer — the same precedence rule as {@link streamAbortError} above.
+ */
+export function streamReadError(cause: unknown, provider: string): AiProviderError {
+  if (cause instanceof AiProviderError) return cause;
+  return new AiProviderError('transport', `${provider}: stream connection failed`, { provider, cause });
+}
+
+/**
  * Race a promise against an AbortSignal and an optional idle timer. The idle timer is
  * armed for each call (so callers reset it per chunk). Rejects with `AiProviderError`
- * (`timeout`) when the idle deadline elapses or the signal aborts.
+ * (`timeout`) when the idle deadline elapses or the signal aborts, and with
+ * {@link streamReadError} (`transport`) when the read itself fails.
  *
  * TWO TIMEOUTS, DELIBERATELY CLASSIFIED DIFFERENTLY (#1052):
  *  - THIS function's own `idleTimeoutMs` firing is a transport fault — the provider went quiet.
@@ -287,7 +319,14 @@ export function raceRead<T>(
     onIdle();
     return Promise.reject(streamAbortError(signal, provider));
   }
-  if (idleTimeoutMs <= 0 && !signal) return read;
+  // #1052 review — this shortcut must classify too. It used to hand the caller the RAW read
+  // promise, so with no idle deadline and no signal a reset socket escaped unclassified through
+  // the one path that skips the race below. Same failure, second door.
+  if (idleTimeoutMs <= 0 && !signal) {
+    return read.catch((err: unknown) => {
+      throw streamReadError(err, provider);
+    });
+  }
 
   return new Promise<T>((resolve, reject) => {
     let settled = false;
@@ -324,7 +363,10 @@ export function raceRead<T>(
 
     read.then(
       (value) => finish(() => resolve(value)),
-      (err) => finish(() => reject(err)),
+      // #1052 review — classify rather than forward. A native rejection here is the socket
+      // dying under the read; see {@link streamReadError} for why the boundary is this promise
+      // and not `parseSse`'s loop body.
+      (err: unknown) => finish(() => reject(streamReadError(err, provider))),
     );
   });
 }

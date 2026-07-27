@@ -19,8 +19,9 @@ import {
  *
  *   - configuring a fallback must not disturb the primary (they are separate rows, and the
  *     pre-#1052 partial uniques allowed only one row per scope);
- *   - deleting the primary must not delete the fallback, and vice versa — those deletes were
- *     scope-only predicates before this change and would have taken both;
+ *   - deleting the primary takes the fallback WITH it, so no stored credential outlives the
+ *     action an admin performs to destroy it — while deleting the fallback leaves the primary
+ *     alone, because the dependency runs one way (#1052 review);
  *   - a fallback carries its OWN key and endpoint, because #373's invariant is that whoever
  *     owns the key owns the destination;
  *   - the admin model allowlist applies to the fallback, so "configure a fallback" is not a
@@ -110,7 +111,20 @@ describe('AI provider fallback slot (#1052)', () => {
     expect(res.body.keyLast4).toBe('9999');
   });
 
-  it('deleting the PRIMARY leaves the fallback in place (and vice versa)', async () => {
+  /**
+   * #1052 review — DELETING A PROVIDER DESTROYS ITS FALLBACK'S CREDENTIAL TOO.
+   *
+   * This asserted the OPPOSITE first ("deleting the PRIMARY leaves the fallback in place"), on
+   * the reasoning that a delete should not silently wipe a configured backup. Reversed
+   * deliberately: the CONTRACT changed, not just the assertion.
+   *
+   * A fallback with no primary is not a backup — resolution reads the primary first and gives up
+   * when there is none, so the survivor serves no turn and answers no health probe. It preserves
+   * no capability. What it does preserve is a stored, encrypted API key that outlived the one
+   * action an admin takes in order to destroy it: invisibly, since this release ships no fallback
+   * UI, and re-armed the moment anyone re-creates a primary.
+   */
+  it('deleting the PRIMARY also deletes the fallback, so no credential outlives the delete', async () => {
     await request(server)
       .put('/api/v1/settings/ai-provider')
       .set(admin)
@@ -120,17 +134,34 @@ describe('AI provider fallback slot (#1052)', () => {
       .set(admin)
       .send({ providerType: 'openai', model: 'fallback-model', apiKey: 'sk-fallback-0002' });
 
-    // Both deletes were scope-only predicates before #1052 — this would have wiped the
-    // operator's configured backup, key and all, from a button that says "delete the provider".
     await request(server).delete('/api/v1/settings/ai-provider').set(admin).expect(204);
-    const remaining = rows().filter((r) => r.scope === 'server');
-    expect(remaining).toHaveLength(1);
-    expect(remaining[0].role).toBe('fallback');
-    const survivor = await request(server).get('/api/v1/settings/ai-provider/fallback').set(admin);
-    expect(survivor.body.model).toBe('fallback-model');
+
+    // No row of either role survives, and with it no stored key. Asserted on the DURABLE rows
+    // rather than only through the GET: a read that merely stopped reporting the fallback would
+    // leave the ciphertext in the database for a backup or an export to carry off later.
+    expect(rows().filter((r) => r.scope === 'server')).toHaveLength(0);
+    expect(rows().some((r) => r.encryptedApiKey)).toBe(false);
+  });
+
+  it('deleting the FALLBACK leaves the primary alone — the dependency runs one way', async () => {
+    // The asymmetry is the point. A fallback depends on a primary for its meaning; a primary
+    // does not depend on a fallback, so removing the backup must never disarm the table.
+    await request(server)
+      .put('/api/v1/settings/ai-provider')
+      .set(admin)
+      .send({ providerType: 'openai', model: 'primary-model', apiKey: 'sk-primary-0001' });
+    await request(server)
+      .put('/api/v1/settings/ai-provider/fallback')
+      .set(admin)
+      .send({ providerType: 'openai', model: 'fallback-model', apiKey: 'sk-fallback-0002' });
 
     await request(server).delete('/api/v1/settings/ai-provider/fallback').set(admin).expect(204);
-    expect(rows().filter((r) => r.scope === 'server')).toHaveLength(0);
+
+    const remaining = rows().filter((r) => r.scope === 'server');
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0].role).toBe('primary');
+    const survivor = await request(server).get('/api/v1/settings/ai-provider').set(admin);
+    expect(survivor.body.model).toBe('primary-model');
   });
 
   it('enforces the admin model allowlist on the fallback', async () => {
