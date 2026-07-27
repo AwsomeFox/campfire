@@ -214,6 +214,9 @@ test.describe('print layouts (#667)', () => {
       const { campaignId, navigation } = seed();
       await page.goto(`/c/${campaignId}/encounters/${navigation.encounterId}`);
       await expect(page.getByRole('button', { name: 'Print / Save PDF' })).toHaveCount(0);
+      await page.emulateMedia({ media: 'print' });
+      await expect(page.locator('.cf-print-roster')).toHaveCount(0);
+      await expect(page.getByRole('region', { name: 'Encounter reference sheet' })).toHaveCount(0);
     } finally {
       await context.close();
     }
