@@ -342,6 +342,8 @@ describe('Issue #600: session-zero consent lifecycle (e2e)', () => {
       const status = await consentStatus(dm);
       // UI gate correctly shows the newcomer as outstanding against latest.
       expect(status.outstanding.some((o: { userId: string }) => o.userId === String(newbie.id))).toBe(true);
+      // Same sticky version the AI is bound to — not null while play continues under v3.
+      expect(status.effectiveVersion?.version).toBe(3);
 
       const charter = await ctx.app.get(McpToolsService).effectiveSessionZero(campaignId);
       expect(charter.charterSource).toBe('accepted');

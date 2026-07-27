@@ -37,6 +37,7 @@ import {
   isMaterialCharterChange,
   outstandingAcknowledgers,
   resolveEffectiveVersion,
+  type AckLookup,
   type CharterFields,
 } from './charter-versions';
 
@@ -216,6 +217,26 @@ export class SessionZeroConsentService {
       .map((r) => ({ userId: String(r.userId), userName: r.displayName || r.username || '' }));
   }
 
+  /**
+   * The version the AI is bound by and what "play" is licensed against: strict all-members
+   * resolution first, then the sticky fallback when a newcomer has not yet answered but the
+   * rest of the table already licensed a version.
+   */
+  private resolveBoundVersion(
+    versions: SessionZeroCharterVersion[],
+    requiredIds: string[],
+    acksFor: AckLookup,
+  ): SessionZeroCharterVersion | null {
+    const strict = resolveEffectiveVersion(versions, requiredIds, acksFor);
+    if (strict) return strict;
+
+    const participantsWithAcks = requiredIds.filter((userId) =>
+      versions.some((v) => acksFor(v.id).has(userId)),
+    );
+    if (participantsWithAcks.length === 0) return null;
+    return resolveEffectiveVersion(versions, participantsWithAcks, acksFor);
+  }
+
   /** Acknowledgment states for a set of versions, as the pure resolver wants them. */
   private async ackTable(versionIds: number[]): Promise<Map<number, Map<string, CharterAcknowledgmentState>>> {
     const out = new Map<number, Map<string, CharterAcknowledgmentState>>();
@@ -254,7 +275,7 @@ export class SessionZeroConsentService {
     const acksFor = (versionId: number) => table.get(versionId) ?? new Map<string, CharterAcknowledgmentState>();
 
     const latest = versions[0]; // listVersions is newest-first
-    const effective = resolveEffectiveVersion(
+    const effective = this.resolveBoundVersion(
       versions,
       required.map((r) => r.userId),
       acksFor,
@@ -332,22 +353,9 @@ export class SessionZeroConsentService {
     const acksFor = (versionId: number) => table.get(versionId) ?? new Map<string, CharterAcknowledgmentState>();
     const requiredIds = required.map((r) => r.userId);
 
-    const effective = resolveEffectiveVersion(versions, requiredIds, acksFor);
+    const effective = this.resolveBoundVersion(versions, requiredIds, acksFor);
     if (effective) {
       return { status: 'accepted', charter: { ...charterOf(effective), version: effective.version } };
-    }
-
-    // Full required set did not clear a gate. Prefer the last version still agreed by
-    // everyone who has already answered — newcomers with zero acknowledgments must not
-    // collapse a consented table onto the mutable draft.
-    const participantsWithAcks = requiredIds.filter((userId) =>
-      versions.some((v) => acksFor(v.id).has(userId)),
-    );
-    if (participantsWithAcks.length > 0) {
-      const sticky = resolveEffectiveVersion(versions, participantsWithAcks, acksFor);
-      if (sticky) {
-        return { status: 'accepted', charter: { ...charterOf(sticky), version: sticky.version } };
-      }
     }
 
     return { status: 'unbound' };

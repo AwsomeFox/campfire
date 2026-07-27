@@ -24,6 +24,8 @@ import {
  * GET /invites/:code is an unauthenticated code oracle (rate-limit brute-force
  * code guessing) and POST /invites/:code/accept additionally runs a full scrypt
  * password hash per request — the exact DoS shape the auth throttle exists for.
+ * POST /invites/:code/decline is authenticated but still resolves codes through the
+ * same oracle, so it gets the same cap.
  */
 const INVITE_THROTTLE = Throttle({ [THROTTLE_AUTH]: { limit: AUTH_THROTTLE_LIMIT, ttl: AUTH_THROTTLE_TTL_MS } });
 
@@ -163,6 +165,7 @@ export class JoinController {
     return this.invites.join(code, user, body.acknowledgeVersion);
   }
 
+  @INVITE_THROTTLE
   @Post(':code/decline')
   @ApiOperation({
     summary: 'Decline an invite, on the record',
