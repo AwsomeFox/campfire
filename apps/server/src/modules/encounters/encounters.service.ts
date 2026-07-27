@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, ForbiddenException, Inject, Inj
 import { and, eq, gt, inArray, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
-import { ActiveEffect, AoeTemplate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_DAMAGE_TYPES, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, defaultCombatantStatblock, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
+import { ActiveEffect, AoeTemplate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
 import { z as zod } from 'zod';
 import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -681,34 +681,11 @@ export class EncountersService {
   }
 
   /** Statblock-derived damage defences for direct tracker damage (issue #605). */
-  private targetDamageDefenses(row: typeof combatants.$inferSelect): TargetDefenses {
+  private targetDamageDefenses(row: typeof combatants.$inferSelect, damageTypes: readonly string[]): TargetDefenses {
     if (row.ruleEntryId === null) return { resistances: [], vulnerabilities: [], immunities: [] };
     const entry = this.db.select({ dataJson: ruleEntries.dataJson }).from(ruleEntries).where(eq(ruleEntries.id, row.ruleEntryId)).get();
     const data = entry ? fromJsonText<Record<string, unknown>>(entry.dataJson, {}) : {};
-    const readList = (...keys: string[]): string[] => {
-      const normalized: string[] = [];
-      for (const key of keys) {
-        const value = data[key];
-        const values = Array.isArray(value) ? value.map(String) : typeof value === 'string' ? [value] : [];
-        for (const raw of values) {
-          // Only accept standalone canonical types or a simple comma-separated list.
-          // Qualified prose (for example, "slashing from nonmagical attacks") needs
-          // source tags that direct tracker damage does not carry yet, so treating it
-          // as unconditional would silently apply the wrong resistance.
-          const types = raw.split(',').map((item) => item.trim().toLowerCase());
-          if (types.length > 0 && types.every((type) => (DND5E_DAMAGE_TYPES as readonly string[]).includes(type))) {
-            normalized.push(...types);
-          }
-        }
-        if (normalized.length > 0) return [...new Set(normalized)];
-      }
-      return [];
-    };
-    return {
-      resistances: readList('damage_resistances', 'damageResistances', 'resistances'),
-      vulnerabilities: readList('damage_vulnerabilities', 'damageVulnerabilities', 'vulnerabilities'),
-      immunities: readList('damage_immunities', 'damageImmunities', 'immunities'),
-    };
+    return damageDefensesFromStatblock(data, damageTypes);
   }
 
   /** Batch-load compendium statblocks for boss-action detection (issue #618). */
@@ -3362,7 +3339,7 @@ export class EncountersService {
               damageType ?? '',
               // Untyped damage cannot use a defence, so avoid an unnecessary statblock
               // lookup for the tracker’s frequent raw HP adjustments.
-              damageType ? this.targetDamageDefenses(fresh) : { resistances: [], vulnerabilities: [], immunities: [] },
+              damageType ? this.targetDamageDefenses(fresh, adapter.damageTypes ?? []) : { resistances: [], vulnerabilities: [], immunities: [] },
               { half: patch.saveOutcome === 'half' },
             );
             if (damageMetadataTouched) {

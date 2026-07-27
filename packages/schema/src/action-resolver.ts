@@ -238,6 +238,33 @@ export type TargetDefenses = z.infer<typeof TargetDefenses>;
 
 export const EMPTY_DEFENSES: TargetDefenses = { resistances: [], vulnerabilities: [], immunities: [] };
 
+/**
+ * Read statblock damage defences through the aliases used by importers and hand-entered
+ * entries. When a vocabulary is supplied, retain only standalone canonical types or an
+ * entirely simple comma-separated canonical list; qualified prose needs source metadata.
+ */
+export function damageDefensesFromStatblock(data: Record<string, unknown> | null | undefined, vocabulary?: readonly string[]): TargetDefenses {
+  const readList = (...keys: string[]): string[] => {
+    if (!data) return [];
+    const canonical = vocabulary?.map((type) => type.toLowerCase());
+    for (const key of keys) {
+      const value = data[key];
+      const values = Array.isArray(value) ? value.map(String) : typeof value === 'string' ? [value] : [];
+      const entries = values.flatMap((raw) => raw.split(',').map((item) => item.trim()).filter(Boolean));
+      if (entries.length === 0) continue;
+      if (!canonical) return entries;
+      const normalized = entries.map((entry) => entry.toLowerCase());
+      if (normalized.every((entry) => canonical.includes(entry))) return [...new Set(normalized)];
+    }
+    return [];
+  };
+  return {
+    resistances: readList('damage_resistances', 'damageResistances', 'resistances'),
+    vulnerabilities: readList('damage_vulnerabilities', 'damageVulnerabilities', 'vulnerabilities'),
+    immunities: readList('damage_immunities', 'damageImmunities', 'immunities'),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Resolution result types (shared by API + MCP + web). Player-safe vs DM-only
 // text is separated so the monster-HP redaction (issue #43) is preserved.

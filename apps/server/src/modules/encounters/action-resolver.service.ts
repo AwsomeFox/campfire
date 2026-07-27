@@ -17,6 +17,7 @@ import {
   Role,
   UsableAction,
   applyDamageModifiers,
+  damageDefensesFromStatblock,
   classifyAttackOutcome,
   classifySaveOutcome,
   combatantActionsFromStatblock,
@@ -185,20 +186,7 @@ export class ActionResolverService {
   /** Damage-type defences for a target from its statblock/sheet (best-effort; empty when none). */
   private targetDefenses(row: typeof combatants.$inferSelect): TargetDefenses {
     const data = this.statblockData(row);
-    const readList = (...keys: string[]): string[] => {
-      if (!data) return [];
-      for (const k of keys) {
-        const v = data[k];
-        if (Array.isArray(v)) return v.map((x) => String(x)).filter(Boolean);
-        if (typeof v === 'string' && v.trim() !== '') return v.split(/[,;]/).map((s) => s.trim()).filter(Boolean);
-      }
-      return [];
-    };
-    return {
-      resistances: readList('damage_resistances', 'damageResistances', 'resistances'),
-      vulnerabilities: readList('damage_vulnerabilities', 'damageVulnerabilities', 'vulnerabilities'),
-      immunities: readList('damage_immunities', 'damageImmunities', 'immunities'),
-    };
+    return damageDefensesFromStatblock(data);
   }
 
   /** A target's saving-throw modifier for one ability (character: mod + prof; monster: statblock mod). */
