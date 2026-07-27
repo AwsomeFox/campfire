@@ -1,0 +1,13 @@
+{
+  "tracked": [
+    {
+      "pr": 1562,
+      "status": "babysitting",
+      "url": "https://github.com/AwsomeFox/campfire/pull/1562",
+      "headBranch": "fix/issue-600",
+      "baseBranch": "main",
+      "updatedAt": "2026-07-27T18:35:00Z",
+      "notes": "Head b0b269b6. No conflicts. Open kilo/Devin threads addressed by head and resolved. Waiting on required CI (lint/coverage/build/build-test/e2e)."
+    }
+  ]
+}
