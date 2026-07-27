@@ -89,6 +89,7 @@ import {
 import { isDown } from './encounterEndedSummary';
 import { EncounterAftermathPanel } from './EncounterAftermathPanel';
 import { TurnWorkspace } from './TurnWorkspace';
+import { appendConcentrationCheck, dequeueConcentrationCheck, type ConcentrationCheckPrompt } from './concentrationCheckQueue';
 import { initials as tokenInitials } from '../../lib/avatarText';
 import { useAuth } from '../../app/auth';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
@@ -965,12 +966,7 @@ export default function RunSessionPage() {
     /** Combatant whose card rolled the damage — attributed as the combat-log actor when set. */
     actorCombatantId?: number;
   } | null>(null);
-  const [pendingConcentrationChecks, setPendingConcentrationChecks] = useState<Array<{
-    combatantId: number;
-    name: string;
-    damage: number;
-    dc: number;
-  }>>([]);
+  const [pendingConcentrationChecks, setPendingConcentrationChecks] = useState<ConcentrationCheckPrompt[]>([]);
   /** Live map layout from BattleMap for AoE hit-testing (issue #626). */
   const [aoeHitLayout, setAoeHitLayout] = useState<AoeHitLayout | null>(null);
   // Issue #414: structured action Use flow — pick targets, preview, apply, undo.
@@ -1503,7 +1499,7 @@ export default function RunSessionPage() {
       const name = queryClient
         .getQueryData<EncounterWithCombatants>(queryKeys.encounter(eid))
         ?.combatants.find((combatant) => combatant.id === variables.combatantId)?.name ?? 'Combatant';
-      setPendingConcentrationChecks((pending) => [...pending, { combatantId: variables.combatantId, name, ...check }]);
+      setPendingConcentrationChecks((pending) => appendConcentrationCheck(pending, { combatantId: variables.combatantId, name, ...check }));
     },
     onSettled: () => {
       // Only reconcile after the last in-flight HP write of a burst settles.
@@ -1551,7 +1547,7 @@ export default function RunSessionPage() {
           );
           if (response.data.concentrationCheck) {
             const name = previous?.combatants.find((combatant) => combatant.id === combatantId)?.name ?? 'Combatant';
-            setPendingConcentrationChecks((pending) => [...pending, { combatantId, name, ...response.data.concentrationCheck! }]);
+            setPendingConcentrationChecks((pending) => appendConcentrationCheck(pending, { combatantId, name, ...response.data.concentrationCheck! }));
           }
         }
         await invalidateEncounter(queryClient, eid);
@@ -2429,7 +2425,7 @@ export default function RunSessionPage() {
             Concentration check: DC {pendingConcentrationChecks[0].dc} ({pendingConcentrationChecks[0].damage} damage).
           </p>
           <div className="flex gap-2">
-            <button type="button" className="btn btn-ghost" disabled={combatantTurnState.isPending} onClick={() => setPendingConcentrationChecks((pending) => pending.slice(1))}>
+            <button type="button" className="btn btn-ghost" disabled={combatantTurnState.isPending} onClick={() => setPendingConcentrationChecks(dequeueConcentrationCheck)}>
               Passed
             </button>
             <button
@@ -2440,7 +2436,7 @@ export default function RunSessionPage() {
                 const check = pendingConcentrationChecks[0];
                 void combatantTurnState
                   .mutateAsync({ combatantId: check.combatantId, patch: { concentration: null } })
-                  .then(() => setPendingConcentrationChecks((pending) => pending.slice(1)))
+                  .then(() => setPendingConcentrationChecks(dequeueConcentrationCheck))
                   .catch(() => undefined);
               }}
             >

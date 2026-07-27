@@ -491,4 +491,14 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
     const [target] = orm.select().from(combatants).where(eq(combatants.id, c2)).all();
     expect(target.conditionInstances).toBe('[]');
   });
+
+  it('does not apply 5e concentration checks in a non-5e campaign (issue #606)', async () => {
+    dataDir = makeTempDataDir();
+    const { orm, service } = build();
+    const { encounterId, c1, c2 } = seed(orm);
+    const encounter = orm.select().from(encounters).where(eq(encounters.id, encounterId)).get()!;
+    orm.update(campaigns).set({ ruleSystem: 'pf2e' }).where(eq(campaigns.id, encounter.campaignId)).run();
+    orm.update(combatants).set({ conditionInstances: JSON.stringify([{ id: 'focus', name: 'Focus', isConcentration: true, sourceCombatantId: c1 }]) }).where(eq(combatants.id, c2)).run();
+    expect((await service.updateCombatant(encounterId, c1, { hpDelta: -8 }, dmUser, 'dm')).concentrationCheck).toBeNull();
+  });
 });
