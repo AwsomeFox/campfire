@@ -5720,6 +5720,48 @@ export const AI_DM_TRANSCRIPT_CLIENT_REF_MAX = 64;
  */
 export const AI_DM_TRANSCRIPT_RETENTION_MAX_EVENTS = 2_000;
 
+/**
+ * CONVERSATION MEMORY (#1038). The driver built a fresh one-message array per turn, so the
+ * model had amnesia between turns even though #572 had already made the table transcript
+ * durable and ordered. These constants bound how much of that transcript is replayed back
+ * into the prompt. There is deliberately NO second turn log: `ai_dm_transcript_events` is
+ * already the per-campaign, densely-sequenced record of what happened, and a `driver_turns`
+ * table beside it would be a second source of truth to keep in sync.
+ *
+ * The budget is EXPLICIT CONSTANTS rather than a fraction of the model's context window on
+ * purpose. Every token here is paid on every turn AND on every retry/fallback attempt
+ * (#1052), so "remember more" has to be a legible, reviewable cost rather than something
+ * that scales silently with whichever model a campaign is pointed at.
+ *
+ * Two tiers, because recency is worth more than completeness:
+ *  - the newest {@link AI_DM_PROMPT_HISTORY_MAX_MESSAGES} events replay VERBATIM as real
+ *    conversation turns, so the model sees exact prior wording;
+ *  - older events that still fit are COMPACTED to one line each in the `## Recent history`
+ *    system-prompt section — the gist survives, the token cost collapses.
+ */
+export const AI_DM_PROMPT_HISTORY_MAX_MESSAGES = 20;
+
+/**
+ * How many older events may be compacted into the `## Recent history` digest, beyond the
+ * verbatim window. Bounded separately so a long session cannot grow the system prompt
+ * without limit — past this, history is genuinely out of the model's view.
+ */
+export const AI_DM_PROMPT_HISTORY_MAX_DIGEST = 40;
+
+/**
+ * Token ceiling for everything #1038 adds to a turn (verbatim replay + digest), measured
+ * with the repo's existing ~4-chars-per-token estimator. Whichever limit binds first — this
+ * or the event counts above — wins, so a table of very long posts degrades by dropping the
+ * OLDEST context rather than by silently inflating the prompt.
+ */
+export const AI_DM_PROMPT_HISTORY_MAX_TOKENS = 1_500;
+
+/** Longest single history entry replayed verbatim; longer ones are truncated with an ellipsis. */
+export const AI_DM_PROMPT_HISTORY_ENTRY_MAX_CHARS = 1_200;
+
+/** Longest single line in the compacted `## Recent history` digest. */
+export const AI_DM_PROMPT_HISTORY_DIGEST_LINE_MAX_CHARS = 200;
+
 export const AiDmTranscriptEvent = z.object({
   /** Stable, client-visible event identity (unique per campaign) — the idempotent merge key. */
   eventId: z.string(),

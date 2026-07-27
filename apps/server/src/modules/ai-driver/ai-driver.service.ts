@@ -17,7 +17,12 @@ import { EncountersService } from '../encounters/encounters.service';
 import { MembersService } from '../membership/members.service';
 import { CharactersService } from '../characters/characters.service';
 import type { AiDmSeat, NarrationLanguage, Role, RuleEntry, RulePack } from '@campfire/schema';
-import { buildNarrationLanguageContract, resolveNarrationLanguage } from '@campfire/schema';
+import {
+  AI_DM_PROMPT_HISTORY_MAX_DIGEST,
+  AI_DM_PROMPT_HISTORY_MAX_MESSAGES,
+  buildNarrationLanguageContract,
+  resolveNarrationLanguage,
+} from '@campfire/schema';
 import type {
   AiProvider,
   AiMessage,
@@ -30,6 +35,11 @@ import { AiProviderError } from '../ai-dm/providers/errors';
 import { DEFAULT_IDLE_TIMEOUT_MS } from '../ai-dm/providers/http';
 import { AI_PROVIDER_RESOLVER, resolveProviderForExecution, type AiProviderResolver } from './ai-provider-resolver';
 import { AiDmStreamService } from './ai-driver-stream.service';
+import {
+  buildPromptHistory,
+  EMPTY_PROMPT_HISTORY,
+  renderRecentHistorySection,
+} from './driver-history';
 import { AiDmTranscriptService } from './ai-driver-transcript.service';
 import { extractToolResourceIdentity, type ToolResourceIdentity } from './ai-dm-tool-resource';
 import {
@@ -268,6 +278,17 @@ export interface AiDmSessionState {
   /** The last player who asked for a human takeover (advisory), or null (#314). */
   takeoverRequestedBy: string | null;
   /**
+   * How many transcript events the next turn could draw conversation memory from (#1038).
+   *
+   * DERIVED, never stored: it is a count over the transcript, refreshed on every session read
+   * ({@link AiDriverService.getSession}) rather than tracked as state, because a cached copy
+   * would drift the moment a turn, a DM purge, or retention pruning changed the underlying
+   * rows. It counts the PROMPT projection specifically — narrative events the model may
+   * actually be told about — so it answers "how much does the AI remember", not "how many
+   * rows exist".
+   */
+  historyLength?: number;
+  /**
    * Active narrowly-scoped approvals letting the seat read ONE secret entity under the DM
    * principal (issue #557). Keyed `${tool}:${entityId}`; each entry is single-use (consumed
    * the first time the matching read runs) so a grant for get_npc:42 can't be replayed to
@@ -371,6 +392,14 @@ export interface RunTurnOptions {
    * attack" in the same round must still produce two transcript lines.
    */
   clientRef?: string;
+  /**
+   * `seq` of this turn's own `player.action` transcript row (#1038), set by the code that
+   * recorded it. The history replay excludes everything from this row onward so the action
+   * being answered is not also replayed as history. A QUEUED action is recorded when it is
+   * accepted and only answered later, so its seq has to travel with it — by then it is no
+   * longer the newest row and cannot be identified by position.
+   */
+  actionSeq?: number;
   /** Display name for the transcript's player-action line (falls back to the user's name). */
   actorName?: string;
   /** Character the action was spoken as, recorded on the transcript line for attribution. */
@@ -1146,7 +1175,17 @@ export class AiDriverService {
   }
 
   getSession(campaignId: number): AiDmSessionState {
-    return this.ensureSession(campaignId);
+    const session = this.ensureSession(campaignId);
+    // #1038: refresh the derived memory depth on every read. Cheap (one indexed COUNT) and
+    // always current — the alternative, tracking it as state, would go stale on a DM purge or
+    // on retention pruning, and a stale "the AI remembers 40 turns" is worse than no number.
+    // Best-effort: a failed count must not break the session read that the whole table polls.
+    try {
+      session.historyLength = this.transcript.promptHistoryDepth(campaignId);
+    } catch {
+      session.historyLength = session.historyLength ?? 0;
+    }
+    return session;
   }
 
   private loadPersistedControlState(campaignId: number): HydratedControlState {
@@ -1464,17 +1503,21 @@ export class AiDriverService {
     triggeredBy: RequestUser,
     input: string,
     opts: RunTurnOptions,
-  ): void {
+  ): number | null {
     // A proactive turn has no player behind it — the AI acted on its own (#1044). Recording
     // one would attribute the system's prompt to a human at the table.
-    if (opts.proactive) return;
+    if (opts.proactive) return null;
     // A retry / dispute REPLAYS an action that is already in the transcript; it is not a new
     // one. Recording it again would both duplicate the line and — because `input` on these
     // paths is the model prompt, not what anyone typed — publish the speaker prefix and the
     // injected dispute framing to every player at the table. The lever writes its own
     // `control` event carrying only the player-authored text.
-    if (opts.lever) return;
-    this.transcript.record({
+    if (opts.lever) return null;
+    // #1038: the returned `seq` is how the turn excludes its OWN action from the history it
+    // replays. #572 persists an accepted action BEFORE the AI answers it, so by prompt-assembly
+    // time the live message is already the newest row — without this the model would receive
+    // the same action twice, once as history and once as the thing to answer.
+    return this.transcript.record({
       campaignId,
       kind: 'player.action',
       actorUserId: triggeredBy.id,
@@ -1485,7 +1528,7 @@ export class AiDriverService {
         ...(opts.characterName ? { characterName: opts.characterName } : {}),
         ...(opts.characterId !== undefined ? { characterId: opts.characterId } : {}),
       },
-    });
+    })?.seq ?? null;
   }
 
   /** Persist + broadcast one aggregated narration step (never a raw token delta). */
@@ -1772,9 +1815,12 @@ export class AiDriverService {
       // The action IS accepted — it just runs later. Broadcast it NOW so the whole table
       // sees who queued what while the current turn is still narrating (#572). Recording it
       // only when it dequeues would recreate the original bug for queued actions.
-      this.recordPlayerAction(campaignId, triggeredBy, input, opts);
+      const queuedActionSeq = this.recordPlayerAction(campaignId, triggeredBy, input, opts);
       return new Promise((resolve, reject) => {
-        queue.push({ input, characterId: opts.characterId, user: triggeredBy, opts, resolve, reject, queuedAt: Date.now() });
+        // Carry the seq forward: when this entry is finally dequeued the row is buried under
+        // the narration of the turn that was running, so it can no longer be found by position.
+        const queuedOpts: RunTurnOptions = { ...opts, ...(queuedActionSeq !== null ? { actionSeq: queuedActionSeq } : {}) };
+        queue.push({ input, characterId: opts.characterId, user: triggeredBy, opts: queuedOpts, resolve, reject, queuedAt: Date.now() });
         this.actionQueues.set(campaignId, queue);
       });
     }
@@ -1785,7 +1831,12 @@ export class AiDriverService {
     // #572: the action cleared every gate (flag, seat, budget, pause, human control, queue),
     // so it is now an ACCEPTED table event — persist + broadcast it before the AI answers.
     // A queued action was already recorded above and must not be recorded twice on dequeue.
-    if (!opts.dequeued) this.recordPlayerAction(campaignId, triggeredBy, input, opts);
+    // #1038: `actionSeq` identifies this turn's own action row so the history replay below can
+    // exclude it. A dequeued action was recorded when it was accepted and carries its seq in
+    // `opts`; a lever/proactive turn records nothing now and leaves this null.
+    const actionSeq = opts.dequeued
+      ? (opts.actionSeq ?? null)
+      : this.recordPlayerAction(campaignId, triggeredBy, input, opts);
 
     // Remember the input so the retry / nudge / flag levers can replay this turn (#314).
     this.lastInputs.set(campaignId, input);
@@ -1840,7 +1891,36 @@ export class AiDriverService {
     // #577 — one ledger per turn. Seeded by the system-prompt context reads below, extended by
     // every executed tool call, and consulted (never written) by the grounding verdict.
     const ledger = new RetrievalLedger();
-    const system = await this.assembleSystemPrompt(campaignId, seat, opts.narrationLanguage, ledger);
+
+    /**
+     * #1038 — conversation memory. Read the narrative slice of #572's durable transcript and
+     * split it into a verbatim replay (prepended to `messages` below) and a compacted digest
+     * (a `## Recent history` system-prompt section). Read here, before the system prompt is
+     * assembled, because the digest is part of that prompt.
+     *
+     * Best-effort like every other context read on this path: if the transcript read fails the
+     * turn still runs, it just runs without memory — degrading to the pre-#1038 behaviour
+     * rather than dropping the player's action on the floor.
+     */
+    let promptHistory = EMPTY_PROMPT_HISTORY;
+    try {
+      const historyEvents = this.transcript.listForPrompt(campaignId, {
+        // Read enough rows to fill BOTH tiers; the builder decides what survives the budget.
+        limit: AI_DM_PROMPT_HISTORY_MAX_MESSAGES + AI_DM_PROMPT_HISTORY_MAX_DIGEST,
+        ...(actionSeq !== null ? { beforeSeq: actionSeq } : {}),
+      });
+      promptHistory = buildPromptHistory(historyEvents, wrapUntrustedPlayerInput);
+    } catch (err) {
+      this.logger.warn(`Prompt history unavailable for campaign ${campaignId}: ${String(err)}`);
+    }
+
+    const system = await this.assembleSystemPrompt(
+      campaignId,
+      seat,
+      opts.narrationLanguage,
+      ledger,
+      promptHistory.digest,
+    );
 
     let speakerPrefix = '';
     if (opts.characterId) {
@@ -1870,7 +1950,13 @@ export class AiDriverService {
     // Untrusted-input hardening (#317): fence + neutralize the player message so it reads as
     // in-world DATA, not instructions. The system prompt's UNTRUSTED_INPUT_PREAMBLE explains the fence.
     // Skipped for trusted system-generated proactive prompts.
-    const messages: AiMessage[] = [{ role: 'user', content: opts.proactive ? wrappedInput : wrapUntrustedPlayerInput(wrappedInput) }];
+    // #1038: bounded prior conversation FIRST, then the action being answered. Replayed player
+    // text was re-fenced by `buildPromptHistory` through this same wrapper — history that
+    // skipped the fence would turn every past message into a standing injection channel.
+    const messages: AiMessage[] = [
+      ...promptHistory.messages,
+      { role: 'user', content: opts.proactive ? wrappedInput : wrapUntrustedPlayerInput(wrappedInput) },
+    ];
 
     // status is already 'running' (reserved synchronously above, #381).
     if (opts.scene !== undefined) session.scene = opts.scene;
@@ -3854,6 +3940,8 @@ export class AiDriverService {
      * and the whole mechanism would cry wolf on every turn.
      */
     ledger?: RetrievalLedger,
+    /** #1038 — compacted older conversation, rendered as `## Recent history`. Null when none. */
+    historyDigest?: string | null,
   ): Promise<string> {
     const parts: string[] = [GROUNDING_PREAMBLE, GROUNDING_CITATION_CONTRACT, UNTRUSTED_INPUT_PREAMBLE];
     if (seat.instructions) parts.push(`## DM steering\n${seat.instructions}`);
@@ -3940,6 +4028,12 @@ export class AiDriverService {
     if (supports.length > 0) {
       parts.push(`## Participant-authorized practical supports\n${JSON.stringify(supports)}`);
     }
+
+    // #1038 — compacted older conversation. Placed AFTER the live world state (which is read
+    // fresh every turn and is authoritative about how things are NOW) and BEFORE the table
+    // corrections below, so the ordering reads as: what is true → what was said → what a human
+    // overruled. History is the weakest of the three and must never outrank a correction.
+    if (historyDigest) parts.push(renderRecentHistorySection(historyDigest, wrapUntrustedPlayerInput));
 
     // #577 — close the human-correction loop. Flagging a claim as unverified is only useful if
     // the model stops repeating it, so a DM's correction is replayed here as table-authoritative
