@@ -2226,7 +2226,11 @@ export const SessionZeroConsentStatus = z.object({
   effectiveVersion: SessionZeroCharterVersion.nullable().default(null),
   /** True when latest !== effective because a material version is awaiting acknowledgment. */
   awaitingRenewal: z.boolean().default(false),
-  /** Members who must still answer the latest version for the gate to clear. */
+  /**
+   * Members who must still answer the latest version for the gate to clear.
+   * Empty when the strict all-members gate is already satisfied — including when a
+   * non-material addition "rode along" and became effective without a fresh answer.
+   */
   outstanding: z
     .array(z.object({ userId: z.string(), userName: z.string().default(''), state: CharterAcknowledgmentState.nullable() }))
     .default([]),

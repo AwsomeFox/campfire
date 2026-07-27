@@ -281,23 +281,26 @@ export class SessionZeroConsentService {
     }
 
     const required = await this.requiredAcknowledgers(campaignId);
+    const requiredIds = required.map((r) => r.userId);
     const table = await this.ackTable(versions.map((v) => v.id));
     const acksFor = (versionId: number) => table.get(versionId) ?? new Map<string, CharterAcknowledgmentState>();
 
     const latest = versions[0]; // listVersions is newest-first
-    const effective = this.resolveBoundVersion(
-      versions,
-      required.map((r) => r.userId),
-      acksFor,
-    );
+    // Strict all-members resolution (no sticky newcomer fallback). A non-material addition
+    // can "ride along" and make this equal `latest` without anyone answering that row —
+    // outstanding must then be empty, or the DM sees phantom "Still to answer" names.
+    const strictEffective = resolveEffectiveVersion(versions, requiredIds, acksFor);
+    const effective = this.resolveBoundVersion(versions, requiredIds, acksFor);
 
     const nameOf = new Map(required.map((r) => [r.userId, r.userName]));
-    const outstandingEntries = outstandingAcknowledgers(
-      latest,
-      required.map((r) => r.userId),
-      versions,
-      acksFor,
-    ).map((entry) => ({ userId: entry.userId, userName: nameOf.get(entry.userId) ?? '', state: entry.state }));
+    const outstandingEntries =
+      strictEffective?.id === latest.id
+        ? []
+        : outstandingAcknowledgers(latest, requiredIds, versions, acksFor).map((entry) => ({
+            userId: entry.userId,
+            userName: nameOf.get(entry.userId) ?? '',
+            state: entry.state,
+          }));
 
     // Caller already resolved membership (requireMember); reuse that role instead of
     // re-querying campaignMembers on every consent status read.
@@ -312,7 +315,29 @@ export class SessionZeroConsentService {
           and(eq(sessionZeroAcknowledgments.versionId, latest.id), eq(sessionZeroAcknowledgments.userId, user.id)),
         )
         .limit(1);
-      if (row) mine = toAck(row, latest.version);
+      if (row) {
+        mine = toAck(row, latest.version);
+      } else if (strictEffective?.id === latest.id) {
+        // Ride-along: the table is already licensed on `latest` without a direct answer.
+        // Surface the acknowledgment that still covers this participant so the panel does
+        // not prompt them to re-agree when nothing is required.
+        const covering = [...versions]
+          .sort((a, b) => b.version - a.version)
+          .find((v) => acksFor(v.id).get(user.id) === 'acknowledged');
+        if (covering) {
+          const [prior] = await this.db
+            .select()
+            .from(sessionZeroAcknowledgments)
+            .where(
+              and(
+                eq(sessionZeroAcknowledgments.versionId, covering.id),
+                eq(sessionZeroAcknowledgments.userId, user.id),
+              ),
+            )
+            .limit(1);
+          if (prior) mine = toAck(prior, covering.version);
+        }
+      }
     }
 
     const awaitingRenewal = effective === null || effective.id !== latest.id;

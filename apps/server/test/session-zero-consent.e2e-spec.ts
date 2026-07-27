@@ -248,17 +248,34 @@ describe('Issue #600: session-zero consent lifecycle (e2e)', () => {
       expect((await consentStatus(dm)).effectiveVersion?.version).toBe(3);
     });
 
+    it('keeps outstanding empty when a non-material addition rides along', async () => {
+      // THE phantom-outstanding case: after the table is fully licensed, a DM-only
+      // protection addition becomes effective without anyone answering that version row.
+      // outstanding must stay empty — otherwise the consent panel lists every member as
+      // "Still to answer" and prompts a re-agree when nothing is required.
+      await setDraft({ lines: [M.line, 'Animal cruelty', 'Extra protection'] });
+      const res = await publish('added a protection');
+      expect(res.status).toBe(201);
+      expect(res.body).toMatchObject({ version: 4, material: false });
+
+      const status = await consentStatus(dm);
+      expect(status.effectiveVersion?.version).toBe(4);
+      expect(status.awaitingRenewal).toBe(false);
+      expect(status.outstanding).toEqual([]);
+      expect(status.mine?.state).toBe('acknowledged');
+    });
+
     it('does not let a cosmetic follow-up publish launder an unacknowledged withdrawal', async () => {
-      await setDraft({ veils: [] }); // withdraw the veil -> material v4
-      const v4 = await publish('withdrew a veil');
-      expect(v4.body).toMatchObject({ version: 4, material: true });
+      await setDraft({ veils: [] }); // withdraw the veil -> material v5
+      const v5 = await publish('withdrew a veil');
+      expect(v5.body).toMatchObject({ version: 5, material: true });
 
-      await setDraft({ toneAndExpectations: `${M.tone} (tidied)` }); // cosmetic v5
-      const v5 = await publish('wording');
-      expect(v5.body).toMatchObject({ version: 5, material: false });
+      await setDraft({ toneAndExpectations: `${M.tone} (tidied)` }); // cosmetic v6
+      const v6 = await publish('wording');
+      expect(v6.body).toMatchObject({ version: 6, material: false });
 
-      // v5's own diff is innocuous, but it still contains v4's withdrawal.
-      expect((await consentStatus(dm)).effectiveVersion?.version).toBe(3);
+      // v6's own diff is innocuous, but it still contains v5's withdrawal.
+      expect((await consentStatus(dm)).effectiveVersion?.version).toBe(4);
     });
   });
 
@@ -276,15 +293,15 @@ describe('Issue #600: session-zero consent lifecycle (e2e)', () => {
       const mcpTools = ctx.app.get(McpToolsService);
       const charter = await mcpTools.effectiveSessionZero(campaignId);
 
-      // The table is on v3: v4 withdrew the veil and v5 is a cosmetic follow-up, and
-      // neither has been acknowledged. So the model must STILL be told about the veil —
-      // the protection has not been consented away yet.
+      // The table is on v4 (ride-along addition): v5 withdrew the veil and v6 is a
+      // cosmetic follow-up, and neither has been acknowledged. So the model must STILL
+      // be told about the veil — the protection has not been consented away yet.
       expect(charter.charterSource).toBe('accepted');
-      expect(charter.charterVersion).toBe(3);
+      expect(charter.charterVersion).toBe(4);
       expect(charter.veils).toContain(M.veil);
 
       // The veil assertion above is precisely the draft-vs-accepted distinction: the
-      // DM's working draft has veils: [] (it was emptied to publish v4), so a model
+      // DM's working draft has veils: [] (it was emptied to publish v5), so a model
       // reading the draft — or reading the newest version — would not be told about the
       // veil at all. Only the accepted version still carries it.
       const draft = await dm.get(`${API}/campaigns/${campaignId}/session-zero`);
@@ -330,9 +347,9 @@ describe('Issue #600: session-zero consent lifecycle (e2e)', () => {
     });
 
     it('keeps the AI on the last agreed charter when a new player is seated without acknowledging', async () => {
-      // Table is on accepted v3 (consent-gate tests above re-acked after the decline).
+      // Table is on accepted v4 (ride-along addition after the decline/re-ack cycle).
       // Seating a brand-new player via POST /members must not collapse the AI onto the
-      // mutable draft (which currently has veils: [] from the v4 publish).
+      // mutable draft (which currently has veils: [] from the v5 publish).
       const newbie = await newUser('sz-newbie', 'newbie-password-1');
       const seat = await dm
         .post(`${API}/campaigns/${campaignId}/members`)
@@ -342,14 +359,14 @@ describe('Issue #600: session-zero consent lifecycle (e2e)', () => {
       const status = await consentStatus(dm);
       // UI gate correctly shows the newcomer as outstanding against latest.
       expect(status.outstanding.some((o: { userId: string }) => o.userId === String(newbie.id))).toBe(true);
-      // Same sticky version the AI is bound to — not null while play continues under v3.
-      expect(status.effectiveVersion?.version).toBe(3);
+      // Same sticky version the AI is bound to — not null while play continues under v4.
+      expect(status.effectiveVersion?.version).toBe(4);
 
       const charter = await ctx.app.get(McpToolsService).effectiveSessionZero(campaignId);
       expect(charter.charterSource).toBe('accepted');
-      // Sticky agreement: still the last version the existing table licensed (v3), which
+      // Sticky agreement: still the last version the existing table licensed (v4), which
       // still carries the veil the draft has since withdrawn.
-      expect(charter.charterVersion).toBe(3);
+      expect(charter.charterVersion).toBe(4);
       expect(charter.veils).toContain(M.veil);
     });
 
@@ -371,11 +388,11 @@ describe('Issue #600: session-zero consent lifecycle (e2e)', () => {
 
       const status = await consentStatus(dm);
       expect(status.outstanding.some((o: { userId: string; state: string | null }) => o.userId === String(refuser.id) && o.state === 'declined')).toBe(true);
-      expect(status.effectiveVersion?.version).toBe(3);
+      expect(status.effectiveVersion?.version).toBe(4);
 
       const charter = await ctx.app.get(McpToolsService).effectiveSessionZero(campaignId);
       expect(charter.charterSource).toBe('accepted');
-      expect(charter.charterVersion).toBe(3);
+      expect(charter.charterVersion).toBe(4);
       expect(charter.veils).toContain(M.veil);
     });
   });
