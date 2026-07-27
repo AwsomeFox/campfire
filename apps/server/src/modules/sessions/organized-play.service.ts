@@ -6,6 +6,7 @@ import {
   ScheduleTemplateSlot,
   expandRecurrence,
   isValidIanaTimeZone,
+  materializeWallClock,
   scheduleNotificationChangeType,
   scheduleNotificationFallbackBody,
   scheduleNotificationFallbackTitle,
@@ -748,18 +749,69 @@ export class OrganizedPlayService {
     return { startsAt, endsAt: endInstant(startsAt, input.durationMinutes) };
   }
 
+  /**
+   * Honour a caller-supplied `excludeScheduleId` only if the caller could have
+   * seen that schedule anyway. Returns `undefined` — "no exclusion" — for an id
+   * that is unreadable OR that does not exist.
+   *
+   * WHY THIS EXISTS. `redactConflicts` withholds `scheduleId` from a caller who
+   * cannot read the conflicting campaign, and the privacy spec states the reason
+   * out loud: it must not hand back "an id he could use to probe further". But
+   * the exclusion was applied INSIDE the SQL, before redaction ever ran, so the
+   * filter answered the question the projection refused to. A stranger who can
+   * see an opaque busy block enumerates ids in `excludeScheduleId` until the
+   * block disappears, and the id that makes it vanish IS the withheld id. The
+   * redaction stayed intact and was bypassed anyway — a guarantee enforced at one
+   * point and sidestepped at its sibling, the exact shape this branch keeps
+   * finding.
+   *
+   * The two rejected outcomes are DELIBERATELY identical. An unreadable id and a
+   * nonexistent id both yield "no exclusion", so the response is byte-for-byte
+   * what the caller would have got by sending no exclusion at all: same
+   * conflicts, same order, same array length. There is nothing to difference.
+   *
+   * Nor does a timing channel replace the content one: this runs exactly one
+   * indexed primary-key lookup on EVERY path, including both rejecting paths, so
+   * no branch does conditional extra work whose duration could discriminate.
+   *
+   * The legitimate use is untouched. `excludeScheduleId` exists for "I am editing
+   * this occurrence, do not report it colliding with itself" — and someone
+   * editing an occurrence can necessarily read its campaign, so their exclusion
+   * always survives this check.
+   *
+   * WHY ONLY THIS FIELD. Every other filter on this endpoint names a resource the
+   * CALLER already holds — a room id, a DM id, member ids, a time window — and
+   * reporting whether it is busy is the whole purpose of the probe; the window
+   * and the subject id survive redaction for exactly that reason.
+   * `excludeScheduleId` is the only input that is the IDENTITY OF A HIDDEN ROW
+   * rather than a resource the caller named, and that is what makes it an oracle.
+   * A future filter of that shape needs this same treatment.
+   */
+  private async honourableExclusion(excludeScheduleId: number | undefined, scope: AccessScope): Promise<number | undefined> {
+    if (excludeScheduleId == null) return undefined;
+    const [row] = await this.db
+      .select({ campaignId: scheduledSessions.campaignId })
+      .from(scheduledSessions)
+      .where(eq(scheduledSessions.id, excludeScheduleId))
+      .limit(1);
+    if (!row) return undefined;
+    return canSee(scope, row.campaignId) ? excludeScheduleId : undefined;
+  }
+
   /** Read-only "would this collide?" probe. Writes nothing. */
   async checkConflicts(input: ScheduleConflictQuery, user: RequestUser): Promise<ScheduleConflictReport> {
     const { startsAt, endsAt } = this.resolveWindow(input);
+    // Scope is resolved BEFORE the query, because the exclusion filter is itself
+    // access-controlled — see honourableExclusion.
+    const scope = await this.roles.accessibleCampaignIds(user);
     const raws = this.findConflictRows(this.db, {
       startsAt,
       endsAt,
       roomId: input.roomId,
       assignedDmUserId: input.assignedDmUserId,
       memberUserIds: input.memberUserIds,
-      excludeScheduleId: input.excludeScheduleId,
+      excludeScheduleId: await this.honourableExclusion(input.excludeScheduleId, scope),
     });
-    const scope = await this.roles.accessibleCampaignIds(user);
     const names = await this.lookupNames(
       raws.map((r) => r.campaignId),
       raws.flatMap((r) => (r.roomId != null ? [r.roomId] : [])),
@@ -1477,8 +1529,16 @@ export class OrganizedPlayService {
     let localStart = '';
     if (input.localStart) {
       if (!timezone) throw new BadRequestException('localStart requires a timezone on the occurrence or in the body');
-      scheduledAt = wallClockToUtc(input.localStart, timezone).utcIso;
-      localStart = input.localStart;
+      // `materializeWallClock`, NOT `wallClockToUtc` + echoing the request. When
+      // the requested clock falls in a spring-forward gap the instant is shifted
+      // past the transition (New York 02:30 -> 03:30), and storing the requested
+      // 02:30 alongside the 03:30 instant makes the row describe two different
+      // times. Same helper `expandRecurrence` materializes with, so the two paths
+      // are one expression of the rule rather than two that can drift — which is
+      // how this site was missed when the recurrence path was fixed.
+      const resolved = materializeWallClock(input.localStart, timezone);
+      scheduledAt = resolved.utcIso;
+      localStart = resolved.localStart;
     } else if (input.scheduledAt) {
       const ms = Date.parse(input.scheduledAt);
       if (!Number.isFinite(ms)) throw new BadRequestException('scheduledAt is not a valid date-time');

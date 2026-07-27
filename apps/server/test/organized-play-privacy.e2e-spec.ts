@@ -246,6 +246,79 @@ describe('organized play privacy (e2e, real cookie sessions)', () => {
     expect((await bob.get(`/api/v1/organized-play/occurrences/${occId}/attendance`)).status).toBe(403);
   });
 
+  /**
+   * The redaction promises Bob no "id he could use to probe further". This runs
+   * the attack that recovered it anyway.
+   *
+   * `excludeScheduleId` was applied inside the SQL, BEFORE redaction, so the
+   * filter answered what the projection withheld: exclude the right id and the
+   * opaque busy block vanishes. Enumerating ids therefore recovers the exact
+   * `scheduleId` the response nulls out — the redaction intact and bypassed.
+   */
+  it('does not let an outsider recover the hidden scheduleId by enumerating excludeScheduleId', async () => {
+    const probeWith = async (excludeScheduleId?: number) => {
+      const body: Record<string, unknown> = { scheduledAt: '2099-05-05T20:00:00.000Z', durationMinutes: 60, roomId };
+      if (excludeScheduleId != null) body.excludeScheduleId = excludeScheduleId;
+      const res = await bob.post('/api/v1/organized-play/conflicts').send(body);
+      expect(res.status).toBe(201);
+      return res.body.conflicts.filter((c: { kind: string }) => c.kind === 'room');
+    };
+
+    // Baseline: Bob sees one opaque room conflict and is told no id for it.
+    const baseline = await probeWith();
+    expect(baseline).toHaveLength(1);
+    expect(baseline[0].visible).toBe(false);
+    expect(baseline[0].scheduleId).toBeNull();
+
+    // The id actually being withheld, read as Alice (who may see it).
+    const owner = await alice.post('/api/v1/organized-play/conflicts').send({
+      scheduledAt: '2099-05-05T20:00:00.000Z',
+      durationMinutes: 60,
+      roomId,
+    });
+    const hiddenId = owner.body.conflicts.find((c: { kind: string }) => c.kind === 'room').scheduleId as number;
+    expect(typeof hiddenId).toBe('number');
+
+    // THE ATTACK: walk candidate ids and watch for the conflict disappearing.
+    // Whichever id silences it is the id the response refused to give Bob.
+    let recovered: number | null = null;
+    for (let candidate = 1; candidate <= hiddenId + 3; candidate += 1) {
+      if ((await probeWith(candidate)).length === 0) {
+        recovered = candidate;
+        break;
+      }
+    }
+    expect(recovered).toBeNull();
+
+    // Specifically, naming the true id must not behave differently from naming
+    // an unrelated one, or from naming none at all: same conflicts, same length.
+    expect(await probeWith(hiddenId)).toEqual(baseline);
+    // …and an id that does not exist at all is indistinguishable from those two,
+    // so "no such row" cannot be told apart from "row you may not see".
+    expect(await probeWith(999_999)).toEqual(baseline);
+  });
+
+  it('still honours excludeScheduleId for a caller who can actually read that schedule', async () => {
+    // The legitimate use — "I am editing this occurrence, do not report it
+    // colliding with itself" — must survive the fix above. Alice can read her own
+    // booking, so her exclusion is obeyed.
+    const owner = await alice.post('/api/v1/organized-play/conflicts').send({
+      scheduledAt: '2099-05-05T20:00:00.000Z',
+      durationMinutes: 60,
+      roomId,
+    });
+    const ownId = owner.body.conflicts.find((c: { kind: string }) => c.kind === 'room').scheduleId as number;
+
+    const excluded = await alice.post('/api/v1/organized-play/conflicts').send({
+      scheduledAt: '2099-05-05T20:00:00.000Z',
+      durationMinutes: 60,
+      roomId,
+      excludeScheduleId: ownId,
+    });
+    expect(excluded.status).toBe(201);
+    expect(excluded.body.conflicts.filter((c: { kind: string }) => c.kind === 'room')).toHaveLength(0);
+  });
+
   it('a player cannot create or cancel a series in a campaign they only play in', async () => {
     const create = await bob.post(`/api/v1/campaigns/${sharedCampaignId}/series`).send({
       title: 'Player Coup',

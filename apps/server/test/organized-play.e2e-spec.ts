@@ -1830,6 +1830,45 @@ describe('organized play (e2e)', () => {
     expect((await api().patch(`/api/v1/schedule/${keyed.body.id}`).set(dm).send({ scheduledAt: '2099-05-18T20:00:00.000Z' })).status).toBe(200);
   });
 
+  /**
+   * The instant/wall-clock invariant on the RESCHEDULE path.
+   *
+   * `expandRecurrence` was fixed to store the wall clock a gap occurrence really
+   * gets, but `rescheduleOccurrence`'s `localStart` branch echoed the requested
+   * value back — the same rule written twice and drifting, which is exactly the
+   * failure mode the fix was for. Both now go through `materializeWallClock`.
+   */
+  it('stores the ACTUAL wall clock when a reschedule lands in a spring-forward gap', async () => {
+    const series = await api()
+      .post(`/api/v1/campaigns/${campaignId}/series`)
+      .set(dm)
+      .send({ title: 'Gap Move', timezone: 'America/New_York', startDate: '2099-04-07', startTime: '19:00', freq: 'weekly', count: 1 });
+    expect(series.status).toBe(201);
+    const occ = series.body.occurrences[0];
+
+    // 02:30 does not exist on 2099-03-08 in New York: the clocks jump 02:00 -> 03:00.
+    const moved = await api()
+      .post(`/api/v1/organized-play/occurrences/${occ.id}/reschedule`)
+      .set(dm)
+      .send({ localStart: '2099-03-08T02:30' });
+    expect(moved.status).toBe(201);
+
+    // The instant is shifted past the transition — 03:30 EDT is 07:30Z…
+    expect(moved.body.occurrence.scheduledAt).toBe('2099-03-08T07:30:00.000Z');
+    // …so the PERSISTED wall clock must read 03:30, not the impossible 02:30 that
+    // was asked for. Storing the request would make one row describe two times.
+    expect(moved.body.occurrence.localStart).toBe('2099-03-08T03:30');
+
+    // A non-gap move still echoes the requested clock exactly.
+    const ordinary = await api()
+      .post(`/api/v1/organized-play/occurrences/${occ.id}/reschedule`)
+      .set(dm)
+      .send({ localStart: '2099-03-15T02:30' });
+    expect(ordinary.status).toBe(201);
+    expect(ordinary.body.occurrence.localStart).toBe('2099-03-15T02:30');
+    expect(ordinary.body.occurrence.scheduledAt).toBe('2099-03-15T06:30:00.000Z');
+  });
+
   it('does not push a fresh SEQUENCE for a room change, which the feed never renders', async () => {
     const seqRoom = (await api().post(`/api/v1/organized-play/venues/${venueId}/rooms`).set(dm).send({ name: 'Sequence Room' })).body;
     const series = await api()

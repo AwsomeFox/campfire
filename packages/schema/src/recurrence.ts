@@ -183,6 +183,49 @@ export function wallClockToUtc(local: LocalDateTime, timeZone: string): Resolved
   return { utcMs: earliest, utcIso: new Date(earliest).toISOString(), resolution: 'ambiguous' };
 }
 
+/** A requested wall clock, resolved to the instant AND the wall clock it really occupies. */
+export type MaterializedWallClock = {
+  /** Canonical ISO-8601 UTC instant the session actually starts at. */
+  utcIso: string;
+  /**
+   * The wall clock that instant ACTUALLY reads in the zone — never the requested
+   * one when the requested one does not exist.
+   */
+  localStart: LocalDateTime;
+  resolution: WallClockResolution;
+};
+
+/**
+ * THE one expression of "what gets persisted when someone asks for this wall
+ * clock". Every path that stores a `local_start` alongside a `scheduled_at` must
+ * come through here, so that the pair cannot disagree.
+ *
+ * The invariant is `utcToLocalDateTime(scheduledAt, timezone) === localStart`,
+ * and it held everywhere except the DST GAP: 02:30 does not exist on the
+ * spring-forward day, `wallClockToUtc` shifts the instant past the transition to
+ * 03:30, and a caller that then stored the REQUESTED 02:30 produced a row whose
+ * instant and wall clock describe different times. Any UI trusting `local_start`
+ * shows the table meeting an hour early.
+ *
+ * `localStart` is derived from the chosen instant UNCONDITIONALLY rather than
+ * only in the gap branch. For `exact` and `ambiguous` the derivation is
+ * provably identical to echoing the request — both round-trip, which is how
+ * `wallClockToUtc` selects them in the first place — so the branch would be dead
+ * weight whose only power is to be got wrong. There is no `if` here to drift.
+ *
+ * Note this deliberately does NOT return a local DATE. Callers materializing a
+ * recurrence keep the date the RULE names as the occurrence's identity; only the
+ * clock is corrected. See expandRecurrence.
+ */
+export function materializeWallClock(local: LocalDateTime, timeZone: string): MaterializedWallClock {
+  const resolved = wallClockToUtc(local, timeZone);
+  return {
+    utcIso: resolved.utcIso,
+    localStart: utcToLocalDateTime(resolved.utcIso, timeZone),
+    resolution: resolved.resolution,
+  };
+}
+
 /** Split a `YYYY-MM-DD` into numeric parts (assumes `isLocalDate`). */
 function dateParts(date: LocalDate): { year: number; month: number; day: number } {
   const [year, month, day] = date.split('-').map(Number);
@@ -300,25 +343,16 @@ export function expandRecurrence(spec: RecurrenceSpec): ExpandedOccurrence[] {
     if (localDate == null) continue;
     if (until != null && localDate > until) break;
     const requested: LocalDateTime = `${localDate}T${spec.startTime}`;
-    const resolved = wallClockToUtc(requested, spec.timezone);
-    // A GAP occurrence does not happen at the requested wall clock — 02:30 does
-    // not exist on the spring-forward day, and `wallClockToUtc` shifts the
-    // instant past the transition. `localStart` is the PERSISTED wall clock of
-    // the materialized row, so it has to describe the instant that was actually
-    // chosen (03:30) rather than the one that was asked for: everywhere else in
-    // this feature the two agree by construction (`SchedulingService.update`
-    // re-derives localStart whenever the instant moves, `rescheduleOccurrence`
-    // derives it from `scheduledAt`), and a row that alone breaks the invariant
-    // renders an hour off in any UI that trusts the stored wall clock.
-    //
-    // `localDate` is deliberately NOT re-derived: it is the recurrence identity
-    // — which day of the rule this is — and the rule still says this day.
-    const localStart: LocalDateTime =
-      resolved.resolution === 'gap' ? utcToLocalDateTime(resolved.utcIso, spec.timezone) : requested;
+    // Shared with rescheduleOccurrence, so the instant/wall-clock pair this row
+    // stores cannot disagree with the pair that endpoint stores. `localDate` is
+    // deliberately NOT re-derived from the result: it is the recurrence identity
+    // — which day of the rule this is — and a DST gap moves the clock, not the
+    // day the rule names.
+    const resolved = materializeWallClock(requested, spec.timezone);
     out.push({
       index: out.length,
       localDate,
-      localStart,
+      localStart: resolved.localStart,
       scheduledAt: resolved.utcIso,
       durationMinutes: spec.durationMinutes,
       resolution: resolved.resolution,

@@ -3,6 +3,7 @@ import {
   addDaysLocal,
   addMonthsLocal,
   expandRecurrence,
+  materializeWallClock,
   isLocalDate,
   isLocalDateTime,
   isLocalTime,
@@ -246,6 +247,26 @@ describe('recurrence expansion (#588)', () => {
     // The gap occurrence still exists — the table still meets that night.
     expect(out[1].localDate).toBe('2026-03-08');
     expect(out[1].scheduledAt).toBe('2026-03-08T07:30:00.000Z');
+  });
+
+  it('materializeWallClock is the single expression of the persisted instant/wall-clock pair', () => {
+    // Gap: the requested clock does not exist, so the pair reports the one the
+    // shifted instant really reads.
+    const gap = materializeWallClock('2026-03-08T02:30', 'America/New_York');
+    expect(gap.resolution).toBe('gap');
+    expect(gap.localStart).toBe('2026-03-08T03:30');
+    expect(utcToLocalDateTime(gap.utcIso, 'America/New_York')).toBe(gap.localStart);
+
+    // Exact and ambiguous both round-trip, so deriving unconditionally is
+    // identical to echoing the request — which is why there is no branch to drift.
+    const exact = materializeWallClock('2026-03-15T02:30', 'America/New_York');
+    expect(exact.resolution).toBe('exact');
+    expect(exact.localStart).toBe('2026-03-15T02:30');
+
+    const ambiguous = materializeWallClock('2026-11-01T01:30', 'America/New_York');
+    expect(ambiguous.resolution).toBe('ambiguous');
+    expect(ambiguous.localStart).toBe('2026-11-01T01:30');
+    expect(utcToLocalDateTime(ambiguous.utcIso, 'America/New_York')).toBe(ambiguous.localStart);
   });
 
   it('stores a gap occurrence’s ACTUAL wall clock, so localStart round-trips against the instant', () => {
