@@ -29,6 +29,7 @@ import {
   campaignMembers,
   campaigns,
   rulePacks,
+  settings,
   users,
 } from '../../db/schema';
 import { AuditService } from '../audit/audit.service';
@@ -132,28 +133,74 @@ export class AdminCatalogService {
     update: CampaignCatalogPrivacyPolicyUpdate,
     actor: Actor,
   ): Promise<CampaignCatalogPrivacyPolicy> {
-    const current = await this.getPrivacyPolicy();
-    // A PARTIAL UPDATE MATERIALISES THE WHOLE POLICY, DELIBERATELY.
+    // ATOMIC READ-MERGE-WRITE. THE READ USES `tx`, AND THAT IS THE WHOLE POINT.
     //
-    // Sending only `names` also persists the current `descriptions`, which pins it to
-    // whatever it resolves to today — including a value that came from
-    // CATALOG_PRIVACY_DEFAULTS rather than from an operator. A later change to those
-    // defaults will then not reach this server. That is the intended trade and it is
-    // the safe direction for a disclosure setting: an operator who has deliberately
-    // configured what admins may read about every campaign on the server should not
-    // have half of that decision silently re-decided by a future release. Freezing
-    // what they saw when they chose is the conservative behaviour; drifting is not.
+    // This used to `await this.getPrivacyPolicy()`, merge in JS, then `await setJson`.
+    // Two clients sending DISJOINT partial updates both read the same `current` before
+    // either wrote, and each then replaced the WHOLE object — so a descriptions-only
+    // update silently restored `names: visible` moments after another operator set it to
+    // `redacted`. Last writer wins on a field they never mentioned.
     //
-    // The consequence a reader needs to know is that `source: 'settings'` after any
-    // update means "an operator has configured this", not "an operator chose each
-    // field individually". The audit detail below records both resolved values, so
-    // the trail says what was actually stored rather than what was sent.
-    const next = {
-      names: update.names ?? current.names,
-      descriptions: update.descriptions ?? current.descriptions,
-    };
-    await this.settings.setJson(CATALOG_PRIVACY_SETTINGS_KEY, next);
-    const policy = await this.getPrivacyPolicy();
+    // That is the worst-directed member of this module's post-commit family: the two
+    // audit-failure defects told an operator a change had failed when it had landed;
+    // this one silently UNDOES a privacy tightening that landed, and tells nobody. An
+    // operator who redacts names and sees success has no reason to look again.
+    //
+    // Fixed by serialising rather than by demanding a complete policy. Requiring every
+    // field would make the PUT more honest about being a replace, but it breaks existing
+    // partial callers and pushes the merge onto clients who will each get it slightly
+    // wrong — which is how this class of bug spreads rather than ends.
+    //
+    // `SettingsService` cannot join a caller's transaction (its methods are async over
+    // their own handle, and `setJson` is itself a read-then-write), so the settings row
+    // is touched directly here. Reading with `tx` INSIDE the synchronous better-sqlite3
+    // transaction is what makes this atomic: an awaited read followed by a transactional
+    // write would leave exactly the gap being closed — the mistake #1539 hit in
+    // `updateSeries`. Nothing can interleave inside a sync transaction body, because
+    // Node is single-threaded and there is no await in it.
+    const policy = this.db.transaction((tx): CampaignCatalogPrivacyPolicy => {
+      const rows = tx
+        .select({ value: settings.value })
+        .from(settings)
+        .where(eq(settings.key, CATALOG_PRIVACY_SETTINGS_KEY))
+        .all();
+
+      let stored: Record<string, unknown> | null = null;
+      if (rows[0]) {
+        try {
+          const parsed: unknown = JSON.parse(rows[0].value);
+          stored = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : null;
+        } catch {
+          // A corrupt row reads as "no override", matching getPrivacyPolicy's tolerance.
+          stored = null;
+        }
+      }
+      const readField = (v: unknown) => (v === 'visible' || v === 'redacted' ? v : undefined);
+      const currentNames = readField(stored?.names);
+      const currentDescriptions = readField(stored?.descriptions);
+
+      // A PARTIAL UPDATE STILL MATERIALISES THE WHOLE POLICY, DELIBERATELY — but now it
+      // merges over the value read in this same transaction rather than one that may
+      // already be stale. Sending only `names` also persists the current
+      // `descriptions`, pinning it to today's value including one that came from
+      // CATALOG_PRIVACY_DEFAULTS. That is the safe direction for a disclosure setting:
+      // an operator who configured what admins may read should not have half of that
+      // decision silently re-decided by a future release.
+      const next = {
+        names: update.names ?? currentNames ?? CATALOG_PRIVACY_DEFAULTS.names,
+        descriptions: update.descriptions ?? currentDescriptions ?? CATALOG_PRIVACY_DEFAULTS.descriptions,
+      };
+      const json = JSON.stringify(next);
+      if (rows[0]) {
+        tx.update(settings).set({ value: json }).where(eq(settings.key, CATALOG_PRIVACY_SETTINGS_KEY)).run();
+      } else {
+        tx.insert(settings).values({ key: CATALOG_PRIVACY_SETTINGS_KEY, value: json }).run();
+      }
+      // Returned from inside the transaction: this is what THIS call committed. A later
+      // writer may change it a moment afterwards, but reporting their value back to this
+      // caller would be a different lie from the one just fixed.
+      return { ...next, source: 'settings' };
+    });
 
     // THE POLICY HAS COMMITTED, AND THIS IS THE WORST PLACE IN THE MODULE TO LIE ABOUT
     // THAT.
@@ -417,6 +464,7 @@ export class AdminCatalogService {
         detail:
           `op=${req.operation}, requested=${result.requested}, applied=${result.applied}, ` +
           `wouldApply=${result.wouldApply}, skipped=${result.skipped}, failed=${result.failed}` +
+          `, ${this.describeTargets(results)}` +
           (req.reason ? `, reason=${req.reason.slice(0, 300)}` : ''),
       });
     } catch (err) {
@@ -428,6 +476,50 @@ export class AdminCatalogService {
     }
 
     return result;
+  }
+
+
+  /**
+   * Which campaigns a batch actually touched, grouped by outcome.
+   *
+   * WHY COUNTS ALONE WERE NOT ENOUGH. `applyOne` returns before writing any per-campaign
+   * audit row on a dry run, and returns early for skips and failures in a real run too.
+   * So the only trace of those items was this summary — which recorded `requested=200`
+   * and nothing about WHICH 200. An operator could probe the state and eligibility of
+   * two hundred NAMED campaigns they cannot otherwise read, and the trail kept none of
+   * the names.
+   *
+   * That is the same principle the read paths fail closed for: a dry run across named
+   * campaigns is a privileged read wearing a different verb. It is also the one mode
+   * where nothing else is written to notice the gap.
+   *
+   * Kept in the EXISTING summary row rather than as per-item records for non-applied
+   * items, which would be a third audit shape and would multiply a 200-campaign dry run
+   * into 200 rows. Real applies keep their per-campaign rows exactly as before, so there
+   * are still only two shapes: one summary per batch, one row per campaign that changed.
+   *
+   * Truncation is DECLARED, never silent — a trail that quietly drops ids is worse than
+   * one that admits it, because the reader cannot tell the difference from completeness.
+   */
+  private describeTargets(results: CampaignCatalogBulkItemResult[]): string {
+    const byOutcome = new Map<string, number[]>();
+    for (const r of results) {
+      const list = byOutcome.get(r.outcome) ?? [];
+      list.push(r.campaignId);
+      byOutcome.set(r.outcome, list);
+    }
+    // Cap generously but finitely: 200 ids is the batch ceiling and fits comfortably,
+    // yet the guard means a future ceiling raise cannot silently produce a monster row.
+    const MAX_IDS = 200;
+    const parts: string[] = [];
+    for (const outcome of ['applied', 'would_apply', 'skipped', 'failed']) {
+      const ids = byOutcome.get(outcome);
+      if (!ids || ids.length === 0) continue;
+      const shown = ids.slice(0, MAX_IDS);
+      const suffix = ids.length > shown.length ? ` (+${ids.length - shown.length} more, truncated)` : '';
+      parts.push(`${outcome}=[${shown.join(',')}]${suffix}`);
+    }
+    return parts.length > 0 ? parts.join(' ') : 'targets=[]';
   }
 
   private validateBulkArgs(req: CampaignCatalogBulkRequest): void {

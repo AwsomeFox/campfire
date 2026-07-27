@@ -957,6 +957,62 @@ describe('Issue #587: campaign catalog paging, filtering and bulk lifecycle (e2e
       expect(read[0].detail).toMatch(/total=\d+/);
     });
 
+    it('does not let disjoint partial privacy updates clobber each other', async () => {
+      // Two clients sending DISJOINT partial updates both read the same policy before
+      // either wrote, then each replaced the WHOLE object — so a descriptions-only update
+      // silently restored `names: visible` right after another operator set `redacted`.
+      // Last writer wins on a field they never mentioned, and nobody is told.
+      //
+      // Driven at the SERVICE layer and started before either is awaited: supertest
+      // serialises on one agent and better-sqlite3 is synchronous, so an HTTP-level
+      // version of this race passes whether or not the bug is present.
+      const svc = ctx.app.get(AdminCatalogService);
+      const operator = { actor: '1', actorRole: 'admin' as const };
+
+      // Known start: both fields visible.
+      await svc.updatePrivacyPolicy({ names: 'visible', descriptions: 'visible' }, operator);
+
+      // A tightens names; B touches only descriptions. B must not resurrect names.
+      const [a, b] = await Promise.all([
+        svc.updatePrivacyPolicy({ names: 'redacted' }, operator),
+        svc.updatePrivacyPolicy({ descriptions: 'redacted' }, operator),
+      ]);
+
+      // Whichever committed second must carry BOTH tightenings, because it merged over
+      // the value the first one wrote rather than a snapshot taken before it.
+      const stored = await svc.getPrivacyPolicy();
+      expect(stored.names).toBe('redacted');
+      expect(stored.descriptions).toBe('redacted');
+
+      // And each caller was told something true about its own commit.
+      for (const res of [a, b]) expect(['visible', 'redacted']).toContain(res.names);
+
+      // Reset for later tests.
+      await svc.updatePrivacyPolicy({ names: 'visible', descriptions: 'redacted' }, operator);
+    });
+
+    it('records WHICH campaigns a dry run probed, not merely how many', async () => {
+      // `applyOne` returns before writing any per-campaign row on a dry run, so the
+      // summary was the only trace — and it recorded counts alone. An operator could
+      // probe the state and eligibility of up to 200 NAMED campaigns they cannot read,
+      // and the trail kept none of the names. A dry run over named campaigns is a
+      // privileged read wearing a different verb.
+      const targets = [aIds[0], aIds[3]];
+      const res = await bulk({ operation: 'archive', campaignIds: targets, dryRun: true, reason: 'probe' });
+      expect(res.status).toBe(201);
+
+      const trail = await admin.get('/api/v1/admin/audit').query({ limit: 50 });
+      const rows = (Array.isArray(trail.body) ? trail.body : trail.body.items) as Array<{
+        action: string;
+        detail: string;
+      }>;
+      const summary = rows.find((r) => r.action === 'campaign.catalog.bulk.dryrun');
+      expect(summary).toBeDefined();
+      // Every requested id appears, under whatever outcome it got.
+      for (const id of targets) expect(summary!.detail).toContain(String(id));
+      expect(summary!.detail).toMatch(/would_apply=\[|skipped=\[/);
+    });
+
     it('REFUSES to serve a read it cannot record, on every read path', async () => {
       // A DELIBERATE ASYMMETRY, PINNED SO IT CANNOT DRIFT.
       //
