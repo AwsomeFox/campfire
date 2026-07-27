@@ -513,6 +513,25 @@ function AdminCatalog() {
                           <Chip variant="private">{t('admin.catalog.redacted')}</Chip>
                         </span>
                       )}
+                      {/* THE DESCRIPTION HAS TO BE VISIBLE WHEN THE POLICY SAYS IT IS.
+                          The server returns it under a `visible` policy and lets `?q=`
+                          match it, but nothing rendered it — so an operator could not
+                          read a field they had explicitly configured as visible, and a
+                          description-only search hit looked like a row matching on
+                          nothing. Shown as a secondary line rather than a column because
+                          it runs to 10k characters; the full text is in the title.
+                          `descriptionRedacted` rows carry '' by construction (see the
+                          schema), so a withheld description renders nothing at all —
+                          there is no placeholder to leak a length or a shape. */}
+                      {entry.description !== '' && (
+                        <div
+                          className="text-xs text-secondary truncate max-w-xs"
+                          title={entry.description}
+                          data-testid={`catalog-description-${entry.id}`}
+                        >
+                          {entry.description}
+                        </div>
+                      )}
                     </td>
                     <td className="py-2 pr-4">{entry.status}</td>
                     <td className="py-2 pr-4">
