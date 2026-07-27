@@ -6387,10 +6387,12 @@ export type AiModelPrice = z.infer<typeof AiModelPrice>;
  * matched case-insensitively while nothing stopped two rows differing only in case from
  * being stored, which made the resolved price depend on array order.
  *
- * Trimmed and lowercased on all three parts: an admin typing `OpenAI` and `openai`, or
- * pasting a base URL with a trailing space, means the same row both times. ` ` as the
- * separator because it cannot occur in any of the three fields, so no combination of values
- * can collide by containing the separator.
+ * Provider type and model are trimmed and lowercased — an admin typing `OpenAI` and `openai`
+ * means the same row both times, and case-insensitive model matching is the rule the resolver
+ * has always documented. The three parts are joined on a NUL escape, which cannot occur in any
+ * of them, so no combination of values can collide by containing the separator.
+ *
+ * The base URL is deliberately NOT lowercased wholesale; see {@link normalizePricingBaseUrl}.
  */
 export function aiPricingIdentityKey(entry: {
   providerType: string;
@@ -6398,7 +6400,37 @@ export function aiPricingIdentityKey(entry: {
   baseUrl?: string | null;
 }): string {
   const norm = (s: string | null | undefined) => (s ?? '').trim().toLowerCase();
-  return `${norm(entry.providerType)} ${norm(entry.model)} ${norm(entry.baseUrl)}`;
+  // '\u0000' as an ESCAPE, never a literal NUL byte in this file — a raw control character
+  // here makes the whole module read as binary to grep, diff and review tooling.
+  return [norm(entry.providerType), norm(entry.model), normalizePricingBaseUrl(entry.baseUrl)].join('\u0000');
+}
+
+/**
+ * Case-fold a base URL only where a URL is genuinely case-insensitive.
+ *
+ * Scheme and host are case-insensitive (RFC 3986 3.1 and 6.2.2.1); PATH and QUERY are not, and
+ * gateways routinely carry a case-sensitive tenant, deployment or workspace id in the path.
+ * Lowercasing the whole string collapsed `https://host/TenantA` and `https://host/tenanta` into
+ * ONE pricing identity, which did two things at once: the duplicate check refused to let an
+ * admin enter separate prices for two genuinely different endpoints, and the resolver could
+ * hand one tenant's negotiated rate to the other — while requests still went to the URL
+ * exactly as typed. That is this feature's central failure, a confident wrong number, arriving
+ * through the KEY rather than through the arithmetic.
+ *
+ * A value that does not parse as an absolute URL is compared verbatim after trimming rather
+ * than guessed at: with no parse there is no way to know which span is the host.
+ */
+export function normalizePricingBaseUrl(raw: string | null | undefined): string {
+  const trimmed = (raw ?? '').trim();
+  if (!trimmed) return '';
+  try {
+    const url = new URL(trimmed);
+    // `protocol` and `host` come back already lowercased from the URL parser, which also drops
+    // a redundant default port. Everything from the path on keeps its case.
+    return `${url.protocol}//${url.host}${url.pathname}${url.search}${url.hash}`;
+  } catch {
+    return trimmed;
+  }
 }
 
 /**

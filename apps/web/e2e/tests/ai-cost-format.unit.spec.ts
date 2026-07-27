@@ -12,7 +12,7 @@
  *      separately they disagreed about case and about blank rows.
  */
 import { expect, test } from '@playwright/test';
-import { aiPricingDuplicateIndices, aiPricingIdentityKey } from '@campfire/schema';
+import { aiPricingDuplicateIndices, aiPricingIdentityKey, normalizePricingBaseUrl } from '@campfire/schema';
 import { formatApproxUsd, formatUsdRangeValue } from '../../src/features/ai-dm/costEstimate';
 
 test.describe('formatApproxUsd (#1065)', () => {
@@ -56,6 +56,36 @@ test.describe('pricing identity (#1065)', () => {
 
   test('treats the base URL as part of the key, never as decoration', () => {
     expect(aiPricingDuplicateIndices([row('openai', 'gpt-4o'), row('openai', 'gpt-4o', 'https://proxy/v1')])).toEqual([]);
+  });
+
+  test('case-folds a base URL only where a URL is case-insensitive', () => {
+    // Scheme and host are case-insensitive; the parser also drops a redundant default port.
+    expect(normalizePricingBaseUrl('HTTPS://API.Example.COM/v1')).toBe('https://api.example.com/v1');
+    expect(normalizePricingBaseUrl('https://api.example.com:443/v1')).toBe('https://api.example.com/v1');
+    expect(aiPricingIdentityKey(row('openai', 'gpt-4o', 'HTTPS://Proxy.Example/v1')))
+      .toBe(aiPricingIdentityKey(row('openai', 'gpt-4o', 'https://proxy.example/v1')));
+  });
+
+  test('keeps two tenants on one host apart, path case and all', () => {
+    // The regression: lowercasing the whole URL merged these, so an admin could not price
+    // them separately and one tenant's negotiated rate could be applied to the other.
+    expect(normalizePricingBaseUrl('https://gw.example/TenantA'))
+      .not.toBe(normalizePricingBaseUrl('https://gw.example/tenanta'));
+    expect(
+      aiPricingDuplicateIndices([
+        row('openai', 'gpt-4o', 'https://gw.example/TenantA'),
+        row('openai', 'gpt-4o', 'https://gw.example/tenanta'),
+      ]),
+    ).toEqual([]);
+    // Query case is preserved for the same reason.
+    expect(normalizePricingBaseUrl('https://gw.example/v1?deployment=ProdEU'))
+      .not.toBe(normalizePricingBaseUrl('https://gw.example/v1?deployment=prodeu'));
+  });
+
+  test('compares an unparseable base URL verbatim rather than guessing at its parts', () => {
+    expect(normalizePricingBaseUrl('  not a url  ')).toBe('not a url');
+    expect(normalizePricingBaseUrl('')).toBe('');
+    expect(normalizePricingBaseUrl(null)).toBe('');
   });
 
   test('reports the LATER index of a duplicate, so the first entry stays valid', () => {

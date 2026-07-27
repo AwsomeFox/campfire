@@ -240,36 +240,44 @@ export class AiProviderConfigService {
    * serialized to a client; the cost basis built from it echoes back only the provider type
    * and model, never the endpoint.
    *
-   * Equally deliberately NOT `resolveEffectiveConfigWithEndpointScope`, which decrypts the API
-   * key. Rendering a budget estimate must not decrypt a credential — that would put a secret
-   * through a code path whose only job is to multiply two numbers, on every page render.
+   * DERIVED BY CALLING THE EXECUTION RESOLVER, NOT BY RE-DERIVING FROM ROWS.
    *
-   * Follows the same endpoint-scope rule as the credential resolver: the scope that OWNS the
-   * credential owns the endpoint and provider type, while the primary row still supplies the
-   * model. That matters for pricing because a keyless campaign override runs against the
-   * SERVER's endpoint, so its price must be looked up against that endpoint rather than
-   * against none.
+   * An earlier version selected the owning row itself, from `credentialSource`. That is the
+   * mistake this comment exists to prevent anyone repeating: `credentialSource` answers WHAT
+   * KIND OF CREDENTIAL is in use, and `'server'` is its only scope-bearing member. Reading it
+   * as a row selector is a category error, and it does not merely mis-handle an edge case —
+   * `'environment'` does not say WHOSE row supplied the environment key. A campaign override
+   * on `anthropic` with no key, under a server row on `openai` with `OPENAI_API_KEY` set,
+   * yields `'environment'`, and execution then runs OPENAI at the server's endpoint. Any
+   * mapping of that enum to a row prices `anthropic` for an `openai` call — a $0-for-a-paid-
+   * call estimate reached through a different enum value than the one first reported.
+   *
+   * There is no ordering of those branches that is correct, because the executed provider,
+   * endpoint AND model are a property of the RESOLUTION, not of any single row. So this asks
+   * the resolver rather than imitating it: one derivation, and a pricing identity that cannot
+   * drift from what the turn will actually contact.
+   *
+   * The cost of that is a `decryptSecret` on a render path, which an earlier note here
+   * objected to. It is worth paying and it is contained: the key is decrypted into a local
+   * that is dropped on the next line and never returned, logged, or serialized. Weigh that
+   * against the alternative this replaces, which was a second implementation of the endpoint
+   * decision that was already wrong in two configurations.
+   *
+   * `baseUrl` is SERVER-SIDE ONLY and must never be serialized to a client — surfacing an
+   * inherited server endpoint to a campaign DM discloses a URL they cannot otherwise obtain
+   * (#373). The cost basis built from it echoes back only the provider type and model.
    */
   async getPricingIdentity(
     campaignId: number,
   ): Promise<{ providerType: AiProviderType | null; model: string | null; baseUrl: string }> {
-    const server = await this.serverRow();
-    const camp = await this.campaignRow(campaignId);
-    const primary = camp ?? server;
-    if (!primary) return { providerType: null, model: null, baseUrl: '' };
-
-    const credentialSource = camp
-      ? campaignCredentialSource(camp, server)
-      : localCredentialSource(primary);
-    const endpointOwner =
-      camp && (credentialSource === 'server' || credentialSource === 'environment') && server
-        ? server
-        : primary;
-
+    const { config } = await this.resolveEffectiveConfigWithEndpointScope(campaignId);
+    if (!config) return { providerType: null, model: null, baseUrl: '' };
+    // Everything but the three identity fields is dropped here — in particular `apiKey`,
+    // which must not travel any further towards a cost estimator.
     return {
-      providerType: endpointOwner.providerType as AiProviderType,
-      model: primary.model,
-      baseUrl: (endpointOwner.baseUrl ?? '').trim(),
+      providerType: config.providerType,
+      model: config.model,
+      baseUrl: (config.baseUrl ?? '').trim(),
     };
   }
 
