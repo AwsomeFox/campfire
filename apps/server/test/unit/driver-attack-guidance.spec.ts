@@ -1,5 +1,14 @@
 import { GROUNDING_PREAMBLE } from '../../src/modules/ai-driver/ai-driver.service';
-import { ActionSpec, isResolvableSpec, rollBranchDamage, type OutcomeBranch } from '@campfire/schema';
+import {
+  ActionSpec,
+  criticalDamageRuleForAdapter,
+  Dnd5eAdapter,
+  isResolvableSpec,
+  Pf2eAdapter,
+  rollBranchDamage,
+  Sf2eAdapter,
+  type OutcomeBranch,
+} from '@campfire/schema';
 
 /**
  * #1053 — the AI DM must be TOLD that server-side attack resolution exists.
@@ -8,8 +17,8 @@ import { ActionSpec, isResolvableSpec, rollBranchDamage, type OutcomeBranch } fr
  * The issue was filed as "no tool combines roll d20 + compare AC + apply damage; the AI must
  * chain three or more calls and each step risks hallucination". The observation was true and
  * the diagnosis was wrong: `resolve_action` (#414) had done all of it server-side — adapter-
- * aware hit/miss/crit, crit doubling the DICE only, resistance/immunity, atomic apply, undo
- * token — and was already on the driver's live-play allowlist. What was missing was one
+ * aware hit/miss/crit, critical damage, resistance/immunity, atomic apply, undo token — and
+ * was already on the driver's live-play allowlist. What was missing was one
  * sentence in the system prompt. The preamble said "you may resolve live play directly: ROLL
  * DICE, apply HP/conditions…", which is a description of the manual chain, and never named
  * `resolve_action` at all.
@@ -46,11 +55,40 @@ describe('driver system prompt names the server-side attack path (#1053)', () =>
     expect(preamble).toMatch(/roll_dice[^\n]*(no target|no consequence)/i);
   });
 
-  it('states the crit rule the server actually implements', () => {
-    // The model narrates the outcome, so it needs the same rule the server applied, or its
-    // prose contradicts the numbers on the sheet.
-    expect(preamble).toMatch(/crit[^\n]*doubles the dice/i);
-    expect(preamble).toMatch(/never the flat/i);
+  it('defers the crit rule to the campaign system instead of asserting one', () => {
+    // This preamble is shared by EVERY campaign, so a concrete crit rule in it is wrong for
+    // some table: 5e doubles the dice, PF2e/SF2e double the total. An earlier draft of this
+    // very line said "a crit doubles the dice, never the flat modifier" — true for 5e only,
+    // and stated as universal. The prompt promises the server applies the system's rule; the
+    // server keeps that promise via criticalDamageRuleForAdapter.
+    expect(preamble).toMatch(/critical rule/i);
+    expect(preamble).not.toMatch(/doubles the dice/i);
+    expect(preamble).toMatch(/never recompute a crit yourself/i);
+  });
+
+  /**
+   * #1053 review — a STANDALONE save is `saving_throw`'s job (#1040), not `resolve_action`'s.
+   * `resolve_action` needs an encounter, an actor combatant, targets and an outcome spec, so
+   * "make a DC 15 Dexterity save" outside combat is a call the model cannot even construct.
+   * An earlier draft steered every save at `resolve_action`; these pin the split.
+   */
+  describe('saving throws are steered at the right tool', () => {
+    it('names saving_throw for a standalone save', () => {
+      expect(preamble).toMatch(/saving_throw/);
+      expect(preamble).toMatch(/STANDALONE saving throw[^\n]*saving_throw/);
+    });
+
+    it('does not blanket-forbid saves in favour of resolve_action', () => {
+      // The regression to catch: any sentence that tells the model to use resolve_action FOR
+      // a saving throw without the "part of an action" qualifier.
+      expect(preamble).not.toMatch(/a saving throw[^\n]*use resolve_action/i);
+    });
+
+    it('still routes an action-embedded save through resolve_action', () => {
+      // The other half: a save that IS a structured action's outcome must not be split into
+      // a bare saving_throw, or nothing applies the success/failure branch.
+      expect(preamble).toMatch(/resolve_action instead only when the save is part of an action/i);
+    });
   });
 });
 
@@ -113,12 +151,17 @@ describe('the inline-spec example in the prompt is actually valid (#1053)', () =
  * Why the formula/flat split is load-bearing (#1053).
  *
  * `DamagePart.formula`'s own doc comment used to read `Dice expression ("2d6+3")`, which
- * contradicted `rollBranchDamage`'s contract that a crit re-rolls `formula` and adds `flat`
- * once. Anyone following the documented example got the modifier doubled on every critical
- * hit — silently, with no error. These pin the real behaviour so the two cannot drift apart
- * again, and so the hazard is written down rather than rediscovered.
+ * contradicted `rollBranchDamage`'s contract. Anyone following the documented example got the
+ * modifier doubled on every 5e critical hit — silently, with no error.
+ *
+ * Review of this PR raised the sharper version of the same problem: the split was documented
+ * as a universal convention while `rollBranchDamage` implemented 5e's rule unconditionally, so
+ * a PF2e `1d8+3` crit resolved as `2d8+3` when PF2e says `(1d8+3)*2`. The rule is now the
+ * adapter's (`criticalDamageRuleForAdapter`), and the split is what makes EITHER rule
+ * computable: `double-dice` must know which half is dice, `double-total` must know the
+ * modifier so it can double that too.
  */
-describe('critical damage doubles dice, never the modifier (#1053)', () => {
+describe('critical damage follows the system, not a hardcoded rule (#1053)', () => {
   /** Deterministic roller: every die shows its maximum face. */
   const maxRoll = (expr: string) => {
     const [count, sides] = expr.split('d').map(Number);
@@ -136,23 +179,82 @@ describe('critical damage doubles dice, never the modifier (#1053)', () => {
     };
   }
 
-  it('the CORRECT shape doubles only the dice', () => {
+  it('5e (double-dice, the default) doubles only the dice', () => {
     // 1d8 max = 8. Normal: 8 + 3 = 11. Crit: (8 + 8) + 3 = 19 — the +3 is added once.
     expect(rollBranchDamage(branch('1d8', 3), maxRoll).parts[0].amount).toBe(11);
     expect(rollBranchDamage(branch('1d8', 3), maxRoll, { critical: true }).parts[0].amount).toBe(19);
+    // Omitting criticalRule must behave exactly as before the seam existed.
+    expect(rollBranchDamage(branch('1d8', 3), maxRoll, { critical: true, criticalRule: 'double-dice' }).parts[0].amount).toBe(19);
   });
 
-  it('folding the modifier INTO the formula doubles it — the hazard the docs used to invite', () => {
-    // "1d8+3" as a formula rolls 11 normally (same as above), but 22 on a crit instead of 19:
-    // the +3 got doubled. Nothing errors; the sheet is just quietly wrong.
-    const wrong = rollBranchDamage(branch('1d8+3', 0), (expr) => {
+  it('PF2e (double-total) doubles the modifier too — the bug this seam fixes', () => {
+    // (8 + 3) * 2 = 22, not the 19 the 5e rule produces. Before #1053 every PF2e crit in the
+    // resolver came out as 19: correct arithmetic, wrong game.
+    expect(rollBranchDamage(branch('1d8', 3), maxRoll, { critical: true, criticalRule: 'double-total' }).parts[0].amount).toBe(22);
+    // A non-critical hit is identical under both rules — the rule only changes crits.
+    expect(rollBranchDamage(branch('1d8', 3), maxRoll, { criticalRule: 'double-total' }).parts[0].amount).toBe(11);
+  });
+
+  it('the adapters carry the rule, so the resolver never has to know the system', () => {
+    // The default is the point: an adapter that has never declared a crit rule keeps 5e's,
+    // which is what every system did before this seam — no silent PF2e math anywhere.
+    expect(criticalDamageRuleForAdapter(Dnd5eAdapter)).toBe('double-dice');
+    expect(criticalDamageRuleForAdapter(Pf2eAdapter)).toBe('double-total');
+    expect(criticalDamageRuleForAdapter(Sf2eAdapter)).toBe('double-total');
+    expect(criticalDamageRuleForAdapter({})).toBe('double-dice');
+  });
+
+  it('folding the modifier INTO the formula still breaks — under BOTH rules', () => {
+    const foldedRoller = (expr: string) => {
       const m = expr.match(/(\d+)d(\d+)(?:\+(\d+))?/)!;
-      return { total: Number(m[1]) * Number(m[2]) + Number(m[3] ?? 0) } as ReturnType<
-        Parameters<typeof rollBranchDamage>[1]
-      >;
-    }, { critical: true });
-    expect(wrong.parts[0].amount).toBe(22);
-    // ...versus the 19 the correct split produces. Documented, not endorsed.
-    expect(wrong.parts[0].amount).not.toBe(19);
+      return { total: Number(m[1]) * Number(m[2]) + Number(m[3] ?? 0) } as ReturnType<Parameters<typeof rollBranchDamage>[1]>;
+    };
+    // 5e: "1d8+3" rolls 11 normally but 22 on a crit instead of 19 — the +3 got doubled.
+    expect(rollBranchDamage(branch('1d8+3', 0), foldedRoller, { critical: true }).parts[0].amount).toBe(22);
+    // PF2e: it happens to land on 22 as well, but only by coincidence of this example — the
+    // server cannot tell which half is dice, so it cannot report a breakdown or apply any
+    // future rule that treats them differently. Documented, not endorsed.
+    expect(rollBranchDamage(branch('1d8+3', 0), foldedRoller, { critical: true, criticalRule: 'double-total' }).parts[0].amount).toBe(22);
+  });
+
+  /**
+   * #1053 review — `DamagePart.flat` was `.min(0)`, so `1d8-1` had NO legal encoding: `flat:-1`
+   * failed validation and leaving `-1` in `formula` doubled the penalty on a 5e crit. The
+   * convention this PR documents was unrepresentable for the case it most needed to cover.
+   */
+  describe('negative modifiers are representable', () => {
+    it('accepts a negative flat through the schema', () => {
+      const spec = ActionSpec.parse({
+        mode: 'attack',
+        attack: { bonus: '+5' },
+        outcomes: { hit: { damage: [{ formula: '1d8', flat: -1, type: 'slashing' }] } },
+      });
+      expect(spec.outcomes.hit!.damage[0].flat).toBe(-1);
+    });
+
+    it('applies the penalty ONCE on a 5e crit, not twice', () => {
+      // 1d8 max = 8. Normal: 8 - 1 = 7. Crit: (8 + 8) - 1 = 15.
+      expect(rollBranchDamage(branch('1d8', -1), maxRoll).parts[0].amount).toBe(7);
+      expect(rollBranchDamage(branch('1d8', -1), maxRoll, { critical: true }).parts[0].amount).toBe(15);
+      // The old workaround — the penalty smuggled into the formula — gives 14: doubled.
+      const foldedRoller = (expr: string) => {
+        const m = expr.match(/(\d+)d(\d+)(?:-(\d+))?/)!;
+        return { total: Number(m[1]) * Number(m[2]) - Number(m[3] ?? 0) } as ReturnType<Parameters<typeof rollBranchDamage>[1]>;
+      };
+      expect(rollBranchDamage(branch('1d8-1', 0), foldedRoller, { critical: true }).parts[0].amount).toBe(14);
+    });
+
+    it('doubles the penalty on a PF2e crit, which is what PF2e says to do', () => {
+      // "double the damage after adding all the modifiers, bonuses, and penalties": (8-1)*2.
+      expect(rollBranchDamage(branch('1d8', -1), maxRoll, { critical: true, criticalRule: 'double-total' }).parts[0].amount).toBe(14);
+    });
+
+    it('floors damage at 0 — a penalty can never heal the target', () => {
+      // A deliberate decision, not inherited: the floor lives at the END of the calculation so
+      // it catches both rules. 2 - 5 = -3 → 0, and (2 - 5) * 2 = -6 → 0.
+      const oneRoll = () => ({ total: 2 }) as ReturnType<Parameters<typeof rollBranchDamage>[1]>;
+      expect(rollBranchDamage(branch('1d4', -5), oneRoll).parts[0].amount).toBe(0);
+      expect(rollBranchDamage(branch('1d4', -5), oneRoll, { critical: true, criticalRule: 'double-total' }).parts[0].amount).toBe(0);
+    });
   });
 });

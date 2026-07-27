@@ -23,6 +23,7 @@ import {
   computeAttackModifier,
   computeSaveDc,
   CombatantStatblock,
+  criticalDamageRuleForAdapter,
   dnd5eProficiencyBonus,
   expandStatblockActions,
   isResolvableSpec,
@@ -541,7 +542,10 @@ export class ActionResolverService {
       // failure branch's damage at half (the common "save for half" authoring shape).
       const damageBranch = branch.damage.length === 0 && branch.halfDamage ? pickOutcomeBranch(spec, 'failure') ?? branch : branch;
       const half = branch.halfDamage;
-      const rolled = rollBranchDamage(damageBranch, roll, { critical });
+      // #1053: the crit rule is the SYSTEM's, not 5e's. `criticalDamageRuleForAdapter` returns
+      // 'double-dice' for any adapter that has not declared one, so 5e and every unaudited
+      // system keep the behaviour they had; PF2e/SF2e now double the total as their rules say.
+      const rolled = rollBranchDamage(damageBranch, roll, { critical, criticalRule: criticalDamageRuleForAdapter(adapter) });
       for (const part of rolled.parts) {
         const { final, applied } = applyDamageModifiers(part.amount, part.type, defenses, { half });
         base.damage.push({ type: part.type, amount: final, applied });

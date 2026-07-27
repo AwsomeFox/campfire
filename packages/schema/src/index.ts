@@ -32,7 +32,7 @@ import {
   sortOrderAscTiebreak,
   type InitiativeTiebreakCombatant,
 } from './initiative-tiebreak';
-import { ActionSpec } from './action-resolver';
+import { ActionSpec, type CriticalDamageRule } from './action-resolver';
 import { RestModel } from './rest';
 import { CharacterAction } from './character-action';
 import { CombatantStatblock } from './combatant-statblock';
@@ -2978,6 +2978,19 @@ export interface RuleSystemAdapter {
    * slots it doesn't have. This is the seam that keeps the turn tracker from hardcoding 5e.
    */
   readonly actionEconomy?: ActionEconomyModel;
+  /**
+   * OPTIONAL — how a critical hit multiplies damage in this system (issue #1053). The
+   * structured action resolver used to hardcode 5e's "roll the dice twice, add the modifier
+   * once" for every campaign, so a PF2e `1d8+3` crit came out as `2d8+3` instead of the
+   * `(1d8+3)*2` PF2e prescribes. Adapters whose crit rule differs from 5e's declare it here;
+   * everyone else omits it and {@link criticalDamageRuleForAdapter} returns `double-dice`,
+   * which is both 5e's rule and the pre-existing behaviour for every system.
+   *
+   * Only the systems whose rule has been confirmed are declared today — 5e (by omission) and
+   * PF2e/SF2e. The remaining adapters are unaudited and therefore left on the 5e default
+   * rather than guessed at; see the follow-up issue linked from #1053.
+   */
+  readonly criticalDamage?: CriticalDamageRule;
   /** Map a monster rule-entry's `dataJson` to canonical statblock fields (AC/HP/CR/abilities/…). */
   mapStatblock(data: Record<string, unknown>): MonsterStatblockData;
   /** Resolve a monster's numeric max HP from its `dataJson`, or null when unavailable. */
@@ -4366,6 +4379,11 @@ export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
   levelBasedDC: pf2eLevelBasedDC,
   simpleDC: pf2eSimpleDC,
   degreeOfSuccess: pf2eDegreeOfSuccess,
+  // PF2e crits double the TOTAL, not just the dice (issue #1053): "double the damage after
+  // adding all the modifiers, bonuses, and penalties". Inherited by the SF2e adapter below,
+  // which spreads this object. Without it the resolver applied 5e's dice-only doubling to
+  // every PF2e critical and silently under-reported the modifier.
+  criticalDamage: 'double-total',
   // PF2e roll catalog (issue #415): proficiency adds your LEVEL plus a rank bonus, and checks
   // report degrees of success — a concrete demonstration that the catalog math is adapter-owned.
   buildCheckCatalog(character: CheckCatalogCharacter): RollCheckDefinition[] {

@@ -749,11 +749,24 @@ export const GROUNDING_PREAMBLE = [
   // The worked example is not decoration. Every field of ActionSpec is optional with a default,
   // so a plausible guess (`{attack: {bonus: '+5'}}`) parses fine and then fails `isResolvableSpec`
   // for want of `mode`, and the model falls straight back to the manual chain we are trying to
-  // stop. The `formula` / `flat` split is called out for a sharper reason: a crit re-rolls
-  // `formula` and adds `flat` ONCE, so writing "1d8+3" as the formula silently doubles the +3.
-  '- To resolve an ATTACK, call resolve_action — never hand-roll one. It rolls the d20 with the right modifier, compares the target’s AC, classifies hit/miss/crit under THIS campaign’s rule system, rolls damage (a crit doubles the dice, never the flat modifier), applies damage-type resistance/immunity, writes the result, and returns an undo token. Pass commit:true to resolve and apply in ONE call.',
-  '- resolve_action needs no pre-authored action: for a monster swing or an improvised attack pass an inline `spec`. A minimal one looks like {"mode":"attack","attack":{"bonus":"+5"},"outcomes":{"hit":{"damage":[{"formula":"1d8","flat":3,"type":"slashing"}]}}}. Put ONLY dice in `formula` and the modifier in `flat` — a critical hit re-rolls `formula` and adds `flat` once, so "1d8+3" as a formula would wrongly double the +3.',
-  '- roll_dice is for rolls with no target and no consequence — a lone ability check, a random table, a morale roll. It does NOT apply anything. Never use it to build an attack, a saving throw, or damage: use resolve_action, which applies the outcome for you.',
+  // stop. The `formula` / `flat` split is called out for a sharper reason: it is the ONLY thing
+  // that lets the server apply a system's critical rule rather than one hardcoded rule — 5e
+  // doubles the dice and adds `flat` once, PF2e doubles the whole total. Fold the modifier into
+  // `formula` and neither rule can be computed correctly (see CriticalDamageRule, #1053).
+  //
+  // Deliberately NOT stated here: which crit rule applies. This preamble is shared by every
+  // campaign whatever its rule system, so any concrete arithmetic in it would be wrong for
+  // some table. The server reads the rule from the campaign's adapter; the model is told the
+  // rule is applied for it and is told what to report, which is the resolver's own numbers.
+  '- To resolve an ATTACK, call resolve_action — never hand-roll one. It rolls the d20 with the right modifier, compares the target’s AC, classifies hit/miss/crit under THIS campaign’s rule system, rolls damage and applies that system’s own critical rule, applies damage-type resistance/immunity, writes the result, and returns an undo token. Pass commit:true to resolve and apply in ONE call. Narrate the totals it returns — never recompute a crit yourself, and never assume one system’s crit maths applies at this table.',
+  '- resolve_action needs no pre-authored action: for a monster swing or an improvised attack pass an inline `spec`. A minimal one looks like {"mode":"attack","attack":{"bonus":"+5"},"outcomes":{"hit":{"damage":[{"formula":"1d8","flat":3,"type":"slashing"}]}}}. Put ONLY dice in `formula` and the modifier in `flat` (negative for a penalty: `1d8-1` is {"formula":"1d8","flat":-1}) — that split is what lets the server apply this system’s critical rule to the right half, so "1d8+3" as a formula gives wrong crit damage.',
+  // #1053 review: `saving_throw` (#1040) is a character-aware tool that derives the real
+  // ability modifier and proficiency from the sheet, and needs nothing but a character and a
+  // DC. `resolve_action` needs an encounter, an actor combatant, targets and an outcome spec —
+  // so steering "make a DC 15 Dex save" at it asks for a call the model cannot construct.
+  // The line splits on whether the save is a STANDALONE ask or a consequence of an action.
+  '- roll_dice is for rolls with no target and no consequence — a random table, a morale roll. It does NOT apply anything. Never use it to hand-roll an attack, a save, or damage.',
+  '- For a STANDALONE saving throw ("make a DC 15 Dexterity save", a hazard or a trap, in or out of combat), call saving_throw with the character and the DC: it reads their real ability score and proficiency. Use resolve_action instead only when the save is part of an action you are resolving — a spell or effect whose outcome spec already carries the DC and its success/failure branches — because it rolls the save AND applies the branch in the same call.',
   '- Respect the session-zero charter (lines/veils/safety tools) below at all times.',
 ].join('\n');
 

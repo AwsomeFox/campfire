@@ -25,6 +25,20 @@ describe('combatant statblock expansion (issue #425)', () => {
     expect(isResolvableSpec(action.spec)).toBe(true);
   });
 
+  it('keeps a NEGATIVE damage modifier in flat, not in the dice formula (#1053)', () => {
+    // `DamagePart.flat` used to be `.min(0)`, so this expander folded a penalty back into the
+    // formula as "1d8-1" — which a 5e crit then re-rolled, doubling the penalty. Now the split
+    // survives, and the resolver applies the system's crit rule to the dice half only.
+    const action = expandRawStatblockAction(
+      { name: 'Weak Bite', desc: 'Melee attack.', attack_bonus: 2, damage: [{ expression: '1d8-1', type: 'piercing' }] },
+      'action',
+      'dnd5e',
+    );
+    const part = action.spec!.outcomes.hit!.damage[0];
+    expect(part.formula).toBe('1d8');
+    expect(part.flat).toBe(-1);
+  });
+
   it('expands saving-throw actions while preserving prose', () => {
     const action = expandRawStatblockAction(
       {
