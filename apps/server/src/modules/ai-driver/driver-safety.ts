@@ -44,6 +44,35 @@
  *      live deltas on `turn.end`, so without an explicit retraction the withheld prose would
  *      be promoted into the client's permanent transcript by the very event that ends the turn.
  *
+ * ── THE INVARIANT ────────────────────────────────────────────────────────────────────
+ * If you read nothing else in this file, read this:
+ *
+ *     NO PATH MAY COMMIT LIVE TEXT FOR A TURN WHOSE CONTENT WAS WITHHELD, REGARDLESS OF
+ *     WHICH STOP REASON THE TURN REPORTS.
+ *
+ * Stated once, in one place, because three separate routes to violating it have already been
+ * found and each had to be closed at a different layer:
+ *
+ *   1. RECONNECT ORDERING. `narration.withheld` is ephemeral with no durable counterpart, so a
+ *      client that dropped before it arrived replayed the persisted rows and committed the
+ *      buffered deltas. Closed by testing the stop reason AT the commit points
+ *      (`commitsLiveText` in the web reducer) rather than depending on the retraction arriving.
+ *
+ *   2. METERING. Discarding refusal prose also discarded the estimator's only measurement, so
+ *      refused turns metered as zero and REFUNDED their reservation. Closed by settling
+ *      unmeasurable turns as unknown spend instead of metering zero.
+ *
+ *   3. TEARDOWN RACE. A mode switch landing between the terminal safety frame and streamStep's
+ *      `finally` marked the session detached, which suppressed the retraction and reported
+ *      `aborted` — a stop reason the reducer is ALLOWED to commit. Closed by keeping
+ *      `content_withheld` on the detached path, so the reason is true rather than compensated
+ *      for somewhere else.
+ *
+ * The through-line: each was either a guarantee enforced at some call sites and not their
+ * siblings, or a correct guard fed an input that lied. When adding a path that ends a turn, the
+ * question is not "did I remember to clear the buffer" — it is "does every commit point still
+ * refuse this turn?".
+ *
  * ── Where each transport hides its refusal ───────────────────────────────────────────
  * Three of the adapters reported a refusal in a field nobody read, and the pattern was the
  * same every time: the adapter MODELLED the shape, then only consulted it on whichever path

@@ -3,6 +3,7 @@ import { createAiEvalHarness, dm, player, type AiEvalHarness } from './ai-eval-h
 import { AiDmStreamService, type AiDmStreamEvent } from '../src/modules/ai-driver/ai-driver-stream.service';
 import { NARRATION_QUARANTINE_CHARS } from '../src/modules/ai-driver/driver-safety';
 import { AiDmService } from '../src/modules/ai-dm/ai-dm.service';
+import { AiDriverService } from '../src/modules/ai-driver/ai-driver.service';
 
 /**
  * #598 — a provider content filter / refusal is a WITHHELD TURN, not successful narration.
@@ -374,6 +375,62 @@ describe('ai-dm driver — provider content filters / refusals are withheld turn
       // And the spend is recorded as an ESTIMATE, not presented as an exact figure.
       expect(after.tokensUnknown ?? 0).toBeGreaterThan(0);
     });
+  });
+
+  it('a mode switch racing the terminal frame still reports content_withheld, not aborted', async () => {
+    // THE TEARDOWN RACE. Driver mode is switched off AFTER the terminal safety frame has
+    // populated `result` but BEFORE streamStep's `finally` runs. `teardownSession` marks the
+    // session detached, which correctly suppresses `narration.withheld` (emitting onto a
+    // replaced session's channel would splice a frame into a table that moved on) — and the
+    // detached exit then reported `aborted`, which the web reducer is ALLOWED to commit live
+    // text for. Provider-filtered prose landed permanently in the transcript because a mode
+    // switch happened to fall in a few-millisecond window.
+    //
+    // `commitsLiveText()` was not wrong; it was handed a stop reason that lied. The turn really
+    // did end because content was withheld, so that is what it must say.
+    //
+    // The race is made deterministic by `stallAfterDone`, which holds the stream open at
+    // exactly that instant. A test that merely LOOKED like this race — tearing down before the
+    // terminal frame — would exercise the ordinary aborted path and prove nothing.
+    const campaignId = await armedCampaign('Withheld teardown race');
+    const safeHead = 'A. '.repeat(Math.ceil((NARRATION_QUARANTINE_CHARS * 1.5) / 3));
+    h.script({
+      text: `${safeHead}${UNSAFE}`,
+      finishReason: 'content_filter',
+      streamChunks: 30,
+      stallAfterDone: true,
+    });
+
+    const reachedTerminalFrame = new Promise<void>((resolve) => {
+      h.mock.onStall = () => resolve();
+    });
+
+    const { result: res, events } = await withStream(h, campaignId, async () => {
+      // `.then()` rather than a bare call: a supertest `Test` does not dispatch until it is
+      // subscribed to, so holding it unawaited would deadlock against `reachedTerminalFrame`.
+      const turn = h.sendMessage(campaignId, { input: 'go' }).then((r) => r);
+      // Wait until the provider has emitted its terminal safety frame and is holding there.
+      await reachedTerminalFrame;
+      // Now tear the session down, inside the window. Driven directly rather than through the
+      // mode-switch endpoint: the stalled step still HOLDS the campaign spend lock, so an HTTP
+      // mode switch would block on that mutex and never reach teardown inside the window. This
+      // calls the same `teardownSession` the mode switch does (detach + cancelGeneration), at
+      // exactly the instant the race requires.
+      h.ctx.app.get(AiDriverService).teardownSession(campaignId);
+      return turn;
+    });
+
+    // The turn ends as what it WAS, not as what the teardown made it look like.
+    expect(res.body.stopReason).toBe('content_withheld');
+    expect(res.body.narration).toBe('');
+    expect(JSON.stringify(events)).not.toContain(UNSAFE);
+
+    // And the durable record agrees, so a replay cannot promote the prose either — the
+    // reducer's `commitsLiveText` guard keys on exactly this value.
+    const log = await transcript(campaignId);
+    expect(JSON.stringify(log.body)).not.toContain(UNSAFE);
+    const ended = log.body.items.find((e: { kind: string }) => e.kind === 'turn.ended');
+    expect(ended?.payload?.stopReason).toBe('content_withheld');
   });
 
   it('reports the SETTLED budget after a metering rejection, not the pre-call snapshot', async () => {

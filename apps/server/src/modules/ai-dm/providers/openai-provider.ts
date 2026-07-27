@@ -505,8 +505,19 @@ class OpenAiStreamAccumulator {
       this.refusalChars += delta.refusal.length;
     }
     if (typeof delta.content === 'string' && delta.content.length > 0) {
+      // #598 — ONCE REFUSED, STOP FORWARDING. The quarantine window exists because a turn
+      // cannot be known to be refused until the terminal signal arrives; it is a bounded,
+      // documented residual. But here the signal has ALREADY arrived — `refused` is sticky and
+      // set — so every remaining delta is known to belong to a refused turn, and forwarding it
+      // would release content AFTER the thing the window was waiting for. That is not the
+      // unavoidable residual, it is a leak past it, and on an interleaved
+      // refusal-then-content stream it is unbounded rather than capped at the window.
+      //
+      // `text` still accumulates so the step's usage estimate stays honest; only the live
+      // broadcast stops. Costs nothing in the ordinary case, where a refusal has no content
+      // after it.
       this.text += delta.content;
-      yield { type: 'text', delta: delta.content };
+      if (!this.refused) yield { type: 'text', delta: delta.content };
     }
     for (const tc of delta.tool_calls ?? []) {
       const idx = tc.index ?? 0;

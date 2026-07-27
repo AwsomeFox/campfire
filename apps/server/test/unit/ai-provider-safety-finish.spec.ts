@@ -144,6 +144,39 @@ describe('OpenAI Chat Completions — message.refusal / delta.refusal (#598)', (
     expect(done && done.type === 'done' && done.result.finishReason).toBe('refusal');
   });
 
+  it('streaming: emits NO text delta after a refusal, even if content keeps arriving', async () => {
+    // This is the assertion the sticky test above was missing, and the gap is instructive: it
+    // checked the final `finishReason` and said nothing about what went out on the wire in
+    // between. Classification being sticky does not stop bytes being broadcast.
+    //
+    // The quarantine window exists because a turn cannot be known to be refused until the
+    // terminal signal arrives — a bounded, documented residual. Here the signal has ALREADY
+    // arrived, so every subsequent delta is known to belong to a refused turn. Forwarding it
+    // releases content AFTER the thing the window was waiting for, which on an interleaved
+    // refusal-then-content stream is unbounded rather than capped at ~240 characters.
+    const LEAK = 'CONTENT_AFTER_THE_REFUSAL_MUST_NOT_STREAM';
+    const frames = [
+      `data: ${JSON.stringify({ choices: [{ delta: { content: 'The alley narrows. ' } }] })}\n\n`,
+      `data: ${JSON.stringify({ choices: [{ delta: { refusal: 'No.' } }] })}\n\n`,
+      `data: ${JSON.stringify({ choices: [{ delta: { content: LEAK } }] })}\n\n`,
+      `data: ${JSON.stringify({ choices: [{ finish_reason: 'stop', delta: {} }] })}\n\n`,
+      'data: [DONE]\n\n',
+    ];
+    const { fetchImpl } = fakeFetch(streamResponse(frames));
+    const p = new OpenAiProvider({ apiKey: 'k', model: 'm', endpointMode: 'chat_completions', fetchImpl });
+    const events = await collect(p.stream(req));
+
+    const textDeltas = events.filter((e) => e.type === 'text');
+    // The delta BEFORE the refusal is legitimate — it is the residual the quarantine covers.
+    expect(textDeltas).toHaveLength(1);
+    expect(JSON.stringify(textDeltas)).not.toContain(LEAK);
+    // …and the step's usage estimate still sees it, so suppressing the broadcast does not make
+    // the turn look cheaper than it was.
+    const done = events.find((e) => e.type === 'done');
+    expect(done && done.type === 'done' && done.result.text).toContain(LEAK);
+    expect(done && done.type === 'done' && done.result.finishReason).toBe('refusal');
+  });
+
   it('an ordinary `stop` with no refusal field is still delivered', async () => {
     // The control. The check must key on the FIELD, not on anything about `stop`, or every
     // successful Chat Completions turn would be withheld.

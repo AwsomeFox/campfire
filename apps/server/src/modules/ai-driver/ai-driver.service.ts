@@ -2829,10 +2829,27 @@ export class AiDriverService {
     // Detached mid-turn: skip stuck detection (would mutate/emit against a dead object) and
     // just signal turn.end so open stream clients close the orphaned bubble cleanly.
     if (session.detached) {
-      this.emitTurnEnd(campaignId, 'aborted', finalNarration, steps, totalTokens, budgetRemaining);
+      // #598 — A WITHHELD TURN KEEPS ITS STOP REASON EVEN HERE.
+      //
+      // The race this closes: Driver mode is switched off (or to Co-DM) after the terminal
+      // safety frame has populated `result` but before streamStep's `finally` runs.
+      // `teardownSession` marks the session detached, which suppresses `narration.withheld` —
+      // correctly, because emitting onto a replaced session's channel would splice a frame into
+      // a table that has moved on. This branch then reported `aborted`, and the web reducer is
+      // ALLOWED to promote live text for `aborted`. So provider-filtered prose was committed
+      // permanently to the transcript, defeating the whole feature via a mode switch that
+      // happened to land in a few-millisecond window.
+      //
+      // `commitsLiveText()` was not wrong — it was handed a stop reason that lied. The turn
+      // genuinely ended because content was withheld; the teardown is incidental timing. Saying
+      // so makes the reason TRUE rather than adding a second mechanism to compensate for it
+      // being false, and routes this case into the guarantee already built and tested instead
+      // of teaching another code path about safety.
+      const detachedStopReason: AiDmStopReason = withheldTurn ? 'content_withheld' : 'aborted';
+      this.emitTurnEnd(campaignId, detachedStopReason, finalNarration, steps, totalTokens, budgetRemaining);
       return {
         narration: finalNarration,
-        stopReason: 'aborted',
+        stopReason: detachedStopReason,
         steps,
         toolCalls: executed,
         tokensUsed: totalTokens,
