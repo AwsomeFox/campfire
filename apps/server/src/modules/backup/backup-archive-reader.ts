@@ -195,7 +195,7 @@ export class BackupArchiveReader {
     let actual = 0;
     await this.stream(entry, async (source) => {
       for await (const chunk of source) {
-        const bytes = Buffer.from(chunk);
+        const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
         actual += bytes.length;
         if (!this.accountActual(bytes.length) || actual > maxBytes || actual > this.limits.maxEntryUncompressedBytes) throw new Error('entry limit exceeded');
         chunks.push(bytes);
@@ -242,7 +242,7 @@ export class BackupArchiveReader {
     const hash = createHash('sha256');
     await this.stream(entry, async (source) => {
       for await (const chunk of source) {
-        const bytes = Buffer.from(chunk);
+        const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
         actual += bytes.length;
         if (!this.accountActual(bytes.length) || actual > this.limits.maxEntryUncompressedBytes) {
           throw new Error('entry limit exceeded');

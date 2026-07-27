@@ -50,6 +50,30 @@ async function rejects(file: string, limits = low): Promise<void> {
   await expect(BackupArchiveReader.open(file, undefined, limits)).rejects.toBeInstanceOf(BadRequestException);
 }
 
+function readerWithChunks(chunks: readonly (Buffer | Uint8Array | string)[]): BackupArchiveReader {
+  const source = {
+    async *[Symbol.asyncIterator]() {
+      yield* chunks;
+    },
+  } as unknown as PassThrough;
+  const fakeZip = {
+    openReadStream: jest.fn((_entry: unknown, callback: (error: Error | null, stream?: PassThrough) => void) => {
+      callback(null, source);
+    }),
+    close: jest.fn(),
+  };
+  return new (BackupArchiveReader as unknown as new (
+    zip: typeof fakeZip,
+    entries: readonly unknown[],
+    limits: BackupArchiveReaderLimits,
+  ) => BackupArchiveReader)(fakeZip, [], {
+    maxCompressedBytes: 1024,
+    maxEntries: 3,
+    maxEntryUncompressedBytes: 1024,
+    maxTotalUncompressedBytes: 1024,
+  });
+}
+
 afterAll(() => fs.rmSync(tmp, { recursive: true, force: true }));
 
 describe('BackupArchiveReader', () => {
@@ -143,6 +167,42 @@ describe('BackupArchiveReader', () => {
     await expect(BackupArchiveReader.open(file, undefined, { ...low, maxCompressedBytes: 1 })).rejects.toThrow(
       '1 byte compressed size limit',
     );
+  });
+
+  it('retains Buffer chunks without copying in read and hash paths', async () => {
+    const chunk = Buffer.from('already-a-buffer');
+    const from = jest.spyOn(Buffer, 'from');
+    try {
+      await expect(readerWithChunks([chunk]).readBuffer({ fileName: 'data' } as never, 1024)).resolves.toEqual(chunk);
+      await expect(readerWithChunks([chunk]).hashEntry({ fileName: 'data' } as never)).resolves.toEqual({
+        bytes: chunk.length,
+        sha256: crypto.createHash('sha256').update(chunk).digest('hex'),
+      });
+      expect(from).not.toHaveBeenCalled();
+    } finally {
+      from.mockRestore();
+    }
+  });
+
+  it('converts Uint8Array and string chunks correctly', async () => {
+    const bytes = new Uint8Array([0x61, 0x62, 0x63]);
+    const text = 'stream text';
+    const expectedBytes = Buffer.from(bytes);
+    const expectedText = Buffer.from(text);
+    const from = jest.spyOn(Buffer, 'from');
+    try {
+      await expect(readerWithChunks([bytes]).readBuffer({ fileName: 'data' } as never, 1024)).resolves.toEqual(expectedBytes);
+      expect(from).toHaveBeenCalledWith(bytes);
+
+      from.mockClear();
+      await expect(readerWithChunks([text]).hashEntry({ fileName: 'data' } as never)).resolves.toEqual({
+        bytes: expectedText.length,
+        sha256: crypto.createHash('sha256').update(expectedText).digest('hex'),
+      });
+      expect(from).toHaveBeenCalledWith(text);
+    } finally {
+      from.mockRestore();
+    }
   });
 
   it('closes a stream opened after its cancellation signal fired', async () => {
