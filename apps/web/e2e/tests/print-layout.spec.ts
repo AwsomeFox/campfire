@@ -30,7 +30,9 @@ async function mockPublicRecap(page: Page): Promise<void> {
 async function expectPrintSurface(page: Page): Promise<void> {
   await page.emulateMedia({ media: 'print' });
   await expect(page.getByRole('button', { name: 'Print' })).toBeHidden();
-  await expect.poll(() => page.locator('.cf-print-chrome').evaluateAll(
+  const chrome = page.locator('.cf-print-chrome');
+  await expect(chrome).not.toHaveCount(0);
+  await expect.poll(() => chrome.evaluateAll(
     (elements) => elements.every((element) => getComputedStyle(element).display === 'none'),
   )).toBe(true);
   await expect(page.locator('.cf-tabbar')).toBeHidden();

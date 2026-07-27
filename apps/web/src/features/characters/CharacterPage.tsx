@@ -337,14 +337,16 @@ export default function CharacterPage() {
         </div>
         {isOwner && <Chip variant="dm">You can edit</Chip>}
         <div className="flex items-center gap-1 ml-auto">
-          <Btn
-            ghost
-            type="button"
-            className="cf-print-hide !min-h-0 !py-1.5 text-xs"
-            onClick={() => window.print()}
-          >
-            Print
-          </Btn>
+          {!editingSheet && (
+            <Btn
+              ghost
+              type="button"
+              className="cf-print-hide !min-h-0 !py-1.5 text-xs"
+              onClick={() => window.print()}
+            >
+              Print
+            </Btn>
+          )}
           {canEdit && !editingSheet && (
             <Btn ghost className="cf-print-hide !min-h-0 !py-1.5 text-xs" onClick={() => setEditingSheet(true)}>
               ✎ Edit sheet

@@ -36,9 +36,13 @@
   /* Both character panels remain mounted for accessible tab semantics; print
      needs the complete sheet, irrespective of which tab was active on screen. */
   #character-sheet-panel-play,
-  #character-sheet-panel-build,
   .cf-character-sheet-panel-hidden {
     display: block !important;
+  }
+
+  #character-sheet-panel-build {
+    display: grid !important;
+    grid-template-columns: 1fr 280px !important;
   }
 
   .cf-authed-shell,
