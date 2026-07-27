@@ -69,15 +69,14 @@ interrupted write.
 
 ### Which export profiles stream
 
-Whole-server backups and campaign exports under the **backup** profile hand attachment
-files to the archive as filesystem paths, so their bytes never enter the server heap.
+Whole-server backups and campaign exports under the **backup** profile hand attachment files
+to the archive as filesystem paths, so their bytes never enter the server heap.
 
 The **handoff** and **publish** profiles must strip embedded metadata (EXIF/XMP) before an
-attachment may travel, and bytes cannot be sanitized without being read. Those two profiles
-therefore still hold sanitized attachment bytes in memory while the archive is assembled.
-Campaigns with many large images can use substantial heap under `handoff`/`publish` even
-though the ZIP itself is streamed. Whole-server backups — the disaster-recovery path — are
-unaffected.
+attachment may travel, and bytes cannot be sanitized without being read. Each attachment is
+therefore read, sanitized, and written straight into the export's staging directory, so only
+one attachment is held in memory at a time rather than all of them. Peak heap for those
+profiles is bounded by the largest single attachment, not by the size of the campaign.
 
 ### Restore is stricter than it used to be
 
