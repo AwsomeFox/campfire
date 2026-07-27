@@ -287,6 +287,7 @@ export async function downloadServerBackup(options?: {
         `This browser cannot stream the response and can only safely buffer backups with a known size up to ${MAX_BROWSER_BACKUP_BUFFER_BYTES / 1024 / 1024} MiB. Use a browser with File System Access support or download with curl.`,
       );
     }
+    options?.onPhase?.('streaming');
     const blob = await res.blob();
     if (blob.size > MAX_BROWSER_BACKUP_BUFFER_BYTES) {
       throw new BackupDownloadLimitError(
