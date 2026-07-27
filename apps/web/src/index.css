@@ -2362,3 +2362,44 @@ a:hover .cf-name-reveal {
   40% { opacity: 0.9; }
   100% { transform: scale(0.4); opacity: 0; }
 }
+
+/* ---------------------------------------------------------------------------
+   Table safety hold / X-Card (issue #599).
+
+   Rendered above <main> on every campaign route. Two states with deliberately
+   different visual weight: idle is a quiet strip that must never compete with
+   the page, and active is a banner that must be impossible to miss from across
+   a room — the whole point of the acknowledgment is that everyone sees it.
+   --------------------------------------------------------------------------- */
+.cf-safety-bar {
+  display: flex; flex-direction: column; gap: var(--space-1);
+  padding: var(--space-1) var(--space-4);
+}
+.cf-safety-idle {
+  display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap;
+  font-size: var(--type-control); opacity: 0.9;
+}
+.cf-safety-anon { display: inline-flex; align-items: center; gap: var(--space-1); }
+.cf-safety-bar-active { padding-block: var(--space-2); }
+.cf-safety-banner {
+  display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap;
+  padding: var(--space-3) var(--space-4); border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--color-danger, #b3261e) 18%, var(--color-surface));
+  border: 2px solid var(--color-danger, #b3261e);
+}
+/* The shared-display curtain, because a TV that keeps showing the fight through a
+   safety stop is this feature failing loudly.
+
+   `fixed`, not `absolute`: the cast stage's own containers carry no positioning
+   rule, so an absolutely-positioned child would resolve against whatever ancestor
+   happens to be positioned — unpredictable, and a curtain that only covers part of
+   the screen is worse than none. The display is a full-viewport kiosk anyway. */
+.cf-safety-display {
+  position: fixed; inset: 0; display: grid; place-items: center;
+  z-index: var(--cf-layer-dialog, 50);
+  background: color-mix(in srgb, var(--color-neutral-900) 92%, transparent);
+}
+.cf-safety-display-inner {
+  display: flex; flex-direction: column; gap: var(--space-2);
+  text-align: center; font-size: clamp(1.5rem, 4vw, 3rem);
+}

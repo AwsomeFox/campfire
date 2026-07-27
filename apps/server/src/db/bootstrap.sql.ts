@@ -1532,6 +1532,34 @@ CREATE TABLE IF NOT EXISTS ai_driver_grounding_claims (
   corrected_at TEXT
 );
 
+-- Issue #599: the table safety hold (X-Card). ONE row per campaign holding the CURRENT
+-- stop state — not an append-only log — because the only question every gate asks is
+-- "is play frozen right now", and a single upserted row makes activation idempotent:
+-- two participants tapping at once both succeed and the table pauses once.
+--
+-- There is NO activated_by_user_id column, on purpose. An anonymous activation must not
+-- be attributable through a back door, and the cheapest way to guarantee that is for the
+-- identity never to reach storage: the controller drops it before calling the service, so
+-- there is no column for a future projection to forget to redact and nothing for a DM
+-- reading the audit log to join against. activated_by_name is written ONLY for an
+-- explicitly attributed activation and is NULL for both "anonymous" and "no hold".
+--
+-- released_by is the opposite case and is always recorded: releasing is an accountable
+-- facilitator act, not a protected one.
+CREATE TABLE IF NOT EXISTS table_safety_holds (
+  campaign_id INTEGER PRIMARY KEY REFERENCES campaigns(id) ON DELETE CASCADE,
+  active INTEGER NOT NULL DEFAULT 0,
+  activated_at TEXT,
+  activated_by_name TEXT,
+  anonymous INTEGER NOT NULL DEFAULT 1,
+  activation_count INTEGER NOT NULL DEFAULT 0,
+  released_at TEXT,
+  released_by TEXT,
+  recovery TEXT,
+  facilitator_note TEXT,
+  updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_users_oidc_sub ON users(oidc_sub);
 CREATE INDEX IF NOT EXISTS idx_characters_campaign ON characters(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_quests_campaign ON quests(campaign_id);

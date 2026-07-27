@@ -42,6 +42,7 @@ import {
 } from '../../components/Announcer';
 import { GameIcon } from '../../components/GameIcon';
 import { useDialog } from '../../components/useDialog';
+import { SafetyHoldDisplayOverlay } from '../../components/SafetyHoldBar';
 import { NpcDispositionBadge, QuestStatusBadge } from '../../components/EntitySemanticBadges';
 import { BattleMap } from '../encounters/RunSessionPage';
 import { useAuth } from '../../app/auth';
@@ -1072,6 +1073,13 @@ export default function PlayerDisplayPage() {
         <div className="cf-scene-body" data-testid={`cf-scene-${scene}`} data-scene={scene}>
           {sceneContent}
         </div>
+        {/* #599 — the shared display's half of the safety hold. A TV in the corner of the room
+            cannot raise a hold (on the /cast token route it has no member identity at all), but
+            it absolutely must stop showing the fight when one is raised: a monitor still
+            rendering initiative order through a safety stop is the loudest possible way for
+            this feature to fail. Authed route only — the cast-token client cannot read the
+            member-scoped safety endpoint, and is documented as an uncovered surface. */}
+        {!isCastMode && <SafetyHoldDisplayOverlay campaignId={cid} />}
       </div>
     </div>,
   );

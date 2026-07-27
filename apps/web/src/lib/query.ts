@@ -18,7 +18,7 @@
  * only owns caching, dedupe, polling, and optimistic writes on top of it.
  */
 import { QueryClient, useQuery, type QueryKey, type UseQueryResult } from '@tanstack/react-query';
-import type { AiDmSeat } from '@campfire/schema';
+import type { AiDmSeat, TableSafetyHold } from '@campfire/schema';
 import { api, API, ApiError } from './api';
 
 /**
@@ -59,6 +59,8 @@ export const queryKeys = {
   aiDmGrounding: (campaignId: number) => ['campaign', campaignId, 'ai-dm', 'grounding'] as const,
   /** #1558 — confirm-policy tool calls waiting on a DM's approval. */
   aiDmToolConfirmations: (campaignId: number) => ['campaign', campaignId, 'ai-dm', 'tool-confirmations'] as const,
+  /** #599 — the table safety hold (X-Card). Read by every campaign surface, not just the table. */
+  tableSafety: (campaignId: number) => ['campaign', campaignId, 'safety'] as const,
 } satisfies Record<string, (...args: never[]) => QueryKey>;
 
 /**
@@ -249,6 +251,32 @@ export function useAiDmToolConfirmations(
 
 export function invalidateAiDmToolConfirmations(client: QueryClient, campaignId: number): void {
   void client.invalidateQueries({ queryKey: queryKeys.aiDmToolConfirmations(campaignId) });
+}
+
+/**
+ * Watch the table safety hold (#599).
+ *
+ * `refetchInterval` is deliberate and deliberately short. Every other read in this file is
+ * happy to wait for an SSE tick, because being a few seconds stale about a quest title costs
+ * nothing. Being stale about whether the table has stopped costs the exact thing the feature
+ * exists to buy, and SSE is the layer most likely to be quietly dead (a sleeping laptop, a
+ * proxy that dropped the stream, a tab restored from bfcache). The poll is the floor under the
+ * event: the event makes it feel instant, the poll makes it eventually true regardless.
+ */
+export function useTableSafety(campaignId: number | undefined): UseQueryResult<TableSafetyHold> {
+  return useQuery({
+    queryKey: campaignId !== undefined ? queryKeys.tableSafety(campaignId) : ['safety', 'disabled'],
+    queryFn: () => api.get<TableSafetyHold>(`${API}/campaigns/${campaignId}/safety`),
+    enabled: campaignId !== undefined && Number.isFinite(campaignId),
+    staleTime: 0,
+    refetchInterval: 20_000,
+    refetchOnWindowFocus: true,
+  });
+}
+
+/** Mark the table safety hold stale (SSE `safety.hold` tick, or after activating/releasing). */
+export function invalidateTableSafety(client: QueryClient, campaignId: number): void {
+  void client.invalidateQueries({ queryKey: queryKeys.tableSafety(campaignId) });
 }
 
 export function invalidateAiDm(client: QueryClient, campaignId: number): void {

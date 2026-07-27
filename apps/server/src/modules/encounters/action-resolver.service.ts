@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { and, eq } from 'drizzle-orm';
 import {
   ActionApplyPolicy,
@@ -44,6 +44,7 @@ import { DB, type DrizzleDb } from '../../db/db.module';
 import { campaigns, characters, combatants, encounterEvents, encounters, ruleEntries } from '../../db/schema';
 import { CampaignEventsService } from '../events/campaign-events.service';
 import { AuditService } from '../audit/audit.service';
+import { TableSafetyService } from '../safety/table-safety.service';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { conditionWriteSetFromNames, sheetConditionWriteSetFromNames } from '../../common/conditions';
 import { nowIso } from '../../common/time';
@@ -77,6 +78,8 @@ export class ActionResolverService {
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly events: CampaignEventsService,
     private readonly audit: AuditService,
+    /** #599 — optional and last; several specs construct this service positionally. */
+    @Optional() private readonly safety?: TableSafetyService,
   ) {}
 
   // -------------------------------------------------------------------------
@@ -754,6 +757,11 @@ export class ActionResolverService {
    */
   apply(encounterId: number, resolution: ActionResolution, user: RequestUser, role: Role): { undoToken: ActionUndoToken } {
     const encounter = this.encounterRowOrThrow(encounterId);
+    // #599: applying a resolution writes damage, conditions, and death saves to the board. That
+    // is play advancing, and it is precisely what someone raising an X-Card mid-swing is asking
+    // to stop. `resolve` (the preview) stays open — computing a number nobody has committed is
+    // harmless, and blocking it would only hide from the table what was about to happen.
+    this.safety?.assertNotHeld(encounter.campaignId);
     const actor = this.combatantRowOrThrow(encounterId, resolution.actorCombatantId);
     const isDm = role === 'dm';
     if (!isDm) {
