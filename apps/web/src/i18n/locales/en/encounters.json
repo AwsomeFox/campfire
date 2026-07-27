@@ -17,7 +17,9 @@
       "filterStatus": "Filter by status",
       "noResults": "Nothing matches your filters.",
       "resultCount": "{{count}} encounter",
-      "resultCount_other": "{{count}} encounters"
+      "resultCount_other": "{{count}} encounters",
+      "arrived": "{{names}} was added to the encounter list",
+      "arrived_other": "{{count}} encounters were added: {{names}}"
     },
     "empty": {
       "title": "No encounters yet",

@@ -160,8 +160,17 @@ test.describe('confirm dialog pending labels — slow requests (issue #793)', ()
     );
 
     await page.goto(encounterUrl());
-    // The row control exposes a contextual accessible name (not the decorative ✕ glyph).
-    await page.getByRole('button', { name: /Remove .+/ }).first().click();
+    // The row control exposes a contextual accessible name (not the decorative ✕ glyph) —
+    // but so does the battle-map control above it. Whenever the encounter has a map the
+    // page also carries a "Remove map" button, which matches /Remove .+/ and precedes the
+    // combatant rows in DOM order, so an unscoped `.first()` clicked the MAP's remove
+    // button instead. No combatant dialog ever opened, and the failure surfaced 30s later
+    // as "the Remove button inside the dialog is not clickable" — blaming the dialog
+    // rather than the click that was meant to open it. Scoping to a combatant row makes
+    // the locator unable to mean anything but the row control.
+    const combatantRow = page.locator('[data-testid^="combatant-row-"]').first();
+    await expect(combatantRow).toBeVisible();
+    await combatantRow.getByRole('button', { name: /^Remove .+/ }).first().click();
     const dialog = page.getByRole('dialog', { name: 'Remove this combatant from the encounter?' });
     await dialog.getByRole('button', { name: 'Remove', exact: true }).click();
     await started;

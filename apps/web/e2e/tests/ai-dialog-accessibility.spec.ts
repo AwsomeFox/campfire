@@ -182,7 +182,22 @@ test.describe('AI mode disclosure accessibility', () => {
     expect(flippedBox).not.toBeNull();
     expect(flippedBox!.y + flippedBox!.height).toBeLessThanOrEqual(triggerBox!.y);
 
-    await page.getByRole('heading', { name: 'Cinderhaven' }).click();
+    // Dismiss with an outside click, targeting a VIEWPORT coordinate rather than a page
+    // element. The trigger was just pinned with position:fixed, so the popover is anchored
+    // to the viewport and does not move with the document — but every element inside <main>
+    // shifts down by however much chrome sits above it. Clicking a heading worked only
+    // because it cleared the popover's top edge by ~21px, which is not a margin anyone
+    // chose: #599's safety bar adds ~50px above <main> and drops that heading underneath
+    // the popover, so the click is swallowed and the popover never closes.
+    //
+    // Assert the point really is outside the popover so a future layout change fails loudly
+    // here instead of silently clicking the popover it is supposed to dismiss.
+    const popoverBox = (await popover.boundingBox())!;
+    const stickyHeader = (await page.locator('header.md\\:hidden').boundingBox())!;
+    const outsideY = Math.round((stickyHeader.y + stickyHeader.height + popoverBox.y) / 2);
+    expect(outsideY).toBeGreaterThan(stickyHeader.y + stickyHeader.height);
+    expect(outsideY).toBeLessThan(popoverBox.y);
+    await page.mouse.click(180, outsideY);
     await expect(popover).toBeHidden();
     await expect(trigger).toHaveAttribute('aria-expanded', 'false');
   });

@@ -116,7 +116,7 @@ export function CatchUpPanel({ campaignId }: { campaignId: number }) {
       className="catch-up-panel"
       role="region"
       aria-labelledby={titleId}
-      style={{ borderColor: 'var(--color-accent-muted)', background: 'var(--color-surface-raised)' }}
+      style={{ borderColor: 'var(--color-accent-700)', background: 'var(--color-surface)' }}
     >
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, flexWrap: 'wrap' }}>
         <GameIcon slug="campfire" size={22} reserveSpace />

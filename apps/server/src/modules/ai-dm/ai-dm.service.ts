@@ -9,7 +9,12 @@ import {
 } from '@nestjs/common';
 import { and, desc, eq, gt, gte, sql } from 'drizzle-orm';
 import type { z } from 'zod';
-import { AiDmProactiveSettings, estimateUsdForSplit } from '@campfire/schema';
+import {
+  AI_DM_SEAT_INHERITED_FIELDS,
+  AiDmProactiveSettings,
+  AiDmSeatDefaults,
+  estimateUsdForSplit,
+} from '@campfire/schema';
 import type {
   AiDmMode,
   AiDmReadiness,
@@ -100,19 +105,34 @@ function toDomain(row: typeof aiDmSeats.$inferSelect): AiDmSeat {
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     proactiveSettings: AiDmProactiveSettings.parse(row.proactiveSettings ?? {}),
+    // #1070: a persisted seat inherits nothing. Detach is whole-seat on first configure,
+    // matching the provider's row-granularity override, so a configured campaign is its own
+    // truth and must not report otherwise.
+    inheritedFields: [],
   };
 }
 
-/** In-memory default seat for a campaign that has never configured one — never persisted. */
-function defaultSeat(campaignId: number): AiDmSeat {
+/**
+ * In-memory default seat for a campaign that has never configured one — never persisted.
+ *
+ * `defaults` are the server-wide values from {@link AiDmService.getSeatDefaults} (#1070).
+ * Passing them makes this seat the LIVE inherited view: a campaign with no row tracks the
+ * server defaults until the moment it saves, exactly as a campaign with no provider override
+ * tracks the server provider row. `inheritedFields` names what came from there, so a DM can
+ * see an inherited token budget BEFORE enabling the seat — the point at which it could spend.
+ *
+ * Called with no `defaults` it behaves exactly as it did before #1070, which is what keeps
+ * the pure/unit call sites (and any caller that has no DB handle) working unchanged.
+ */
+function defaultSeat(campaignId: number, defaults?: AiDmSeatDefaults): AiDmSeat {
   const ts = nowIso();
   return {
     campaignId,
-    mode: 'off',
-    enabled: false,
+    mode: defaults?.mode ?? 'off',
+    enabled: false, // never inherited: switching a seat on is a human's decision (#1070)
     model: '',
-    instructions: '',
-    tokenBudget: 0,
+    instructions: defaults?.instructions ?? '',
+    tokenBudget: defaults?.tokenBudget ?? 0,
     tokensUsed: 0,
     tokensReserved: 0,
     tokensRefunded: 0,
@@ -127,10 +147,20 @@ function defaultSeat(campaignId: number): AiDmSeat {
       cooldownSeconds: 300,
       maxProactiveTokensPerHour: 5000,
     },
-    actionQueueDepth: 8,
+    actionQueueDepth: defaults?.actionQueueDepth ?? 8,
+    // Only report a field as inherited when a server default actually supplied a value that
+    // differs from the built-in fallback — otherwise every untouched install would claim to
+    // be inheriting the same zeros it would have produced anyway.
+    inheritedFields: defaults ? inheritedFieldsFor(defaults) : [],
     createdAt: ts,
     updatedAt: ts,
   };
+}
+
+/** Which server defaults actually differ from the built-in fallbacks (#1070). */
+function inheritedFieldsFor(defaults: AiDmSeatDefaults): string[] {
+  const fallback = AiDmSeatDefaults.parse({});
+  return AI_DM_SEAT_INHERITED_FIELDS.filter((field) => defaults[field] !== fallback[field]);
 }
 
 /**
@@ -363,7 +393,23 @@ export class AiDmService implements OnApplicationBootstrap {
   /** Read the seat (its configured, un-metered default when none exists yet). No experimental gate — reads are inert. */
   async getSeat(campaignId: number): Promise<AiDmSeat> {
     const row = await this.findRow(campaignId);
-    return row ? toDomain(row) : defaultSeat(campaignId);
+    // #1070: the server-defaults read happens ONLY on the inheritance path — a campaign that
+    // has configured its seat resolves from its own row and never touches `settings`. That
+    // matters because SettingsService.getJson hits SQLite on every call (no cache), and the
+    // per-turn hot path must not gain a query for a value it cannot use.
+    return row ? toDomain(row) : defaultSeat(campaignId, await this.getSeatDefaults());
+  }
+
+  /**
+   * Server-wide AI seat defaults (#1070), or the built-in fallbacks when an admin has set none.
+   *
+   * Stored as one JSON value in the existing `settings` key/value table rather than a new
+   * table, so this needed no migration at all. A malformed or partial stored value falls back
+   * per-field through zod rather than throwing — a bad default must not be able to break every
+   * campaign's seat read.
+   */
+  async getSeatDefaults(): Promise<AiDmSeatDefaults> {
+    return this.settings.getAiSeatDefaults();
   }
 
   /**
@@ -829,7 +875,10 @@ export class AiDmService implements OnApplicationBootstrap {
           : undefined;
 
     if (!existing) {
-      const base = defaultSeat(campaignId);
+      // #1070: seed the new row from the server defaults for every field this call did not
+      // specify. Detaching is whole-seat, so without seeding the act of saving ONE field
+      // would silently revert the others to the built-in zeros the DM never chose.
+      const base = defaultSeat(campaignId, await this.getSeatDefaults());
       await this.db.insert(aiDmSeats).values({
         campaignId,
         mode: input.mode ?? base.mode,

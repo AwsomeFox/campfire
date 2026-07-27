@@ -363,7 +363,7 @@ export function SkeletonConditionalRegion({
 }) {
   if (preset === 'scribe') {
     return (
-      <section className="cf-card p-5 space-y-3" data-testid={SKELETON_TEST_IDS['conditional-region']} data-skeleton-preset={preset}>
+      <section className="cf-card cf-density-default space-y-3" data-testid={SKELETON_TEST_IDS['conditional-region']} data-skeleton-preset={preset}>
         <SkeletonStatus label={label ?? 'Loading AI scribe…'} className="flex items-center gap-2 flex-wrap">
           <SkeletonBar width="18px" className="h-[18px]" />
           <SkeletonBar width="88px" className="h-3.5" />
@@ -377,7 +377,7 @@ export function SkeletonConditionalRegion({
 
   if (preset === 'attendance') {
     return (
-      <section className="cf-card p-5 space-y-2" data-testid={SKELETON_TEST_IDS['conditional-region']} data-skeleton-preset={preset}>
+      <section className="cf-card cf-density-default space-y-2" data-testid={SKELETON_TEST_IDS['conditional-region']} data-skeleton-preset={preset}>
         <SkeletonStatus label={label ?? 'Loading attendance…'} className="space-y-2">
           <div className="flex items-center gap-2">
             <SkeletonBar width="84px" className="h-3" />
