@@ -51,8 +51,8 @@ Campfire serializes archive creation and restore work: if another archive operat
 wait and retry rather than starting a competing in-memory export. Downloads are streamed from
 the server, and restores are staged on disk before the live database and uploads are replaced.
 The current fixed safety limits are **1 GiB compressed archive**, **512 MiB per entry**,
-**4 GiB total uncompressed data**, and **100,000 entries**. They are not configuration
-environment variables.
+**4 GiB total uncompressed data**, and **100,000 entries**. These limits cannot be changed
+with environment variables.
 
 Leave temporary disk capacity for the received ZIP and its extracted staging directory in
 addition to the live data. Validation failures and cancellation clean up staging/partial server
