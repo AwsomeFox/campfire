@@ -47,6 +47,7 @@ import {
   bytesContainIdentifier,
   exportLimitations,
   partitionIdentifiers,
+  redactIdentifiers,
   resolveExportPolicy,
   type ExportAttachmentInventory,
   type ExportInventory,
@@ -492,7 +493,21 @@ export class ExportService {
     return inventory;
   }
 
-  /** Machine-readable redaction block embedded in the payload and the archive manifest. */
+  /**
+   * Machine-readable redaction block embedded in the payload and the archive manifest.
+   *
+   * NOTE the asymmetry with {@link ExportInventory}: the inventory is a DM-facing
+   * report returned over an authenticated dm-only endpoint (GET /export/preview) and
+   * may name the identifiers the sweep could not remove. The disclosure below SHIPS
+   * INSIDE THE ARCHIVE, so it must never carry an identifier literal.
+   *
+   * `identifiers.unscannable` is exactly such a literal list: `partitionIdentifiers`
+   * classes anything shorter than `MIN_SCANNABLE_IDENTIFIER` as unscannable, and
+   * every numeric user id below 1000 plus every short username / display name ("kim",
+   * "Bob", "Jo") lands in it. Copying it into campaign.json + archive-manifest.json
+   * published the very roster identities the publish profile exists to withhold, so
+   * only the COUNT travels.
+   */
   private redactionDisclosure(inventory: ExportInventory): ArchiveRedactionDisclosure {
     return {
       profile: inventory.profile,
@@ -500,7 +515,11 @@ export class ExportService {
       policy: { ...inventory.policy },
       rows: inventory.rows,
       attachments: inventory.attachments,
-      identifiers: inventory.identifiers,
+      identifiers: {
+        scanned: inventory.identifiers.scanned,
+        occurrencesRedacted: inventory.identifiers.occurrencesRedacted,
+        unscannableCount: inventory.identifiers.unscannable.length,
+      },
       pseudonyms: inventory.pseudonyms,
       limitations: inventory.limitations,
     };
@@ -772,11 +791,28 @@ export class ExportService {
     //
     // Issue #586: the combat log is a blow-by-blow record of what happened at the
     // table, so it is played state — a profile that withholds played state must not
-    // render it. It is also the one markdown input NOT sourced from the redacted
-    // payload, so it never bypasses the projection: it simply is not read.
-    const encounterEvents = policy.playedState
+    // render it at all.
+    //
+    // It is also the ONE markdown input read straight from the database instead of
+    // from the projected payload, so when a profile DOES carry played state (handoff
+    // always; publish with playedState=true) it would otherwise be the single string
+    // in the archive that never meets the free-text sweep. `actor`, `target` and
+    // `detail` are free text a DM/AI wrote — a combatant a DM named after the person
+    // playing it renders as `[redacted]` in campaign.json and in the combatant table,
+    // and would have survived verbatim in the combat log two lines below. Push the
+    // events through the SAME sweep with the SAME identifier set so there is genuinely
+    // one redaction boundary rather than one plus an exception.
+    const rawEncounterEvents = policy.playedState
       ? await this.encounters.listEventsForEncounters(data.encounters.map((e) => e.id))
       : new Map<number, EncounterEvent[]>();
+    const encounterEvents = policy.scanFreeText
+      ? new Map<number, EncounterEvent[]>(
+          [...rawEncounterEvents].map(([id, events]) => [
+            id,
+            redactIdentifiers(events, profileResult.projection.scannedIdentifiers).value,
+          ]),
+        )
+      : rawEncounterEvents;
 
     const encounterAlloc: Array<{ stem: string; filename: string }> = [];
     for (const e of [...data.encounters].sort((a, b) => a.id - b.id)) {

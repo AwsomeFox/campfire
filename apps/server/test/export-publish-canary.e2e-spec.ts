@@ -43,6 +43,16 @@ const M = {
   pngTextChunk: 'canary-exif-lima-9f42',
   diceLabel: 'canary-dice-mike-9f43',
   scheduleLocation: 'canary-venue-november-9f44',
+  /**
+   * A member whose username and display name are SHORTER than
+   * MIN_SCANNABLE_IDENTIFIER. Every other seeded identity is long, which is a blind
+   * spot: `partitionIdentifiers` files anything under 4 characters as "unscannable",
+   * and the archive-embedded redaction disclosure used to publish that list
+   * verbatim. Real rosters are full of these — every numeric user id under 1000, and
+   * display names like "Bob", "Jo", "kim". Short by construction, still unique.
+   */
+  shortUsername: 'kq7',
+  shortDisplayName: 'Zq8',
 } as const;
 
 /**
@@ -157,9 +167,17 @@ describe('publish export canary — no private identifier or content survives (i
     playerAgent = request.agent(server);
     await playerAgent.post('/api/v1/auth/login').send({ username: M.playerUsername, password: 'player-password-1' });
 
+    // A second member whose identifiers are too short for the free-text sweep. The
+    // FIELD ALLOWLIST is what keeps them out of the payload; nothing in the archive
+    // may name them either.
+    const shortPlayer = await dmAgent
+      .post('/api/v1/users')
+      .send({ username: M.shortUsername, password: 'player-password-2', displayName: M.shortDisplayName, serverRole: 'user' });
+
     const camp = await dmAgent.post('/api/v1/campaigns').send({ name: 'Canary Publish Campaign' });
     campaignId = camp.body.id;
     await dmAgent.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: playerUserId, role: 'player' });
+    await dmAgent.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: shortPlayer.body.id, role: 'player' });
 
     // World content — the part that SHOULD survive, plus a DM secret that should not.
     await dmAgent
@@ -172,6 +190,22 @@ describe('publish export canary — no private identifier or content survives (i
     await dmAgent.post(`/api/v1/campaigns/${campaignId}/locations`).send({ name: 'Drowned Belfry' });
     const encounter = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Bell Ambush' });
     await dmAgent.post(`/api/v1/encounters/${encounter.body.id}/combatants`).send({ kind: 'monster', name: 'Deep Toll', hpMax: 30 });
+
+    // A RUN encounter, so the archive has a combat log. Combat-log rows are written
+    // straight to `encounter_events` and rendered into `encounters/*.md` from the
+    // database rather than from the projected payload — the one markdown input that
+    // is not a projection of campaign.json. DMs routinely name a token after the
+    // person playing it, so seed exactly that: the combatant (and therefore the
+    // logged `actor`/`target`) carries a member's real display name.
+    const loggedEncounter = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .send({ name: 'Bell Toll Skirmish' });
+    await dmAgent
+      .post(`/api/v1/encounters/${loggedEncounter.body.id}/combatants`)
+      .send({ kind: 'monster', name: M.playerDisplayName, hpMax: 12 });
+    await dmAgent.post(`/api/v1/encounters/${loggedEncounter.body.id}/roll-initiative`).send({});
+    const started = await dmAgent.post(`/api/v1/encounters/${loggedEncounter.body.id}/start`).send({});
+    expect(started.status).toBe(201);
 
     // Session + attendance + a played recap that names the player's display name.
     const session = await dmAgent
@@ -239,9 +273,26 @@ describe('publish export canary — no private identifier or content survives (i
       M.dmUsername, M.playerUsername, M.playerDisplayName, M.playerEmailish, M.dmSecret,
       M.whisperBody, M.privateNote, M.proposalText, M.rsvpNote, M.attachmentFilename,
       M.diceLabel, M.scheduleLocation, UNREVEALED_QUEST_TITLE, M.auditDetail,
+      M.shortUsername, M.shortDisplayName,
     ]) {
       expect(serialized).toContain(marker);
     }
+  });
+
+  /**
+   * Positive control for the combat-log seed: a backup mdzip must really contain the
+   * rendered log line, so the redacted-profile assertions below cannot pass merely
+   * because no combat log was ever written.
+   */
+  it('backup mdzip renders the combat log (the seed for the log-leak check worked)', async () => {
+    const res = await dmAgent
+      .get(`/api/v1/campaigns/${campaignId}/export?format=mdzip`)
+      .buffer(true)
+      .parse(binaryParser);
+    expect(res.status).toBe(200);
+    const { haystack } = await flattenZip(res.body as Buffer);
+    expect(haystack).toContain('Combat started');
+    expect(haystack).toContain(M.playerDisplayName);
   });
 
   it('publish JSON export contains no canary marker and no identity-shaped key', async () => {
@@ -354,6 +405,72 @@ describe('publish export canary — no private identifier or content survives (i
     for (const absent of ['members.md', 'audit.md', 'dice-rolls.md']) {
       expect(names).not.toContain(absent);
     }
+
+    // The combat log DID come back with played state (so the assertion above that
+    // M.playerDisplayName is absent is a real check, not a vacuous one) — but the
+    // names inside it went through the same free-text sweep as the rest of the
+    // archive. `encounters/*.md` is rendered from the database, not from the
+    // projected payload, so without an explicit sweep it is the one place a member's
+    // name survives while being redacted everywhere else in the same zip.
+    expect(haystack).toContain('Combat started');
+  });
+
+  /**
+   * Handoff is the profile that ALWAYS carries played state, so it is the one that
+   * always renders the combat log — and it is also the profile whose entire job is to
+   * hand over the world without the previous group's identities.
+   */
+  it('handoff mdzip keeps the combat log and the secrets but no member identity inside them', async () => {
+    const res = await dmAgent
+      .get(`/api/v1/campaigns/${campaignId}/export?format=mdzip&profile=handoff`)
+      .buffer(true)
+      .parse(binaryParser);
+    expect(res.status).toBe(200);
+    const { haystack, names } = await flattenZip(res.body as Buffer);
+
+    // The new DM inherits the world, its secrets and where the party got to.
+    expect(haystack).toContain(M.dmSecret);
+    expect(haystack).toContain('Combat started');
+    expect(names.some((n) => n.startsWith('encounters/'))).toBe(true);
+
+    // They do not inherit who was at the table — including inside the combat log.
+    for (const marker of [
+      M.dmUsername, M.playerUsername, M.playerDisplayName, M.playerEmailish,
+      M.shortUsername, M.shortDisplayName, M.privateNote, M.whisperBody,
+      M.auditDetail, M.rsvpNote, M.diceLabel, M.scheduleLocation,
+    ]) {
+      expect(`${marker}:${haystack.includes(marker)}`).toBe(`${marker}:false`);
+    }
+    expect(names).not.toContain('members.md');
+  });
+
+  /**
+   * The archive-embedded redaction disclosure is itself campaign-derived content. It
+   * must describe the redaction without reproducing what was redacted: the list of
+   * identifiers too short to sweep for is a DM-facing preview field, not an archive
+   * field.
+   */
+  it('the redaction disclosure reports identifier counts, never identifier literals', async () => {
+    const res = await dmAgent
+      .get(`/api/v1/campaigns/${campaignId}/export?format=mdzip&profile=publish`)
+      .buffer(true)
+      .parse(binaryParser);
+    const zip = await JSZip.loadAsync(res.body as Buffer);
+    const manifest = JSON.parse(await zip.file('archive-manifest.json')!.async('string'));
+    const campaignJson = JSON.parse(await zip.file('campaign.json')!.async('string'));
+
+    for (const disclosure of [manifest.redaction, campaignJson.redaction]) {
+      expect(disclosure.identifiers.unscannable).toBeUndefined();
+      expect(typeof disclosure.identifiers.unscannableCount).toBe('number');
+      // There ARE short identifiers on this roster — the count must be honest, so
+      // this is not passing by having nothing to report.
+      expect(disclosure.identifiers.unscannableCount).toBeGreaterThan(0);
+    }
+
+    // …while the DM-only preview still names them, which is the whole point of
+    // reporting them rather than silently ignoring them.
+    const preview = await dmAgent.get(`/api/v1/campaigns/${campaignId}/export/preview?profile=publish&format=mdzip`);
+    expect(preview.body.identifiers.unscannable).toEqual(expect.arrayContaining([M.shortUsername, M.shortDisplayName]));
   });
 });
 

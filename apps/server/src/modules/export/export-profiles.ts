@@ -371,6 +371,12 @@ export class ExportPseudonymizer {
  * pre-export inventory as unscannable rather than silently ignored — the
  * ALLOWLIST is what keeps them out of structured fields; the sweep is only a
  * second line of defence for free text.
+ *
+ * The reported LITERALS are for the DM-only preview endpoint ONLY. They are roster
+ * identities by construction (every numeric user id under 1000 lands here, as does
+ * any display name like "Bob" or "Jo"), so nothing that ships inside an archive may
+ * reproduce the list — see `ExportService.redactionDisclosure`, which carries only
+ * the count.
  */
 export const MIN_SCANNABLE_IDENTIFIER = 4;
 
