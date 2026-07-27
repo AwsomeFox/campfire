@@ -12,6 +12,7 @@ import { AttachmentsService } from '../../src/modules/attachments/attachments.se
 import { AttachmentDerivativesService } from '../../src/modules/attachments/attachment-derivatives.service';
 import { FsDeletionService } from '../../src/modules/attachments/fs-deletion.service';
 import { KEY_ENVELOPE_ENTRY } from '../../src/modules/backup/backup-key-envelope';
+import { MAX_KEY_ENVELOPE_BYTES } from '../../src/modules/backup/backup-archive-reader';
 import type { BackupManifest } from '../../src/modules/backup/backup-manifest';
 import type { RequestUser } from '../../src/common/user.types';
 import { encryptSecret, decryptSecret } from '../../src/common/crypto';
@@ -137,6 +138,16 @@ describe('BackupService AI keyfile envelope (#496, real SQLite)', () => {
     const service = makeService();
     await expect(service.buildBackup({ keyPassphrase: 'short' })).rejects.toThrow(
       /at least 12 characters/,
+    );
+  });
+
+  it('rejects an oversized serialized key envelope before appending it to the archive', async () => {
+    // Base64 plus the envelope metadata makes this serialized entry larger than
+    // the 1 MiB restore-entry ceiling even though the keyfile itself is 1 MiB.
+    fs.writeFileSync(path.join(dataDir, 'ai-config.key'), Buffer.alloc(MAX_KEY_ENVELOPE_BYTES));
+
+    await expect(makeService().buildBackup({ keyPassphrase: PASSPHRASE })).rejects.toThrow(
+      /key envelope exceeds.*restore entry limit/i,
     );
   });
 

@@ -30,12 +30,27 @@ type MulterFile = Express.Multer.File;
 
 /** A restored archive can be large (whole DB + all uploads). 1 GB ceiling. */
 const MAX_RESTORE_BYTES = 1024 * 1024 * 1024;
-const UPLOAD_STAGE_ROOT = path.join(os.tmpdir(), 'campfire-backup-uploads');
-fs.mkdirSync(UPLOAD_STAGE_ROOT, { recursive: true, mode: 0o700 });
-fs.chmodSync(UPLOAD_STAGE_ROOT, 0o700);
+let uploadStageRoot: string | undefined;
+
+/**
+ * Make the Multer staging directory lazily. `mkdtempSync` atomically creates a
+ * unique directory (rather than trusting a predictable path in a shared temp
+ * area), and the restrictive mode keeps uploaded archives private.
+ */
+export function createPrivateUploadStageRoot(tmpDir = os.tmpdir()): string {
+  const root = fs.mkdtempSync(path.join(tmpDir, 'campfire-backup-uploads-'));
+  fs.chmodSync(root, 0o700);
+  return root;
+}
+
+function getUploadStageRoot(): string {
+  uploadStageRoot ??= createPrivateUploadStageRoot();
+  return uploadStageRoot;
+}
+
 const uploadStorage = diskStorage({
   destination: (_req, _file, callback) => {
-    try { callback(null, UPLOAD_STAGE_ROOT); }
+    try { callback(null, getUploadStageRoot()); }
     catch (err) { callback(err as Error, ''); }
   },
   filename: (_req, _file, callback) => callback(null, `${crypto.randomUUID()}.zip`),

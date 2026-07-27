@@ -1130,7 +1130,13 @@ export class BackupService implements OnApplicationBootstrap {
           }
         }
         const envelope = JSON.stringify(encryptKeyfile(keyBytes, requestedPassphrase), null, 2);
-        declaredArchiveBytes += Buffer.byteLength(envelope);
+        const envelopeBytes = Buffer.byteLength(envelope);
+        if (envelopeBytes > MAX_KEY_ENVELOPE_BYTES) {
+          throw new ServiceUnavailableException(
+            `Backup key envelope exceeds the ${MAX_KEY_ENVELOPE_BYTES} byte restore entry limit`,
+          );
+        }
+        declaredArchiveBytes += envelopeBytes;
         if (declaredArchiveBytes > MAX_ARCHIVE_UNCOMPRESSED_BYTES) {
           throw new ServiceUnavailableException(
             `Backup contents exceed the ${MAX_ARCHIVE_UNCOMPRESSED_BYTES} byte restore archive limit`,
