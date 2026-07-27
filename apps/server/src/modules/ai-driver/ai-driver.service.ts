@@ -17,7 +17,12 @@ import { EncountersService } from '../encounters/encounters.service';
 import { MembersService } from '../membership/members.service';
 import { CharactersService } from '../characters/characters.service';
 import type { AiDmSeat, NarrationLanguage, Role, RuleEntry, RulePack } from '@campfire/schema';
-import { buildNarrationLanguageContract, resolveNarrationLanguage } from '@campfire/schema';
+import {
+  AI_DM_PROMPT_HISTORY_MAX_DIGEST,
+  AI_DM_PROMPT_HISTORY_MAX_MESSAGES,
+  buildNarrationLanguageContract,
+  resolveNarrationLanguage,
+} from '@campfire/schema';
 import type {
   AiProvider,
   AiMessage,
@@ -30,6 +35,11 @@ import { AiProviderError } from '../ai-dm/providers/errors';
 import { DEFAULT_IDLE_TIMEOUT_MS } from '../ai-dm/providers/http';
 import { AI_PROVIDER_RESOLVER, resolveProviderForExecution, type AiProviderResolver } from './ai-provider-resolver';
 import { AiDmStreamService } from './ai-driver-stream.service';
+import {
+  buildPromptHistory,
+  EMPTY_PROMPT_HISTORY,
+  renderRecentHistorySection,
+} from './driver-history';
 import { AiDmTranscriptService } from './ai-driver-transcript.service';
 import { extractToolResourceIdentity, type ToolResourceIdentity } from './ai-dm-tool-resource';
 import {
@@ -268,6 +278,17 @@ export interface AiDmSessionState {
   /** The last player who asked for a human takeover (advisory), or null (#314). */
   takeoverRequestedBy: string | null;
   /**
+   * How many transcript events the next turn could draw conversation memory from (#1038).
+   *
+   * DERIVED, never stored: it is a count over the transcript, refreshed on every session read
+   * ({@link AiDriverService.getSession}) rather than tracked as state, because a cached copy
+   * would drift the moment a turn, a DM purge, or retention pruning changed the underlying
+   * rows. It counts the PROMPT projection specifically — narrative events the model may
+   * actually be told about — so it answers "how much does the AI remember", not "how many
+   * rows exist".
+   */
+  historyLength?: number;
+  /**
    * Active narrowly-scoped approvals letting the seat read ONE secret entity under the DM
    * principal (issue #557). Keyed `${tool}:${entityId}`; each entry is single-use (consumed
    * the first time the matching read runs) so a grant for get_npc:42 can't be replayed to
@@ -371,6 +392,14 @@ export interface RunTurnOptions {
    * attack" in the same round must still produce two transcript lines.
    */
   clientRef?: string;
+  /**
+   * `seq` of this turn's own `player.action` transcript row (#1038), set by the code that
+   * recorded it. The history replay excludes everything from this row onward so the action
+   * being answered is not also replayed as history. A QUEUED action is recorded when it is
+   * accepted and only answered later, so its seq has to travel with it — by then it is no
+   * longer the newest row and cannot be identified by position.
+   */
+  actionSeq?: number;
   /** Display name for the transcript's player-action line (falls back to the user's name). */
   actorName?: string;
   /** Character the action was spoken as, recorded on the transcript line for attribution. */
@@ -467,6 +496,46 @@ function isStoredActingDmGrant(value: unknown): value is AiDmActingDmGrant {
     && (rec.note === null || typeof rec.note === 'string');
 }
 
+/**
+ * #1042. Validators for the two GRANT maps. Deliberately strict about the discriminated
+ * fields (`profile` / `policy`) rather than trusting the row: these are read back only to be
+ * revoked and audited, and an audit line describing a malformed grant is worse than none.
+ * Anything that fails validation is dropped silently — it was going to be discarded either way.
+ */
+function isStoredSecretApproval(value: unknown): value is AiDmSecretReadApproval {
+  const rec = recordOf(value);
+  return !!rec
+    && typeof rec.tool === 'string'
+    && Number.isInteger(rec.entityId)
+    && typeof rec.grantedBy === 'string'
+    && typeof rec.grantedAt === 'string'
+    && (rec.note === null || typeof rec.note === 'string')
+    && typeof rec.consumed === 'boolean';
+}
+
+function isStoredPendingConfirmation(value: unknown): value is AiDmPendingToolConfirmation {
+  const rec = recordOf(value);
+  return !!rec
+    && typeof rec.id === 'string'
+    && typeof rec.tool === 'string'
+    && !!recordOf(rec.args)
+    && typeof rec.toolCallId === 'string'
+    && (rec.profile === 'prep' || rec.profile === 'live' || rec.profile === 'aftermath')
+    && (rec.policy === 'auto' || rec.policy === 'confirm' || rec.policy === 'propose' || rec.policy === 'deny')
+    && typeof rec.requestedAt === 'string'
+    && typeof rec.actor === 'string'
+    && typeof rec.triggeredBy === 'string'
+    && Number.isInteger(rec.turnNumber);
+}
+
+/** Parse a persisted JSON map of grants, keeping only the entries that validate (#1042). */
+function storedGrantMap<T>(raw: string | null | undefined, guard: (v: unknown) => v is T): T[] {
+  const parsed = fromJsonText<unknown>(raw ?? null, null);
+  const rec = recordOf(parsed);
+  if (!rec) return [];
+  return Object.values(rec).filter(guard);
+}
+
 function isStoredTableVote(value: unknown): value is AiDmTableVote {
   const rec = recordOf(value);
   const ballots = recordOf(rec?.ballots);
@@ -482,6 +551,12 @@ function isStoredTableVote(value: unknown): value is AiDmTableVote {
     && typeof rec.expiresAt === 'string'
     && typeof rec.resolved === 'boolean'
     && (rec.outcome === 'passed' || rec.outcome === 'failed' || rec.outcome === null);
+}
+
+/** JSON-encode a grant map, or null when it holds nothing (#1042). */
+function nonEmptyJson(map: Record<string, unknown> | undefined): string | null {
+  if (!map) return null;
+  return Object.keys(map).length > 0 ? toJsonText(map) : null;
 }
 
 function persistedStatusFor(session: AiDmSessionState): AiDmSessionStatus {
@@ -504,8 +579,43 @@ const RECOVERY_SHAPES = allowlist<ControlStateRecovery>({
   open_vote: true,
 });
 
+/**
+ * What THIS boot had to throw away — issue #1042.
+ *
+ * Deliberately NOT a {@link ControlStateRecovery}. That type answers "what SHAPE did the seat
+ * come back in", is a steady state, and is suppressed on repeat by `announced_recovery` so a
+ * table that left the AI paused is not told so on every deploy. This answers a different and
+ * strictly one-shot question: "what did the restart destroy". The two co-occur — a lapsed vote
+ * on a seat that came back paused reports `settled: 'paused'` and would otherwise have its vote
+ * expiry swallowed entirely — so folding these into `ControlStateRecovery` would reintroduce
+ * exactly the silence this issue is about.
+ *
+ * It needs no suppression marker of its own: the discarded state is cleared from the row in the
+ * same reconciled write-back, so a second boot finds nothing to report.
+ */
+interface RestartReconciliation {
+  /** The vote whose ballot window lapsed while the server was down, already marked failed. */
+  voteExpired: AiDmTableVote | null;
+  /** Secret-read approvals (#557) revoked by the restart. Never restored. */
+  approvalsRevoked: AiDmSecretReadApproval[];
+  /** Confirm-policy tool calls (#474) discarded by the restart. Never restored. */
+  confirmationsDiscarded: AiDmPendingToolConfirmation[];
+}
+
+const NOTHING_DISCARDED: RestartReconciliation = {
+  voteExpired: null,
+  approvalsRevoked: [],
+  confirmationsDiscarded: [],
+};
+
+function discardedAnything(r: RestartReconciliation): boolean {
+  return r.voteExpired !== null || r.approvalsRevoked.length > 0 || r.confirmationsDiscarded.length > 0;
+}
+
 interface HydratedControlState {
   session: AiDmSessionState;
+  /** One-shot record of what the restart destroyed (#1042). */
+  reconciliation: RestartReconciliation;
   /** What the table is TOLD came back, or null when the seat came back clean. */
   recovery: ControlStateRecovery | null;
   /**
@@ -1146,12 +1256,22 @@ export class AiDriverService {
   }
 
   getSession(campaignId: number): AiDmSessionState {
-    return this.ensureSession(campaignId);
+    const session = this.ensureSession(campaignId);
+    // #1038: refresh the derived memory depth on every read. Cheap (one indexed COUNT) and
+    // always current — the alternative, tracking it as state, would go stale on a DM purge or
+    // on retention pruning, and a stale "the AI remembers 40 turns" is worse than no number.
+    // Best-effort: a failed count must not break the session read that the whole table polls.
+    try {
+      session.historyLength = this.transcript.promptHistoryDepth(campaignId);
+    } catch {
+      session.historyLength = session.historyLength ?? 0;
+    }
+    return session;
   }
 
   private loadPersistedControlState(campaignId: number): HydratedControlState {
     const fresh = this.freshSession(campaignId);
-    if (!this.db) return { session: fresh, recovery: null, settled: null, announce: false, dirty: false };
+    if (!this.db) return { session: fresh, reconciliation: NOTHING_DISCARDED, recovery: null, settled: null, announce: false, dirty: false };
 
     // Reading the control state is best-effort in exactly the way writing it is: `ensureSession`
     // sits under EVERY driver endpoint (including the read-only GET /session), so a failed read
@@ -1166,9 +1286,9 @@ export class AiDriverService {
         .get() as AiDriverControlStateRow | undefined;
     } catch (err) {
       this.logger.error(`Failed to load AI driver control state for campaign ${campaignId}`, err);
-      return { session: fresh, recovery: null, settled: null, announce: false, dirty: false };
+      return { session: fresh, reconciliation: NOTHING_DISCARDED, recovery: null, settled: null, announce: false, dirty: false };
     }
-    if (!row) return { session: fresh, recovery: null, settled: null, announce: false, dirty: false };
+    if (!row) return { session: fresh, reconciliation: NOTHING_DISCARDED, recovery: null, settled: null, announce: false, dirty: false };
 
     const storedState = LADDER_STATES.has(row.state) ? row.state as AiDmLadderState : 'running';
     fresh.state = storedState;
@@ -1202,6 +1322,20 @@ export class AiDriverService {
       }
     }
     fresh.takeoverRequestedBy = row.takeoverRequestedBy ?? null;
+
+    // #1042: the two GRANT maps are read back to be REVOKED, not restored. `fresh` keeps the
+    // empty maps `freshSession` gave it, so the seat comes back with no outstanding authority —
+    // which is the safe direction. A secret-read approval names one hidden entity and was
+    // granted to a room the DM could see; a queued confirm-policy call is an irreversible write
+    // a DM had not yet approved. Neither should silently outlive the process that witnessed the
+    // room, and the AI can simply ask again. What #1042 is actually about is that before this
+    // they vanished with no audit row and no signal — the same "silently revoked" failure the
+    // issue reports for takeovers, which #559 fixed for takeovers and not for these.
+    const approvalsRevoked = storedGrantMap(row.secretReadApprovals, isStoredSecretApproval)
+      // A consumed approval is already spent; reporting it as "revoked by the restart" would be
+      // a false alarm about authority that no longer existed.
+      .filter((a) => !a.consumed);
+    const confirmationsDiscarded = storedGrantMap(row.pendingToolConfirmations, isStoredPendingConfirmation);
 
     if (row.lastInput) this.lastInputs.set(campaignId, row.lastInput);
     if (fresh.state === 'awaiting_players' && !fresh.stuck) fresh.state = 'running';
@@ -1253,12 +1387,23 @@ export class AiDriverService {
     // restart re-derives it from the same stale bytes — an expired vote in particular would look
     // freshly open again to any reader that goes straight to the table. The announced-shape
     // marker is part of that: if it is not persisted, every boot looks like a transition again.
+    const reconciliation: RestartReconciliation = {
+      voteExpired: voteExpiredOnLoad ? fresh.vote : null,
+      approvalsRevoked,
+      confirmationsDiscarded,
+    };
+
     const dirty = interruptedTurn
       || voteExpiredOnLoad
       || settled !== lastAnnounced
       || fresh.state !== storedState
-      || fresh.status !== row.status;
-    return { session: fresh, recovery, settled, announce, dirty };
+      || fresh.status !== row.status
+      // #1042: discarded grants MUST be written back, and this is the only thing that stops the
+      // revocation being announced again on every subsequent boot. `announced_recovery` cannot
+      // do that job here — it tracks a steady shape, and "the restart revoked two approvals" is
+      // an event, not a shape. Clearing the source data is the suppression.
+      || discardedAnything(reconciliation);
+    return { session: fresh, reconciliation, recovery, settled, announce, dirty };
   }
 
   /**
@@ -1289,6 +1434,130 @@ export class AiDriverService {
   }
 
   /**
+   * Tell the table what the restart destroyed — issue #1042.
+   *
+   * This is the whole point of the issue. The acceptance criteria offer a choice on every item
+   * — *recovered* OR *explicitly expired / audited as revoked* — and for grants of authority
+   * the second is the safer branch: a secret-read approval names one hidden entity and was
+   * granted to a room the DM could see, and a queued confirm-policy call is an irreversible
+   * write nobody has approved. Resurrecting either into a room whose composition the server can
+   * no longer verify buys convenience with authority. Dropping them is right. Dropping them in
+   * SILENCE is the bug.
+   *
+   * Three channels, each carrying a different amount, on purpose:
+   *  - AUDIT: one row per discarded grant, naming the exact tool and entity/args, because
+   *    "two approvals were revoked" is not an answer to "which secret was the AI allowed to
+   *    read". This is the durable record, and it is the only place the detail exists.
+   *  - STREAM: one frame with COUNTS ONLY. It reaches every member of the table, and a
+   *    secret-read approval names a hidden entity; putting the detail here would leak through
+   *    the notification channel the very secret the approval was scoped to protect.
+   *  - TRANSCRIPT: a `control` row so a player who reconnects an hour later still sees that the
+   *    table was reset, rather than inferring it from a vote that quietly stopped existing. The
+   *    secret-read half is recorded `visibility: 'dm'` for the same reason the #557 grant rows
+   *    are, so a player is never handed the entity id and merely trusted not to render it.
+   *
+   * Best-effort throughout, like {@link announceRecoveredState}: a failure to announce must
+   * never stop the session being served. The state is already correct on disk by this point.
+   */
+  private announceRestartReconciliation(session: AiDmSessionState, r: RestartReconciliation): void {
+    const campaignId = session.campaignId;
+    const parts: string[] = [];
+
+    if (r.voteExpired) {
+      parts.push('an open table vote lapsed');
+      // The stream signal the acceptance criteria ask for by name. Before this a vote that ran
+      // out of clock during downtime came back `failed` with the table never told: hydration
+      // skips `open_vote` for a resolved vote, so `settled` was null and the #559 recovery
+      // notice never fired. The state was right and nobody knew.
+      this.stream.emit({ type: 'vote', campaignId, action: 'expired', kind: r.voteExpired.kind, outcome: 'failed' });
+      void this.audit
+        .log({
+          actor: `ai-dm-seat:${campaignId}`,
+          actorRole: 'dm',
+          action: 'ai-dm.driver.vote.expired_on_restart',
+          entityType: 'ai-dm',
+          campaignId,
+          detail: `table vote ${r.voteExpired.id} (${r.voteExpired.kind}) expired during downtime — opened by ${r.voteExpired.openedBy}, ${Object.keys(r.voteExpired.ballots).length}/${r.voteExpired.threshold} ballots cast`,
+        })
+        .catch((err) => this.logger.error(`Vote-expiry audit failed for campaign ${campaignId}`, err));
+      this.recordControl(campaignId, {
+        control: 'vote_expired_on_restart',
+        kind: r.voteExpired.kind,
+        outcome: 'failed',
+      });
+    }
+
+    for (const a of r.approvalsRevoked) {
+      // NO per-approval stream frame here, deliberately. The existing #557 `secret-approval`
+      // frame carries `tool` + `entityId` and the driver SSE controller forwards it to EVERY
+      // member unprojected — so it already tells players that hidden NPC 42 exists (see the
+      // finding noted on this PR). Emitting one per revoked approval on restart would broadcast
+      // the DM's whole approved-secrets set in a burst, turning a pre-existing leak into a
+      // considerably louder one. The counts-only `session.reset` frame below is enough for a
+      // client to refetch; the per-item detail stays on the audit row and the DM-only
+      // transcript row, which are the surfaces that already redact properly.
+      void this.audit
+        .log({
+          actor: `ai-dm-seat:${campaignId}`,
+          actorRole: 'dm',
+          action: 'ai-dm.driver.secret.revoked_on_restart',
+          entityType: 'ai-dm',
+          campaignId,
+          detail: `secret-read ${a.tool}#${a.entityId} (granted by ${a.grantedBy} at ${a.grantedAt}) revoked by a server restart`,
+        })
+        .catch((err) => this.logger.error(`Secret-approval revocation audit failed for campaign ${campaignId}`, err));
+    }
+    if (r.approvalsRevoked.length > 0) {
+      parts.push(`${r.approvalsRevoked.length} secret-read approval(s) were revoked`);
+      this.transcript.record({
+        campaignId,
+        kind: 'control',
+        visibility: 'dm',
+        payload: {
+          control: 'secret-approvals_revoked_on_restart',
+          count: r.approvalsRevoked.length,
+          tools: r.approvalsRevoked.map((a) => `${a.tool}#${a.entityId}`),
+        },
+      });
+    }
+
+    for (const c of r.confirmationsDiscarded) {
+      this.stream.emit({ type: 'tool-confirmation', campaignId, action: 'rejected', confirmationId: c.id, tool: c.tool });
+      void this.audit
+        .log({
+          actor: `ai-dm-seat:${campaignId}`,
+          actorRole: 'dm',
+          action: 'ai-dm.driver.confirmation.discarded_on_restart',
+          entityType: 'ai-dm',
+          campaignId,
+          detail: `pending confirmation ${c.id} for ${c.tool} (queued ${c.requestedAt}, turn ${c.turnNumber}, triggered by ${c.triggeredBy}) discarded by a server restart — never executed`,
+        })
+        .catch((err) => this.logger.error(`Confirmation-discard audit failed for campaign ${campaignId}`, err));
+    }
+    if (r.confirmationsDiscarded.length > 0) {
+      parts.push(`${r.confirmationsDiscarded.length} tool call(s) awaiting approval were discarded`);
+      this.recordControl(campaignId, {
+        control: 'tool_confirmations_discarded_on_restart',
+        count: r.confirmationsDiscarded.length,
+      });
+    }
+
+    this.stream.emit({
+      type: 'session.reset',
+      campaignId,
+      voteExpired: r.voteExpired !== null,
+      approvalsRevoked: r.approvalsRevoked.length,
+      confirmationsDiscarded: r.confirmationsDiscarded.length,
+    });
+    void this.notify(
+      campaignId,
+      RECOVERY_ACTOR,
+      'AI DM session state was reset by a restart',
+      `A server restart cleared session state that could not be carried across it: ${parts.join('; ')}. Nothing was executed. The table can redo any of it.`,
+    );
+  }
+
+  /**
    * Write the session's control state to disk.
    *
    * `announced` records which recovery shape the table has been told about. It defaults to null,
@@ -1315,6 +1584,12 @@ export class AiDriverService {
       vote: session.vote ? toJsonText(session.vote) : null,
       takeoverRequestedBy: stringOrNull(session.takeoverRequestedBy),
       lastInput: this.lastInputs.get(session.campaignId) ?? null,
+      // #1042. `consumeApproval` deletes a spent approval from the map outright, so what is
+      // written here is exactly the set of LIVE grants — no filtering needed, and no risk of
+      // persisting authority that has already been used. An empty map is written as NULL so a
+      // seat with nothing outstanding leaves no reconciliation work for the next boot.
+      secretReadApprovals: nonEmptyJson(session.secretReadApprovals),
+      pendingToolConfirmations: nonEmptyJson(session.pendingToolConfirmations),
       updatedAt: ts,
     };
 
@@ -1341,6 +1616,8 @@ export class AiDriverService {
             takeoverRequestedBy: values.takeoverRequestedBy,
             lastInput: values.lastInput,
             announcedRecovery: values.announcedRecovery,
+            secretReadApprovals: values.secretReadApprovals,
+            pendingToolConfirmations: values.pendingToolConfirmations,
             updatedAt: values.updatedAt,
           },
         })
@@ -1464,17 +1741,21 @@ export class AiDriverService {
     triggeredBy: RequestUser,
     input: string,
     opts: RunTurnOptions,
-  ): void {
+  ): number | null {
     // A proactive turn has no player behind it — the AI acted on its own (#1044). Recording
     // one would attribute the system's prompt to a human at the table.
-    if (opts.proactive) return;
+    if (opts.proactive) return null;
     // A retry / dispute REPLAYS an action that is already in the transcript; it is not a new
     // one. Recording it again would both duplicate the line and — because `input` on these
     // paths is the model prompt, not what anyone typed — publish the speaker prefix and the
     // injected dispute framing to every player at the table. The lever writes its own
     // `control` event carrying only the player-authored text.
-    if (opts.lever) return;
-    this.transcript.record({
+    if (opts.lever) return null;
+    // #1038: the returned `seq` is how the turn excludes its OWN action from the history it
+    // replays. #572 persists an accepted action BEFORE the AI answers it, so by prompt-assembly
+    // time the live message is already the newest row — without this the model would receive
+    // the same action twice, once as history and once as the thing to answer.
+    return this.transcript.record({
       campaignId,
       kind: 'player.action',
       actorUserId: triggeredBy.id,
@@ -1485,7 +1766,7 @@ export class AiDriverService {
         ...(opts.characterName ? { characterName: opts.characterName } : {}),
         ...(opts.characterId !== undefined ? { characterId: opts.characterId } : {}),
       },
-    });
+    })?.seq ?? null;
   }
 
   /** Persist + broadcast one aggregated narration step (never a raw token delta). */
@@ -1647,7 +1928,7 @@ export class AiDriverService {
   private ensureSession(campaignId: number): AiDmSessionState {
     let s = this.sessions.get(campaignId);
     if (!s) {
-      const { session, recovery, settled, announce, dirty } = this.loadPersistedControlState(campaignId);
+      const { session, reconciliation, recovery, settled, announce, dirty } = this.loadPersistedControlState(campaignId);
       s = session;
       // Publish BEFORE persisting/announcing: both re-enter this service, and the map entry must
       // already be the canonical object so nothing hydrates a second time.
@@ -1657,6 +1938,12 @@ export class AiDriverService {
       // transition every time.
       if (dirty) this.persistControlState(s, settled);
       if (announce && recovery) this.announceRecoveredState(s, recovery);
+      // #1042: independent of `announce`. What the restart DESTROYED is a different question
+      // from what shape the seat came back in, and it must not be gated on the shape having
+      // changed — a lapsed vote on a seat that came back paused (a steady, already-announced
+      // shape) is exactly the case that was being swallowed. Runs AFTER the write-back, so a
+      // crash between the two re-announces rather than silently losing the notice.
+      if (discardedAnything(reconciliation)) this.announceRestartReconciliation(s, reconciliation);
     }
     return s;
   }
@@ -1772,9 +2059,12 @@ export class AiDriverService {
       // The action IS accepted — it just runs later. Broadcast it NOW so the whole table
       // sees who queued what while the current turn is still narrating (#572). Recording it
       // only when it dequeues would recreate the original bug for queued actions.
-      this.recordPlayerAction(campaignId, triggeredBy, input, opts);
+      const queuedActionSeq = this.recordPlayerAction(campaignId, triggeredBy, input, opts);
       return new Promise((resolve, reject) => {
-        queue.push({ input, characterId: opts.characterId, user: triggeredBy, opts, resolve, reject, queuedAt: Date.now() });
+        // Carry the seq forward: when this entry is finally dequeued the row is buried under
+        // the narration of the turn that was running, so it can no longer be found by position.
+        const queuedOpts: RunTurnOptions = { ...opts, ...(queuedActionSeq !== null ? { actionSeq: queuedActionSeq } : {}) };
+        queue.push({ input, characterId: opts.characterId, user: triggeredBy, opts: queuedOpts, resolve, reject, queuedAt: Date.now() });
         this.actionQueues.set(campaignId, queue);
       });
     }
@@ -1785,7 +2075,12 @@ export class AiDriverService {
     // #572: the action cleared every gate (flag, seat, budget, pause, human control, queue),
     // so it is now an ACCEPTED table event — persist + broadcast it before the AI answers.
     // A queued action was already recorded above and must not be recorded twice on dequeue.
-    if (!opts.dequeued) this.recordPlayerAction(campaignId, triggeredBy, input, opts);
+    // #1038: `actionSeq` identifies this turn's own action row so the history replay below can
+    // exclude it. A dequeued action was recorded when it was accepted and carries its seq in
+    // `opts`; a lever/proactive turn records nothing now and leaves this null.
+    const actionSeq = opts.dequeued
+      ? (opts.actionSeq ?? null)
+      : this.recordPlayerAction(campaignId, triggeredBy, input, opts);
 
     // Remember the input so the retry / nudge / flag levers can replay this turn (#314).
     this.lastInputs.set(campaignId, input);
@@ -1840,7 +2135,36 @@ export class AiDriverService {
     // #577 — one ledger per turn. Seeded by the system-prompt context reads below, extended by
     // every executed tool call, and consulted (never written) by the grounding verdict.
     const ledger = new RetrievalLedger();
-    const system = await this.assembleSystemPrompt(campaignId, seat, opts.narrationLanguage, ledger);
+
+    /**
+     * #1038 — conversation memory. Read the narrative slice of #572's durable transcript and
+     * split it into a verbatim replay (prepended to `messages` below) and a compacted digest
+     * (a `## Recent history` system-prompt section). Read here, before the system prompt is
+     * assembled, because the digest is part of that prompt.
+     *
+     * Best-effort like every other context read on this path: if the transcript read fails the
+     * turn still runs, it just runs without memory — degrading to the pre-#1038 behaviour
+     * rather than dropping the player's action on the floor.
+     */
+    let promptHistory = EMPTY_PROMPT_HISTORY;
+    try {
+      const historyEvents = this.transcript.listForPrompt(campaignId, {
+        // Read enough rows to fill BOTH tiers; the builder decides what survives the budget.
+        limit: AI_DM_PROMPT_HISTORY_MAX_MESSAGES + AI_DM_PROMPT_HISTORY_MAX_DIGEST,
+        ...(actionSeq !== null ? { beforeSeq: actionSeq } : {}),
+      });
+      promptHistory = buildPromptHistory(historyEvents, wrapUntrustedPlayerInput);
+    } catch (err) {
+      this.logger.warn(`Prompt history unavailable for campaign ${campaignId}: ${String(err)}`);
+    }
+
+    const system = await this.assembleSystemPrompt(
+      campaignId,
+      seat,
+      opts.narrationLanguage,
+      ledger,
+      promptHistory.digest,
+    );
 
     let speakerPrefix = '';
     if (opts.characterId) {
@@ -1870,7 +2194,13 @@ export class AiDriverService {
     // Untrusted-input hardening (#317): fence + neutralize the player message so it reads as
     // in-world DATA, not instructions. The system prompt's UNTRUSTED_INPUT_PREAMBLE explains the fence.
     // Skipped for trusted system-generated proactive prompts.
-    const messages: AiMessage[] = [{ role: 'user', content: opts.proactive ? wrappedInput : wrapUntrustedPlayerInput(wrappedInput) }];
+    // #1038: bounded prior conversation FIRST, then the action being answered. Replayed player
+    // text was re-fenced by `buildPromptHistory` through this same wrapper — history that
+    // skipped the fence would turn every past message into a standing injection channel.
+    const messages: AiMessage[] = [
+      ...promptHistory.messages,
+      { role: 'user', content: opts.proactive ? wrappedInput : wrapUntrustedPlayerInput(wrappedInput) },
+    ];
 
     // status is already 'running' (reserved synchronously above, #381).
     if (opts.scene !== undefined) session.scene = opts.scene;
@@ -3024,6 +3354,10 @@ export class AiDriverService {
       turnNumber: session.turnCount,
     };
     session.pendingToolConfirmations[key] = pending;
+    // #1042: a queued confirmation is an irreversible write waiting on a human. If the process
+    // dies before the DM answers, the next boot has to be able to tell them it was discarded —
+    // which it can only do from a persisted record.
+    this.persistControlState(session);
     return pending;
   }
 
@@ -3202,6 +3536,11 @@ export class AiDriverService {
       consumed: false,
     };
     session.secretReadApprovals[key] = approval;
+    // #1042: durable immediately, not at the next turn boundary. The window this closes is the
+    // whole bug — a grant made and then lost to a crash five seconds later must still be
+    // revocable-with-an-audit-row on the next boot, and an unpersisted grant is one there is no
+    // record of to revoke.
+    this.persistControlState(session);
     await this.audit.log({
       actor: auditActor(granter),
       actorRole: role,
@@ -3241,6 +3580,9 @@ export class AiDriverService {
     const approvals = session.secretReadApprovals ?? {};
     if (approvals[key] && !approvals[key].consumed) {
       delete approvals[key];
+      // #1042: a revoked grant must leave the row too, or the next restart would "revoke" it a
+      // second time and audit a revocation of authority that no longer existed.
+      this.persistControlState(session);
       await this.audit.log({
         actor: auditActor(granter),
         actorRole: role,
@@ -3270,6 +3612,11 @@ export class AiDriverService {
     approval.consumed = true;
     const approvals = session.secretReadApprovals;
     if (approvals) delete approvals[approvalKey(approval.tool, approval.entityId)];
+    // #1042: spending an approval must reach the row, so a restart moments later does not
+    // announce the revocation of a grant the AI had already used. Best-effort inside
+    // persistControlState, and this sits on the tool-dispatch path, so a failure here costs one
+    // spurious audit line on the next boot — never the read itself.
+    this.persistControlState(session);
   }
 
   /** Look up an unconsumed approval for {tool, entityId}, or null (issue #557). */
@@ -3314,6 +3661,11 @@ export class AiDriverService {
     const key = pendingConfirmationKey(pending.tool, pending.toolCallId);
     delete pendingMap[key];
     session.pendingToolConfirmations = pendingMap;
+    // #1042: written before the approve path runs the tool, not after. If the tool call crashes
+    // the process mid-execution, the confirmation must NOT come back pending — a DM answering
+    // it a second time would run an irreversible write twice, which is a worse failure than the
+    // one this issue is about.
+    this.persistControlState(session);
 
     if (action === 'reject') {
       await this.audit.log({
@@ -3854,6 +4206,8 @@ export class AiDriverService {
      * and the whole mechanism would cry wolf on every turn.
      */
     ledger?: RetrievalLedger,
+    /** #1038 — compacted older conversation, rendered as `## Recent history`. Null when none. */
+    historyDigest?: string | null,
   ): Promise<string> {
     const parts: string[] = [GROUNDING_PREAMBLE, GROUNDING_CITATION_CONTRACT, UNTRUSTED_INPUT_PREAMBLE];
     if (seat.instructions) parts.push(`## DM steering\n${seat.instructions}`);
@@ -3940,6 +4294,12 @@ export class AiDriverService {
     if (supports.length > 0) {
       parts.push(`## Participant-authorized practical supports\n${JSON.stringify(supports)}`);
     }
+
+    // #1038 — compacted older conversation. Placed AFTER the live world state (which is read
+    // fresh every turn and is authoritative about how things are NOW) and BEFORE the table
+    // corrections below, so the ordering reads as: what is true → what was said → what a human
+    // overruled. History is the weakest of the three and must never outrank a correction.
+    if (historyDigest) parts.push(renderRecentHistorySection(historyDigest, wrapUntrustedPlayerInput));
 
     // #577 — close the human-correction loop. Flagging a claim as unverified is only useful if
     // the model stops repeating it, so a DM's correction is replayed here as table-authoritative

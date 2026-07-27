@@ -8,6 +8,7 @@ import {
   ModerationReportCreate,
   ModerationReportPage,
   ModerationRetentionPolicyUpdate,
+  ModerationSilenceCreate,
 } from '@campfire/schema';
 
 // `.strict()` at the DTO layer, matching notes/comments: an unrecognized body key
@@ -20,6 +21,8 @@ export class ModerationReportPageDto extends createZodDto(ModerationReportPage) 
 export class ModerationEvidenceDto extends createZodDto(ModerationEvidence) {}
 export class ModerationIncidentExportDto extends createZodDto(ModerationIncidentExport) {}
 export class ModerationRetentionPolicyUpdateDto extends createZodDto(ModerationRetentionPolicyUpdate.strict()) {}
+/** Issue #597: direct DM silence, no report required. */
+export class ModerationSilenceCreateDto extends createZodDto(ModerationSilenceCreate) {}
 
 /**
  * Explicit redaction request (issue #601 bullet 6). A free-text reason is REQUIRED:

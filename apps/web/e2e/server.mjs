@@ -45,6 +45,12 @@ const child = spawn(process.execPath, [serverEntry], {
     // Keep the strict auth throttler out of the way — the seed step fires several
     // rapid login/setup calls that aren't testing rate limiting.
     THROTTLE_DISABLED: '1',
+    // Same reasoning for the AI-map generation limiter: it is per CAMPAIGN, and every
+    // spec shares one seeded campaign, so one spec generating a map charged the next
+    // spec's generation and surfaced a rate-limit error where that spec expected a
+    // moderation block. The limiter's own behaviour is covered directly in the server
+    // unit suite, so switching it off here loses no coverage.
+    CAMPFIRE_AI_MAP_RATE_LIMIT_MS: '0',
     // No dev-auth bypass: real sessions only (see header note).
     DEV_AUTH: '',
     // Issue #445 fixture: proves the admin can clear an encrypted key and see the

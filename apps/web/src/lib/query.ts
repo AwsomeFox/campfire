@@ -146,6 +146,12 @@ export interface AiDmSession {
   actingDm: AiDmActingDmGrant | null;
   vote: AiDmTableVote | null;
   takeoverRequestedBy: string | null;
+  /**
+   * How many past table events the AI can draw on for conversation memory (#1038). Derived
+   * server-side from the durable transcript on every read, so it reflects a DM purge or
+   * retention pruning immediately. Optional: a server predating #1038 simply omits it.
+   */
+  historyLength?: number;
 }
 
 /**
