@@ -129,6 +129,8 @@ export function sourceStatsFrom(
     resolvedInbox: source.resolvedInbox.length,
     encounters: fought.length,
     diceRolls: source.diceRolls?.length ?? 0,
+    excludedInboxByConsent: 0,
+    excludedInboxPrivate: 0,
   };
   if (scope && isSessionScope(scope)) {
     stats.scheduledSessionId = scope.scheduledSessionId;

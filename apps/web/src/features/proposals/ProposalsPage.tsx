@@ -536,6 +536,7 @@ function ProposalCard({
                 : `Approving creates the ${proposal.entityType} through the normal write path.`}
             </p>
           )}
+          {proposal.generationProvenance && <GenerationProvenanceView proposal={proposal} />}
         </div>
       </div>
 
@@ -592,6 +593,34 @@ function ProposalCard({
         )}
       </div>
     </Card>
+  );
+}
+
+function GenerationProvenanceView({ proposal }: { proposal: Proposal }) {
+  const p = proposal.generationProvenance;
+  if (!p) return null;
+  const consent = p.consent;
+  return (
+    <div className="cf-inset p-2 mt-2 text-[11px] text-secondary space-y-1">
+      <p className="m-0 text-slate-200 font-semibold">AI generation provenance</p>
+      <p className="m-0">
+        Provider: {p.provider}
+        {p.providerType ? ` (${p.providerType})` : ''} · Model: {p.model || 'default'} · Endpoint: {p.endpoint.scope}
+        {p.endpoint.baseUrl ? ` (${p.endpoint.baseUrl})` : ''}
+      </p>
+      <p className="m-0">
+        Prompt: {p.promptVersion} · {p.promptHash.slice(0, 12)}… · Source hash:{' '}
+        {p.sourceHash ? `${p.sourceHash.slice(0, 12)}…` : 'n/a'}
+      </p>
+      {consent && (
+        <p className="m-0">
+          Consent: policy {consent.campaignPolicy}; included {consent.includedInboxCount} inbox note
+          {consent.includedInboxCount === 1 ? '' : 's'}, excluded {consent.excludedInboxByConsent} by consent
+          {consent.excludedInboxPrivate ? `, ${consent.excludedInboxPrivate} private` : ''}.
+        </p>
+      )}
+      <p className="m-0">Retention: {p.retentionNotice}</p>
+    </div>
   );
 }
 

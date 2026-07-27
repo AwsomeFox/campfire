@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { and, asc, desc, eq, inArray, isNull } from 'drizzle-orm';
 import type { z } from 'zod';
 import type {
+  AiExternalContentPolicy,
   Note,
   NarrationLanguage,
   Role,
@@ -15,12 +16,13 @@ import type {
   ScribeSourceStats,
   ScribeTrigger,
 } from '@campfire/schema';
-import { buildNarrationLanguageContract, resolveNarrationLanguage } from '@campfire/schema';
+import { AI_EXTERNAL_PROVIDER_PRIVACY, AiGenerationProvenance, buildNarrationLanguageContract, resolveNarrationLanguage } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import {
   aiDmSeats,
   aiScribeConfigs,
   aiScribeJobs,
+  campaignMembers,
   campaigns,
   encounters,
   proposals,
@@ -28,6 +30,7 @@ import {
   sessions,
 } from '../../db/schema';
 import { nowIso } from '../../common/time';
+import { provenanceEndpointBaseUrl } from '../../common/ai-provenance-endpoint';
 import { auditActor, type RequestUser } from '../../common/user.types';
 import { AuditService } from '../audit/audit.service';
 import { SettingsService } from '../settings/settings.service';
@@ -52,8 +55,40 @@ import {
   type ScribeSessionScope,
   type ScribeSourceScope,
 } from './scribe-scope';
+import {
+  applyScribeConsent,
+  withheldConsentDetail,
+  type ScribeConsentSummary,
+  type ScribeEgress,
+} from './scribe-consent';
 
 type ScribeConfigUpdateInput = z.infer<typeof ScribeConfigUpdate>;
+
+const SCRIBE_PROMPT_VERSION = 'scribe-recap-v2';
+
+export type ScribeAssembly = {
+  /**
+   * The assembled, consent-filtered material. Always present — "is there enough here to
+   * be worth recapping?" is a SCRIBE-RUN question (see `hasRecapMaterial`), not a property
+   * of the assembly, and collapsing it to null here previously dropped prepared encounters
+   * from the MCP scaffold tool, which spends no tokens and calls no model.
+   */
+  source: RecapDraftSource;
+  consent: ScribeConsentSummary;
+};
+
+/**
+ * Whether assembled material is worth drafting a recap FROM (issue #316).
+ *
+ * A still-`preparing` encounter is prep, not play, so it cannot carry a recap on its own —
+ * but it is perfectly legitimate source material to hand an agent or a human who is
+ * writing one. This gate therefore belongs to the run engine (which would otherwise spend
+ * provider tokens narrating nothing), NOT to assembly.
+ */
+export function hasRecapMaterial(source: RecapDraftSource): boolean {
+  const fought = source.encounters.filter((e) => e.status === 'running' || e.status === 'ended');
+  return fought.length > 0 || source.resolvedInbox.length > 0 || (source.diceRolls?.length ?? 0) > 0;
+}
 
 type RunOpts = {
   dryRun?: boolean;
@@ -85,6 +120,8 @@ function defaultConfig(campaignId: number): ScribeConfig {
     cron: false,
     budgetPerRun: 2000,
     sourceCursorAt: null,
+    // Fail-closed placeholder; `getConfig` recomputes it from the resolved provider (#501).
+    externalSend: true,
     createdAt: ts,
     updatedAt: ts,
   };
@@ -97,6 +134,8 @@ function configToDomain(row: typeof aiScribeConfigs.$inferSelect): ScribeConfig 
     cron: row.cron,
     budgetPerRun: row.budgetPerRun,
     sourceCursorAt: row.sourceCursorAt ?? null,
+    // Fail-closed placeholder; `getConfig` recomputes it from the resolved provider (#501).
+    externalSend: true,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -106,6 +145,19 @@ function parseSourceStats(raw: string | null | undefined): ScribeSourceStats | n
   if (!raw) return null;
   try {
     return JSON.parse(raw) as ScribeSourceStats;
+  } catch {
+    return null;
+  }
+}
+
+function parseGenerationProvenance(raw: string | null | undefined): AiGenerationProvenance | null {
+  if (!raw) return null;
+  try {
+    // Validate rather than blind-cast: a shape-drifted blob from an older build (or a
+    // hand-edited DB) must not surface as a malformed `generationProvenance` in the API
+    // response and break clients. Unparseable ⇒ null, same as "no provenance recorded".
+    const parsed = AiGenerationProvenance.safeParse(JSON.parse(raw));
+    return parsed.success ? parsed.data : null;
   } catch {
     return null;
   }
@@ -125,6 +177,7 @@ function jobToDomain(row: typeof aiScribeJobs.$inferSelect): ScribeJob {
     sourceHash: row.sourceHash ?? null,
     scheduledSessionId: row.scheduledSessionId ?? null,
     sourceStats: parseSourceStats(row.sourceStats),
+    generationProvenance: parseGenerationProvenance(row.generationProvenance),
     createdBy: row.createdBy,
     createdAt: row.createdAt,
   };
@@ -175,7 +228,17 @@ export class ScribeService implements OnApplicationBootstrap {
 
   async getConfig(campaignId: number): Promise<ScribeConfig> {
     const [row] = await this.db.select().from(aiScribeConfigs).where(eq(aiScribeConfigs.campaignId, campaignId)).limit(1);
-    return row ? configToDomain(row) : defaultConfig(campaignId);
+    const stored = row ? configToDomain(row) : defaultConfig(campaignId);
+    // Derived per read (#501): the DM-facing external-send confirmation must describe what
+    // a run will ACTUALLY do. On an install with no provider configured nothing leaves the
+    // server, and warning about a vendor call that will not happen trains DMs to ignore
+    // the dialog before the run where it does matter.
+    //
+    // COST, accepted deliberately: this makes every getConfig a provider-config resolution,
+    // including the call inside the spend lock that only wants `budgetPerRun`. It is two
+    // indexed row reads via the NON-decrypting `getEffectiveView`, so it neither decrypts a
+    // key nor touches the network. Revisit if provider resolution ever grows either.
+    return { ...stored, externalSend: (await this.resolveEgress(campaignId)) === 'external' };
   }
 
   async putConfig(campaignId: number, input: ScribeConfigUpdateInput, user: RequestUser): Promise<ScribeConfig> {
@@ -227,13 +290,93 @@ export class ScribeService implements OnApplicationBootstrap {
 
   // ── source assembly ───────────────────────────────────────────────────────
 
+  private async aiContentPolicy(campaignId: number): Promise<AiExternalContentPolicy> {
+    const [row] = await this.db
+      .select({ aiExternalContentPolicy: campaigns.aiExternalContentPolicy })
+      .from(campaigns)
+      .where(eq(campaigns.id, campaignId))
+      .limit(1);
+    return (row?.aiExternalContentPolicy ?? 'member_consent') as AiExternalContentPolicy;
+  }
+
+  private async consentingMemberIds(campaignId: number): Promise<Set<string>> {
+    const rows = await this.db
+      .select({ userId: campaignMembers.userId })
+      .from(campaignMembers)
+      .where(and(eq(campaignMembers.campaignId, campaignId), eq(campaignMembers.aiExternalUseConsent, true)));
+    return new Set(rows.map((row) => String(row.userId)));
+  }
+
   /**
-   * Assemble recap source material. When `scope` is set, only inbox notes resolved
-   * during the window, encounters fought/linked in the window, and dice rolls logged
-   * in the window are included (#499). Without scope, all campaign material is loaded
-   * then filtered (on-demand default).
+   * The operator's EXPLICIT declaration that the configured provider endpoint is
+   * on-box / operator-controlled, so a generation through it does not constitute
+   * external use (issue #501).
+   *
+   * Deliberately an explicit opt-in rather than an inference. Campfire will NOT try to
+   * decide that a `baseUrl` is "local enough" by inspecting its host: a loopback or
+   * RFC1918 address can just as easily be an egress proxy forwarding to a public vendor,
+   * and guessing wrong leaks member-authored content that a member declined to share.
+   * That is the operator's call to make, and it defaults to OFF (fail-closed).
+   *
+   * Note this is NOT the same knob as `AI_PROVIDER_ALLOW_PRIVATE_HOSTS`, which is the SSRF
+   * host policy — permitting a private host as a *destination* says nothing about whether
+   * content sent there stays inside the deployment.
    */
-  async assembleSource(campaignId: number, scope?: ScribeSourceScope): Promise<RecapDraftSource | null> {
+  private operatorDeclaredLocalEndpoint(): boolean {
+    const raw = process.env.AI_PROVIDER_ENDPOINT_IS_LOCAL?.trim().toLowerCase();
+    return raw === '1' || raw === 'true';
+  }
+
+  /**
+   * Decide, BEFORE any material is assembled, whether this campaign's generation will
+   * actually leave the server (issue #501).
+   *
+   * `getEffectiveView` is the non-decrypting mirror of `resolveEffectiveConfig`'s
+   * precedence: both resolve `campaign ?? server`, and `resolveEffectiveConfig` returns
+   * null exactly when neither row exists — which is exactly when `configured` is false.
+   * So "no provider row" ⟺ the run falls through to the injected/no-op seam, where
+   * `endpointScope` resolves to `'injected'`/`'none'` and nothing is transmitted anywhere.
+   *
+   * Anything else is treated as external. A configured `baseUrl` is genuinely ambiguous —
+   * it could be a localhost Ollama or a public API — so it stays external unless the
+   * operator has explicitly declared otherwise.
+   */
+  private async resolveEgress(campaignId: number): Promise<ScribeEgress> {
+    const view = await this.providerConfig.getEffectiveView(campaignId);
+    if (!view.configured) return 'local';
+    return this.operatorDeclaredLocalEndpoint() ? 'local' : 'external';
+  }
+
+  private async applyConsentGate(
+    campaignId: number,
+    source: RecapDraftSource,
+    egress: ScribeEgress,
+  ): Promise<ScribeAssembly> {
+    const policy = await this.aiContentPolicy(campaignId);
+    const consented =
+      egress === 'external' && policy === 'member_consent'
+        ? await this.consentingMemberIds(campaignId)
+        : new Set<string>();
+    return applyScribeConsent(source, policy, consented, egress);
+  }
+
+  /**
+   * Assemble the recap source AND the consent decision that produced it (#501).
+   *
+   * Public because the scribe run engine is not the only egress path: the MCP
+   * `draft_session_recap` tool hands this same material straight to a connected
+   * agent (which IS an external model), so it must go through the identical
+   * consent filter rather than reading notes directly.
+   *
+   * `egress` defaults to `'external'` — the fail-closed choice — so any caller that has
+   * not reasoned about where the material is going gets the strict gate. Only the run
+   * engine, which has resolved the effective provider first, passes `'local'`.
+   */
+  async assembleSourceWithConsent(
+    campaignId: number,
+    scope?: ScribeSourceScope,
+    egress: ScribeEgress = 'external',
+  ): Promise<ScribeAssembly> {
     const resolvedInbox = await this.notes.listAllInbox(campaignId, true);
     const encounterList = await this.encounters.listForCampaign(campaignId);
     const encountersWithCombatants = await Promise.all(encounterList.map((e) => this.encounters.getWithCombatantsOrThrow(e.id)));
@@ -261,6 +404,9 @@ export class ScribeService implements OnApplicationBootstrap {
 
     const source: RecapDraftSource = {
       resolvedInbox: resolvedInbox.map((n: Note) => ({
+        id: n.id,
+        authorUserId: n.authorUserId,
+        visibility: n.visibility,
         body: n.body,
         resolvedNote: n.resolvedNote,
         entityName: n.entityName,
@@ -269,6 +415,7 @@ export class ScribeService implements OnApplicationBootstrap {
       encounters: encountersWithCombatants.map((e) => {
         const meta = encounterMeta.get(e.id);
         return {
+          id: e.id,
           name: e.name,
           status: e.status,
           combatants: e.combatants,
@@ -279,9 +426,12 @@ export class ScribeService implements OnApplicationBootstrap {
         };
       }),
       diceRolls: (await this.rolls.listForCampaign(campaignId, DEFAULT_DICE_ROLLS_RETENTION)).map((r) => ({
+        id: r.id,
         label: r.label,
         actor: r.actor,
         rollerName: r.rollerName,
+        // Join key for the consent gate only — stripped again before the prompt (#501).
+        rollerUserId: r.rollerUserId,
         total: r.total,
         dc: r.dc,
         success: r.success,
@@ -292,9 +442,11 @@ export class ScribeService implements OnApplicationBootstrap {
     };
 
     const scoped = scope ? filterSourceByScope(source, scope, sessionPlayedAtById) : source;
-    const fought = scoped.encounters.filter((e) => e.status === 'running' || e.status === 'ended');
-    if (fought.length === 0 && scoped.resolvedInbox.length === 0 && (scoped.diceRolls?.length ?? 0) === 0) return null;
-    return scoped;
+    const filtered = await this.applyConsentGate(campaignId, scoped, egress);
+    // Deliberately NOT collapsed to null when there is nothing "recap-worthy". Callers that
+    // would spend tokens narrating it ask `hasRecapMaterial`; the MCP scaffold tool, which
+    // spends none, gets whatever exists — including encounters that are still `preparing`.
+    return { source: filtered.source, consent: filtered.consent };
   }
 
   private async sessionPlayedAtMap(campaignId: number): Promise<Map<number, string | null>> {
@@ -303,6 +455,84 @@ export class ScribeService implements OnApplicationBootstrap {
       .from(sessions)
       .where(and(eq(sessions.campaignId, campaignId), isNull(sessions.deletedAt)));
     return new Map(rows.map((r) => [r.id, r.playedAt ?? null]));
+  }
+
+  private sourceStats(source: RecapDraftSource, scope: ScribeSourceScope | undefined, consent: ScribeConsentSummary): ScribeSourceStats {
+    return {
+      ...sourceStatsFrom(source, scope),
+      excludedInboxByConsent: consent.excludedInboxByConsent,
+      excludedInboxPrivate: consent.excludedInboxPrivate,
+      // The CAUSE behind the count, archived so the DM-facing copy can name the remedy that
+      // applies. A `no_material` run records no provenance, so this is the only place the
+      // UI can learn the policy from (#501 review).
+      campaignPolicy: consent.campaignPolicy,
+    };
+  }
+
+  private sourceIds(source: RecapDraftSource, scope?: ScribeSourceScope): AiGenerationProvenance['sourceIds'] {
+    return {
+      inboxNotes: source.resolvedInbox.map((note) => note.id).filter((id): id is number => typeof id === 'number'),
+      encounters: source.encounters.map((encounter) => encounter.id).filter((id): id is number => typeof id === 'number'),
+      diceRolls: (source.diceRolls ?? []).map((roll) => roll.id).filter((id): id is number => typeof id === 'number'),
+      ...(scope && isSessionScope(scope) ? { scheduledSessionId: scope.scheduledSessionId } : {}),
+      ...(scope && !isSessionScope(scope) ? { sinceAt: scope.sinceAt } : {}),
+    };
+  }
+
+  private promptHash(system: string, userPrompt: string): string {
+    return createHash('sha256')
+      .update(JSON.stringify({ promptVersion: SCRIBE_PROMPT_VERSION, system, userPrompt }))
+      .digest('hex');
+  }
+
+  private buildGenerationProvenance(input: {
+    source: RecapDraftSource;
+    scope?: ScribeSourceScope;
+    sourceHash: string;
+    system: string;
+    userPrompt: string;
+    provider: string;
+    providerType: string | null;
+    model: string;
+    endpointScope: AiGenerationProvenance['endpoint']['scope'];
+    endpointBaseUrl?: string | null;
+    consent: ScribeConsentSummary;
+  }): AiGenerationProvenance {
+    const provenance: AiGenerationProvenance = {
+      source: 'ai_scribe',
+      provider: input.provider,
+      providerType: input.providerType,
+      model: input.model,
+      endpoint: {
+        scope: input.endpointScope,
+        baseUrl: input.endpointBaseUrl ?? null,
+      },
+      sourceIds: this.sourceIds(input.source, input.scope),
+      sourceHash: input.sourceHash,
+      promptVersion: SCRIBE_PROMPT_VERSION,
+      promptHash: this.promptHash(input.system, input.userPrompt),
+      consent: input.consent,
+      retentionNotice: AI_EXTERNAL_PROVIDER_PRIVACY.retentionNote,
+      createdAt: nowIso(),
+    };
+
+    // Validate on WRITE, not just on read (#501). Every read path — `parseGenerationProvenance`
+    // here and `proposal-records.toDomain` — validates and falls back to `null`, so a blob
+    // that does not satisfy the schema silently becomes "no provenance recorded" at read
+    // time with nothing logged at either end. For a provenance feature, losing the record
+    // is precisely the failure it exists to prevent, so make it loud instead of silent.
+    //
+    // This is a LOUD LOG, not a guard: the blob is still returned and persisted either
+    // way. Failing the run outright would trade a degraded record for a lost recap, which
+    // is the worse outcome — the log is what turns a silent drop into a visible one.
+    // Not currently reachable: every field comes from a validated config or a constant.
+    const parsed = AiGenerationProvenance.safeParse(provenance);
+    if (!parsed.success) {
+      this.logger.error(
+        `scribe generationProvenance failed schema validation and will be dropped on read: ${parsed.error.message}`,
+      );
+    }
+    return provenance;
   }
 
   // ── the run engine ──────────────────────────────────────────────────────────
@@ -334,13 +564,25 @@ export class ScribeService implements OnApplicationBootstrap {
       return this.record(campaignId, trigger, user, 'disabled', { detail: 'AI DM seat not enabled', scope });
     }
 
-    const source = await this.assembleSource(campaignId, scope);
-    const stats = source ? sourceStatsFrom(source, scope) : sourceStatsFrom({ resolvedInbox: [], encounters: [] }, scope);
-    if (!source) {
+    // Resolve WHERE this generation will go BEFORE assembling, so the consent gate that
+    // runs inside assembly is the one that actually applies (#501). Issue #501 is scoped
+    // to EXTERNAL use; gating a purely local generation on external-use consent silently
+    // empties recaps on the default self-hosted install, where nothing is transmitted at
+    // all. The gate still runs strictly inside assembly, before any bytes exist to send.
+    const egress = await this.resolveEgress(campaignId);
+    const assembly = await this.assembleSourceWithConsent(campaignId, scope, egress);
+    const source = assembly.source;
+    const stats = this.sourceStats(source, scope, assembly.consent);
+    // The run engine — not assembly — decides whether there is enough to be worth spending
+    // provider tokens on. A campaign with only `preparing` encounters has nothing to recap.
+    if (!hasRecapMaterial(source)) {
       return this.record(campaignId, trigger, user, 'no_material', {
-        detail: scope && isSessionScope(scope)
-          ? `no inbox/encounter material for scheduled session #${scope.scheduledSessionId}`
-          : 'no inbox/encounter material',
+        detail: withheldConsentDetail(
+          scope && isSessionScope(scope)
+            ? `no inbox/encounter material for scheduled session #${scope.scheduledSessionId}`
+            : 'no inbox/encounter material',
+          assembly.consent,
+        ),
         scope,
         sourceStats: stats,
       });
@@ -409,7 +651,7 @@ export class ScribeService implements OnApplicationBootstrap {
     }
 
     type SpendResult =
-      | { ok: true; text: string; tokensUsed: number; providerName: string }
+      | { ok: true; text: string; tokensUsed: number; providerName: string; generationProvenance: AiGenerationProvenance }
       | {
           ok: false;
           status: 'over_budget' | 'failed';
@@ -453,17 +695,29 @@ export class ScribeService implements OnApplicationBootstrap {
       let text = '';
       let tokensUsed = 0;
       let providerName = '';
+      // #501 provenance, captured as the call resolves so the stored blob names the
+      // provider/model/endpoint that actually produced the text. Defaults are the
+      // manual/legacy shape, so a throw before resolution never writes a half-truth.
+      let providerType: string | null = null;
+      let model = seatAfterLock.model || '';
+      let endpointScope: AiGenerationProvenance['endpoint']['scope'] = 'injected';
+      let endpointBaseUrl: string | null = null;
+      let system = '';
       // Resolved INSIDE the try: the hold is live from here on, so every step between
       // reserving and settling must be on a path that releases it. Resolving the config
       // outside would strand the reservation if decrypting/reading it threw (#563).
       let config: AiProviderConfig | null = null;
+      // Which scope OWNS the resolved endpoint — not merely whether a campaign row
+      // exists. A keyless campaign override executes against the SERVER endpoint (#501).
+      let resolvedEndpointScope: 'campaign' | 'server' | null = null;
       try {
-        config = await this.providerConfig.resolveEffectiveConfig(campaignId);
+        ({ config, endpointScope: resolvedEndpointScope } =
+          await this.providerConfig.resolveEffectiveConfigWithEndpointScope(campaignId));
         const aiSupports = await this.supportPreferences.listForAi(campaignId);
         const supportGuidance = aiSupports.length > 0
           ? `\n\nParticipant-authorized practical supports (apply respectfully; do not infer diagnoses):\n${JSON.stringify(aiSupports)}`
           : '';
-        const system =
+        system =
           (seatAfterLock.instructions ? `${seatAfterLock.instructions}\n\n` : '') +
           'You are the campaign scribe. Write a concise, in-voice session recap from the source material below. ' +
           'Return only the finished recap prose (markdown allowed); do not include the raw source-notes appendix.' +
@@ -471,6 +725,17 @@ export class ScribeService implements OnApplicationBootstrap {
           '\n\n' +
           buildNarrationLanguageContract(narrationResolved.language, narrationResolved.provenance);
         if (config) {
+          // Ordering interlock (#501). The consent gate ran during assembly against the
+          // egress we predicted BEFORE the spend lock. If a provider row appeared in the
+          // meantime, this material was assembled unfiltered for a local seam and is now
+          // about to be handed to an external endpoint. Refuse rather than send: the catch
+          // below releases the reservation and records a failed run.
+          if (egress === 'local' && !this.operatorDeclaredLocalEndpoint()) {
+            throw new Error(
+              'provider configuration changed to an external endpoint after source assembly; ' +
+                'refusing to send material that was not filtered for external-use consent',
+            );
+          }
           const provider: AiProvider = createAiProvider({ ...config, params: { ...config.params, maxTokens } });
           const result = await provider.generate({
             system,
@@ -481,6 +746,16 @@ export class ScribeService implements OnApplicationBootstrap {
           text = result.text;
           tokensUsed = result.usage.totalTokens;
           providerName = provider.name;
+          providerType = config.providerType;
+          model = result.model || config.model;
+          // The scope that OWNS the endpoint, so a keyless campaign override that runs
+          // against the server endpoint is recorded as 'server' — both truthful and the
+          // condition the baseUrl gate below keys off (#501 review).
+          endpointScope = resolvedEndpointScope ?? 'none';
+          // Never persist the SERVER row's baseUrl — scribe jobs and filed proposals are
+          // DM-readable, and the admin-managed server endpoint is deliberately hidden from
+          // campaign DMs (#501 review).
+          endpointBaseUrl = provenanceEndpointBaseUrl(endpointScope, config.baseUrl);
         } else {
           const result = await this.fallbackProvider.generate({
             campaignId,
@@ -493,6 +768,9 @@ export class ScribeService implements OnApplicationBootstrap {
           text = result.narration;
           tokensUsed = result.tokensUsed;
           providerName = this.fallbackProvider.name;
+          providerType = null;
+          model = seatAfterLock.model || '';
+          endpointScope = providerName === 'noop' ? 'none' : 'injected';
         }
       } catch (err) {
         await this.aiDm.releaseReservationQuietly(reservation, {
@@ -545,7 +823,25 @@ export class ScribeService implements OnApplicationBootstrap {
         };
       }
 
-      return { ok: true, text, tokensUsed, providerName };
+      return {
+        ok: true,
+        text,
+        tokensUsed,
+        providerName,
+        generationProvenance: this.buildGenerationProvenance({
+          source,
+          scope,
+          sourceHash,
+          system,
+          userPrompt: draft,
+          provider: providerName,
+          providerType,
+          model,
+          endpointScope,
+          endpointBaseUrl,
+          consent: assembly.consent,
+        }),
+      };
     });
 
     if (!spend.ok) {
@@ -559,7 +855,7 @@ export class ScribeService implements OnApplicationBootstrap {
         ...(spend.providerName !== undefined ? { provider: spend.providerName } : {}),
       });
     }
-    const { text, tokensUsed, providerName } = spend;
+    const { text, tokensUsed, providerName, generationProvenance } = spend;
 
     if (dryRun) {
       const job = await this.record(campaignId, trigger, user, 'succeeded', {
@@ -567,6 +863,7 @@ export class ScribeService implements OnApplicationBootstrap {
         sourceHash,
         tokensUsed,
         provider: providerName,
+        generationProvenance,
         scope,
         sourceStats: stats,
       });
@@ -586,7 +883,12 @@ export class ScribeService implements OnApplicationBootstrap {
       { recap: text, title },
       user,
       'dm' as Role,
-      { proposer: `AI Scribe (${providerName})`, proposerUserId: `ai-dm:${campaignId}`, proposerToken: null },
+      {
+        proposer: `AI Scribe (${providerName})`,
+        proposerUserId: `ai-dm:${campaignId}`,
+        proposerToken: null,
+        generationProvenance,
+      },
     );
 
     await this.audit.log({
@@ -607,6 +909,7 @@ export class ScribeService implements OnApplicationBootstrap {
       proposalCount: 1,
       tokensUsed,
       provider: providerName,
+      generationProvenance,
       scope,
       sourceStats: stats,
     });
@@ -788,6 +1091,7 @@ export class ScribeService implements OnApplicationBootstrap {
       proposalCount?: number;
       tokensUsed?: number;
       provider?: string;
+      generationProvenance?: AiGenerationProvenance;
       scope?: ScribeSourceScope;
       sourceStats?: ScribeSourceStats;
       sourcePreview?: ScribeSourcePreview;
@@ -811,6 +1115,7 @@ export class ScribeService implements OnApplicationBootstrap {
         detail: extra.detail ?? '',
         scheduledSessionId: scheduledSessionId ?? null,
         sourceStats: extra.sourceStats ? JSON.stringify(extra.sourceStats) : null,
+        generationProvenance: extra.generationProvenance ? JSON.stringify(extra.generationProvenance) : null,
         createdBy: auditActor(user),
         createdAt: nowIso(),
       })
