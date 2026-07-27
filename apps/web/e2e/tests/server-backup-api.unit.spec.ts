@@ -59,3 +59,67 @@ test.describe('backup destination picker cancellation', () => {
     }
   });
 });
+
+test('copies a SharedArrayBuffer-backed subarray into a standalone BlobPart', async () => {
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  const originalStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  const originalFetch = Object.getOwnPropertyDescriptor(globalThis, 'fetch');
+  const originalBlob = Object.getOwnPropertyDescriptor(globalThis, 'Blob');
+  const originalDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
+  const originalTimeout = Object.getOwnPropertyDescriptor(globalThis, 'setTimeout');
+  const originalCreateObjectUrl = Object.getOwnPropertyDescriptor(URL, 'createObjectURL');
+  const originalRevokeObjectUrl = Object.getOwnPropertyDescriptor(URL, 'revokeObjectURL');
+  const backing = new SharedArrayBuffer(8);
+  const bytes = new Uint8Array(backing);
+  bytes.set([99, 1, 2, 3, 88]);
+  const chunk = new Uint8Array(backing, 1, 3);
+  let blobParts: BlobPart[] = [];
+
+  class CapturingBlob {
+    constructor(parts: BlobPart[]) {
+      blobParts = parts;
+    }
+  }
+
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: { showSaveFilePicker: undefined } });
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: { getItem: () => null } });
+  Object.defineProperty(globalThis, 'fetch', {
+    configurable: true,
+    value: async () => ({
+      ok: true,
+      headers: new Headers({ 'Content-Type': 'application/zip', 'Content-Length': '3' }),
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(chunk);
+          controller.close();
+        },
+      }),
+    }),
+  });
+  Object.defineProperty(globalThis, 'Blob', { configurable: true, value: CapturingBlob });
+  Object.defineProperty(globalThis, 'document', {
+    configurable: true,
+    value: { body: { appendChild: () => undefined }, createElement: () => ({ click: () => undefined, remove: () => undefined }) },
+  });
+  Object.defineProperty(globalThis, 'setTimeout', { configurable: true, value: (callback: () => void) => { callback(); return 0; } });
+  Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: () => 'blob:test' });
+  Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: () => undefined });
+  try {
+    await expect(downloadServerBackup()).resolves.toMatchObject({ bytes: 3, destination: 'browser-memory' });
+    expect(blobParts).toHaveLength(1);
+    const part = blobParts[0];
+    expect(part).toBeInstanceOf(ArrayBuffer);
+    if (!(part instanceof ArrayBuffer)) throw new Error('Expected a standalone ArrayBuffer BlobPart.');
+    expect(part).not.toBe(backing);
+    expect([...new Uint8Array(part)]).toEqual([1, 2, 3]);
+  } finally {
+    if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow); else delete (globalThis as { window?: Window }).window;
+    if (originalStorage) Object.defineProperty(globalThis, 'localStorage', originalStorage); else delete (globalThis as { localStorage?: Storage }).localStorage;
+    if (originalFetch) Object.defineProperty(globalThis, 'fetch', originalFetch); else delete (globalThis as { fetch?: typeof fetch }).fetch;
+    if (originalBlob) Object.defineProperty(globalThis, 'Blob', originalBlob); else delete (globalThis as { Blob?: typeof Blob }).Blob;
+    if (originalDocument) Object.defineProperty(globalThis, 'document', originalDocument); else delete (globalThis as { document?: Document }).document;
+    if (originalTimeout) Object.defineProperty(globalThis, 'setTimeout', originalTimeout);
+    if (originalCreateObjectUrl) Object.defineProperty(URL, 'createObjectURL', originalCreateObjectUrl);
+    if (originalRevokeObjectUrl) Object.defineProperty(URL, 'revokeObjectURL', originalRevokeObjectUrl);
+  }
+});

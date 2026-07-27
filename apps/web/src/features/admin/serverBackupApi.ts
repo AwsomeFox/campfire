@@ -330,9 +330,10 @@ export async function downloadServerBackup(options?: {
         `This browser must buffer the archive in memory and only supports backups up to ${MAX_BROWSER_BACKUP_BUFFER_BYTES / 1024 / 1024} MiB. The partial download was discarded.`,
       );
     }
-    // Copy each chunk into an ArrayBuffer so TypeScript's SharedArrayBuffer-aware
-    // stream types remain valid Blob parts. This path is already the bounded-memory fallback.
-    chunks.push(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength) as ArrayBuffer);
+    // Slice the view itself, not its backing buffer: a stream chunk can be a subarray
+    // over a SharedArrayBuffer, whose slice would retain the broader backing store and
+    // is not a BlobPart. Uint8Array#slice creates a tightly-sized standalone buffer.
+    chunks.push(value.slice().buffer);
     report();
   }
   const blob = new Blob(chunks, { type: res.headers.get('Content-Type') ?? 'application/zip' });
