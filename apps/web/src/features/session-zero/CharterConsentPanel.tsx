@@ -106,9 +106,16 @@ export function CharterConsentPanel({
       data-testid="charter-consent"
       style={{ display: 'grid', gap: 10 }}
     >
-      <h3 id="charter-consent-heading" className="card-kicker" style={{ margin: 0 }}>
+      {/*
+        h2, not h3. This card is a direct sibling of the page's other top-level cards —
+        "Access support" is an h2 — and it renders BEFORE them in the DOM, so an h3 here
+        jumps straight from the route's h1 and axe's `heading-order` rule fails the whole
+        page. `card-kicker` carries the visual weight, so the level is free to be whatever
+        the document outline needs it to be.
+      */}
+      <h2 id="charter-consent-heading" className="card-kicker" style={{ margin: 0 }}>
         {t('sessionZero.consent.heading')}
-      </h3>
+      </h2>
 
       {error && <ErrorNote message={error} onRetry={load} />}
 
