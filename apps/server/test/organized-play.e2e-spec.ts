@@ -1240,13 +1240,30 @@ describe('organized play (e2e)', () => {
 
   it('a series room change that would double-book the series against ITSELF is rejected', async () => {
     const selfRoom = (await api().post(`/api/v1/organized-play/venues/${venueId}/rooms`).set(dm).send({ name: 'Self Clash Room' })).body;
-    // Roomless daily 25-hour tables: overlapping with each other, but holding no
-    // shared resource, so creating them collides with nothing.
+    // Daily 24-hour local tables across the 2099-03-08 spring-forward, which makes
+    // that local day 23 hours — so two of these occurrences genuinely overlap by an
+    // hour in real time. Created with NO room and NO DM, so they hold no shared
+    // resource and the intra-batch check at creation has nothing to group on:
+    // creating them collides with nothing, which is what makes the PATCH below the
+    // first moment the overlap can matter.
     const series = await api()
       .post(`/api/v1/campaigns/${campaignId}/series`)
       .set(dm)
-      .send({ title: 'Overlapping Marathon', timezone: 'UTC', startDate: '2099-09-20', startTime: '18:00', durationMinutes: 1440, freq: 'daily', count: 3 });
+      .send({
+        title: 'Overlapping Marathon',
+        timezone: 'America/New_York',
+        startDate: '2099-03-06',
+        startTime: '19:00',
+        durationMinutes: 1440,
+        freq: 'daily',
+        count: 4,
+      });
     expect(series.status).toBe(201);
+    // Sanity-check the premise rather than trusting the zone math: occurrence 2
+    // starts before occurrence 1 has ended.
+    const occs = series.body.occurrences as Array<{ scheduledAt: string; durationMinutes: number }>;
+    const endOf = (o: { scheduledAt: string; durationMinutes: number }) => Date.parse(o.scheduledAt) + o.durationMinutes * 60_000;
+    expect(Date.parse(occs[2].scheduledAt)).toBeLessThan(endOf(occs[1]));
 
     // Assigning them all to ONE room double-books it. No stored-row probe can see
     // this: each occurrence's probe excludes its own id, and its siblings still

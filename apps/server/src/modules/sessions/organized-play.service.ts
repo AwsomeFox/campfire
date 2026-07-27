@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, asc, eq, inArray, ne, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import {
   MAX_SERIES_OCCURRENCES,
