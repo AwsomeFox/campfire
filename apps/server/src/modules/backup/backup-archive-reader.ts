@@ -140,7 +140,6 @@ export class BackupArchiveReader {
           if (settled) return;
           settled = true;
           cleanup();
-          zip.close();
           reject(err);
         };
         const abort = () => fail(new Error('aborted'));

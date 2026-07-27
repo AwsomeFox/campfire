@@ -84,6 +84,16 @@ describe('BackupArchiveReader', () => {
     await rejects(zip([{ name: 'bad\0name' }]));
   });
 
+  it('closes a ZIP exactly once when central-directory validation fails', async () => {
+    const close = jest.spyOn(yauzl.ZipFile.prototype, 'close');
+    try {
+      await rejects(zip([{ name: 'duplicate' }, { name: 'duplicate' }]));
+      expect(close).toHaveBeenCalledTimes(1);
+    } finally {
+      close.mockRestore();
+    }
+  });
+
   it('uses canonical Unicode names for duplicate checks and raw bytes for zip-slip guards', async () => {
     const first = Buffer.from('first');
     const second = Buffer.from('second');

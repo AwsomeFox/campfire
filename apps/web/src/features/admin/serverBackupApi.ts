@@ -290,7 +290,7 @@ export async function downloadServerBackup(options?: {
     const blob = await res.blob();
     if (blob.size > MAX_BROWSER_BACKUP_BUFFER_BYTES) {
       throw new BackupDownloadLimitError(
-        `This browser must buffer the archive in memory and only supports backups up to ${MAX_BROWSER_BACKUP_BUFFER_BYTES / 1024 / 1024} MiB. The partial download was discarded.`,
+        `This browser must buffer the archive in memory and only supports backups up to ${MAX_BROWSER_BACKUP_BUFFER_BYTES / 1024 / 1024} MiB. The oversized buffered response was discarded.`,
       );
     }
     options?.onPhase?.('finalizing');
