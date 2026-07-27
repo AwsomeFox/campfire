@@ -1,0 +1,13 @@
+{
+  "tracked": [
+    {
+      "pr": 1617,
+      "status": "babysitting",
+      "url": "https://github.com/AwsomeFox/campfire/pull/1617",
+      "headBranch": "fix/issue-670",
+      "baseBranch": "main",
+      "updatedAt": "2026-07-27T20:39:00Z",
+      "notes": "Added to tracked on babysitting-9baa. MERGEABLE; CI in progress (run 30303393698). No review threads yet."
+    }
+  ]
+}
