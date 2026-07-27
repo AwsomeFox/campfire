@@ -1026,6 +1026,32 @@ export class OrganizedPlayService {
   }
 
   /**
+   * The SERIES row read inside the caller's transaction — the series-level
+   * counterpart to {@link getOccurrenceRowInTxOrThrow}, and it exists for exactly
+   * the same reason.
+   *
+   * Every series write path awaits before it can open its transaction (the room
+   * lookup that resolves a venue is async and cannot run inside a synchronous
+   * one), so the row it validated against is a SNAPSHOT — and any value DERIVED
+   * from that snapshot and then written is derived from a state that may already
+   * be gone. `updateSeries` derived four such values: the venue to keep when the
+   * room is cleared, and the three "did this actually change?" predicates that
+   * decide whether the booking probe runs at all.
+   */
+  private getSeriesRowInTxOrThrow(tx: SyncDb, id: number): SeriesRow {
+    const [row] = tx.select().from(sessionSeries).where(eq(sessionSeries.id, id)).limit(1).all();
+    if (!row) throw new NotFoundException(`Session series ${id} not found`);
+    return row;
+  }
+
+  /** A room's venue, read inside the caller's transaction. Same rule as resolveVenueId. */
+  private getRoomVenueInTxOrThrow(tx: SyncDb, roomId: number): number {
+    const [row] = tx.select({ venueId: playRooms.venueId }).from(playRooms).where(eq(playRooms.id, roomId)).limit(1).all();
+    if (!row) throw new NotFoundException(`Play room ${roomId} not found`);
+    return row.venueId;
+  }
+
+  /**
    * Create a series and materialize its occurrences.
    *
    * The conflict check and every occurrence insert happen inside ONE
@@ -1203,32 +1229,43 @@ export class OrganizedPlayService {
     return room.venueId;
   }
 
-  /**
-   * The venue a booking should hold after its room changes — the ONE expression
-   * of that rule, shared by the series fan-out and both per-occurrence paths.
+  /*
+   * CLEARING THE ROOM DOES NOT CLEAR THE VENUE — the rule all three write paths
+   * apply, each against the row it re-read inside its own transaction.
    *
-   * CLEARING THE ROOM DOES NOT CLEAR THE VENUE. A room supplies its own venue, so
-   * naming a room resolves it; naming NO room says "no particular table", which
-   * is not the same statement as "not at this venue any more". Keeping the venue
-   * is also the only non-destructive reading, and destructiveness is the whole
-   * point here: `SessionSeriesUpdate` and `OccurrenceReassign` expose no
-   * `venueId` field at all, so a cleared venue CANNOT BE PUT BACK through the
-   * API. There is no recovery path, only recreating the series.
+   * A room supplies its own venue, so naming a room resolves it; naming NO room
+   * says "no particular table", which is not the same statement as "not at this
+   * venue any more". Keeping the venue is also the only non-destructive reading,
+   * and destructiveness is the whole point here: `SessionSeriesUpdate` and
+   * `OccurrenceReassign` expose no `venueId` field at all, so a cleared venue
+   * CANNOT BE PUT BACK through the API. There is no recovery path, only
+   * recreating the series.
    *
    * The series PATCH reached that state from a request that changed nothing. It
    * keyed on `input.roomId === undefined`, so a venue-only series (venue set,
    * room already null) PATCHed with an explicit `roomId: null` — a client
    * resending its current state — resolved `(null, null)` to `null` and silently
    * dropped the venue from the series and every future occurrence, removing them
-   * from every venue-filtered calendar. The per-occurrence paths never fired on
-   * that case because they compare against `existing.roomId` rather than against
-   * `undefined`, but they cleared the venue on a genuine room clear for the same
-   * reason, so all three now go through here.
+   * from every venue-filtered calendar.
+   *
+   * This was a shared async helper until the venue derivation moved inside
+   * `updateSeries`'s transaction, which left it with no callers: the two
+   * per-occurrence paths never called it — they express the same rule inline
+   * against their in-tx row (`roomId === existing.roomId || roomId == null ?
+   * existing.venueId : roomVenue`), which is why the docblock's claim that "all
+   * three go through here" had already stopped being true. The rule is recorded
+   * here, next to `resolveVenueId`, because the three sites must keep agreeing on
+   * it even though none of them can share code: each needs its OWN transaction's
+   * row, and a helper that took a snapshot is precisely what went stale.
+   *
+   * What CAN safely be resolved before a transaction is the other direction,
+   * room -> venue (`resolveVenueId`): `PlayRoomCreate` omits `venueId` and
+   * `PlayRoomUpdate` is its `.partial()`, so a room's venue is immutable after
+   * creation and no concurrent write can move it. `createSeries` and
+   * `applyTemplate` rely on that, correctly. The mutable direction is a SERIES'
+   * own `venueId`, which this very endpoint rewrites — so that one, and only that
+   * one, has to be read inside the transaction that rewrites it.
    */
-  private async venueAfterRoomChange(nextRoomId: number | null, currentVenueId: number | null): Promise<number | null> {
-    if (nextRoomId == null) return currentVenueId;
-    return this.resolveVenueId(null, nextRoomId);
-  }
 
   /**
    * Series-level metadata edit. Fans out to FUTURE occurrences only, and only to
@@ -1243,44 +1280,64 @@ export class OrganizedPlayService {
     role: Role,
     nowMs: number = Date.now(),
   ): Promise<SessionSeriesWithOccurrences> {
+    // Existence and permission checks only. Everything this method WRITES is
+    // derived inside the transaction below, from a row re-read there — see
+    // getSeriesRowInTxOrThrow. This await is the yield that makes that necessary.
     const existing = await this.getSeriesRowOrThrow(id);
     if (input.roomId !== undefined && input.roomId !== null) await this.getRoomOrThrow(input.roomId);
-    const venueId =
-      input.roomId === undefined ? existing.venueId : await this.venueAfterRoomChange(input.roomId, existing.venueId);
     const ts = nowIso();
     const nowStr = new Date(nowMs).toISOString();
-
-    // "Overridden" means the coordinator made a per-occurrence decision ABOUT
-    // METADATA that this fan-out must not silently undo — a move or a re-seat.
-    // Filtering by kind is load-bearing, not tidiness: the ledger also records
-    // `cancel` and `restore`, and a cancel-then-restore is a lifecycle event, not
-    // a metadata decision. Counting those as overrides froze the occurrence out
-    // of every later series edit permanently, leaving it with a stale title,
-    // room, DM and event keys forever — the opposite of the documented contract,
-    // and invisible until someone compared two occurrences by hand.
-    // Which shared resources this edit actually moves. Everything else in the
-    // body (title, notes, capacity, event/season keys) holds no booking, so it
-    // cannot collide with anything and needs no probe.
-    const nextRoomId = input.roomId === undefined ? existing.roomId : input.roomId;
-    const nextDm = input.assignedDmUserId === undefined ? existing.assignedDmUserId : input.assignedDmUserId;
-    const roomChanged = nextRoomId !== existing.roomId;
-    const dmChanged = nextDm !== existing.assignedDmUserId;
-    // Only the resources actually CHANGING are probed. Re-confirming a resource
-    // the occurrence already holds would report its own neighbours as if this
-    // edit had caused them — and, in the intra-batch scan, would flag the series
-    // against ITSELF over a room the edit never touched, pushing the coordinator
-    // into forcing an edit that introduced no new clash.
-    //
-    // Built ONCE and shared by both checks below. The two answer the same
-    // question about the same inputs, so they must not each construct their own
-    // view of what changed: that is precisely how they drifted apart before.
-    const probeRoomId = roomChanged ? nextRoomId : null;
-    const probeDm = dmChanged ? nextDm : '';
 
     let forced: RawConflict[] = [];
     let forcedBatch: ScheduleConflict[] = [];
     let notifyRows: ScheduleRow[] = [];
+    // The series state this edit is a delta AGAINST, re-read inside the
+    // transaction. Used after it for the notification diff, which must compare
+    // against the values that were actually in force when the write happened.
+    let before: SeriesRow = existing;
     this.db.transaction((tx) => {
+      // EVERY derived value below comes from this row, not from the snapshot
+      // awaited above. A concurrent series PATCH committing in that gap would
+      // otherwise make this request write conclusions about a state that no
+      // longer exists — most visibly on an explicit `roomId: null`, where
+      // "clearing the room keeps the venue" would re-assert the OLD venue and
+      // silently relocate a booking the other request had just moved.
+      before = this.getSeriesRowInTxOrThrow(tx, id);
+      // CLEARING THE ROOM DOES NOT CLEAR THE VENUE — the rule stated in full on
+      // venueAfterRoomChange, applied here against the fresh row. A named room
+      // supplies its own venue; naming no room says "no particular table", which
+      // is not the same statement as "not at this venue any more".
+      const venueId = input.roomId == null ? before.venueId : this.getRoomVenueInTxOrThrow(tx, input.roomId);
+
+      // Which shared resources this edit actually moves. Everything else in the
+      // body (title, notes, capacity, event/season keys) holds no booking, so it
+      // cannot collide with anything and needs no probe.
+      const nextRoomId = input.roomId === undefined ? before.roomId : input.roomId;
+      const nextDm = input.assignedDmUserId === undefined ? before.assignedDmUserId : input.assignedDmUserId;
+      const roomChanged = nextRoomId !== before.roomId;
+      const dmChanged = nextDm !== before.assignedDmUserId;
+      // Only the resources actually CHANGING are probed. Re-confirming a resource
+      // the occurrence already holds would report its own neighbours as if this
+      // edit had caused them — and, in the intra-batch scan, would flag the series
+      // against ITSELF over a room the edit never touched, pushing the coordinator
+      // into forcing an edit that introduced no new clash.
+      //
+      // Built ONCE and shared by both checks below. The two answer the same
+      // question about the same inputs, so they must not each construct their own
+      // view of what changed: that is precisely how they drifted apart before.
+      // Deriving them from `before` rather than the outer snapshot is what stops
+      // a concurrent room change making this request skip the probe entirely.
+      const probeRoomId = roomChanged ? nextRoomId : null;
+      const probeDm = dmChanged ? nextDm : '';
+
+      // "Overridden" means the coordinator made a per-occurrence decision ABOUT
+      // METADATA that this fan-out must not silently undo — a move or a re-seat.
+      // Filtering by kind is load-bearing, not tidiness: the ledger also records
+      // `cancel` and `restore`, and a cancel-then-restore is a lifecycle event, not
+      // a metadata decision. Counting those as overrides froze the occurrence out
+      // of every later series edit permanently, leaving it with a stale title,
+      // room, DM and event keys forever — the opposite of the documented contract,
+      // and invisible until someone compared two occurrences by hand.
       // Read INSIDE the transaction, like every other read this fan-out's
       // correctness depends on. better-sqlite3 is synchronous, so nothing can
       // interleave once this callback runs — but an `await`ed read before it is a
@@ -1455,21 +1512,29 @@ export class OrganizedPlayService {
       action: 'organized_play.series_update',
       entityType: 'session',
       entityId: id,
-      campaignId: existing.campaignId,
+      campaignId: before.campaignId,
     });
-    this.events.emit({ type: 'schedule.updated', campaignId: existing.campaignId, scheduleId: id });
+    this.events.emit({ type: 'schedule.updated', campaignId: before.campaignId, scheduleId: id });
     // Only the facets a member's copy of the night actually carries. Title-only
     // stays silent here for the same reason `shouldNotifyScheduleUpdate` keeps it
     // silent on the one-off path, and room/DM/capacity are not party-visible
     // fields at all — see notifyOccurrenceChange.
     // NOTIFIES ('updated'), and only for the facets a member's copy of the night
     // actually carries.
+    //
+    // Diffed against `before` — the row read INSIDE the transaction — not the
+    // snapshot awaited at the top. The question this answers is "did this write
+    // change anything the party can see", and only the value that was actually in
+    // force when the write committed can answer it: against a stale snapshot a
+    // concurrent edit could make an unchanged field look changed, notifying the
+    // whole party about nothing, or a changed one look unchanged and tell them
+    // nothing at all.
     const changedFields = diffScheduleNotificationFields(
-      { scheduledAt: '', durationMinutes: 0, location: existing.location, notes: existing.notes },
-      { scheduledAt: '', durationMinutes: 0, location: input.location ?? existing.location, notes: input.notes ?? existing.notes },
+      { scheduledAt: '', durationMinutes: 0, location: before.location, notes: before.notes },
+      { scheduledAt: '', durationMinutes: 0, location: input.location ?? before.location, notes: input.notes ?? before.notes },
     );
     if (shouldNotifyScheduleUpdate(changedFields)) {
-      await this.notifyOccurrenceChange(existing.campaignId, user, notifyRows, 'updated', changedFields);
+      await this.notifyOccurrenceChange(before.campaignId, user, notifyRows, 'updated', changedFields);
     }
     return this.withForcedConflicts(await this.getSeries(id), forced, forcedBatch, user);
   }

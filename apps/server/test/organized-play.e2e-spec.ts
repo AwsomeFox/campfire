@@ -1952,6 +1952,81 @@ describe('organized play (e2e)', () => {
     ).toEqual(['reassign']);
   });
 
+  it('does not re-assert a stale venue when a room-clearing PATCH races a room change', async () => {
+    const service = ctx.app.get(OrganizedPlayService);
+    const actor = { id: 'dev:op-dm', name: 'OP DM', roles: [] as string[] };
+    // A second venue, so "kept the old venue" and "kept the new one" are
+    // distinguishable rather than both being the same id.
+    const otherVenueId = (
+      await api().post('/api/v1/organized-play/venues').set(dm).send({ name: 'The Second Table', timezone: 'UTC' })
+    ).body.id;
+    const otherRoomId = (
+      await api().post(`/api/v1/organized-play/venues/${otherVenueId}/rooms`).set(dm).send({ name: 'Back Room', capacity: 6 })
+    ).body.id;
+
+    const series = await api()
+      .post(`/api/v1/campaigns/${campaignId}/series`)
+      .set(dm)
+      .send({ title: 'Venue Race', timezone: 'UTC', startDate: '2099-10-06', startTime: '18:00', freq: 'weekly', count: 2, roomId: blueRoomId });
+    expect(series.status).toBe(201);
+    expect(series.body.venueId).toBe(venueId);
+
+    // The interleaving is PINNED, not raced. A plain Promise.all does not
+    // reproduce this: the room-clearing request has strictly fewer awaits than
+    // the room-changing one, so it always reaches its transaction first and its
+    // snapshot is never stale. The hazard needs the opposite order — the clearing
+    // request must read the series, then be overtaken, then write. So the clearer
+    // is suspended between its pre-transaction read and its transaction while the
+    // room change runs to completion.
+    let release!: () => void;
+    const overtaken = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let suspended = false;
+    const realRead = service.getSeriesRowOrThrow.bind(service);
+    const spy = jest.spyOn(service, 'getSeriesRowOrThrow').mockImplementation(async (seriesId: number) => {
+      const row = await realRead(seriesId);
+      // Only the FIRST caller (the clearer) is held; the room change must be
+      // allowed to proceed and commit while it waits.
+      if (!suspended) {
+        suspended = true;
+        await overtaken;
+      }
+      return row;
+    });
+
+    try {
+      const clearing = service.updateSeries(series.body.id, { roomId: null } as never, actor as never, 'dm');
+      // Let the clearer reach the spy and park there.
+      await new Promise((resolve) => setImmediate(resolve));
+      // The room change commits in that gap: series and occurrences move to the
+      // second venue.
+      await service.updateSeries(series.body.id, { roomId: otherRoomId } as never, actor as never, 'dm');
+      const moved = await api().get(`/api/v1/campaigns/${campaignId}/series/${series.body.id}`).set(dm);
+      expect(moved.body.venueId).toBe(otherVenueId);
+
+      release();
+      await clearing;
+    } finally {
+      spy.mockRestore();
+    }
+
+    const after = await api().get(`/api/v1/campaigns/${campaignId}/series/${series.body.id}`).set(dm);
+    expect(after.status).toBe(200);
+    // The clearer's snapshot said venue #1. Deriving "keep the venue" from that
+    // snapshot writes venue #1 back over the move that already committed — a
+    // relocation neither request asked for, last-write-wins on a value the CALLER
+    // never supplied. Derived from the in-transaction row, it keeps venue #2.
+    expect(after.body.roomId).toBeNull();
+    expect(after.body.venueId).toBe(otherVenueId);
+    // …and every occurrence must agree with the series rather than carrying its
+    // own copy of the stale derivation.
+    for (const occ of after.body.occurrences) {
+      expect(occ.venueId).toBe(otherVenueId);
+      expect(occ.roomId).toBeNull();
+    }
+  });
+
   it('a reschedule that moves nothing files no override and pushes no SEQUENCE', async () => {
     // The twin of the no-op reassign case. The ledger is append-only and
     // updateSeries reads every `reschedule` entry as a permanent override, so a
