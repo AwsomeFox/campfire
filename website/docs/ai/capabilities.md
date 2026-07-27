@@ -111,6 +111,18 @@ AI-created encounters appear in your encounter list immediately, badged
 The server admin sets the default provider under **Admin → AI console**. Campaign
 DMs normally inherit it; an advanced per-campaign override remains available under
 **Settings → AI Dungeon Master** when a table needs a different model or credential.
+
+!!! warning "A campaign override without its own key is a model-only override"
+
+    If the override stores no API key of its own, it borrows the **server** row's
+    credential — and with it the server's provider type and base URL, because a stored key
+    is only ever sent to the endpoint stored alongside it. Only the **model** and sampling
+    parameters come from the campaign. This applies even when the override names a
+    different provider, including the offline `mock` one: the turn still runs on the
+    server's provider and endpoint, and the settings screen reports the credential as
+    coming **from the server**. To run a table with no external calls at all, the *server*
+    row is what has to change; a campaign override cannot opt out on its own.
+
 Together these screens configure:
 
 - **Mode** (off / co-DM / driver).
@@ -287,6 +299,16 @@ If the primary still cannot serve the step and you have configured a **fallback
 provider**, the turn is served by that instead. Failover is a last resort, not load
 balancing: the primary gets all of its attempts first, so a one-off blip never quietly
 moves your table onto a different model mid-scene.
+
+**Failover is decided per step, not per turn**, and this is the part most likely to be
+misread during an incident. A single turn may run many tool-loop steps, and each one starts
+over at the primary. So a primary that is *persistently* down is retried afresh on every
+step before the fallback is reached again — the symptom you see is **turns becoming very
+slow**, not one clean switch to the fallback. That is intentional (a provider that recovers
+mid-turn should be used again immediately, and a table should not be silently migrated onto
+another model for the rest of a scene), but it means a configured fallback is not a
+substitute for fixing the primary. If turns have gone slow, check the primary rather than
+assuming the fallback absorbed it.
 
 **What is never retried**, because none of it is transient: a bad or expired key, a
 malformed request, a prompt that exceeds the context window, and — most importantly — a
