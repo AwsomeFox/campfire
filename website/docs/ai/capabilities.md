@@ -255,6 +255,7 @@ unread, and the incident record tells a DM exactly how much that was.
     needs this protection, it has to come from a provider that performs the check. The
     session-zero charter, the proposal gate on canon writes, the tool allowlist, and human
     review all still apply either way.
+
 ### Approving what the AI asks to do
 
 Some actions the AI proposes do not run straight away — they wait for the DM. `begin_encounter`
