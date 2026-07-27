@@ -11,6 +11,11 @@ import {
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
+import { diskStorage } from 'multer';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import crypto from 'node:crypto';
 import { ApiConsumes, ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import type { Response } from 'express';
 import type { Request } from 'express';
@@ -25,6 +30,21 @@ type MulterFile = Express.Multer.File;
 
 /** A restored archive can be large (whole DB + all uploads). 1 GB ceiling. */
 const MAX_RESTORE_BYTES = 1024 * 1024 * 1024;
+const UPLOAD_STAGE_ROOT = path.join(os.tmpdir(), 'campfire-backup-uploads');
+fs.mkdirSync(UPLOAD_STAGE_ROOT, { recursive: true, mode: 0o700 });
+fs.chmodSync(UPLOAD_STAGE_ROOT, 0o700);
+const uploadStorage = diskStorage({
+  destination: (_req, _file, callback) => {
+    try { callback(null, UPLOAD_STAGE_ROOT); }
+    catch (err) { callback(err as Error, ''); }
+  },
+  filename: (_req, _file, callback) => callback(null, `${crypto.randomUUID()}.zip`),
+});
+
+async function removeUpload(file: MulterFile | undefined): Promise<void> {
+  if (!file?.path) return;
+  await fs.promises.rm(file.path, { force: true });
+}
 
 @ApiTags('backup')
 @Controller('backup')
@@ -105,10 +125,11 @@ export class BackupController {
   @ApiResponse({ status: 200, description: 'Manifest metadata and upload listing.' })
   @ApiResponse({ status: 400, description: 'Malformed or invalid archive.' })
   @ApiResponse({ status: 403, description: 'Not a server admin.' })
-  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: MAX_RESTORE_BYTES } }))
+  @UseInterceptors(FileInterceptor('file', { storage: uploadStorage, limits: { fileSize: MAX_RESTORE_BYTES } }))
   async inspect(@UploadedFile() file: MulterFile | undefined) {
     if (!file) throw new BadRequestException('Missing backup archive (multipart field "file")');
-    return this.backup.inspect(file.buffer);
+    try { return await this.backup.inspectFile(file.path); }
+    finally { await removeUpload(file); }
   }
 
   @Post('restore')
@@ -126,7 +147,7 @@ export class BackupController {
   @ApiResponse({ status: 200, description: 'Restore applied. Returns a summary of what was restored.' })
   @ApiResponse({ status: 400, description: 'Missing/invalid confirmation token, or malformed/invalid archive.' })
   @ApiResponse({ status: 403, description: 'Not a server admin.' })
-  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: MAX_RESTORE_BYTES } }))
+  @UseInterceptors(FileInterceptor('file', { storage: uploadStorage, limits: { fileSize: MAX_RESTORE_BYTES } }))
   async restore(
     @UploadedFile() file: MulterFile | undefined,
     @Body('confirm') confirm: string | undefined,
@@ -134,16 +155,16 @@ export class BackupController {
     @CurrentUser() user: RequestUser,
   ) {
     if (!file) throw new BadRequestException('Missing backup archive (multipart field "file")');
-    const fields = BackupRestoreBody.safeParse({ confirm, keyPassphrase });
-    if (!fields.success) {
-      const message = fields.error.issues.map((i) => i.message).join('; ');
-      throw new BadRequestException(message || 'Invalid restore request');
-    }
-    return this.backup.restore(
-      file.buffer,
-      fields.data.confirm,
-      user,
-      fields.data.keyPassphrase ? { keyPassphrase: fields.data.keyPassphrase } : undefined,
-    );
+    try {
+      const fields = BackupRestoreBody.safeParse({ confirm, keyPassphrase });
+      if (!fields.success) {
+        const message = fields.error.issues.map((i) => i.message).join('; ');
+        throw new BadRequestException(message || 'Invalid restore request');
+      }
+      return await this.backup.restoreFile(
+        file.path, fields.data.confirm, user,
+        fields.data.keyPassphrase ? { keyPassphrase: fields.data.keyPassphrase } : undefined,
+      );
+    } finally { await removeUpload(file); }
   }
 }

@@ -15,6 +15,7 @@ import {
 } from '@nestjs/common';
 import Database from 'better-sqlite3';
 import JSZip from 'jszip';
+import { BackupArchiveReader, MAX_KEY_ENVELOPE_BYTES, MAX_MANIFEST_BYTES } from './backup-archive-reader';
 import { DB_HOLDER, DbHolder, dbFilePath, resolveDataDir } from '../../db/db.module';
 import { decryptSecret } from '../../common/crypto';
 import { AiProviderConfigService } from '../ai-provider-config/ai-provider-config.service';
@@ -181,6 +182,8 @@ export interface RestoreOptions {
   keyPassphrase?: string;
   /** #497: optional progress callback as each restore phase completes. */
   onProgress?: (phase: RestoreProgressPhase) => void;
+  /** Cancels archive I/O and removes all restore staging before live data changes. */
+  signal?: AbortSignal;
 }
 
 /** All file paths (relative to `root`) under `root`, recursively. Returns [] if root is absent. */
@@ -1168,12 +1171,18 @@ export class BackupService implements OnApplicationBootstrap {
    * restoring or touching the live server (issue #514).
    */
   async inspect(buffer: Buffer): Promise<BackupInspectResult> {
-    const zip = await this.loadBackupZip(buffer);
-    const { manifest, sourceFormatVersion } = await this.readManifestFromZipWithSource(zip);
+    const staged = await this.stageArchiveBuffer(buffer);
+    try { return await this.inspectFile(staged); } finally { await fs.promises.rm(path.dirname(staged), { recursive: true, force: true }); }
+  }
+
+  async inspectFile(archivePath: string, signal?: AbortSignal): Promise<BackupInspectResult> {
+    const zip = await BackupArchiveReader.open(archivePath, signal);
+    try {
+    const { manifest, sourceFormatVersion } = await this.readManifestFromArchiveWithSource(zip, signal);
     const uploads: string[] = [];
-    for (const name of Object.keys(zip.files)) {
-      const entry = zip.files[name];
-      if (entry.dir || !name.startsWith(UPLOADS_PREFIX)) continue;
+    for (const entry of zip.entries) {
+      const name = entry.fileName;
+      if (name.endsWith('/') || !name.startsWith(UPLOADS_PREFIX)) continue;
       const rel = name.slice(UPLOADS_PREFIX.length);
       // Reject unsafe paths the same way restore() does (issue #997 fix 1).
       if (rel === '' || rel.includes('..') || path.isAbsolute(rel)) {
@@ -1182,7 +1191,7 @@ export class BackupService implements OnApplicationBootstrap {
       uploads.push(rel);
     }
     uploads.sort();
-    const envelopeEntry = zip.file(KEY_ENVELOPE_ENTRY);
+    const envelopeEntry = zip.get(KEY_ENVELOPE_ENTRY);
     const view = manifestToInspectView(manifest, uploads, sourceFormatVersion);
     // Cross-check manifest vs archive entry so inspect() does not claim portability
     // when the envelope file is missing from a truncated/tampered zip.
@@ -1190,10 +1199,22 @@ export class BackupService implements OnApplicationBootstrap {
       ...view,
       aiKeyIncluded: view.aiKeyIncluded && !!envelopeEntry,
     };
+    } finally { zip.close(); }
   }
 
   async restore(
     buffer: Buffer,
+    confirm: string | undefined,
+    user: RequestUser,
+    options?: RestoreOptions,
+  ): Promise<RestoreResult> {
+    const staged = await this.stageArchiveBuffer(buffer);
+    try { return await this.restoreFile(staged, confirm, user, options); }
+    finally { await fs.promises.rm(path.dirname(staged), { recursive: true, force: true }); }
+  }
+
+  async restoreFile(
+    archivePath: string,
     confirm: string | undefined,
     user: RequestUser,
     options?: RestoreOptions,
@@ -1204,10 +1225,11 @@ export class BackupService implements OnApplicationBootstrap {
       );
     }
 
-    const zip = await this.loadBackupZip(buffer);
-    const manifest = await this.readManifestFromZip(zip);
+    const zip = await BackupArchiveReader.open(archivePath, options?.signal);
+    try {
+    const manifest = await this.readManifestFromArchive(zip, options?.signal);
 
-    const envelopeEntry = zip.file(KEY_ENVELOPE_ENTRY);
+    const envelopeEntry = zip.get(KEY_ENVELOPE_ENTRY);
     if (manifest.aiKeyIncluded && !envelopeEntry) {
       throw new BadRequestException(
         'Invalid backup archive — manifest claims an AI key envelope but the entry is missing',
@@ -1233,7 +1255,7 @@ export class BackupService implements OnApplicationBootstrap {
       }
       let envelope;
       try {
-        envelope = parseKeyEnvelopeJson(await envelopeEntry.async('string'));
+        envelope = parseKeyEnvelopeJson((await zip.readBuffer(envelopeEntry, MAX_KEY_ENVELOPE_BYTES, options?.signal)).toString('utf8'));
       } catch (err) {
         throw new BadRequestException(
           `Invalid backup key envelope: ${err instanceof Error ? err.message : String(err)}`,
@@ -1249,19 +1271,20 @@ export class BackupService implements OnApplicationBootstrap {
     }
 
     // --- Validate DB payload ---
-    const dbFile = zip.file(manifest.db);
+    const dbFile = zip.get(manifest.db);
     if (!dbFile) throw new BadRequestException('Invalid backup archive — database is missing');
-    const dbBytes = await dbFile.async('nodebuffer');
-    if (!looksLikeSqlite(dbBytes)) {
-      throw new BadRequestException('Invalid backup archive — database is not a SQLite file');
-    }
-
     // Open the incoming DB read-only in a throwaway location to confirm it's a
     // real, non-corrupt Campfire database (right magic bytes alone aren't enough).
     const stageDir = fs.mkdtempSync(path.join(os.tmpdir(), 'campfire-restore-'));
     const stagedDbPath = path.join(stageDir, 'campfire.db');
     try {
-      fs.writeFileSync(stagedDbPath, dbBytes);
+      const stagedDb = await zip.extractToFile(dbFile, stagedDbPath, options?.signal);
+      if (manifest.dbBytes !== stagedDb.bytes) throw new BadRequestException('Invalid backup archive — database size does not match manifest');
+      const dbHeader = await fs.promises.open(stagedDbPath, 'r').then(async (handle) => {
+        try { const header = Buffer.alloc(SQLITE_MAGIC.length); await handle.read(header, 0, header.length, 0); return header; }
+        finally { await handle.close(); }
+      });
+      if (!looksLikeSqlite(dbHeader)) throw new BadRequestException('Invalid backup archive — database is not a SQLite file');
       try {
         const probe = new Database(stagedDbPath, { readonly: true, fileMustExist: true });
         try {
@@ -1307,21 +1330,32 @@ export class BackupService implements OnApplicationBootstrap {
 
       // --- Collect + path-check uploads, then stage them on disk (#497) ---
       const stagedUploadsDir = path.join(stageDir, 'uploads');
-      const uploadEntries: Array<{ rel: string; data: Buffer }> = [];
-      for (const name of Object.keys(zip.files)) {
-        const entry = zip.files[name];
-        if (entry.dir || !name.startsWith(UPLOADS_PREFIX)) continue;
+      const uploadEntries: Array<{ rel: string; bytes: number }> = [];
+      const expectedAttachments = new Map((manifest.attachments ?? []).map((attachment) => [attachment.path, attachment]));
+      const foundAttachments = new Set<string>();
+      for (const entry of zip.entries) {
+        const name = entry.fileName;
+        if (name.endsWith('/') || !name.startsWith(UPLOADS_PREFIX)) continue;
         const rel = name.slice(UPLOADS_PREFIX.length);
         // Zip-slip guard: reject any entry that would escape the uploads root.
         if (rel === '' || rel.includes('..') || path.isAbsolute(rel)) {
           throw new BadRequestException('Invalid backup archive — unsafe upload path');
         }
-        const data = await entry.async('nodebuffer');
-        const dest = path.join(stagedUploadsDir, rel);
-        fs.mkdirSync(path.dirname(dest), { recursive: true });
-        fs.writeFileSync(dest, data);
-        uploadEntries.push({ rel, data });
+        const uploadsRoot = path.resolve(stagedUploadsDir);
+        const dest = path.resolve(uploadsRoot, rel);
+        if (!dest.startsWith(`${uploadsRoot}${path.sep}`)) {
+          throw new BadRequestException('Invalid backup archive — unsafe upload path');
+        }
+        const extracted = await zip.extractToFile(entry, dest, options?.signal);
+        const expected = expectedAttachments.get(rel);
+        if (expected && (expected.size !== extracted.bytes || expected.sha256 !== extracted.sha256)) {
+          throw new BadRequestException('Invalid backup archive — upload checksum does not match manifest');
+        }
+        if (expected) foundAttachments.add(rel);
+        uploadEntries.push({ rel, bytes: extracted.bytes });
       }
+      if (manifest.uploadCount !== uploadEntries.length) throw new BadRequestException('Invalid backup archive — upload count does not match manifest');
+      if (expectedAttachments.size && foundAttachments.size !== expectedAttachments.size) throw new BadRequestException('Invalid backup archive — manifest attachment is missing');
       if (restoredKeyBytes && envSetOnHost) {
         this.logger.warn(
           'restore: AI_CONFIG_KEY is set on this host — skipping keyfile write from the archive envelope. ' +
@@ -1375,7 +1409,7 @@ export class BackupService implements OnApplicationBootstrap {
       const result: RestoreResult = {
         ok: true,
         restoredAt: nowIso(),
-        dbBytes: dbBytes.length,
+        dbBytes: stagedDb.bytes,
         uploadCount: uploadEntries.length,
         phases: progressPhases,
       };
@@ -1395,6 +1429,7 @@ export class BackupService implements OnApplicationBootstrap {
     } finally {
       fs.rmSync(stageDir, { recursive: true, force: true });
     }
+    } finally { zip.close(); }
   }
 
   private async loadBackupZip(buffer: Buffer): Promise<JSZip> {
@@ -1403,6 +1438,39 @@ export class BackupService implements OnApplicationBootstrap {
     } catch {
       throw new BadRequestException('Invalid backup archive — not a readable zip file');
     }
+  }
+
+  /** Compatibility wrapper staging legacy buffer callers without retaining it during parsing. */
+  private async stageArchiveBuffer(buffer: Buffer): Promise<string> {
+    const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'campfire-backup-upload-'));
+    const file = path.join(dir, 'archive.zip');
+    try {
+      await fs.promises.writeFile(file, buffer, { mode: 0o600 });
+      return file;
+    } catch (err) {
+      await fs.promises.rm(dir, { recursive: true, force: true });
+      throw err;
+    }
+  }
+
+  private async readManifestFromArchive(zip: BackupArchiveReader, signal?: AbortSignal): Promise<BackupManifest> {
+    const manifestFile = zip.get(MANIFEST_ENTRY);
+    if (!manifestFile) throw new BadRequestException('Invalid backup archive — manifest.json is missing');
+    let parsed: unknown;
+    try { parsed = JSON.parse((await zip.readBuffer(manifestFile, MAX_MANIFEST_BYTES, signal)).toString('utf8')); }
+    catch { throw new BadRequestException('Invalid backup archive — manifest.json is not valid JSON'); }
+    return parseBackupManifest(parsed);
+  }
+
+  private async readManifestFromArchiveWithSource(zip: BackupArchiveReader, signal?: AbortSignal): Promise<{ manifest: BackupManifest; sourceFormatVersion: number }> {
+    const manifestFile = zip.get(MANIFEST_ENTRY);
+    if (!manifestFile) throw new BadRequestException('Invalid backup archive — manifest.json is missing');
+    let parsed: unknown;
+    try { parsed = JSON.parse((await zip.readBuffer(manifestFile, MAX_MANIFEST_BYTES, signal)).toString('utf8')); }
+    catch { throw new BadRequestException('Invalid backup archive — manifest.json is not valid JSON'); }
+    const rawVersion = (parsed as Record<string, unknown>)?.version;
+    const sourceFormatVersion = typeof rawVersion === 'number' && Number.isInteger(rawVersion) && rawVersion >= 0 ? rawVersion : 0;
+    return { manifest: parseBackupManifest(parsed), sourceFormatVersion };
   }
 
   private async readManifestFromZip(zip: JSZip): Promise<BackupManifest> {
