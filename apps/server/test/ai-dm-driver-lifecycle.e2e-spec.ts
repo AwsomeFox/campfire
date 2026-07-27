@@ -2,6 +2,8 @@ import request from 'supertest';
 import { createAiEvalHarness, dm, player, type AiEvalHarness } from './ai-eval-harness';
 import { AiDmStreamService, type AiDmStreamEvent } from '../src/modules/ai-driver/ai-driver-stream.service';
 import { AiDriverService } from '../src/modules/ai-driver/ai-driver.service';
+import { AiDmService } from '../src/modules/ai-dm/ai-dm.service';
+import { AI_PROVIDER_RESOLVER } from '../src/modules/ai-driver/ai-provider-resolver';
 
 /**
  * Issue #1043 — AI Driver session lifecycle phases.
@@ -407,6 +409,170 @@ describe('ai-dm driver — session lifecycle phases (#1043)', () => {
 
     expect(frames).toEqual(['greeting', 'active']);
     expect(rows).toEqual(['greeting', 'active']);
+  });
+
+  it('a concurrent ordinary turn never takes lifecycle directions, whatever the scheduling', async () => {
+    const campaignId = await armed('No Cross Contamination');
+    const driver = h.ctx.app.get(AiDriverService);
+    const user = {
+      id: 'dev:ai-eval-player',
+      name: 'ai-eval-player',
+      serverRole: 'user' as const,
+      devRole: 'player' as const,
+    };
+    await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/sessions`)
+      .set(dm)
+      .send({ title: 'Session 1', recap: 'The party burned the barge.' });
+
+    // A TOOL ROUND-TRIP, so the ordinary turn is provably still mid-turn after it has assembled
+    // its system prompt: the first provider call returns a tool call, and the turn loops back for
+    // a second. The barrier below releases between the two.
+    h.script(
+      { toolCalls: [{ id: 'c1', name: 'get_campaign_summary', arguments: { campaignId } }] },
+      { text: 'You search the room and find a loose flagstone.', streamChunks: 4 },
+    );
+
+    // THE WINDOW, MADE DETERMINISTIC — and by a BARRIER on an observable event, not a sleep, so
+    // the ordering is exact rather than probable.
+    //
+    // An ordinary turn reserves its slot and then spends several awaits before it assembles its
+    // prompt. A lifecycle request that is in flight during that stretch had, in every earlier
+    // version of this code, ALREADY moved campaign-wide state: first the durable transcript row,
+    // then the SSE frame and the persisted value, then the in-memory field. Each round narrowed
+    // the window instead of removing it, and an ordinary player action that assembled its prompt
+    // inside what was left still came back carrying the greeting's directions.
+    //
+    // Here the LIFECYCLE turn is held inside `assertRunnable` — which really does read the
+    // database, so this is a stretch the live server produces — until the ordinary turn has
+    // reached the provider, which by construction is after it assembled its system prompt. Under
+    // the old code the phase was staged synchronously when `startSession` was called, so it is
+    // sitting at `greeting` for that entire stretch. The assertion is on the ordinary turn's OWN
+    // prompt: it must be an ordinary prompt.
+    //
+    // The phase now travels as a request parameter, so this holds by construction rather than by
+    // timing: nothing the ordinary turn reads can be moved by another request.
+    const aiDm = h.ctx.app.get(AiDmService);
+    const realAssert = aiDm.assertRunnable.bind(aiDm);
+    let calls = 0;
+    const spy = jest.spyOn(aiDm, 'assertRunnable').mockImplementation(async (id: number) => {
+      const seat = await realAssert(id);
+      // Call 1 is the lifecycle turn: `startSession` is invoked first below.
+      if (++calls === 1) {
+        for (let i = 0; i < 20_000 && h.mock.received.length === 0; i += 1) {
+          await new Promise((r) => setImmediate(r));
+        }
+      }
+      return seat;
+    });
+
+    try {
+      // Lifecycle FIRST, so the old code stages `greeting` before the ordinary turn starts.
+      const greeting = driver.startSession(campaignId, user, 'player');
+      const action = driver.runTurn(campaignId, user, 'I search the room');
+      const [, ordinary] = await Promise.allSettled([greeting, action]);
+      expect(ordinary.status).toBe('fulfilled');
+    } finally {
+      spy.mockRestore();
+    }
+
+    // The ordinary turn reached the provider first (the greeting was held), so its prompt is the
+    // first one recorded. It must carry no lifecycle direction and no greeting recap section.
+    const systems = h.mock.received.map((r) => String(r?.system ?? ''));
+    expect(systems.length).toBeGreaterThanOrEqual(1);
+    expect(systems[0]).not.toContain('Session phase');
+    // NOTE the recap TEXT is not a usable marker: `get_campaign_summary` mentions sessions on
+    // every turn regardless of phase. The greeting's own '## Previous session recap' heading and
+    // the '## Session phase' direction block are what only a lifecycle prompt produces.
+    expect(systems[0]).not.toContain('Previous session recap');
+  });
+
+  it('refuses a player action while the AI is wrapping up, instead of acknowledging one it will lose', async () => {
+    const campaignId = await armed('Wrap Up Refuses Input');
+    const driver = h.ctx.app.get(AiDriverService);
+    const user = {
+      id: 'dev:ai-eval-player',
+      name: 'ai-eval-player',
+      serverRole: 'user' as const,
+      devRole: 'player' as const,
+    };
+
+    h.script({ text: 'You make camp. Until next time.', streamChunks: 6 });
+
+    // A player types while the closing summary is streaming.
+    const closing = driver.wrapUpSession(campaignId, { ...user, devRole: 'dm' as const }, 'dm');
+    const action = driver.runTurn(campaignId, user, 'I keep walking');
+    const [wrap, player_] = await Promise.allSettled([closing, action]);
+
+    expect(wrap.status).toBe('fulfilled');
+
+    // ACKNOWLEDGED-THEN-LOST IS THE BUG. Queueing this action told the whole table it had been
+    // accepted — a persisted, broadcast `player.action` row — and then the wrap-up landed the
+    // phase in `ended`, so on drain it was either refused by the ended gate or answered under the
+    // closing-summary direction. Both outcomes leave a phantom row in the authoritative log for
+    // an action that never got a turn. Refusing up front is the mirror of the rule that stops a
+    // lifecycle turn queueing behind play: an action queued behind a session punctuation mark is
+    // not the same action by the time it drains.
+    expect(player_.status).toBe('rejected');
+    const err = (player_ as PromiseRejectedResult).reason as { status?: number; response?: { code?: string } };
+    expect(err.status).toBe(409);
+
+    // ...and NOTHING was written for it. This is the assertion that fails on the old behaviour
+    // even when drain scheduling happens to reject the action, because the row was written when
+    // the action was accepted onto the queue, not when it drained.
+    const page = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/transcript`).set(dm);
+    const actions = (page.body.items as Array<{ kind: string; payload: Record<string, unknown> }>)
+      .filter((e) => e.kind === 'player.action');
+    expect(actions).toHaveLength(0);
+    expect(JSON.stringify(page.body.items)).not.toContain('I keep walking');
+
+    expect(await phaseOf(campaignId)).toBe('ended');
+  });
+
+  it('a turn that throws AFTER publishing the phase takes the announcement back', async () => {
+    const campaignId = await armed('Throw After Publish');
+    const resolver = h.ctx.app.get(AI_PROVIDER_RESOLVER) as { resolve: (...a: unknown[]) => Promise<unknown> };
+    const realResolve = resolver.resolve;
+
+    const streamSvc = h.ctx.app.get(AiDmStreamService);
+    const frames: string[] = [];
+    const sub = streamSvc.streamFor(campaignId).subscribe((e) => {
+      if (e.type === 'phase') frames.push((e as Extract<AiDmStreamEvent, { type: 'phase' }>).phase);
+    });
+
+    // Provider RESOLUTION yielding nothing lands after the slot is reserved and the phase is
+    // published, but before the provider call — so unlike a scripted provider error (which the
+    // turn loop catches and reports as `provider_error`) this raises 503 out of `runTurn` and
+    // reaches the lifecycle catch. That is the path on which a transient phase is already live on
+    // every client when the turn dies.
+    resolver.resolve = async () => null;
+    try {
+      const res = await start(campaignId, player);
+      expect(res.status).toBeGreaterThanOrEqual(500);
+    } finally {
+      resolver.resolve = realResolve;
+      sub.unsubscribe();
+    }
+
+    // ANNOUNCED, THEREFORE UNANNOUNCED. Restoring only the in-memory value would leave every SSE
+    // client and the persisted control-state row sitting on `greeting` for a turn that never ran,
+    // while GET /session reported something else — and a later restart would then report a
+    // lifecycle interruption for a turn that was rejected. The compensating transition is the
+    // other half of the pair.
+    expect(frames).toEqual(['greeting', 'active']);
+    expect(await phaseOf(campaignId)).toBe('active');
+
+    // And the durable log tells the same story as the stream, rather than trailing off at
+    // `greeting`.
+    const page = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/transcript`).set(dm);
+    const rows = (page.body.items as Array<{ kind: string; payload: Record<string, unknown> }>)
+      .filter((e) => e.kind === 'control' && e.payload.control === 'phase')
+      .map((e) => String(e.payload.phase));
+    expect(rows).toEqual(['greeting', 'active']);
+
+    // The seat is usable afterwards — a failed transition must not strand the table.
+    h.script({ text: 'Welcome back.', usage: { promptTokens: 4, completionTokens: 3, totalTokens: 7 } });
+    expect((await start(campaignId, player)).status).toBe(201);
   });
 
   it('the phase block is absent from an ordinary turn', async () => {

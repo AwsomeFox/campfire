@@ -213,6 +213,25 @@ export type AiDmSessionPhase =
   | 'ended';    // the session is closed; player input is refused until someone starts a new one
 
 /** Phases that exist only for the duration of their own turn (#1043). See {@link AiDmSessionPhase}. */
+/**
+ * The lifecycle phase a given turn should be NARRATED under (#1043).
+ *
+ * A lifecycle turn carries its own transient phase in `opts.lifecycle` — that is the request's
+ * intention, and it belongs to that request alone.
+ *
+ * Every other turn is narrated under the SETTLED phase, and a transient value on the session is
+ * deliberately read as `active`. `greeting` and `wrap_up` belong, by construction, to the single
+ * turn that drives them; a player action that merely overlaps one is still an ordinary action and
+ * must be answered as one. Collapsing here rather than trusting `session.phase` is what makes the
+ * guarantee independent of scheduling: it does not matter whether the concurrent turn assembles
+ * its prompt before, during, or after the lifecycle turn publishes — it can never take the
+ * greeting's recap-and-welcome or the wrap-up's closing-summary instructions.
+ */
+function promptPhaseFor(lifecycle: AiDmSessionPhase | undefined, sessionPhase: AiDmSessionPhase): AiDmSessionPhase {
+  if (lifecycle) return lifecycle;
+  return isTransientPhase(sessionPhase) ? 'active' : sessionPhase;
+}
+
 function isTransientPhase(phase: AiDmSessionPhase): boolean {
   return phase === 'greeting' || phase === 'wrap_up';
 }
@@ -2431,26 +2450,21 @@ export class AiDriverService {
   ): Promise<AiDmTurnRunResult> {
     const session = this.ensureSession(campaignId);
     const previousPhase = session.phase;
-    // PREFLIGHT ONLY — IN MEMORY, DELIBERATELY UNPUBLISHED (#1043).
+    // NOTHING IS MUTATED HERE — the phase is carried as a REQUEST PARAMETER, not staged on the
+    // session (#1043).
     //
-    // The prompt assembly reads `session.phase` to pick the direction block and decide whether to
-    // fetch the recap, so it genuinely has to move before the turn runs. What must NOT move yet is
-    // the RECORD of it. Publishing here — persisting, emitting the SSE frame, writing the durable
-    // `control: phase` transcript row — would commit an outcome before the gates that decide the
-    // outcome have run, and every gate below can still refuse: a paused seat, a human takeover, an
-    // exhausted budget, a safety hold, or a turn already in flight.
+    // Earlier versions moved `session.phase` before the turn because prompt assembly reads it.
+    // That made a per-request intention visible to every concurrent reader, and each fix narrowed
+    // the window rather than closing it: first the transcript row, then the persistence and the
+    // SSE frame, and still an ordinary turn could observe the in-memory field between reserving
+    // its slot and assembling its prompt, and take greeting/wrap-up directions it was never meant
+    // to see. The window was never the cause.
     //
-    // Compensating afterwards is not equivalent. The `catch` could restore the VALUE, but the
-    // durable table log would still carry an opening or a wrap-up that never happened, every
-    // client would visibly flicker through a phase the table was never in, and — because the old
-    // path wrote to DISK first — a crash in the window before the restore would leave a transient
-    // phase persisted, which hydration then correctly but falsely reports as an interrupted
-    // lifecycle turn. Each new refusal path made that worse, so the fix is to stop publishing
-    // early rather than to compensate more thoroughly.
-    //
-    // `runTurn` publishes this exactly once, at the moment it reserves the turn slot — after every
-    // gate has passed. A refused request therefore leaves no frame, no row, and nothing on disk.
-    session.phase = phase;
+    // Now `opts.lifecycle` carries the phase to exactly the one place that needs it — see
+    // {@link promptPhaseFor} — and `session.phase` moves only where it is also published: once,
+    // inside `runTurn`, after every gate has passed. A refused request therefore changes nothing
+    // observable at all: no field, no frame, no row, nothing on disk. There is no window left to
+    // narrow because there is no interval in which the shared value is wrong.
     try {
       return await this.runTurn(campaignId, user, prompt, {
         proactive: true,
@@ -2466,11 +2480,18 @@ export class AiDriverService {
       // The turn never ran (a gate refused it). Restore the phase the table was actually in —
       // NOT `nextPhase`, which would end a session on the strength of a request that bounced.
       //
-      // In memory, and silently: the preflight above was never published, so there is nothing to
-      // compensate and no second transition to announce. If the turn DID get under way and then
-      // threw, `runTurn` has already published the transient phase, and this restore is followed
-      // by the settled transition below — the table still ends up somewhere real.
-      if (session.phase === phase) session.phase = previousPhase;
+      // `session.phase === phase` is now an exact test of WHETHER PUBLICATION HAPPENED, because
+      // `runTurn` is the only thing that sets it and it publishes in the same breath. So:
+      //
+      //  - Gate refused before the slot was reserved -> the phase was never touched, this is a
+      //    no-op, and the table sees nothing. Correct: nothing happened.
+      //  - The turn got under way and then threw (no execution config, context setup failing)
+      //    -> the transient phase is live on every client and on disk, so it must be TAKEN BACK
+      //    the same way it was announced. `setPhase` publishes the compensating transition;
+      //    restoring only the in-memory value would leave SSE clients and the persisted row stuck
+      //    on `greeting`/`wrap_up` while `GET /session` reported something else, and would make a
+      //    later restart report a lifecycle interruption for a turn that never really ran.
+      if (session.phase === phase) this.setPhase(session, previousPhase);
       void this.audit
         .log({
           actor: auditActor(user),
@@ -2830,6 +2851,29 @@ export class AiDriverService {
         message: 'This session has been wrapped up. Start a new one (POST /ai-dm/start-session) to keep playing.',
       });
     }
+    // #1043 — a wrap-up IN PROGRESS refuses ordinary player input too, rather than queueing it.
+    //
+    // The mirror of the reject-not-defer rule one gate below: an action queued behind a session
+    // punctuation mark is not the same action when it drains. A wrap-up lands in `ended`, so by the
+    // time the queue drains, the gate above either refuses the action outright or — depending on
+    // drain scheduling — it starts as the phase changes and is answered under the closing-summary
+    // direction. Either way the table was told the action was ACCEPTED: a `player.action` row was
+    // persisted and broadcast to everyone, and then the action vanished or was answered as if the
+    // session had closed. A phantom row in the shared log is exactly the silent divergence #572
+    // exists to prevent.
+    //
+    // `greeting` deliberately does NOT refuse. It lands in `active`, so an action queued behind a
+    // greeting drains into an ordinary turn and is answered normally — nothing is lost, and a table
+    // should be able to start typing while the AI is welcoming them.
+    //
+    // Recoverable in seconds and self-describing, like every other lifecycle refusal: a wrap-up is
+    // one turn, and the message says to wait for it.
+    if (session.phase === 'wrap_up' && !opts.proactive) {
+      throw new ConflictException({
+        code: 'AI_DM_SESSION_WRAPPING_UP',
+        message: 'The AI is wrapping up the session. Wait for the closing summary before sending anything else.',
+      });
+    }
     // Serialize turns per campaign (#381): reject a concurrent POST /message while a turn is
     // already streaming. Two interleaved turns would splice their narration.delta events onto the
     // one un-keyed SSE channel and merge into a single bubble. This check + the synchronous slot
@@ -2839,15 +2883,8 @@ export class AiDriverService {
       // region that decides everything else about the slot, so there is no window in which it
       // could be accepted by mistake.
       //
-      // Queueing it is wrong twice over. First, the phase is CAMPAIGN-WIDE and was already moved
-      // by `runLifecycleTurn` before this method was reached, while a turn's system prompt is
-      // assembled several awaits later — so a queued greeting rewrites the prompt of the action
-      // currently streaming and of everything behind it. They reach `assembleSystemPrompt` while
-      // it observes `greeting`/`wrap_up`, and ordinary play comes back carrying recap-and-welcome
-      // or closing-summary instructions meant for a table that is sitting down or packing up.
-      //
-      // Second — and this is why DEFERRING the phase until the entry executes is not the fix — a
-      // lifecycle turn's meaning is fixed when it is REQUESTED, not when it runs. "The table has
+      // A lifecycle turn's meaning is fixed when it is REQUESTED, not when it runs — and this is
+      // also why DEFERRING the phase until the entry executes was never the fix. "The table has
       // just sat down" spoken after two turns of play have resolved is false however cleanly the
       // phase was sequenced, and a closing summary composed after three more things happened is
       // out of date. A player action is interchangeable with a later copy of itself; a session
@@ -2888,13 +2925,14 @@ export class AiDriverService {
     // that already cleared assertRunnable sees `running` at the guard above and is rejected.
     session.status = 'running';
 
-    // #1043: the slot is reserved and every gate has passed, so a lifecycle transition is now an
-    // OUTCOME rather than an intention — announce it here, and only here. `runLifecycleTurn` moved
-    // `session.phase` in memory before calling in (the prompt assembly reads it), deliberately
-    // without persisting, emitting or recording. This is the commit point: before it, a refusal
-    // leaves no trace anywhere; after it, the phase is real and the settled transition that
-    // follows the turn is the other half of a pair the table can see.
-    if (opts.lifecycle && session.phase === opts.lifecycle) this.publishPhase(session);
+    // #1043: THE ONLY PLACE A TRANSIENT LIFECYCLE PHASE IS EVER SET.
+    //
+    // The slot is reserved and every gate has passed, so the transition is now an OUTCOME rather
+    // than an intention. `runLifecycleTurn` staged nothing — it passed the phase as a parameter —
+    // so before this line a refused request has changed no shared state whatsoever, and after it
+    // the phase is real, published, and paired with the settled transition that follows the turn.
+    // One owner, one moment, no window in which the value is wrong for anybody else.
+    if (opts.lifecycle) this.setPhase(session, opts.lifecycle);
 
     // #572: the action cleared every gate (flag, seat, budget, pause, human control, queue),
     // so it is now an ACCEPTED table event — persist + broadcast it before the AI answers.
@@ -2991,6 +3029,8 @@ export class AiDriverService {
       opts.narrationLanguage,
       ledger,
       promptHistory.digest,
+      // #1043: this turn's OWN phase, threaded in rather than read from the shared session.
+      promptPhaseFor(opts.lifecycle, session.phase),
     );
 
     let speakerPrefix = '';
@@ -5148,6 +5188,19 @@ export class AiDriverService {
     ledger?: RetrievalLedger,
     /** #1038 — compacted older conversation, rendered as `## Recent history`. Null when none. */
     historyDigest?: string | null,
+    /**
+     * #1043 — the lifecycle phase THIS turn is being narrated under.
+     *
+     * A PARAMETER, not a read of `session.phase`, and that distinction is the whole fix. The
+     * phase a lifecycle turn runs under is a property of that ONE REQUEST; reading it off the
+     * shared session made it visible to every concurrent turn, so an ordinary player action that
+     * happened to assemble its prompt during the window took the greeting or wrap-up directions.
+     * Three rounds of narrowing that window did not remove it, because the cause was never the
+     * window — it was expressing a per-request intention as campaign-wide mutable state.
+     *
+     * {@link promptPhaseFor} decides the value; nothing in here consults the session.
+     */
+    phase: AiDmSessionPhase = 'active',
   ): Promise<string> {
     const parts: string[] = [GROUNDING_PREAMBLE, GROUNDING_CITATION_CONTRACT, UNTRUSTED_INPUT_PREAMBLE];
     if (seat.instructions) parts.push(`## DM steering\n${seat.instructions}`);
@@ -5173,7 +5226,6 @@ export class AiDriverService {
     // #1043 — session lifecycle. The phase block shapes HOW this turn should read; the recap is
     // only fetched for a greeting, because it is the one turn that needs it and it is a
     // non-trivial read to put on every turn of the session.
-    const phase = this.ensureSession(campaignId).phase;
     const phaseDirection = PHASE_DIRECTION[phase];
     if (phaseDirection) parts.push(phaseDirection);
 
