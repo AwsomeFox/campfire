@@ -581,13 +581,19 @@ class ResponsesStreamAccumulator {
             name: event.item.name ?? '',
             args: '',
           });
+        } else if (event.item?.type === 'refusal') {
+          this.refused = true;
+          this.refusalChars += (event.item.refusal ?? '').length;
         }
         break;
       }
       case 'response.output_text.delta': {
         const delta = event.delta ?? '';
         this.text += delta;
-        yield { type: 'text', delta };
+        // #598 — mirror the Chat Completions stream guard: once a refusal signal has
+        // arrived, later output_text deltas belong to a withheld turn and must not reach
+        // the live table.
+        if (!this.refused) yield { type: 'text', delta };
         break;
       }
       case 'response.function_call_arguments.delta': {
