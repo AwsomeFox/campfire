@@ -590,6 +590,16 @@ export class BackupService implements OnApplicationBootstrap {
     let estimatedBytes = 0;
     try {
       previous = await this.readCadence();
+      // An interactive backup or restore owns the same archive lane. This is
+      // expected coordination, not a failed scheduled attempt. Check before
+      // disk preflight so the active operation's temporary staging cannot turn
+      // a deferral into a false low-space failure and cadence backoff.
+      if (this.archiveOperation) {
+        this.logger.warn(
+          `Scheduled backup deferred: whole-server ${this.archiveOperation} operation is already in progress`,
+        );
+        return;
+      }
       const retentionPolicy = parseBackupRetentionPolicy();
       const minFreeBytes = parseBackupMinFreeBytes();
       const dir = this.backupDir();
@@ -606,9 +616,8 @@ export class BackupService implements OnApplicationBootstrap {
         this.logger.warn(message);
         return;
       }
-      // An interactive backup or restore owns the same archive lane. This is
-      // expected coordination, not a failed scheduled attempt. Leave cadence
-      // due so the next scheduler poll retries as soon as the lane is free.
+      // Retain this second check as the atomic guard against an interactive
+      // operation beginning while the disk preflight was running.
       if (this.archiveOperation) {
         this.logger.warn(
           `Scheduled backup deferred: whole-server ${this.archiveOperation} operation is already in progress`,

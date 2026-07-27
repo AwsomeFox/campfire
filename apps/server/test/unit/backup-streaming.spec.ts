@@ -216,10 +216,12 @@ describe('backup streaming writer (#603)', () => {
     (svc as any).archiveOperation = 'backup';
     const createStream = jest.spyOn(fs, 'createWriteStream');
     const writeFailure = jest.spyOn(svc as any, 'writeFailureCadence');
+    const probeDisk = jest.spyOn(svc as any, 'probeDisk');
     try {
       await expect((svc as any).runScheduledBackup(60 * 60 * 1000)).resolves.toBeUndefined();
       expect(createStream).not.toHaveBeenCalled();
       expect(writeFailure).not.toHaveBeenCalled();
+      expect(probeDisk).not.toHaveBeenCalled();
       // Contention is a deferral. Recording it as a failure would raise a backup alert
       // out of a routine admin download and push the real run out by the failure
       // backoff — corrupting the one signal an operator must be able to trust.
@@ -230,6 +232,7 @@ describe('backup streaming writer (#603)', () => {
       expect(after.lastSuccessAt).toBe(seeded.lastSuccessAt);
     } finally {
       writeFailure.mockRestore();
+      probeDisk.mockRestore();
       createStream.mockRestore();
       (svc as any).archiveOperation = null;
       if (previous === undefined) delete process.env.BACKUP_DIR;
