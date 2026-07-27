@@ -329,6 +329,47 @@ describe('AI seat portability across clone / export / import (#1049)', () => {
     expect((await readSeat(negative.body.id)).body.actionQueueDepth).toBeGreaterThanOrEqual(1);
   });
 
+  /**
+   * The scalar sibling of the two JSON blocks (Devin review).
+   *
+   * This PR hardened `stylePresets` and `proactiveSettings` in this reader and left `mode`,
+   * `enabled` and `tokenBudget` on bare coercion — a rule applied to the reported fields and
+   * not their siblings. Of the three, only `mode` actually needs anything: `boolOf` is TOTAL
+   * (anything that is not `true` is `false`) and `tokenBudget` is already floored at 0, so
+   * neither has an unrepresentable value to admit. `mode` is the one scalar with a closed
+   * domain that nothing enforced — `str(src.mode, 'off')` accepts any string at all.
+   *
+   * It is a milder defect than the JSON blocks and a real one. It does NOT wedge the seat: an
+   * unknown mode is cast, not parsed (`(row.mode as AiDmMode) ?? 'off'`), so the seat stays
+   * readable. But `assertRunnable`'s gate is `seat.enabled && seat.mode !== 'off'`, which fails
+   * OPEN — an unrecognised mode arms the seat — and readiness then reports it as Co-DM, because
+   * that is the fallback branch of `seat.mode === 'driver' ? … : 'mode.coDm'`. So an archive
+   * could produce a seat that is armed under a mode name no code recognises and that the UI
+   * describes as something it is not.
+   *
+   * Not a privilege escalation — an archive that can say `mode: 'nonsense'` can equally say
+   * `mode: 'co_dm'` and get the same capability legitimately. It is fixed because "stored a
+   * value outside its own enum and then displayed it as a different mode" is the same
+   * reports-something-untrue family as the rest of this PR, not because it lets anyone in.
+   */
+  it('an out-of-enum mode in an archive falls back to off rather than being stored verbatim', async () => {
+    const imported = await importWithSeat('Bogus Mode', { mode: 'driver_but_evil' });
+    expect(imported.status).toBe(201);
+    const seat = await readSeat(imported.body.id);
+    expect(seat.status).toBe(200);
+    expect(['off', 'co_dm', 'driver']).toContain(seat.body.mode);
+    // `off` specifically, not merely "some legal value": an unreadable mode is not consent to
+    // arm the seat, and the gate above treats everything except `off` as armed.
+    expect(seat.body.mode).toBe('off');
+  });
+
+  it('a LEGAL mode is untouched by that guard', async () => {
+    // The fallback must apply to illegal input only — the main round-trip above already carries
+    // `co_dm`, and this pins the third enum member so the guard cannot degenerate into "always off".
+    const imported = await importWithSeat('Driver Mode', { mode: 'driver' });
+    expect((await readSeat(imported.body.id)).body.mode).toBe('driver');
+  });
+
   it('a malformed style block in an uploaded archive does not reach the column', async () => {
     // The import path reads untrusted JSON. An array written straight into a `mode: 'json'`
     // column would surface as a malformed settings object far from here.
@@ -377,15 +418,89 @@ describe('the seat portability classification (#1049)', () => {
     expect(Object.keys(portableAiSeat(FAKE_ROW)).sort()).toEqual([...PORTABLE_AI_SEAT_FIELDS].sort());
   });
 
+  /** The same coercers campaigns.service passes, plus a spy on the operator-facing warning. */
+  const coercers = (warn?: jest.Mock) => ({
+    str: (value: unknown, fallback = '') => (typeof value === 'string' ? value : fallback),
+    boolOf: (value: unknown) => value === true,
+    intOr: (value: unknown, fallback: number) => (typeof value === 'number' ? value : fallback),
+    warn,
+  });
+
   it('the UNTRUSTED-archive reader returns every field the classification lists', () => {
     // The import path is a separate closed literal from the export/clone one, so it can drop a
     // field the other carries — a defect invisible to any assertion about names.
-    const read = readPortableAiSeat({}, {
-      str: (value, fallback = '') => (typeof value === 'string' ? value : fallback),
-      boolOf: (value) => value === true,
-      intOr: (value, fallback) => (typeof value === 'number' ? value : fallback),
-    });
+    const read = readPortableAiSeat({}, coercers());
     expect(Object.keys(read).sort()).toEqual([...PORTABLE_AI_SEAT_FIELDS].sort());
+  });
+
+  /**
+   * ABSENT is not INVALID (Devin review).
+   *
+   * `parseOrDefault` used to hand the raw value straight to `schema.safeParse` and treat every
+   * failure as an illegal value. `AiDmStylePresets` carries a top-level `.default(...)`, so
+   * `safeParse(undefined)` SUCCEEDS and it never accused anyone. `AiDmProactiveSettings` is a
+   * bare `z.object({...})` with per-key defaults and no top-level one, so `safeParse(undefined)`
+   * FAILS — and every archive predating #1044 told its operator that their AI settings "did not
+   * validate" when nothing whatsoever was wrong.
+   *
+   * That asymmetry lived in the two schemas, but the defect is that the READER could not tell
+   * the two situations apart, so which behaviour you got depended on an unrelated detail of how
+   * a schema happened to be declared. Bolting a top-level `.default()` onto the one schema would
+   * restore today's symmetry and leave that intact for the next block added. So `parseOrDefault`
+   * now makes the distinction itself — which is also why `null` counts as absent: JSON has no
+   * `undefined`, and our OWN export writes `null` for an unset column, so null is simply what
+   * "absent" looks like by the time it reaches this function.
+   *
+   * This is the mirror of the defect closed on #1556. There, a default meaning "the reassuring
+   * thing" turned an omission into a false REASSURANCE; here a missing default turned an
+   * omission into a false ACCUSATION. Both are code that cannot distinguish "absent" from
+   * "present and wrong", which is why the fix belongs in the code that decides, not in the data.
+   */
+  describe('absent blocks import silently; invalid ones still warn', () => {
+    it('an archive with NO proactiveSettings key imports at defaults, WITHOUT accusing anyone', () => {
+      const warn = jest.fn();
+      const read = readPortableAiSeat({}, coercers(warn));
+      expect(warn).not.toHaveBeenCalled();
+      expect(read.proactiveSettings).toMatchObject({ enabled: false, cooldownSeconds: 300 });
+    });
+
+    it('a NULL block — how our own export carries an unset column — is absent, not invalid', () => {
+      // `portableAiSeat` copies the row verbatim and the JSON columns are nullable, so a seat
+      // that never configured either block exports as `null`. Re-importing our own export must
+      // not warn about a value we wrote ourselves.
+      const warn = jest.fn();
+      const read = readPortableAiSeat({ proactiveSettings: null, stylePresets: null }, coercers(warn));
+      expect(warn).not.toHaveBeenCalled();
+      expect(read.stylePresets).toMatchObject({ tone: 'default' });
+      expect(read.proactiveSettings).toMatchObject({ enabled: false });
+    });
+
+    it('a genuinely INVALID block still warns and still falls back', () => {
+      // The warning is the whole reason the fallback is acceptable rather than silent data loss,
+      // so narrowing "invalid" must not cost us the real accusation.
+      const warn = jest.fn();
+      const read = readPortableAiSeat(
+        { proactiveSettings: { enabled: true, cooldownSeconds: 999_999 } },
+        coercers(warn),
+      );
+      expect(warn).toHaveBeenCalledWith('proactiveSettings', expect.stringContaining('did not validate'));
+      expect(read.proactiveSettings?.cooldownSeconds).toBe(300);
+    });
+
+    it('both blocks behave the same way now, in both directions', () => {
+      // The point of fixing the reader rather than the schema: behaviour no longer depends on
+      // whether a given schema happens to carry a top-level `.default(...)`.
+      const absent = jest.fn();
+      readPortableAiSeat({}, coercers(absent));
+      expect(absent).not.toHaveBeenCalled();
+
+      const invalid = jest.fn();
+      readPortableAiSeat(
+        { stylePresets: { tone: 'grimdark' }, proactiveSettings: { cooldownSeconds: 1 } },
+        coercers(invalid),
+      );
+      expect(invalid.mock.calls.map((call) => call[0]).sort()).toEqual(['proactiveSettings', 'stylePresets']);
+    });
   });
 
   it('classifies the three fields that were being silently dropped as config', () => {

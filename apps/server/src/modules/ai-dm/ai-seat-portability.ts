@@ -1,5 +1,5 @@
 import type { aiDmSeats } from '../../db/schema';
-import { AiDmProactiveSettings, AiDmStylePresets } from '@campfire/schema';
+import { AiDmMode, AiDmProactiveSettings, AiDmStylePresets } from '@campfire/schema';
 
 /**
  * Which AI-seat fields travel on clone / export / import — stated ONCE (issue #1049).
@@ -255,7 +255,23 @@ export function readPortableAiSeat(
   { str, boolOf, intOr, warn }: ImportCoercers,
 ): PortableAiSeat {
   return {
-    mode: str(src.mode, 'off'),
+    // VALIDATED against its enum, not merely coerced to a string (#1049 review).
+    //
+    // `str(src.mode, 'off')` accepted any string at all, so an archive could store a mode
+    // outside `AiDmMode`. That does not wedge the seat the way an illegal JSON block does —
+    // `toDomain` CASTS mode rather than parsing it — but `assertRunnable` gates on
+    // `seat.enabled && seat.mode !== 'off'`, which fails OPEN, and readiness then labels the
+    // unrecognised mode as Co-DM via the fallback branch of its `mode === 'driver' ? … : …`.
+    // An armed seat under a mode no code recognises, described to the DM as something it is
+    // not, is the same reports-something-untrue family as the rest of this issue.
+    //
+    // Falls back to `off` rather than to `co_dm`: a mode we could not read is not consent to
+    // arm the seat, and `off` is the only value that gate treats as disarmed.
+    mode: enumOrDefault(AiDmMode, src.mode, 'off', 'mode', warn),
+    // `enabled` and `tokenBudget` need no equivalent and get none — deliberately, not by
+    // oversight. `boolOf` is TOTAL (anything not `true` becomes `false`) and the budget is
+    // floored at 0 below, so neither has an unrepresentable value left to admit. `mode` was the
+    // only scalar here with a closed domain that nothing enforced.
     enabled: boolOf(src.enabled),
     model: str(src.model),
     instructions: str(src.instructions),
@@ -282,9 +298,60 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 /**
+ * Parse an untrusted scalar against a closed enum, falling back to an explicit legal value.
+ *
+ * Separate from {@link parseOrDefault} because an enum has no `schema.parse({})` to fall back
+ * to — the caller has to name the safe value, and which value is safe is a judgement about that
+ * field (for `mode` it is `off`, the only one that leaves the seat disarmed). It follows the
+ * same absent-is-not-invalid rule for the same reason: a missing key is an old archive, not a
+ * malformed one, and telling an operator otherwise is a false accusation.
+ */
+function enumOrDefault<T extends string>(
+  schema: { safeParse(value: unknown): { success: true; data: T } | { success: false; error: unknown } },
+  value: unknown,
+  fallback: T,
+  field: string,
+  warn?: (field: string, detail: string) => void,
+): T {
+  if (value === undefined || value === null) return fallback;
+  const parsed = schema.safeParse(value);
+  if (parsed.success) return parsed.data;
+  warn?.(field, `the imported archive's \`${field}\` is not a recognised value; falling back to '${fallback}'`);
+  return fallback;
+}
+
+/**
  * Parse an untrusted JSON block with its real schema, falling back to the schema's own defaults
  * when it does not validate. Returning `schema.parse({})` rather than `{}` matters: the column
  * is read back through the same schema, so the fallback must itself be a legal value.
+ *
+ * ── ABSENT is not INVALID ─────────────────────────────────────────────────────────────
+ * Both cases end at the same defaults, but only one of them deserves a warning, and the first
+ * cut of this function could not tell them apart — it handed the raw value to `safeParse` and
+ * called every failure illegal. Whether that accused an innocent archive then depended on an
+ * unrelated detail of how each schema happened to be declared:
+ *
+ *   - `AiDmStylePresets` ends in a top-level `.default(...)`, so `safeParse(undefined)`
+ *     SUCCEEDS and it never warned about anything;
+ *   - `AiDmProactiveSettings` is a bare `z.object({...})` — per-key defaults, no top-level one —
+ *     so `safeParse(undefined)` FAILS, and every archive predating #1044 told its operator that
+ *     their AI settings "did not validate" when nothing was wrong with them.
+ *
+ * The fix belongs HERE rather than in the one schema. Adding a top-level `.default()` to
+ * `AiDmProactiveSettings` would equalise today's two blocks and leave the next `config` block
+ * to inherit whichever behaviour its author's schema style happened to produce. Deciding it in
+ * the reader makes "absent imports quietly, invalid is reported" a property of the import path
+ * itself, which is the level the promise is made at.
+ *
+ * `null` counts as absent for the same reason: JSON has no `undefined`, the seat's JSON columns
+ * are nullable, and `portableAiSeat` copies them verbatim — so an unset block leaves in OUR OWN
+ * export as `null`. Treating that as illegal would have the importer warn about a value this
+ * codebase wrote.
+ *
+ * This is the mirror image of the defect closed on #1556, where a default meaning "the
+ * reassuring thing" turned an omission into a false REASSURANCE. Here a missing default turned
+ * an omission into a false ACCUSATION. Same root cause both times — code that cannot distinguish
+ * "absent" from "present and wrong" — so it is fixed the same way: teach the code to ask.
  */
 function parseOrDefault<T>(
   schema: { safeParse(value: unknown): { success: true; data: T } | { success: false; error: unknown }; parse(value: unknown): T },
@@ -292,6 +359,10 @@ function parseOrDefault<T>(
   field: string,
   warn?: (field: string, detail: string) => void,
 ): T {
+  // Nothing was carried for this block — an archive predating the feature, or a seat that never
+  // configured it. Defaults, and NO warning: there is nothing for the operator to act on.
+  if (value === undefined || value === null) return schema.parse({});
+
   const parsed = schema.safeParse(value);
   if (parsed.success) return parsed.data;
   warn?.(field, `the imported archive's \`${field}\` did not validate; falling back to defaults`);
