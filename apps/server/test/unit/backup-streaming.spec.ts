@@ -118,6 +118,51 @@ describe('backup streaming writer (#603)', () => {
     }
   });
 
+  it('reserves staging plus archive space when scheduled output shares its filesystem', async () => {
+    const backupDir = path.join(dataDir, 'backups');
+    const previousBackupDir = process.env.BACKUP_DIR;
+    const previousMinFree = process.env.BACKUP_MIN_FREE_BYTES;
+    process.env.BACKUP_DIR = backupDir;
+    process.env.BACKUP_MIN_FREE_BYTES = '1024';
+    const stagingBytes = 10 * 1024 * 1024;
+    const archiveBytes = Math.ceil(stagingBytes * 1.15);
+    const freeBytes = archiveBytes + 1024 + 1;
+    const svc = service();
+    const estimate = jest
+      .spyOn(svc as any, 'estimateFallbackBackupBytes')
+      .mockReturnValue(stagingBytes);
+    const probeDisk = jest.spyOn(svc as any, 'probeDisk');
+    const statfs = jest.spyOn(fs, 'statfsSync').mockReturnValue({
+      type: 0,
+      bsize: 1,
+      blocks: freeBytes * 2,
+      bfree: freeBytes,
+      bavail: freeBytes,
+      files: 0,
+      ffree: 0,
+    });
+    const createStream = jest.spyOn(fs, 'createWriteStream');
+    try {
+      await expect((svc as any).runScheduledBackup(60 * 60 * 1000)).resolves.toBeUndefined();
+      expect(createStream).not.toHaveBeenCalled();
+      expect(probeDisk).toHaveBeenCalledWith(
+        backupDir,
+        1024,
+        archiveBytes + stagingBytes,
+      );
+      expect((await svc.getStatus()).cadence?.lastError).toMatch(/low disk space/i);
+    } finally {
+      createStream.mockRestore();
+      statfs.mockRestore();
+      probeDisk.mockRestore();
+      estimate.mockRestore();
+      if (previousBackupDir === undefined) delete process.env.BACKUP_DIR;
+      else process.env.BACKUP_DIR = previousBackupDir;
+      if (previousMinFree === undefined) delete process.env.BACKUP_MIN_FREE_BYTES;
+      else process.env.BACKUP_MIN_FREE_BYTES = previousMinFree;
+    }
+  });
+
   it('publishes scheduled archives atomically and leaves no partial file', async () => {
     const backupDir = path.join(dataDir, 'backups');
     const previous = process.env.BACKUP_DIR;

@@ -505,13 +505,20 @@ export class BackupService implements OnApplicationBootstrap {
       const retentionPolicy = parseBackupRetentionPolicy();
       const minFreeBytes = parseBackupMinFreeBytes();
       const dir = this.backupDir();
+      const stagingBytes = this.estimateFallbackBackupBytes();
       estimatedBytes = estimateNextBackupBytes(
         previous?.lastSize ?? null,
-        () => this.estimateFallbackBackupBytes(),
+        stagingBytes,
       );
-      disk = this.probeDisk(dir, minFreeBytes, estimatedBytes);
+      // A scheduled backup can hold both the complete staging generation and
+      // the growing .partial ZIP at once. When both paths share a filesystem,
+      // reserve their combined peak so two individually-successful probes do
+      // not consume the live database's configured free-space reserve.
+      const scheduledPeakBytes =
+        this.pathsShareFilesystem(dir, os.tmpdir()) ? estimatedBytes + stagingBytes : estimatedBytes;
+      disk = this.probeDisk(dir, minFreeBytes, scheduledPeakBytes);
       fs.mkdirSync(dir, { recursive: true });
-      disk = this.probeDisk(dir, minFreeBytes, estimatedBytes);
+      disk = this.probeDisk(dir, minFreeBytes, scheduledPeakBytes);
       if (disk && disk.lowSpace) {
         const message =
           `Scheduled backup skipped: low disk space in BACKUP_DIR ` +
@@ -636,6 +643,17 @@ export class BackupService implements OnApplicationBootstrap {
       current = parent;
     }
     return current;
+  }
+
+  private pathsShareFilesystem(left: string, right: string): boolean {
+    const leftRoot = this.existingPathForStatfs(left);
+    const rightRoot = this.existingPathForStatfs(right);
+    if (!leftRoot || !rightRoot) return false;
+    try {
+      return fs.statSync(leftRoot).dev === fs.statSync(rightRoot).dev;
+    } catch {
+      return false;
+    }
   }
 
   private failureBackoffMs(previous: BackupCadenceState | null, intervalMs: number): number {
