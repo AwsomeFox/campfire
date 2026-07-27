@@ -752,20 +752,78 @@ export class SchedulingService {
       next.scheduledAt !== existing.scheduledAt && existing.timezone
         ? { localStart: utcToLocalDateTime(next.scheduledAt, existing.timezone) }
         : {};
-    const updated = await this.db
-      .update(scheduledSessions)
-      .set({
-        ...patch,
-        ...localStartPatch,
-        ...(calendarFieldChanged ? { icsSequence: existing.icsSequence + 1 } : {}),
-        updatedAt: nextUpdatedAt(existing.updatedAt),
-      })
-      .where(
-        opts?.expectedUpdatedAt
-          ? and(eq(scheduledSessions.id, id), eq(scheduledSessions.updatedAt, opts.expectedUpdatedAt))
-          : eq(scheduledSessions.id, id),
-      )
-      .returning();
+    // Issue #588: which of this row's prose fields this PATCH actually changes.
+    // The window fields are absent by construction — a series occurrence cannot
+    // reach the write below with a moved instant or a grown duration, the guard
+    // above rejects that and names the endpoint that records it properly. So the
+    // ledger entry this produces is a PROSE entry and says so.
+    //
+    // Field NAMES only, never the prose itself: the exception ledger is readable
+    // by organized-play coordinators who need not be members of the campaign,
+    // and the note bodies are versioned in the revisions table where campaign
+    // membership is enforced. Naming the field is what makes the lineage useful;
+    // quoting it would leak.
+    const editedProseFields = (['title', 'location', 'notes'] as const).filter((f) => next[f] !== existing[f]);
+    let updated: Array<typeof scheduledSessions.$inferSelect> = [];
+    // One transaction so the row write and its ledger entry cannot separate. A
+    // committed prose edit with no `edit` entry is exactly the invisible
+    // per-occurrence divergence this ledger exists to surface, and the reverse —
+    // an entry for a write that lost a stale-write race — would claim an edit
+    // that never happened.
+    this.db.transaction((tx) => {
+      updated = tx
+        .update(scheduledSessions)
+        .set({
+          ...patch,
+          ...localStartPatch,
+          ...(calendarFieldChanged ? { icsSequence: existing.icsSequence + 1 } : {}),
+          updatedAt: nextUpdatedAt(existing.updatedAt),
+        })
+        .where(
+          opts?.expectedUpdatedAt
+            ? and(eq(scheduledSessions.id, id), eq(scheduledSessions.updatedAt, opts.expectedUpdatedAt))
+            : eq(scheduledSessions.id, id),
+        )
+        .returning()
+        .all();
+      // Nothing was written — leave the rollback to the stale-write throw below,
+      // which needs an async read this synchronous callback cannot make.
+      if (!updated[0]) return;
+      // #588: the legacy editor is still the ordinary way a DM retitles or
+      // re-notes ONE night of a series from the Schedule tab, and until now it
+      // left no trace at all: the lineage could not show that this occurrence had
+      // diverged from its series, even though `updateSeries` would later flatten
+      // the divergence away. `edit` is NOT in METADATA_OVERRIDE_KINDS, so
+      // appending it does not detach the night from future series edits — that is
+      // the whole distinction between recording a prose edit and honouring a
+      // booking decision (reschedule / reassign).
+      if (existing.seriesId != null && editedProseFields.length > 0) {
+        tx.insert(seriesExceptions)
+          .values({
+            seriesId: existing.seriesId,
+            occurrenceId: id,
+            recurrenceLocalDate: recurrenceLocalDateFor(existing, seriesTimezoneInTx(tx, existing.seriesId)),
+            kind: 'edit',
+            // A prose edit moves no instant and no assignment, so from == to
+            // throughout, recorded rather than defaulted for the same reason
+            // `cancel` records them: the entry states the seating in force when
+            // the edit happened.
+            fromScheduledAt: existing.scheduledAt,
+            toScheduledAt: existing.scheduledAt,
+            toLocalStart: existing.localStart,
+            fromRoomId: existing.roomId,
+            toRoomId: existing.roomId,
+            fromAssignedDmUserId: existing.assignedDmUserId,
+            toAssignedDmUserId: existing.assignedDmUserId,
+            fromCapacity: existing.capacity,
+            toCapacity: existing.capacity,
+            reason: `edited ${editedProseFields.join(', ')}`,
+            actorUserId: user.id,
+            createdAt: nowIso(),
+          })
+          .run();
+      }
+    });
     if (!updated[0]) {
       const current = await this.getRowOrThrow(id);
       throw staleWrite(opts?.expectedUpdatedAt, current.updatedAt);

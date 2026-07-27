@@ -319,6 +319,65 @@ describe('organized play privacy (e2e, real cookie sessions)', () => {
     expect(excluded.body.conflicts.filter((c: { kind: string }) => c.kind === 'room')).toHaveLength(0);
   });
 
+  /**
+   * The room half of this endpoint is deliberately public to every authenticated
+   * caller: a shared facility's occupancy is what the coordinator pool is FOR.
+   * The person half is not. `POST /organized-play/conflicts` writes nothing and
+   * costs nothing, so an unrestricted person probe is a free, repeatable oracle:
+   * sweep day-sized windows against an account id and the exact windows come back
+   * — redaction removes the campaign, the title and the schedule id, but never
+   * the window, because the window IS the conflict. That reconstructs when and
+   * where someone runs games, which is the same existence the coordinator
+   * calendar deliberately withholds by blanking `assignedDmUserId`.
+   */
+  it('does not answer a person-specific probe for a stranger the caller shares no table with', async () => {
+    const carol = request.agent(ctx.app.getHttpServer());
+    const carolId = (
+      await admin.post('/api/v1/users').send({ username: 'op-carol', password: 'password-carol-1', serverRole: 'user' })
+    ).body.id;
+    expect(typeof carolId).toBe('number');
+    await carol.post('/api/v1/auth/login').send({ username: 'op-carol', password: 'password-carol-1' });
+
+    const probe = async (agent: ReturnType<typeof request.agent>) => {
+      const res = await agent.post('/api/v1/organized-play/conflicts').send({
+        scheduledAt: '2099-05-05T20:00:00.000Z',
+        durationMinutes: 60,
+        assignedDmUserId: String(aliceId),
+      });
+      expect(res.status).toBe(201);
+      return res.body.conflicts.filter((c: { kind: string }) => c.kind === 'dm');
+    };
+
+    // Carol shares no campaign with Alice, so Alice's schedule is not a question
+    // she gets to ask. DROPPED, not rejected: the response is exactly what she
+    // would have got by sending no id, so a 403 cannot tell her the account
+    // exists either.
+    expect(await probe(carol)).toHaveLength(0);
+    const silent = await carol.post('/api/v1/organized-play/conflicts').send({
+      scheduledAt: '2099-05-05T20:00:00.000Z',
+      durationMinutes: 60,
+    });
+    expect(silent.body.conflicts.filter((c: { kind: string }) => c.kind === 'dm')).toHaveLength(0);
+
+    // The legitimate use is untouched. Bob plays at Alice's Open Table, so
+    // scheduling around her is exactly what this probe is for — he still gets the
+    // busy window, still redacted down to no campaign and no title.
+    const bobSees = await probe(bob);
+    expect(bobSees).toHaveLength(1);
+    expect(bobSees[0]).toMatchObject({ visible: false, campaignId: null, title: null });
+    expect(bobSees[0].startsAt).toBe(BOOKED_START);
+
+    // And a caller may always ask about themselves, with no campaign in common
+    // with anybody — Carol checking her own availability is not a probe of a
+    // third party.
+    const self = await carol.post('/api/v1/organized-play/conflicts').send({
+      scheduledAt: '2099-05-05T20:00:00.000Z',
+      durationMinutes: 60,
+      assignedDmUserId: String(carolId),
+    });
+    expect(self.status).toBe(201);
+  });
+
   it('a player cannot create or cancel a series in a campaign they only play in', async () => {
     const create = await bob.post(`/api/v1/campaigns/${sharedCampaignId}/series`).send({
       title: 'Player Coup',

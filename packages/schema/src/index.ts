@@ -1593,7 +1593,15 @@ export type SessionSeriesCancel = z.infer<typeof SessionSeriesCancel>;
  * was materialized. This is what makes "per-occurrence exceptions, cancellations
  * and reschedule lineage" auditable rather than inferred from the current row.
  */
-export const SeriesExceptionKind = z.enum(['cancel', 'reschedule', 'reassign', 'restore']);
+/**
+ * `edit` records a per-occurrence PROSE edit (title / location / notes) made
+ * through the legacy `PATCH /schedule/:id` (#588). It is deliberately NOT a
+ * metadata override — see `METADATA_OVERRIDE_KINDS` — so the occurrence still
+ * receives later series edits; it exists so the lineage shows the edit happened
+ * at all. Treating it as an override would freeze the night out of every later
+ * series edit permanently, because the ledger is append-only.
+ */
+export const SeriesExceptionKind = z.enum(['cancel', 'reschedule', 'reassign', 'restore', 'edit']);
 export type SeriesExceptionKind = z.infer<typeof SeriesExceptionKind>;
 
 export const SeriesException = z.object({

@@ -923,6 +923,13 @@ describe('organized play (e2e)', () => {
     const renamed = await api().patch(`/api/v1/schedule/${occ.id}`).set(dm).send({ title: 'Renamed in place', notes: 'bring dice' });
     expect(renamed.status).toBe(200);
     expect(renamed.body).toMatchObject({ title: 'Renamed in place', notes: 'bring dice' });
+    // …and that prose edit IS recorded, as a non-override `edit`. It previously
+    // left no trace at all, so the lineage could not show a per-occurrence edit
+    // had happened. See the dedicated test for why `edit` must not be treated as
+    // a metadata override.
+    expect(
+      (await api().get(`/api/v1/organized-play/occurrences/${occ.id}/exceptions`).set(dm)).body.map((e: { kind: string }) => e.kind),
+    ).toEqual(['edit']);
 
     // The dedicated endpoint is the way through, and it records the lineage.
     const viaReschedule = await api()
@@ -930,7 +937,9 @@ describe('organized play (e2e)', () => {
       .set(dm)
       .send({ scheduledAt: '2099-06-03T18:00:00Z' });
     expect(viaReschedule.status).toBe(201);
-    expect((await api().get(`/api/v1/organized-play/occurrences/${occ.id}/exceptions`).set(dm)).body).toHaveLength(1);
+    expect(
+      (await api().get(`/api/v1/organized-play/occurrences/${occ.id}/exceptions`).set(dm)).body.map((e: { kind: string }) => e.kind),
+    ).toEqual(['edit', 'reschedule']);
 
     // A one-off night holds no series and is untouched by the guard.
     const oneOff = await api().post(`/api/v1/campaigns/${campaignId}/schedule`).set(dm).send({ scheduledAt: '2099-06-10T18:00:00Z' });
@@ -980,6 +989,42 @@ describe('organized play (e2e)', () => {
     // A no-op re-send must NOT push a fresh revision at every subscriber.
     const noop = await api().patch(`/api/v1/schedule/${night.body.id}`).set(dm).send({ notes: 'actually, bring snacks' });
     expect(noop.body.icsSequence).toBe(seq0 + 1);
+  });
+
+  it('bumps SEQUENCE when a notes REVISION is restored, which is a publish like any other edit', async () => {
+    const night = await api()
+      .post(`/api/v1/campaigns/${campaignId}/schedule`)
+      .set(dm)
+      .send({ scheduledAt: '2099-07-08T18:00:00Z', title: 'Revision Night', notes: 'bring the map' });
+    expect(night.status).toBe(201);
+    const id = night.body.id as number;
+
+    const edited = await api().patch(`/api/v1/schedule/${id}`).set(dm).send({ notes: 'map cancelled, bring snacks' });
+    expect(edited.status).toBe(200);
+    const seqAfterEdit = edited.body.icsSequence as number;
+
+    // Restoring the older revision changes the DESCRIPTION subscribers see, so it
+    // is a published revision and needs its own SEQUENCE. #588 is what coupled
+    // notes to the feed; before this the restore wrote the column and left the
+    // sequence alone, so a client that gates on SEQUENCE (RFC 5545 §3.8.7.4)
+    // went on showing "map cancelled" indefinitely.
+    const revisions = await api().get(`/api/v1/revisions/scheduled_session/${id}`).set(dm);
+    expect(revisions.status).toBe(200);
+    const original = revisions.body.find((r: { snapshot: Record<string, string> }) => r.snapshot.notes === 'bring the map');
+    expect(original).toBeDefined();
+
+    const restored = await api().post(`/api/v1/revisions/scheduled_session/${id}/${original.id}/restore`).set(dm).send({});
+    expect(restored.status).toBe(201);
+    const afterRestore = await api().get(`/api/v1/schedule/${id}`).set(dm);
+    expect(afterRestore.body.notes).toBe('bring the map');
+    expect(afterRestore.body.icsSequence).toBe(seqAfterEdit + 1);
+
+    // …and restoring the revision that is ALREADY live changes nothing a
+    // subscriber can see, so it must not push one at them — the same no-op rule
+    // the PATCH path follows.
+    const again = await api().post(`/api/v1/revisions/scheduled_session/${id}/${original.id}/restore`).set(dm).send({});
+    expect(again.status).toBe(201);
+    expect((await api().get(`/api/v1/schedule/${id}`).set(dm)).body.icsSequence).toBe(seqAfterEdit + 1);
   });
 
   // ----- exception ledger integrity -----
@@ -2159,6 +2204,76 @@ describe('organized play (e2e)', () => {
       toRoomId: number | null;
     }>;
     expect(lineage.map((e) => [e.fromRoomId, e.toRoomId])).toContainEqual([kindRoom.body.id, roomC.body.id]);
+  });
+
+  it('records a legacy prose edit in the ledger WITHOUT freezing the occurrence out of its series', async () => {
+    const series = await api()
+      .post(`/api/v1/campaigns/${campaignId}/series`)
+      .set(dm)
+      .send({ title: 'Prose Lineage', timezone: 'UTC', startDate: '2099-09-08', startTime: '18:00', freq: 'weekly', count: 2, notes: 'series notes' });
+    expect(series.status).toBe(201);
+    const occ = series.body.occurrences[0];
+
+    // A DM edits this one night's notes through the ordinary Schedule tab.
+    const edited = await api().patch(`/api/v1/schedule/${occ.id}`).set(dm).send({ notes: 'bring the map for THIS night' });
+    expect(edited.status).toBe(200);
+
+    // It is now visible in the lineage, which previously showed nothing at all.
+    const ledger = (await api().get(`/api/v1/organized-play/occurrences/${occ.id}/exceptions`).set(dm)).body;
+    expect(ledger.map((e: { kind: string }) => e.kind)).toEqual(['edit']);
+    // Field names only — the note body is versioned elsewhere and the ledger is
+    // readable by coordinators who may not be in this campaign.
+    expect(ledger[0].reason).toBe('edited notes');
+    expect(JSON.stringify(ledger[0])).not.toContain('bring the map');
+
+    // …and it is NOT an override: a later series TITLE edit still reaches it.
+    // Treating a prose edit as an override would detach this night permanently,
+    // because the ledger is append-only.
+    const renamed = await api().patch(`/api/v1/campaigns/${campaignId}/series/${series.body.id}`).set(dm).send({ title: 'Prose Lineage (v2)' });
+    expect(renamed.status).toBe(200);
+    const byId = new Map(renamed.body.occurrences.map((o: { id: number }) => [o.id, o]));
+    expect(byId.get(occ.id)).toMatchObject({ title: 'Prose Lineage (v2)' });
+    // The fan-out is field-scoped, so a title edit leaves the DM's notes alone.
+    expect((byId.get(occ.id) as { notes: string }).notes).toBe('bring the map for THIS night');
+
+    // A genuine re-seat still IS an override, so the two kinds stay distinct.
+    expect((await api().post(`/api/v1/organized-play/occurrences/${occ.id}/reassign`).set(dm).send({ capacity: 3 })).status).toBe(201);
+    const second = await api().patch(`/api/v1/campaigns/${campaignId}/series/${series.body.id}`).set(dm).send({ capacity: 9 });
+    expect(second.status).toBe(200);
+    const after = new Map(second.body.occurrences.map((o: { id: number }) => [o.id, o]));
+    expect(after.get(occ.id)).toMatchObject({ capacity: 3 });
+  });
+
+  it('announces a series metadata edit with the NEW title, not the snapshot it read', async () => {
+    const series = await api()
+      .post(`/api/v1/campaigns/${campaignId}/series`)
+      .set(dm)
+      .send({ title: 'Old Title', timezone: 'UTC', startDate: '2099-09-22', startTime: '18:00', freq: 'weekly', count: 2, notes: 'v1' });
+    expect(series.status).toBe(201);
+
+    const service = ctx.app.get(OrganizedPlayService);
+    const notifications = (service as unknown as { notifications: { notifyCampaign: (...a: unknown[]) => Promise<void> } }).notifications;
+    const seen: Array<{ label: string }> = [];
+    const spy = jest.spyOn(notifications, 'notifyCampaign').mockImplementation(async (...args: unknown[]) => {
+      const event = args[2] as { data?: { label?: string } };
+      if (event?.data?.label !== undefined) seen.push({ label: event.data.label });
+    });
+    try {
+      // Title AND notes together: notes makes it notifiable, title is the field
+      // rendered into the notification's label.
+      const res = await api()
+        .patch(`/api/v1/campaigns/${campaignId}/series/${series.body.id}`)
+        .set(dm)
+        .send({ title: 'New Title', notes: 'v2' });
+      expect(res.status).toBe(200);
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(seen).toHaveLength(1);
+    // The rows the fan-out read were snapshots taken BEFORE it wrote, so passing
+    // them verbatim announced the old title for a night that already had the new one.
+    expect(seen[0].label).toBe('New Title');
   });
 
   it('does not push a fresh SEQUENCE for a room change, which the feed never renders', async () => {

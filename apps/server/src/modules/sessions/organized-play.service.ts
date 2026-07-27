@@ -47,6 +47,7 @@ import {
 } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import {
+  campaignMembers,
   playRooms,
   playVenues,
   scheduleTemplates,
@@ -802,13 +803,15 @@ export class OrganizedPlayService {
    * editing an occurrence can necessarily read its campaign, so their exclusion
    * always survives this check.
    *
-   * WHY ONLY THIS FIELD. Every other filter on this endpoint names a resource the
-   * CALLER already holds — a room id, a DM id, member ids, a time window — and
-   * reporting whether it is busy is the whole purpose of the probe; the window
-   * and the subject id survive redaction for exactly that reason.
-   * `excludeScheduleId` is the only input that is the IDENTITY OF A HIDDEN ROW
-   * rather than a resource the caller named, and that is what makes it an oracle.
-   * A future filter of that shape needs this same treatment.
+   * WHY NOT ONLY THIS FIELD. This docblock used to argue that `excludeScheduleId`
+   * was the endpoint's ONLY oracle, because every other filter merely names a
+   * resource the caller already holds. That reasoning was wrong about PEOPLE, and
+   * {@link honourableSubjects} is the correction — a room is a shared facility
+   * whose occupancy is public to the coordinator pool by design, but a person is
+   * not a facility, and "is this account busy at 19:00 on the 14th" is a question
+   * about them, not about a resource the caller controls. A future filter of
+   * EITHER shape — the identity of a hidden row, or the identity of a person —
+   * needs one of these two treatments.
    */
   private async honourableExclusion(excludeScheduleId: number | undefined, scope: AccessScope): Promise<number | undefined> {
     if (excludeScheduleId == null) return undefined;
@@ -821,18 +824,74 @@ export class OrganizedPlayService {
     return canSee(scope, row.campaignId) ? excludeScheduleId : undefined;
   }
 
+  /**
+   * Which of the person ids in a probe this caller may actually ask about.
+   *
+   * `POST /organized-play/conflicts` is open to ANY authenticated user, writes
+   * nothing, and is therefore repeatable at no cost. A person-specific probe
+   * returns the exact window of the subject's booking even when the booking's
+   * campaign is redacted — `visible: false` drops the campaign, title and
+   * schedule id, but the whole POINT of a conflict is the window, so the window
+   * stays. Numeric account ids are obtainable, so an unrestricted probe let
+   * anyone sweep day-sized windows against an id they do not otherwise share a
+   * table with and reconstruct when and where that person runs games.
+   *
+   * That is precisely the existence this module withholds elsewhere: the
+   * coordinator calendar blanks `assignedDmUserId` on a booking the caller cannot
+   * read, on the stated principle that a private game must be ABSENT rather than
+   * redacted, because redaction alone leaks that it happened. Leaving the probe
+   * unrestricted made that blanking decorative — the same fact was one POST away.
+   *
+   * The rule: a person may be probed when the caller shares a campaign with them
+   * (`scope`), or when they ARE the caller. That is the population a coordinator
+   * has any business scheduling around, and it is exactly what the booking flows
+   * need — the DM and members you are seating at your own table are members of
+   * your own campaign, so every legitimate probe survives unchanged.
+   *
+   * Unauthorized ids are DROPPED, not rejected, following honourableExclusion:
+   * a 403 would itself answer "does this account exist and is it a stranger",
+   * whereas a dropped id yields byte-for-byte the response the caller would have
+   * got by not sending it.
+   *
+   * NOT applied to the booking WRITE paths, deliberately. Those already require
+   * DM/coordinator role on a specific campaign, they commit or reject a real row
+   * rather than answering a question, and their probe is the conflict check that
+   * makes the write safe. The hazard here is the free, silent, unlimited repeat.
+   */
+  private async honourableSubjects(requested: string[], scope: AccessScope, user: RequestUser): Promise<Set<string>> {
+    const wanted = [...new Set(requested.filter((id) => id.trim() !== ''))];
+    if (wanted.length === 0) return new Set();
+    if (scope === 'all') return new Set(wanted);
+    // The caller may always ask about themselves — they need no campaign in
+    // common with themselves, and a user with no campaigns at all can still
+    // check their own availability.
+    const allowed = new Set(wanted.filter((id) => id === user.id));
+    const others = wanted.filter((id) => id !== user.id);
+    if (others.length === 0 || scope.length === 0) return allowed;
+    const numeric = others.map((id) => Number(id)).filter((n) => Number.isInteger(n));
+    if (numeric.length === 0) return allowed;
+    const rows = await this.db
+      .select({ userId: campaignMembers.userId })
+      .from(campaignMembers)
+      .where(and(inArray(campaignMembers.campaignId, scope), inArray(campaignMembers.userId, numeric)));
+    for (const row of rows) allowed.add(String(row.userId));
+    return allowed;
+  }
+
   /** Read-only "would this collide?" probe. Writes nothing. */
   async checkConflicts(input: ScheduleConflictQuery, user: RequestUser): Promise<ScheduleConflictReport> {
     const { startsAt, endsAt } = this.resolveWindow(input);
-    // Scope is resolved BEFORE the query, because the exclusion filter is itself
-    // access-controlled — see honourableExclusion.
+    // Scope is resolved BEFORE the query, because the exclusion filter and the
+    // person filters are themselves access-controlled — see honourableExclusion
+    // and honourableSubjects.
     const scope = await this.roles.accessibleCampaignIds(user);
+    const subjects = await this.honourableSubjects([input.assignedDmUserId, ...input.memberUserIds], scope, user);
     const raws = this.findConflictRows(this.db, {
       startsAt,
       endsAt,
       roomId: input.roomId,
-      assignedDmUserId: input.assignedDmUserId,
-      memberUserIds: input.memberUserIds,
+      assignedDmUserId: subjects.has(input.assignedDmUserId) ? input.assignedDmUserId : '',
+      memberUserIds: input.memberUserIds.filter((id) => subjects.has(id)),
       excludeScheduleId: await this.honourableExclusion(input.excludeScheduleId, scope),
     });
     const names = await this.lookupNames(
@@ -1257,7 +1316,21 @@ export class OrganizedPlayService {
       const booking = affected.filter((occ) => occ.status !== 'cancelled');
       // A cancelled night is not one the party can be told to turn up to, so it
       // is not a notification subject either — the same line `booking` draws.
-      notifyRows = booking;
+      //
+      // These rows are SNAPSHOTS read before the fan-out wrote, so the title they
+      // carry is the OLD one. `notifyOccurrenceChange` renders `title` into the
+      // notification's `label` — the only row field it reads that this method can
+      // change — so handing them over verbatim announced the rename under the
+      // pre-rename name, for a night that already had the new one. Overlaying the
+      // new title here rather than re-reading keeps the notification payload
+      // derived from the same values the writes below use.
+      //
+      // Only `title` needs it. `location` and `notes` never reach the payload as
+      // row fields: they are carried as `changedFields`, computed from `input`
+      // directly at the call site, so they cannot go stale the same way. And
+      // `scheduledAt`/`durationMinutes` — the payload's other two row fields —
+      // are not editable through a series metadata PATCH at all.
+      notifyRows = input.title === undefined ? booking : booking.map((occ) => ({ ...occ, title: input.title as string }));
 
       // #588: a metadata PATCH that carries `roomId` or `assignedDmUserId` is a
       // BULK reassignment wearing a metadata edit's clothes — one request moves
