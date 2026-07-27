@@ -57,6 +57,14 @@ export const MODES: { value: AiDmMode; label: string; blurb: string }[] = [
 ];
 
 const MODE_LABEL: Record<AiDmMode, string> = { off: 'Off', co_dm: 'Co-DM', driver: 'Driver' };
+/** Field names as a DM would read them in the inherited-defaults notice (#1070). */
+const INHERITED_FIELD_LABEL: Record<string, string> = {
+  mode: 'operating mode',
+  instructions: 'steering',
+  tokenBudget: 'token budget',
+  actionQueueDepth: 'action queue depth',
+};
+
 const MODE_TAG: Record<AiDmMode, string> = { off: 'tag-neutral', co_dm: 'tag-accent-2', driver: 'tag-accent' };
 
 export default function AiDmCard({
@@ -151,6 +159,22 @@ export default function AiDmCard({
         any of this to take effect; until then, saving here returns a clear "disabled" message. This page carries only
         the settings that vary per table — mode, budget, and steering.
       </p>
+
+      {/*
+        #1070 — this campaign has never configured its seat, so these values are coming LIVE from
+        the server-wide defaults. Shown BEFORE the mode/budget controls because enabling the seat
+        is what lets it start spending: an inherited token budget has to be visible ahead of that
+        decision, not discovered after it. Saving anything here detaches this campaign, seeded
+        from what it is inheriting now, so nothing it currently shows will silently change.
+      */}
+      {seat.inheritedFields.length > 0 && (
+        <p className="cf-inset p-3 text-muted" style={{ margin: 0, fontSize: 11.5 }} data-testid="ai-dm-inherited-notice">
+          Using the server-wide defaults for{' '}
+          <strong>{seat.inheritedFields.map((f) => INHERITED_FIELD_LABEL[f] ?? f).join(', ')}</strong>. This campaign
+          hasn't been configured yet, so it follows the server default and moves when an admin changes it. Saving any
+          setting below keeps the current values and stops following.
+        </p>
+      )}
 
       <AiSetupChecklist campaignId={campaignId} isAdmin={isAdmin} className="cf-inset p-3" />
       <ModeSection campaignId={campaignId} seat={seat} onChanged={(s) => { setSeat(s); refreshReadiness(); }} />

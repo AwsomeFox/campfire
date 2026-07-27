@@ -45,6 +45,7 @@ import { campaigns, characters, combatants, encounterEvents, encounters, ruleEnt
 import { CampaignEventsService } from '../events/campaign-events.service';
 import { AuditService } from '../audit/audit.service';
 import { fromJsonText, toJsonText } from '../../common/json';
+import { conditionWriteSetFromNames } from '../../common/conditions';
 import { nowIso } from '../../common/time';
 import { rollDice } from '../../common/dice';
 import { auditActor } from '../../common/user.types';
@@ -856,7 +857,9 @@ export class ActionResolverService {
             deathState: result.deathState,
             deathSaveSuccesses: result.deathSaveSuccesses,
             deathSaveFailures: result.deathSaveFailures,
-            conditions: toJsonText([...conditions]),
+            // Structured instances must move with the names (see common/conditions.ts):
+            // a resolved action that removes a condition has to drop its instance too.
+            ...conditionWriteSetFromNames([...conditions], fresh.conditionInstances),
             activeEffects: toJsonText(nextEffects),
           })
           .where(eq(combatants.id, fresh.id))
@@ -977,7 +980,11 @@ export class ActionResolverService {
             deathState: t.deathStateBefore,
             deathSaveSuccesses: t.deathSaveSuccessesBefore,
             deathSaveFailures: t.deathSaveFailuresBefore,
-            conditions: toJsonText(t.conditionsBefore),
+            // UNDO is the worst place to half-revert. Restoring only the names left the
+            // structured instance the action had added, which the next write re-derived
+            // into visibility — the DM undoes, watches the condition come back, and has no
+            // model for why. Roll both columns back together (see common/conditions.ts).
+            ...conditionWriteSetFromNames(t.conditionsBefore, fresh.conditionInstances),
             activeEffects: toJsonText(keptEffects),
           })
           .where(eq(combatants.id, fresh.id))

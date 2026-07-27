@@ -32,8 +32,8 @@ import { AiDmStreamService } from './ai-driver-stream.service';
 import { ProactiveService } from './proactive.service';
 import { DriverGroundingService } from './driver-grounding.service';
 import { projectGroundingVerdictForRole } from './driver-grounding';
-import { projectAiDmToolEventForRole } from './ai-dm-tool-resource';
-import { AiDmTranscriptService, projectTranscriptEventForRole } from './ai-driver-transcript.service';
+import { AiDmTranscriptService } from './ai-driver-transcript.service';
+import { projectAiDmStreamEventForRole } from './ai-driver-stream-projection';
 
 /** Player action submitted to the AI DM seat (POST /ai-dm/message). */
 const AiDmMessageRequest = z
@@ -616,20 +616,14 @@ export class AiDriverController {
     );
     return merge(
       this.stream.streamFor(id).pipe(
-        // #572: role redaction is enforced HERE, at the broadcast boundary. A withheld
-        // transcript event is DROPPED from this subscriber's stream entirely — a player is
-        // never handed a DM-only event and merely trusted not to render it.
-        map((event) => {
-          if (event.type !== 'transcript') return event;
-          const projected = projectTranscriptEventForRole(event.event, event.visibility, role);
-          // Strip the internal `visibility` hint: it never leaves the server.
-          return projected === null ? null : { type: 'transcript' as const, campaignId: event.campaignId, event: projected, at: event.at };
-        }),
+        // Role redaction is enforced HERE, at the broadcast boundary (#572), for EVERY frame
+        // type rather than the two that used to be named inline (#1552). A withheld frame is
+        // DROPPED from this subscriber's stream entirely — a player is never handed a DM-only
+        // event and merely trusted not to render it. `projectAiDmStreamEventForRole` fails
+        // closed: an unclassified frame type does not compile, and does not reach the wire.
+        map((event) => projectAiDmStreamEventForRole(event, role)),
         filter((event): event is NonNullable<typeof event> => event !== null),
-        map((event): MessageEvent => ({
-          // Role-project tool frames so hidden encounter ids never reach non-DMs (#825 / #262).
-          data: event.type === 'tool' ? projectAiDmToolEventForRole(event, role) : event,
-        })),
+        map((event): MessageEvent => ({ data: event })),
       ),
       interval(HEARTBEAT_MS).pipe(map((): MessageEvent => ({ data: { type: 'ping' } }))),
     ).pipe(takeUntil(closed));
