@@ -53,7 +53,7 @@ test.describe('print layouts (#667)', () => {
       await expect(page.getByTestId('character-sheet-panel-build').getByText('Background', { exact: true }).first()).toBeVisible();
       await expect(page.locator('.reading-surface')).toHaveScreenshot('character-sheet-print.png', {
         animations: 'disabled',
-        maxDiffPixelRatio: 0.05,
+        maxDiffPixelRatio: 0.02,
       });
 
       // Print chrome must not hide document/feature asides by element name.
@@ -86,7 +86,7 @@ test.describe('print layouts (#667)', () => {
       await expect(page.getByRole('heading', { name: 'Linked encounters' })).toBeHidden();
       await expect(page.locator('[data-entity-type="session"]')).toHaveScreenshot('session-recap-print.png', {
         animations: 'disabled',
-        maxDiffPixelRatio: 0.05,
+        maxDiffPixelRatio: 0.02,
       });
 
       await page.emulateMedia({ media: 'screen' });
@@ -94,6 +94,7 @@ test.describe('print layouts (#667)', () => {
       await expect(page.getByRole('button', { name: 'Print' })).toHaveCount(0);
       await page.emulateMedia({ media: 'print' });
       await expect(page.locator('.cf-print-editor')).toBeHidden();
+      await expect(page.locator('.cf-print-only').getByText('The party crossed the moon gate.')).toBeVisible();
     } finally {
       await context.close();
     }

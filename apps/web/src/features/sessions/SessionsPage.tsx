@@ -947,6 +947,7 @@ function SessionDetail({
       </div>
 
       {editing ? (
+        <>
         <Card className="cf-print-editor edit-recap-form min-w-0 space-y-3">
           {protectedRecap.restorePrompt}
           {protectedRecap.leavePrompt}
@@ -1098,6 +1099,16 @@ function SessionDetail({
             </div>
           </form>
         </Card>
+        {/* Browser print (Ctrl/Cmd+P) while editing should still yield the draft
+            recap rather than a blank page once the editor chrome is print-hidden. */}
+        <Card className="cf-print-only cf-print-paper min-w-0">
+          {recapDraft.trim() ? (
+            <Markdown>{recapDraft}</Markdown>
+          ) : (
+            <p className="text-sm">No recap written yet.</p>
+          )}
+        </Card>
+        </>
       ) : (
         <Card>
           {recapLoading ? (

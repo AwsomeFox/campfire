@@ -33,6 +33,10 @@
     display: none !important;
   }
 
+  .cf-print-only {
+    display: block !important;
+  }
+
   /* Both character panels remain mounted for accessible tab semantics; print
      needs the complete sheet, irrespective of which tab was active on screen. */
   #character-sheet-panel-play,
@@ -85,6 +89,11 @@
 /* Screen-only tab state. Avoid the native `hidden` attribute here because its
    user-agent/Tailwind rule would also suppress the panel in print. */
 .cf-character-sheet-panel-hidden {
+  display: none;
+}
+
+/* Content reserved for print (e.g. a read-only draft preview while editing). */
+.cf-print-only {
   display: none;
 }
 
