@@ -403,7 +403,9 @@ export function mapCreature(row: Record<string, unknown>): ImportedEntry {
     ...normalizedCreatureActions(row.special_abilities),
     ...normalizedCreatureActions(row.traits),
   ];
-  const defenses = row.resistances_and_immunities && typeof row.resistances_and_immunities === 'object'
+  const defenses = row.resistances_and_immunities &&
+    typeof row.resistances_and_immunities === 'object' &&
+    !Array.isArray(row.resistances_and_immunities)
     ? row.resistances_and_immunities as Record<string, unknown>
     : null;
   return {

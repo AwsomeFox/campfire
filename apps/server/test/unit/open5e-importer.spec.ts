@@ -105,4 +105,17 @@ describe('Open5e creature importer', () => {
       [],
     ).resistances).toEqual(['fire', 'cold']);
   });
+
+  it('rejects malformed array-shaped aggregate defenses and keeps direct fallbacks', () => {
+    const entry = mapCreature({
+      key: 'malformed-defenses',
+      name: 'Malformed defenses',
+      resistances_and_immunities: [{ damage_resistances: ['cold'] }],
+      damage_resistances: ['fire'],
+    });
+    const data = JSON.parse(entry.dataJson!);
+    expect(data.resistances_and_immunities).toBeNull();
+    expect(data.damage_resistances).toEqual(['fire']);
+    expect(damageDefensesFromStatblock(data, DND5E_DAMAGE_TYPES).resistances).toEqual(['fire']);
+  });
 });
