@@ -321,6 +321,97 @@ CREATE TABLE IF NOT EXISTS session_attendees (
   UNIQUE(session_id, character_id)
 );
 
+-- Organized play (issue #588): venues and their bookable rooms/tables.
+-- Deliberately NOT campaign-scoped — the entire point is that several campaigns
+-- share one room calendar, so a venue cannot hang off a single campaign. Nothing
+-- here is destroyed by a campaign purge; a purged campaign's bookings vanish with
+-- its scheduled_sessions rows and the room simply frees up.
+CREATE TABLE IF NOT EXISTS play_venues (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  timezone TEXT NOT NULL DEFAULT 'UTC',
+  address TEXT NOT NULL DEFAULT '',
+  notes TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS play_rooms (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  venue_id INTEGER NOT NULL REFERENCES play_venues(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  capacity INTEGER NOT NULL DEFAULT 0,
+  notes TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(venue_id, name)
+);
+
+-- A recurring run of game nights. The recurrence is stored as an IANA zone plus a
+-- LOCAL start date/time plus a rule — never as a first instant and a fixed stride —
+-- so "Tuesdays at 19:00 in America/New_York" stays 19:00 local across a DST flip.
+-- Occurrences are materialized into scheduled_sessions (see modules/sessions/
+-- organized-play.service.ts for why materialized beats on-the-fly expansion).
+CREATE TABLE IF NOT EXISTS session_series (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  title TEXT NOT NULL DEFAULT '',
+  location TEXT NOT NULL DEFAULT '',
+  notes TEXT NOT NULL DEFAULT '',
+  timezone TEXT NOT NULL DEFAULT 'UTC',
+  start_date TEXT NOT NULL,
+  start_time TEXT NOT NULL,
+  duration_minutes INTEGER NOT NULL DEFAULT 240,
+  freq TEXT NOT NULL DEFAULT 'weekly',
+  interval INTEGER NOT NULL DEFAULT 1,
+  count INTEGER NOT NULL DEFAULT 1,
+  until_date TEXT,
+  venue_id INTEGER REFERENCES play_venues(id) ON DELETE SET NULL,
+  room_id INTEGER REFERENCES play_rooms(id) ON DELETE SET NULL,
+  assigned_dm_user_id TEXT NOT NULL DEFAULT '',
+  capacity INTEGER NOT NULL DEFAULT 0,
+  event_id TEXT NOT NULL DEFAULT '',
+  season_id TEXT NOT NULL DEFAULT '',
+  series_uid TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+-- Append-only ledger of every per-occurrence deviation from the series rule:
+-- cancellations, reschedules (with both instants, so lineage is recorded rather
+-- than inferred from the surviving row) and room/DM reassignments.
+CREATE TABLE IF NOT EXISTS series_exceptions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  series_id INTEGER NOT NULL REFERENCES session_series(id) ON DELETE CASCADE,
+  occurrence_id INTEGER REFERENCES scheduled_sessions(id) ON DELETE SET NULL,
+  recurrence_local_date TEXT NOT NULL DEFAULT '',
+  kind TEXT NOT NULL,
+  from_scheduled_at TEXT,
+  to_scheduled_at TEXT,
+  to_local_start TEXT NOT NULL DEFAULT '',
+  reason TEXT NOT NULL DEFAULT '',
+  actor_user_id TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+
+-- Reusable blueprint applied in one call to create a whole block of tables.
+-- slots_json is a JSON array of ScheduleTemplateSlot (see packages/schema).
+CREATE TABLE IF NOT EXISTS schedule_templates (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  venue_id INTEGER REFERENCES play_venues(id) ON DELETE SET NULL,
+  timezone TEXT NOT NULL DEFAULT 'UTC',
+  freq TEXT NOT NULL DEFAULT 'weekly',
+  interval INTEGER NOT NULL DEFAULT 1,
+  count INTEGER NOT NULL DEFAULT 8,
+  event_id TEXT NOT NULL DEFAULT '',
+  season_id TEXT NOT NULL DEFAULT '',
+  slots_json TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS scheduled_sessions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
@@ -334,6 +425,21 @@ CREATE TABLE IF NOT EXISTS scheduled_sessions (
   cancelled_by TEXT,
   cancellation_reason TEXT NOT NULL DEFAULT '',
   session_id INTEGER REFERENCES sessions(id) ON DELETE SET NULL,
+  -- Organized-play decoration (issue #588). Every column defaults to
+  -- empty/absent, so a campaign that never opts in behaves exactly as before.
+  series_id INTEGER REFERENCES session_series(id) ON DELETE SET NULL,
+  occurrence_index INTEGER NOT NULL DEFAULT 0,
+  timezone TEXT NOT NULL DEFAULT '',
+  local_start TEXT NOT NULL DEFAULT '',
+  venue_id INTEGER REFERENCES play_venues(id) ON DELETE SET NULL,
+  room_id INTEGER REFERENCES play_rooms(id) ON DELETE SET NULL,
+  assigned_dm_user_id TEXT NOT NULL DEFAULT '',
+  capacity INTEGER NOT NULL DEFAULT 0,
+  event_id TEXT NOT NULL DEFAULT '',
+  season_id TEXT NOT NULL DEFAULT '',
+  ics_uid TEXT NOT NULL DEFAULT '',
+  ics_sequence INTEGER NOT NULL DEFAULT 0,
+  original_scheduled_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -1193,6 +1299,18 @@ CREATE INDEX IF NOT EXISTS idx_session_shares_expiry ON session_shares(expires_a
 CREATE INDEX IF NOT EXISTS idx_scheduled_sessions_campaign_at
   ON scheduled_sessions(campaign_id, scheduled_at, id);
 CREATE INDEX IF NOT EXISTS idx_session_rsvps_schedule ON session_rsvps(scheduled_session_id);
+-- #588: organized play. The coordinator calendar and every conflict probe are
+-- overlap scans over scheduled_at across ALL campaigns, so they cannot use the
+-- campaign-scoped index above.
+CREATE INDEX IF NOT EXISTS idx_scheduled_sessions_at ON scheduled_sessions(scheduled_at);
+CREATE INDEX IF NOT EXISTS idx_scheduled_sessions_room_at ON scheduled_sessions(room_id, scheduled_at);
+CREATE INDEX IF NOT EXISTS idx_scheduled_sessions_dm_at ON scheduled_sessions(assigned_dm_user_id, scheduled_at);
+CREATE INDEX IF NOT EXISTS idx_scheduled_sessions_series ON scheduled_sessions(series_id, occurrence_index);
+CREATE INDEX IF NOT EXISTS idx_play_rooms_venue ON play_rooms(venue_id);
+CREATE INDEX IF NOT EXISTS idx_session_series_campaign ON session_series(campaign_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_session_series_uid ON session_series(series_uid);
+CREATE INDEX IF NOT EXISTS idx_series_exceptions_series ON series_exceptions(series_id, id);
+CREATE INDEX IF NOT EXISTS idx_series_exceptions_occurrence ON series_exceptions(occurrence_id);
 CREATE INDEX IF NOT EXISTS idx_campaigns_ics_token ON campaigns(ics_token);
 -- #116: normal campaign listings filter deleted_at IS NULL; the trash view filters
 -- IS NOT NULL. Index it so both are index scans rather than full-table filters.

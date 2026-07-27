@@ -55,6 +55,52 @@ export function schedulePastSql(nowIso: string): SQL {
   return sql`(${scheduleEndedSql(nowIso)} OR NOT ${scheduleLiveSql()})`;
 }
 
+/**
+ * The effective lifecycle status as a SQL projection — the twin of
+ * SchedulingService.projectLink() for set-based reads (issue #588).
+ *
+ * Derived from scheduleLiveSql() rather than restating the rules, so a
+ * cross-campaign calendar can never disagree with the per-campaign Schedule tab
+ * (or with the reminder sweep) about whether a night is live. Reintroducing a
+ * raw `status = 'scheduled'` comparison anywhere is exactly what causes that drift.
+ */
+export function scheduleEffectiveStatusSql(): SQL<string> {
+  return sql`(CASE WHEN ${scheduleLiveSql()} THEN 'scheduled' ELSE ${scheduledSessions.status} END)`;
+}
+
+/**
+ * True for rows that have opted into the SHARED organized-play resource pool
+ * (issue #588): they hold a room or venue, belong to a series, or carry an event key.
+ *
+ * This predicate is the privacy boundary for every cross-campaign read. A private
+ * home game that never touches venues/series is invisible to the coordinator
+ * calendar and to conflict detection — not merely redacted, but absent — so
+ * shipping this feature cannot make an existing campaign's mere *existence* at
+ * 7pm on Tuesday observable to a stranger. The cost is that a collision with a
+ * purely private night goes unreported; that is the right trade, because nobody
+ * outside that campaign is competing for its (nonexistent) shared resource.
+ */
+export function scheduleOrganizedPlaySql(): SQL {
+  return sql`(
+    ${scheduledSessions.roomId} IS NOT NULL
+    OR ${scheduledSessions.venueId} IS NOT NULL
+    OR ${scheduledSessions.seriesId} IS NOT NULL
+    OR ${scheduledSessions.eventId} != ''
+  )`;
+}
+
+/**
+ * True when the row's [start, end) window overlaps [`startIso`, `endIso`).
+ * Half-open on both sides: a night that ends exactly when another starts does NOT
+ * conflict, which is what back-to-back organized-play slots depend on.
+ */
+export function scheduleOverlapsSql(startIso: string, endIso: string): SQL {
+  return sql`(
+    julianday(${scheduledSessions.scheduledAt}) < julianday(${endIso})
+    AND ${scheduleEndJulianSql()} > julianday(${startIso})
+  )`;
+}
+
 /** True once scheduledAt + durationMinutes has passed. */
 export function scheduleEndedSql(nowIso: string): SQL {
   return sql`${scheduleEndJulianSql()} <= julianday(${nowIso})`;

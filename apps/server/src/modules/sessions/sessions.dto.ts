@@ -14,7 +14,21 @@ import {
   SessionShareCreate,
   SessionShareUpdate,
   SessionSharePolicyUpdate,
+  PlayVenueCreate,
+  PlayVenueUpdate,
+  PlayRoomCreate,
+  PlayRoomUpdate,
+  SessionSeriesCreate,
+  SessionSeriesUpdate,
+  SessionSeriesExtend,
+  SessionSeriesCancel,
+  OccurrenceReschedule,
+  OccurrenceReassign,
+  ScheduleConflictQuery,
+  ScheduleTemplateCreate,
+  ScheduleTemplateApply,
 } from '@campfire/schema';
+import { z } from 'zod';
 
 // .strict() at the DTO layer only (shared exports stay lenient for mcp-tools.ts /
 // proposals.service.ts — see encounters.dto.ts): an unrecognized body key 400s
@@ -40,3 +54,24 @@ export class RsvpSetDto extends createZodDto(
 export class SessionShareCreateDto extends createZodDto(SessionShareCreate.strict()) {}
 export class SessionShareUpdateDto extends createZodDto(SessionShareUpdate) {}
 export class SessionSharePolicyUpdateDto extends createZodDto(SessionSharePolicyUpdate.strict()) {}
+
+// ---------- organized play (issue #588) ----------
+export class PlayVenueCreateDto extends createZodDto(PlayVenueCreate.strict()) {}
+export class PlayVenueUpdateDto extends createZodDto(PlayVenueUpdate.strict()) {}
+export class PlayRoomCreateDto extends createZodDto(PlayRoomCreate.strict()) {}
+export class PlayRoomUpdateDto extends createZodDto(PlayRoomUpdate.strict()) {}
+// `force` is a request-time coordinator override, not part of the stored series,
+// so it is added at the DTO layer exactly like expectedUpdatedAt above.
+export class SessionSeriesCreateDto extends createZodDto(
+  SessionSeriesCreate.extend({ force: z.boolean().default(false) }).strict(),
+) {}
+export class SessionSeriesUpdateDto extends createZodDto(SessionSeriesUpdate.strict()) {}
+export class SessionSeriesExtendDto extends createZodDto(
+  SessionSeriesExtend.extend({ force: z.boolean().default(false) }).strict(),
+) {}
+export class SessionSeriesCancelDto extends createZodDto(SessionSeriesCancel.strict().default({})) {}
+export class OccurrenceRescheduleDto extends createZodDto(OccurrenceReschedule.strict()) {}
+export class OccurrenceReassignDto extends createZodDto(OccurrenceReassign.strict()) {}
+export class ScheduleConflictQueryDto extends createZodDto(ScheduleConflictQuery.strict()) {}
+export class ScheduleTemplateCreateDto extends createZodDto(ScheduleTemplateCreate.strict()) {}
+export class ScheduleTemplateApplyDto extends createZodDto(ScheduleTemplateApply.strict()) {}

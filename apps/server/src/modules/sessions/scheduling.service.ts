@@ -13,13 +13,15 @@ import {
   scheduleNotificationFallbackTitle,
   scheduleNotificationFallbackBody,
   scheduleNotificationLabel,
+  isValidIanaTimeZone,
+  utcToLocalDateTime,
   type ScheduleNotificationData,
 } from '@campfire/schema';
 import type { ScheduledSession, ScheduledSessionWithRsvps, ScheduledSessionListPage, SessionRsvp, CalendarFeed, Role, PageParams } from '@campfire/schema';
 import { SCHEDULE_PAST_DEFAULT_LIMIT, SCHEDULE_PAST_MAX_LIMIT } from '@campfire/schema';
 import { applyPage } from '../../common/pagination';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { scheduledSessions, sessionRsvps, campaigns, sessions, notificationReminders } from '../../db/schema';
+import { scheduledSessions, sessionRsvps, campaigns, sessions, notificationReminders, seriesExceptions } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { generateIcsFeedToken, looksLikeIcsFeedToken } from '../../common/crypto';
@@ -32,7 +34,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
-import { buildCampaignIcs } from './ics.util';
+import { buildCampaignIcs, legacyIcsUid } from './ics.util';
 import {
   scheduleInProgressSql,
   scheduleLiveSql,
@@ -79,7 +81,12 @@ export type LinkSessionOutcome = { campaignId: number; linked: boolean; wasPrevi
 /** Result of the row-level half of a schedule↔session unlink (#504). */
 export type UnlinkSessionOutcome = { campaignId: number; scheduleIds: number[] };
 
-function toDomain(row: typeof scheduledSessions.$inferSelect): ScheduledSession {
+/**
+ * Row -> API shape. Exported (issue #588) so the organized-play layer projects
+ * occurrences through exactly the same mapper the Schedule tab uses — a second
+ * hand-written mapper is how two views of one row start disagreeing.
+ */
+export function scheduledSessionToDomain(row: typeof scheduledSessions.$inferSelect): ScheduledSession {
   return {
     id: row.id,
     campaignId: row.campaignId,
@@ -93,10 +100,27 @@ function toDomain(row: typeof scheduledSessions.$inferSelect): ScheduledSession 
     cancelledBy: row.cancelledBy,
     cancellationReason: row.cancellationReason,
     sessionId: row.sessionId,
+    // Organized-play decoration (#588) — empty/absent on every row that never
+    // opted in, which is what keeps this feature invisible to existing tables.
+    seriesId: row.seriesId,
+    occurrenceIndex: row.occurrenceIndex,
+    timezone: row.timezone,
+    localStart: row.localStart,
+    venueId: row.venueId,
+    roomId: row.roomId,
+    assignedDmUserId: row.assignedDmUserId,
+    capacity: row.capacity,
+    eventId: row.eventId,
+    seasonId: row.seasonId,
+    icsUid: row.icsUid,
+    icsSequence: row.icsSequence,
+    originalScheduledAt: row.originalScheduledAt,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
 }
+
+const toDomain = scheduledSessionToDomain;
 
 function rsvpToDomain(row: typeof sessionRsvps.$inferSelect): SessionRsvp {
   return {
@@ -491,19 +515,39 @@ export class SchedulingService {
 
   async create(campaignId: number, input: ScheduledSessionCreateInput, user: RequestUser, role: Role): Promise<ScheduledSessionWithRsvps> {
     const ts = nowIso();
-    const [row] = await this.db
-      .insert(scheduledSessions)
-      .values({
-        campaignId,
-        scheduledAt: this.normalizeScheduledAt(input.scheduledAt),
-        durationMinutes: input.durationMinutes ?? 240,
-        title: input.title ?? '',
-        location: input.location ?? '',
-        notes: input.notes ?? '',
-        createdAt: ts,
-        updatedAt: ts,
-      })
-      .returning();
+    const scheduledAt = this.normalizeScheduledAt(input.scheduledAt);
+    // Issue #588: an explicit IANA zone is optional metadata on a ONE-OFF night —
+    // the instant stays authoritative and `localStart` is derived from it, so the
+    // two can never contradict each other. Recurring series are the opposite way
+    // round (wall clock authoritative, instant derived) because only a wall clock
+    // survives a DST transition; see OrganizedPlayService.
+    const timezone = input.timezone && isValidIanaTimeZone(input.timezone) ? input.timezone : '';
+    const localStart = timezone ? utcToLocalDateTime(scheduledAt, timezone) : '';
+    // The UID must exist before the row is readable, and it needs the row id, so
+    // insert + stamp commit together. The string is byte-identical to the UID the
+    // ICS feed emitted before #588, so subscribers see an update, never a new event.
+    const row = this.db.transaction((tx) => {
+      const [inserted] = tx
+        .insert(scheduledSessions)
+        .values({
+          campaignId,
+          scheduledAt,
+          durationMinutes: input.durationMinutes ?? 240,
+          title: input.title ?? '',
+          location: input.location ?? '',
+          notes: input.notes ?? '',
+          timezone,
+          localStart,
+          originalScheduledAt: scheduledAt,
+          createdAt: ts,
+          updatedAt: ts,
+        })
+        .returning()
+        .all();
+      const icsUid = legacyIcsUid(campaignId, inserted.id);
+      tx.update(scheduledSessions).set({ icsUid }).where(eq(scheduledSessions.id, inserted.id)).run();
+      return { ...inserted, icsUid };
+    });
 
     await this.audit.log({
       actor: auditActor(user),
@@ -559,9 +603,27 @@ export class SchedulingService {
       location: patch.location ?? existing.location,
       notes: patch.notes ?? existing.notes,
     };
+    // Issue #588: bump the RFC 5545 SEQUENCE whenever a field a calendar client
+    // renders actually changed, and keep the local wall clock in step with the
+    // instant when the row carries an explicit zone. Only on a real change — a
+    // no-op PATCH must not push a fresh SEQUENCE at every subscriber.
+    const calendarFieldChanged =
+      next.scheduledAt !== existing.scheduledAt
+      || next.durationMinutes !== existing.durationMinutes
+      || next.title !== existing.title
+      || next.location !== existing.location;
+    const localStartPatch =
+      next.scheduledAt !== existing.scheduledAt && existing.timezone
+        ? { localStart: utcToLocalDateTime(next.scheduledAt, existing.timezone) }
+        : {};
     const updated = await this.db
       .update(scheduledSessions)
-      .set({ ...patch, updatedAt: nextUpdatedAt(existing.updatedAt) })
+      .set({
+        ...patch,
+        ...localStartPatch,
+        ...(calendarFieldChanged ? { icsSequence: existing.icsSequence + 1 } : {}),
+        updatedAt: nextUpdatedAt(existing.updatedAt),
+      })
       .where(
         opts?.expectedUpdatedAt
           ? and(eq(scheduledSessions.id, id), eq(scheduledSessions.updatedAt, opts.expectedUpdatedAt))
@@ -630,6 +692,9 @@ export class SchedulingService {
         cancelledAt: ts,
         cancelledBy: user.id,
         cancellationReason: reason,
+        // #588: a cancellation is published as STATUS:CANCELLED under the SAME
+        // UID, so it needs a higher SEQUENCE or subscribers keep the live copy.
+        icsSequence: existing.icsSequence + 1,
         updatedAt: ts,
       })
       .where(eq(scheduledSessions.id, id));
@@ -689,6 +754,9 @@ export class SchedulingService {
           cancelledAt: null,
           cancelledBy: null,
           cancellationReason: '',
+          // #588: un-cancelling is another update a subscriber must apply on top
+          // of the STATUS:CANCELLED copy it already holds, so SEQUENCE advances.
+          icsSequence: existing.icsSequence + 1,
           updatedAt: ts,
         })
         .where(eq(scheduledSessions.id, id))
@@ -696,6 +764,26 @@ export class SchedulingService {
       tx.delete(notificationReminders)
         .where(eq(notificationReminders.scheduledSessionId, id))
         .run();
+      // #588: an occurrence's exception ledger is append-only, so an un-cancel is
+      // recorded rather than expressed by deleting the earlier `cancel` entry.
+      // Without this a restored night would read, forever, as still cancelled in
+      // the lineage the coordinator audits from.
+      if (existing.seriesId != null) {
+        tx.insert(seriesExceptions)
+          .values({
+            seriesId: existing.seriesId,
+            occurrenceId: id,
+            recurrenceLocalDate: existing.localStart.slice(0, 10),
+            kind: 'restore',
+            fromScheduledAt: existing.scheduledAt,
+            toScheduledAt: existing.scheduledAt,
+            toLocalStart: existing.localStart,
+            reason: '',
+            actorUserId: user.id,
+            createdAt: ts,
+          })
+          .run();
+      }
     });
     await this.audit.log({
       actor: auditActor(user),

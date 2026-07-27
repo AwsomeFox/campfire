@@ -36,6 +36,14 @@ import { ActionSpec } from './action-resolver';
 import { CharacterAction } from './character-action';
 import { CombatantStatblock } from './combatant-statblock';
 import { NarrationLanguage } from './narration-language';
+import {
+  MAX_SERIES_OCCURRENCES,
+  RECURRENCE_FREQS,
+  isLocalDate,
+  isLocalDateTime,
+  isLocalTime,
+  isValidIanaTimeZone,
+} from './recurrence';
 // Structured action resolver (issue #414): data model + pure, system-aware resolution math.
 // Re-exported so server / MCP / web import it from '@campfire/schema' alongside everything else.
 export * from './action-resolver';
@@ -1138,6 +1146,52 @@ const IsoDateTime = z
   .max(40)
   .refine((v) => !Number.isNaN(Date.parse(v)), 'expected an ISO-8601 date-time'); // normalized to UTC server-side
 
+/**
+ * Organized-play scheduling fields (issue #588).
+ *
+ * A scheduled session IS the occurrence: rather than fork a parallel
+ * "occurrence" table, the organized-play layer decorates the existing row, so
+ * RSVPs, reminders, the ICS feed and the schedule↔recap link keep working
+ * unchanged. Every field defaults to an empty/absent value, so a campaign that
+ * never opts into venues or series is byte-for-byte the same as before.
+ */
+const organizedPlayScheduleFields = {
+  /** Parent recurring series, or null for a one-off night. */
+  seriesId: Id.nullable().default(null),
+  /** 0-based position within the parent series (the recurrence identity). */
+  occurrenceIndex: z.number().int().min(0).default(0),
+  /**
+   * IANA zone this night's wall clock is expressed in. '' = legacy row with no
+   * explicit zone; clients then localize the UTC instant to the viewer, exactly
+   * as they did before #588.
+   */
+  timezone: z.string().max(64).default(''),
+  /** `YYYY-MM-DDTHH:MM` wall clock in `timezone`. '' when `timezone` is ''. */
+  localStart: z.string().max(20).default(''),
+  venueId: Id.nullable().default(null),
+  /** Booked room/table. Null = no room resource (free-text `location` only). */
+  roomId: Id.nullable().default(null),
+  /** Running DM for this table. '' = unassigned. Same id space as Note.authorUserId. */
+  assignedDmUserId: z.string().max(120).default(''),
+  /** Seat capacity. 0 = unlimited (and the pre-#588 behaviour). */
+  capacity: z.number().int().min(0).max(1000).default(0),
+  /** Organized-play event / season grouping keys. '' = ungrouped. */
+  eventId: z.string().max(80).default(''),
+  seasonId: z.string().max(80).default(''),
+  /**
+   * Stable RFC 5545 UID. Survives reschedules and updates so a subscribed
+   * calendar rewrites the event in place instead of accumulating ghosts.
+   * '' on rows written before #588 — the ICS emitter then derives the legacy
+   * `campfire-c<campaign>-s<id>` UID, which is the same string those
+   * subscribers already hold.
+   */
+  icsUid: z.string().max(200).default(''),
+  /** RFC 5545 SEQUENCE, bumped on every change a calendar client must re-apply. */
+  icsSequence: z.number().int().min(0).default(0),
+  /** First materialized instant, retained across reschedules as lineage. */
+  originalScheduledAt: IsoDateTime.nullable().default(null),
+};
+
 export const ScheduledSession = z.object({
   id: Id,
   campaignId: Id,
@@ -1153,9 +1207,33 @@ export const ScheduledSession = z.object({
   cancelledBy: z.string().max(120).nullable().default(null),
   cancellationReason: z.string().max(1000).default(''),
   sessionId: Id.nullable().default(null),
+  ...organizedPlayScheduleFields,
   ...timestamps,
 });
 export type ScheduledSession = z.infer<typeof ScheduledSession>;
+
+/**
+ * Organized-play fields are server-owned: they are set by series materialization
+ * and by the dedicated assignment/reschedule endpoints (which run conflict
+ * checks first), never by a raw schedule create/update body. Omitting them keeps
+ * `POST /campaigns/:id/schedule` from accepting a `seriesId` that would silently
+ * adopt a night into someone else's series, or a `roomId` that skipped its
+ * double-booking check.
+ */
+const ORGANIZED_PLAY_OMIT = {
+  seriesId: true,
+  occurrenceIndex: true,
+  venueId: true,
+  roomId: true,
+  assignedDmUserId: true,
+  capacity: true,
+  eventId: true,
+  seasonId: true,
+  icsUid: true,
+  icsSequence: true,
+  originalScheduledAt: true,
+} as const;
+
 export const ScheduledSessionCreate = ScheduledSession.omit({
   id: true,
   campaignId: true,
@@ -1166,6 +1244,10 @@ export const ScheduledSessionCreate = ScheduledSession.omit({
   sessionId: true,
   createdAt: true,
   updatedAt: true,
+  ...ORGANIZED_PLAY_OMIT,
+  // `localStart` is derived server-side from `scheduledAt` + `timezone`; a caller
+  // supplying both could assert a wall clock that contradicts the instant.
+  localStart: true,
 })
   .partial()
   .required({ scheduledAt: true })
@@ -1234,6 +1316,395 @@ export const ScheduledSessionListPage = z.object({
   offset: z.number().int().nonnegative(),
 });
 export type ScheduledSessionListPage = z.infer<typeof ScheduledSessionListPage>;
+
+// ---------- organized play: venues, rooms, series, conflicts (issue #588) ----------
+// Wall-clock/recurrence math lives in ./recurrence so it can be unit-tested with
+// no DB and reused by any surface that has to reason about a series.
+export * from './recurrence';
+
+/** A recognized IANA zone, validated against this runtime's ICU data. */
+export const IanaTimeZone = z
+  .string()
+  .trim()
+  .min(1)
+  .max(64)
+  .refine(isValidIanaTimeZone, 'expected an IANA time zone (e.g. America/New_York)');
+
+/** `YYYY-MM-DD` calendar date in some zone — deliberately not an instant. */
+export const LocalDateString = z.string().trim().max(10).refine(isLocalDate, 'expected a YYYY-MM-DD local date');
+/** `HH:MM` 24-hour wall clock in some zone. */
+export const LocalTimeString = z.string().trim().max(5).refine(isLocalTime, 'expected an HH:MM local time');
+/** `YYYY-MM-DDTHH:MM` wall clock in some zone. */
+export const LocalDateTimeString = z
+  .string()
+  .trim()
+  .max(16)
+  .refine(isLocalDateTime, 'expected a YYYY-MM-DDTHH:MM local date-time');
+
+/**
+ * A physical (or virtual) place organized play happens. Install-level, not
+ * campaign-scoped: the whole point is that several campaigns share one room
+ * calendar, so a venue cannot hang off a single campaign.
+ */
+export const PlayVenue = z.object({
+  id: Id,
+  name: z.string().trim().min(1).max(120),
+  /** Default zone for series booked here. Rooms inherit it. */
+  timezone: IanaTimeZone,
+  address: z.string().max(300).default(''),
+  notes: z.string().max(2000).default(''),
+  ...timestamps,
+});
+export type PlayVenue = z.infer<typeof PlayVenue>;
+export const PlayVenueCreate = PlayVenue.omit({ id: true, createdAt: true, updatedAt: true }).partial({
+  address: true,
+  notes: true,
+});
+export type PlayVenueCreate = z.infer<typeof PlayVenueCreate>;
+export const PlayVenueUpdate = PlayVenueCreate.partial();
+export type PlayVenueUpdate = z.infer<typeof PlayVenueUpdate>;
+
+/** One bookable table/room inside a venue. `capacity` 0 = unlimited. */
+export const PlayRoom = z.object({
+  id: Id,
+  venueId: Id,
+  name: z.string().trim().min(1).max(120),
+  capacity: z.number().int().min(0).max(1000).default(0),
+  notes: z.string().max(2000).default(''),
+  ...timestamps,
+});
+export type PlayRoom = z.infer<typeof PlayRoom>;
+export const PlayRoomCreate = PlayRoom.omit({ id: true, venueId: true, createdAt: true, updatedAt: true }).partial({
+  capacity: true,
+  notes: true,
+});
+export type PlayRoomCreate = z.infer<typeof PlayRoomCreate>;
+export const PlayRoomUpdate = PlayRoomCreate.partial();
+export type PlayRoomUpdate = z.infer<typeof PlayRoomUpdate>;
+
+export const PlayVenueWithRooms = PlayVenue.extend({ rooms: z.array(PlayRoom) });
+export type PlayVenueWithRooms = z.infer<typeof PlayVenueWithRooms>;
+
+export const RecurrenceFreqEnum = z.enum(RECURRENCE_FREQS);
+export type RecurrenceFreqEnum = z.infer<typeof RecurrenceFreqEnum>;
+
+/**
+ * A recurring run of game nights.
+ *
+ * The recurrence is stored as (IANA zone + local start date + local start time +
+ * rule), NOT as a first instant plus a fixed millisecond stride. That is the
+ * whole DST story: "Tuesdays at 19:00 America/New_York" must stay 19:00 local
+ * when the offset flips, and only a wall clock can say that.
+ */
+export const SessionSeries = z.object({
+  id: Id,
+  campaignId: Id,
+  title: z.string().max(200).default(''),
+  location: z.string().max(200).default(''),
+  notes: z.string().max(5000).default(''),
+  timezone: IanaTimeZone,
+  startDate: LocalDateString,
+  startTime: LocalTimeString,
+  durationMinutes: z.number().int().min(15).max(24 * 60).default(240),
+  freq: RecurrenceFreqEnum,
+  interval: z.number().int().min(1).max(52).default(1),
+  count: z.number().int().min(1).max(MAX_SERIES_OCCURRENCES).default(1),
+  untilDate: LocalDateString.nullable().default(null),
+  venueId: Id.nullable().default(null),
+  roomId: Id.nullable().default(null),
+  assignedDmUserId: z.string().max(120).default(''),
+  capacity: z.number().int().min(0).max(1000).default(0),
+  eventId: z.string().max(80).default(''),
+  seasonId: z.string().max(80).default(''),
+  /** Stable UID root shared by every occurrence's ICS UID. Server-assigned. */
+  seriesUid: z.string().max(120),
+  status: z.enum(['active', 'cancelled']).default('active'),
+  ...timestamps,
+});
+export type SessionSeries = z.infer<typeof SessionSeries>;
+
+export const SessionSeriesCreate = SessionSeries.omit({
+  id: true,
+  campaignId: true,
+  seriesUid: true,
+  status: true,
+  createdAt: true,
+  updatedAt: true,
+}).partial({
+  title: true,
+  location: true,
+  notes: true,
+  durationMinutes: true,
+  interval: true,
+  count: true,
+  untilDate: true,
+  venueId: true,
+  roomId: true,
+  assignedDmUserId: true,
+  capacity: true,
+  eventId: true,
+  seasonId: true,
+});
+export type SessionSeriesCreate = z.infer<typeof SessionSeriesCreate>;
+
+/**
+ * Series-level edits. Deliberately excludes the recurrence rule: changing
+ * "when" on a live series would have to reconcile every materialized occurrence
+ * against its exceptions, and the honest operation for that is cancelling the
+ * series and creating a new one. Metadata edits fan out to future occurrences
+ * that carry no per-occurrence override.
+ */
+export const SessionSeriesUpdate = z.object({
+  title: z.string().max(200).optional(),
+  location: z.string().max(200).optional(),
+  notes: z.string().max(5000).optional(),
+  roomId: Id.nullable().optional(),
+  assignedDmUserId: z.string().max(120).optional(),
+  capacity: z.number().int().min(0).max(1000).optional(),
+  eventId: z.string().max(80).optional(),
+  seasonId: z.string().max(80).optional(),
+});
+export type SessionSeriesUpdate = z.infer<typeof SessionSeriesUpdate>;
+
+/** Materialize `addCount` more occurrences past the end of an existing series. */
+export const SessionSeriesExtend = z.object({
+  addCount: z.number().int().min(1).max(MAX_SERIES_OCCURRENCES),
+});
+export type SessionSeriesExtend = z.infer<typeof SessionSeriesExtend>;
+
+export const SessionSeriesCancel = z.object({ reason: z.string().max(1000).optional() });
+export type SessionSeriesCancel = z.infer<typeof SessionSeriesCancel>;
+
+/**
+ * Append-only ledger of everything that happened to a single occurrence after it
+ * was materialized. This is what makes "per-occurrence exceptions, cancellations
+ * and reschedule lineage" auditable rather than inferred from the current row.
+ */
+export const SeriesExceptionKind = z.enum(['cancel', 'reschedule', 'reassign', 'restore']);
+export type SeriesExceptionKind = z.infer<typeof SeriesExceptionKind>;
+
+export const SeriesException = z.object({
+  id: Id,
+  seriesId: Id,
+  occurrenceId: Id.nullable().default(null),
+  /** The occurrence's ORIGINAL local date — the RFC 5545 RECURRENCE-ID analogue. */
+  recurrenceLocalDate: z.string().max(10).default(''),
+  kind: SeriesExceptionKind,
+  fromScheduledAt: IsoDateTime.nullable().default(null),
+  toScheduledAt: IsoDateTime.nullable().default(null),
+  toLocalStart: z.string().max(20).default(''),
+  reason: z.string().max(1000).default(''),
+  actorUserId: z.string().max(120).default(''),
+  createdAt: IsoDate,
+});
+export type SeriesException = z.infer<typeof SeriesException>;
+
+export const SessionSeriesWithOccurrences = SessionSeries.extend({
+  occurrences: z.array(ScheduledSession),
+  exceptions: z.array(SeriesException),
+});
+export type SessionSeriesWithOccurrences = z.infer<typeof SessionSeriesWithOccurrences>;
+
+/** Move ONE occurrence without disturbing the rest of its series. */
+export const OccurrenceReschedule = z.object({
+  /** New wall clock. Combined with the occurrence's zone (or `timezone`). */
+  localStart: LocalDateTimeString.optional(),
+  timezone: IanaTimeZone.optional(),
+  /** Alternative to localStart for callers that already have an instant. */
+  scheduledAt: IsoDateTime.optional(),
+  durationMinutes: z.number().int().min(15).max(24 * 60).optional(),
+  roomId: Id.nullable().optional(),
+  reason: z.string().max(1000).optional(),
+  /** Book anyway despite reported conflicts (coordinator override). */
+  force: z.boolean().default(false),
+});
+export type OccurrenceReschedule = z.infer<typeof OccurrenceReschedule>;
+
+/** Re-seat one occurrence: different room, different running DM, different capacity. */
+export const OccurrenceReassign = z.object({
+  roomId: Id.nullable().optional(),
+  assignedDmUserId: z.string().max(120).optional(),
+  capacity: z.number().int().min(0).max(1000).optional(),
+  reason: z.string().max(1000).optional(),
+  force: z.boolean().default(false),
+});
+export type OccurrenceReassign = z.infer<typeof OccurrenceReassign>;
+
+export const ScheduleConflictKind = z.enum(['room', 'dm', 'member']);
+export type ScheduleConflictKind = z.infer<typeof ScheduleConflictKind>;
+
+/**
+ * One reason a proposed booking cannot go ahead.
+ *
+ * PRIVACY: `campaignId`, `campaignName`, `scheduleId` and `title` are populated
+ * ONLY when the caller can already read that campaign. A coordinator who cannot
+ * still learns that the resource is taken and for how long — which is the whole
+ * point of a shared room — but learns nothing about whose game it is. `visible`
+ * says which of the two shapes this is, so a client never has to guess whether a
+ * null means "redacted" or "genuinely absent".
+ */
+export const ScheduleConflict = z.object({
+  kind: ScheduleConflictKind,
+  /** True when the caller may see the conflicting campaign's identity. */
+  visible: z.boolean(),
+  startsAt: IsoDateTime,
+  endsAt: IsoDateTime,
+  roomId: Id.nullable().default(null),
+  roomName: z.string().max(120).default(''),
+  venueName: z.string().max(120).default(''),
+  /** Which subject collided: the DM's or the member's user id (never redacted — the caller supplied it). */
+  subjectUserId: z.string().max(120).default(''),
+  campaignId: Id.nullable().default(null),
+  campaignName: z.string().max(200).nullable().default(null),
+  scheduleId: Id.nullable().default(null),
+  title: z.string().max(200).nullable().default(null),
+});
+export type ScheduleConflict = z.infer<typeof ScheduleConflict>;
+
+/** Ask "would this booking collide?" without writing anything. */
+export const ScheduleConflictQuery = z.object({
+  scheduledAt: IsoDateTime.optional(),
+  localStart: LocalDateTimeString.optional(),
+  timezone: IanaTimeZone.optional(),
+  durationMinutes: z.number().int().min(1).max(24 * 60).default(240),
+  roomId: Id.nullable().default(null),
+  assignedDmUserId: z.string().max(120).default(''),
+  memberUserIds: z.array(z.string().max(120)).max(50).default([]),
+  /** Ignore this occurrence when checking (used when editing it in place). */
+  excludeScheduleId: Id.optional(),
+});
+export type ScheduleConflictQuery = z.infer<typeof ScheduleConflictQuery>;
+
+export const ScheduleConflictReport = z.object({
+  scheduledAt: IsoDateTime,
+  endsAt: IsoDateTime,
+  conflicts: z.array(ScheduleConflict),
+});
+export type ScheduleConflictReport = z.infer<typeof ScheduleConflictReport>;
+
+/**
+ * One row of the cross-campaign coordinator calendar. Same privacy rule as
+ * ScheduleConflict: a night in a campaign the caller cannot read is reported as
+ * an opaque busy block against its room/DM, never with its title or campaign.
+ */
+export const CoordinatorCalendarEntry = z.object({
+  visible: z.boolean(),
+  startsAt: IsoDateTime,
+  endsAt: IsoDateTime,
+  status: z.enum(['scheduled', 'cancelled', 'completed']),
+  timezone: z.string().max(64).default(''),
+  localStart: z.string().max(20).default(''),
+  venueId: Id.nullable().default(null),
+  venueName: z.string().max(120).default(''),
+  roomId: Id.nullable().default(null),
+  roomName: z.string().max(120).default(''),
+  capacity: z.number().int().min(0).default(0),
+  seatsTaken: z.number().int().min(0).default(0),
+  eventId: z.string().max(80).default(''),
+  seasonId: z.string().max(80).default(''),
+  assignedDmUserId: z.string().max(120).default(''),
+  scheduleId: Id.nullable().default(null),
+  campaignId: Id.nullable().default(null),
+  campaignName: z.string().max(200).nullable().default(null),
+  title: z.string().max(200).nullable().default(null),
+  seriesId: Id.nullable().default(null),
+});
+export type CoordinatorCalendarEntry = z.infer<typeof CoordinatorCalendarEntry>;
+
+export const CoordinatorCalendar = z.object({
+  from: IsoDateTime,
+  to: IsoDateTime,
+  entries: z.array(CoordinatorCalendarEntry),
+});
+export type CoordinatorCalendar = z.infer<typeof CoordinatorCalendar>;
+
+/**
+ * A reusable blueprint for a block of organized-play tables — "Tuesday 19:00 in
+ * the Blue Room, Thursday 19:00 in the Red Room, 8 weeks" — applied in one call
+ * to create every series at once.
+ */
+export const ScheduleTemplateSlot = z.object({
+  /** 0 = Sunday … 6 = Saturday. The template anchors to the next matching date. */
+  weekday: z.number().int().min(0).max(6),
+  startTime: LocalTimeString,
+  durationMinutes: z.number().int().min(15).max(24 * 60).default(240),
+  roomId: Id.nullable().default(null),
+  assignedDmUserId: z.string().max(120).default(''),
+  capacity: z.number().int().min(0).max(1000).default(0),
+  title: z.string().max(200).default(''),
+});
+export type ScheduleTemplateSlot = z.infer<typeof ScheduleTemplateSlot>;
+
+export const ScheduleTemplate = z.object({
+  id: Id,
+  name: z.string().trim().min(1).max(120),
+  venueId: Id.nullable().default(null),
+  timezone: IanaTimeZone,
+  freq: RecurrenceFreqEnum.default('weekly'),
+  interval: z.number().int().min(1).max(52).default(1),
+  count: z.number().int().min(1).max(MAX_SERIES_OCCURRENCES).default(8),
+  eventId: z.string().max(80).default(''),
+  seasonId: z.string().max(80).default(''),
+  slots: z.array(ScheduleTemplateSlot).min(1).max(20),
+  ...timestamps,
+});
+export type ScheduleTemplate = z.infer<typeof ScheduleTemplate>;
+
+export const ScheduleTemplateCreate = ScheduleTemplate.omit({ id: true, createdAt: true, updatedAt: true }).partial({
+  venueId: true,
+  freq: true,
+  interval: true,
+  count: true,
+  eventId: true,
+  seasonId: true,
+});
+export type ScheduleTemplateCreate = z.infer<typeof ScheduleTemplateCreate>;
+
+/** Instantiate a template into a campaign, starting on/after `startDate`. */
+export const ScheduleTemplateApply = z.object({
+  campaignId: Id,
+  startDate: LocalDateString,
+  /** Override the template's occurrence count for this application. */
+  count: z.number().int().min(1).max(MAX_SERIES_OCCURRENCES).optional(),
+  /**
+   * Rotate DMs across the generated slots. When non-empty this overrides each
+   * slot's `assignedDmUserId`, cycling through the list slot by slot — the
+   * organized-play "rotating DM" pattern.
+   */
+  dmRotation: z.array(z.string().max(120)).max(50).default([]),
+  eventId: z.string().max(80).optional(),
+  seasonId: z.string().max(80).optional(),
+  /** Create the series even where occurrences collide with existing bookings. */
+  force: z.boolean().default(false),
+});
+export type ScheduleTemplateApply = z.infer<typeof ScheduleTemplateApply>;
+
+export const ScheduleTemplateApplyResult = z.object({
+  templateId: Id,
+  campaignId: Id,
+  series: z.array(SessionSeries),
+  occurrencesCreated: z.number().int().nonnegative(),
+  /** Conflicts detected during the bulk create (reported even when forced). */
+  conflicts: z.array(ScheduleConflict),
+});
+export type ScheduleTemplateApplyResult = z.infer<typeof ScheduleTemplateApplyResult>;
+
+/**
+ * Non-destructive read joining an occurrence to the play log it produced and the
+ * characters recorded present. Nothing here writes: the occurrence keeps its own
+ * lifecycle, the recap keeps its own attendance rows, and this view simply reads
+ * across the existing link.
+ */
+export const OccurrenceAttendance = z.object({
+  scheduleId: Id,
+  sessionId: Id.nullable().default(null),
+  sessionNumber: z.number().int().positive().nullable().default(null),
+  capacity: z.number().int().min(0).default(0),
+  rsvpYes: z.number().int().min(0).default(0),
+  seatsRemaining: z.number().int().nullable().default(null),
+  attendees: z.array(z.object({ characterId: Id, characterName: z.string().max(200).default('') })),
+});
+export type OccurrenceAttendance = z.infer<typeof OccurrenceAttendance>;
 
 // Fog-of-war visibility helpers shared by server redaction and the web VTT (issue #465).
 export * from './fog-visibility';
