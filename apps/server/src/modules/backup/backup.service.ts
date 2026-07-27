@@ -1363,7 +1363,7 @@ export class BackupService implements OnApplicationBootstrap {
       const chunks: Buffer[] = [];
       const sink = output ?? new PassThrough();
       if (!output) {
-        sink.on('data', (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+        sink.on('data', (chunk: Buffer) => chunks.push(chunk));
       }
       let compressedBytes = 0;
       const onFirstByte = options?.onFirstByte;

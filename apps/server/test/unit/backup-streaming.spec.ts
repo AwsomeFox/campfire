@@ -137,6 +137,17 @@ describe('backup streaming writer (#603)', () => {
     expect(Buffer.concat(chunks).subarray(0, 4).toString()).toBe('PK\u0003\u0004');
   });
 
+  it('reuses buffered compatibility chunks without copying Buffers', async () => {
+    const from = jest.spyOn(Buffer, 'from');
+    try {
+      const archive = await service().buildBackup();
+      expect(archive.subarray(0, 4).toString()).toBe('PK\u0003\u0004');
+      expect(from.mock.calls.filter(([value]) => Buffer.isBuffer(value))).toHaveLength(0);
+    } finally {
+      from.mockRestore();
+    }
+  });
+
   it('rejects an overlapping whole-server backup', async () => {
     const svc = service();
     const output = new PassThrough();
