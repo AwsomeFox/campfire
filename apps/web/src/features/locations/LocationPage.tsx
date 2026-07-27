@@ -539,7 +539,7 @@ export default function LocationPage() {
 
       {!editing && (
         <>
-          <div className="flex items-center gap-2.5 flex-wrap">
+          <div className="flex items-start gap-2.5 flex-wrap">
             {canDmWrite ? (
               <div className="w-32 h-20 shrink-0">
                 <ImageUpload
@@ -565,71 +565,74 @@ export default function LocationPage() {
             )}
             <h1 className="text-2xl font-extrabold text-white min-w-0 break-words">{location.name}</h1>
             <Chip variant={statusVariant(location.status)}><LocationStatusLabel status={location.status} /></Chip>
-            <PrintControl
-              resetKey={location.id}
-              allowSecrets={isDm && Boolean(location.dmSecret)}
-              className="ml-auto"
-            />
-            {isDm && location.status === 'unexplored' && (
-              <Chip variant="failed" className="!ml-0"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players</span></Chip>
-            )}
-            {canDmWrite && (
-              <div className="cf-print-hide"><EntitySecrecyControls
-                entityKind="location"
-                entityName={location.name}
-                hidden={location.status === 'unexplored'}
-                preview={revealPreview}
-                onReveal={async () => {
-                  await setStatus('explored');
-                }}
-                onUndoReveal={async () => {
-                  await setStatus('unexplored');
-                }}
-              /></div>
-            )}
-            {canDmWrite && nextStatus && location.status !== 'unexplored' && (
-              <Btn className="cf-print-hide !min-h-0 !py-1.5 text-xs"
-                disabled={statusSaving}
-                onClick={() => setStatus(nextStatus)}
-                title={NEXT_STATUS_LABEL[location.status]}
-              >
-                {NEXT_STATUS_LABEL[location.status]}
-              </Btn>
-            )}
-            {!isDm && role !== null && (
-              <div className="cf-print-hide flex gap-2 shrink-0">
-                <Btn
-                  ghost
-                  className="!min-h-0 !py-1.5 text-xs"
-                  onClick={startPropose}
-                  title="Suggest a change to the DM for approval"
-                >
-                  ✎ Suggest an edit
-                </Btn>
-              </div>
-            )}
-            {canDmWrite && (
-              <div className="cf-print-hide flex gap-2 shrink-0">
-                <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={startEdit}>
-                  ✎ Edit
-                </Btn>
-                <StatusMenuButton
-                  className="cf-btn cf-btn-ghost cf-density-compact text-xs"
-                  triggerLabel={`Location status: ${LOCATION_STATUS_LABEL[location.status]}`}
-                  triggerDescription="DM: set status directly"
-                  value={location.status}
-                  options={(LocationStatus.options as Location['status'][]).map((s) => ({
-                    value: s,
-                    label: <LocationStatusLabel status={s} />,
-                  }))}
+            {/* One right-aligned action cluster — a second ml-auto would split the row and can
+                park Edit under the tall Landmark upload hit-target. */}
+            <div className="relative z-10 ml-auto flex items-center gap-2 flex-wrap shrink-0">
+              <PrintControl
+                resetKey={location.id}
+                allowSecrets={isDm && Boolean(location.dmSecret)}
+              />
+              {isDm && location.status === 'unexplored' && (
+                <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players</span></Chip>
+              )}
+              {canDmWrite && (
+                <div className="cf-print-hide"><EntitySecrecyControls
+                  entityKind="location"
+                  entityName={location.name}
+                  hidden={location.status === 'unexplored'}
+                  preview={revealPreview}
+                  onReveal={async () => {
+                    await setStatus('explored');
+                  }}
+                  onUndoReveal={async () => {
+                    await setStatus('unexplored');
+                  }}
+                /></div>
+              )}
+              {canDmWrite && nextStatus && location.status !== 'unexplored' && (
+                <Btn className="cf-print-hide !min-h-0 !py-1.5 text-xs"
                   disabled={statusSaving}
-                  triggerText="Status ▾"
-                  onSelect={(s) => setStatus(s)}
-                  announceFailure={announce}
-                  failureMessage="Couldn't update status."
-                />
-              </div>
-            )}
+                  onClick={() => setStatus(nextStatus)}
+                  title={NEXT_STATUS_LABEL[location.status]}
+                >
+                  {NEXT_STATUS_LABEL[location.status]}
+                </Btn>
+              )}
+              {!isDm && role !== null && (
+                <div className="cf-print-hide flex gap-2 shrink-0">
+                  <Btn
+                    ghost
+                    className="!min-h-0 !py-1.5 text-xs"
+                    onClick={startPropose}
+                    title="Suggest a change to the DM for approval"
+                  >
+                    ✎ Suggest an edit
+                  </Btn>
+                </div>
+              )}
+              {canDmWrite && (
+                <div className="cf-print-hide flex gap-2 shrink-0">
+                  <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={startEdit}>
+                    ✎ Edit
+                  </Btn>
+                  <StatusMenuButton
+                    className="cf-btn cf-btn-ghost cf-density-compact text-xs"
+                    triggerLabel={`Location status: ${LOCATION_STATUS_LABEL[location.status]}`}
+                    triggerDescription="DM: set status directly"
+                    value={location.status}
+                    options={(LocationStatus.options as Location['status'][]).map((s) => ({
+                      value: s,
+                      label: <LocationStatusLabel status={s} />,
+                    }))}
+                    disabled={statusSaving}
+                    triggerText="Status ▾"
+                    onSelect={(s) => setStatus(s)}
+                    announceFailure={announce}
+                    failureMessage="Couldn't update status."
+                  />
+                </div>
+              )}
+            </div>
           </div>
           {location.kind && <p className="text-sm text-slate-400 -mt-3">{location.kind}</p>}
 

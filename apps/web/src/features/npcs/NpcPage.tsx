@@ -372,7 +372,7 @@ export default function NpcPage() {
 
       {!editing && (
         <>
-          <div className="flex items-center gap-3 flex-wrap">
+          <div className="flex items-start gap-3 flex-wrap">
             {canDmWrite ? (
               <ImageUpload
                 campaignId={cid}
@@ -406,45 +406,46 @@ export default function NpcPage() {
               {npc.role && <p className="text-sm text-slate-400 break-words">{npc.role}</p>}
             </div>
             <NpcDispositionBadge disposition={npc.disposition} />
-            <PrintControl
-              resetKey={npc.id}
-              allowSecrets={isDm && Boolean(npc.dmSecret)}
-              className="ml-auto"
-            />
-            {isDm && npc.hidden && <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players</span></Chip>}
-            {canDmWrite && (
-              <div className="cf-print-hide flex gap-2">
-                <EntitySecrecyControls
-                  entityKind="npc"
-                  entityName={npc.name}
-                  hidden={npc.hidden}
-                  preview={revealPreview}
-                  onReveal={async () => {
-                    const updated = await api.patch<Npc>(`${API}/npcs/${id}`, { hidden: false });
-                    setNpc(updated);
-                  }}
-                  onUndoReveal={async () => {
-                    const updated = await api.patch<Npc>(`${API}/npcs/${id}`, { hidden: true });
-                    setNpc(updated);
-                  }}
-                />
-                <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={startEdit}>
-                  ✎ Edit
-                </Btn>
-              </div>
-            )}
-            {!isDm && role !== null && (
-              <div className="cf-print-hide flex gap-2">
-                <Btn
-                  ghost
-                  className="!min-h-0 !py-1.5 text-xs"
-                  onClick={startPropose}
-                  title="Suggest a change to the DM for approval"
-                >
-                  ✎ Suggest an edit
-                </Btn>
-              </div>
-            )}
+            <div className="relative z-10 ml-auto flex items-center gap-2 flex-wrap shrink-0">
+              <PrintControl
+                resetKey={npc.id}
+                allowSecrets={isDm && Boolean(npc.dmSecret)}
+              />
+              {isDm && npc.hidden && <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players</span></Chip>}
+              {canDmWrite && (
+                <div className="cf-print-hide flex gap-2">
+                  <EntitySecrecyControls
+                    entityKind="npc"
+                    entityName={npc.name}
+                    hidden={npc.hidden}
+                    preview={revealPreview}
+                    onReveal={async () => {
+                      const updated = await api.patch<Npc>(`${API}/npcs/${id}`, { hidden: false });
+                      setNpc(updated);
+                    }}
+                    onUndoReveal={async () => {
+                      const updated = await api.patch<Npc>(`${API}/npcs/${id}`, { hidden: true });
+                      setNpc(updated);
+                    }}
+                  />
+                  <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={startEdit}>
+                    ✎ Edit
+                  </Btn>
+                </div>
+              )}
+              {!isDm && role !== null && (
+                <div className="cf-print-hide flex gap-2">
+                  <Btn
+                    ghost
+                    className="!min-h-0 !py-1.5 text-xs"
+                    onClick={startPropose}
+                    title="Suggest a change to the DM for approval"
+                  >
+                    ✎ Suggest an edit
+                  </Btn>
+                </div>
+              )}
+            </div>
           </div>
 
           <div className="cf-print-columns grid grid-cols-1 md:grid-cols-[1fr_320px] gap-4 items-start">
