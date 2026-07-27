@@ -326,7 +326,7 @@ export default function NpcPage() {
   });
 
   return (
-    <div className="cf-print-root max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" {...entityTargetProps('npc', npc.id)}>
+    <div className="cf-print-root cf-print-reference max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" {...entityTargetProps('npc', npc.id)}>
       <div className="cf-print-chrome"><DetailPageWayfinding
         campaignId={cid}
         defaultPath={`/c/${cid}/npcs`}

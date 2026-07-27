@@ -126,6 +126,8 @@ test.describe('print layouts (#667)', () => {
         await expect.poll(() => page.locator('.cf-print-chrome').evaluateAll(
           (elements) => elements.every((element) => getComputedStyle(element).display === 'none'),
         )).toBe(true);
+        await expect(page.locator('.cf-print-reference > .cf-print-only')).toBeVisible();
+        await expect(page.locator('.cf-print-reference > .cf-print-columns')).toBeHidden();
         await page.emulateMedia({ media: 'screen' });
       }
 
@@ -146,7 +148,11 @@ test.describe('print layouts (#667)', () => {
     const dmPage = await dmContext.newPage();
     const { campaignId, navigation } = seed();
     const secret = 'PRINT-ONLY DM SECRET';
+    let previousSecret = '';
     try {
+      const existing = await dmPage.request.get(`/api/v1/npcs/${navigation.npcId}`);
+      expect(existing.ok()).toBe(true);
+      previousSecret = (await existing.json() as { dmSecret?: string }).dmSecret ?? '';
       const patch = await dmPage.request.patch(`/api/v1/npcs/${navigation.npcId}`, { data: { dmSecret: secret } });
       expect(patch.ok()).toBe(true);
       await dmPage.goto(`/c/${campaignId}/npcs/${navigation.npcId}`);
@@ -161,6 +167,7 @@ test.describe('print layouts (#667)', () => {
       await dmPage.goto(`/c/${campaignId}/quests/${navigation.questId}`);
       await expect.poll(() => dmPage.evaluate(() => document.documentElement.classList.contains('cf-print-include-secrets'))).toBe(false);
     } finally {
+      await dmPage.request.patch(`/api/v1/npcs/${navigation.npcId}`, { data: { dmSecret: previousSecret } });
       await dmContext.close();
     }
 
@@ -172,6 +179,18 @@ test.describe('print layouts (#667)', () => {
       await expect(playerPage.getByText(secret)).toHaveCount(0);
     } finally {
       await playerContext.close();
+    }
+  });
+
+  test('keeps encounter paper prep DM-only', async ({ browser }) => {
+    const context = await browser.newContext({ storageState: stateFor('viewer') });
+    const page = await context.newPage();
+    try {
+      const { campaignId, navigation } = seed();
+      await page.goto(`/c/${campaignId}/encounters/${navigation.encounterId}`);
+      await expect(page.getByRole('button', { name: 'Print / Save PDF' })).toHaveCount(0);
+    } finally {
+      await context.close();
     }
   });
 });

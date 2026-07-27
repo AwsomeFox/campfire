@@ -135,6 +135,10 @@
   /* The live encounter cockpit has maps, controls and activity feeds; its paper
      counterpart is the intentionally small reference sheet below. */
   .cf-print-encounter > :not(.cf-print-only) { display: none !important; }
+
+  /* Entity detail pages use one intentional paper tree, avoiding duplicate
+     headings, facts and secrets from the interactive live layout. */
+  .cf-print-reference > :not(.cf-print-only) { display: none !important; }
 }
 
 /* Screen-only tab state. Avoid the native `hidden` attribute here because its

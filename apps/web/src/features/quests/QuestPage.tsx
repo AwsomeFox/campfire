@@ -463,7 +463,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
   });
 
   return (
-    <div className="cf-print-root max-w-6xl mx-auto px-4 mt-5 pb-20 lg:pb-10" style={{ display: 'flex', flexDirection: 'column', gap: 14 }} {...entityTargetProps('quest', quest.id)}>
+    <div className="cf-print-root cf-print-reference max-w-6xl mx-auto px-4 mt-5 pb-20 lg:pb-10" style={{ display: 'flex', flexDirection: 'column', gap: 14 }} {...entityTargetProps('quest', quest.id)}>
       {error && <div className="cf-print-hide"><ErrorNote message={error} onRetry={load} /></div>}
 
       {canDmWrite && (

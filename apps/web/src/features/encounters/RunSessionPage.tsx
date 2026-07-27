@@ -2049,7 +2049,7 @@ export default function RunSessionPage() {
           </span>
         )}
         <DifficultyBadge difficulty={difficulty} />
-        <PrintControl allowSecrets={isDm} className="ml-auto" />
+        {isDm && <PrintControl className="ml-auto" />}
         <span
           className={`cf-chip ${encounterSyncChipClass(encounterSync)}`}
           data-testid="encounter-sync-chip"
