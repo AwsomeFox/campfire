@@ -3404,6 +3404,32 @@ function migrateCampaignModules585(sqlite: Database.Database): void {
   addColumn('detached_at', 'detached_at TEXT');
 }
 
+/**
+ * Issue #1047: sheet-scoped condition metadata.
+ *
+ * Adds `characters.condition_instances`, the counterpart to the `combatants` column #423
+ * added. NULLABLE on purpose, and deliberately NOT backfilled: every existing row holds
+ * bare strings in `conditions`, and the read path (common/conditions.ts
+ * readConditionInstances) materialises those into instances on demand. A backfill would
+ * rewrite every character row on upgrade to produce data the reader already derives, and
+ * would then have to be kept in step with the reader forever.
+ *
+ * So an install with years of bare strings reads exactly as it did before, and only gains
+ * structure when something actually writes metadata. Nothing here can lose a condition:
+ * the legacy column is untouched.
+ *
+ * Probe-before-act per house style — ADD COLUMN is not idempotent on its own.
+ */
+function migrateCharacterConditionInstances1047(sqlite: Database.Database): void {
+  const hasCharacters = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='characters'")
+    .get();
+  if (!hasCharacters) return;
+  const columns = sqlite.prepare('PRAGMA table_info(characters)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'condition_instances')) return;
+  sqlite.exec('ALTER TABLE characters ADD COLUMN condition_instances TEXT');
+}
+
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
   { name: '0001_users_oidc', run: migrateUsersTableForOidc },
   { name: '0002_campaigns_rule_system', run: migrateCampaignsTableForRuleSystem },
@@ -3590,6 +3616,11 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // on a database that has already recorded it would silently re-run the grandfather
   // backfill against seats a DM may since have deliberately revoked.
   { name: '0127_safety_controls_597', run: migrateSafetyControls597 },
+  // 0132 was CENTRALLY ALLOCATED to issue #1047 by the merge coordinator; the gap above is
+  // deliberate and must not be "tidied" down to the next free ordinal. runMigrations dedupes
+  // on the FULL name string, so the `_1047` suffix is what guarantees this runs exactly once
+  // even if a sibling branch lands a colliding ordinal.
+  { name: '0132_character_condition_instances_1047', run: migrateCharacterConditionInstances1047 },
 ];
 
 /**
