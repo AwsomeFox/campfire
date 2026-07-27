@@ -1289,11 +1289,20 @@ export class OrganizedPlayService {
    *
    * Two privacy layers, both required:
    *   1. Only rows in the shared organized-play pool are considered at all, so a
-   *      private campaign is absent rather than redacted.
+   *      private campaign is absent rather than redacted (scheduleOrganizedPlaySql).
    *   2. Of those, rows in campaigns the caller cannot read are reduced to an
-   *      opaque busy block: window, room, capacity and seat count survive
-   *      (a coordinator has to know the room is full), while campaign, title and
-   *      schedule id do not.
+   *      opaque busy block. What survives is the RESOURCE picture a coordinator
+   *      plans from — window, local wall clock, venue/room, capacity, seats taken,
+   *      event/season key, lifecycle status — and nothing that identifies the
+   *      campaign (id, name, title, schedule id, series id) or any PERSON.
+   *
+   * `assignedDmUserId` is redacted with the campaign identity rather than kept
+   * with the resource fields. This endpoint is open to any authenticated user over
+   * a 366-day window with no campaign filter, so returning it would answer, in one
+   * request, "where is this named person every night for the next year" for
+   * campaigns the caller cannot read. The conflict probe still reports a `dm`
+   * collision, but only for an id the CALLER already supplied — confirming a
+   * guess is a far smaller disclosure than enumerating the mapping wholesale.
    */
   async coordinatorCalendar(
     user: RequestUser,
@@ -1367,7 +1376,8 @@ export class OrganizedPlayService {
         seatsTaken: seats.get(row.id) ?? 0,
         eventId: row.eventId,
         seasonId: row.seasonId,
-        assignedDmUserId: row.assignedDmUserId,
+        // A person, not a resource — see the docblock. Redacted with identity.
+        assignedDmUserId: visible ? row.assignedDmUserId : '',
         scheduleId: visible ? row.id : null,
         campaignId: visible ? row.campaignId : null,
         campaignName: visible ? (names.campaigns.get(row.campaignId) ?? null) : null,

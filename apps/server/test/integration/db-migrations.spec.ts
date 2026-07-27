@@ -8,6 +8,7 @@ import {
   getRecordedAppVersion,
 } from '../../src/db/db.module';
 import { makeTempDataDir, writeOldSchemaDb, columnNames, countRows } from './fixtures';
+import { legacyIcsUid } from '../../src/modules/sessions/ics.util';
 
 /**
  * Integration coverage for the hand-rolled ADD-COLUMN / table-rebuild migrations
@@ -193,6 +194,10 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
         local_start: string;
         series_id: number | null;
       };
+      // Compared against legacyIcsUid() itself, not a hand-copied format string:
+      // the invariant is "the migration and the feed agree", and two independent
+      // copies of the same literal cannot detect the two drifting apart.
+      expect(row.ics_uid).toBe(legacyIcsUid(row.campaign_id, row.id));
       expect(row.ics_uid).toBe(`campfire-c${row.campaign_id}-s${row.id}@campfire`);
       // The legacy row stays organized-play-neutral: no zone, no wall clock, no
       // series, no sequence bump. Nothing about an existing campaign changed.

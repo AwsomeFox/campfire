@@ -73,6 +73,65 @@ describe('IANA wall-clock resolution (#588)', () => {
     expect(resolved.utcIso).toBe('2026-11-01T05:30:00.000Z'); // 01:30 EDT, not 06:30Z/EST
     expect(utcToLocalDateTime(resolved.utcIso, 'America/New_York')).toBe('2026-11-01T01:30');
   });
+
+  /**
+   * UTC has no transitions at all, so every wall clock must resolve 'exact' and
+   * be its own instant. Worth pinning explicitly: 'UTC' is the DEFAULT zone on
+   * play_venues/session_series, so it is the code path most installs take, and a
+   * bracket that mis-detected ambiguity here would mis-schedule everyone.
+   */
+  it('treats UTC itself as transition-free', () => {
+    for (const local of ['2026-03-08T02:30', '2026-11-01T01:30', '1970-01-01T00:00']) {
+      const resolved = wallClockToUtc(local, 'UTC');
+      expect({ local, ...resolved }).toEqual({ local, utcMs: Date.parse(`${local}:00.000Z`), utcIso: `${local}:00.000Z`, resolution: 'exact' });
+    }
+  });
+
+  /**
+   * The offset is read from the runtime's tz database at the TARGET instant, not
+   * from today's rules, so a zone that changed its rules historically resolves by
+   * the rules in force then. Europe/Moscow ran DST until 2011 and abolished it
+   * that year; a naive "does this zone observe DST?" test gets both of these wrong.
+   */
+  it('honours the rules in force at the target instant, not today\'s rules', () => {
+    // 2011-03-27: the last spring-forward Moscow ever had (+3 -> +4).
+    const gap = wallClockToUtc('2011-03-27T02:30', 'Europe/Moscow');
+    expect(gap.resolution).toBe('gap');
+    expect(utcToLocalDateTime(gap.utcIso, 'Europe/Moscow')).toBe('2011-03-27T03:30');
+
+    // 2014-10-26: the one-off step back to +3 when permanent DST was repealed.
+    const ambiguous = wallClockToUtc('2014-10-26T01:30', 'Europe/Moscow');
+    expect(ambiguous.resolution).toBe('ambiguous');
+    expect(utcToLocalDateTime(ambiguous.utcIso, 'Europe/Moscow')).toBe('2014-10-26T01:30');
+
+    // 2016: no DST any more, so a summer wall clock is plain +3 and unambiguous.
+    const flat = wallClockToUtc('2016-07-15T19:00', 'Europe/Moscow');
+    expect(flat.resolution).toBe('exact');
+    expect(flat.utcIso).toBe('2016-07-15T16:00:00.000Z');
+  });
+
+  /**
+   * Chatham runs +12:45/+13:45 — a non-hour offset whose transitions land on :45
+   * rather than on the hour. Any arithmetic that rounded offsets to whole hours,
+   * or assumed a transition happens at :00, resolves these two wrong.
+   */
+  it('handles a zone with a :45 offset and :45 transitions (Pacific/Chatham)', () => {
+    const flat = wallClockToUtc('2026-06-15T19:00', 'Pacific/Chatham');
+    expect(flat.resolution).toBe('exact');
+    expect(flat.utcIso).toBe('2026-06-15T06:15:00.000Z'); // 19:00 - 12:45
+
+    // Spring forward 2026-09-27: 02:45 -> 03:45 local.
+    const gap = wallClockToUtc('2026-09-27T03:00', 'Pacific/Chatham');
+    expect(gap.resolution).toBe('gap');
+    expect(utcToLocalDateTime(gap.utcIso, 'Pacific/Chatham')).toBe('2026-09-27T04:00');
+
+    // Fall back 2026-04-05: 03:45 -> 02:45 local, so 03:00 happens twice.
+    const ambiguous = wallClockToUtc('2026-04-05T03:00', 'Pacific/Chatham');
+    expect(ambiguous.resolution).toBe('ambiguous');
+    expect(utcToLocalDateTime(ambiguous.utcIso, 'Pacific/Chatham')).toBe('2026-04-05T03:00');
+    // "Earlier of the two" means the still-DST (+13:45) reading, not the +12:45 one.
+    expect(ambiguous.utcIso).toBe('2026-04-04T13:15:00.000Z');
+  });
 });
 
 describe('local calendar arithmetic (#588)', () => {

@@ -145,9 +145,11 @@ export class OrganizedPlayController {
   @ApiOperation({
     summary: 'Cross-campaign coordinator calendar',
     description:
-      'Any authenticated user. Lists organized-play bookings (rows holding a room/venue/series/event) overlapping [from, to). '
-      + 'Bookings in campaigns the caller cannot read are returned as opaque busy blocks — window, room, capacity and seats taken, '
-      + 'with `visible: false` and no campaign, title or schedule id. Campaigns that never opted into organized play are absent entirely.',
+      'Any authenticated user. Lists organized-play bookings (rows holding a room/venue, an assigned DM, or an event/season key) '
+      + 'overlapping [from, to). Bookings in campaigns the caller cannot read are returned as opaque busy blocks — window, local '
+      + 'wall clock, venue/room, capacity, seats taken and event/season key — with `visible: false` and no campaign, title, '
+      + 'schedule id, series id or assigned DM. Campaigns that never opted into organized play are absent entirely; belonging to a '
+      + 'recurring series is NOT by itself an opt-in.',
   })
   @ApiQuery({ name: 'from', required: true, description: 'ISO date-time, inclusive.' })
   @ApiQuery({ name: 'to', required: true, description: 'ISO date-time, exclusive. At most 366 days after `from`.' })

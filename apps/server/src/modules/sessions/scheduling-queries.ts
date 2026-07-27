@@ -70,22 +70,38 @@ export function scheduleEffectiveStatusSql(): SQL<string> {
 
 /**
  * True for rows that have opted into the SHARED organized-play resource pool
- * (issue #588): they hold a room or venue, belong to a series, or carry an event key.
+ * (issue #588): they hold a room or venue, name an assigned DM, or carry an
+ * event/season key.
  *
  * This predicate is the privacy boundary for every cross-campaign read. A private
- * home game that never touches venues/series is invisible to the coordinator
- * calendar and to conflict detection — not merely redacted, but absent — so
- * shipping this feature cannot make an existing campaign's mere *existence* at
- * 7pm on Tuesday observable to a stranger. The cost is that a collision with a
- * purely private night goes unreported; that is the right trade, because nobody
- * outside that campaign is competing for its (nonexistent) shared resource.
+ * home game that holds none of those is invisible to the coordinator calendar and
+ * to conflict detection — not merely redacted, but absent — so shipping this
+ * feature cannot make an existing campaign's mere *existence* at 7pm on Tuesday
+ * observable to a stranger. The cost is that a collision with a purely private
+ * night goes unreported; that is the right trade, because nobody outside that
+ * campaign is competing for its (nonexistent) shared resource.
+ *
+ * SERIES MEMBERSHIP IS DELIBERATELY *NOT* AN OPT-IN SIGNAL. `series_id IS NOT NULL`
+ * once appeared here and it silently published private campaigns: recurrence is a
+ * general convenience ("we play every Thursday"), not a declaration that a table
+ * is shared, so a DM who used it for an ordinary basement game was enrolled in the
+ * install-wide pool without ever naming a venue, a room or an event. That leaked
+ * the window, the local wall clock and even the RSVP count of a campaign holding
+ * nothing anybody else could compete for — precisely the "something is here"
+ * disclosure this predicate exists to prevent. A series that IS organized play
+ * still qualifies, through the room/venue/DM/event it actually holds.
+ *
+ * Every column tested here is one that ONLY the organized-play write paths ever
+ * set (SchedulingService.create leaves them all at their empty defaults), so
+ * membership of the pool is always the result of an explicit act.
  */
 export function scheduleOrganizedPlaySql(): SQL {
   return sql`(
     ${scheduledSessions.roomId} IS NOT NULL
     OR ${scheduledSessions.venueId} IS NOT NULL
-    OR ${scheduledSessions.seriesId} IS NOT NULL
+    OR ${scheduledSessions.assignedDmUserId} != ''
     OR ${scheduledSessions.eventId} != ''
+    OR ${scheduledSessions.seasonId} != ''
   )`;
 }
 
