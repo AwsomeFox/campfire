@@ -26,6 +26,11 @@
  */
 import type { AiDmTranscriptEvent } from '@campfire/schema';
 import type { AiDmStreamEvent } from '../../lib/useAiDmStream';
+import {
+  isTranscriptRememberEnabled,
+  transcriptCacheKey,
+  type TranscriptViewerId,
+} from './transcriptPrivacy';
 
 /** Max entries retained per campaign; the oldest are dropped past this (design: ~200). */
 export const MAX_TRANSCRIPT_ENTRIES = 200;
@@ -44,20 +49,32 @@ export const MAX_TRANSCRIPT_ENTRIES = 200;
  * They therefore get separate keys. Namespacing is preferred over having either surface
  * detect the other's writes, because it is the only option that does not require the two to
  * know about each other — whichever one is mounted, it reads back exactly what it wrote.
+ *
+ * #573 composes a USER namespace over this one rather than replacing it: both axes are
+ * real, and a key must separate them both (see {@link transcriptStorageKey}).
  */
 export type TranscriptStorageScope = 'table' | 'activity';
 
 /**
- * localStorage key for a campaign's cached transcript.
+ * localStorage key for one VIEWER's cached transcript of a campaign, or `null` when
+ * there is no established viewer (#573).
  *
  * Since #572 this is a PAINT CACHE, not the source of truth — the server transcript is
- * refetched on mount and reconciled over it. The `v2` generation deliberately orphans
- * caches written before #572: those entries carry client-minted random ids that would
- * duplicate against the server's stable `eventId`s instead of merging with them.
- * (Namespacing this key per USER is issue #573 and is NOT solved here.)
+ * refetched on mount and reconciled over it.
+ *
+ * #573 added the user namespace and, with it, the null return. A transcript records who
+ * said what at the table, so keying it by campaign alone let the next account to sign in
+ * on a shared browser repaint the previous one's history. The null is the load-bearing
+ * part: "never hydrate before identity is established" is enforced by there being NO KEY
+ * to read until `/me` has resolved, rather than by every call site remembering to check.
+ * See {@link transcriptCacheKey} for the generation and the accompanying purge.
  */
-export function transcriptStorageKey(campaignId: number, scope: TranscriptStorageScope = 'table'): string {
-  return scope === 'table' ? `cf.aiDm.transcript.v2.${campaignId}` : `cf.aiDm.transcript.v2.${scope}.${campaignId}`;
+export function transcriptStorageKey(
+  viewerId: TranscriptViewerId,
+  campaignId: number,
+  scope: TranscriptStorageScope = 'table',
+): string | null {
+  return transcriptCacheKey(viewerId, campaignId, scope);
 }
 
 // ---- Entry shapes ---------------------------------------------------------
@@ -881,11 +898,27 @@ function hasStorage(): boolean {
   }
 }
 
-/** Load a campaign's persisted transcript, or the empty state on miss/parse error. */
-export function loadTranscript(campaignId: number, scope: TranscriptStorageScope = 'table'): TranscriptState {
+/**
+ * Load this VIEWER's persisted transcript for a campaign, or the empty state on miss /
+ * parse error / no established identity / no device grant (#573).
+ *
+ * Returning `emptyTranscript` for "identity not established yet" is what makes a slow
+ * `/me` safe: a surface that renders before auth resolves paints nothing rather than
+ * painting whatever the last account left behind.
+ */
+export function loadTranscript(
+  viewerId: TranscriptViewerId,
+  campaignId: number,
+  scope: TranscriptStorageScope = 'table',
+): TranscriptState {
   if (!hasStorage()) return emptyTranscript;
+  const key = transcriptStorageKey(viewerId, campaignId, scope);
+  if (key === null) return emptyTranscript;
+  // Withdrawing the grant purges, so this is belt-and-braces — but a cache written under
+  // a grant that has since been withdrawn must never repaint.
+  if (!isTranscriptRememberEnabled(viewerId)) return emptyTranscript;
   try {
-    const raw = window.localStorage.getItem(transcriptStorageKey(campaignId, scope));
+    const raw = window.localStorage.getItem(key);
     if (!raw) return emptyTranscript;
     const parsed: unknown = JSON.parse(raw);
     if (parsed && typeof parsed === 'object' && Array.isArray((parsed as TranscriptState).entries)) {
@@ -900,37 +933,54 @@ export function loadTranscript(campaignId: number, scope: TranscriptStorageScope
 }
 
 /**
- * Persist a campaign's transcript cache (best-effort; a full/blocked store is swallowed).
+ * Persist this viewer's transcript cache (best-effort; a full/blocked store is swallowed).
  *
- * An EMPTY state never overwrites a non-empty cache (#572). Several surfaces share this
+ * #573: WRITES NOTHING unless the viewer is established AND has explicitly opted into
+ * remembering transcripts on this device. That check comes first, before the JSON
+ * serialization, so the private default is also the cheap default — this effect fires on
+ * every narration delta.
+ *
+ * An EMPTY state is NEVER written (#572, tightened by #573). Several surfaces share this
  * key, and a component that has not hydrated yet — or that re-hydrates on a driver-mode
  * flip — transiently holds zero entries; letting that write through erased the scrollback
- * another surface was about to load. Clearing is an explicit operation
- * ({@link clearTranscript}), never a side effect of a mount race.
+ * another surface was about to load. #573 widened it from "never overwrites a non-empty
+ * cache" to "never written at all", so that a key EXISTING means it holds real table
+ * content: an empty placeholder key is worth nothing to read back, and it made a purge
+ * look incomplete (a `reset` after a revoked-access 403 promptly recreated the key it had
+ * just deleted). Clearing stays an explicit operation ({@link clearTranscript}).
  */
 export function saveTranscript(
+  viewerId: TranscriptViewerId,
   campaignId: number,
   state: TranscriptState,
   scope: TranscriptStorageScope = 'table',
 ): void {
   if (!hasStorage()) return;
-  if (state.entries.length === 0 && loadTranscript(campaignId, scope).entries.length > 0) return;
+  if (state.entries.length === 0) return;
+  const key = transcriptStorageKey(viewerId, campaignId, scope);
+  if (key === null || !isTranscriptRememberEnabled(viewerId)) return;
   try {
     const bounded =
       state.entries.length > MAX_TRANSCRIPT_ENTRIES
         ? { entries: state.entries.slice(state.entries.length - MAX_TRANSCRIPT_ENTRIES) }
         : state;
-    window.localStorage.setItem(transcriptStorageKey(campaignId, scope), JSON.stringify(bounded));
+    window.localStorage.setItem(key, JSON.stringify(bounded));
   } catch {
     /* quota / privacy mode — transcript is best-effort, not authoritative */
   }
 }
 
-/** Remove a campaign's persisted transcript. */
-export function clearTranscript(campaignId: number, scope: TranscriptStorageScope = 'table'): void {
+/** Remove this viewer's persisted transcript for one campaign + scope. */
+export function clearTranscript(
+  viewerId: TranscriptViewerId,
+  campaignId: number,
+  scope: TranscriptStorageScope = 'table',
+): void {
   if (!hasStorage()) return;
+  const key = transcriptStorageKey(viewerId, campaignId, scope);
+  if (key === null) return;
   try {
-    window.localStorage.removeItem(transcriptStorageKey(campaignId, scope));
+    window.localStorage.removeItem(key);
   } catch {
     /* ignore */
   }

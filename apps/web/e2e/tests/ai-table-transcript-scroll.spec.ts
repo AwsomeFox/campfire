@@ -1,6 +1,7 @@
 import { expect, test, type Page } from '@playwright/test';
 import { seed, stateFor } from './seed';
 import { transcriptStorageKey, type TranscriptEntry } from '../../src/features/ai-dm/transcript';
+import { transcriptRememberKey } from '../../src/features/ai-dm/transcriptPrivacy';
 
 test.use({ storageState: stateFor('player') });
 
@@ -73,6 +74,33 @@ function seedLongTranscript(_campaignId: number): TranscriptEntry[] {
   return entries;
 }
 
+/**
+ * Prime the transcript paint cache the way the app itself would (#573).
+ *
+ * Two keys, not one. Since #573 the cache is namespaced by the AUTHENTICATED USER, and it
+ * is only read when that user has opted into remembering transcripts on this device — the
+ * default is off, so seeding the transcript key alone now loads nothing. Reading the id
+ * from `/me` rather than hardcoding it keeps this honest: if namespacing regressed to a
+ * shared key, these specs would still pass, so they have to go through the real key
+ * builder with the real id.
+ */
+async function seedTranscriptCache(page: Page, campaignId: number, entries: TranscriptEntry[]): Promise<void> {
+  const me = await page.request.get('/api/v1/me');
+  expect(me.ok()).toBe(true);
+  const userId: number = (await me.json()).user.id;
+  const key = transcriptStorageKey(userId, campaignId);
+  expect(key).not.toBeNull();
+  const grantKey = transcriptRememberKey(userId);
+  expect(grantKey).not.toBeNull();
+  await page.addInitScript(
+    ({ key: k, grantKey: g, payload }) => {
+      localStorage.setItem(g, '1');
+      localStorage.setItem(k, payload);
+    },
+    { key: key!, grantKey: grantKey!, payload: JSON.stringify({ entries }) },
+  );
+}
+
 test.describe('AI table transcript scroll (#590)', () => {
   test('opens at the latest line when the transcript is hydrated from storage', async ({ page }) => {
     const { campaignId } = seed();
@@ -81,12 +109,7 @@ test.describe('AI table transcript scroll (#590)', () => {
     // banners settle — short 520px viewports crushed clientHeight to ~50px in CI.
     await page.setViewportSize({ width: 800, height: 900 });
     await mockDriverTable(page, campaignId);
-    await page.addInitScript(
-      ({ key, payload }) => {
-        localStorage.setItem(key, payload);
-      },
-      { key: transcriptStorageKey(campaignId), payload: JSON.stringify({ entries }) },
-    );
+    await seedTranscriptCache(page, campaignId, entries);
 
     await page.goto(`/c/${campaignId}/table`);
     const transcript = page.getByRole('log', { name: 'Table transcript' });
@@ -110,12 +133,7 @@ test.describe('AI table transcript scroll (#590)', () => {
     const entries = seedLongTranscript(campaignId);
     await page.setViewportSize({ width: 800, height: 900 });
     await mockDriverTable(page, campaignId);
-    await page.addInitScript(
-      ({ key, payload }) => {
-        localStorage.setItem(key, payload);
-      },
-      { key: transcriptStorageKey(campaignId), payload: JSON.stringify({ entries }) },
-    );
+    await seedTranscriptCache(page, campaignId, entries);
 
     await page.goto(`/c/${campaignId}/table`);
     const transcript = page.getByRole('log', { name: 'Table transcript' });
