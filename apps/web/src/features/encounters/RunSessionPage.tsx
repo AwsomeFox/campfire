@@ -2474,7 +2474,7 @@ export default function RunSessionPage() {
                 />
               </div>
             ) : (
-          orderedCombatants.map((c) => (
+              orderedCombatants.map((c) => (
             <CombatantRow
               key={c.id}
               rowRef={(el) => setCombatantRowRef(c.id, el)}
@@ -2564,7 +2564,7 @@ export default function RunSessionPage() {
               }
               onRemove={() => setConfirmRemoveCombatantId(c.id)}
             />
-          ))
+              ))
             )}
           </div>
 
