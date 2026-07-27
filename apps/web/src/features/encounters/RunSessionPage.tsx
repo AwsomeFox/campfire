@@ -5180,7 +5180,12 @@ function ApplyDamageBar({
   const damageTypes = ruleSystemAdapter(ruleSystem).damageTypes ?? [];
   const supportsDamageRules = ruleSystemAdapter(ruleSystem).supportsDirectDamageRules === true;
   const damage = mode === 'damage' && supportsDamageRules
-    ? { damageType: damageType || undefined, saveOutcome, isCrit: isCrit || undefined, damageDice: isCrit ? diceTotal : undefined }
+    ? {
+        damageType: damageType || undefined,
+        saveOutcome: saveOutcome === 'half' ? ('half' as const) : undefined,
+        isCrit: isCrit && diceTotal !== undefined ? true : undefined,
+        damageDice: isCrit && diceTotal !== undefined ? diceTotal : undefined,
+      }
     : {};
   return (
     <div

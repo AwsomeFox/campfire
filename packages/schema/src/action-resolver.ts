@@ -250,11 +250,17 @@ export function damageDefensesFromStatblock(data: Record<string, unknown> | null
     for (const key of keys) {
       const value = data[key];
       const values = Array.isArray(value) ? value.map(String) : typeof value === 'string' ? [value] : [];
-      const entries = values.flatMap((raw) => raw.split(',').map((item) => item.trim()).filter(Boolean));
+      const entries = values.flatMap((raw) => {
+        const parts = raw.split(/[,;]/).map((item) => item.trim()).filter(Boolean);
+        if (!canonical) return parts;
+        const normalized = parts.map((entry) => entry.toLowerCase());
+        // Preserve unconditional array entries beside qualified prose, but never
+        // carve partial types from one qualified comma-separated expression.
+        return normalized.length > 0 && normalized.every((entry) => canonical.includes(entry)) ? normalized : [];
+      });
       if (entries.length === 0) continue;
       if (!canonical) return entries;
-      const normalized = entries.map((entry) => entry.toLowerCase());
-      if (normalized.every((entry) => canonical.includes(entry))) return [...new Set(normalized)];
+      return [...new Set(entries)];
     }
     return [];
   };
