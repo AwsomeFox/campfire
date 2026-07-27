@@ -1,0 +1,13 @@
+{
+  "tracked": [
+    {
+      "pr": 1562,
+      "status": "babysitting",
+      "url": "https://github.com/AwsomeFox/campfire/pull/1562",
+      "headBranch": "fix/issue-600",
+      "baseBranch": "main",
+      "updatedAt": "2026-07-27T18:22:00Z",
+      "notes": "Added on synchronize of 1ba226e4. MERGEABLE; all review threads resolved. Guardian re-open fix in 1ba226e4. Waiting on required CI."
+    }
+  ]
+}
