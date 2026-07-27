@@ -969,6 +969,19 @@ export class ExportService {
     }
   }
 
+  /**
+   * Only an ENOENT from a fresh stat proves the source disappeared after it was
+   * planned. Every other outcome must preserve the original staging failure.
+   */
+  private rethrowUnlessLiveAttachmentIsMissing(sourcePath: string, stagingError: unknown): void {
+    try {
+      fs.statSync(sourcePath);
+    } catch (statError: unknown) {
+      if ((statError as NodeJS.ErrnoException).code === 'ENOENT') return;
+    }
+    throw stagingError;
+  }
+
   private async writeMarkdownZip(
     writer: MarkdownZipWriter,
     campaignId: number,
@@ -1001,7 +1014,10 @@ export class ExportService {
         } catch (err) {
           // A stream-open ENOENT may be wrapped by pipeline. Classify only a
           // genuinely absent source as the established warning/skip outcome.
-          if (fs.existsSync(decision.sourcePath)) throw err;
+          // existsSync() also returns false for permission and other I/O errors,
+          // which would incorrectly turn a staging failure into a missing-file
+          // warning. statSync lets us distinguish an actual ENOENT race.
+          this.rethrowUnlessLiveAttachmentIsMissing(decision.sourcePath, err);
           decision.sourcePath = undefined;
           decision.bytes = null;
           decision.withheldReason = 'file missing on disk';

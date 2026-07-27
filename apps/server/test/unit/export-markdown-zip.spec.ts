@@ -301,6 +301,42 @@ describe('buildMarkdownZip — filename collisions (issues #530 / #863)', () => 
     }
   });
 
+  it('treats only an ENOENT restat as a vanished live attachment source', () => {
+    const service = serviceWithCollisions();
+    const stat = jest.spyOn(fs, 'statSync').mockImplementation(() => {
+      throw Object.assign(new Error('gone'), { code: 'ENOENT' });
+    });
+
+    expect(() => (service as any).rethrowUnlessLiveAttachmentIsMissing('/missing/attachment', new Error('staging failed')))
+      .not.toThrow();
+
+    stat.mockRestore();
+  });
+
+  it.each(['EACCES', 'EPERM'])('preserves the staging error when restat returns %s', (code) => {
+    const service = serviceWithCollisions();
+    const stagingError = new Error('staging failed');
+    const stat = jest.spyOn(fs, 'statSync').mockImplementation(() => {
+      throw Object.assign(new Error('access denied'), { code });
+    });
+
+    expect(() => (service as any).rethrowUnlessLiveAttachmentIsMissing('/restricted/attachment', stagingError))
+      .toThrow(stagingError);
+
+    stat.mockRestore();
+  });
+
+  it('preserves the staging error when the live attachment still exists', () => {
+    const service = serviceWithCollisions();
+    const stagingError = new Error('staging failed');
+    const stat = jest.spyOn(fs, 'statSync').mockReturnValue({} as fs.Stats);
+
+    expect(() => (service as any).rethrowUnlessLiveAttachmentIsMissing('/present/attachment', stagingError))
+      .toThrow(stagingError);
+
+    stat.mockRestore();
+  });
+
   it('rejects a pre-aborted streaming export without writing output', async () => {
     const service = serviceWithCollisions();
     const controller = new AbortController();
