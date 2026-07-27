@@ -499,6 +499,12 @@ export class ActionResolverService {
       const ac = this.targetDefenseValue(target, adapter as unknown as RuleSystemAdapter);
       if (ac === null) throw new BadRequestException(`Target "${target.name}" has no known AC — resolve manually rather than inventing one.`);
       outcome = classifyAttackOutcome(adapter, total, nat, ac);
+      // #1053 review — `critical` is set in ATTACK mode only. A PF2e critical save FAILURE also
+      // doubles damage under that system, and this flag never becomes true in save/check mode,
+      // so `double-total` is wired to attacks and not to saves. Left deliberately rather than
+      // overlooked: a `critFailure` branch may already be authored with the doubled numbers, so
+      // wiring it needs a decision about double-counting, not a one-line change. Tracked in the
+      // follow-up issue from #1053 — called out here so the seam is not mistaken for complete.
       critical = outcome === 'crit';
       base.attackTotal = total;
       base.naturalRoll = nat;

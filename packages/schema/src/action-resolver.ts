@@ -555,6 +555,14 @@ export function computeSaveDc(
  *    vs AC and mapped: criticalSuccess→crit, success→hit, failure→miss, criticalFailure→critMiss.
  *  - Otherwise (5e / d20): a natural 20 is a crit, a natural 1 is an automatic miss (critMiss),
  *    else total ≥ AC hits.
+ *
+ * LIMIT (#1053 review): "total ≥ AC" assumes ASCENDING armour class. An OSR variant on the
+ * DESCENDING convention stores descending AC in `armorClass` and hits on
+ * `roll >= thac0 - descendingAc` (`osrAttackHits` in osr-adapter.ts), so this comparison runs
+ * the wrong way round for those tables — against descending AC 2 nearly any positive total
+ * reads as a hit. Until classification is adapter-owned (tracked in the follow-up issue from
+ * #1053) the AI Driver's guidance does not send descending-AC campaigns down this path; see
+ * `resolverKnowsAttackRule` in ai-driver.service.ts.
  */
 export function classifyAttackOutcome(
   adapter: ResolverAdapter,
