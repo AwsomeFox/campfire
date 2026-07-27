@@ -2,6 +2,7 @@ import request from 'supertest';
 import { createAiEvalHarness, dm, player, type AiEvalHarness } from './ai-eval-harness';
 import { AiDmStreamService, type AiDmStreamEvent } from '../src/modules/ai-driver/ai-driver-stream.service';
 import { NARRATION_QUARANTINE_CHARS } from '../src/modules/ai-driver/driver-safety';
+import { AiDmService } from '../src/modules/ai-dm/ai-dm.service';
 
 /**
  * #598 — a provider content filter / refusal is a WITHHELD TURN, not successful narration.
@@ -248,6 +249,80 @@ describe('ai-dm driver — provider content filters / refusals are withheld turn
     expect(narrations).toHaveLength(1);
     expect(narrations[0].payload.text).toBe('You roll for it.');
     expect((await incidents(campaignId)).body[0].step).toBe(2);
+  });
+
+  it('a meterTurn REJECTION on a withheld turn still retracts, and still commits nothing', async () => {
+    // The fail-open this guards. `meterTurn` writes an audit row and a usage-history row; either
+    // can fail. It used to run BEFORE the withheld branch, so its rejection unwound past every
+    // withheld path into runTurn's catch-all, the turn was reclassified `provider_error`, and no
+    // `narration.withheld` was ever sent — at which point the web reducer commits the deltas that
+    // had already been released into the table's permanent transcript on the terminal frame.
+    //
+    // In other words: a bookkeeping error could publish text a provider refused. That is the exact
+    // outcome this whole issue exists to prevent, reached through the ledger. This case is the
+    // point of the fix — the path is invisible in normal operation and silently regresses.
+    const campaignId = await armedCampaign('Withheld meter failure');
+    // Longer than the window, so some prose is genuinely already on the wire when it fails.
+    const safeHead = 'A. '.repeat(Math.ceil((NARRATION_QUARANTINE_CHARS * 1.5) / 3));
+    h.script({ text: `${safeHead}${UNSAFE}`, finishReason: 'content_filter', streamChunks: 30 });
+
+    const aiDm = h.ctx.app.get(AiDmService);
+    const meterSpy = jest
+      .spyOn(aiDm, 'meterTurn')
+      .mockRejectedValueOnce(new Error('usage-history write failed'));
+
+    try {
+      const { result: res, events } = await withStream(h, campaignId, () =>
+        h.sendMessage(campaignId, { input: 'go' }),
+      );
+      expect(meterSpy).toHaveBeenCalled();
+
+      // The retraction went out ANYWAY: it is published inside streamStep, in the same
+      // statement that drops the prose, with nothing fallible between the two.
+      const withheld = events.find((e) => e.type === 'narration.withheld');
+      expect(withheld).toBeDefined();
+      expect(withheld?.type === 'narration.withheld' && withheld.reason).toBe('content_filter');
+
+      // The turn is still classified as withheld, not as a provider failure — so the table gets
+      // the right sentence and the right levers, and the incident is still recorded.
+      expect(res.body.stopReason).toBe('content_withheld');
+      expect(res.body.narration).toBe('');
+      expect((await incidents(campaignId)).body).toHaveLength(1);
+
+      // And nothing carrying the refused prose reached the wire or the durable transcript.
+      expect(JSON.stringify(events)).not.toContain(UNSAFE);
+      expect(events.some((e) => e.type === 'narration.message')).toBe(false);
+      const log = await transcript(campaignId);
+      expect(JSON.stringify(log.body)).not.toContain(UNSAFE);
+      expect(log.body.items.some((e: { kind: string }) => e.kind === 'narration')).toBe(false);
+    } finally {
+      meterSpy.mockRestore();
+    }
+  });
+
+  it('the incident’s turn number matches the stuck record for the same turn', async () => {
+    // `WithheldTurnIncident.turn` documents that it correlates with the stuck record. It did not:
+    // the incident was written from inside the step loop, before the turn's `finally` bumped
+    // `session.turnCount`, while the stuck record is written after it — so a DM cross-referencing
+    // the two lists could not line up a single row.
+    const campaignId = await armedCampaign('Withheld turn correlation');
+    h.script({ text: `${UNSAFE}`, finishReason: 'content_filter' });
+    await h.sendMessage(campaignId, { input: 'go' });
+
+    const first = (await h.getDriverSession(campaignId)).body;
+    expect(first.stuck.reason).toBe('content_withheld');
+    expect((await incidents(campaignId)).body[0].turn).toBe(first.stuck.turn);
+
+    // Not an accident of both happening to be 0 on the first turn: run a second withheld turn
+    // and assert they still agree, and that the number actually advanced.
+    h.script({ text: `${UNSAFE}`, finishReason: 'refusal' });
+    await h.sendMessage(campaignId, { input: 'go again' });
+
+    const second = (await h.getDriverSession(campaignId)).body;
+    const rows = (await incidents(campaignId)).body; // newest first
+    expect(rows).toHaveLength(2);
+    expect(rows[0].turn).toBe(second.stuck.turn);
+    expect(rows[0].turn).toBeGreaterThan(rows[1].turn);
   });
 
   it('audits the withhold with counts only, and not as a provider failure', async () => {

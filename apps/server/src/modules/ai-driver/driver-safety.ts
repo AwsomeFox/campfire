@@ -195,7 +195,15 @@ export class NarrationQuarantine {
  */
 export interface WithheldTurnIncident {
   campaignId: number;
-  /** Session turn counter at the time of the withhold — correlates with the stuck record. */
+  /**
+   * Session turn counter for the withheld turn — the SAME value `session.stuck.turn` carries,
+   * so a DM can line the incident trail up against the ladder.
+   *
+   * That correlation is only true because the incident is persisted after the turn loop's
+   * `finally` has incremented the counter, exactly where the stuck record is written. Recording
+   * it from inside the loop reads the counter one increment early and puts every pair off by
+   * one; see the `withheldTurn` deferral in ai-driver.service.ts.
+   */
   turn: number;
   /** Which tool-loop step of the turn was withheld (1-based). */
   step: number;
@@ -204,7 +212,16 @@ export interface WithheldTurnIncident {
   provider: string;
   /** The model id that actually served the request. */
   model: string;
-  /** Characters the model produced that were never broadcast. Length only, never content. */
+  /**
+   * Characters still held by the quarantine delay line when the refusal landed, and therefore
+   * never broadcast. Length only, never content.
+   *
+   * BOUNDED BY {@link NARRATION_QUARANTINE_CHARS}, which is what it actually measures: on a
+   * refused reply longer than the window this is the tail the delay line caught at the cut-off,
+   * NOT the size of the refusal. A small number here on a long refusal means most of the reply
+   * had already aged out and been broadcast — which is what {@link releasedChars} says, and why
+   * that is the field to read first.
+   */
   withheldChars: number;
   /**
    * Characters that had already been broadcast when the terminal frame arrived — the residual
