@@ -2096,6 +2096,285 @@ export const SessionZeroUpdate = z.object({
 });
 export type SessionZeroUpdate = z.infer<typeof SessionZeroUpdate>;
 
+// ---------- session-zero consent lifecycle (issue #600) ----------
+//
+// The problem this solves: the invite preview showed a campaign NAME and a role, join
+// created a membership immediately, and the charter was ONE MUTABLE ROW a DM could
+// rewrite under everybody's feet. So a participant could not see the table's boundaries
+// before committing to it, and once inside there was no record of what they had actually
+// agreed to — the row they consented to no longer existed.
+//
+// The backbone is therefore IMMUTABLE VERSIONS. `session_zero` remains the DM's working
+// DRAFT; publishing snapshots it into a `session_zero_charter_versions` row that is never
+// updated afterwards. An acknowledgment points at one specific version id, which is the
+// only way "renewed consent after a material change" can be expressed at all: without a
+// stable target, "they agreed" has no referent.
+
+/**
+ * How a participant answered ONE charter version.
+ *
+ * `discuss` is deliberately its own state rather than a flavour of decline. A participant
+ * who wants to talk about a line before agreeing is not refusing, and collapsing the two
+ * would either overstate their objection or silently count them as consenting. Both
+ * `discuss` and `declined` block the consent gate; only `acknowledged` clears it.
+ */
+export const CharterAcknowledgmentState = z.enum(['acknowledged', 'discuss', 'declined']);
+export type CharterAcknowledgmentState = z.infer<typeof CharterAcknowledgmentState>;
+
+/** How much of the charter a not-yet-member sees at the invite link. */
+export const CharterPreviewPolicy = z.enum(['boundaries', 'full']);
+export type CharterPreviewPolicy = z.infer<typeof CharterPreviewPolicy>;
+
+/**
+ * One immutable published charter version.
+ *
+ * Nothing here is ever UPDATEd after insert. A "change" is always a new row with the
+ * next `version` number, which is what lets an acknowledgment name exactly what was
+ * agreed to and lets the diff between two versions be reconstructed years later.
+ */
+export const SessionZeroCharterVersion = z.object({
+  id: Id,
+  campaignId: Id,
+  /** 1-based, per campaign, gapless. */
+  version: z.number().int().positive(),
+  lines: z.array(z.string().min(1).max(500)).max(200).default([]),
+  veils: z.array(z.string().min(1).max(500)).max(200).default([]),
+  safetyTools: z.array(z.string().min(1).max(200)).max(50).default([]),
+  houseRules: z.string().max(20_000).default(''),
+  toneAndExpectations: z.string().max(20_000).default(''),
+  /**
+   * Whether this version WITHDREW a protection relative to its predecessor — see
+   * `isMaterialCharterChange`. Frozen at publish time rather than recomputed on read:
+   * the consent gate depends on it, and a gate whose answer can change retroactively
+   * because somebody edited the comparison rule is not a gate.
+   */
+  material: z.boolean().default(false),
+  /** DM's own note on what changed and why. Shown alongside the diff. */
+  changeSummary: z.string().max(2000).default(''),
+  publishedBy: z.string().max(120).default(''),
+  publishedAt: IsoDate,
+});
+export type SessionZeroCharterVersion = z.infer<typeof SessionZeroCharterVersion>;
+
+export const SessionZeroCharterPublish = z
+  .object({ changeSummary: z.string().max(2000).default('') })
+  .strict();
+export type SessionZeroCharterPublish = z.infer<typeof SessionZeroCharterPublish>;
+
+/**
+ * The field-level difference between two versions.
+ *
+ * `removed*` are the entries that make a change MATERIAL — a protection the table had
+ * and no longer has. `added*` are recorded for the reader but never invalidate consent:
+ * a version that only adds a line is strictly more protective than the one somebody
+ * already agreed to, and forcing re-acknowledgment for it would train participants to
+ * click through safety prompts.
+ */
+export const CharterVersionDiff = z.object({
+  fromVersion: z.number().int().nonnegative(),
+  toVersion: z.number().int().positive(),
+  material: z.boolean(),
+  addedLines: z.array(z.string()).default([]),
+  removedLines: z.array(z.string()).default([]),
+  addedVeils: z.array(z.string()).default([]),
+  removedVeils: z.array(z.string()).default([]),
+  addedSafetyTools: z.array(z.string()).default([]),
+  removedSafetyTools: z.array(z.string()).default([]),
+  houseRulesChanged: z.boolean().default(false),
+  toneChanged: z.boolean().default(false),
+});
+export type CharterVersionDiff = z.infer<typeof CharterVersionDiff>;
+
+export const SessionZeroAcknowledgment = z.object({
+  id: Id,
+  campaignId: Id,
+  versionId: Id,
+  version: z.number().int().positive(),
+  userId: z.string().min(1).max(120),
+  userName: z.string().max(120).default(''),
+  state: CharterAcknowledgmentState,
+  /** Participant's own words — required for `discuss`/`declined`, so an objection is legible. */
+  note: z.string().max(2000).default(''),
+  ...timestamps,
+});
+export type SessionZeroAcknowledgment = z.infer<typeof SessionZeroAcknowledgment>;
+
+export const SessionZeroAcknowledgmentInput = z
+  .object({
+    versionId: Id,
+    state: CharterAcknowledgmentState,
+    note: z.string().max(2000).default(''),
+  })
+  .strict();
+export type SessionZeroAcknowledgmentInput = z.infer<typeof SessionZeroAcknowledgmentInput>;
+
+/**
+ * Whether this campaign's consent gate is currently satisfied, and by which version.
+ *
+ * `effectiveVersion` is what the AI is bound by and what "play" is licensed against. It
+ * is NOT simply the newest version: a newly published version that withdrew a protection
+ * does not take effect until everyone who must acknowledge it has. Until then the table
+ * — and the model — keep operating under the last version everybody actually agreed to,
+ * which is the only reading of "renewed acknowledgment before live AI or play" that is
+ * safe in the direction that matters.
+ */
+export const SessionZeroConsentStatus = z.object({
+  campaignId: Id,
+  /** Newest published version, acknowledged or not. Null before the first publish. */
+  latestVersion: SessionZeroCharterVersion.nullable().default(null),
+  /** The newest version whose consent gate is satisfied. Null before anyone acknowledges. */
+  effectiveVersion: SessionZeroCharterVersion.nullable().default(null),
+  /** True when latest !== effective because a material version is awaiting acknowledgment. */
+  awaitingRenewal: z.boolean().default(false),
+  /**
+   * Members who must still answer the latest version for the gate to clear.
+   * Empty when the strict all-members gate is already satisfied — including when a
+   * non-material addition "rode along" and became effective without a fresh answer.
+   */
+  outstanding: z
+    .array(z.object({ userId: z.string(), userName: z.string().default(''), state: CharterAcknowledgmentState.nullable() }))
+    .default([]),
+  /** The caller's own answer to the latest version, if any. */
+  mine: SessionZeroAcknowledgment.nullable().default(null),
+  /** Diff from the effective version to the latest, when they differ. */
+  diff: CharterVersionDiff.nullable().default(null),
+});
+export type SessionZeroConsentStatus = z.infer<typeof SessionZeroConsentStatus>;
+
+/**
+ * A private boundary a participant sends to the FACILITATOR only.
+ *
+ * The public charter is negotiated out loud; this is the channel for the line somebody
+ * cannot say in front of the group. It is never readable by other participants, never
+ * exported, and never sent to a model. `anonymous` additionally withholds the submitter
+ * from the facilitator — the DM sees the boundary and can honour it without learning
+ * whose it is.
+ */
+export const SessionZeroBoundarySubmission = z.object({
+  id: Id,
+  campaignId: Id,
+  kind: z.enum(['line', 'veil']),
+  text: z.string().min(1).max(500),
+  anonymous: z.boolean().default(false),
+  /** '' whenever `anonymous` — the server drops it on the way out, it is not merely hidden. */
+  submitterUserId: z.string().max(120).default(''),
+  submitterName: z.string().max(120).default(''),
+  /** True only for the submitter's own rows, so a participant can find and withdraw theirs. */
+  mine: z.boolean().default(false),
+  ...timestamps,
+});
+export type SessionZeroBoundarySubmission = z.infer<typeof SessionZeroBoundarySubmission>;
+
+export const SessionZeroBoundarySubmissionCreate = z
+  .object({
+    kind: z.enum(['line', 'veil']),
+    text: z.string().trim().min(1).max(500),
+    anonymous: z.boolean().default(false),
+  })
+  .strict();
+export type SessionZeroBoundarySubmissionCreate = z.infer<typeof SessionZeroBoundarySubmissionCreate>;
+
+/**
+ * Guardian consent — WITHOUT collecting a date of birth, ever.
+ *
+ * The issue asks for a guardian flow that does not collect exact birth dates, and the
+ * tempting shortcut is to take a date and derive an age from it. That stores precisely
+ * the identifier being avoided, and storing it is the harm — deriving a boolean from it
+ * afterwards does not un-store it. So the model carries a single ATTESTATION boolean
+ * plus guardian contact details, and there is no column, field, or request key anywhere
+ * in this flow that holds a date, an age, or a year. `session-zero-consent.spec.ts`
+ * asserts that against the live table definition rather than trusting this comment.
+ */
+export const GuardianConsentStatus = z.enum(['pending', 'granted', 'declined', 'withdrawn']);
+export type GuardianConsentStatus = z.infer<typeof GuardianConsentStatus>;
+
+export const SessionZeroGuardianConsent = z.object({
+  id: Id,
+  campaignId: Id,
+  /** The participant the guardian is answering for. */
+  userId: z.string().min(1).max(120),
+  userName: z.string().max(120).default(''),
+  /** The charter version the guardian was shown and is answering about. */
+  versionId: Id,
+  version: z.number().int().positive(),
+  guardianName: z.string().max(120).default(''),
+  guardianEmail: z.string().max(200).default(''),
+  guardianRelationship: z.string().max(80).default(''),
+  status: GuardianConsentStatus,
+  decisionNote: z.string().max(2000).default(''),
+  decidedAt: IsoDate.nullable().default(null),
+  ...timestamps,
+});
+export type SessionZeroGuardianConsent = z.infer<typeof SessionZeroGuardianConsent>;
+
+/**
+ * Requesting guardian consent. `.strict()` is load-bearing rather than stylistic here:
+ * it is what makes an integrator's `birthDate`/`dateOfBirth`/`age` field a 400 instead
+ * of a silently ignored key that its sender believes was stored.
+ */
+export const SessionZeroGuardianConsentRequest = z
+  .object({
+    versionId: Id,
+    guardianName: z.string().trim().min(1).max(120),
+    guardianEmail: z.string().trim().min(3).max(200),
+    guardianRelationship: z.string().trim().max(80).default(''),
+    /**
+     * The participant is below the age of majority where they live. A single boolean,
+     * asserted by the person requesting the flow — deliberately not a threshold, a
+     * jurisdiction, or anything from which a birth date could be reconstructed.
+     */
+    minorAttested: z.literal(true),
+  })
+  .strict();
+export type SessionZeroGuardianConsentRequest = z.infer<typeof SessionZeroGuardianConsentRequest>;
+
+export const SessionZeroGuardianConsentDecision = z
+  .object({
+    status: z.enum(['granted', 'declined', 'withdrawn']),
+    note: z.string().max(2000).default(''),
+  })
+  .strict();
+export type SessionZeroGuardianConsentDecision = z.infer<typeof SessionZeroGuardianConsentDecision>;
+
+/**
+ * The charter as shown to somebody who has NOT joined — the privacy-critical projection.
+ *
+ * This is served to an unauthenticated caller holding an invite code, so it is built the
+ * same way as the #587 admin catalog: an enumerated allowlist, never "the charter minus
+ * a few fields". It carries the safety boundaries a person needs in order to decline
+ * meaningfully and NOTHING else — no member names or counts, no private boundary
+ * submissions, no campaign description, no quests/notes/sessions, and never the DM's
+ * unpublished draft. Only a published version is ever previewable.
+ */
+export const CharterPreview = z.object({
+  version: z.number().int().positive(),
+  lines: z.array(z.string()).default([]),
+  veils: z.array(z.string()).default([]),
+  safetyTools: z.array(z.string()).default([]),
+  /** Present only under the `full` preview policy; '' otherwise. */
+  houseRules: z.string().default(''),
+  toneAndExpectations: z.string().default(''),
+  /** Whether the DM chose to disclose the prose fields as well as the boundaries. */
+  previewPolicy: CharterPreviewPolicy,
+  /** The campaign's external-AI content policy, so "is a model reading my words" is answerable pre-join. */
+  aiExternalContentPolicy: AiExternalContentPolicy,
+  publishedAt: IsoDate,
+});
+export type CharterPreview = z.infer<typeof CharterPreview>;
+
+/** Body for POST /invites/:code/join — the version the joiner agrees to (issue #600). */
+export const InviteJoin = z.object({ acknowledgeVersion: z.number().int().positive().optional() }).strict();
+export type InviteJoin = z.infer<typeof InviteJoin>;
+
+/** Body for POST /invites/:code/decline — a recorded refusal, not just a closed tab. */
+export const InviteDecline = z.object({ note: z.string().max(2000).default('') }).strict();
+export type InviteDecline = z.infer<typeof InviteDecline>;
+
+export const SessionZeroPreviewPolicyUpdate = z
+  .object({ previewPolicy: CharterPreviewPolicy })
+  .strict();
+export type SessionZeroPreviewPolicyUpdate = z.infer<typeof SessionZeroPreviewPolicyUpdate>;
+
 // ---------- table safety hold / X-Card (issue #599) ----------
 //
 // Session zero (above) records the safety tools a table AGREED to use as free text.
@@ -2596,6 +2875,11 @@ export const NotificationType = z.enum([
   // The driver AI-DM got stuck / a recovery lever was pulled (issue #314): AI errored/looped,
   // budget exhausted, a ruling was disputed, a table vote resolved, or a human took the seat.
   'ai_dm_alert',
+  // A new session-zero charter version was published (issue #600). Sent to the whole
+  // table, and deliberately NOT muteable into silence when the change was material: a
+  // version that withdrew a protection is the one notification a participant most needs,
+  // because play and live AI are gated on their answer to it (see notificationCategory).
+  'charter_published',
   // Issue #599: a table safety hold (X-Card) was raised or resolved. Its own type rather than
   // a reuse of ai_dm_alert because it fires on tables with no AI seat at all, and because
   // "AI DM Alert" is the wrong thing to show someone whose table just stopped for safety.
@@ -2652,7 +2936,7 @@ export const NotificationCategory = z.enum([
   'quests', // quest_updated
   'proposals', // proposal_submitted, proposal_resolved
   'inbox', // inbox_submitted
-  'access', // added_to_campaign, character_reassigned — ALWAYS ON (access control)
+  'access', // added_to_campaign, character_reassigned, charter_published — ALWAYS ON (access control)
   'security', // ai_dm_alert, safety_hold — ALWAYS ON (security/recovery)
 ]);
 export type NotificationCategory = z.infer<typeof NotificationCategory>;
@@ -2698,6 +2982,12 @@ export const NOTIFICATION_TYPE_CATEGORY: Record<NotificationType, NotificationCa
   proposal_resolved: 'proposals',
   inbox_submitted: 'inbox',
   ai_dm_alert: 'security',
+  // 'access' rather than a category of its own, and therefore ALWAYS ON. A published
+  // charter version can withdraw a protection the recipient previously agreed to, and
+  // their answer to it gates play and live AI for the whole table (issue #600). A
+  // notification a participant can mute into silence, or defer into a digest that
+  // arrives after the session, would make the consent gate look like an ambush.
+  charter_published: 'access',
   safety_hold: 'security',
 };
 
@@ -5934,9 +6224,16 @@ export type InvitePolicyUpdate = z.infer<typeof InvitePolicyUpdate>;
 export const InviteMutationResult = z.object({ revoked: z.number().int().nonnegative() });
 export type InviteMutationResult = z.infer<typeof InviteMutationResult>;
 
-// Public preview of a valid invite (GET /invites/:code) — just enough for the
-// join page to say what you're joining and as what. campaignId is included so
-// the web app can navigate to /c/:id after joining.
+// Public preview of a valid invite (GET /invites/:code) — what you're joining, as what,
+// and (issue #600) WHAT THE TABLE HAS AGREED TO. campaignId is included so the web app
+// can navigate to /c/:id after joining.
+//
+// Issue #600 added `charter`/`consentRequired`: previously this returned a campaign name
+// and a role, so the only way to discover a table's lines and veils was to join it —
+// which is the commitment the boundaries were supposed to inform. The charter here is a
+// privacy-safe projection of a PUBLISHED version only (see CharterPreview); it is null
+// when the campaign has never published one, and joining is then ungated exactly as
+// before.
 export const InvitePreview = z.object({
   campaignId: Id,
   campaignName: z.string(),
@@ -5947,6 +6244,13 @@ export const InvitePreview = z.object({
   // misleading. An invite always seats a read-only viewer or a full player; the
   // interactive-guest capability is granted afterwards by a DM, never by a link.
   permissions: EffectivePermissions,
+  charter: CharterPreview.nullable().default(null),
+  /**
+   * True when the campaign has a published charter, so POST /invites/:code/join and
+   * /accept require `acknowledgeVersion`. False for campaigns that never published —
+   * their join flow is unchanged, which is what keeps this backwards compatible.
+   */
+  consentRequired: z.boolean().default(false),
 });
 export type InvitePreview = z.infer<typeof InvitePreview>;
 
@@ -5956,6 +6260,19 @@ export const InviteAccept = z.object({
   username: User.shape.username,
   password: Password,
   displayName: z.string().max(120).optional(),
+  /**
+   * Issue #600: the charter version number the joiner is agreeing to. REQUIRED when the
+   * campaign has published a charter, and it must be the CURRENT version — accepting a
+   * stale one would let a link shared before a material change carry consent across it.
+   * Omitted (and ignored) for campaigns that never published, whose join flow is
+   * unchanged.
+   *
+   * The per-campaign VERSION NUMBER rather than the row id: this travels to an
+   * unauthenticated caller, and a global autoincrement id would disclose roughly how many
+   * charter versions exist server-wide for no benefit. The number is already on the
+   * preview.
+   */
+  acknowledgeVersion: z.number().int().positive().optional(),
 });
 export type InviteAccept = z.infer<typeof InviteAccept>;
 

@@ -9,12 +9,14 @@
  */
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import type { InvitePreview } from '@campfire/schema';
 import { api, ApiError, API, isTransientError } from '../../lib/api';
 import { loginHrefWithReturn } from '../../lib/safeInternalPath';
 import { useAuth } from '../../app/auth';
 import { PasswordInput } from '../../components/PasswordInput';
 import { BrandMark } from '../../components/BrandMark';
+import { CharterPreviewPanel } from '../session-zero/CharterPreviewPanel';
 import {
   AUTH_ERROR_IDS,
   AUTH_FIELD_IDS,
@@ -30,6 +32,16 @@ const ROLE_BLURB: Record<InvitePreview['role'], string> = {
   player: 'a player',
   viewer: 'a viewer',
 };
+
+/**
+ * Issue #600: join/accept both use HTTP 409 for "already a member" / "username taken"
+ * AND for a stale charter version. The charter conflict message is stable server copy
+ * from `assertCharterAcknowledged` — match on it so the UI does not mis-route the user
+ * into the campaign or claim their username is taken.
+ */
+function isStaleCharterConflict(err: ApiError): boolean {
+  return /session-zero charter you must acknowledge/i.test(err.message);
+}
 
 /**
  * Issue #597: the join page must say what the seat can DO before you accept it, not
@@ -78,6 +90,7 @@ function InvitePermissions({ permissions }: { permissions: InvitePreview['permis
 }
 
 export function JoinPage() {
+  const { t } = useTranslation();
   const { code = '' } = useParams<{ code: string }>();
   const { me, ready, refresh } = useAuth();
   const navigate = useNavigate();
@@ -93,6 +106,11 @@ export function JoinPage() {
   const [confirm, setConfirm] = useState('');
   const [error, setError] = useState<AuthErrorState | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  // Issue #600: consent must be an explicit act, so the join button stays disabled until
+  // the box is ticked. The server enforces the same gate — this is the affordance, not
+  // the control.
+  const [charterAccepted, setCharterAccepted] = useState(false);
+  const [declined, setDeclined] = useState(false);
 
   useLayoutEffect(() => {
     if (error) focusAuthError(error);
@@ -152,20 +170,56 @@ export function JoinPage() {
   }, [loadPreview]);
 
   const alreadyMember = Boolean(preview && me?.memberships.some((m) => m.campaignId === preview.campaignId));
+  const needsCharterConsent = Boolean(preview?.charter && !alreadyMember);
+  const charterConsentMissing = needsCharterConsent && !charterAccepted;
   // Carry `/join/:code` through local/OIDC login so existing users resume the
   // invite preview instead of losing the link (issue #478).
   const loginHref = loginHrefWithReturn(`/join/${code}`);
 
-  async function joinAsCurrentUser() {
-    if (!preview) return;
+  /** Issue #600: a recorded refusal rather than a closed tab. */
+  async function declineInvite() {
     setError(null);
     setSubmitting(true);
     try {
-      await api.post(`${API}/invites/${encodeURIComponent(code)}/join`);
+      await api.post(`${API}/invites/${encodeURIComponent(code)}/decline`, { note: '' });
+      setDeclined(true);
+    } catch (err) {
+      setError({
+        kind: 'form',
+        message: err instanceof ApiError ? err.message : AUTH_GENERIC_ERROR,
+      });
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  /** Preview went stale while the form was open — reload it and require a fresh tick. */
+  async function handleStaleCharterConflict() {
+    setCharterAccepted(false);
+    setDeclined(false);
+    await loadPreview();
+    setError({
+      kind: 'form',
+      message: t('sessionZero.join.charterChanged'),
+    });
+  }
+
+  async function joinAsCurrentUser() {
+    if (!preview) return;
+    if (charterConsentMissing) return;
+    setError(null);
+    setSubmitting(true);
+    try {
+      await api.post(`${API}/invites/${encodeURIComponent(code)}/join`, {
+        acknowledgeVersion: preview.charter ? preview.charter.version : undefined,
+      });
       await refresh();
       navigate(`/c/${preview.campaignId}`, { replace: true });
     } catch (err) {
-      if (err instanceof ApiError && err.status === 409) {
+      if (err instanceof ApiError && err.status === 409 && isStaleCharterConflict(err)) {
+        await handleStaleCharterConflict();
+      } else if (err instanceof ApiError && err.status === 409) {
+        // Genuine already-a-member conflict — land them in the campaign.
         navigate(`/c/${preview.campaignId}`, { replace: true });
       } else {
         setError({
@@ -181,6 +235,7 @@ export function JoinPage() {
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     if (!preview) return;
+    if (charterConsentMissing) return;
     setError(null);
 
     const clientError = validateNewAccountFields({ username, password, confirm });
@@ -195,11 +250,14 @@ export function JoinPage() {
         username,
         password,
         displayName: displayName.trim() || undefined,
+        acknowledgeVersion: preview.charter ? preview.charter.version : undefined,
       });
       await refresh();
       navigate(`/c/${preview.campaignId}`, { replace: true });
     } catch (err) {
-      if (err instanceof ApiError && err.status === 409) {
+      if (err instanceof ApiError && err.status === 409 && isStaleCharterConflict(err)) {
+        await handleStaleCharterConflict();
+      } else if (err instanceof ApiError && err.status === 409) {
         setError({
           kind: 'fields',
           fields: {
@@ -286,7 +344,45 @@ export function JoinPage() {
                 </p>
               </div>
 
-              {!alreadyMember && <InvitePermissions permissions={preview.permissions} />}
+              {!alreadyMember && preview.permissions && (
+                <InvitePermissions permissions={preview.permissions} />
+              )}
+
+              {/*
+                Issue #600 — the boundaries, before the commitment. `charter` is null for a
+                campaign that never published a version, in which case this whole block is
+                absent and the join flow is exactly what it was.
+              */}
+              {preview.charter && !alreadyMember && (
+                <div className="w-full flex flex-col gap-3">
+                  <CharterPreviewPanel charter={preview.charter} />
+                  <label className="flex items-start gap-2 text-sm" style={{ textAlign: 'start' }}>
+                    <input
+                      type="checkbox"
+                      checked={charterAccepted}
+                      onChange={(e) => setCharterAccepted(e.target.checked)}
+                      style={{ marginTop: 3 }}
+                    />
+                    <span>{t('sessionZero.join.charterAgree')}</span>
+                  </label>
+                  {me && (
+                    declined ? (
+                      <p className="text-muted" style={{ margin: 0, fontSize: 13 }}>
+                        {t('sessionZero.join.declinedMessage')}
+                      </p>
+                    ) : (
+                      <button
+                        type="button"
+                        className="btn"
+                        disabled={submitting}
+                        onClick={declineInvite}
+                      >
+                        {t('sessionZero.join.decline')}
+                      </button>
+                    )
+                  )}
+                </div>
+              )}
 
               {me ? (
                 <div className="w-full flex flex-col gap-3">
@@ -314,7 +410,7 @@ export function JoinPage() {
                       type="button"
                       className="btn btn-primary btn-block"
                       style={{ minHeight: 44 }}
-                      disabled={submitting}
+                      disabled={submitting || charterConsentMissing}
                       onClick={joinAsCurrentUser}
                     >
                       {submitting
@@ -414,7 +510,12 @@ export function JoinPage() {
                     </p>
                   )}
 
-                  <button type="submit" className="btn btn-primary btn-block" style={{ minHeight: 44 }} disabled={submitting}>
+                  <button
+                    type="submit"
+                    className="btn btn-primary btn-block"
+                    style={{ minHeight: 44 }}
+                    disabled={submitting || charterConsentMissing}
+                  >
                     {submitting ? 'Pulling up a chair…' : 'Create account & join'}
                   </button>
                   <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>

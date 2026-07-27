@@ -292,8 +292,101 @@ CREATE TABLE IF NOT EXISTS session_zero (
   safety_tools TEXT NOT NULL DEFAULT '[]',
   house_rules TEXT NOT NULL DEFAULT '',
   tone_and_expectations TEXT NOT NULL DEFAULT '',
+  -- Issue #600: how much of the PUBLISHED charter a not-yet-member sees at an invite
+  -- link. 'boundaries' (default) discloses lines/veils/safety tools -- the safety floor
+  -- somebody needs in order to decline meaningfully; 'full' additionally discloses the
+  -- house-rules and tone prose, which can carry campaign specifics. There is deliberately
+  -- no 'none': a table that will not show its boundaries should not be handing out public
+  -- join links, and an opt-out here would quietly restore the exact gap #600 closes.
+  preview_policy TEXT NOT NULL DEFAULT 'boundaries' CHECK (preview_policy IN ('boundaries', 'full')),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
+);
+
+-- Issue #600: IMMUTABLE published charter versions. Rows here are INSERT-only -- there is
+-- no update path in the service, and a "change" is always the next version number. This is
+-- the backbone of the whole feature: an acknowledgment has to name a specific, frozen
+-- version, or "renewed consent after a material change" has no referent to point at.
+--
+-- The material flag is frozen at publish time rather than recomputed on read. The consent gate
+-- depends on it, and a gate whose verdict can change retroactively because somebody
+-- adjusted the comparison rule is not a gate.
+CREATE TABLE IF NOT EXISTS session_zero_charter_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL,
+  lines TEXT NOT NULL DEFAULT '[]',
+  veils TEXT NOT NULL DEFAULT '[]',
+  safety_tools TEXT NOT NULL DEFAULT '[]',
+  house_rules TEXT NOT NULL DEFAULT '',
+  tone_and_expectations TEXT NOT NULL DEFAULT '',
+  material INTEGER NOT NULL DEFAULT 0 CHECK (material IN (0, 1)),
+  change_summary TEXT NOT NULL DEFAULT '',
+  published_by TEXT NOT NULL DEFAULT '',
+  published_at TEXT NOT NULL,
+  UNIQUE(campaign_id, version)
+);
+
+-- Issue #600: one participant's answer to ONE version. UNIQUE(version_id, user_id) is what
+-- makes re-answering an update rather than a second opinion, and what makes "has everyone
+-- acknowledged version N" a countable question.
+CREATE TABLE IF NOT EXISTS session_zero_acknowledgments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  version_id INTEGER NOT NULL REFERENCES session_zero_charter_versions(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL,
+  user_name TEXT NOT NULL DEFAULT '',
+  state TEXT NOT NULL CHECK (state IN ('acknowledged', 'discuss', 'declined')),
+  note TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(version_id, user_id)
+);
+
+-- Issue #600: a boundary sent privately to the FACILITATOR, never to the table.
+--
+-- Anonymous rows keep submitter_user_id ONLY so the submitter can withdraw their own
+-- row; every read path that serves a facilitator drops it. That is a deliberate trade
+-- (the column exists, so a DB-level reader could correlate) chosen over the alternative
+-- of orphaning anonymous submissions beyond their author's reach. Never exported, never
+-- sent to a model.
+CREATE TABLE IF NOT EXISTS session_zero_boundary_submissions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind IN ('line', 'veil')),
+  text TEXT NOT NULL,
+  anonymous INTEGER NOT NULL DEFAULT 0 CHECK (anonymous IN (0, 1)),
+  submitter_user_id TEXT NOT NULL,
+  submitter_name TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+-- Issue #600: guardian consent, WITHOUT a date of birth.
+--
+-- Note what is absent and must stay absent: there is no birth_date, no date_of_birth, no
+-- age, no birth_year, no age_band. The issue asks for a guardian flow that does not
+-- collect exact birth dates, and taking a date in order to derive a boolean from it would
+-- store precisely the identifier being avoided -- deriving afterwards does not un-store it.
+-- The minor_attested column is the whole of what is recorded about the participant's age, and it is
+-- an assertion rather than a measurement. test/unit/session-zero-consent.spec.ts asserts
+-- this against the live PRAGMA output rather than trusting this comment.
+CREATE TABLE IF NOT EXISTS session_zero_guardian_consents (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL,
+  user_name TEXT NOT NULL DEFAULT '',
+  version_id INTEGER NOT NULL REFERENCES session_zero_charter_versions(id) ON DELETE CASCADE,
+  guardian_name TEXT NOT NULL DEFAULT '',
+  guardian_email TEXT NOT NULL DEFAULT '',
+  guardian_relationship TEXT NOT NULL DEFAULT '',
+  minor_attested INTEGER NOT NULL DEFAULT 1 CHECK (minor_attested IN (0, 1)),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'granted', 'declined', 'withdrawn')),
+  decision_note TEXT NOT NULL DEFAULT '',
+  decided_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(campaign_id, user_id)
 );
 
 CREATE TABLE IF NOT EXISTS participant_support_preferences (
@@ -1820,6 +1913,17 @@ CREATE INDEX IF NOT EXISTS idx_campaign_catch_up_campaign ON campaign_catch_up_c
 -- character. Partial so unlinked (NULL) seats do not collide. Matches migration 0067.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_members_character
   ON campaign_members(character_id) WHERE character_id IS NOT NULL;
+-- #600: the consent gate reads a campaign's versions newest-first on every AI turn and
+-- every charter render, and counts acknowledgments per version.
+CREATE INDEX IF NOT EXISTS idx_charter_versions_campaign
+  ON session_zero_charter_versions(campaign_id, version);
+CREATE INDEX IF NOT EXISTS idx_charter_acks_version ON session_zero_acknowledgments(version_id);
+CREATE INDEX IF NOT EXISTS idx_charter_acks_campaign_user
+  ON session_zero_acknowledgments(campaign_id, user_id);
+CREATE INDEX IF NOT EXISTS idx_charter_boundary_campaign
+  ON session_zero_boundary_submissions(campaign_id, id);
+CREATE INDEX IF NOT EXISTS idx_charter_guardian_campaign
+  ON session_zero_guardian_consents(campaign_id, status);
 CREATE INDEX IF NOT EXISTS idx_participant_support_campaign ON participant_support_preferences(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_participant_support_ai_consent ON participant_support_preferences(campaign_id, ai_use_consent);
 CREATE INDEX IF NOT EXISTS idx_campaign_invites_campaign ON campaign_invites(campaign_id);
