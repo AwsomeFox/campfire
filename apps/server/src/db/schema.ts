@@ -446,6 +446,15 @@ export const notes = sqliteTable('notes', {
   resolvedNote: text('resolved_note').notNull().default(''),
   // Soft-delete / trash timestamp (issue #116) — see campaigns.deletedAt.
   deletedAt: text('deleted_at'),
+  // Moderation quarantine (issue #601). The gap the issue names is that "DMs cannot
+  // quarantine whispers": a whisper is invisible to everyone but its author, its single
+  // recipient and the DMs, so an abusive one had no removal path short of asking the
+  // author to delete their own message. A quarantined note is treated exactly like a
+  // trashed one by every NORMAL read (list/get/search) — including for its author and
+  // recipient, because withholding it from the target is the point. It stays visible
+  // ONLY through the moderation evidence path. Cleared by `unquarantine`.
+  quarantinedAt: text('quarantined_at'),
+  quarantinedBy: text('quarantined_by'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -498,6 +507,14 @@ export const comments = sqliteTable('comments', {
   // so the player who wrote the comment stays its author of record.
   editedAt: text('edited_at'),
   editedBy: text('edited_by'),
+  // Moderation quarantine (issue #601). NULL = normal. An ISO timestamp means a DM
+  // withheld the body pending review of an open report: toDomain() swaps the prose for
+  // a neutral placeholder for EVERY reader (the author included), and the campaign
+  // search index drops the row. Unlike deleted_at this is never author-settable — only
+  // the moderation queue sets or clears it, and the original prose survives ONLY in the
+  // separately-gated moderation_evidence snapshot, never in this row.
+  quarantinedAt: text('quarantined_at'),
+  quarantinedBy: text('quarantined_by'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -543,6 +560,128 @@ export const auditLog = sqliteTable('audit_log', {
   detail: text('detail').notNull().default(''),
   requestId: text('request_id'),
   createdAt: text('created_at').notNull(),
+});
+
+// ---------------------------------------------------------------------------
+// Moderation / abuse incidents (issue #601)
+//
+// CASCADE DECISION (deliberate, and the opposite of every other campaign-scoped
+// table here): `campaign_id` on the three moderation tables is a PLAIN INTEGER
+// with NO `REFERENCES campaigns(id) ON DELETE CASCADE`.
+//
+// Every other campaign-scoped table cascades because its rows are campaign
+// CONTENT — when the campaign is purged, the content should go with it. Abuse
+// evidence is not content; it is the record of someone being harmed inside that
+// campaign. Cascading would hand any DM a one-click evidence shredder: delete
+// the campaign, and every report filed against you evaporates along with the
+// snapshots that proved it. That is precisely the failure mode #601 exists to
+// close, and it is worse than the equivalent for audit rows because a report is
+// often the only remaining copy of content the abuser has already edited away.
+//
+// So evidence outlives its campaign. The cost is that a purge leaves rows whose
+// `campaign_id` no longer resolves — accepted, and bounded three ways:
+//   1. Retention is TIME-based (`expires_at`), not lifetime-based: content is
+//      redacted on schedule whether or not the campaign still exists (bullet 6,
+//      "suitable for minors"). Orphaned rows therefore stop holding prose.
+//   2. Orphaned reports are unreachable through the campaign DM queue (there is
+//      no campaign left to be a DM of), so they are visible only via audited
+//      server-admin break-glass. Fail closed by construction.
+//   3. `campaign_purge_tombstones` already establishes the precedent in this DB
+//      that some records deliberately survive a purge.
+// ---------------------------------------------------------------------------
+
+/**
+ * Integrity-protected snapshot of reportable content, captured BEFORE the source
+ * row is mutated (or at report time, whichever comes first).
+ *
+ * `content_hash` is a sha256 over a canonical field serialization — see
+ * moderation/moderation-evidence.ts `moderationEvidenceHash` for the exact byte
+ * layout and the reasoning behind each included field. Reads recompute it and
+ * report intact / redacted / tampered; nothing in the app ever rewrites a stored
+ * hash except a recorded redaction, which stamps `redacted_at` so the resulting
+ * mismatch is explained rather than alarming.
+ */
+export const moderationEvidence = sqliteTable('moderation_evidence', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  campaignId: integer('campaign_id').notNull(), // NOT an FK — see the cascade note above.
+  targetType: text('target_type').notNull(), // ModerationTargetType
+  targetId: integer('target_id'), // null for 'conduct' (and optional for 'ai_narration')
+  reason: text('reason').notNull(), // ModerationEvidenceReason — why the snapshot was taken
+  source: text('source').notNull().default('server_capture'), // 'server_capture' | 'reporter_supplied'
+  authorUserId: text('author_user_id').notNull().default(''), // the report SUBJECT
+  authorName: text('author_name').notNull().default(''),
+  recipientUserId: text('recipient_user_id'), // whisper/notification target
+  anchorEntityType: text('anchor_entity_type'),
+  anchorEntityId: integer('anchor_entity_id'),
+  // The source row's own updated_at at capture time — the "revision" #601 asks for.
+  revisionAt: text('revision_at').notNull().default(''),
+  content: text('content').notNull().default(''),
+  contextJson: text('context_json').notNull().default('{}'), // JSON: visibility, inCharacter, parentId, …
+  contentHash: text('content_hash').notNull(),
+  // sha256 over every field EXCEPT `content`. Redaction overwrites the content, so
+  // `content_hash` cannot match afterwards — without this second digest, stamping
+  // `redacted_at` would silently switch tamper detection off for the whole row and
+  // let the author, target or capture time be rewritten under the benign `redacted`
+  // verdict. This digest still verifies after a redaction, so `redacted` means "the
+  // content went and nothing else did". See moderation/moderation-evidence.ts.
+  metadataHash: text('metadata_hash').notNull().default(''),
+  redactedAt: text('redacted_at'),
+  redactedBy: text('redacted_by'),
+  redactionReason: text('redaction_reason').notNull().default(''),
+  expiresAt: text('expires_at'), // content-retention horizon; null = policy disabled at capture
+  capturedAt: text('captured_at').notNull(),
+});
+
+/**
+ * The durable incident record. `subject_user_id` is denormalized off the evidence
+ * so the conflicted-DM check (a DM may not moderate a report about themselves)
+ * is a column comparison and can never be skipped by a forgotten join.
+ */
+export const moderationReports = sqliteTable('moderation_reports', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  campaignId: integer('campaign_id').notNull(), // NOT an FK — see the cascade note above.
+  targetType: text('target_type').notNull(),
+  targetId: integer('target_id'),
+  reporterUserId: text('reporter_user_id').notNull(),
+  reporterName: text('reporter_name').notNull().default(''),
+  subjectUserId: text('subject_user_id').notNull().default(''),
+  subjectName: text('subject_name').notNull().default(''),
+  reason: text('reason').notNull(), // ModerationReportReason
+  details: text('details').notNull().default(''),
+  status: text('status').notNull().default('open'), // ModerationReportStatus
+  resolution: text('resolution'), // ModerationResolution; null until resolved
+  resolutionNote: text('resolution_note').notNull().default(''),
+  evidenceId: integer('evidence_id').notNull(),
+  // Whether THIS report is currently withholding its target. Tracked per-report so
+  // resolving one report cannot lift a quarantine another still justifies.
+  quarantined: integer('quarantined', { mode: 'boolean' }).notNull().default(false),
+  escalatedAt: text('escalated_at'),
+  escalationReason: text('escalation_reason').notNull().default(''),
+  acknowledgedAt: text('acknowledged_at'),
+  resolvedAt: text('resolved_at'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+/**
+ * An active posting mute (the `mute` queue action). Enforced at comment/note
+ * creation. Deliberately keyed on the user id rather than a membership row so a
+ * muted member who leaves and rejoins is still muted — leaving a table is not a
+ * way to clear a moderation sanction.
+ */
+export const moderationMutes = sqliteTable('moderation_mutes', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  campaignId: integer('campaign_id').notNull(), // NOT an FK — see the cascade note above.
+  userId: text('user_id').notNull(), // String(users.id) or dev:<name>
+  userName: text('user_name').notNull().default(''),
+  reason: text('reason').notNull().default(''),
+  expiresAt: text('expires_at'), // null = indefinite, until a DM lifts it
+  createdBy: text('created_by').notNull().default(''),
+  createdAt: text('created_at').notNull(),
+  // Set when a DM lifts the mute. Kept (rather than deleted) so the sanction
+  // history survives — "was this person ever muted here" is a moderation question.
+  liftedAt: text('lifted_at'),
+  liftedBy: text('lifted_by'),
 });
 
 export const users = sqliteTable('users', {
@@ -1276,6 +1415,41 @@ export const aiDmUsageHistory = sqliteTable('ai_dm_usage_history', {
   action: text('action').notNull().default(''), // 'ai-dm.driver.turn' | 'ai-dm.scribe' | ...
   model: text('model').notNull().default(''),
   actor: text('actor').notNull().default(''),
+  createdAt: text('created_at').notNull(),
+});
+
+// Authoritative multi-player AI-DM table transcript (issue #572). One row per durable
+// transcript event, written by AiDmTranscriptService BEFORE the matching frame is
+// broadcast on the narration SSE channel — so a client that reconnects and pages from
+// its last seq can never miss an event other clients already rendered.
+//
+// `seq` is a PER-CAMPAIGN monotonic counter assigned inside the same synchronous
+// better-sqlite3 transaction as the insert: the ordering key, the pagination cursor and
+// the reconnect watermark, all in one. Not `createdAt` (wall clock is not a total order)
+// and not the global `id` (it interleaves across campaigns). UNIQUE (campaignId, seq).
+// `eventId` is the stable client-visible identity (server-minted uuid, unique per
+// campaign) used to merge the same event arriving twice (live SSE + a page fetch).
+// `clientRef` is the sender's optimistic-echo CORRELATION token (not an idempotency
+// key) — echoed back so the submitting browser replaces its local entry in place.
+// `turnId` groups one driver turn's narration/tool/turn-end rows into one DM bubble.
+// `visibility` is row-level redaction ('all' | 'dm'); field-level redaction of a hidden
+// encounter id inside a tool payload reuses projectAiDmToolEventForRole instead.
+//
+// narration.delta is deliberately NOT stored — narration.message is the aggregated
+// authoritative text per step, and persisting every token chunk would blow the table up
+// ~100x per turn for no added information.
+export const aiDmTranscriptEvents = sqliteTable('ai_dm_transcript_events', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  campaignId: integer('campaign_id').notNull(),
+  seq: integer('seq').notNull(),
+  eventId: text('event_id').notNull(),
+  kind: text('kind').notNull(), // AiDmTranscriptEventKind
+  actorUserId: text('actor_user_id'),
+  actorName: text('actor_name'),
+  clientRef: text('client_ref'),
+  turnId: text('turn_id'),
+  payload: text('payload').notNull().default('{}'), // JSON-encoded, kind-specific
+  visibility: text('visibility').notNull().default('all'), // 'all' | 'dm'
   createdAt: text('created_at').notNull(),
 });
 

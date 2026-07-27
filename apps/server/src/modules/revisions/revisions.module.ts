@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { ModerationModule } from '../moderation/moderation.module';
 import { RoleAccessModule } from '../membership/role-access.module';
 import { RevisionsService } from './revisions.service';
 import { RevisionsController } from './revisions.controller';
@@ -12,7 +13,7 @@ import { RevisionsController } from './revisions.controller';
  * this module no longer imports AuditModule.
  */
 @Module({
-  imports: [RoleAccessModule],
+  imports: [RoleAccessModule, ModerationModule],
   controllers: [RevisionsController],
   providers: [RevisionsService],
   exports: [RevisionsService],
