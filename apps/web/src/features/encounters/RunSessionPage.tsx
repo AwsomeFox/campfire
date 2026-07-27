@@ -1501,10 +1501,9 @@ export default function RunSessionPage() {
     onSuccess: (response, variables) => {
       const check = response.concentrationCheck;
       if (!check || concentrationQueueEncounterRef.current !== eid) return;
-      const name = queryClient
-        .getQueryData<EncounterWithCombatants>(queryKeys.encounter(eid))
-        ?.combatants.find((combatant) => combatant.id === variables.combatantId)?.name ?? 'Combatant';
-      setPendingConcentrationChecks((pending) => appendConcentrationCheck(pending, { combatantId: variables.combatantId, name, ...check }));
+      setPendingConcentrationChecks((pending) =>
+        appendConcentrationCheck(pending, { combatantId: variables.combatantId, name: response.name, ...check }),
+      );
     },
     onSettled: () => {
       // Only reconcile after the last in-flight HP write of a burst settles.
@@ -1552,8 +1551,9 @@ export default function RunSessionPage() {
             ),
           );
           if (response.concentrationCheck && concentrationQueueEncounterRef.current === requestEncounterId) {
-            const name = previous?.combatants.find((combatant) => combatant.id === combatantId)?.name ?? 'Combatant';
-            setPendingConcentrationChecks((pending) => appendConcentrationCheck(pending, { combatantId, name, ...response.concentrationCheck }));
+            setPendingConcentrationChecks((pending) =>
+              appendConcentrationCheck(pending, { combatantId, name: response.name, ...response.concentrationCheck }),
+            );
           }
         }
         await invalidateEncounter(queryClient, eid);

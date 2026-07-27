@@ -10,6 +10,7 @@ test.describe('concentration checks (issue #606)', () => {
     expect(source).toContain('pendingConcentrationChecks');
     expect(source).toContain('api.patch<CombatantUpdateResult>');
     expect(source).toContain('response.concentrationCheck');
+    expect(source).toContain('name: response.name');
     expect(source).toContain('appendConcentrationCheck');
   });
 
