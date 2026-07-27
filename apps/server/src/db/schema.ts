@@ -1462,6 +1462,8 @@ export const aiDriverControlState = sqliteTable('ai_driver_control_state', {
    */
   secretReadApprovals: text('secret_read_approvals'),
   pendingToolConfirmations: text('pending_tool_confirmations'),
+  /** #1051 — collaborative handoff: the AI narrates, a DM confirms mechanical commits. */
+  collaborative: integer('collaborative', { mode: 'boolean' }).notNull().default(false),
   updatedAt: text('updated_at').notNull(),
 });
 

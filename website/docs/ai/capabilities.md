@@ -155,6 +155,41 @@ If a driver stalls or makes a call the table disputes, players have recovery lev
 open a **table vote** (to override or pause), or **request a human takeover**. The DM
 can pause and resume the seat at any time.
 
+### Collaborative handoff: the AI narrates, you rule
+
+Between "the AI runs the table" and "a human takes the seat entirely" there is a middle setting.
+Turn on **collaborative handoff** (DM only) and the AI keeps narrating and keeps playing NPCs,
+but every call that would **commit a mechanical outcome** waits for you:
+
+| Still automatic | Waits for you |
+| --- | --- |
+| Dice rolls, saves, initiative | Applying an action's damage or effects |
+| Reading the world | Changing HP or conditions |
+| Undoing a mistake | Advancing the turn |
+| Proposing canon edits (already a proposal) | Adding, changing or removing combatants |
+| | Starting or committing an encounter |
+
+Dice stay automatic on purpose. A roll produces a *number*; nothing changes until something
+applies it, and a single attack is a roll, a save and an apply — confirming each one would make
+the mode unusable while protecting nothing. Undo stays automatic for the same reason in reverse:
+a confirmation in front of the undo button leaves a wrong result on the board until someone
+approves removing it.
+
+**The AI is told to narrate a waiting action as attempted, not finished** — "she swings for the
+gap in its armour", never "she hits for nine damage". Otherwise the table would hear an outcome
+that never happened.
+
+The mode is sticky in the way that matters: pausing the seat, taking it over and handing it
+back, or getting stuck and recovering all leave it on, and it survives a server restart. Nothing
+except turning it off gives the AI back the authority to change the board on its own.
+
+!!! tip "Approving the waiting actions"
+    Deferred calls land in the AI's pending tool-confirmation queue, which appears at the top of
+    the **AI Table** as soon as something is queued — see [Approving what the AI asks
+    to do](#approving-what-the-ai-asks-to-do) below. Each waiting action is shown as a decision
+    with its arguments one click away, and the campaign's DMs are notified even when nobody is
+    looking at the table.
+
 ### What survives a server restart
 
 The seat's **state** is stored in the database, not in server memory, so a restart or a
