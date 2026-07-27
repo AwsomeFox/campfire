@@ -1683,6 +1683,30 @@ function migrateAiDriverSessionPersistence1042(sqlite: Database.Database): void 
 }
 
 /**
+ * Issue #1051 — collaborative handoff on `ai_driver_control_state`.
+ *
+ * NOT NULL DEFAULT 0, so SQLite backfills every existing row to "off" — which is the behaviour
+ * every campaign already has. An upgraded install cannot wake up with the AI unexpectedly
+ * deferring, or unexpectedly not deferring; the column is inert until a DM turns it on.
+ *
+ * A separate, never-before-recorded migration name rather than a widening of #559's
+ * `migrateAiDriverControlStateTable`, for the reason that migration's own comment gives: a
+ * database that already recorded the CREATE never re-runs it, so a column folded in there would
+ * stay missing forever — and every drizzle read of the table would then throw inside the
+ * best-effort try/catch that swallows it, silently disabling restart-safety with no symptom.
+ */
+function migrateAiDriverCollaborative1051(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ai_driver_control_state'")
+    .get();
+  if (!hasTable) return;
+  const cols = sqlite.prepare('PRAGMA table_info(ai_driver_control_state)').all() as Array<{ name: string }>;
+  if (!cols.some((c) => c.name === 'collaborative')) {
+    sqlite.exec('ALTER TABLE ai_driver_control_state ADD COLUMN collaborative INTEGER NOT NULL DEFAULT 0');
+  }
+}
+
+/**
  * Migration for DBs created before DM-initiated check requests (issue #415): the
  * `check_requests` table didn't exist. Same "new table" pattern as migrateAiScribeTables —
  * CREATE TABLE / CREATE INDEX IF NOT EXISTS, recorded so upgraded hosts get the table (and its
@@ -3423,6 +3447,32 @@ function migrateCampaignModules585(sqlite: Database.Database): void {
   addColumn('detached_at', 'detached_at TEXT');
 }
 
+/**
+ * Issue #1047: sheet-scoped condition metadata.
+ *
+ * Adds `characters.condition_instances`, the counterpart to the `combatants` column #423
+ * added. NULLABLE on purpose, and deliberately NOT backfilled: every existing row holds
+ * bare strings in `conditions`, and the read path (common/conditions.ts
+ * readConditionInstances) materialises those into instances on demand. A backfill would
+ * rewrite every character row on upgrade to produce data the reader already derives, and
+ * would then have to be kept in step with the reader forever.
+ *
+ * So an install with years of bare strings reads exactly as it did before, and only gains
+ * structure when something actually writes metadata. Nothing here can lose a condition:
+ * the legacy column is untouched.
+ *
+ * Probe-before-act per house style — ADD COLUMN is not idempotent on its own.
+ */
+function migrateCharacterConditionInstances1047(sqlite: Database.Database): void {
+  const hasCharacters = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='characters'")
+    .get();
+  if (!hasCharacters) return;
+  const columns = sqlite.prepare('PRAGMA table_info(characters)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'condition_instances')) return;
+  sqlite.exec('ALTER TABLE characters ADD COLUMN condition_instances TEXT');
+}
+
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
   { name: '0001_users_oidc', run: migrateUsersTableForOidc },
   { name: '0002_campaigns_rule_system', run: migrateCampaignsTableForRuleSystem },
@@ -3593,6 +3643,12 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // `_1042` suffix survives a sibling branch landing a colliding ordinal, and renaming it later
   // is the one edit that would silently skip it on every database that already recorded it.
   { name: '0131_ai_driver_session_persistence_1042', run: migrateAiDriverSessionPersistence1042 },
+  // 0138 was CENTRALLY ALLOCATED to issue #1051 by the merge coordinator; the ordinals below it
+  // are held by other in-flight branches, so the gap is deliberate and must not be tidied down to
+  // the next free one. Must stay AFTER 0118 (the CREATE) in the array — runMigrations goes in
+  // array order and an ALTER against a missing table is a no-op that never retries. Run-once is
+  // guaranteed by the FULL name string, which is why the `_1051` suffix matters.
+  { name: '0138_ai_collaborative_handoff_1051', run: migrateAiDriverCollaborative1051 },
   // Campaign modules take 0120, assigned centrally. The 0114/0115 this branch originally
   // carried were reassigned to #1443 and #1524 as those landed first; 0112/0113 are a
   // permanent gap, since the branch holding them ended up taking 0118/0119.
@@ -3617,6 +3673,11 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // colliding number. Renaming it after a database has recorded it is the one edit that would
   // break run-once.
   { name: '0134_ai_seat_style_presets_1049', run: migrateAiDmSeatsTableForStylePresets1049 },
+  // 0132 was CENTRALLY ALLOCATED to issue #1047 by the merge coordinator; the gap above is
+  // deliberate and must not be "tidied" down to the next free ordinal. runMigrations dedupes
+  // on the FULL name string, so the `_1047` suffix is what guarantees this runs exactly once
+  // even if a sibling branch lands a colliding ordinal.
+  { name: '0132_character_condition_instances_1047', run: migrateCharacterConditionInstances1047 },
 ];
 
 /**

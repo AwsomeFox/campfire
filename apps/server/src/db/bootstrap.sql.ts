@@ -178,6 +178,9 @@ CREATE TABLE IF NOT EXISTS characters (
   death_save_successes INTEGER NOT NULL DEFAULT 0,
   death_save_failures INTEGER NOT NULL DEFAULT 0,
   conditions TEXT NOT NULL DEFAULT '[]',
+  -- Issue #1047: sheet-scoped ConditionInstance[] JSON; NULL means derive from the legacy
+  -- conditions names. No backticks in this file: it is one big TS template literal.
+  condition_instances TEXT,
   save_proficiencies TEXT NOT NULL DEFAULT '[]',
   skills TEXT NOT NULL DEFAULT '{}',
   actions TEXT NOT NULL DEFAULT '[]',
@@ -1242,6 +1245,11 @@ CREATE TABLE IF NOT EXISTS ai_driver_control_state (
   -- audit a revocation you have no record of.
   secret_read_approvals TEXT,
   pending_tool_confirmations TEXT,
+  -- Issue #1051: collaborative handoff is on (the AI narrates, a DM decides mechanics). Its own
+  -- column rather than a ladder-state value, because the state column is one slot that a pause,
+  -- a takeover, or a stuck seat legitimately takes over -- and a mode that vanished when a DM
+  -- paused for five minutes would silently restore full autonomy on resume.
+  collaborative INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT NOT NULL
 );
 

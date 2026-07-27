@@ -14,6 +14,7 @@ import { FsDeletionService } from '../../src/modules/attachments/fs-deletion.ser
 import { CampaignLibraryService } from '../../src/modules/campaign-library/campaign-library.service';
 import { EncountersService } from '../../src/modules/encounters/encounters.service';
 import { CharactersService } from '../../src/modules/characters/characters.service';
+import type { ConditionInstance } from '@campfire/schema';
 import { fromJsonText } from '../../src/common/json';
 import type { RequestUser } from '../../src/common/user.types';
 import { makeTempDataDir } from './fixtures';
@@ -260,6 +261,90 @@ describe('encounter condition sync (issue #486, service layer)', () => {
     it('reconciles conditionInstances when a sheet-side removal lands', async () => {
       const ctx = await materialisedThenClearedOnSheet();
       expect(readInstanceNames(ctx.orm, ctx.combatantId)).toEqual(['prone']);
+    });
+  });
+
+  /**
+   * Issue #1047 — the sheet<->combat boundary.
+   *
+   * The sheet stores the same ConditionInstance shape as a combatant, but rounds do not
+   * elapse outside an encounter, so the round/turn-scoped fields are nulled on the way to
+   * the sheet and adopted as "indefinite" on the way back in. This is where the next
+   * desync would live, so it is asserted in both directions.
+   */
+  describe('sheet <-> combat condition boundary (#1047)', () => {
+    function readSheetInstances(orm: ReturnType<typeof build>['orm'], characterId: number) {
+      const [row] = orm.select().from(characters).where(eq(characters.id, characterId)).limit(1).all();
+      return fromJsonText<ConditionInstance[]>(row.conditionInstances, []);
+    }
+
+    it('strips round-scoped fields when a condition travels to the sheet on /end', async () => {
+      const ctx = seedRunningFight();
+      // A condition with a live round counter and a repeat save, as combat produces.
+      await ctx.encountersService.updateCombatant(
+        ctx.encounterId,
+        ctx.combatantId,
+        {
+          addConditionInstance: {
+            id: 'inst_poison', name: 'poisoned', ruleEntryId: null, source: 'Giant Spider',
+            sourceCombatantId: 4242, durationRounds: 3, roundsRemaining: 2, timing: 'end-of-turn',
+            saveTiming: 'end-of-turn', saveDc: 13, saveAbility: 'con', isConcentration: false,
+            stacks: 1, notes: 'bite', custom: false,
+          },
+        },
+        dmUser,
+        'dm',
+      );
+
+      await ctx.encountersService.end(ctx.encounterId, dmUser, 'dm');
+
+      const [sheet] = readSheetInstances(ctx.orm, ctx.characterId).filter((i) => i.name === 'poisoned');
+      expect(sheet).toBeDefined();
+      // Kept: the duration-independent facts.
+      expect(sheet.source).toBe('Giant Spider');
+      expect(sheet.notes).toBe('bite');
+      expect(sheet.stacks).toBe(1);
+      // Stripped: everything that only means something inside a round loop.
+      expect(sheet.durationRounds).toBeNull();
+      expect(sheet.roundsRemaining).toBeNull();
+      expect(sheet.timing).toBe('none');
+      expect(sheet.saveTiming).toBe('none');
+      expect(sheet.saveDc).toBeNull();
+      expect(sheet.saveAbility).toBeNull();
+      expect(sheet.sourceCombatantId).toBeNull();
+      // The condition itself survives — a mid-countdown effect is not silently dropped.
+      expect(readConditions(ctx.orm, 'character', ctx.characterId)).toContain('poisoned');
+    });
+
+    it('carries sheet metadata into a new encounter as an indefinite condition', async () => {
+      const ctx = seedRunningFight();
+      await ctx.charactersService.patchConditions(ctx.characterId, { add: ['cursed'] }, dmUser, 'dm');
+      // Give the sheet instance metadata a bare string cannot express.
+      const sheetInstances = readSheetInstances(ctx.orm, ctx.characterId).map((i) =>
+        i.name === 'cursed' ? { ...i, source: 'Hag bargain', stacks: 3, notes: 'family debt' } : i,
+      );
+      ctx.orm
+        .update(characters)
+        .set({ conditionInstances: JSON.stringify(sheetInstances) })
+        .where(eq(characters.id, ctx.characterId))
+        .run();
+
+      const next = await ctx.encountersService.create(ctx.campaignId, { name: 'Round two' }, dmUser, 'dm');
+      const pc = next.combatants.find((c) => c.characterId === ctx.characterId);
+      expect(pc).toBeDefined();
+      const [carried] = fromJsonText<ConditionInstance[]>(
+        ctx.orm.select().from(combatants).where(eq(combatants.id, pc!.id)).limit(1).all()[0].conditionInstances,
+        [],
+      ).filter((i) => i.name === 'cursed');
+
+      expect(carried).toBeDefined();
+      expect(carried.source).toBe('Hag bargain');
+      expect(carried.notes).toBe('family debt');
+      // stacks survives the boundary — this is what lets exhaustion be an instance, not a column (#1073).
+      expect(carried.stacks).toBe(3);
+      // Adopted as indefinite: you did not walk in with a round timer already running.
+      expect(carried.roundsRemaining).toBeNull();
+      expect(carried.timing).toBe('none');
     });
   });
 });
