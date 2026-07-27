@@ -353,6 +353,24 @@ function indexOfId(entries: TranscriptEntry[], id: string): number {
 }
 
 /**
+ * May a turn ending this way promote its buffered live deltas into the permanent transcript?
+ *
+ * #598 — asked at BOTH commit points (the live `turn.end`/`turn.error` fold and the durable
+ * `turn.ended` replay fold) rather than relying on an earlier branch having cleared the
+ * buffer first. That ordering dependency is exactly what failed: `narration.withheld` is an
+ * ephemeral frame with no durable counterpart, so a client that received deltas and then
+ * dropped before it arrived replays the persisted rows WITHOUT ever seeing the retraction,
+ * and the commit ran anyway. Everything else in this feature protects the live path; the
+ * replay path was written to render history, not to enforce a safety decision.
+ *
+ * Putting the test where the commit happens means a third delivery mode added later inherits
+ * it by construction instead of needing to remember to tidy up first.
+ */
+function commitsLiveText(stopReason: string | undefined): boolean {
+  return stopReason !== 'content_withheld';
+}
+
+/**
  * Fold one SSE event into the transcript. See design point 4 (streaming render) and
  * point 5 (tool events → inline chips).
  */
@@ -492,8 +510,9 @@ function applyStream(state: TranscriptState, event: AiDmStreamEvent): Transcript
       };
       next[idx] = {
         ...bubble,
-        // Commit any trailing live deltas that never got a repairing message.
-        committed: bubble.live ? [...bubble.committed, bubble.live] : bubble.committed,
+        // Commit any trailing live deltas that never got a repairing message — UNLESS the
+        // turn was withheld, in which case there is nothing here that may be kept (#598).
+        committed: commitsLiveText(meta.stopReason) && bubble.live ? [...bubble.committed, bubble.live] : bubble.committed,
         live: '',
         status: 'done',
         meta,
@@ -777,8 +796,14 @@ function applyServerEvent(state: TranscriptState, event: AiDmTranscriptEvent): T
       next[idx] = {
         ...bubble,
         id,
-        // Commit any trailing live deltas the aggregated narration never repaired.
-        committed: bubble.live ? [...bubble.committed, bubble.live] : bubble.committed,
+        // Commit any trailing live deltas the aggregated narration never repaired — UNLESS
+        // the turn was withheld (#598). THIS is the reconnect hole: a client that received
+        // deltas and then dropped before `narration.withheld` reconnects into catch-up, which
+        // replays the durable rows only. The retraction is an EPHEMERAL frame with no durable
+        // counterpart, so it is simply absent from the replay, and this line would promote the
+        // refused prose into the permanent transcript — a connection blip at the wrong instant
+        // defeating the entire feature.
+        committed: commitsLiveText(meta.stopReason) && bubble.live ? [...bubble.committed, bubble.live] : bubble.committed,
         live: '',
         status: 'done',
         meta,

@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import type { AiDmTranscriptEvent } from '@campfire/schema';
 import { parseAiDmStreamEvent } from '../../src/lib/useAiDmStream';
 import {
   dmEntryText,
@@ -60,10 +61,17 @@ test('narration.withheld drops live deltas so turn.end cannot commit them', () =
   expect(bubble!.meta?.stopReason).toBe('content_withheld');
 });
 
-test('without the retraction, turn.end WOULD have committed the deltas (regression guard)', () => {
-  // Same frames minus the withheld one. This is the pre-#598 behaviour, asserted here so the
-  // test above cannot silently start passing for the wrong reason (e.g. deltas never buffered).
-  const state = apply(emptyTranscript, turnStart, delta(UNSAFE), turnEnd);
+test('turn.end DOES commit trailing deltas normally (regression guard)', () => {
+  // The control for every "nothing was committed" assertion above: proves the deltas really
+  // were buffered and really would have landed, so those tests cannot start passing for the
+  // wrong reason (e.g. deltas silently never reaching the bubble at all).
+  //
+  // Deliberately a NON-withheld stop reason. This used to reuse the withheld `turnEnd` and
+  // relied on the retraction being the only thing standing between the buffer and the
+  // transcript — which stopped being true once the commit itself learned to refuse a
+  // `content_withheld` turn. Keeping the old framing would have made this a test of the
+  // hole rather than of the buffering.
+  const state = apply(emptyTranscript, turnStart, delta(UNSAFE), { ...turnEnd, stopReason: 'complete' });
   const bubble = state.entries.find((e): e is DmEntry => e.kind === 'dm');
   expect(dmEntryText(bubble!)).toContain(UNSAFE);
 });
@@ -138,6 +146,81 @@ test('two withheld turns in one session each get their own line', () => {
   const system = twice.entries.filter((e): e is SystemEntry => e.kind === 'system');
   expect(system).toHaveLength(2);
   expect(system.every((e) => e.variant === 'withheld')).toBe(true);
+});
+
+/**
+ * The RECONNECT hole (#598).
+ *
+ * `narration.withheld` is an ephemeral SSE frame with no durable counterpart. A client that
+ * received deltas and then dropped before it arrived reconnects into catch-up, which replays
+ * only the PERSISTED rows — so the retraction is simply absent, and `turn.ended` used to
+ * promote the refused prose into the permanent transcript. Everything else in this feature
+ * guards the live path; the replay path was written to render history rather than to enforce
+ * a safety decision.
+ *
+ * These replay the durable rows WITHOUT the retraction frame, because its absence is the
+ * entire scenario — a test that included it would prove nothing.
+ */
+function serverEvent(seq: number, kind: string, payload: Record<string, unknown>): AiDmTranscriptEvent {
+  return {
+    eventId: `evt-${seq}`,
+    seq,
+    campaignId: 1,
+    kind: kind as AiDmTranscriptEvent['kind'],
+    actorUserId: null,
+    actorName: null,
+    clientRef: null,
+    turnId: 'turn-1',
+    payload,
+    at,
+  };
+}
+
+test('a reconnect that MISSED the retraction still commits nothing', () => {
+  const authoritative = transcriptReducer(emptyTranscript, { type: 'authoritative' });
+  // Live, before the drop: a bubble opened and deltas arrived. No retraction — that frame is
+  // precisely what this client never received.
+  const live = apply(authoritative, turnStart, delta(UNSAFE));
+
+  // Catch-up: the durable rows for the same turn. The withhold reaches the replay only as an
+  // ordinary `control` row plus the turn's `content_withheld` stop reason.
+  const replayed = transcriptReducer(live, {
+    type: 'serverEvents',
+    events: [
+      serverEvent(1, 'control', { control: 'stuck', reason: 'content_withheld', state: 'awaiting_players' }),
+      serverEvent(2, 'turn.ended', { stopReason: 'content_withheld', steps: 1, tokensUsed: 12, budgetRemaining: 100 }),
+    ],
+  });
+
+  const bubble = replayed.entries.find((e): e is DmEntry => e.kind === 'dm');
+  expect(bubble).toBeTruthy();
+  expect(dmEntryText(bubble!)).toBe('');
+  expect(JSON.stringify(replayed)).not.toContain(UNSAFE);
+  // Still a CLOSED turn — the bubble must not sit spinning forever.
+  expect(bubble!.status).toBe('done');
+  expect(bubble!.meta?.stopReason).toBe('content_withheld');
+});
+
+test('replay still commits trailing deltas for every NON-withheld stop reason', () => {
+  // The guard is scoped to the safety terminal state. A turn that ended any other way still
+  // owns its trailing prose, and dropping it would be a truncation bug.
+  const authoritative = transcriptReducer(emptyTranscript, { type: 'authoritative' });
+  const live = apply(authoritative, turnStart, delta('the lamp gutters'));
+  const replayed = transcriptReducer(live, {
+    type: 'serverEvents',
+    events: [serverEvent(2, 'turn.ended', { stopReason: 'complete', steps: 1, tokensUsed: 12, budgetRemaining: 100 })],
+  });
+  const bubble = replayed.entries.find((e): e is DmEntry => e.kind === 'dm');
+  expect(dmEntryText(bubble!)).toContain('the lamp gutters');
+});
+
+test('the LIVE commit point refuses a withheld stop reason too, without the retraction', () => {
+  // Same rule, other commit point. The live path is normally covered by the retraction, but
+  // the test lives where the commit happens so neither delivery mode depends on an earlier
+  // branch having tidied up — including if the retraction frame is ever dropped live.
+  const state = apply(emptyTranscript, turnStart, delta(UNSAFE), turnEnd);
+  const bubble = state.entries.find((e): e is DmEntry => e.kind === 'dm');
+  expect(dmEntryText(bubble!)).toBe('');
 });
 
 test('a withheld frame with an unrecognized reason is still honoured as a retraction', () => {
