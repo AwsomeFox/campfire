@@ -212,11 +212,13 @@ export function ServerBackupWorkflowCard() {
   }, [loadStatus]);
 
   function cancelDownload() {
+    const controller = downloadAbortRef.current;
+    if (!controller) return;
     if (!window.confirm('Cancel this backup download? Any partially written file will be cleaned up when the browser supports it.')) {
       return;
     }
-    downloadAbortRef.current?.abort();
-    downloadAbortRef.current = null;
+    controller.abort();
+    if (downloadAbortRef.current === controller) downloadAbortRef.current = null;
     setDownloadNote('Cancelling download…');
   }
 
