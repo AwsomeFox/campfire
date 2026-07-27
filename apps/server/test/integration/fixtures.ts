@@ -147,6 +147,21 @@ export function writeOldSchemaDb(dataDir: string): void {
       updated_at TEXT NOT NULL
     );
 
+    -- scheduled_sessions: the pre-#504/#588 shape — no lifecycle columns and none
+    -- of the organized-play decoration, so migrations 0111/0123/0124 all have real
+    -- work to do (and 0124 has a row whose ics_uid it must backfill).
+    CREATE TABLE scheduled_sessions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      campaign_id INTEGER NOT NULL,
+      scheduled_at TEXT NOT NULL,
+      duration_minutes INTEGER NOT NULL DEFAULT 240,
+      title TEXT NOT NULL DEFAULT '',
+      location TEXT NOT NULL DEFAULT '',
+      notes TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
     -- api_tokens: no admin_enabled.
     CREATE TABLE api_tokens (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -299,6 +314,9 @@ export function writeOldSchemaDb(dataDir: string): void {
   ).run(now, now);
   sqlite.prepare(
     "INSERT INTO sessions (campaign_id, number, recap, created_at, updated_at) VALUES (1, 1, 'the tale so far', ?, ?)",
+  ).run(now, now);
+  sqlite.prepare(
+    "INSERT INTO scheduled_sessions (campaign_id, scheduled_at, title, created_at, updated_at) VALUES (1, '2099-01-01T19:00:00.000Z', 'Legacy game night', ?, ?)",
   ).run(now, now);
   sqlite.prepare(
     "INSERT INTO api_tokens (user_id, name, scope, token_hash, token_prefix, created_at, updated_at) VALUES (1, 'legacy token', 'dm', 'legacy-token-hash', 'legacy', ?, ?)",

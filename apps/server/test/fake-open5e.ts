@@ -82,6 +82,16 @@ const CREATURES = [
     armor_class: 13,
     hit_points: 59,
     speed: { walk: 40, unit: 'feet' },
+    resistances_and_immunities: {
+      damage_immunities_display: 'poison',
+      damage_immunities: [{ name: 'Poison', key: 'poison' }],
+      damage_resistances_display: 'fire, lightning',
+      damage_resistances: [{ name: 'Fire', key: 'fire' }, { name: 'Lightning', key: 'lightning' }],
+      damage_vulnerabilities_display: 'cold',
+      damage_vulnerabilities: [{ name: 'Cold', key: 'cold' }],
+      condition_immunities_display: '',
+      condition_immunities: [],
+    },
     ability_scores: { strength: 20, dexterity: 12, constitution: 16, intelligence: 4, wisdom: 12, charisma: 6 },
     actions: [
       {

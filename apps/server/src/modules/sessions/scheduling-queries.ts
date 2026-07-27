@@ -55,6 +55,68 @@ export function schedulePastSql(nowIso: string): SQL {
   return sql`(${scheduleEndedSql(nowIso)} OR NOT ${scheduleLiveSql()})`;
 }
 
+/**
+ * The effective lifecycle status as a SQL projection — the twin of
+ * SchedulingService.projectLink() for set-based reads (issue #588).
+ *
+ * Derived from scheduleLiveSql() rather than restating the rules, so a
+ * cross-campaign calendar can never disagree with the per-campaign Schedule tab
+ * (or with the reminder sweep) about whether a night is live. Reintroducing a
+ * raw `status = 'scheduled'` comparison anywhere is exactly what causes that drift.
+ */
+export function scheduleEffectiveStatusSql(): SQL<string> {
+  return sql`(CASE WHEN ${scheduleLiveSql()} THEN 'scheduled' ELSE ${scheduledSessions.status} END)`;
+}
+
+/**
+ * True for rows that have opted into the SHARED organized-play resource pool
+ * (issue #588): they hold a room or venue, name an assigned DM, or carry an
+ * event/season key.
+ *
+ * This predicate is the privacy boundary for every cross-campaign read. A private
+ * home game that holds none of those is invisible to the coordinator calendar and
+ * to conflict detection — not merely redacted, but absent — so shipping this
+ * feature cannot make an existing campaign's mere *existence* at 7pm on Tuesday
+ * observable to a stranger. The cost is that a collision with a purely private
+ * night goes unreported; that is the right trade, because nobody outside that
+ * campaign is competing for its (nonexistent) shared resource.
+ *
+ * SERIES MEMBERSHIP IS DELIBERATELY *NOT* AN OPT-IN SIGNAL. `series_id IS NOT NULL`
+ * once appeared here and it silently published private campaigns: recurrence is a
+ * general convenience ("we play every Thursday"), not a declaration that a table
+ * is shared, so a DM who used it for an ordinary basement game was enrolled in the
+ * install-wide pool without ever naming a venue, a room or an event. That leaked
+ * the window, the local wall clock and even the RSVP count of a campaign holding
+ * nothing anybody else could compete for — precisely the "something is here"
+ * disclosure this predicate exists to prevent. A series that IS organized play
+ * still qualifies, through the room/venue/DM/event it actually holds.
+ *
+ * Every column tested here is one that ONLY the organized-play write paths ever
+ * set (SchedulingService.create leaves them all at their empty defaults), so
+ * membership of the pool is always the result of an explicit act.
+ */
+export function scheduleOrganizedPlaySql(): SQL {
+  return sql`(
+    ${scheduledSessions.roomId} IS NOT NULL
+    OR ${scheduledSessions.venueId} IS NOT NULL
+    OR ${scheduledSessions.assignedDmUserId} != ''
+    OR ${scheduledSessions.eventId} != ''
+    OR ${scheduledSessions.seasonId} != ''
+  )`;
+}
+
+/**
+ * True when the row's [start, end) window overlaps [`startIso`, `endIso`).
+ * Half-open on both sides: a night that ends exactly when another starts does NOT
+ * conflict, which is what back-to-back organized-play slots depend on.
+ */
+export function scheduleOverlapsSql(startIso: string, endIso: string): SQL {
+  return sql`(
+    julianday(${scheduledSessions.scheduledAt}) < julianday(${endIso})
+    AND ${scheduleEndJulianSql()} > julianday(${startIso})
+  )`;
+}
+
 /** True once scheduledAt + durationMinutes has passed. */
 export function scheduleEndedSql(nowIso: string): SQL {
   return sql`${scheduleEndJulianSql()} <= julianday(${nowIso})`;

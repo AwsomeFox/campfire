@@ -9,6 +9,7 @@ import {
   Post,
   Query,
   Sse,
+  UseInterceptors,
   type MessageEvent,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiQuery, ApiResponse, ApiProduces } from '@nestjs/swagger';
@@ -31,8 +32,8 @@ import { AiDriverService, toPublicAiDmSessionState } from './ai-driver.service';
 import { AiDmStreamService } from './ai-driver-stream.service';
 import { ProactiveService } from './proactive.service';
 import { DriverGroundingService } from './driver-grounding.service';
-import { projectGroundingVerdictForRole } from './driver-grounding';
 import { AiDmTranscriptService } from './ai-driver-transcript.service';
+import { GroundingProjectionInterceptor } from './grounding-projection.interceptor';
 import { projectAiDmStreamEventForRole } from './ai-driver-stream-projection';
 
 /** Player action submitted to the AI DM seat (POST /ai-dm/message). */
@@ -216,6 +217,11 @@ const HEARTBEAT_MS = 25_000;
  */
 @ApiTags('ai-dm')
 @WriteModeExempt()
+// #1043: DM-only grounding is redacted for the reading role HERE, for the whole controller,
+// rather than in each handler that happens to remember. See the interceptor for why: the
+// per-handler version held only for handlers whose author knew the rule, and start-session did
+// not. A handler in this controller cannot return an unprojected verdict.
+@UseInterceptors(GroundingProjectionInterceptor)
 @Controller('campaigns/:id/ai-dm')
 export class AiDriverController {
   constructor(
@@ -245,7 +251,7 @@ export class AiDriverController {
     @Body() body: AiDmMessageDto,
     @CurrentUser() user: RequestUser,
   ) {
-    const role = await this.access.requireRole(user, id, 'player');
+    await this.access.requireRole(user, id, 'player');
     const turn = await this.driver.runTurn(id, user, body.input, {
       scene: body.scene,
       maxSteps: body.maxSteps,
@@ -258,10 +264,14 @@ export class AiDriverController {
       characterName: body.characterName,
       displayText: body.displayText,
     });
-    // #577 — the turn result carries the grounding verdict, including the raw retrieval ledger.
-    // This endpoint is player-callable, so it is a second delivery path for DM-only ids and gets
-    // the same role projection as GET /ai-dm/grounding (#825).
-    return turn.grounding ? { ...turn, grounding: projectGroundingVerdictForRole(turn.grounding, role) } : turn;
+    // #577 — the turn result carries the grounding verdict, including the raw retrieval ledger,
+    // and this endpoint is player-callable, so it is a second delivery path for DM-only ids.
+    //
+    // #1043: that projection is no longer applied here. GroundingProjectionInterceptor covers the
+    // whole controller, and this was the ONLY handler that ever had the inline version — which is
+    // precisely why start-session could ship without it and leak. Two mechanisms for one
+    // guarantee is how the guarantee drifts, so there is deliberately only one left.
+    return turn;
   }
 
   @Get('session')
@@ -304,6 +314,49 @@ export class AiDriverController {
   async resume(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     await this.access.requireRole(user, id, 'dm');
     return toPublicAiDmSessionState(this.driver.setPaused(id, false));
+  }
+
+  // ---- Session lifecycle (#1043) ----------------------------------------------------
+
+  @Post('start-session')
+  @Throttle({ ai: { limit: 5, ttl: 60000 } })
+  @ApiOperation({
+    summary: 'Open a session: the AI greets the table and recaps where it left off',
+    description:
+      'Player+ — sitting down to play is a table act, not a DM-only one. Runs ONE greeting turn ' +
+      'through the same gates as any player action (seat enabled, token budget, pause, human ' +
+      'control, turn lock), so a paused or frozen seat refuses it and the lifecycle phase is left ' +
+      'untouched. The recap is the DM-approved `sessions.recap` written by the AI Scribe — the ' +
+      'model is told to use it and to say so plainly when there is none, never to invent one. ' +
+      'The phase moves greeting → active when the turn returns, whatever its stop reason.',
+  })
+  @ApiResponse({ status: 201, description: 'The greeting turn summary.' })
+  @ApiResponse({ status: 409, description: 'A lifecycle turn is already in progress, or the AI is mid-turn.' })
+  @ApiResponse({ status: 503, description: 'Seat paused, under human control, or no provider configured.' })
+  async startSession(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const role = await this.access.requireRole(user, id, 'player');
+    return this.driver.startSession(id, user, role);
+  }
+
+  @Post('wrap-up')
+  @Throttle({ ai: { limit: 5, ttl: 60000 } })
+  @ApiOperation({
+    summary: 'Close the session: the AI delivers a spoken closing summary',
+    description:
+      'DM only — closing a session is a decision, not an announcement. Runs ONE wrap-up turn and ' +
+      'lands the phase in `ended`, after which player input is refused until someone starts a new ' +
+      'session. This does NOT write a session recap: the AI Scribe owns that, through the DM ' +
+      'proposal queue, and a second unreviewed summary on the campaign record would be a canon ' +
+      'write nobody approved.',
+  })
+  @ApiResponse({ status: 201, description: 'The wrap-up turn summary.' })
+  @ApiResponse({ status: 409, description: 'Already wrapped up, a lifecycle turn is in progress, or the AI is mid-turn.' })
+  // Same 503 surface as `startSession`: a wrap-up is an ordinary `runTurn`, so a paused seat, a
+  // human takeover, or a missing provider refuses it exactly as it refuses a player action.
+  @ApiResponse({ status: 503, description: 'Seat paused, under human control, or no provider configured.' })
+  async wrapUp(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const role = await this.access.requireRole(user, id, 'dm');
+    return this.driver.wrapUpSession(id, user, role);
   }
 
   @Post('collaborative')

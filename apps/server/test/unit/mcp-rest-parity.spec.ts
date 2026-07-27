@@ -59,6 +59,8 @@ describe('MCP REST parity manifest (#683)', () => {
       {} as never,
       {} as never,
       {} as never,
+      // #588: OrganizedPlayService — injected only for toConflictResponse.
+      {} as never,
     );
     const names = new Set(service.buildToolset(user).tools.map((t) => t.name));
     const missing = MCP_REST_PARITY_ISSUE_683.flatMap((entry) =>

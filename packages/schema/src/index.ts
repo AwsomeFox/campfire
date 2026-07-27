@@ -32,11 +32,19 @@ import {
   sortOrderAscTiebreak,
   type InitiativeTiebreakCombatant,
 } from './initiative-tiebreak';
-import { ActionSpec } from './action-resolver';
+import { ActionSpec, RESOLVER_MATH_D20_5E, type CriticalDamageRule, type ResolverMathProfile } from './action-resolver';
 import { RestModel } from './rest';
 import { CharacterAction } from './character-action';
 import { CombatantStatblock } from './combatant-statblock';
 import { NarrationLanguage } from './narration-language';
+import {
+  MAX_SERIES_OCCURRENCES,
+  RECURRENCE_FREQS,
+  isLocalDate,
+  isLocalDateTime,
+  isLocalTime,
+  isValidIanaTimeZone,
+} from './recurrence';
 // Structured action resolver (issue #414): data model + pure, system-aware resolution math.
 // Re-exported so server / MCP / web import it from '@campfire/schema' alongside everything else.
 export * from './action-resolver';
@@ -611,6 +619,12 @@ export const CONDITIONS = [
   'Unconscious',
 ] as const;
 export type ConditionName = (typeof CONDITIONS)[number];
+
+/** Canonical 5e damage-type vocabulary for rule-aware encounter damage (issue #605). */
+export const DND5E_DAMAGE_TYPES = [
+  'acid', 'bludgeoning', 'cold', 'fire', 'force', 'lightning', 'necrotic',
+  'piercing', 'poison', 'psychic', 'radiant', 'slashing', 'thunder',
+] as const;
 
 /**
  * Case-insensitive membership check against a rule-system condition vocabulary
@@ -1213,6 +1227,52 @@ const IsoDateTime = z
   .max(40)
   .refine((v) => !Number.isNaN(Date.parse(v)), 'expected an ISO-8601 date-time'); // normalized to UTC server-side
 
+/**
+ * Organized-play scheduling fields (issue #588).
+ *
+ * A scheduled session IS the occurrence: rather than fork a parallel
+ * "occurrence" table, the organized-play layer decorates the existing row, so
+ * RSVPs, reminders, the ICS feed and the schedule↔recap link keep working
+ * unchanged. Every field defaults to an empty/absent value, so a campaign that
+ * never opts into venues or series is byte-for-byte the same as before.
+ */
+const organizedPlayScheduleFields = {
+  /** Parent recurring series, or null for a one-off night. */
+  seriesId: Id.nullable().default(null),
+  /** 0-based position within the parent series (the recurrence identity). */
+  occurrenceIndex: z.number().int().min(0).default(0),
+  /**
+   * IANA zone this night's wall clock is expressed in. '' = legacy row with no
+   * explicit zone; clients then localize the UTC instant to the viewer, exactly
+   * as they did before #588.
+   */
+  timezone: z.string().max(64).default(''),
+  /** `YYYY-MM-DDTHH:MM` wall clock in `timezone`. '' when `timezone` is ''. */
+  localStart: z.string().max(20).default(''),
+  venueId: Id.nullable().default(null),
+  /** Booked room/table. Null = no room resource (free-text `location` only). */
+  roomId: Id.nullable().default(null),
+  /** Running DM for this table. '' = unassigned. Same id space as Note.authorUserId. */
+  assignedDmUserId: z.string().max(120).default(''),
+  /** Seat capacity. 0 = unlimited (and the pre-#588 behaviour). */
+  capacity: z.number().int().min(0).max(1000).default(0),
+  /** Organized-play event / season grouping keys. '' = ungrouped. */
+  eventId: z.string().max(80).default(''),
+  seasonId: z.string().max(80).default(''),
+  /**
+   * Stable RFC 5545 UID. Survives reschedules and updates so a subscribed
+   * calendar rewrites the event in place instead of accumulating ghosts.
+   * '' on rows written before #588 — the ICS emitter then derives the legacy
+   * `campfire-c<campaign>-s<id>` UID, which is the same string those
+   * subscribers already hold.
+   */
+  icsUid: z.string().max(200).default(''),
+  /** RFC 5545 SEQUENCE, bumped on every change a calendar client must re-apply. */
+  icsSequence: z.number().int().min(0).default(0),
+  /** First materialized instant, retained across reschedules as lineage. */
+  originalScheduledAt: IsoDateTime.nullable().default(null),
+};
+
 export const ScheduledSession = z.object({
   id: Id,
   campaignId: Id,
@@ -1228,9 +1288,33 @@ export const ScheduledSession = z.object({
   cancelledBy: z.string().max(120).nullable().default(null),
   cancellationReason: z.string().max(1000).default(''),
   sessionId: Id.nullable().default(null),
+  ...organizedPlayScheduleFields,
   ...timestamps,
 });
 export type ScheduledSession = z.infer<typeof ScheduledSession>;
+
+/**
+ * Organized-play fields are server-owned: they are set by series materialization
+ * and by the dedicated assignment/reschedule endpoints (which run conflict
+ * checks first), never by a raw schedule create/update body. Omitting them keeps
+ * `POST /campaigns/:id/schedule` from accepting a `seriesId` that would silently
+ * adopt a night into someone else's series, or a `roomId` that skipped its
+ * double-booking check.
+ */
+const ORGANIZED_PLAY_OMIT = {
+  seriesId: true,
+  occurrenceIndex: true,
+  venueId: true,
+  roomId: true,
+  assignedDmUserId: true,
+  capacity: true,
+  eventId: true,
+  seasonId: true,
+  icsUid: true,
+  icsSequence: true,
+  originalScheduledAt: true,
+} as const;
+
 export const ScheduledSessionCreate = ScheduledSession.omit({
   id: true,
   campaignId: true,
@@ -1241,6 +1325,10 @@ export const ScheduledSessionCreate = ScheduledSession.omit({
   sessionId: true,
   createdAt: true,
   updatedAt: true,
+  ...ORGANIZED_PLAY_OMIT,
+  // `localStart` is derived server-side from `scheduledAt` + `timezone`; a caller
+  // supplying both could assert a wall clock that contradicts the instant.
+  localStart: true,
 })
   .partial()
   .required({ scheduledAt: true })
@@ -1258,10 +1346,48 @@ export const ScheduledSessionUpdate = z.object({
   location: z.string().max(200).optional(),
   notes: z.string().max(5000).optional(),
 });
+// `timezone` is deliberately absent (#588), so a one-off's zone is set at creation
+// and never corrected here. On a one-off the INSTANT is authoritative and the zone
+// is display metadata that `localStart` is derived from — a wrong zone therefore
+// mislabels the wall clock but never moves the game, and PATCHing `scheduledAt`
+// re-derives `localStart` from the stored zone, so the row stays self-consistent
+// either way. A series occurrence is the opposite (wall clock authoritative), and
+// its zone belongs to the series, which is why the reschedule endpoint owns it.
+// The cost of this is real but bounded: correcting a zone typo means recreating
+// the row. If that becomes a live complaint, the fix is a dedicated endpoint that
+// re-derives `localStart` — not a field here, which would silently rewrite a
+// derived column through a path that does no organized-play validation.
 export const ScheduledSessionCancel = z.object({
   reason: z.string().max(1000).optional(),
 });
 export type ScheduledSessionCancel = z.infer<typeof ScheduledSessionCancel>;
+/**
+ * Restore body (#588). Fully optional: every pre-existing caller posts no body.
+ *
+ * `force` exists because a restore RE-ACQUIRES the room and DM its cancellation
+ * released — while the night was cancelled, another campaign may legitimately have
+ * booked them — so restore rejects with 409 SCHEDULE_CONFLICT like every other
+ * booking path and needs the same coordinator override. Carried in a body rather
+ * than a query param to match `ScheduledSessionCancel` on `DELETE /schedule/:id`:
+ * the same shape of optional lifecycle payload on the same controller.
+ */
+export const ScheduledSessionRestore = z.object({
+  force: z.boolean().default(false),
+  /**
+   * Why the night is coming back. Written to the `restore` ledger entry.
+   *
+   * Bounds copied from `ScheduledSessionCancel.reason` deliberately, not chosen
+   * afresh: both are audit prose on the SAME append-only ledger, and two fields
+   * on one ledger disagreeing about their own limits is how the next
+   * inconsistency starts. Without this the ledger could hold "cancelled: venue
+   * flooded" followed by a restore explaining nothing, and a coordinator reading
+   * it could not tell whether the flood receded or someone misclicked — which is
+   * the question the ledger exists to answer.
+   */
+  reason: z.string().max(1000).optional(),
+});
+export type ScheduledSessionRestore = z.infer<typeof ScheduledSessionRestore>;
+
 export const ScheduledSessionDuplicate = z.object({
   scheduledAt: IsoDateTime.optional(),
   durationMinutes: z.number().int().min(15).max(24 * 60).optional(),
@@ -1309,6 +1435,460 @@ export const ScheduledSessionListPage = z.object({
   offset: z.number().int().nonnegative(),
 });
 export type ScheduledSessionListPage = z.infer<typeof ScheduledSessionListPage>;
+
+// ---------- organized play: venues, rooms, series, conflicts (issue #588) ----------
+// Wall-clock/recurrence math lives in ./recurrence so it can be unit-tested with
+// no DB and reused by any surface that has to reason about a series.
+export * from './recurrence';
+
+/** A recognized IANA zone, validated against this runtime's ICU data. */
+export const IanaTimeZone = z
+  .string()
+  .trim()
+  .min(1)
+  .max(64)
+  .refine(isValidIanaTimeZone, 'expected an IANA time zone (e.g. America/New_York)');
+
+/** `YYYY-MM-DD` calendar date in some zone — deliberately not an instant. */
+export const LocalDateString = z.string().trim().max(10).refine(isLocalDate, 'expected a YYYY-MM-DD local date');
+/** `HH:MM` 24-hour wall clock in some zone. */
+export const LocalTimeString = z.string().trim().max(5).refine(isLocalTime, 'expected an HH:MM local time');
+/** `YYYY-MM-DDTHH:MM` wall clock in some zone. */
+export const LocalDateTimeString = z
+  .string()
+  .trim()
+  .max(16)
+  .refine(isLocalDateTime, 'expected a YYYY-MM-DDTHH:MM local date-time');
+
+/**
+ * A physical (or virtual) place organized play happens. Install-level, not
+ * campaign-scoped: the whole point is that several campaigns share one room
+ * calendar, so a venue cannot hang off a single campaign.
+ */
+export const PlayVenue = z.object({
+  id: Id,
+  name: z.string().trim().min(1).max(120),
+  /** Default zone for series booked here. Rooms inherit it. */
+  timezone: IanaTimeZone,
+  address: z.string().max(300).default(''),
+  notes: z.string().max(2000).default(''),
+  ...timestamps,
+});
+export type PlayVenue = z.infer<typeof PlayVenue>;
+export const PlayVenueCreate = PlayVenue.omit({ id: true, createdAt: true, updatedAt: true }).partial({
+  address: true,
+  notes: true,
+});
+export type PlayVenueCreate = z.infer<typeof PlayVenueCreate>;
+export const PlayVenueUpdate = PlayVenueCreate.partial();
+export type PlayVenueUpdate = z.infer<typeof PlayVenueUpdate>;
+
+/** One bookable table/room inside a venue. `capacity` 0 = unlimited. */
+export const PlayRoom = z.object({
+  id: Id,
+  venueId: Id,
+  name: z.string().trim().min(1).max(120),
+  capacity: z.number().int().min(0).max(1000).default(0),
+  notes: z.string().max(2000).default(''),
+  ...timestamps,
+});
+export type PlayRoom = z.infer<typeof PlayRoom>;
+export const PlayRoomCreate = PlayRoom.omit({ id: true, venueId: true, createdAt: true, updatedAt: true }).partial({
+  capacity: true,
+  notes: true,
+});
+export type PlayRoomCreate = z.infer<typeof PlayRoomCreate>;
+export const PlayRoomUpdate = PlayRoomCreate.partial();
+export type PlayRoomUpdate = z.infer<typeof PlayRoomUpdate>;
+
+export const PlayVenueWithRooms = PlayVenue.extend({ rooms: z.array(PlayRoom) });
+export type PlayVenueWithRooms = z.infer<typeof PlayVenueWithRooms>;
+
+export const RecurrenceFreqEnum = z.enum(RECURRENCE_FREQS);
+export type RecurrenceFreqEnum = z.infer<typeof RecurrenceFreqEnum>;
+
+/**
+ * A recurring run of game nights.
+ *
+ * The recurrence is stored as (IANA zone + local start date + local start time +
+ * rule), NOT as a first instant plus a fixed millisecond stride. That is the
+ * whole DST story: "Tuesdays at 19:00 America/New_York" must stay 19:00 local
+ * when the offset flips, and only a wall clock can say that.
+ */
+export const SessionSeries = z.object({
+  id: Id,
+  campaignId: Id,
+  title: z.string().max(200).default(''),
+  location: z.string().max(200).default(''),
+  notes: z.string().max(5000).default(''),
+  timezone: IanaTimeZone,
+  startDate: LocalDateString,
+  startTime: LocalTimeString,
+  durationMinutes: z.number().int().min(15).max(24 * 60).default(240),
+  freq: RecurrenceFreqEnum,
+  interval: z.number().int().min(1).max(52).default(1),
+  count: z.number().int().min(1).max(MAX_SERIES_OCCURRENCES).default(1),
+  untilDate: LocalDateString.nullable().default(null),
+  venueId: Id.nullable().default(null),
+  roomId: Id.nullable().default(null),
+  assignedDmUserId: z.string().max(120).default(''),
+  capacity: z.number().int().min(0).max(1000).default(0),
+  eventId: z.string().max(80).default(''),
+  seasonId: z.string().max(80).default(''),
+  /** Stable UID root shared by every occurrence's ICS UID. Server-assigned. */
+  seriesUid: z.string().max(120),
+  status: z.enum(['active', 'cancelled']).default('active'),
+  ...timestamps,
+});
+export type SessionSeries = z.infer<typeof SessionSeries>;
+
+export const SessionSeriesCreate = SessionSeries.omit({
+  id: true,
+  campaignId: true,
+  seriesUid: true,
+  status: true,
+  createdAt: true,
+  updatedAt: true,
+}).partial({
+  title: true,
+  location: true,
+  notes: true,
+  durationMinutes: true,
+  interval: true,
+  count: true,
+  untilDate: true,
+  venueId: true,
+  roomId: true,
+  assignedDmUserId: true,
+  capacity: true,
+  eventId: true,
+  seasonId: true,
+});
+export type SessionSeriesCreate = z.infer<typeof SessionSeriesCreate>;
+
+/**
+ * Series-level edits. Deliberately excludes the recurrence rule: changing
+ * "when" on a live series would have to reconcile every materialized occurrence
+ * against its exceptions, and the honest operation for that is cancelling the
+ * series and creating a new one. Metadata edits fan out to future occurrences
+ * that carry no per-occurrence override.
+ */
+export const SessionSeriesUpdate = z.object({
+  title: z.string().max(200).optional(),
+  location: z.string().max(200).optional(),
+  notes: z.string().max(5000).optional(),
+  roomId: Id.nullable().optional(),
+  assignedDmUserId: z.string().max(120).optional(),
+  capacity: z.number().int().min(0).max(1000).optional(),
+  eventId: z.string().max(80).optional(),
+  seasonId: z.string().max(80).optional(),
+});
+export type SessionSeriesUpdate = z.infer<typeof SessionSeriesUpdate>;
+
+/** Materialize `addCount` more occurrences past the end of an existing series. */
+export const SessionSeriesExtend = z.object({
+  addCount: z.number().int().min(1).max(MAX_SERIES_OCCURRENCES),
+});
+export type SessionSeriesExtend = z.infer<typeof SessionSeriesExtend>;
+
+export const SessionSeriesCancel = z.object({ reason: z.string().max(1000).optional() });
+export type SessionSeriesCancel = z.infer<typeof SessionSeriesCancel>;
+
+/**
+ * Append-only ledger of everything that happened to a single occurrence after it
+ * was materialized. This is what makes "per-occurrence exceptions, cancellations
+ * and reschedule lineage" auditable rather than inferred from the current row.
+ */
+/**
+ * `edit` records a per-occurrence PROSE edit (title / location / notes) made
+ * through the legacy `PATCH /schedule/:id` (#588). It is deliberately NOT a
+ * metadata override — see `METADATA_OVERRIDE_KINDS` — so the occurrence still
+ * receives later series edits; it exists so the lineage shows the edit happened
+ * at all. Treating it as an override would freeze the night out of every later
+ * series edit permanently, because the ledger is append-only.
+ */
+export const SeriesExceptionKind = z.enum(['cancel', 'reschedule', 'reassign', 'restore', 'edit']);
+export type SeriesExceptionKind = z.infer<typeof SeriesExceptionKind>;
+
+export const SeriesException = z.object({
+  id: Id,
+  seriesId: Id,
+  occurrenceId: Id.nullable().default(null),
+  /** The occurrence's ORIGINAL local date — the RFC 5545 RECURRENCE-ID analogue. */
+  recurrenceLocalDate: z.string().max(10).default(''),
+  kind: SeriesExceptionKind,
+  fromScheduledAt: IsoDateTime.nullable().default(null),
+  toScheduledAt: IsoDateTime.nullable().default(null),
+  toLocalStart: z.string().max(20).default(''),
+  /**
+   * The assignment delta this entry represents (#588).
+   *
+   * Recorded because the surviving occurrence holds only its FINAL assignment, so
+   * an A->B->C sequence of room moves loses B entirely — and a ledger that
+   * advertises "append-only exception lineage" while retaining only the instants
+   * cannot answer what any entry actually changed. Equal `from`/`to` on a
+   * cancel/restore, which states the seating in force at that moment.
+   */
+  fromRoomId: z.number().int().nullable().default(null),
+  toRoomId: z.number().int().nullable().default(null),
+  fromAssignedDmUserId: z.string().max(120).default(''),
+  toAssignedDmUserId: z.string().max(120).default(''),
+  fromCapacity: z.number().int().min(0).default(0),
+  toCapacity: z.number().int().min(0).default(0),
+  reason: z.string().max(1000).default(''),
+  actorUserId: z.string().max(120).default(''),
+  createdAt: IsoDate,
+});
+export type SeriesException = z.infer<typeof SeriesException>;
+
+/** Move ONE occurrence without disturbing the rest of its series. */
+export const OccurrenceReschedule = z.object({
+  /** New wall clock. Combined with the occurrence's zone (or `timezone`). */
+  localStart: LocalDateTimeString.optional(),
+  timezone: IanaTimeZone.optional(),
+  /** Alternative to localStart for callers that already have an instant. */
+  scheduledAt: IsoDateTime.optional(),
+  durationMinutes: z.number().int().min(15).max(24 * 60).optional(),
+  roomId: Id.nullable().optional(),
+  reason: z.string().max(1000).optional(),
+  /** Book anyway despite reported conflicts (coordinator override). */
+  force: z.boolean().default(false),
+});
+export type OccurrenceReschedule = z.infer<typeof OccurrenceReschedule>;
+
+/** Re-seat one occurrence: different room, different running DM, different capacity. */
+export const OccurrenceReassign = z.object({
+  roomId: Id.nullable().optional(),
+  assignedDmUserId: z.string().max(120).optional(),
+  capacity: z.number().int().min(0).max(1000).optional(),
+  reason: z.string().max(1000).optional(),
+  force: z.boolean().default(false),
+});
+export type OccurrenceReassign = z.infer<typeof OccurrenceReassign>;
+
+export const ScheduleConflictKind = z.enum(['room', 'dm', 'member']);
+export type ScheduleConflictKind = z.infer<typeof ScheduleConflictKind>;
+
+/**
+ * One reason a proposed booking cannot go ahead.
+ *
+ * PRIVACY: `campaignId`, `campaignName`, `scheduleId` and `title` are populated
+ * ONLY when the caller can already read that campaign. A coordinator who cannot
+ * still learns that the resource is taken and for how long — which is the whole
+ * point of a shared room — but learns nothing about whose game it is. `visible`
+ * says which of the two shapes this is, so a client never has to guess whether a
+ * null means "redacted" or "genuinely absent".
+ */
+export const ScheduleConflict = z.object({
+  kind: ScheduleConflictKind,
+  /** True when the caller may see the conflicting campaign's identity. */
+  visible: z.boolean(),
+  startsAt: IsoDateTime,
+  endsAt: IsoDateTime,
+  roomId: Id.nullable().default(null),
+  roomName: z.string().max(120).default(''),
+  venueName: z.string().max(120).default(''),
+  /** Which subject collided: the DM's or the member's user id (never redacted — the caller supplied it). */
+  subjectUserId: z.string().max(120).default(''),
+  campaignId: Id.nullable().default(null),
+  campaignName: z.string().max(200).nullable().default(null),
+  scheduleId: Id.nullable().default(null),
+  title: z.string().max(200).nullable().default(null),
+});
+export type ScheduleConflict = z.infer<typeof ScheduleConflict>;
+/**
+ * Restore RESPONSE (#588) — a restored night plus what forcing it overrode.
+ *
+ * `conflicts` is REQUIRED, not optional and not defaulted, and that is the
+ * point: `restore` accepts `force`, and the rule this feature states is that an
+ * override the caller cannot tell they took is not an override. Every other
+ * force-taking booking path already returned its redacted list; restore returned
+ * a bare `ScheduledSessionWithRsvps`, so a forced restore that double-booked a
+ * room succeeded in silence. Making the field required means a restore path that
+ * forgets to report does not compile.
+ *
+ * Empty on an unforced restore that hit nothing — the caller overrode nothing.
+ */
+export const ScheduledSessionRestored = ScheduledSessionWithRsvps.extend({
+  conflicts: z.array(ScheduleConflict),
+});
+export type ScheduledSessionRestored = z.infer<typeof ScheduledSessionRestored>;
+
+/**
+ * Response of the two per-occurrence booking writes (reschedule / reassign).
+ *
+ * Named rather than left as an inline `{ occurrence, conflicts }` so that the
+ * "a force-taking write reports what it overrode" rule is checkable by
+ * machine — see force-reports-conflicts.spec.ts. `conflicts` is required here
+ * for the same reason it is on ScheduledSessionRestored.
+ */
+export const OccurrenceWriteResult = z.object({
+  occurrence: ScheduledSession,
+  conflicts: z.array(ScheduleConflict),
+});
+export type OccurrenceWriteResult = z.infer<typeof OccurrenceWriteResult>;
+
+export const SessionSeriesWithOccurrences = SessionSeries.extend({
+  occurrences: z.array(ScheduledSession),
+  exceptions: z.array(SeriesException),
+  /**
+   * Conflicts a coordinator FORCED past on the write that returned this payload
+   * (#588). Empty on reads, and empty on any write that was not forced.
+   *
+   * The whole justification for `force` is that overriding is a decision the
+   * caller makes knowingly — so create, extend and the metadata fan-out have to
+   * report what they overbooked, exactly as applyTemplate and the per-occurrence
+   * endpoints already did. A 200 that silently double-books is an override the
+   * caller cannot tell they took.
+   */
+  conflicts: z.array(ScheduleConflict).default([]),
+});
+export type SessionSeriesWithOccurrences = z.infer<typeof SessionSeriesWithOccurrences>;
+
+/** Ask "would this booking collide?" without writing anything. */
+export const ScheduleConflictQuery = z.object({
+  scheduledAt: IsoDateTime.optional(),
+  localStart: LocalDateTimeString.optional(),
+  timezone: IanaTimeZone.optional(),
+  durationMinutes: z.number().int().min(1).max(24 * 60).default(240),
+  roomId: Id.nullable().default(null),
+  assignedDmUserId: z.string().max(120).default(''),
+  memberUserIds: z.array(z.string().max(120)).max(50).default([]),
+  /** Ignore this occurrence when checking (used when editing it in place). */
+  excludeScheduleId: Id.optional(),
+});
+export type ScheduleConflictQuery = z.infer<typeof ScheduleConflictQuery>;
+
+export const ScheduleConflictReport = z.object({
+  scheduledAt: IsoDateTime,
+  endsAt: IsoDateTime,
+  conflicts: z.array(ScheduleConflict),
+});
+export type ScheduleConflictReport = z.infer<typeof ScheduleConflictReport>;
+
+/**
+ * One row of the cross-campaign coordinator calendar. Same privacy rule as
+ * ScheduleConflict: a night in a campaign the caller cannot read is reported as
+ * an opaque busy block against its room/DM, never with its title or campaign.
+ */
+export const CoordinatorCalendarEntry = z.object({
+  visible: z.boolean(),
+  startsAt: IsoDateTime,
+  endsAt: IsoDateTime,
+  status: z.enum(['scheduled', 'cancelled', 'completed']),
+  timezone: z.string().max(64).default(''),
+  localStart: z.string().max(20).default(''),
+  venueId: Id.nullable().default(null),
+  venueName: z.string().max(120).default(''),
+  roomId: Id.nullable().default(null),
+  roomName: z.string().max(120).default(''),
+  capacity: z.number().int().min(0).default(0),
+  seatsTaken: z.number().int().min(0).default(0),
+  eventId: z.string().max(80).default(''),
+  seasonId: z.string().max(80).default(''),
+  assignedDmUserId: z.string().max(120).default(''),
+  scheduleId: Id.nullable().default(null),
+  campaignId: Id.nullable().default(null),
+  campaignName: z.string().max(200).nullable().default(null),
+  title: z.string().max(200).nullable().default(null),
+  seriesId: Id.nullable().default(null),
+});
+export type CoordinatorCalendarEntry = z.infer<typeof CoordinatorCalendarEntry>;
+
+export const CoordinatorCalendar = z.object({
+  from: IsoDateTime,
+  to: IsoDateTime,
+  entries: z.array(CoordinatorCalendarEntry),
+});
+export type CoordinatorCalendar = z.infer<typeof CoordinatorCalendar>;
+
+/**
+ * A reusable blueprint for a block of organized-play tables — "Tuesday 19:00 in
+ * the Blue Room, Thursday 19:00 in the Red Room, 8 weeks" — applied in one call
+ * to create every series at once.
+ */
+export const ScheduleTemplateSlot = z.object({
+  /** 0 = Sunday … 6 = Saturday. The template anchors to the next matching date. */
+  weekday: z.number().int().min(0).max(6),
+  startTime: LocalTimeString,
+  durationMinutes: z.number().int().min(15).max(24 * 60).default(240),
+  roomId: Id.nullable().default(null),
+  assignedDmUserId: z.string().max(120).default(''),
+  capacity: z.number().int().min(0).max(1000).default(0),
+  title: z.string().max(200).default(''),
+});
+export type ScheduleTemplateSlot = z.infer<typeof ScheduleTemplateSlot>;
+
+export const ScheduleTemplate = z.object({
+  id: Id,
+  name: z.string().trim().min(1).max(120),
+  venueId: Id.nullable().default(null),
+  timezone: IanaTimeZone,
+  freq: RecurrenceFreqEnum.default('weekly'),
+  interval: z.number().int().min(1).max(52).default(1),
+  count: z.number().int().min(1).max(MAX_SERIES_OCCURRENCES).default(8),
+  eventId: z.string().max(80).default(''),
+  seasonId: z.string().max(80).default(''),
+  slots: z.array(ScheduleTemplateSlot).min(1).max(20),
+  ...timestamps,
+});
+export type ScheduleTemplate = z.infer<typeof ScheduleTemplate>;
+
+export const ScheduleTemplateCreate = ScheduleTemplate.omit({ id: true, createdAt: true, updatedAt: true }).partial({
+  venueId: true,
+  freq: true,
+  interval: true,
+  count: true,
+  eventId: true,
+  seasonId: true,
+});
+export type ScheduleTemplateCreate = z.infer<typeof ScheduleTemplateCreate>;
+
+/** Instantiate a template into a campaign, starting on/after `startDate`. */
+export const ScheduleTemplateApply = z.object({
+  campaignId: Id,
+  startDate: LocalDateString,
+  /** Override the template's occurrence count for this application. */
+  count: z.number().int().min(1).max(MAX_SERIES_OCCURRENCES).optional(),
+  /**
+   * Rotate DMs across the generated slots. When non-empty this overrides each
+   * slot's `assignedDmUserId`, cycling through the list slot by slot — the
+   * organized-play "rotating DM" pattern.
+   */
+  dmRotation: z.array(z.string().max(120)).max(50).default([]),
+  eventId: z.string().max(80).optional(),
+  seasonId: z.string().max(80).optional(),
+  /** Create the series even where occurrences collide with existing bookings. */
+  force: z.boolean().default(false),
+});
+export type ScheduleTemplateApply = z.infer<typeof ScheduleTemplateApply>;
+
+export const ScheduleTemplateApplyResult = z.object({
+  templateId: Id,
+  campaignId: Id,
+  series: z.array(SessionSeries),
+  occurrencesCreated: z.number().int().nonnegative(),
+  /** Conflicts detected during the bulk create (reported even when forced). */
+  conflicts: z.array(ScheduleConflict),
+});
+export type ScheduleTemplateApplyResult = z.infer<typeof ScheduleTemplateApplyResult>;
+
+/**
+ * Non-destructive read joining an occurrence to the play log it produced and the
+ * characters recorded present. Nothing here writes: the occurrence keeps its own
+ * lifecycle, the recap keeps its own attendance rows, and this view simply reads
+ * across the existing link.
+ */
+export const OccurrenceAttendance = z.object({
+  scheduleId: Id,
+  sessionId: Id.nullable().default(null),
+  sessionNumber: z.number().int().positive().nullable().default(null),
+  capacity: z.number().int().min(0).default(0),
+  rsvpYes: z.number().int().min(0).default(0),
+  seatsRemaining: z.number().int().nullable().default(null),
+  attendees: z.array(z.object({ characterId: Id, characterName: z.string().max(200).default('') })),
+});
+export type OccurrenceAttendance = z.infer<typeof OccurrenceAttendance>;
 
 // Fog-of-war visibility helpers shared by server redaction and the web VTT (issue #465).
 export * from './fog-visibility';
@@ -2969,6 +3549,10 @@ export interface RuleSystemAdapter {
   initiativeTiebreak(a: InitiativeTiebreakCombatant, b: InitiativeTiebreakCombatant): number;
   /** The condition vocabulary offered in the combat UI (5e: the run-session chip list). */
   readonly conditions: readonly string[];
+  /** Optional typed-damage vocabulary offered by this system's encounter controls (issue #605). */
+  readonly damageTypes?: readonly string[];
+  /** Whether this adapter owns 5e-style direct-damage semantics (save-half and dice-only crits). */
+  readonly supportsDirectDamageRules?: boolean;
   /**
    * OPTIONAL — the action-economy model for this system's turn workspace (issue #413):
    * the ordered slots (action / bonus / reaction / movement, or PF2e's three actions,
@@ -2978,6 +3562,32 @@ export interface RuleSystemAdapter {
    * slots it doesn't have. This is the seam that keeps the turn tracker from hardcoding 5e.
    */
   readonly actionEconomy?: ActionEconomyModel;
+  /**
+   * OPTIONAL — how a critical hit multiplies damage in this system (issue #1053). The
+   * structured action resolver used to hardcode 5e's "roll the dice twice, add the modifier
+   * once" for every campaign, so a PF2e `1d8+3` crit came out as `2d8+3` instead of the
+   * `(1d8+3)*2` PF2e prescribes. Adapters whose crit rule differs from 5e's declare it here;
+   * everyone else omits it and {@link criticalDamageRuleForAdapter} returns `double-dice`,
+   * which is both 5e's rule and the pre-existing behaviour for every system.
+   *
+   * Only the systems whose rule has been confirmed are declared today — 5e (by omission) and
+   * PF2e/SF2e. The remaining adapters are unaudited and therefore left on the 5e default
+   * rather than guessed at; declaring one is a one-line change once a system's rule is confirmed.
+   */
+  readonly criticalDamage?: CriticalDamageRule;
+  /**
+   * OPTIONAL, OPT-IN — declare this only if the structured action resolver's OWN maths is this
+   * system's maths (issue #1053 review): a single d20 plus a flat modifier, compared against
+   * ascending armour class, with 5e's level-based proficiency bonus. See
+   * {@link ResolverMathProfile} for why each clause matters and which systems break which one.
+   *
+   * Omitting it means "the resolver does not speak this system", and omission is the DEFAULT on
+   * purpose. Callers ask {@link resolverImplementsSystemMath}; an adapter that has not been
+   * audited withholds rather than being assumed d20-compatible, because the cost of a wrong
+   * assumption here is `resolve_action` committing HP off the wrong arithmetic. Declaring it is
+   * a factual claim — check the three clauses against the system's rules first.
+   */
+  readonly resolverMath?: ResolverMathProfile;
   /** Map a monster rule-entry's `dataJson` to canonical statblock fields (AC/HP/CR/abilities/…). */
   mapStatblock(data: Record<string, unknown>): MonsterStatblockData;
   /** Resolve a monster's numeric max HP from its `dataJson`, or null when unavailable. */
@@ -3157,6 +3767,11 @@ export const DND5E_PACK_SLUG = 'open5e-srd';
 export const Dnd5eAdapter: RuleSystemAdapter = {
   id: DND5E_ADAPTER_ID,
   label: 'D&D 5e',
+  // The structured resolver's attack/save maths IS 5e's — d20 + flat modifier vs ascending AC,
+  // level-based proficiency — so 5e is the one adapter that can declare this today (#1053).
+  // Unknown / empty / homebrew slugs resolve to this adapter via `ruleSystemAdapter`, so they
+  // inherit the declaration, which is correct: 5e maths is exactly what those campaigns get.
+  resolverMath: RESOLVER_MATH_D20_5E,
   presentation: DND5E_STATBLOCK_PRESENTATION,
   characterSheet: {
     abilityFields: STANDARD_D20_ABILITY_FIELDS,
@@ -3224,6 +3839,8 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
   // source of truth), not a separate hand-maintained subset. This is what every 5e
   // surface — character sheet, encounter tracker, compendium — offers as suggestions.
   conditions: CONDITIONS,
+  damageTypes: DND5E_DAMAGE_TYPES,
+  supportsDirectDamageRules: true,
   // 5e turn workspace (issue #413): action / bonus action / reaction / movement.
   actionEconomy: DND5E_ACTION_ECONOMY,
   // 5e square-grid ruler: Euclidean by default; DMs may prefer alternating-diagonal counting.
@@ -4366,6 +4983,11 @@ export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
   levelBasedDC: pf2eLevelBasedDC,
   simpleDC: pf2eSimpleDC,
   degreeOfSuccess: pf2eDegreeOfSuccess,
+  // PF2e crits double the TOTAL, not just the dice (issue #1053): "double the damage after
+  // adding all the modifiers, bonuses, and penalties". Inherited by the SF2e adapter below,
+  // which spreads this object. Without it the resolver applied 5e's dice-only doubling to
+  // every PF2e critical and silently under-reported the modifier.
+  criticalDamage: 'double-total',
   // PF2e roll catalog (issue #415): proficiency adds your LEVEL plus a rank bonus, and checks
   // report degrees of success — a concrete demonstration that the catalog math is adapter-owned.
   buildCheckCatalog(character: CheckCatalogCharacter): RollCheckDefinition[] {
@@ -8477,8 +9099,21 @@ export const CombatantCreate = z.object({
   // Add from a saved campaign-library monster (snapshot copied server-side).
   libraryMonsterId: Id.optional(),
 });
+/** How a target's saving throw changes a manually-applied damage roll. */
+export const DamageSaveOutcome = z.enum(['full', 'half']);
+export type DamageSaveOutcome = z.infer<typeof DamageSaveOutcome>;
+
 export const CombatantUpdate = z.object({
   hpDelta: z.number().int().optional(),
+  // Direct encounter damage metadata (issue #605).  These fields are meaningful only
+  // for negative hpDelta values; the server derives the final delta from the target's
+  // statblock defences so REST, MCP, and the encounter UI use one rules path.
+  damageType: z.string().trim().min(1).max(24).optional(),
+  saveOutcome: DamageSaveOutcome.optional(),
+  isCrit: z.boolean().optional(),
+  // The dice-only portion of hpDelta.  On a critical hit the engine adds this once,
+  // leaving the flat modifier untouched (5e's "double dice, not modifier" rule).
+  damageDice: z.number().int().positive().optional(),
   hpSet: z.number().int().nonnegative().optional(),
   spDelta: z.number().int().optional(),
   spSet: z.number().int().nonnegative().optional(),
@@ -10162,3 +10797,402 @@ export const MentionTarget = z.object({
   name: z.string(), // quest/session title, or entity name — what to match & display
 });
 export type MentionTarget = z.infer<typeof MentionTarget>;
+
+// ---------- server-admin campaign metadata catalog (issue #587) ----------
+//
+// The premise of #587, and the only thing that makes this surface defensible:
+// an operator must be able to FIND and MANAGE a campaign without being able to
+// READ it. Everything below is therefore an explicit, enumerated projection of
+// operational metadata. It is NOT "the campaigns row minus a few fields" —
+// `SELECT campaigns.*` would already ship `ics_token` (a live capability secret
+// for the public calendar feed) today, and would silently ship whatever column
+// lands next. Adding a field here is a deliberate act with a review attached.
+//
+// What is deliberately absent, and must stay absent: quests, notes, comments,
+// attachments' bytes or filenames, session-zero lines/veils/safety tools, any
+// `dmSecret`, `icsToken`, `currentLocationId`, `activeEncounterId`, and the
+// campaign's own recap/session prose. See the negative tests in
+// test/admin-campaign-catalog-isolation.e2e-spec.ts.
+
+/**
+ * Whether a catalog row's human-authored strings are disclosed to the operator.
+ *
+ * A campaign NAME can itself be sensitive ("Tuesday Trauma Processing Group"),
+ * which is why #587 asks for this to be configurable rather than assumed public.
+ */
+export const CampaignCatalogFieldVisibility = z.enum(['visible', 'redacted']);
+export type CampaignCatalogFieldVisibility = z.infer<typeof CampaignCatalogFieldVisibility>;
+
+/**
+ * A campaign's OWN opt-out, set by its DM (see PUT /campaigns/:id/catalog-privacy).
+ *
+ * TIGHTEN-ONLY, on purpose. `inherit` follows the server default; `redacted`
+ * overrides it toward privacy. There is deliberately no per-campaign value that
+ * forces disclosure when the server default is `redacted`, and — more
+ * importantly — a server admin cannot move a campaign back to `inherit`. If an
+ * operator could un-redact a table that opted out, the opt-out would be
+ * decorative.
+ */
+export const CampaignCatalogPrivacy = z.enum(['inherit', 'redacted']);
+export type CampaignCatalogPrivacy = z.infer<typeof CampaignCatalogPrivacy>;
+
+/**
+ * Server-wide default disclosure for catalog strings.
+ *
+ * `descriptions` defaults to `redacted` and `names` to `visible`: a name is the
+ * handle an operator needs in order to talk to a DM about their campaign at all,
+ * while a description is free prose that routinely carries pitch, premise, and
+ * content warnings — i.e. the thing the issue is worried about. Operators who
+ * want either treated differently flip it here, and it is audited when they do.
+ */
+export const CampaignCatalogPrivacyPolicy = z.object({
+  names: CampaignCatalogFieldVisibility,
+  descriptions: CampaignCatalogFieldVisibility,
+  /** 'default' until an operator stores an override, then 'settings'. */
+  source: z.enum(['default', 'settings']),
+});
+export type CampaignCatalogPrivacyPolicy = z.infer<typeof CampaignCatalogPrivacyPolicy>;
+
+export const CampaignCatalogPrivacyPolicyUpdate = z.object({
+  names: CampaignCatalogFieldVisibility.optional(),
+  descriptions: CampaignCatalogFieldVisibility.optional(),
+});
+export type CampaignCatalogPrivacyPolicyUpdate = z.infer<typeof CampaignCatalogPrivacyPolicyUpdate>;
+
+/** The installed rule pack ("module") powering a campaign, as the catalog reports it. */
+export const CampaignCatalogModule = z.object({
+  /** campaigns.rule_system — the slug the campaign asked for. '' when unset. */
+  slug: z.string().max(120).default(''),
+  /** Display name of the installed pack, or '' when nothing with this slug is installed. */
+  name: z.string().max(200).default(''),
+  /** Installed pack version, or '' when unknown/uninstalled. */
+  version: z.string().max(60).default(''),
+  /**
+   * False when `slug` is non-empty but no rule pack with that slug is installed —
+   * the campaign is pinned to a module this server cannot serve. This is the
+   * fleet-wide condition the `update_module` bulk operation exists to fix.
+   */
+  installed: z.boolean().default(false),
+});
+export type CampaignCatalogModule = z.infer<typeof CampaignCatalogModule>;
+
+/** The primary owner / DM of record, identified only well enough to contact them. */
+export const CampaignCatalogOwner = z.object({
+  userId: Id,
+  displayName: z.string().max(200).default(''),
+  username: z.string().max(200).default(''),
+  /** True when resolved from campaign_members.is_primary_owner rather than "first dm". */
+  primaryOwner: z.boolean().default(false),
+});
+export type CampaignCatalogOwner = z.infer<typeof CampaignCatalogOwner>;
+
+/**
+ * ONE catalog row. Every field here is either operational (counts, bytes, dates,
+ * policy flags) or an explicitly privacy-gated string. Nothing here is campaign
+ * content, and nothing here is derived from campaign content.
+ */
+export const CampaignCatalogEntry = z.object({
+  id: Id,
+  /**
+   * The campaign name, or a non-identifying placeholder when redacted.
+   *
+   * The placeholder is derived SOLELY from the id (`Campaign #42`), which the
+   * row already discloses — so it reveals exactly zero additional bits. It is
+   * deliberately not blank (an operator must still be able to tell two rows
+   * apart and act on one) and deliberately not a truncation, initialism, or
+   * length hint, all of which leak the very string being withheld.
+   */
+  name: z.string().max(200),
+  nameRedacted: z.boolean().default(false),
+  /** '' whenever `descriptionRedacted` is true — a redacted description has no placeholder. */
+  description: z.string().max(10_000).default(''),
+  descriptionRedacted: z.boolean().default(false),
+  /** The campaign's own opt-out, so an operator can see WHY a row is redacted. */
+  catalogPrivacy: CampaignCatalogPrivacy,
+  status: z.enum(['active', 'paused', 'completed']),
+  /** paused/completed — the campaign is read-only for its members. */
+  archived: z.boolean().default(false),
+  /** Soft-deleted (issue #116). Excluded from the catalog unless explicitly requested. */
+  trashed: z.boolean().default(false),
+  module: CampaignCatalogModule,
+  primaryDm: CampaignCatalogOwner.nullable().default(null),
+  memberCount: z.number().int().nonnegative().default(0),
+  dmCount: z.number().int().nonnegative().default(0),
+  /** Logged sessions (campaigns.session_count) — a play-volume signal, not session content. */
+  sessionCount: z.number().int().nonnegative().default(0),
+  /** Earliest still-scheduled future session, or null. Timestamp only — no title, no notes. */
+  nextSessionAt: IsoDate.nullable().default(null),
+  /** max(campaigns.updated_at, newest audit row for the campaign). Never an entity body. */
+  lastActivityAt: IsoDate.nullable().default(null),
+  /**
+   * Sum of COMMITTED attachment sizes — stored content, excluding bytes merely reserved
+   * by in-flight uploads. Bytes only, never a filename or a mime type. Deliberately a
+   * narrower measure than the one `overQuota` uses; see below.
+   */
+  storageBytes: z.number().int().nonnegative().default(0),
+  /** Committed attachment rows, on the same committed-only basis as `storageBytes`. */
+  attachmentCount: z.number().int().nonnegative().default(0),
+  storageQuotaBytes: z.number().int().nonnegative().nullable().default(null),
+  /**
+   * True when a quota is set and committed + RESERVED bytes exceed it — the same sum
+   * upload enforcement compares against, so this flag agrees with whether the server is
+   * currently refusing uploads for the campaign. It can therefore be true while
+   * `storageBytes` alone is under the cap, for a campaign held over by in-flight uploads.
+   */
+  overQuota: z.boolean().default(false),
+  publicInvitesEnabled: z.boolean().default(true),
+  aiExternalContentPolicy: AiExternalContentPolicy,
+  createdAt: IsoDate,
+  updatedAt: IsoDate,
+});
+export type CampaignCatalogEntry = z.infer<typeof CampaignCatalogEntry>;
+
+/** Default page size for the admin catalog. */
+export const CAMPAIGN_CATALOG_DEFAULT_LIMIT = 25;
+/** Hard cap for `?limit=` — the catalog is paged in SQL, never bulk-dumped. */
+export const CAMPAIGN_CATALOG_MAX_LIMIT = 100;
+
+export const CampaignCatalogSort = z.enum(['name', 'status', 'storage', 'activity', 'nextSession', 'created', 'id']);
+export type CampaignCatalogSort = z.infer<typeof CampaignCatalogSort>;
+
+/**
+ * Offset pagination rather than a keyset cursor, and that is a considered choice:
+ * the catalog is an operator table with SEVEN user-selectable sort keys, most of
+ * them non-unique aggregates (storage bytes, activity timestamps). A keyset
+ * cursor over a non-unique, mutable aggregate silently skips or repeats rows.
+ * LIMIT/OFFSET is honest about being a snapshot, and `total` is a real COUNT(*)
+ * over the same predicates. Both are pushed into SQL — see the issue's complaint
+ * about campaigns.service.ts loading every row and filtering in memory.
+ */
+export const CampaignCatalogPage = z.object({
+  items: z.array(CampaignCatalogEntry),
+  total: z.number().int().nonnegative(),
+  hasMore: z.boolean(),
+  limit: z.number().int().positive(),
+  offset: z.number().int().nonnegative(),
+  /** Echoed so an operator (and the audit row) can see exactly which slice this was. */
+  sort: CampaignCatalogSort,
+  order: z.enum(['asc', 'desc']),
+});
+export type CampaignCatalogPage = z.infer<typeof CampaignCatalogPage>;
+
+// ---- bulk lifecycle operations (issue #587 bullet 3) ----
+
+/**
+ * Every bulk operation the catalog offers. Deliberately a closed enum: an
+ * operator acting across campaigns they are not a member of gets exactly these
+ * verbs and no generic "patch arbitrary columns" escape hatch.
+ */
+export const CampaignCatalogBulkOperation = z.enum([
+  'archive',
+  'pause',
+  'activate',
+  'reassign_owner',
+  'set_quota',
+  'set_policy',
+  'request_export',
+  'update_module',
+]);
+export type CampaignCatalogBulkOperation = z.infer<typeof CampaignCatalogBulkOperation>;
+
+export const CampaignCatalogBulkOutcome = z.enum(['would_apply', 'applied', 'skipped', 'failed']);
+export type CampaignCatalogBulkOutcome = z.infer<typeof CampaignCatalogBulkOutcome>;
+
+/**
+ * The one `skipped` reason that means "nothing to do; the campaign is already like
+ * this", as opposed to the several that mean "this item was ineligible" or "the preview
+ * went stale".
+ *
+ * Exported as a shared constant because the UI needs to tell those apart and must not do
+ * it by counting: a summary that asserts WHY nothing happened has to read the per-item
+ * reasons, and a literal duplicated on the client would drift out of agreement with the
+ * server the first time the wording is touched.
+ */
+export const CAMPAIGN_CATALOG_NO_OP_REASON = 'already in the requested state';
+
+export const CampaignCatalogBulkItemResult = z.object({
+  campaignId: Id,
+  outcome: CampaignCatalogBulkOutcome,
+  /** Human-readable "why" — always set for skipped/failed, often set for applied. */
+  reason: z.string().max(500).default(''),
+  /** The field the operation would change, before → after. Omitted when nothing changes. */
+  field: z.string().max(60).default(''),
+  before: z.string().max(200).default(''),
+  after: z.string().max(200).default(''),
+  /**
+   * An OPAQUE digest of every table this operation's plan was computed from — not just
+   * the campaign row. Compare it for equality; do not parse it.
+   *
+   * A dry run is only a safety property if Apply performs the plan that was PREVIEWED.
+   * The client can detect its own edits, but not the campaign moving underneath it — a
+   * DM reactivating a completed campaign between preview and apply turns a `skipped`
+   * verdict into a real archive the operator never saw. Echoing the version the plan was
+   * computed from lets Apply carry it back as a precondition.
+   *
+   * It covers EVERY dependency because a guard over a proxy is worse than no guard: this
+   * was `campaigns.updated_at` alone, which no write to `campaign_members` or
+   * `campaign_export_requests` advances — so a previewed ownership handover still
+   * "matched" after someone else had installed a different owner, and Apply demoted them
+   * without re-showing the plan.
+   */
+  stateVersion: z.string().max(64).default(''),
+});
+export type CampaignCatalogBulkItemResult = z.infer<typeof CampaignCatalogBulkItemResult>;
+
+export const CampaignCatalogBulkRequest = z
+  .object({
+    operation: CampaignCatalogBulkOperation,
+    campaignIds: z.array(Id).min(1).max(200),
+    /**
+     * Defaults TRUE. A bulk lifecycle change across campaigns the operator cannot
+     * read should require typing `"dryRun": false`, not merely forgetting a flag.
+     */
+    dryRun: z.boolean().default(true),
+    /** Recorded verbatim in the audit trail for real runs. */
+    reason: z.string().max(500).default(''),
+    /** reassign_owner: the user who becomes dm + primary owner. */
+    toUserId: Id.optional(),
+    /** set_quota: bytes, or null to clear the quota. */
+    storageQuotaBytes: z.number().int().nonnegative().nullable().optional(),
+    /**
+     * set_policy: close public invite links. `false` only.
+     *
+     * The catalog can shut invites off — the containment action an operator needs —
+     * but cannot turn them on. Enabling is gated on the campaign being active and
+     * untrashed (see `InvitesService.setPolicy`), and arming the flag from here would
+     * bypass that: the next `activate` preserves it and every retained link revives at
+     * once. `true` is rejected with a 400 rather than silently ignored.
+     */
+    publicInvitesEnabled: z.boolean().optional(),
+    /** set_policy: external-AI content policy. */
+    aiExternalContentPolicy: AiExternalContentPolicy.optional(),
+    /** update_module: the rule-pack slug to move campaigns onto. */
+    ruleSystem: z.string().max(120).optional(),
+    /**
+     * request_export: which export profile the DM is being asked to produce.
+     *
+     * Constrained to the profiles the export module can actually build. A free string
+     * here reaches the DM as a request for something that cannot be produced — they
+     * approve it and then have no way to satisfy it — so the operator is corrected at
+     * request time instead. Defaults to `backup` when omitted.
+     */
+    exportProfile: ExportProfile.optional(),
+    /**
+     * Per-campaign preconditions carried back from a dry run.
+     *
+     * Each entry pins the opaque `stateVersion` the previewed verdict was computed from,
+     * which covers every table that verdict was planned from rather than the campaign row
+     * alone. A
+     * campaign whose version has moved is SKIPPED with a reason rather than replanned
+     * from its new state — the operator agreed to a specific plan, and silently applying
+     * a different one is the failure a dry run exists to prevent. Skipping per item
+     * rather than rejecting the batch is deliberate: a 200-campaign run that aborts
+     * because one campaign moved is its own bad outcome.
+     *
+     * Optional, so an API client that never previews is unaffected.
+     */
+    preconditions: z
+      .array(z.object({ campaignId: Id, stateVersion: z.string().max(64) }))
+      .max(200)
+      .optional(),
+  })
+  .strict();
+export type CampaignCatalogBulkRequest = z.infer<typeof CampaignCatalogBulkRequest>;
+
+export const CampaignCatalogBulkResult = z.object({
+  operation: CampaignCatalogBulkOperation,
+  dryRun: z.boolean(),
+  requested: z.number().int().nonnegative(),
+  wouldApply: z.number().int().nonnegative(),
+  applied: z.number().int().nonnegative(),
+  skipped: z.number().int().nonnegative(),
+  failed: z.number().int().nonnegative(),
+  results: z.array(CampaignCatalogBulkItemResult),
+});
+export type CampaignCatalogBulkResult = z.infer<typeof CampaignCatalogBulkResult>;
+
+// ---- admin-initiated export REQUESTS (issue #587 bullet 3) ----
+//
+// An operator can ask for an export; they cannot take one. The catalog's whole
+// premise collapses if "request export" hands the requester a file containing
+// every quest, note and DM secret in the campaign. So the request is a durable
+// ASK addressed to the campaign's DMs, who approve or deny it and who alone can
+// then run the existing DM-gated export route. The admin-facing views of these
+// rows carry status and timestamps — never an artifact, never content.
+
+export const CampaignExportRequestStatus = z.enum(['pending', 'approved', 'denied', 'cancelled']);
+export type CampaignExportRequestStatus = z.infer<typeof CampaignExportRequestStatus>;
+
+export const CampaignExportRequest = z.object({
+  id: Id,
+  campaignId: Id,
+  /** Audit-actor string of the requesting operator (`token:<name>` or a user id). */
+  requestedBy: z.string().max(200),
+  requestedByUserId: z.string().max(120).default(''),
+  /**
+   * Which export profile was asked for. Always one of `ExportProfile` for rows this
+   * module writes — the request body is validated against that enum — but typed as a
+   * plain string because the column carries a `''` default and this is what the DB
+   * hands back, not a re-validated value.
+   */
+  profile: z.string().max(40).default(''),
+  /** Why the operator is asking. Required, and shown to the DM who decides. */
+  justification: z.string().max(2000).default(''),
+  status: CampaignExportRequestStatus,
+  decidedBy: z.string().max(200).nullable().default(null),
+  decidedAt: IsoDate.nullable().default(null),
+  decisionNote: z.string().max(2000).default(''),
+  createdAt: IsoDate,
+  updatedAt: IsoDate,
+});
+export type CampaignExportRequest = z.infer<typeof CampaignExportRequest>;
+
+/**
+ * A page of export requests for the CROSS-CAMPAIGN admin listing.
+ *
+ * Paged for the same reason the catalog itself is, and with the same offset/`total`
+ * shape rather than a cursor. This listing previously returned a bare array capped at
+ * 100 with no offset and no total, which silently truncated: requests raised on other
+ * campaigns pushed older pending ones out of the only view that spans campaigns, and an
+ * operator could not enumerate the queue without already knowing every affected campaign
+ * id — the exact thing a cross-campaign view exists to avoid. A pending approval nobody
+ * can see is an approval that never happens, and the waiting DM gets no signal either.
+ *
+ * The DM-facing per-campaign inbox stays a plain array: it is bounded by one campaign's
+ * own history, which is not a queue anyone has to page through.
+ */
+export const CampaignExportRequestPage = z.object({
+  items: z.array(CampaignExportRequest),
+  total: z.number().int().nonnegative(),
+  hasMore: z.boolean(),
+  limit: z.number().int().positive(),
+  offset: z.number().int().nonnegative(),
+});
+export type CampaignExportRequestPage = z.infer<typeof CampaignExportRequestPage>;
+
+export const CampaignExportRequestDecision = z
+  .object({
+    decision: z.enum(['approved', 'denied']),
+    note: z.string().max(2000).default(''),
+  })
+  .strict();
+export type CampaignExportRequestDecision = z.infer<typeof CampaignExportRequestDecision>;
+
+/** A campaign's own catalog-privacy opt-out, as its DM reads and writes it. */
+export const CampaignCatalogPrivacySetting = z.object({
+  campaignId: Id,
+  catalogPrivacy: CampaignCatalogPrivacy,
+  /** The server default in force, so a DM can see what `inherit` currently means. */
+  serverDefault: CampaignCatalogPrivacyPolicy,
+  /** What the catalog actually discloses for this campaign right now. */
+  effective: z.object({
+    names: CampaignCatalogFieldVisibility,
+    descriptions: CampaignCatalogFieldVisibility,
+  }),
+});
+export type CampaignCatalogPrivacySetting = z.infer<typeof CampaignCatalogPrivacySetting>;
+
+export const CampaignCatalogPrivacyUpdate = z
+  .object({ catalogPrivacy: CampaignCatalogPrivacy })
+  .strict();
+export type CampaignCatalogPrivacyUpdate = z.infer<typeof CampaignCatalogPrivacyUpdate>;

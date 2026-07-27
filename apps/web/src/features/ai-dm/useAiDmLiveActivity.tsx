@@ -243,7 +243,11 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
           event.type === 'stuck' ||
           event.type === 'recovered' ||
           event.type === 'vote' ||
-          event.type === 'takeover'
+          event.type === 'takeover' ||
+          // #1043: the lifecycle phase is thin server truth like every sibling above. This hook
+          // drives surfaces outside the AI Table, which would otherwise never hear that the
+          // session opened or ended unless the viewer was the one who pressed the button.
+          event.type === 'phase'
         ) {
           invalidateAiDm(queryClient, campaignId);
         }
