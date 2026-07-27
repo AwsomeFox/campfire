@@ -161,7 +161,17 @@ function wrapNodeResponse(res: IncomingMessage): FetchResponse {
   res.pipe(tee);
   const body = Readable.toWeb(tee) as ReadableStream<Uint8Array>;
   const readBuffered = async (): Promise<string> => {
-    await finished(res).catch(() => undefined);
+    // Issue #1602: propagate a body-stream failure instead of swallowing it. `finished`
+    // rejects when the transfer ends early — the socket died mid-body, or the request was
+    // aborted. The old `.catch(() => undefined)` returned the partial bytes anyway, which
+    // made a TRUNCATED body indistinguishable from a complete non-JSON one; `readJsonBody`
+    // then classified a retryable transport fault as the deterministic `invalid_response`.
+    // This wrapper is the production path — `defaultFetchImpl` hands every adapter the
+    // guarded fetch, and `validateAiProviderOutboundUrl` pins addresses on every success —
+    // so the swallow made that classification unreachable exactly where it matters.
+    // Both readers of this (`readJsonBody`, and `safeText` via its own try/catch) handle a
+    // rejection; nothing depends on the partial-bytes-on-error behaviour.
+    await finished(res);
     return Buffer.concat(chunks).toString('utf8');
   };
   return {

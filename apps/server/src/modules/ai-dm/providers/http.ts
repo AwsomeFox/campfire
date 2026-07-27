@@ -154,7 +154,7 @@ export function postAndReadJson<T>(
   bodyObj: unknown,
   opts: PostJsonOptions,
 ): Promise<T> {
-  return postWithRetry(fetchImpl, url, headers, bodyObj, opts, (res) => readJsonBody<T>(res, opts.provider));
+  return postWithRetry(fetchImpl, url, headers, bodyObj, opts, (res) => readJsonBody<T>(res, opts.provider, opts.signal));
 }
 
 /**
@@ -246,6 +246,15 @@ async function postWithRetry<T>(
  * Issue #987: GET helper for model discovery (`GET /v1/models`). Simpler than `postJson`
  * — no body, no retry loop (model lists are not transient), just a timeout-guarded GET
  * with the same error classification.
+ *
+ * Issue #1602: callers apply {@link readJsonBody} themselves rather than getting the read
+ * pulled inside a retry loop the way {@link postAndReadJson} does, so a body that dies
+ * mid-read here is classified `transport`/retryable but nothing retries it. That
+ * asymmetry is deliberate: the sole caller is `listModels`, reached only from
+ * `fetchAvailableModels` — an operator pressing a button in provider config, which
+ * collapses every failure into one generic BadRequest anyway. No turn fails, no token
+ * budget is spent, and the operator retries by clicking again. The POST path had to pull
+ * the read inside the loop because it IS the driver's hot path.
  */
 export async function getJson(
   fetchImpl: FetchLike,
@@ -298,13 +307,22 @@ const MAX_RAW_BODY_CHARS = 1000;
  * verbatim as `turn.error.message`; the offending prefix goes to `rawBody` and the server
  * log, truncated, so a provider streaming megabytes of HTML cannot flood either.
  */
-export async function readJsonBody<T>(res: FetchResponse, provider: string): Promise<T> {
+export async function readJsonBody<T>(res: FetchResponse, provider: string, signal?: AbortSignal): Promise<T> {
   let text: string;
   try {
     text = await res.text();
   } catch (cause) {
     // A guarded fetch already speaks the taxonomy — do not re-wrap and lose its kind.
     if (cause instanceof AiProviderError) throw cause;
+    // The caller's signal firing mid-body is a CANCELLATION, not a fault — a seat
+    // teardown or a stop control (#558). It must not be relabelled `transport`, because
+    // `transport` is retryable and retrying would re-POST a generation the table just
+    // cancelled. `postJson`'s fetch-throw branch draws the same line via `t.didTimeout()`,
+    // but that lever is unavailable here: the TTFB timer is already cleared by the time
+    // the body is read (#1063), so the caller's signal is the only remaining signal.
+    if (signal?.aborted) {
+      throw new AiProviderError('timeout', `${provider}: request aborted`, { provider, retryable: false, cause });
+    }
     throw new AiProviderError('transport', `${provider}: connection closed before the response body was complete`, {
       provider,
       status: res.status,

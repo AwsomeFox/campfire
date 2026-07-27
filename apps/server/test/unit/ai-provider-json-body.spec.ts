@@ -1,5 +1,8 @@
 import { describe, it, expect } from '@jest/globals';
+import http from 'node:http';
 import { readJsonBody, postAndReadJson, DEFAULT_RETRY } from '../../src/modules/ai-dm/providers/http';
+import type { FetchLike } from '../../src/modules/ai-dm/providers/http';
+import { createAiProviderGuardedFetch } from '../../src/common/ai-provider-outbound';
 import { AiProviderError } from '../../src/modules/ai-dm/providers/errors';
 import { OpenAiProvider } from '../../src/modules/ai-dm/providers/openai-provider';
 import { AnthropicProvider } from '../../src/modules/ai-dm/providers/anthropic-provider';
@@ -146,5 +149,112 @@ describe('adapters surface invalid_response instead of a native SyntaxError (#16
     const { fetchImpl } = fakeFetch(nonJsonResponse(HTML_BODY));
     const p = new OpenAiImageProvider({ apiKey: 'k', model: 'm', fetchImpl, retry: { ...DEFAULT_RETRY, maxRetries: 0 } });
     await expectInvalidResponse(p.generateImage({ prompt: 'x', n: 1, width: 256, height: 256, model: 'm' }));
+  });
+});
+
+describe('a truncated body through the REAL guarded fetch wrapper (#1602)', () => {
+  /**
+   * The tests above drive hand-written fixtures whose `text()` rejects. That is not enough
+   * on its own: `defaultFetchImpl` hands every provider built without an injected
+   * `fetchImpl` — i.e. every provider in production — `createAiProviderGuardedFetch`, and
+   * `validateAiProviderOutboundUrl` pins addresses on every successful decision, so real
+   * traffic goes through `wrapNodeResponse`, not through the global `fetch`. That wrapper
+   * used to `.catch(() => undefined)` its body-stream error and hand back the partial
+   * bytes, which turned every mid-body death into a `JSON.parse` failure — so the
+   * retryable branch this issue exists to create was inert on the only path that runs, and
+   * a fixture with a rejecting `text()` could never have noticed.
+   *
+   * This test therefore drives a real socket through the real wrapper.
+   */
+  it('classifies a connection that dies mid-body as transport, and actually retries it', async () => {
+    const server = http.createServer((_req, res) => {
+      // Promise more bytes than we send, then kill the socket, so the client sees a
+      // PREMATURE CLOSE rather than a short-but-complete body. The distinction is the
+      // whole point: the same bytes delivered completely would be `invalid_response`.
+      res.writeHead(200, { 'content-type': 'application/json', 'content-length': '512' });
+      res.write('{"choices":[{"message":{"content":"half a se', () => res.socket?.destroy());
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+    const addr = server.address();
+    if (!addr || typeof addr === 'string') throw new Error('expected bound port');
+
+    // A 127.0.0.1 literal takes the `net.isIP` branch of the outbound check, so the
+    // decision carries `resolvedAddresses` and the request is pinned — exactly the
+    // production shape, with no DNS stubbing needed.
+    const guarded = createAiProviderGuardedFetch({ allowPrivateHosts: true, allowHosts: [], allowCidrs: [], denyHosts: [] });
+    let attempts = 0;
+    const counting: FetchLike = async (url, init) => {
+      attempts += 1;
+      return guarded(url, init);
+    };
+
+    try {
+      const err = await postAndReadJson(counting, `http://127.0.0.1:${addr.port}/v1/chat/completions`, {}, {}, {
+        provider: 'openai',
+        timeoutMs: 5000,
+        retry: { maxRetries: 1, baseDelayMs: 1, maxDelayMs: 1 },
+        sleep: async () => {},
+        rand: () => 0,
+      }).then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(AiProviderError);
+      expect((err as AiProviderError).kind).toBe('transport');
+      expect((err as AiProviderError).retryable).toBe(true);
+      expect(attempts).toBe(2); // the retry gate re-issued it, which is the behaviour the PR claims
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) => server.close((e) => (e ? reject(e) : resolve())));
+    }
+  });
+
+  it('does NOT relabel a caller abort mid-body as a retryable transport fault', async () => {
+    // Making `readBuffered` rethrow newly exposes this: `finished(res)` also rejects when
+    // the request is aborted, and a seat teardown or stop control (#558) firing mid-body
+    // must stay non-retryable — a retry would re-POST a generation the table just
+    // cancelled. `postJson`'s fetch-throw branch uses `t.didTimeout()` to draw this line,
+    // but the TTFB timer is already cleared once the body is being read (#1063), so
+    // `readJsonBody` has to consult the caller's signal instead.
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json', 'content-length': '512' });
+      res.write('{"choices":[{"message":{"content":"'); // then hang, holding the socket open
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+    const addr = server.address();
+    if (!addr || typeof addr === 'string') throw new Error('expected bound port');
+
+    const guarded = createAiProviderGuardedFetch({ allowPrivateHosts: true, allowHosts: [], allowCidrs: [], denyHosts: [] });
+    let attempts = 0;
+    const counting: FetchLike = async (url, init) => {
+      attempts += 1;
+      return guarded(url, init);
+    };
+    const ac = new AbortController();
+
+    try {
+      const pending = postAndReadJson(counting, `http://127.0.0.1:${addr.port}/v1/chat/completions`, {}, {}, {
+        provider: 'openai',
+        timeoutMs: 5000,
+        retry: { maxRetries: 2, baseDelayMs: 1, maxDelayMs: 1 },
+        signal: ac.signal,
+        sleep: async () => {},
+        rand: () => 0,
+      }).then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 50)); // let the headers land
+      ac.abort();
+      const err = await pending;
+
+      expect(err).toBeInstanceOf(AiProviderError);
+      expect((err as AiProviderError).kind).toBe('timeout');
+      expect((err as AiProviderError).retryable).toBe(false);
+      expect(attempts).toBe(1); // a cancelled generation is never re-issued
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) => server.close((e) => (e ? reject(e) : resolve())));
+    }
   });
 });
