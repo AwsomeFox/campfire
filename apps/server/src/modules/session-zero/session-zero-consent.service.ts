@@ -219,8 +219,13 @@ export class SessionZeroConsentService {
 
   /**
    * The version the AI is bound by and what "play" is licensed against: strict all-members
-   * resolution first, then the sticky fallback when a newcomer has not yet answered but the
-   * rest of the table already licensed a version.
+   * resolution first, then the sticky fallback when a newcomer has not yet cleared the gate
+   * but the rest of the table already licensed a version.
+   *
+   * Sticky participants are only those who have positively acknowledged some version —
+   * a `declined`/`discuss` row must not re-include an outstanding member and collapse the
+   * fallback to null (which would strip every safety boundary from the AI). Silence and
+   * refusal both leave the previously-agreed charter in force for everyone else.
    */
   private resolveBoundVersion(
     versions: SessionZeroCharterVersion[],
@@ -231,7 +236,7 @@ export class SessionZeroConsentService {
     if (strict) return strict;
 
     const participantsWithAcks = requiredIds.filter((userId) =>
-      versions.some((v) => acksFor(v.id).has(userId)),
+      versions.some((v) => acksFor(v.id).get(userId) === 'acknowledged'),
     );
     if (participantsWithAcks.length === 0) return null;
     return resolveEffectiveVersion(versions, participantsWithAcks, acksFor);
@@ -256,7 +261,11 @@ export class SessionZeroConsentService {
     return out;
   }
 
-  async consentStatus(campaignId: number, user: RequestUser | null): Promise<SessionZeroConsentStatus> {
+  async consentStatus(
+    campaignId: number,
+    user: RequestUser | null,
+    isFacilitator = false,
+  ): Promise<SessionZeroConsentStatus> {
     const versions = await this.listVersions(campaignId);
     if (versions.length === 0) {
       return {
@@ -289,14 +298,8 @@ export class SessionZeroConsentService {
       acksFor,
     ).map((entry) => ({ userId: entry.userId, userName: nameOf.get(entry.userId) ?? '', state: entry.state }));
 
-    const isFacilitator =
-      user !== null &&
-      (await this.db
-        .select({ role: campaignMembers.role })
-        .from(campaignMembers)
-        .where(and(eq(campaignMembers.campaignId, campaignId), eq(campaignMembers.userId, Number(user.id))))
-        .limit(1)
-        .get())?.role === 'dm';
+    // Caller already resolved membership (requireMember); reuse that role instead of
+    // re-querying campaignMembers on every consent status read.
     const outstanding = isFacilitator ? outstandingEntries : [];
 
     let mine: SessionZeroAcknowledgment | null = null;
@@ -336,9 +339,10 @@ export class SessionZeroConsentService {
    *     Withhold instead (empty boundaries + `charterSource: 'none'`).
    *
    * Sticky agreement: when the full required set has not cleared a gate (e.g. a brand-new
-   * player was seated via POST /members with no acknowledgment yet), we still serve the
-   * last version agreed by everyone who HAS participated in consent. Seating someone must
-   * not silently unbind the AI from a charter the rest of the table already accepted.
+   * player was seated via POST /members and has not acknowledged — or has declined /
+   * asked to discuss —), we still serve the last version agreed by everyone who HAS
+   * positively acknowledged. Seating someone, or their refusal, must not silently unbind
+   * the AI from a charter the rest of the table already accepted.
    */
   async effectiveCharter(campaignId: number): Promise<
     | { status: 'never_published' }
@@ -502,6 +506,12 @@ export class SessionZeroConsentService {
   /**
    * Re-validate the charter gate inside a membership transaction so a publish that lands
    * after the outer preview read cannot seat someone against a stale version.
+   *
+   * Exact version match is intentional and distinct from `hasAcknowledgedThrough`: join /
+   * accept must name the CURRENT published version shown in the invite preview. Covering
+   * acknowledgments apply only after someone is seated, when resolving the table's
+   * effective charter — they must not let a pre-join body that cites an older version
+   * carry consent across a publish that landed between preview and seat.
    */
   assertCharterAcknowledgedTx(
     tx: Parameters<Parameters<DrizzleDb['transaction']>[0]>[0],

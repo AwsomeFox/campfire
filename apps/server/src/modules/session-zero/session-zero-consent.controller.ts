@@ -80,8 +80,8 @@ export class SessionZeroConsentController {
   })
   @ApiResponse({ status: 200, description: 'Consent gate status.', type: SessionZeroConsentStatusDto })
   async consentStatus(@Param('campaignId', ParseIntPipe) campaignId: number, @CurrentUser() user: RequestUser) {
-    await this.access.requireMember(user, campaignId);
-    return this.consent.consentStatus(campaignId, user);
+    const role = await this.access.requireMember(user, campaignId);
+    return this.consent.consentStatus(campaignId, user, role === 'dm');
   }
 
   @Post('consent')

@@ -352,6 +352,32 @@ describe('Issue #600: session-zero consent lifecycle (e2e)', () => {
       expect(charter.charterVersion).toBe(3);
       expect(charter.veils).toContain(M.veil);
     });
+
+    it('keeps the AI on the last agreed charter when a new player declines', async () => {
+      // A declined/discuss row must not poison the sticky fallback into unbound — that
+      // would strip lines/veils/safety tools from the AI while the rest of the table
+      // already licensed a version. Silence and refusal both leave the prior charter up.
+      const refuser = await newUser('sz-refuser', 'refuser-password-1');
+      const seat = await dm
+        .post(`${API}/campaigns/${campaignId}/members`)
+        .send({ userId: refuser.id, role: 'player' });
+      expect(seat.status).toBe(201);
+
+      const latest = (await consentStatus(dm)).latestVersion;
+      const declined = await refuser.agent
+        .post(`${API}/campaigns/${campaignId}/session-zero/consent`)
+        .send({ versionId: latest.id, state: 'declined', note: 'A line I need is missing.' });
+      expect(declined.status).toBe(201);
+
+      const status = await consentStatus(dm);
+      expect(status.outstanding.some((o: { userId: string; state: string | null }) => o.userId === String(refuser.id) && o.state === 'declined')).toBe(true);
+      expect(status.effectiveVersion?.version).toBe(3);
+
+      const charter = await ctx.app.get(McpToolsService).effectiveSessionZero(campaignId);
+      expect(charter.charterSource).toBe('accepted');
+      expect(charter.charterVersion).toBe(3);
+      expect(charter.veils).toContain(M.veil);
+    });
   });
 
   // -------------------------------------------------------------------------
