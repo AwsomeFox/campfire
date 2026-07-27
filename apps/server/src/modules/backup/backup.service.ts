@@ -51,9 +51,8 @@ import {
   BACKUP_FORMAT_VERSION,
   BACKUP_KIND,
   BACKUP_ORPHAN_LIST_CAP,
-  BACKUP_VERSION,
   CURRENT_SCHEMA_REVISION,
-  DB_ENTRY_V1,
+  DB_ENTRY,
   manifestToInspectView,
   parseBackupManifest,
   serializeBackupManifest,
@@ -76,11 +75,9 @@ import {
   type RestoreProgressPhase,
 } from './backup-restore-apply';
 
-export { BACKUP_APP, BACKUP_KIND, BACKUP_VERSION, BACKUP_FORMAT_VERSION };
+export { BACKUP_APP, BACKUP_KIND, BACKUP_FORMAT_VERSION };
 export type { BackupManifest, BackupInspectResult };
 
-/** Canonical zip entry name for the database in format-1 archives. */
-const DB_ENTRY = DB_ENTRY_V1;
 export { DB_ENTRY };
 
 /** Zip entry names inside a backup archive. */

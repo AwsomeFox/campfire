@@ -14,9 +14,6 @@ export const BACKUP_KIND = 'server-backup';
  */
 export const BACKUP_FORMAT_VERSION = 3;
 
-/** @deprecated Use {@link BACKUP_FORMAT_VERSION}. Kept for existing imports/tests. */
-export const BACKUP_VERSION = BACKUP_FORMAT_VERSION;
-
 /** DB migration count at backup time — a coarse schema revision for operators. */
 export const CURRENT_SCHEMA_REVISION = MIGRATION_NAMES.length;
 
@@ -121,15 +118,9 @@ export interface BackupManifest {
    *  credential fleet that hinges on the keyfile. Non-secret — no key
    *  material or last-4 leaks through this count. */
   aiCredentialCount?: number;
-  /**
-   * Per-attachment reconciliation records (#828). Written by archives from
-   * this Campfire release onward; older archives omit this field.
-   */
+  /** Per-attachment checksum records required by the v3 archive contract. */
   attachments: BackupAttachmentRecord[];
-  /**
-   * Reconciliation summary (#828). Written by archives from this release onward;
-   * older archives omit this field (they were produced before reconciliation).
-   */
+  /** Reconciliation summary required by the v3 archive contract. */
   reconciliation: BackupReconciliation;
 }
 
@@ -257,8 +248,8 @@ function parseAttachmentRecords(raw: Record<string, unknown>): BackupAttachmentR
   });
 }
 
-/** Expected db entry path for backup archives. */
-export const DB_ENTRY_V1 = 'db/campfire.db';
+/** Expected database entry path for backup archives. */
+export const DB_ENTRY = 'db/campfire.db';
 
 function parseManifestV3(raw: Record<string, unknown>): BackupManifest {
   const createdAt = asNonEmptyString(raw.createdAt);
@@ -269,11 +260,11 @@ function parseManifestV3(raw: Record<string, unknown>): BackupManifest {
     throw new BadRequestException('Invalid backup archive — manifest is missing required fields');
   }
   // Validate that db points to the canonical entry for this format (issue #997 fix 2).
-  if (db !== DB_ENTRY_V1) {
+  if (db !== DB_ENTRY) {
     // Truncate user-controlled value to avoid log/response inflation.
     const truncated = db.length > 60 ? db.slice(0, 60) + '…' : db;
     throw new BadRequestException(
-      `Invalid backup archive — manifest.db must be "${DB_ENTRY_V1}" for format version ${BACKUP_FORMAT_VERSION}, got "${truncated}"`,
+      `Invalid backup archive — manifest.db must be "${DB_ENTRY}" for format version ${BACKUP_FORMAT_VERSION}, got "${truncated}"`,
     );
   }
   if (typeof dbBytes !== 'number' || !Number.isFinite(dbBytes) || dbBytes < 0) {
@@ -326,9 +317,8 @@ function parseManifestV3(raw: Record<string, unknown>): BackupManifest {
     !asNonEmptyString(r.generation) || !validCount(r.totalAttachments) || !validCount(r.missing) ||
     !validCount(r.changed) || !Array.isArray(r.orphans) || !validCount(r.orphanCount) ||
     typeof r.clean !== 'boolean' || !orphans.every((value) => typeof value === 'string') ||
-    totalAttachments !== attachments.length + missing || uploadCount !== attachments.length ||
-    missing > totalAttachments || changed > attachments.length ||
-    orphanCount < orphans.length || clean !== (missing === 0 && changed === 0)
+    totalAttachments !== attachments.length || uploadCount !== attachments.length ||
+    missing !== 0 || changed !== 0 || orphanCount < orphans.length || clean !== true
   ) {
     throw new BadRequestException('Invalid backup archive — manifest reconciliation is invalid');
   }

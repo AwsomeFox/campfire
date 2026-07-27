@@ -3,7 +3,7 @@ import {
   BACKUP_APP,
   BACKUP_FORMAT_VERSION,
   BACKUP_KIND,
-  DB_ENTRY_V1,
+  DB_ENTRY,
   assertBackupManifestBytes,
   manifestToInspectView,
   parseBackupManifest,
@@ -16,7 +16,7 @@ const baseV3 = {
   kind: BACKUP_KIND,
   version: BACKUP_FORMAT_VERSION,
   createdAt: '2026-07-20T12:00:00.000Z',
-  db: DB_ENTRY_V1,
+  db: DB_ENTRY,
   dbBytes: 12345,
   uploadCount: 0,
   appVersion: '0.14.1',
@@ -55,7 +55,7 @@ describe('parseBackupManifest (v3 only)', () => {
   });
 
   it('rejects invalid db paths and invalid reconciliation invariants', () => {
-    expect(() => parseBackupManifest({ ...baseV3, db: '../escape.db' })).toThrow(DB_ENTRY_V1);
+    expect(() => parseBackupManifest({ ...baseV3, db: '../escape.db' })).toThrow(DB_ENTRY);
     expect(() => parseBackupManifest({
       ...baseV3,
       reconciliation: { ...baseV3.reconciliation, totalAttachments: 1 },

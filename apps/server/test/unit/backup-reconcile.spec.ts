@@ -41,11 +41,11 @@ describe('Backup manifest reconciliation (v3)', () => {
     expect(() => parseBackupManifest({ ...one, uploadCount: 0 })).toThrow(/reconciliation is invalid/i);
     expect(() => parseBackupManifest({ ...one, reconciliation: { ...one.reconciliation, totalAttachments: 2 } })).toThrow(/reconciliation is invalid/i);
     expect(() => parseBackupManifest({ ...one, reconciliation: { ...one.reconciliation, changed: 1, clean: true } })).toThrow(/reconciliation is invalid/i);
-    expect(() => parseBackupManifest({ ...one, reconciliation: { ...one.reconciliation, changed: 1, clean: false } })).not.toThrow();
+    expect(() => parseBackupManifest({ ...one, reconciliation: { ...one.reconciliation, changed: 1, clean: false } })).toThrow(/reconciliation is invalid/i);
   });
 
-  it('allows a failed snapshot only when its missing count accounts for omitted attachments', () => {
-    expect(parseBackupManifest({ ...base, reconciliation: { ...base.reconciliation, totalAttachments: 1, missing: 1, clean: false } }).reconciliation.missing).toBe(1);
+  it('rejects partial snapshots because the writer never publishes them', () => {
+    expect(() => parseBackupManifest({ ...base, reconciliation: { ...base.reconciliation, totalAttachments: 1, missing: 1, clean: false } })).toThrow(/reconciliation is invalid/i);
   });
 
   it('BACKUP_ORPHAN_LIST_CAP is a positive integer', () => {
