@@ -32,6 +32,7 @@ type MulterFile = Express.Multer.File;
 const MAX_RESTORE_BYTES = 1024 * 1024 * 1024;
 export const BACKUP_UPLOAD_STAGE_PREFIX = 'campfire-backup-uploads-';
 export const BACKUP_UPLOAD_STAGE_OWNER_FILE = '.campfire-upload-stage-owner.json';
+const MAX_BACKUP_UPLOAD_STAGE_OWNER_BYTES = 4 * 1024;
 let uploadStageRoot: string | undefined;
 
 interface UploadStageOwner {
@@ -153,6 +154,7 @@ export function reclaimStaleUploadStageRoots(
       const markerPath = uploadStageOwnerPath(root);
       const marker = fs.lstatSync(markerPath);
       if (!marker.isFile() || marker.isSymbolicLink()) continue;
+      if (marker.size > MAX_BACKUP_UPLOAD_STAGE_OWNER_BYTES) continue;
       if (
         (uid !== undefined && (stat.uid !== uid || marker.uid !== uid)) ||
         (stat.mode & 0o077) !== 0 || (marker.mode & 0o077) !== 0

@@ -122,6 +122,28 @@ describe('backup upload staging root', () => {
     expect(fs.existsSync(legacy)).toBe(true);
   });
 
+  it('skips an oversized owner marker without reading it or blocking other reclamation', () => {
+    const oversized = createPrivateUploadStageRoot(tmpDir);
+    const reclaimable = createPrivateUploadStageRoot(tmpDir);
+    const oversizedMarker = path.join(oversized, BACKUP_UPLOAD_STAGE_OWNER_FILE);
+    const reclaimableMarker = path.join(reclaimable, BACKUP_UPLOAD_STAGE_OWNER_FILE);
+    fs.writeFileSync(oversizedMarker, Buffer.alloc(4 * 1024 + 1, 0x20));
+    owner(reclaimable, { version: 1, pid: 999_999_999 });
+    const realRead = fs.readFileSync.bind(fs);
+    const read = jest.spyOn(fs, 'readFileSync').mockImplementation(((file: fs.PathOrFileDescriptor, ...args: unknown[]) => {
+      return realRead(file, ...(args as []));
+    }) as typeof fs.readFileSync);
+    try {
+      reclaimStaleUploadStageRoots(tmpDir, undefined, () => ({ state: 'dead' }));
+      expect(fs.existsSync(oversized)).toBe(true);
+      expect(fs.existsSync(reclaimable)).toBe(false);
+      expect(read).not.toHaveBeenCalledWith(oversizedMarker, 'utf8');
+      expect(read).toHaveBeenCalledWith(reclaimableMarker, 'utf8');
+    } finally {
+      read.mockRestore();
+    }
+  });
+
   it('parses Linux start ticks after a stat comm containing spaces and parentheses', () => {
     const realRead = fs.readFileSync.bind(fs);
     const suffix = Array.from({ length: 20 }, (_, index) => (index === 19 ? '4242' : index === 0 ? 'R' : '0'));
