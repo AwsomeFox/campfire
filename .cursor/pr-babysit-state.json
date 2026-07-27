@@ -2,12 +2,14 @@
   "tracked": [
     {
       "pr": 1617,
-      "status": "babysitting",
+      "status": "merged",
       "url": "https://github.com/AwsomeFox/campfire/pull/1617",
       "headBranch": "fix/issue-670",
       "baseBranch": "main",
-      "updatedAt": "2026-07-27T21:18:23Z",
-      "notes": "Head c1ec467f. Merged main (activity rail) resolving RunSessionPage conflict. MERGEABLE. Waiting CI."
+      "updatedAt": "2026-07-27T22:01:55Z",
+      "notes": "Merged squash 8a283ff9 after CI green. Fixed print-DOM e2e, header cluster, DM-only roster, merged main conflict, resolved review threads.",
+      "mergedAt": "2026-07-27T22:01:49Z",
+      "mergeCommit": "8a283ff909040ccf0723bd38a2a172ab0cde6bf7"
     }
   ]
 }
