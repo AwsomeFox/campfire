@@ -766,7 +766,12 @@ export class ExportService {
     const stagingDir = fs.mkdtempSync(path.join(os.tmpdir(), 'campfire-export-'));
     let stageNumber = 0;
     let archiveError: Error | undefined;
-    const outputComplete = finished(destination, { cleanup: true });
+    // `writeMarkdownZip` can still fail while querying/projecting the campaign.
+    // A response is only committed once archiver has emitted bytes, not merely
+    // because the archive was constructed and piped.
+    let archiveBytesProduced = false;
+    const outputCompletionAbort = new AbortController();
+    const outputComplete = finished(destination, { cleanup: true, signal: outputCompletionAbort.signal });
     // Attach a rejection handler immediately: an output can fail while an
     // attachment is still being staged, before the main flow reaches its await.
     void outputComplete.catch(() => undefined);
@@ -777,15 +782,17 @@ export class ExportService {
     const abort = () => destroy(signal.reason instanceof Error ? signal.reason : new Error('Export aborted'));
     const onArchiveError = (err: Error) => {
       archiveError = err;
-      if (!destination.destroyed) destination.destroy(err);
+      if (archiveBytesProduced && !destination.destroyed) destination.destroy(err);
     };
     const onDestinationError = (err: Error) => {
       archiveError = err;
       archive.destroy(err);
     };
+    const onArchiveData = () => { archiveBytesProduced = true; };
     signal.addEventListener('abort', abort, { once: true });
     archive.once('error', onArchiveError);
     destination.once('error', onDestinationError);
+    archive.on('data', onArchiveData);
     archive.pipe(destination);
     try {
       const result = await this.writeMarkdownZip(
@@ -827,16 +834,28 @@ export class ExportService {
       return result;
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
-      destroy(error);
-      try {
-        await outputComplete;
-      } catch {
-        // Preserve the operation's primary failure (abort, staging, or archiver).
+      if (archiveBytesProduced || destination.writableEnded || destination.destroyed) {
+        destroy(error);
+        try {
+          await outputComplete;
+        } catch {
+          // Preserve the operation's primary failure (abort, staging, or archiver).
+        }
+      } else {
+        // No bytes reached the response: leave it available for Nest's normal
+        // exception handling instead of resetting the client connection. The
+        // primary error is rethrown below, so close archiver without emitting a
+        // second asynchronous error after its listener cleanup.
+        archive.destroy();
       }
       throw error;
     } finally {
+      // Cancels only the finished() observation, not the destination stream. It
+      // removes its listeners when a pre-stream failure leaves the response open.
+      outputCompletionAbort.abort();
       signal.removeEventListener('abort', abort);
       archive.removeListener('error', onArchiveError);
+      archive.removeListener('data', onArchiveData);
       destination.removeListener('error', onDestinationError);
       fs.rmSync(stagingDir, { recursive: true, force: true });
     }
