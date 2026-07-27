@@ -208,12 +208,13 @@ export class SessionZeroConsentController {
     @Body() body: SessionZeroGuardianConsentRequestDto,
     @CurrentUser() user: RequestUser,
   ) {
-    await this.access.requireMember(user, campaignId, { write: true });
+    const role = await this.access.requireMember(user, campaignId, { write: true });
     return this.consent.requestGuardianConsent(
       campaignId,
       body,
       { userId: user.id, userName: user.name ?? '' },
       user,
+      role,
     );
   }
 

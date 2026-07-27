@@ -4,6 +4,7 @@ import type {
   CharterAcknowledgmentState,
   CharterPreview,
   CharterPreviewPolicy,
+  Role,
   SessionZeroAcknowledgment,
   SessionZeroAcknowledgmentInput,
   SessionZeroBoundarySubmission,
@@ -688,6 +689,7 @@ export class SessionZeroConsentService {
     input: SessionZeroGuardianConsentRequest,
     subject: { userId: string; userName: string },
     actor: RequestUser,
+    actorRole: Role,
   ): Promise<SessionZeroGuardianConsent> {
     const version = await this.getVersion(campaignId, input.versionId);
     const ts = nowIso();
@@ -756,7 +758,9 @@ export class SessionZeroConsentService {
 
     await this.audit.log({
       actor: auditActor(actor),
-      actorRole: 'dm',
+      // Participant-opened route (requireMember write) — attribute the real campaign role,
+      // not a hard-coded facilitator label.
+      actorRole,
       action: 'session_zero.guardian.request',
       entityType: 'session_zero_guardian_consent',
       entityId: row.row.id,
