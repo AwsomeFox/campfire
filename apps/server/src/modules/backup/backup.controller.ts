@@ -30,7 +30,57 @@ type MulterFile = Express.Multer.File;
 
 /** A restored archive can be large (whole DB + all uploads). 1 GB ceiling. */
 const MAX_RESTORE_BYTES = 1024 * 1024 * 1024;
+export const BACKUP_UPLOAD_STAGE_PREFIX = 'campfire-backup-uploads-';
+export const BACKUP_UPLOAD_STAGE_OWNER_FILE = '.campfire-upload-stage-owner.json';
 let uploadStageRoot: string | undefined;
+
+function uploadStageOwnerPath(root: string): string {
+  return path.join(root, BACKUP_UPLOAD_STAGE_OWNER_FILE);
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM still proves a process exists; only ESRCH means the owner is gone.
+    return (err as NodeJS.ErrnoException).code !== 'ESRCH';
+  }
+}
+
+/**
+ * Best-effort startup reclamation for orphaned Multer upload roots. We only
+ * remove a direct child with our exact prefix, a regular owner marker, and a
+ * dead recorded owner PID. Roots from a live sibling process (and any unknown
+ * or suspicious temp entry) are left untouched.
+ */
+export function reclaimStaleUploadStageRoots(tmpDir = os.tmpdir(), currentRoot?: string): void {
+  const parent = path.resolve(tmpDir);
+  const current = currentRoot ? path.resolve(currentRoot) : undefined;
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(parent, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (!entry.name.startsWith(BACKUP_UPLOAD_STAGE_PREFIX)) continue;
+    const root = path.resolve(parent, entry.name);
+    if (path.dirname(root) !== parent || root === current) continue;
+    try {
+      const stat = fs.lstatSync(root);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) continue;
+      const marker = fs.lstatSync(uploadStageOwnerPath(root));
+      if (!marker.isFile() || marker.isSymbolicLink()) continue;
+      const owner = JSON.parse(fs.readFileSync(uploadStageOwnerPath(root), 'utf8')) as { pid?: unknown };
+      if (typeof owner.pid !== 'number' || !Number.isInteger(owner.pid) || owner.pid <= 0) continue;
+      if (processIsAlive(owner.pid)) continue;
+      fs.rmSync(root, { recursive: true, force: true });
+    } catch {
+      // Cleanup is never allowed to block startup or hide the request result.
+    }
+  }
+}
 
 /**
  * Make the Multer staging directory lazily. `mkdtempSync` atomically creates a
@@ -38,8 +88,13 @@ let uploadStageRoot: string | undefined;
  * area), and the restrictive mode keeps uploaded archives private.
  */
 export function createPrivateUploadStageRoot(tmpDir = os.tmpdir()): string {
-  const root = fs.mkdtempSync(path.join(tmpDir, 'campfire-backup-uploads-'));
+  const root = fs.mkdtempSync(path.join(tmpDir, BACKUP_UPLOAD_STAGE_PREFIX));
   fs.chmodSync(root, 0o700);
+  fs.writeFileSync(uploadStageOwnerPath(root), JSON.stringify({ pid: process.pid }), {
+    encoding: 'utf8',
+    flag: 'wx',
+    mode: 0o600,
+  });
   return root;
 }
 
@@ -99,7 +154,9 @@ function isBackupDownloadCancellation(error: unknown, signal: AbortSignal): bool
 @Controller('backup')
 @ServerRoles('admin')
 export class BackupController {
-  constructor(private readonly backup: BackupService) {}
+  constructor(private readonly backup: BackupService) {
+    reclaimStaleUploadStageRoots();
+  }
 
   @Get('status')
   @ApiOperation({
