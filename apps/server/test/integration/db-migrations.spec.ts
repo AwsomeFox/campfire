@@ -918,6 +918,77 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     }
   });
 
+  it('0129 creates ai_driver_withheld_turns identically on a fresh DB and an upgraded one (#598)', () => {
+    // Same convention check as 0121: bootstrap.sql and the migration drifting apart would leave
+    // an upgraded install with a subtly different table than a fresh one.
+    expect(MIGRATION_NAMES).toContain('0129_ai_driver_withheld_turns_598');
+
+    const expected = [
+      'id',
+      'campaign_id',
+      'turn',
+      'step',
+      'finish_reason',
+      'provider',
+      'model',
+      'withheld_chars',
+      'released_chars',
+      'suppressed_tool_calls',
+      'triggered_by_user_id',
+      'created_at',
+    ].sort();
+
+    // The privacy contract is part of the SCHEMA, not just of the code that writes it: there
+    // must be no column capable of holding the withheld prose, nor a digest of it. A future
+    // "just add a text column so a DM can review what was blocked" would recreate the exposure
+    // in a longer-lived, exportable place than the live stream it was kept off — so it fails here.
+    expect(expected.filter((c) => /text|body|content|prose|excerpt|narration|hash|digest/.test(c))).toEqual([]);
+
+    const upgradedDir = makeTempDataDir();
+    dataDir = makeTempDataDir();
+    try {
+      const fresh = openDatabase(dataDir);
+      let freshCols: string[];
+      try {
+        freshCols = columnNames(fresh.sqlite, 'ai_driver_withheld_turns');
+        expect(
+          (fresh.sqlite.pragma('index_list(ai_driver_withheld_turns)') as Array<{ name: string }>).map((i) => i.name),
+        ).toContain('idx_ai_driver_withheld_campaign');
+      } finally {
+        fresh.sqlite.close();
+      }
+
+      writeOldSchemaDb(upgradedDir);
+      const upgraded = openDatabase(upgradedDir);
+      try {
+        const upgradedCols = [...columnNames(upgraded.sqlite, 'ai_driver_withheld_turns')].sort();
+        expect(upgradedCols).toEqual(expected);
+        expect(upgradedCols).toEqual([...freshCols].sort());
+        upgraded.sqlite
+          .prepare(
+            `INSERT INTO ai_driver_withheld_turns
+               (campaign_id, turn, step, finish_reason, provider, model, withheld_chars, released_chars,
+                suppressed_tool_calls, triggered_by_user_id, created_at)
+             VALUES (1, 3, 1, 'content_filter', 'mock', 'm', 412, 0, 1, 'dev:1', '2026-01-01T00:00:00.000Z')`,
+          )
+          .run();
+        expect(countRows(upgraded.sqlite, 'ai_driver_withheld_turns')).toBe(1);
+      } finally {
+        upgraded.sqlite.close();
+      }
+
+      // Re-opening must not drop or re-create the table (probe-before-act + run-once dedupe).
+      const again = openDatabase(upgradedDir);
+      try {
+        expect(countRows(again.sqlite, 'ai_driver_withheld_turns')).toBe(1);
+      } finally {
+        again.sqlite.close();
+      }
+    } finally {
+      fs.rmSync(upgradedDir, { recursive: true, force: true });
+    }
+  });
+
   it('0130 creates table_safety_holds identically on a fresh DB and an upgraded one (#599)', () => {
     // Same drift guard as 0121: bootstrap.sql and the migration must produce the SAME table, or
     // an upgraded install ends up with a subtly different safety-hold row than a fresh one.

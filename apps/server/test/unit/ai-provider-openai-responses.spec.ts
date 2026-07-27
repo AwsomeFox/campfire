@@ -122,7 +122,10 @@ describe('OpenAiProvider — Responses API — streaming', () => {
     expect(done && done.type === 'done' && done.result.text).toBe('You open the door.');
     expect(done && done.type === 'done' && done.result.toolCalls).toEqual([{ id: 'call_1', name: 'roll_dice', arguments: { sides: 20 } }]);
     expect(done && done.type === 'done' && done.result.usage).toEqual({ promptTokens: 12, completionTokens: 6, totalTokens: 18 });
-    expect(done && done.type === 'done' && done.result.finishReason).toBe('stop');
+    // #598: was `stop`. The streaming accumulator ignored tool calls when resolving the finish
+    // reason while the non-streaming path already reported `tool_calls` for the same response —
+    // the two transports of ONE protocol disagreed. Both now go through resolveResponsesFinish.
+    expect(done && done.type === 'done' && done.result.finishReason).toBe('tool_calls');
   });
 });
 

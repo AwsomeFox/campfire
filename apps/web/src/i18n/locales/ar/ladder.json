@@ -11,7 +11,8 @@
       "loop": "The DM repeated itself",
       "dispute": "A ruling was disputed",
       "provider_error": "The AI provider failed",
-      "unsupported_claim": "The DM stated something it could not back with a source"
+      "unsupported_claim": "The DM stated something it could not back with a source",
+      "content_withheld": "The reply was withheld before it reached the table"
     },
     "tableTools": "Table tools",
     "working": "Working…",

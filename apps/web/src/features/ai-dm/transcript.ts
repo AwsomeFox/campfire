@@ -171,6 +171,8 @@ export interface SystemEntry {
     | 'takeover'
     | 'vote'
     | 'rules'
+    /** #598 — a turn a provider content filter / refusal withheld. Neutral; carries no content. */
+    | 'withheld'
     // #1043 — the durable session-lifecycle control rows.
     | 'phase'
     | 'phaseInterrupted'
@@ -354,6 +356,24 @@ function indexOfId(entries: TranscriptEntry[], id: string): number {
 }
 
 /**
+ * May a turn ending this way promote its buffered live deltas into the permanent transcript?
+ *
+ * #598 — asked at BOTH commit points (the live `turn.end`/`turn.error` fold and the durable
+ * `turn.ended` replay fold) rather than relying on an earlier branch having cleared the
+ * buffer first. That ordering dependency is exactly what failed: `narration.withheld` is an
+ * ephemeral frame with no durable counterpart, so a client that received deltas and then
+ * dropped before it arrived replays the persisted rows WITHOUT ever seeing the retraction,
+ * and the commit ran anyway. Everything else in this feature protects the live path; the
+ * replay path was written to render history, not to enforce a safety decision.
+ *
+ * Putting the test where the commit happens means a third delivery mode added later inherits
+ * it by construction instead of needing to remember to tidy up first.
+ */
+function commitsLiveText(stopReason: string | undefined): boolean {
+  return stopReason !== 'content_withheld';
+}
+
+/**
  * Fold one SSE event into the transcript. See design point 4 (streaming render) and
  * point 5 (tool events → inline chips).
  */
@@ -441,6 +461,42 @@ function applyStream(state: TranscriptState, event: AiDmStreamEvent): Transcript
       return { ...state, entries: next };
     }
 
+    // #598 — RETRACTION. The server withheld this turn after some deltas had already been
+    // broadcast, so drop the open bubble's live buffer before `turn.end` can promote it into
+    // `committed` (see the turn.end case below, which commits any trailing live text). That
+    // promotion is the difference between "text a player glimpsed" and "text permanently in
+    // this table's transcript", and it is the one part of the exposure a client can still undo.
+    //
+    // Deliberately handled ABOVE the authoritative-surface early-return at the top of this
+    // function: the durable `control` row that #572 records covers the visible LINE, but only
+    // this frame can clear an ephemeral delta buffer that was never persisted anywhere.
+    case 'narration.withheld': {
+      const idx = openBubbleIndex(entries);
+      const cleared =
+        idx === -1
+          ? entries
+          : (() => {
+              const next = entries.slice();
+              const bubble = entries[idx] as DmEntry;
+              next[idx] = { ...bubble, live: '' };
+              return next;
+            })();
+      // On an authoritative surface the persisted control row renders the line, exactly as it
+      // does for `stuck`; folding both would print it twice.
+      if (state.authoritative) return { ...state, entries: cleared };
+      return {
+        ...state,
+        entries: push(cleared, {
+          id: makeId(),
+          kind: 'system',
+          variant: 'withheld',
+          text: event.message,
+          data: { reason: event.reason },
+          at: event.at,
+        }),
+      };
+    }
+
     case 'turn.error':
     case 'turn.end': {
       const idx = openBubbleIndex(entries);
@@ -457,8 +513,9 @@ function applyStream(state: TranscriptState, event: AiDmStreamEvent): Transcript
       };
       next[idx] = {
         ...bubble,
-        // Commit any trailing live deltas that never got a repairing message.
-        committed: bubble.live ? [...bubble.committed, bubble.live] : bubble.committed,
+        // Commit any trailing live deltas that never got a repairing message — UNLESS the
+        // turn was withheld, in which case there is nothing here that may be kept (#598).
+        committed: commitsLiveText(meta.stopReason) && bubble.live ? [...bubble.committed, bubble.live] : bubble.committed,
         live: '',
         status: 'done',
         meta,
@@ -480,7 +537,35 @@ function applyStream(state: TranscriptState, event: AiDmStreamEvent): Transcript
         }),
       };
 
-    case 'stuck':
+    case 'stuck': {
+      // #598 — a withheld turn joins the stuck ladder, so the server emits `narration.withheld`
+      // and then, moments later on this same channel, a `stuck` frame with reason
+      // `content_withheld`. Authoritative surfaces early-return on `stuck` above and render the
+      // durable row, so the table view shows one line. These thin surfaces (dashboard activity,
+      // encounter driver dock, player display) fold both — so they printed the withheld line
+      // AND "The AI DM got stuck", and the second sentence blames the table's AI for failing
+      // when it had actually declined. That framing is the thing #598 argues against.
+      //
+      // Fold it under the WITHHELD variant, and only when the retraction did not already put
+      // that line up. Suppressing outright would leave a client that connected between the two
+      // frames with no line at all; deduping on the tail entry keeps that client covered
+      // (`stuck` arrives before `turn.end`, and neither the retraction nor anything between
+      // them pushes another entry) without ever printing the event twice.
+      if (event.reason === 'content_withheld') {
+        const last = entries[entries.length - 1];
+        if (last?.kind === 'system' && last.variant === 'withheld') return state;
+        return {
+          ...state,
+          entries: push(entries, {
+            id: makeId(),
+            kind: 'system',
+            variant: 'withheld',
+            text: event.detail,
+            data: { reason: event.reason, state: event.state },
+            at: event.at,
+          }),
+        };
+      }
       return {
         ...state,
         entries: push(entries, {
@@ -492,6 +577,7 @@ function applyStream(state: TranscriptState, event: AiDmStreamEvent): Transcript
           at: event.at,
         }),
       };
+    }
 
     case 'recovered':
       return {
@@ -728,8 +814,14 @@ function applyServerEvent(state: TranscriptState, event: AiDmTranscriptEvent): T
       next[idx] = {
         ...bubble,
         id,
-        // Commit any trailing live deltas the aggregated narration never repaired.
-        committed: bubble.live ? [...bubble.committed, bubble.live] : bubble.committed,
+        // Commit any trailing live deltas the aggregated narration never repaired — UNLESS
+        // the turn was withheld (#598). THIS is the reconnect hole: a client that received
+        // deltas and then dropped before `narration.withheld` reconnects into catch-up, which
+        // replays the durable rows only. The retraction is an EPHEMERAL frame with no durable
+        // counterpart, so it is simply absent from the replay, and this line would promote the
+        // refused prose into the permanent transcript — a connection blip at the wrong instant
+        // defeating the entire feature.
+        committed: commitsLiveText(meta.stopReason) && bubble.live ? [...bubble.committed, bubble.live] : bubble.committed,
         live: '',
         status: 'done',
         meta,
@@ -775,28 +867,43 @@ function applyServerEvent(state: TranscriptState, event: AiDmTranscriptEvent): T
 
     case 'control': {
       const control = asText(event.payload.control);
+      // #598: a withhold reaches the durable log as an ordinary `stuck` control row (the safety
+      // terminal state is a rung on the existing ladder, not a parallel mechanism). Give it its
+      // own variant anyway — "the AI DM got stuck" is the wrong sentence for a reply that was
+      // generated and deliberately not shown.
+      //
+      // COUPLING WORTH KNOWING ABOUT: on a replayed transcript this is the ONLY thing telling a
+      // withheld turn apart from a genuine stall, and it depends on `payload.reason` surviving
+      // the server's role projection. It does today. If that projection ever begins redacting
+      // `reason` for some role, every withheld turn silently reverts to reading as "the AI DM
+      // got stuck" for that role — a wording regression with no test failure and no error,
+      // because the fallback is itself a valid variant. The turn's `turn.ended` stop reason
+      // carries the same signal if a second source is ever wanted.
+      const withheld = control === 'stuck' && asText(event.payload.reason) === 'content_withheld';
       const variant: SystemEntry['variant'] =
-        control === 'paused'
-          ? 'paused'
-          : control === 'resumed'
-            ? 'resumed'
-            : control === 'takeover'
-              ? 'takeover'
-              : control === 'stuck'
-                ? 'stuck'
-                : control === 'recovered'
-                  ? 'recovered'
-                  // #1043 — the two lifecycle controls the server records. Without these they
-                  // fell through to `info`, whose copy is `State: {{state}}`, and the phase rows
-                  // carry `phase`/`interrupted` rather than `state` — so every successful
-                  // greeting and wrap-up wrote two blank `State:` lines into the durable
-                  // transcript. `phase_interrupted` is kept distinct because it reports a
-                  // transition that DIED, which is not the same news as one that landed.
-                  : control === 'phase'
-                    ? 'phase'
-                    : control === 'phase_interrupted'
-                      ? 'phaseInterrupted'
-                      : 'info';
+        withheld
+          ? 'withheld'
+          : control === 'paused'
+            ? 'paused'
+            : control === 'resumed'
+              ? 'resumed'
+              : control === 'takeover'
+                ? 'takeover'
+                : control === 'stuck'
+                  ? 'stuck'
+                  : control === 'recovered'
+                    ? 'recovered'
+                    // #1043 — the two lifecycle controls the server records. Without these they
+                    // fell through to `info`, whose copy is `State: {{state}}`, and the phase rows
+                    // carry `phase`/`interrupted` rather than `state` — so every successful
+                    // greeting and wrap-up wrote two blank `State:` lines into the durable
+                    // transcript. `phase_interrupted` is kept distinct because it reports a
+                    // transition that DIED, which is not the same news as one that landed.
+                    : control === 'phase'
+                      ? 'phase'
+                      : control === 'phase_interrupted'
+                        ? 'phaseInterrupted'
+                        : 'info';
       return upsert({
         id: event.eventId,
         kind: 'system',
