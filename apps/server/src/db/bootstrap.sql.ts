@@ -364,6 +364,11 @@ CREATE TABLE IF NOT EXISTS notes (
   resolved INTEGER NOT NULL DEFAULT 0,
   resolved_note TEXT NOT NULL DEFAULT '',
   deleted_at TEXT,
+  -- Moderation quarantine (issue #601): a DM withholding an abusive note/whisper
+  -- pending review. Treated exactly like deleted_at by every NORMAL read, including
+  -- for the author and the whisper recipient. See db/schema.ts for the full docs.
+  quarantined_at TEXT,
+  quarantined_by TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -397,6 +402,11 @@ CREATE TABLE IF NOT EXISTS comments (
   -- prose. See db/schema.ts for the full column docs.
   edited_at TEXT,
   edited_by TEXT,
+  -- Moderation quarantine (issue #601): the body reads back as a neutral
+  -- "withheld pending moderation review" placeholder for every caller while set,
+  -- and the search index drops the row. Only the moderation queue writes these.
+  quarantined_at TEXT,
+  quarantined_by TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -447,6 +457,91 @@ CREATE TABLE IF NOT EXISTS audit_log (
   request_id TEXT,
   created_at TEXT NOT NULL
 );
+
+-- Moderation / abuse incidents (issue #601).
+--
+-- Like audit_log directly above, and for a sharper reason, campaign_id carries NO
+-- foreign key: abuse evidence must OUTLIVE the campaign it was gathered in. A
+-- REFERENCES campaigns(id) ON DELETE CASCADE here would make "purge the campaign"
+-- a one-click way for a DM to destroy every report filed against them — the exact
+-- failure #601 exists to close, and often the only surviving copy of content the
+-- subject has already edited away. Retention is therefore TIME-based (expires_at,
+-- redaction on expiry) rather than lifetime-based, so orphaned rows still stop
+-- holding prose on schedule. See db/schema.ts for the full reasoning and column docs.
+CREATE TABLE IF NOT EXISTS moderation_evidence (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL,
+  target_type TEXT NOT NULL,
+  target_id INTEGER,
+  reason TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'server_capture',
+  author_user_id TEXT NOT NULL DEFAULT '',
+  author_name TEXT NOT NULL DEFAULT '',
+  recipient_user_id TEXT,
+  anchor_entity_type TEXT,
+  anchor_entity_id INTEGER,
+  revision_at TEXT NOT NULL DEFAULT '',
+  content TEXT NOT NULL DEFAULT '',
+  context_json TEXT NOT NULL DEFAULT '{}',
+  content_hash TEXT NOT NULL,
+  -- sha256 over every field EXCEPT content. Redaction overwrites content, so
+  -- content_hash cannot match afterwards; this digest still can, which is what stops
+  -- redacted_at from being a switch that disables tamper detection for the row.
+  metadata_hash TEXT NOT NULL DEFAULT '',
+  redacted_at TEXT,
+  redacted_by TEXT,
+  redaction_reason TEXT NOT NULL DEFAULT '',
+  expires_at TEXT,
+  captured_at TEXT NOT NULL
+);
+-- The pre-mutation capture path asks "is there already a snapshot for this target?"
+-- on every moderated edit/delete, and the expiry sweep scans by expires_at.
+CREATE INDEX IF NOT EXISTS idx_moderation_evidence_target
+  ON moderation_evidence(campaign_id, target_type, target_id);
+CREATE INDEX IF NOT EXISTS idx_moderation_evidence_expiry ON moderation_evidence(expires_at);
+
+CREATE TABLE IF NOT EXISTS moderation_reports (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL,
+  target_type TEXT NOT NULL,
+  target_id INTEGER,
+  reporter_user_id TEXT NOT NULL,
+  reporter_name TEXT NOT NULL DEFAULT '',
+  subject_user_id TEXT NOT NULL DEFAULT '',
+  subject_name TEXT NOT NULL DEFAULT '',
+  reason TEXT NOT NULL,
+  details TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'open',
+  resolution TEXT,
+  resolution_note TEXT NOT NULL DEFAULT '',
+  evidence_id INTEGER NOT NULL REFERENCES moderation_evidence(id),
+  quarantined INTEGER NOT NULL DEFAULT 0,
+  escalated_at TEXT,
+  escalation_reason TEXT NOT NULL DEFAULT '',
+  acknowledged_at TEXT,
+  resolved_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+-- The DM queue pages by (campaign, status); the mutation hooks ask "is this target
+-- under an unresolved report?" before every edit/delete.
+CREATE INDEX IF NOT EXISTS idx_moderation_reports_queue ON moderation_reports(campaign_id, status, id);
+CREATE INDEX IF NOT EXISTS idx_moderation_reports_target
+  ON moderation_reports(campaign_id, target_type, target_id, status);
+
+CREATE TABLE IF NOT EXISTS moderation_mutes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL,
+  user_id TEXT NOT NULL,
+  user_name TEXT NOT NULL DEFAULT '',
+  reason TEXT NOT NULL DEFAULT '',
+  expires_at TEXT,
+  created_by TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  lifted_at TEXT,
+  lifted_by TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_moderation_mutes_active ON moderation_mutes(campaign_id, user_id, lifted_at);
 
 CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

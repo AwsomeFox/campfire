@@ -191,6 +191,13 @@ export const router = createBrowserRouter(
             element: lazyPage(() => import('../features/proposals/ProposalsPage')),
           },
           {
+            // Moderation queue (issue #601). Reachable by any member: a DM sees the
+            // campaign queue, anyone else sees only the reports they filed. The split
+            // is decided server-side, so there is nothing role-specific to gate here.
+            path: '/c/:campaignId/moderation',
+            element: lazyPage(() => import('../features/moderation/ModerationQueuePage')),
+          },
+          {
             path: '/c/:campaignId/compendium',
             element: lazyPage(() => import('../features/compendium/CompendiumPage')),
           },

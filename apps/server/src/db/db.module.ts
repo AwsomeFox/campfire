@@ -2441,6 +2441,46 @@ function migrateArchmageEscalation542(sqlite: Database.Database): void {
 }
 
 /**
+ * Issue #601: moderation incidents — evidence snapshots, reports, mutes, and the
+ * quarantine columns on the two moderated content tables.
+ *
+ * The three new tables (moderation_evidence / moderation_reports /
+ * moderation_mutes) are created by BOOTSTRAP_SQL, which runs on every boot and so
+ * reaches fresh AND upgraded DBs — same pattern entity_revisions (#157) uses. This
+ * migration therefore exists only for the two ALTER TABLE paths bootstrap cannot
+ * express: `comments.quarantined_at/_by` and `notes.quarantined_at/_by`. Both are
+ * plain nullable ADD COLUMNs — no table rebuild, and no FTS trigger impact (the
+ * comments FTS index covers `body`, which is untouched; quarantine is enforced as a
+ * WHERE predicate alongside the existing deleted_at one, not by reindexing).
+ *
+ * Probes sqlite_master before PRAGMA table_info so a DB predating either table is a
+ * clean no-op, matching migrateAiProviderConfigTable / migrateArchmageEscalation542.
+ */
+function migrateModerationIncidents601(sqlite: Database.Database): void {
+  const columnNames = (table: string): string[] =>
+    (sqlite.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name);
+  const tableExists = (table: string): boolean =>
+    sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(table) != null;
+
+  for (const table of ['comments', 'notes'] as const) {
+    if (!tableExists(table)) continue; // fresh DB — BOOTSTRAP_SQL already declares both columns.
+    const has = columnNames(table);
+    if (!has.includes('quarantined_at')) sqlite.exec(`ALTER TABLE ${table} ADD COLUMN quarantined_at TEXT`);
+    if (!has.includes('quarantined_by')) sqlite.exec(`ALTER TABLE ${table} ADD COLUMN quarantined_by TEXT`);
+  }
+
+  // `moderation_evidence.metadata_hash` was added after the table's first shape, so a
+  // DB created by an earlier build of this branch has the table but not the column.
+  // `CREATE TABLE IF NOT EXISTS` in BOOTSTRAP_SQL cannot add a column to an existing
+  // table, so the ALTER belongs here. Defaults to '' — verifyModerationEvidence treats
+  // an empty metadata digest as "nothing to verify against" rather than as tampering,
+  // so pre-existing snapshots keep their old verdicts instead of being falsely accused.
+  if (tableExists('moderation_evidence') && !columnNames('moderation_evidence').includes('metadata_hash')) {
+    sqlite.exec("ALTER TABLE moderation_evidence ADD COLUMN metadata_hash TEXT NOT NULL DEFAULT ''");
+  }
+}
+
+/**
  * Issue #604: durable responsive derivatives for image attachments.
  *
  * Pre-#604 servers have no `attachment_derivatives` table at all — the only
@@ -3163,6 +3203,19 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   //      0112/0113 (backfill); 0118/0119 collide with none of them.
   { name: '0118_ai_driver_control_state_559', run: migrateAiDriverControlStateTable },
   { name: '0119_ai_driver_control_state_announced_recovery_559', run: migrateAiDriverControlStateAnnouncedRecovery },
+  // 0112-0115 stay centrally allocated to other in-flight branches (0112/0113 → #1442,
+  // 0114 → #501, 0115 → #572), so this migration takes 0117 rather than computing
+  // "next free" for itself — parallel branches all computing that independently is how
+  // they collide.
+  //
+  // It sits BELOW #559's 0118/0119 in the array despite the lower ordinal: #559 reached
+  // main first, so the merge keeps main's entries ahead of this branch's. Execution order
+  // between them is immaterial — they touch disjoint tables — and the ordinal is a
+  // readability convention only. What actually guarantees run-once is the full NAME
+  // string, which `runMigrations` dedupes on; that is exactly why this is NOT renumbered
+  // to 0120 to look tidy, since renaming a migration a database has already recorded is
+  // the one edit that would break run-once behaviour.
+  { name: '0117_moderation_incidents_601', run: migrateModerationIncidents601 },
 ];
 
 /**
