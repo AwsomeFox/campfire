@@ -123,6 +123,34 @@ describe('AI seat portability across clone / export / import (#1049)', () => {
     expect(seat.body).toMatchObject(expectedConfig);
   });
 
+  /**
+   * THREE export paths exist, and the plain one above is only the first.
+   * `buildProfileExport` runs `buildExport`'s output through `projectExport(raw, policy)` for
+   * the redaction profiles (#586), so a field can travel fine on `/export` and be dropped on
+   * `/export?profile=backup` — the same defect one path over, which is the shape this whole PR
+   * is about. `projectExport` turns out NOT to allowlist `aiSeat` fields (it passes the whole
+   * object through when `policy.credentials`, and nulls it entirely otherwise), so the three
+   * newly-carried fields are safe today. The assertion exists anyway: the next person adding a
+   * seat field should find a test that fails rather than a path nobody checked.
+   */
+  it('the BACKUP profile carries the new fields too, not just the plain export', async () => {
+    const exported = await dmAgent.get(`/api/v1/campaigns/${campaignId}/export?profile=backup`);
+    expect(exported.status).toBe(200);
+    expect(exported.body.aiSeat).toMatchObject(expectedConfig);
+  });
+
+  it('the redacting profiles drop the WHOLE seat, by design', async () => {
+    // Not a field-level omission to fix: `handoff` and `publish` set `credentials: false`, and
+    // the seat is classified as capability/credential-shaped operational state. Asserted so the
+    // difference between "dropped deliberately" and "dropped accidentally" stays legible — the
+    // same reason this suite asserts its non-travelling counters.
+    for (const profile of ['handoff', 'publish']) {
+      const exported = await dmAgent.get(`/api/v1/campaigns/${campaignId}/export?profile=${profile}`);
+      expect(exported.status).toBe(200);
+      expect(exported.body.aiSeat).toBeNull();
+    }
+  });
+
   it('an import starts its OWN usage accounting', async () => {
     const exported = await dmAgent.get(`/api/v1/campaigns/${campaignId}/export`);
     const imported = await dmAgent

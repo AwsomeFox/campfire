@@ -5907,6 +5907,15 @@ export const AI_DM_SEAT_NON_INHERITED_FIELDS = {
   enabled: 'Consent to spend. A new campaign must be switched on by a human, never by a default.',
   model: 'An informational label derived from the effective provider, which already inherits on its own.',
   proactiveSettings: 'Consent to spend AUTONOMOUSLY — the same reason `enabled` does not travel, and sharper.',
+  // #1049. Style is pure prompt guidance and costs nothing to inherit, so this is NOT the
+  // consent-to-spend reasoning above — it is simply that there is nothing to inherit FROM.
+  // `AiDmSeatDefaults` has no style field, so making this inherited would mean inventing a
+  // server-wide default for a setting no admin can currently set, i.e. every campaign would
+  // "inherit" a hardcoded all-`default` value and `inheritedFields` would report a source that
+  // does not exist. `defaultSeat` therefore keeps stylePresets as a built-in. If a server-wide
+  // house style is ever wanted, the change is to add it to AiDmSeatDefaults and move this key
+  // into AI_DM_SEAT_INHERITED_FIELDS — the two are deliberately one edit apart.
+  stylePresets: 'No server-wide default exists to inherit from; AiDmSeatDefaults has no style field.',
   tokensUsed: 'Per-campaign meter reading — spend belongs to the campaign that spent it.',
   tokensReserved: 'Per-campaign meter reading — in-flight capacity held by this campaign alone.',
   tokensRefunded: 'Per-campaign meter reading — refunds settle against this campaign only.',
