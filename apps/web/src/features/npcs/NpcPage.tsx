@@ -16,6 +16,9 @@ import { Card, Chip, Btn, Skeleton, ErrorNote, DmPanel, EmptyState } from '../..
 import { NpcDispositionBadge, QuestStatusBadge } from '../../components/EntitySemanticBadges';
 import { NotFoundState } from '../../components/NotFoundState';
 import { Markdown } from '../../components/Markdown';
+import { PrintControl } from '../../components/PrintControl';
+import { PrintOnly } from '../../components/PrintOnly';
+import { npcDispositionPresentation } from '../../components/entitySemantics';
 import { NotesRail } from '../../components/NotesRail';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
@@ -325,18 +328,27 @@ export default function NpcPage() {
   });
 
   return (
-    <div className="max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" {...entityTargetProps('npc', npc.id)}>
-      <DetailPageWayfinding
+    <div className="cf-print-root cf-print-reference max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" {...entityTargetProps('npc', npc.id)}>
+      <div className="cf-print-chrome"><DetailPageWayfinding
         campaignId={cid}
         defaultPath={`/c/${cid}/npcs`}
         defaultLabel="← Back to NPCs"
-      />
+      /></div>
+      <PrintOnly>
+        <section className="cf-print-only cf-print-paper">
+          <h1>{npc.name}</h1>
+          {npc.role && <p>{npc.role} · {npcDispositionPresentation(npc.disposition).label}</p>}
+          <Markdown>{npc.body || 'No description yet.'}</Markdown>
+          <p><strong>Faction:</strong> {factionName || 'None'} · <strong>Last seen:</strong> {locationName || 'Unknown'}</p>
+          {isDm && npc.dmSecret && <div className="cf-print-secret"><DmPanel>{npc.dmSecret}</DmPanel></div>}
+        </section>
+      </PrintOnly>
 
-      {error && <ErrorNote message={error} onRetry={load} />}
-      {actionError && <ErrorNote message={actionError} onRetry={() => setActionError(null)} />}
+      {error && <div className="cf-print-hide"><ErrorNote message={error} onRetry={load} /></div>}
+      {actionError && <div className="cf-print-hide"><ErrorNote message={actionError} onRetry={() => setActionError(null)} /></div>}
 
       {canDmWrite && (
-        <VisibleToPlayersBar
+        <div className="cf-print-hide"><VisibleToPlayersBar
           visible={!npc.hidden}
           onHide={async () => {
             const updated = await api.patch<Npc>(`${API}/npcs/${id}`, { hidden: true });
@@ -346,11 +358,11 @@ export default function NpcPage() {
             const updated = await api.patch<Npc>(`${API}/npcs/${id}`, { hidden: false });
             setNpc(updated);
           }}
-        />
+        /></div>
       )}
 
       {proposeDone && !editing && (
-        <Card density="compact" className="flex items-center justify-between gap-3 border border-[var(--color-accent-700)] text-sm">
+        <Card density="compact" className="cf-print-hide flex items-center justify-between gap-3 border border-[var(--color-accent-700)] text-sm">
           <span className="text-slate-200">✅ Suggestion sent to the DM — it's waiting for approval.</span>
           <Link to={`/c/${cid}/proposals`} className="text-purple-400 hover:underline shrink-0">
             View my proposals
@@ -360,7 +372,7 @@ export default function NpcPage() {
 
       {!editing && (
         <>
-          <div className="flex items-center gap-3 flex-wrap">
+          <div className="flex items-start gap-3 flex-wrap">
             {canDmWrite ? (
               <ImageUpload
                 campaignId={cid}
@@ -394,53 +406,59 @@ export default function NpcPage() {
               {npc.role && <p className="text-sm text-slate-400 break-words">{npc.role}</p>}
             </div>
             <NpcDispositionBadge disposition={npc.disposition} />
-            {isDm && npc.hidden && <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players</span></Chip>}
-            {canDmWrite && (
-              <div className="flex gap-2 ml-auto">
-                <EntitySecrecyControls
-                  entityKind="npc"
-                  entityName={npc.name}
-                  hidden={npc.hidden}
-                  preview={revealPreview}
-                  onReveal={async () => {
-                    const updated = await api.patch<Npc>(`${API}/npcs/${id}`, { hidden: false });
-                    setNpc(updated);
-                  }}
-                  onUndoReveal={async () => {
-                    const updated = await api.patch<Npc>(`${API}/npcs/${id}`, { hidden: true });
-                    setNpc(updated);
-                  }}
-                />
-                <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={startEdit}>
-                  ✎ Edit
-                </Btn>
-              </div>
-            )}
-            {!isDm && role !== null && (
-              <div className="flex gap-2 ml-auto">
-                <Btn
-                  ghost
-                  className="!min-h-0 !py-1.5 text-xs"
-                  onClick={startPropose}
-                  title="Suggest a change to the DM for approval"
-                >
-                  ✎ Suggest an edit
-                </Btn>
-              </div>
-            )}
+            <div className="relative z-10 ml-auto flex items-center gap-2 flex-wrap shrink-0">
+              <PrintControl
+                resetKey={npc.id}
+                allowSecrets={isDm && Boolean(npc.dmSecret)}
+              />
+              {isDm && npc.hidden && <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players</span></Chip>}
+              {canDmWrite && (
+                <div className="cf-print-hide flex gap-2">
+                  <EntitySecrecyControls
+                    entityKind="npc"
+                    entityName={npc.name}
+                    hidden={npc.hidden}
+                    preview={revealPreview}
+                    onReveal={async () => {
+                      const updated = await api.patch<Npc>(`${API}/npcs/${id}`, { hidden: false });
+                      setNpc(updated);
+                    }}
+                    onUndoReveal={async () => {
+                      const updated = await api.patch<Npc>(`${API}/npcs/${id}`, { hidden: true });
+                      setNpc(updated);
+                    }}
+                  />
+                  <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={startEdit}>
+                    ✎ Edit
+                  </Btn>
+                </div>
+              )}
+              {!isDm && role !== null && (
+                <div className="cf-print-hide flex gap-2">
+                  <Btn
+                    ghost
+                    className="!min-h-0 !py-1.5 text-xs"
+                    onClick={startPropose}
+                    title="Suggest a change to the DM for approval"
+                  >
+                    ✎ Suggest an edit
+                  </Btn>
+                </div>
+              )}
+            </div>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-[1fr_320px] gap-4 items-start">
+          <div className="cf-print-columns grid grid-cols-1 md:grid-cols-[1fr_320px] gap-4 items-start">
             <div className="space-y-4 min-w-0">
               <Card>
                 {npc.body ? <Markdown>{npc.body}</Markdown> : <p className="text-sm text-secondary italic">No description yet.</p>}
               </Card>
 
-              {isDm && npc.dmSecret && <DmPanel>{npc.dmSecret}</DmPanel>}
+              {isDm && npc.dmSecret && <div className="cf-print-secret"><DmPanel>{npc.dmSecret}</DmPanel></div>}
 
               {/* Body revision history + restore (#157/#233) — DM-only, so a clobbered or
                   regretted edit is recoverable. Refetches after each save. */}
-              {isDm && (
+              {isDm && (<div className="cf-print-hide">
                 <RevisionHistoryPanel
                   entityType="npc"
                   entityId={id}
@@ -452,7 +470,7 @@ export default function NpcPage() {
                     void reloadLatest();
                   }}
                 />
-              )}
+              </div>)}
 
               <Card className="space-y-3">
                 <h2 className="font-bold text-white text-sm">Connected</h2>
@@ -484,7 +502,7 @@ export default function NpcPage() {
                 )}
               </Card>
 
-              <EntityDiscussion campaignId={cid} entityType="npc" entityId={id} />
+              <div className="cf-print-hide"><EntityDiscussion campaignId={cid} entityType="npc" entityId={id} /></div>
             </div>
 
             <div className="space-y-4 min-w-0">
@@ -532,7 +550,7 @@ export default function NpcPage() {
                 </div>
               </Card>
 
-              <NotesRail campaignId={cid} entityType="npc" entityId={id} />
+              <div className="cf-print-hide"><NotesRail campaignId={cid} entityType="npc" entityId={id} /></div>
             </div>
           </div>
         </>
@@ -540,7 +558,7 @@ export default function NpcPage() {
 
       {editing && (
         <Card
-          className="space-y-3"
+          className="cf-print-editor space-y-3"
           role="region"
           aria-label={proposeMode ? 'Suggest NPC edit' : 'Edit NPC'}
           aria-describedby={saveError ? `${NPC_EDITOR_ID_PREFIX}-form-error` : undefined}
