@@ -72,6 +72,8 @@ export const ERROR_KIND_RETRY: Record<AiErrorKind, RetryDisposition> = {
   timeout: 'retry',
   // A request the provider called malformed. Deterministic; it will be malformed again.
   invalid_request: 'give_up',
+  // Body arrived but is not the JSON the adapter expected — same bytes every attempt.
+  invalid_response: 'give_up',
   server: 'retry',
   // Unclassified. Fail closed: an error we cannot reason about is not one we should
   // re-issue on the table's budget.
@@ -105,6 +107,7 @@ export const SAFETY_ERROR_KINDS: Record<AiErrorKind, boolean> = {
   transport: false,
   timeout: false,
   invalid_request: false,
+  invalid_response: false,
   server: false,
   unknown: false,
 };
