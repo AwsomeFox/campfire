@@ -143,6 +143,74 @@ describe('AI seat portability across clone / export / import (#1049)', () => {
     expect(exported.body.aiSeat).not.toHaveProperty('campaignId');
   });
 
+  /**
+   * Fixing the DROP inherited its side effect. Before this PR the import path did not carry
+   * `stylePresets`, `proactiveSettings` or `actionQueueDepth` at all — they fell to column
+   * defaults, and that omission was, accidentally, also a VALIDATION. Now that the three
+   * travel, an archive can put an object-shaped but ILLEGAL value into a JSON column.
+   *
+   * Shape-checking is not enough: the value detonates at a distance. `AiDmService.toDomain`
+   * parses both blocks with their zod schemas on every read, so an out-of-range value imports
+   * "successfully" and then throws on `GET /ai-dm` and every Driver operation — a seat that is
+   * permanently unusable, from an import that reported success.
+   */
+  async function importWithSeat(name: string, seatOverride: Record<string, unknown>) {
+    const exported = await dmAgent.get(`/api/v1/campaigns/${campaignId}/export`);
+    return dmAgent.post('/api/v1/campaigns/import').send({
+      ...exported.body,
+      campaign: { ...exported.body.campaign, name },
+      aiSeat: { ...exported.body.aiSeat, ...seatOverride },
+    });
+  }
+
+  it('an object-shaped but INVALID style enum imports and leaves a READABLE seat', async () => {
+    const imported = await importWithSeat('Bad Enum', { stylePresets: { tone: 'grimdark' } });
+    expect(imported.status).toBe(201);
+    // The load-bearing assertion: the seat must still be readable. Before the fix this 500s,
+    // because toDomain parses stylePresets and 'grimdark' is not an AiDmTone.
+    const seat = await readSeat(imported.body.id);
+    expect(seat.status).toBe(200);
+    expect(seat.body.stylePresets.tone).toBe('default');
+  });
+
+  it('an out-of-range proactive value imports and leaves a READABLE seat', async () => {
+    // Devin's generalisation: same shape as the style case, and this one is exposure THIS PR
+    // created — proactiveSettings did not travel at all before.
+    const imported = await importWithSeat('Bad Cooldown', {
+      proactiveSettings: { enabled: true, cooldownSeconds: 999_999 },
+    });
+    expect(imported.status).toBe(201);
+    const seat = await readSeat(imported.body.id);
+    expect(seat.status).toBe(200);
+    expect(seat.body.proactiveSettings.cooldownSeconds).toBeLessThanOrEqual(3600);
+  });
+
+  it('a PARTIAL but legal style block is kept, not discarded', async () => {
+    // Falling back to defaults must apply to INVALID input only. Every axis defaults
+    // independently, so naming one axis is legal and must survive — over-rejecting would make
+    // the feature lossy in the ordinary case to defend against the rare one.
+    const imported = await importWithSeat('Partial Style', { stylePresets: { tone: 'noir' } });
+    expect(imported.status).toBe(201);
+    const seat = await readSeat(imported.body.id);
+    expect(seat.body.stylePresets).toMatchObject({ tone: 'noir', pacing: 'default' });
+  });
+
+  it('clamps actionQueueDepth into the 1-20 range the seat schema allows', async () => {
+    // 0 makes `queue.length >= maxDepth` true immediately, so a seat that looks configured
+    // silently rejects every action submitted while a turn runs. The previous guard was
+    // Math.max(0, …) directly beneath a comment explaining that 0 was the thing to prevent.
+    const low = await importWithSeat('Zero Depth', { actionQueueDepth: 0 });
+    expect(low.status).toBe(201);
+    expect((await readSeat(low.body.id)).body.actionQueueDepth).toBeGreaterThanOrEqual(1);
+
+    const high = await importWithSeat('Huge Depth', { actionQueueDepth: 999 });
+    expect(high.status).toBe(201);
+    expect((await readSeat(high.body.id)).body.actionQueueDepth).toBeLessThanOrEqual(20);
+
+    const negative = await importWithSeat('Negative Depth', { actionQueueDepth: -5 });
+    expect((await readSeat(negative.body.id)).body.actionQueueDepth).toBeGreaterThanOrEqual(1);
+  });
+
   it('a malformed style block in an uploaded archive does not reach the column', async () => {
     // The import path reads untrusted JSON. An array written straight into a `mode: 'json'`
     // column would surface as a malformed settings object far from here.

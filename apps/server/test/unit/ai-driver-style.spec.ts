@@ -2,6 +2,7 @@ import {
   AI_DM_STYLE_PRESET_AXES,
   AI_DM_STYLE_PRESET_DEFAULTS,
   AI_DM_STYLE_PRESET_OPTIONS,
+  AI_DM_PROMPT_HISTORY_MAX_TOKENS,
   AI_DM_STYLE_SECTION_MAX_TOKENS,
   AiDmCombatStyle,
   AiDmNpcDepth,
@@ -109,6 +110,48 @@ describe('#1049 table style — bounded cost', () => {
     }
     expect(worst).toBeGreaterThan(0);
     expect(worst).toBeLessThanOrEqual(AI_DM_STYLE_SECTION_MAX_TOKENS);
+  });
+});
+
+/**
+ * #1038 × #1049 — the combined system-prompt budget, CHECKED rather than deferred.
+ *
+ * When #1049 was written, #1553's `## Recent history` section was not yet on main, so the
+ * contention between the two was prospective and flagged for whoever merged second. #1553 has
+ * since landed and this branch merged after it, so the re-check is due here and this is it.
+ *
+ * BOTH consumers are bounded by EXPLICIT CONSTANTS, deliberately not by a fraction of the
+ * model's context window (see the #1038 rationale in packages/schema): every token is paid on
+ * every turn AND on every #1052 retry or fallback attempt, so the cost has to be legible rather
+ * than scaling silently with whichever model a campaign is pointed at.
+ *
+ * They are ADDITIVE and neither knows about the other, which is precisely the contention that
+ * was flagged. The answer is that both are hard ceilings rather than elastic fill-to-budget
+ * consumers, so the combined worst case is a single number — asserted below — and it does not
+ * move when a campaign changes model. A future third bounded section would repeat this
+ * arithmetic by hand; that is a note for the next author, not a defect today.
+ */
+describe('#1038 × #1049 combined prompt budget', () => {
+  it('the two bounded sections have a fixed, small combined ceiling', () => {
+    const combined = AI_DM_STYLE_SECTION_MAX_TOKENS + AI_DM_PROMPT_HISTORY_MAX_TOKENS;
+    expect(combined).toBe(1_750);
+
+    // Sized against the SMALLEST context window the seat can realistically be pointed at — a
+    // self-hosted 4k model — not against a frontier model's, so the bound holds for the worst
+    // deployment rather than the best. 1,750 leaves the majority of even that window for the
+    // rest of the system prompt, the turn, and the reserved output.
+    const SMALLEST_REALISTIC_CONTEXT_WINDOW = 4_096;
+    expect(combined).toBeLessThan(SMALLEST_REALISTIC_CONTEXT_WINDOW / 2);
+  });
+
+  it('neither section is elastic — both are constants, so the ceiling cannot drift', () => {
+    // The property that makes the sum meaningful. If either became "fill the remaining
+    // context", the combined figure above would stop being a bound and this assertion is what
+    // would notice.
+    expect(Number.isFinite(AI_DM_STYLE_SECTION_MAX_TOKENS)).toBe(true);
+    expect(Number.isFinite(AI_DM_PROMPT_HISTORY_MAX_TOKENS)).toBe(true);
+    expect(AI_DM_STYLE_SECTION_MAX_TOKENS).toBeGreaterThan(0);
+    expect(AI_DM_PROMPT_HISTORY_MAX_TOKENS).toBeGreaterThan(0);
   });
 });
 

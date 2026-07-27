@@ -2782,7 +2782,14 @@ export class CampaignsService {
           campaignId: cid,
           // #1049: same classification as clone/export, but read through coercers — this side
           // parses untrusted JSON from an uploaded archive, not a typed row.
-          ...readPortableAiSeat(aiSeatSrc as Record<string, unknown>, { str, boolOf, intOr }),
+          ...readPortableAiSeat(aiSeatSrc as Record<string, unknown>, {
+            str,
+            boolOf,
+            intOr,
+            // An illegal block falls back to defaults rather than failing the whole archive —
+            // but never silently, or the operator has no way to know their style was dropped.
+            warn: (field, detail) => importLog.warn(`campaign ${cid}: ${detail} (${field})`),
+          }),
           ...freshAiSeatCounters(),
           createdAt: ts,
           updatedAt: ts,

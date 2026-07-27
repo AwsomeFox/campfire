@@ -34,6 +34,7 @@ import { SessionZeroService } from '../session-zero/session-zero.service';
 import { SupportPreferencesService } from '../session-zero/support-preferences.service';
 import { providerCapabilities } from './providers';
 import type { AiProviderConfig } from './providers/factory';
+import { renderTableStyleSection } from '../ai-driver/driver-style';
 
 type AiDmSeatUpdateInput = z.infer<typeof AiDmSeatUpdate>;
 type AiDmTurnRequestInput = z.infer<typeof AiDmTurnRequest>;
@@ -150,6 +151,20 @@ function defaultSeat(campaignId: number): AiDmSeat {
  *   2. the per-campaign seat's `enabled` flag (turns only).
  * Plus a per-campaign token budget that a turn is metered against.
  */
+/**
+ * Append the rendered `## Table style` section to a seat's freeform instructions (#1049).
+ *
+ * AUGMENTS, never replaces: the DM's hand-written persona stays first and the style block is
+ * added under it, matching the Driver's own prompt assembly. Returns the instructions unchanged
+ * when no style is configured, so an unstyled seat produces a byte-identical prompt to the one
+ * it produced before #1049 — the feature costs zero tokens until a DM opts in.
+ */
+function withTableStyle(instructions: string, presets: AiDmSeat['stylePresets']): string {
+  const section = renderTableStyleSection(presets);
+  if (!section) return instructions;
+  return instructions ? `${instructions}\n\n${section}` : section;
+}
+
 @Injectable()
 export class AiDmService implements OnApplicationBootstrap {
   private readonly logger = new Logger(AiDmService.name);
@@ -1016,7 +1031,15 @@ export class AiDmService implements OnApplicationBootstrap {
         campaignId,
         kind: input.kind,
         prompt: input.prompt,
-        instructions: seat.instructions,
+        // #1049: the table style travels with the persona on THIS surface too.
+        //
+        // `renderTableStyleSection` was originally spliced only into the Driver's
+        // `assembleSystemPrompt`, so a DM who configured a style, saved it, and then narrated
+        // through POST /ai-dm/turn (or the MCP `ai_dm_narrate` tool) got a prompt that silently
+        // ignored it — the same "reports success, has no effect" signature this issue is about.
+        // This is the same narration, just a different entry point, so leaving it out was the
+        // hardest exclusion to defend.
+        instructions: withTableStyle(seat.instructions, seat.stylePresets),
         model: execModel,
         maxTokens: reservation.tokensReserved,
       });
