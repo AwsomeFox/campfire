@@ -500,6 +500,15 @@ export interface RunTurnOptions {
    * reach the shared table log. The lever records its own clean `control` event instead.
    */
   lever?: 'nudge' | 'flag';
+  /**
+   * INTERNAL (#1043): this turn IS a lifecycle transition (start-session / wrap-up) rather than a
+   * player action, and the campaign-wide phase has already been moved for it.
+   *
+   * Set only by {@link AiDriverService.runLifecycleTurn}, never by a client — the DTO does not
+   * accept it. Its one job is to make the action queue REFUSE this turn rather than accept it;
+   * the queue branch in {@link AiDriverService.runTurn} carries the reasoning.
+   */
+  lifecycle?: AiDmSessionPhase;
 }
 
 interface ActionQueueEntry {
@@ -793,9 +802,9 @@ const PHASE_DIRECTION: Partial<Record<AiDmSessionPhase, string>> = {
     'The table has just sat down. This turn is a welcome, not a scene.',
     '- Greet the players warmly and briefly, by character name where you know it.',
     '- Recap where the party left off using ONLY the "Previous session recap" section below and',
-    '  the campaign context. If there is no recap section, say the last session has no written',
-    '  recap yet rather than inventing what happened — a confabulated recap is worse than none,',
-    '  because the table will take it as canon.',
+    '  the campaign context. That section is ALWAYS present: if it says there is none on record,',
+    '  say the last session has no written recap yet rather than inventing what happened — a',
+    '  confabulated recap is worse than none, because the table will take it as canon.',
     '- End by handing control back: ask what the party wants to do. Do NOT open a scene, roll',
     '  dice, advance a turn, or resolve anything. Nobody has acted yet.',
   ].join('\n'),
@@ -2347,6 +2356,10 @@ export class AiDriverService {
         maxSteps: 2,
         maxTokens: 700,
         actorName: user.name ?? undefined,
+        // #1043: marks this as a transition, so the action queue refuses it rather than running
+        // it behind play. `proactive` cannot carry that meaning — the autonomous triggers are
+        // proactive too, and they SHOULD queue: they move no phase and are still true later.
+        lifecycle: phase,
       });
     } catch (err) {
       // The turn never ran (a gate refused it). Restore the phase the table was actually in —
@@ -2609,6 +2622,35 @@ export class AiDriverService {
     // one un-keyed SSE channel and merge into a single bubble. This check + the synchronous slot
     // reservation below run with NO await between them, so a second request can never slip past.
     if (session.status === 'running') {
+      // #1043 — A LIFECYCLE TURN IS NEVER QUEUED. It is refused, here, in the same synchronous
+      // region that decides everything else about the slot, so there is no window in which it
+      // could be accepted by mistake.
+      //
+      // Queueing it is wrong twice over. First, the phase is CAMPAIGN-WIDE and was already moved
+      // by `runLifecycleTurn` before this method was reached, while a turn's system prompt is
+      // assembled several awaits later — so a queued greeting rewrites the prompt of the action
+      // currently streaming and of everything behind it. They reach `assembleSystemPrompt` while
+      // it observes `greeting`/`wrap_up`, and ordinary play comes back carrying recap-and-welcome
+      // or closing-summary instructions meant for a table that is sitting down or packing up.
+      //
+      // Second — and this is why DEFERRING the phase until the entry executes is not the fix — a
+      // lifecycle turn's meaning is fixed when it is REQUESTED, not when it runs. "The table has
+      // just sat down" spoken after two turns of play have resolved is false however cleanly the
+      // phase was sequenced, and a closing summary composed after three more things happened is
+      // out of date. A player action is interchangeable with a later copy of itself; a session
+      // punctuation mark is not. Sharing the player FIFO is the category error, not a scheduling
+      // detail. Deferral would also split "a transition is in progress" across the phase field
+      // and a queue entry, leaving no single source of truth for the 409 the two entry points
+      // already raise.
+      //
+      // Refusing costs nothing: `runLifecycleTurn` catches this, restores the previous phase, and
+      // audits the rejection, so the table is left exactly as it was, and any member can press
+      // the button again the moment the turn finishes.
+      if (opts.lifecycle) {
+        throw new ConflictException(
+          'The AI is mid-turn. Wait for it to finish before starting or wrapping up the session.',
+        );
+      }
       // Queue the action instead of rejecting with 409
       const queue = this.actionQueues.get(campaignId) ?? [];
       const maxDepth = await this.getActionQueueDepth(campaignId);

@@ -458,10 +458,16 @@ export default function AiTablePage() {
           event.type === 'stuck' ||
           event.type === 'recovered' ||
           event.type === 'vote' ||
-          event.type === 'takeover'
+          event.type === 'takeover' ||
+          event.type === 'phase'
         ) {
           // Lifecycle signals move the thin server truth — reconcile the session/seat reads
           // so the header + composer-lock reflect the new state (#340 reads the same truth).
+          // #1043: `phase` belongs here for the same reason as its siblings, and more sharply.
+          // Only the member who pressed Start Session / Wrap Up gets a response carrying the new
+          // phase; everyone else learns it from this frame alone. Without the refetch they keep a
+          // stale phase and can type into an ended session, collecting a 409 nothing warned them
+          // about.
           invalidateAiDm(queryClient, campaignId);
           if (event.type === 'state' && event.state !== 'running') setStreaming(false);
         }

@@ -321,7 +321,7 @@ export class AiDriverController {
       'The phase moves greeting → active when the turn returns, whatever its stop reason.',
   })
   @ApiResponse({ status: 201, description: 'The greeting turn summary.' })
-  @ApiResponse({ status: 409, description: 'A lifecycle turn is already in progress.' })
+  @ApiResponse({ status: 409, description: 'A lifecycle turn is already in progress, or the AI is mid-turn.' })
   @ApiResponse({ status: 503, description: 'Seat paused, under human control, or no provider configured.' })
   async startSession(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const role = await this.access.requireRole(user, id, 'player');
@@ -340,7 +340,10 @@ export class AiDriverController {
       'write nobody approved.',
   })
   @ApiResponse({ status: 201, description: 'The wrap-up turn summary.' })
-  @ApiResponse({ status: 409, description: 'Already wrapped up, or a lifecycle turn is in progress.' })
+  @ApiResponse({ status: 409, description: 'Already wrapped up, a lifecycle turn is in progress, or the AI is mid-turn.' })
+  // Same 503 surface as `startSession`: a wrap-up is an ordinary `runTurn`, so a paused seat, a
+  // human takeover, or a missing provider refuses it exactly as it refuses a player action.
+  @ApiResponse({ status: 503, description: 'Seat paused, under human control, or no provider configured.' })
   async wrapUp(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const role = await this.access.requireRole(user, id, 'dm');
     return this.driver.wrapUpSession(id, user, role);

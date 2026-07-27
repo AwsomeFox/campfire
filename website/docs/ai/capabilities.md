@@ -262,6 +262,12 @@ Neither control is a way around anything. Both run a normal AI turn, so a paused
 exhausted token budget, or a human holding the DM seat refuses them just as it refuses a player
 action — and a start request that gets refused leaves the session exactly where it was.
 
+**Both wait for a quiet moment.** If the AI is already mid-turn, starting or wrapping up is
+refused rather than queued behind the play in progress. Unlike a player action, which means the
+same thing whenever it runs, "we have just sat down" is only true when you press it — a greeting
+delivered after two more turns of play would recap a session that had already resumed. Press it
+again once the AI finishes; nothing about the table changes in the meantime.
+
 After the AI wraps up, player input is refused until someone starts a new session. That is the
 only thing the lifecycle blocks, and any player can clear it in one click.
 
@@ -270,6 +276,7 @@ not leave a table unable to start playing; the failure shows up in the AI's reco
 where failures belong. Likewise, if the server restarts while the AI is mid-greeting or
 mid-wrap-up, that turn is gone — so the table is put back into normal play and **told that it
 happened**, rather than left waiting for a summary that is never coming.
+
 ### Short rests and long rests
 
 The AI DM can run a rest for the whole party in **one atomic call** rather than setting each

@@ -558,6 +558,15 @@ function applyStream(state: TranscriptState, event: AiDmStreamEvent): Transcript
     // Folding it here would also read as narration in the scrollback long after it was resolved.
     case 'tool-confirmation':
       return state;
+    // #1043: the lifecycle phase is TABLE STATE, not a thing that was said — the same split as
+    // `grounding` and `tool-confirmation` above. It already has two homes: the dedicated phase
+    // note on the AI Table, which reconciles off its own refetch on this same signal, and the
+    // durable `control` row the server records, which reaches authoritative surfaces as a
+    // `transcript` frame. Folding this frame too would double the line there, and would invent a
+    // client-only system entry on the surfaces that have no durable copy. What this frame is FOR
+    // is the invalidation its consumers now do.
+    case 'phase':
+      return state;
 
     default: {
       // Exhaustiveness guard — a new event kind must be handled explicitly.

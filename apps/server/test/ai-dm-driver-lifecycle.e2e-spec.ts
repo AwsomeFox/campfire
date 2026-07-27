@@ -1,6 +1,7 @@
 import request from 'supertest';
 import { createAiEvalHarness, dm, player, type AiEvalHarness } from './ai-eval-harness';
 import { AiDmStreamService, type AiDmStreamEvent } from '../src/modules/ai-driver/ai-driver-stream.service';
+import { AiDriverService } from '../src/modules/ai-driver/ai-driver.service';
 
 /**
  * Issue #1043 — AI Driver session lifecycle phases.
@@ -230,6 +231,80 @@ describe('ai-dm driver — session lifecycle phases (#1043)', () => {
       .filter((e) => e.kind === 'control' && e.payload.control === 'phase')
       .map((e) => e.payload.phase);
     expect(controls).toContain('greeting');
+  });
+
+  it('refuses a lifecycle turn while the table is mid-turn, rather than queueing it behind play', async () => {
+    const campaignId = await armed('Lifecycle Concurrency');
+    const driver = h.ctx.app.get(AiDriverService);
+    const user = {
+      id: 'dev:ai-eval-player',
+      name: 'ai-eval-player',
+      serverRole: 'user' as const,
+      devRole: 'player' as const,
+    };
+
+    // A DM-approved recap exists, so the retry at the end proves the greeting still gets its
+    // recap once the table is quiet. NOTE the recap TEXT is not a usable contamination marker:
+    // `get_campaign_summary` mentions sessions on every turn regardless of phase. The greeting's
+    // own '## Previous session recap' heading is the thing only a lifecycle prompt produces.
+    await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/sessions`)
+      .set(dm)
+      .send({ title: 'Session 1', recap: 'The party burned the smugglers’ barge.' });
+
+    // TWO scripted turns although only one may legitimately run: the second exists so the
+    // pre-fix behaviour (the greeting queued behind the action, then executed) fails these
+    // assertions on SUBSTANCE rather than stalling on a starved mock.
+    h.script(
+      { text: 'You find a loose flagstone.', streamChunks: 6 },
+      { text: 'Welcome back to the table.', streamChunks: 6 },
+    );
+
+    // An ordinary player action, driven through the service because supertest's per-request
+    // connection lifecycle cannot be raced. It reserves the turn slot synchronously.
+    const action = driver.runTurn(campaignId, user, 'I search the room');
+    // ...and NOW someone presses Start Session, while that turn is still narrating.
+    const greeting = driver.startSession(campaignId, user, 'player');
+
+    const [ordinary, lifecycle] = await Promise.allSettled([action, greeting]);
+    expect(ordinary.status).toBe('fulfilled');
+
+    // WHY REFUSED AND NOT DEFERRED. The phase is campaign-wide and is applied synchronously,
+    // before `runTurn` reaches its queue branch — but a turn's system prompt is assembled several
+    // awaits later. So pressing Start Session mid-turn rewrites the prompt of the action ALREADY
+    // STREAMING, and of everything queued behind it: they reach `assembleSystemPrompt` while it
+    // observes `greeting`, and an ordinary "I search the room" comes back with recap-and-welcome
+    // instructions aimed at a table that has not sat down.
+    //
+    // Deferring the phase until the queue entry executes would fix the contamination and still
+    // leave the greeting wrong: "the table has just sat down", spoken after a turn of play has
+    // already resolved, recapping a session that already resumed. A lifecycle turn's meaning is
+    // fixed when it is REQUESTED, unlike a player action, which is why sharing the action FIFO is
+    // the category error. Refusing is also the only option that keeps `phase` the single source
+    // of truth for "a transition is in progress", rather than splitting that across the queue.
+    expect(lifecycle.status).toBe('rejected');
+    expect(((lifecycle as PromiseRejectedResult).reason as { status?: number }).status).toBe(409);
+
+    // The refusal is a speed bump, not a lockout: nothing about the table changed.
+    expect(await phaseOf(campaignId)).toBe('active');
+
+    // THE CONTAMINATION ASSERTION. Exactly one turn ran, and it was an ordinary player action
+    // that saw no lifecycle prompt. Pre-fix this system carried 'Session phase: OPENING' and the
+    // previous session's recap.
+    const systems = h.mock.received.map((r) => String(r?.system ?? ''));
+    expect(systems).toHaveLength(1);
+    expect(systems[0]).not.toContain('Session phase');
+    expect(systems[0]).not.toContain('Previous session recap');
+
+    // And it is immediately retryable once the table is quiet — the whole point of refusing.
+    h.resetMock(); // drop the unconsumed second turn so the retry reads its own script
+    h.script({ text: 'Welcome back, everyone.', usage: { promptTokens: 6, completionTokens: 4, totalTokens: 10 } });
+    const retried = await start(campaignId, player);
+    expect(retried.status).toBe(201);
+    // The greeting the refusal deferred is the same greeting, unharmed: opening block + recap.
+    expect(lastSystem()).toContain('Session phase: OPENING');
+    expect(lastSystem()).toContain('smugglers');
+    expect(await phaseOf(campaignId)).toBe('active');
   });
 
   it('the phase block is absent from an ordinary turn', async () => {
