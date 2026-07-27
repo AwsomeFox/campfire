@@ -1470,6 +1470,25 @@ function migrateAiDmSeatsTableForActionQueueDepth(sqlite: Database.Database): vo
   sqlite.exec('ALTER TABLE ai_dm_seats ADD COLUMN action_queue_depth INTEGER DEFAULT 8');
 }
 
+/**
+ * Issue #1049: structured table style (tone / pacing / verbosity / combat style / NPC depth)
+ * on the AI-DM seat. One JSON column rather than five scalars, matching `proactive_settings`
+ * — the block is always read and written whole, and #1070's cross-campaign reuse will want to
+ * copy it as one value. Defaults to '{}', which zod fills with the all-`default` preset,
+ * meaning an upgraded seat renders no style section at all until a DM chooses one.
+ */
+function migrateAiDmSeatsTableForStylePresets1049(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ai_dm_seats'")
+    .get();
+  if (!hasTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(ai_dm_seats)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'style_presets')) return;
+
+  sqlite.exec("ALTER TABLE ai_dm_seats ADD COLUMN style_presets TEXT DEFAULT '{}'");
+}
+
 function migrateAiDmSeatsTableForProactiveSettings(sqlite: Database.Database): void {
   const hasTable = sqlite
     .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ai_dm_seats'")
@@ -3395,6 +3414,177 @@ function migrateAiDriverGroundingClaims577(sqlite: Database.Database): void {
 }
 
 /**
+ * Issue #588 — organized-play scheduling: venue/room resources, recurring series,
+ * a per-occurrence exception ledger, reusable schedule templates, and the
+ * organized-play decoration on `scheduled_sessions` (series link, explicit IANA
+ * timezone + local wall clock, room/DM assignment, capacity, event/season keys,
+ * stable ICS UID/SEQUENCE, and reschedule lineage).
+ *
+ * Purely additive: new tables are `CREATE TABLE IF NOT EXISTS`, and every column
+ * added to `scheduled_sessions` is guarded by a `PRAGMA table_info` probe, so the
+ * whole migration is safe to re-run (boot is not once-only — DbHolder re-runs it
+ * after a restore).
+ *
+ * The FK on `scheduled_sessions.series_id` cannot be added by ALTER (SQLite has no
+ * ADD CONSTRAINT), so on an upgraded DB the column is a plain INTEGER while a
+ * freshly bootstrapped DB carries the declared REFERENCES. That asymmetry already
+ * exists throughout this file (see migrateSchedulingLifecycle504's `session_id`)
+ * and is why series teardown is written as an explicit delete in
+ * CampaignsService.purge() rather than left to the constraint.
+ */
+function migrateOrganizedPlay588(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS play_venues (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      timezone TEXT NOT NULL DEFAULT 'UTC',
+      address TEXT NOT NULL DEFAULT '',
+      notes TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS play_rooms (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      venue_id INTEGER NOT NULL REFERENCES play_venues(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      capacity INTEGER NOT NULL DEFAULT 0,
+      notes TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(venue_id, name)
+    );
+    CREATE TABLE IF NOT EXISTS session_series (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+      title TEXT NOT NULL DEFAULT '',
+      location TEXT NOT NULL DEFAULT '',
+      notes TEXT NOT NULL DEFAULT '',
+      timezone TEXT NOT NULL DEFAULT 'UTC',
+      start_date TEXT NOT NULL,
+      start_time TEXT NOT NULL,
+      duration_minutes INTEGER NOT NULL DEFAULT 240,
+      freq TEXT NOT NULL DEFAULT 'weekly',
+      interval INTEGER NOT NULL DEFAULT 1,
+      count INTEGER NOT NULL DEFAULT 1,
+      until_date TEXT,
+      venue_id INTEGER REFERENCES play_venues(id) ON DELETE SET NULL,
+      room_id INTEGER REFERENCES play_rooms(id) ON DELETE SET NULL,
+      assigned_dm_user_id TEXT NOT NULL DEFAULT '',
+      capacity INTEGER NOT NULL DEFAULT 0,
+      event_id TEXT NOT NULL DEFAULT '',
+      season_id TEXT NOT NULL DEFAULT '',
+      series_uid TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS series_exceptions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      series_id INTEGER NOT NULL REFERENCES session_series(id) ON DELETE CASCADE,
+      occurrence_id INTEGER REFERENCES scheduled_sessions(id) ON DELETE SET NULL,
+      recurrence_local_date TEXT NOT NULL DEFAULT '',
+      kind TEXT NOT NULL,
+      from_scheduled_at TEXT,
+      to_scheduled_at TEXT,
+      to_local_start TEXT NOT NULL DEFAULT '',
+      -- #588: what the entry actually CHANGED. Without these the ledger records
+      -- only the instants, so an A->B->C sequence of room moves leaves B
+      -- unrecoverable — the surviving occurrence holds only C — and the
+      -- "append-only exception lineage" could not answer the one question a
+      -- coordinator asks it. from_* == to_* on a cancel/restore, which records the
+      -- seating in force at that moment rather than pretending nothing was held.
+      from_room_id INTEGER,
+      to_room_id INTEGER,
+      from_assigned_dm_user_id TEXT NOT NULL DEFAULT '',
+      to_assigned_dm_user_id TEXT NOT NULL DEFAULT '',
+      from_capacity INTEGER NOT NULL DEFAULT 0,
+      to_capacity INTEGER NOT NULL DEFAULT 0,
+      reason TEXT NOT NULL DEFAULT '',
+      actor_user_id TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS schedule_templates (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      venue_id INTEGER REFERENCES play_venues(id) ON DELETE SET NULL,
+      timezone TEXT NOT NULL DEFAULT 'UTC',
+      freq TEXT NOT NULL DEFAULT 'weekly',
+      interval INTEGER NOT NULL DEFAULT 1,
+      count INTEGER NOT NULL DEFAULT 8,
+      event_id TEXT NOT NULL DEFAULT '',
+      season_id TEXT NOT NULL DEFAULT '',
+      slots_json TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_play_rooms_venue ON play_rooms(venue_id);
+    CREATE INDEX IF NOT EXISTS idx_session_series_campaign ON session_series(campaign_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_session_series_uid ON session_series(series_uid);
+    CREATE INDEX IF NOT EXISTS idx_series_exceptions_series ON series_exceptions(series_id, id);
+    CREATE INDEX IF NOT EXISTS idx_series_exceptions_occurrence ON series_exceptions(occurrence_id);
+  `);
+
+  const hasScheduledSessions = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='scheduled_sessions'")
+    .get();
+  if (!hasScheduledSessions) return;
+
+  const cols = sqlite.prepare('PRAGMA table_info(scheduled_sessions)').all() as Array<{ name: string }>;
+  const has = (name: string): boolean => cols.some((c) => c.name === name);
+  const addColumns: Array<[string, string]> = [
+    ['series_id', 'INTEGER'],
+    ['occurrence_index', 'INTEGER NOT NULL DEFAULT 0'],
+    ['timezone', "TEXT NOT NULL DEFAULT ''"],
+    ['local_start', "TEXT NOT NULL DEFAULT ''"],
+    ['venue_id', 'INTEGER'],
+    ['room_id', 'INTEGER'],
+    ['assigned_dm_user_id', "TEXT NOT NULL DEFAULT ''"],
+    ['capacity', 'INTEGER NOT NULL DEFAULT 0'],
+    ['event_id', "TEXT NOT NULL DEFAULT ''"],
+    ['season_id', "TEXT NOT NULL DEFAULT ''"],
+    ['ics_uid', "TEXT NOT NULL DEFAULT ''"],
+    ['ics_sequence', 'INTEGER NOT NULL DEFAULT 0'],
+    ['original_scheduled_at', 'TEXT'],
+  ];
+  for (const [name, ddl] of addColumns) {
+    if (!has(name)) sqlite.exec(`ALTER TABLE scheduled_sessions ADD COLUMN ${name} ${ddl}`);
+  }
+
+  sqlite.exec(`
+    CREATE INDEX IF NOT EXISTS idx_scheduled_sessions_at ON scheduled_sessions(scheduled_at);
+    CREATE INDEX IF NOT EXISTS idx_scheduled_sessions_room_at ON scheduled_sessions(room_id, scheduled_at);
+    CREATE INDEX IF NOT EXISTS idx_scheduled_sessions_dm_at ON scheduled_sessions(assigned_dm_user_id, scheduled_at);
+    CREATE INDEX IF NOT EXISTS idx_scheduled_sessions_series ON scheduled_sessions(series_id, occurrence_index);
+  `);
+}
+
+/**
+ * Issue #588 — backfill the stable ICS UID for every pre-existing scheduled
+ * session. Deliberately a SEPARATE, ADJACENT ordinal after the create/ALTER step
+ * above (0123): the create must be recorded as applied even if a backfill on a
+ * huge table is interrupted, and splitting them keeps that recovery honest.
+ *
+ * The backfilled string is EXACTLY the UID `buildCampaignIcs` has always emitted
+ * (`campfire-c<campaign>-s<id>@campfire`). Minting a fresh UID here would tell
+ * every already-subscribed calendar that each existing event was deleted and a
+ * different one created — the ghost-accumulation this feature is meant to stop.
+ * Only rows with an empty ics_uid are touched, so re-running is a no-op.
+ */
+function migrateOrganizedPlayIcsUidBackfill588(sqlite: Database.Database): void {
+  const hasScheduledSessions = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='scheduled_sessions'")
+    .get();
+  if (!hasScheduledSessions) return;
+  const cols = sqlite.prepare('PRAGMA table_info(scheduled_sessions)').all() as Array<{ name: string }>;
+  if (!cols.some((c) => c.name === 'ics_uid')) return;
+  sqlite.exec(`
+    UPDATE scheduled_sessions
+       SET ics_uid = 'campfire-c' || campaign_id || '-s' || id || '@campfire'
+     WHERE ics_uid = ''
+  `);
+}
+
+/**
  * Issue #585 — campaign module package identity, install/fork lineage, per-artifact
  * baselines and pre-apply snapshots.
  *
@@ -3426,6 +3616,99 @@ function migrateCampaignModules585(sqlite: Database.Database): void {
   addColumn('forked_at', 'forked_at TEXT');
   addColumn('detached', 'detached INTEGER NOT NULL DEFAULT 0');
   addColumn('detached_at', 'detached_at TEXT');
+}
+
+/**
+ * Issue #587: server-admin campaign metadata catalog.
+ *
+ * Two independent pieces, both idempotent and both probe-before-act:
+ *
+ *  1. `campaigns.catalog_privacy` — a campaign's OWN opt-out from having its name and
+ *     description disclosed in the catalog. NOT NULL DEFAULT 'inherit', so the ADD COLUMN
+ *     backfills every existing row to the server-default-following value in one statement
+ *     (SQLite materialises a constant non-null default for existing rows on ALTER TABLE
+ *     ADD COLUMN, and 'inherit' is constant). No table rebuild. No REFERENCES clause is
+ *     involved, so the #69 convention about omitting FKs on ALTER does not apply here.
+ *
+ *  2. `campaign_export_requests` — an operator's ASK that a campaign's DMs produce an
+ *     export. Brand-new table, so the current house style (see
+ *     migrateAiDriverGroundingClaims577 above) applies: probe sqlite_master, verify the
+ *     expected column set, and DROP/recreate only if an earlier partial shape is found.
+ *     A pre-existing table carrying all expected columns is left completely alone.
+ *
+ *     ONE WAY THIS TABLE IS NOT LIKE ITS MODEL. The DROP/recreate convention is borrowed
+ *     from migrateAiDriverGroundingClaims577, but that table holds derived, audit-style
+ *     claims that can be recomputed; this one holds DM CONSENT DECISIONS — who was asked
+ *     to hand over a campaign's contents, why, and what the DM answered. Recreating it
+ *     DESTROYS that record, and nothing can reconstruct it.
+ *
+ *     The branch is unreachable in practice: only a partial pre-release install of this
+ *     same feature can leave a `campaign_export_requests` with the wrong shape, and such
+ *     a table has no real decisions in it. So the convention is kept rather than traded
+ *     for a column-by-column rebuild that would exist solely for a state no shipped
+ *     version can be in. But the analogy is doing less work than it looks like it is:
+ *     if this table ever needs a shape change AFTER release, that migration must
+ *     preserve the rows rather than inherit this branch.
+ *
+ * Fresh DBs never take either path — BOOTSTRAP_SQL already declares both correctly. The
+ * classic failure for this convention is bootstrap.sql and the migration drifting apart,
+ * leaving an upgraded install with a subtly different table than a fresh one;
+ * test/integration/db-migrations.spec.ts asserts fresh/upgraded parity for both pieces.
+ */
+function migrateAdminCampaignCatalog587(sqlite: Database.Database): void {
+  const hasCampaigns = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaigns'")
+    .get();
+  if (hasCampaigns) {
+    const columns = sqlite.prepare('PRAGMA table_info(campaigns)').all() as Array<{ name: string }>;
+    if (!columns.some((c) => c.name === 'catalog_privacy')) {
+      sqlite.exec("ALTER TABLE campaigns ADD COLUMN catalog_privacy TEXT NOT NULL DEFAULT 'inherit'");
+    }
+  }
+
+  const existing = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaign_export_requests'")
+    .all();
+  if (existing.length > 0) {
+    const cols = sqlite.prepare('PRAGMA table_info(campaign_export_requests)').all() as Array<{ name: string }>;
+    const names = new Set(cols.map((c) => c.name));
+    const expected = [
+      'id',
+      'campaign_id',
+      'requested_by',
+      'requested_by_user_id',
+      'profile',
+      'justification',
+      'status',
+      'decided_by',
+      'decided_at',
+      'decision_note',
+      'created_at',
+      'updated_at',
+    ];
+    if (expected.every((c) => names.has(c))) return;
+    sqlite.exec('DROP TABLE campaign_export_requests');
+  }
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS campaign_export_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+      requested_by TEXT NOT NULL,
+      requested_by_user_id TEXT NOT NULL DEFAULT '',
+      profile TEXT NOT NULL DEFAULT '',
+      justification TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'pending',
+      decided_by TEXT,
+      decided_at TEXT,
+      decision_note TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_campaign_export_requests_campaign
+      ON campaign_export_requests(campaign_id, id);
+    CREATE INDEX IF NOT EXISTS idx_campaign_export_requests_status
+      ON campaign_export_requests(status, id);
+  `);
 }
 
 /**
@@ -3746,6 +4029,13 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // on a database that has already recorded it would silently re-run the grandfather
   // backfill against seats a DM may since have deliberately revoked.
   { name: '0127_safety_controls_597', run: migrateSafetyControls597 },
+  // 0126 was CENTRALLY ALLOCATED to issue #587 by the merge coordinator; 0122-0125 are held
+  // by other in-flight branches, so the gap above is deliberate and must not be "tidied" down
+  // to the next free ordinal. runMigrations dedupes on the FULL name string, so the `_587`
+  // suffix is what guarantees this runs exactly once even if a sibling branch lands a
+  // colliding ordinal — and renaming this entry after a database has recorded it is the one
+  // edit that silently re-runs it.
+  { name: '0126_admin_campaign_catalog_587', run: migrateAdminCampaignCatalog587 },
   // 0130 was CENTRALLY ALLOCATED to issue #599 by the merge coordinator. 0122-0129 are held by
   // other in-flight branches, so the gap above is deliberate and must not be "tidied" down to
   // the next free ordinal — every branch computing "next free" for itself is exactly how these
@@ -3754,6 +4044,26 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // why this is never renumbered: renaming a migration a database has already recorded is the
   // one edit that silently breaks run-once.
   { name: '0130_table_safety_holds_599', run: migrateTableSafetyHolds599 },
+  // 0134 was CENTRALLY ALLOCATED to issue #1049 by the merge coordinator; 0126-0133 were held by
+  // other in-flight branches when this entry was written. Several have since landed and are
+  // registered in this same array (0130 → #599, 0131 → #1042, 0132 → #1047), which changes
+  // nothing: the gap above is still deliberate and must not be "tidied" down to the next free
+  // ordinal. As with 0121 and 0117, ordinals are presentational — `runMigrations` applies
+  // entries in ARRAY order and dedupes on the FULL name string, so the `_1049` suffix is what
+  // guarantees this runs exactly once even if a sibling branch lands a colliding number.
+  // Renaming it after a database has recorded it is the one edit that would break run-once.
+  { name: '0134_ai_seat_style_presets_1049', run: migrateAiDmSeatsTableForStylePresets1049 },
+  // 0123/0124 are CENTRALLY ALLOCATED to this branch by the merge coordinator.
+  // 0112-0122 are held by other in-flight branches, so the gap above is deliberate
+  // and these are NOT "the next free ordinal" — do not renumber them to close it.
+  // runMigrations dedupes on the FULL name, so the `_588` suffix is what actually
+  // guarantees run-once even if a sibling branch lands a colliding ordinal first.
+  // The pair must stay adjacent and in this order: 0124 backfills a column 0123 adds.
+  // They sit below main's entries because main reached the merge base first; execution
+  // order between them is immaterial — 0130 touches `table_safety_holds` and 0123/0124
+  // touch the organized-play tables and `scheduled_sessions`, which are disjoint.
+  { name: '0123_organized_play_588', run: migrateOrganizedPlay588 },
+  { name: '0124_organized_play_ics_uid_backfill_588', run: migrateOrganizedPlayIcsUidBackfill588 },
   // 0132 was CENTRALLY ALLOCATED to issue #1047 by the merge coordinator; the gap above is
   // deliberate and must not be "tidied" down to the next free ordinal. runMigrations dedupes
   // on the FULL name string, so the `_1047` suffix is what guarantees this runs exactly once

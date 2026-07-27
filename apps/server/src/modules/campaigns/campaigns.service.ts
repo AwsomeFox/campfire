@@ -51,6 +51,8 @@ import {
   castSessions,
   scheduledSessions,
   sessionRsvps,
+  sessionSeries,
+  seriesExceptions,
   comments,
   entityRevisions,
   campaignInvites,
@@ -96,6 +98,8 @@ import { ATTACHMENT_STATE_COMMITTED } from '../attachments/attachment.constants'
 import { sanitizeAttachmentFilename } from '../attachments/filename';
 import { APP_VERSION } from '../../common/build-metadata';
 import { CURRENT_SCHEMA_REVISION } from '../backup/backup-manifest';
+import { freshAiSeatCounters, portableAiSeat, readPortableAiSeat } from '../ai-dm/ai-seat-portability';
+import { AiDmService } from '../ai-dm/ai-dm.service';
 import {
   assertCompendiumImportAllowed,
   buildResolutionMap,
@@ -308,6 +312,10 @@ export class CampaignsService {
     private readonly invites: InvitesService,
     private readonly fsDeletion: FsDeletionService,
     private readonly events: CampaignEventsService,
+    // #1049 review: clone and import write `ai_dm_seats` directly, so they owe the AI-DM
+    // module a nudge afterwards — see syncProactiveWatcher. AiDmModule imports nothing that
+    // leads back to CampaignsModule, so this edge is acyclic.
+    private readonly aiDm: AiDmService,
   ) {}
 
   /**
@@ -1738,14 +1746,11 @@ export class CampaignsService {
       if (aiSeatRow) {
         tx.insert(aiDmSeats).values({
           campaignId: cloneId,
-          mode: aiSeatRow.mode,
-          enabled: aiSeatRow.enabled,
-          model: aiSeatRow.model,
-          instructions: aiSeatRow.instructions,
-          tokenBudget: aiSeatRow.tokenBudget,
-          tokensUsed: 0,
-          turnCount: 0,
-          lastTurnAt: null,
+          // #1049: one classification, three call sites. Counters are zeroed explicitly rather
+          // than left to column defaults so "this clone starts its own accounting" is a stated
+          // decision, not an accident of which fields the insert happened to omit.
+          ...portableAiSeat(aiSeatRow),
+          ...freshAiSeatCounters(),
           createdAt: ts,
           updatedAt: ts,
         }).run();
@@ -1794,6 +1799,13 @@ export class CampaignsService {
       campaignId: newId,
       detail: `cloned from campaign ${id} (${template ? 'template' : 'full'})`,
     });
+
+    // #1049 review: carrying `proactiveSettings` is not the same as HONOURING them. The watcher
+    // is in-memory and starts only from AiDmService.configure's callback, which this path
+    // bypasses by inserting the seat row directly inside the copy transaction — so without this
+    // the clone reads back proactive ON and never fires a proactive turn. Called AFTER commit
+    // deliberately: the sync re-reads the persisted row.
+    await this.aiDm.syncProactiveWatcher(newId);
     return this.getOrThrow(newId);
   }
 
@@ -2783,14 +2795,17 @@ export class CampaignsService {
       if (aiSeatSrc && Object.keys(aiSeatSrc).length > 0) {
         tx.insert(aiDmSeats).values({
           campaignId: cid,
-          mode: str(aiSeatSrc.mode, 'off'),
-          enabled: boolOf(aiSeatSrc.enabled),
-          model: str(aiSeatSrc.model),
-          instructions: str(aiSeatSrc.instructions),
-          tokenBudget: Math.max(0, intOr(aiSeatSrc.tokenBudget, 0)),
-          tokensUsed: 0,
-          turnCount: 0,
-          lastTurnAt: null,
+          // #1049: same classification as clone/export, but read through coercers — this side
+          // parses untrusted JSON from an uploaded archive, not a typed row.
+          ...readPortableAiSeat(aiSeatSrc as Record<string, unknown>, {
+            str,
+            boolOf,
+            intOr,
+            // An illegal block falls back to defaults rather than failing the whole archive —
+            // but never silently, or the operator has no way to know their style was dropped.
+            warn: (field, detail) => importLog.warn(`campaign ${cid}: ${detail} (${field})`),
+          }),
+          ...freshAiSeatCounters(),
           createdAt: ts,
           updatedAt: ts,
         }).run();
@@ -2898,6 +2913,11 @@ export class CampaignsService {
         );
       }
     }
+
+    // #1049 review: same gap as clone — the seat row was inserted directly inside the import
+    // transaction, so nothing told the in-memory proactive watcher it exists. An archive
+    // carrying `proactiveSettings.enabled: true` would otherwise import as ON-but-inert.
+    await this.aiDm.syncProactiveWatcher(newId);
 
     const campaign = await this.getOrThrow(newId);
     return {
@@ -3202,6 +3222,10 @@ export class CampaignsService {
       await this.db.select({ id: scheduledSessions.id }).from(scheduledSessions).where(eq(scheduledSessions.campaignId, id))
     ).map((r) => r.id);
     const storyBeatIds = (await this.db.select({ id: storyBeats.id }).from(storyBeats).where(eq(storyBeats.campaignId, id))).map((r) => r.id);
+    // #588: series_exceptions hangs off session_series, not off campaign_id.
+    const seriesIds = (
+      await this.db.select({ id: sessionSeries.id }).from(sessionSeries).where(eq(sessionSeries.campaignId, id))
+    ).map((r) => r.id);
 
     try {
       this.db.transaction((tx) => {
@@ -3234,6 +3258,9 @@ export class CampaignsService {
         if (scheduledSessionIds.length > 0) {
           tx.delete(sessionRsvps).where(inArray(sessionRsvps.scheduledSessionId, scheduledSessionIds)).run();
         }
+        if (seriesIds.length > 0) {
+          tx.delete(seriesExceptions).where(inArray(seriesExceptions.seriesId, seriesIds)).run();
+        }
         if (storyBeatIds.length > 0) {
           tx.delete(storyBranches).where(inArray(storyBranches.beatId, storyBeatIds)).run();
         }
@@ -3264,6 +3291,11 @@ export class CampaignsService {
         tx.delete(castSessions).where(eq(castSessions.campaignId, id)).run();
         tx.delete(sessions).where(eq(sessions.campaignId, id)).run();
         tx.delete(scheduledSessions).where(eq(scheduledSessions.campaignId, id)).run();
+        // #588: after the occurrences, so the series has no live children left.
+        // Venues/rooms are install-level shared resources and are deliberately
+        // NOT touched — purging a campaign must not remove a room other campaigns
+        // are booked into.
+        tx.delete(sessionSeries).where(eq(sessionSeries.campaignId, id)).run();
         tx.delete(proposals).where(eq(proposals.campaignId, id)).run();
         tx.delete(campaignGuestDmGrants).where(eq(campaignGuestDmGrants.campaignId, id)).run();
         tx.delete(campaignMembers).where(eq(campaignMembers.campaignId, id)).run();

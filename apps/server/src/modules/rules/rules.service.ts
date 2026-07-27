@@ -39,6 +39,7 @@ import {
   MAX_ENTRIES_PER_SECTION,
   OPEN5E_DEFAULT_BASE_URL,
   fetchOpen5eSection,
+  OPEN5E_PACK_VERSION,
   type ImportedEntry,
   type Open5eSection,
 } from './open5e-importer';
@@ -1288,7 +1289,7 @@ export class RulesService implements OnModuleInit {
     const license = licenses.size > 0 ? [...licenses].join(', ') : 'OGL/CC';
 
     return this.persistPack(
-      { slug, name: 'Open5e SRD', version: nowIso().slice(0, 10), license, sourceUrl: baseUrl, sectionLabels: sections },
+      { slug, name: 'Open5e SRD', version: OPEN5E_PACK_VERSION, license, sourceUrl: baseUrl, sectionLabels: sections },
       allEntries,
       user,
       `(cap ${MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped${truncationNote(sectionResults)})`,

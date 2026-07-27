@@ -8,14 +8,17 @@
  * pages) and MembersPage's audit list — out of scope here to avoid duplicating
  * owned surfaces; this page covers the General + Rule system + Danger tab.
  */
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import type {
   AiExternalContentPolicy,
   Campaign,
+  CampaignCatalogPrivacySetting,
   CampaignCloneMode,
   CampaignClonePreview,
+  CampaignExportRequest,
+  CampaignExportRequestPage,
   CampaignInvite,
   CastSession,
   CastSessionCreated,
@@ -295,6 +298,8 @@ export default function CampaignSettingsPage() {
                   await refreshCampaigns();
                 }}
               />
+              <CatalogPrivacyCard key={`catalog-privacy-${campaign.id}`} campaign={campaign} />
+              <ExportRequestsCard key={`export-requests-${campaign.id}`} campaign={campaign} />
               <CastSessionsCard key={`cast-${campaign.id}`} campaign={campaign} />
             </SettingsCategory>
 
@@ -662,6 +667,322 @@ function PublicInvitesCard({ campaign, onChanged }: { campaign: Campaign; onChan
           onCancel={() => setConfirming(null)}
           onConfirm={() => void revokeAll()}
         />
+      )}
+    </div>
+  );
+}
+
+/**
+ * Catalog privacy (issue #587) — the campaign's own control over being listed to
+ * server operators.
+ *
+ * Server admins now have a metadata catalog spanning every campaign, including ones
+ * they are not members of. It shows no campaign content, but a NAME can itself be
+ * sensitive — a support-adjacent table's name may disclose more than its description
+ * ever would — so the DM gets to withhold it. Withholding replaces the name with
+ * `Campaign #<id>`, derived from the id the operator can already see, so it discloses
+ * nothing further while still letting them administer the row.
+ *
+ * Deliberately DM-only and unreachable from any admin route: an opt-out that the party
+ * it protects against can clear is not an opt-out.
+ */
+function CatalogPrivacyCard({ campaign }: { campaign: Campaign }) {
+  const [setting, setSetting] = useState<CampaignCatalogPrivacySetting | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      setSetting(await api.get<CampaignCatalogPrivacySetting>(`${API}/campaigns/${campaign.id}/catalog/privacy`));
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't load catalog privacy.");
+    }
+  }, [campaign.id]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  async function save(next: 'inherit' | 'redacted') {
+    setBusy(true);
+    setError(null);
+    try {
+      setSetting(
+        await api.put<CampaignCatalogPrivacySetting>(`${API}/campaigns/${campaign.id}/catalog/privacy`, {
+          catalogPrivacy: next,
+        }),
+      );
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't update catalog privacy.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const redacted = setting?.catalogPrivacy === 'redacted';
+  const effective = setting?.effective;
+
+  return (
+    <div
+      id="catalog-privacy"
+      className="card elev-sm settings-anchor"
+      tabIndex={-1}
+      data-testid="catalog-privacy-settings"
+      aria-labelledby="catalog-privacy-heading"
+    >
+      <div className="flex items-center gap-2 flex-wrap">
+        <span id="catalog-privacy-heading" className="card-kicker" style={{ margin: 0 }}>
+          Server catalog listing
+        </span>
+        <span className={`tag ${redacted ? 'tag-neutral' : 'tag-accent'}`}>
+          {redacted ? 'name withheld' : 'follows server default'}
+        </span>
+      </div>
+      <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
+        Server admins can browse a catalog of every campaign on this server in order to find and administer
+        it. That catalog shows operational details only — member counts, storage, next session, status — and
+        never quests, notes, attachments, session zero, or DM secrets. You can additionally withhold this
+        campaign&apos;s name and description; admins then see only &ldquo;Campaign #{campaign.id}&rdquo;.
+      </p>
+      {effective && (
+        <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
+          Right now admins see: name <strong>{effective.names}</strong>, description{' '}
+          <strong>{effective.descriptions}</strong>.
+          {setting?.catalogPrivacy === 'inherit' && setting.serverDefault
+            ? ` (Server default: names ${setting.serverDefault.names}, descriptions ${setting.serverDefault.descriptions}.)`
+            : ''}
+        </p>
+      )}
+      <div className="flex flex-col sm:flex-row gap-2">
+        {redacted ? (
+          <button className="btn" disabled={busy} aria-busy={busy || undefined} onClick={() => void save('inherit')}>
+            Follow the server default
+          </button>
+        ) : (
+          <button
+            className="btn btn-primary"
+            disabled={busy}
+            aria-busy={busy || undefined}
+            onClick={() => void save('redacted')}
+          >
+            Withhold name &amp; description
+          </button>
+        )}
+      </div>
+      <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
+        Withholding only ever tightens privacy. If the server default already withholds names, following the
+        default will not reveal yours.
+      </p>
+      {error && <p className="text-sm text-red-400 m-0" role="alert">{error}</p>}
+    </div>
+  );
+}
+
+/**
+ * Export requests (issue #587) — the DM half of the catalog's `request_export`.
+ *
+ * A server operator can ASK for an export; they cannot take one. The ask lands here,
+ * and until this card existed it landed nowhere a DM could see: the admin console
+ * offered the operation, the server recorded a pending row, and this page rendered only
+ * the privacy card — so requests sat pending forever unless somebody hand-rolled an API
+ * call. An approval workflow in which nobody can approve is not a workflow.
+ *
+ * Approving records CONSENT and nothing else. No admin route returns an artifact; the
+ * bundle is still produced by a DM through the existing DM-gated campaign export. That
+ * separation is the whole reason the request is a durable row rather than a button that
+ * hands over a file, and the card says so plainly so a DM knows what they are agreeing
+ * to before they agree to it.
+ */
+/** Rows fetched per read of the DM's export inbox. */
+const EXPORT_REQUEST_PAGE = 25;
+
+function ExportRequestsCard({ campaign }: { campaign: Campaign }) {
+  const [requests, setRequests] = useState<CampaignExportRequest[] | null>(null);
+  const [total, setTotal] = useState(0);
+  const [notes, setNotes] = useState<Record<number, string>>({});
+  const [busyId, setBusyId] = useState<number | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [pagesLoaded, setPagesLoaded] = useState(1);
+  const [error, setError] = useState<string | null>(null);
+
+  // PAGES BY OFFSET, NOT BY GROWING `limit`.
+  //
+  // The first version of this control kept `offset=0` and raised `limit` by 25 a click.
+  // The server clamps `limit` to CAMPAIGN_CATALOG_MAX_LIMIT, so past 100 rows every click
+  // re-fetched the same 100 while the button stayed visible (`requests.length < total`
+  // was still true) — a control that visibly does nothing, which is worse than the cap it
+  // was added to remove.
+  //
+  // Fetching whole pages by offset and re-reading ALL of them keeps two properties at
+  // once: the list grows, and it never shows a request as pending that a decision in
+  // another tab has already answered. The endpoint orders pending-first, so page one
+  // always holds everything actually waiting on this DM however far back the history goes.
+  const load = useCallback(
+    async (pages = 1) => {
+      try {
+        const collected: CampaignExportRequest[] = [];
+        let seenTotal = 0;
+        let fetched = 0;
+        for (let i = 0; i < pages; i += 1) {
+          const page = await api.get<CampaignExportRequestPage>(
+            `${API}/campaigns/${campaign.id}/catalog/export-requests` +
+              `?limit=${EXPORT_REQUEST_PAGE}&offset=${i * EXPORT_REQUEST_PAGE}`,
+          );
+          collected.push(...page.items);
+          seenTotal = page.total;
+          fetched += 1;
+          if (!page.hasMore) break;
+        }
+        setRequests(collected);
+        setTotal(seenTotal);
+        // What was actually fetched, so a shrinking inbox cannot leave this asking for
+        // pages that no longer exist.
+        setPagesLoaded(Math.max(1, fetched));
+      } catch (err) {
+        setError(err instanceof ApiError ? err.message : "Couldn't load export requests.");
+      }
+    },
+    [campaign.id],
+  );
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  async function showMore() {
+    setLoadingMore(true);
+    try {
+      await load(pagesLoaded + 1);
+    } finally {
+      setLoadingMore(false);
+    }
+  }
+
+  async function decide(requestId: number, decision: 'approved' | 'denied') {
+    setBusyId(requestId);
+    setError(null);
+    try {
+      await api.post<CampaignExportRequest>(
+        `${API}/campaigns/${campaign.id}/catalog/export-requests/${requestId}/decision`,
+        { decision, note: (notes[requestId] ?? '').trim() },
+      );
+      // Reload the same window the DM is looking at, not just the first page.
+      await load(pagesLoaded);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't record that decision.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  const pending = (requests ?? []).filter((r) => r.status === 'pending');
+  const decided = (requests ?? []).filter((r) => r.status !== 'pending');
+
+  return (
+    <div
+      id="export-requests"
+      className="card elev-sm settings-anchor"
+      tabIndex={-1}
+      data-testid="export-requests-settings"
+      aria-labelledby="export-requests-heading"
+    >
+      <div className="flex items-center gap-2 flex-wrap">
+        <span id="export-requests-heading" className="card-kicker" style={{ margin: 0 }}>
+          Export requests
+        </span>
+        {pending.length > 0 && <span className="tag tag-accent">{pending.length} awaiting you</span>}
+      </div>
+      <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
+        A server admin can ask you to produce an export of this campaign. They cannot take one — approving
+        records your consent, and the bundle is still something you produce yourself from this campaign&apos;s
+        export tools. Leaving a request alone keeps it pending; nothing is shared either way.
+      </p>
+
+      {requests !== null && requests.length === 0 && (
+        <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
+          No server admin has requested an export of this campaign.
+        </p>
+      )}
+
+      {pending.map((r) => (
+        <div
+          key={r.id}
+          className="flex flex-col gap-2"
+          style={{ borderTop: '1px solid var(--color-divider)', paddingTop: 8 }}
+        >
+          <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
+            <strong>{r.requestedBy}</strong> asked for a <strong>{r.profile || 'backup'}</strong> export on{' '}
+            {r.createdAt.slice(0, 10)}.
+          </p>
+          {r.justification && (
+            <p style={{ margin: 0, fontSize: 12 }}>
+              <span className="text-muted">Their reason: </span>
+              {r.justification}
+            </p>
+          )}
+          <label className="flex flex-col gap-1 text-muted" style={{ fontSize: 11.5 }}>
+            Note back (optional, recorded with your decision)
+            <input
+              className="input"
+              value={notes[r.id] ?? ''}
+              onChange={(e) => setNotes((prev) => ({ ...prev, [r.id]: e.target.value }))}
+            />
+          </label>
+          <div className="flex flex-col sm:flex-row gap-2">
+            <button
+              className="btn btn-primary"
+              disabled={busyId === r.id}
+              aria-busy={busyId === r.id || undefined}
+              onClick={() => void decide(r.id, 'approved')}
+            >
+              Approve
+            </button>
+            <button
+              className="btn"
+              disabled={busyId === r.id}
+              aria-busy={busyId === r.id || undefined}
+              onClick={() => void decide(r.id, 'denied')}
+            >
+              Deny
+            </button>
+          </div>
+        </div>
+      ))}
+
+      {decided.length > 0 && (
+        <div style={{ borderTop: '1px solid var(--color-divider)', paddingTop: 8 }}>
+          <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
+            Earlier requests
+          </p>
+          <ul style={{ margin: '4px 0 0', paddingInlineStart: 16 }}>
+            {decided.map((r) => (
+              <li key={r.id} className="text-muted" style={{ fontSize: 11.5 }}>
+                {r.createdAt.slice(0, 10)} — {r.requestedBy} asked for {r.profile || 'backup'}:{' '}
+                <strong>{r.status}</strong>
+                {r.decisionNote ? ` (${r.decisionNote})` : ''}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {requests !== null && requests.length < total && (
+        <button
+          className="btn"
+          style={{ alignSelf: 'flex-start' }}
+          disabled={loadingMore}
+          aria-busy={loadingMore || undefined}
+          data-testid="export-requests-show-more"
+          onClick={() => void showMore()}
+        >
+          Show earlier requests ({requests.length} of {total})
+        </button>
+      )}
+
+      {error && (
+        <p className="text-sm text-red-400 m-0" role="alert">
+          {error}
+        </p>
       )}
     </div>
   );

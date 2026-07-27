@@ -1,5 +1,5 @@
 import { sqliteTable, text, integer, real, index, uniqueIndex, primaryKey } from 'drizzle-orm/sqlite-core';
-import type { AiDmProactiveSettings } from '@campfire/schema';
+import type { AiDmProactiveSettings, AiDmStylePresets } from '@campfire/schema';
 
 /**
  * Drizzle table definitions mirroring @campfire/schema entities.
@@ -64,6 +64,14 @@ export const campaigns = sqliteTable('campaigns', {
   // instead of picking an arbitrary first result. Nullable in older DBs pre-migration;
   // see db/db.module.ts migrateCampaignsTableForActiveEncounter().
   activeEncounterId: integer('active_encounter_id'),
+  // Issue #587: this campaign's opt-out from disclosing its NAME and DESCRIPTION in
+  // the server-admin metadata catalog. 'inherit' (default) follows the server-wide
+  // policy; 'redacted' overrides it toward privacy. Tighten-only, and writable ONLY
+  // by the campaign's own DM (PUT /campaigns/:id/catalog-privacy) — deliberately not
+  // reachable from any admin bulk operation, because an opt-out a server admin can
+  // clear is not an opt-out. Nullable in older DBs pre-migration; see
+  // db/db.module.ts migrateAdminCampaignCatalog587().
+  catalogPrivacy: text('catalog_privacy').notNull().default('inherit'),
   // Soft-delete / trash timestamp (issue #116). NULL => live; an ISO timestamp => the
   // campaign is trashed: excluded from normal listings while its rows + on-disk uploads
   // survive for a grace period, restorable until an explicit purge. Migrated via
@@ -403,6 +411,121 @@ export const castSessions = sqliteTable('cast_sessions', {
   updatedAt: text('updated_at').notNull(),
 });
 
+// Organized play (issue #588): a venue is an install-level resource, not a
+// campaign child — several campaigns share one room calendar by design, so a
+// venue cannot hang off a single campaign (and a campaign purge must not take
+// the room with it).
+//
+// WHERE THE CONSTRAINTS LIVE, before anyone files "these tables declare no
+// foreign keys and no unique indexes": this file is the drizzle QUERY-side view,
+// not the DDL. Schema is hand-written in bootstrap.sql.ts — only 6 of ~80 tables
+// here bother with `references()`, and those are for relation typing rather than
+// for creating the constraint. The organized-play tables are fully constrained
+// there: `play_rooms.venue_id` → `play_venues` ON DELETE CASCADE plus
+// `UNIQUE(venue_id, name)`; `session_series.campaign_id` → `campaigns` CASCADE,
+// with `venue_id`/`room_id` ON DELETE SET NULL; `series_exceptions.series_id` →
+// `session_series` CASCADE and `occurrence_id` SET NULL;
+// `schedule_templates.venue_id` and `scheduled_sessions.series_id` SET NULL; and
+// `idx_session_series_uid` is a UNIQUE index on `series_uid`, which is what stops
+// two series minting colliding ICS UIDs. Adding `references()` here would change
+// no database — and the application-level cascade in CampaignsService.purge()
+// exists because installs predating FK enforcement still have to purge cleanly,
+// which is what db-cascades.e2e-spec.ts pins on both paths.
+export const playVenues = sqliteTable('play_venues', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  name: text('name').notNull(),
+  // IANA zone — the default zone for series booked here.
+  timezone: text('timezone').notNull().default('UTC'),
+  address: text('address').notNull().default(''),
+  notes: text('notes').notNull().default(''),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+// One bookable table/room inside a venue. capacity 0 = unlimited.
+export const playRooms = sqliteTable('play_rooms', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  venueId: integer('venue_id').notNull(),
+  name: text('name').notNull(),
+  capacity: integer('capacity').notNull().default(0),
+  notes: text('notes').notNull().default(''),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+// A recurring run of game nights (issue #588). Stores the IANA zone plus the LOCAL
+// start date/time and the rule — never a first instant plus a fixed stride — so
+// occurrences materialize at the same wall clock on both sides of a DST
+// transition. See db/db.module.ts migrateOrganizedPlay588().
+export const sessionSeries = sqliteTable('session_series', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  campaignId: integer('campaign_id').notNull(),
+  title: text('title').notNull().default(''),
+  location: text('location').notNull().default(''),
+  notes: text('notes').notNull().default(''),
+  timezone: text('timezone').notNull().default('UTC'),
+  startDate: text('start_date').notNull(), // YYYY-MM-DD, local to `timezone`
+  startTime: text('start_time').notNull(), // HH:MM, local to `timezone`
+  durationMinutes: integer('duration_minutes').notNull().default(240),
+  freq: text('freq').notNull().default('weekly'),
+  interval: integer('interval').notNull().default(1),
+  count: integer('count').notNull().default(1),
+  untilDate: text('until_date'),
+  venueId: integer('venue_id'),
+  roomId: integer('room_id'),
+  assignedDmUserId: text('assigned_dm_user_id').notNull().default(''),
+  capacity: integer('capacity').notNull().default(0),
+  eventId: text('event_id').notNull().default(''),
+  seasonId: text('season_id').notNull().default(''),
+  seriesUid: text('series_uid').notNull(),
+  status: text('status').notNull().default('active'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+// Append-only per-occurrence deviation ledger: cancellations, reschedules (both
+// instants recorded, so lineage is stored rather than inferred from the surviving
+// row) and room/DM reassignments.
+export const seriesExceptions = sqliteTable('series_exceptions', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  seriesId: integer('series_id').notNull(),
+  occurrenceId: integer('occurrence_id'),
+  // The occurrence's ORIGINAL local date — the RFC 5545 RECURRENCE-ID analogue.
+  recurrenceLocalDate: text('recurrence_local_date').notNull().default(''),
+  kind: text('kind').notNull(), // 'cancel' | 'reschedule' | 'reassign' | 'restore'
+  fromScheduledAt: text('from_scheduled_at'),
+  toScheduledAt: text('to_scheduled_at'),
+  toLocalStart: text('to_local_start').notNull().default(''),
+  // #588: the assignment delta, so the append-only lineage can answer "what did
+  // this entry change?" rather than only "when".
+  fromRoomId: integer('from_room_id'),
+  toRoomId: integer('to_room_id'),
+  fromAssignedDmUserId: text('from_assigned_dm_user_id').notNull().default(''),
+  toAssignedDmUserId: text('to_assigned_dm_user_id').notNull().default(''),
+  fromCapacity: integer('from_capacity').notNull().default(0),
+  toCapacity: integer('to_capacity').notNull().default(0),
+  reason: text('reason').notNull().default(''),
+  actorUserId: text('actor_user_id').notNull().default(''),
+  createdAt: text('created_at').notNull(),
+});
+
+// Reusable blueprint for bulk-creating a block of organized-play tables.
+// slots_json is a JSON array of ScheduleTemplateSlot (packages/schema).
+export const scheduleTemplates = sqliteTable('schedule_templates', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  name: text('name').notNull(),
+  venueId: integer('venue_id'),
+  timezone: text('timezone').notNull().default('UTC'),
+  freq: text('freq').notNull().default('weekly'),
+  interval: integer('interval').notNull().default(1),
+  count: integer('count').notNull().default(8),
+  eventId: text('event_id').notNull().default(''),
+  seasonId: text('season_id').notNull().default(''),
+  slotsJson: text('slots_json').notNull().default('[]'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
 // Planned (future) game nights — distinct from `sessions` above, which are play
 // logs of sessions that already happened. See modules/sessions/scheduling.
 export const scheduledSessions = sqliteTable('scheduled_sessions', {
@@ -418,6 +541,27 @@ export const scheduledSessions = sqliteTable('scheduled_sessions', {
   cancelledBy: text('cancelled_by'),
   cancellationReason: text('cancellation_reason').notNull().default(''),
   sessionId: integer('session_id'),
+  // Organized-play decoration (issue #588). An occurrence IS a scheduled session:
+  // decorating the existing row keeps RSVPs, reminders, the ICS feed and the
+  // schedule↔recap link working unchanged, and every column below defaults to
+  // empty/absent so a campaign that never opts in sees zero behaviour change.
+  // Absent in older DBs pre-migration; see db.module.ts migrateOrganizedPlay588().
+  seriesId: integer('series_id'),
+  occurrenceIndex: integer('occurrence_index').notNull().default(0),
+  timezone: text('timezone').notNull().default(''), // IANA zone, '' = legacy row
+  localStart: text('local_start').notNull().default(''), // YYYY-MM-DDTHH:MM in `timezone`
+  venueId: integer('venue_id'),
+  roomId: integer('room_id'),
+  assignedDmUserId: text('assigned_dm_user_id').notNull().default(''),
+  capacity: integer('capacity').notNull().default(0), // 0 = unlimited
+  eventId: text('event_id').notNull().default(''),
+  seasonId: text('season_id').notNull().default(''),
+  // Stable RFC 5545 UID + SEQUENCE, so a reschedule rewrites the event in a
+  // subscribed calendar instead of leaving a ghost beside a new one. '' on
+  // pre-#588 rows until migration 0124 backfills the legacy UID string.
+  icsUid: text('ics_uid').notNull().default(''),
+  icsSequence: integer('ics_sequence').notNull().default(0),
+  originalScheduledAt: text('original_scheduled_at'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -1430,6 +1574,10 @@ export const aiDmSeats = sqliteTable('ai_dm_seats', {
   lastTurnAt: text('last_turn_at'),
   /** Proactive DM settings per campaign (#1044). */
   proactiveSettings: text('proactive_settings', { mode: 'json' }).$type<AiDmProactiveSettings>().default({} as any),
+  /** Structured table style (#1049): tone/pacing/verbosity/combat/NPC depth, JSON-encoded.
+   *  One JSON column rather than five scalars, matching `proactive_settings` above — the whole
+   *  block is read, written and (for #1070's cross-campaign reuse) copied as one value. */
+  stylePresets: text('style_presets', { mode: 'json' }).$type<AiDmStylePresets>().default({} as any),
   /** Depth cap for the FIFO action queue when turns are submitted while running (#1045). */
   actionQueueDepth: integer('action_queue_depth').default(8),
   createdAt: text('created_at').notNull(),
@@ -1877,6 +2025,47 @@ export const campaignModuleSnapshots = sqliteTable('campaign_module_snapshots', 
   createdBy: text('created_by').notNull().default(''),
   rolledBackAt: text('rolled_back_at'),
 });
+
+/**
+ * Issue #587: a server operator's REQUEST that a campaign be exported.
+ *
+ * The catalog's whole premise is that an operator can locate and administer a
+ * campaign without being able to read it. Handing the requester an export would
+ * undo that in one call — a campaign export carries every quest, note,
+ * session-zero line and dmSecret there is. So a request is stored as an ASK
+ * addressed to the campaign's own DMs, who approve or deny it and who alone can
+ * then run the existing DM-gated export route. No column here ever holds
+ * exported content, and there is no admin route that returns one.
+ *
+ * `requestedBy` is the audit-actor string (`token:<name>` or a user id), matching
+ * audit_log.actor so the two trails join without a second identity notion.
+ */
+export const campaignExportRequests = sqliteTable(
+  'campaign_export_requests',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    campaignId: integer('campaign_id').notNull(),
+    /** Audit-actor string of the requesting operator. */
+    requestedBy: text('requested_by').notNull(),
+    /** Numeric user id as text when the requester was a real account; '' otherwise. */
+    requestedByUserId: text('requested_by_user_id').notNull().default(''),
+    /** Export profile asked for (see modules/export/export-profiles.ts). */
+    profile: text('profile').notNull().default(''),
+    /** Why the operator is asking. Required at the API layer and shown to the deciding DM. */
+    justification: text('justification').notNull().default(''),
+    /** 'pending' | 'approved' | 'denied' | 'cancelled'. */
+    status: text('status').notNull().default('pending'),
+    decidedBy: text('decided_by'),
+    decidedAt: text('decided_at'),
+    decisionNote: text('decision_note').notNull().default(''),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (t) => ({
+    campaignIdx: index('idx_campaign_export_requests_campaign').on(t.campaignId, t.id),
+    statusIdx: index('idx_campaign_export_requests_status').on(t.status, t.id),
+  }),
+);
 
 // Table safety hold / X-Card (issue #599). One row per campaign carrying the CURRENT stop
 // state, upserted rather than appended: activation must be idempotent and must never fail

@@ -88,7 +88,16 @@ export interface AiEvalHarness {
    */
   configureSeat(
     campaignId: number,
-    patch?: { enabled?: boolean; mode?: 'off' | 'co_dm' | 'driver'; model?: string; instructions?: string; tokenBudget?: number },
+    patch?: {
+      enabled?: boolean;
+      mode?: 'off' | 'co_dm' | 'driver';
+      model?: string;
+      instructions?: string;
+      tokenBudget?: number;
+      /** #1049 structured table style. Loosely typed so a spec can also post an INVALID value
+       *  and assert the strict DTO rejects it. */
+      stylePresets?: Record<string, string>;
+    },
   ): Promise<request.Response>;
   /** Configure a per-campaign `mock` AI provider (needed before switching a seat to Driver mode). */
   configureProvider(campaignId: number): Promise<request.Response>;

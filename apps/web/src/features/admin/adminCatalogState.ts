@@ -1,0 +1,395 @@
+/**
+ * Issue #587 — pure presentation logic for the server-admin campaign catalog.
+ *
+ * Extracted from the page component so it can be exercised without a browser (the
+ * repo's `*.unit.spec.ts` convention) and so the page file stays about layout. Nothing
+ * here is a control: the server re-decides every filter, every permission and every
+ * bulk outcome. These are the courtesies that make the console usable — the difference
+ * between an operator working a queue confidently and one clicking buttons that 400.
+ */
+import type {
+  AiExternalContentPolicy,
+  CampaignCatalogBulkOperation,
+  CampaignCatalogBulkResult,
+  CampaignCatalogEntry,
+  CampaignCatalogSort,
+  ExportProfile,
+} from '@campfire/schema';
+import { CAMPAIGN_CATALOG_NO_OP_REASON } from '@campfire/schema';
+import type { ChipVariant } from '../../components/chipVariants';
+
+export const CATALOG_PAGE_SIZE = 25;
+
+/** Filters the page can express. Mirrors the server's query parameters exactly. */
+export type CatalogFilters = {
+  q: string;
+  status: '' | 'active' | 'paused' | 'completed';
+  moduleInstalled: '' | 'true' | 'false';
+  overQuota: boolean;
+  trashed: boolean;
+};
+
+export const EMPTY_FILTERS: CatalogFilters = {
+  q: '',
+  status: '',
+  moduleInstalled: '',
+  overQuota: false,
+  trashed: false,
+};
+
+/**
+ * Build the catalog query string.
+ *
+ * Empty values are OMITTED rather than sent blank. For the filters this module actually
+ * sends that is merely tidy — `parseCatalogQuery` already maps an empty `status`,
+ * `moduleInstalled`, `overQuota`, `trashed` or `q` to "not filtering".
+ *
+ * It becomes load-bearing the moment anyone adds `ruleSystem` or `packageVersion` to
+ * `CatalogFilters`: those are the two parameters where the server deliberately
+ * distinguishes ABSENT from PRESENT-BUT-EMPTY, because "campaigns with no rule system
+ * set" is a real condition an operator wants to find. Serialising either of those
+ * unconditionally would silently apply a filter nobody chose, so keep the omit-empty
+ * habit here and that addition stays safe.
+ */
+export function buildCatalogQuery(
+  filters: CatalogFilters,
+  page: { offset: number; limit: number; sort: CampaignCatalogSort; order: 'asc' | 'desc' },
+): string {
+  const params = new URLSearchParams();
+  params.set('limit', String(page.limit));
+  params.set('offset', String(page.offset));
+  params.set('sort', page.sort);
+  params.set('order', page.order);
+  if (filters.q.trim() !== '') params.set('q', filters.q.trim());
+  if (filters.status !== '') params.set('status', filters.status);
+  if (filters.moduleInstalled !== '') params.set('moduleInstalled', filters.moduleInstalled);
+  if (filters.overQuota) params.set('overQuota', 'true');
+  if (filters.trashed) params.set('trashed', 'true');
+  return params.toString();
+}
+
+/** Human-readable byte size. Operators scan these columns; raw byte counts do not scan. */
+export function formatBytes(bytes: number): string {
+  if (bytes <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const exponent = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+  const value = bytes / 1024 ** exponent;
+  return `${value >= 10 || exponent === 0 ? Math.round(value) : value.toFixed(1)} ${units[exponent]}`;
+}
+
+/** Storage cell label, including the quota when one is set. */
+export function storageLabel(entry: CampaignCatalogEntry): string {
+  const used = formatBytes(entry.storageBytes);
+  return entry.storageQuotaBytes === null ? used : `${used} / ${formatBytes(entry.storageQuotaBytes)}`;
+}
+
+/**
+ * Which bulk operations the current selection can meaningfully take.
+ *
+ * Purely a courtesy — the server skips ineligible items with a reason regardless. The
+ * point is to stop an operator selecting fifty campaigns and discovering afterwards
+ * that the verb was never applicable to any of them.
+ */
+export function availableOperations(selected: CampaignCatalogEntry[]): CampaignCatalogBulkOperation[] {
+  if (selected.length === 0) return [];
+  const ops: CampaignCatalogBulkOperation[] = [];
+  if (selected.some((c) => c.status !== 'completed')) ops.push('archive');
+  if (selected.some((c) => c.status !== 'paused')) ops.push('pause');
+  if (selected.some((c) => c.status !== 'active')) ops.push('activate');
+  ops.push('reassign_owner', 'set_quota', 'set_policy', 'update_module', 'request_export');
+  return ops;
+}
+
+/**
+ * A last-request-wins gate for overlapping async loads.
+ *
+ * WHY THIS IS NOT COSMETIC ON THIS SCREEN. `load()` fires on every filter, sort and page
+ * change, and nothing sequenced the responses — whichever resolved LAST called `setPage`.
+ * A slow response for a superseded query therefore repainted the table with campaigns
+ * that do not match the controls the operator is looking at.
+ *
+ * On most screens that is a flicker. Here the rows are selectable, and the selection
+ * feeds bulk operations that reassign ownership and change privacy policy across many
+ * campaigns at once. Acting on rows that do not match the visible filters is precisely
+ * the failure this console exists to prevent. It also compounds the retained-selection
+ * model: `selected` deliberately survives pagination, so a stale row that reached the
+ * table could be ticked and then carried through further navigation inside the payload.
+ *
+ * A DEBOUNCE WOULD BE THE WRONG FIX. It narrows the window; it does not close it — any
+ * request still in flight when a newer one starts can still land last. This gate closes
+ * it: each `start()` invalidates every earlier attempt, and a superseded attempt is
+ * refused permission to commit no matter when it resolves.
+ *
+ * Kept here rather than inline in the page so tests drive the real gate. A copy of this
+ * logic living in a spec would pass regardless of what the page does — a trap this PR
+ * has already fallen into once.
+ */
+export type LatestOnlyGate = {
+  /** Begin an attempt. The returned predicate is true only while it is still the newest. */
+  start: () => () => boolean;
+};
+
+export function createLatestOnlyGate(): LatestOnlyGate {
+  let newest = 0;
+  return {
+    start() {
+      const mine = ++newest;
+      return () => mine === newest;
+    },
+  };
+}
+
+/**
+ * The selected campaigns, in a stable order, from the page's selection map.
+ *
+ * SELECTION IS HELD BY VALUE AND SURVIVES PAGINATION. It used to be a `Set<number>` with
+ * the entries derived as `items.filter(...)` over the CURRENT page — so ticking twelve
+ * campaigns across three pages showed a count of four and dispatched four. The other
+ * eight were silently dropped: no error, no skip reason, and their boxes still ticked on
+ * the way back. The console did less than the operator asked and called it success.
+ *
+ * Sorted by id so a batch never depends on the order the boxes were clicked: the payload
+ * and its preview fingerprint stay stable, and re-selecting the same campaigns in a
+ * different order does not read as a different batch.
+ *
+ * Lives here rather than inline in the page so tests exercise the function the page
+ * actually calls — a test that re-implemented this derivation would pass regardless of
+ * what the page did, which is precisely the failure it exists to catch.
+ */
+export function selectedEntriesFrom(
+  selected: ReadonlyMap<number, CampaignCatalogEntry>,
+): CampaignCatalogEntry[] {
+  return [...selected.values()].sort((a, b) => a.id - b.id);
+}
+
+/**
+ * Keep the chosen operation valid as the selection changes.
+ *
+ * `availableOperations` narrows with the selection, but the chooser's state does not
+ * follow it on its own. When the current operation drops out of the list, a `<select>`
+ * with no matching `<option>` renders the FIRST option while still holding the stale
+ * value — so the operator reads "archive" and dispatches "pause". Reconciling on every
+ * change is what stops the control from lying about what the button will do.
+ */
+export function reconcileOperation(
+  current: CampaignCatalogBulkOperation,
+  available: CampaignCatalogBulkOperation[],
+): CampaignCatalogBulkOperation {
+  if (available.length === 0) return current;
+  return available.includes(current) ? current : available[0];
+}
+
+/**
+ * The operation-specific arguments, as the form holds them.
+ *
+ * Everything is a string because these come straight from inputs; `buildBulkPayload`
+ * is the single place that converts and drops the fields the operation does not use.
+ */
+export type BulkArgs = {
+  /** reassign_owner: the user id that becomes dm + primary owner. */
+  toUserId: string;
+  /** set_quota: bytes, or '' to CLEAR the quota (sent as null). */
+  storageQuotaBytes: string;
+  /** set_policy: close public invite links. Only ever closes — see below. */
+  closePublicInvites: boolean;
+  /** set_policy: '' leaves the AI content policy untouched. */
+  aiExternalContentPolicy: '' | AiExternalContentPolicy;
+  /** update_module: rule-pack slug. */
+  ruleSystem: string;
+  /** request_export: which profile the DM is asked to produce. */
+  exportProfile: ExportProfile;
+};
+
+export const EMPTY_BULK_ARGS: BulkArgs = {
+  toUserId: '',
+  storageQuotaBytes: '',
+  closePublicInvites: false,
+  aiExternalContentPolicy: '',
+  ruleSystem: '',
+  exportProfile: 'backup',
+};
+
+/**
+ * Why the current arguments cannot be submitted yet, as a translation key, or null.
+ *
+ * Mirrors `validateBulkArgs` on the server. The server remains the decider — this only
+ * stops the page dispatching a request it can already see will 400, which is the
+ * difference between a disabled button with a reason and a red error after the click.
+ */
+export function bulkArgsError(operation: CampaignCatalogBulkOperation, args: BulkArgs): string | null {
+  switch (operation) {
+    case 'reassign_owner':
+      return /^\d+$/.test(args.toUserId.trim()) && Number(args.toUserId.trim()) > 0
+        ? null
+        : 'admin.catalog.args.toUserIdRequired';
+    case 'set_quota': {
+      const raw = args.storageQuotaBytes.trim();
+      if (raw === '') return null; // '' is a deliberate "clear the quota", sent as null
+      return /^\d+$/.test(raw) ? null : 'admin.catalog.args.quotaInvalid';
+    }
+    case 'set_policy':
+      // The server requires at least one of the two policy fields.
+      return args.closePublicInvites || args.aiExternalContentPolicy !== ''
+        ? null
+        : 'admin.catalog.args.policyRequired';
+    case 'update_module':
+      return args.ruleSystem.trim() === '' ? 'admin.catalog.args.ruleSystemRequired' : null;
+    case 'request_export':
+      return null; // exportProfile always holds a valid enum value; `reason` is checked below
+    default:
+      return null;
+  }
+}
+
+/**
+ * The exact request body for a bulk run.
+ *
+ * Built here rather than inline in the page so the "which operation carries which
+ * argument" mapping is unit-testable against the server's DTO — four of the five
+ * argument-taking operations used to send nothing but `operation`/`campaignIds`/
+ * `dryRun`/`reason`, so every one of them 400'd even as a dry run.
+ */
+export function buildBulkPayload(
+  operation: CampaignCatalogBulkOperation,
+  campaignIds: number[],
+  dryRun: boolean,
+  reason: string,
+  args: BulkArgs,
+  /**
+   * The dry run this apply is executing, when there is one. Its per-item
+   * `stateVersion`s ride along as preconditions so the server applies the plan that was
+   * PREVIEWED rather than replanning from state that has moved since — a DM reactivating
+   * a completed campaign between preview and apply otherwise turns a `skipped` verdict
+   * into a real archive nobody saw. Omitted on the dry run itself, which has nothing to
+   * pin yet.
+   */
+  preview?: CampaignCatalogBulkResult | null,
+): Record<string, unknown> {
+  const body: Record<string, unknown> = { operation, campaignIds, dryRun, reason };
+  if (!dryRun && preview) {
+    const selected = new Set(campaignIds);
+    const preconditions = preview.results
+      .filter((r) => selected.has(r.campaignId) && r.stateVersion !== '')
+      .map((r) => ({ campaignId: r.campaignId, stateVersion: r.stateVersion }));
+    if (preconditions.length > 0) body.preconditions = preconditions;
+  }
+  switch (operation) {
+    case 'reassign_owner':
+      body.toUserId = Number(args.toUserId.trim());
+      break;
+    case 'set_quota': {
+      const raw = args.storageQuotaBytes.trim();
+      // '' means CLEAR, which the server spells `null` — not "argument omitted".
+      body.storageQuotaBytes = raw === '' ? null : Number(raw);
+      break;
+    }
+    case 'set_policy':
+      // Only ever `false`. The catalog can close public invites but not open them:
+      // enabling is gated on the campaign being active and untrashed, and arming the
+      // flag from here would revive every retained link on the next `activate`.
+      if (args.closePublicInvites) body.publicInvitesEnabled = false;
+      if (args.aiExternalContentPolicy !== '') body.aiExternalContentPolicy = args.aiExternalContentPolicy;
+      break;
+    case 'update_module':
+      body.ruleSystem = args.ruleSystem.trim();
+      break;
+    case 'request_export':
+      body.exportProfile = args.exportProfile;
+      break;
+    default:
+      break;
+  }
+  return body;
+}
+
+/**
+ * A stable fingerprint of everything a bulk run would send, minus `dryRun`.
+ *
+ * THE DRY RUN IS ONLY A SAFETY PROPERTY IF APPLY RUNS THE THING THAT WAS PREVIEWED.
+ * "A preview exists" is not the same claim as "the preview describes what Apply will
+ * do", and the gap between them is where an operator previews a reassignment to Alice,
+ * edits the owner to Bob, and Apply proceeds against Bob having shown them Alice.
+ *
+ * Comparing fingerprints rather than clearing the preview on each individual edit is
+ * deliberate: a clear-call has to be remembered for every field that can vary, and this
+ * page has already demonstrated twice that it will not be. A fingerprint covers the
+ * fields that exist today, the ones someone adds tomorrow, and `reason` — which the
+ * original invalidation also missed — because it is derived from the payload builder
+ * itself rather than from a list maintained by hand.
+ *
+ * `dryRun` is excluded because it is the one field that legitimately differs between the
+ * preview and the apply.
+ */
+export function bulkPayloadFingerprint(
+  operation: CampaignCatalogBulkOperation,
+  campaignIds: number[],
+  reason: string,
+  args: BulkArgs,
+): string {
+  // Ids sorted so a different selection ORDER is not mistaken for a different batch.
+  const sortedIds = [...campaignIds].sort((a, b) => a - b);
+  const body = buildBulkPayload(operation, sortedIds, true, reason, args);
+  delete body.dryRun;
+  // Key order fixed, so two equal payloads always produce the same string.
+  return JSON.stringify(Object.entries(body).sort(([a], [b]) => a.localeCompare(b)));
+}
+
+/**
+ * True when a bulk result changed nothing BECAUSE the campaigns were already in the
+ * requested state — the one situation in which the reassuring "nothing would change"
+ * hint is a true statement.
+ *
+ * THE COUNTS DO NOT CARRY THE CAUSE. This used to be `applied === 0 && wouldApply === 0`,
+ * which is satisfied just as well by a batch in which every single item FAILED. The hint
+ * it drives is not a count, it is a claim about why — "the selected campaigns are already
+ * in this state" — and it was printed in bold above a list of failures, telling an
+ * operator that nothing needed doing at the exact moment everything had gone wrong.
+ *
+ * So the cause is now read from the evidence for it: no failures, and every skip carrying
+ * the server's own no-op reason. An ineligible campaign, a stale preview, or a trashed
+ * row all skip for reasons that are NOT "already in this state", and none of them should
+ * be summarised as if they were; they are visible per-item, which is where a reason that
+ * differs per campaign belongs.
+ */
+export function isNoOpResult(result: CampaignCatalogBulkResult): boolean {
+  if (result.applied !== 0 || result.wouldApply !== 0 || result.failed !== 0) return false;
+  const skips = result.results.filter((r) => r.outcome === 'skipped');
+  return skips.length > 0 && skips.every((r) => r.reason === CAMPAIGN_CATALOG_NO_OP_REASON);
+}
+
+/** Chip variant for a per-item bulk outcome, from the shared chip palette. */
+export function outcomeVariant(outcome: string): ChipVariant {
+  switch (outcome) {
+    case 'applied':
+      return 'completed';
+    // A dry-run row is a proposal in the literal sense — something that has not
+    // happened yet and is waiting on a human to confirm it. Reusing the proposal chip
+    // keeps that reading consistent with the rest of the app.
+    case 'would_apply':
+      return 'proposal';
+    case 'skipped':
+      return 'neutral';
+    case 'failed':
+      return 'failed';
+    default:
+      return 'neutral';
+  }
+}
+
+/**
+ * Whether a row's displayed name is a privacy placeholder rather than the real name.
+ * The page badges these so an operator never mistakes `Campaign #42` for a table
+ * someone actually named that.
+ */
+export function isPlaceholderName(entry: CampaignCatalogEntry): boolean {
+  return entry.nameRedacted;
+}
+
+/** Page count for the offset pager, floor 1 so an empty catalog still reads "1 of 1". */
+export function pageCount(total: number, limit: number): number {
+  return Math.max(1, Math.ceil(total / Math.max(1, limit)));
+}
+
+export function currentPage(offset: number, limit: number): number {
+  return Math.floor(offset / Math.max(1, limit)) + 1;
+}

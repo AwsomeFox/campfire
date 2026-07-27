@@ -133,6 +133,13 @@ import { FOG_HIDDEN_TOKEN_LABEL, partitionMapTokens } from './mapTokenPlacement'
 import { gridCellRevealRect } from './fogGridReveal';
 import { combatantsInAoe, type AoeHitLayout, type AoeHitTestContext } from './aoeHitTest';
 import {
+  buildAoeDamageApplications,
+  normalizeDirectDamageType,
+  type DamageSaveOutcome,
+  type DirectDamageMetadata,
+  type TargetDamageApplication,
+} from './directDamage';
+import {
   calibrationToPx,
   clampPercent,
   computeContainedRect,
@@ -959,11 +966,14 @@ export default function RunSessionPage() {
   // A damage/heal amount just rolled from a character card, awaiting a one-tap target
   // pick (issue: wire actions → dice → damage). Cleared on apply or dismiss.
   const [pendingApply, setPendingApply] = useState<{
+    id: number;
     amount: number;
     label: string;
+    diceTotal?: number;
     /** Combatant whose card rolled the damage — attributed as the combat-log actor when set. */
     actorCombatantId?: number;
   } | null>(null);
+  const pendingApplySequence = useRef(0);
   /** Live map layout from BattleMap for AoE hit-testing (issue #626). */
   const [aoeHitLayout, setAoeHitLayout] = useState<AoeHitLayout | null>(null);
   // Issue #414: structured action Use flow — pick targets, preview, apply, undo.
@@ -1261,8 +1271,8 @@ export default function RunSessionPage() {
   // A character card rolled damage — surface the one-tap "apply to target" bar. A
   // non-positive total (a 0/negative damage expr) has nothing to apply, so clear any
   // prior pending amount rather than leaving a stale bar from an earlier roll.
-  const onApplyDamageRolled = useCallback((amount: number, label: string, actorCombatantId?: number) => {
-    setPendingApply(amount > 0 ? { amount, label, actorCombatantId } : null);
+  const onApplyDamageRolled = useCallback((amount: number, label: string, diceTotal: number | undefined, actorCombatantId?: number) => {
+    setPendingApply(amount > 0 ? { id: ++pendingApplySequence.current, amount, label, diceTotal, actorCombatantId } : null);
   }, []);
 
   useRollApplyDamageBridge(encounter?.status === 'running' ? onApplyDamageRolled : undefined);
@@ -1458,22 +1468,38 @@ export default function RunSessionPage() {
       combatantId,
       delta,
       actorId,
+      damageType,
+      saveOutcome,
+      isCrit,
+      damageDice,
       idempotencyKey,
     }: {
       combatantId: number;
       delta: number;
       actorId?: number;
+      damageType?: string;
+      saveOutcome?: 'full' | 'half';
+      isCrit?: boolean;
+      damageDice?: number;
       idempotencyKey: string;
     }) =>
       api.patch(
         `${API}/encounters/${eid}/combatants/${combatantId}`,
-        hpPatchWithActor({ hpDelta: delta, idempotencyKey }, actorId, combatantId, isDm),
+        hpPatchWithActor({ hpDelta: delta, damageType, saveOutcome, isCrit, damageDice, idempotencyKey }, actorId, combatantId, isDm),
       ),
-    onMutate: async ({ combatantId, delta }) => {
+    onMutate: async ({ combatantId, delta, damageType, saveOutcome, isCrit, damageDice }) => {
       setActionError(null);
       await queryClient.cancelQueries({ queryKey: queryKeys.encounter(eid) });
       const previous = queryClient.getQueryData<EncounterWithCombatants>(queryKeys.encounter(eid));
-      if (previous) {
+      // Defence data lives in the server's authoritative statblock.  Do not briefly
+      // show an incorrect local HP total when damage rules are active; refetch settles it.
+      if (
+        previous &&
+        damageType === undefined &&
+        saveOutcome === undefined &&
+        isCrit === undefined &&
+        damageDice === undefined
+      ) {
         queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), {
           ...previous,
           combatants: previous.combatants.map((c) => (c.id === combatantId ? applyHpDelta(c, delta, ruleSystem) : c)),
@@ -1499,13 +1525,26 @@ export default function RunSessionPage() {
   });
 
   const applyHpDeltaBulk = useCallback(
-    async (combatantIds: readonly number[], delta: number, actorId?: number) => {
-      if (combatantIds.length === 0) return;
+    async (
+      applications: readonly TargetDamageApplication[],
+      delta: number,
+      actorId?: number,
+    ) => {
+      if (applications.length === 0) return;
       setActionError(null);
       await queryClient.cancelQueries({ queryKey: queryKeys.encounter(eid) });
       const previous = queryClient.getQueryData<EncounterWithCombatants>(queryKeys.encounter(eid));
-      const targets = new Set(combatantIds);
-      if (previous) {
+      const targets = new Set(applications.map(({ combatantId }) => combatantId));
+      const hasDamageMetadata = applications.some(({ damage }) =>
+        damage.damageType !== undefined ||
+        damage.saveOutcome !== undefined ||
+        damage.isCrit !== undefined ||
+        damage.damageDice !== undefined
+      );
+      if (
+        previous &&
+        !hasDamageMetadata
+      ) {
         queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), {
           ...previous,
           combatants: previous.combatants.map((c) =>
@@ -1524,11 +1563,11 @@ export default function RunSessionPage() {
       // itself and is deliberately left out of this change.
       const bulkOperationId = newOperationId();
       try {
-        for (const combatantId of combatantIds) {
+        for (const { combatantId, damage } of applications) {
           await api.patch(
             `${API}/encounters/${eid}/combatants/${combatantId}`,
             hpPatchWithActor(
-              { hpDelta: delta, idempotencyKey: `${bulkOperationId}:${combatantId}` },
+              { hpDelta: delta, ...damage, idempotencyKey: `${bulkOperationId}:${combatantId}` },
               actorId,
               combatantId,
               isDm,
@@ -2365,8 +2404,11 @@ export default function RunSessionPage() {
 
       {pendingApply && (
         <ApplyDamageBar
+          key={pendingApply.id}
           amount={pendingApply.amount}
           label={pendingApply.label}
+          diceTotal={pendingApply.diceTotal}
+          ruleSystem={campaign?.ruleSystem}
           targets={orderedCombatants.filter((c) => canEditCombatantPermission(c) && c.hpCurrent != null)}
           applyDisabled={riskyBlocked}
           aoeTemplates={encounter.aoe ?? []}
@@ -2388,14 +2430,14 @@ export default function RunSessionPage() {
               : null
           }
           isStarfinder={isStarfinder}
-          onApply={(combatantId, delta) => {
+          onApply={(combatantId, delta, damage) => {
             const actorId = hpLogActorId(pendingApply.actorCombatantId ?? currentCombatantId, combatantId);
-            hpDelta.mutate({ combatantId, delta, actorId });
+            hpDelta.mutate({ combatantId, delta, actorId, ...damage });
             setPendingApply(null);
           }}
-          onApplyToAll={(combatantIds, delta) => {
+          onApplyToAll={(applications, delta) => {
             const actorId = pendingApply.actorCombatantId ?? currentCombatantId ?? undefined;
-            void applyHpDeltaBulk(combatantIds, delta, actorId)
+            void applyHpDeltaBulk(applications, delta, actorId)
               .then(() => setPendingApply(null))
               .catch(() => undefined);
           }}
@@ -2480,7 +2522,7 @@ export default function RunSessionPage() {
               // Omit campaignId while sheets are stale so click-to-roll cannot use obsolete mods (#421).
               campaignId={sheetsInteractive ? cid : undefined}
               onRollError={surfaceActionError}
-              onApplyDamage={(amount, label) => onApplyDamageRolled(amount, label, c.id)}
+              onApplyDamage={(amount, label, diceTotal) => onApplyDamageRolled(amount, label, diceTotal, c.id)}
               onUseAction={
                 canEditCombatant(c) && c.characterId != null
                   ? (actionIndex) => {
@@ -5126,6 +5168,8 @@ export function BattleMap({
 function ApplyDamageBar({
   amount,
   label,
+  diceTotal,
+  ruleSystem,
   targets,
   aoeTemplates = [],
   aoeHitContext,
@@ -5137,18 +5181,34 @@ function ApplyDamageBar({
 }: {
   amount: number;
   label: string;
+  diceTotal?: number;
+  ruleSystem?: string | null;
   targets: Combatant[];
   aoeTemplates?: AoeTemplate[];
   aoeHitContext?: AoeHitTestContext | null;
   isStarfinder?: boolean;
   applyDisabled?: boolean;
-  onApply: (combatantId: number, delta: number) => void;
-  onApplyToAll: (combatantIds: number[], delta: number) => void;
+  onApply: (combatantId: number, delta: number, damage: DirectDamageMetadata) => void;
+  onApplyToAll: (applications: TargetDamageApplication[], delta: number) => void;
   onDismiss: () => void;
 }) {
   const [mode, setMode] = useState<'damage' | 'heal'>('damage');
   const [targetAc, setTargetAc] = useState<'KAC' | 'EAC'>('KAC');
+  const [damageType, setDamageType] = useState('');
+  const [saveOutcome, setSaveOutcome] = useState<DamageSaveOutcome>('full');
+  const [aoeSaveOutcomes, setAoeSaveOutcomes] = useState<Partial<Record<number, DamageSaveOutcome>>>({});
+  const [isCrit, setIsCrit] = useState(false);
   const delta = mode === 'heal' ? amount : -amount;
+  const damageTypes = ruleSystemAdapter(ruleSystem).damageTypes ?? [];
+  const supportsDamageRules = ruleSystemAdapter(ruleSystem).supportsDirectDamageRules === true;
+  const damage = mode === 'damage' && supportsDamageRules
+    ? {
+        damageType: normalizeDirectDamageType(damageType),
+        saveOutcome: saveOutcome === 'half' ? ('half' as const) : undefined,
+        isCrit: isCrit && diceTotal !== undefined ? true : undefined,
+        damageDice: isCrit && diceTotal !== undefined ? diceTotal : undefined,
+      }
+    : {};
   return (
     <div
       className="cf-inset"
@@ -5184,6 +5244,32 @@ function ApplyDamageBar({
           </button>
         ))}
       </div>
+      {mode === 'damage' && supportsDamageRules && (
+        <div className="flex items-center gap-2 flex-wrap" aria-label="Damage modifiers">
+          <label className="text-muted" style={{ fontSize: 11.5 }}>
+            Type{' '}
+            {damageTypes.length > 0 ? (
+              <select value={damageType} onChange={(event) => setDamageType(event.target.value)} aria-label="Damage type">
+                <option value="">untyped</option>
+                {damageTypes.map((type) => <option key={type} value={type}>{type}</option>)}
+              </select>
+            ) : (
+              <input value={damageType} onChange={(event) => setDamageType(event.target.value)} aria-label="Damage type" placeholder="untyped" maxLength={24} />
+            )}
+          </label>
+          <label className="text-muted" style={{ fontSize: 11.5 }}>
+            Save{' '}
+            <select value={saveOutcome} onChange={(event) => setSaveOutcome(event.target.value as DamageSaveOutcome)} aria-label="Save outcome">
+              <option value="full">full damage</option>
+              <option value="half">saved — half</option>
+            </select>
+          </label>
+          <button type="button" className="btn btn-ghost cf-target-44" aria-pressed={isCrit} disabled={diceTotal === undefined} onClick={() => setIsCrit((value) => !value)} title={diceTotal === undefined ? 'Critical damage requires a dice roll breakdown' : 'Double rolled dice, not flat modifiers'}>
+            Critical{isCrit ? ' × dice' : ''}
+          </button>
+          {(damageType || saveOutcome === 'half' || isCrit) && <span className="text-muted" style={{ fontSize: 11.5 }}>Rules modifiers apply per target.</span>}
+        </div>
+      )}
       {isStarfinder && (
         <div className="seg inline-flex" role="group" aria-label="Target AC" style={{ gap: 4 }}>
           {(['KAC', 'EAC'] as const).map((ac) => (
@@ -5227,7 +5313,7 @@ function ApplyDamageBar({
                 title={`${mode === 'heal' ? 'Heal' : 'Deal'} ${amount} to ${c.name}${acLabel}`}
                 disabled={applyDisabled}
                 data-testid={`apply-damage-target-${c.id}`}
-                onClick={() => onApply(c.id, delta)}
+                onClick={() => onApply(c.id, delta, damage)}
               >
                 {c.name}{acLabel}
               </button>
@@ -5244,24 +5330,50 @@ function ApplyDamageBar({
             {aoeTemplates.map((t) => {
               const affectedCombatants = combatantsInAoe(targets, t, aoeHitContext);
               const buttonLabel = `Apply to all in ${t.shape} (${t.sizeFt} ft)`;
+              const applications = mode === 'damage' && supportsDamageRules
+                ? buildAoeDamageApplications(
+                    affectedCombatants.map((c) => c.id),
+                    damage,
+                    saveOutcome,
+                    aoeSaveOutcomes,
+                  )
+                : affectedCombatants.map((c) => ({ combatantId: c.id, damage: {} }));
               return (
-                <button
-                  key={t.id}
-                  type="button"
-                  className="btn btn-secondary cf-target-44"
-                  style={{ fontSize: 12, padding: '0 12px' }}
-                  disabled={applyDisabled || affectedCombatants.length === 0}
-                  title={
-                    affectedCombatants.length === 0
-                      ? `No editable targets inside this ${t.shape} template`
-                      : `${mode === 'heal' ? 'Heal' : 'Deal'} ${amount} to ${affectedCombatants.map((c) => c.name).join(', ')}`
-                  }
-                  data-testid={`apply-damage-aoe-${t.id}`}
-                  onClick={() => onApplyToAll(affectedCombatants.map((c) => c.id), delta)}
-                >
-                  {buttonLabel}
-                  {affectedCombatants.length > 0 ? ` (${affectedCombatants.length})` : ''}
-                </button>
+                <div key={t.id} className="flex items-center gap-2 flex-wrap">
+                  <button
+                    type="button"
+                    className="btn btn-secondary cf-target-44"
+                    style={{ fontSize: 12, padding: '0 12px' }}
+                    disabled={applyDisabled || affectedCombatants.length === 0}
+                    title={
+                      affectedCombatants.length === 0
+                        ? `No editable targets inside this ${t.shape} template`
+                        : `${mode === 'heal' ? 'Heal' : 'Deal'} ${amount} to ${affectedCombatants.map((c) => c.name).join(', ')}`
+                    }
+                    data-testid={`apply-damage-aoe-${t.id}`}
+                    onClick={() => onApplyToAll(applications, delta)}
+                  >
+                    {buttonLabel}
+                    {affectedCombatants.length > 0 ? ` (${affectedCombatants.length})` : ''}
+                  </button>
+                  {mode === 'damage' && supportsDamageRules && affectedCombatants.map((c) => (
+                    <label key={c.id} className="text-muted" style={{ fontSize: 11.5 }}>
+                      {c.name}{' '}
+                      <select
+                        value={aoeSaveOutcomes[c.id] ?? saveOutcome}
+                        onChange={(event) => {
+                          const outcome = event.target.value as DamageSaveOutcome;
+                          setAoeSaveOutcomes((current) => ({ ...current, [c.id]: outcome }));
+                        }}
+                        aria-label={`Save outcome for ${c.name} in ${t.shape} template`}
+                        data-testid={`aoe-save-outcome-${t.id}-${c.id}`}
+                      >
+                        <option value="full">full damage</option>
+                        <option value="half">saved — half</option>
+                      </select>
+                    </label>
+                  ))}
+                </div>
               );
             })}
           </div>
@@ -5347,7 +5459,7 @@ function CombatantRow({
   campaignId: number | undefined;
   onRollError: (msg: string | null) => void;
   /** A damage total rolled from the card, to be applied to a target combatant. */
-  onApplyDamage: (amount: number, label: string) => void;
+  onApplyDamage: (amount: number, label: string, diceTotal?: number) => void;
   /** Issue #414 / #425: open the structured action Use flow for a resolvable action index. */
   onUseAction?: (actionIndex: number) => void;
   onUseMonsterAction?: (actionIndex: number, actionName: string, spec: ActionSpec) => void;

@@ -1,0 +1,1723 @@
+import path from 'node:path';
+import Database from 'better-sqlite3';
+import request from 'supertest';
+import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
+import { AuditService } from '../src/modules/audit/audit.service';
+import { CampaignEventsService } from '../src/modules/events/campaign-events.service';
+import { NotificationsService } from '../src/modules/notifications/notifications.service';
+import { AdminCatalogService } from '../src/modules/admin-catalog/admin-catalog.service';
+import type { RequestUser } from '../src/common/user.types';
+
+/**
+ * Issue #587 — catalog paging/filtering (criterion 2) and bulk lifecycle (criterion 3).
+ *
+ * The isolation suite next door proves the catalog cannot READ a campaign. This one
+ * proves it is actually useful for the job it exists to do, and that the two properties
+ * the issue calls out specifically really hold:
+ *
+ *  - Pagination and filtering are SERVER-side. The finding names
+ *    `campaigns.service.ts` loading every campaign and filtering in memory; a catalog
+ *    that did the same thing behind a nicer URL would have fixed nothing. `total` must
+ *    therefore be a real count over the filtered set, not `items.length`, and a page
+ *    must not be a slice of a fully-materialised list.
+ *  - Bulk operations dry-run by default and are atomic PER ITEM. A batch containing one
+ *    bad campaign must apply the good ones, report the bad one, and still return 200 —
+ *    a bulk archive that half-applies behind a 500 leaves an operator with no idea what
+ *    happened.
+ */
+describe('Issue #587: campaign catalog paging, filtering and bulk lifecycle (e2e)', () => {
+  let ctx: TestAppContext;
+  let server: import('http').Server;
+  let admin: ReturnType<typeof request.agent>;
+  let dmA: ReturnType<typeof request.agent>;
+  let dmB: ReturnType<typeof request.agent>;
+  let dmAId: number;
+  let dmBId: number;
+  /** Campaigns owned by dmA, in creation order. */
+  const aIds: number[] = [];
+  let bId: number;
+
+  async function newUser(username: string, password: string) {
+    const created = await admin.post('/api/v1/users').send({ username, password, serverRole: 'user' });
+    expect(created.status).toBe(201);
+    const agent = request.agent(server);
+    const login = await agent.post('/api/v1/auth/login').send({ username, password });
+    expect(login.status).toBe(201);
+    return { agent, id: created.body.id as number };
+  }
+
+  async function catalog(query: Record<string, string | number> = {}) {
+    const res = await admin.get('/api/v1/admin/campaigns').query(query);
+    expect(res.status).toBe(200);
+    return res.body as {
+      items: Array<Record<string, unknown>>;
+      total: number;
+      hasMore: boolean;
+      limit: number;
+      offset: number;
+      sort: string;
+      order: string;
+    };
+  }
+
+  async function bulk(body: Record<string, unknown>) {
+    const res = await admin.post('/api/v1/admin/campaigns/bulk').send(body);
+    return res;
+  }
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    server = ctx.app.getHttpServer();
+
+    admin = request.agent(server);
+    const setup = await admin.post('/api/v1/auth/setup').send({ username: 'cat2-admin', password: 'admin-password-1' });
+    expect(setup.status).toBe(201);
+
+    const a = await newUser('cat2-dm-a', 'dm-password-1');
+    dmA = a.agent;
+    dmAId = a.id;
+    const b = await newUser('cat2-dm-b', 'dm-password-2');
+    dmB = b.agent;
+    dmBId = b.id;
+
+    for (let i = 0; i < 6; i += 1) {
+      const res = await dmA.post('/api/v1/campaigns').send({ name: `Table A${i}` });
+      expect(res.status).toBe(201);
+      aIds.push(res.body.id);
+    }
+    const bCamp = await dmB.post('/api/v1/campaigns').send({ name: 'Table B0' });
+    expect(bCamp.status).toBe(201);
+    bId = bCamp.body.id;
+
+    // Pin B0 to a rule pack that is NOT installed, out of band.
+    //
+    // The DM-facing create/update route validates that `ruleSystem` names an installed
+    // pack, so this state cannot be reached through the API — but it is reached in the
+    // real world the other way round: the campaign is created while the pack is
+    // installed, and the pack is later uninstalled (or the campaign is imported from a
+    // server that had it). That orphaned-module condition is precisely what the
+    // catalog's `moduleInstalled=false` filter and the `update_module` bulk operation
+    // exist to find and fix, so the fixture has to create it directly.
+    const db = new Database(path.join(ctx.dataDir, 'campfire.db'));
+    try {
+      db.prepare('UPDATE campaigns SET rule_system = ? WHERE id = ?').run('srd-5e', bId);
+    } finally {
+      db.close();
+    }
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  // -------------------------------------------------------------------------
+  // Criterion 1 + 2: the catalog spans campaigns the admin is not a member of,
+  // and pages/filters in SQL.
+  // -------------------------------------------------------------------------
+
+  describe('scoped catalog with server-side paging', () => {
+    it('lists campaigns the admin is not a member of, which the member-scoped list does not', async () => {
+      const member = await admin.get('/api/v1/campaigns');
+      expect(member.status).toBe(200);
+      expect(member.body).toHaveLength(0);
+
+      const page = await catalog({ limit: 100 });
+      expect(page.total).toBe(7);
+      expect(page.items).toHaveLength(7);
+    });
+
+    it('reports a real total over the whole filtered set, not the size of the page', async () => {
+      const page = await catalog({ limit: 2 });
+      expect(page.items).toHaveLength(2);
+      expect(page.total).toBe(7); // the count is over all matching rows, not this slice
+      expect(page.hasMore).toBe(true);
+      expect(page.limit).toBe(2);
+      expect(page.offset).toBe(0);
+    });
+
+    it('pages without repeating or skipping a row', async () => {
+      const seen: number[] = [];
+      for (let offset = 0; offset < 8; offset += 3) {
+        const page = await catalog({ limit: 3, offset, sort: 'id', order: 'asc' });
+        seen.push(...page.items.map((i) => i.id as number));
+      }
+      expect(seen).toHaveLength(7);
+      expect(new Set(seen).size).toBe(7);
+      expect([...seen].sort((x, y) => x - y)).toEqual([...aIds, bId].sort((x, y) => x - y));
+    });
+
+    it('reports hasMore=false on the terminal page', async () => {
+      const page = await catalog({ limit: 3, offset: 6, sort: 'id', order: 'asc' });
+      expect(page.items).toHaveLength(1);
+      expect(page.hasMore).toBe(false);
+    });
+
+    it('clamps an oversized limit rather than letting the catalog be bulk-dumped', async () => {
+      const page = await catalog({ limit: 5000 });
+      expect(page.limit).toBe(100);
+    });
+
+    it('rejects nonsense query values instead of silently ignoring them', async () => {
+      for (const query of [{ overQuota: 'banana' }, { sort: 'colour' }, { order: 'sideways' }, { limit: 'x' }]) {
+        const res = await admin.get('/api/v1/admin/campaigns').query(query);
+        expect(res.status).toBe(400);
+      }
+    });
+
+    it('is refused entirely to a non-admin', async () => {
+      const res = await dmA.get('/api/v1/admin/campaigns');
+      expect(res.status).toBe(403);
+    });
+  });
+
+  describe('filters are real predicates', () => {
+    it('filters by primary DM, returning only that DM\'s campaigns', async () => {
+      const page = await catalog({ primaryDmUserId: dmBId, limit: 100 });
+      expect(page.total).toBe(1);
+      expect(page.items[0].id).toBe(bId);
+      expect((page.items[0].primaryDm as { userId: number }).userId).toBe(dmBId);
+
+      // The other half of the predicate. Asserting only dmB's single row would also pass
+      // for a filter that ignored the parameter and happened to return one campaign, so
+      // check that the two filters PARTITION the catalog: dmA gets all of hers and none
+      // of dmB's, and the two totals sum to the unfiltered total.
+      const mine = await catalog({ primaryDmUserId: dmAId, limit: 100 });
+      expect(mine.total).toBe(aIds.length);
+      expect((mine.items.map((c) => c.id) as number[]).slice().sort((x, y) => x - y)).toEqual(
+        aIds.slice().sort((x, y) => x - y),
+      );
+      expect(mine.items.every((c) => (c.primaryDm as { userId: number }).userId === dmAId)).toBe(true);
+      expect(mine.items.some((c) => c.id === bId)).toBe(false);
+
+      const all = await catalog({ limit: 100 });
+      expect(all.total).toBe(mine.total + page.total);
+    });
+
+    it('filters on the SAME primary DM the row displays, not merely any DM', async () => {
+      // `resolvePrimaryDms` picks exactly ONE seat per campaign for the `primaryDm`
+      // column (primary_owner first, then oldest seat). The filter used to test
+      // membership instead — "is this user any dm here" — so filtering by a SECONDARY DM
+      // returned rows whose displayed primary DM was somebody else. One parameter name
+      // answering two different questions, agreeing only on single-DM campaigns.
+      const target = aIds[0];
+      const db = new Database(path.join(ctx.dataDir, 'campfire.db'));
+      try {
+        // dmB becomes a co-DM on one of dmA's campaigns, WITHOUT the primary-owner seat.
+        db.prepare(
+          `INSERT INTO campaign_members (campaign_id, user_id, role, is_primary_owner, created_at, updated_at)
+           VALUES (?, ?, 'dm', 0, ?, ?)`,
+        ).run(target, dmBId, new Date().toISOString(), new Date().toISOString());
+      } finally {
+        db.close();
+      }
+
+      try {
+        // dmB is a DM here but NOT the primary one, so this campaign must not appear.
+        const asSecondary = await catalog({ primaryDmUserId: dmBId, limit: 100 });
+        expect(asSecondary.items.map((i) => i.id)).not.toContain(target);
+        // `total` runs the same predicate, so it must agree with the page.
+        expect(asSecondary.total).toBe(asSecondary.items.length);
+
+        // dmA still holds the primary seat, so it still appears under her.
+        const asPrimary = await catalog({ primaryDmUserId: dmAId, limit: 100 });
+        expect(asPrimary.items.map((i) => i.id)).toContain(target);
+
+        // The invariant that actually matters, stated directly: every row returned by
+        // this filter displays the DM that was filtered on.
+        for (const dmId of [dmAId, dmBId]) {
+          const page = await catalog({ primaryDmUserId: dmId, limit: 100 });
+          for (const item of page.items) {
+            expect((item.primaryDm as { userId: number }).userId).toBe(dmId);
+          }
+        }
+      } finally {
+        const cleanup = new Database(path.join(ctx.dataDir, 'campfire.db'));
+        try {
+          cleanup
+            .prepare(`DELETE FROM campaign_members WHERE campaign_id = ? AND user_id = ? AND is_primary_owner = 0`)
+            .run(target, dmBId);
+        } finally {
+          cleanup.close();
+        }
+      }
+    });
+
+    it('filters by rule system, and distinguishes "unset" from "not filtering"', async () => {
+      const withPack = await catalog({ ruleSystem: 'srd-5e', limit: 100 });
+      expect(withPack.total).toBe(1);
+      expect(withPack.items[0].id).toBe(bId);
+
+      const unset = await catalog({ ruleSystem: '', limit: 100 });
+      expect(unset.total).toBe(6);
+    });
+
+    it('surfaces campaigns pinned to a module this server cannot serve', async () => {
+      // 'srd-5e' was never installed as a rule pack in this test server, so B0 is
+      // exactly the "pinned to a missing module" condition the filter exists to find.
+      const missing = await catalog({ moduleInstalled: 'false', limit: 100 });
+      expect(missing.items.map((i) => i.id)).toEqual([bId]);
+      expect((missing.items[0].module as { installed: boolean; slug: string })).toMatchObject({
+        installed: false,
+        slug: 'srd-5e',
+      });
+    });
+
+    it('filters by status, and the filter follows a bulk status change', async () => {
+      expect((await catalog({ status: 'active', limit: 100 })).total).toBe(7);
+
+      const res = await bulk({ operation: 'pause', campaignIds: [aIds[0]], dryRun: false, reason: 'filter test' });
+      expect(res.status).toBe(201);
+
+      expect((await catalog({ status: 'active', limit: 100 })).total).toBe(6);
+      const paused = await catalog({ status: 'paused', limit: 100 });
+      expect(paused.items.map((i) => i.id)).toEqual([aIds[0]]);
+      expect(paused.items[0].archived).toBe(true);
+
+      await bulk({ operation: 'activate', campaignIds: [aIds[0]], dryRun: false, reason: 'filter test undo' });
+    });
+
+    it('excludes trashed campaigns unless they are explicitly asked for', async () => {
+      const trashTarget = aIds[5];
+      const del = await dmA.delete(`/api/v1/campaigns/${trashTarget}`);
+      expect([200, 204]).toContain(del.status);
+
+      const live = await catalog({ limit: 100 });
+      expect(live.items.map((i) => i.id)).not.toContain(trashTarget);
+      expect(live.total).toBe(6);
+
+      const trashed = await catalog({ trashed: 'true', limit: 100 });
+      expect(trashed.items.map((i) => i.id)).toEqual([trashTarget]);
+      expect(trashed.items[0].trashed).toBe(true);
+    });
+
+    it('does not let a search term smuggle a trashed campaign past the trash filter', async () => {
+      // REGRESSION (operator precedence). The search predicate is an OR-chain and the
+      // trash/status filters are ANDed alongside it. `AND` binds tighter than `OR`, so
+      // an unparenthesised chain degrades the whole WHERE to
+      //   (deleted_at IS NULL AND status = ? AND <name match>) OR <rule_system match> OR <id match>
+      // and any row matching a trailing branch comes back regardless of the filters the
+      // operator actually set. A soft-deleted campaign surfacing in an admin search is a
+      // disclosure bug, not a cosmetic one, so it is pinned here.
+      const trashTarget = aIds[5]; // trashed by the preceding test
+      const db = new Database(path.join(ctx.dataDir, 'campfire.db'));
+      try {
+        db.prepare('UPDATE campaigns SET rule_system = ? WHERE id = ?').run('trash-probe-system', trashTarget);
+      } finally {
+        db.close();
+      }
+
+      // The rule-system branch of the OR-chain matches this row, and only this row.
+      const search = await catalog({ q: 'trash-probe-system', limit: 100 });
+      expect(search.items.map((i) => i.id)).not.toContain(trashTarget);
+      // `total` is a COUNT over the same predicate, so it leaks the row even when the
+      // page happens not to show it. Both have to hold.
+      expect(search.total).toBe(0);
+
+      // Same again with a status filter present: the shape that makes the precedence
+      // bug reachable with more than one ANDed clause.
+      const filtered = await catalog({ q: 'trash-probe-system', status: 'active', limit: 100 });
+      expect(filtered.items.map((i) => i.id)).not.toContain(trashTarget);
+      expect(filtered.total).toBe(0);
+
+      // …and the numeric-id branch must not become a trash bypass either.
+      const byId = await catalog({ q: String(trashTarget), limit: 100 });
+      expect(byId.items.map((i) => i.id)).not.toContain(trashTarget);
+      expect(byId.total).toBe(0);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Criterion 3: bulk lifecycle with a dry run.
+  // -------------------------------------------------------------------------
+
+  describe('bulk operations', () => {
+    it('dry-runs by DEFAULT when the flag is omitted, and changes nothing', async () => {
+      const res = await bulk({ operation: 'archive', campaignIds: [aIds[1]] });
+      expect(res.status).toBe(201);
+      expect(res.body.dryRun).toBe(true);
+      expect(res.body.wouldApply).toBe(1);
+      expect(res.body.applied).toBe(0);
+      expect(res.body.results[0]).toMatchObject({
+        campaignId: aIds[1],
+        outcome: 'would_apply',
+        field: 'status',
+        before: 'active',
+      });
+      // The preview names EVERY write it would perform, not just the headline one: this
+      // campaign has public invites on, and archiving closes them. Asserted as a prefix
+      // plus the consequence so the test does not re-encode a description that is
+      // deliberately allowed to grow.
+      expect(String(res.body.results[0].after)).toMatch(/^completed/);
+      expect(res.body.results[0].after).toContain('closes public invites');
+
+      const entry = await admin.get(`/api/v1/admin/campaigns/${aIds[1]}`);
+      expect(entry.body.status).toBe('active'); // untouched
+    });
+
+    it('applies for real only when dryRun is explicitly false', async () => {
+      const res = await bulk({
+        operation: 'archive',
+        campaignIds: [aIds[1]],
+        dryRun: false,
+        reason: 'season over',
+      });
+      expect(res.status).toBe(201);
+      expect(res.body.applied).toBe(1);
+      expect(res.body.results[0].outcome).toBe('applied');
+
+      const entry = await admin.get(`/api/v1/admin/campaigns/${aIds[1]}`);
+      expect(entry.body.status).toBe('completed');
+      expect(entry.body.archived).toBe(true);
+      // Archiving also closes public invites — an archived campaign that still accepts
+      // joiners through a live link is the inconsistency migration 0059 exists to fix.
+      expect(entry.body.publicInvitesEnabled).toBe(false);
+    });
+
+    it('is idempotent: re-running reports skipped rather than churning rows', async () => {
+      const res = await bulk({ operation: 'archive', campaignIds: [aIds[1]], dryRun: false, reason: 'again' });
+      expect(res.status).toBe(201);
+      expect(res.body.applied).toBe(0);
+      expect(res.body.skipped).toBe(1);
+      expect(res.body.results[0].reason).toContain('already in the requested state');
+    });
+
+    it('applies the good items and reports the bad one, without failing the batch', async () => {
+      // THE atomicity contract: one nonexistent campaign in a batch of three must not
+      // cost the other two their change, and must not surface as a 500.
+      const missingId = 999_999;
+      const res = await bulk({
+        operation: 'pause',
+        campaignIds: [aIds[2], missingId, aIds[3]],
+        dryRun: false,
+        reason: 'partial batch',
+      });
+      expect(res.status).toBe(201);
+      expect(res.body.applied).toBe(2);
+      expect(res.body.skipped).toBe(1);
+      expect(res.body.failed).toBe(0);
+
+      const byId = Object.fromEntries(
+        (res.body.results as Array<{ campaignId: number; outcome: string; reason: string }>).map((r) => [
+          r.campaignId,
+          r,
+        ]),
+      );
+      expect(byId[aIds[2]].outcome).toBe('applied');
+      expect(byId[aIds[3]].outcome).toBe('applied');
+      expect(byId[missingId].outcome).toBe('skipped');
+      expect(byId[missingId].reason).toContain('not found');
+
+      for (const id of [aIds[2], aIds[3]]) {
+        const entry = await admin.get(`/api/v1/admin/campaigns/${id}`);
+        expect(entry.body.status).toBe('paused');
+      }
+    });
+
+    it('skips a trashed campaign rather than resurrecting it into a lifecycle change', async () => {
+      const res = await bulk({ operation: 'pause', campaignIds: [aIds[5]], dryRun: false, reason: 'trashed' });
+      expect(res.status).toBe(201);
+      expect(res.body.skipped).toBe(1);
+      expect(res.body.results[0].reason).toContain('trash');
+    });
+
+    it('de-duplicates repeated ids in one batch', async () => {
+      const res = await bulk({ operation: 'pause', campaignIds: [aIds[2], aIds[2]], dryRun: true });
+      expect(res.status).toBe(201);
+      expect(res.body.requested).toBe(1);
+    });
+
+    it('reassigns ownership, moving the primary-owner seat atomically', async () => {
+      const target = aIds[4];
+      const res = await bulk({
+        operation: 'reassign_owner',
+        campaignIds: [target],
+        toUserId: dmBId,
+        dryRun: false,
+        reason: 'DM stepped down',
+      });
+      expect(res.status).toBe(201);
+      expect(res.body.applied).toBe(1);
+
+      const entry = await admin.get(`/api/v1/admin/campaigns/${target}`);
+      expect((entry.body.primaryDm as { userId: number; primaryOwner: boolean })).toMatchObject({
+        userId: dmBId,
+        primaryOwner: true,
+      });
+      // Exactly one primary owner survives the move.
+      const members = await dmB.get(`/api/v1/campaigns/${target}/members`);
+      expect(members.status).toBe(200);
+      const owners = (members.body as Array<{ userId: number; primaryOwner?: boolean }>).filter(
+        (m) => m.primaryOwner,
+      );
+      expect(owners).toHaveLength(1);
+      expect(owners[0].userId).toBe(dmBId);
+    });
+
+    it("announces the promotion so the new owner's open tabs stop showing player nav", async () => {
+      // `MembersService.update` emits `membership.updated` on a role change so the
+      // affected member's browsers invalidate their cached /me memberships immediately
+      // (issue #437). The bulk path writes the seat directly and emitted nothing, so a
+      // user promoted to owner kept rendering player-only navigation and could not reach
+      // DM settings until they happened to reload.
+      const target = aIds[0];
+      const events = ctx.app.get(CampaignEventsService);
+      const seen: Array<{ type: string; campaignId: number; userId?: string; role?: string }> = [];
+      const spy = jest
+        .spyOn(events, 'emit')
+        .mockImplementation((event) =>
+          void seen.push(event as unknown as { type: string; campaignId: number }),
+        );
+      try {
+        const res = await bulk({
+          operation: 'reassign_owner',
+          campaignIds: [target],
+          toUserId: dmBId,
+          dryRun: false,
+          reason: 'promotion announcement drill',
+        });
+        expect(res.status).toBe(201);
+        expect(res.body.applied).toBe(1);
+      } finally {
+        spy.mockRestore();
+      }
+
+      const promotion = seen.find((e) => e.type === 'membership.updated' && e.campaignId === target);
+      expect(promotion).toBeDefined();
+      // Addressed to the promoted user, carrying the role their cached /me must learn.
+      expect(promotion!.userId).toBe(String(dmBId));
+      expect(promotion!.role).toBe('dm');
+    });
+
+    it('signals EVERY promoted target, whether the seat was new or already existed', async () => {
+      // The property, not the mechanism. Both branches must tell the promoted user
+      // out-of-band, because `CampaignEventsService.streamFor` filters by campaignId and
+      // the client subscribes only for the campaign it is VIEWING. Being a member is
+      // necessary for that subscription, not sufficient for it to be open — a player
+      // promoted while looking at a different campaign has no subscriber either, which
+      // is why the earlier "existing seats are already covered" split was wrong.
+      const notifications = ctx.app.get(NotificationsService);
+
+      const signalledFor = async (target: number, toUserId: number) => {
+        const seen: Array<{ userId: number | string; campaignId: number }> = [];
+        const spy = jest
+          .spyOn(notifications, 'notifyUser')
+          .mockImplementation(async (userId, campaignId) => {
+            seen.push({ userId, campaignId });
+          });
+        try {
+          const res = await bulk({
+            operation: 'reassign_owner',
+            campaignIds: [target],
+            toUserId,
+            dryRun: false,
+            reason: 'promotion signal drill',
+          });
+          expect(res.status).toBe(201);
+          expect(res.body.applied).toBe(1);
+        } finally {
+          spy.mockRestore();
+        }
+        return seen.some((x) => x.campaignId === target && String(x.userId) === String(toUserId));
+      };
+
+      // (a) A brand-new seat: dmB has no membership on this campaign of dmA's.
+      expect(await signalledFor(aIds[1], dmBId)).toBe(true);
+
+      // (b) An EXISTING seat promoted from player to dm — the case that used to be
+      // silent on the theory that the SSE event would reach them.
+      const existingTarget = aIds[2];
+      const db = new Database(path.join(ctx.dataDir, 'campfire.db'));
+      try {
+        db.prepare(
+          `INSERT INTO campaign_members (campaign_id, user_id, role, is_primary_owner, created_at, updated_at)
+           VALUES (?, ?, 'player', 0, ?, ?)`,
+        ).run(existingTarget, dmBId, new Date().toISOString(), new Date().toISOString());
+      } finally {
+        db.close();
+      }
+      expect(await signalledFor(existingTarget, dmBId)).toBe(true);
+
+      // And the seat really is a dm now, so the signal describes a real change.
+      const members = await dmB.get(`/api/v1/campaigns/${existingTarget}/members`);
+      expect(members.status).toBe(200);
+      const seat = (members.body as Array<{ userId: number; role: string; primaryOwner?: boolean }>).find(
+        (m) => m.userId === dmBId,
+      );
+      expect(seat).toMatchObject({ role: 'dm', primaryOwner: true });
+    });
+
+    it('sets and clears a storage quota, and reports overQuota', async () => {
+      const target = aIds[0];
+      const set = await bulk({
+        operation: 'set_quota',
+        campaignIds: [target],
+        storageQuotaBytes: 1024,
+        dryRun: false,
+        reason: 'quota',
+      });
+      expect(set.status).toBe(201);
+      expect(set.body.applied).toBe(1);
+      let entry = await admin.get(`/api/v1/admin/campaigns/${target}`);
+      expect(entry.body.storageQuotaBytes).toBe(1024);
+      expect(entry.body.overQuota).toBe(false);
+
+      const clear = await bulk({
+        operation: 'set_quota',
+        campaignIds: [target],
+        storageQuotaBytes: null,
+        dryRun: false,
+        reason: 'clear quota',
+      });
+      expect(clear.status).toBe(201);
+      entry = await admin.get(`/api/v1/admin/campaigns/${target}`);
+      expect(entry.body.storageQuotaBytes).toBeNull();
+    });
+
+    it('flags a campaign held over quota by reserved bytes, matching upload enforcement', async () => {
+      // TWO DEFINITIONS OF "USAGE", ONE CONSOLE. `storageBytes` sums committed rows only,
+      // and `overQuota` was derived from it — but quota enforcement in
+      // attachments.service.ts counts committed AND reserved. A campaign whose uploads
+      // the server was actively refusing therefore did not appear under `?overQuota=true`
+      // and showed no chip, which is the one question this column exists to answer.
+      const target = aIds[2];
+      const db = new Database(path.join(ctx.dataDir, 'campfire.db'));
+      try {
+        // A reservation, not a committed file: `storageBytes` must stay 0.
+        db.prepare(
+          `INSERT INTO attachments (campaign_id, uploader_user_id, kind, filename, mime, size, state,
+             created_at, updated_at)
+           VALUES (?, '1', 'image', 'in-flight.png', 'image/png', 4096, 'reserved', ?, ?)`,
+        ).run(target, new Date().toISOString(), new Date().toISOString());
+      } finally {
+        db.close();
+      }
+
+      const set = await bulk({
+        operation: 'set_quota',
+        campaignIds: [target],
+        storageQuotaBytes: 1024,
+        dryRun: false,
+        reason: 'quota below the in-flight reservation',
+      });
+      expect(set.body.applied).toBe(1);
+
+      const entry = await admin.get(`/api/v1/admin/campaigns/${target}`);
+      expect(entry.body.storageBytes).toBe(0); // still nothing stored
+      expect(entry.body.overQuota).toBe(true); // but uploads are being refused
+
+      // And the filter agrees with the column, since both read the same expression.
+      const over = await catalog({ overQuota: 'true', limit: 100 });
+      expect((over.items as Array<{ id: number }>).some((c) => c.id === target)).toBe(true);
+      const under = await catalog({ overQuota: 'false', limit: 100 });
+      expect((under.items as Array<{ id: number }>).some((c) => c.id === target)).toBe(false);
+
+      const db2 = new Database(path.join(ctx.dataDir, 'campfire.db'));
+      try {
+        db2.prepare('DELETE FROM attachments WHERE campaign_id = ?').run(target);
+      } finally {
+        db2.close();
+      }
+      await bulk({
+        operation: 'set_quota',
+        campaignIds: [target],
+        storageQuotaBytes: null,
+        dryRun: false,
+        reason: 'clear the quota again',
+      });
+    });
+
+    it('sets invite and AI policy', async () => {
+      const target = aIds[0];
+      const res = await bulk({
+        operation: 'set_policy',
+        campaignIds: [target],
+        publicInvitesEnabled: false,
+        aiExternalContentPolicy: 'disabled',
+        dryRun: false,
+        reason: 'policy sweep',
+      });
+      expect(res.status).toBe(201);
+      expect(res.body.applied).toBe(1);
+      const entry = await admin.get(`/api/v1/admin/campaigns/${target}`);
+      expect(entry.body.publicInvitesEnabled).toBe(false);
+      expect(entry.body.aiExternalContentPolicy).toBe('disabled');
+    });
+
+    it('still reports what applied when the audit write fails after the change committed', async () => {
+      // Every campaign in a batch commits in its OWN transaction, and the per-item
+      // results are the operator's only record of which ones did. The audit writes all
+      // happen AFTER those commits, so letting one propagate would turn a batch that
+      // really did apply into a 500 with no body: the operator cannot tell what landed,
+      // and retrying is unsafe precisely because some of it already has.
+      const audit = ctx.app.get(AuditService);
+      const spy = jest.spyOn(audit, 'log').mockRejectedValue(new Error('audit table is unavailable'));
+      const target = aIds[2]; // left `paused` by the partial-batch test above
+      try {
+        const res = await bulk({
+          operation: 'activate',
+          campaignIds: [target],
+          dryRun: false,
+          reason: 'audit failure drill',
+        });
+        // Not a 500, and the per-item verdict survived.
+        expect(res.status).toBe(201);
+        expect(res.body.applied).toBe(1);
+        expect(res.body.failed).toBe(0);
+        expect(res.body.results[0]).toMatchObject({ campaignId: target, outcome: 'applied' });
+        // The operator is told the trail is incomplete rather than left to assume it.
+        expect(res.body.results[0].reason).toContain('audit');
+      } finally {
+        spy.mockRestore();
+      }
+
+      // And the change genuinely committed — `applied` was the truthful verdict.
+      const entry = await admin.get(`/api/v1/admin/campaigns/${target}`);
+      expect(entry.body.status).toBe('active');
+      await bulk({ operation: 'pause', campaignIds: [target], dryRun: false, reason: 'audit drill undo' });
+    });
+
+    it('refuses to ENABLE public invites, which would bypass the invite reactivation gate', async () => {
+      // `InvitesService.setPolicy` refuses to enable public invites unless the campaign
+      // is active and untrashed, so that restoring or unarchiving cannot silently
+      // revive retained links. Writing the column from the bulk path would sidestep
+      // that entirely: arm the flag on a paused campaign, then `activate` — whose
+      // status change deliberately preserves the flag — and every link goes live.
+      const target = aIds[1];
+      const paused = await bulk({ operation: 'pause', campaignIds: [target], dryRun: false, reason: 'arm test' });
+      expect(paused.status).toBe(201);
+
+      const armed = await bulk({
+        operation: 'set_policy',
+        campaignIds: [target],
+        publicInvitesEnabled: true,
+        dryRun: false,
+        reason: 'attempt to pre-arm invites',
+      });
+      expect(armed.status).toBe(400);
+
+      // A dry run must not be a way to sneak the same request past the check either.
+      const dry = await bulk({
+        operation: 'set_policy',
+        campaignIds: [target],
+        publicInvitesEnabled: true,
+        dryRun: true,
+        reason: 'attempt to pre-arm invites',
+      });
+      expect(dry.status).toBe(400);
+
+      // The flag really is still off, so a later activate cannot revive anything.
+      await bulk({ operation: 'activate', campaignIds: [target], dryRun: false, reason: 'arm test undo' });
+      const entry = await admin.get(`/api/v1/admin/campaigns/${target}`);
+      expect(entry.body.publicInvitesEnabled).toBe(false);
+
+      // Disabling — the containment action an operator actually needs — still works.
+      const closed = await bulk({
+        operation: 'set_policy',
+        campaignIds: [target],
+        publicInvitesEnabled: false,
+        dryRun: false,
+        reason: 'close invites',
+      });
+      expect(closed.status).toBe(201);
+    });
+
+    it('applies only the plan that was previewed, skipping campaigns that moved', async () => {
+      // The dry run is the only thing an operator consents to. Without a precondition,
+      // `applyOne` replans from CURRENT state: a preview that reported a completed
+      // campaign as `skipped` became a real archive if a DM reactivated it in between —
+      // a write nobody saw. The client can detect its own edits but not the campaign
+      // moving underneath it.
+      const target = aIds[4];
+
+      // Put it in `completed` so an `archive` preview is a genuine no-op skip.
+      await bulk({ operation: 'archive', campaignIds: [target], dryRun: false, reason: 'set up completed' });
+      const preview = await bulk({ operation: 'archive', campaignIds: [target], dryRun: true, reason: 'preview' });
+      expect(preview.status).toBe(201);
+      const item = (preview.body.results as Array<{ campaignId: number; outcome: string; stateVersion: string }>)[0];
+      expect(item.outcome).toBe('skipped');
+      expect(item.stateVersion).not.toBe('');
+
+      // A DM reactivates it before Apply — exactly the interleaving that used to convert
+      // the skip into a silent archive.
+      const reactivated = await bulk({
+        operation: 'activate',
+        campaignIds: [target],
+        dryRun: false,
+        reason: 'DM brings it back',
+      });
+      expect(reactivated.body.applied).toBe(1);
+
+      // Apply carrying the previewed version must NOT archive it.
+      const applied = await bulk({
+        operation: 'archive',
+        campaignIds: [target],
+        dryRun: false,
+        reason: 'apply the preview',
+        preconditions: [{ campaignId: target, stateVersion: item.stateVersion }],
+      });
+      expect(applied.status).toBe(201);
+      expect(applied.body.applied).toBe(0);
+      expect(applied.body.skipped).toBe(1);
+      expect(applied.body.results[0].reason).toContain('changed since the preview');
+
+      // And the campaign really is still active — the unseen write did not happen.
+      const entry = await admin.get(`/api/v1/admin/campaigns/${target}`);
+      expect(entry.body.status).toBe('active');
+
+      // One moved campaign must not abort the rest of a batch.
+      const other = aIds[0];
+      const mixed = await bulk({
+        operation: 'archive',
+        campaignIds: [target, other],
+        dryRun: false,
+        reason: 'mixed batch',
+        preconditions: [{ campaignId: target, stateVersion: item.stateVersion }],
+      });
+      expect(mixed.status).toBe(201);
+      expect(mixed.body.skipped).toBeGreaterThanOrEqual(1);
+      const byId = Object.fromEntries(
+        (mixed.body.results as Array<{ campaignId: number; outcome: string }>).map((r) => [r.campaignId, r.outcome]),
+      );
+      expect(byId[target]).toBe('skipped');
+      expect(byId[other]).not.toBe('skipped');
+
+      await bulk({ operation: 'activate', campaignIds: [other], dryRun: false, reason: 'undo' });
+    });
+
+    it('tells the operator that archiving will close public invites', async () => {
+      // The mutation is correct — it mirrors CampaignsService.update — but the dry run
+      // described only the status change, so an operator archiving a campaign with live
+      // join links was never told those links stop working until a DM re-enables them.
+      // For a preview, an incomplete description IS the defect.
+      const target = aIds[3];
+      const db = new Database(path.join(ctx.dataDir, 'campfire.db'));
+      try {
+        db.prepare('UPDATE campaigns SET status = ?, public_invites_enabled = 1 WHERE id = ?').run(
+          'active',
+          target,
+        );
+      } finally {
+        db.close();
+      }
+
+      const preview = await bulk({ operation: 'archive', campaignIds: [target], dryRun: true, reason: 'preview' });
+      expect(preview.status).toBe(201);
+      const item = (preview.body.results as Array<{ outcome: string; after: string }>)[0];
+      expect(item.outcome).toBe('would_apply');
+      expect(item.after).toContain('closes public invites');
+
+      // A campaign with no live links must NOT claim it closes them. `public_invites_enabled`
+      // defaults to TRUE, so this has to be set explicitly rather than assumed.
+      const quiet = aIds[0];
+      const db2 = new Database(path.join(ctx.dataDir, 'campfire.db'));
+      try {
+        db2
+          .prepare("UPDATE campaigns SET status = 'active', public_invites_enabled = 0 WHERE id = ?")
+          .run(quiet);
+      } finally {
+        db2.close();
+      }
+      const quietPreview = await bulk({
+        operation: 'archive',
+        campaignIds: [quiet],
+        dryRun: true,
+        reason: 'preview',
+      });
+      const quietItem = (quietPreview.body.results as Array<{ after: string }>)[0];
+      expect(quietItem.after).not.toContain('closes public invites');
+
+      // And the audit trail records what the preview promised, not less.
+      const applied = await bulk({ operation: 'archive', campaignIds: [target], dryRun: false, reason: 'apply' });
+      expect(applied.body.applied).toBe(1);
+      const trail = await dmA.get(`/api/v1/campaigns/${target}/audit`).query({ limit: 20 });
+      const rows = (Array.isArray(trail.body) ? trail.body : trail.body.items) as Array<{
+        action: string;
+        detail: string;
+      }>;
+      const row = rows.find((r) => r.action === 'campaign.catalog.archive');
+      expect(row).toBeDefined();
+      expect(row!.detail).toContain('closes public invites');
+    });
+
+    it('refuses to pin a campaign to a rule pack this server does not have', async () => {
+      const res = await bulk({
+        operation: 'update_module',
+        campaignIds: [aIds[0]],
+        ruleSystem: 'not-installed-anywhere',
+        dryRun: false,
+        reason: 'module update',
+      });
+      expect(res.status).toBe(201);
+      expect(res.body.applied).toBe(0);
+      expect(res.body.skipped).toBe(1);
+      expect(res.body.results[0].reason).toContain('not installed');
+    });
+
+    it('demands the argument each operation actually needs', async () => {
+      const cases: Array<Record<string, unknown>> = [
+        { operation: 'reassign_owner', campaignIds: [aIds[0]], dryRun: false },
+        { operation: 'set_quota', campaignIds: [aIds[0]], dryRun: false },
+        { operation: 'set_policy', campaignIds: [aIds[0]], dryRun: false },
+        { operation: 'update_module', campaignIds: [aIds[0]], dryRun: false },
+        { operation: 'request_export', campaignIds: [aIds[0]], dryRun: false },
+      ];
+      for (const body of cases) {
+        const res = await bulk(body);
+        expect(res.status).toBe(400);
+      }
+    });
+
+    it('rejects an unrecognized body key instead of silently dropping it', async () => {
+      const res = await bulk({ operation: 'pause', campaignIds: [aIds[0]], dryrun: false });
+      expect(res.status).toBe(400);
+    });
+
+    it('caps the batch size', async () => {
+      const res = await bulk({ operation: 'pause', campaignIds: Array.from({ length: 201 }, (_, i) => i + 1) });
+      expect(res.status).toBe(400);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Export requests: an ask, answered by the DM.
+  // -------------------------------------------------------------------------
+
+  describe('export requests are asks, not grants', () => {
+    it('raises a request the DM can see, and refuses a second while one is pending', async () => {
+      const target = aIds[3];
+      const first = await bulk({
+        operation: 'request_export',
+        campaignIds: [target],
+        exportProfile: 'backup',
+        dryRun: false,
+        reason: 'archiving the season for the group',
+      });
+      expect(first.status).toBe(201);
+      expect(first.body.applied).toBe(1);
+
+      const second = await bulk({
+        operation: 'request_export',
+        campaignIds: [target],
+        exportProfile: 'backup',
+        dryRun: false,
+        reason: 'archiving the season for the group',
+      });
+      expect(second.status).toBe(201);
+      expect(second.body.skipped).toBe(1);
+      expect(second.body.results[0].reason).toContain('already pending');
+
+      const inbox = await dmA.get(`/api/v1/campaigns/${target}/catalog/export-requests`);
+      expect(inbox.status).toBe(200);
+      expect(inbox.body.items).toHaveLength(1);
+      expect(inbox.body.total).toBe(1);
+      expect(inbox.body.items[0]).toMatchObject({ status: 'pending', profile: 'backup' });
+      expect(inbox.body.items[0].justification).toContain('archiving the season');
+    });
+
+    it('refuses a profile the export module cannot build', async () => {
+      // A free-string profile reaches the DM as a request for something that cannot be
+      // produced: they approve it and then have no way to satisfy it. The operator is
+      // corrected at request time instead.
+      const res = await bulk({
+        operation: 'request_export',
+        campaignIds: [aIds[3]],
+        exportProfile: 'foo',
+        dryRun: false,
+        reason: 'asking for a profile that does not exist',
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it('lets the DM decide, and records the decision without producing an artifact', async () => {
+      const target = aIds[3];
+      const inbox = await dmA.get(`/api/v1/campaigns/${target}/catalog/export-requests`);
+      const requestId = inbox.body.items[0].id;
+
+      const decide = await dmA
+        .post(`/api/v1/campaigns/${target}/catalog/export-requests/${requestId}/decision`)
+        .send({ decision: 'denied', note: 'players have not consented' });
+      expect(decide.status).toBe(201);
+      expect(decide.body.status).toBe('denied');
+      expect(decide.body.decisionNote).toBe('players have not consented');
+      // Nothing resembling an export bundle came back.
+      expect(Object.keys(decide.body)).not.toContain('data');
+
+      const again = await dmA
+        .post(`/api/v1/campaigns/${target}/catalog/export-requests/${requestId}/decision`)
+        .send({ decision: 'approved', note: 'changed my mind' });
+      expect(again.status).toBe(400); // already decided
+    });
+
+    it('returns the truthful decision when the audit write fails after it committed', async () => {
+      // The decision commits before either audit mirror is written. A failure there used
+      // to surface as a 500 while the request really was approved — so the DM's client
+      // still showed `pending`, retrying got "already decided", and they were left unable
+      // to tell whether their campaign's data was now exportable. For a CONSENT decision
+      // that ambiguity is exactly what the workflow exists to prevent.
+      const target = aIds[2];
+      const raise = await bulk({
+        operation: 'request_export',
+        campaignIds: [target],
+        exportProfile: 'backup',
+        dryRun: false,
+        reason: 'audit failure drill for the decision path',
+      });
+      expect(raise.status).toBe(201);
+
+      const inbox = await dmA.get(`/api/v1/campaigns/${target}/catalog/export-requests`);
+      const pending = (inbox.body.items as Array<{ id: number; status: string }>).find((r) => r.status === 'pending');
+      expect(pending).toBeDefined();
+
+      const audit = ctx.app.get(AuditService);
+      const spy = jest.spyOn(audit, 'log').mockRejectedValue(new Error('audit table is unavailable'));
+      try {
+        const decide = await dmA
+          .post(`/api/v1/campaigns/${target}/catalog/export-requests/${pending!.id}/decision`)
+          .send({ decision: 'approved', note: 'consent recorded despite the audit outage' });
+        // Not a 500, and the answer is the decision that actually landed.
+        expect(decide.status).toBe(201);
+        expect(decide.body.status).toBe('approved');
+      } finally {
+        spy.mockRestore();
+      }
+
+      // The decision genuinely persisted, so `approved` was the truthful reply.
+      const after = await dmA.get(`/api/v1/campaigns/${target}/catalog/export-requests`);
+      const stored = (after.body.items as Array<{ id: number; status: string }>).find((r) => r.id === pending!.id);
+      expect(stored!.status).toBe('approved');
+    });
+
+    it('lets exactly one of two concurrent decisions win', async () => {
+      // The status pre-check is a read with an await before the write. Without the
+      // precondition in the UPDATE predicate both callers pass that check, both update,
+      // both write audit rows, and the last write silently decides whether consent was
+      // granted — behind a trail that contradicts itself. Consent must not be settled by
+      // write ordering.
+      const target = aIds[4];
+      const raise = await bulk({
+        operation: 'request_export',
+        campaignIds: [target],
+        exportProfile: 'handoff',
+        dryRun: false,
+        reason: 'concurrency drill for the export request',
+      });
+      expect(raise.status).toBe(201);
+
+      const inbox = await dmA.get(`/api/v1/campaigns/${target}/catalog/export-requests`);
+      const pending = (inbox.body.items as Array<{ id: number; status: string }>).find((r) => r.status === 'pending');
+      expect(pending).toBeDefined();
+      const requestId = pending!.id;
+
+      // DRIVEN AT THE SERVICE LAYER ON PURPOSE. Two overlapping HTTP requests do NOT
+      // reproduce this: supertest serialises them on one agent and better-sqlite3 is
+      // synchronous, so the second handler's pre-check runs after the first has already
+      // committed and catches it. That makes an HTTP-level version of this test pass
+      // whether or not the bug is fixed — a green test proving nothing.
+      //
+      // Calling the service twice WITHOUT awaiting the first starts both before either
+      // reaches its write: call A runs to its `await select` and yields, call B then
+      // performs its own select and sees the same `pending` row. Both pre-checks pass,
+      // and both proceed to update — which is precisely the interleaving the predicate
+      // has to survive.
+      const svc = ctx.app.get(AdminCatalogService);
+      const actingDm = { id: String(dmAId), name: 'cat2-dm-a', serverRole: 'user' } as RequestUser;
+      const settled = await Promise.allSettled([
+        svc.decideExportRequest(requestId, { decision: 'approved', note: 'first writer' }, actingDm, target),
+        svc.decideExportRequest(requestId, { decision: 'denied', note: 'second writer' }, actingDm, target),
+      ]);
+
+      // Exactly one wins; the loser is told, never silently handed the other's verdict.
+      const winners = settled.filter((r) => r.status === 'fulfilled');
+      const losers = settled.filter((r) => r.status === 'rejected');
+      expect(winners).toHaveLength(1);
+      expect(losers).toHaveLength(1);
+
+      // And the stored row agrees with whichever call reported success, so the audit
+      // trail and the persisted consent cannot disagree.
+      const winner = (winners[0] as PromiseFulfilledResult<{ status: string; decisionNote: string }>).value;
+      const after = await dmA.get(`/api/v1/campaigns/${target}/catalog/export-requests`);
+      const stored = (after.body.items as Array<{ id: number; status: string; decisionNote: string }>).find(
+        (r) => r.id === requestId,
+      );
+      expect(stored!.status).toBe(winner.status);
+      expect(stored!.decisionNote).toBe(winner.decisionNote);
+    });
+
+    it('creates only one pending request when two are raised concurrently', async () => {
+      // The one-pending-request rule was checked in an awaited read and enforced nowhere
+      // else, so two overlapping `request_export` calls both saw no pending row and both
+      // inserted — leaving duplicate pending asks and both batches reporting `applied`.
+      //
+      // Driven at the service layer for the same reason as the decision race: two
+      // overlapping HTTP requests do NOT reproduce it, because supertest serialises them
+      // on one agent and better-sqlite3 is synchronous, so the second pre-check runs
+      // after the first insert has committed and catches it.
+      //
+      // HONEST NOTE ON WHAT THIS STILL PROVES. When it was written, `planChange` awaited
+      // its own reads, so starting both service calls before awaiting either interleaved
+      // them at the pre-check — the state the INSERT … WHERE NOT EXISTS had to survive.
+      // The plan path is now synchronous end to end (reads, decision and write happen
+      // with no await between them), so that interleaving is no longer reachable from
+      // here and this asserts the INVARIANT rather than reproducing the race. The
+      // enforcement of record is the INSERT predicate plus the in-transaction
+      // revalidation, and the interleaving itself is driven directly in
+      // 'will not write a plan whose state moved after the plan was built'.
+      const target = bId; // untouched by the other export-request tests
+      const svc = ctx.app.get(AdminCatalogService);
+      const operator = { id: '1', name: 'cat2-admin', serverRole: 'admin' } as RequestUser;
+      const req = {
+        operation: 'request_export' as const,
+        campaignIds: [target],
+        dryRun: false,
+        reason: 'concurrency drill for raising an export request',
+        exportProfile: 'backup' as const,
+      };
+
+      const [a, b] = await Promise.all([svc.bulk(operator, req), svc.bulk(operator, req)]);
+
+      // Exactly one batch may claim it applied; the other must not report success for a
+      // row it never wrote.
+      const applied = [a, b].filter((r) => r.applied === 1);
+      expect(applied).toHaveLength(1);
+
+      // ONE CONDITION, ONE VERDICT. The loser hit exactly the situation the sequential
+      // pre-check reports as `skipped` — "an export request is already pending" — and
+      // reported `failed` purely because it was caught by the INSERT's own predicate
+      // instead. `failed` tells an operator to retry; the only correct action here is to
+      // do nothing.
+      const loser = [a, b].find((r) => r.applied === 0)!;
+      expect(loser.failed).toBe(0);
+      expect(loser.skipped).toBe(1);
+      expect(loser.results[0].reason).toContain('already pending');
+
+      // And the campaign has exactly ONE pending request, which is the actual invariant.
+      const inbox = await dmB.get(`/api/v1/campaigns/${target}/catalog/export-requests`);
+      expect(inbox.status).toBe(200);
+      const stillPending = (inbox.body.items as Array<{ status: string }>).filter((r) => r.status === 'pending');
+      expect(stillPending).toHaveLength(1);
+    });
+
+    it('pages the cross-campaign queue and audits the read', async () => {
+      // This listing is the ONLY view that spans campaigns. Capped at 100 with no offset
+      // and no total, it silently truncated: requests on other campaigns pushed older
+      // pending ones out, and an operator could not enumerate the queue without already
+      // knowing every affected campaign id — the exact thing the view exists to avoid.
+      // A pending approval nobody can see is an approval that never happens.
+      const first = await admin.get('/api/v1/admin/campaigns/export-requests').query({ limit: 1, offset: 0 });
+      expect(first.status).toBe(200);
+      expect(Array.isArray(first.body.items)).toBe(true);
+      expect(first.body.items).toHaveLength(1);
+      expect(first.body.limit).toBe(1);
+      expect(first.body.offset).toBe(0);
+      // A real COUNT over the same predicate, not `items.length`.
+      expect(first.body.total).toBeGreaterThan(1);
+      expect(first.body.hasMore).toBe(true);
+
+      // The second page is a different row, so paging actually advances.
+      const second = await admin.get('/api/v1/admin/campaigns/export-requests').query({ limit: 1, offset: 1 });
+      expect(second.status).toBe(200);
+      expect(second.body.items[0].id).not.toBe(first.body.items[0].id);
+      expect(second.body.total).toBe(first.body.total);
+
+      // Walking the offsets reaches every row and terminates.
+      const seen: number[] = [];
+      for (let offset = 0; offset < first.body.total; offset += 2) {
+        const page = await admin.get('/api/v1/admin/campaigns/export-requests').query({ limit: 2, offset });
+        seen.push(...(page.body.items as Array<{ id: number }>).map((r) => r.id));
+      }
+      expect(new Set(seen).size).toBe(first.body.total);
+
+      // Scoping to one campaign still pages, and `total` follows the filter.
+      const scoped = await admin
+        .get('/api/v1/admin/campaigns/export-requests')
+        .query({ campaignId: aIds[3], limit: 100 });
+      expect(scoped.status).toBe(200);
+      expect(scoped.body.total).toBe(scoped.body.items.length);
+      expect((scoped.body.items as Array<{ campaignId: number }>).every((r) => r.campaignId === aIds[3])).toBe(true);
+
+      // AUDITED. The module's docblock promises catalog BROWSING is audited, not just
+      // mutations, and this read discloses requester justifications and DM decision
+      // notes — other people's stated reasons, which is what that promise is for.
+      const trail = await admin.get('/api/v1/admin/audit').query({ limit: 100 });
+      expect(trail.status).toBe(200);
+      const entries = (Array.isArray(trail.body) ? trail.body : trail.body.items) as Array<{
+        action: string;
+        detail: string;
+      }>;
+      const read = entries.filter((e) => e.action === 'campaign.catalog.export_requests.list');
+      expect(read.length).toBeGreaterThan(0);
+      // The slice is recorded, so a reviewer can reconstruct what was actually seen
+      // rather than merely that somebody looked.
+      expect(read[0].detail).toMatch(/returned=\d+/);
+      expect(read[0].detail).toMatch(/total=\d+/);
+    });
+
+    it('does not let disjoint partial privacy updates clobber each other', async () => {
+      // Two clients sending DISJOINT partial updates both read the same policy before
+      // either wrote, then each replaced the WHOLE object — so a descriptions-only update
+      // silently restored `names: visible` right after another operator set `redacted`.
+      // Last writer wins on a field they never mentioned, and nobody is told.
+      //
+      // Driven at the SERVICE layer and started before either is awaited: supertest
+      // serialises on one agent and better-sqlite3 is synchronous, so an HTTP-level
+      // version of this race passes whether or not the bug is present.
+      const svc = ctx.app.get(AdminCatalogService);
+      const operator = { actor: '1', actorRole: 'admin' as const };
+
+      // Known start: both fields visible.
+      await svc.updatePrivacyPolicy({ names: 'visible', descriptions: 'visible' }, operator);
+
+      // A tightens names; B touches only descriptions. B must not resurrect names.
+      const [a, b] = await Promise.all([
+        svc.updatePrivacyPolicy({ names: 'redacted' }, operator),
+        svc.updatePrivacyPolicy({ descriptions: 'redacted' }, operator),
+      ]);
+
+      // Whichever committed second must carry BOTH tightenings, because it merged over
+      // the value the first one wrote rather than a snapshot taken before it.
+      const stored = await svc.getPrivacyPolicy();
+      expect(stored.names).toBe('redacted');
+      expect(stored.descriptions).toBe('redacted');
+
+      // And each caller was told something true about its own commit.
+      for (const res of [a, b]) expect(['visible', 'redacted']).toContain(res.names);
+
+      // Reset for later tests.
+      await svc.updatePrivacyPolicy({ names: 'visible', descriptions: 'redacted' }, operator);
+    });
+
+    it('records WHICH campaigns a dry run probed, not merely how many', async () => {
+      // `applyOne` returns before writing any per-campaign row on a dry run, so the
+      // summary was the only trace — and it recorded counts alone. An operator could
+      // probe the state and eligibility of up to 200 NAMED campaigns they cannot read,
+      // and the trail kept none of the names. A dry run over named campaigns is a
+      // privileged read wearing a different verb.
+      const targets = [aIds[0], aIds[3]];
+      const res = await bulk({ operation: 'archive', campaignIds: targets, dryRun: true, reason: 'probe' });
+      expect(res.status).toBe(201);
+
+      const trail = await admin.get('/api/v1/admin/audit').query({ limit: 50 });
+      const rows = (Array.isArray(trail.body) ? trail.body : trail.body.items) as Array<{
+        action: string;
+        detail: string;
+      }>;
+      const summary = rows.find((r) => r.action === 'campaign.catalog.bulk.dryrun');
+      expect(summary).toBeDefined();
+      // Every requested id appears, under whatever outcome it got.
+      for (const id of targets) expect(summary!.detail).toContain(String(id));
+      expect(summary!.detail).toMatch(/would_apply=\[|skipped=\[/);
+    });
+
+    it('REFUSES to serve a read it cannot record, on every read path', async () => {
+      // A DELIBERATE ASYMMETRY, PINNED SO IT CANNOT DRIFT.
+      //
+      // The write paths guard their audit writes: by then the change has committed, and
+      // relabelling it failed would send an operator to retry work that already landed.
+      // Reads are the opposite — nothing has happened yet, declining costs only a retry,
+      // and it preserves the property the whole feature rests on: every disclosure of
+      // campaign metadata to a non-member is recorded. A silently unaudited read is the
+      // failure this module exists to prevent.
+      //
+      // Covers all three read paths, and BOTH rows of the two double-writes, because a
+      // partial double-write must not serve data either.
+      const audit = ctx.app.get(AuditService);
+
+      const failsClosed = async (call: () => Promise<{ status: number; body: unknown }>) => {
+        const spy = jest.spyOn(audit, 'log').mockRejectedValue(new Error('audit table is unavailable'));
+        try {
+          return await call();
+        } finally {
+          spy.mockRestore();
+        }
+      };
+
+      // 1. The paged listing.
+      const list = await failsClosed(() => admin.get('/api/v1/admin/campaigns').query({ limit: 5 }));
+      expect(list.status).toBeGreaterThanOrEqual(500);
+      expect((list.body as { items?: unknown }).items).toBeUndefined();
+
+      // 2. The single-entry read (double-write: campaign row + server mirror).
+      const entry = await failsClosed(() => admin.get(`/api/v1/admin/campaigns/${aIds[0]}`));
+      expect(entry.status).toBeGreaterThanOrEqual(500);
+      expect((entry.body as { id?: number }).id).toBeUndefined();
+
+      // 3. The export-request listing, unscoped (one row) and scoped (double-write).
+      const unscoped = await failsClosed(() => admin.get('/api/v1/admin/campaigns/export-requests'));
+      expect(unscoped.status).toBeGreaterThanOrEqual(500);
+      expect((unscoped.body as { items?: unknown }).items).toBeUndefined();
+
+      const scoped = await failsClosed(() =>
+        admin.get('/api/v1/admin/campaigns/export-requests').query({ campaignId: aIds[3] }),
+      );
+      expect(scoped.status).toBeGreaterThanOrEqual(500);
+      expect((scoped.body as { items?: unknown }).items).toBeUndefined();
+
+      // And the refusal is transient, not sticky: the same reads work once audit does.
+      const recovered = await admin.get('/api/v1/admin/campaigns').query({ limit: 5 });
+      expect(recovered.status).toBe(200);
+      expect(Array.isArray(recovered.body.items)).toBe(true);
+    });
+
+    it('records a CAMPAIGN-SCOPED read in the server-admin trail too, not instead', async () => {
+      // The audit row used to take its scope from the query string
+      // (`campaignId: opts.campaignId ?? null`). `listServerAdmin` returns only rows
+      // WHERE campaign_id IS NULL, so the unfiltered read landed in the server-admin
+      // trail and the FILTERED one vanished from it — backwards, since reading one named
+      // campaign's export requests is the more targeted act, not the less accountable.
+      const target = aIds[3];
+      const before = await admin.get('/api/v1/admin/audit').query({ limit: 100 });
+      const countIn = (body: unknown) =>
+        ((Array.isArray(body) ? body : (body as { items: unknown[] }).items) as Array<{ action: string }>).filter(
+          (e) => e.action === 'campaign.catalog.export_requests.list',
+        ).length;
+      const baseline = countIn(before.body);
+
+      const scoped = await admin.get('/api/v1/admin/campaigns/export-requests').query({ campaignId: target });
+      expect(scoped.status).toBe(200);
+
+      // The server-admin trail gained a row for this scoped read.
+      const after = await admin.get('/api/v1/admin/audit').query({ limit: 100 });
+      expect(countIn(after.body)).toBe(baseline + 1);
+
+      // …and the campaign's OWN trail records that an outsider read its export requests,
+      // which is the second audience the double-write exists for.
+      const campaignTrail = await dmA.get(`/api/v1/campaigns/${target}/audit`).query({ limit: 50 });
+      expect(campaignTrail.status).toBe(200);
+      const campaignRows = (
+        Array.isArray(campaignTrail.body) ? campaignTrail.body : campaignTrail.body.items
+      ) as Array<{ action: string }>;
+      expect(campaignRows.some((r) => r.action === 'campaign.catalog.export_requests.list')).toBe(true);
+    });
+
+    it('reading a campaign does not make it look recently active', async () => {
+      // OBSERVER EFFECT. `lastActivityExpr` took the newest campaign-scoped audit row as
+      // activity, and `getCatalogEntry` writes a campaign-scoped `campaign.catalog.read`.
+      // So merely OPENING a dormant campaign's entry bumped its lastActivityAt, floating
+      // it up the default `activity` sort and into `activityAfter` filters — the act of
+      // inspecting changed the measurement, self-reinforcingly.
+      const target = aIds[3];
+      const before = await admin.get(`/api/v1/admin/campaigns/${target}`);
+      expect(before.status).toBe(200);
+      const activityBefore = before.body.lastActivityAt as string | null;
+
+      // Read it several more times; each writes another campaign-scoped read row.
+      for (let i = 0; i < 3; i += 1) await admin.get(`/api/v1/admin/campaigns/${target}`);
+
+      const after = await admin.get(`/api/v1/admin/campaigns/${target}`);
+      expect(after.body.lastActivityAt).toBe(activityBefore);
+
+      // The same row seen through the LIST path agrees — the filter and the projection
+      // share the expression, so both must ignore reads.
+      const listed = await catalog({ limit: 100 });
+      const row = (listed.items as Array<{ id: number; lastActivityAt: string | null }>).find(
+        (c) => c.id === target,
+      );
+      expect(row?.lastActivityAt).toBe(activityBefore);
+
+      // But a real administrative WRITE still counts, or the column would be inert.
+      // Pick the operation that is genuinely a change from the CURRENT status: an
+      // earlier test in this file may already have paused this campaign, and a no-op
+      // bulk run writes nothing, which would make this assertion pass vacuously in the
+      // wrong direction.
+      const status = String(after.body.status);
+      const change = status === 'paused' ? 'activate' : 'pause';
+      const undo = change === 'activate' ? 'pause' : 'activate';
+
+      const applied = await bulk({
+        operation: change,
+        campaignIds: [target],
+        dryRun: false,
+        reason: 'activity should move for a real change',
+      });
+      expect(applied.status).toBe(201);
+      expect(applied.body.applied).toBe(1); // a skip here would prove nothing below
+
+      const moved = await admin.get(`/api/v1/admin/campaigns/${target}`);
+      expect(String(moved.body.lastActivityAt) > String(activityBefore)).toBe(true);
+
+      await bulk({ operation: undo, campaignIds: [target], dryRun: false, reason: 'undo' });
+    });
+
+    it('does not let a non-DM member or an outsider decide', async () => {
+      const target = aIds[3];
+      const raise = await bulk({
+        operation: 'request_export',
+        campaignIds: [target],
+        exportProfile: 'publish',
+        dryRun: false,
+        reason: 'second ask for the publishable module',
+      });
+      expect(raise.status).toBe(201);
+      const inbox = await dmA.get(`/api/v1/campaigns/${target}/catalog/export-requests`);
+      const pending = (inbox.body.items as Array<{ id: number; status: string }>).find((r) => r.status === 'pending');
+      expect(pending).toBeDefined();
+
+      // The requesting admin is not a member, so cannot answer their own ask.
+      const selfApprove = await admin
+        .post(`/api/v1/campaigns/${target}/catalog/export-requests/${pending!.id}/decision`)
+        .send({ decision: 'approved', note: 'approving my own request' });
+      expect(selfApprove.status).toBe(403);
+
+      // And an unrelated DM cannot answer for someone else's campaign.
+      const otherDm = await dmB
+        .post(`/api/v1/campaigns/${target}/catalog/export-requests/${pending!.id}/decision`)
+        .send({ decision: 'approved', note: 'not my table' });
+      expect(otherDm.status).toBe(403);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // The preview guard has to cover every table the plan reads, not one proxy
+  // for them. Both scenarios below passed the old `campaigns.updated_at` guard.
+  // -------------------------------------------------------------------------
+
+  describe('the state version covers every table an operation plans from', () => {
+    it('refuses a stale ownership preview after someone else installed a different owner', async () => {
+      // THE GUARD WATCHED A PROXY, NOT THE STATE IT GUARDS. `reassign_owner` plans from
+      // `campaign_members`, and nothing that writes a seat advances `campaigns.updated_at`
+      // — so a previewed A -> B handover still "matched" after a second operator had
+      // already made C the owner. Apply then replanned against the new seat table and
+      // DEMOTED C, a write nobody previewed, waved through by a guard reporting
+      // "unchanged". A guard that lies is worse than none, because Apply trusts it and
+      // stops asking the operator to look again.
+      const created = await dmA.post('/api/v1/campaigns').send({ name: 'Guard: reassign' });
+      expect(created.status).toBe(201);
+      const target = created.body.id as number;
+      const third = await newUser('cat2-dm-c', 'dm-password-3');
+
+      const preview = await bulk({
+        operation: 'reassign_owner',
+        campaignIds: [target],
+        toUserId: dmBId,
+        dryRun: true,
+        reason: 'preview a handover to B',
+      });
+      expect(preview.status).toBe(201);
+      const item = (preview.body.results as Array<{ outcome: string; stateVersion: string }>)[0];
+      expect(item.outcome).toBe('would_apply');
+      expect(item.stateVersion).not.toBe('');
+
+      const before = await admin.get(`/api/v1/admin/campaigns/${target}`);
+      const raced = await bulk({
+        operation: 'reassign_owner',
+        campaignIds: [target],
+        toUserId: third.id,
+        dryRun: false,
+        reason: 'a second operator gets there first',
+      });
+      expect(raced.body.applied).toBe(1);
+      const after = await admin.get(`/api/v1/admin/campaigns/${target}`);
+
+      // The heart of the finding: the column the old guard compared did NOT move, even
+      // though the campaign's ownership just changed hands.
+      expect(after.body.updatedAt).toBe(before.body.updatedAt);
+
+      const applied = await bulk({
+        operation: 'reassign_owner',
+        campaignIds: [target],
+        toUserId: dmBId,
+        dryRun: false,
+        reason: 'apply the stale preview',
+        preconditions: [{ campaignId: target, stateVersion: item.stateVersion }],
+      });
+      expect(applied.status).toBe(201);
+      expect(applied.body.applied).toBe(0);
+      expect(applied.body.skipped).toBe(1);
+      expect(applied.body.results[0].reason).toContain('changed since the preview');
+
+      // And C is still the owner — the demotion nobody saw did not happen.
+      const entry = await admin.get(`/api/v1/admin/campaigns/${target}`);
+      expect((entry.body.primaryDm as { userId: number }).userId).toBe(third.id);
+    });
+
+    it('refuses a stale export-request preview after the DM decided the pending one', async () => {
+      // The same defect on the other dependent table. A preview reported `skipped`
+      // ("already pending"); the DM then DENIED that request, which changes
+      // `campaign_export_requests` and not `campaigns.updated_at`. Apply replanned, found
+      // nothing pending, and turned a previewed skip into a live INSERT — a fresh ask
+      // raised against a DM who had just said no, with no preview shown for it.
+      const created = await dmA.post('/api/v1/campaigns').send({ name: 'Guard: export' });
+      expect(created.status).toBe(201);
+      const target = created.body.id as number;
+      const inboxUrl = `/api/v1/campaigns/${target}/catalog/export-requests`;
+
+      const first = await bulk({
+        operation: 'request_export',
+        campaignIds: [target],
+        exportProfile: 'backup',
+        dryRun: false,
+        reason: 'first ask, so the second one previews as a skip',
+      });
+      expect(first.body.applied).toBe(1);
+
+      const preview = await bulk({
+        operation: 'request_export',
+        campaignIds: [target],
+        exportProfile: 'backup',
+        dryRun: true,
+        reason: 'preview a second ask while one is pending',
+      });
+      const item = (preview.body.results as Array<{ outcome: string; reason: string; stateVersion: string }>)[0];
+      expect(item.outcome).toBe('skipped');
+      expect(item.reason).toContain('already pending');
+
+      const inbox = await dmA.get(inboxUrl);
+      const pending = (inbox.body.items as Array<{ id: number; status: string }>).find(
+        (r) => r.status === 'pending',
+      );
+      expect(pending).toBeDefined();
+      const before = await admin.get(`/api/v1/admin/campaigns/${target}`);
+      const decided = await dmA
+        .post(`${inboxUrl}/${pending!.id}/decision`)
+        .send({ decision: 'denied', note: 'the table has not consented' });
+      expect(decided.status).toBe(201);
+      const after = await admin.get(`/api/v1/admin/campaigns/${target}`);
+      expect(after.body.updatedAt).toBe(before.body.updatedAt);
+
+      const applied = await bulk({
+        operation: 'request_export',
+        campaignIds: [target],
+        exportProfile: 'backup',
+        dryRun: false,
+        reason: 'apply the stale preview of the second ask',
+        preconditions: [{ campaignId: target, stateVersion: item.stateVersion }],
+      });
+      expect(applied.status).toBe(201);
+      expect(applied.body.applied).toBe(0);
+      expect(applied.body.skipped).toBe(1);
+      expect(applied.body.results[0].reason).toContain('changed since the preview');
+
+      // The previewed skip stayed a skip: no second request exists.
+      const finalInbox = await dmA.get(inboxUrl);
+      expect(finalInbox.body.total).toBe(1);
+      expect(finalInbox.body.items[0].status).toBe('denied');
+    });
+
+    it('refuses a stale update_module preview after the missing pack was installed', async () => {
+      // `rule_packs` was left out of the dependency set on the argument that a pack's
+      // presence is server inventory a concurrent catalog operation cannot edit, and that
+      // re-planning against it could only turn a would_apply into a skip. Both halves are
+      // wrong, and the dangerous direction is the reverse one: a preview that SKIPPED
+      // ("not installed on this server") becomes a real rule-system write the moment
+      // another admin installs that pack.
+      const created = await dmA.post('/api/v1/campaigns').send({ name: 'Guard: module' });
+      const target = created.body.id as number;
+      const slug = 'guard-pack-587';
+
+      const preview = await bulk({
+        operation: 'update_module',
+        campaignIds: [target],
+        ruleSystem: slug,
+        dryRun: true,
+        reason: 'preview pinning a pack that is not here yet',
+      });
+      const item = (preview.body.results as Array<{ outcome: string; reason: string; stateVersion: string }>)[0];
+      expect(item.outcome).toBe('skipped');
+      expect(item.reason).toContain('not installed');
+
+      const before = await admin.get(`/api/v1/admin/campaigns/${target}`);
+      const db = new Database(path.join(ctx.dataDir, 'campfire.db'));
+      try {
+        db.prepare(
+          `INSERT INTO rule_packs (slug, name, version, license, source_url, installed_at, entry_count)
+           VALUES (?, 'Guard Pack', '1.0.0', '', '', ?, 0)`,
+        ).run(slug, new Date().toISOString());
+      } finally {
+        db.close();
+      }
+      const after = await admin.get(`/api/v1/admin/campaigns/${target}`);
+      // Installing a pack touches no campaign row — which is why the old guard let this
+      // through.
+      expect(after.body.updatedAt).toBe(before.body.updatedAt);
+
+      const applied = await bulk({
+        operation: 'update_module',
+        campaignIds: [target],
+        ruleSystem: slug,
+        dryRun: false,
+        reason: 'apply the stale preview',
+        preconditions: [{ campaignId: target, stateVersion: item.stateVersion }],
+      });
+      expect(applied.body.applied).toBe(0);
+      expect(applied.body.skipped).toBe(1);
+      expect(applied.body.results[0].reason).toContain('changed since the preview');
+
+      const entry = await admin.get(`/api/v1/admin/campaigns/${target}`);
+      expect(entry.body.ruleSystem).not.toBe(slug);
+    });
+
+    it('refuses a stale reassign_owner preview after a disabled target was re-enabled', async () => {
+      // Same defect through `users`: the plan branches on `users.disabled`, so a target
+      // who is disabled at preview time (skipped) and re-enabled before Apply turned that
+      // skip into a live ownership handover nobody previewed.
+      const created = await dmA.post('/api/v1/campaigns').send({ name: 'Guard: disabled target' });
+      const target = created.body.id as number;
+      const suspended = await newUser('cat2-dm-d', 'dm-password-4');
+      const setDisabled = (value: 0 | 1) => {
+        const db = new Database(path.join(ctx.dataDir, 'campfire.db'));
+        try {
+          db.prepare('UPDATE users SET disabled = ? WHERE id = ?').run(value, suspended.id);
+        } finally {
+          db.close();
+        }
+      };
+
+      setDisabled(1);
+      const preview = await bulk({
+        operation: 'reassign_owner',
+        campaignIds: [target],
+        toUserId: suspended.id,
+        dryRun: true,
+        reason: 'preview a handover to a suspended account',
+      });
+      const item = (preview.body.results as Array<{ outcome: string; reason: string; stateVersion: string }>)[0];
+      expect(item.outcome).toBe('skipped');
+      expect(item.reason).toContain('disabled');
+
+      const before = await admin.get(`/api/v1/admin/campaigns/${target}`);
+      setDisabled(0);
+      const after = await admin.get(`/api/v1/admin/campaigns/${target}`);
+      expect(after.body.updatedAt).toBe(before.body.updatedAt);
+
+      const applied = await bulk({
+        operation: 'reassign_owner',
+        campaignIds: [target],
+        toUserId: suspended.id,
+        dryRun: false,
+        reason: 'apply the stale preview',
+        preconditions: [{ campaignId: target, stateVersion: item.stateVersion }],
+      });
+      expect(applied.body.applied).toBe(0);
+      expect(applied.body.skipped).toBe(1);
+      expect(applied.body.results[0].reason).toContain('changed since the preview');
+
+      const entry = await admin.get(`/api/v1/admin/campaigns/${target}`);
+      expect((entry.body.primaryDm as { userId: number }).userId).toBe(dmAId);
+    });
+
+    it('will not write a plan whose state moved after the plan was built', async () => {
+      // THE CHECK HAS TO RUN INSIDE THE TRANSACTION IT GUARDS. Widening the dependency
+      // set makes the comparison correct; it does not make it binding. Every read that
+      // decides the plan happens before the write transaction opens, so comparing
+      // versions out there narrows the window rather than closing it — and
+      // `reassign_owner` demotes every current primary owner unconditionally, so an owner
+      // installed inside that window is silently replaced having appeared in no preview.
+      //
+      // The window is driven directly: the FIRST dependency read (the one outside the
+      // transaction) is allowed to complete, ownership is then changed underneath, and
+      // the read inside the transaction must catch it. Nothing here fakes the check —
+      // only the interleaving, which the synchronous read/plan/write path would otherwise
+      // make unreachable from a test.
+      const created = await dmA.post('/api/v1/campaigns').send({ name: 'Guard: in-transaction' });
+      const target = created.body.id as number;
+      const intruder = await newUser('cat2-dm-e', 'dm-password-5');
+
+      const svc = ctx.app.get(AdminCatalogService);
+      const proto = Object.getPrototypeOf(svc) as {
+        readDependencies: (...args: unknown[]) => unknown;
+      };
+      const original = proto.readDependencies;
+      let reads = 0;
+      const spy = jest
+        .spyOn(proto, 'readDependencies')
+        .mockImplementation(function (this: unknown, ...args: unknown[]) {
+          const result = original.apply(this, args);
+          reads += 1;
+          if (reads === 1) {
+            // Between the plan's reads and its write, a second operator installs a
+            // different owner. This is the interleaving Codex named.
+            const db = new Database(path.join(ctx.dataDir, 'campfire.db'));
+            try {
+              db.prepare('UPDATE campaign_members SET is_primary_owner = 0 WHERE campaign_id = ?').run(target);
+              db.prepare(
+                `INSERT INTO campaign_members (campaign_id, user_id, role, is_primary_owner, created_at, updated_at)
+                 VALUES (?, ?, 'dm', 1, ?, ?)`,
+              ).run(target, intruder.id, new Date().toISOString(), new Date().toISOString());
+            } finally {
+              db.close();
+            }
+          }
+          return result;
+        });
+
+      let applied!: Awaited<ReturnType<typeof bulk>>;
+      try {
+        applied = await bulk({
+          operation: 'reassign_owner',
+          campaignIds: [target],
+          toUserId: dmBId,
+          dryRun: false,
+          reason: 'apply against state that moves mid-flight',
+        });
+      } finally {
+        spy.mockRestore();
+      }
+
+      expect(applied.status).toBe(201);
+      expect(applied.body.applied).toBe(0);
+      expect(applied.body.skipped).toBe(1);
+      expect(reads).toBeGreaterThanOrEqual(2); // the guard really did re-read on `tx`
+
+      // The owner installed in the window survives. Without the in-transaction check this
+      // is dmB, demoted from a plan that never mentioned the intruder.
+      const entry = await admin.get(`/api/v1/admin/campaigns/${target}`);
+      expect((entry.body.primaryDm as { userId: number }).userId).toBe(intruder.id);
+    });
+
+    it('pages the DM inbox and keeps the requests awaiting a decision on page one', async () => {
+      // Capped at 100 with no offset, this had the same silent-truncation defect the
+      // cross-campaign listing was fixed for. Ordering by id alone additionally let
+      // decided history push the actionable rows off the top.
+      const created = await dmA.post('/api/v1/campaigns').send({ name: 'Guard: inbox paging' });
+      const target = created.body.id as number;
+      const inboxUrl = `/api/v1/campaigns/${target}/catalog/export-requests`;
+
+      // Three decided requests, then one still pending.
+      for (let i = 0; i < 3; i += 1) {
+        await bulk({
+          operation: 'request_export',
+          campaignIds: [target],
+          exportProfile: 'backup',
+          dryRun: false,
+          reason: `decided history entry number ${i}`,
+        });
+        const open = await dmA.get(inboxUrl);
+        const pending = (open.body.items as Array<{ id: number; status: string }>).find(
+          (r) => r.status === 'pending',
+        );
+        await dmA.post(`${inboxUrl}/${pending!.id}/decision`).send({ decision: 'denied', note: 'not now' });
+      }
+      await bulk({
+        operation: 'request_export',
+        campaignIds: [target],
+        exportProfile: 'backup',
+        dryRun: false,
+        reason: 'the one that is actually awaiting a decision',
+      });
+
+      const page = await dmA.get(inboxUrl).query({ limit: 1, offset: 0 });
+      expect(page.status).toBe(200);
+      expect(page.body.total).toBe(4);
+      expect(page.body.hasMore).toBe(true);
+      // Page one holds the request waiting on this DM, not the newest decided one.
+      expect(page.body.items).toHaveLength(1);
+      expect(page.body.items[0].status).toBe('pending');
+
+      // And the rest are reachable rather than truncated away.
+      const rest = await dmA.get(inboxUrl).query({ limit: 10, offset: 1 });
+      expect(rest.body.items).toHaveLength(3);
+      expect((rest.body.items as Array<{ status: string }>).every((r) => r.status === 'denied')).toBe(true);
+
+      // A negative offset 400s here exactly as it does on the catalog listing.
+      const negative = await dmA.get(inboxUrl).query({ offset: -1 });
+      expect(negative.status).toBe(400);
+
+      // `limit` is CLAMPED, which is why the DM card pages by offset rather than by
+      // raising `limit`: past the cap a growing limit returns the same rows forever while
+      // the "show earlier" control stays visible, doing visibly nothing.
+      const overCap = await dmA.get(inboxUrl).query({ limit: 5000 });
+      expect(overCap.status).toBe(200);
+      expect(overCap.body.limit).toBeLessThanOrEqual(100);
+    });
+  });
+});

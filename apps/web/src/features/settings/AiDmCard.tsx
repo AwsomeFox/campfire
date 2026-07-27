@@ -17,10 +17,16 @@ import { useCallback, useEffect, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import type { AiDmMode, AiDmSeat, AiProviderEffectiveView, Campaign, NarrationLanguage } from '@campfire/schema';
-import { NARRATION_LANGUAGE_OPTIONS } from '@campfire/schema';
+import {
+  AI_DM_STYLE_PRESET_AXES,
+  AI_DM_STYLE_PRESET_OPTIONS,
+  NARRATION_LANGUAGE_OPTIONS,
+  type AiDmStylePresets,
+} from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
 import { SkeletonCard } from '../../components/ui';
 import { AI_DM_BUDGET_INPUT_ID, AI_DM_BUDGET_SECTION_ID } from './aiDmBudgetIds';
+import { AI_DM_STYLE_SECTION_ID, aiDmStyleSelectId } from './aiDmStyleIds';
 import { ProviderForm } from './ProviderForm';
 import { queryKeys } from '../../lib/query';
 import { useAuth } from '../../app/auth';
@@ -189,6 +195,7 @@ export default function AiDmCard({
         onChanged={(s) => { setSeat(s); refreshReadiness(); }}
       />
       <InstructionsSection campaignId={campaignId} seat={seat} onChanged={(s) => setSeat(s)} />
+      <TableStyleSection campaignId={campaignId} seat={seat} onChanged={(s) => setSeat(s)} />
     </div>
   );
 }
@@ -581,6 +588,98 @@ function InstructionsSection({
       <div className="flex gap-2 items-center">
         <button className="btn btn-primary" style={{ fontSize: 12.5 }} disabled={saving} onClick={() => void save()}>
           {saving ? 'Saving…' : 'Save instructions'}
+        </button>
+        {saved && <span className="text-muted" style={{ fontSize: 12 }}>Saved.</span>}
+      </div>
+    </Section>
+  );
+}
+
+
+/**
+ * Structured table style (#1049).
+ *
+ * The steering textarea above already accepts anything, but a blank box gives no hint that
+ * pacing or NPC depth were dials at all. These dropdowns make the common axes discoverable
+ * without replacing the freeform field — the two are complementary, and both feed the same
+ * part of the system prompt.
+ *
+ * The copy says "asks the AI to" rather than "makes the AI", because that is the truth: each
+ * choice adds a line of guidance to the prompt. It is a request to a language model, not a
+ * setting the server enforces, and nothing checks the narration that comes back against it.
+ */
+function TableStyleSection({
+  campaignId,
+  seat,
+  onChanged,
+}: {
+  campaignId: number;
+  seat: AiDmSeat;
+  onChanged: (seat: AiDmSeat) => void;
+}) {
+  const [presets, setPresets] = useState<AiDmStylePresets>(seat.stylePresets);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Deliberately NOT re-synced from `seat`, matching InstructionsSection above.
+  // Every section on this card shares one `seat` object in the parent, so saving the
+  // mode, budget or instructions replaces it wholesale — and `stylePresets` comes back
+  // as a NEW object reference even when its values are identical. An effect keyed on
+  // that reference would fire on every sibling save and overwrite dropdown choices the
+  // DM had picked but not yet saved, with no warning. The parent doesn't mount this
+  // section until the seat has loaded, so seeding once in useState is sufficient.
+
+  async function save() {
+    setSaving(true);
+    setSaved(false);
+    setError(null);
+    try {
+      const updated = await api.put<AiDmSeat>(`${API}/campaigns/${campaignId}/ai-dm`, { stylePresets: presets });
+      onChanged(updated);
+      setSaved(true);
+      // Matches every other section on this card: the confirmation is a flash, not a state.
+      // Without this the "Saved." line stays up indefinitely and reads as still-current
+      // after the DM has gone on to edit something else.
+      setTimeout(() => setSaved(false), 2000);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : 'Could not save table style.');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Section title="Table style" id={AI_DM_STYLE_SECTION_ID}>
+      <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
+        Asks the AI to narrate a certain way. Each choice adds a line of guidance to its prompt — it steers voice and
+        pacing, it does not change what is true, and a model can ignore it. Leave an axis on Default to say nothing
+        about it.
+      </p>
+      <div className="flex gap-2 flex-wrap">
+        {AI_DM_STYLE_PRESET_AXES.map((axis) => (
+          <div className="field" style={{ maxWidth: 260 }} key={axis.key}>
+            <label htmlFor={aiDmStyleSelectId(axis.key)}>{axis.label}</label>
+            <select
+              id={aiDmStyleSelectId(axis.key)}
+              className="input"
+              value={presets[axis.key]}
+              disabled={saving}
+              onChange={(e) => setPresets((prev) => ({ ...prev, [axis.key]: e.target.value }))}
+            >
+              {AI_DM_STYLE_PRESET_OPTIONS[axis.key].map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        ))}
+      </div>
+      {error && <p className="text-sm" style={{ color: '#f87171' }}>{error}</p>}
+      <div className="flex gap-2 items-center">
+        <button className="btn btn-primary" style={{ fontSize: 12.5 }} disabled={saving} onClick={() => void save()}>
+          {saving ? 'Saving…' : 'Save table style'}
         </button>
         {saved && <span className="text-muted" style={{ fontSize: 12 }}>Saved.</span>}
       </div>

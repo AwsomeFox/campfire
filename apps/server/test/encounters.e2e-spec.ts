@@ -355,6 +355,185 @@ describe('encounters (e2e)', () => {
       expect(res.body.hpCurrent).toBe(15);
     });
 
+    it('applies direct 5e damage type, save-half, immunity, vulnerability, and crit dice math (issue #605)', async () => {
+      const server = ctx.app.getHttpServer();
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const ts = new Date().toISOString();
+      const source = await db.select({ packId: ruleEntries.packId }).from(ruleEntries).where(eq(ruleEntries.id, ruleEntryId)).get();
+      expect(source).toBeDefined();
+      const [entry] = await db
+        .insert(ruleEntries)
+        .values({
+          packId: source!.packId,
+          slug: `defended-target-${Date.now()}`,
+          name: 'Defended target',
+          type: 'monster',
+          summary: '',
+          body: '',
+          dataJson: JSON.stringify({
+            hitPoints: 100,
+            // A simple statblock string is an unconditional canonical list.
+            damage_resistances: ' Fire, LIGHTNING ',
+            damage_vulnerabilities: ['cold'],
+            damage_immunities: ['poison'],
+          }),
+          createdAt: ts,
+          updatedAt: ts,
+        })
+        .returning();
+      const add = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', ruleEntryId: entry.id });
+      expect(add.status).toBe(201);
+      const targetId = add.body.id;
+
+      // 18 → saved half 9 → fire resistance 4 (round down each step).
+      let res = await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${targetId}`).set(dm)
+        .send({ hpDelta: -18, damageType: 'fire', saveOutcome: 'half' });
+      expect(res.status).toBe(200);
+      expect(res.body.hpCurrent).toBe(96);
+      const savedEvents = await request(server).get(`/api/v1/encounters/${encounterId}/events`).set(dm);
+      const savedEvent = savedEvents.body.find((event: { detail: string }) => /18 fire.*saved for half/.test(event.detail));
+      expect(savedEvent).toBeDefined();
+      expect(savedEvent.detail).not.toContain('saved for half, halved');
+
+      res = await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${targetId}`).set(dm)
+        .send({ hpDelta: -6, damageType: 'cold' });
+      expect(res.body.hpCurrent).toBe(84); // vulnerability doubles 6 → 12
+
+      res = await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${targetId}`).set(dm)
+        .send({ hpDelta: -20, damageType: 'poison' });
+      expect(res.body.hpCurrent).toBe(84); // immunity wins
+      const events = await request(server).get(`/api/v1/encounters/${encounterId}/events`).set(dm);
+      expect(events.body.some((event: { detail: string }) => /took 0 damage.*immune/.test(event.detail))).toBe(true);
+
+      res = await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${targetId}`).set(dm)
+        .send({ hpDelta: -8, damageType: 'slashing', isCrit: true, damageDice: 5 });
+      expect(res.body.hpCurrent).toBe(71); // (5 dice × 2) + 3 flat modifier
+
+      // API/MCP callers get the adapter's canonical vocabulary, normalized before
+      // defence math and the combat log (not arbitrary free-form strings).
+      res = await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${targetId}`).set(dm)
+        .send({ hpDelta: -4, damageType: 'FIRE' });
+      expect(res.status).toBe(200);
+      expect(res.body.hpCurrent).toBe(69); // uppercase FIRE normalizes and resists to 2
+      const normalizedEvents = await request(server).get(`/api/v1/encounters/${encounterId}/events`).set(dm);
+      expect(normalizedEvents.body.some((event: { detail: string }) => /4 fire.*resistant/.test(event.detail))).toBe(true);
+
+      // A negative flat modifier can make the dice subtotal larger than the net roll.
+      // That is still valid critical math: 2 × 4 dice - 1 flat = 7.
+      res = await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${targetId}`).set(dm)
+        .send({ hpDelta: -3, damageType: 'slashing', isCrit: true, damageDice: 4 });
+      expect(res.status).toBe(200);
+      expect(res.body.hpCurrent).toBe(62);
+
+      const unknownType = await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${targetId}`).set(dm)
+        .send({ hpDelta: -4, damageType: 'laser' });
+      expect(unknownType.status).toBe(400);
+
+      const meaninglessDiceSubtotal = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${targetId}`)
+        .set(dm)
+        .send({ hpDelta: -4, damageDice: 4 });
+      expect(meaninglessDiceSubtotal.status).toBe(400);
+      expect(meaninglessDiceSubtotal.body.message).toContain('requires a critical hit');
+
+      for (const damageDice of [0, -1]) {
+        const invalidCriticalSubtotal = await request(server)
+          .patch(`/api/v1/encounters/${encounterId}/combatants/${targetId}`)
+          .set(dm)
+          .send({ hpDelta: -4, isCrit: true, damageDice });
+        expect(invalidCriticalSubtotal.status).toBe(400);
+      }
+
+      const emptyDamageType = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${targetId}`)
+        .set(dm)
+        .send({ hpDelta: -4, damageType: '   ' });
+      expect(emptyDamageType.status).toBe(400);
+
+      const conflictingHpSet = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${targetId}`)
+        .set(dm)
+        .send({ hpDelta: -4, hpSet: 100, damageType: 'fire' });
+      expect(conflictingHpSet.status).toBe(400);
+      expect(conflictingHpSet.body.message).toContain('cannot be combined with hpSet');
+
+      // The web AoE apply path sends one PATCH per affected target. Mixed save
+      // outcomes must therefore produce independent full/half results in one burst.
+      const fullSaveTarget = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'Failed save target', hpMax: 100 });
+      const halfSaveTarget = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'Successful save target', hpMax: 100 });
+      expect(fullSaveTarget.status).toBe(201);
+      expect(halfSaveTarget.status).toBe(201);
+
+      const fullSaveHit = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${fullSaveTarget.body.id}`)
+        .set(dm)
+        .send({ hpDelta: -10, damageType: 'fire' });
+      const halfSaveHit = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${halfSaveTarget.body.id}`)
+        .set(dm)
+        .send({ hpDelta: -10, damageType: 'fire', saveOutcome: 'half' });
+      expect(fullSaveHit.status).toBe(200);
+      expect(halfSaveHit.status).toBe(200);
+      expect(fullSaveHit.body.hpCurrent).toBe(90);
+      expect(halfSaveHit.body.hpCurrent).toBe(95);
+
+      const [qualifiedEntry] = await db
+        .insert(ruleEntries)
+        .values({
+          packId: source!.packId,
+          slug: `qualified-defense-${Date.now()}`,
+          name: 'Qualified defense target',
+          type: 'monster',
+          summary: '',
+          body: '',
+          dataJson: JSON.stringify({ hitPoints: 100, damage_resistances: 'slashing from nonmagical attacks' }),
+          createdAt: ts,
+          updatedAt: ts,
+        })
+        .returning();
+      const qualifiedTarget = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', ruleEntryId: qualifiedEntry.id });
+      expect(qualifiedTarget.status).toBe(201);
+      const qualifiedHit = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${qualifiedTarget.body.id}`)
+        .set(dm)
+        .send({ hpDelta: -10, damageType: 'slashing' });
+      expect(qualifiedHit.status).toBe(200);
+      expect(qualifiedHit.body.hpCurrent).toBe(90); // source tags are not modeled, so no unconditional resistance
+
+      const invalid = await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${targetId}`).set(dm)
+        .send({ hpDelta: -8, isCrit: true });
+      expect(invalid.status).toBe(400);
+    });
+
+    it('rejects direct-damage metadata for adapters that do not own 5e damage rules (issue #605)', async () => {
+      const server = ctx.app.getHttpServer();
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const ts = new Date().toISOString();
+      await db.insert(rulePacks).values({ slug: 'pf2e-srd', name: 'PF2e SRD', version: '1', license: '', sourceUrl: '', installedAt: ts, entryCount: 0 }).onConflictDoNothing();
+      const campaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'No 5e damage math', ruleSystem: 'pf2e-srd' });
+      const encounter = await request(server).post(`/api/v1/campaigns/${campaign.body.id}/encounters`).set(dm).send({ name: 'Adapter gate' });
+      const target = await request(server).post(`/api/v1/encounters/${encounter.body.id}/combatants`).set(dm).send({ kind: 'monster', name: 'Target', hpMax: 20 });
+
+      const rejected = await request(server).patch(`/api/v1/encounters/${encounter.body.id}/combatants/${target.body.id}`).set(dm)
+        .send({ hpDelta: -5, damageType: 'fire' });
+      expect(rejected.status).toBe(400);
+      const raw = await request(server).patch(`/api/v1/encounters/${encounter.body.id}/combatants/${target.body.id}`).set(dm).send({ hpDelta: -5 });
+      expect(raw.status).toBe(200);
+      expect(raw.body.hpCurrent).toBe(15);
+    });
+
     // Issue #495: players may only add conditions from the active rule vocabulary;
     // arbitrary free-text ("god_mode") must 400. MCP update_combatant shares this path.
     it('owning player cannot inject an arbitrary free-text condition (issue #495)', async () => {

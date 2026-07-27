@@ -80,6 +80,7 @@ import {
   ScheduledSessionCreate,
   ScheduledSessionCancel,
   ScheduledSessionDuplicate,
+  ScheduledSessionRestore,
   ScheduledSessionUpdate,
   SessionZeroUpdate,
   RsvpSetBody,
@@ -140,6 +141,7 @@ import { InventoryService } from '../inventory/inventory.service';
 import { TimelineService } from '../timeline/timeline.service';
 import { CommentsService } from '../comments/comments.service';
 import { SchedulingService } from '../sessions/scheduling.service';
+import { OrganizedPlayService } from '../sessions/organized-play.service';
 import { ScribeService } from '../scribe/scribe.service';
 import { filterHidden } from '../../common/redact';
 import { UsersService } from '../users/users.service';
@@ -407,6 +409,10 @@ export class McpToolsService {
     private readonly timeline: TimelineService,
     private readonly comments: CommentsService,
     private readonly scheduling: SchedulingService,
+    // #588: only for toConflictResponse — the ONE translator that turns a
+    // SeriesConflictSignal into a per-caller-redacted 409, shared with
+    // ScheduleController so REST and MCP cannot disagree about a booking clash.
+    private readonly organizedPlay: OrganizedPlayService,
     private readonly scribe: ScribeService,
     private readonly users: UsersService,
     private readonly revisions: RevisionsService,
@@ -4709,12 +4715,30 @@ export class McpToolsService {
       server,
       user,
       'restore_scheduled_session',
-      'DM only: restore a cancelled scheduled game night. Clears cancellation metadata and returns it to live schedule projections.',
-      { scheduleId: Id.describe('Cancelled scheduled session id — from list_scheduled_sessions') },
-      async ({ scheduleId }) => {
+      'DM only: restore a cancelled scheduled game night. Clears cancellation metadata and returns it to live schedule '
+        + 'projections. A cancelled night RELEASED any room and assigned DM it held, so restoring re-books them: if either '
+        + 'was taken meanwhile this fails with SCHEDULE_CONFLICT listing the clashes, and `force: true` overrides it.',
+      {
+        scheduleId: Id.describe('Cancelled scheduled session id — from list_scheduled_sessions'),
+        // #588: the same override fields REST exposes on POST /schedule/:id/restore.
+        // Without them an MCP caller could see the clash but had no way to act on it.
+        ...ScheduledSessionRestore.shape,
+      },
+      async ({ scheduleId, ...fields }) => {
         const row = await this.scheduling.getRowOrThrow(scheduleId as number);
+        const validated = ScheduledSessionRestore.parse(fields);
         const role = await this.access.requireRole(user, row.campaignId, 'dm');
-        return this.scheduling.restore(scheduleId as number, user, role);
+        try {
+          return await this.scheduling.restore(scheduleId as number, user, role, validated.force, (validated.reason ?? '').trim());
+        } catch (err) {
+          // #588: `SeriesConflictSignal` is a plain Error, so the generic envelope
+          // would render it as an opaque 500 "Something went wrong" — the caller
+          // would learn neither that the room was taken nor that `force` exists.
+          // ScheduleController already translates it; routing MCP through the SAME
+          // translator keeps one redaction rule rather than a second copy that can
+          // disagree about what a stranger may see.
+          return await this.organizedPlay.toConflictResponse(err, user);
+        }
       },
     );
 
