@@ -124,6 +124,53 @@ If a driver stalls or makes a call the table disputes, players have recovery lev
 open a **table vote** (to override or pause), or **request a human takeover**. The DM
 can pause and resume the seat at any time.
 
+### When the provider has a bad moment
+
+Providers rate-limit, return 5xx, and drop connections mid-response. Campfire absorbs a
+**transient** failure in two layers before the table hears about it:
+
+- every request to a provider is already retried with exponential backoff and jitter,
+  honouring `Retry-After`; and
+- if the connection dies *after* the reply started streaming — which no request-level
+  retry can recover — the driver re-issues the whole step once, on a short backoff.
+
+If the primary still cannot serve the step and you have configured a **fallback
+provider**, the turn is served by that instead. Failover is a last resort, not load
+balancing: the primary gets all of its attempts first, so a one-off blip never quietly
+moves your table onto a different model mid-scene.
+
+**What is never retried**, because none of it is transient: a bad or expired key, a
+malformed request, a prompt that exceeds the context window, and — most importantly — a
+**content refusal**. Re-sending a prompt the provider just declined, or handing it to a
+second vendor to see whether that one answers, is a safety bypass rather than resilience,
+so Campfire does neither.
+
+**A retry also never rewrites what players already read.** Once any narration has reached
+the table the step is not re-issued: a second, different reply to the same moment would
+leave the table with two versions and no way to tell which counts. That turn ends on the
+recovery ladder as a **provider failure** — distinct from a tool error, with **Retry** and
+**Continue without AI** offered first — and a human decides.
+
+#### Configuring a fallback provider
+
+Optional, and off by default.
+
+- **Server-wide:** `PUT /settings/ai-provider/fallback` (server admin)
+- **Per campaign:** `PUT /campaigns/{id}/ai-provider/fallback` (DM)
+
+A fallback is a **fully independent** config with its own key, base URL, and model — not a
+second model on the primary's credential. That is deliberate: a key you store is only ever
+sent to the endpoint stored alongside it. It is bound by the same server admin model
+allowlist and the same base-URL host policy as the primary, so adding one is never a route
+around either. A misconfigured fallback is ignored with a warning rather than being allowed
+to break a turn the primary could have served.
+
+!!! note "Retries spend tokens"
+
+    A provider bills for what it generated even when the connection then dies, so every
+    attempt is metered against the campaign's token budget. The budget is re-checked before
+    each attempt, so retries cannot overspend a cap you set — they simply stop.
+
 ### The scheduled AI scribe
 
 A companion **AI scribe** can **draft session recaps** — after a scheduled session ends,

@@ -1471,6 +1471,15 @@ export const aiProviderConfigs = sqliteTable('ai_provider_configs', {
   encryptedApiKey: text('encrypted_api_key'), // aes-256-gcm ciphertext; null = no key stored
   keyLast4: text('key_last4'), // masked display indicator only — never the key
   allowedModels: text('allowed_models').notNull().default('[]'), // JSON string[] admin allowlist (server scope)
+  /**
+   * #1052: 'primary' | 'fallback'. A fallback row is a SECOND, fully independent provider
+   * config at the same scope, used only after the primary exhausts its retries on a TRANSIENT
+   * failure. Modelled as its own row rather than extra columns on the primary so it carries
+   * its own key, base URL, and provider type as one unit — the #373 invariant is that whoever
+   * owns the key owns the endpoint, and a half-config sharing the primary's key would break it.
+   * The partial unique indexes are keyed on (scope, role) / (campaign_id, role).
+   */
+  role: text('role').notNull().default('primary'),
   createdBy: text('created_by').notNull().default(''),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),

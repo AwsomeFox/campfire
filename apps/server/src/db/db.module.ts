@@ -3258,6 +3258,50 @@ function migrateCampaignModules585(sqlite: Database.Database): void {
   addColumn('detached_at', 'detached_at TEXT');
 }
 
+/**
+ * Issue #1052 — an OPTIONAL FALLBACK provider config per scope.
+ *
+ * Two edits, and the second is the one that matters. Adding `role` is a plain ADD COLUMN with
+ * a default, so every existing row becomes the 'primary' it always was. But the pre-existing
+ * partial uniques —
+ *     UNIQUE(scope)       WHERE scope = 'server'
+ *     UNIQUE(campaign_id) WHERE campaign_id IS NOT NULL
+ * — permit exactly ONE row per scope, which makes a fallback row impossible to insert. They
+ * are dropped and recreated keyed on (…, role).
+ *
+ * DROP + CREATE rather than editing the original DDL in place: `CREATE UNIQUE INDEX IF NOT
+ * EXISTS` is a no-op against a database that already has an index of that name, so editing
+ * migration 0040's body would silently leave every existing install on the old
+ * one-row-per-scope constraint while fresh installs got the new one. The index NAMES change
+ * too (`…_server` → `…_server_role`), so a half-applied state cannot masquerade as complete.
+ *
+ * Idempotent and safe to re-run: the column is probed for, and DROP INDEX IF EXISTS is a
+ * no-op. Widening a unique index can never fail on existing data — every row satisfying the
+ * old, stricter constraint satisfies the new one.
+ */
+function migrateAiProviderConfigFallbackRole1052(sqlite: Database.Database): void {
+  const tableExists =
+    sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ai_provider_configs'").get() != null;
+  // A fresh DB gets the whole shape from BOOTSTRAP_SQL; there is nothing to migrate.
+  if (!tableExists) return;
+
+  const cols = (sqlite.prepare('PRAGMA table_info(ai_provider_configs)').all() as Array<{ name: string }>).map(
+    (c) => c.name,
+  );
+  if (!cols.includes('role')) {
+    sqlite.exec("ALTER TABLE ai_provider_configs ADD COLUMN role TEXT NOT NULL DEFAULT 'primary'");
+  }
+
+  sqlite.exec(`
+    DROP INDEX IF EXISTS idx_ai_provider_configs_server;
+    DROP INDEX IF EXISTS idx_ai_provider_configs_campaign;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_provider_configs_server_role
+      ON ai_provider_configs(scope, role) WHERE scope = 'server';
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_provider_configs_campaign_role
+      ON ai_provider_configs(campaign_id, role) WHERE campaign_id IS NOT NULL;
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
   { name: '0001_users_oidc', run: migrateUsersTableForOidc },
   { name: '0002_campaigns_rule_system', run: migrateCampaignsTableForRuleSystem },
@@ -3428,6 +3472,15 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // contiguous or sorted. That is also why nothing is renumbered to look tidy: renaming a
   // migration a database has already recorded is the one edit that breaks run-once.
   { name: '0120_campaign_modules_585', run: migrateCampaignModules585 },
+  // 0122-0129 are held by other in-flight branches (0129 is allocated to #598), so this takes
+  // 0130 rather than computing "next free" for itself — several branches each computing that
+  // in parallel is exactly how they collide. `runMigrations` dedupes on the FULL name string,
+  // so the `_1052` suffix is what guarantees run-once, and renaming it later is the one edit
+  // that would break that.
+  //
+  // This one is NOT purely additive, unlike its neighbours: it REPLACES two partial unique
+  // indexes. It must therefore never be reordered above 0040, which creates the originals.
+  { name: '0130_ai_provider_config_fallback_role_1052', run: migrateAiProviderConfigFallbackRole1052 },
 ];
 
 /**

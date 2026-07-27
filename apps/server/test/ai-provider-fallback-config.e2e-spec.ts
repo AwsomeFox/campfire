@@ -1,0 +1,210 @@
+import request from 'supertest';
+import Database from 'better-sqlite3';
+import { createTestApp, closeTestApp, createTestAppNoDevAuth, type TestAppContext } from './test-app';
+import { dbFilePath } from '../src/db/db.module';
+
+/**
+ * #1052 — the OPTIONAL fallback provider slot.
+ *
+ * The fallback is a SECOND, fully independent provider config at the same scope, stored as its
+ * own row keyed on (scope, role). The properties worth pinning are the ones a shared-row or
+ * shared-key design would have broken:
+ *
+ *   - configuring a fallback must not disturb the primary (they are separate rows, and the
+ *     pre-#1052 partial uniques allowed only one row per scope);
+ *   - deleting the primary must not delete the fallback, and vice versa — those deletes were
+ *     scope-only predicates before this change and would have taken both;
+ *   - a fallback carries its OWN key and endpoint, because #373's invariant is that whoever
+ *     owns the key owns the destination;
+ *   - the admin model allowlist applies to the fallback, so "configure a fallback" is not a
+ *     way to route around it;
+ *   - the key is as write-only here as anywhere else.
+ */
+
+const admin = { 'x-dev-role': 'dm', 'x-dev-user': 'fallback-admin' };
+
+describe('AI provider fallback slot (#1052)', () => {
+  let ctx: TestAppContext;
+  let server: ReturnType<TestAppContext['app']['getHttpServer']>;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    server = ctx.app.getHttpServer();
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  /** Raw rows, read through a plain handle so drizzle's own predicates cannot mask a bug. */
+  function rows(): Array<Record<string, unknown>> {
+    const db = new Database(dbFilePath(ctx.dataDir), { readonly: true });
+    try {
+      return db.prepare('SELECT * FROM ai_provider_configs ORDER BY id').all() as Array<Record<string, unknown>>;
+    } finally {
+      db.close();
+    }
+  }
+
+  async function reset(): Promise<void> {
+    await request(server).delete('/api/v1/settings/ai-provider/fallback').set(admin);
+    await request(server).delete('/api/v1/settings/ai-provider').set(admin);
+  }
+
+  beforeEach(reset);
+
+  it('defaults to no fallback — failover is opt-in', async () => {
+    const res = await request(server).get('/api/v1/settings/ai-provider/fallback').set(admin);
+    expect(res.status).toBe(200);
+    expect(res.body?.model).toBeUndefined();
+    expect(rows()).toHaveLength(0);
+  });
+
+  it('stores the fallback as a SEPARATE row and leaves the primary untouched', async () => {
+    const primary = await request(server)
+      .put('/api/v1/settings/ai-provider')
+      .set(admin)
+      .send({ providerType: 'openai', model: 'primary-model', apiKey: 'sk-primary-0001' });
+    expect(primary.status).toBe(200);
+
+    const fallback = await request(server)
+      .put('/api/v1/settings/ai-provider/fallback')
+      .set(admin)
+      .send({ providerType: 'anthropic', model: 'fallback-model', apiKey: 'sk-fallback-0002' });
+    expect(fallback.status).toBe(200);
+    expect(fallback.body.model).toBe('fallback-model');
+    expect(fallback.body.providerType).toBe('anthropic');
+
+    // Two rows at the server scope. Before #1052 the partial unique on `scope` made this
+    // impossible; the index is now keyed on (scope, role).
+    const stored = rows().filter((r) => r.scope === 'server');
+    expect(stored).toHaveLength(2);
+    expect(stored.map((r) => r.role).sort()).toEqual(['fallback', 'primary']);
+
+    // Independent credentials + endpoints. A fallback sharing the primary's key would send
+    // that key wherever the fallback row points, which is exactly the #373 exfiltration.
+    const [a, b] = stored;
+    expect(a.encrypted_api_key).not.toEqual(b.encrypted_api_key);
+
+    // The primary is exactly as it was.
+    const readback = await request(server).get('/api/v1/settings/ai-provider').set(admin);
+    expect(readback.body).toMatchObject({ model: 'primary-model', providerType: 'openai' });
+  });
+
+  it('never returns the fallback API key, only the masked indicator', async () => {
+    await request(server)
+      .put('/api/v1/settings/ai-provider/fallback')
+      .set(admin)
+      .send({ providerType: 'openai', model: 'm', apiKey: 'sk-secret-value-9999' });
+
+    const res = await request(server).get('/api/v1/settings/ai-provider/fallback').set(admin);
+    expect(JSON.stringify(res.body)).not.toContain('sk-secret-value-9999');
+    expect(res.body.configured).toBe(true);
+    expect(res.body.keyLast4).toBe('9999');
+  });
+
+  it('deleting the PRIMARY leaves the fallback in place (and vice versa)', async () => {
+    await request(server)
+      .put('/api/v1/settings/ai-provider')
+      .set(admin)
+      .send({ providerType: 'openai', model: 'primary-model', apiKey: 'sk-primary-0001' });
+    await request(server)
+      .put('/api/v1/settings/ai-provider/fallback')
+      .set(admin)
+      .send({ providerType: 'openai', model: 'fallback-model', apiKey: 'sk-fallback-0002' });
+
+    // Both deletes were scope-only predicates before #1052 — this would have wiped the
+    // operator's configured backup, key and all, from a button that says "delete the provider".
+    await request(server).delete('/api/v1/settings/ai-provider').set(admin).expect(204);
+    const remaining = rows().filter((r) => r.scope === 'server');
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0].role).toBe('fallback');
+    const survivor = await request(server).get('/api/v1/settings/ai-provider/fallback').set(admin);
+    expect(survivor.body.model).toBe('fallback-model');
+
+    await request(server).delete('/api/v1/settings/ai-provider/fallback').set(admin).expect(204);
+    expect(rows().filter((r) => r.scope === 'server')).toHaveLength(0);
+  });
+
+  it('enforces the admin model allowlist on the fallback', async () => {
+    await request(server)
+      .put('/api/v1/settings/ai-provider')
+      .set(admin)
+      .send({ providerType: 'openai', model: 'allowed-1', apiKey: 'sk-primary-0001', allowedModels: ['allowed-1'] });
+
+    // A fallback serves real turns, so exempting it would make "configure a fallback" a
+    // one-step route around the allowlist AND the base-URL host policy.
+    const rejected = await request(server)
+      .put('/api/v1/settings/ai-provider/fallback')
+      .set(admin)
+      .send({ providerType: 'openai', model: 'not-on-the-list', apiKey: 'sk-fallback-0002' });
+    expect(rejected.status).toBe(400);
+
+    const accepted = await request(server)
+      .put('/api/v1/settings/ai-provider/fallback')
+      .set(admin)
+      .send({ providerType: 'openai', model: 'allowed-1', apiKey: 'sk-fallback-0002' });
+    expect(accepted.status).toBe(200);
+  });
+
+  it('a fallback row does not change which provider the PRIMARY resolution picks', async () => {
+    // `serverRow()`/`campaignRow()` are `.limit(1)` with no ORDER BY, so a missing role filter
+    // would return an arbitrary one of the two rows and silently swap the table's provider on
+    // some fraction of turns. Asserted through the public effective-config read.
+    await request(server)
+      .put('/api/v1/settings/ai-provider')
+      .set(admin)
+      .send({ providerType: 'openai', model: 'primary-model', apiKey: 'sk-primary-0001' });
+    await request(server)
+      .put('/api/v1/settings/ai-provider/fallback')
+      .set(admin)
+      .send({ providerType: 'anthropic', model: 'fallback-model', apiKey: 'sk-fallback-0002' });
+
+    for (let i = 0; i < 5; i++) {
+      const res = await request(server).get('/api/v1/settings/ai-provider').set(admin);
+      expect(res.body.model).toBe('primary-model');
+      expect(res.body.providerType).toBe('openai');
+    }
+  });
+
+});
+
+/**
+ * Admin gating for the fallback routes, with REAL auth rather than the dev-auth header
+ * shortcut — under dev auth every identity satisfies the server-role guard, so an ACL
+ * assertion made there would pass no matter what the decorator said.
+ */
+describe('AI provider fallback slot is admin-gated (#1052, no dev auth)', () => {
+  let ctx: TestAppContext;
+  let adminAgent: ReturnType<typeof request.agent>;
+  let userAgent: ReturnType<typeof request.agent>;
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    const server = ctx.app.getHttpServer();
+    adminAgent = request.agent(server);
+    await adminAgent.post('/api/v1/auth/setup').send({ username: 'fb-admin', password: 'admin-password-1' });
+    await adminAgent
+      .post('/api/v1/users')
+      .send({ username: 'fb-user', password: 'user-password-1', serverRole: 'user' });
+    userAgent = request.agent(server);
+    await userAgent.post('/api/v1/auth/login').send({ username: 'fb-user', password: 'user-password-1' });
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('an admin may configure the fallback; a non-admin user is 403 on every verb', async () => {
+    const ok = await adminAgent
+      .put('/api/v1/settings/ai-provider/fallback')
+      .send({ providerType: 'mock', model: 'mock-model' });
+    expect(ok.status).toBe(200);
+
+    expect((await userAgent.get('/api/v1/settings/ai-provider/fallback')).status).toBe(403);
+    expect(
+      (await userAgent.put('/api/v1/settings/ai-provider/fallback').send({ providerType: 'mock', model: 'm' })).status,
+    ).toBe(403);
+    expect((await userAgent.delete('/api/v1/settings/ai-provider/fallback')).status).toBe(403);
+  });
+});

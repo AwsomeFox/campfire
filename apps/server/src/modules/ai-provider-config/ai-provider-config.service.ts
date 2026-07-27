@@ -35,6 +35,16 @@ type ConfigView = z.infer<typeof AiProviderConfigView>;
 type TestInput = z.infer<typeof AiProviderTestRequest>;
 type TestResult = z.infer<typeof AiProviderTestResult>;
 type Scope = 'server' | 'campaign';
+/**
+ * #1052: which of a scope's two provider slots a row is. 'primary' is what every pre-#1052
+ * row is and what every existing read path means; 'fallback' is an OPTIONAL second, fully
+ * independent config used only after the primary exhausts its retries on a transient failure.
+ *
+ * Every row lookup below filters on this. Without the filter `serverRow()`/`campaignRow()`
+ * — which are `.limit(1)` with no ORDER BY — would return an ARBITRARY one of the two rows,
+ * so adding a fallback would non-deterministically swap the table's primary provider.
+ */
+export type AiProviderRole = 'primary' | 'fallback';
 type Row = typeof aiProviderConfigs.$inferSelect;
 type TestedTarget = TestResult['testedTarget'];
 
@@ -129,20 +139,29 @@ export class AiProviderConfigService {
 
   // ── row access ─────────────────────────────────────────────────────────────
 
-  private async serverRow(): Promise<Row | undefined> {
+  private async serverRow(role: AiProviderRole = 'primary'): Promise<Row | undefined> {
     const [row] = await this.db
       .select()
       .from(aiProviderConfigs)
-      .where(eq(aiProviderConfigs.scope, 'server'))
+      // The role filter is load-bearing, not cosmetic (#1052): this is `.limit(1)` with no
+      // ORDER BY, so without it a configured fallback would be returned in place of the
+      // primary on an arbitrary subset of queries.
+      .where(and(eq(aiProviderConfigs.scope, 'server'), eq(aiProviderConfigs.role, role)))
       .limit(1);
     return row;
   }
 
-  private async campaignRow(campaignId: number): Promise<Row | undefined> {
+  private async campaignRow(campaignId: number, role: AiProviderRole = 'primary'): Promise<Row | undefined> {
     const [row] = await this.db
       .select()
       .from(aiProviderConfigs)
-      .where(and(eq(aiProviderConfigs.scope, 'campaign'), eq(aiProviderConfigs.campaignId, campaignId)))
+      .where(
+        and(
+          eq(aiProviderConfigs.scope, 'campaign'),
+          eq(aiProviderConfigs.campaignId, campaignId),
+          eq(aiProviderConfigs.role, role),
+        ),
+      )
       .limit(1);
     return row;
   }
@@ -291,6 +310,7 @@ export class AiProviderConfigService {
     input: ConfigUpdateInput,
     user: RequestUser,
     auditCampaignId?: number,
+    role: AiProviderRole = 'primary',
   ): Promise<void> {
     const ts = nowIso();
     await this.assertBaseUrlPermitted(input.baseUrl);
@@ -311,15 +331,19 @@ export class AiProviderConfigService {
       }
     }
 
-    // allowedModels is only meaningful at the server scope (the admin allowlist).
+    // allowedModels is only meaningful at the server scope (the admin allowlist), and only on
+    // the PRIMARY row (#1052): the allowlist is one server-wide policy, not a per-slot one, and
+    // letting a fallback row carry its own copy would create a second, silently-diverging
+    // source of truth for which models are permitted.
     const allowedModels =
-      scope === 'server' && input.allowedModels !== undefined
+      scope === 'server' && role === 'primary' && input.allowedModels !== undefined
         ? JSON.stringify(input.allowedModels)
         : (existing?.allowedModels ?? '[]');
 
     const values = {
       scope,
       campaignId,
+      role,
       providerType: input.providerType,
       baseUrl: input.baseUrl?.trim() ? input.baseUrl.trim() : null,
       model: input.model,
@@ -347,7 +371,7 @@ export class AiProviderConfigService {
       action: 'ai-provider.configure',
       entityType: 'ai-provider',
       campaignId: auditCampaignId ?? null,
-      detail: `${scope} provider=${input.providerType} model=${input.model} key=${keyAction}`,
+      detail: `${scope}/${role} provider=${input.providerType} model=${input.model} key=${keyAction}`,
     });
   }
 
@@ -424,7 +448,12 @@ export class AiProviderConfigService {
   }
 
   async deleteServer(user: RequestUser): Promise<void> {
-    await this.db.delete(aiProviderConfigs).where(eq(aiProviderConfigs.scope, 'server'));
+    // #1052: role-scoped. Without the filter this would delete the fallback slot too — a
+    // "remove the server provider" click silently wiping the operator's configured backup,
+    // including its stored credential, is not what that button says it does.
+    await this.db
+      .delete(aiProviderConfigs)
+      .where(and(eq(aiProviderConfigs.scope, 'server'), eq(aiProviderConfigs.role, 'primary')));
     await this.audit.log({
       actor: auditActor(user),
       actorRole: auditActorRole(user),
@@ -435,9 +464,16 @@ export class AiProviderConfigService {
   }
 
   async deleteCampaign(campaignId: number, user: RequestUser): Promise<void> {
+    // #1052: role-scoped, for the same reason as deleteServer above.
     await this.db
       .delete(aiProviderConfigs)
-      .where(and(eq(aiProviderConfigs.scope, 'campaign'), eq(aiProviderConfigs.campaignId, campaignId)));
+      .where(
+        and(
+          eq(aiProviderConfigs.scope, 'campaign'),
+          eq(aiProviderConfigs.campaignId, campaignId),
+          eq(aiProviderConfigs.role, 'primary'),
+        ),
+      );
     await this.audit.log({
       actor: auditActor(user),
       actorRole: auditActorRole(user),
@@ -468,8 +504,8 @@ export class AiProviderConfigService {
    * `baseUrl: 'https://attacker.example'` with no key and have the server's admin key
    * shipped there.
    */
-  async resolveEffectiveConfig(campaignId: number): Promise<AiProviderConfig | null> {
-    return (await this.resolveEffectiveConfigWithEndpointScope(campaignId)).config;
+  async resolveEffectiveConfig(campaignId: number, role: AiProviderRole = 'primary'): Promise<AiProviderConfig | null> {
+    return (await this.resolveEffectiveConfigWithEndpointScope(campaignId, role)).config;
   }
 
   /**
@@ -490,9 +526,18 @@ export class AiProviderConfigService {
    */
   async resolveEffectiveConfigWithEndpointScope(
     campaignId: number,
+    /**
+     * #1052: which slot to resolve. `'fallback'` runs the IDENTICAL precedence and identical
+     * #373 key/endpoint binding one slot over — campaign fallback ?? server fallback, and a
+     * keyless campaign fallback inherits the SERVER FALLBACK's key + endpoint + provider type,
+     * never the server PRIMARY's. Crossing the slots there would silently ship the primary's
+     * credential to an endpoint the fallback row names, which is exactly the exfiltration
+     * #373 closed, re-opened one level down.
+     */
+    role: AiProviderRole = 'primary',
   ): Promise<{ config: AiProviderConfig | null; endpointScope: 'campaign' | 'server' | null }> {
-    const server = await this.serverRow();
-    const camp = await this.campaignRow(campaignId);
+    const server = await this.serverRow(role);
+    const camp = await this.campaignRow(campaignId, role);
     const primary = camp ?? server;
     if (!primary) return { config: null, endpointScope: null };
 
@@ -615,9 +660,9 @@ export class AiProviderConfigService {
    */
   async resolveExecutionModel(
     campaignId: number,
-    opts: { resolveDns?: boolean } = {},
+    opts: { resolveDns?: boolean; role?: AiProviderRole } = {},
   ): Promise<{ model: string; config: AiProviderConfig } | null> {
-    const config = await this.resolveEffectiveConfig(campaignId);
+    const config = await this.resolveEffectiveConfig(campaignId, opts.role ?? 'primary');
     if (!config) return null;
     // Fail closed on a previously-stored blocked host (issues #1064, #570).
     await this.assertBaseUrlPermitted(config.baseUrl, opts.resolveDns ?? true);
@@ -629,6 +674,113 @@ export class AiProviderConfigService {
       );
     }
     return { model: config.model, config };
+  }
+
+  /**
+   * Resolve the OPTIONAL fallback provider for a campaign (#1052), or null when none is
+   * configured at either scope.
+   *
+   * Deliberately runs the SAME `resolveExecutionModel` — the same SSRF/base-URL re-check and
+   * the same admin model allowlist. A fallback is a provider the table's turns will actually
+   * be served by, so exempting it from execution-time policy would make "configure a fallback"
+   * a way to route around the allowlist and the host policy in one step.
+   *
+   * A rejected fallback (blocked host, disallowed model) resolves to null rather than throwing:
+   * the fallback exists to make a bad moment better, and letting its misconfiguration take down
+   * a turn the PRIMARY could have served would invert the whole point. The rejection is logged
+   * so it is not silent.
+   */
+  async resolveFallbackExecutionModel(
+    campaignId: number,
+    opts: { resolveDns?: boolean } = {},
+  ): Promise<{ model: string; config: AiProviderConfig } | null> {
+    try {
+      return await this.resolveExecutionModel(campaignId, { ...opts, role: 'fallback' });
+    } catch (err) {
+      this.logger.warn(
+        `Fallback AI provider for campaign ${campaignId} is configured but not usable, ignoring it: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return null;
+    }
+  }
+
+  // ── fallback slot CRUD (#1052) ───────────────────────────────────────────────
+  //
+  // Thin wrappers over the primary-slot methods with `role: 'fallback'`. Deliberately NOT a
+  // `role` request-body field on the existing routes: the slot is part of the resource's
+  // identity, and a body field would make it possible to overwrite the primary by typo, on
+  // endpoints whose whole job is storing a credential.
+
+  async getServerFallbackView(): Promise<ConfigView | null> {
+    const row = await this.serverRow('fallback');
+    return row ? this.toView(row, localCredentialSource(row)) : null;
+  }
+
+  async getCampaignFallbackView(campaignId: number): Promise<ConfigView | null> {
+    const [row, serverFallback] = await Promise.all([
+      this.campaignRow(campaignId, 'fallback'),
+      this.serverRow('fallback'),
+    ]);
+    return row ? this.toView(row, campaignCredentialSource(row, serverFallback)) : null;
+  }
+
+  /** Upsert the server-default FALLBACK provider (admin-gated at the controller). */
+  async putServerFallback(input: ConfigUpdateInput, user: RequestUser): Promise<ConfigView> {
+    // The fallback serves real turns, so it is bound by the same admin allowlist as a campaign
+    // override. The server PRIMARY is exempt because it is the row that DEFINES the allowlist;
+    // the fallback does not define it, so it must obey it.
+    this.assertCampaignModelAllowed(input.model, await this.serverRow('primary'));
+    const existing = await this.serverRow('fallback');
+    await this.upsert('server', null, existing, input, user, undefined, 'fallback');
+    const row = await this.serverRow('fallback');
+    return this.toView(row!, localCredentialSource(row!));
+  }
+
+  /** Upsert a per-campaign FALLBACK override (DM-gated at the controller). */
+  async putCampaignFallback(campaignId: number, input: ConfigUpdateInput, user: RequestUser): Promise<ConfigView> {
+    this.assertCampaignModelAllowed(input.model, await this.serverRow('primary'));
+    const existing = await this.campaignRow(campaignId, 'fallback');
+    await this.upsert('campaign', campaignId, existing, input, user, campaignId, 'fallback');
+    const row = await this.campaignRow(campaignId, 'fallback');
+    return this.toView(row!, campaignCredentialSource(row!, await this.serverRow('fallback')));
+  }
+
+  /** Remove the server fallback slot entirely (no-op when unset). */
+  async deleteServerFallback(user: RequestUser): Promise<void> {
+    await this.db
+      .delete(aiProviderConfigs)
+      .where(and(eq(aiProviderConfigs.scope, 'server'), eq(aiProviderConfigs.role, 'fallback')));
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: auditActorRole(user),
+      action: 'ai-provider.delete',
+      entityType: 'ai-provider',
+      campaignId: null,
+      detail: 'server/fallback removed',
+    });
+  }
+
+  /** Remove a campaign's fallback slot entirely (no-op when unset). */
+  async deleteCampaignFallback(campaignId: number, user: RequestUser): Promise<void> {
+    await this.db
+      .delete(aiProviderConfigs)
+      .where(
+        and(
+          eq(aiProviderConfigs.scope, 'campaign'),
+          eq(aiProviderConfigs.campaignId, campaignId),
+          eq(aiProviderConfigs.role, 'fallback'),
+        ),
+      );
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: auditActorRole(user),
+      action: 'ai-provider.delete',
+      entityType: 'ai-provider',
+      campaignId,
+      detail: 'campaign/fallback removed',
+    });
   }
 
   // ── test-connection (builds the real provider via #309's factory) ────────────

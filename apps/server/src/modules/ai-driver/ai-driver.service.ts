@@ -28,7 +28,21 @@ import type {
 } from '../ai-dm/providers/ai-provider';
 import { AiProviderError } from '../ai-dm/providers/errors';
 import { DEFAULT_IDLE_TIMEOUT_MS } from '../ai-dm/providers/http';
-import { AI_PROVIDER_RESOLVER, resolveProviderForExecution, type AiProviderResolver } from './ai-provider-resolver';
+import {
+  AI_PROVIDER_RESOLVER,
+  resolveFallbackForExecution,
+  resolveProviderForExecution,
+  type AiProviderResolver,
+} from './ai-provider-resolver';
+// #1052 — transient-failure retry + provider failover. The POLICY is pure and lives here so
+// the guard ordering (safety → already-broadcast → affordability → attempts) is testable
+// without a provider, a lock, or a database.
+import {
+  decideStepRetry,
+  maxStepAttempts,
+  providerForAttempt,
+  type RetryRefusalReason,
+} from './driver-retry';
 import { AiDmStreamService } from './ai-driver-stream.service';
 import { AiDmTranscriptService } from './ai-driver-transcript.service';
 import { extractToolResourceIdentity, type ToolResourceIdentity } from './ai-dm-tool-resource';
@@ -89,6 +103,20 @@ export let DRIVER_STREAM_IDLE_TIMEOUT_MS = DEFAULT_IDLE_TIMEOUT_MS;
 /** Test-only: override {@link DRIVER_STREAM_IDLE_TIMEOUT_MS}. */
 export function setDriverStreamIdleTimeoutMsForTests(ms: number): void {
   DRIVER_STREAM_IDLE_TIMEOUT_MS = ms;
+}
+
+/**
+ * Backoff sleep for the #1052 retry loop. A module-level indirection so specs can make the
+ * wait instantaneous without faking timers globally — the driver's own idle watchdog also
+ * uses setTimeout, and swapping the whole timer implementation out from under it in a test
+ * changes the behaviour under test.
+ */
+export let sleepMs: (ms: number) => Promise<void> = (ms) =>
+  ms > 0 ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve();
+
+/** Test-only: replace the retry backoff sleep (#1052). */
+export function setRetrySleepForTests(fn: (ms: number) => Promise<void>): void {
+  sleepMs = fn;
 }
 
 /** Why a driver turn stopped — surfaced on the result + the turn.end SSE event. */
@@ -1806,6 +1834,11 @@ export class AiDriverService {
       );
     }
     const { provider, model: execModel } = execution;
+    // #1052: the OPTIONAL second provider. Resolved once per turn rather than lazily on
+    // failure, so a misconfigured fallback surfaces in the logs at a calm moment instead of
+    // during the incident it was meant to cover. `null` whenever none is configured or it
+    // fails execution-time policy — failover is opt-in and never invents a provider.
+    const fallbackExecution = await resolveFallbackForExecution(this.resolver, campaignId);
 
     const seatPrincipal = this.seatPrincipal(campaignId);
     const contextPrincipal = this.contextPrincipal(campaignId);
@@ -1906,6 +1939,19 @@ export class AiDriverService {
     const { signal: generationSignal, handle: generationHandle } = this.beginGeneration(campaignId);
     let providerError: AiProviderError | undefined;
     let tokensUsageUnknown = false;
+    /**
+     * #1052 — how the last step's attempt loop ended. `attempts` counts provider calls made
+     * for that step (1 when nothing was retried); `gaveUp` names why no further attempt was
+     * made, or null when an attempt succeeded. Audited so "why did this not retry?" — most
+     * importantly "because it was a refusal" — is answerable after the fact.
+     */
+    let retryOutcome: { attempts: number; gaveUp: RetryRefusalReason | null } = { attempts: 1, gaveUp: null };
+    // #1052 / #577: the provider + model that actually SERVED the most recent step. Starts as
+    // the primary and only moves on a successful failover, so the grounding verdict's
+    // provenance badge names the model that produced the narration being judged rather than
+    // the one the DM configured.
+    let servedProviderName = provider.name;
+    let servedProviderModel = execModel;
 
     try {
       for (let step = 0; step < maxSteps; step++) {
@@ -1924,173 +1970,254 @@ export class AiDriverService {
         // seat after ownership, then keep provider streaming and metering in one
         // critical section. A scribe that spent while this turn waited can
         // exhaust the budget without this driver making another provider call.
-        const spend = await this.aiDm.withSpendLock(campaignId, async () => {
-          const currentSeat = await this.aiDm.getSeat(campaignId);
-          const currentRemaining = currentSeat.budgetRemaining;
-          if (currentRemaining <= 0) {
-            return { kind: 'budget_exhausted' as const, seat: currentSeat, budgetRemaining: 0 };
-          }
-          // Detach (#1071) vs freeze (#1057) vs kill (#558) — authority is re-checked under the
-          // spend lock immediately before the provider call.
-          const lockAuth = await this.checkGenerationAuthority(campaignId, session, generationSignal);
-          if (lockAuth !== 'ok') {
-            return {
-              kind: 'stopped' as const,
-              reason: lockAuth,
-              seat: currentSeat,
-              budgetRemaining: currentRemaining,
-              text: '',
-              metered: null,
-            };
-          }
-          let reservation: AiDmTokenReservation;
-          try {
-            reservation = await this.aiDm.reserveTokenBudget(campaignId, Math.min(perStepCap, currentRemaining));
-          } catch {
-            return { kind: 'server_cap' as const, seat: currentSeat, budgetRemaining: currentRemaining };
-          }
-
-          const maxTokens = reservation.tokensReserved;
-          steps = stepNumber;
-          let step:
-            | { ok: true; text: string; result: AiGenerateResult | undefined; aborted: boolean; cancelled: boolean }
-            | { ok: false; text: string; result: AiGenerateResult | undefined; error: AiProviderError };
-          try {
-            step = await this.streamStep(campaignId, provider, session, generationSignal, {
-              system,
-              messages,
-              // Issue #564: the executable model derives ONLY from the effective provider
-              // config (allowlist-validated at resolution above), NEVER from legacy seat.model.
-              model: execModel,
-              maxTokens,
-              tools: toolSchemas,
-            });
-          } catch (err) {
-            // Settling the hold is bookkeeping; the provider error is what the caller
-            // needs to see. Never let a failed settle replace it (#563).
-            let unknownMetered: { seat: AiDmSeat; budgetRemaining: number };
-            try {
-              unknownMetered = await this.aiDm.markReservationUsageUnknown(reservation, {
-                actor,
-                action: 'ai-dm.driver.usage_unknown',
-                detail: `step ${stepNumber} provider exception model=${execModel} usage unknown by ${triggeredBy.id}`,
-                model: execModel,
-              });
-            } catch (releaseErr) {
-              this.logger.error(
-                `Failed to release AI token reservation (campaign=${campaignId}, tokens=${reservation.tokensReserved}) after a provider exception: ${
-                  releaseErr instanceof Error ? releaseErr.message : String(releaseErr)
-                }`,
-              );
-              unknownMetered = { seat: currentSeat, budgetRemaining: currentRemaining };
+        //
+        // #1052: ONE attempt. The retry/failover loop below calls this repeatedly, taking
+        // and releasing the lock each time.
+        const runAttempt = async (attemptProvider: AiProvider, attemptModel: string) =>
+          this.aiDm.withSpendLock(campaignId, async () => {
+            const currentSeat = await this.aiDm.getSeat(campaignId);
+            const currentRemaining = currentSeat.budgetRemaining;
+            if (currentRemaining <= 0) {
+              return { kind: 'budget_exhausted' as const, seat: currentSeat, budgetRemaining: 0 };
             }
-            const error =
-              err instanceof AiProviderError
-                ? err
-                : new AiProviderError('unknown', err instanceof Error ? err.message : String(err), {
-                    provider: provider.name,
-                    cause: err,
-                  });
-            return {
-              kind: 'provider_error' as const,
-              seat: unknownMetered.seat,
-              budgetRemaining: unknownMetered.budgetRemaining,
-              text: '',
-              error,
-              usageUnknown: true,
-              metered: undefined,
-            };
-          }
-
-          if (!step.ok) {
-            const resolved = resolveProviderStepUsage(step.text, step.result);
-            let metered: { seat: AiDmSeat; tokensUsed: number; budgetRemaining: number } | undefined;
-            let unknownMetered: { seat: AiDmSeat; budgetRemaining: number } | undefined;
-            if (resolved.unknown) {
-              unknownMetered = await this.aiDm.markReservationUsageUnknown(reservation, {
-                actor,
-                action: 'ai-dm.driver.usage_unknown',
-                detail: `step ${stepNumber} provider_error model=${execModel} usage unknown by ${triggeredBy.id}`,
-                model: step.result?.model || execModel,
-              });
-            } else {
-              metered = await this.aiDm.meterTurn(campaignId, resolved.tokens, {
-                actor,
-                action: 'ai-dm.driver.turn',
-                detail: `step ${stepNumber} provider_error model=${execModel} +${resolved.tokens} tokens (partial) by ${triggeredBy.id}`,
-                model: step.result?.model || execModel,
-              }, reservation);
-            }
-            return {
-              kind: 'provider_error' as const,
-              seat: metered?.seat ?? unknownMetered?.seat ?? currentSeat,
-              budgetRemaining: metered?.budgetRemaining ?? unknownMetered?.budgetRemaining ?? currentRemaining,
-              text: step.text,
-              error: step.error,
-              usageUnknown: resolved.unknown,
-              metered,
-            };
-          }
-
-          const { text, result, aborted, cancelled } = step;
-
-          // Meter this step's REAL usage before releasing the mutex, including
-          // a completed/partial stream that was frozen before narration/tool
-          // delivery. The SQL clamp remains defense in depth; another local
-          // spender cannot pass a stale budget gate while this call is billed.
-          let usage = result?.usage.totalTokens ?? 0;
-          // Issue #1076: some providers (Ollama, llama.cpp, LM Studio, some OpenRouter models)
-          // omit streaming usage. When that happens usage is 0 despite real content. Estimate
-          // rather than silently fail-open on budget enforcement.
-          const outputText = text || result?.text || '';
-          if (usage === 0 && (outputText.length > 0 || (result?.toolCalls?.length ?? 0) > 0)) {
-            const outputChars = outputText.length + JSON.stringify(result?.toolCalls ?? []).length;
-            // ~4 chars per token is a conservative English-language estimate.
-            usage = Math.max(1, Math.ceil(outputChars / 4));
-            this.logger.warn(
-              `Provider did not report streaming usage for step ${stepNumber} (model=${result?.model || execModel}); estimating ${usage} tokens from ${outputChars} output chars`,
-            );
-          }
-          const servedModel = result?.model || execModel;
-          const metered = await this.aiDm.meterTurn(campaignId, usage, {
-            actor,
-            action: 'ai-dm.driver.turn',
-            detail: `step ${stepNumber} model=${servedModel || 'default'} +${usage} tokens by ${triggeredBy.id}`,
-          }, reservation);
-          // streamStep sets `aborted` on mode-switch detach and `cancelled` on stop-control abort (#558).
-          if (aborted || cancelled || session.detached) {
-            const postAuth = await this.checkGenerationAuthority(campaignId, session, generationSignal);
-            if (postAuth !== 'ok') {
+            // Detach (#1071) vs freeze (#1057) vs kill (#558) — authority is re-checked under the
+            // spend lock immediately before the provider call.
+            const lockAuth = await this.checkGenerationAuthority(campaignId, session, generationSignal);
+            if (lockAuth !== 'ok') {
               return {
                 kind: 'stopped' as const,
-                reason: postAuth,
+                reason: lockAuth,
+                seat: currentSeat,
+                budgetRemaining: currentRemaining,
+                text: '',
+                metered: null,
+              };
+            }
+            let reservation: AiDmTokenReservation;
+            try {
+              reservation = await this.aiDm.reserveTokenBudget(campaignId, Math.min(perStepCap, currentRemaining));
+            } catch {
+              return { kind: 'server_cap' as const, seat: currentSeat, budgetRemaining: currentRemaining };
+            }
+
+            const maxTokens = reservation.tokensReserved;
+            steps = stepNumber;
+            let step: Awaited<ReturnType<AiDriverService['streamStep']>>;
+            try {
+              step = await this.streamStep(campaignId, attemptProvider, session, generationSignal, {
+                system,
+                messages,
+                // Issue #564: the executable model derives ONLY from the effective provider
+                // config (allowlist-validated at resolution above), NEVER from legacy seat.model.
+                // #1052: on a failover attempt this is the FALLBACK's own allowlist-validated
+                // model, resolved through the same execution-time choke point.
+                model: attemptModel,
+                maxTokens,
+                tools: toolSchemas,
+              });
+            } catch (err) {
+              // Settling the hold is bookkeeping; the provider error is what the caller
+              // needs to see. Never let a failed settle replace it (#563).
+              let unknownMetered: { seat: AiDmSeat; budgetRemaining: number };
+              try {
+                unknownMetered = await this.aiDm.markReservationUsageUnknown(reservation, {
+                  actor,
+                  action: 'ai-dm.driver.usage_unknown',
+                  detail: `step ${stepNumber} provider exception model=${attemptModel} usage unknown by ${triggeredBy.id}`,
+                  model: attemptModel,
+                });
+              } catch (releaseErr) {
+                this.logger.error(
+                  `Failed to release AI token reservation (campaign=${campaignId}, tokens=${reservation.tokensReserved}) after a provider exception: ${
+                    releaseErr instanceof Error ? releaseErr.message : String(releaseErr)
+                  }`,
+                );
+                unknownMetered = { seat: currentSeat, budgetRemaining: currentRemaining };
+              }
+              const error =
+                err instanceof AiProviderError
+                  ? err
+                  : new AiProviderError('unknown', err instanceof Error ? err.message : String(err), {
+                      provider: attemptProvider.name,
+                      cause: err,
+                    });
+              return {
+                kind: 'provider_error' as const,
+                seat: unknownMetered.seat,
+                budgetRemaining: unknownMetered.budgetRemaining,
+                text: '',
+                error,
+                usageUnknown: true,
+                metered: undefined,
+                // streamStep threw before returning, so nothing it emitted is knowable here.
+                // 0 is the honest value: this path is a throw from the provider call itself
+                // (a non-AiProviderError escaping), which happens before any delta.
+                broadcastChars: 0,
+              };
+            }
+
+            if (!step.ok) {
+              const resolved = resolveProviderStepUsage(step.text, step.result);
+              let metered: { seat: AiDmSeat; tokensUsed: number; budgetRemaining: number } | undefined;
+              let unknownMetered: { seat: AiDmSeat; budgetRemaining: number } | undefined;
+              if (resolved.unknown) {
+                unknownMetered = await this.aiDm.markReservationUsageUnknown(reservation, {
+                  actor,
+                  action: 'ai-dm.driver.usage_unknown',
+                  detail: `step ${stepNumber} provider_error model=${attemptModel} usage unknown by ${triggeredBy.id}`,
+                  model: step.result?.model || attemptModel,
+                });
+              } else {
+                metered = await this.aiDm.meterTurn(campaignId, resolved.tokens, {
+                  actor,
+                  action: 'ai-dm.driver.turn',
+                  detail: `step ${stepNumber} provider_error model=${attemptModel} +${resolved.tokens} tokens (partial) by ${triggeredBy.id}`,
+                  model: step.result?.model || attemptModel,
+                }, reservation);
+              }
+              return {
+                kind: 'provider_error' as const,
+                seat: metered?.seat ?? unknownMetered?.seat ?? currentSeat,
+                budgetRemaining: metered?.budgetRemaining ?? unknownMetered?.budgetRemaining ?? currentRemaining,
+                text: step.text,
+                error: step.error,
+                usageUnknown: resolved.unknown,
+                metered,
+                // #1052: what this attempt actually put on the wire, which is what decides
+                // whether a silent retry would contradict something the table already read.
+                broadcastChars: step.broadcastChars,
+              };
+            }
+
+            const { text, result, aborted, cancelled } = step;
+
+            // Meter this step's REAL usage before releasing the mutex, including
+            // a completed/partial stream that was frozen before narration/tool
+            // delivery. The SQL clamp remains defense in depth; another local
+            // spender cannot pass a stale budget gate while this call is billed.
+            let usage = result?.usage.totalTokens ?? 0;
+            // Issue #1076: some providers (Ollama, llama.cpp, LM Studio, some OpenRouter models)
+            // omit streaming usage. When that happens usage is 0 despite real content. Estimate
+            // rather than silently fail-open on budget enforcement.
+            const outputText = text || result?.text || '';
+            if (usage === 0 && (outputText.length > 0 || (result?.toolCalls?.length ?? 0) > 0)) {
+              const outputChars = outputText.length + JSON.stringify(result?.toolCalls ?? []).length;
+              // ~4 chars per token is a conservative English-language estimate.
+              usage = Math.max(1, Math.ceil(outputChars / 4));
+              this.logger.warn(
+                `Provider did not report streaming usage for step ${stepNumber} (model=${result?.model || attemptModel}); estimating ${usage} tokens from ${outputChars} output chars`,
+              );
+            }
+            const servedModel = result?.model || attemptModel;
+            const metered = await this.aiDm.meterTurn(campaignId, usage, {
+              actor,
+              action: 'ai-dm.driver.turn',
+              detail: `step ${stepNumber} model=${servedModel || 'default'} +${usage} tokens by ${triggeredBy.id}`,
+            }, reservation);
+            // streamStep sets `aborted` on mode-switch detach and `cancelled` on stop-control abort (#558).
+            if (aborted || cancelled || session.detached) {
+              const postAuth = await this.checkGenerationAuthority(campaignId, session, generationSignal);
+              if (postAuth !== 'ok') {
+                return {
+                  kind: 'stopped' as const,
+                  reason: postAuth,
+                  seat: metered.seat,
+                  budgetRemaining: metered.budgetRemaining,
+                  text,
+                  metered,
+                };
+              }
+              return {
+                kind: 'aborted' as const,
                 seat: metered.seat,
                 budgetRemaining: metered.budgetRemaining,
                 text,
                 metered,
               };
             }
-            return {
-              kind: 'aborted' as const,
-              seat: metered.seat,
-              budgetRemaining: metered.budgetRemaining,
-              text,
-              metered,
-            };
+            const postStreamAuth = await this.checkGenerationAuthority(campaignId, session, generationSignal);
+            if (postStreamAuth !== 'ok') {
+              return {
+                kind: 'stopped' as const,
+                reason: postStreamAuth,
+                seat: metered.seat,
+                budgetRemaining: metered.budgetRemaining,
+                text,
+                metered,
+              };
+            }
+            return { kind: 'metered' as const, text, result, metered };
+          });
+
+        // ── #1052: per-step attempt loop (transient-failure retry + provider failover) ──
+        //
+        // Wrapped AROUND withSpendLock, never inside it. The backoff sleep is the reason:
+        // the spend lock is the campaign-wide mutex the scribe shares (#1058), so sleeping
+        // while holding it would block every other spender for the whole backoff — turning a
+        // provider blip on the driver into a stall on an unrelated scribe job. Each attempt
+        // takes the lock, spends, and releases; the waiting happens in between, unlocked.
+        //
+        // Re-taking the lock per attempt also means the budget gate is re-evaluated with
+        // fresh numbers every time (`currentRemaining <= 0` below), so a retry storm cannot
+        // outrun a budget another spender has since drained. That is the load-bearing reason
+        // this is not "reserve once, retry inside".
+        let spend!: Awaited<ReturnType<typeof runAttempt>>;
+        let attempt = 1;
+        const attemptCap = maxStepAttempts(!!fallbackExecution);
+        // Reset per STEP: a multi-step turn must not audit step 3's failure with step 1's
+        // attempt count.
+        retryOutcome = { attempts: 1, gaveUp: null };
+        // eslint-disable-next-line no-constant-condition
+        for (;;) {
+          const useFallback = providerForAttempt(attempt, !!fallbackExecution) === 'fallback';
+          const attemptProvider = useFallback ? fallbackExecution!.provider : provider;
+          const attemptModel = useFallback ? fallbackExecution!.model : execModel;
+          spend = await runAttempt(attemptProvider, attemptModel);
+          retryOutcome = { attempts: attempt, gaveUp: null };
+          if (spend.kind !== 'provider_error' || !spend.error) {
+            // #577 provenance: record WHICH provider actually served the step, so a turn that
+            // failed over is not attributed to the primary the DM configured.
+            if (spend.kind === 'metered') {
+              servedProviderName = attemptProvider.name;
+              servedProviderModel = attemptModel;
+            }
+            break;
           }
-          const postStreamAuth = await this.checkGenerationAuthority(campaignId, session, generationSignal);
-          if (postStreamAuth !== 'ok') {
-            return {
-              kind: 'stopped' as const,
-              reason: postStreamAuth,
-              seat: metered.seat,
-              budgetRemaining: metered.budgetRemaining,
-              text,
-              metered,
-            };
+
+          const decision = decideStepRetry({
+            error: spend.error,
+            attempt,
+            maxAttempts: attemptCap,
+            // What the TABLE saw, not what the model generated — a retry that would
+            // contradict prose already on the wire is refused outright.
+            broadcastChars: spend.broadcastChars ?? 0,
+            budgetRemaining: spend.metered?.budgetRemaining ?? spend.budgetRemaining,
+          });
+          if (!decision.retry) {
+            retryOutcome = { attempts: attempt, gaveUp: decision.reason };
+            break;
           }
-          return { kind: 'metered' as const, text, result, metered };
-        });
+          // A freeze / kill / detach that landed during the backoff must win over the retry;
+          // re-check BEFORE sleeping and again after, so a stop control is not made to wait
+          // out a provider's Retry-After.
+          if ((await this.checkGenerationAuthority(campaignId, session, generationSignal)) !== 'ok') {
+            retryOutcome = { attempts: attempt, gaveUp: 'attempts_exhausted' };
+            break;
+          }
+          this.logger.warn(
+            `AI provider step ${stepNumber} attempt ${attempt}/${attemptCap} failed on campaign ${campaignId} ` +
+              `(${spend.error.kind}); retrying in ${decision.delayMs}ms` +
+              `${providerForAttempt(decision.attempt, !!fallbackExecution) === 'fallback' ? ' on the FALLBACK provider' : ''}`,
+          );
+          await sleepMs(decision.delayMs);
+          if ((await this.checkGenerationAuthority(campaignId, session, generationSignal)) !== 'ok') {
+            retryOutcome = { attempts: attempt, gaveUp: 'attempts_exhausted' };
+            break;
+          }
+          attempt = decision.attempt;
+          retryOutcome = { attempts: attempt, gaveUp: null };
+        }
+
 
         if (spend.kind === 'budget_exhausted' || spend.kind === 'server_cap') {
           latestSeat = spend.seat;
@@ -2129,7 +2256,13 @@ export class AiDriverService {
             action: 'ai-dm.driver.provider_error',
             entityType: 'ai-dm',
             campaignId,
-            detail: `${detail} (triggered by ${triggeredBy.id})`,
+            // #1052: record the attempt count and WHY the loop stopped. Without the reason a
+            // reader cannot tell a genuine 3-attempt exhaustion from a first-attempt refusal
+            // that was deliberately never retried — and those call for opposite responses.
+            detail:
+              `${detail} [attempts=${retryOutcome.attempts}` +
+              `${retryOutcome.gaveUp ? ` gave_up=${retryOutcome.gaveUp}` : ''}` +
+              `${fallbackExecution ? ' fallback=configured' : ''}] (triggered by ${triggeredBy.id})`,
           });
           break;
         }
@@ -2254,8 +2387,8 @@ export class AiDriverService {
       parsed: turnGrounding,
       ledger,
       executed,
-      provider: provider.name,
-      model: execModel,
+      provider: servedProviderName,
+      model: servedProviderModel,
       triggeredBy,
     });
 
@@ -2427,12 +2560,33 @@ export class AiDriverService {
     generationSignal: AbortSignal,
     req: { system: string; messages: AiMessage[]; model: string; maxTokens: number; tools: AiToolSchema[] },
   ): Promise<
-    | { ok: true; text: string; result: AiGenerateResult | undefined; aborted: boolean; cancelled: boolean }
-    | { ok: false; text: string; result: AiGenerateResult | undefined; error: AiProviderError }
+    | {
+        ok: true;
+        text: string;
+        result: AiGenerateResult | undefined;
+        aborted: boolean;
+        cancelled: boolean;
+        broadcastChars: number;
+      }
+    | {
+        ok: false;
+        text: string;
+        result: AiGenerateResult | undefined;
+        error: AiProviderError;
+        /** #1052 — narration this attempt actually put on the wire; gates a silent retry. */
+        broadcastChars: number;
+      }
   > {
     let text = '';
     let result: AiGenerateResult | undefined;
     let streamUsage: AiUsage | undefined;
+    /**
+     * #1052: characters actually EMITTED as `narration.delta`, which is deliberately not the
+     * same as `text.length`. `text` is what the model generated; this is what the table saw.
+     * The #577 citation filter already withholds protocol framing from the wire, so the two
+     * diverge today, and a retry decision must be made on what a player could have read.
+     */
+    let broadcastChars = 0;
     // #577: the grounding citation block is protocol framing appended after the prose. Without
     // this filter the table would watch the DM "type" raw JSON at the end of every turn. `text`
     // still accumulates the FULL raw output — the block is parsed off it once the step lands.
@@ -2440,6 +2594,8 @@ export class AiDriverService {
     const toolAcc = new Map<number, { id?: string; name?: string; args: string }>();
     let aborted = false;
     let cancelled = false;
+    /** Set when the stream threw a typed provider error; returned after `finally` flushes. */
+    let failure: { error: AiProviderError; partial: AiGenerateResult | undefined } | undefined;
     const idleAc = new AbortController();
     const linked = linkAbortSignals(generationSignal, idleAc.signal);
     const idleMs = DRIVER_STREAM_IDLE_TIMEOUT_MS;
@@ -2529,7 +2685,10 @@ export class AiDriverService {
         if (ev.type === 'text') {
           text += ev.delta;
           const visible = deltaFilter.push(ev.delta);
-          if (visible) this.stream.emit({ type: 'narration.delta', campaignId, text: visible });
+          if (visible) {
+            broadcastChars += visible.length;
+            this.stream.emit({ type: 'narration.delta', campaignId, text: visible });
+          }
         } else if (ev.type === 'usage') {
           streamUsage = ev.usage;
         } else if (ev.type === 'tool_call') {
@@ -2549,9 +2708,12 @@ export class AiDriverService {
       } else {
         const partial = partialResult();
         if (err instanceof AiProviderError) {
-          return { ok: false, text, result: partial, error: err };
+          // NOTE: the `finally` below still runs and may flush a held tail, so `broadcastChars`
+          // is read AFTER it — hence the deferred-return shape rather than returning here.
+          failure = { error: err, partial };
+        } else {
+          throw err;
         }
-        throw err;
       }
     } finally {
       linked.cleanup();
@@ -2560,11 +2722,20 @@ export class AiDriverService {
       // #577: release any tail the fence detector was holding back but that never became a
       // grounding block, so a reply ending in "[" is not silently truncated for the table.
       const tail = deltaFilter.flush();
-      if (tail && !session.detached) this.stream.emit({ type: 'narration.delta', campaignId, text: tail });
+      if (tail && !session.detached) {
+        broadcastChars += tail.length;
+        this.stream.emit({ type: 'narration.delta', campaignId, text: tail });
+      }
+    }
+    // #1052: the error path returns only after `finally` has flushed any held tail, so the
+    // reported `broadcastChars` is the FINAL count the table saw — a retry decision made on a
+    // pre-flush count could re-narrate over prose the flush had just emitted.
+    if (failure) {
+      return { ok: false, text, result: failure.partial, error: failure.error, broadcastChars };
     }
     // A provider that only streamed deltas (no `done`) still yields its text.
     if (result && !result.text && text) result = { ...result, text };
-    return { ok: true, text, result, aborted, cancelled };
+    return { ok: true, text, result, aborted, cancelled, broadcastChars };
   }
 
   /**

@@ -36,6 +36,17 @@ export interface AiProviderResolver {
    * which presence-checks this method so a harness resolver without it is handled cleanly.
    */
   resolveForExecution?(campaignId: number): Promise<{ provider: AiProvider; model: string } | null>;
+  /**
+   * Resolve the OPTIONAL fallback provider for a campaign (issue #1052), or null when none is
+   * configured. Same execution-time policy as {@link resolveForExecution} — the fallback is a
+   * provider that will serve real turns, so it goes through the same base-URL host check and
+   * the same admin model allowlist.
+   *
+   * OPTIONAL for the same reason `resolveForExecution` is: the offline eval harness binds a
+   * bare `{ resolve }` shim. A resolver without this method simply has no fallback, which is
+   * the correct default — failover is opt-in.
+   */
+  resolveFallbackForExecution?(campaignId: number): Promise<{ provider: AiProvider; model: string } | null>;
 }
 
 /**
@@ -60,6 +71,14 @@ export class ConfigAiProviderResolver implements AiProviderResolver {
     // decrypted config the model was validated against, so the provider we build here
     // cannot diverge from the policy decision.
     const resolved = await this.config.resolveExecutionModel(campaignId);
+    if (!resolved) return null;
+    return { provider: createAiProvider(resolved.config), model: resolved.model };
+  }
+
+  async resolveFallbackForExecution(
+    campaignId: number,
+  ): Promise<{ provider: AiProvider; model: string } | null> {
+    const resolved = await this.config.resolveFallbackExecutionModel(campaignId);
     if (!resolved) return null;
     return { provider: createAiProvider(resolved.config), model: resolved.model };
   }
@@ -88,4 +107,25 @@ export async function resolveProviderForExecution(
   // through resolveForExecution above, so this branch only runs in the offline harness.
   const model = (provider as { model?: string }).model ?? '';
   return { provider, model };
+}
+
+/**
+ * Resolve the OPTIONAL fallback for a turn (issue #1052), or null when there is none.
+ *
+ * Best-effort by contract. A fallback that cannot be resolved — misconfigured, host now
+ * blocked, model no longer on the allowlist — must never take down a turn the PRIMARY can
+ * serve perfectly well: the fallback exists to make a bad moment better, and letting its
+ * misconfiguration cause the failure it was added to prevent inverts the entire feature. The
+ * underlying service already logs the rejection, so this is quiet but not silent.
+ */
+export async function resolveFallbackForExecution(
+  resolver: AiProviderResolver,
+  campaignId: number,
+): Promise<ResolvedExecution | null> {
+  if (!resolver.resolveFallbackForExecution) return null;
+  try {
+    return await resolver.resolveFallbackForExecution(campaignId);
+  } catch {
+    return null;
+  }
 }

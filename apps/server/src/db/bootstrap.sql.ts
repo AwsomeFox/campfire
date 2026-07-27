@@ -1298,12 +1298,19 @@ CREATE TABLE IF NOT EXISTS ai_provider_configs (
   encrypted_api_key TEXT,
   key_last4 TEXT,
   allowed_models TEXT NOT NULL DEFAULT '[]',
+  -- #1052: 'primary' | 'fallback'. A fallback row is a SECOND, fully independent provider
+  -- config at the same scope, tried only after the primary has exhausted its retries on a
+  -- transient failure. It is a separate row (not extra columns) so it carries its own key,
+  -- endpoint, and provider type — which is what the #373 key/endpoint binding requires.
+  role TEXT NOT NULL DEFAULT 'primary',
   created_by TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_provider_configs_server ON ai_provider_configs(scope) WHERE scope = 'server';
-CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_provider_configs_campaign ON ai_provider_configs(campaign_id) WHERE campaign_id IS NOT NULL;
+-- The partial uniques are keyed on (…, role) so a scope can hold one primary AND one
+-- fallback, while still permitting no more than one of each.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_provider_configs_server_role ON ai_provider_configs(scope, role) WHERE scope = 'server';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_provider_configs_campaign_role ON ai_provider_configs(campaign_id, role) WHERE campaign_id IS NOT NULL;
 
 -- AI scribe (issue #316): per-campaign trigger config + a log of runs. The scribe
 -- drafts a session recap from the campaign's own material using the configured
