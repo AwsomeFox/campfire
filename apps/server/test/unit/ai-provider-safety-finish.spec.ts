@@ -349,6 +349,53 @@ describe('Anthropic — stop_reason refusal (#598)', () => {
   });
 });
 
+describe('OpenAI Responses — refusal shapes count consistently (#598)', () => {
+  it('counts a TOP-LEVEL refusal item, not just a refusal content part', async () => {
+    // The counter ran in the content-part branch and not its sibling, so the SAME refusal
+    // measured as its real length or as zero depending purely on which shape the wire used.
+    // The driver no longer depends on this to avoid a free turn — an unmeasurable turn settles
+    // as unknown spend — but an estimate that silently varies by wire shape is its own defect.
+    const refusal = 'I cannot help with that request.';
+    const { fetchImpl } = fakeFetch(
+      jsonResponse({ model: 'm', status: 'completed', output: [{ type: 'refusal', refusal }] }),
+    );
+    const p = new OpenAiProvider({ apiKey: 'k', model: 'm', endpointMode: 'responses', fetchImpl });
+    const result = await p.generate(req);
+    expect(result.finishReason).toBe('refusal');
+    expect(result.refusalChars).toBe(refusal.length);
+    expect(JSON.stringify(result)).not.toContain('cannot help');
+  });
+
+  it('counts a refusal delivered only on `response.refusal.done`, with no deltas', async () => {
+    // A stream may send the complete refusal on `.done` and no `.delta` frames at all. Counting
+    // only deltas measured that as zero — the fourth door onto the same free-turn bug.
+    const refusal = 'No.';
+    const frames = [
+      `data: ${JSON.stringify({ type: 'response.refusal.done', refusal })}\n\n`,
+      `data: ${JSON.stringify({ type: 'response.completed', response: { status: 'completed' } })}\n\n`,
+    ];
+    const { fetchImpl } = fakeFetch(streamResponse(frames));
+    const p = new OpenAiProvider({ apiKey: 'k', model: 'm', endpointMode: 'responses', fetchImpl });
+    const events = await collect(p.stream(req));
+    const done = events.find((e) => e.type === 'done');
+    expect(done && done.type === 'done' && done.result.refusalChars).toBe(refusal.length);
+  });
+
+  it('does not double-count a refusal sent as deltas AND a done frame', async () => {
+    const frames = [
+      `data: ${JSON.stringify({ type: 'response.refusal.delta', delta: 'No' })}\n\n`,
+      `data: ${JSON.stringify({ type: 'response.refusal.delta', delta: '.' })}\n\n`,
+      `data: ${JSON.stringify({ type: 'response.refusal.done', refusal: 'No.' })}\n\n`,
+      `data: ${JSON.stringify({ type: 'response.completed', response: { status: 'completed' } })}\n\n`,
+    ];
+    const { fetchImpl } = fakeFetch(streamResponse(frames));
+    const p = new OpenAiProvider({ apiKey: 'k', model: 'm', endpointMode: 'responses', fetchImpl });
+    const events = await collect(p.stream(req));
+    const done = events.find((e) => e.type === 'done');
+    expect(done && done.type === 'done' && done.result.refusalChars).toBe(3);
+  });
+});
+
 describe('Gemini — safety finish reasons (#598)', () => {
   it.each(['SAFETY', 'RECITATION', 'PROHIBITED_CONTENT', 'SPII', 'BLOCKLIST', 'IMAGE_SAFETY'])(
     'maps %s to content_filter rather than letting it fall through to `unknown`',

@@ -2474,36 +2474,70 @@ export class AiDriverService {
           // a completed/partial stream that was frozen before narration/tool
           // delivery. The SQL clamp remains defense in depth; another local
           // spender cannot pass a stale budget gate while this call is billed.
-          let usage = result?.usage.totalTokens ?? 0;
-          // Issue #1076: some providers (Ollama, llama.cpp, LM Studio, some OpenRouter models)
-          // omit streaming usage. When that happens usage is 0 despite real content. Estimate
-          // rather than silently fail-open on budget enforcement.
-          // #598: a withheld step returns no prose at all (streamStep blanks it), so the
-          // estimate reads the length the outcome carries. Without this a refused turn on a
-          // usage-omitting provider would meter as 0 tokens, and a loop of refusals would
-          // never move the budget gate.
+          // ABSENCE OF A MEASUREMENT IS NOT A MEASUREMENT OF ZERO (#598 review).
           //
-          // `generatedChars` folds in the provider's REFUSAL length too, which on a
-          // refusal-only turn is the only output there is. The adapters discard refusal prose
-          // so it can never be broadcast — and discarding it took this estimator's only
-          // measurement with it. The provider bills for that work whether or not the table
-          // ever sees it, so the length (never the text) has to survive the discard.
-          const generatedChars = step.withheld ? step.withheld.generatedChars : (text || result?.text || '').length;
-          if (usage === 0 && (generatedChars > 0 || (result?.toolCalls?.length ?? 0) > 0)) {
-            const outputChars = generatedChars + JSON.stringify(result?.toolCalls ?? []).length;
-            // ~4 chars per token is a conservative English-language estimate.
-            usage = Math.max(1, Math.ceil(outputChars / 4));
+          // This used to compute usage inline and fall through to `meterTurn(…, 0)` whenever it
+          // had nothing to estimate from — which REFUNDS the whole reservation. Any turn that
+          // reported no usage and produced nothing visible was therefore free, and the budget
+          // gate never advanced no matter how many billable provider calls it took. Three
+          // different shapes reached that state: a refusal whose prose the adapters discard, a
+          // Gemini PROMPT block (no candidate, no text, and no `usageMetadata` at all), and any
+          // future provider quirk that returns "we did work and produced nothing you can see".
+          //
+          // Rather than enumerate them, this now routes through the same
+          // `resolveProviderStepUsage` the provider-error path has always used, which already
+          // distinguishes the three cases properly: a reported figure, an estimate from output
+          // length, or UNKNOWN. An unknown settlement consumes the reservation instead of
+          // refunding it and marks the seat total as an estimate — so the gate advances, the
+          // number is honest about its own confidence, and an unseen provider shape fails safe
+          // instead of silently free. Zero is now reachable only when something actually said
+          // zero.
+          //
+          // `generatedChars` folds in the provider's REFUSAL length, which on a refusal-only
+          // turn is the only output there is: the adapters discard refusal prose so it can
+          // never be broadcast, and discarding it took this estimator's only measurement with
+          // it. The provider bills for that work whether or not the table ever sees it, so the
+          // length (never the text) has to survive the discard.
+          const resolvedUsage = resolveProviderStepUsage(text, result, step.withheld?.generatedChars ?? 0);
+          const usage = resolvedUsage.tokens;
+          if (resolvedUsage.unknown) {
             this.logger.warn(
-              `Provider did not report streaming usage for step ${stepNumber} (model=${result?.model || execModel}); estimating ${usage} tokens from ${outputChars} output chars`,
+              `Provider reported no usage and no measurable output for step ${stepNumber} ` +
+                `(model=${result?.model || execModel}); settling the reservation as UNKNOWN spend rather than ` +
+                `metering zero, which would refund a billable call.`,
+            );
+          } else if ((result?.usage.totalTokens ?? 0) === 0) {
+            this.logger.warn(
+              `Provider did not report streaming usage for step ${stepNumber} (model=${result?.model || execModel}); estimating ${usage} tokens from output length`,
             );
           }
           const servedModel = result?.model || execModel;
-          const meter = () =>
-            this.aiDm.meterTurn(campaignId, usage, {
+          /**
+           * Settle the reservation exactly once, by whichever route the measurement justifies.
+           * Returns a uniform shape so callers never have to care which one ran.
+           */
+          const settle = async (): Promise<{
+            seat: AiDmSeat;
+            tokensUsed: number;
+            budgetRemaining: number;
+            usageUnknown: boolean;
+          }> => {
+            if (resolvedUsage.unknown) {
+              const u = await this.aiDm.markReservationUsageUnknown(reservation, {
+                actor,
+                action: 'ai-dm.driver.usage_unknown',
+                detail: `step ${stepNumber} model=${servedModel || 'default'} produced no measurable output by ${triggeredBy.id}`,
+                model: servedModel,
+              });
+              return { seat: u.seat, tokensUsed: 0, budgetRemaining: u.budgetRemaining, usageUnknown: true };
+            }
+            const m = await this.aiDm.meterTurn(campaignId, usage, {
               actor,
               action: 'ai-dm.driver.turn',
               detail: `step ${stepNumber} model=${servedModel || 'default'} +${usage} tokens by ${triggeredBy.id}`,
             }, reservation);
+            return { ...m, usageUnknown: false };
+          };
 
           // #598 — SAFETY FIRST, and deliberately ahead of every other post-stream branch,
           // INCLUDING metering.
@@ -2525,7 +2559,7 @@ export class AiDriverService {
           // own reservation on failure (#563), so the worst case here is unbilled tokens,
           // which is strictly better than published text.
           if (step.withheld) {
-            let metered: { seat: AiDmSeat; tokensUsed: number; budgetRemaining: number } | undefined;
+            let metered: { seat: AiDmSeat; tokensUsed: number; budgetRemaining: number; usageUnknown: boolean } | undefined;
             // The seat as it stands after metering, however metering went. Falling through to
             // the PRE-CALL snapshot on failure would report bookkeeping that did not happen —
             // and `meterTurn` settles its reservation either way (#563): either the spend was
@@ -2536,7 +2570,7 @@ export class AiDriverService {
             let settledSeat: AiDmSeat = currentSeat;
             let settledRemaining = currentRemaining;
             try {
-              metered = await meter();
+              metered = await settle();
               settledSeat = metered.seat;
               settledRemaining = metered.budgetRemaining;
             } catch (err) {
@@ -2570,9 +2604,13 @@ export class AiDriverService {
               suppressedToolCalls: result?.toolCalls?.length ?? 0,
               servedModel,
               step: stepNumber,
+              // A withheld turn the provider never measured is still a billable call. The
+              // reservation was consumed as unknown spend rather than refunded; say so, so the
+              // seat total reads as an estimate rather than as an exact figure.
+              usageUnknown: metered?.usageUnknown ?? resolvedUsage.unknown,
             };
           }
-          const metered = await meter();
+          const metered = await settle();
           // streamStep sets `aborted` on mode-switch detach and `cancelled` on stop-control abort (#558).
           if (aborted || cancelled || session.detached) {
             const postAuth = await this.checkGenerationAuthority(campaignId, session, generationSignal);
@@ -2630,6 +2668,10 @@ export class AiDriverService {
           latestSeat = spend.seat;
           budgetRemaining = spend.budgetRemaining;
           totalTokens += spend.metered?.tokensUsed ?? 0;
+          // An unmeasured turn was settled as unknown spend, not metered as zero. Surface that
+          // so `turn.ended` marks the seat total as an estimate rather than presenting it as
+          // exact (#1076's flag, reused).
+          if (spend.usageUnknown) tokensUsageUnknown = true;
           stopReason = 'content_withheld';
           withheldTurn = {
             withheld: spend.withheld,
@@ -2648,6 +2690,7 @@ export class AiDriverService {
           budgetRemaining = spend.budgetRemaining;
           totalTokens += spend.metered?.tokensUsed ?? 0;
           stopReason = generationAuthorityStopReason(spend.reason);
+          if (spend.metered?.usageUnknown) tokensUsageUnknown = true;
           if (spend.text) setNarration(spend.text);
           break;
         }
@@ -2656,6 +2699,7 @@ export class AiDriverService {
           budgetRemaining = spend.budgetRemaining;
           totalTokens += spend.metered?.tokensUsed ?? 0;
           stopReason = 'aborted';
+          if (spend.metered?.usageUnknown) tokensUsageUnknown = true;
           if (spend.text) setNarration(spend.text);
           break;
         }
@@ -2680,6 +2724,7 @@ export class AiDriverService {
         }
 
         const { text, result, metered } = spend;
+        if (metered.usageUnknown) tokensUsageUnknown = true;
         totalTokens += metered.tokensUsed;
         budgetRemaining = metered.budgetRemaining;
         latestSeat = metered.seat;
@@ -5004,15 +5049,25 @@ export function summarizeToolArgs(args: Record<string, unknown> | undefined | nu
 export function resolveProviderStepUsage(
   text: string,
   result: AiGenerateResult | undefined,
+  /**
+   * #598 — output the provider produced that this adapter deliberately did NOT return as
+   * text, in characters. Today that is refusal prose, which is discarded so it can never be
+   * broadcast; the length still has to reach the estimator or a refusal-only turn measures as
+   * nothing. A number, never the text.
+   */
+  extraGeneratedChars = 0,
 ): { tokens: number; unknown: boolean } {
   const reported = result?.usage?.totalTokens ?? 0;
   if (reported > 0) return { tokens: reported, unknown: false };
   const outputText = text || result?.text || '';
   const toolCalls = result?.toolCalls ?? [];
-  if (outputText.length > 0 || toolCalls.length > 0) {
-    const outputChars = outputText.length + JSON.stringify(toolCalls).length;
+  const generatedChars = outputText.length + Math.max(0, extraGeneratedChars);
+  if (generatedChars > 0 || toolCalls.length > 0) {
+    const outputChars = generatedChars + JSON.stringify(toolCalls).length;
     return { tokens: Math.max(1, Math.ceil(outputChars / 4)), unknown: false };
   }
+  // NOTHING TO MEASURE. Not zero — unknown. The caller settles the reservation as unknown
+  // spend rather than metering zero, which would refund a billable provider call.
   return { tokens: 0, unknown: true };
 }
 

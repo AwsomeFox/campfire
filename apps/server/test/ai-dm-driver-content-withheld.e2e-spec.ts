@@ -329,6 +329,53 @@ describe('ai-dm driver — provider content filters / refusals are withheld turn
     expect(after.tokensUsed).toBeGreaterThan(before.tokensUsed);
   });
 
+  /**
+   * The PROPERTY, not the case.
+   *
+   * Three independent reviewers found three different wire shapes that all metered as zero and
+   * refunded the reservation: refusal prose discarded before counting, a Gemini prompt block
+   * with no `usageMetadata` and nothing to count, and a Responses top-level refusal item
+   * counted in one branch but not its sibling. Every one is the same defect — treating ABSENCE
+   * OF A MEASUREMENT as A MEASUREMENT OF ZERO — reached by a route nobody enumerated first.
+   *
+   * So this asserts the invariant rather than the shapes: a turn that produced nothing
+   * measurable must consume its reservation as UNKNOWN spend, whatever produced it. A fourth
+   * wire shape then fails safe instead of silently free.
+   */
+  describe('an unmeasurable turn is never free (#598)', () => {
+    it.each([
+      // A safety terminal state with no prose and no usage — the Gemini prompt-block shape.
+      { label: 'prompt-block style refusal', finishReason: 'content_filter' as const },
+      // A refusal whose prose the adapter discarded, on a provider that reports no usage.
+      { label: 'refusal with no countable output', finishReason: 'refusal' as const },
+      // Not a safety state at all: an ordinary empty completion with no usage. The invariant
+      // is about MEASUREMENT, not about refusals, so it must hold here too.
+      { label: 'empty completion', finishReason: 'stop' as const },
+    ])('$label consumes the reservation instead of refunding it', async ({ label, finishReason }) => {
+      const campaignId = await armedCampaign(`Unmeasurable ${label}`);
+      const before = (await h.getSeat(campaignId)).body;
+
+      h.script({
+        text: '',
+        finishReason,
+        // Nothing to count anywhere: no narration, no refusal characters, no tool calls…
+        refusalChars: 0,
+        toolCalls: [],
+        // …and a provider that reports no usage at all.
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      });
+      await h.sendMessage(campaignId, { input: 'go' });
+
+      const after = (await h.getSeat(campaignId)).body;
+      // The reservation must NOT come back. Metering zero refunds it, which is what let a
+      // stream of billable provider calls run behind a budget gate that never advanced.
+      expect(after.tokensReserved ?? 0).toBe(0);
+      expect(after.budgetRemaining).toBeLessThan(before.budgetRemaining);
+      // And the spend is recorded as an ESTIMATE, not presented as an exact figure.
+      expect(after.tokensUnknown ?? 0).toBeGreaterThan(0);
+    });
+  });
+
   it('reports the SETTLED budget after a metering rejection, not the pre-call snapshot', async () => {
     // `meterTurn` settles its reservation even when it throws (#563): either the spend was
     // already committed and a later audit/history write failed, or the hold is consumed as

@@ -253,7 +253,14 @@ export class OpenAiProvider implements AiProvider {
           }
         }
       } else if (item.type === 'refusal') {
+        // A refusal can also arrive as a TOP-LEVEL output item rather than a content part.
+        // This branch set the flag but not the count, so the SAME refusal measured as zero
+        // characters or as its real length depending purely on which shape the wire used — a
+        // counter running in one branch and absent from its sibling. The driver no longer
+        // depends on this number to avoid a free turn (unmeasurable turns settle as unknown
+        // spend), but an estimate that silently varies by wire shape is its own defect.
         refused = true;
+        refusalChars += (item.refusal ?? '').length;
       } else if (item.type === 'function_call') {
         toolCalls.push({
           id: item.call_id ?? item.id ?? `call_${toolCalls.length}`,
@@ -595,7 +602,13 @@ class ResponsesStreamAccumulator {
         break;
       }
       case 'response.refusal.done': {
+        // `.done` carries the COMPLETE refusal, while `.delta` carries increments. A provider
+        // may send either or both, so take the larger rather than adding — adding would double
+        // count a stream that sends both, and ignoring `.done` would count ZERO for a stream
+        // that sends only that. The second case is the one that matters: it is the same
+        // unmeasured-turn shape as the other three, reached through a fourth door.
         this.refused = true;
+        this.refusalChars = Math.max(this.refusalChars, (event.refusal ?? '').length);
         break;
       }
       // #598: `response.completed` is not the only terminal frame. A filtered or failed
@@ -731,6 +744,8 @@ interface ResponsesApiResponse {
     // the decline text comes back in its own part rather than as `output_text` (#598).
     type: 'message' | 'function_call' | 'refusal';
     content?: { type: string; text?: string; refusal?: string }[];
+    /** The decline text when the refusal is a TOP-LEVEL item rather than a content part. */
+    refusal?: string;
     id?: string;
     call_id?: string;
     name?: string;
@@ -752,6 +767,8 @@ interface ResponsesStreamEvent {
     name?: string;
   };
   delta?: string;
+  /** #598 — the COMPLETE refusal text on `response.refusal.done`. Only its length is used. */
+  refusal?: string;
   call_id?: string;
   item_id?: string;
   response?: ResponsesApiResponse;
