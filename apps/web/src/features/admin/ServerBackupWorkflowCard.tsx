@@ -427,9 +427,11 @@ export function ServerBackupWorkflowCard() {
             <p className="text-xs text-slate-300">
               {downloadPhase === 'preparing' && 'Preparing backup and choosing a destination…'}
               {downloadPhase === 'streaming' &&
-                (downloadProgress?.totalBytes === null
+                (downloadProgress === null
+                  ? 'Streaming backup…'
+                  : downloadProgress.totalBytes === null
                   ? `Streaming backup — ${formatBytes(downloadProgress.receivedBytes)} received.`
-                  : `Streaming backup — ${formatBytes(downloadProgress?.receivedBytes ?? 0)} of ${formatBytes(downloadProgress?.totalBytes ?? 0)}.`)}
+                  : `Streaming backup — ${formatBytes(downloadProgress.receivedBytes)} of ${formatBytes(downloadProgress.totalBytes)}.`)}
               {downloadPhase === 'finalizing' && 'Finalizing saved archive…'}
             </p>
             {downloadPhase === 'streaming' && (

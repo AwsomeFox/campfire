@@ -205,7 +205,7 @@ test.describe('server backup workflow UI (issues #514 / #444)', () => {
     await expect(card.getByRole('alert')).toContainText("Couldn't load data.");
   });
 
-  test('uses indeterminate progress when a chunked response omits Content-Length', async ({ page }) => {
+  test('shows neutral and unknown-length streaming progress before and after the first chunk', async ({ page }) => {
     await page.addInitScript(() => {
       Object.defineProperty(window, 'showSaveFilePicker', { value: undefined, configurable: true });
       const nativeFetch = window.fetch.bind(window);
@@ -214,8 +214,8 @@ test.describe('server backup workflow UI (issues #514 / #444)', () => {
         if (!url.endsWith('/api/v1/backup')) return nativeFetch(input, init);
         const stream = new ReadableStream<Uint8Array>({
           start(controller) {
-            controller.enqueue(new TextEncoder().encode('zip'));
-            window.setTimeout(() => controller.close(), 600);
+            window.setTimeout(() => controller.enqueue(new TextEncoder().encode('zip')), 250);
+            window.setTimeout(() => controller.close(), 800);
           },
         });
         return Promise.resolve(new Response(stream, { headers: { 'Content-Type': 'application/zip' } }));
@@ -228,8 +228,37 @@ test.describe('server backup workflow UI (issues #514 / #444)', () => {
     await card.getByRole('button', { name: 'Create & download backup' }).click();
     const progress = card.getByRole('progressbar', { name: 'Backup download progress' });
     await expect(progress).toBeVisible();
+    await expect(card.getByRole('status')).toContainText('Streaming backup…');
     await expect(progress).not.toHaveAttribute('value');
     await expect(card.getByRole('status')).toContainText(/Streaming backup — 3 B received/i);
+  });
+
+  test('shows known-length streaming progress after the first chunk', async ({ page }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(window, 'showSaveFilePicker', { value: undefined, configurable: true });
+      const nativeFetch = window.fetch.bind(window);
+      window.fetch = (input, init) => {
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        if (!url.endsWith('/api/v1/backup')) return nativeFetch(input, init);
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            window.setTimeout(() => controller.enqueue(new TextEncoder().encode('zip')), 250);
+            window.setTimeout(() => controller.close(), 800);
+          },
+        });
+        return Promise.resolve(new Response(stream, { headers: { 'Content-Type': 'application/zip', 'Content-Length': '3' } }));
+      };
+    });
+    await page.route('**/api/v1/backup/status', (route) => route.fulfill({ status: 200, json: MOCK_STATUS }));
+
+    await page.goto('/admin/storage');
+    const card = page.locator('.server-backup-workflow-card');
+    await card.getByRole('button', { name: 'Create & download backup' }).click();
+    const progress = card.getByRole('progressbar', { name: 'Backup download progress' });
+    await expect(card.getByRole('status')).toContainText('Streaming backup…');
+    await expect(progress).toHaveAttribute('value', '3');
+    await expect(progress).toHaveAttribute('max', '3');
+    await expect(card.getByRole('status')).toContainText(/Streaming backup — 3 B of 3 B/i);
   });
 
   test('writes to a File System Access destination without browser buffering', async ({ page }) => {
