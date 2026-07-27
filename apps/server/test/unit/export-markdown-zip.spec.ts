@@ -302,6 +302,38 @@ describe('buildMarkdownZip — filename collisions (issues #530 / #863)', () => 
     expect(zip.file('campaign.json')).not.toBeNull();
   });
 
+  it('restricts the export staging directory and every staged attachment file', async () => {
+    const sourceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'export-staging-mode-source-'));
+    const source = path.join(sourceDir, 'source.bin');
+    fs.writeFileSync(source, 'source bytes');
+    const service = serviceWithCollisions();
+    (service as any).attachments.openExportStreamIfPresent = () => fs.createReadStream(source);
+    jest.spyOn(service as any, 'writeMarkdownZip').mockImplementation(async (writer: any) => {
+      await writer.attachment('uploads/direct.bin', Buffer.from('direct'));
+      const buffered = await writer.stageAttachment(Buffer.from('buffered'));
+      const stagingDir = path.dirname(buffered.path);
+      expect(fs.statSync(stagingDir).mode & 0o777).toBe(0o700);
+      await writer.stageLiveAttachment({ campaignId: 1, id: 1, mime: 'application/octet-stream' });
+      await writer.attachmentPath('uploads/path.bin', source);
+      const stagedFiles = fs.readdirSync(stagingDir).map((name) => path.join(stagingDir, name));
+      expect(stagedFiles).toHaveLength(4);
+      expect(stagedFiles.map((file) => fs.statSync(file).mode & 0o777)).toEqual([
+        0o600,
+        0o600,
+        0o600,
+        0o600,
+      ]);
+      return { warnings: [], inventory: {} };
+    });
+    const output = new PassThrough();
+    output.resume();
+    try {
+      await service.streamMarkdownZip(output, new AbortController().signal, 1, USER);
+    } finally {
+      fs.rmSync(sourceDir, { recursive: true, force: true });
+    }
+  });
+
   it('securely opens live attachments for streamed backup ZIPs', async () => {
     const sourceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'export-backup-path-'));
     const source = path.join(sourceDir, 'attachment.png');

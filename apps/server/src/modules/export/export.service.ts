@@ -845,6 +845,7 @@ export class ExportService {
     // never raise an unhandled 'error' event and take the process down.
     archive.on('error', () => undefined);
     const stagingDir = fs.mkdtempSync(path.join(os.tmpdir(), 'campfire-export-'));
+    fs.chmodSync(stagingDir, 0o700);
     let stageNumber = 0;
     let archiveError: Error | undefined;
     // `writeMarkdownZip` can still fail while querying/projecting the campaign.
@@ -903,12 +904,12 @@ export class ExportService {
           file: (entryPath, content) => archive.append(content, { name: entryPath }),
           attachment: async (entryPath, content) => {
             const staged = path.join(stagingDir, `${stageNumber++}.attachment`);
-            await fs.promises.writeFile(staged, content, { flag: 'wx', signal });
+            await fs.promises.writeFile(staged, content, { flag: 'wx', mode: 0o600, signal });
             archive.file(staged, { name: entryPath });
           },
           stageAttachment: async (content) => {
             const staged = path.join(stagingDir, `${stageNumber++}.attachment`);
-            await fs.promises.writeFile(staged, content, { flag: 'wx', signal });
+            await fs.promises.writeFile(staged, content, { flag: 'wx', mode: 0o600, signal });
             return { path: staged, checksum: sha256Hex(content) };
           },
           stageLiveAttachment: async (source) => {
@@ -922,7 +923,7 @@ export class ExportService {
                 callback(null, chunk);
               },
             });
-            await pipeline(input, hashing, fs.createWriteStream(staged, { flags: 'wx' }), { signal });
+            await pipeline(input, hashing, fs.createWriteStream(staged, { flags: 'wx', mode: 0o600 }), { signal });
             if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('Export aborted');
             return { path: staged, checksum: hash.digest('hex') };
           },
@@ -942,7 +943,12 @@ export class ExportService {
             // Stage and hash one bounded chunk at a time. Archiver only sees the
             // staged file once this pipeline completes, eliminating the manifest
             // checksum/source-byte TOCTOU window.
-            await pipeline(fs.createReadStream(source), hashing, fs.createWriteStream(staged, { flags: 'wx' }), { signal });
+            await pipeline(
+              fs.createReadStream(source),
+              hashing,
+              fs.createWriteStream(staged, { flags: 'wx', mode: 0o600 }),
+              { signal },
+            );
             if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('Export aborted');
             archive.file(staged, { name: entryPath });
             return { path: staged, checksum: hash.digest('hex') };
