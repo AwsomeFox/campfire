@@ -452,6 +452,32 @@ describe('encounters (e2e)', () => {
       expect(conflictingHpSet.status).toBe(400);
       expect(conflictingHpSet.body.message).toContain('cannot be combined with hpSet');
 
+      // The web AoE apply path sends one PATCH per affected target. Mixed save
+      // outcomes must therefore produce independent full/half results in one burst.
+      const fullSaveTarget = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'Failed save target', hpMax: 100 });
+      const halfSaveTarget = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'Successful save target', hpMax: 100 });
+      expect(fullSaveTarget.status).toBe(201);
+      expect(halfSaveTarget.status).toBe(201);
+
+      const fullSaveHit = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${fullSaveTarget.body.id}`)
+        .set(dm)
+        .send({ hpDelta: -10, damageType: 'fire' });
+      const halfSaveHit = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${halfSaveTarget.body.id}`)
+        .set(dm)
+        .send({ hpDelta: -10, damageType: 'fire', saveOutcome: 'half' });
+      expect(fullSaveHit.status).toBe(200);
+      expect(halfSaveHit.status).toBe(200);
+      expect(fullSaveHit.body.hpCurrent).toBe(90);
+      expect(halfSaveHit.body.hpCurrent).toBe(95);
+
       const [qualifiedEntry] = await db
         .insert(ruleEntries)
         .values({

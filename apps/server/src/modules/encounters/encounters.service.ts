@@ -78,6 +78,7 @@ type CombatantUpdateInput = z.infer<typeof CombatantUpdate>;
 type RollRequestInput = z.infer<typeof RollRequest>;
 type ActionRollRequestInput = z.infer<typeof ActionRollRequest>;
 type ManualRollRequestInput = z.infer<typeof ManualRollRequest>;
+type SyncDb = DrizzleDb | Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
 
 /**
  * better-sqlite3 throws a synchronous Error with `.code` set to one of the
@@ -681,9 +682,13 @@ export class EncountersService {
   }
 
   /** Statblock-derived damage defences for direct tracker damage (issue #605). */
-  private targetDamageDefenses(row: typeof combatants.$inferSelect, damageTypes: readonly string[]): TargetDefenses {
+  private targetDamageDefenses(
+    row: typeof combatants.$inferSelect,
+    damageTypes: readonly string[],
+    db: SyncDb = this.db,
+  ): TargetDefenses {
     if (row.ruleEntryId === null) return { resistances: [], vulnerabilities: [], immunities: [] };
-    const entry = this.db.select({ dataJson: ruleEntries.dataJson }).from(ruleEntries).where(eq(ruleEntries.id, row.ruleEntryId)).get();
+    const entry = db.select({ dataJson: ruleEntries.dataJson }).from(ruleEntries).where(eq(ruleEntries.id, row.ruleEntryId)).get();
     const data = entry ? fromJsonText<Record<string, unknown>>(entry.dataJson, {}) : {};
     return damageDefensesFromStatblock(data, damageTypes);
   }
@@ -3345,7 +3350,7 @@ export class EncountersService {
               damageType ?? '',
               // Untyped damage cannot use a defence, so avoid an unnecessary statblock
               // lookup for the tracker’s frequent raw HP adjustments.
-              damageType ? this.targetDamageDefenses(fresh, adapter.damageTypes ?? []) : { resistances: [], vulnerabilities: [], immunities: [] },
+              damageType ? this.targetDamageDefenses(fresh, adapter.damageTypes ?? [], tx) : { resistances: [], vulnerabilities: [], immunities: [] },
               { half: patch.saveOutcome === 'half' },
             );
             if (damageMetadataTouched) {
