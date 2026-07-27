@@ -52,7 +52,6 @@ export interface BackupInspectResult {
   app: string;
   kind: string;
   formatVersion: number;
-  sourceFormatVersion: number;
   appVersion: string | null;
   schemaVersion: number | null;
   createdAt: string | null;

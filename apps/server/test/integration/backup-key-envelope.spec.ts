@@ -94,7 +94,7 @@ describe('BackupService AI keyfile envelope (#496, real SQLite)', () => {
     const manifest = await manifestFromArchive(buffer);
     expect(manifest.aiKeySource).toBe('keyfile');
     expect(manifest.aiKeyIncluded).toBe(false);
-    expect(manifest.version).toBe(1);
+    expect(manifest.version).toBe(3);
     // No envelope entry when no passphrase was supplied.
     const zip = await JSZip.loadAsync(buffer);
     expect(zip.file(KEY_ENVELOPE_ENTRY)).toBeNull();
@@ -119,7 +119,7 @@ describe('BackupService AI keyfile envelope (#496, real SQLite)', () => {
     const manifest = await manifestFromArchive(buffer);
     expect(manifest.aiKeySource).toBe('keyfile');
     expect(manifest.aiKeyIncluded).toBe(true);
-    expect(manifest.version).toBe(2);
+    expect(manifest.version).toBe(3);
     const zip = await JSZip.loadAsync(buffer);
     const entry = zip.file(KEY_ENVELOPE_ENTRY);
     expect(entry).not.toBeNull();
@@ -368,33 +368,31 @@ describe('BackupService AI keyfile envelope (#496, real SQLite)', () => {
     zip.file('manifest.json', JSON.stringify(manifest, null, 2));
     const tampered = await zip.generateAsync({ type: 'nodebuffer' });
 
-    await expect(service.inspect(tampered)).rejects.toThrow(
-      /reconciliation requires attachment checksum metadata/i,
-    );
+    await expect(service.inspect(tampered)).rejects.toThrow(/requires attachment checksum metadata/i);
     await expect(service.restore(tampered, RESTORE_CONFIRM_TOKEN, testUser)).rejects.toThrow(
-      /reconciliation requires attachment checksum metadata/i,
+      /requires attachment checksum metadata/i,
     );
   });
 
-  it('rejects a format-2 archive when both checksum-era metadata fields are stripped', async () => {
+  it('rejects a v3 archive when both checksum-era metadata fields are stripped', async () => {
     const service = makeService();
     const zip = await JSZip.loadAsync(await service.buildBackup({ keyPassphrase: PASSPHRASE }));
     const manifest = JSON.parse(await zip.file('manifest.json')!.async('string')) as BackupManifest;
-    expect(manifest.version).toBe(2);
+    expect(manifest.version).toBe(3);
     delete (manifest as { attachments?: unknown }).attachments;
     delete (manifest as { reconciliation?: unknown }).reconciliation;
     zip.file('manifest.json', JSON.stringify(manifest, null, 2));
     const tampered = await zip.generateAsync({ type: 'nodebuffer' });
 
     await expect(service.inspect(tampered)).rejects.toThrow(
-      /format version 2 requires attachment checksum metadata/i,
+      /requires attachment checksum metadata/i,
     );
     await expect(service.restore(tampered, RESTORE_CONFIRM_TOKEN, testUser, {
       keyPassphrase: PASSPHRASE,
-    })).rejects.toThrow(/format version 2 requires attachment checksum metadata/i);
+    })).rejects.toThrow(/requires attachment checksum metadata/i);
   });
 
-  it('accepts a legacy manifest that genuinely omits attachment checksum metadata', async () => {
+  it('rejects legacy metadata before destructive restore apply', async () => {
     const service = makeService();
     const zip = await JSZip.loadAsync(await service.buildBackup());
     const manifest = JSON.parse(await zip.file('manifest.json')!.async('string')) as BackupManifest;
@@ -405,11 +403,8 @@ describe('BackupService AI keyfile envelope (#496, real SQLite)', () => {
     zip.file('manifest.json', JSON.stringify(manifest, null, 2));
     const legacy = await zip.generateAsync({ type: 'nodebuffer' });
 
-    await expect(service.inspect(legacy)).resolves.toMatchObject({ uploads: ['fixture.bin'] });
-    await expect(service.restore(legacy, RESTORE_CONFIRM_TOKEN, testUser)).resolves.toMatchObject({
-      ok: true,
-      uploadCount: 1,
-    });
+    await expect(service.inspect(legacy)).rejects.toThrow(/requires attachment checksum metadata/i);
+    await expect(service.restore(legacy, RESTORE_CONFIRM_TOKEN, testUser)).rejects.toThrow(/requires attachment checksum metadata/i);
   });
 
   it('inspect() rejects a physically truncated archive', async () => {

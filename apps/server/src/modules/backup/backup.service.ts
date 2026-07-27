@@ -49,7 +49,6 @@ import {
 import {
   BACKUP_APP,
   BACKUP_FORMAT_VERSION,
-  BACKUP_FORMAT_VERSION_WITH_KEY_ENVELOPE,
   BACKUP_KIND,
   BACKUP_ORPHAN_LIST_CAP,
   BACKUP_VERSION,
@@ -1319,7 +1318,7 @@ export class BackupService implements OnApplicationBootstrap {
       const manifest: BackupManifest = {
         app: BACKUP_APP,
         kind: BACKUP_KIND,
-        version: aiKeyIncluded ? BACKUP_FORMAT_VERSION_WITH_KEY_ENVELOPE : 1,
+        version: BACKUP_FORMAT_VERSION,
         appVersion: serverAppVersion(),
         schemaVersion: CURRENT_SCHEMA_REVISION,
         createdAt: nowIso(),
@@ -1568,9 +1567,9 @@ export class BackupService implements OnApplicationBootstrap {
   async inspectFile(archivePath: string, signal?: AbortSignal): Promise<BackupInspectResult> {
     const zip = await BackupArchiveReader.open(archivePath, signal);
     try {
-      const { manifest, sourceFormatVersion } = await this.readManifestFromArchiveWithSource(zip, signal);
+      const manifest = await this.readManifestFromArchive(zip, signal);
       const uploads = await this.validateArchivePayload(zip, manifest, signal);
-      const view = manifestToInspectView(manifest, uploads, sourceFormatVersion);
+      const view = manifestToInspectView(manifest, uploads);
       return view;
     } finally { zip.close(); }
   }
@@ -1839,17 +1838,6 @@ export class BackupService implements OnApplicationBootstrap {
     try { parsed = JSON.parse((await zip.readBuffer(manifestFile, MAX_MANIFEST_BYTES, signal)).toString('utf8')); }
     catch { throw new BadRequestException('Invalid backup archive — manifest.json is not valid JSON'); }
     return parseBackupManifest(parsed);
-  }
-
-  private async readManifestFromArchiveWithSource(zip: BackupArchiveReader, signal?: AbortSignal): Promise<{ manifest: BackupManifest; sourceFormatVersion: number }> {
-    const manifestFile = zip.get(MANIFEST_ENTRY);
-    if (!manifestFile) throw new BadRequestException('Invalid backup archive — manifest.json is missing');
-    let parsed: unknown;
-    try { parsed = JSON.parse((await zip.readBuffer(manifestFile, MAX_MANIFEST_BYTES, signal)).toString('utf8')); }
-    catch { throw new BadRequestException('Invalid backup archive — manifest.json is not valid JSON'); }
-    const rawVersion = (parsed as Record<string, unknown>)?.version;
-    const sourceFormatVersion = typeof rawVersion === 'number' && Number.isInteger(rawVersion) && rawVersion >= 0 ? rawVersion : 0;
-    return { manifest: parseBackupManifest(parsed), sourceFormatVersion };
   }
 
 }

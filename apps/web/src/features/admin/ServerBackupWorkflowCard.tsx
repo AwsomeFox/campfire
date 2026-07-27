@@ -66,9 +66,6 @@ function InspectResults({ result }: { result: BackupInspectResult }) {
           <dt className="text-[10px] uppercase tracking-widest text-secondary">Format version</dt>
           <dd className="font-semibold text-white">
             {result.formatVersion}
-            {result.sourceFormatVersion !== result.formatVersion && (
-              <span className="text-slate-400 font-normal"> (source: {result.sourceFormatVersion})</span>
-            )}
           </dd>
         </div>
         <div>

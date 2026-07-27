@@ -4,8 +4,7 @@ import { stateFor } from './seed';
 const MOCK_INSPECT = {
   app: 'campfire',
   kind: 'server-backup',
-  formatVersion: 1,
-  sourceFormatVersion: 1,
+  formatVersion: 3,
   appVersion: '0.14.2',
   schemaVersion: 57,
   createdAt: '2026-07-20T18:30:00.000Z',
@@ -104,7 +103,7 @@ test.describe('server backup workflow UI (issues #514 / #444)', () => {
     await expect(region).toBeVisible();
     await expect(region.getByText('0.14.2')).toBeVisible();
     await expect(region.getByText('57')).toBeVisible();
-    await expect(region.getByText('Format version').locator('..').getByText('1')).toBeVisible();
+    await expect(region.getByText('Format version').locator('..').getByText('3')).toBeVisible();
     await expect(region.getByText(/Upload contents/)).toContainText('2');
     await expect(region.getByRole('listitem', { name: 'campaigns/1/portraits/hero.png' })).toBeVisible();
     await expect(region.getByRole('listitem', { name: 'campaigns/1/maps/world.jpg' })).toBeVisible();
@@ -122,7 +121,7 @@ test.describe('server backup workflow UI (issues #514 / #444)', () => {
         contentType: 'application/json',
         body: JSON.stringify({
           message:
-            'Invalid backup archive — manifest format version 42 is newer than this server supports (format version 1). Upgrade Campfire to at least v99.0.0 before restoring this archive.',
+            'Invalid backup archive — manifest format version 42 is unsupported; this pre-1.0 server accepts format version 3 only.',
         }),
       });
     });

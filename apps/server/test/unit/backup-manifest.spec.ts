@@ -1,6 +1,7 @@
 import { BadRequestException } from '@nestjs/common';
 import {
   BACKUP_APP,
+  BACKUP_FORMAT_VERSION,
   BACKUP_KIND,
   DB_ENTRY_V1,
   assertBackupManifestBytes,
@@ -10,112 +11,73 @@ import {
 } from '../../src/modules/backup/backup-manifest';
 import { MAX_ARCHIVE_ENTRIES, MAX_MANIFEST_BYTES } from '../../src/modules/backup/backup-archive-reader';
 
-describe('parseBackupManifest (issue #514)', () => {
-  const baseV1 = {
-    app: BACKUP_APP,
-    kind: BACKUP_KIND,
-    version: 1,
-    createdAt: '2026-07-20T12:00:00.000Z',
-    db: 'db/campfire.db',
-    dbBytes: 12345,
-    uploadCount: 2,
-    appVersion: '0.14.1',
-    schemaVersion: 55,
-  };
+const baseV3 = {
+  app: BACKUP_APP,
+  kind: BACKUP_KIND,
+  version: BACKUP_FORMAT_VERSION,
+  createdAt: '2026-07-20T12:00:00.000Z',
+  db: DB_ENTRY_V1,
+  dbBytes: 12345,
+  uploadCount: 0,
+  appVersion: '0.14.1',
+  schemaVersion: 55,
+  aiKeySource: 'env',
+  aiKeyIncluded: false,
+  attachments: [],
+  reconciliation: {
+    generation: 'test-generation', totalAttachments: 0, missing: 0, changed: 0,
+    orphans: [], orphanCount: 0, clean: true,
+  },
+};
 
-  it('accepts a current-format manifest', () => {
-    expect(parseBackupManifest(baseV1)).toMatchObject({
-      version: 1,
-      dbBytes: 12345,
-      uploadCount: 2,
-      appVersion: '0.14.1',
-      schemaVersion: 55,
+describe('parseBackupManifest (v3 only)', () => {
+  it('accepts the complete current-format manifest', () => {
+    expect(parseBackupManifest(baseV3)).toMatchObject({
+      version: BACKUP_FORMAT_VERSION, dbBytes: 12345, uploadCount: 0,
+      aiKeySource: 'env', aiKeyIncluded: false, attachments: [],
     });
-    expect(
-      parseBackupManifest({
-        ...baseV1,
-        version: 2,
-        aiKeySource: 'keyfile',
-        aiKeyIncluded: true,
-        attachments: [],
-      }),
-    ).toMatchObject({ version: 2, aiKeySource: 'keyfile', aiKeyIncluded: true });
   });
 
-  it('rejects format version 2 without envelope posture markers', () => {
-    expect(() => parseBackupManifest({ ...baseV1, version: 2 })).toThrow(BadRequestException);
-    expect(() =>
-      parseBackupManifest({ ...baseV1, version: 2, aiKeyIncluded: true }),
-    ).toThrow(/aiKeySource="keyfile"/);
-    expect(() =>
-      parseBackupManifest({ ...baseV1, version: 2, aiKeySource: 'keyfile' }),
-    ).toThrow(/aiKeyIncluded=true/);
+  it.each([undefined, 0, 1, 2, 4, 99])('rejects legacy or unsupported version %s', (version) => {
+    const manifest = version === undefined
+      ? Object.fromEntries(Object.entries(baseV3).filter(([key]) => key !== 'version'))
+      : { ...baseV3, version };
+    expect(() => parseBackupManifest(manifest)).toThrow(/format version/i);
   });
 
-  it('rejects format version 2 when checksum-era metadata is stripped', () => {
+  it.each([
+    ['attachments', undefined, /attachments must be an array/i],
+    ['reconciliation', undefined, /requires reconciliation metadata/i],
+    ['aiKeySource', undefined, /requires aiKeySource/i],
+    ['aiKeyIncluded', undefined, /requires aiKeyIncluded/i],
+  ])('rejects a v3 manifest missing required %s', (field, value, message) => {
+    expect(() => parseBackupManifest({ ...baseV3, [field]: value })).toThrow(message);
+  });
+
+  it('rejects invalid db paths and invalid reconciliation invariants', () => {
+    expect(() => parseBackupManifest({ ...baseV3, db: '../escape.db' })).toThrow(DB_ENTRY_V1);
     expect(() => parseBackupManifest({
-      ...baseV1,
-      version: 2,
-      aiKeySource: 'keyfile',
-      aiKeyIncluded: true,
-    })).toThrow(/format version 2 requires attachment checksum metadata/i);
+      ...baseV3,
+      reconciliation: { ...baseV3.reconciliation, totalAttachments: 1 },
+    })).toThrow(/reconciliation is invalid/i);
+    expect(() => parseBackupManifest({
+      ...baseV3,
+      reconciliation: { ...baseV3.reconciliation, clean: false },
+    })).toThrow(/reconciliation is invalid/i);
   });
 
-  it('migrates a pre-version manifest (format 0) to the current shape', () => {
-    const { version: _v, ...withoutVersion } = baseV1;
-    expect(parseBackupManifest(withoutVersion)).toMatchObject({
-      version: 1,
-      dbBytes: 12345,
+  it('requires a keyfile envelope posture to be represented by the archive payload', () => {
+    const parsed = parseBackupManifest({
+      ...baseV3, aiKeySource: 'keyfile', aiKeyIncluded: true,
     });
+    expect(parsed.aiKeyIncluded).toBe(true);
+    expect(() => parseBackupManifest({ ...baseV3, aiKeyIncluded: true })).toThrow(/requires aiKeySource/i);
   });
 
-  it('rejects an unsupported future format before restore would touch data', () => {
-    expect(() =>
-      parseBackupManifest({
-        ...baseV1,
-        version: 99,
-        minCampfireVersion: '9.9.0',
-      }),
-    ).toThrow(BadRequestException);
-    try {
-      parseBackupManifest({ ...baseV1, version: 99, minCampfireVersion: '9.9.0' });
-    } catch (err) {
-      expect(err).toBeInstanceOf(BadRequestException);
-      expect((err as BadRequestException).message).toContain('format version 99');
-      expect((err as BadRequestException).message).toContain('v9.9.0');
-    }
-  });
-
-  it('rejects foreign or malformed manifests', () => {
-    expect(() => parseBackupManifest({ kind: BACKUP_KIND, version: 1 })).toThrow(BadRequestException);
-    expect(() => parseBackupManifest({ ...baseV1, version: 1.5 })).toThrow(BadRequestException);
+  it('rejects malformed and foreign manifests', () => {
+    expect(() => parseBackupManifest({ kind: BACKUP_KIND, version: BACKUP_FORMAT_VERSION })).toThrow(BadRequestException);
+    expect(() => parseBackupManifest({ ...baseV3, version: 3.5 })).toThrow(BadRequestException);
     expect(() => parseBackupManifest(null)).toThrow(BadRequestException);
-  });
-
-  // Issue #997 fix 2: validate manifest.db against expected entry name
-  describe('manifest.db validation (issue #997)', () => {
-    it('rejects a manifest with unexpected db entry for format 1', () => {
-      expect(() =>
-        parseBackupManifest({ ...baseV1, db: 'malicious/path.db' }),
-      ).toThrow(BadRequestException);
-      try {
-        parseBackupManifest({ ...baseV1, db: 'malicious/path.db' });
-      } catch (err) {
-        expect((err as BadRequestException).message).toContain(DB_ENTRY_V1);
-        expect((err as BadRequestException).message).toContain('malicious/path.db');
-      }
-    });
-
-    it('rejects a format-0 manifest with unexpected db entry', () => {
-      const { version: _v, ...withoutVersion } = baseV1;
-      expect(() =>
-        parseBackupManifest({ ...withoutVersion, db: '../escape.db' }),
-      ).toThrow(BadRequestException);
-    });
-
-    it('accepts a manifest with the canonical db entry', () => {
-      expect(parseBackupManifest(baseV1).db).toBe(DB_ENTRY_V1);
-    });
   });
 });
 
@@ -133,16 +95,15 @@ describe('backup manifest size contract', () => {
       hidden: false,
       sha256: 'a'.repeat(64),
     }));
-    const manifest = {
-      app: BACKUP_APP,
-      kind: BACKUP_KIND,
-      version: 1,
-      createdAt: '2026-07-20T12:00:00.000Z',
-      db: DB_ENTRY_V1,
-      dbBytes: 12345,
+    const manifest = parseBackupManifest({
+      ...baseV3,
       uploadCount: count,
       attachments,
-    };
+      reconciliation: {
+        ...baseV3.reconciliation,
+        totalAttachments: count,
+      },
+    });
 
     const json = serializeBackupManifest(manifest);
     expect(Buffer.byteLength(json)).toBeGreaterThan(4 * 1024 * 1024);
@@ -155,138 +116,28 @@ describe('backup manifest size contract', () => {
   });
 });
 
-// Issue #997 fix 3: manifestToInspectView preserves sourceFormatVersion
-describe('manifestToInspectView (issue #997)', () => {
-  const manifest = {
-    app: BACKUP_APP,
-    kind: BACKUP_KIND,
-    version: 1,
-    createdAt: '2026-07-20T12:00:00.000Z',
-    db: 'db/campfire.db',
-    dbBytes: 12345,
-    uploadCount: 2,
-    appVersion: '0.14.1',
-    schemaVersion: 55,
-  };
-
-  it('reports sourceFormatVersion distinct from normalized formatVersion', () => {
-    const result = manifestToInspectView(manifest, ['a.png'], 0);
-    expect(result.formatVersion).toBe(1);
-    expect(result.sourceFormatVersion).toBe(0);
+describe('manifestToInspectView', () => {
+  it('returns the single native format version without a legacy source field', () => {
+    const view = manifestToInspectView(parseBackupManifest(baseV3), []);
+    expect(view.formatVersion).toBe(BACKUP_FORMAT_VERSION);
+    expect(view).not.toHaveProperty('sourceFormatVersion');
   });
 
-  it('reports matching versions for a native format-1 archive', () => {
-    const result = manifestToInspectView(manifest, [], 1);
-    expect(result.formatVersion).toBe(1);
-    expect(result.sourceFormatVersion).toBe(1);
-  });
-});
-
-
-// #496 AI credential key posture in the manifest
-describe('AI key posture manifest fields (#496)', () => {
-  const baseV1 = {
-    app: BACKUP_APP,
-    kind: BACKUP_KIND,
-    version: 1,
-    createdAt: '2026-07-20T12:00:00.000Z',
-    db: 'db/campfire.db',
-    dbBytes: 12345,
-    uploadCount: 0,
-  };
-
-  it('carries aiKeySource + aiKeyIncluded + aiCredentialCount when present', () => {
-    const parsed = parseBackupManifest({
-      ...baseV1,
-      aiKeySource: 'keyfile',
-      aiKeyIncluded: true,
-      aiCredentialCount: 3,
-    });
-    expect(parsed.aiKeySource).toBe('keyfile');
-    expect(parsed.aiKeyIncluded).toBe(true);
-    expect(parsed.aiCredentialCount).toBe(3);
-  });
-
-  it('accepts aiKeySource=env (operator-managed key)', () => {
-    const parsed = parseBackupManifest({ ...baseV1, aiKeySource: 'env' });
-    expect(parsed.aiKeySource).toBe('env');
-    // No envelope included is the expected posture for env-managed keys.
-    expect(parsed.aiKeyIncluded).toBeUndefined();
-  });
-
-  it('ignores garbage values in the key-posture fields (backward compat)', () => {
-    const parsed = parseBackupManifest({
-      ...baseV1,
-      aiKeySource: 'garbage',
-      aiKeyIncluded: 'yes-please',
-      aiCredentialCount: -5,
-    });
-    expect(parsed.aiKeySource).toBeUndefined();
-    expect(parsed.aiKeyIncluded).toBeUndefined();
-    expect(parsed.aiCredentialCount).toBeUndefined();
-  });
-
-  it('accepts a manifest without any of the new key-posture fields (older archives)', () => {
-    const parsed = parseBackupManifest(baseV1);
-    expect(parsed.aiKeySource).toBeUndefined();
-    expect(parsed.aiKeyIncluded).toBeUndefined();
-    expect(parsed.aiCredentialCount).toBeUndefined();
-  });
-
-  it('propagates key-posture fields into the inspect view', () => {
-    const manifest = {
-      ...baseV1,
-      aiKeySource: 'keyfile' as const,
-      aiKeyIncluded: true,
-      aiCredentialCount: 7,
-    };
-    const view = manifestToInspectView(manifest, [], 1);
-    expect(view.aiKeySource).toBe('keyfile');
-    expect(view.aiKeyIncluded).toBe(true);
-    expect(view.aiCredentialCount).toBe(7);
-  });
-
-  it('inspect view exposes safe defaults when the manifest omits key-posture', () => {
-    const view = manifestToInspectView(baseV1, [], 1);
-    expect(view.aiKeySource).toBeNull();
-    expect(view.aiKeyIncluded).toBe(false);
-    expect(view.aiCredentialCount).toBeNull();
-    expect(view.reconciliation).toBeNull();
-    expect(view.attachmentChecksums).toEqual([]);
-  });
-
-  it('inspect view surfaces reconciliation and attachment checksums (issue #444)', () => {
+  it('surfaces strict checksum and reconciliation metadata', () => {
     const manifest = parseBackupManifest({
-      ...baseV1,
-      attachments: [
-        {
-          id: 1,
-          campaignId: 3,
-          path: '3/1.png',
-          size: 100,
-          mime: 'image/png',
-          hidden: false,
-          sha256: 'a'.repeat(64),
-        },
-      ],
+      ...baseV3,
+      uploadCount: 1,
+      attachments: [{
+        id: 1, campaignId: 3, path: '3/1.png', size: 100, mime: 'image/png',
+        hidden: false, sha256: 'a'.repeat(64),
+      }],
       reconciliation: {
-        generation: 'gen-test',
-        totalAttachments: 1,
-        missing: 0,
-        changed: 0,
-        orphans: [],
-        orphanCount: 0,
-        clean: true,
+        generation: 'gen-test', totalAttachments: 1, missing: 0, changed: 0,
+        orphans: [], orphanCount: 0, clean: true,
       },
     });
-    const view = manifestToInspectView(manifest, ['3/1.png'], 1);
-    expect(view.reconciliation).toMatchObject({
-      generation: 'gen-test',
-      clean: true,
-      totalAttachments: 1,
-    });
-    expect(view.attachmentChecksums).toEqual([
-      { path: '3/1.png', size: 100, sha256: 'a'.repeat(64) },
-    ]);
+    const view = manifestToInspectView(manifest, ['3/1.png']);
+    expect(view.attachmentChecksums).toEqual([{ path: '3/1.png', size: 100, sha256: 'a'.repeat(64) }]);
+    expect(view.reconciliation).toMatchObject({ generation: 'gen-test', clean: true });
   });
 });
