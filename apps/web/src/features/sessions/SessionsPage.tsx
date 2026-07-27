@@ -490,7 +490,7 @@ export default function SessionsPage() {
       >
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
         {/* Timeline list */}
-        <aside className={`min-w-0 space-y-3 ${showDetailOnMobile ? 'hidden lg:block' : ''}`}>
+        <aside className={`cf-print-hide min-w-0 space-y-3 ${showDetailOnMobile ? 'hidden lg:block' : ''}`}>
           {/* AI scribe (issue #342) — configure triggers, run on demand (with a dry-run
               preview), and review recent runs. Renders nothing until the AI DM seat is on. */}
           <ScribePanel campaignId={cid} isDm={isDm} />
@@ -919,7 +919,7 @@ function SessionDetail({
   return (
     <div className="reading-surface space-y-3" style={{ maxWidth: 720 }} {...entityTargetProps('session', session.id)}>
       <div>
-        <button onClick={onBack} className="text-xs text-secondary hover:text-[var(--color-neutral-300)] lg:hidden mb-1 block">
+        <button onClick={onBack} className="cf-print-hide text-xs text-secondary hover:text-[var(--color-neutral-300)] lg:hidden mb-1 block">
           ← Back to sessions
         </button>
       </div>
@@ -934,10 +934,21 @@ function SessionDetail({
           {session.title || 'Untitled session'}
         </h2>
         <span className="text-muted text-xs">{formatDate(session.playedAt)}</span>
+        {!editing && (
+          <Btn
+            ghost
+            type="button"
+            className="cf-print-hide !min-h-0 !py-1.5 text-xs ml-auto"
+            onClick={() => window.print()}
+          >
+            Print
+          </Btn>
+        )}
       </div>
 
       {editing ? (
-        <Card className="edit-recap-form min-w-0 space-y-3">
+        <>
+        <Card className="cf-print-editor edit-recap-form min-w-0 space-y-3">
           {protectedRecap.restorePrompt}
           {protectedRecap.leavePrompt}
           <form
@@ -1088,6 +1099,16 @@ function SessionDetail({
             </div>
           </form>
         </Card>
+        {/* Browser print (Ctrl/Cmd+P) while editing should still yield the draft
+            recap rather than a blank page once the editor chrome is print-hidden. */}
+        <Card className="cf-print-only cf-print-paper min-w-0">
+          {recapDraft.trim() ? (
+            <Markdown>{recapDraft}</Markdown>
+          ) : (
+            <p className="text-sm">No recap written yet.</p>
+          )}
+        </Card>
+        </>
       ) : (
         <Card>
           {recapLoading ? (
@@ -1100,10 +1121,14 @@ function SessionDetail({
         </Card>
       )}
 
-      {!editing && <AttendancePanel sessionId={session.id} campaignId={session.campaignId} />}
+      {!editing && (
+        <div className="cf-print-hide">
+          <AttendancePanel sessionId={session.id} campaignId={session.campaignId} />
+        </div>
+      )}
 
       {canDmWrite && !editing && (
-        <div className="flex gap-2">
+        <div className="cf-print-hide flex gap-2">
           <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setEditing(true)}>
             Edit recap
           </Btn>
@@ -1113,24 +1138,30 @@ function SessionDetail({
         </div>
       )}
 
-      {!editing && <SharePanel sessionId={session.id} campaignId={campaignId} />}
+      {!editing && (
+        <div className="cf-print-hide">
+          <SharePanel sessionId={session.id} campaignId={campaignId} />
+        </div>
+      )}
 
       {/* Recap revision history + restore (issue #157) — DM-only, so a clobbered or
           regretted edit can be recovered. Refetches whenever a save/restore happens. */}
       {canDmWrite && !editing && (
-        <RevisionHistoryPanel
-          entityType="session"
-          entityId={session.id}
-          currentSnapshot={{ recap }}
-          expectedUpdatedAt={loadedUpdatedAt}
-          label="Recap history"
-          reloadNonce={historyNonce}
-          onRestored={() => {
-            setHistoryNonce((n) => n + 1);
-            void reloadLatest();
-            onChange();
-          }}
-        />
+        <div className="cf-print-hide">
+          <RevisionHistoryPanel
+            entityType="session"
+            entityId={session.id}
+            currentSnapshot={{ recap }}
+            expectedUpdatedAt={loadedUpdatedAt}
+            label="Recap history"
+            reloadNonce={historyNonce}
+            onRestored={() => {
+              setHistoryNonce((n) => n + 1);
+              void reloadLatest();
+              onChange();
+            }}
+          />
+        </div>
       )}
 
       {confirmingDelete && (
@@ -1155,8 +1186,10 @@ function SessionDetail({
 
       {/* Discussion thread on the recap (issue #123) — the shared, between-sessions
           surface: react to the recap, ask the DM, or post an in-character scene. */}
-      <EncounterBacklinksCard campaignId={campaignId} encounters={linkedEncounters ?? []} />
-      <EntityDiscussion campaignId={campaignId} entityType="session" entityId={session.id} />
+      <div className="cf-print-hide">
+        <EncounterBacklinksCard campaignId={campaignId} encounters={linkedEncounters ?? []} />
+        <EntityDiscussion campaignId={campaignId} entityType="session" entityId={session.id} />
+      </div>
     </div>
   );
 }

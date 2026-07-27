@@ -940,7 +940,7 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
       };
 
   return (
-    <div className={rootClassName} style={rootStyle} onClick={closePanel}>
+    <div className={`cf-print-chrome ${rootClassName}`} style={rootStyle} onClick={closePanel}>
       <div
         id={NOTIFICATIONS_DIALOG_ID}
         ref={dialogRef}
@@ -1107,4 +1107,3 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
     </div>
   );
 }
-
