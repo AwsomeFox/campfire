@@ -40,6 +40,8 @@ import type { RuleEntryType } from '@campfire/schema';
  */
 
 export const OPEN5E_DEFAULT_BASE_URL = 'https://api.open5e.com/v2';
+/** Importer schema revision. Reinstalling an older pack deterministically refreshes its rows. */
+export const OPEN5E_PACK_VERSION = 'open5e-v2-defenses-1';
 export const MAX_ENTRIES_PER_SECTION = 2000;
 // Live sections are large: creatures ~3.5k, magicitems ~2.3k, spells ~2k entries
 // (verified against api.open5e.com 2026-07). Open5e's DRF pagination honours large
@@ -401,6 +403,9 @@ export function mapCreature(row: Record<string, unknown>): ImportedEntry {
     ...normalizedCreatureActions(row.special_abilities),
     ...normalizedCreatureActions(row.traits),
   ];
+  const defenses = row.resistances_and_immunities && typeof row.resistances_and_immunities === 'object'
+    ? row.resistances_and_immunities as Record<string, unknown>
+    : null;
   return {
     slug: asString(row.key) || asString(row.name),
     name: asString(row.name),
@@ -414,11 +419,13 @@ export function mapCreature(row: Record<string, unknown>): ImportedEntry {
       armorClass: row.armor_class ?? null,
       hitPoints: row.hit_points ?? null,
       speed: row.speed ?? null,
-      // Keep the upstream values intact. Encounter damage applies only simple,
-      // unconditional canonical entries until attack-source qualifiers are modeled.
-      damage_resistances: row.damage_resistances ?? null,
-      damage_vulnerabilities: row.damage_vulnerabilities ?? null,
-      damage_immunities: row.damage_immunities ?? null,
+      // Preserve the complete v2 object so qualifiers/exceptions are not erased. The
+      // top-level aliases feed older presentation paths and retain the structured
+      // damage-type objects rather than coercing them to "[object Object]".
+      resistances_and_immunities: defenses,
+      damage_resistances: defenses?.damage_resistances ?? row.damage_resistances ?? null,
+      damage_vulnerabilities: defenses?.damage_vulnerabilities ?? row.damage_vulnerabilities ?? null,
+      damage_immunities: defenses?.damage_immunities ?? row.damage_immunities ?? null,
       abilityScores: row.ability_scores ?? null,
       specialAbilities,
       actions: regularActions,

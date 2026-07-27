@@ -3347,7 +3347,9 @@ export class EncountersService {
               const parts = [`${criticalTotal} ${type}`];
               if (patch.isCrit) parts.push('critical');
               if (patch.saveOutcome === 'half') parts.push('saved for half');
-              if (applied !== 'normal') parts.push(applied === 'halved' ? 'halved' : applied);
+              if (applied !== 'normal' && !(patch.saveOutcome === 'half' && applied === 'halved')) {
+                parts.push(applied === 'halved' ? 'halved' : applied);
+              }
               directDamageSummary = parts.join(', ');
             }
             return -final;

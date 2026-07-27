@@ -393,6 +393,10 @@ describe('encounters (e2e)', () => {
         .send({ hpDelta: -18, damageType: 'fire', saveOutcome: 'half' });
       expect(res.status).toBe(200);
       expect(res.body.hpCurrent).toBe(96);
+      const savedEvents = await request(server).get(`/api/v1/encounters/${encounterId}/events`).set(dm);
+      const savedEvent = savedEvents.body.find((event: { detail: string }) => /18 fire.*saved for half/.test(event.detail));
+      expect(savedEvent).toBeDefined();
+      expect(savedEvent.detail).not.toContain('saved for half, halved');
 
       res = await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${targetId}`).set(dm)
         .send({ hpDelta: -6, damageType: 'cold' });

@@ -238,36 +238,64 @@ export type TargetDefenses = z.infer<typeof TargetDefenses>;
 
 export const EMPTY_DEFENSES: TargetDefenses = { resistances: [], vulnerabilities: [], immunities: [] };
 
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function hasMeaningfulQualifier(value: Record<string, unknown>): boolean {
+  const identityKeys = new Set(['name', 'key', 'damage_type', 'damageType', 'type']);
+  return Object.entries(value).some(([key, item]) => {
+    if (identityKeys.has(key) || item === null || item === undefined || item === '' || item === false) return false;
+    if (Array.isArray(item)) return item.length > 0;
+    if (typeof item === 'object') return Object.keys(item as Record<string, unknown>).length > 0;
+    return true;
+  });
+}
+
 /**
  * Read statblock damage defences through the aliases used by importers and hand-entered
- * entries. When a vocabulary is supplied, retain only standalone canonical types or an
- * entirely simple comma-separated canonical list; qualified prose needs source metadata.
+ * entries, including Open5e v2's `resistances_and_immunities` object. When a vocabulary
+ * is supplied, retain only unconditional canonical types. Structured qualifier/exception
+ * metadata and qualified display prose are deliberately excluded until attack source tags
+ * are part of direct-damage requests.
  */
 export function damageDefensesFromStatblock(data: Record<string, unknown> | null | undefined, vocabulary?: readonly string[]): TargetDefenses {
-  const readList = (...keys: string[]): string[] => {
+  const nested = recordValue(data?.resistances_and_immunities) ?? recordValue(data?.resistancesAndImmunities);
+  const canonical = vocabulary?.map((type) => type.toLowerCase());
+  const normalizeStrings = (raw: string): string[] => {
+    const parts = raw.split(/[,;]/).map((item) => item.trim()).filter(Boolean);
+    if (!canonical) return parts;
+    const normalized = parts.map((entry) => entry.toLowerCase().replace(/^and\s+/, ''));
+    return normalized.length > 0 && normalized.every((entry) => canonical.includes(entry)) ? normalized : [];
+  };
+  const readList = (nestedKey: string, ...keys: string[]): string[] => {
     if (!data) return [];
-    const canonical = vocabulary?.map((type) => type.toLowerCase());
-    for (const key of keys) {
-      const value = data[key];
-      const values = Array.isArray(value) ? value.map(String) : typeof value === 'string' ? [value] : [];
-      const entries = values.flatMap((raw) => {
-        const parts = raw.split(/[,;]/).map((item) => item.trim()).filter(Boolean);
-        if (!canonical) return parts;
-        const normalized = parts.map((entry) => entry.toLowerCase());
-        // Preserve unconditional array entries beside qualified prose, but never
-        // carve partial types from one qualified comma-separated expression.
-        return normalized.length > 0 && normalized.every((entry) => canonical.includes(entry)) ? normalized : [];
-      });
-      if (entries.length === 0) continue;
-      if (!canonical) return entries;
-      return [...new Set(entries)];
+    const direct = keys.map((key) => data[key]).find((value) => value !== undefined && value !== null);
+    const value = direct ?? nested?.[nestedKey];
+    const values = Array.isArray(value) ? value : value === undefined || value === null ? [] : [value];
+    const display = nested?.[`${nestedKey}_display`];
+    if (canonical && typeof display === 'string' && display.trim() && normalizeStrings(display).length === 0) {
+      return [];
     }
-    return [];
+    const entries = values.flatMap((item) => {
+      if (typeof item === 'string') return normalizeStrings(item);
+      const record = recordValue(item);
+      if (!record || hasMeaningfulQualifier(record)) return [];
+      const typeRecord = recordValue(record.damage_type) ?? recordValue(record.damageType) ?? recordValue(record.type) ?? record;
+      const type = String(typeRecord.key ?? typeRecord.name ?? '').trim();
+      if (!type) return [];
+      if (!canonical) return [type];
+      const normalized = type.toLowerCase();
+      return canonical.includes(normalized) ? [normalized] : [];
+    });
+    return [...new Set(entries)];
   };
   return {
-    resistances: readList('damage_resistances', 'damageResistances', 'resistances'),
-    vulnerabilities: readList('damage_vulnerabilities', 'damageVulnerabilities', 'vulnerabilities'),
-    immunities: readList('damage_immunities', 'damageImmunities', 'immunities'),
+    resistances: readList('damage_resistances', 'damage_resistances', 'damageResistances', 'resistances'),
+    vulnerabilities: readList('damage_vulnerabilities', 'damage_vulnerabilities', 'damageVulnerabilities', 'vulnerabilities'),
+    immunities: readList('damage_immunities', 'damage_immunities', 'damageImmunities', 'immunities'),
   };
 }
 
