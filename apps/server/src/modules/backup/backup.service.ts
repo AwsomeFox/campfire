@@ -1330,30 +1330,113 @@ export class BackupService implements OnApplicationBootstrap {
     try { return await this.inspectFile(staged); } finally { await fs.promises.rm(path.dirname(staged), { recursive: true, force: true }); }
   }
 
+  /**
+   * Validate every payload an archive promises without applying it. This is used
+   * by inspect and therefore scheduled-backup verification; entries are hashed
+   * as streams so an operator check never accumulates large upload buffers.
+   */
+  private async validateArchivePayload(
+    zip: BackupArchiveReader,
+    manifest: BackupManifest,
+    signal?: AbortSignal,
+  ): Promise<string[]> {
+    const envelopeEntry = zip.get(KEY_ENVELOPE_ENTRY);
+    if (manifest.aiKeyIncluded && !envelopeEntry) {
+      throw new BadRequestException(
+        'Invalid backup archive — manifest claims an AI key envelope but the entry is missing',
+      );
+    }
+    if (!manifest.aiKeyIncluded && envelopeEntry) {
+      throw new BadRequestException(
+        `Invalid backup archive — manifest does not include an AI key envelope but ${KEY_ENVELOPE_ENTRY} is present`,
+      );
+    }
+    if (envelopeEntry) {
+      try {
+        parseKeyEnvelopeJson((await zip.readBuffer(envelopeEntry, MAX_KEY_ENVELOPE_BYTES, signal)).toString('utf8'));
+      } catch (err) {
+        throw new BadRequestException(
+          `Invalid backup key envelope: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
+    const dbFile = zip.get(manifest.db);
+    if (!dbFile) throw new BadRequestException('Invalid backup archive — database is missing');
+
+    const stageDir = fs.mkdtempSync(path.join(os.tmpdir(), 'campfire-inspect-'));
+    try {
+      const stagedDbPath = path.join(stageDir, 'campfire.db');
+      const stagedDb = await zip.extractToFile(dbFile, stagedDbPath, signal);
+      if (manifest.dbBytes !== stagedDb.bytes) {
+        throw new BadRequestException('Invalid backup archive — database size does not match manifest');
+      }
+      const dbHeader = await fs.promises.open(stagedDbPath, 'r').then(async (handle) => {
+        try {
+          const header = Buffer.alloc(SQLITE_MAGIC.length);
+          await handle.read(header, 0, header.length, 0);
+          return header;
+        } finally {
+          await handle.close();
+        }
+      });
+      if (!looksLikeSqlite(dbHeader)) throw new BadRequestException('Invalid backup archive — database is not a SQLite file');
+      try {
+        const probe = new Database(stagedDbPath, { readonly: true, fileMustExist: true });
+        try {
+          const integrity = probe.pragma('integrity_check', { simple: true });
+          const hasUsers = probe
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+            .get();
+          if (integrity !== 'ok' || !hasUsers) {
+            throw new BadRequestException('Invalid backup archive — database failed validation');
+          }
+        } finally {
+          probe.close();
+        }
+      } catch (err) {
+        if (err instanceof BadRequestException) throw err;
+        throw new BadRequestException('Invalid backup archive — database could not be opened');
+      }
+
+      const expectedAttachments = new Map((manifest.attachments ?? []).map((attachment) => [attachment.path, attachment]));
+      const foundAttachments = new Set<string>();
+      const uploads: string[] = [];
+      for (const entry of zip.entries) {
+        const name = entry.fileName;
+        if (name.endsWith('/') || !name.startsWith(UPLOADS_PREFIX)) continue;
+        const rel = name.slice(UPLOADS_PREFIX.length);
+        if (rel === '' || rel.includes('..') || path.isAbsolute(rel)) {
+          throw new BadRequestException('Invalid backup archive — unsafe upload path');
+        }
+        const actual = await zip.hashEntry(entry, signal);
+        const expected = expectedAttachments.get(rel);
+        if (expected && (expected.size !== actual.bytes || expected.sha256 !== actual.sha256)) {
+          throw new BadRequestException('Invalid backup archive — upload checksum does not match manifest');
+        }
+        if (expected) foundAttachments.add(rel);
+        uploads.push(rel);
+      }
+      if (manifest.uploadCount !== uploads.length) {
+        throw new BadRequestException('Invalid backup archive — upload count does not match manifest');
+      }
+      if (expectedAttachments.size && foundAttachments.size !== expectedAttachments.size) {
+        throw new BadRequestException('Invalid backup archive — manifest attachment is missing');
+      }
+      uploads.sort();
+      return uploads;
+    } finally {
+      await fs.promises.rm(stageDir, { recursive: true, force: true });
+    }
+  }
+
   async inspectFile(archivePath: string, signal?: AbortSignal): Promise<BackupInspectResult> {
     const zip = await BackupArchiveReader.open(archivePath, signal);
     try {
-    const { manifest, sourceFormatVersion } = await this.readManifestFromArchiveWithSource(zip, signal);
-    const uploads: string[] = [];
-    for (const entry of zip.entries) {
-      const name = entry.fileName;
-      if (name.endsWith('/') || !name.startsWith(UPLOADS_PREFIX)) continue;
-      const rel = name.slice(UPLOADS_PREFIX.length);
-      // Reject unsafe paths the same way restore() does (issue #997 fix 1).
-      if (rel === '' || rel.includes('..') || path.isAbsolute(rel)) {
-        throw new BadRequestException('Invalid backup archive — unsafe upload path');
-      }
-      uploads.push(rel);
-    }
-    uploads.sort();
-    const envelopeEntry = zip.get(KEY_ENVELOPE_ENTRY);
-    const view = manifestToInspectView(manifest, uploads, sourceFormatVersion);
-    // Cross-check manifest vs archive entry so inspect() does not claim portability
-    // when the envelope file is missing from a truncated/tampered zip.
-    return {
-      ...view,
-      aiKeyIncluded: view.aiKeyIncluded && !!envelopeEntry,
-    };
+      const { manifest, sourceFormatVersion } = await this.readManifestFromArchiveWithSource(zip, signal);
+      const uploads = await this.validateArchivePayload(zip, manifest, signal);
+      const view = manifestToInspectView(manifest, uploads, sourceFormatVersion);
+      return view;
     } finally { zip.close(); }
   }
 

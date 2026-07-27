@@ -269,15 +269,90 @@ describe('BackupService AI keyfile envelope (#496, real SQLite)', () => {
     expect(typeof view.aiCredentialCount === 'number' || view.aiCredentialCount === null).toBe(true);
   });
 
+  it('inspect() rejects a truncated database payload instead of trusting manifest metadata', async () => {
+    const service = makeService();
+    const archive = await service.buildBackup();
+    const zip = await JSZip.loadAsync(archive);
+    const manifest = JSON.parse(await zip.file('manifest.json')!.async('string')) as BackupManifest;
+    zip.file(manifest.db, Buffer.from('SQLite format 3\0too-short'));
+
+    await expect(service.inspect(await zip.generateAsync({ type: 'nodebuffer' }))).rejects.toThrow(
+      /database size does not match manifest/i,
+    );
+  });
+
+  it('inspect() streams uploads and rejects a manifest checksum mismatch', async () => {
+    const service = makeService();
+    const archive = await service.buildBackup();
+    const zip = await JSZip.loadAsync(archive);
+    const manifest = JSON.parse(await zip.file('manifest.json')!.async('string')) as BackupManifest;
+    manifest.uploadCount = 1;
+    manifest.attachments = [{
+      id: 1,
+      campaignId: 1,
+      path: 'fixture.bin',
+      size: 3,
+      mime: 'application/octet-stream',
+      hidden: false,
+      sha256: '0'.repeat(64),
+    }];
+    zip.file('uploads/fixture.bin', 'abc');
+    zip.file('manifest.json', JSON.stringify(manifest, null, 2));
+
+    const tampered = await zip.generateAsync({ type: 'nodebuffer' });
+    await expect(service.inspect(tampered)).rejects.toThrow(
+      /upload checksum does not match manifest/i,
+    );
+
+    const scheduledPath = path.join(dataDir, 'campfire-backup-tampered.zip');
+    fs.writeFileSync(scheduledPath, tampered);
+    const verification = await (service as unknown as {
+      verifyScheduledArchive(filePath: string): Promise<{ verified: boolean; error: string }>;
+    }).verifyScheduledArchive(scheduledPath);
+    expect(verification.verified).toBe(false);
+    expect(verification.error).toMatch(/upload checksum does not match manifest/i);
+  });
+
+  it('inspect() rejects a physically truncated archive', async () => {
+    const service = makeService();
+    const archive = await service.buildBackup();
+    await expect(service.inspect(archive.subarray(0, archive.length - 16))).rejects.toThrow(
+      /readable zip file|malformed or truncated/i,
+    );
+  });
+
   it('rejects restore when manifest claims an envelope but the entry is missing', async () => {
     const service = makeService();
     const buffer = await service.buildBackup({ keyPassphrase: PASSPHRASE });
     const zip = await JSZip.loadAsync(buffer);
     zip.remove(KEY_ENVELOPE_ENTRY);
     const tampered = await zip.generateAsync({ type: 'nodebuffer' });
+    await expect(service.inspect(tampered)).rejects.toThrow(/manifest claims an AI key envelope/i);
     await expect(
       service.restore(tampered, RESTORE_CONFIRM_TOKEN, testUser, { keyPassphrase: PASSPHRASE }),
     ).rejects.toThrow(/manifest claims an AI key envelope/i);
+  });
+
+  it('inspect rejects an envelope with an invalid JSON shape without requiring its passphrase', async () => {
+    const service = makeService();
+    const archive = await service.buildBackup({ keyPassphrase: PASSPHRASE });
+    const zip = await JSZip.loadAsync(archive);
+    zip.file(KEY_ENVELOPE_ENTRY, '{}');
+
+    await expect(service.inspect(await zip.generateAsync({ type: 'nodebuffer' }))).rejects.toThrow(
+      /Invalid backup key envelope/i,
+    );
+  });
+
+  it('inspect rejects an unexpected envelope entry when the manifest omits it', async () => {
+    const service = makeService();
+    const archive = await service.buildBackup();
+    const zip = await JSZip.loadAsync(archive);
+    zip.file(KEY_ENVELOPE_ENTRY, '{}');
+
+    await expect(service.inspect(await zip.generateAsync({ type: 'nodebuffer' }))).rejects.toThrow(
+      /manifest does not include an AI key envelope/i,
+    );
   });
 
   it('restored keyfile decrypts stored provider credentials after envelope restore', async () => {

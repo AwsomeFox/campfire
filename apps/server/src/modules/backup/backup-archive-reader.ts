@@ -216,6 +216,23 @@ export class BackupArchiveReader {
     }
   }
 
+  /** Stream an entry through the archive limits and digest it without buffering it. */
+  async hashEntry(entry: Entry, signal?: AbortSignal): Promise<{ bytes: number; sha256: string }> {
+    let actual = 0;
+    const hash = createHash('sha256');
+    await this.stream(entry, async (source) => {
+      for await (const chunk of source) {
+        const bytes = Buffer.from(chunk);
+        actual += bytes.length;
+        if (!this.accountActual(bytes.length) || actual > this.limits.maxEntryUncompressedBytes) {
+          throw new Error('entry limit exceeded');
+        }
+        hash.update(bytes);
+      }
+    }, signal);
+    return { bytes: actual, sha256: hash.digest('hex') };
+  }
+
   private async stream(entry: Entry, consume: (source: Readable) => Promise<void>, signal?: AbortSignal): Promise<void> {
     if (signal?.aborted) invalid('archive read was cancelled');
     let source: Readable | null = null;
