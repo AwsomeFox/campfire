@@ -696,6 +696,64 @@ const DEATH_STATE_LABEL: Record<string, string> = { dying: 'Dying', stable: 'Sta
  * (saves cleared), 10–19 = one success, 2–9 = one failure. The server's response is the
  * source of truth for the counters + HP; the button just supplies the d20 face.
  */
+/**
+ * Death-save pips (issue #428 hit area, #1478 stability).
+ *
+ * MUST stay at module scope. This used to be declared inside `DeathSaveTracker`'s body,
+ * which minted a NEW component type on every render of the tracker. React compares
+ * element types by identity, so a fresh type meant the whole pip subtree was unmounted
+ * and remounted on every re-render instead of being updated in place — the DOM nodes were
+ * destroyed and rebuilt several times per second while the encounter polled.
+ *
+ * That cost more than churn: it dropped keyboard focus from a pip mid-interaction, and it
+ * made the buttons intermittently unmeasurable — an element could pass a visibility check
+ * and then be detached before its box could be read a moment later. That is exactly what
+ * made `combat-mobile-target-size.spec.ts` "flaky" at phone widths (worst at 430px, where
+ * the larger viewport renders more and widens the window). Hoisting the component gives it
+ * a stable identity, so React reconciles the existing nodes and the pips stop churning.
+ */
+function DeathSavePips({
+  kind,
+  count,
+  color,
+  canEdit,
+  busy,
+  onSet,
+}: {
+  kind: 'deathSaveSuccesses' | 'deathSaveFailures';
+  count: number;
+  color: string;
+  canEdit: boolean;
+  busy: boolean;
+  onSet: (patch: { deathSaveSuccesses?: number; deathSaveFailures?: number }) => void;
+}) {
+  return (
+    <span style={{ display: 'inline-flex', gap: 4 }} data-testid={`death-save-${kind === 'deathSaveSuccesses' ? 'success' : 'failure'}-pips`}>
+      {[0, 1, 2].map((i) => {
+        const filled = i < count;
+        const next = count === i + 1 ? i : i + 1; // click the highest-lit pip to clear it
+        return (
+          <button
+            key={i}
+            type="button"
+            className="cf-death-save-pip"
+            aria-label={`${kind === 'deathSaveSuccesses' ? 'Success' : 'Failure'} ${i + 1} of 3${filled ? ' (marked)' : ''}`}
+            aria-pressed={filled}
+            disabled={!canEdit || busy}
+            onClick={() => onSet({ [kind]: next })}
+            style={{
+              // Visual pip color via CSS variables; hit area is the 44×44 class (issue #428).
+              ['--cf-death-save-pip-color' as string]: color,
+              ['--cf-death-save-pip-fill' as string]: filled ? color : 'transparent',
+              cursor: canEdit && !busy ? 'pointer' : 'default',
+            }}
+          />
+        );
+      })}
+    </span>
+  );
+}
+
 function DeathSaveTracker({
   successes,
   failures,
@@ -711,33 +769,6 @@ function DeathSaveTracker({
   onSet: (patch: { deathSaveSuccesses?: number; deathSaveFailures?: number }) => void;
   onRoll: () => void;
 }) {
-  function Pips({ kind, count, color }: { kind: 'deathSaveSuccesses' | 'deathSaveFailures'; count: number; color: string }) {
-    return (
-      <span style={{ display: 'inline-flex', gap: 4 }} data-testid={`death-save-${kind === 'deathSaveSuccesses' ? 'success' : 'failure'}-pips`}>
-        {[0, 1, 2].map((i) => {
-          const filled = i < count;
-          const next = count === i + 1 ? i : i + 1; // click the highest-lit pip to clear it
-          return (
-            <button
-              key={i}
-              type="button"
-              className="cf-death-save-pip"
-              aria-label={`${kind === 'deathSaveSuccesses' ? 'Success' : 'Failure'} ${i + 1} of 3${filled ? ' (marked)' : ''}`}
-              aria-pressed={filled}
-              disabled={!canEdit || busy}
-              onClick={() => onSet({ [kind]: next })}
-              style={{
-                // Visual pip color via CSS variables; hit area is the 44×44 class (issue #428).
-                ['--cf-death-save-pip-color' as string]: color,
-                ['--cf-death-save-pip-fill' as string]: filled ? color : 'transparent',
-                cursor: canEdit && !busy ? 'pointer' : 'default',
-              }}
-            />
-          );
-        })}
-      </span>
-    );
-  }
   return (
     <div
       style={{ display: 'flex', gap: 12, alignItems: 'center', marginTop: 5, fontSize: 'var(--type-label)', flexWrap: 'wrap' }}
@@ -745,11 +776,11 @@ function DeathSaveTracker({
     >
       <span style={{ display: 'inline-flex', gap: 4, alignItems: 'center' }}>
         <span className="text-muted" style={{ letterSpacing: 0.3 }}>Saves</span>
-        <Pips kind="deathSaveSuccesses" count={successes} color="var(--color-accent)" />
+        <DeathSavePips kind="deathSaveSuccesses" count={successes} color="var(--color-accent)" canEdit={canEdit} busy={busy} onSet={onSet} />
       </span>
       <span style={{ display: 'inline-flex', gap: 4, alignItems: 'center' }}>
         <span className="text-muted" style={{ letterSpacing: 0.3 }}>Fails</span>
-        <Pips kind="deathSaveFailures" count={failures} color="#e5484d" />
+        <DeathSavePips kind="deathSaveFailures" count={failures} color="#e5484d" canEdit={canEdit} busy={busy} onSet={onSet} />
       </span>
       {canEdit && (
         <button
@@ -821,11 +852,33 @@ function hpLogActorId(actorCombatantId: number | undefined | null, targetCombata
   return actorCombatantId;
 }
 
+/**
+ * Attach the combat-log actor to an HP patch — but only for a DM (issue #1478).
+ *
+ * `actorId` is a DM-authored field: the server 403s ANY non-DM patch that carries it, so
+ * that a player cannot spoof who dealt the damage. Sending it as a player was therefore
+ * fatal — and it fired whenever the current-turn combatant differed from the target, i.e.
+ * a player applying damage to their own character on anyone else's turn (~half the time,
+ * depending on initiative).
+ *
+ * Dropping the field costs nothing, because it is redundant on the player path: the
+ * server's tri-state `actorId` contract (encounters.service.ts `resolveCombatLogActor`)
+ * falls back to the current-turn combatant when `actorId` is OMITTED — the identical
+ * attribution the client was trying to send. So the log line is unchanged; only the 403
+ * goes away.
+ *
+ * Deliberately gated client-side rather than having the server ignore a redundant value:
+ * the client's `currentCombatantId` is a cached read, so an "actorId === current turn"
+ * leniency rule on the server would still 403 whenever the turn advanced between render
+ * and request — trading a deterministic bug for a rare, racy one.
+ */
 function hpPatchWithActor(
   patch: Record<string, unknown>,
   actorCombatantId: number | undefined | null,
   targetCombatantId: number,
+  canAttributeActor: boolean,
 ): Record<string, unknown> {
+  if (!canAttributeActor) return patch;
   const actorId = hpLogActorId(actorCombatantId, targetCombatantId);
   return actorId != null ? { ...patch, actorId } : patch;
 }
@@ -1414,7 +1467,7 @@ export default function RunSessionPage() {
     }) =>
       api.patch(
         `${API}/encounters/${eid}/combatants/${combatantId}`,
-        hpPatchWithActor({ hpDelta: delta, idempotencyKey }, actorId, combatantId),
+        hpPatchWithActor({ hpDelta: delta, idempotencyKey }, actorId, combatantId, isDm),
       ),
     onMutate: async ({ combatantId, delta }) => {
       setActionError(null);
@@ -1478,6 +1531,7 @@ export default function RunSessionPage() {
               { hpDelta: delta, idempotencyKey: `${bulkOperationId}:${combatantId}` },
               actorId,
               combatantId,
+              isDm,
             ),
           );
         }
@@ -1490,7 +1544,7 @@ export default function RunSessionPage() {
         throw err;
       }
     },
-    [eid, queryClient, reportError, ruleSystem, enterReconciling],
+    [eid, queryClient, reportError, ruleSystem, enterReconciling, isDm],
   );
 
   const patchCombatant = useCallback(
@@ -1498,10 +1552,10 @@ export default function RunSessionPage() {
       const needsActor = Object.keys(patch).some((key) => HP_LOG_PATCH_KEYS.has(key));
       const actorCombatantId =
         needsActor && encounter?.status === 'running' ? (encounter.currentCombatantId ?? undefined) : undefined;
-      const enriched = needsActor ? hpPatchWithActor(patch, actorCombatantId, combatantId) : patch;
+      const enriched = needsActor ? hpPatchWithActor(patch, actorCombatantId, combatantId, isDm) : patch;
       combatantPatch.mutate({ combatantId, patch: enriched });
     },
-    [combatantPatch, encounter?.status, encounter?.currentCombatantId],
+    [combatantPatch, encounter?.status, encounter?.currentCombatantId, isDm],
   );
 
   const patchCombatantTurnState = useCallback(
