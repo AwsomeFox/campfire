@@ -1,0 +1,13 @@
+{
+  "tracked": [
+    {
+      "pr": 1613,
+      "status": "babysitting",
+      "url": "https://github.com/AwsomeFox/campfire/pull/1613",
+      "headBranch": "fix/issue-1608",
+      "baseBranch": "main",
+      "updatedAt": "2026-07-27T20:26:00Z",
+      "notes": "Added to tracked on babysitting-7e62. MERGEABLE; no conflicts. Kilo upload-id warning already fixed in 73764f60 (outdated open thread). CI in progress on run 30302481251."
+    }
+  ]
+}
