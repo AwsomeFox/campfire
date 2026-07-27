@@ -170,15 +170,17 @@ test.describe('print layouts (#667)', () => {
       // Same route component reuse (NPC → NPC) must also require a fresh opt-in.
       const otherNpc = await dmPage.request.post(`/api/v1/campaigns/${campaignId}/npcs`, {
         data: {
-          name: 'Print secret neighbor',
+          name: `Print secret neighbor ${Date.now()}`,
           role: 'Test double',
-          disposition: 'neutral',
           body: 'Another printable NPC.',
-          dmSecret: 'NEIGHBOR DM SECRET',
         },
       });
       expect(otherNpc.ok()).toBe(true);
       const otherNpcId = (await otherNpc.json() as { id: number }).id;
+      const secretPatch = await dmPage.request.patch(`/api/v1/npcs/${otherNpcId}`, {
+        data: { dmSecret: 'NEIGHBOR DM SECRET' },
+      });
+      expect(secretPatch.ok()).toBe(true);
       try {
         await dmPage.goto(`/c/${campaignId}/npcs/${navigation.npcId}`);
         await dmPage.getByLabel('Include DM secrets').check();
