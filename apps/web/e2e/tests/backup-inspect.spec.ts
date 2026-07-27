@@ -191,6 +191,31 @@ test.describe('server backup workflow UI (issues #514 / #444)', () => {
     await expect(card.getByRole('alert').getByRole('button', { name: 'Retry' })).toBeVisible();
   });
 
+  test('uses the bounded blob fallback when the response has no readable body', async ({ page }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(window, 'showSaveFilePicker', { value: undefined, configurable: true });
+      const nativeFetch = window.fetch.bind(window);
+      window.fetch = async (input, init) => {
+        const response = await nativeFetch(input, init);
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        if (!url.endsWith('/api/v1/backup')) return response;
+        return new Proxy(response, {
+          get(target, property) {
+            if (property === 'body') return null;
+            const value = Reflect.get(target, property, target);
+            return typeof value === 'function' ? value.bind(target) : value;
+          },
+        });
+      };
+    });
+    await page.route('**/api/v1/backup/status', (route) => route.fulfill({ status: 200, json: MOCK_STATUS }));
+    await page.route('**/api/v1/backup', (route) => route.fulfill({ status: 200, headers: { 'Content-Type': 'application/zip', 'Content-Disposition': 'attachment; filename="blob.zip"', 'Content-Length': '4' }, body: 'zip!' }));
+    await page.goto('/admin/storage');
+    const card = page.locator('.server-backup-workflow-card');
+    await card.getByRole('button', { name: 'Create & download backup' }).click();
+    await expect(card.getByText(/Downloaded blob\.zip/)).toBeVisible();
+  });
+
   test('localizes generic network failures while preserving download-specific errors', async ({ page }) => {
     await page.addInitScript(() => {
       Object.defineProperty(window, 'showSaveFilePicker', { value: undefined, configurable: true });
