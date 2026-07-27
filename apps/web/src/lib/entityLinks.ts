@@ -245,6 +245,11 @@ export function notificationHref(notification: Notification): string {
         : `/c/${campaignId}/inbox`;
     case 'ai_dm_alert':
       return `/c/${campaignId}/table`;
+    // #599 — a safety hold applies to the whole table, not one entity. The campaign home is
+    // the only destination that is right whether the stop happened in an encounter, at the AI
+    // table, or between scenes; the persistent safety bar is on every one of those pages.
+    case 'safety_hold':
+      return `/c/${campaignId}`;
     // Issue #789: session_reminder / rsvp_nudge carry the schedule row id in
     // entityId (entityType null) — same routing as a schedule ping.
     case 'session_scheduled':

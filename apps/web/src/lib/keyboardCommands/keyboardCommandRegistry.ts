@@ -15,7 +15,8 @@ export type KeyboardCommandId =
   | 'globalSearch'
   | 'quickCapture'
   | 'shortcutHelp'
-  | 'encounterNextTurn';
+  | 'encounterNextTurn'
+  | 'safetyHold';
 
 export type KeyChord = {
   key: string;
@@ -61,6 +62,17 @@ export const KEYBOARD_COMMANDS: readonly KeyboardCommandMeta[] = [
     description: 'Advance initiative on a running encounter.',
     contextHint: 'Only while running an encounter as DM.',
     defaultChord: { key: '.', mod: true },
+  },
+  {
+    // #599. Escape is not available (it closes dialogs) and every unmodified letter is
+    // swallowed by the typing guard, so this is a chord — but it is a chord nobody has to
+    // remember under pressure, because the button it mirrors is on screen at all times.
+    // Deliberately NOT context-gated: unlike Next turn there is no state in which stopping
+    // the table is unavailable, which is why this entry has no `contextHint`.
+    id: 'safetyHold',
+    label: 'Pause the table (safety)',
+    description: 'Immediately stop encounter advancement and the AI DM. No reason required.',
+    defaultChord: { key: 'x', mod: true, shift: true },
   },
 ] as const;
 

@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { and, eq, gt, inArray, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
@@ -54,6 +54,7 @@ import type { CombatantHpState, GeneratorCandidate, RosterSlotPlan, RosterTuneOp
 import { ATTACHMENT_STATE_COMMITTED } from '../attachments/attachment.constants';
 import { AttachmentsService } from '../attachments/attachments.service';
 import { CampaignLibraryService } from '../campaign-library/campaign-library.service';
+import { TableSafetyService } from '../safety/table-safety.service';
 import { canWriteBackHp, hpSyncSliceOf, hpSyncSlicesEqual } from './hp-sync';
 import {
   backfillEncounterOpResponse,
@@ -472,7 +473,32 @@ export class EncountersService {
     private readonly revisions: RevisionsService,
     private readonly attachmentsService: AttachmentsService,
     private readonly campaignLibrary: CampaignLibraryService,
+    /**
+     * #599 — the table safety hold. Optional and LAST in the list because several integration
+     * specs hand-construct this service positionally (test/integration/encounter-*.spec.ts);
+     * appending leaves those constructions valid and un-gated, which is the right degraded
+     * shape for a unit test of turn logic. Every use is `?.`-guarded.
+     */
+    @Optional() private readonly safety?: TableSafetyService,
   ) {}
+
+  /**
+   * Refuse to advance play while a participant's safety hold stands (issue #599).
+   *
+   * Placed in the SERVICE, not the controller, deliberately. Turn advancement is reachable from
+   * three places — the REST controller, the MCP tool surface a connected AI client drives, and
+   * the AI driver's own tool dispatch — and a gate that only covers the first is a gate an X-Card
+   * can be walked around by anything holding an MCP token.
+   *
+   * Gated: start, next-turn, end-turn, undo-turn, and applying a resolved action. NOT gated:
+   * `end`, because ending the encounter is one of the facilitator's listed recovery moves and a
+   * safety hold that traps the table inside a running fight would be worse than no hold at all;
+   * and not the editing paths (HP, conditions, notes), because a facilitator cleaning up the
+   * board while the table talks is exactly what a stop is for.
+   */
+  private assertNoSafetyHold(campaignId: number): void {
+    this.safety?.assertNotHeld(campaignId);
+  }
 
   /**
    * In-memory idempotency map for the generated-encounter commit (issue #412):
@@ -3803,6 +3829,7 @@ export class EncountersService {
 
   async start(encounterId: number, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {
     const encounterRow = await this.getRowOrThrow(encounterId);
+    this.assertNoSafetyHold(encounterRow.campaignId); // #599
     if (encounterRow.status !== 'preparing') {
       // Without this guard, /start on an already-'ended' encounter revives it with a
       // stale endedAt still set (or re-starts a 'running' one, resetting round/turnIndex
@@ -3917,6 +3944,7 @@ export class EncountersService {
     role: Role,
   ): Promise<EncounterWithCombatants> {
     const encounterRow = await this.getRowOrThrow(encounterId);
+    this.assertNoSafetyHold(encounterRow.campaignId); // #599
     if (encounterRow.status !== 'running') {
       throw new BadRequestException('Encounter is not running');
     }
@@ -3947,6 +3975,7 @@ export class EncountersService {
     role: Role,
   ): Promise<EncounterWithCombatants> {
     const encounterRow = await this.getRowOrThrow(encounterId);
+    this.assertNoSafetyHold(encounterRow.campaignId); // #599
     if (encounterRow.status !== 'running') {
       throw new BadRequestException('Encounter is not running');
     }
@@ -4341,6 +4370,7 @@ export class EncountersService {
    */
   async undoTurn(encounterId: number, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {
     const encounterRow = await this.getRowOrThrow(encounterId);
+    this.assertNoSafetyHold(encounterRow.campaignId); // #599
     if (encounterRow.status !== 'running') {
       throw new BadRequestException('Encounter is not running');
     }

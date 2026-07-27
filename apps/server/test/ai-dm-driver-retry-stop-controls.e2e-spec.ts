@@ -77,6 +77,40 @@ describe('ai-dm driver — retry loop reports accurately (#1052 review)', () => 
     expect(abandoned!.detail).not.toContain('attempts_exhausted');
   });
 
+  /**
+   * #599 × #1052 — a SAFETY HOLD must reach a turn sitting in a retry backoff.
+   *
+   * New seam on both sides: the X-Card freeze (#599) and this branch's retry/failover loop both
+   * go through `checkGenerationAuthority`, and neither existed when the other was written. The
+   * failure this guards is the retry OUTLIVING the freeze — a backoff that sleeps on, then
+   * issues attempt 2 against a table that has just asked play to stop. That is the one thing an
+   * X-Card may never do, and a retry backoff is exactly where a stop control can be slept
+   * through.
+   *
+   * `frozen`, not `cancelled`: `applySafetyHold` sets `state = 'paused'`, so `isFrozen` is true
+   * when the authority check turns the aborted signal into a reason, and the ladder must offer
+   * the freeze recovery rather than a provider-error retry.
+   */
+  it('a SAFETY HOLD during the backoff freezes the turn instead of the retry outliving it', async () => {
+    const campaignId = await armed('Safety Hold During Backoff');
+    const driver = h.ctx.app.get(AiDriverService);
+    // Attempt 2 must never run — were the hold to miss the backoff window, this text would
+    // become the turn's narration and the assertions below would be testing nothing.
+    h.script({ throwError: transient(), throwAfterChunks: 0 }, { text: 'ATTEMPT TWO RAN' });
+    duringBackoff = () => driver.applySafetyHold(campaignId, true);
+
+    const res = await h.sendMessage(campaignId, { input: 'onward' });
+    expect(res.status).toBe(201);
+    expect(res.body.stopReason).toBe('frozen');
+    expect(res.body.stopReason).not.toBe('provider_error');
+    // The retry did not outlive the hold.
+    expect(res.body.narration ?? '').not.toContain('ATTEMPT TWO RAN');
+
+    // ...and the seat is actually held, not merely reported as such.
+    const session = (await h.getDriverSession(campaignId)).body;
+    expect(session.state).toBe('paused');
+  });
+
   it('a PAUSE during the backoff ends the turn as frozen', async () => {
     const campaignId = await armed('Pause During Backoff');
     const driver = h.ctx.app.get(AiDriverService);

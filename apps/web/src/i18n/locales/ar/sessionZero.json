@@ -36,7 +36,8 @@
         "hint": "Tools the table has agreed to use (X-Card, Open Door, Script Change…).",
         "formLabel": "Safety tools",
         "formHelp": "Tools the table agreed to use. One entry per line.",
-        "placeholder": "X-Card\nOpen Door\nScript Change"
+        "placeholder": "X-Card\nOpen Door\nScript Change",
+        "builtIn": "Campfire has a built-in X-Card: the Pause the table button, on every page. Anyone can use it, no reason needed, and it stops encounters and the AI DM immediately."
       },
       "houseRules": {
         "title": "House rules",
