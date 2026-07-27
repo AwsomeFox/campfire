@@ -123,16 +123,26 @@ export class ExportController {
 
     if (format === 'mdzip') {
       const filename = this.exportService.exportFilename(campaign.name, 'zip', profile);
-      res
-        .status(200)
-        .set({
-          'Content-Type': 'application/zip',
-          'Content-Disposition': `attachment; filename="${filename}"`,
-          // Issue #730: exports must not enter HTTP or PWA caches.
-          'Cache-Control': 'private, no-store',
-          // Issue #586: the redaction profile is visible without opening the archive.
-          'X-Campfire-Export-Profile': profile,
-        });
+      // Deferred until the archive actually produces bytes. buildProfileExport runs a
+      // long series of DB reads first, and this endpoint is reached by a plain anchor
+      // navigation, not fetch — so committing zip headers up front meant a mid-read
+      // failure was serialised as JSON that Express still labelled `application/zip`
+      // with an attachment disposition (res.json does not override a set Content-Type).
+      // The browser cannot inspect the status on a navigation, so it saved the error
+      // body to disk as a corrupt archive. Setting them on first byte makes "these
+      // headers exist only if bytes are coming" true by construction.
+      const onFirstByte = () => {
+        res
+          .status(200)
+          .set({
+            'Content-Type': 'application/zip',
+            'Content-Disposition': `attachment; filename="${filename}"`,
+            // Issue #730: exports must not enter HTTP or PWA caches.
+            'Cache-Control': 'private, no-store',
+            // Issue #586: the redaction profile is visible without opening the archive.
+            'X-Campfire-Export-Profile': profile,
+          });
+      };
       // Do not buffer a whole archive in the request path. `close` also fires for
       // a browser cancelling a download, allowing the service to tear down the
       // archiver and its per-export staging directory promptly.
@@ -144,7 +154,7 @@ export class ExportController {
       };
       res.once('close', onClose);
       try {
-        await this.exportService.streamMarkdownZip(res, abortController.signal, campaignId, user, { profile, options });
+        await this.exportService.streamMarkdownZip(res, abortController.signal, campaignId, user, { profile, options, onFirstByte });
       } catch (err) {
         if (abortController.signal.aborted) return;
         // Once streaming has started, the service has already destroyed the

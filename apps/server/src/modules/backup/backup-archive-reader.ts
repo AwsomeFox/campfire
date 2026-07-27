@@ -107,6 +107,10 @@ export class BackupArchiveReader {
     if (signal?.aborted) invalid('archive read was cancelled');
     let zip: ZipFile;
     try { zip = await openZip(filePath); } catch { invalid('not a readable zip file'); }
+    if (signal?.aborted) {
+      zip.close();
+      invalid('archive read was cancelled');
+    }
     const entries: Entry[] = [];
     const names = new Set<string>();
     let declaredTotal = 0;
@@ -189,7 +193,6 @@ export class BackupArchiveReader {
 
   async extractToFile(entry: Entry, destination: string, signal?: AbortSignal): Promise<{ bytes: number; sha256: string }> {
     await fs.promises.mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
-    const output = fs.createWriteStream(destination, { flags: 'wx', mode: 0o600 });
     let actual = 0;
     const hash = createHash('sha256');
     try {
@@ -205,11 +208,17 @@ export class BackupArchiveReader {
             callback(null, chunk);
           },
         });
+        // Open the destination here, not before this.stream(), so pipeline() owns its
+        // error from birth. Creating it earlier left it unowned across the async
+        // openReadStream await: an ENOSPC/EACCES emitted in that window is an
+        // unhandled stream 'error', i.e. an uncaught exception that kills the server.
+        // A full disk during a restore must fail the restore, not the process.
+        const output = fs.createWriteStream(destination, { flags: 'wx', mode: 0o600 });
         await pipeline(source, limiter, output);
       }, signal);
       return { bytes: actual, sha256: hash.digest('hex') };
     } catch (err) {
-      output.destroy();
+      // pipeline() has already destroyed the destination on failure.
       await fs.promises.rm(destination, { force: true });
       throw err;
     }
@@ -217,7 +226,17 @@ export class BackupArchiveReader {
 
   private async stream(entry: Entry, consume: (source: Readable) => Promise<void>, signal?: AbortSignal): Promise<void> {
     if (signal?.aborted) invalid('archive read was cancelled');
-    const source = await new Promise<Readable>((resolve, reject) => this.zip.openReadStream(entry, (err, stream) => err || !stream ? reject(err ?? new Error('Cannot open entry')) : resolve(stream)));
+    let source: Readable;
+    try {
+      source = await new Promise<Readable>((resolve, reject) => this.zip.openReadStream(entry, (err, stream) => err || !stream ? reject(err ?? new Error('Cannot open entry')) : resolve(stream)));
+    } catch (err) {
+      // A readable central directory can still point at a corrupt or truncated local
+      // entry header, which rejects here — before the consume mapping below. That is a
+      // bad archive (400); letting the raw yauzl error escape reported it as a server
+      // fault (500) and sent the operator looking in the wrong place.
+      if (isSystemIoError(err)) throw err;
+      invalid(signal?.aborted ? 'archive read was cancelled' : 'entry is malformed, truncated, or exceeds its size limit');
+    }
     const abort = () => source.destroy(new Error('aborted'));
     signal?.addEventListener('abort', abort, { once: true });
     // Cancellation can occur while openReadStream's callback is pending, and abort events

@@ -179,6 +179,84 @@ describe('backup streaming writer (#603)', () => {
     }
   });
 
+  // Whether staging and archive share a budget is stubbed rather than inherited: both
+  // BACKUP_DIR and os.tmpdir() resolve under /tmp here, and on a runner that mounts /tmp
+  // separately the branch taken would come from the box's layout instead of the test.
+  // Both branches are therefore driven explicitly.
+  function runScheduledWithDisk(sameDevice: boolean) {
+    const backupDir = path.join(dataDir, 'backups');
+    const stagingBytes = 10 * 1024 * 1024;
+    const archiveBytes = Math.ceil(stagingBytes * 1.15);
+    const freeBytes = archiveBytes + 1024 + 1;
+    const svc = service();
+    const estimate = jest
+      .spyOn(svc as any, 'estimateFallbackBackupBytes')
+      .mockReturnValue(stagingBytes);
+    const probeDisk = jest.spyOn(svc as any, 'probeDisk');
+    const shareFs = jest.spyOn(svc as any, 'pathsShareFilesystem').mockReturnValue(sameDevice);
+    const statfs = jest.spyOn(fs, 'statfsSync').mockReturnValue({
+      type: 0,
+      bsize: 1,
+      blocks: freeBytes * 2,
+      bfree: freeBytes,
+      bavail: freeBytes,
+      files: 0,
+      ffree: 0,
+    });
+    const createStream = jest.spyOn(fs, 'createWriteStream');
+    const restore = () => {
+      createStream.mockRestore();
+      statfs.mockRestore();
+      shareFs.mockRestore();
+      probeDisk.mockRestore();
+      estimate.mockRestore();
+    };
+    return { svc, backupDir, stagingBytes, archiveBytes, probeDisk, createStream, restore };
+  }
+
+  async function withScheduledEnv(run: () => Promise<void>): Promise<void> {
+    const previousBackupDir = process.env.BACKUP_DIR;
+    const previousMinFree = process.env.BACKUP_MIN_FREE_BYTES;
+    process.env.BACKUP_DIR = path.join(dataDir, 'backups');
+    process.env.BACKUP_MIN_FREE_BYTES = '1024';
+    try {
+      await run();
+    } finally {
+      if (previousBackupDir === undefined) delete process.env.BACKUP_DIR;
+      else process.env.BACKUP_DIR = previousBackupDir;
+      if (previousMinFree === undefined) delete process.env.BACKUP_MIN_FREE_BYTES;
+      else process.env.BACKUP_MIN_FREE_BYTES = previousMinFree;
+    }
+  }
+
+  it('reserves staging plus archive space when scheduled output shares its filesystem', async () => {
+    await withScheduledEnv(async () => {
+      const t = runScheduledWithDisk(true);
+      try {
+        await expect((t.svc as any).runScheduledBackup(60 * 60 * 1000)).resolves.toBeUndefined();
+        expect(t.createStream).not.toHaveBeenCalled();
+        expect(t.probeDisk).toHaveBeenCalledWith(t.backupDir, 1024, t.archiveBytes + t.stagingBytes);
+        expect((await t.svc.getStatus()).cadence?.lastError).toMatch(/low disk space/i);
+      } finally {
+        t.restore();
+      }
+    });
+  });
+
+  it('reserves only the archive estimate when staging is on a different filesystem', async () => {
+    await withScheduledEnv(async () => {
+      const t = runScheduledWithDisk(false);
+      try {
+        // Independent budgets: doubling here would refuse backups a host can actually take.
+        await expect((t.svc as any).runScheduledBackup(60 * 60 * 1000)).resolves.toBeUndefined();
+        expect(t.probeDisk).toHaveBeenCalledWith(t.backupDir, 1024, t.archiveBytes);
+        expect(t.probeDisk).not.toHaveBeenCalledWith(t.backupDir, 1024, t.archiveBytes + t.stagingBytes);
+      } finally {
+        t.restore();
+      }
+    });
+  });
+
   it('publishes scheduled archives atomically and leaves no partial file', async () => {
     const backupDir = path.join(dataDir, 'backups');
     const previous = process.env.BACKUP_DIR;

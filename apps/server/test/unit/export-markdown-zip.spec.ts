@@ -168,6 +168,32 @@ describe('buildMarkdownZip — filename collisions (issues #530 / #863)', () => 
     expect(output.destroyed).toBe(false);
   });
 
+  it('does not signal the caller to commit zip headers when no bytes are produced', async () => {
+    const service = serviceWithCollisions();
+    jest.spyOn(service as any, 'buildProfileExport').mockRejectedValue(new Error('database unavailable'));
+    const onFirstByte = jest.fn();
+    const output = new PassThrough();
+    await expect(
+      service.streamMarkdownZip(output, new AbortController().signal, 1, USER, { onFirstByte }),
+    ).rejects.toThrow('database unavailable');
+    // The controller hangs Content-Type/Content-Disposition off this callback. Firing it
+    // for a failed export would send a JSON error labelled `application/zip` as an
+    // attachment, which an anchor-driven download saves to disk as a corrupt archive.
+    expect(onFirstByte).not.toHaveBeenCalled();
+    jest.restoreAllMocks();
+  });
+
+  it('signals the caller exactly once, before the first byte, on a successful export', async () => {
+    const service = serviceWithCollisions();
+    const seen: string[] = [];
+    const onFirstByte = jest.fn(() => seen.push('headers'));
+    const output = new PassThrough();
+    output.on('data', () => seen.push('byte'));
+    await service.streamMarkdownZip(output, new AbortController().signal, 1, USER, { onFirstByte });
+    expect(onFirstByte).toHaveBeenCalledTimes(1);
+    expect(seen[0]).toBe('headers');
+  });
+
   it('destroys the destination when a failure occurs after archive bytes begin flowing', async () => {
     const service = serviceWithCollisions();
     const controller = new AbortController();

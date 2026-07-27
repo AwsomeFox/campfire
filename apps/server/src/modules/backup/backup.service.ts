@@ -179,6 +179,13 @@ export interface BuildBackupOptions {
   keyPassphrase?: string;
   /** Abort archive generation (for example when an HTTP client disconnects). */
   signal?: AbortSignal;
+  /**
+   * Invoked once, immediately before the first archive byte reaches `output`.
+   * HTTP callers use it to commit download headers only when bytes are genuinely on
+   * their way, so a failure during snapshot/reconciliation still yields a normal error
+   * response rather than a JSON body wearing `Content-Type: application/zip`.
+   */
+  onFirstByte?: () => void;
 }
 
 /** Options accepted by {@link BackupService.restore}. */
@@ -278,19 +285,6 @@ async function stageAndHashFile(
 
 function assertBackupNotCancelled(signal?: AbortSignal): void {
   if (signal?.aborted) throw new Error('Backup generation cancelled');
-}
-
-/**
- * Whether two paths live on the same filesystem, so that space reserved for one is not
- * separately available to the other. Falls back to `false` (independent budgets, the
- * historical assumption) when either path cannot be stat'd.
- */
-function sameFilesystem(a: string, b: string): boolean {
-  try {
-    return fs.statSync(a).dev === fs.statSync(b).dev;
-  } catch {
-    return false;
-  }
 }
 
 /** Normalize on-disk keyfile bytes (64-hex UTF-8) or raw 32-byte material. */
@@ -529,22 +523,22 @@ export class BackupService implements OnApplicationBootstrap {
       const retentionPolicy = parseBackupRetentionPolicy();
       const minFreeBytes = parseBackupMinFreeBytes();
       const dir = this.backupDir();
+      const stagingBytes = this.estimateFallbackBackupBytes();
       estimatedBytes = estimateNextBackupBytes(
         previous?.lastSize ?? null,
-        () => this.estimateFallbackBackupBytes(),
+        stagingBytes,
       );
       // buildBackup stages a full copy of the DB snapshot and the uploads tree under
-      // os.tmpdir() while this archive is being written into BACKUP_DIR. When the two
-      // share a filesystem both allocations are live at once, and checking each path
-      // separately would pass twice on space that can only satisfy one of them — the
-      // run then fails with ENOSPC partway through, having eaten the reserve the live
-      // database depends on. Reserve for the sum in that case.
-      const peakBytes = sameFilesystem(os.tmpdir(), dir)
-        ? estimatedBytes + this.estimateFallbackBackupBytes()
-        : estimatedBytes;
-      disk = this.probeDisk(dir, minFreeBytes, peakBytes);
+      // os.tmpdir() while the growing .partial ZIP is written into BACKUP_DIR. When the
+      // two share a filesystem both allocations are live at once, so checking each path
+      // separately would pass twice on space that can only satisfy one of them — the run
+      // then fails with ENOSPC partway through, having eaten the free-space reserve the
+      // live database depends on. Reserve their combined peak in that case.
+      const scheduledPeakBytes =
+        this.pathsShareFilesystem(dir, os.tmpdir()) ? estimatedBytes + stagingBytes : estimatedBytes;
+      disk = this.probeDisk(dir, minFreeBytes, scheduledPeakBytes);
       fs.mkdirSync(dir, { recursive: true });
-      disk = this.probeDisk(dir, minFreeBytes, peakBytes);
+      disk = this.probeDisk(dir, minFreeBytes, scheduledPeakBytes);
       if (disk && disk.lowSpace) {
         const message =
           `Scheduled backup skipped: low disk space in BACKUP_DIR ` +
@@ -684,6 +678,17 @@ export class BackupService implements OnApplicationBootstrap {
       current = parent;
     }
     return current;
+  }
+
+  private pathsShareFilesystem(left: string, right: string): boolean {
+    const leftRoot = this.existingPathForStatfs(left);
+    const rightRoot = this.existingPathForStatfs(right);
+    if (!leftRoot || !rightRoot) return false;
+    try {
+      return fs.statSync(leftRoot).dev === fs.statSync(rightRoot).dev;
+    } catch {
+      return false;
+    }
   }
 
   private failureBackoffMs(previous: BackupCadenceState | null, intervalMs: number): number {
@@ -1248,8 +1253,10 @@ export class BackupService implements OnApplicationBootstrap {
         sink.on('data', (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
       }
       let compressedBytes = 0;
+      const onFirstByte = options?.onFirstByte;
       const compressedLimit = new Transform({
         transform(chunk: Buffer, _encoding, callback) {
+          if (compressedBytes === 0) onFirstByte?.();
           compressedBytes += chunk.length;
           if (compressedBytes > MAX_ARCHIVE_COMPRESSED_BYTES) {
             callback(new Error(`Backup archive exceeds the ${MAX_ARCHIVE_COMPRESSED_BYTES} byte compressed restore limit`));
@@ -1515,6 +1522,10 @@ export class BackupService implements OnApplicationBootstrap {
       const progressPhases: RestoreProgressPhase[] = ['validated', 'staging-uploads'];
       options?.onProgress?.('validated');
       options?.onProgress?.('staging-uploads');
+      // Validation and extraction are intentionally non-destructive. Recheck
+      // cancellation at the last boundary before closing the live database so
+      // an abort during staging cannot cross into the atomic replacement.
+      assertBackupNotCancelled(options?.signal);
       let applyPhases: RestoreProgressPhase[] = [];
       this.holder.withDatabaseClosed((dataDir) => {
         options?.onProgress?.('quiescing');

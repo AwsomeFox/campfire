@@ -122,17 +122,29 @@ export class BackupController {
 
   private async sendBackup(req: Request, res: Response, keyPassphrase?: string): Promise<void> {
     const operation = requestAbort(req, res);
-    res
-      .status(200)
-      .set({
-        'Content-Type': 'application/zip',
-        'Content-Disposition': `attachment; filename="${this.backup.backupFilename()}"`,
-        // Issue #730: never let browsers / the PWA Cache Storage retain a whole-server archive.
-        'Cache-Control': 'private, no-store',
-      });
+    // Deferred until the first archive byte. Snapshot, reconciliation and staging all
+    // run before any byte is produced; committing zip headers up front meant a failure
+    // in that window produced a JSON error still labelled `application/zip` with an
+    // attachment disposition. Today's web client uses fetch and can read the status,
+    // but that is a UI detail — a curl or anchor-driven caller would just save the
+    // error body as a corrupt archive.
+    const onFirstByte = () => {
+      res
+        .status(200)
+        .set({
+          'Content-Type': 'application/zip',
+          'Content-Disposition': `attachment; filename="${this.backup.backupFilename()}"`,
+          // Issue #730: never let browsers / the PWA Cache Storage retain a whole-server archive.
+          'Cache-Control': 'private, no-store',
+        });
+    };
     try {
       await this.backup.buildBackup(
-        { ...(keyPassphrase && keyPassphrase.length > 0 ? { keyPassphrase } : {}), signal: operation.signal },
+        {
+          ...(keyPassphrase && keyPassphrase.length > 0 ? { keyPassphrase } : {}),
+          signal: operation.signal,
+          onFirstByte,
+        },
         res,
       );
     } catch (error) {

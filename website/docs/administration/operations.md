@@ -67,6 +67,35 @@ for larger archives. When cancelling a direct-to-file export, the UI asks the br
 stream to discard its partial file; confirm the destination is clean if the browser reports an
 interrupted write.
 
+### Restore is stricter than it used to be
+
+Restore now validates each archive against its manifest before touching live data: every
+upload's recorded size and SHA-256 must match the bytes in the archive, `uploadCount` must
+equal the number of attachment entries, and every attachment named in the manifest must be
+present. Archives that have been hand-edited, truncated by an interrupted transfer, or
+assembled by hand may therefore be rejected with a `400` where an older Campfire accepted
+them. This is deliberate — silently restoring an incomplete archive is worse than refusing
+it — but it means **you should verify existing archives now, not during a recovery**. Run
+`Inspect (dry-run)` against your most recent archives after upgrading; inspection uses the
+same validation as restore and changes nothing.
+
+Cancelling a restore is honoured up to the moment the live database and uploads are
+replaced; a cancellation observed before that boundary tears down staging and leaves the
+install untouched.
+
+### Temporary disk capacity
+
+A backup's peak temporary usage is the database snapshot **plus a full staged copy of the
+uploads tree** plus the archive being written — not just the size of the finished archive.
+Hosts with a small or `tmpfs`-backed `/tmp` should size accordingly, or point `TMPDIR` at a
+larger volume.
+
+When `BACKUP_DIR` and the staging directory are on the **same filesystem**, both allocations
+are live at once, so the scheduled-backup preflight reserves their combined peak rather than
+checking each independently. `BACKUP_MIN_FREE_BYTES` is the free space that must remain
+*after* that peak. If the two are on different filesystems each is checked against its own
+budget.
+
 ### Backup manifest compatibility
 
 Each archive includes a `manifest.json` with:

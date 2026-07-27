@@ -759,7 +759,7 @@ export class ExportService {
     signal: AbortSignal,
     campaignId: number,
     user: RequestUser,
-    opts: { profile?: ExportProfile; options?: ExportProfileOptions } = {},
+    opts: { profile?: ExportProfile; options?: ExportProfileOptions; onFirstByte?: () => void } = {},
   ): Promise<{ warnings: string[]; inventory: ExportInventory }> {
     if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('Export aborted');
     const archive = archiver('zip', { zlib: { level: 9 } });
@@ -808,7 +808,13 @@ export class ExportService {
       archiveError = err;
       archive.destroy(err);
     };
-    const onArchiveData = () => { archiveBytesProduced = true; };
+    const onArchiveData = () => {
+      // Registered before archive.pipe(destination) below, so this runs ahead of the
+      // first write and the caller can commit response headers only now that bytes
+      // are genuinely on their way.
+      if (!archiveBytesProduced) opts.onFirstByte?.();
+      archiveBytesProduced = true;
+    };
     signal.addEventListener('abort', abort, { once: true });
     archive.once('error', onArchiveError);
     destination.once('error', onDestinationError);

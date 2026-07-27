@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import zlib from 'node:zlib';
+import yauzl, { type ZipFile } from 'yauzl';
 import { BadRequestException } from '@nestjs/common';
 import { BackupArchiveReader, type BackupArchiveReaderLimits } from '../../src/modules/backup/backup-archive-reader';
 
@@ -127,5 +128,28 @@ describe('BackupArchiveReader', () => {
     opened!(null, source);
     await expect(pending).rejects.toBeInstanceOf(BadRequestException);
     expect(source.destroyed).toBe(true);
+  });
+
+  it('closes a ZIP opened after its cancellation signal fired', async () => {
+    let opened: ((error: Error | null, zip?: ZipFile) => void) | undefined;
+    const open = jest.spyOn(yauzl, 'open').mockImplementation(((
+      _file: string,
+      _options: yauzl.Options,
+      callback: (error: Error | null, zip?: ZipFile) => void,
+    ) => {
+      opened = callback;
+    }) as typeof yauzl.open);
+    const close = jest.fn();
+    const controller = new AbortController();
+    try {
+      const pending = BackupArchiveReader.open(zip([{ name: 'a' }]), controller.signal, low);
+      while (!opened) await new Promise<void>((resolve) => setImmediate(resolve));
+      controller.abort();
+      opened(null, { close } as unknown as ZipFile);
+      await expect(pending).rejects.toBeInstanceOf(BadRequestException);
+      expect(close).toHaveBeenCalledTimes(1);
+    } finally {
+      open.mockRestore();
+    }
   });
 });
