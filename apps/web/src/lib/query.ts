@@ -106,7 +106,13 @@ export type AiDmSessionStatus = 'idle' | 'running' | 'paused';
 export type AiDmSessionPhase = 'greeting' | 'active' | 'wrap_up' | 'ended';
 
 /** Stuck-ladder lifecycle the player levers act on (server `AiDmLadderState`, #314). */
-export type AiDmLadderState = 'running' | 'awaiting_players' | 'paused' | 'human_control';
+export type AiDmLadderState =
+  | 'running'
+  | 'awaiting_players'
+  | 'paused'
+  | 'human_control'
+  /** #1051 — the AI narrates, a DM confirms every mechanical commit. Not a frozen state. */
+  | 'collaborative';
 
 /** Snapshot of the current stuck condition; null when healthy (server `AiDmStuckInfo`, #314). */
 export interface AiDmStuckInfo {

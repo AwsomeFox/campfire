@@ -19,7 +19,11 @@ export default defineConfig({
   testDir: './e2e/tests',
   // Include `.mts` so ESM-only unit specs (import.meta.url) are discovered.
   testMatch: /.*(test|spec)\.(js|ts|mjs|mts)/,
-  // Unit-only specs run via pw-unit.config.ts — keep them out of the e2e suite.
+  // Unit-only specs run via playwright.unit.config.ts — `npm run test:unit -w apps/web`,
+  // CI job `unit-web` — so keep them out of the browser suite. This comment named
+  // `pw-unit.config.ts`, a file that has never existed; issue #1574 is partly the story of
+  // that config being referenced by no script and no workflow for long enough that 157
+  // specs accumulated behind it without ever being executed.
   testIgnore: /.*\.unit\.spec\.m?ts/,
   // One seeded backend shared by every spec — keep it serial and deterministic.
   fullyParallel: false,

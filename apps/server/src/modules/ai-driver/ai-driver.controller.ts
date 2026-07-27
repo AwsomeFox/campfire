@@ -146,6 +146,14 @@ const AiDmRulesLookupRequest = z
   .strict();
 class AiDmRulesLookupDto extends createZodDto(AiDmRulesLookupRequest) {}
 
+/** Turn collaborative handoff on/off (POST /ai-dm/collaborative, #1051). */
+const AiDmCollaborativeRequest = z
+  .object({
+    enabled: z.boolean().describe('true = the AI narrates but a DM confirms every mechanical commit.'),
+  })
+  .strict();
+class AiDmCollaborativeDto extends createZodDto(AiDmCollaborativeRequest) {}
+
 /**
  * Grant or revoke a narrowly-scoped secret-read approval (POST /ai-dm/secret-approval, #557).
  * Lets a DM let the autonomous seat read ONE secret entity under the DM principal during
@@ -336,6 +344,30 @@ export class AiDriverController {
   async wrapUp(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const role = await this.access.requireRole(user, id, 'dm');
     return this.driver.wrapUpSession(id, user, role);
+  }
+
+  @Post('collaborative')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Turn collaborative handoff on or off (AI narrates, DM decides mechanics)',
+    description:
+      'DM only. A middle rung between full autonomy and a full human takeover: the AI keeps ' +
+      'narrating and keeps calling tools, but every call that would COMMIT a mechanical outcome — ' +
+      'applying an action, changing HP or conditions, advancing the turn, changing who is on the ' +
+      'board — routes to the existing confirm-policy queue (#474) instead of executing, and a DM ' +
+      'resolves it via POST /ai-dm/tool-confirmation. Dice rolls, reads and undo stay automatic. ' +
+      'Idempotent. Survives pause, takeover, stuck states and restarts, so autonomy is never ' +
+      'restored as a side effect of some unrelated control.',
+  })
+  @ApiResponse({ status: 200, description: 'The updated session state.' })
+  @ApiResponse({ status: 403, description: 'Not a DM.' })
+  async collaborative(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: AiDmCollaborativeDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    await this.access.requireRole(user, id, 'dm');
+    return toPublicAiDmSessionState(this.driver.setCollaborative(id, body.enabled));
   }
 
   @Post('trigger')

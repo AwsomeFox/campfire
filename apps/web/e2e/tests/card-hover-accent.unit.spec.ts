@@ -98,8 +98,22 @@ test.describe('Card hover accent coherence (#644)', () => {
     ];
     for (const { file, min } of expected) {
       const text = READ(join(ROOT, file));
-      const count = (text.match(/cf-card-hover/g) || []).length;
-      expect(count, `${file} must compose .cf-card-hover on at least ${min} card(s)`).toBeGreaterThanOrEqual(min);
+      // Two ways to compose the utility, and BOTH satisfy issue #644 — the guarantee is
+      // that hover is routed through the token, not that a particular string appears.
+      // Writing the class literally is one; passing `hover` to the shared <Card> is the
+      // other, and `components/ui.tsx` turns that prop into exactly `cf-card-hover`.
+      // Counting only the literal made this assertion FALSE for PartyPage.tsx, which had
+      // since moved to <Card density="compact" hover> — the design-system route that
+      // issue #674 pushes toward. A file-scraping check has to accept the better
+      // implementation or it penalises the refactor it was meant to protect.
+      const literal = (text.match(/cf-card-hover/g) || []).length;
+      const viaCardProp = (text.match(/<Card(?:\s[^>]*?)?\shover(?=[\s/>])/g) || []).length;
+      const count = literal + viaCardProp;
+      expect(
+        count,
+        `${file} must compose .cf-card-hover on at least ${min} card(s), ` +
+          'either as the literal class or via <Card hover>',
+      ).toBeGreaterThanOrEqual(min);
     }
   });
 

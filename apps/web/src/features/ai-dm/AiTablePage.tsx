@@ -93,11 +93,14 @@ import { AI_TABLE_FIELD, AI_TABLE_PREFIX } from '../../components/formFieldLabel
 import { Btn, Card, Chip, EmptyState, Skeleton, type ChipVariant } from '../../components/ui';
 
 /** Seat status → chip variant for the header status pill. */
-const STATUS_VARIANT: Record<'idle' | 'narrating' | 'paused' | 'human', ChipVariant> = {
+const STATUS_VARIANT: Record<'idle' | 'narrating' | 'paused' | 'human' | 'collaborative', ChipVariant> = {
   idle: 'available',
   narrating: 'active',
   paused: 'private',
   human: 'dm',
+  // #1051 — a healthy, running seat with its mechanics deferred, so it reads as active rather
+  // than as a stopped state.
+  collaborative: 'dm',
 };
 
 export default function AiTablePage() {
@@ -656,6 +659,10 @@ export default function AiTablePage() {
   // render in their normal state rather than flickering through a phase nobody is in.
   const phase = session?.phase ?? 'active';
   const humanControl = session?.state === 'human_control';
+  // #1051. This flag only reports the MODE. The approval surface for the calls it defers is
+  // #1558's `ToolConfirmationsPanel`, mounted above the transcript on this same page — so a DM
+  // who sees this status also sees, and resolves, the queue the mode fills.
+  const collaborative = session?.state === 'collaborative';
   const awaiting = session?.state === 'awaiting_players';
   const locked = streaming || paused || humanControl || awaiting;
   const lockReason = streaming
@@ -870,18 +877,21 @@ export default function AiTablePage() {
     );
   }
 
-  const statusKey: 'idle' | 'narrating' | 'paused' | 'human' = streaming
+  const statusKey: 'idle' | 'narrating' | 'paused' | 'human' | 'collaborative' = streaming
     ? 'narrating'
     : paused
       ? 'paused'
       : humanControl
         ? 'human'
-        : 'idle';
+        : collaborative
+          ? 'collaborative'
+          : 'idle';
   const statusLabel = {
     idle: t('table.seatIdle'),
     narrating: t('table.seatNarrating'),
     paused: t('table.seatPaused'),
     human: t('table.seatHumanControl'),
+    collaborative: t('table.seatCollaborative'),
   }[statusKey];
 
   return (
