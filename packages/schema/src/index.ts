@@ -9698,6 +9698,29 @@ export const CampaignExportRequest = z.object({
 });
 export type CampaignExportRequest = z.infer<typeof CampaignExportRequest>;
 
+/**
+ * A page of export requests for the CROSS-CAMPAIGN admin listing.
+ *
+ * Paged for the same reason the catalog itself is, and with the same offset/`total`
+ * shape rather than a cursor. This listing previously returned a bare array capped at
+ * 100 with no offset and no total, which silently truncated: requests raised on other
+ * campaigns pushed older pending ones out of the only view that spans campaigns, and an
+ * operator could not enumerate the queue without already knowing every affected campaign
+ * id — the exact thing a cross-campaign view exists to avoid. A pending approval nobody
+ * can see is an approval that never happens, and the waiting DM gets no signal either.
+ *
+ * The DM-facing per-campaign inbox stays a plain array: it is bounded by one campaign's
+ * own history, which is not a queue anyone has to page through.
+ */
+export const CampaignExportRequestPage = z.object({
+  items: z.array(CampaignExportRequest),
+  total: z.number().int().nonnegative(),
+  hasMore: z.boolean(),
+  limit: z.number().int().positive(),
+  offset: z.number().int().nonnegative(),
+});
+export type CampaignExportRequestPage = z.infer<typeof CampaignExportRequestPage>;
+
 export const CampaignExportRequestDecision = z
   .object({
     decision: z.enum(['approved', 'denied']),

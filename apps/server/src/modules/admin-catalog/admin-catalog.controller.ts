@@ -1,5 +1,6 @@
 import { Body, Controller, Get, Param, ParseIntPipe, Post, Put, Query } from '@nestjs/common';
 import { ApiOperation, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { CAMPAIGN_CATALOG_DEFAULT_LIMIT, CAMPAIGN_CATALOG_MAX_LIMIT } from '@campfire/schema';
 import { ServerRoles } from '../../common/decorators/server-roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { auditActor, auditActorRole, type RequestUser } from '../../common/user.types';
@@ -11,7 +12,7 @@ import {
   CampaignCatalogPageDto,
   CampaignCatalogPrivacyPolicyDto,
   CampaignCatalogPrivacyPolicyUpdateDto,
-  CampaignExportRequestDto,
+  CampaignExportRequestPageDto,
 } from './admin-catalog.dto';
 import { intQuery, parseCatalogQuery } from './catalog-query';
 
@@ -91,12 +92,35 @@ export class AdminCatalogController {
     summary: 'List export requests raised from the catalog',
     description:
       'Server-admin only. Status and timestamps for asks addressed to campaign DMs. Returns no exported content and ' +
-      'no artifact — approval is recorded here, but producing a bundle remains the DM-gated campaign export route.',
+      'no artifact — approval is recorded here, but producing a bundle remains the DM-gated campaign export route. ' +
+      'Paged with a real `total`, so the cross-campaign queue can actually be enumerated rather than silently ' +
+      'truncated at the cap. Records `campaign.catalog.export_requests.list` in the server-admin trail: this read ' +
+      'discloses requester justifications and DM decision notes, so it is audited like every other catalog read.',
   })
   @ApiQuery({ name: 'campaignId', required: false, type: Number, description: 'Restrict to one campaign.' })
-  @ApiResponse({ status: 200, description: 'Export requests, newest first.', type: [CampaignExportRequestDto] })
-  listExportRequests(@Query('campaignId') campaignId?: string) {
-    return this.catalog.listExportRequests(intQuery(campaignId, 'campaignId'));
+  @ApiQuery({
+    name: 'limit',
+    required: false,
+    type: Number,
+    description: `Page size (default ${CAMPAIGN_CATALOG_DEFAULT_LIMIT}, max ${CAMPAIGN_CATALOG_MAX_LIMIT}).`,
+  })
+  @ApiQuery({ name: 'offset', required: false, type: Number, description: 'Rows to skip.' })
+  @ApiResponse({
+    status: 200,
+    description: 'A page of export requests, newest first, with a real total.',
+    type: CampaignExportRequestPageDto,
+  })
+  listExportRequests(
+    @CurrentUser() user: RequestUser,
+    @Query('campaignId') campaignId?: string,
+    @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
+  ) {
+    return this.catalog.listExportRequests(user, {
+      campaignId: intQuery(campaignId, 'campaignId'),
+      limit: intQuery(limit, 'limit'),
+      offset: intQuery(offset, 'offset'),
+    });
   }
 
   @Post('bulk')

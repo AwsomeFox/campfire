@@ -191,6 +191,55 @@ describe('Issue #587: campaign catalog paging, filtering and bulk lifecycle (e2e
       expect(all.total).toBe(mine.total + page.total);
     });
 
+    it('filters on the SAME primary DM the row displays, not merely any DM', async () => {
+      // `resolvePrimaryDms` picks exactly ONE seat per campaign for the `primaryDm`
+      // column (primary_owner first, then oldest seat). The filter used to test
+      // membership instead — "is this user any dm here" — so filtering by a SECONDARY DM
+      // returned rows whose displayed primary DM was somebody else. One parameter name
+      // answering two different questions, agreeing only on single-DM campaigns.
+      const target = aIds[0];
+      const db = new Database(path.join(ctx.dataDir, 'campfire.db'));
+      try {
+        // dmB becomes a co-DM on one of dmA's campaigns, WITHOUT the primary-owner seat.
+        db.prepare(
+          `INSERT INTO campaign_members (campaign_id, user_id, role, is_primary_owner, created_at, updated_at)
+           VALUES (?, ?, 'dm', 0, ?, ?)`,
+        ).run(target, dmBId, new Date().toISOString(), new Date().toISOString());
+      } finally {
+        db.close();
+      }
+
+      try {
+        // dmB is a DM here but NOT the primary one, so this campaign must not appear.
+        const asSecondary = await catalog({ primaryDmUserId: dmBId, limit: 100 });
+        expect(asSecondary.items.map((i) => i.id)).not.toContain(target);
+        // `total` runs the same predicate, so it must agree with the page.
+        expect(asSecondary.total).toBe(asSecondary.items.length);
+
+        // dmA still holds the primary seat, so it still appears under her.
+        const asPrimary = await catalog({ primaryDmUserId: dmAId, limit: 100 });
+        expect(asPrimary.items.map((i) => i.id)).toContain(target);
+
+        // The invariant that actually matters, stated directly: every row returned by
+        // this filter displays the DM that was filtered on.
+        for (const dmId of [dmAId, dmBId]) {
+          const page = await catalog({ primaryDmUserId: dmId, limit: 100 });
+          for (const item of page.items) {
+            expect((item.primaryDm as { userId: number }).userId).toBe(dmId);
+          }
+        }
+      } finally {
+        const cleanup = new Database(path.join(ctx.dataDir, 'campfire.db'));
+        try {
+          cleanup
+            .prepare(`DELETE FROM campaign_members WHERE campaign_id = ? AND user_id = ? AND is_primary_owner = 0`)
+            .run(target, dmBId);
+        } finally {
+          cleanup.close();
+        }
+      }
+    });
+
     it('filters by rule system, and distinguishes "unset" from "not filtering"', async () => {
       const withPack = await catalog({ ruleSystem: 'srd-5e', limit: 100 });
       expect(withPack.total).toBe(1);
@@ -756,6 +805,61 @@ describe('Issue #587: campaign catalog paging, filtering and bulk lifecycle (e2e
       expect(inbox.status).toBe(200);
       const stillPending = (inbox.body as Array<{ status: string }>).filter((r) => r.status === 'pending');
       expect(stillPending).toHaveLength(1);
+    });
+
+    it('pages the cross-campaign queue and audits the read', async () => {
+      // This listing is the ONLY view that spans campaigns. Capped at 100 with no offset
+      // and no total, it silently truncated: requests on other campaigns pushed older
+      // pending ones out, and an operator could not enumerate the queue without already
+      // knowing every affected campaign id — the exact thing the view exists to avoid.
+      // A pending approval nobody can see is an approval that never happens.
+      const first = await admin.get('/api/v1/admin/campaigns/export-requests').query({ limit: 1, offset: 0 });
+      expect(first.status).toBe(200);
+      expect(Array.isArray(first.body.items)).toBe(true);
+      expect(first.body.items).toHaveLength(1);
+      expect(first.body.limit).toBe(1);
+      expect(first.body.offset).toBe(0);
+      // A real COUNT over the same predicate, not `items.length`.
+      expect(first.body.total).toBeGreaterThan(1);
+      expect(first.body.hasMore).toBe(true);
+
+      // The second page is a different row, so paging actually advances.
+      const second = await admin.get('/api/v1/admin/campaigns/export-requests').query({ limit: 1, offset: 1 });
+      expect(second.status).toBe(200);
+      expect(second.body.items[0].id).not.toBe(first.body.items[0].id);
+      expect(second.body.total).toBe(first.body.total);
+
+      // Walking the offsets reaches every row and terminates.
+      const seen: number[] = [];
+      for (let offset = 0; offset < first.body.total; offset += 2) {
+        const page = await admin.get('/api/v1/admin/campaigns/export-requests').query({ limit: 2, offset });
+        seen.push(...(page.body.items as Array<{ id: number }>).map((r) => r.id));
+      }
+      expect(new Set(seen).size).toBe(first.body.total);
+
+      // Scoping to one campaign still pages, and `total` follows the filter.
+      const scoped = await admin
+        .get('/api/v1/admin/campaigns/export-requests')
+        .query({ campaignId: aIds[3], limit: 100 });
+      expect(scoped.status).toBe(200);
+      expect(scoped.body.total).toBe(scoped.body.items.length);
+      expect((scoped.body.items as Array<{ campaignId: number }>).every((r) => r.campaignId === aIds[3])).toBe(true);
+
+      // AUDITED. The module's docblock promises catalog BROWSING is audited, not just
+      // mutations, and this read discloses requester justifications and DM decision
+      // notes — other people's stated reasons, which is what that promise is for.
+      const trail = await admin.get('/api/v1/admin/audit').query({ limit: 100 });
+      expect(trail.status).toBe(200);
+      const entries = (Array.isArray(trail.body) ? trail.body : trail.body.items) as Array<{
+        action: string;
+        detail: string;
+      }>;
+      const read = entries.filter((e) => e.action === 'campaign.catalog.export_requests.list');
+      expect(read.length).toBeGreaterThan(0);
+      // The slice is recorded, so a reviewer can reconstruct what was actually seen
+      // rather than merely that somebody looked.
+      expect(read[0].detail).toMatch(/returned=\d+/);
+      expect(read[0].detail).toMatch(/total=\d+/);
     });
 
     it('does not let a non-DM member or an outsider decide', async () => {

@@ -19,6 +19,7 @@ import type {
   CampaignCatalogPrivacySetting,
   CampaignCatalogSort,
   CampaignExportRequest,
+  CampaignExportRequestPage,
   CampaignExportRequestDecision,
 } from '@campfire/schema';
 import { CAMPAIGN_CATALOG_DEFAULT_LIMIT, CAMPAIGN_CATALOG_MAX_LIMIT } from '@campfire/schema';
@@ -739,20 +740,85 @@ export class AdminCatalogService {
 
   // ---------------------------------------------------------------- export requests
 
-  /** Admin view of export requests. Status and timestamps only — never an artifact. */
-  async listExportRequests(campaignId?: number): Promise<CampaignExportRequest[]> {
+  /**
+   * Admin view of export requests. Status and timestamps only — never an artifact.
+   *
+   * PAGED, AND AUDITED. This previously returned a bare array capped at
+   * CAMPAIGN_CATALOG_MAX_LIMIT with no offset and no total, so above that cap it
+   * silently truncated: requests raised on other campaigns pushed older pending ones out
+   * of the only listing that spans campaigns, and an operator could not enumerate the
+   * queue without already knowing every affected campaign id — which is precisely what
+   * the cross-campaign view exists to avoid. A pending approval nobody can see is an
+   * approval that never happens.
+   *
+   * The audit row is not decoration either. This module's docblock makes "catalog
+   * BROWSING is audited, not just mutations" an explicit guarantee, and this read
+   * discloses requester justifications and DM decision notes — other people's stated
+   * reasons, which is exactly the content that guarantee exists to cover. Every other
+   * catalog read records one; this one did not.
+   */
+  async listExportRequests(
+    user: RequestUser,
+    opts: { campaignId?: number; limit?: number; offset?: number } = {},
+  ): Promise<CampaignExportRequestPage> {
+    const limit = clampListLimit(opts.limit, CAMPAIGN_CATALOG_DEFAULT_LIMIT, CAMPAIGN_CATALOG_MAX_LIMIT);
+    const offset = Math.max(0, Math.floor(opts.offset ?? 0));
+    const where = opts.campaignId === undefined ? undefined : eq(campaignExportRequests.campaignId, opts.campaignId);
+
     const rows = await this.db
       .select()
       .from(campaignExportRequests)
-      .where(campaignId === undefined ? undefined : eq(campaignExportRequests.campaignId, campaignId))
+      .where(where)
+      .orderBy(desc(campaignExportRequests.id))
+      .limit(limit)
+      .offset(offset);
+
+    const [{ total }] = await this.db
+      .select({ total: sql<number>`count(*)` })
+      .from(campaignExportRequests)
+      .where(where);
+
+    const items = rows.map((r) => this.toExportRequest(r));
+
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: auditActorRole(user),
+      action: 'campaign.catalog.export_requests.list',
+      entityType: 'campaign_export_request',
+      // Scoped to a campaign only when the operator asked for one, so the server-admin
+      // trail keeps spanning campaigns the way the listing itself does.
+      campaignId: opts.campaignId ?? null,
+      detail:
+        `returned=${items.length}, total=${total}, limit=${limit}, offset=${offset}` +
+        (opts.campaignId === undefined ? '' : `, campaign=${opts.campaignId}`),
+    });
+
+    return {
+      items,
+      total: Number(total),
+      hasMore: offset + items.length < Number(total),
+      limit,
+      offset,
+    };
+  }
+
+  /**
+   * The DM-facing inbox for one campaign.
+   *
+   * Deliberately NOT routed through `listExportRequests`: that method writes a
+   * server-admin audit row, and a DM reading the asks addressed to their own campaign is
+   * not an operator browsing the catalog. Recording it as one would put DMs in the
+   * server-admin trail and misattribute a routine act as a privileged read. Bounded by a
+   * single campaign's own history, so it needs no paging.
+   */
+  async listExportRequestsForCampaign(campaignId: number): Promise<CampaignExportRequest[]> {
+    const rows = await this.db
+      .select()
+      .from(campaignExportRequests)
+      .where(eq(campaignExportRequests.campaignId, campaignId))
       .orderBy(desc(campaignExportRequests.id))
       .limit(CAMPAIGN_CATALOG_MAX_LIMIT);
     return rows.map((r) => this.toExportRequest(r));
-  }
-
-  /** The DM-facing inbox for one campaign. */
-  async listExportRequestsForCampaign(campaignId: number): Promise<CampaignExportRequest[]> {
-    return this.listExportRequests(campaignId);
   }
 
   /**
@@ -1000,11 +1066,41 @@ export class AdminCatalogService {
       );
     }
     if (query.primaryDmUserId !== undefined) {
+      // THE FILTER MUST ASK THE SAME QUESTION THE PROJECTION ANSWERS.
+      //
+      // This used to be `EXISTS (… m.user_id = ? AND m.role = 'dm')`, i.e. "is this user
+      // ANY dm on the campaign". But `resolvePrimaryDms` picks exactly ONE seat per
+      // campaign to fill the `primaryDm` column. So filtering by a secondary DM returned
+      // rows whose displayed primary DM was somebody else — one parameter name answering
+      // two different questions, agreeing only on single-DM campaigns.
+      //
+      // Comparing against the selected seat rather than testing membership leaves one
+      // definition of "primary DM" instead of two that drift. The ordering here is the
+      // SAME rule `resolvePrimaryDms` applies (is_primary_owner first, then oldest seat); if
+      // either changes both must, and the e2e regression pins their agreement rather than
+      // trusting this comment to keep them in step.
       clauses.push(
-        sql`EXISTS (SELECT 1 FROM campaign_members m
-          WHERE m.campaign_id = ${campaigns.id} AND m.user_id = ${query.primaryDmUserId} AND m.role = 'dm')`,
+        sql`(SELECT m.user_id FROM campaign_members m
+          WHERE m.campaign_id = ${campaigns.id} AND m.role = 'dm'
+          ORDER BY m.is_primary_owner DESC, m.id ASC
+          LIMIT 1) = ${query.primaryDmUserId}`,
       );
     }
+    // NULL-EXCLUDING ON PURPOSE, AND ASYMMETRICALLY SO. `nextSessionExpr()` is NULL for a
+    // campaign with nothing scheduled ahead of now, and SQL comparisons against NULL do
+    // not match — so EITHER bound drops every unscheduled campaign.
+    //
+    // For `nextSessionAfter` ("scheduled after X") that is plainly right. For
+    // `nextSessionBefore` it is the defensible reading but not the only one: an operator
+    // asking "whose next session is before Friday" is often really asking "what needs
+    // attention soon", and campaigns with NOTHING scheduled are arguably the most
+    // attention-worthy rows of all — yet they are precisely what this excludes.
+    //
+    // Kept excluding because the parameter names a bound on a DATE, and inventing a
+    // convention where a missing date sorts as "urgent" would make the two bounds
+    // asymmetric in a way no operator could predict from the names. "Campaigns with no
+    // next session" is a genuinely different query and deserves its own explicit filter
+    // rather than being smuggled in as a side effect of a date range.
     if (query.nextSessionAfter) clauses.push(gte(this.nextSessionExpr(), query.nextSessionAfter));
     if (query.nextSessionBefore) clauses.push(lte(this.nextSessionExpr(), query.nextSessionBefore));
     if (query.activityAfter) clauses.push(gte(this.lastActivityExpr(), query.activityAfter));

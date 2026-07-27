@@ -360,7 +360,10 @@ describe('Issue #587: catalog metadata cannot reach campaign content (e2e)', () 
 
       const listed = await admin.get('/api/v1/admin/campaigns/export-requests');
       expect(listed.status).toBe(200);
-      expect(listed.body.length).toBeGreaterThan(0);
+      // Paged shape: the cross-campaign queue now carries a real `total` so it can be
+      // enumerated rather than silently truncated at the cap.
+      expect(listed.body.items.length).toBeGreaterThan(0);
+      expect(listed.body.total).toBeGreaterThan(0);
       expectNoContentMarkers(listed, 'GET /admin/campaigns/export-requests after request');
 
       // And the DM-gated export route stays closed to the admin even after asking.

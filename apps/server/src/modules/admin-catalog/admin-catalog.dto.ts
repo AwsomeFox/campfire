@@ -9,6 +9,7 @@ import {
   CampaignCatalogPrivacySetting,
   CampaignCatalogPrivacyUpdate,
   CampaignExportRequest,
+  CampaignExportRequestPage,
   CampaignExportRequestDecision,
 } from '@campfire/schema';
 
@@ -31,3 +32,4 @@ export class CampaignCatalogBulkResultDto extends createZodDto(CampaignCatalogBu
 export class CampaignCatalogPrivacyPolicyDto extends createZodDto(CampaignCatalogPrivacyPolicy) {}
 export class CampaignCatalogPrivacySettingDto extends createZodDto(CampaignCatalogPrivacySetting) {}
 export class CampaignExportRequestDto extends createZodDto(CampaignExportRequest) {}
+export class CampaignExportRequestPageDto extends createZodDto(CampaignExportRequestPage) {}
