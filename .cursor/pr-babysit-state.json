@@ -6,8 +6,8 @@
       "url": "https://github.com/AwsomeFox/campfire/pull/1617",
       "headBranch": "fix/issue-670",
       "baseBranch": "main",
-      "updatedAt": "2026-07-27T20:59:57Z",
-      "notes": "Head pending. Fixed location Edit click intercept (header action cluster). Prior e2e duplication + reviews done. Waiting CI after layout fix."
+      "updatedAt": "2026-07-27T21:14:31Z",
+      "notes": "Head c0670520 (+ test tweak). DM-only encounter roster gated; Devin SEC thread resolved. Waiting CI after follow-up push."
     }
   ]
 }
