@@ -467,4 +467,22 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
     orm.update(encounters).set({ currentCombatantId: pc.id }).where(eq(encounters.id, encounter.id)).run();
     return { campaignId: campaign.id, encounterId: encounter.id, pc: pc.id, monster: monster.id };
   }
+
+  it('detects structured-only concentration after damage and clears every linked condition on failure (issue #606)', async () => {
+    dataDir = makeTempDataDir();
+    const { orm, service } = build();
+    const { encounterId, c1, c2 } = seed(orm);
+    orm
+      .update(combatants)
+      .set({ conditionInstances: JSON.stringify([{ id: 'bless', name: 'Bless', isConcentration: true, sourceCombatantId: c1 }]) })
+      .where(eq(combatants.id, c2))
+      .run();
+
+    const damaged = await service.updateCombatant(encounterId, c1, { hpDelta: -25 }, dmUser, 'dm');
+    expect(damaged.concentrationCheck).toEqual({ damage: 20, dc: 10 });
+
+    await service.updateCombatantTurnState(encounterId, c1, { concentration: null }, dmUser, 'dm');
+    const [target] = orm.select().from(combatants).where(eq(combatants.id, c2)).all();
+    expect(target.conditionInstances).toBe('[]');
+  });
 });
