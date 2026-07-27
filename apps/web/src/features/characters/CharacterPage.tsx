@@ -303,11 +303,13 @@ export default function CharacterPage() {
 
   return (
     <div className="reading-surface max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" {...entityTargetProps('character', character.id)}>
-      <DetailPageWayfinding
-        campaignId={cid}
-        defaultPath={`/c/${cid}/party`}
-        defaultLabel="← Back to party"
-      />
+      <div className="cf-print-hide">
+        <DetailPageWayfinding
+          campaignId={cid}
+          defaultPath={`/c/${cid}/party`}
+          defaultLabel="← Back to party"
+        />
+      </div>
 
       {(error || actionError) && <ErrorNote message={actionError ?? error ?? ''} onRetry={() => { setActionError(null); void load(); }} />}
 
@@ -319,7 +321,7 @@ export default function CharacterPage() {
             className="h-14 w-14 shrink-0 rounded-full object-cover border border-[var(--color-neutral-700)]"
           />
         ) : (
-          <div className="h-14 w-14 shrink-0 rounded-full bg-[var(--color-accent-900)] text-[var(--color-accent-200)] flex items-center justify-center text-[17px] font-semibold">
+          <div className="cf-print-paper h-14 w-14 shrink-0 rounded-full bg-[var(--color-accent-900)] text-[var(--color-accent-200)] flex items-center justify-center text-[17px] font-semibold">
             {initials(character.name)}
           </div>
         )}
@@ -335,13 +337,25 @@ export default function CharacterPage() {
         </div>
         {isOwner && <Chip variant="dm">You can edit</Chip>}
         <div className="flex items-center gap-1 ml-auto">
+          {!editingSheet && (
+            <Btn
+              ghost
+              type="button"
+              className="cf-print-hide !min-h-0 !py-1.5 text-xs"
+              onClick={() => window.print()}
+            >
+              Print
+            </Btn>
+          )}
           {canEdit && !editingSheet && (
-            <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setEditingSheet(true)}>
+            <Btn ghost className="cf-print-hide !min-h-0 !py-1.5 text-xs" onClick={() => setEditingSheet(true)}>
               ✎ Edit sheet
             </Btn>
           )}
           {canEdit && (
-            <CharacterTrashMenu characterName={character.name} busy={trashing} onTrash={trash} />
+            <span className="cf-print-hide">
+              <CharacterTrashMenu characterName={character.name} busy={trashing} onTrash={trash} />
+            </span>
           )}
         </div>
       </div>
@@ -389,8 +403,8 @@ export default function CharacterPage() {
         aria-labelledby="character-sheet-tab-play"
         tabIndex={0}
         data-testid="character-sheet-panel-play"
-        className={tab === 'play' ? 'space-y-4 min-w-0' : 'hidden'}
-        hidden={tab !== 'play'}
+        className={tab === 'play' ? 'space-y-4 min-w-0' : 'cf-character-sheet-panel-hidden space-y-4 min-w-0'}
+        aria-hidden={tab !== 'play'}
       >
         <section
           id={characterSheetSectionId('abilities')}
@@ -539,8 +553,10 @@ export default function CharacterPage() {
         aria-labelledby="character-sheet-tab-build"
         tabIndex={0}
         data-testid="character-sheet-panel-build"
-        className={tab === 'build' ? 'grid grid-cols-1 md:grid-cols-[1fr_280px] gap-4 items-start min-w-0' : 'hidden'}
-        hidden={tab !== 'build'}
+        className={tab === 'build'
+          ? 'grid grid-cols-1 md:grid-cols-[1fr_280px] gap-4 items-start min-w-0'
+          : 'cf-character-sheet-panel-hidden grid grid-cols-1 md:grid-cols-[1fr_280px] gap-4 items-start min-w-0'}
+        aria-hidden={tab !== 'build'}
       >
         <div className="space-y-4 min-w-0">
           <section
@@ -645,8 +661,10 @@ export default function CharacterPage() {
         </div>
       </div>
 
-      <EntityDiscussion campaignId={cid} entityType="character" entityId={character.id} />
-      {isOwner && <NotesRail campaignId={cid} entityType="character" entityId={character.id} />}
+      <div className="cf-print-hide">
+        <EntityDiscussion campaignId={cid} entityType="character" entityId={character.id} />
+        {isOwner && <NotesRail campaignId={cid} entityType="character" entityId={character.id} />}
+      </div>
 
       {pendingUndo && (
         <UndoSnackbar

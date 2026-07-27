@@ -782,7 +782,7 @@ function LayoutContent() {
       {/* Desktop sidebar */}
       {(campaignId !== undefined || onAdminRoute) && (
         <aside
-          className="hidden md:flex w-[230px] shrink-0 sticky top-0 flex-col gap-1.5 h-screen overflow-y-auto overflow-x-hidden p-3.5 border-r"
+          className="cf-print-chrome hidden md:flex w-[230px] shrink-0 sticky top-0 flex-col gap-1.5 h-screen overflow-y-auto overflow-x-hidden p-3.5 border-r"
           style={{ borderColor: 'var(--color-divider)' }}
         >
           <div className="flex items-center gap-1 mb-2">
@@ -885,7 +885,7 @@ function LayoutContent() {
       <div className="flex-1 min-w-0 flex flex-col">
         {/* Mobile topbar */}
         <header
-          className="md:hidden sticky top-0 z-30 flex items-center gap-2.5 px-3.5 py-2.5 border-b backdrop-blur"
+          className="cf-print-chrome md:hidden sticky top-0 z-30 flex items-center gap-2.5 px-3.5 py-2.5 border-b backdrop-blur"
           style={{
             borderColor: 'var(--color-divider)',
             background: 'color-mix(in srgb, var(--color-bg) 88%, transparent)',
@@ -955,7 +955,7 @@ function LayoutContent() {
             and admin links. */}
         {campaignId === undefined && !onAdminRoute && (
           <header
-            className="hidden md:flex sticky top-0 z-30 items-center gap-2.5 px-5 py-3 border-b"
+            className="cf-print-chrome hidden md:flex sticky top-0 z-30 items-center gap-2.5 px-5 py-3 border-b"
             style={{ borderColor: 'var(--color-divider)' }}
           >
             <Link to="/" className="flex items-center gap-2.5">
