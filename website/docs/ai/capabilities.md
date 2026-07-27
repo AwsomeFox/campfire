@@ -124,6 +124,28 @@ If a driver stalls or makes a call the table disputes, players have recovery lev
 open a **table vote** (to override or pause), or **request a human takeover**. The DM
 can pause and resume the seat at any time.
 
+### What survives a server restart
+
+The seat's **state** is stored in the database, not in server memory, so a restart or a
+redeploy in the middle of a session does not quietly reset the table. A pause stays paused,
+a human takeover stays granted, the stuck ladder and its replay input survive (so **nudge**
+and **retry** still work), and an open table vote comes back with its ballots intact.
+
+Some things deliberately **do not** survive, because they are grants of authority made to a
+room the server can no longer verify once the process has gone:
+
+| Cleared by a restart | Why |
+| --- | --- |
+| **Secret-read approvals** — a DM letting the seat read one specific hidden NPC, quest, or location | The grant named one entity and was made in a room you were watching. The DM can grant it again in a second; silently carrying it forward is the option with a downside. |
+| **Tool calls awaiting your approval** | These are irreversible live-play writes nobody approved yet. They are discarded un-executed; the AI will ask again if it still needs to. |
+| **A table vote whose time ran out while the server was down** | Downtime still burns the ballot window, so the vote comes back **failed** rather than as a live decision people can still be counted into. |
+
+**None of that happens quietly.** Every cleared grant gets its own audit entry naming exactly
+what it covered, the table gets a notification and a live signal, and the reset is written into
+the table log so someone who reconnects later still sees it. Losing the state is acceptable;
+losing it without telling anyone is not — a DM should never have to *discover* that an approval
+they granted is gone, or that the AI is waiting on a confirmation that no longer exists.
+
 ### When a provider refuses or filters a reply
 
 If the AI provider reports that it **stopped a reply on safety grounds** — a content

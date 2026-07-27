@@ -750,4 +750,101 @@ describe('per-campaign trash: GET /campaigns/:id/trash (e2e, issue #269)', () =>
     const list = await request(server).get(`/api/v1/campaigns/${campaignId}/sessions`).set(dm);
     expect(list.body.some((s: { id: number }) => s.id === sessionId)).toBe(true);
   });
+
+  // ------------------------------------------------------------------
+  // Summary counters are SQL aggregates (issue #602)
+  // ------------------------------------------------------------------
+  /**
+   * `inventoryCount` and `commentCount` used to be `.length` of a full list load — every
+   * inventory row and every comment body pulled into JS, on a projection the dashboard
+   * re-reads on a timer. They are SQL aggregates now, and these tests pin the part an
+   * aggregate is easy to get WRONG: the predicates. A count that forgets soft-deletes, or
+   * that counts comments hanging off a hidden quest for a player, is faster and wrong.
+   */
+  describe('summary counters are aggregates, not loaded rows (issue #602)', () => {
+    const player602 = { 'x-dev-role': 'player', 'x-dev-user': 'p-602' };
+    let campId: number;
+
+    beforeAll(async () => {
+      const server = ctx.app.getHttpServer();
+      const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Counter Campaign' });
+      campId = camp.body.id;
+
+      const openQuest = await request(server)
+        .post(`/api/v1/campaigns/${campId}/quests`)
+        .set(dm)
+        // Issue #754: omitting `hidden` on create means DM-only, so a quest meant to be
+        // party-visible must say so explicitly.
+        .send({ title: 'The Open Road', hidden: false });
+      expect(openQuest.status).toBe(201);
+      const secretQuest = await request(server)
+        .post(`/api/v1/campaigns/${campId}/quests`)
+        .set(dm)
+        .send({ title: 'The Secret Road', hidden: true });
+      expect(secretQuest.status).toBe(201);
+
+      // 2 comments on a visible anchor, 3 on a hidden one.
+      for (const body of ['Where next?', 'North, surely.']) {
+        const res = await request(server)
+          .post(`/api/v1/campaigns/${campId}/comments`)
+          .set(dm)
+          .send({ entityType: 'quest', entityId: openQuest.body.id, body });
+        expect(res.status).toBe(201);
+      }
+      for (const body of ['The duke betrays them', 'Reveal in act three', 'Do not tell the party']) {
+        const res = await request(server)
+          .post(`/api/v1/campaigns/${campId}/comments`)
+          .set(dm)
+          .send({ entityType: 'quest', entityId: secretQuest.body.id, body });
+        expect(res.status).toBe(201);
+      }
+
+      // 3 live items plus 1 sent to the trash.
+      for (const name of ['Rope (50 ft)', 'Torch', 'Rations']) {
+        const res = await request(server).post(`/api/v1/campaigns/${campId}/inventory`).set(dm).send({ name });
+        expect(res.status).toBe(201);
+      }
+      const doomed = await request(server)
+        .post(`/api/v1/campaigns/${campId}/inventory`)
+        .set(dm)
+        .send({ name: 'Broken Lantern' });
+      expect(doomed.status).toBe(201);
+      const trashed = await request(server).delete(`/api/v1/inventory/${doomed.body.id}`).set(dm);
+      expect(trashed.status).toBe(200);
+    });
+
+    it('counts every comment the DM may see, including those on a hidden anchor', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server).get(`/api/v1/campaigns/${campId}/summary`).set(dm);
+      expect(res.status).toBe(200);
+      expect(res.body.commentCount).toBe(5);
+    });
+
+    it('drops hidden-anchor comments from a non-DM’s count (issue #230 redaction preserved)', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server).get(`/api/v1/campaigns/${campId}/summary`).set(player602);
+      expect(res.status).toBe(200);
+      // The 3 comments on the hidden quest must not be counted — the integer alone would
+      // otherwise leak that a secret quest exists and is being discussed.
+      expect(res.body.commentCount).toBe(2);
+    });
+
+    it('counts only live inventory items, never the trashed one', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server).get(`/api/v1/campaigns/${campId}/summary`).set(dm);
+      expect(res.status).toBe(200);
+      expect(res.body.inventoryCount).toBe(3);
+    });
+
+    it('agrees with the list endpoint it replaced', async () => {
+      const server = ctx.app.getHttpServer();
+      // The aggregate must return exactly what `.length` of the corresponding list would
+      // have — that equivalence is the entire safety argument for the swap.
+      const [summaryRes, inventoryRes] = await Promise.all([
+        request(server).get(`/api/v1/campaigns/${campId}/summary`).set(dm),
+        request(server).get(`/api/v1/campaigns/${campId}/inventory`).set(dm),
+      ]);
+      expect(summaryRes.body.inventoryCount).toBe((inventoryRes.body as unknown[]).length);
+    });
+  });
 });

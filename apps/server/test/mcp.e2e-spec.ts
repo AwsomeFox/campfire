@@ -384,7 +384,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect((denied.content as TextContent[])[0].text).toContain('403');
   });
 
-  it('viewer-scoped PAT: create_quest is a 403-equivalent isError, but add_note works', async () => {
+  it('viewer-scoped PAT: create_quest is a 403-equivalent isError, and so is a SHARED note (issue #597)', async () => {
     const client = await mcpClient(viewerToken);
 
     const denied = await client.callTool({
@@ -395,9 +395,23 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const message = (denied.content as TextContent[])[0].text;
     expect(message).toContain('403');
 
-    const note = await client.callTool({
+    // Issue #597: a viewer-scoped token acts as a READ-ONLY seat, so it may not write
+    // anything that reaches another member — a dm_shared note notifies every DM. This
+    // used to succeed, which meant the least-privilege token an operator hands an agent
+    // could still broadcast into the table. The token cap deliberately wins over the
+    // owner's real role here: an interactive agent needs a player-scoped token.
+    const sharedNote = await client.callTool({
       name: 'add_note',
       arguments: { campaignId, body: 'A viewer note over MCP', visibility: 'dm_shared' },
+    });
+    expect(sharedNote.isError).toBe(true);
+    expect((sharedNote.content as TextContent[])[0].text).toContain('403');
+
+    // A PRIVATE note still works — it reaches nobody, and note-taking is what a viewer
+    // seat is for.
+    const note = await client.callTool({
+      name: 'add_note',
+      arguments: { campaignId, body: 'A viewer note over MCP', visibility: 'private' },
     });
     expect(note.isError).toBeFalsy();
     const created = parseResult(note) as { body: string; kind: string };

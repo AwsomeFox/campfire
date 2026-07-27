@@ -168,7 +168,7 @@ describe('quests (e2e)', () => {
     expect(playerListAfter.body.some((q: { id: number }) => q.id === hiddenId)).toBe(true);
   });
 
-  it('viewer cannot create quest (403) but can post inbox', async () => {
+  it('viewer cannot create a quest, and (issue #597) cannot post to the DM inbox either', async () => {
     const server = ctx.app.getHttpServer();
 
     const questRes = await request(server)
@@ -177,11 +177,14 @@ describe('quests (e2e)', () => {
       .send({ title: 'Should fail' });
     expect(questRes.status).toBe(403);
 
+    // This used to be a 201. A DM-inbox submission notifies every DM, so it is outbound
+    // content, and a viewer seat is read-only unless a DM has granted it the
+    // interactive-guest capability (issue #597 — see safety-controls.e2e-spec.ts).
     const inboxRes = await request(server)
       .post(`/api/v1/campaigns/${campaignId}/inbox`)
       .set(viewer)
       .send({ body: 'I found a secret door!' });
-    expect(inboxRes.status).toBe(201);
+    expect(inboxRes.status).toBe(403);
   });
 
   it('GET /campaigns/:id/quests returns bounded role-safe progress in objective order', async () => {
