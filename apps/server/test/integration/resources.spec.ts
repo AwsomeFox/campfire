@@ -4,6 +4,7 @@ import { characters, combatants, encounters, encounterEvents, campaigns } from '
 import { CharactersService } from '../../src/modules/characters/characters.service';
 import { EncountersService } from '../../src/modules/encounters/encounters.service';
 import { AuditService } from '../../src/modules/audit/audit.service';
+import { ModerationService } from '../../src/modules/moderation/moderation.service';
 import { CampaignEventsService } from '../../src/modules/events/campaign-events.service';
 import { RevisionsService } from '../../src/modules/revisions/revisions.service';
 import { RollsService } from '../../src/modules/rolls/rolls.service';
@@ -30,7 +31,10 @@ describe('inline spell slots & character resources (issue #422)', () => {
 
     const audit = new AuditService(db);
     const events = new CampaignEventsService();
-    const revisions = new RevisionsService(db);
+    // Issue #601: RevisionsService fires the moderation pre-mutation evidence hook
+    // on restore, so it takes a real ModerationService. Deliberately not optional —
+    // an absent hook would silently stop capturing abuse evidence.
+    const revisions = new RevisionsService(db, new ModerationService(db, audit));
     const rolls = new RollsService(db);
     const fsDeletion = new FsDeletionService(db, audit);
     const attachments = new AttachmentsService(db, audit, fsDeletion, new AttachmentDerivativesService(db));

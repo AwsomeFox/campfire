@@ -4,6 +4,7 @@ import Database from 'better-sqlite3';
 import { openDatabase, dbFilePath, type DrizzleDb } from '../../src/db/db.module';
 import { campaigns } from '../../src/db/schema';
 import { AiDriverService } from '../../src/modules/ai-driver/ai-driver.service';
+import { AiDmTranscriptService } from '../../src/modules/ai-driver/ai-driver-transcript.service';
 import type { RequestUser } from '../../src/common/user.types';
 import { makeTempDataDir } from './fixtures';
 
@@ -33,8 +34,13 @@ interface Harness {
 
 /**
  * Build an AiDriverService over `orm`. Only the collaborators the control-state paths actually
- * touch are stubbed (audit / stream / notifications); everything else is a turn-execution
- * dependency that these levers never reach.
+ * touch are stubbed (audit / stream / notifications / transcript); everything else is a
+ * turn-execution dependency that these levers never reach.
+ *
+ * The transcript is the REAL AiDmTranscriptService over the same connection rather than a spy:
+ * the control-state levers exercised here (open/cast vote, takeover, handback) also record
+ * durable transcript rows since #572, and this spec already owns a migrated database, so the
+ * true write path runs. A bare `undefined` would throw the moment a lever recorded.
  */
 function makeService(orm: DrizzleDb): Harness {
   const aiDm = { registerDriverSessionTeardown: jest.fn() };
@@ -58,7 +64,8 @@ function makeService(orm: DrizzleDb): Harness {
     undefined as unknown as Ctor[9],
     undefined as unknown as Ctor[10],
     undefined as unknown as Ctor[11],
-    orm as Ctor[12],
+    new AiDmTranscriptService(orm, stream as unknown as ConstructorParameters<typeof AiDmTranscriptService>[1]) as Ctor[12],
+    orm as Ctor[13],
   );
   return { service, audit, stream, notifications } as Harness;
 }

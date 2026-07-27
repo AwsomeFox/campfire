@@ -9,6 +9,7 @@
  * stops until reauth; a campaign/feature 403 stops without clearing identity.
  */
 import { useEffect, useRef, useSyncExternalStore } from 'react';
+import type { AiDmTranscriptEvent } from '@campfire/schema';
 import { API } from './api';
 import { getSessionResumeEpoch, subscribeSessionResume } from './sessionExpiry';
 import { sseBlockData, startSseReconnectLoop } from './sseReconnect';
@@ -54,7 +55,19 @@ export type AiDmStreamEvent =
   | { type: 'recovered'; campaignId: number; state: string; at: string }
   | { type: 'state'; campaignId: number; state: string; at: string }
   | { type: 'vote'; campaignId: number; action: string; kind: string; outcome?: string; at: string }
-  | { type: 'takeover'; campaignId: number; action: string; memberId: string; at: string };
+  | { type: 'takeover'; campaignId: number; action: string; memberId: string; at: string }
+  /**
+   * One durably-persisted transcript event (#572) — the authoritative multi-player table
+   * log. Unlike every other frame here this one is BACKED BY A ROW: it carries a stable
+   * `eventId` and a per-campaign `seq`, so a client can merge it idempotently with a REST
+   * page and resume from its watermark after a disconnect. Crucially it includes the
+   * accepted PLAYER ACTION, which had no frame at all before #572 — only the sender ever
+   * saw its own submission. Events the viewer may not read are dropped server-side and
+   * never reach this stream.
+   */
+  | { type: 'transcript'; campaignId: number; event: AiDmTranscriptEvent; at: string }
+  /** The DM erased the transcript (#572): drop the local copy and refetch — `seq` restarted. */
+  | { type: 'transcript.reset'; campaignId: number; at: string };
 
 /** Narrow union of the `type` discriminants for cheap membership checks. */
 export type AiDmStreamEventType = AiDmStreamEvent['type'];
@@ -202,6 +215,19 @@ export function parseAiDmStreamEvent(value: unknown): AiDmStreamEvent | null {
         memberId: v.memberId,
         at: v.at as string,
       };
+    case 'transcript': {
+      // Structural validation only: `seq` and `eventId` are what the merge keys off, so a
+      // frame missing either is unusable and dropped rather than folded in half-formed.
+      const event = v.event;
+      if (!isRecord(event)) return null;
+      if (typeof event.eventId !== 'string' || typeof event.seq !== 'number' || !Number.isInteger(event.seq)) {
+        return null;
+      }
+      if (typeof event.kind !== 'string' || typeof event.at !== 'string') return null;
+      return { type, campaignId: v.campaignId as number, event: event as unknown as AiDmTranscriptEvent, at: v.at as string };
+    }
+    case 'transcript.reset':
+      return { type, campaignId: v.campaignId as number, at: v.at as string };
     default:
       // `ping` keepalives and any unknown/future event kind fall through here.
       return null;
