@@ -7,6 +7,7 @@ function response(): EventEmitter & {
   destroyed: boolean;
   status: jest.Mock;
   set: jest.Mock;
+  removeHeader: jest.Mock;
 } {
   const res = Object.assign(new EventEmitter(), {
     writableEnded: false,
@@ -14,6 +15,7 @@ function response(): EventEmitter & {
     destroyed: false,
     status: jest.fn(),
     set: jest.fn(),
+    removeHeader: jest.fn(),
   });
   res.status.mockReturnValue(res);
   res.set.mockReturnValue(res);
@@ -61,5 +63,7 @@ describe('BackupController download cancellation', () => {
     await expect(new BackupController(backup as never).download(req as never, res as never)).rejects.toThrow(
       'reconciliation',
     );
+    expect(res.removeHeader).toHaveBeenCalledWith('Content-Type');
+    expect(res.removeHeader).toHaveBeenCalledWith('Content-Disposition');
   });
 });
