@@ -463,6 +463,7 @@ describe('encounters — applyCombatantHp (issue #57 5e HP model)', () => {
       const concentrating = charState({ isConcentrating: true, hpCurrent: 20, hpTemp: 5 });
       expect(applyCombatantHp(concentrating, { hpSet: 1 }).concentrationCheck).toBeNull();
       expect(applyCombatantHp(concentrating, { hpTemp: 0 }).concentrationCheck).toBeNull();
+      expect(applyCombatantHp(concentrating, { hpSet: 1, hpDelta: -20 }).concentrationCheck).toBeNull();
     });
   });
 

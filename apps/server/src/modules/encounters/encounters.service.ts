@@ -3295,7 +3295,7 @@ export class EncountersService {
         if (recomputeHp) {
           const effectiveHpMax = hpMaxChanged ? Math.max(1, patch.hpMax!) : fresh.hpMax;
           const shouldCheckConcentration =
-            adapter.id === DND5E_ADAPTER_ID && patch.hpDelta !== undefined && patch.hpDelta < 0;
+            adapter.id === DND5E_ADAPTER_ID && patch.hpSet === undefined && patch.hpDelta !== undefined && patch.hpDelta < 0;
           const state: CombatantHpState = {
             kind: fresh.kind as CombatantHpState['kind'],
             hpCurrent: fresh.hpCurrent,
@@ -3308,7 +3308,10 @@ export class EncountersService {
               shouldCheckConcentration &&
               (fromJsonText<{ concentration?: string | null }>(fresh.turnState, {}).concentration != null ||
                 tx
-                  .select()
+                  .select({
+                    conditionInstances: combatants.conditionInstances,
+                    conditions: combatants.conditions,
+                  })
                   .from(combatants)
                   .where(eq(combatants.encounterId, encounterId))
                   .all()

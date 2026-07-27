@@ -819,7 +819,7 @@ export function applyCombatantHp(state: CombatantHpState, patch: CombatantHpPatc
   // 3. death-state recompute.
   if (!isCharacter) {
     // Monsters never track death saves — 0 HP is simply "down" (isDown / hpBand).
-    const damage = patch.hpDelta !== undefined && patch.hpDelta < 0 ? -patch.hpDelta : 0;
+    const damage = patch.hpSet === undefined && patch.hpDelta !== undefined && patch.hpDelta < 0 ? -patch.hpDelta : 0;
     return {
       hpCurrent,
       hpTemp,
@@ -874,7 +874,7 @@ export function applyCombatantHp(state: CombatantHpState, patch: CombatantHpPatc
       deathState = 'dying';
     }
   }
-  const damage = patch.hpDelta !== undefined && patch.hpDelta < 0 ? -patch.hpDelta : 0;
+  const damage = patch.hpSet === undefined && patch.hpDelta !== undefined && patch.hpDelta < 0 ? -patch.hpDelta : 0;
   return {
     hpCurrent,
     hpTemp,
