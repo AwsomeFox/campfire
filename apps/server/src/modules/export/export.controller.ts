@@ -124,75 +124,75 @@ export class ExportController {
       }
     }
     try {
-    if (abortController?.signal.aborted) return;
-    // allowArchived: exporting an archived (read-only) campaign is a primary archive use case.
-    await this.access.requireRole(user, campaignId, 'dm', { allowArchived: true });
-    if (abortController?.signal.aborted) return;
-    const campaign = await this.campaigns.getOrThrow(campaignId);
-    if (abortController?.signal.aborted) return;
-    const profile = parseProfile(profileQuery);
-    const options: ExportProfileOptions = {
-      includeDmSecrets: boolQuery(dmSecrets),
-      includePlayedState: boolQuery(playedState),
-      includePlayerContent: boolQuery(playerContent),
-    };
-
-    if (format === 'mdzip') {
-      const filename = this.exportService.exportFilename(campaign.name, 'zip', profile);
-      // Deferred until the archive actually produces bytes. buildProfileExport runs a
-      // long series of DB reads first, and this endpoint is reached by a plain anchor
-      // navigation, not fetch — so committing zip headers up front meant a mid-read
-      // failure was serialised as JSON that Express still labelled `application/zip`
-      // with an attachment disposition (res.json does not override a set Content-Type).
-      // The browser cannot inspect the status on a navigation, so it saved the error
-      // body to disk as a corrupt archive. Setting them on first byte makes "these
-      // headers exist only if bytes are coming" true by construction.
-      const onFirstByte = () => {
-        res
-          .status(200)
-          .set({
-            'Content-Type': 'application/zip',
-            'Content-Disposition': `attachment; filename="${filename}"`,
-            // Issue #730: exports must not enter HTTP or PWA caches.
-            'Cache-Control': 'private, no-store',
-            // Issue #586: the redaction profile is visible without opening the archive.
-            'X-Campfire-Export-Profile': profile,
-          });
+      if (abortController?.signal.aborted) return;
+      // allowArchived: exporting an archived (read-only) campaign is a primary archive use case.
+      await this.access.requireRole(user, campaignId, 'dm', { allowArchived: true });
+      if (abortController?.signal.aborted) return;
+      const campaign = await this.campaigns.getOrThrow(campaignId);
+      if (abortController?.signal.aborted) return;
+      const profile = parseProfile(profileQuery);
+      const options: ExportProfileOptions = {
+        includeDmSecrets: boolQuery(dmSecrets),
+        includePlayedState: boolQuery(playedState),
+        includePlayerContent: boolQuery(playerContent),
       };
-      // Do not buffer a whole archive in the request path. `close` also fires for
-      // a browser cancelling a download, allowing the service to tear down the
-      // archiver and its per-export staging directory promptly.
-      try {
-        await this.exportService.streamMarkdownZip(res, abortController!.signal, campaignId, user, { profile, options, onFirstByte });
-      } catch (err) {
-        if (abortController!.signal.aborted) return;
-        // Once streaming has started, the service has already destroyed the
-        // failed response. Do not ask Nest to write a second JSON error response
-        // over committed ZIP headers.
-        if (res.headersSent || res.destroyed) return;
-        // Projection can fail before archiver emits a byte. Restore a normal
-        // error-response header state so Nest's exception filter sends JSON
-        // instead of a misleading attachment named like a ZIP archive.
-        res.removeHeader('Content-Type');
-        res.removeHeader('Content-Disposition');
-        res.removeHeader('X-Campfire-Export-Profile');
-        throw err;
-      }
-      return;
-    }
 
-    const { data } = await this.exportService.buildProfileExport(campaignId, user, profile, options, { format: 'json' });
-    const filename = this.exportService.exportFilename(campaign.name, 'json', profile);
-    res
-      .status(200)
-      .set({
-        'Content-Type': 'application/json',
-        'Content-Disposition': `attachment; filename="${filename}"`,
-        // Issue #730: exports must not enter HTTP or PWA caches.
-        'Cache-Control': 'private, no-store',
-        'X-Campfire-Export-Profile': profile,
-      })
-      .send(JSON.stringify(data));
+      if (format === 'mdzip') {
+        const filename = this.exportService.exportFilename(campaign.name, 'zip', profile);
+        // Deferred until the archive actually produces bytes. buildProfileExport runs a
+        // long series of DB reads first, and this endpoint is reached by a plain anchor
+        // navigation, not fetch — so committing zip headers up front meant a mid-read
+        // failure was serialised as JSON that Express still labelled `application/zip`
+        // with an attachment disposition (res.json does not override a set Content-Type).
+        // The browser cannot inspect the status on a navigation, so it saved the error
+        // body to disk as a corrupt archive. Setting them on first byte makes "these
+        // headers exist only if bytes are coming" true by construction.
+        const onFirstByte = () => {
+          res
+            .status(200)
+            .set({
+              'Content-Type': 'application/zip',
+              'Content-Disposition': `attachment; filename="${filename}"`,
+              // Issue #730: exports must not enter HTTP or PWA caches.
+              'Cache-Control': 'private, no-store',
+              // Issue #586: the redaction profile is visible without opening the archive.
+              'X-Campfire-Export-Profile': profile,
+            });
+        };
+        // Do not buffer a whole archive in the request path. `close` also fires for
+        // a browser cancelling a download, allowing the service to tear down the
+        // archiver and its per-export staging directory promptly.
+        try {
+          await this.exportService.streamMarkdownZip(res, abortController!.signal, campaignId, user, { profile, options, onFirstByte });
+        } catch (err) {
+          if (abortController!.signal.aborted) return;
+          // Once streaming has started, the service has already destroyed the
+          // failed response. Do not ask Nest to write a second JSON error response
+          // over committed ZIP headers.
+          if (res.headersSent || res.destroyed) return;
+          // Projection can fail before archiver emits a byte. Restore a normal
+          // error-response header state so Nest's exception filter sends JSON
+          // instead of a misleading attachment named like a ZIP archive.
+          res.removeHeader('Content-Type');
+          res.removeHeader('Content-Disposition');
+          res.removeHeader('X-Campfire-Export-Profile');
+          throw err;
+        }
+        return;
+      }
+
+      const { data } = await this.exportService.buildProfileExport(campaignId, user, profile, options, { format: 'json' });
+      const filename = this.exportService.exportFilename(campaign.name, 'json', profile);
+      res
+        .status(200)
+        .set({
+          'Content-Type': 'application/json',
+          'Content-Disposition': `attachment; filename="${filename}"`,
+          // Issue #730: exports must not enter HTTP or PWA caches.
+          'Cache-Control': 'private, no-store',
+          'X-Campfire-Export-Profile': profile,
+        })
+        .send(JSON.stringify(data));
     } finally {
       if (abortController) res.off('close', onClose);
     }
