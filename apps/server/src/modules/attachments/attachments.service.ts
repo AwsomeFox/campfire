@@ -413,7 +413,9 @@ export class AttachmentsService implements OnApplicationBootstrap {
   exportPathIfPresent(row: { campaignId: number; id: number; mime: string }): string | null {
     const source = this.filePath(row);
     try {
-      return fs.statSync(source).isFile() ? source : null;
+      // Never follow a row-backed path that was replaced with a symlink: archive
+      // consumers must not be able to read a target outside the uploads tree.
+      return fs.lstatSync(source).isFile() ? source : null;
     } catch (error: unknown) {
       // A missing row-backed file is an expected export race. Permission and
       // other I/O errors must remain visible to the archive caller instead of

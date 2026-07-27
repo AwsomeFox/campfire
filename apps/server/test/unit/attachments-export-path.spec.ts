@@ -27,24 +27,34 @@ describe('AttachmentsService.exportPathIfPresent', () => {
 
   it('returns the source for a present regular file', () => {
     const attachments = withSourcePath();
-    jest.spyOn(fs, 'statSync').mockReturnValue({ isFile: () => true } as fs.Stats);
+    jest.spyOn(fs, 'lstatSync').mockReturnValue({ isFile: () => true } as fs.Stats);
 
     expect(attachments.exportPathIfPresent(ROW)).toBe(SOURCE);
   });
 
+  it('does not follow a row-backed symlink', () => {
+    const attachments = withSourcePath();
+    jest.spyOn(fs, 'lstatSync').mockReturnValue({
+      isFile: () => false,
+      isSymbolicLink: () => true,
+    } as fs.Stats);
+
+    expect(attachments.exportPathIfPresent(ROW)).toBeNull();
+  });
+
   it('returns null only when the source is absent', () => {
     const attachments = withSourcePath();
-    jest.spyOn(fs, 'statSync').mockImplementation(() => {
+    jest.spyOn(fs, 'lstatSync').mockImplementation(() => {
       throw Object.assign(new Error('missing'), { code: 'ENOENT' });
     });
 
     expect(attachments.exportPathIfPresent(ROW)).toBeNull();
   });
 
-  it.each(['EACCES', 'EPERM'])('propagates %s from stat', (code) => {
+  it.each(['EACCES', 'EPERM'])('propagates %s from lstat', (code) => {
     const attachments = withSourcePath();
     const error = Object.assign(new Error('access denied'), { code });
-    jest.spyOn(fs, 'statSync').mockImplementation(() => { throw error; });
+    jest.spyOn(fs, 'lstatSync').mockImplementation(() => { throw error; });
 
     expect(() => attachments.exportPathIfPresent(ROW)).toThrow(error);
   });
