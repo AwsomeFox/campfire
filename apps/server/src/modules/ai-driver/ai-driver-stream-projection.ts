@@ -63,6 +63,8 @@ export const AI_DM_BROADCAST_SAFE_FRAMES: Record<BroadcastSafeFrameType, string>
     'Stuck-ladder detection: a reason code, a state, and the player levers being offered. The levers are the players’ own affordances (#314).',
   recovered: 'A lifecycle state name — the table needs to see the seat start running again.',
   state: 'A lifecycle state name (paused, running, human control) that every member’s UI renders.',
+  phase:
+    'A session lifecycle phase name (greeting, active, wrap_up, ended) and nothing else (#1043) — the same shape as `state`, and the source of the table-visible phase note every member’s UI renders. Start Session is a lever any member may pull, so the phase is not DM-only information.',
   vote: 'A TABLE vote — its whole purpose is that every member sees it (#314).',
   takeover:
     'Names a campaign MEMBER taking the seat, which is already visible to the table from the member list.',

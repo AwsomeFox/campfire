@@ -257,6 +257,66 @@ describe('ai-dm driver — grounding: creative narration vs. factual claims (#57
    *
    * The AI behaving correctly was what leaked the DM's prep.
    */
+  /**
+   * #1043 — the SAME leak, through a NEW door.
+   *
+   * `POST /ai-dm/start-session` is player-callable (sitting down to play is a table act) and runs
+   * a full driver turn with tools, so its result carries the same `turn.grounding` — including
+   * the raw `retrievals` ledger, which lists every id the turn read whether or not the model
+   * cited any of them. `POST /ai-dm/message` had projected that for the reading role since #577;
+   * the lifecycle endpoint shipped without it.
+   *
+   * A greeting is the WORST turn to leak from: recapping the last session is exactly the turn
+   * most likely to touch a concealed NPC or an unrevealed quest, because that is what a recap is
+   * about. This asserts on a player's response BODY, not on whether a projection helper was
+   * called — the projection is now applied at the controller boundary rather than per-handler,
+   * so a call-site assertion would test the wrong thing.
+   */
+  it('never leaks a DM-only id through the player-callable start-session greeting (#1043)', async () => {
+    const campaignId = await armedCampaign('Grounding lifecycle leak');
+
+    const npc = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/npcs`)
+      .set(dm)
+      .send({ name: 'The Patron', body: 'Secretly bankrolling the party.', hidden: true });
+    expect(npc.status).toBe(201);
+    const npcId = npc.body.id as number;
+
+    const grant = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/ai-dm/secret-approval`)
+      .set(dm)
+      .send({ action: 'grant', tool: 'get_npc', entityId: npcId, note: 'may recap the patron thread' });
+    expect(grant.status).toBe(201);
+
+    // The greeting reads the hidden NPC (approved), then cites it in the recap.
+    h.script(
+      { toolCalls: [{ id: 'c1', name: 'get_npc', arguments: { npcId } }] },
+      {
+        text:
+          'Welcome back. When we left off, your patron had gone quiet.' +
+          groundingBlock([
+            { text: 'The patron went quiet.', kind: 'canon', cites: [{ type: 'npc', id: npcId }] },
+          ]),
+      },
+    );
+
+    const res = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/ai-dm/start-session`)
+      .set(player)
+      .send({});
+    expect(res.status).toBe(201);
+
+    // The read really happened — we are not passing by failing to retrieve anything.
+    const asDm = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/grounding`).set(dm);
+    expect(asDm.status).toBe(200);
+    expect(JSON.stringify(asDm.body)).toContain(`/npcs/${npcId}`);
+
+    // ...and the PLAYER's copy of that same turn names none of it.
+    expect(JSON.stringify(res.body)).not.toContain(`/npcs/${npcId}`);
+    expect(res.body.grounding.retrievals.some((r: { id: number }) => r.id === npcId)).toBe(false);
+    expect(res.body.grounding.claims[0].citations[0]).toMatchObject({ id: 0, redacted: true });
+  });
+
   it('never publishes a DM-only cited id to a player, on either delivery path', async () => {
     const campaignId = await armedCampaign('Grounding DM-only citation');
 

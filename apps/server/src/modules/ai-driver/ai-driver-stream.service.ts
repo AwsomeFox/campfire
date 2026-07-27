@@ -84,6 +84,10 @@ export type AiDmStreamEvent =
   | { type: 'stuck'; campaignId: number; reason: string; detail: string; state: string; levers: string[]; at: string }
   | { type: 'recovered'; campaignId: number; state: string; at: string }
   | { type: 'state'; campaignId: number; state: string; at: string }
+  // #1043 — the session lifecycle phase changed (greeting / active / wrap_up / ended). Thin like
+  // every other signal here: clients refetch GET /ai-dm/session for the authoritative state. The
+  // phase is not secret and carries no payload beyond itself.
+  | { type: 'phase'; campaignId: number; phase: string; at: string }
   | { type: 'vote'; campaignId: number; action: string; kind: string; outcome?: string; at: string }
   | { type: 'takeover'; campaignId: number; action: string; memberId: string; at: string }
   // #557 — a DM granted or revoked a narrowly-scoped secret-read approval (the seat may now

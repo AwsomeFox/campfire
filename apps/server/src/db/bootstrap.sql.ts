@@ -1367,6 +1367,12 @@ CREATE TABLE IF NOT EXISTS ai_driver_control_state (
   -- audit a revocation you have no record of.
   secret_read_approvals TEXT,
   pending_tool_confirmations TEXT,
+  -- Issue #1043: the session lifecycle phase (greeting | active | wrap_up | ended). Defaults to
+  -- 'active' so a campaign that never runs start-session keeps behaving exactly as it did before
+  -- the lifecycle existed. The two transient phases last only as long as the turn that drives
+  -- them, so finding one here on boot means that turn never returned; hydration reconciles it to
+  -- 'active' and announces the loss rather than pretending a summary is still coming.
+  phase TEXT NOT NULL DEFAULT 'active',
   -- Issue #1051: collaborative handoff is on (the AI narrates, a DM decides mechanics). Its own
   -- column rather than a ladder-state value, because the state column is one slot that a pause,
   -- a takeover, or a stuck seat legitimately takes over -- and a mode that vanished when a DM

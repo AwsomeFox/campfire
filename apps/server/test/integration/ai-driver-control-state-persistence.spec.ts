@@ -3,7 +3,12 @@ import { describe, expect, it, jest, afterEach } from '@jest/globals';
 import Database from 'better-sqlite3';
 import { openDatabase, dbFilePath, type DrizzleDb } from '../../src/db/db.module';
 import { campaigns } from '../../src/db/schema';
-import { AiDriverService } from '../../src/modules/ai-driver/ai-driver.service';
+import {
+  AiDriverService,
+  GREETING_PROMPT,
+  WRAP_UP_PROMPT,
+  lifecyclePhaseForInput,
+} from '../../src/modules/ai-driver/ai-driver.service';
 import { AiDmTranscriptService } from '../../src/modules/ai-driver/ai-driver-transcript.service';
 import type { RequestUser } from '../../src/common/user.types';
 import { makeTempDataDir } from './fixtures';
@@ -135,6 +140,7 @@ describe('AI driver control state persistence across restart (#559, real SQLite)
         'announced_recovery',
         // #1042 — the two grant maps, added by 0131 as a separate additive migration.
         'secret_read_approvals', 'pending_tool_confirmations',
+        'phase', // #1043 — session lifecycle, added by 0133 as a separate additive migration.
         'collaborative', // #1051 — added by 0138 as a separate additive migration.
         'updated_at',
       ]),
@@ -243,6 +249,48 @@ describe('AI driver control state persistence across restart (#559, real SQLite)
     expect(
       (restarted.service as unknown as { requireReplayInput: (id: number) => string }).requireReplayInput(campaignId),
     ).toBe('I open the crypt door.');
+    // ...and it is recognisably ORDINARY player text, so its retry stays an ordinary turn.
+    expect(lifecyclePhaseForInput('I open the crypt door.')).toBeUndefined();
+  });
+
+  it('a failed lifecycle turn is still replayable AS a lifecycle turn after a restart (#1043)', () => {
+    // WHAT THIS GUARDS. The retry/nudge lever replays `last_input`, and a lifecycle turn is not
+    // reproducible from that string alone — the phase selects the direction block and lifts the
+    // `ended` gate. An earlier fix held that phase in a parallel in-memory map, which meant the
+    // input survived a restart and its qualifier did not: a retried greeting came back as an
+    // ordinary active turn, and a retried wrap-up was refused outright by the `ended` gate.
+    //
+    // The phase is now DERIVED from the input, so there is no second value that can fail to
+    // survive. This asserts the one stateful link that remains: `last_input` round-trips a
+    // lifecycle prompt through real SQLite byte-for-byte, so the derivation still answers on the
+    // far side of a restart.
+    for (const [prompt, expected] of [
+      [GREETING_PROMPT, 'greeting'],
+      [WRAP_UP_PROMPT, 'wrap_up'],
+    ] as const) {
+      const first = firstBoot();
+      const session = first.service.getSession(campaignId);
+      // The shape a failed greeting/wrap-up leaves behind: the transient phase is bounded by its
+      // turn, so it has already settled, and only the stuck ladder shows the failure.
+      session.state = 'awaiting_players';
+      session.stuck = { reason: 'provider_error', detail: 'provider failed', since: '2026-07-26T00:00:01.000Z', turn: 1 };
+      session.phase = expected === 'greeting' ? 'active' : 'ended';
+      (first.service as unknown as { lastInputs: Map<number, string> }).lastInputs.set(campaignId, prompt);
+      (first.service as unknown as { persistControlState: (s: unknown) => void }).persistControlState(session);
+
+      const restarted = boot();
+      const recovered = restarted.service.getSession(campaignId);
+      expect(recovered.levers).toContain('retry');
+      const replay = (
+        restarted.service as unknown as { requireReplayInput: (id: number) => string }
+      ).requireReplayInput(campaignId);
+      expect(replay).toBe(prompt);
+      expect(lifecyclePhaseForInput(replay)).toBe(expected);
+
+      open?.sqlite.close();
+      open = null;
+      fs.rmSync(dataDir, { recursive: true, force: true });
+    }
   });
 
   it('parks a turn that was generating when the process died into an audited pause', () => {
@@ -655,6 +703,114 @@ describe('AI driver control state persistence across restart (#559, real SQLite)
         .map((c) => (c[0] as { action: string }).action)
         .filter((a) => a === 'ai-dm.driver.secret.revoked_on_restart'),
     ).toHaveLength(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // #1043 — the session lifecycle phase across a restart.
+  // -------------------------------------------------------------------------
+
+  it('defaults to `active` and persists a settled phase across a restart', () => {
+    const first = firstBoot();
+    expect(first.service.getSession(campaignId).phase).toBe('active');
+    expect(rawRow()).toBeUndefined();
+
+    first.service.setPaused(campaignId, true);
+    // `active` is the pre-#1043 behaviour, so an upgraded database full of live campaigns comes
+    // back indistinguishable from before rather than in a phase nobody put it in.
+    expect(rawRow()).toMatchObject({ phase: 'active' });
+
+    const session = first.service.getSession(campaignId);
+    session.phase = 'ended';
+    first.service.setPaused(campaignId, false);
+    expect(rawRow()).toMatchObject({ phase: 'ended' });
+
+    // `ended` is a settled phase: it survives, because a session someone deliberately closed
+    // must not quietly reopen because the server was redeployed.
+    const restarted = boot();
+    expect(restarted.service.getSession(campaignId).phase).toBe('ended');
+  });
+
+  it('reconciles an interrupted `wrap_up` to `active` and says so out loud', () => {
+    const first = firstBoot();
+    const session = first.service.getSession(campaignId);
+    session.phase = 'wrap_up';
+    first.service.setPaused(campaignId, true);
+    expect(rawRow()).toMatchObject({ phase: 'wrap_up' });
+
+    const restarted = boot();
+    // A transient phase on disk means, by construction, that its turn never returned — the turn
+    // lived in process memory and its narration is gone. Coming back still `wrap_up` would
+    // promise a closing summary nothing is going to produce.
+    expect(restarted.service.getSession(campaignId).phase).toBe('active');
+
+    // ...and NOT silently. A DM who pressed Wrap Up before a deploy must not have to work out
+    // for themselves that the summary is never arriving.
+    const audited = restarted.audit.log.mock.calls
+      .map((c) => c[0] as { action: string; detail: string })
+      .filter((a) => a.action === 'ai-dm.driver.session.phase_interrupted');
+    expect(audited).toHaveLength(1);
+    expect(audited[0].detail).toContain('wrap_up');
+    expect(restarted.notifications.notifyCampaign).toHaveBeenCalled();
+
+    // The reconciled phase reaches disk, which is the only thing stopping the notice repeating
+    // on every subsequent boot.
+    expect(rawRow()).toMatchObject({ phase: 'active' });
+    const third = boot();
+    third.service.getSession(campaignId);
+    expect(
+      third.audit.log.mock.calls
+        .map((c) => (c[0] as { action: string }).action)
+        .filter((a) => a === 'ai-dm.driver.session.phase_interrupted'),
+    ).toHaveLength(0);
+  });
+
+  it('announces an interrupted phase even on a seat whose shape was already announced', () => {
+    const first = firstBoot();
+    const session = first.service.getSession(campaignId);
+    session.phase = 'greeting';
+    first.service.setPaused(campaignId, true);
+    open!.sqlite
+      .prepare('UPDATE ai_driver_control_state SET announced_recovery = ? WHERE campaign_id = ?')
+      .run('paused', campaignId);
+
+    const restarted = boot();
+    restarted.service.getSession(campaignId);
+
+    // WHY THE PHASE NOTICE IS NOT A ControlStateRecovery. The seat came back `paused` — a steady
+    // shape already announced — so #559's recovery notice is correctly suppressed. Routing the
+    // phase through that same mechanism would suppress it too, and on a seat that came back
+    // clean it would never fire at all (`settled === null`).
+    expect(
+      restarted.audit.log.mock.calls
+        .map((c) => (c[0] as { action: string }).action)
+        .filter((a) => a === 'ai-dm.driver.control_state.recovered'),
+    ).toHaveLength(0);
+    expect(
+      restarted.audit.log.mock.calls
+        .map((c) => (c[0] as { action: string }).action)
+        .filter((a) => a === 'ai-dm.driver.session.phase_interrupted'),
+    ).toHaveLength(1);
+  });
+
+  it('says nothing about the phase when a restart interrupted none', () => {
+    const first = firstBoot();
+    first.service.setPaused(campaignId, true);
+    const restarted = boot();
+    restarted.service.getSession(campaignId);
+    expect(
+      restarted.audit.log.mock.calls
+        .map((c) => (c[0] as { action: string }).action)
+        .filter((a) => a === 'ai-dm.driver.session.phase_interrupted'),
+    ).toHaveLength(0);
+  });
+
+  it('an unknown persisted phase falls back to `active` rather than being carried forward', () => {
+    firstBoot();
+    open!.sqlite.prepare('UPDATE ai_driver_control_state SET phase = ? WHERE campaign_id = ?').run('bogus', campaignId);
+    const restarted = boot();
+    // Same reasoning as #559's other hydration allowlists: an unrecognised value must resolve to
+    // the safe default, not be trusted into the session where nothing knows what it means.
+    expect(restarted.service.getSession(campaignId).phase).toBe('active');
   });
 
   // -------------------------------------------------------------------------

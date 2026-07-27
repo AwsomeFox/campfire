@@ -670,11 +670,13 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
              VALUES (1, 'paused', 'human_control', '2026-01-01T00:00:00.000Z')`,
           )
           .run();
-        // Mark 0131 un-run so reopening exercises the ALTER against the legacy shape. 0138 (#1051)
-        // is un-recorded alongside it because the legacy CREATE above omits every additive column
-        // on this table, and the fresh-vs-upgraded column comparison below only holds if all of
-        // them get re-applied.
+        // All THREE additive migrations on this table are un-recorded, not just the one under
+        // test: the legacy CREATE above predates every one of them, and the fresh-vs-upgraded
+        // column comparison below only holds if all of them re-run against the legacy shape.
+        // Un-recording only one leaves a sibling's column missing and fails the comparison for a
+        // reason that has nothing to do with what this test is actually checking.
         seeded.sqlite.prepare('DELETE FROM __migrations WHERE name = ?').run('0131_ai_driver_session_persistence_1042');
+        seeded.sqlite.prepare('DELETE FROM __migrations WHERE name = ?').run('0133_ai_session_phase_1043');
         seeded.sqlite.prepare('DELETE FROM __migrations WHERE name = ?').run('0138_ai_collaborative_handoff_1051');
       } finally {
         seeded.sqlite.close();
@@ -864,9 +866,11 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     }
   });
 
-  it('0138 backfills ai_driver_control_state.collaborative to off on a legacy table (#1051)', () => {
-    expect(MIGRATION_NAMES).toContain('0138_ai_collaborative_handoff_1051');
-    expect(MIGRATION_NAMES.indexOf('0138_ai_collaborative_handoff_1051')).toBeGreaterThan(
+  it('0133 backfills ai_driver_control_state.phase on a legacy table (#1043)', () => {
+    expect(MIGRATION_NAMES).toContain('0133_ai_session_phase_1043');
+    // ALTERs the table 0118 creates, so it must run after it — runMigrations goes in array order
+    // and an ALTER against a missing table is a no-op that never retries.
+    expect(MIGRATION_NAMES.indexOf('0133_ai_session_phase_1043')).toBeGreaterThan(
       MIGRATION_NAMES.indexOf('0118_ai_driver_control_state_559'),
     );
 
@@ -877,11 +881,13 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       let freshCols: string[];
       try {
         freshCols = columnNames(fresh.sqlite, 'ai_driver_control_state');
-        expect(freshCols).toContain('collaborative');
+        expect(freshCols).toContain('phase');
       } finally {
         fresh.sqlite.close();
       }
 
+      // The shape every existing install has: #559's control-state table, none of the additive
+      // columns, and live rows in it.
       writeOldSchemaDb(upgradedDir);
       const seeded = openDatabase(upgradedDir);
       try {
@@ -904,11 +910,99 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
              VALUES (1, 'paused', 'human_control', '2026-01-01T00:00:00.000Z')`,
           )
           .run();
-        // Both additive migrations on this table are un-recorded: the legacy CREATE above omits
-        // 0131's columns too, and the fresh-vs-upgraded comparison below only holds if every
-        // additive migration gets re-applied against the legacy shape.
-        seeded.sqlite.prepare('DELETE FROM __migrations WHERE name = ?').run('0138_ai_collaborative_handoff_1051');
+        // All THREE additive migrations on this table are un-recorded, not just the one under
+        // test: the legacy CREATE above predates every one of them, and the fresh-vs-upgraded
+        // column comparison below only holds if all of them re-run against the legacy shape.
+        // Un-recording only one leaves a sibling's column missing and fails the comparison for a
+        // reason that has nothing to do with what this test is actually checking.
         seeded.sqlite.prepare('DELETE FROM __migrations WHERE name = ?').run('0131_ai_driver_session_persistence_1042');
+        seeded.sqlite.prepare('DELETE FROM __migrations WHERE name = ?').run('0133_ai_session_phase_1043');
+        seeded.sqlite.prepare('DELETE FROM __migrations WHERE name = ?').run('0138_ai_collaborative_handoff_1051');
+      } finally {
+        seeded.sqlite.close();
+      }
+
+      const upgraded = openDatabase(upgradedDir);
+      try {
+        expect([...columnNames(upgraded.sqlite, 'ai_driver_control_state')].sort()).toEqual([...freshCols].sort());
+        const row = upgraded.sqlite
+          .prepare('SELECT state, phase FROM ai_driver_control_state WHERE campaign_id = 1')
+          .get() as { state: string; phase: string } | undefined;
+        // NOT NULL + DEFAULT is what makes the ALTER safe on a populated table: SQLite backfills
+        // every existing row with 'active', whose behaviour is identical to the pre-#1043 seat.
+        // An upgraded install with live sessions therefore wakes up exactly as it went to sleep,
+        // rather than every campaign in the database landing in a lifecycle phase nobody chose.
+        expect(row?.phase).toBe('active');
+        // ADD COLUMN, never a rebuild — the existing takeover grant is untouched.
+        expect(row?.state).toBe('human_control');
+      } finally {
+        upgraded.sqlite.close();
+      }
+
+      // Re-running is a no-op (the PRAGMA probe), not a duplicate-column error.
+      const again = openDatabase(upgradedDir);
+      try {
+        expect(countRows(again.sqlite, 'ai_driver_control_state')).toBe(1);
+      } finally {
+        again.sqlite.close();
+      }
+    } finally {
+      fs.rmSync(upgradedDir, { recursive: true, force: true });
+    }
+  });
+
+  it('0138 backfills ai_driver_control_state.collaborative on a legacy table (#1051)', () => {
+    expect(MIGRATION_NAMES).toContain('0138_ai_collaborative_handoff_1051');
+    // ALTERs the table 0118 creates, so it must run after it — runMigrations goes in array order
+    // and an ALTER against a missing table is a no-op that never retries.
+    expect(MIGRATION_NAMES.indexOf('0138_ai_collaborative_handoff_1051')).toBeGreaterThan(
+      MIGRATION_NAMES.indexOf('0118_ai_driver_control_state_559'),
+    );
+
+    const upgradedDir = makeTempDataDir();
+    dataDir = makeTempDataDir();
+    try {
+      const fresh = openDatabase(dataDir);
+      let freshCols: string[];
+      try {
+        freshCols = columnNames(fresh.sqlite, 'ai_driver_control_state');
+        expect(freshCols).toContain('collaborative');
+      } finally {
+        fresh.sqlite.close();
+      }
+
+      // The shape every existing install has: #559's control-state table, none of the additive
+      // columns, and live rows in it.
+      writeOldSchemaDb(upgradedDir);
+      const seeded = openDatabase(upgradedDir);
+      try {
+        seeded.sqlite.exec('DROP TABLE IF EXISTS ai_driver_control_state');
+        seeded.sqlite.exec(`
+          CREATE TABLE ai_driver_control_state (
+            campaign_id INTEGER PRIMARY KEY,
+            status TEXT NOT NULL DEFAULT 'idle',
+            state TEXT NOT NULL DEFAULT 'running',
+            scene TEXT, last_narration TEXT, last_turn_at TEXT,
+            turn_count INTEGER NOT NULL DEFAULT 0,
+            stuck TEXT, acting_dm TEXT, vote TEXT,
+            takeover_requested_by TEXT, last_input TEXT, announced_recovery TEXT,
+            updated_at TEXT NOT NULL
+          );
+        `);
+        seeded.sqlite
+          .prepare(
+            `INSERT INTO ai_driver_control_state (campaign_id, status, state, updated_at)
+             VALUES (1, 'paused', 'human_control', '2026-01-01T00:00:00.000Z')`,
+          )
+          .run();
+        // All THREE additive migrations on this table are un-recorded, not just the one under
+        // test: the legacy CREATE above predates every one of them, and the fresh-vs-upgraded
+        // column comparison below only holds if all of them re-run against the legacy shape.
+        // Un-recording only one leaves a sibling's column missing and fails the comparison for a
+        // reason that has nothing to do with what this test is actually checking.
+        seeded.sqlite.prepare('DELETE FROM __migrations WHERE name = ?').run('0131_ai_driver_session_persistence_1042');
+        seeded.sqlite.prepare('DELETE FROM __migrations WHERE name = ?').run('0133_ai_session_phase_1043');
+        seeded.sqlite.prepare('DELETE FROM __migrations WHERE name = ?').run('0138_ai_collaborative_handoff_1051');
       } finally {
         seeded.sqlite.close();
       }
@@ -923,11 +1017,13 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
         // campaign already has. An upgraded install cannot wake up with the AI unexpectedly
         // deferring — or, worse, unexpectedly not deferring.
         expect(row?.collaborative).toBe(0);
-        expect(row?.state).toBe('human_control'); // ADD COLUMN, never a rebuild
+        // ADD COLUMN, never a rebuild — the existing takeover grant is untouched.
+        expect(row?.state).toBe('human_control');
       } finally {
         upgraded.sqlite.close();
       }
 
+      // Re-running is a no-op (the PRAGMA probe), not a duplicate-column error.
       const again = openDatabase(upgradedDir);
       try {
         expect(countRows(again.sqlite, 'ai_driver_control_state')).toBe(1);

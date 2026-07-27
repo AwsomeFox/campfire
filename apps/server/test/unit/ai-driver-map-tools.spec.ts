@@ -58,6 +58,7 @@ describe('guardDriverLivePlayArgs — battle-map execution guards (#488)', () =>
     return {
       campaignId: 1,
       status: 'idle',
+      phase: 'active', // #1043 — the default lifecycle phase.
       collaborative: false, // #1051 — mode off by default.
       state: 'running',
       scene: null,
@@ -212,6 +213,7 @@ describe('toPublicAiDmSessionState', () => {
     const session: AiDmSessionState = {
       campaignId: 1,
       status: 'idle',
+      phase: 'active',
       collaborative: false,
       state: 'running',
       scene: null,
@@ -231,6 +233,7 @@ describe('toPublicAiDmSessionState', () => {
     expect(toPublicAiDmSessionState(session)).toEqual({
       campaignId: 1,
       status: 'idle',
+      phase: 'active', // #1043 — member-visible, so it survives the projection.
       collaborative: false, // #1051 — member-visible, so it survives the projection.
       state: 'running',
       scene: null,
