@@ -861,7 +861,7 @@ function ExportRequestsCard({ campaign }: { campaign: Campaign }) {
         <div
           key={r.id}
           className="flex flex-col gap-2"
-          style={{ borderTop: '1px solid var(--line)', paddingTop: 8 }}
+          style={{ borderTop: '1px solid var(--color-divider)', paddingTop: 8 }}
         >
           <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
             <strong>{r.requestedBy}</strong> asked for a <strong>{r.profile || 'backup'}</strong> export on{' '}
@@ -903,7 +903,7 @@ function ExportRequestsCard({ campaign }: { campaign: Campaign }) {
       ))}
 
       {decided.length > 0 && (
-        <div style={{ borderTop: '1px solid var(--line)', paddingTop: 8 }}>
+        <div style={{ borderTop: '1px solid var(--color-divider)', paddingTop: 8 }}>
           <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
             Earlier requests
           </p>
