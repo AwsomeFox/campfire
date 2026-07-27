@@ -174,6 +174,19 @@ export function looksLikeIcsFeedToken(token: string): boolean {
 }
 
 /**
+ * Identity root for a recurring series' ICS UIDs (issue #588).
+ *
+ * Explicitly NOT a secret and NOT a capability: it is published inside every ICS
+ * UID the series emits, and holding it grants nothing. It is random rather than
+ * derived from the row id so a UID stays globally unique across installs — two
+ * Campfire instances must never mint colliding UIDs into one subscriber's
+ * calendar, which is exactly how a "stable UID" turns into a merge disaster.
+ */
+export function generateSeriesUid(): string {
+  return randomBytes(12).toString('hex');
+}
+
+/**
  * MCP OAuth (issue #37) secrets. Campfire acts as a minimal OAuth 2.1
  * authorization server so `/mcp` can be added as a Claude connector without a
  * hand-copied PAT. Four opaque token kinds, all following the same storage

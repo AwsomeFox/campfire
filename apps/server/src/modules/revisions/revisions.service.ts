@@ -1,5 +1,5 @@
 import { ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, asc, desc, eq, isNotNull, isNull } from 'drizzle-orm';
+import { and, asc, desc, eq, isNotNull, isNull, sql } from 'drizzle-orm';
 import type { EntityRevision, RevisionAuthorSource, Role, RevisionEntityType } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import {
@@ -695,6 +695,14 @@ export class RevisionsService {
    * `currentUpdatedAt` (the version read inside the current transaction — not the
    * caller's optimistic-concurrency token). Returns false when the row was
    * concurrently changed (0 rows).
+   *
+   * `proseChanged` says whether this write actually alters the stored prose. The
+   * caller knows — it has just compared the two — and no arm can re-derive it,
+   * because the CAS write is the only read-modify-write in play. Arms whose
+   * entity publishes its prose OUTSIDE the app need it: a column write is not
+   * automatically a published revision, and a restore-to-same must not announce
+   * one. Every other arm ignores it, which is correct: their prose has no
+   * external subscribers to announce anything to.
    */
   private writeProseCas(
     db: SyncDb,
@@ -703,6 +711,7 @@ export class RevisionsService {
     prose: string,
     ts: string,
     currentUpdatedAt: string,
+    proseChanged: boolean,
   ): boolean {
     const changesOf = (result: unknown): number =>
       (result as { changes?: number }).changes ?? 0;
@@ -788,11 +797,33 @@ export class RevisionsService {
           ) > 0
         );
       case 'scheduled_session':
+        // #588 coupled this arm to a PUBLISHED artifact: a scheduled session's
+        // `notes` is emitted as the VEVENT DESCRIPTION in the ICS feed, so
+        // restoring an older revision changes what subscribers should see. RFC
+        // 5545 §3.8.7.4 lets a client ignore a revision that does not carry a
+        // higher SEQUENCE, so without this bump a calendar app kept showing the
+        // pre-restore description indefinitely — LAST-MODIFIED alone only moved
+        // the lenient clients. Bumped in the SAME statement as the write, under
+        // the same CAS predicate, so a restore can never publish content without
+        // the sequence that makes it visible, nor a sequence without content.
+        //
+        // Read-modify-write in SQL rather than `existing.icsSequence + 1`: this
+        // method never read the row, and re-reading it here would reintroduce
+        // the gap the CAS exists to close.
+        //
+        // Guarded on a real change for the rule stated in SchedulingService.update
+        // and in the series fan-out: a no-op must not push a fresh SEQUENCE to
+        // every subscriber. Restoring the revision that is already live is a
+        // no-op by definition.
         return (
           changesOf(
             db
               .update(scheduledSessions)
-              .set({ notes: prose, updatedAt: ts })
+              .set({
+                notes: prose,
+                updatedAt: ts,
+                ...(proseChanged ? { icsSequence: sql`${scheduledSessions.icsSequence} + 1` } : {}),
+              })
               .where(and(eq(scheduledSessions.id, entityId), eq(scheduledSessions.updatedAt, currentUpdatedAt)))
               .run(),
           ) > 0
@@ -998,7 +1029,7 @@ export class RevisionsService {
       // CAS baseline is the in-tx read (`target.updatedAt`), not the caller's token —
       // assertNotStale already validated opts.expectedUpdatedAt against that baseline.
       const casBaseline = target.updatedAt;
-      if (!this.writeProseCas(tx, entityType, entityId, restoredProse, ts, casBaseline)) {
+      if (!this.writeProseCas(tx, entityType, entityId, restoredProse, ts, casBaseline, target.prose !== restoredProse)) {
         // Row moved between the in-tx read and the CAS write (should be rare under
         // better-sqlite3's write lock); surface the same STALE_WRITE shape as PATCH.
         throw new ConflictException({

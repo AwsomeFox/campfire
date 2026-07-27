@@ -69,6 +69,18 @@ export type AiDmStreamEvent =
   | { type: 'stuck'; campaignId: number; reason: string; detail: string; state: string; levers: string[]; at: string }
   | { type: 'recovered'; campaignId: number; state: string; at: string }
   | { type: 'state'; campaignId: number; state: string; at: string }
+  /**
+   * #1043 — the session lifecycle phase changed (greeting / active / wrap_up / ended). Thin like
+   * `state`: the client refetches the session for the authoritative truth rather than reducing
+   * this locally, because the member who pressed the button is not the only one who has to know.
+   * A stale phase is what lets a player type into an ended session and collect a 409 they had no
+   * way to see coming.
+   *
+   * `phase` is a plain string, deliberately NOT a union of the four known names. The server owns
+   * this vocabulary, and a client that dropped a phase it did not recognise would skip the
+   * invalidation and go stale — precisely the failure this frame exists to prevent.
+   */
+  | { type: 'phase'; campaignId: number; phase: string; at: string }
   | { type: 'vote'; campaignId: number; action: string; kind: string; outcome?: string; at: string }
   | { type: 'takeover'; campaignId: number; action: string; memberId: string; at: string }
   // #474 / #1558 — a confirm-policy tool call was queued for DM approval, or a DM resolved one.
@@ -259,6 +271,11 @@ export function parseAiDmStreamEvent(value: unknown): AiDmStreamEvent | null {
     case 'state':
       if (typeof v.state !== 'string') return null;
       return { type, campaignId: v.campaignId as number, state: v.state, at: v.at as string };
+    case 'phase':
+      // #1043. Structural validation only — any non-empty phase name is passed through, for the
+      // reason given on the union member: an unrecognised phase must still trigger the refetch.
+      if (typeof v.phase !== 'string') return null;
+      return { type, campaignId: v.campaignId as number, phase: v.phase, at: v.at as string };
     case 'vote':
       if (typeof v.action !== 'string' || typeof v.kind !== 'string') return null;
       return {

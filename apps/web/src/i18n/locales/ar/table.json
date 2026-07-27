@@ -30,6 +30,14 @@
       "showArgs": "Show arguments",
       "showArgsMore": "Show arguments ({{count}} more not summarised)"
     },
+    "startSession": "Start Session",
+    "wrapUp": "Wrap Up",
+    "lifecycleFailed": "Couldn't change the session phase. Try again.",
+    "phaseNote": {
+      "greeting": "The AI is opening the session\u2026",
+      "wrap_up": "The AI is wrapping up the session\u2026",
+      "ended": "This session has ended. Start a new one to keep playing."
+    },
     "pauseFailed": "Couldn't change the AI DM's pause state.",
     "emptyTitle": "The table is quiet",
     "emptyHint": "Type an action below to begin the scene.",
@@ -46,6 +54,7 @@
     "composerLockedPaused": "The AI DM is paused.",
     "composerLockedHuman": "A human has taken the DM seat.",
     "composerLockedAwaiting": "Waiting on the rest of the table…",
+    "composerLockedEnded": "This session has ended. Start a new one to keep playing.",
     "composerUnlocked": "Composer unlocked. You can send an action.",
     "narrationReady": "The table is ready.",
     "sceneFieldLabel": "Scene",
@@ -72,6 +81,20 @@
     "systemVote": "Table vote: {{action}}",
     "systemRules": "Rules answer: {{text}}",
     "systemRulesEmpty": "Rules answer",
+    "systemPhase": {
+      "active": "The session is under way.",
+      "greeting": "The AI is opening the session.",
+      "wrap_up": "The AI is wrapping up the session.",
+      "ended": "The session has ended."
+    },
+    "systemPhaseUnknown": "The session phase changed.",
+    "systemPhaseInterrupted": "A restart interrupted the {{phase}} phase.",
+    "phaseName": {
+      "active": "play",
+      "greeting": "opening",
+      "wrap_up": "wrap-up",
+      "ended": "ended"
+    },
     "systemInfo": "State: {{state}}",
     "offTitle": "The AI DM is off",
     "offHint": "No AI is running this table. The DM can switch on Driver mode (the AI acts directly as the DM) or Co-DM mode (the AI only proposes) in settings.",

@@ -19,6 +19,7 @@ import { AiDmStreamService } from './ai-driver-stream.service';
 import { AiDmTranscriptService } from './ai-driver-transcript.service';
 import { ProactiveService } from './proactive.service';
 import { DriverGroundingService } from './driver-grounding.service';
+import { GroundingProjectionInterceptor } from './grounding-projection.interceptor';
 import { AI_PROVIDER_RESOLVER, ConfigAiProviderResolver } from './ai-provider-resolver';
 
 /**
@@ -69,6 +70,9 @@ import { AI_PROVIDER_RESOLVER, ConfigAiProviderResolver } from './ai-provider-re
     ProactiveService,
     // #577 — grounding verdict persistence + the human-correction loop.
     DriverGroundingService,
+    // #1043 — redacts DM-only grounding for the reading role across the whole driver
+    // controller, so a player-callable turn endpoint cannot ship without it.
+    GroundingProjectionInterceptor,
     { provide: AI_PROVIDER_RESOLVER, useClass: ConfigAiProviderResolver },
   ],
   exports: [

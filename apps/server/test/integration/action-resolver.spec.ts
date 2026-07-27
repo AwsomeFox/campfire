@@ -213,6 +213,32 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(hpAfter).toBe(60 - t.totalDamage);
   });
 
+  it('does not flatten a qualified Open5e display into unconditional action resistance', () => {
+    const { orm, service, encounterId, actor, drake } = seed();
+    const target = orm.select().from(combatants).where(eq(combatants.id, drake)).get()!;
+    orm.update(ruleEntries)
+      .set({
+        dataJson: JSON.stringify({
+          resistances_and_immunities: {
+            damage_resistances_display: 'fire from nonmagical attacks',
+            damage_resistances: [{ name: 'Fire', key: 'fire' }],
+          },
+        }),
+      })
+      .where(eq(ruleEntries.id, target.ruleEntryId!))
+      .run();
+
+    // DC 21 always fails, so only an incorrectly flattened resistance could halve it.
+    const res = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 2, targetIds: [drake], commit: false }),
+      alice,
+      'player',
+    );
+    expect(res.resolution.targets[0].outcome).toBe('failure');
+    expect(res.resolution.targets[0].damage[0].applied).toBe('normal');
+  });
+
   it('failed save (DC 21 → always fails) applies full damage and spends + refunds a spell slot', () => {
     const { orm, service, encounterId, actor, aliceChar, drake } = seed();
     const res = service.resolve(encounterId, ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 2, targetIds: [drake], commit: true }), alice, 'player');

@@ -17,12 +17,14 @@ import {
   Role,
   UsableAction,
   applyDamageModifiers,
+  damageDefensesFromStatblock,
   classifyAttackOutcome,
   classifySaveOutcome,
   combatantActionsFromStatblock,
   computeAttackModifier,
   computeSaveDc,
   CombatantStatblock,
+  criticalDamageRuleForAdapter,
   dnd5eProficiencyBonus,
   expandStatblockActions,
   isResolvableSpec,
@@ -183,22 +185,12 @@ export class ActionResolverService {
   }
 
   /** Damage-type defences for a target from its statblock/sheet (best-effort; empty when none). */
-  private targetDefenses(row: typeof combatants.$inferSelect): TargetDefenses {
+  private targetDefenses(
+    row: typeof combatants.$inferSelect,
+    damageTypes?: readonly string[],
+  ): TargetDefenses {
     const data = this.statblockData(row);
-    const readList = (...keys: string[]): string[] => {
-      if (!data) return [];
-      for (const k of keys) {
-        const v = data[k];
-        if (Array.isArray(v)) return v.map((x) => String(x)).filter(Boolean);
-        if (typeof v === 'string' && v.trim() !== '') return v.split(/[,;]/).map((s) => s.trim()).filter(Boolean);
-      }
-      return [];
-    };
-    return {
-      resistances: readList('damage_resistances', 'damageResistances', 'resistances'),
-      vulnerabilities: readList('damage_vulnerabilities', 'damageVulnerabilities', 'vulnerabilities'),
-      immunities: readList('damage_immunities', 'damageImmunities', 'immunities'),
-    };
+    return damageDefensesFromStatblock(data, damageTypes?.length ? damageTypes : undefined);
   }
 
   /** A target's saving-throw modifier for one ability (character: mod + prof; monster: statblock mod). */
@@ -498,6 +490,12 @@ export class ActionResolverService {
       const ac = this.targetDefenseValue(target, adapter as unknown as RuleSystemAdapter);
       if (ac === null) throw new BadRequestException(`Target "${target.name}" has no known AC — resolve manually rather than inventing one.`);
       outcome = classifyAttackOutcome(adapter, total, nat, ac);
+      // #1053 review — `critical` is set in ATTACK mode only. A PF2e critical save FAILURE also
+      // doubles damage under that system, and this flag never becomes true in save/check mode,
+      // so `double-total` is wired to attacks and not to saves. Left deliberately rather than
+      // overlooked: a `critFailure` branch may already be authored with the doubled numbers, so
+      // wiring it needs a decision about double-counting, not a one-line change. Tracked in #1600 —
+      // called out here so the seam is not mistaken for complete.
       critical = outcome === 'crit';
       base.attackTotal = total;
       base.naturalRoll = nat;
@@ -535,13 +533,22 @@ export class ActionResolverService {
 
     // Select the outcome branch (with crit → hit / degree fallbacks) and roll its damage.
     const branch = pickOutcomeBranch(spec, outcome);
-    const defenses = this.targetDefenses(target);
+    // A closed adapter vocabulary lets the shared parser conservatively exclude
+    // qualified Open5e display clauses instead of flattening them into unconditional
+    // resistance during structured action resolution.
+    const defenses = this.targetDefenses(
+      target,
+      (adapter as unknown as RuleSystemAdapter).damageTypes,
+    );
     if (branch) {
       // Save-for-half: a branch flagged halfDamage with NO damage of its own borrows the
       // failure branch's damage at half (the common "save for half" authoring shape).
       const damageBranch = branch.damage.length === 0 && branch.halfDamage ? pickOutcomeBranch(spec, 'failure') ?? branch : branch;
       const half = branch.halfDamage;
-      const rolled = rollBranchDamage(damageBranch, roll, { critical });
+      // #1053: the crit rule is the SYSTEM's, not 5e's. `criticalDamageRuleForAdapter` returns
+      // 'double-dice' for any adapter that has not declared one, so 5e and every unaudited
+      // system keep the behaviour they had; PF2e/SF2e now double the total as their rules say.
+      const rolled = rollBranchDamage(damageBranch, roll, { critical, criticalRule: criticalDamageRuleForAdapter(adapter) });
       for (const part of rolled.parts) {
         const { final, applied } = applyDamageModifiers(part.amount, part.type, defenses, { half });
         base.damage.push({ type: part.type, amount: final, applied });

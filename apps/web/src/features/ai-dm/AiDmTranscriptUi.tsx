@@ -143,6 +143,17 @@ export function TranscriptRow({
 }
 
 
+/**
+ * #1043 — the session phases that have their own copy. Kept as a literal list rather than
+ * imported from the server enum because this is a rendering question: it asks "do we have a
+ * translated line for this string", and a phase added server-side without copy must fall back,
+ * not print a raw key.
+ */
+const KNOWN_PHASES = ['active', 'greeting', 'wrap_up', 'ended'] as const;
+function isKnownPhase(value: string): boolean {
+  return (KNOWN_PHASES as readonly string[]).includes(value);
+}
+
 /** Localized text for a system/divider transcript line (visible + SR mirror). */
 export function systemText(entry: SystemEntry, t: (k: string, o?: Record<string, unknown>) => string): string {
   switch (entry.variant) {
@@ -172,6 +183,20 @@ export function systemText(entry: SystemEntry, t: (k: string, o?: Record<string,
       return entry.text
         ? t('table.systemRules', { text: entry.text })
         : t('table.systemRulesEmpty');
+    // #1043 — the durable lifecycle rows. The phase name is interpolated through its own key
+    // rather than printed raw: these rows are read by everyone at the table, in their own
+    // language, and `wrap_up` is not a phrase. An unrecognised phase (a row written by a newer
+    // server) falls back to the generic line instead of rendering a missing-key placeholder.
+    case 'phase': {
+      const phase = entry.data?.phase ?? '';
+      return isKnownPhase(phase) ? t(`table.systemPhase.${phase}`) : t('table.systemPhaseUnknown');
+    }
+    case 'phaseInterrupted': {
+      const interrupted = entry.data?.interrupted ?? '';
+      return t('table.systemPhaseInterrupted', {
+        phase: isKnownPhase(interrupted) ? t(`table.phaseName.${interrupted}`) : interrupted,
+      });
+    }
     case 'info':
     default:
       return t('table.systemInfo', { state: entry.data?.state ?? '' });

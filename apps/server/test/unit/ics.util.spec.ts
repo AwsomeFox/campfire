@@ -57,6 +57,21 @@ function schedule(overrides: Partial<ScheduledSession> = {}): ScheduledSession {
     cancelledBy: null,
     cancellationReason: '',
     sessionId: null,
+    // Organized-play decoration (#588) — the empty/absent defaults every campaign
+    // that never opted in carries, so these cases keep asserting pre-#588 output.
+    seriesId: null,
+    occurrenceIndex: 0,
+    timezone: '',
+    localStart: '',
+    venueId: null,
+    roomId: null,
+    assignedDmUserId: '',
+    capacity: 0,
+    eventId: '',
+    seasonId: '',
+    icsUid: '',
+    icsSequence: 0,
+    originalScheduledAt: null,
     createdAt: '2099-01-01T00:00:00.000Z',
     updatedAt: '2099-01-01T00:00:00.000Z',
     ...overrides,
@@ -127,24 +142,7 @@ describe('RFC 5545 UTF-8 content-line folding', () => {
   it('uses a 1-minute DTEND when durationMinutes is 0 (ended-now)', () => {
     const ics = buildCampaignIcs(
       { id: 1, name: 'Test' },
-      [
-        {
-          id: 9,
-          campaignId: 1,
-          scheduledAt: '2099-06-01T17:30:00.000Z',
-          durationMinutes: 0,
-          title: 'Ended',
-          location: '',
-          notes: '',
-          status: 'scheduled',
-          cancelledAt: null,
-          cancelledBy: null,
-          cancellationReason: '',
-          sessionId: null,
-          createdAt: '2099-01-01T00:00:00.000Z',
-          updatedAt: '2099-01-01T00:00:00.000Z',
-        },
-      ],
+      [schedule({ id: 9, campaignId: 1, scheduledAt: '2099-06-01T17:30:00.000Z', durationMinutes: 0, title: 'Ended' })],
     );
     expect(ics).toContain('DTSTART:20990601T173000Z');
     expect(ics).toContain('DTEND:20990601T173100Z');
