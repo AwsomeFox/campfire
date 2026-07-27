@@ -490,7 +490,7 @@ export default function SessionsPage() {
       >
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
         {/* Timeline list */}
-        <aside className={`min-w-0 space-y-3 ${showDetailOnMobile ? 'hidden lg:block' : ''}`}>
+        <aside className={`cf-print-hide min-w-0 space-y-3 ${showDetailOnMobile ? 'hidden lg:block' : ''}`}>
           {/* AI scribe (issue #342) — configure triggers, run on demand (with a dry-run
               preview), and review recent runs. Renders nothing until the AI DM seat is on. */}
           <ScribePanel campaignId={cid} isDm={isDm} />
@@ -934,18 +934,20 @@ function SessionDetail({
           {session.title || 'Untitled session'}
         </h2>
         <span className="text-muted text-xs">{formatDate(session.playedAt)}</span>
-        <Btn
-          ghost
-          type="button"
-          className="cf-print-hide !min-h-0 !py-1.5 text-xs ml-auto"
-          onClick={() => window.print()}
-        >
-          Print
-        </Btn>
+        {!editing && (
+          <Btn
+            ghost
+            type="button"
+            className="cf-print-hide !min-h-0 !py-1.5 text-xs ml-auto"
+            onClick={() => window.print()}
+          >
+            Print
+          </Btn>
+        )}
       </div>
 
       {editing ? (
-        <Card className="edit-recap-form min-w-0 space-y-3">
+        <Card className="cf-print-editor edit-recap-form min-w-0 space-y-3">
           {protectedRecap.restorePrompt}
           {protectedRecap.leavePrompt}
           <form
@@ -1108,7 +1110,11 @@ function SessionDetail({
         </Card>
       )}
 
-      {!editing && <AttendancePanel sessionId={session.id} campaignId={session.campaignId} />}
+      {!editing && (
+        <div className="cf-print-hide">
+          <AttendancePanel sessionId={session.id} campaignId={session.campaignId} />
+        </div>
+      )}
 
       {canDmWrite && !editing && (
         <div className="cf-print-hide flex gap-2">
@@ -1169,8 +1175,10 @@ function SessionDetail({
 
       {/* Discussion thread on the recap (issue #123) — the shared, between-sessions
           surface: react to the recap, ask the DM, or post an in-character scene. */}
-      <EncounterBacklinksCard campaignId={campaignId} encounters={linkedEncounters ?? []} />
-      <EntityDiscussion campaignId={campaignId} entityType="session" entityId={session.id} />
+      <div className="cf-print-hide">
+        <EncounterBacklinksCard campaignId={campaignId} encounters={linkedEncounters ?? []} />
+        <EntityDiscussion campaignId={campaignId} entityType="session" entityId={session.id} />
+      </div>
     </div>
   );
 }
