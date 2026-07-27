@@ -112,4 +112,10 @@ describe('schema — direct encounter damage metadata (issue #605)', () => {
     expect(CombatantUpdate.safeParse({ hpDelta: -4, damageType: '' }).success).toBe(false);
     expect(CombatantUpdate.safeParse({ hpDelta: -4, damageType: '   ' }).success).toBe(false);
   });
+
+  it('requires a positive dice subtotal when critical metadata includes one', () => {
+    expect(CombatantUpdate.safeParse({ hpDelta: -4, isCrit: true, damageDice: 4 }).success).toBe(true);
+    expect(CombatantUpdate.safeParse({ hpDelta: -4, isCrit: true, damageDice: 0 }).success).toBe(false);
+    expect(CombatantUpdate.safeParse({ hpDelta: -4, isCrit: true, damageDice: -1 }).success).toBe(false);
+  });
 });

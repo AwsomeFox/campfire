@@ -439,6 +439,14 @@ describe('encounters (e2e)', () => {
       expect(meaninglessDiceSubtotal.status).toBe(400);
       expect(meaninglessDiceSubtotal.body.message).toContain('requires a critical hit');
 
+      for (const damageDice of [0, -1]) {
+        const invalidCriticalSubtotal = await request(server)
+          .patch(`/api/v1/encounters/${encounterId}/combatants/${targetId}`)
+          .set(dm)
+          .send({ hpDelta: -4, isCrit: true, damageDice });
+        expect(invalidCriticalSubtotal.status).toBe(400);
+      }
+
       const emptyDamageType = await request(server)
         .patch(`/api/v1/encounters/${encounterId}/combatants/${targetId}`)
         .set(dm)

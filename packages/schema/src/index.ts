@@ -8172,7 +8172,7 @@ export const CombatantUpdate = z.object({
   isCrit: z.boolean().optional(),
   // The dice-only portion of hpDelta.  On a critical hit the engine adds this once,
   // leaving the flat modifier untouched (5e's "double dice, not modifier" rule).
-  damageDice: z.number().int().optional(),
+  damageDice: z.number().int().positive().optional(),
   hpSet: z.number().int().nonnegative().optional(),
   spDelta: z.number().int().optional(),
   spSet: z.number().int().nonnegative().optional(),
