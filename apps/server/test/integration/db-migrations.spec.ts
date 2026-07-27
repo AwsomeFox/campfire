@@ -723,6 +723,76 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     }
   });
 
+  it('0130 creates table_safety_holds identically on a fresh DB and an upgraded one (#599)', () => {
+    // Same drift guard as 0121: bootstrap.sql and the migration must produce the SAME table, or
+    // an upgraded install ends up with a subtly different safety-hold row than a fresh one.
+    expect(MIGRATION_NAMES).toContain('0130_table_safety_holds_599');
+
+    const expected = [
+      'campaign_id',
+      'active',
+      'activated_at',
+      'activated_by_name',
+      'anonymous',
+      'activation_count',
+      'released_at',
+      'released_by',
+      'recovery',
+      'facilitator_note',
+      'updated_at',
+    ].sort();
+
+    const upgradedDir = makeTempDataDir();
+    dataDir = makeTempDataDir();
+    try {
+      const fresh = openDatabase(dataDir);
+      let freshCols: string[];
+      try {
+        freshCols = columnNames(fresh.sqlite, 'table_safety_holds');
+        expect([...freshCols].sort()).toEqual(expected);
+        // The column that must NOT exist. An anonymous hold keeps its promise by the identity
+        // never reaching storage, so there is nothing here for a later projection to forget to
+        // redact or for a DM reading the audit log to join against.
+        expect(freshCols).not.toContain('activated_by_user_id');
+      } finally {
+        fresh.sqlite.close();
+      }
+
+      writeOldSchemaDb(upgradedDir);
+      const upgraded = openDatabase(upgradedDir);
+      try {
+        const upgradedCols = [...columnNames(upgraded.sqlite, 'table_safety_holds')].sort();
+        expect(upgradedCols).toEqual(expected);
+        expect(upgradedCols).toEqual([...freshCols].sort());
+        upgraded.sqlite
+          .prepare(
+            `INSERT INTO table_safety_holds
+               (campaign_id, active, activated_at, anonymous, activation_count, updated_at)
+             VALUES (1, 1, '2026-01-01T00:00:00.000Z', 1, 1, '2026-01-01T00:00:00.000Z')`,
+          )
+          .run();
+        expect(countRows(upgraded.sqlite, 'table_safety_holds')).toBe(1);
+      } finally {
+        upgraded.sqlite.close();
+      }
+
+      // A restart must not drop the row: an un-paused table is exactly what a safety hold
+      // surviving a deploy is supposed to prevent.
+      const again = openDatabase(upgradedDir);
+      try {
+        expect(countRows(again.sqlite, 'table_safety_holds')).toBe(1);
+        const row = again.sqlite.prepare('SELECT active FROM table_safety_holds WHERE campaign_id = 1').get() as
+          | { active: number }
+          | undefined;
+        expect(row?.active).toBe(1);
+      } finally {
+        again.sqlite.close();
+      }
+    } finally {
+      fs.rmSync(upgradedDir, { recursive: true, force: true });
+    }
+  });
+
   it('0138 backfills ai_driver_control_state.collaborative to off on a legacy table (#1051)', () => {
     expect(MIGRATION_NAMES).toContain('0138_ai_collaborative_handoff_1051');
     expect(MIGRATION_NAMES.indexOf('0138_ai_collaborative_handoff_1051')).toBeGreaterThan(

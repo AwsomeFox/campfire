@@ -52,6 +52,7 @@ import {
   type ConnectionSyncState,
 } from '../lib/connectionSync';
 import { KeyboardCommandProvider, useKeyboardCommands, useKeyboardCommandHint } from '../components/KeyboardCommandProvider';
+import { SafetyHoldBar } from '../components/SafetyHoldBar';
 import {
   buildCampaignNavGroups,
   isActiveNavPath,
@@ -1019,6 +1020,12 @@ function LayoutContent() {
             )}
           </div>
         )}
+
+        {/* #599 — the participant safety hold. Mounted here, above <main>, so it is on screen on
+            EVERY campaign route (encounter tracker, AI Table, everything else) rather than only
+            on the surface whose author remembered to add it. It renders nothing outside a
+            campaign, and nothing until the hold read resolves. */}
+        {campaignId !== undefined && <SafetyHoldBar campaignId={campaignId} />}
 
         <main
           ref={mainRef}
