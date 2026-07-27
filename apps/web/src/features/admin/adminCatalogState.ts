@@ -100,6 +100,29 @@ export function availableOperations(selected: CampaignCatalogEntry[]): CampaignC
 }
 
 /**
+ * The selected campaigns, in a stable order, from the page's selection map.
+ *
+ * SELECTION IS HELD BY VALUE AND SURVIVES PAGINATION. It used to be a `Set<number>` with
+ * the entries derived as `items.filter(...)` over the CURRENT page — so ticking twelve
+ * campaigns across three pages showed a count of four and dispatched four. The other
+ * eight were silently dropped: no error, no skip reason, and their boxes still ticked on
+ * the way back. The console did less than the operator asked and called it success.
+ *
+ * Sorted by id so a batch never depends on the order the boxes were clicked: the payload
+ * and its preview fingerprint stay stable, and re-selecting the same campaigns in a
+ * different order does not read as a different batch.
+ *
+ * Lives here rather than inline in the page so tests exercise the function the page
+ * actually calls — a test that re-implemented this derivation would pass regardless of
+ * what the page did, which is precisely the failure it exists to catch.
+ */
+export function selectedEntriesFrom(
+  selected: ReadonlyMap<number, CampaignCatalogEntry>,
+): CampaignCatalogEntry[] {
+  return [...selected.values()].sort((a, b) => a.id - b.id);
+}
+
+/**
  * Keep the chosen operation valid as the selection changes.
  *
  * `availableOperations` narrows with the selection, but the chooser's state does not

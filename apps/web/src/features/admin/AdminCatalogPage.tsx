@@ -41,6 +41,7 @@ import {
   outcomeVariant,
   pageCount,
   reconcileOperation,
+  selectedEntriesFrom,
   storageLabel,
   type BulkArgs,
   type CatalogFilters,
@@ -161,7 +162,24 @@ function AdminCatalog() {
   const [offset, setOffset] = useState(0);
   const [sort, setSort] = useState<CampaignCatalogSort>('activity');
   const [order, setOrder] = useState<'asc' | 'desc'>('desc');
-  const [selected, setSelected] = useState<Set<number>>(new Set());
+  /**
+   * The selected campaigns, BY VALUE rather than by id.
+   *
+   * This deliberately survives pagination, and holding the entries themselves is what
+   * makes that safe. It used to be a `Set<number>` that persisted across pages while the
+   * derived `selectedEntries` was `items.filter(...)` over the CURRENT page only — so
+   * ticking twelve campaigns across three pages showed a count of four and dispatched
+   * four. The other eight were silently dropped: no error, no skip reason, and their
+   * boxes still ticked on the way back. The console did less than the operator asked and
+   * reported success.
+   *
+   * Keeping the entry means a selection off-page still counts, still dispatches, and
+   * still contributes to `availableOperations`. Those retained rows can be stale if the
+   * campaign changed since it was fetched, but only the client-side courtesies read
+   * them — the server re-decides eligibility per item and reports a reason per item, so
+   * a stale row costs an accurate skip rather than a wrong write.
+   */
+  const [selected, setSelected] = useState<Map<number, CampaignCatalogEntry>>(new Map());
   const [operation, setOperation] = useState<CampaignCatalogBulkOperation>('archive');
   const [bulkArgs, setBulkArgs] = useState<BulkArgs>(EMPTY_BULK_ARGS);
   const [reason, setReason] = useState('');
@@ -196,7 +214,9 @@ function AdminCatalog() {
   }, [load]);
 
   const items = useMemo(() => page?.items ?? [], [page]);
-  const selectedEntries = useMemo(() => items.filter((c) => selected.has(c.id)), [items, selected]);
+  // Every selected campaign, including ones on pages the operator has navigated away
+  // from. Sorted by id so the payload and its fingerprint do not depend on click order.
+  const selectedEntries = useMemo(() => selectedEntriesFrom(selected), [selected]);
   const operations = useMemo(() => availableOperations(selectedEntries), [selectedEntries]);
 
   // Keep the chooser honest. When the selection narrows `operations`, a `<select>` whose
@@ -239,11 +259,11 @@ function AdminCatalog() {
     return null;
   }, [operation, bulkArgs, reason]);
 
-  const toggle = (id: number) => {
+  const toggle = (entry: CampaignCatalogEntry) => {
     setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+      const next = new Map(prev);
+      if (next.has(entry.id)) next.delete(entry.id);
+      else next.set(entry.id, entry);
       return next;
     });
     setPreview(null);
@@ -252,7 +272,10 @@ function AdminCatalog() {
   const applyFilters = (next: Partial<CatalogFilters>) => {
     setFilters((prev) => ({ ...prev, ...next }));
     setOffset(0);
-    setSelected(new Set());
+    // Filters redefine which campaigns are even under consideration, so a selection made
+    // against the previous predicate is not meaningful against this one. Paging does NOT
+    // clear — see the `selected` declaration.
+    setSelected(new Map());
     setPreview(null);
   };
 
@@ -277,7 +300,7 @@ function AdminCatalog() {
         // makes the mismatch visible rather than leaving Apply pointed somewhere new.
         setPreviewKey(currentBulkKey);
         if (!dryRun) {
-          setSelected(new Set());
+          setSelected(new Map());
           setPreviewKey(null);
           await load();
         }
@@ -460,7 +483,7 @@ function AdminCatalog() {
                       <input
                         type="checkbox"
                         checked={selected.has(entry.id)}
-                        onChange={() => toggle(entry.id)}
+                        onChange={() => toggle(entry)}
                         aria-label={t('admin.catalog.selectRow', { id: entry.id })}
                       />
                     </td>

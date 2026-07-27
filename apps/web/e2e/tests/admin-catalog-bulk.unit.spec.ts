@@ -7,6 +7,7 @@ import {
   bulkArgsError,
   bulkPayloadFingerprint,
   reconcileOperation,
+  selectedEntriesFrom,
   type BulkArgs,
 } from '../../src/features/admin/adminCatalogState';
 
@@ -212,6 +213,102 @@ test.describe('Apply cannot run a batch that was never previewed', () => {
     // '' is the only value that means "leave it alone", and it is omitted entirely.
     const untouched = buildBulkPayload('set_policy', [1], true, 'r', args({ closePublicInvites: true }));
     expect('aiExternalContentPolicy' in untouched).toBe(false);
+  });
+});
+
+test.describe('a selection spanning pages is not silently dropped', () => {
+  // The selection used to be a `Set<number>` that survived pagination while the derived
+  // entries were `items.filter(...)` over the CURRENT page — so ticking campaigns across
+  // three pages dispatched only the visible ones, with no error and no skip reason. The
+  // model is now a Map holding the entries themselves; these pin what that buys.
+
+  // `derive` IS the function the page calls — imported, not re-implemented. A local
+  // copy would pass no matter what AdminCatalogPage did, which is the exact trap this
+  // suite exists to avoid.
+  const derive = selectedEntriesFrom;
+
+  test('entries selected on earlier pages survive navigating away', () => {
+    const selected = new Map<number, CampaignCatalogEntry>();
+    for (const e of [entry(1, 'active'), entry(2, 'active')]) selected.set(e.id, e);
+    // Page 2 renders entirely different rows; the earlier ticks must persist.
+    for (const e of [entry(30, 'active'), entry(31, 'active')]) selected.set(e.id, e);
+
+    const derived = derive(selected);
+    expect(derived.map((c) => c.id)).toEqual([1, 2, 30, 31]);
+    // The count the header shows and the ids the payload carries are the same four.
+    expect(
+      buildBulkPayload(
+        'archive',
+        derived.map((c) => c.id),
+        true,
+        'r',
+        args(),
+      ).campaignIds,
+    ).toEqual([1, 2, 30, 31]);
+  });
+
+  test('the dispatched batch is exactly what the count claims', () => {
+    // The precise defect: twelve ticked across three pages, count said four, four ran.
+    // Ids chosen to straddle three pages at CATALOG_PAGE_SIZE=25: four on page 1, four
+    // on page 2, four on page 3. Any derivation scoped to a single page loses eight.
+    const ids = [1, 2, 3, 4, 26, 27, 28, 29, 51, 52, 53, 54];
+    const selected = new Map<number, CampaignCatalogEntry>();
+    for (const id of ids) selected.set(id, entry(id, 'active'));
+    const derived = derive(selected);
+    expect(derived).toHaveLength(12);
+    expect(derived.map((c) => c.id)).toEqual(ids);
+    expect(
+      buildBulkPayload(
+        'archive',
+        derived.map((c) => c.id),
+        false,
+        'sweep',
+        args(),
+      ).campaignIds,
+    ).toHaveLength(12);
+  });
+
+  test('unticking removes an off-page entry too', () => {
+    const selected = new Map<number, CampaignCatalogEntry>();
+    for (const e of [entry(1, 'active'), entry(30, 'active'), entry(60, 'active')]) selected.set(e.id, e);
+    selected.delete(30);
+    // 60 is also off-page and must SURVIVE — untick removes one entry, not everything
+    // that happens not to be visible.
+    expect(derive(selected).map((c) => c.id)).toEqual([1, 60]);
+  });
+
+  test('click order does not change the payload or its fingerprint', () => {
+    // Sorting by id keeps the batch and its preview fingerprint stable, so selecting the
+    // same campaigns in a different order does not read as a different batch.
+    const a = new Map<number, CampaignCatalogEntry>();
+    for (const e of [entry(30, 'active'), entry(1, 'active'), entry(2, 'active')]) a.set(e.id, e);
+    const b = new Map<number, CampaignCatalogEntry>();
+    for (const e of [entry(1, 'active'), entry(2, 'active'), entry(30, 'active')]) b.set(e.id, e);
+    expect(derive(a).map((c) => c.id)).toEqual(derive(b).map((c) => c.id));
+    expect(
+      bulkPayloadFingerprint(
+        'archive',
+        derive(a).map((c) => c.id),
+        'r',
+        args(),
+      ),
+    ).toBe(
+      bulkPayloadFingerprint(
+        'archive',
+        derive(b).map((c) => c.id),
+        'r',
+        args(),
+      ),
+    );
+  });
+
+  test('operation eligibility accounts for off-page selections', () => {
+    // A completed campaign ticked on page 1 must still narrow the verbs on page 3,
+    // rather than becoming invisible to `availableOperations` once it scrolls away.
+    const selected = new Map<number, CampaignCatalogEntry>();
+    selected.set(60, entry(60, 'completed')); // ticked on an earlier page, now off-screen
+    expect(derive(selected).map((c) => c.id)).toEqual([60]);
+    expect(availableOperations(derive(selected))).not.toContain('archive');
   });
 });
 
