@@ -34,29 +34,88 @@ export const BACKUP_UPLOAD_STAGE_PREFIX = 'campfire-backup-uploads-';
 export const BACKUP_UPLOAD_STAGE_OWNER_FILE = '.campfire-upload-stage-owner.json';
 let uploadStageRoot: string | undefined;
 
+interface UploadStageOwner {
+  version: 1;
+  pid: number;
+  token?: string;
+  bootId?: string;
+  startTicks?: string;
+}
+
+export type UploadStageProcessState =
+  | { state: 'alive'; bootId: string; startTicks: string }
+  | { state: 'dead' }
+  | { state: 'unknown' };
+
+export type UploadStageProcessLookup = (pid: number) => UploadStageProcessState;
+
+const processToken = crypto.randomUUID();
+
+export function linuxProcessState(pid: number, platform = process.platform): UploadStageProcessState {
+  if (platform !== 'linux') return { state: 'unknown' };
+  let bootId: string;
+  try {
+    bootId = fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
+  } catch {
+    // Without the boot identity we cannot tell a missing proc entry from an
+    // unmounted/inaccessible procfs, so preserve rather than guess stale.
+    return { state: 'unknown' };
+  }
+  if (!bootId) return { state: 'unknown' };
+  let stat: string;
+  try {
+    stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { state: 'dead' };
+    return { state: 'unknown' };
+  }
+  // stat's second field is parenthesized and may contain spaces, so split only
+  // after its final closing parenthesis. starttime is field 22 / index 19 here.
+  const closing = stat.lastIndexOf(')');
+  const fields = closing >= 0 ? stat.slice(closing + 1).trim().split(/\s+/) : [];
+  const startTicks = fields[19];
+  if (!startTicks || !/^\d+$/.test(startTicks)) return { state: 'unknown' };
+  return { state: 'alive', bootId, startTicks };
+}
+
 function uploadStageOwnerPath(root: string): string {
   return path.join(root, BACKUP_UPLOAD_STAGE_OWNER_FILE);
 }
 
-function processIsAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    // EPERM still proves a process exists; only ESRCH means the owner is gone.
-    return (err as NodeJS.ErrnoException).code !== 'ESRCH';
+function shouldReclaimUploadStageOwner(
+  owner: UploadStageOwner,
+  lookup: UploadStageProcessLookup,
+): boolean {
+  // A token is an exact identity proof for this process, including PID 1 after
+  // a container restart. A mismatched token under our own PID is necessarily a
+  // prior process instance and can be reclaimed without relying on /proc.
+  if (owner.pid === process.pid && typeof owner.token === 'string') {
+    return owner.token !== processToken;
   }
+  const state = lookup(owner.pid);
+  if (state.state === 'dead') return true;
+  if (state.state === 'unknown') return false;
+  // A live PID is not enough: only the Linux boot/start identity proves it is
+  // the same process instance that created this root. Missing/legacy metadata
+  // stays conservative and is never removed while liveness is uncertain.
+  if (typeof owner.bootId !== 'string' || typeof owner.startTicks !== 'string') return false;
+  return owner.bootId !== state.bootId || owner.startTicks !== state.startTicks;
 }
 
 /**
  * Best-effort startup reclamation for orphaned Multer upload roots. We only
  * remove a direct child with our exact prefix, a regular owner marker, and a
- * dead recorded owner PID. Roots from a live sibling process (and any unknown
- * or suspicious temp entry) are left untouched.
+ * provably stale recorded process instance. Roots from a live sibling process
+ * (and any unknown or suspicious temp entry) are left untouched.
  */
-export function reclaimStaleUploadStageRoots(tmpDir = os.tmpdir(), currentRoot?: string): void {
+export function reclaimStaleUploadStageRoots(
+  tmpDir = os.tmpdir(),
+  currentRoot?: string,
+  lookup: UploadStageProcessLookup = linuxProcessState,
+): void {
   const parent = path.resolve(tmpDir);
   const current = currentRoot ? path.resolve(currentRoot) : undefined;
+  const uid = typeof process.getuid === 'function' ? process.getuid() : undefined;
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(parent, { withFileTypes: true });
@@ -70,12 +129,35 @@ export function reclaimStaleUploadStageRoots(tmpDir = os.tmpdir(), currentRoot?:
     try {
       const stat = fs.lstatSync(root);
       if (!stat.isDirectory() || stat.isSymbolicLink()) continue;
-      const marker = fs.lstatSync(uploadStageOwnerPath(root));
+      const markerPath = uploadStageOwnerPath(root);
+      const marker = fs.lstatSync(markerPath);
       if (!marker.isFile() || marker.isSymbolicLink()) continue;
-      const owner = JSON.parse(fs.readFileSync(uploadStageOwnerPath(root), 'utf8')) as { pid?: unknown };
-      if (typeof owner.pid !== 'number' || !Number.isInteger(owner.pid) || owner.pid <= 0) continue;
-      if (processIsAlive(owner.pid)) continue;
-      fs.rmSync(root, { recursive: true, force: true });
+      if (
+        (uid !== undefined && (stat.uid !== uid || marker.uid !== uid)) ||
+        (stat.mode & 0o077) !== 0 || (marker.mode & 0o077) !== 0
+      ) continue;
+      const owner = JSON.parse(fs.readFileSync(markerPath, 'utf8')) as UploadStageOwner;
+      if (
+        owner.version !== 1 ||
+        typeof owner.pid !== 'number' || !Number.isInteger(owner.pid) || owner.pid <= 0
+      ) continue;
+      if (!shouldReclaimUploadStageOwner(owner, lookup)) continue;
+      // Recheck both inodes immediately before moving the root aside. The
+      // rename gives us a stable exact target for recursive removal even if a
+      // concurrent process scans the same temp parent.
+      const finalRoot = fs.lstatSync(root);
+      const finalMarker = fs.lstatSync(markerPath);
+      if (
+        !finalRoot.isDirectory() || finalRoot.isSymbolicLink() ||
+        !finalMarker.isFile() || finalMarker.isSymbolicLink() ||
+        (uid !== undefined && (finalRoot.uid !== uid || finalMarker.uid !== uid)) ||
+        (finalRoot.mode & 0o077) !== 0 || (finalMarker.mode & 0o077) !== 0 ||
+        finalRoot.dev !== stat.dev || finalRoot.ino !== stat.ino ||
+        finalMarker.dev !== marker.dev || finalMarker.ino !== marker.ino
+      ) continue;
+      const quarantine = path.join(parent, `${BACKUP_UPLOAD_STAGE_PREFIX}reclaim-${crypto.randomUUID()}`);
+      fs.renameSync(root, quarantine);
+      fs.rmSync(quarantine, { recursive: true, force: true });
     } catch {
       // Cleanup is never allowed to block startup or hide the request result.
     }
@@ -91,7 +173,15 @@ export function createPrivateUploadStageRoot(tmpDir = os.tmpdir()): string {
   const root = fs.mkdtempSync(path.join(tmpDir, BACKUP_UPLOAD_STAGE_PREFIX));
   try {
     fs.chmodSync(root, 0o700);
-    fs.writeFileSync(uploadStageOwnerPath(root), JSON.stringify({ pid: process.pid }), {
+    const identity = linuxProcessState(process.pid);
+    fs.writeFileSync(uploadStageOwnerPath(root), JSON.stringify({
+      version: 1,
+      pid: process.pid,
+      token: processToken,
+      ...(identity.state === 'alive'
+        ? { bootId: identity.bootId, startTicks: identity.startTicks }
+        : {}),
+    }), {
       encoding: 'utf8',
       flag: 'wx',
       mode: 0o600,
