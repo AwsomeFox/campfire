@@ -978,7 +978,29 @@ export class SchedulingService {
     // restore is the exact moment the night becomes eligible to remind again. Restore
     // starts a new incarnation of the night, so it starts with a clean ledger.
     let forced: RawConflict[] = [];
+    // The row this restore actually re-books, re-read inside the transaction.
+    // Everything after it — audit, notification, the returned payload — describes
+    // what was written, so it must describe THIS row, not the snapshot above.
+    let booked: typeof scheduledSessions.$inferSelect = existing;
     this.db.transaction((tx) => {
+      // Re-read INSIDE the transaction, because every value below is derived from
+      // this row and the read above is separated from this write by an await.
+      //
+      // The probe already ran in here; its INPUTS did not, and that was the gap.
+      // A series PATCH may legitimately move a cancelled occurrence's room —
+      // cancelled rows sit outside `scheduleLiveSql()`, so the fan-out skips the
+      // booking check for them by design — and it can commit in that gap. This
+      // restore would then probe the room the row USED to hold, find it free, and
+      // flip a row now pointing at a different, possibly occupied, room to
+      // `scheduled`: a live double-booking created by the one path whose probe
+      // exists to prevent exactly that. The SEQUENCE and the ledger entry came
+      // off the same stale snapshot, so both would have described the wrong room.
+      booked = this.getRowOrThrowTx(tx, id);
+      // Re-validated in here too: if a concurrent restore already won, this one
+      // must not re-probe and re-announce a night that is no longer cancelled.
+      if (booked.status !== 'cancelled') {
+        throw new NotFoundException(`Scheduled session ${id} is not cancelled`);
+      }
       // #588: a restore is a BOOKING, not merely a status flip.
       //
       // Cancelling RELEASES the resource — a cancelled row keeps its `room_id`
@@ -993,10 +1015,10 @@ export class SchedulingService {
       // Probed inside the write transaction like every other booking path, so the
       // answer still holds at the moment the row reclaims the resource.
       const conflicts = findConflictRows(tx, {
-        startsAt: existing.scheduledAt,
-        endsAt: endInstant(existing.scheduledAt, existing.durationMinutes),
-        roomId: existing.roomId,
-        assignedDmUserId: existing.assignedDmUserId,
+        startsAt: booked.scheduledAt,
+        endsAt: endInstant(booked.scheduledAt, booked.durationMinutes),
+        roomId: booked.roomId,
+        assignedDmUserId: booked.assignedDmUserId,
         memberUserIds: [],
         // Cancelled rows are already outside the live filter so this row cannot
         // match its own probe; excluded explicitly anyway so the guarantee does
@@ -1017,7 +1039,7 @@ export class SchedulingService {
           cancellationReason: '',
           // #588: un-cancelling is another update a subscriber must apply on top
           // of the STATUS:CANCELLED copy it already holds, so SEQUENCE advances.
-          icsSequence: existing.icsSequence + 1,
+          icsSequence: booked.icsSequence + 1,
           updatedAt: ts,
         })
         .where(eq(scheduledSessions.id, id))
@@ -1029,23 +1051,23 @@ export class SchedulingService {
       // recorded rather than expressed by deleting the earlier `cancel` entry.
       // Without this a restored night would read, forever, as still cancelled in
       // the lineage the coordinator audits from.
-      if (existing.seriesId != null) {
+      if (booked.seriesId != null) {
         tx.insert(seriesExceptions)
           .values({
-            seriesId: existing.seriesId,
+            seriesId: booked.seriesId,
             occurrenceId: id,
-            recurrenceLocalDate: recurrenceLocalDateFor(existing, seriesTimezoneInTx(tx, existing.seriesId)),
+            recurrenceLocalDate: recurrenceLocalDateFor(booked, seriesTimezoneInTx(tx, booked.seriesId)),
             kind: 'restore',
-            fromScheduledAt: existing.scheduledAt,
-            toScheduledAt: existing.scheduledAt,
-            toLocalStart: existing.localStart,
+            fromScheduledAt: booked.scheduledAt,
+            toScheduledAt: booked.scheduledAt,
+            toLocalStart: booked.localStart,
             // from == to: a restore re-acquires what the row already names.
-            fromRoomId: existing.roomId,
-            toRoomId: existing.roomId,
-            fromAssignedDmUserId: existing.assignedDmUserId,
-            toAssignedDmUserId: existing.assignedDmUserId,
-            fromCapacity: existing.capacity,
-            toCapacity: existing.capacity,
+            fromRoomId: booked.roomId,
+            toRoomId: booked.roomId,
+            fromAssignedDmUserId: booked.assignedDmUserId,
+            toAssignedDmUserId: booked.assignedDmUserId,
+            fromCapacity: booked.capacity,
+            toCapacity: booked.capacity,
             reason,
             actorUserId: user.id,
             createdAt: ts,
@@ -1059,17 +1081,17 @@ export class SchedulingService {
       action: 'schedule.restore',
       entityType: 'session',
       entityId: id,
-      campaignId: existing.campaignId,
+      campaignId: booked.campaignId,
     });
-    this.emitScheduleUpdated(existing.campaignId, id);
+    this.emitScheduleUpdated(booked.campaignId, id);
     await this.notifyScheduleLifecycle(
-      existing.campaignId,
+      booked.campaignId,
       user,
       this.scheduleNotificationData({
-        scheduleId: existing.id,
-        scheduledAt: existing.scheduledAt,
-        durationMinutes: existing.durationMinutes,
-        title: existing.title,
+        scheduleId: booked.id,
+        scheduledAt: booked.scheduledAt,
+        durationMinutes: booked.durationMinutes,
+        title: booked.title,
         changeType: 'updated',
       }),
     );

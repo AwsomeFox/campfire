@@ -3,6 +3,7 @@ import request from 'supertest';
 import type { Database } from 'better-sqlite3';
 import { DB_HOLDER, type DbHolder } from '../src/db/db.module';
 import { OrganizedPlayService } from '../src/modules/sessions/organized-play.service';
+import { SchedulingService } from '../src/modules/sessions/scheduling.service';
 import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'op-dm' };
@@ -1546,6 +1547,83 @@ describe('organized play (e2e)', () => {
     const oneOff = await api().post(`/api/v1/campaigns/${campaignId}/schedule`).set(dm).send({ scheduledAt: '2099-04-21T18:00:00Z' });
     expect((await api().delete(`/api/v1/schedule/${oneOff.body.id}`).set(dm).send({ reason: 'x' })).status).toBe(200);
     expect((await api().post(`/api/v1/schedule/${oneOff.body.id}/restore`).set(dm)).status).toBe(201);
+  });
+
+  it('re-probes the room a cancelled night was MOVED to, not the one it held when restore began', async () => {
+    const scheduling = ctx.app.get(SchedulingService);
+    const opService = ctx.app.get(OrganizedPlayService);
+    const actor = { id: 'dev:op-dm', name: 'OP DM', roles: [] as string[] };
+    const fromRoom = (await api().post(`/api/v1/organized-play/venues/${venueId}/rooms`).set(dm).send({ name: 'Race From' })).body;
+    const toRoom = (await api().post(`/api/v1/organized-play/venues/${venueId}/rooms`).set(dm).send({ name: 'Race To' })).body;
+
+    const mine = await api()
+      .post(`/api/v1/campaigns/${campaignId}/series`)
+      .set(dm)
+      .send({ title: 'Restore Race', timezone: 'UTC', startDate: '2099-11-03', startTime: '18:00', durationMinutes: 180, freq: 'weekly', count: 1, roomId: fromRoom.id });
+    expect(mine.status).toBe(201);
+    const occ = mine.body.occurrences[0];
+    expect((await api().delete(`/api/v1/schedule/${occ.id}`).set(dm).send({ reason: 'DM away' })).status).toBe(200);
+
+    // Another campaign holds the room the occurrence is about to be MOVED to.
+    // Nothing holds the room it currently points at.
+    const rival = await api()
+      .post(`/api/v1/campaigns/${otherCampaignId}/series`)
+      .set(dm)
+      .send({ title: 'Holds Race To', timezone: 'UTC', startDate: '2099-11-03', startTime: '18:00', durationMinutes: 180, freq: 'weekly', count: 1, roomId: toRoom.id });
+    expect(rival.status).toBe(201);
+
+    // Pin the interleaving: restore reads the row, is overtaken by a series PATCH
+    // that moves the cancelled occurrence onto the contended room — legitimate,
+    // because a cancelled row is outside the live filter and the fan-out skips
+    // its booking check by design — and only then runs its transaction.
+    let release!: () => void;
+    const overtaken = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let held = false;
+    // Private on the service; reached through a cast because the suspension point
+    // has to be the read this fix moved, not a public stand-in for it.
+    const target = scheduling as unknown as {
+      getRowWithEffectiveStatus: (id: number) => Promise<unknown>;
+    };
+    const realRead = target.getRowWithEffectiveStatus.bind(target);
+    const spy = jest.spyOn(target, 'getRowWithEffectiveStatus').mockImplementation(async (rowId: number) => {
+      const res = await realRead(rowId);
+      if (!held) {
+        held = true;
+        await overtaken;
+      }
+      return res;
+    });
+
+    let outcome: string;
+    try {
+      // Called at the service layer, so the raw signal surfaces rather than the
+      // 409 the controller renders it into.
+      const restoring = scheduling
+        .restore(occ.id, actor as never, 'dm')
+        .then(() => 'restored')
+        .catch((e: { name?: string }) => `rejected:${e?.name ?? 'err'}`);
+      await new Promise((resolve) => setImmediate(resolve));
+      const moved = await opService.updateSeries(mine.body.id, { roomId: toRoom.id } as never, actor as never, 'dm');
+      expect(moved.occurrences[0].roomId).toBe(toRoom.id);
+      release();
+      outcome = await restoring;
+    } finally {
+      spy.mockRestore();
+    }
+
+    // Probing the STALE room found it free and would have flipped a row now
+    // pointing at the rival's room back to `scheduled` — a live double-booking
+    // created by the one path whose probe exists to prevent it.
+    expect(outcome).toBe('rejected:SeriesConflictSignal');
+    const after = await api().get(`/api/v1/schedule/${occ.id}`).set(dm);
+    expect(after.body.status).toBe('cancelled');
+    expect(after.body.roomId).toBe(toRoom.id);
+    // Rolled back whole: no `restore` on the ledger for an attempt that failed.
+    expect(
+      (await api().get(`/api/v1/organized-play/occurrences/${occ.id}/exceptions`).set(dm)).body.map((e: { kind: string }) => e.kind),
+    ).toEqual(['cancel']);
   });
 
   it('a cancel-then-restore is NOT a metadata override, so later series edits still reach it', async () => {
