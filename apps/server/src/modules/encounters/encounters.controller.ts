@@ -618,7 +618,12 @@ export class EncountersController {
       'delaying / readying an action. The DM may edit any combatant; a player only a combatant linked to a character ' +
       'they own. Changes compose atomically under concurrency.',
   })
-  @ApiResponse({ status: 200, description: 'Updated combatant.' })
+  // 201, not 200: this is a POST with no @HttpCode, so Nest sends its POST default.
+  // The annotation claimed 200 while encounters.e2e-spec.ts has always pinned 201
+  // (issue #1538) — the runtime was right and the docs were wrong. Correcting the
+  // runtime instead would be an observable API change for existing clients, so the
+  // annotation is what moves.
+  @ApiResponse({ status: 201, description: 'Updated combatant.' })
   @ApiResponse({ status: 403, description: 'Not the DM or the owning player.' })
   async turnState(
     @Param('id', ParseIntPipe) id: number,
