@@ -227,6 +227,7 @@ export class BackupArchiveReader {
           source,
           limiter,
           fs.createWriteStream(destination, { flags: 'wx', mode: 0o600 }),
+          { signal },
         );
       }, signal);
       return { bytes: actual, sha256: hash.digest('hex') };
