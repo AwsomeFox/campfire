@@ -965,12 +965,12 @@ export default function RunSessionPage() {
     /** Combatant whose card rolled the damage — attributed as the combat-log actor when set. */
     actorCombatantId?: number;
   } | null>(null);
-  const [pendingConcentrationCheck, setPendingConcentrationCheck] = useState<{
+  const [pendingConcentrationChecks, setPendingConcentrationChecks] = useState<Array<{
     combatantId: number;
     name: string;
     damage: number;
     dc: number;
-  } | null>(null);
+  }>>([]);
   /** Live map layout from BattleMap for AoE hit-testing (issue #626). */
   const [aoeHitLayout, setAoeHitLayout] = useState<AoeHitLayout | null>(null);
   // Issue #414: structured action Use flow — pick targets, preview, apply, undo.
@@ -1503,7 +1503,7 @@ export default function RunSessionPage() {
       const name = queryClient
         .getQueryData<EncounterWithCombatants>(queryKeys.encounter(eid))
         ?.combatants.find((combatant) => combatant.id === variables.combatantId)?.name ?? 'Combatant';
-      setPendingConcentrationCheck({ combatantId: variables.combatantId, name, ...check });
+      setPendingConcentrationChecks((pending) => [...pending, { combatantId: variables.combatantId, name, ...check }]);
     },
     onSettled: () => {
       // Only reconcile after the last in-flight HP write of a burst settles.
@@ -1540,7 +1540,7 @@ export default function RunSessionPage() {
       const bulkOperationId = newOperationId();
       try {
         for (const combatantId of combatantIds) {
-          await api.patch(
+          const response = await api.patch<CombatantUpdateResult>(
             `${API}/encounters/${eid}/combatants/${combatantId}`,
             hpPatchWithActor(
               { hpDelta: delta, idempotencyKey: `${bulkOperationId}:${combatantId}` },
@@ -1549,6 +1549,10 @@ export default function RunSessionPage() {
               isDm,
             ),
           );
+          if (response.data.concentrationCheck) {
+            const name = previous?.combatants.find((combatant) => combatant.id === combatantId)?.name ?? 'Combatant';
+            setPendingConcentrationChecks((pending) => [...pending, { combatantId, name, ...response.data.concentrationCheck! }]);
+          }
         }
         await invalidateEncounter(queryClient, eid);
       } catch (err) {
@@ -2418,22 +2422,25 @@ export default function RunSessionPage() {
         />
       )}
 
-      {pendingConcentrationCheck && (
+      {pendingConcentrationChecks[0] && (
         <div className="card border border-warning" role="alert" aria-live="assertive" style={{ padding: 12 }} data-testid="concentration-check-prompt">
-          <strong>{pendingConcentrationCheck.name} must make a Constitution saving throw.</strong>
+          <strong>{pendingConcentrationChecks[0].name} must make a Constitution saving throw.</strong>
           <p className="text-muted" style={{ margin: '4px 0 10px' }}>
-            Concentration check: DC {pendingConcentrationCheck.dc} ({pendingConcentrationCheck.damage} damage).
+            Concentration check: DC {pendingConcentrationChecks[0].dc} ({pendingConcentrationChecks[0].damage} damage).
           </p>
           <div className="flex gap-2">
-            <button type="button" className="btn btn-ghost" onClick={() => setPendingConcentrationCheck(null)}>
+            <button type="button" className="btn btn-ghost" disabled={combatantTurnState.isPending} onClick={() => setPendingConcentrationChecks((pending) => pending.slice(1))}>
               Passed
             </button>
             <button
               type="button"
               className="btn btn-danger"
+              disabled={combatantTurnState.isPending}
               onClick={() => {
-                patchCombatantTurnState(pendingConcentrationCheck.combatantId, { concentration: null });
-                setPendingConcentrationCheck(null);
+                const check = pendingConcentrationChecks[0];
+                void combatantTurnState
+                  .mutateAsync({ combatantId: check.combatantId, patch: { concentration: null } })
+                  .then(() => setPendingConcentrationChecks((pending) => pending.slice(1)));
               }}
             >
               Failed — end concentration

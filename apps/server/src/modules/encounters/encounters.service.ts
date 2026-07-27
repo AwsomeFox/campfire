@@ -3302,9 +3302,21 @@ export class EncountersService {
             deathState: fresh.deathState as CombatantHpState['deathState'],
             deathSaveSuccesses: fresh.deathSaveSuccesses,
           deathSaveFailures: fresh.deathSaveFailures,
+          // A caster can be concentrating solely through an effect on another
+          // combatant. Inspect the encounter-wide canonical source relationship,
+          // not just this row's display state.
           isConcentrating:
             fromJsonText<{ concentration?: string | null }>(fresh.turnState, {}).concentration != null ||
-            parseConditionInstances(fresh.conditionInstances, fromJsonText<string[]>(fresh.conditions, [])).some((condition) => condition.isConcentration),
+            tx
+              .select()
+              .from(combatants)
+              .where(eq(combatants.encounterId, encounterId))
+              .all()
+              .some((candidate) =>
+                parseConditionInstances(candidate.conditionInstances, fromJsonText<string[]>(candidate.conditions, [])).some(
+                  (condition) => condition.isConcentration && condition.sourceCombatantId === combatantId,
+                ),
+              ),
         };
         const result = applyCombatantHp(state, {
             hpDelta: patch.hpDelta,
@@ -4825,12 +4837,14 @@ export class EncountersService {
       if (patch.resetMovement) turnState.movementUsedFt = 0;
       if (patch.moveFt !== undefined) turnState.movementUsedFt = Math.max(0, turnState.movementUsedFt + patch.moveFt);
       if (patch.concentration !== undefined) {
-        const hadConcentration = turnState.concentration;
         if (patch.concentration !== turnState.concentration) {
           logs.push({ detail: patch.concentration ? `began concentrating on ${patch.concentration}` : 'concentration ended' });
         }
         turnState.concentration = patch.concentration;
-        if (hadConcentration && !patch.concentration) {
+        // A structured concentration source may exist even when the older
+        // turn-state display marker is absent. Clearing concentration must always
+        // clear its canonical links atomically, not depend on that marker.
+        if (!patch.concentration) {
           const allRows = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all();
           const withInstances = allRows.map((r) => ({
             id: r.id,
