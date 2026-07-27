@@ -3,7 +3,12 @@ import { describe, expect, it, jest, afterEach } from '@jest/globals';
 import Database from 'better-sqlite3';
 import { openDatabase, dbFilePath, type DrizzleDb } from '../../src/db/db.module';
 import { campaigns } from '../../src/db/schema';
-import { AiDriverService } from '../../src/modules/ai-driver/ai-driver.service';
+import {
+  AiDriverService,
+  GREETING_PROMPT,
+  WRAP_UP_PROMPT,
+  lifecyclePhaseForInput,
+} from '../../src/modules/ai-driver/ai-driver.service';
 import { AiDmTranscriptService } from '../../src/modules/ai-driver/ai-driver-transcript.service';
 import type { RequestUser } from '../../src/common/user.types';
 import { makeTempDataDir } from './fixtures';
@@ -244,6 +249,48 @@ describe('AI driver control state persistence across restart (#559, real SQLite)
     expect(
       (restarted.service as unknown as { requireReplayInput: (id: number) => string }).requireReplayInput(campaignId),
     ).toBe('I open the crypt door.');
+    // ...and it is recognisably ORDINARY player text, so its retry stays an ordinary turn.
+    expect(lifecyclePhaseForInput('I open the crypt door.')).toBeUndefined();
+  });
+
+  it('a failed lifecycle turn is still replayable AS a lifecycle turn after a restart (#1043)', () => {
+    // WHAT THIS GUARDS. The retry/nudge lever replays `last_input`, and a lifecycle turn is not
+    // reproducible from that string alone — the phase selects the direction block and lifts the
+    // `ended` gate. An earlier fix held that phase in a parallel in-memory map, which meant the
+    // input survived a restart and its qualifier did not: a retried greeting came back as an
+    // ordinary active turn, and a retried wrap-up was refused outright by the `ended` gate.
+    //
+    // The phase is now DERIVED from the input, so there is no second value that can fail to
+    // survive. This asserts the one stateful link that remains: `last_input` round-trips a
+    // lifecycle prompt through real SQLite byte-for-byte, so the derivation still answers on the
+    // far side of a restart.
+    for (const [prompt, expected] of [
+      [GREETING_PROMPT, 'greeting'],
+      [WRAP_UP_PROMPT, 'wrap_up'],
+    ] as const) {
+      const first = firstBoot();
+      const session = first.service.getSession(campaignId);
+      // The shape a failed greeting/wrap-up leaves behind: the transient phase is bounded by its
+      // turn, so it has already settled, and only the stuck ladder shows the failure.
+      session.state = 'awaiting_players';
+      session.stuck = { reason: 'provider_error', detail: 'provider failed', since: '2026-07-26T00:00:01.000Z', turn: 1 };
+      session.phase = expected === 'greeting' ? 'active' : 'ended';
+      (first.service as unknown as { lastInputs: Map<number, string> }).lastInputs.set(campaignId, prompt);
+      (first.service as unknown as { persistControlState: (s: unknown) => void }).persistControlState(session);
+
+      const restarted = boot();
+      const recovered = restarted.service.getSession(campaignId);
+      expect(recovered.levers).toContain('retry');
+      const replay = (
+        restarted.service as unknown as { requireReplayInput: (id: number) => string }
+      ).requireReplayInput(campaignId);
+      expect(replay).toBe(prompt);
+      expect(lifecyclePhaseForInput(replay)).toBe(expected);
+
+      open?.sqlite.close();
+      open = null;
+      fs.rmSync(dataDir, { recursive: true, force: true });
+    }
   });
 
   it('parks a turn that was generating when the process died into an audited pause', () => {
