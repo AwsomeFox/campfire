@@ -6699,7 +6699,7 @@ function CombatLog({ events }: { events: EncounterEvent[] }) {
   }, [events]);
 
   return (
-    <Card className="space-y-2" id="combat-log">
+    <Card className="space-y-2 min-w-0" id="combat-log">
       <h2 id={headingId} className="card-kicker" style={{ margin: 0 }}>Combat log</h2>
       <div
         ref={logRef}
@@ -6707,8 +6707,8 @@ function CombatLog({ events }: { events: EncounterEvent[] }) {
         aria-labelledby={headingId}
         aria-live="off"
         tabIndex={0}
-        className="reading-supporting"
-        style={{ maxHeight: 260, overflowY: 'auto', overflowAnchor: 'none' }}
+        className="reading-supporting min-w-0"
+        style={{ maxHeight: 260, overflowY: 'auto', overflowX: 'hidden', overflowAnchor: 'none', overflowWrap: 'anywhere' }}
       >
         {events.length === 0 ? (
           <p className="text-muted" style={{ fontSize: 12, margin: 0 }}>
