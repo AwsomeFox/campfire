@@ -427,6 +427,7 @@ export class AdminCatalogService {
           field: '',
           before: '',
           after: '',
+          stateVersion: '',
         });
       }
     }
@@ -587,13 +588,14 @@ export class AdminCatalogService {
     req: CampaignCatalogBulkRequest,
     actor: Actor,
   ): Promise<CampaignCatalogBulkItemResult> {
-    const skip = (reason: string): CampaignCatalogBulkItemResult => ({
+    const skip = (reason: string, stateVersion = ''): CampaignCatalogBulkItemResult => ({
       campaignId,
       outcome: 'skipped',
       reason,
       field: '',
       before: '',
       after: '',
+      stateVersion,
     });
 
     const [row] = await this.db
@@ -605,6 +607,7 @@ export class AdminCatalogService {
         publicInvitesEnabled: campaigns.publicInvitesEnabled,
         aiExternalContentPolicy: campaigns.aiExternalContentPolicy,
         deletedAt: campaigns.deletedAt,
+        updatedAt: campaigns.updatedAt,
       })
       .from(campaigns)
       .where(eq(campaigns.id, campaignId))
@@ -613,14 +616,40 @@ export class AdminCatalogService {
     if (!row) return skip('campaign not found');
     // A trashed campaign is on its way out; lifecycle edits to it would resurrect
     // confusion rather than resolve it. Restoring is a separate, deliberate act.
-    if (row.deletedAt) return skip('campaign is in the trash');
+    if (row.deletedAt) return skip('campaign is in the trash', row.updatedAt);
+
+    // APPLY ONLY THE PLAN THAT WAS PREVIEWED.
+    //
+    // The client can tell when IT changed the request, but not when the CAMPAIGN moved
+    // underneath it. Without this, a dry run that reported a completed campaign as
+    // `skipped` ("already in the requested state") became a real archive if a DM
+    // reactivated it before the operator clicked Apply — `planChange` simply replanned
+    // from the new state and wrote a change nobody had seen or agreed to. On a console
+    // whose verbs rewrite ownership and privacy across up to 200 campaigns at once,
+    // "what you agreed to" and "what runs" have to be the same thing.
+    //
+    // The version is the campaign's `updated_at`, which moves on ANY write, so this is
+    // deliberately conservative: an unrelated edit also forces a re-preview. Refusing
+    // and asking to look again is the honest failure; silently applying a different plan
+    // is the one being removed.
+    //
+    // SKIPPED, not failed, and not fatal to the batch — a 200-campaign run that aborts
+    // because one campaign moved is its own bad outcome. Absent preconditions (an API
+    // client that never previewed) leave behaviour unchanged.
+    const precondition = req.preconditions?.find((p) => p.campaignId === campaignId);
+    if (precondition && precondition.stateVersion !== row.updatedAt) {
+      return skip('campaign changed since the preview; run the dry run again', row.updatedAt);
+    }
 
     const plan = await this.planChange(row, req, actor);
-    if (plan === null) return skip('already in the requested state');
-    if (typeof plan === 'string') return skip(plan);
+    // Both carry the version too: a no-op or ineligible verdict is still a PLAN the
+    // operator saw, and it must be pinnable — the reactivated-campaign case is precisely
+    // a `skipped` verdict turning into a real write.
+    if (plan === null) return skip('already in the requested state', row.updatedAt);
+    if (typeof plan === 'string') return skip(plan, row.updatedAt);
 
     if (req.dryRun) {
-      return { campaignId, outcome: 'would_apply', reason: '', ...plan.summary };
+      return { campaignId, outcome: 'would_apply', reason: '', ...plan.summary, stateVersion: row.updatedAt };
     }
 
     plan.apply();
@@ -668,7 +697,7 @@ export class AdminCatalogService {
       auditNote = 'applied, but the audit row could not be written';
     }
 
-    return { campaignId, outcome: 'applied', reason: auditNote, ...plan.summary };
+    return { campaignId, outcome: 'applied', reason: auditNote, ...plan.summary, stateVersion: row.updatedAt };
   }
 
   /**
@@ -708,8 +737,26 @@ export class AdminCatalogService {
 
     const statusChange = (next: 'active' | 'paused' | 'completed') => {
       if (row.status === next) return null;
+      // THE PREVIEW MUST NAME EVERY WRITE, NOT JUST THE HEADLINE ONE.
+      //
+      // Moving out of `active` also closes public invites (see apply()). That mutation
+      // is correct — it mirrors the DM-facing path in CampaignsService.update — but the
+      // dry run reported only `status: active -> completed`, so an operator archiving a
+      // campaign with live join links was never told those links would stop working and
+      // would need a DM to deliberately re-enable them after reactivation. The behaviour
+      // was right and its description was incomplete, which for a dry run is the same
+      // defect: the preview is the only thing the operator consents to.
+      //
+      // Folded into `after` rather than a new field so it flows into the per-campaign
+      // audit detail too — that row is built from this summary, and the trail should not
+      // record less than the preview showed.
+      const closesInvites = next !== 'active' && row.publicInvitesEnabled;
       return {
-        summary: { field: 'status', before: row.status, after: next },
+        summary: {
+          field: 'status',
+          before: row.status,
+          after: closesInvites ? `${next} (closes public invites)` : next,
+        },
         apply: () => {
           this.db.transaction((tx) => {
             // Moving a campaign out of `active` also closes public invites, mirroring

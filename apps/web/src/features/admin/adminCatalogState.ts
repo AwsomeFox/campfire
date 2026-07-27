@@ -254,8 +254,24 @@ export function buildBulkPayload(
   dryRun: boolean,
   reason: string,
   args: BulkArgs,
+  /**
+   * The dry run this apply is executing, when there is one. Its per-item
+   * `stateVersion`s ride along as preconditions so the server applies the plan that was
+   * PREVIEWED rather than replanning from state that has moved since — a DM reactivating
+   * a completed campaign between preview and apply otherwise turns a `skipped` verdict
+   * into a real archive nobody saw. Omitted on the dry run itself, which has nothing to
+   * pin yet.
+   */
+  preview?: CampaignCatalogBulkResult | null,
 ): Record<string, unknown> {
   const body: Record<string, unknown> = { operation, campaignIds, dryRun, reason };
+  if (!dryRun && preview) {
+    const selected = new Set(campaignIds);
+    const preconditions = preview.results
+      .filter((r) => selected.has(r.campaignId) && r.stateVersion !== '')
+      .map((r) => ({ campaignId: r.campaignId, stateVersion: r.stateVersion }));
+    if (preconditions.length > 0) body.preconditions = preconditions;
+  }
   switch (operation) {
     case 'reassign_owner':
       body.toUserId = Number(args.toUserId.trim());

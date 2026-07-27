@@ -9887,6 +9887,16 @@ export const CampaignCatalogBulkItemResult = z.object({
   field: z.string().max(60).default(''),
   before: z.string().max(200).default(''),
   after: z.string().max(200).default(''),
+  /**
+   * The campaign's `updated_at` at the moment this verdict was computed.
+   *
+   * A dry run is only a safety property if Apply performs the plan that was PREVIEWED.
+   * The client can detect its own edits, but not the campaign moving underneath it — a
+   * DM reactivating a completed campaign between preview and apply turns a `skipped`
+   * verdict into a real archive the operator never saw. Echoing the version the plan was
+   * computed from lets Apply carry it back as a precondition.
+   */
+  stateVersion: z.string().max(64).default(''),
 });
 export type CampaignCatalogBulkItemResult = z.infer<typeof CampaignCatalogBulkItemResult>;
 
@@ -9928,6 +9938,22 @@ export const CampaignCatalogBulkRequest = z
      * request time instead. Defaults to `backup` when omitted.
      */
     exportProfile: ExportProfile.optional(),
+    /**
+     * Per-campaign preconditions carried back from a dry run.
+     *
+     * Each entry pins the `stateVersion` the previewed verdict was computed from. A
+     * campaign whose version has moved is SKIPPED with a reason rather than replanned
+     * from its new state — the operator agreed to a specific plan, and silently applying
+     * a different one is the failure a dry run exists to prevent. Skipping per item
+     * rather than rejecting the batch is deliberate: a 200-campaign run that aborts
+     * because one campaign moved is its own bad outcome.
+     *
+     * Optional, so an API client that never previews is unaffected.
+     */
+    preconditions: z
+      .array(z.object({ campaignId: Id, stateVersion: z.string().max(64) }))
+      .max(200)
+      .optional(),
   })
   .strict();
 export type CampaignCatalogBulkRequest = z.infer<typeof CampaignCatalogBulkRequest>;

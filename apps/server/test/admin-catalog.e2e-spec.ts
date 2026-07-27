@@ -342,8 +342,13 @@ describe('Issue #587: campaign catalog paging, filtering and bulk lifecycle (e2e
         outcome: 'would_apply',
         field: 'status',
         before: 'active',
-        after: 'completed',
       });
+      // The preview names EVERY write it would perform, not just the headline one: this
+      // campaign has public invites on, and archiving closes them. Asserted as a prefix
+      // plus the consequence so the test does not re-encode a description that is
+      // deliberately allowed to grow.
+      expect(String(res.body.results[0].after)).toMatch(/^completed/);
+      expect(res.body.results[0].after).toContain('closes public invites');
 
       const entry = await admin.get(`/api/v1/admin/campaigns/${aIds[1]}`);
       expect(entry.body.status).toBe('active'); // untouched
@@ -661,6 +666,124 @@ describe('Issue #587: campaign catalog paging, filtering and bulk lifecycle (e2e
         reason: 'close invites',
       });
       expect(closed.status).toBe(201);
+    });
+
+    it('applies only the plan that was previewed, skipping campaigns that moved', async () => {
+      // The dry run is the only thing an operator consents to. Without a precondition,
+      // `applyOne` replans from CURRENT state: a preview that reported a completed
+      // campaign as `skipped` became a real archive if a DM reactivated it in between —
+      // a write nobody saw. The client can detect its own edits but not the campaign
+      // moving underneath it.
+      const target = aIds[4];
+
+      // Put it in `completed` so an `archive` preview is a genuine no-op skip.
+      await bulk({ operation: 'archive', campaignIds: [target], dryRun: false, reason: 'set up completed' });
+      const preview = await bulk({ operation: 'archive', campaignIds: [target], dryRun: true, reason: 'preview' });
+      expect(preview.status).toBe(201);
+      const item = (preview.body.results as Array<{ campaignId: number; outcome: string; stateVersion: string }>)[0];
+      expect(item.outcome).toBe('skipped');
+      expect(item.stateVersion).not.toBe('');
+
+      // A DM reactivates it before Apply — exactly the interleaving that used to convert
+      // the skip into a silent archive.
+      const reactivated = await bulk({
+        operation: 'activate',
+        campaignIds: [target],
+        dryRun: false,
+        reason: 'DM brings it back',
+      });
+      expect(reactivated.body.applied).toBe(1);
+
+      // Apply carrying the previewed version must NOT archive it.
+      const applied = await bulk({
+        operation: 'archive',
+        campaignIds: [target],
+        dryRun: false,
+        reason: 'apply the preview',
+        preconditions: [{ campaignId: target, stateVersion: item.stateVersion }],
+      });
+      expect(applied.status).toBe(201);
+      expect(applied.body.applied).toBe(0);
+      expect(applied.body.skipped).toBe(1);
+      expect(applied.body.results[0].reason).toContain('changed since the preview');
+
+      // And the campaign really is still active — the unseen write did not happen.
+      const entry = await admin.get(`/api/v1/admin/campaigns/${target}`);
+      expect(entry.body.status).toBe('active');
+
+      // One moved campaign must not abort the rest of a batch.
+      const other = aIds[0];
+      const mixed = await bulk({
+        operation: 'archive',
+        campaignIds: [target, other],
+        dryRun: false,
+        reason: 'mixed batch',
+        preconditions: [{ campaignId: target, stateVersion: item.stateVersion }],
+      });
+      expect(mixed.status).toBe(201);
+      expect(mixed.body.skipped).toBeGreaterThanOrEqual(1);
+      const byId = Object.fromEntries(
+        (mixed.body.results as Array<{ campaignId: number; outcome: string }>).map((r) => [r.campaignId, r.outcome]),
+      );
+      expect(byId[target]).toBe('skipped');
+      expect(byId[other]).not.toBe('skipped');
+
+      await bulk({ operation: 'activate', campaignIds: [other], dryRun: false, reason: 'undo' });
+    });
+
+    it('tells the operator that archiving will close public invites', async () => {
+      // The mutation is correct — it mirrors CampaignsService.update — but the dry run
+      // described only the status change, so an operator archiving a campaign with live
+      // join links was never told those links stop working until a DM re-enables them.
+      // For a preview, an incomplete description IS the defect.
+      const target = aIds[3];
+      const db = new Database(path.join(ctx.dataDir, 'campfire.db'));
+      try {
+        db.prepare('UPDATE campaigns SET status = ?, public_invites_enabled = 1 WHERE id = ?').run(
+          'active',
+          target,
+        );
+      } finally {
+        db.close();
+      }
+
+      const preview = await bulk({ operation: 'archive', campaignIds: [target], dryRun: true, reason: 'preview' });
+      expect(preview.status).toBe(201);
+      const item = (preview.body.results as Array<{ outcome: string; after: string }>)[0];
+      expect(item.outcome).toBe('would_apply');
+      expect(item.after).toContain('closes public invites');
+
+      // A campaign with no live links must NOT claim it closes them. `public_invites_enabled`
+      // defaults to TRUE, so this has to be set explicitly rather than assumed.
+      const quiet = aIds[0];
+      const db2 = new Database(path.join(ctx.dataDir, 'campfire.db'));
+      try {
+        db2
+          .prepare("UPDATE campaigns SET status = 'active', public_invites_enabled = 0 WHERE id = ?")
+          .run(quiet);
+      } finally {
+        db2.close();
+      }
+      const quietPreview = await bulk({
+        operation: 'archive',
+        campaignIds: [quiet],
+        dryRun: true,
+        reason: 'preview',
+      });
+      const quietItem = (quietPreview.body.results as Array<{ after: string }>)[0];
+      expect(quietItem.after).not.toContain('closes public invites');
+
+      // And the audit trail records what the preview promised, not less.
+      const applied = await bulk({ operation: 'archive', campaignIds: [target], dryRun: false, reason: 'apply' });
+      expect(applied.body.applied).toBe(1);
+      const trail = await dmA.get(`/api/v1/campaigns/${target}/audit`).query({ limit: 20 });
+      const rows = (Array.isArray(trail.body) ? trail.body : trail.body.items) as Array<{
+        action: string;
+        detail: string;
+      }>;
+      const row = rows.find((r) => r.action === 'campaign.catalog.archive');
+      expect(row).toBeDefined();
+      expect(row!.detail).toContain('closes public invites');
     });
 
     it('refuses to pin a campaign to a rule pack this server does not have', async () => {

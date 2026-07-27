@@ -308,6 +308,10 @@ function AdminCatalog() {
             dryRun,
             reason,
             bulkArgs,
+            // On a real run, carry the previewed per-campaign versions so the server
+            // applies the plan that was shown rather than replanning from state that has
+            // since moved. A campaign that changed comes back as a skip with a reason.
+            dryRun ? null : preview,
           ),
         );
         setPreview(result);
@@ -325,7 +329,7 @@ function AdminCatalog() {
         setBusy(false);
       }
     },
-    [operation, reason, bulkArgs, selectedEntries, currentBulkKey, load, t],
+    [operation, reason, bulkArgs, selectedEntries, currentBulkKey, preview, load, t],
   );
 
   if (loading && !page) {
