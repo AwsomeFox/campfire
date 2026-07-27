@@ -163,6 +163,12 @@ export function systemText(entry: SystemEntry, t: (k: string, o?: Record<string,
       return t('table.systemScene', { text: entry.text ?? '' });
     case 'stuck':
       return entry.text ? `${t('table.systemStuck')} ${entry.text}` : t('table.systemStuck');
+    case 'withheld':
+      // #598 — the server supplies the neutral sentence (the same copy the stuck detail and the
+      // audit trail carry); the localized prefix stands alone if it is missing. Nothing here
+      // ever describes WHAT was withheld — that would hand the table the content the withhold
+      // exists to keep from them.
+      return entry.text ? `${t('table.systemWithheld')} ${entry.text}` : t('table.systemWithheld');
     case 'recovered':
       return t('table.systemRecovered');
     case 'paused':
