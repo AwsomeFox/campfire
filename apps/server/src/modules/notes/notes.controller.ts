@@ -69,8 +69,17 @@ export class CampaignNotesController {
   }
 
   @Post('notes')
-  @ApiOperation({ summary: 'Create a note', description: 'Requires campaign membership. Optionally attached to an entity (entityType/entityId) with a visibility (private/dm_shared/party_shared).' })
+  @ApiOperation({
+    summary: 'Create a note',
+    description:
+      'Requires campaign membership. Optionally attached to an entity (entityType/entityId) with a visibility ' +
+      '(private/dm_shared/party_shared/whisper). Issue #597: a read-only (viewer) seat may create PRIVATE notes — ' +
+      'they reach nobody — but any OUTBOUND visibility (dm_shared, party_shared, whisper) requires the ' +
+      'interactive-guest capability and is otherwise refused with 403. The gate is applied in NotesService, ' +
+      'against the resulting visibility.',
+  })
   @ApiResponse({ status: 201, description: 'Created note.' })
+  @ApiResponse({ status: 403, description: 'Read-only (viewer) seat attempting an outbound visibility.' })
   async create(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @Body() body: NoteCreateDto,
@@ -81,13 +90,22 @@ export class CampaignNotesController {
   }
 
   @Post('inbox')
-  @ApiOperation({ summary: 'Submit an inbox item', description: 'Requires campaign membership. Inbox items are dm-facing suggestions/questions, distinct from regular notes.' })
+  @ApiOperation({
+    summary: 'Submit an inbox item',
+    description:
+      'Requires an INTERACTIVE campaign seat (issue #597). Inbox items are dm-facing suggestions/questions, ' +
+      'distinct from regular notes, and they notify every DM — so a read-only viewer seat is refused with 403 ' +
+      'unless it holds the interactive-guest capability.',
+  })
   @ApiResponse({ status: 201, description: 'Created inbox item.' })
+  @ApiResponse({ status: 403, description: 'Read-only (viewer) seat without the interactive-guest capability.' })
   async createInbox(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @Body() body: InboxCreateDto,
     @CurrentUser() user: RequestUser,
   ) {
+    // The capability gate itself lives in NotesService.createInbox so the MCP tool
+    // passes through it too (issue #597).
     const role = await this.access.requireMember(user, campaignId, { write: true });
     return this.notes.createInbox(campaignId, body, user, role);
   }

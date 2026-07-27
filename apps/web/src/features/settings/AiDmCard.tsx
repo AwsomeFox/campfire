@@ -52,7 +52,7 @@ export const MODES: { value: AiDmMode; label: string; blurb: string }[] = [
     value: 'driver',
     label: 'Driver',
     blurb:
-      'Acts. The AI holds the DM seat and runs the session directly — it narrates, rolls dice, applies HP and conditions, awards XP, advances turns, reveals map regions, and jots table notes within the budget you set. Canon edits (new NPCs, quests, locations) still become proposals for your review. Requires the experimental server flag, a positive token budget, and a configured provider.',
+      'Acts. The AI holds the DM seat and runs the session directly — it narrates, rolls dice, applies HP and conditions, awards XP, advances turns, creates an encounter when the scene calls for one (always as DM-only prep, hidden until you reveal it), reveals map regions, and jots table notes within the budget you set. Canon edits (new NPCs, quests, locations) still become proposals for your review. Requires the experimental server flag, a positive token budget, and a configured provider.',
   },
 ];
 
@@ -610,6 +610,10 @@ function TableStyleSection({
       const updated = await api.put<AiDmSeat>(`${API}/campaigns/${campaignId}/ai-dm`, { stylePresets: presets });
       onChanged(updated);
       setSaved(true);
+      // Matches every other section on this card: the confirmation is a flash, not a state.
+      // Without this the "Saved." line stays up indefinitely and reads as still-current
+      // after the DM has gone on to edit something else.
+      setTimeout(() => setSaved(false), 2000);
     } catch (e) {
       setError(e instanceof ApiError ? e.message : 'Could not save table style.');
     } finally {
