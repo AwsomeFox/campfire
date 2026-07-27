@@ -192,6 +192,9 @@ describe('backup streaming writer (#603)', () => {
     const estimate = jest
       .spyOn(svc as any, 'estimateFallbackBackupBytes')
       .mockReturnValue(stagingBytes);
+    const sameFilesystem = jest
+      .spyOn(svc as any, 'pathsShareFilesystem')
+      .mockReturnValue(true);
     const probeDisk = jest.spyOn(svc as any, 'probeDisk');
     const shareFs = jest.spyOn(svc as any, 'pathsShareFilesystem').mockReturnValue(sameDevice);
     const statfs = jest.spyOn(fs, 'statfsSync').mockReturnValue({
@@ -209,6 +212,7 @@ describe('backup streaming writer (#603)', () => {
       statfs.mockRestore();
       shareFs.mockRestore();
       probeDisk.mockRestore();
+      sameFilesystem.mockRestore();
       estimate.mockRestore();
     };
     return { svc, backupDir, stagingBytes, archiveBytes, probeDisk, createStream, restore };

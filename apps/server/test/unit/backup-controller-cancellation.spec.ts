@@ -67,6 +67,10 @@ describe('BackupController download cancellation', () => {
     await expect(new BackupController(backup as never).download(req as never, res as never)).rejects.toThrow(
       'reconciliation',
     );
+    // Headers are committed on the first archive byte, so a pre-stream failure must
+    // never have set them: there is nothing to clean up and Nest's JSON error response
+    // goes out with its own Content-Type rather than `application/zip`.
+    expect(res.set).not.toHaveBeenCalled();
   });
 
   it('destroys rather than rethrows when the archive fails after bytes are committed', async () => {

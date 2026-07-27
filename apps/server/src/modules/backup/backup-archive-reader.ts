@@ -95,10 +95,7 @@ export class BackupArchiveReader {
     const limits = { ...DEFAULT_LIMITS, ...overrides };
     let stat: fs.Stats;
     try { stat = await fs.promises.stat(filePath); } catch { invalid('uploaded archive is unavailable'); }
-    if (!stat.isFile()) invalid('uploaded archive is not a regular file');
-    if (stat.size > limits.maxCompressedBytes) {
-      // Report the limit actually in force. It is overridable per call, so a hard-coded
-      // "1 GiB" would misdescribe the rejection a caller with tighter limits just hit.
+    if (!stat.isFile() || stat.size > limits.maxCompressedBytes) {
       const limit = limits.maxCompressedBytes === DEFAULT_LIMITS.maxCompressedBytes
         ? '1 GiB'
         : `${limits.maxCompressedBytes} byte${limits.maxCompressedBytes === 1 ? '' : 's'}`;
@@ -161,10 +158,6 @@ export class BackupArchiveReader {
         zip.once('error', fail);
         zip.on('entry', onEntry);
         zip.once('end', onEnd);
-        // The openZip() above is async and abort events are not replayed to a listener
-        // registered after they fire, so the pre-open check alone would let a cancelled
-        // request still enumerate the whole central directory.
-        if (signal?.aborted) { abort(); return; }
         zip.readEntry();
       });
       return new BackupArchiveReader(zip, entries, limits);
@@ -208,17 +201,16 @@ export class BackupArchiveReader {
             callback(null, chunk);
           },
         });
-        // Open the destination here, not before this.stream(), so pipeline() owns its
-        // error from birth. Creating it earlier left it unowned across the async
-        // openReadStream await: an ENOSPC/EACCES emitted in that window is an
-        // unhandled stream 'error', i.e. an uncaught exception that kills the server.
-        // A full disk during a restore must fail the restore, not the process.
-        const output = fs.createWriteStream(destination, { flags: 'wx', mode: 0o600 });
-        await pipeline(source, limiter, output);
+        // Create the destination only as pipeline takes ownership, after the
+        // ZIP source has opened, so every filesystem error has a listener.
+        await pipeline(
+          source,
+          limiter,
+          fs.createWriteStream(destination, { flags: 'wx', mode: 0o600 }),
+        );
       }, signal);
       return { bytes: actual, sha256: hash.digest('hex') };
     } catch (err) {
-      // pipeline() has already destroyed the destination on failure.
       await fs.promises.rm(destination, { force: true });
       throw err;
     }
@@ -226,29 +218,20 @@ export class BackupArchiveReader {
 
   private async stream(entry: Entry, consume: (source: Readable) => Promise<void>, signal?: AbortSignal): Promise<void> {
     if (signal?.aborted) invalid('archive read was cancelled');
-    let source: Readable;
+    let source: Readable | null = null;
+    const abort = () => source?.destroy(new Error('aborted'));
     try {
       source = await new Promise<Readable>((resolve, reject) => this.zip.openReadStream(entry, (err, stream) => err || !stream ? reject(err ?? new Error('Cannot open entry')) : resolve(stream)));
-    } catch (err) {
-      // A readable central directory can still point at a corrupt or truncated local
-      // entry header, which rejects here — before the consume mapping below. That is a
-      // bad archive (400); letting the raw yauzl error escape reported it as a server
-      // fault (500) and sent the operator looking in the wrong place.
-      if (isSystemIoError(err)) throw err;
-      invalid(signal?.aborted ? 'archive read was cancelled' : 'entry is malformed, truncated, or exceeds its size limit');
+      signal?.addEventListener('abort', abort, { once: true });
+      // Cancellation can occur while openReadStream's callback is pending. Abort
+      // events are not replayed to a listener registered after they fire, so
+      // close the newly opened source before any restore bytes are consumed.
+      if (signal?.aborted) {
+        source.destroy();
+        invalid('archive read was cancelled');
+      }
+      await consume(source);
     }
-    const abort = () => source.destroy(new Error('aborted'));
-    signal?.addEventListener('abort', abort, { once: true });
-    // Cancellation can occur while openReadStream's callback is pending, and abort events
-    // are not replayed to a listener registered after they fire. Without this recheck the
-    // entry would be read in full despite the cancellation — on the restore path that means
-    // work continuing toward a destructive apply after the operator cancelled.
-    if (signal?.aborted) {
-      source.destroy();
-      signal.removeEventListener('abort', abort);
-      invalid('archive read was cancelled');
-    }
-    try { await consume(source); }
     catch (err) {
       if (err instanceof BadRequestException) throw err;
       if (isSystemIoError(err)) throw err;

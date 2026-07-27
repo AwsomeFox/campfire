@@ -161,6 +161,12 @@ export class ExportController {
         // failed response. Do not ask Nest to write a second JSON error response
         // over committed ZIP headers.
         if (res.headersSent || res.destroyed) return;
+        // Projection can fail before archiver emits a byte. Restore a normal
+        // error-response header state so Nest's exception filter sends JSON
+        // instead of a misleading attachment named like a ZIP archive.
+        res.removeHeader('Content-Type');
+        res.removeHeader('Content-Disposition');
+        res.removeHeader('X-Campfire-Export-Profile');
         throw err;
       } finally {
         res.off('close', onClose);
