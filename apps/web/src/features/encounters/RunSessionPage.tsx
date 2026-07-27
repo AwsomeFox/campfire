@@ -25,6 +25,7 @@ import type {
   CampaignLibraryMonster,
   Character,
   Combatant,
+  CombatantUpdateResult,
   CombatantKind,
   ConditionInstance,
   CombatantStatblock as CombatantStatblockData,
@@ -964,6 +965,12 @@ export default function RunSessionPage() {
     /** Combatant whose card rolled the damage — attributed as the combat-log actor when set. */
     actorCombatantId?: number;
   } | null>(null);
+  const [pendingConcentrationCheck, setPendingConcentrationCheck] = useState<{
+    combatantId: number;
+    name: string;
+    damage: number;
+    dc: number;
+  } | null>(null);
   /** Live map layout from BattleMap for AoE hit-testing (issue #626). */
   const [aoeHitLayout, setAoeHitLayout] = useState<AoeHitLayout | null>(null);
   // Issue #414: structured action Use flow — pick targets, preview, apply, undo.
@@ -1465,7 +1472,7 @@ export default function RunSessionPage() {
       actorId?: number;
       idempotencyKey: string;
     }) =>
-      api.patch(
+      api.patch<CombatantUpdateResult>(
         `${API}/encounters/${eid}/combatants/${combatantId}`,
         hpPatchWithActor({ hpDelta: delta, idempotencyKey }, actorId, combatantId, isDm),
       ),
@@ -1489,6 +1496,14 @@ export default function RunSessionPage() {
       // damage. Hold the controls and re-read committed state instead.
       if (isAmbiguousOutcome(err)) enterReconciling();
       else reportError(err);
+    },
+    onSuccess: (response, variables) => {
+      const check = response.data.concentrationCheck;
+      if (!check) return;
+      const name = queryClient
+        .getQueryData<EncounterWithCombatants>(queryKeys.encounter(eid))
+        ?.combatants.find((combatant) => combatant.id === variables.combatantId)?.name ?? 'Combatant';
+      setPendingConcentrationCheck({ combatantId: variables.combatantId, name, ...check });
     },
     onSettled: () => {
       // Only reconcile after the last in-flight HP write of a burst settles.
@@ -2401,6 +2416,30 @@ export default function RunSessionPage() {
           }}
           onDismiss={() => setPendingApply(null)}
         />
+      )}
+
+      {pendingConcentrationCheck && (
+        <div className="card border border-warning" role="alert" aria-live="assertive" style={{ padding: 12 }} data-testid="concentration-check-prompt">
+          <strong>{pendingConcentrationCheck.name} must make a Constitution saving throw.</strong>
+          <p className="text-muted" style={{ margin: '4px 0 10px' }}>
+            Concentration check: DC {pendingConcentrationCheck.dc} ({pendingConcentrationCheck.damage} damage).
+          </p>
+          <div className="flex gap-2">
+            <button type="button" className="btn btn-ghost" onClick={() => setPendingConcentrationCheck(null)}>
+              Passed
+            </button>
+            <button
+              type="button"
+              className="btn btn-danger"
+              onClick={() => {
+                patchCombatantTurnState(pendingConcentrationCheck.combatantId, { concentration: null });
+                setPendingConcentrationCheck(null);
+              }}
+            >
+              Failed — end concentration
+            </button>
+          </div>
+        </div>
       )}
 
       {pendingActionUse && (

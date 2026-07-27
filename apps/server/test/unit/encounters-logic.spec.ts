@@ -435,6 +435,23 @@ describe('encounters — applyCombatantHp (issue #57 5e HP model)', () => {
     });
   });
 
+  describe('concentration checks (issue #606)', () => {
+    it('flags an authoritative DC 10 check when a concentrating caster takes minor damage', () => {
+      const r = applyCombatantHp(charState({ isConcentrating: true }), { hpDelta: -8 });
+      expect(r.concentrationCheck).toEqual({ damage: 8, dc: 10 });
+    });
+
+    it('uses half the actual damage, rounded up, and includes damage absorbed by temporary HP', () => {
+      const r = applyCombatantHp(charState({ isConcentrating: true, hpTemp: 5 }), { hpDelta: -25 });
+      expect(r.concentrationCheck).toEqual({ damage: 25, dc: 13 });
+    });
+
+    it('does not flag healing or damage for a combatant without concentration', () => {
+      expect(applyCombatantHp(charState({ isConcentrating: true }), { hpDelta: 5 }).concentrationCheck).toBeNull();
+      expect(applyCombatantHp(charState(), { hpDelta: -25 }).concentrationCheck).toBeNull();
+    });
+  });
+
   describe('death saves + dying/stable/dead transitions', () => {
     it('a character reduced to exactly 0 begins dying with a clean slate', () => {
       const r = applyCombatantHp(charState({ hpCurrent: 6 }), { hpDelta: -6 });

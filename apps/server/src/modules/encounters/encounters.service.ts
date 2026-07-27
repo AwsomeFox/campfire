@@ -4,7 +4,7 @@ import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
 import { ActiveEffect, AoeTemplate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, STARFINDER_ADAPTER_ID, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, defaultCombatantStatblock, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
 import { z as zod } from 'zod';
-import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
+import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, CombatantUpdateResult, ConcentrationCheck, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaigns, characters, combatants, encounterEvents, encounters, locations, npcs, quests, ruleEntries, rulePacks, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -3026,7 +3026,7 @@ export class EncountersService {
     patch: CombatantUpdateInput,
     user: RequestUser,
     role: Role,
-  ): Promise<Combatant> {
+  ): Promise<CombatantUpdateResult> {
     const encounterRow = await this.getRowOrThrow(encounterId);
     this.assertMutable(encounterRow);
     const existing = await this.getCombatantRowOrThrow(encounterId, combatantId);
@@ -3144,7 +3144,7 @@ export class EncountersService {
       !deathStateTouched &&
       patch.statblock === undefined
     ) {
-      return combatantToDomain(existing);
+      return { ...combatantToDomain(existing), concentrationCheck: null };
     }
 
     // Combatant write + linked-character HP/conditions mirror run in ONE synchronous
@@ -3188,6 +3188,7 @@ export class EncountersService {
     let afterDeath = 'none';
     let afterSucc = 0;
     let afterFail = 0;
+    let concentrationCheck: ConcentrationCheck | null = null;
     // Condition snapshots captured inside the tx (off the fresh row + the write
     // result) so combat-log events derive from the actual committed before/after
     // state, not a stale pre-await read (issue #747, mirroring the HP snapshots).
@@ -3212,7 +3213,7 @@ export class EncountersService {
           fingerprint: encounterOpFingerprint({ combatantId, ...patch, idempotencyKey: undefined }),
         }
       : null;
-    let replayedCombatant: Combatant | null = null;
+    let replayedCombatant: CombatantUpdateResult | null = null;
 
     try {
       this.db.transaction((tx) => {
@@ -3223,7 +3224,7 @@ export class EncountersService {
             // client does not know the outcome, so the committed HP is the whole point.
             // (A missing body cannot happen here: the combatant response is stored inside
             // this transaction, never backfilled. Fall back defensively anyway.)
-            replayedCombatant = (prior.response as Combatant | null) ?? null;
+            replayedCombatant = (prior.response as CombatantUpdateResult | null) ?? null;
             if (replayedCombatant) return;
           }
         }
@@ -3293,23 +3294,27 @@ export class EncountersService {
 
         if (recomputeHp) {
           const effectiveHpMax = hpMaxChanged ? Math.max(1, patch.hpMax!) : fresh.hpMax;
-          const state: CombatantHpState = {
+        const state: CombatantHpState = {
             kind: fresh.kind as CombatantHpState['kind'],
             hpCurrent: fresh.hpCurrent,
             hpMax: effectiveHpMax,
             hpTemp: fresh.hpTemp,
             deathState: fresh.deathState as CombatantHpState['deathState'],
             deathSaveSuccesses: fresh.deathSaveSuccesses,
-            deathSaveFailures: fresh.deathSaveFailures,
-          };
-          const result = applyCombatantHp(state, {
+          deathSaveFailures: fresh.deathSaveFailures,
+          isConcentrating:
+            fromJsonText<{ concentration?: string | null }>(fresh.turnState, {}).concentration != null ||
+            parseConditionInstances(fresh.conditionInstances, fromJsonText<string[]>(fresh.conditions, [])).some((condition) => condition.isConcentration),
+        };
+        const result = applyCombatantHp(state, {
             hpDelta: patch.hpDelta,
             hpSet: patch.hpSet,
             hpTemp: patch.hpTemp,
             deathSaveSuccesses: patch.deathSaveSuccesses,
             deathSaveFailures: patch.deathSaveFailures,
-            deathSaveRoll: patch.deathSaveRoll,
-          });
+          deathSaveRoll: patch.deathSaveRoll,
+        });
+        concentrationCheck = result.concentrationCheck;
 
           // If Starfinder adapter or SP present, damage flows through temp HP -> SP -> HP
           if (adapter.id === STARFINDER_ADAPTER_ID && patch.hpDelta !== undefined && patch.hpDelta < 0) {
@@ -3390,7 +3395,7 @@ export class EncountersService {
         // no instant at which the effect exists without its key (double-apply on retry) or
         // the key exists without its effect (a retry blocked from ever applying).
         if (opClaim) {
-          recordEncounterOp(tx, opClaim, nowIso(), { body: combatantToDomain(row), role });
+          recordEncounterOp(tx, opClaim, nowIso(), { body: { ...combatantToDomain(row), concentrationCheck }, role });
         }
       });
     } catch (err) {
@@ -3398,8 +3403,8 @@ export class EncountersService {
         // Two concurrent attempts of the SAME intent: ours rolled back, theirs committed.
         // Replay their response so exactly one apply survives (issue #580).
         const prior = await readEncounterOpAfterRace(this.db, err.claim);
-        if (prior.response) return prior.response as Combatant;
-        return this.getCombatantRowOrThrow(encounterId, combatantId).then(combatantToDomain);
+        if (prior.response) return prior.response as CombatantUpdateResult;
+        return this.getCombatantRowOrThrow(encounterId, combatantId).then((combatant) => ({ ...combatantToDomain(combatant), concentrationCheck: null }));
       }
       throw err;
     }
@@ -3617,7 +3622,7 @@ export class EncountersService {
 
     this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId, encounterRow.hidden);
 
-    return combatantToDomain(row);
+    return { ...combatantToDomain(row), concentrationCheck };
   }
 
   async removeCombatant(encounterId: number, combatantId: number, user: RequestUser, role: Role): Promise<void> {

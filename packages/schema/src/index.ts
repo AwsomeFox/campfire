@@ -8124,6 +8124,19 @@ export const Combatant = z.object({
 });
 export type Combatant = z.infer<typeof Combatant>;
 
+/** A 5e concentration save required by damage that just landed on a concentrating caster. */
+export const ConcentrationCheck = z.object({
+  damage: z.number().int().positive(),
+  dc: z.number().int().min(10),
+});
+export type ConcentrationCheck = z.infer<typeof ConcentrationCheck>;
+
+/** PATCH combatant result: the persisted combatant plus any immediately-required concentration save. */
+export const CombatantUpdateResult = Combatant.extend({
+  concentrationCheck: ConcentrationCheck.nullable().default(null),
+});
+export type CombatantUpdateResult = z.infer<typeof CombatantUpdateResult>;
+
 export const CombatantCreate = z.object({
   kind: CombatantKind,
   name: z.string().min(1).max(120).optional(), // required unless resolvable from ruleEntryId

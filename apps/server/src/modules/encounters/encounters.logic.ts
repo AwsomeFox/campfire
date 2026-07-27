@@ -13,6 +13,7 @@ import type {
   ActiveEffect,
   Combatant,
   CombatantKind,
+  ConcentrationCheck,
   CombatantTurnState,
   ConditionInstance,
   DeathState,
@@ -739,6 +740,8 @@ export interface CombatantHpState {
   deathState: DeathState;
   deathSaveSuccesses: number;
   deathSaveFailures: number;
+  /** Whether this combatant is currently maintaining a concentration effect. */
+  isConcentrating?: boolean;
 }
 
 /** The HP-affecting slice of a CombatantUpdate patch. */
@@ -754,7 +757,7 @@ export interface CombatantHpPatch {
 export type CombatantHpResult = Pick<
   CombatantHpState,
   'hpCurrent' | 'hpTemp' | 'deathState' | 'deathSaveSuccesses' | 'deathSaveFailures'
->;
+> & { concentrationCheck: ConcentrationCheck | null };
 
 /**
  * Pure 5e HP-application math (issue #57), extracted so it can be unit-tested and
@@ -782,6 +785,7 @@ export function applyCombatantHp(state: CombatantHpState, patch: CombatantHpPatc
   const isCharacter = state.kind === 'character';
   let { hpCurrent, hpTemp, deathState, deathSaveSuccesses: succ, deathSaveFailures: fail } = state;
   const { hpMax } = state;
+  const poolBefore = hpCurrent + hpTemp;
 
   // 1. explicit sets (DM overrides / recording a rolled death save).
   if (patch.hpTemp !== undefined) hpTemp = Math.max(0, patch.hpTemp);
@@ -816,7 +820,15 @@ export function applyCombatantHp(state: CombatantHpState, patch: CombatantHpPatc
   // 3. death-state recompute.
   if (!isCharacter) {
     // Monsters never track death saves — 0 HP is simply "down" (isDown / hpBand).
-    return { hpCurrent, hpTemp, deathState: 'none', deathSaveSuccesses: 0, deathSaveFailures: 0 };
+    const damage = Math.max(0, poolBefore - (hpCurrent + hpTemp));
+    return {
+      hpCurrent,
+      hpTemp,
+      deathState: 'none',
+      deathSaveSuccesses: 0,
+      deathSaveFailures: 0,
+      concentrationCheck: state.isConcentrating && damage > 0 ? { damage, dc: Math.max(10, Math.ceil(damage / 2)) } : null,
+    };
   }
   if (hpCurrent > 0) {
     // Regaining any HP revives a downed character and clears the death-save slate.
@@ -863,7 +875,15 @@ export function applyCombatantHp(state: CombatantHpState, patch: CombatantHpPatc
       deathState = 'dying';
     }
   }
-  return { hpCurrent, hpTemp, deathState, deathSaveSuccesses: succ, deathSaveFailures: fail };
+  const damage = Math.max(0, poolBefore - (hpCurrent + hpTemp));
+  return {
+    hpCurrent,
+    hpTemp,
+    deathState,
+    deathSaveSuccesses: succ,
+    deathSaveFailures: fail,
+    concentrationCheck: state.isConcentrating && damage > 0 ? { damage, dc: Math.max(10, Math.ceil(damage / 2)) } : null,
+  };
 }
 
 // ---------------------------------------------------------------------------
