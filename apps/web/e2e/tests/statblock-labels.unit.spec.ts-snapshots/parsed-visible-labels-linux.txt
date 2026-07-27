@@ -11,6 +11,18 @@
     "creatureType": "Role",
     "ratingLine": "Level 3"
   },
+  "basic-fantasy": {
+    "rating": "Hit Dice",
+    "ratingShort": "HD",
+    "defense": "Armor Class",
+    "defenseShort": "AC",
+    "hitPoints": "Hit Points",
+    "hitPointsShort": "HP",
+    "abilities": "Abilities",
+    "actions": "Actions",
+    "creatureType": "Type",
+    "ratingLine": "Hit Dice 2+1"
+  },
   "dnd5e": {
     "rating": "Challenge",
     "ratingShort": "CR",
@@ -22,6 +34,30 @@
     "actions": "Actions",
     "creatureType": "Type",
     "ratingLine": "Challenge 2"
+  },
+  "labyrinth-lord": {
+    "rating": "Hit Dice",
+    "ratingShort": "HD",
+    "defense": "Armor Class",
+    "defenseShort": "AC",
+    "hitPoints": "Hit Points",
+    "hitPointsShort": "HP",
+    "abilities": "Abilities",
+    "actions": "Actions",
+    "creatureType": "Type",
+    "ratingLine": "Hit Dice 2+1"
+  },
+  "old-school-essentials": {
+    "rating": "Hit Dice",
+    "ratingShort": "HD",
+    "defense": "Armor Class",
+    "defenseShort": "AC",
+    "hitPoints": "Hit Points",
+    "hitPointsShort": "HP",
+    "abilities": "Abilities",
+    "actions": "Actions",
+    "creatureType": "Type",
+    "ratingLine": "Hit Dice 2+1"
   },
   "open-legend": {
     "rating": "Level",
@@ -35,7 +71,31 @@
     "creatureType": "Descriptor",
     "ratingLine": "Level 3"
   },
+  "ose": {
+    "rating": "Hit Dice",
+    "ratingShort": "HD",
+    "defense": "Armor Class",
+    "defenseShort": "AC",
+    "hitPoints": "Hit Points",
+    "hitPointsShort": "HP",
+    "abilities": "Abilities",
+    "actions": "Actions",
+    "creatureType": "Type",
+    "ratingLine": "Hit Dice 2+1"
+  },
   "osr": {
+    "rating": "Hit Dice",
+    "ratingShort": "HD",
+    "defense": "Armor Class",
+    "defenseShort": "AC",
+    "hitPoints": "Hit Points",
+    "hitPointsShort": "HP",
+    "abilities": "Abilities",
+    "actions": "Actions",
+    "creatureType": "Type",
+    "ratingLine": "Hit Dice 2+1"
+  },
+  "osric": {
     "rating": "Hit Dice",
     "ratingShort": "HD",
     "defense": "Armor Class",
@@ -106,5 +166,17 @@
     "actions": "Actions",
     "creatureType": "Type",
     "ratingLine": "Rating 2"
+  },
+  "swords-wizardry": {
+    "rating": "Hit Dice",
+    "ratingShort": "HD",
+    "defense": "Armor Class",
+    "defenseShort": "AC",
+    "hitPoints": "Hit Points",
+    "hitPointsShort": "HP",
+    "abilities": "Abilities",
+    "actions": "Actions",
+    "creatureType": "Type",
+    "ratingLine": "Hit Dice 2+1"
   }
 }

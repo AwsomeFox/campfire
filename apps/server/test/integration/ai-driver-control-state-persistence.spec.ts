@@ -135,6 +135,7 @@ describe('AI driver control state persistence across restart (#559, real SQLite)
         'announced_recovery',
         // #1042 — the two grant maps, added by 0131 as a separate additive migration.
         'secret_read_approvals', 'pending_tool_confirmations',
+        'collaborative', // #1051 — added by 0138 as a separate additive migration.
         'updated_at',
       ]),
     );
@@ -654,6 +655,66 @@ describe('AI driver control state persistence across restart (#559, real SQLite)
         .map((c) => (c[0] as { action: string }).action)
         .filter((a) => a === 'ai-dm.driver.secret.revoked_on_restart'),
     ).toHaveLength(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // #1051 — collaborative handoff across a restart.
+  // -------------------------------------------------------------------------
+
+  it('restores collaborative handoff after a restart', () => {
+    const first = firstBoot();
+    first.service.setCollaborative(campaignId, true);
+    expect(first.service.getSession(campaignId).state).toBe('collaborative');
+    expect(rawRow()).toMatchObject({ collaborative: 1 });
+
+    const restarted = boot();
+    const s = restarted.service.getSession(campaignId);
+    // A deploy must not hand the AI back the authority to change the board on its own. This is
+    // the same class of silent downgrade as a takeover being revoked by a restart (#1042) —
+    // authority quietly widening because a process died.
+    expect(s.state).toBe('collaborative');
+    expect(s.collaborative).toBe(true);
+  });
+
+  it('a PAUSED collaborative seat comes back paused, and resumes back into the mode', () => {
+    const first = firstBoot();
+    first.service.setCollaborative(campaignId, true);
+    first.service.setPaused(campaignId, true);
+    expect(rawRow()).toMatchObject({ status: 'paused', collaborative: 1 });
+
+    const restarted = boot();
+    // The hydration reconciliation used to key on `state === 'running'` only. With a third
+    // non-frozen ladder value in play, a paused collaborative seat fell through every branch and
+    // came back `status: 'idle'` — silently un-paused, which is the one thing restart handling
+    // must never do. Guarding this here because the bug is invisible from the mode's own tests.
+    expect(restarted.service.getSession(campaignId).status).toBe('paused');
+    expect(restarted.service.getSession(campaignId).state).toBe('paused');
+
+    restarted.service.setPaused(campaignId, false);
+    expect(restarted.service.getSession(campaignId).state).toBe('collaborative');
+  });
+
+  it('keeps the mode under a human takeover and hands the seat back into it', async () => {
+    const first = firstBoot();
+    first.service.setCollaborative(campaignId, true);
+    await first.service.grantTakeover(campaignId, dm, undefined, 'take it from here', 'dm');
+    expect(first.service.getSession(campaignId).state).toBe('human_control');
+
+    const restarted = boot();
+    // The urgent condition owns the display slot; the mode persists underneath.
+    expect(restarted.service.getSession(campaignId).state).toBe('human_control');
+    expect(restarted.service.getSession(campaignId).collaborative).toBe(true);
+
+    await restarted.service.handback(campaignId, dm, 'done', 'dm');
+    expect(restarted.service.getSession(campaignId).state).toBe('collaborative');
+  });
+
+  it('an unset column reads as mode-off', () => {
+    const first = firstBoot();
+    first.service.setPaused(campaignId, true);
+    expect(rawRow()).toMatchObject({ collaborative: 0 });
+    const restarted = boot();
+    expect(restarted.service.getSession(campaignId).collaborative).toBe(false);
   });
 
   it('a persistence failure never propagates out of a control lever', () => {

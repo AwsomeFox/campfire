@@ -31,6 +31,32 @@ import { fromJsonText, toJsonText } from './json';
  *     a character sheet). Instances are reconciled against those names: metadata is preserved
  *     for names that survive, instances for names that are gone are DROPPED, and names with
  *     no instance get a bare legacy one.
+ *
+ * ── IF YOU ARE ADDING A STRUCTURED COLUMN NEXT TO AN EXISTING ONE, READ THIS ──────────────
+ *
+ * Run the writer audit AFTER the schema change, not before. This inverts the natural
+ * instinct — you want to survey the call sites, then change the column — and the instinct is
+ * wrong, because ADDING THE SECOND COLUMN IS ITSELF THE EVENT THAT BREAKS A PREVIOUSLY
+ * CORRECT CALL SITE.
+ *
+ * It happened twice here, in both directions:
+ *
+ *   - #423 added `combatants.condition_instances`. Every existing writer of
+ *     `combatants.conditions` was correct the day before and silently became a half-write the
+ *     day after. That is the bug #1575 fixed, two years later, after a DM watched a condition
+ *     they had removed come back.
+ *   - #1047 added `characters.condition_instances`. The action-resolver's two sheet mirrors
+ *     were correct — `characters` had no structured copy — and became the identical bug one
+ *     table over the moment the column existed. An audit taken before the change would have
+ *     cleared them, correctly, and been useless.
+ *
+ * The audit that catches this is mechanical, so run it as the LAST step:
+ *
+ *     grep -rn "conditions: toJsonText\|conditionInstances: toJsonText" apps/server/src \
+ *       | grep -v common/conditions.ts        # must print nothing
+ *
+ * A guarantee you can grep for is worth more than one you assert in a comment — including
+ * this comment.
  */
 
 /** A metadata-free instance for a condition that only ever existed as a string. */
@@ -117,4 +143,88 @@ export function conditionWriteSetFromInstances(
 ): { conditions: string; conditionInstances: string } {
   const bounded = instances.slice(0, 50);
   return { conditions: toJsonText(deriveConditionNames(bounded)), conditionInstances: toJsonText(bounded) };
+}
+
+/* ── the sheet boundary (issue #1047) ────────────────────────────────────────────────────
+ *
+ * `characters` carries the SAME `ConditionInstance` shape as `combatants`, deliberately —
+ * a sheet-only type would be two definitions of one concept, drifting the moment either
+ * side gains a field. That is the defect family this module exists to prevent.
+ *
+ * What differs is SCOPE, not shape. Seven fields only mean something inside an encounter's
+ * round/turn loop and are meaningless on a sheet:
+ *
+ *   durationRounds / roundsRemaining  — rounds do not elapse outside an encounter
+ *   timing / saveTiming               — there is no turn to start or end on
+ *   saveDc / saveAbility              — a repeat save is a per-turn prompt
+ *   sourceCombatantId                 — combatant rows are per-encounter; the id dangles
+ *
+ * They are NULLED on the way to the sheet rather than being absent from the type. The
+ * fields that survive earn their place by being duration-independent facts about the
+ * character: `name`, `stacks` (this is what lets exhaustion be a plain instance instead of
+ * an `exhaustionLevel` column — see #1073), `source` as free text, `ruleEntryId`, `notes`,
+ * `custom`.
+ *
+ * A condition mid-countdown when the fight ends PERSISTS, losing only its counter. That
+ * matches what /end already did with bare names, so upgrading cannot silently drop
+ * conditions off sheets; and "poisoned, duration unknown" is the honest state once there
+ * are no rounds left to count.
+ *
+ * The reverse direction needs no translation: a sheet instance already has these fields
+ * null, so entering an encounter adopts it as an indefinite condition — correct, since you
+ * did not walk in with a round timer already running.
+ */
+
+/** Strip the fields that only mean something inside an encounter's round loop. */
+export function toSheetConditionInstance(inst: ConditionInstance): ConditionInstance {
+  return {
+    ...inst,
+    durationRounds: null,
+    roundsRemaining: null,
+    timing: 'none',
+    saveTiming: 'none',
+    saveDc: null,
+    saveAbility: null,
+    sourceCombatantId: null,
+  };
+}
+
+/** Both CHARACTER condition columns, from combat-scoped instances (/end and the live mirror). */
+export function sheetConditionWriteSetFromInstances(
+  instances: readonly ConditionInstance[],
+): { conditions: string; conditionInstances: string } {
+  return conditionWriteSetFromInstances(instances.map(toSheetConditionInstance));
+}
+
+/** Both CHARACTER condition columns, from names plus whatever the sheet already held. */
+export function sheetConditionWriteSetFromNames(
+  names: readonly string[],
+  priorInstancesText: string | null,
+): { conditions: string; conditionInstances: string } {
+  const instances = reconcileConditionInstances(names, parseConditionInstancesText(priorInstancesText));
+  return sheetConditionWriteSetFromInstances(instances);
+}
+
+/**
+ * Read a stored pair back into instances, materialising bare legacy names.
+ *
+ * Union-on-READ, and now load-bearing for a SECOND table: every pre-#1047 character row has
+ * bare strings in `conditions` and a NULL `condition_instances`. Migration 0132 deliberately
+ * does not rewrite them, and this is what makes that safe.
+ */
+export function readConditionInstances(
+  instancesText: string | null,
+  conditionsText: string | null,
+): ConditionInstance[] {
+  const instances = parseConditionInstancesText(instancesText);
+  const names = fromJsonText<string[]>(conditionsText, []);
+  const seen = new Set(instances.map((i) => i.name.trim().toLowerCase()));
+  for (const raw of names) {
+    const name = raw.trim();
+    if (!name || seen.has(name.toLowerCase())) continue;
+    seen.add(name.toLowerCase());
+    const legacy = legacyConditionInstance(name);
+    if (legacy) instances.push(legacy);
+  }
+  return instances.slice(0, 50);
 }

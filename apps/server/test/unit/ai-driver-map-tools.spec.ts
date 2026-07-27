@@ -58,6 +58,7 @@ describe('guardDriverLivePlayArgs — battle-map execution guards (#488)', () =>
     return {
       campaignId: 1,
       status: 'idle',
+      collaborative: false, // #1051 — mode off by default.
       state: 'running',
       scene: null,
       lastNarration: null,
@@ -211,6 +212,7 @@ describe('toPublicAiDmSessionState', () => {
     const session: AiDmSessionState = {
       campaignId: 1,
       status: 'idle',
+      collaborative: false,
       state: 'running',
       scene: null,
       lastNarration: null,
@@ -229,6 +231,7 @@ describe('toPublicAiDmSessionState', () => {
     expect(toPublicAiDmSessionState(session)).toEqual({
       campaignId: 1,
       status: 'idle',
+      collaborative: false, // #1051 — member-visible, so it survives the projection.
       state: 'running',
       scene: null,
       lastNarration: null,

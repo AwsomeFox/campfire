@@ -46,7 +46,7 @@ import { CampaignEventsService } from '../events/campaign-events.service';
 import { AuditService } from '../audit/audit.service';
 import { TableSafetyService } from '../safety/table-safety.service';
 import { fromJsonText, toJsonText } from '../../common/json';
-import { conditionWriteSetFromNames } from '../../common/conditions';
+import { conditionWriteSetFromNames, sheetConditionWriteSetFromNames } from '../../common/conditions';
 import { nowIso } from '../../common/time';
 import { rollDice } from '../../common/dice';
 import { auditActor } from '../../common/user.types';
@@ -875,6 +875,13 @@ export class ActionResolverService {
 
         // Mirror the HP/condition slice onto a linked, live character sheet (issue #711/#486).
         if (fresh.kind === 'character' && fresh.characterId !== null && encounter.status !== 'ended') {
+          const [sheetRow] = tx
+            .select({ conditionInstances: characters.conditionInstances })
+            .from(characters)
+            .where(eq(characters.id, fresh.characterId))
+            .limit(1)
+            .all();
+          const sheetPriorInstances = sheetRow?.conditionInstances ?? null;
           tx.update(characters)
             .set({
               hpCurrent: result.hpCurrent,
@@ -882,7 +889,9 @@ export class ActionResolverService {
               deathState: result.deathState,
               deathSaveSuccesses: result.deathSaveSuccesses,
               deathSaveFailures: result.deathSaveFailures,
-              conditions: toJsonText([...conditions]),
+              // #1047: the sheet has a structured copy now too, so the mirror must move
+              // the pair or it recreates the #423 desync one table over.
+              ...sheetConditionWriteSetFromNames([...conditions], sheetPriorInstances),
               updatedAt: nowIso(),
             })
             .where(eq(characters.id, fresh.characterId))
@@ -998,6 +1007,13 @@ export class ActionResolverService {
           .where(eq(combatants.id, fresh.id))
           .run();
         if (fresh.kind === 'character' && fresh.characterId !== null && encounter.status !== 'ended') {
+          const [undoSheetRow] = tx
+            .select({ conditionInstances: characters.conditionInstances })
+            .from(characters)
+            .where(eq(characters.id, fresh.characterId))
+            .limit(1)
+            .all();
+          const undoSheetPriorInstances = undoSheetRow?.conditionInstances ?? null;
           tx.update(characters)
             .set({
               hpCurrent: t.hpBefore,
@@ -1005,7 +1021,8 @@ export class ActionResolverService {
               deathState: t.deathStateBefore,
               deathSaveSuccesses: t.deathSaveSuccessesBefore,
               deathSaveFailures: t.deathSaveFailuresBefore,
-              conditions: toJsonText(t.conditionsBefore),
+              // #1047: undo must roll the sheet's structured copy back too.
+              ...sheetConditionWriteSetFromNames(t.conditionsBefore, undoSheetPriorInstances),
               updatedAt: nowIso(),
             })
             .where(eq(characters.id, fresh.characterId))

@@ -33,6 +33,7 @@ import {
   type InitiativeTiebreakCombatant,
 } from './initiative-tiebreak';
 import { ActionSpec } from './action-resolver';
+import { RestModel } from './rest';
 import { CharacterAction } from './character-action';
 import { CombatantStatblock } from './combatant-statblock';
 import { NarrationLanguage } from './narration-language';
@@ -40,6 +41,7 @@ import { NarrationLanguage } from './narration-language';
 // Re-exported so server / MCP / web import it from '@campfire/schema' alongside everything else.
 export * from './action-resolver';
 export * from './spell-slots';
+export * from './rest';
 export * from './character-action';
 export * from './combatant-statblock';
 export * from './character-creation';
@@ -3046,6 +3048,20 @@ export interface RuleSystemAdapter {
   buildCheckCatalog?(character: CheckCatalogCharacter): RollCheckDefinition[];
   /** Standard system resource vocabulary for this rule system (issue #422). */
   readonly resources?: readonly AdapterResourceDef[];
+  /**
+   * OPTIONAL — how a short/long rest recovers under this system (issue #1041).
+   *
+   * Deliberately thin, because the load-bearing part of rest customisation already exists:
+   * `AdapterResourceDef.recharge` (#422) says which rest refills which resource, and
+   * `RECHARGE_RECOVERED_BY_REST` consumes it. This adds only what that cannot express — which
+   * conditions a rest clears, the hit-die mechanic, and whether a long rest resets death saves.
+   *
+   * Omitting it is safe and meaningful: {@link NEUTRAL_REST_MODEL} clears NO conditions and
+   * supports no hit dice, so the six adapters with no rest vocabulary recover HP and their
+   * declared resources without silently inheriting D&D 5e's recovery rules just because 5e is
+   * the fallback adapter.
+   */
+  readonly restModel?: RestModel;
 }
 
 /** Standard system resource pool definition (issue #422). */
@@ -3170,6 +3186,26 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
     // heroic inspiration likewise); a second award while holding one is not a second point.
     { key: 'inspiration', name: 'Inspiration', recharge: 'special', defaultMax: 1 },
   ],
+  // Rest recovery (#1041). `clearedByLongRest` is an ALLOWLIST of what a night's sleep removes,
+  // never a denylist of what is "permanent" — see the RestModel docs for why that direction is
+  // the safe one when conditions are bare strings with no metadata (#1047).
+  //
+  // These four are the 5e conditions a long rest ends on its own: exhaustion drops a level,
+  // and the three that PHB rest/unconsciousness rules resolve without an external cure. The
+  // conditions deliberately ABSENT are the ones that need a specific remedy — petrified,
+  // paralyzed, charmed, poisoned, restrained, grappled, blinded, deafened, invisible — because
+  // a rest that silently ended a Medusa's petrification would erase the DM's scene.
+  restModel: {
+    clearedByLongRest: ['Exhaustion', 'Unconscious', 'Prone', 'Frightened'],
+    clearedByShortRest: [],
+    // 5e hit dice are per-class (d6 sorcerer … d12 barbarian) and the class die is NOT stored
+    // on the sheet in this repo, so there is no honest default: `null` makes a short rest that
+    // asks to spend hit dice require an explicit `hitDie` rather than inventing an average one.
+    defaultHitDie: null,
+    // PHB: a long rest returns spent hit dice up to HALF the character's total (minimum 1).
+    longRestHitDiceFraction: 0.5,
+    longRestClearsDeathSaves: true,
+  },
   // 5e caps character level at 20 (PHB). The cap lives here, not hardcoded in `levelUp`, so a
   // non-5e system enforces its own ceiling (issue #535): 13th Age (10), an uncapped OSR game, etc.
   maxLevel: 20,

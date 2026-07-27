@@ -11,7 +11,7 @@ import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { filterHidden, isVisibleTo, resolveCreateHidden } from '../../common/redact';
 import { fromJsonText, toJsonText } from '../../common/json';
-import { conditionWriteSetFromInstances, legacyConditionInstance as sharedLegacyConditionInstance, parseConditionInstancesText } from '../../common/conditions';
+import { conditionWriteSetFromInstances, legacyConditionInstance as sharedLegacyConditionInstance, parseConditionInstancesText, readConditionInstances, sheetConditionWriteSetFromInstances } from '../../common/conditions';
 import { fogConcealsPixels, parseFogState } from '../../common/fog';
 import { rollDice, rollInitiative, rollOpenLegendActionDice } from '../../common/dice';
 import { foldForSearch, foldedIncludes } from '../../common/text-search';
@@ -1780,7 +1780,12 @@ export class EncountersService {
             // Issue #486: seed tracker conditions from the sheet so Poisoned (etc.)
             // applied before combat is already visible in the run-session roster.
             // Merge semantics for the overlap window: see sync comment on updateCombatant.
-            conditions: character.conditions,
+            // #1047: carry the sheet's structured copy in too. No translation needed —
+            // a sheet instance already has the round-scoped fields null, so it enters as an
+            // indefinite condition, which is correct.
+            ...conditionWriteSetFromInstances(
+              readConditionInstances(character.conditionInstances, character.conditions),
+            ),
             ruleEntryId: null,
             sortOrder: index,
           };
@@ -2526,7 +2531,12 @@ export class EncountersService {
             deathSaveSuccesses: character.deathSaveSuccesses,
             deathSaveFailures: character.deathSaveFailures,
             sheetSyncedUpdatedAt: character.updatedAt,
-            conditions: character.conditions,
+            // #1047: carry the sheet's structured copy in too. No translation needed —
+            // a sheet instance already has the round-scoped fields null, so it enters as an
+            // indefinite condition, which is correct.
+            ...conditionWriteSetFromInstances(
+              readConditionInstances(character.conditionInstances, character.conditions),
+            ),
             ruleEntryId: null,
             sortOrder: sortOrder++,
           };
@@ -2690,6 +2700,7 @@ export class EncountersService {
     let characterSheetUpdatedAt: string | null = null;
     // Issue #486: sheet conditions carried into a late-join character combatant.
     let characterConditions = '[]';
+    let characterConditionInstances: string | null = null;
     // NOT pre-seeded from input.ruleEntryId — only set once the row is confirmed to exist
     // below, so a dangling id can never make it into the INSERT (was previously assigned
     // unconditionally here, so a bogus/deleted ruleEntryId silently got stored).
@@ -2785,7 +2796,11 @@ export class EncountersService {
       characterDeathSaveFailures = character.deathSaveFailures;
       characterSheetUpdatedAt = character.updatedAt;
       // Issue #486: seed from the sheet (same contract as create() auto-add).
+      // #1047: the structured copy comes with it, untranslated (see the create() path).
       characterConditions = character.conditions;
+      characterConditionInstances = toJsonText(
+        readConditionInstances(character.conditionInstances, character.conditions),
+      );
       spCurrent = character.spCurrent;
       spMax = character.spMax;
       rpCurrent = character.rpCurrent;
@@ -2941,6 +2956,7 @@ export class EncountersService {
               : {}),
             // Issue #486: character combatants inherit sheet conditions; monsters/NPCs start empty.
             conditions: characterId !== null ? characterConditions : '[]',
+            conditionInstances: characterId !== null ? characterConditionInstances : null,
             ruleEntryId,
             statblockJson,
             sortOrder: sql`(SELECT COALESCE(MAX(${combatants.sortOrder}), -1) + 1 FROM ${combatants} WHERE ${combatants.encounterId} = ${encounterId})`,
@@ -3349,7 +3365,15 @@ export class EncountersService {
             sheetSet.deathSaveFailures = updated.deathSaveFailures;
           }
           if (conditionFieldsTouched) {
-            sheetSet.conditions = updated.conditions;
+            // #1047: the sheet gets the structured copy too, with round-scoped fields
+            // stripped. Writing only the names here would recreate the #423 desync one
+            // table over — see common/conditions.ts.
+            Object.assign(
+              sheetSet,
+              sheetConditionWriteSetFromInstances(
+                readConditionInstances(updated.conditionInstances, updated.conditions),
+              ),
+            );
           }
           tx.update(characters)
             .set(sheetSet)
@@ -4909,8 +4933,10 @@ export class EncountersService {
       deathState: string;
       deathSaveSuccesses: number;
       deathSaveFailures: number;
-      // Issue #486: conditions travel back with the HP slice on /end.
+      // Issue #486: conditions travel back with the HP slice on /end. #1047: the
+      // structured copy travels with them, stripped to sheet scope.
       conditions: string;
+      conditionInstances: string;
       status: 'active' | 'dead';
       sheetSyncedUpdatedAt: string | null;
     }> = [];
@@ -4937,7 +4963,9 @@ export class EncountersService {
         deathState: row.deathState,
         deathSaveSuccesses: row.deathSaveSuccesses,
         deathSaveFailures: row.deathSaveFailures,
-        conditions: row.conditions,
+        ...sheetConditionWriteSetFromInstances(
+          readConditionInstances(row.conditionInstances, row.conditions),
+        ),
         status: nextStatus ?? 'active',
         sheetSyncedUpdatedAt: row.sheetSyncedUpdatedAt ?? null,
       });
@@ -5055,6 +5083,7 @@ export class EncountersService {
           deathSaveSuccesses: w.deathSaveSuccesses,
           deathSaveFailures: w.deathSaveFailures,
           conditions: w.conditions,
+          conditionInstances: w.conditionInstances,
           updatedAt: ts,
         };
         if (prior !== undefined && prior.status !== w.status) {
