@@ -2,12 +2,14 @@
   "tracked": [
     {
       "pr": 1616,
-      "status": "babysitting",
+      "status": "merged",
       "url": "https://github.com/AwsomeFox/campfire/pull/1616",
       "headBranch": "fix/issue-606-clean",
       "baseBranch": "main",
-      "updatedAt": "2026-07-27T20:53:00Z",
-      "notes": "Head 6ebe9b59. All review threads addressed/resolved including follow-up flaky ceil assertion. Waiting on CI after latest push."
+      "mergeCommit": "2082d19d23d5117ae31bb5f1d95b9c460387b12e",
+      "mergedAt": "2026-07-27T21:38:59Z",
+      "updatedAt": "2026-07-27T21:39:10Z",
+      "notes": "Merged via squash after review fixes (floor DC, monster check redaction, select/.get cleanup, flaky ceil assertion) and green CI run 30304464680. All review threads resolved."
     }
   ]
 }
