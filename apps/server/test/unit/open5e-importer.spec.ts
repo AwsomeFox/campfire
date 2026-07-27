@@ -52,10 +52,43 @@ describe('Open5e creature importer', () => {
     expect(damageDefensesFromStatblock(JSON.parse(entry.dataJson!), DND5E_DAMAGE_TYPES).resistances).toEqual(['fire']);
   });
 
-  it('conservatively excludes a qualified Open5e v2 display group', () => {
+  it.each([
+    {
+      creature: 'Air Elemental',
+      display: 'lightning, thunder; damage from nonmagical weapons',
+      expected: ['lightning', 'thunder'],
+    },
+    {
+      creature: 'Balor',
+      display: 'cold, lightning; damage from nonmagical weapons',
+      expected: ['cold', 'lightning'],
+    },
+    {
+      creature: 'Barbed Devil',
+      display: 'cold; damage from nonmagical, non-silvered weapons',
+      expected: ['cold'],
+    },
+  ])('retains unconditional clauses from the live Open5e v2 $creature shape', ({ display, expected }) => {
     const data = {
       resistances_and_immunities: {
-        damage_resistances_display: 'bludgeoning, piercing, and slashing from nonmagical attacks',
+        damage_resistances_display: display,
+        damage_resistances: [
+          { name: 'Cold', key: 'cold' },
+          { name: 'Lightning', key: 'lightning' },
+          { name: 'Thunder', key: 'thunder' },
+          { name: 'Bludgeoning', key: 'bludgeoning' },
+          { name: 'Piercing', key: 'piercing' },
+          { name: 'Slashing', key: 'slashing' },
+        ],
+      },
+    };
+    expect(damageDefensesFromStatblock(data, DND5E_DAMAGE_TYPES).resistances).toEqual(expected);
+  });
+
+  it('conservatively excludes a wholly qualified Open5e v2 display group', () => {
+    const data = {
+      resistances_and_immunities: {
+        damage_resistances_display: 'damage from nonmagical weapons',
         damage_resistances: [
           { name: 'Bludgeoning', key: 'bludgeoning' },
           { name: 'Piercing', key: 'piercing' },

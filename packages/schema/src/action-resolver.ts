@@ -265,10 +265,12 @@ export function damageDefensesFromStatblock(data: Record<string, unknown> | null
   const nested = recordValue(data?.resistances_and_immunities) ?? recordValue(data?.resistancesAndImmunities);
   const canonical = vocabulary?.map((type) => type.toLowerCase());
   const normalizeStrings = (raw: string): string[] => {
-    const parts = raw.split(/[,;]/).map((item) => item.trim()).filter(Boolean);
-    if (!canonical) return parts;
-    const normalized = parts.map((entry) => entry.toLowerCase().replace(/^and\s+/, ''));
-    return normalized.length > 0 && normalized.every((entry) => canonical.includes(entry)) ? normalized : [];
+    return raw.split(';').flatMap((clause) => {
+      const parts = clause.split(',').map((item) => item.trim()).filter(Boolean);
+      if (!canonical) return parts;
+      const normalized = parts.map((entry) => entry.toLowerCase().replace(/^and\s+/, ''));
+      return normalized.length > 0 && normalized.every((entry) => canonical.includes(entry)) ? normalized : [];
+    });
   };
   const readList = (nestedKey: string, ...keys: string[]): string[] => {
     if (!data) return [];
@@ -276,11 +278,14 @@ export function damageDefensesFromStatblock(data: Record<string, unknown> | null
     const value = direct ?? nested?.[nestedKey];
     const values = Array.isArray(value) ? value : value === undefined || value === null ? [] : [value];
     const display = nested?.[`${nestedKey}_display`];
-    if (canonical && typeof display === 'string' && display.trim() && normalizeStrings(display).length === 0) {
-      return [];
-    }
+    const displayedTypes = canonical && typeof display === 'string' && display.trim()
+      ? new Set(normalizeStrings(display))
+      : null;
     const entries = values.flatMap((item) => {
-      if (typeof item === 'string') return normalizeStrings(item);
+      if (typeof item === 'string') {
+        const types = normalizeStrings(item);
+        return displayedTypes ? types.filter((type) => displayedTypes.has(type)) : types;
+      }
       const record = recordValue(item);
       if (!record || hasMeaningfulQualifier(record)) return [];
       const typeRecord = recordValue(record.damage_type) ?? recordValue(record.damageType) ?? recordValue(record.type) ?? record;
@@ -288,7 +293,7 @@ export function damageDefensesFromStatblock(data: Record<string, unknown> | null
       if (!type) return [];
       if (!canonical) return [type];
       const normalized = type.toLowerCase();
-      return canonical.includes(normalized) ? [normalized] : [];
+      return canonical.includes(normalized) && (!displayedTypes || displayedTypes.has(normalized)) ? [normalized] : [];
     });
     return [...new Set(entries)];
   };
