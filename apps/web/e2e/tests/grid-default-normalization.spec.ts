@@ -1,19 +1,12 @@
 import { expect, test, type Page, type Request, type Route } from '@playwright/test';
-import { seed, stateFor } from './seed';
+import { PNG_16_9, seed, stateFor } from './seed';
 
 interface EncounterResponse {
   id: number;
-  mapAttachmentId?: number | null;
   gridSize: number | null;
   gridScale: number | null;
   gridUnit: string | null;
 }
-
-const DEDUPED_RETRY_MAP_ID = 865_001;
-const PNG_1PX = Buffer.from(
-  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
-  'base64',
-);
 
 function encounterUrl(encounterId: number): string {
   return `/c/${seed().campaignId}/encounters/${encounterId}`;
@@ -157,9 +150,41 @@ test.describe('battle-grid default normalization — issue #865', () => {
   });
 
   test('a deduped default attempt retries after the non-default request owning the pending key fails', async ({ page }) => {
+    const { campaignId } = seed();
     const encounterId = await createGridEncounter(page, 'Grid normalization — deduped retry');
+
+    // The `scale` field this test drives lives inside the Grid & fog panel, which only exists
+    // once the encounter renders a battle-map surface — and that is gated purely on
+    // `mapAttachmentId != null` being present in the encounter read. So give the encounter a
+    // REAL committed map attachment instead of intercepting the encounter GET to splice the
+    // field in (issue #1608 — the same defect #1595 fixed in grid-calibration).
+    //
+    // The interception installed a `page.route` that did a full `route.fetch()` upstream round
+    // trip on every encounter GET and was never unrouted. RunSessionPage polls that query on a
+    // 5s `refetchInterval` and re-invalidates it after every mutation, and this test drives
+    // several (the gated default PATCH, the scale edit, the clearing PATCH), so a refetch was
+    // routinely still inside the handler when the test body finished. `route.fetch()` /
+    // `apiResponse.json()` then rejected against the disposed context ("Response has been
+    // disposed" / "route.fetch: Test ended."). Nothing awaited the handler, so the rejection
+    // landed on whichever test the runner was executing at that moment rather than on this
+    // one — which is why it read as infra noise. Seeding the real field removes the handler,
+    // and with it the window, rather than racing to close it faster with an unroute.
+    const upload = await page.request.post(`/api/v1/campaigns/${campaignId}/attachments`, {
+      multipart: {
+        kind: 'map',
+        file: { name: 'grid-default-map.png', mimeType: 'image/png', buffer: PNG_16_9 },
+      },
+    });
+    expect(upload.ok()).toBe(true);
+    const uploadBody = await upload.json();
+    expect(uploadBody).toMatchObject({ id: expect.any(Number) });
+    const mapAttachmentId = (uploadBody as { id: number }).id;
+
+    // One PATCH: the non-default grid config this test starts from, plus the map. Attaching the
+    // map here rather than in a second PATCH keeps the encounter.update audit trail — which
+    // `gridScaleFiveAuditCount` reads below — the same shape it had under the interception.
     const configured = await page.request.patch(`/api/v1/encounters/${encounterId}`, {
-      data: { gridScale: 10, gridUnit: 'ft' },
+      data: { gridScale: 10, gridUnit: 'ft', mapAttachmentId },
     });
     expect(configured.ok()).toBe(true);
     let attempts = 0;
@@ -168,16 +193,11 @@ test.describe('battle-grid default normalization — issue #865', () => {
       releaseFirst = resolve;
     });
 
-    await page.route(`**/api/v1/attachments/${DEDUPED_RETRY_MAP_ID}/file`, (route) =>
-      route.fulfill({ status: 200, contentType: 'image/png', body: PNG_1PX }),
-    );
+    // Everything that is not the scale-only default PATCH — including every encounter GET —
+    // passes straight through with `route.continue()`. Unlike `route.fetch()`, continue hands
+    // the request back to the browser without materialising an APIResponse the handler then
+    // has to read, so there is nothing left holding a context-scoped object at teardown.
     await page.route(`**/api/v1/encounters/${encounterId}`, async (route) => {
-      if (route.request().method() === 'GET') {
-        const response = await route.fetch();
-        const encounter = (await response.json()) as EncounterResponse;
-        await route.fulfill({ response, json: { ...encounter, mapAttachmentId: DEDUPED_RETRY_MAP_ID } });
-        return;
-      }
       if (!isScaleOnlyDefaultPatch(route.request())) {
         await route.continue();
         return;
