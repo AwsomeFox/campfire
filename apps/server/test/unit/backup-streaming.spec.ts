@@ -376,6 +376,7 @@ describe('backup streaming writer (#603)', () => {
     try {
       const svc = service();
       const reads = jest.spyOn(fs, 'createReadStream');
+      const open = jest.spyOn(fs, 'openSync');
       await (svc as any).runScheduledBackup(60 * 60 * 1000);
       const names = fs.readdirSync(backupDir);
       const archiveName = names.find((name) => name.endsWith('.zip'));
@@ -385,6 +386,8 @@ describe('backup streaming writer (#603)', () => {
       // obtained from the fsynced descriptor, not by hashing the partial again.
       expect(reads.mock.calls.filter(([filePath]) => String(filePath).endsWith('.partial'))).toHaveLength(1);
       reads.mockRestore();
+      expect(open.mock.calls.some(([filePath, flags]) => String(filePath).endsWith('.partial') && flags === 'r+')).toBe(true);
+      open.mockRestore();
 
       const archivePath = path.join(backupDir, archiveName!);
       const cadence = await (svc as any).readCadence();

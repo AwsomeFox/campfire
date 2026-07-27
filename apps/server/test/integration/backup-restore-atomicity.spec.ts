@@ -133,7 +133,7 @@ describe('backup restore atomicity (#497, real SQLite + filesystem)', () => {
       onProgress: (phase) => {
         if (phase === 'staging-uploads') controller.abort();
       },
-    })).rejects.toThrow('cancelled');
+    })).rejects.toThrow('Restore was cancelled before it was applied');
 
     expect(liveMarkerCampaign()).toBe(MARKER_CAMPAIGN);
     expect(liveKeyfile()).toBe(LIVE_KEY);

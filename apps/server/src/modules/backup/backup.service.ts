@@ -334,6 +334,12 @@ function assertBackupNotCancelled(signal?: AbortSignal): void {
   if (signal?.aborted) throw new Error('Backup generation cancelled');
 }
 
+function assertRestoreNotCancelled(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new BadRequestException('Restore was cancelled before it was applied');
+  }
+}
+
 /** Normalize on-disk keyfile bytes (64-hex UTF-8) or raw 32-byte material. */
 function aiKeyMaterialToBuffer(material: Buffer): Buffer {
   const asText = material.toString('utf8').trim();
@@ -612,7 +618,8 @@ export class BackupService implements OnApplicationBootstrap {
           scheduledPassphrase ? { keyPassphrase: scheduledPassphrase } : undefined,
           partialOutput,
         );
-        const descriptor = fs.openSync(partialPath, 'r');
+        // fsync requires a writable descriptor on some platforms/filesystems.
+        const descriptor = fs.openSync(partialPath, 'r+');
         let size: number;
         try {
           fs.fsyncSync(descriptor);
@@ -1710,16 +1717,14 @@ export class BackupService implements OnApplicationBootstrap {
       // abort landing in that window would otherwise carry straight through into the
       // destructive phase. Every other failure in this path costs a temp file; this one
       // would cost the operator their live data after they pressed cancel.
-      if (options?.signal?.aborted) {
-        throw new BadRequestException('Invalid backup archive — restore was cancelled before it was applied');
-      }
+      assertRestoreNotCancelled(options?.signal);
       const progressPhases: RestoreProgressPhase[] = ['validated', 'staging-uploads'];
       options?.onProgress?.('validated');
       options?.onProgress?.('staging-uploads');
       // Validation and extraction are intentionally non-destructive. Recheck
       // cancellation at the last boundary before closing the live database so
       // an abort during staging cannot cross into the atomic replacement.
-      assertBackupNotCancelled(options?.signal);
+      assertRestoreNotCancelled(options?.signal);
       let applyPhases: RestoreProgressPhase[] = [];
       this.holder.withDatabaseClosed((dataDir) => {
         options?.onProgress?.('quiescing');
