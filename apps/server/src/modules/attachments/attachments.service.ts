@@ -414,8 +414,12 @@ export class AttachmentsService implements OnApplicationBootstrap {
     const source = this.filePath(row);
     try {
       return fs.statSync(source).isFile() ? source : null;
-    } catch {
-      return null;
+    } catch (error: unknown) {
+      // A missing row-backed file is an expected export race. Permission and
+      // other I/O errors must remain visible to the archive caller instead of
+      // silently omitting bytes as though the attachment had vanished.
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw error;
     }
   }
 
