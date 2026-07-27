@@ -9,8 +9,14 @@ test.describe('concentration checks (issue #606)', () => {
     const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
     expect(source).toContain('pendingConcentrationChecks');
     expect(source).toContain('api.patch<CombatantUpdateResult>');
-    expect(source).toContain('response.data.concentrationCheck');
+    expect(source).toContain('response.concentrationCheck');
     expect(source).toContain('appendConcentrationCheck');
+  });
+
+  test('clears and protects the prompt queue across encounter navigation', () => {
+    const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
+    expect(source).toContain('setPendingConcentrationChecks([])');
+    expect(source).toContain('concentrationQueueEncounterRef.current !== eid');
   });
 
   test('retains a failed-check prompt until its concentration-clear mutation succeeds', () => {

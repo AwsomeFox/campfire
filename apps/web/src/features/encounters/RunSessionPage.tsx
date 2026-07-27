@@ -967,6 +967,11 @@ export default function RunSessionPage() {
     actorCombatantId?: number;
   } | null>(null);
   const [pendingConcentrationChecks, setPendingConcentrationChecks] = useState<ConcentrationCheckPrompt[]>([]);
+  const concentrationQueueEncounterRef = useRef(eid);
+  useEffect(() => {
+    concentrationQueueEncounterRef.current = eid;
+    setPendingConcentrationChecks([]);
+  }, [eid]);
   /** Live map layout from BattleMap for AoE hit-testing (issue #626). */
   const [aoeHitLayout, setAoeHitLayout] = useState<AoeHitLayout | null>(null);
   // Issue #414: structured action Use flow — pick targets, preview, apply, undo.
@@ -1494,8 +1499,8 @@ export default function RunSessionPage() {
       else reportError(err);
     },
     onSuccess: (response, variables) => {
-      const check = response.data.concentrationCheck;
-      if (!check) return;
+      const check = response.concentrationCheck;
+      if (!check || concentrationQueueEncounterRef.current !== eid) return;
       const name = queryClient
         .getQueryData<EncounterWithCombatants>(queryKeys.encounter(eid))
         ?.combatants.find((combatant) => combatant.id === variables.combatantId)?.name ?? 'Combatant';
@@ -1534,6 +1539,7 @@ export default function RunSessionPage() {
       // targets that succeeded; making that safe needs a stable id on the pending-apply
       // itself and is deliberately left out of this change.
       const bulkOperationId = newOperationId();
+      const requestEncounterId = eid;
       try {
         for (const combatantId of combatantIds) {
           const response = await api.patch<CombatantUpdateResult>(
@@ -1545,9 +1551,9 @@ export default function RunSessionPage() {
               isDm,
             ),
           );
-          if (response.data.concentrationCheck) {
+          if (response.concentrationCheck && concentrationQueueEncounterRef.current === requestEncounterId) {
             const name = previous?.combatants.find((combatant) => combatant.id === combatantId)?.name ?? 'Combatant';
-            setPendingConcentrationChecks((pending) => appendConcentrationCheck(pending, { combatantId, name, ...response.data.concentrationCheck! }));
+            setPendingConcentrationChecks((pending) => appendConcentrationCheck(pending, { combatantId, name, ...response.concentrationCheck }));
           }
         }
         await invalidateEncounter(queryClient, eid);
