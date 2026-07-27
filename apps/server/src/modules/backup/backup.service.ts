@@ -1485,17 +1485,27 @@ export class BackupService implements OnApplicationBootstrap {
     const db = new Database(dbPath, { readonly: true, fileMustExist: true });
     let count = 0;
     try {
-      for (const row of db.prepare(
-        `SELECT id, campaign_id AS campaignId, mime, size, hidden FROM attachments WHERE state = 'committed'`,
-      ).iterate() as Iterable<{ id: number; campaignId: number; mime: string; size: number; hidden: number }>) {
-        const record = byId.get(row.id);
-        const expectedPath = path.relative(uploadsRoot(resolveDataDir()), this.attachments.filePath(row)).split(path.sep).join('/');
-        if (!record || record.campaignId !== row.campaignId || record.mime !== row.mime ||
-          record.size !== row.size || record.hidden !== (row.hidden === 1) || record.path !== expectedPath) {
-          throw new BadRequestException('Invalid backup archive — manifest attachments do not match database snapshot');
+      try {
+        for (const row of db.prepare(
+          `SELECT id, campaign_id AS campaignId, mime, size, hidden FROM attachments WHERE state = 'committed'`,
+        ).iterate() as Iterable<{ id: number; campaignId: number; mime: string; size: number; hidden: number }>) {
+          const record = byId.get(row.id);
+          const expectedPath = path.relative(uploadsRoot(resolveDataDir()), this.attachments.filePath(row)).split(path.sep).join('/');
+          if (!record || record.campaignId !== row.campaignId || record.mime !== row.mime ||
+            record.size !== row.size || record.hidden !== (row.hidden === 1) || record.path !== expectedPath) {
+            throw new BadRequestException('Invalid backup archive — manifest attachments do not match database snapshot');
+          }
+          byId.delete(row.id);
+          count++;
         }
-        byId.delete(row.id);
-        count++;
+      } catch (err) {
+        // The earlier integrity probe intentionally accepts any SQLite database
+        // with a users table. A missing/older attachments schema is still an
+        // invalid v3 archive, not an internal server failure.
+        if (err instanceof Database.SqliteError) {
+          throw new BadRequestException('Invalid backup archive — database attachment schema could not be read');
+        }
+        throw err;
       }
     } finally { db.close(); }
     if (count !== manifest.attachments.length || byId.size !== 0) {

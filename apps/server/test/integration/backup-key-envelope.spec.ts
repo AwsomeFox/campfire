@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import Database from 'better-sqlite3';
 import JSZip from 'jszip';
 import { DbHolder, type DrizzleDb } from '../../src/db/db.module';
 import { SettingsService } from '../../src/modules/settings/settings.service';
@@ -86,6 +87,29 @@ describe('BackupService AI keyfile envelope (#496, real SQLite)', () => {
     const zip = await JSZip.loadAsync(buffer);
     const text = await zip.file('manifest.json')!.async('string');
     return JSON.parse(text) as BackupManifest;
+  }
+
+  async function archiveWithDatabaseMutation(buffer: Buffer, sql: string): Promise<Buffer> {
+    const zip = await JSZip.loadAsync(buffer);
+    const manifest = JSON.parse(await zip.file('manifest.json')!.async('string')) as BackupManifest;
+    const stageDir = fs.mkdtempSync(path.join(os.tmpdir(), 'campfire-schema-tamper-'));
+    const stagedDb = path.join(stageDir, 'campfire.db');
+    try {
+      fs.writeFileSync(stagedDb, await zip.file(manifest.db)!.async('nodebuffer'));
+      const db = new Database(stagedDb);
+      try {
+        db.exec(sql);
+      } finally {
+        db.close();
+      }
+      const mutatedDb = fs.readFileSync(stagedDb);
+      manifest.dbBytes = mutatedDb.byteLength;
+      zip.file(manifest.db, mutatedDb);
+      zip.file('manifest.json', JSON.stringify(manifest));
+      return await zip.generateAsync({ type: 'nodebuffer' });
+    } finally {
+      fs.rmSync(stageDir, { recursive: true, force: true });
+    }
   }
 
   it('records aiKeySource=keyfile when the running server uses the auto-generated keyfile', async () => {
@@ -278,6 +302,22 @@ describe('BackupService AI keyfile envelope (#496, real SQLite)', () => {
 
     await expect(service.inspect(await zip.generateAsync({ type: 'nodebuffer' }))).rejects.toThrow(
       /database size does not match manifest/i,
+    );
+  });
+
+  it.each([
+    ['missing attachments table', 'DROP TABLE attachments'],
+    ['missing attachment column', 'ALTER TABLE attachments RENAME COLUMN hidden TO archived_hidden'],
+  ])('rejects a staged database with a %s as an invalid archive in inspect and restore', async (_case, sql) => {
+    const service = makeService();
+    const archive = await service.buildBackup();
+    const tampered = await archiveWithDatabaseMutation(archive, sql);
+
+    await expect(service.inspect(tampered)).rejects.toThrow(
+      /invalid backup archive — database attachment schema could not be read/i,
+    );
+    await expect(service.restore(tampered, RESTORE_CONFIRM_TOKEN, testUser)).rejects.toThrow(
+      /invalid backup archive — database attachment schema could not be read/i,
     );
   });
 
