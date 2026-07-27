@@ -304,9 +304,7 @@ describe('BackupService AI keyfile envelope (#496, real SQLite)', () => {
     zip.file('manifest.json', JSON.stringify(manifest, null, 2));
 
     const tampered = await zip.generateAsync({ type: 'nodebuffer' });
-    await expect(service.inspect(tampered)).rejects.toThrow(
-      /upload checksum does not match manifest/i,
-    );
+    await expect(service.inspect(tampered)).rejects.toThrow(/manifest attachments do not match database snapshot/i);
 
     const scheduledPath = path.join(dataDir, 'campfire-backup-tampered.zip');
     fs.writeFileSync(scheduledPath, tampered);
@@ -314,7 +312,7 @@ describe('BackupService AI keyfile envelope (#496, real SQLite)', () => {
       verifyScheduledArchive(filePath: string): Promise<{ verified: boolean; error: string }>;
     }).verifyScheduledArchive(scheduledPath);
     expect(verification.verified).toBe(false);
-    expect(verification.error).toMatch(/upload checksum does not match manifest/i);
+    expect(verification.error).toMatch(/manifest attachments do not match database snapshot/i);
   });
 
   it('requires every upload to have exactly one modern manifest checksum record in inspect and restore', async () => {
@@ -340,9 +338,9 @@ describe('BackupService AI keyfile envelope (#496, real SQLite)', () => {
     zip.file('manifest.json', JSON.stringify(manifest, null, 2));
     const tampered = await zip.generateAsync({ type: 'nodebuffer' });
 
-    await expect(service.inspect(tampered)).rejects.toThrow(/missing manifest attachment checksum/i);
+    await expect(service.inspect(tampered)).rejects.toThrow(/manifest attachments do not match database snapshot/i);
     await expect(service.restore(tampered, RESTORE_CONFIRM_TOKEN, testUser)).rejects.toThrow(
-      /missing manifest attachment checksum/i,
+      /manifest attachments do not match database snapshot/i,
     );
   });
 
