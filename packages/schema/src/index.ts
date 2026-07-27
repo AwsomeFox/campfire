@@ -39,6 +39,7 @@ import { NarrationLanguage } from './narration-language';
 // Structured action resolver (issue #414): data model + pure, system-aware resolution math.
 // Re-exported so server / MCP / web import it from '@campfire/schema' alongside everything else.
 export * from './action-resolver';
+export * from './spell-slots';
 export * from './character-action';
 export * from './combatant-statblock';
 export * from './character-creation';

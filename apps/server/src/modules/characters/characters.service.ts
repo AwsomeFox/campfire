@@ -21,6 +21,9 @@ import {
   formatCheckBreakdown,
   sortCheckCatalog,
   pf2eDegreeOfSuccess,
+  // #1039 — the single definition of "how many slots remain" and when a spend must fail.
+  applySpellSlotDelta,
+  spellSlotsRemaining,
 } from '@campfire/schema';
 import type { Character, CharacterAction, CharacterResource, Role, SkillRank, SpellSlotLevel, RollCheckDefinition, CheckRollRequest, CheckRollResponse, CheckRequest, CheckRequestCreate, CheckRequestResolution } from '@campfire/schema';
 import { rollDice } from '../../common/dice';
@@ -1191,24 +1194,64 @@ export class CharactersService {
     return redactSecret(toDomain(row), role);
   }
 
-  /** Spend (+delta) or restore (-delta) slots at one spell level; `used` is clamped to [0, max]. */
+  /**
+   * Spend (+delta) or restore (-delta) slots at one spell level (#1039).
+   *
+   * BEHAVIOUR CHANGE: an overspend now FAILS instead of clamping. Previously, casting at a
+   * level with `used === max` returned 201 with an unchanged sheet — a confusing no-op for a
+   * human clicking a pip, and the unlimited-casting hole for the AI DM, which reads a success
+   * and narrates the spell as cast. Its sibling `adjustResource` (#422, thirty lines below)
+   * has always thrown on the same condition; this brings the two into agreement, and the safe
+   * one was not previously the one guarding spells.
+   *
+   * Restores still clamp at zero. See the asymmetry note in packages/schema/src/spell-slots.ts:
+   * a restore cannot invent a slot, and `used = 0` is the state a long rest produces anyway.
+   *
+   * CONCURRENCY. The read, the decision, and the write happen inside ONE
+   * `this.db.transaction`, and the row is RE-READ inside it rather than reusing the row fetched
+   * for the permission check. better-sqlite3 runs a transaction synchronously to completion
+   * with no JS yield, so two concurrent casts on the same character cannot interleave between
+   * the read and the write within this process — the same single-process argument
+   * `AiDmTranscriptService` documents for its `MAX(seq) + 1` allocation. The previous shape
+   * (`getRowOrThrow` … `await db.update`) had an `await` between read and write, so two casts
+   * resolving in the same turn silently lost one deduction, which is the same unlimited-casting
+   * abuse arriving through the back door.
+   *
+   * A SQL-side `json_set` delta was the alternative. It was rejected because it cannot express
+   * "fail when insufficient" in one statement — it would have to clamp, which is the bug.
+   */
   async patchSpellSlots(id: number, patch: SpellSlotPatchInput, user: RequestUser, role: Role): Promise<Character> {
     const existing = await this.getRowOrThrow(id);
     this.assertCanWrite(existing, user, role);
 
-    const slots = fromJsonText<Record<string, SpellSlotLevel>>(existing.spellSlots, {});
-    const key = String(patch.level);
-    const slot = slots[key];
-    if (!slot || slot.max <= 0) {
-      throw new BadRequestException(`No spell slots at level ${patch.level} — set the level's max via PATCH spellSlots first`);
-    }
-    slots[key] = { max: slot.max, used: Math.max(0, Math.min(slot.max, slot.used + patch.delta)) };
+    let row!: typeof characters.$inferSelect;
+    let outcome!: ReturnType<typeof applySpellSlotDelta>;
+    this.db.transaction((tx) => {
+      const [fresh] = tx.select().from(characters).where(eq(characters.id, id)).limit(1).all();
+      if (!fresh || fresh.deletedAt !== null) throw new NotFoundException(`Character ${id} not found`);
 
-    const [row] = await this.db
-      .update(characters)
-      .set({ spellSlots: toJsonText(slots), updatedAt: nowIso() })
-      .where(eq(characters.id, id))
-      .returning();
+      const slots = fromJsonText<Record<string, SpellSlotLevel>>(fresh.spellSlots, {});
+      outcome = applySpellSlotDelta(slots, patch.level, patch.delta);
+      if (!outcome.ok) {
+        // Thrown from INSIDE the transaction so the read is rolled back with the decision —
+        // nothing is written on the failure path.
+        throw new BadRequestException({
+          code: outcome.reason,
+          message: outcome.message,
+          level: outcome.level,
+          remaining: outcome.remaining,
+          max: outcome.max,
+        });
+      }
+
+      const [updated] = tx
+        .update(characters)
+        .set({ spellSlots: toJsonText(outcome.slots), updatedAt: nowIso() })
+        .where(eq(characters.id, id))
+        .returning()
+        .all();
+      row = updated;
+    });
 
     await this.audit.log({
       actor: auditActor(user),
@@ -1217,10 +1260,21 @@ export class CharactersService {
       entityType: 'character',
       entityId: id,
       campaignId: existing.campaignId,
-      detail: JSON.stringify(patch),
+      detail: JSON.stringify({
+        ...patch,
+        usedBefore: outcome.ok ? outcome.usedBefore : undefined,
+        usedAfter: outcome.ok ? outcome.usedAfter : undefined,
+        remaining: outcome.ok ? outcome.remaining : undefined,
+      }),
     });
     this.emitCharacterUpdated(existing.campaignId, id, user.id);
     return toDomain(row);
+  }
+
+  /** Slots remaining at one level — read-only, for callers that want to check before spending. */
+  async spellSlotsLeft(id: number, level: number): Promise<number> {
+    const existing = await this.getRowOrThrow(id);
+    return spellSlotsRemaining(fromJsonText<Record<string, SpellSlotLevel>>(existing.spellSlots, {}), level);
   }
 
   /** Spend, restore, or configure a bounded character resource (issue #422). */

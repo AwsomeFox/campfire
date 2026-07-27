@@ -796,6 +796,12 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   // character live state
   'update_character_hp',
   'set_character_conditions',
+  // #1039 — spell-slot expenditure. The seat could already spend HP, conditions and XP but had
+  // no way to deduct a slot, so casting was effectively free: the model narrated the spell and
+  // nothing was consumed. Safe to grant only because an overspend is now a hard tool error
+  // rather than a silent clamp — a tool that fails open on "no slots left" would have made
+  // unlimited casting look sanctioned instead of merely unmodelled.
+  'adjust_spell_slots',
   'award_xp',
   'level_up_character',
   // scene / exploration / world consequences
