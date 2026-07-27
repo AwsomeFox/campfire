@@ -770,7 +770,12 @@ export class ExportService {
     const stagingDir = fs.mkdtempSync(path.join(os.tmpdir(), 'campfire-export-'));
     let stageNumber = 0;
     let archiveError: Error | undefined;
-    const outputComplete = finished(destination, { cleanup: true });
+    // `writeMarkdownZip` can still fail while querying/projecting the campaign.
+    // A response is only committed once archiver has emitted bytes, not merely
+    // because the archive was constructed and piped.
+    let archiveBytesProduced = false;
+    const outputCompletionAbort = new AbortController();
+    const outputComplete = finished(destination, { cleanup: true, signal: outputCompletionAbort.signal });
     // Attach a rejection handler immediately: an output can fail while an
     // attachment is still being staged, before the main flow reaches its await.
     void outputComplete.catch(() => undefined);
@@ -786,7 +791,7 @@ export class ExportService {
      * this work before touching the response; preserve that outcome.
      */
     const teardownDestination = (error: Error): boolean => {
-      if (archive.pointer() === 0) return false;
+      if (!archiveBytesProduced && !destination.writableEnded && !destination.destroyed) return false;
       if (!destination.destroyed && !destination.writableEnded) destination.destroy(error);
       return true;
     };
@@ -803,9 +808,11 @@ export class ExportService {
       archiveError = err;
       archive.destroy(err);
     };
+    const onArchiveData = () => { archiveBytesProduced = true; };
     signal.addEventListener('abort', abort, { once: true });
     archive.once('error', onArchiveError);
     destination.once('error', onDestinationError);
+    archive.on('data', onArchiveData);
     archive.pipe(destination);
     try {
       const result = await this.writeMarkdownZip(
@@ -847,21 +854,30 @@ export class ExportService {
       return result;
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
-      archive.destroy(error);
-      // Only wait on the destination when we actually tore it down. An untouched
-      // response is left intact for the controller to answer with a normal error, and
-      // awaiting `finished()` on a stream nobody destroyed would simply hang.
+      // Only wait on the destination when we actually tore it down. An untouched response
+      // is left intact for the controller to answer with a normal error, and awaiting
+      // `finished()` on a stream nobody destroyed would simply hang.
       if (teardownDestination(error)) {
+        archive.destroy(error);
         try {
           await outputComplete;
         } catch {
           // Preserve the operation's primary failure (abort, staging, or archiver).
         }
+      } else {
+        // No bytes reached the response: leave it available for Nest's normal exception
+        // handling instead of resetting the client connection. The primary error is
+        // rethrown below, so close archiver without emitting a second asynchronous error.
+        archive.destroy();
       }
       throw error;
     } finally {
+      // Cancels only the finished() observation, not the destination stream. It
+      // removes its listeners when a pre-stream failure leaves the response open.
+      outputCompletionAbort.abort();
       signal.removeEventListener('abort', abort);
       archive.removeListener('error', onArchiveError);
+      archive.removeListener('data', onArchiveData);
       destination.removeListener('error', onDestinationError);
       fs.rmSync(stagingDir, { recursive: true, force: true });
     }

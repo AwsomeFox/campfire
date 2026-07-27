@@ -157,6 +157,10 @@ export class BackupArchiveReader {
         zip.once('error', fail);
         zip.on('entry', onEntry);
         zip.once('end', onEnd);
+        // The openZip() above is async and abort events are not replayed to a listener
+        // registered after they fire, so the pre-open check alone would let a cancelled
+        // request still enumerate the whole central directory.
+        if (signal?.aborted) { abort(); return; }
         zip.readEntry();
       });
       return new BackupArchiveReader(zip, entries, limits);
@@ -216,11 +220,15 @@ export class BackupArchiveReader {
     const source = await new Promise<Readable>((resolve, reject) => this.zip.openReadStream(entry, (err, stream) => err || !stream ? reject(err ?? new Error('Cannot open entry')) : resolve(stream)));
     const abort = () => source.destroy(new Error('aborted'));
     signal?.addEventListener('abort', abort, { once: true });
-    // addEventListener never fires for an already-aborted signal, and openReadStream above
-    // is async — a cancellation landing during it would otherwise let this entry be read in
-    // full. On the restore path that means work continuing toward a destructive apply after
-    // the operator cancelled, so recheck rather than trusting the pre-open guard.
-    if (signal?.aborted) abort();
+    // Cancellation can occur while openReadStream's callback is pending, and abort events
+    // are not replayed to a listener registered after they fire. Without this recheck the
+    // entry would be read in full despite the cancellation — on the restore path that means
+    // work continuing toward a destructive apply after the operator cancelled.
+    if (signal?.aborted) {
+      source.destroy();
+      signal.removeEventListener('abort', abort);
+      invalid('archive read was cancelled');
+    }
     try { await consume(source); }
     catch (err) {
       if (err instanceof BadRequestException) throw err;

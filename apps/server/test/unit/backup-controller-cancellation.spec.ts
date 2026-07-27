@@ -41,6 +41,19 @@ describe('BackupController download cancellation', () => {
     expect(backup.buildBackup).toHaveBeenCalledTimes(1);
   });
 
+  it('does not rethrow a pipeline failure after the ZIP response is committed', async () => {
+    const req = new EventEmitter();
+    const res = response();
+    const backup = {
+      backupFilename: jest.fn(() => 'backup.zip'),
+      buildBackup: jest.fn(async () => {
+        res.headersSent = true;
+        throw new Error('Backup archive exceeds compressed restore limit');
+      }),
+    };
+    await expect(new BackupController(backup as never).download(req as never, res as never)).resolves.toBeUndefined();
+  });
+
   it('does not hide a genuine failure merely because a cancellation signal exists', async () => {
     const req = new EventEmitter();
     const res = response();

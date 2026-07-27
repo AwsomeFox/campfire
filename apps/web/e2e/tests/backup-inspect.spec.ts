@@ -171,11 +171,7 @@ test.describe('server backup workflow UI (issues #514 / #444)', () => {
     await expect(card.getByText(/buffered the archive in memory/i)).toBeVisible();
   });
 
-  // Precondition: a declared Content-Length. Campfire streams the archive and cannot know
-  // its size up front, so this pre-stream guard only fires behind a buffering reverse proxy
-  // that adds the header. The per-chunk ceiling below is what bounds memory against the
-  // bare server, and it is covered separately.
-  test('rejects oversized fallback downloads up front when a proxy declares Content-Length', async ({ page }) => {
+  test('rejects oversized fallback downloads with recovery copy', async ({ page }) => {
     await page.addInitScript(() => {
       Object.defineProperty(window, 'showSaveFilePicker', { value: undefined, configurable: true });
     });
@@ -238,24 +234,23 @@ test.describe('server backup workflow UI (issues #514 / #444)', () => {
 
   test('writes to a File System Access destination without browser buffering', async ({ page }) => {
     await page.addInitScript(() => {
-      (window as Window & { __backupWrites?: number }).__backupWrites = 0;
+      (window as Window & { __backupWrites?: number; __pickerReceiverIsWindow?: boolean }).__backupWrites = 0;
       Object.defineProperty(window, 'showSaveFilePicker', {
         configurable: true,
-        // Deliberately NOT an arrow function. Chromium's real showSaveFilePicker rejects a
-        // detached receiver with "Illegal invocation", so a mock that ignores `this` would
-        // pass against code that production cannot run. Enforce the receiver here.
-        value: async function (this: unknown) {
+        value: function (this: Window) {
+          const testWindow = window as Window & { __backupWrites?: number; __pickerReceiverIsWindow?: boolean };
+          testWindow.__pickerReceiverIsWindow = this === window;
           if (this !== window) throw new TypeError('Illegal invocation');
-          return {
+          return Promise.resolve({
             name: 'chosen-backup.zip',
             createWritable: async () => ({
               write: async () => {
-                (window as Window & { __backupWrites?: number }).__backupWrites! += 1;
+                testWindow.__backupWrites! += 1;
               },
               close: async () => undefined,
               abort: async () => undefined,
             }),
-          };
+          });
         },
       });
     });
@@ -272,6 +267,10 @@ test.describe('server backup workflow UI (issues #514 / #444)', () => {
     const card = page.locator('.server-backup-workflow-card');
     await card.getByRole('button', { name: 'Create & download backup' }).click();
     await expect(card.getByText(/Saved chosen-backup\.zip .*directly to the selected file/i)).toBeVisible();
+    await expect.poll(() =>
+      page.evaluate(() =>
+        (window as Window & { __pickerReceiverIsWindow?: boolean }).__pickerReceiverIsWindow),
+    ).toBe(true);
     await expect.poll(() => page.evaluate(() => (window as Window & { __backupWrites?: number }).__backupWrites)).toBeGreaterThan(0);
   });
 

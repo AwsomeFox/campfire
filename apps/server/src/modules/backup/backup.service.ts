@@ -280,6 +280,19 @@ function assertBackupNotCancelled(signal?: AbortSignal): void {
   if (signal?.aborted) throw new Error('Backup generation cancelled');
 }
 
+/**
+ * Whether two paths live on the same filesystem, so that space reserved for one is not
+ * separately available to the other. Falls back to `false` (independent budgets, the
+ * historical assumption) when either path cannot be stat'd.
+ */
+function sameFilesystem(a: string, b: string): boolean {
+  try {
+    return fs.statSync(a).dev === fs.statSync(b).dev;
+  } catch {
+    return false;
+  }
+}
+
 /** Normalize on-disk keyfile bytes (64-hex UTF-8) or raw 32-byte material. */
 function aiKeyMaterialToBuffer(material: Buffer): Buffer {
   const asText = material.toString('utf8').trim();
@@ -520,9 +533,18 @@ export class BackupService implements OnApplicationBootstrap {
         previous?.lastSize ?? null,
         () => this.estimateFallbackBackupBytes(),
       );
-      disk = this.probeDisk(dir, minFreeBytes, estimatedBytes);
+      // buildBackup stages a full copy of the DB snapshot and the uploads tree under
+      // os.tmpdir() while this archive is being written into BACKUP_DIR. When the two
+      // share a filesystem both allocations are live at once, and checking each path
+      // separately would pass twice on space that can only satisfy one of them — the
+      // run then fails with ENOSPC partway through, having eaten the reserve the live
+      // database depends on. Reserve for the sum in that case.
+      const peakBytes = sameFilesystem(os.tmpdir(), dir)
+        ? estimatedBytes + this.estimateFallbackBackupBytes()
+        : estimatedBytes;
+      disk = this.probeDisk(dir, minFreeBytes, peakBytes);
       fs.mkdirSync(dir, { recursive: true });
-      disk = this.probeDisk(dir, minFreeBytes, estimatedBytes);
+      disk = this.probeDisk(dir, minFreeBytes, peakBytes);
       if (disk && disk.lowSpace) {
         const message =
           `Scheduled backup skipped: low disk space in BACKUP_DIR ` +
@@ -1481,6 +1503,15 @@ export class BackupService implements OnApplicationBootstrap {
       }
 
       // --- Apply with atomic swap + automatic rollback (#497) ---
+      // Last chance to honour a cancellation. Everything above is validation against
+      // staging; everything below replaces the live database and uploads tree. The
+      // signal is polled at each extract, but validation continues afterwards, so an
+      // abort landing in that window would otherwise carry straight through into the
+      // destructive phase. Every other failure in this path costs a temp file; this one
+      // would cost the operator their live data after they pressed cancel.
+      if (options?.signal?.aborted) {
+        throw new BadRequestException('Invalid backup archive — restore was cancelled before it was applied');
+      }
       const progressPhases: RestoreProgressPhase[] = ['validated', 'staging-uploads'];
       options?.onProgress?.('validated');
       options?.onProgress?.('staging-uploads');

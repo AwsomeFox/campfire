@@ -136,7 +136,8 @@ export class BackupController {
         res,
       );
     } catch (error) {
-      // A client disconnect is expected during a streamed download.
+      // A client disconnect is expected during a streamed download. Preserve
+      // unrelated failures even if the request happened to close at the same time.
       if (isBackupDownloadCancellation(error, operation.signal)) return;
       // Once bytes are committed the response belongs to the archive. Rethrowing would
       // have Nest write a JSON error over the in-flight ZIP — the compressed-size ceiling
@@ -144,6 +145,8 @@ export class BackupController {
       // not a rare one. Destroy the response instead: a truncated transfer the client can
       // detect beats a body that is half archive and half error. Mirrors the export path.
       if (res.headersSent || res.destroyed) {
+        // Destroy rather than merely returning: letting the response end normally would
+        // present a truncated archive as a complete one.
         if (!res.destroyed) res.destroy(error instanceof Error ? error : new Error(String(error)));
         return;
       }

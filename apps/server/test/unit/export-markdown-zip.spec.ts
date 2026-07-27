@@ -158,26 +158,25 @@ describe('buildMarkdownZip — filename collisions (issues #530 / #863)', () => 
     expect(chunks).toHaveLength(0);
   });
 
-  it('leaves the response intact when the export fails before any byte is written', async () => {
+  it('leaves the destination intact when campaign projection fails before archive bytes', async () => {
     const service = serviceWithCollisions();
-    // buildProfileExport runs many DB reads after the controller has staged headers but
-    // before archiver emits anything. Destroying the response here would reset the
-    // connection, and the controller's already-destroyed guard would then swallow the
-    // error — handing the DM an opaque failed download instead of a JSON 500.
-    jest
-      .spyOn(service as unknown as { buildProfileExport: () => Promise<unknown> }, 'buildProfileExport')
-      .mockRejectedValue(new Error('transient database failure'));
+    jest.spyOn(service as any, 'buildProfileExport').mockRejectedValue(new Error('database unavailable'));
     const output = new PassThrough();
-    const chunks: Buffer[] = [];
-    output.on('data', (chunk: Buffer) => chunks.push(chunk));
-
     await expect(service.streamMarkdownZip(output, new AbortController().signal, 1, USER)).rejects.toThrow(
-      'transient database failure',
+      'database unavailable',
     );
-    expect(chunks).toHaveLength(0);
-    // Still writable, so Nest can answer with a normal error response.
     expect(output.destroyed).toBe(false);
-    jest.restoreAllMocks();
+  });
+
+  it('destroys the destination when a failure occurs after archive bytes begin flowing', async () => {
+    const service = serviceWithCollisions();
+    const controller = new AbortController();
+    const output = new PassThrough();
+    output.once('data', () => controller.abort(new Error('client disconnected after output')));
+    await expect(service.streamMarkdownZip(output, controller.signal, 1, USER)).rejects.toThrow(
+      'client disconnected after output',
+    );
+    expect(output.destroyed).toBe(true);
   });
 
   it('produces one zip entry per source entity in every folder', async () => {
