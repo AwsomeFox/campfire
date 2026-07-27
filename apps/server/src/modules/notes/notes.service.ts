@@ -36,10 +36,12 @@ import {
 } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
+import { canSee } from '../../common/note-visibility';
 import { foldForSearch, foldedIncludes } from '../../common/text-search';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService, excerpt } from '../notifications/notifications.service';
 import { RevisionsService } from '../revisions/revisions.service';
+import { ModerationService } from '../moderation/moderation.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import {
@@ -91,26 +93,14 @@ function entityNameFor(
 }
 
 /**
- * Can `user` see this note? private -> author only; dm_shared -> author+dm;
- * party_shared -> everyone; whisper -> author + the single targeted recipient + any
- * DM (oversight, so the whisper still enters the campaign record — issue #127). A
- * non-target, non-DM member must NEVER see a whisper, and this is the single
- * server-side chokepoint every read path (GET, list, MCP) funnels through.
+ * Note visibility (issue #127). The rule itself moved to `common/note-visibility.ts`
+ * for issue #601 — the moderation module must apply the IDENTICAL check when
+ * authorizing "may this reporter report this whisper", and importing it from here
+ * would close a circular module edge (NotesService now depends on ModerationService
+ * for pre-mutation evidence capture). Re-exported so every existing importer
+ * (RevisionsController, the MCP tools) is untouched.
  */
-export function canSee(
-  note: { authorUserId: string; visibility: string; recipientUserId?: string | null },
-  user: RequestUser,
-  role: Role,
-): boolean {
-  if (note.visibility === 'party_shared') return true;
-  if (note.authorUserId === user.id) return true;
-  if (note.visibility === 'dm_shared' && role === 'dm') return true;
-  if (note.visibility === 'whisper') {
-    if (note.recipientUserId === user.id) return true;
-    if (role === 'dm') return true;
-  }
-  return false;
-}
+export { canSee } from '../../common/note-visibility';
 
 @Injectable()
 export class NotesService {
@@ -121,6 +111,10 @@ export class NotesService {
     private readonly audit: AuditService,
     private readonly notifications: NotificationsService,
     private readonly revisions: RevisionsService,
+    // Issue #601: pre-mutation abuse-evidence capture + mute enforcement, and the
+    // quarantine path that finally lets a DM withhold an abusive whisper. The
+    // dependency runs one way (notes -> moderation).
+    private readonly moderation: ModerationService,
   ) {}
 
   /**
@@ -384,7 +378,19 @@ export class NotesService {
     visibility.push(and(eq(notes.visibility, 'whisper'), eq(notes.recipientUserId, user.id))!);
     if (role === 'dm') visibility.push(eq(notes.visibility, 'whisper'));
 
-    const conds: SQL[] = [eq(notes.campaignId, campaignId), eq(notes.kind, 'note'), notDeleted(notes.deletedAt), or(...visibility)!];
+    // notDeleted(quarantinedAt) (issue #601): a quarantined note/whisper is dropped
+    // from every normal read exactly like a trashed one — including for its own
+    // author and, for a whisper, its recipient. Withholding it from the target is
+    // the entire point: the DM has judged the content abusive, and "the victim can
+    // still read it" is not a moderation outcome. It stays reachable only through
+    // the separately-gated moderation evidence path.
+    const conds: SQL[] = [
+      eq(notes.campaignId, campaignId),
+      eq(notes.kind, 'note'),
+      notDeleted(notes.deletedAt),
+      notDeleted(notes.quarantinedAt),
+      or(...visibility)!,
+    ];
     if (filters.entityType) conds.push(eq(notes.entityType, filters.entityType));
     if (filters.entityId !== undefined) conds.push(eq(notes.entityId, filters.entityId));
     if (filters.mine) conds.push(eq(notes.authorUserId, user.id));
@@ -586,6 +592,11 @@ export class NotesService {
     const [row] = await this.db.select().from(notes).where(eq(notes.id, id)).limit(1);
     // A trashed note (soft-deleted, #116) reads as nonexistent unless includeDeleted (restore).
     if (!row || (!includeDeleted && row.deletedAt != null)) throw new NotFoundException(`Note ${id} not found`);
+    // A QUARANTINED note (issue #601) reads as nonexistent to every caller on every
+    // path, including restore — only the moderation queue may lift a quarantine, so
+    // there is deliberately no includeDeleted-style escape hatch here. Without this,
+    // an author could restore their own quarantined note straight back into view.
+    if (row.quarantinedAt != null) throw new NotFoundException(`Note ${id} not found`);
     return row;
   }
 
@@ -597,6 +608,10 @@ export class NotesService {
   }
 
   async create(campaignId: number, input: NoteCreateInput, user: RequestUser, role: Role): Promise<Note> {
+    // Issue #601: a moderation mute must actually stop the muted member posting —
+    // including via a whisper, which is exactly the channel a muted harasser would
+    // reach for next. Checked first so a muted request does no writes at all.
+    await this.moderation.assertNotMuted(campaignId, user);
     const ts = nowIso();
     const visibility = input.visibility ?? 'private';
     const recipientUserId = await this.resolveWhisperTarget(campaignId, visibility, input.recipientUserId);
@@ -661,11 +676,53 @@ export class NotesService {
     // Optimistic concurrency (#157): a co-author's stale save 409s instead of clobbering.
     this.revisions.assertNotStale(existing, opts?.expectedUpdatedAt);
 
+    // Recompute the whisper target from the RESULTING visibility + recipient: switching
+    // away from whisper clears the recipient, switching into whisper (or re-targeting)
+    // re-validates it against campaign membership. issue #127.
+    const finalVisibility = input.visibility ?? existing.visibility;
+    const finalRecipientRaw = 'recipientUserId' in input ? input.recipientUserId : existing.recipientUserId;
+    const recipientUserId = await this.resolveWhisperTarget(existing.campaignId, finalVisibility, finalRecipientRaw);
+
+    // Issue #601: capture the pre-edit abuse-evidence snapshot INSIDE the write
+    // transaction, from the row as it exists there — not from `existing`, read
+    // earlier. A snapshot taken outside this window could be beaten by a concurrent
+    // delete and record content that is not what the edit actually overwrote.
+    // better-sqlite3 is synchronous and SQLite serializes write transactions, so no
+    // other writer can interleave. No-op unless an unresolved report names this note.
+    //
+    // The visibility gate is re-applied here too. `getRowOrThrow` above 404s a
+    // quarantined or trashed note, but it read the row BEFORE this transaction
+    // opened: a DM who quarantines the note in that window would not actually have
+    // stopped the edit, which for a whisper under an open report is exactly the
+    // "subject rewrites the words" move quarantine exists to block. Re-checked
+    // against the row the write will touch, and matching getRowOrThrow's error
+    // exactly — a quarantined note reads as nonexistent on every path, so this
+    // refusal must not be the one place that confirms it is there.
+    const row = this.db.transaction((tx) => {
+      const [current] = tx.select().from(notes).where(eq(notes.id, id)).limit(1).all();
+      if (!current || current.deletedAt != null || current.quarantinedAt != null) {
+        throw new NotFoundException(`Note ${id} not found`);
+      }
+      this.moderation.snapshotNoteIfWatched(tx, current, 'pre_edit');
+      const rows = tx
+        .update(notes)
+        .set({ ...input, recipientUserId, updatedAt: nowIso() })
+        .where(eq(notes.id, id))
+        .returning()
+        .all();
+      return rows[0];
+    });
+
     // Commit an immutable prose version when the body changes (#157/#233/#813) — #157
     // cited notes.service by line as the prose being destroyed, so a clobbered note is
     // recoverable. The revision-read/restore endpoints are gated on the note's OWN
     // visibility + author (RevisionsController), never a blanket dm-gate, so history is
     // no redaction back-door. Mirrors the quests/npcs/locations commit-on-change pattern.
+    //
+    // Ordered AFTER the write transaction (as CommentsService.update already does) so
+    // an edit the transaction REFUSES — a stale save, or the quarantine re-check above
+    // — leaves no revision behind. A version tip recording prose that was never stored
+    // is the same defect as an evidence snapshot for an edit that never happened.
     if (input.body !== undefined && input.body !== existing.body) {
       await this.revisions.commitProseVersion({
         entityType: 'note',
@@ -676,19 +733,6 @@ export class NotesService {
         user,
       });
     }
-
-    // Recompute the whisper target from the RESULTING visibility + recipient: switching
-    // away from whisper clears the recipient, switching into whisper (or re-targeting)
-    // re-validates it against campaign membership. issue #127.
-    const finalVisibility = input.visibility ?? existing.visibility;
-    const finalRecipientRaw = 'recipientUserId' in input ? input.recipientUserId : existing.recipientUserId;
-    const recipientUserId = await this.resolveWhisperTarget(existing.campaignId, finalVisibility, finalRecipientRaw);
-
-    const [row] = await this.db
-      .update(notes)
-      .set({ ...input, recipientUserId, updatedAt: nowIso() })
-      .where(eq(notes.id, id))
-      .returning();
 
     await this.audit.log({
       actor: auditActor(user),
@@ -730,7 +774,21 @@ export class NotesService {
     if (existing.authorUserId !== user.id) {
       throw new ForbiddenException('Only the author may delete this note');
     }
-    await this.db.update(notes).set({ deletedAt: nowIso(), updatedAt: nowIso() }).where(eq(notes.id, id));
+    // Issue #601: same atomic snapshot-then-mutate as update(). This is the sharper
+    // case — an abuser racing a victim's report must not be able to delete the
+    // whisper between the report reading it and the report recording it. The
+    // quarantine/trash gate that `getRowOrThrow` applied to a pre-transaction read is
+    // re-applied here against the row this write will touch, so a quarantine landing
+    // in that window actually stops the delete instead of merely preceding it.
+    const ts = nowIso();
+    this.db.transaction((tx) => {
+      const [current] = tx.select().from(notes).where(eq(notes.id, id)).limit(1).all();
+      if (!current || current.deletedAt != null || current.quarantinedAt != null) {
+        throw new NotFoundException(`Note ${id} not found`);
+      }
+      this.moderation.snapshotNoteIfWatched(tx, current, 'pre_delete');
+      tx.update(notes).set({ deletedAt: ts, updatedAt: ts }).where(eq(notes.id, id)).run();
+    });
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -752,11 +810,22 @@ export class NotesService {
     if (existing.authorUserId !== user.id) {
       throw new ForbiddenException('Only the author may restore this note');
     }
-    const [row] = await this.db
-      .update(notes)
-      .set({ deletedAt: null, updatedAt: nowIso() })
-      .where(eq(notes.id, id))
-      .returning();
+    // Issue #601: gate and write in one transaction, as in update()/remove(). Restore
+    // is the sharpest of the three — it puts a withheld note back into view — so a
+    // quarantine that landed after the `getRowOrThrow` above would otherwise be undone
+    // by the very request it was taken to stop. 404, matching getRowOrThrow.
+    const row = this.db.transaction((tx) => {
+      const [current] = tx.select().from(notes).where(eq(notes.id, id)).limit(1).all();
+      if (!current || current.quarantinedAt != null) throw new NotFoundException(`Note ${id} not found`);
+      if (current.deletedAt == null) throw new NotFoundException(`Note ${id} is not in the trash`);
+      const rows = tx
+        .update(notes)
+        .set({ deletedAt: null, updatedAt: nowIso() })
+        .where(eq(notes.id, id))
+        .returning()
+        .all();
+      return rows[0];
+    });
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -834,6 +903,9 @@ export class NotesService {
       eq(notes.kind, 'inbox'),
       eq(notes.resolved, resolved),
       notDeleted(notes.deletedAt),
+      // Quarantined inbox submissions are withheld from the DM inbox too (#601) —
+      // the queue is where a moderated one is handled, not the ordinary inbox.
+      notDeleted(notes.quarantinedAt),
     ];
 
     if (resolved) {

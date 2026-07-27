@@ -28,7 +28,14 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, u
 import { Link, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import type { AiDmReadiness, Character, Encounter, EncounterWithCombatants } from '@campfire/schema';
+import {
+  AI_DM_TRANSCRIPT_LIST_MAX_LIMIT,
+  type AiDmReadiness,
+  type AiDmTranscriptPage,
+  type Character,
+  type Encounter,
+  type EncounterWithCombatants,
+} from '@campfire/schema';
 import { api, API, translateApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { GameIcon } from '../../components/GameIcon';
@@ -41,13 +48,16 @@ import {
 import { useAiDmStream } from '../../lib/useAiDmStream';
 import {
   transcriptReducer,
+  clearTranscript,
   loadTranscript,
+  newClientRef,
   saveTranscript,
   speakerPrefix,
   dmEntryText,
   emptyTranscript,
 } from './transcript';
 import { invalidateForToolEvent } from './toolActivity';
+import { usePendingHydrate } from './usePendingHydrate';
 import {
   advanceNarrationLog,
   announceableEntryIds,
@@ -109,13 +119,26 @@ export default function AiTablePage() {
   });
   const readiness = readinessQuery.data ?? null;
 
-  // The running transcript is assembled client-side (see transcript.ts). Lazy-hydrate
-  // from localStorage so a reload keeps the recent local scrollback.
+  // The transcript VIEW MODEL (see transcript.ts). The authoritative log lives on the
+  // server since #572; localStorage is only a paint cache so a reload has something on
+  // screen before the first page lands, and is reconciled away by `eventId` as soon as it
+  // does. Hydration is lazy so the cached scrollback is on screen from the first frame.
   const [transcript, dispatch] = useReducer(
     transcriptReducer,
     campaignId,
     (id) => (id !== undefined ? loadTranscript(id) : emptyTranscript),
   );
+
+  /**
+   * Reconnect watermark (#572): the highest authoritative `seq` this client has folded in.
+   * Held in a ref as well as state so the SSE `onReconnect` callback — which is captured
+   * once and must not re-subscribe the stream on every new event — always reads the
+   * CURRENT value when it asks the server for "everything after N".
+   */
+  const lastSeqRef = useRef(0);
+  useEffect(() => {
+    lastSeqRef.current = transcript.lastSeq ?? 0;
+  }, [transcript.lastSeq]);
 
   // `streaming` is the table-wide composer lock: true between turn.start and turn.end.
   // It is driven purely by SSE events, so every client's composer locks in lockstep.
@@ -165,10 +188,102 @@ export default function AiTablePage() {
   const memberName = me?.user.displayName || me?.user.username || t('table.you');
   const characterName = myCharacter?.name;
 
-  // Persist the transcript on every change (bounded inside saveTranscript).
+  /**
+   * Which campaign the reducer state currently holds. Seeded from the first render, since
+   * that is what the lazy initializer loaded, and re-pointed by the campaign-switch reset
+   * below. Needed because a table -> table param change reuses this component instance, so
+   * for one render `campaignId` is already the NEW table while `transcript` still holds the
+   * OLD one's entries.
+   */
+  const transcriptCampaignRef = useRef<number | undefined>(campaignId);
+
+  // Persist the transcript cache on every change (bounded inside saveTranscript).
   useEffect(() => {
-    if (campaignId !== undefined) saveTranscript(campaignId, transcript);
+    // Never write one campaign's entries under another's key. This effect is declared
+    // BEFORE the campaign-switch reset, so on the switch render it would otherwise persist
+    // the previous table's transcript to the new campaign's cache — which the reset would
+    // then read straight back, laundering the leak through localStorage.
+    if (campaignId === undefined || transcriptCampaignRef.current !== campaignId) return;
+    saveTranscript(campaignId, transcript);
   }, [campaignId, transcript]);
+
+  /**
+   * Load the AUTHORITATIVE transcript (#572) — the fix for late join, reload and reconnect.
+   * Before this, a player who joined mid-session had no server transcript to page through
+   * and seeded from `scene` + `lastNarration` behind a "joined mid-session" divider, so no
+   * two browsers at the table agreed on what had happened.
+   *
+   * Fetches the newest page on mount, then gap-fills from the watermark on every later
+   * pass — so the same code path serves the first load AND a reconnect. Failure is soft:
+   * the live stream still works, the client just keeps whatever scrollback it had.
+   */
+  const fetchTranscript = useCallback(
+    async (after?: number) => {
+      if (campaignId === undefined) return;
+      let watermark = after;
+      // A long disconnect can leave more missed events than one page holds. Walk forward
+      // until the server says there is nothing left — a partial catch-up would silently
+      // reintroduce exactly the gap #572 exists to close. Bounded so a pathological
+      // response can never spin the page.
+      for (let page = 0; page < 20; page += 1) {
+        try {
+          const res = await api.get<AiDmTranscriptPage>(
+            `${API}/campaigns/${campaignId}/ai-dm/transcript?limit=${AI_DM_TRANSCRIPT_LIST_MAX_LIMIT}` +
+              (watermark ? `&after=${watermark}` : ''),
+          );
+          if (res.items.length > 0) dispatch({ type: 'serverEvents', events: res.items });
+          const last = res.items[res.items.length - 1];
+          // Only forward (gap-fill) paging continues here; the initial load renders the
+          // newest page and older scrollback is paged by `nextCursor` on demand.
+          if (watermark === undefined || !res.hasMore || !last) return;
+          watermark = last.seq;
+        } catch {
+          /* transcript read is best-effort: the live stream still carries the table */
+          return;
+        }
+      }
+    },
+    [campaignId],
+  );
+
+  const transcriptLoadedFor = useRef<number | undefined>(undefined);
+  const [transcriptFetched, setTranscriptFetched] = useState(false);
+  const pendingHydrate = usePendingHydrate();
+  useEffect(() => {
+    if (campaignId === undefined || !isDriver) return;
+    if (transcriptLoadedFor.current === campaignId) return;
+    const previous = transcriptLoadedFor.current;
+    transcriptLoadedFor.current = campaignId;
+    setTranscriptFetched(false);
+    // TABLE -> TABLE campaign switch. `/c/:campaignId/table` is one unkeyed route element,
+    // so React reuses this component instance when only the param changes — the reducer's
+    // lazy initializer does NOT re-run. That transition is reachable: the always-mounted
+    // notifications bell lists cross-campaign items and navigates straight to
+    // `/c/<other>/table` for an ai_dm_alert. Without this reset, the previous campaign's
+    // entries survive, the new campaign's authoritative events MERGE into them, and the
+    // save effect then persists the old table's transcript under the new campaign's cache
+    // key. A transcript is exactly the wrong thing to leak between tables.
+    //
+    // A reset dispatch rather than `key={campaignId}` on the route: remounting would also
+    // discard scroll/follow position and re-run the whole seed + screen-reader settle
+    // sequence, and this is the narrower, local fix.
+    if (previous !== undefined) {
+      lastSeqRef.current = 0;
+      dispatch({ type: 'hydrate', state: loadTranscript(campaignId) });
+      seededRef.current = false;
+      // The seed effect runs LATER IN THIS SAME COMMIT and would still see the previous
+      // campaign's entries — its `entries.length > 0` branch would latch `seededRef` back
+      // to true, and the new table (whose own transcript is empty) would then never seed
+      // its scene / lastNarration join context at all. Skip that one stale pass.
+      pendingHydrate.mark();
+    }
+    transcriptCampaignRef.current = campaignId;
+    // Opt this surface into authoritative mode BEFORE the first fetch: from here on the
+    // durable `transcript` frames are the transcript, and the thin signal frames that now
+    // have durable counterparts are ignored so nothing renders twice.
+    dispatch({ type: 'authoritative' });
+    void fetchTranscript().finally(() => setTranscriptFetched(true));
+  }, [campaignId, isDriver, fetchTranscript]);
 
   // Seed a fresh transcript (empty localStorage) from thin session state so a brand-new
   // browser drops in behind a "joined mid-session" divider showing scene + last narration.
@@ -182,6 +297,9 @@ export default function AiTablePage() {
   const narrationLogCursorRef = useRef<NarrationLogCursor | null>(null);
   const pendingPreLiveIdsRef = useRef<Set<string>>(new Set());
   useEffect(() => {
+    // A campaign switch queued a hydrate this commit cannot see yet; every branch below
+    // reads `transcript.entries`, so this pass's view belongs to the PREVIOUS table.
+    if (pendingHydrate.consume()) return;
     if (transcript.entries.length > 0) {
       // Hydrated history (or seed applied on the previous commit): no further seed.
       if (!seededRef.current) seededRef.current = true;
@@ -195,6 +313,11 @@ export default function AiTablePage() {
     // Seat still loading: `isDriver` is false while data is missing, but a driver
     // session seed may still arrive — wait before enabling the live log.
     if (!seatQuery.isFetched) return;
+    // #572: never seed a "joined mid-session" placeholder before the AUTHORITATIVE
+    // transcript has had its chance to answer. The placeholder existed only because there
+    // was no server transcript to page through; seeding over one would duplicate the last
+    // narration and give this browser a transcript nobody else has.
+    if (isDriver && !transcriptFetched) return;
     if (!isDriver) {
       // Do NOT set seededRef — a later seat switch into driver with an empty
       // transcript must still run session join-context seeding (#1077 recovery).
@@ -230,6 +353,7 @@ export default function AiTablePage() {
     seatQuery.isFetched,
     sessionQuery.isFetched,
     narrationLogLive,
+    transcriptFetched,
   ]);
 
   // Subscribe to the narration stream. Only opened in Driver mode; the hook itself also
@@ -247,6 +371,14 @@ export default function AiTablePage() {
             campaignId,
             encounterId: event.encounterId ?? activeEncounterId,
           });
+        } else if (event.type === 'transcript.reset') {
+          // The DM erased the log and `seq` restarted; the reducer cleared our copy, so
+          // re-seed from an empty server transcript rather than a stale watermark (#572).
+          // The paint cache must go too, or a reload would repaint erased scrollback that
+          // the (now empty) server transcript has nothing to correct.
+          clearTranscript(campaignId);
+          lastSeqRef.current = 0;
+          void fetchTranscript();
         } else if (
           event.type === 'state' ||
           event.type === 'stuck' ||
@@ -263,6 +395,10 @@ export default function AiTablePage() {
       onReconnect: () => {
         if (campaignId === undefined) return;
         // Transport drop healed — refetch session + live surfaces we may have missed.
+        // #572: replay exactly the transcript events that happened while we were offline,
+        // from our own watermark. Gap-free by construction — `seq` is a dense per-campaign
+        // sequence, so "everything after N" has one correct answer.
+        void fetchTranscript(lastSeqRef.current || undefined);
         setStreaming(false);
         invalidateAiDm(queryClient, campaignId);
         void queryClient.invalidateQueries({ queryKey: queryKeys.campaignEncounters(campaignId) });
@@ -273,6 +409,8 @@ export default function AiTablePage() {
       // Parser recovery keeps the connection; still refetch skipped stream state.
       onStreamRecovery: () => {
         if (campaignId === undefined) return;
+        // Discarded bytes may have eaten transcript frames — recover from the watermark (#572).
+        void fetchTranscript(lastSeqRef.current || undefined);
         setStreaming(false);
         invalidateAiDm(queryClient, campaignId);
         void queryClient.invalidateQueries({ queryKey: queryKeys.campaignEncounters(campaignId) });
@@ -527,15 +665,34 @@ export default function AiTablePage() {
     if (!text || locked || submitting || campaignId === undefined) return;
     setSubmitting(true);
     setSubmitError(null);
-    const body: { input: string; scene?: string; characterId?: number } = {
+    // #572: a correlation token so the authoritative echo REPLACES this client's optimistic
+    // entry instead of rendering the action twice. Deliberately a token, not a content
+    // match — two players typing the same words in the same round are two real lines.
+    const clientRef = newClientRef();
+    const body: {
+      input: string;
+      scene?: string;
+      characterId?: number;
+      clientRef: string;
+      characterName?: string;
+      displayText: string;
+    } = {
+      // `input` is what the MODEL sees (speaker-prefixed, #317); `displayText` is what the
+      // TABLE reads. Keeping them separate stops the prefix leaking into the shared log.
       input: `${speakerPrefix(memberName, characterName)} ${text}`,
       characterId: myMembership?.characterId ?? undefined,
+      clientRef,
+      characterName,
+      displayText: text,
     };
     if (isDm && sceneField.trim()) body.scene = sceneField.trim();
     try {
       await api.post(`${API}/campaigns/${campaignId}/ai-dm/message`, body);
-      // Echo our own action immediately — the stream carries only the AI's narration back.
-      dispatch({ type: 'localPlayer', memberName, characterName, text });
+      // Echo our own action. The action is now ALSO broadcast to everyone else (the #572
+      // fix), so this echo exists only to close the round-trip gap for the sender — and it
+      // is a no-op if the server frame already beat the HTTP response back, because the
+      // reducer dedups on `clientRef` in BOTH directions.
+      dispatch({ type: 'localPlayer', memberName, characterName, text, clientRef });
       setInput('');
       setSceneField('');
     } catch (err) {

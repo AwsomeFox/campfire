@@ -470,6 +470,11 @@ CREATE TABLE IF NOT EXISTS notes (
   resolved INTEGER NOT NULL DEFAULT 0,
   resolved_note TEXT NOT NULL DEFAULT '',
   deleted_at TEXT,
+  -- Moderation quarantine (issue #601): a DM withholding an abusive note/whisper
+  -- pending review. Treated exactly like deleted_at by every NORMAL read, including
+  -- for the author and the whisper recipient. See db/schema.ts for the full docs.
+  quarantined_at TEXT,
+  quarantined_by TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -503,6 +508,11 @@ CREATE TABLE IF NOT EXISTS comments (
   -- prose. See db/schema.ts for the full column docs.
   edited_at TEXT,
   edited_by TEXT,
+  -- Moderation quarantine (issue #601): the body reads back as a neutral
+  -- "withheld pending moderation review" placeholder for every caller while set,
+  -- and the search index drops the row. Only the moderation queue writes these.
+  quarantined_at TEXT,
+  quarantined_by TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -553,6 +563,91 @@ CREATE TABLE IF NOT EXISTS audit_log (
   request_id TEXT,
   created_at TEXT NOT NULL
 );
+
+-- Moderation / abuse incidents (issue #601).
+--
+-- Like audit_log directly above, and for a sharper reason, campaign_id carries NO
+-- foreign key: abuse evidence must OUTLIVE the campaign it was gathered in. A
+-- REFERENCES campaigns(id) ON DELETE CASCADE here would make "purge the campaign"
+-- a one-click way for a DM to destroy every report filed against them — the exact
+-- failure #601 exists to close, and often the only surviving copy of content the
+-- subject has already edited away. Retention is therefore TIME-based (expires_at,
+-- redaction on expiry) rather than lifetime-based, so orphaned rows still stop
+-- holding prose on schedule. See db/schema.ts for the full reasoning and column docs.
+CREATE TABLE IF NOT EXISTS moderation_evidence (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL,
+  target_type TEXT NOT NULL,
+  target_id INTEGER,
+  reason TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'server_capture',
+  author_user_id TEXT NOT NULL DEFAULT '',
+  author_name TEXT NOT NULL DEFAULT '',
+  recipient_user_id TEXT,
+  anchor_entity_type TEXT,
+  anchor_entity_id INTEGER,
+  revision_at TEXT NOT NULL DEFAULT '',
+  content TEXT NOT NULL DEFAULT '',
+  context_json TEXT NOT NULL DEFAULT '{}',
+  content_hash TEXT NOT NULL,
+  -- sha256 over every field EXCEPT content. Redaction overwrites content, so
+  -- content_hash cannot match afterwards; this digest still can, which is what stops
+  -- redacted_at from being a switch that disables tamper detection for the row.
+  metadata_hash TEXT NOT NULL DEFAULT '',
+  redacted_at TEXT,
+  redacted_by TEXT,
+  redaction_reason TEXT NOT NULL DEFAULT '',
+  expires_at TEXT,
+  captured_at TEXT NOT NULL
+);
+-- The pre-mutation capture path asks "is there already a snapshot for this target?"
+-- on every moderated edit/delete, and the expiry sweep scans by expires_at.
+CREATE INDEX IF NOT EXISTS idx_moderation_evidence_target
+  ON moderation_evidence(campaign_id, target_type, target_id);
+CREATE INDEX IF NOT EXISTS idx_moderation_evidence_expiry ON moderation_evidence(expires_at);
+
+CREATE TABLE IF NOT EXISTS moderation_reports (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL,
+  target_type TEXT NOT NULL,
+  target_id INTEGER,
+  reporter_user_id TEXT NOT NULL,
+  reporter_name TEXT NOT NULL DEFAULT '',
+  subject_user_id TEXT NOT NULL DEFAULT '',
+  subject_name TEXT NOT NULL DEFAULT '',
+  reason TEXT NOT NULL,
+  details TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'open',
+  resolution TEXT,
+  resolution_note TEXT NOT NULL DEFAULT '',
+  evidence_id INTEGER NOT NULL REFERENCES moderation_evidence(id),
+  quarantined INTEGER NOT NULL DEFAULT 0,
+  escalated_at TEXT,
+  escalation_reason TEXT NOT NULL DEFAULT '',
+  acknowledged_at TEXT,
+  resolved_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+-- The DM queue pages by (campaign, status); the mutation hooks ask "is this target
+-- under an unresolved report?" before every edit/delete.
+CREATE INDEX IF NOT EXISTS idx_moderation_reports_queue ON moderation_reports(campaign_id, status, id);
+CREATE INDEX IF NOT EXISTS idx_moderation_reports_target
+  ON moderation_reports(campaign_id, target_type, target_id, status);
+
+CREATE TABLE IF NOT EXISTS moderation_mutes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL,
+  user_id TEXT NOT NULL,
+  user_name TEXT NOT NULL DEFAULT '',
+  reason TEXT NOT NULL DEFAULT '',
+  expires_at TEXT,
+  created_by TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  lifted_at TEXT,
+  lifted_by TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_moderation_mutes_active ON moderation_mutes(campaign_id, user_id, lifted_at);
 
 CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1099,6 +1194,29 @@ CREATE TABLE IF NOT EXISTS ai_dm_seats (
   updated_at TEXT NOT NULL
 );
 
+-- Issue #559: durable AI Driver control state. The driver stores live recovery
+-- controls separately from seat configuration so pause/takeover/vote/stuck
+-- state and replay input survive a server restart.
+CREATE TABLE IF NOT EXISTS ai_driver_control_state (
+  campaign_id INTEGER PRIMARY KEY REFERENCES campaigns(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'idle',
+  state TEXT NOT NULL DEFAULT 'running',
+  scene TEXT,
+  last_narration TEXT,
+  last_turn_at TEXT,
+  turn_count INTEGER NOT NULL DEFAULT 0,
+  stuck TEXT,
+  acting_dm TEXT,
+  vote TEXT,
+  takeover_requested_by TEXT,
+  last_input TEXT,
+  -- The recovery shape most recently ANNOUNCED to the table. A seat sitting in a steady
+  -- state (paused / human_control / stuck / open vote) is announced once, not re-announced
+  -- on every subsequent restart.
+  announced_recovery TEXT,
+  updated_at TEXT NOT NULL
+);
+
 -- Issue #1060: per-turn AI usage history for the DM's usage sparkline and audit.
 -- One row per metered turn (driver step, co-DM draft, scribe run). Cascades on
 -- campaign delete so purge cleans it up automatically.
@@ -1113,6 +1231,70 @@ CREATE TABLE IF NOT EXISTS ai_dm_usage_history (
 );
 CREATE INDEX IF NOT EXISTS idx_ai_dm_usage_history_campaign_created
   ON ai_dm_usage_history (campaign_id, created_at DESC, id DESC);
+
+-- Issue #572: the AUTHORITATIVE multi-player AI-DM table transcript. Before this the
+-- transcript was client-local (assembled in the browser from the SSE stream plus a local
+-- echo of that one client's own submissions, cached in localStorage) — so a player who
+-- joined late, reloaded, or reconnected saw a different transcript from everyone else,
+-- and nobody but the sender ever saw the player action an AI answer was responding to.
+--
+-- ORDERING. seq is a PER-CAMPAIGN monotonic counter assigned server-side inside the
+-- same synchronous better-sqlite3 transaction as the insert (see AiDmTranscriptService).
+-- It is the ordering key, the pagination cursor, and the reconnect watermark. It is
+-- deliberately NOT created_at (wall clock has no total order under concurrency) and
+-- deliberately NOT the global autoincrement id (which interleaves across campaigns, so
+-- a per-campaign cursor built on it would leak server-wide write volume). UNIQUE
+-- (campaign_id, seq) makes a duplicate assignment a hard error rather than silent
+-- transcript corruption.
+--
+-- event_id is the stable, client-visible identity (a server-minted uuid) used for
+-- idempotent client-side merge when the same event arrives twice (live SSE plus a page
+-- fetch after reconnect).
+--
+-- client_ref is the sender's optimistic-echo correlation token: the composer mints it,
+-- POSTs it with the action, and the server echoes it back on the persisted event so the
+-- sending client REPLACES its local optimistic entry instead of rendering the action
+-- twice. A token, not content equality — two players typing the same words in the same
+-- second must still produce two distinct lines.
+--
+-- turn_id groups the narration/tool/turn-end rows of ONE driver turn, so a client that
+-- rebuilds the transcript from a REST page assembles the same DM bubble the live stream
+-- produced.
+--
+-- visibility is row-level role redaction ('all' | 'dm'), enforced server-side at BOTH
+-- the REST read and the SSE broadcast boundary. FIELD-level redaction (e.g. a hidden
+-- encounter's id inside a tool payload) reuses the existing projectAiDmToolEventForRole
+-- mechanism rather than inventing a second one.
+--
+-- Deliberately NOT stored: narration.delta. Persisting every streamed token chunk would
+-- multiply this table ~100x per turn for zero added information — narration.message is the
+-- aggregated authoritative text of each step and is what the transcript renders.
+--
+-- RETENTION: bounded to AI_DM_TRANSCRIPT_RETENTION_MAX_EVENTS rows per campaign, pruned
+-- in the same transaction as each insert; cascades on campaign delete; DM-purgeable via
+-- DELETE /campaigns/:id/ai-dm/transcript.
+CREATE TABLE IF NOT EXISTS ai_dm_transcript_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  seq INTEGER NOT NULL,
+  event_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  actor_user_id TEXT,
+  actor_name TEXT,
+  client_ref TEXT,
+  turn_id TEXT,
+  payload TEXT NOT NULL DEFAULT '{}',
+  visibility TEXT NOT NULL DEFAULT 'all',
+  created_at TEXT NOT NULL
+);
+-- The index that matters: every read is "this campaign, ordered by seq" — page back for
+-- late join, page forward from a seq for reconnect gap-fill — and the retention prune and
+-- the next-seq probe are the same keyset scan. UNIQUE also guards the counter.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_dm_transcript_events_campaign_seq
+  ON ai_dm_transcript_events (campaign_id, seq);
+-- Stable event ids are unique per campaign so a client can merge by id with no tiebreak.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_dm_transcript_events_event_id
+  ON ai_dm_transcript_events (campaign_id, event_id);
 
 -- AI provider config: encrypted API-key + provider storage (issue #310). Two
 -- scopes -- 'server' (one row, the admin-managed default) and 'campaign' (a

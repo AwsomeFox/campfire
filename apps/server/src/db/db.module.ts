@@ -1544,6 +1544,61 @@ function migrateAiDmUsageHistoryTable(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before durable AI Driver controls (issue #559): the
+ * `ai_driver_control_state` table didn't exist. New table, one row per campaign.
+ */
+function migrateAiDriverControlStateTable(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS ai_driver_control_state (
+      campaign_id INTEGER PRIMARY KEY REFERENCES campaigns(id) ON DELETE CASCADE,
+      status TEXT NOT NULL DEFAULT 'idle',
+      state TEXT NOT NULL DEFAULT 'running',
+      scene TEXT,
+      last_narration TEXT,
+      last_turn_at TEXT,
+      turn_count INTEGER NOT NULL DEFAULT 0,
+      stuck TEXT,
+      acting_dm TEXT,
+      vote TEXT,
+      takeover_requested_by TEXT,
+      last_input TEXT,
+      announced_recovery TEXT,
+      updated_at TEXT NOT NULL
+    );
+  `);
+}
+
+/**
+ * Backfill `announced_recovery` on `ai_driver_control_state` (issue #559).
+ *
+ * Deliberately its OWN migration rather than a probe bolted inside the create-table migration.
+ * `runMigrations` skips any migration whose NAME is already recorded in `__migrations`, so a probe
+ * living inside `migrateAiDriverControlStateTable` would never run on exactly the DBs that need
+ * it — one that recorded the create against an earlier build whose CREATE lacked the column. The
+ * column would stay missing, every drizzle read/write against the table would throw, and the
+ * best-effort try/catch around persistence would swallow it, silently disabling restart-safety
+ * with no visible symptom. An additive column change gets its own never-before-recorded name so
+ * it runs independently of whether the CREATE was already recorded.
+ *
+ * That reachability is not hypothetical: this migration pair was renumbered several times while
+ * #559 was in review as main took the ordinals underneath it, so DBs exist that recorded the
+ * create under an older name and a column-less shape. Two rules follow, and they outlive whatever
+ * ordinals the pair currently sits on: do NOT fold these two back into one migration, and do NOT
+ * reuse any name either has previously shipped under — a name already in `__migrations` is a
+ * migration that will never run again.
+ */
+function migrateAiDriverControlStateAnnouncedRecovery(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ai_driver_control_state'")
+    .get();
+  if (!hasTable) return;
+  const cols = sqlite.prepare('PRAGMA table_info(ai_driver_control_state)').all() as Array<{ name: string }>;
+  if (!cols.some((c) => c.name === 'announced_recovery')) {
+    sqlite.exec('ALTER TABLE ai_driver_control_state ADD COLUMN announced_recovery TEXT');
+  }
+}
+
+/**
  * Migration for DBs created before DM-initiated check requests (issue #415): the
  * `check_requests` table didn't exist. Same "new table" pattern as migrateAiScribeTables —
  * CREATE TABLE / CREATE INDEX IF NOT EXISTS, recorded so upgraded hosts get the table (and its
@@ -2386,6 +2441,46 @@ function migrateArchmageEscalation542(sqlite: Database.Database): void {
 }
 
 /**
+ * Issue #601: moderation incidents — evidence snapshots, reports, mutes, and the
+ * quarantine columns on the two moderated content tables.
+ *
+ * The three new tables (moderation_evidence / moderation_reports /
+ * moderation_mutes) are created by BOOTSTRAP_SQL, which runs on every boot and so
+ * reaches fresh AND upgraded DBs — same pattern entity_revisions (#157) uses. This
+ * migration therefore exists only for the two ALTER TABLE paths bootstrap cannot
+ * express: `comments.quarantined_at/_by` and `notes.quarantined_at/_by`. Both are
+ * plain nullable ADD COLUMNs — no table rebuild, and no FTS trigger impact (the
+ * comments FTS index covers `body`, which is untouched; quarantine is enforced as a
+ * WHERE predicate alongside the existing deleted_at one, not by reindexing).
+ *
+ * Probes sqlite_master before PRAGMA table_info so a DB predating either table is a
+ * clean no-op, matching migrateAiProviderConfigTable / migrateArchmageEscalation542.
+ */
+function migrateModerationIncidents601(sqlite: Database.Database): void {
+  const columnNames = (table: string): string[] =>
+    (sqlite.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name);
+  const tableExists = (table: string): boolean =>
+    sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(table) != null;
+
+  for (const table of ['comments', 'notes'] as const) {
+    if (!tableExists(table)) continue; // fresh DB — BOOTSTRAP_SQL already declares both columns.
+    const has = columnNames(table);
+    if (!has.includes('quarantined_at')) sqlite.exec(`ALTER TABLE ${table} ADD COLUMN quarantined_at TEXT`);
+    if (!has.includes('quarantined_by')) sqlite.exec(`ALTER TABLE ${table} ADD COLUMN quarantined_by TEXT`);
+  }
+
+  // `moderation_evidence.metadata_hash` was added after the table's first shape, so a
+  // DB created by an earlier build of this branch has the table but not the column.
+  // `CREATE TABLE IF NOT EXISTS` in BOOTSTRAP_SQL cannot add a column to an existing
+  // table, so the ALTER belongs here. Defaults to '' — verifyModerationEvidence treats
+  // an empty metadata digest as "nothing to verify against" rather than as tampering,
+  // so pre-existing snapshots keep their old verdicts instead of being falsely accused.
+  if (tableExists('moderation_evidence') && !columnNames('moderation_evidence').includes('metadata_hash')) {
+    sqlite.exec("ALTER TABLE moderation_evidence ADD COLUMN metadata_hash TEXT NOT NULL DEFAULT ''");
+  }
+}
+
+/**
  * Issue #604: durable responsive derivatives for image attachments.
  *
  * Pre-#604 servers have no `attachment_derivatives` table at all — the only
@@ -2938,6 +3033,71 @@ function migrateCastSessionsTable(sqlite: Database.Database): void {
 }
 
 /**
+ * Issue #572: the authoritative multi-player AI-DM table transcript.
+ *
+ * New table only — no existing table is touched, so the migration is CREATE ... IF NOT
+ * EXISTS plus a defensive column probe. The probe matters because an early build of this
+ * branch shipped the table WITHOUT the per-campaign `seq` / `turn_id` columns (it used
+ * the global row id as the cursor); a dev database created from that build must gain the
+ * columns and a backfilled per-campaign `seq` rather than silently failing every insert.
+ * `seq` is backfilled in (campaign_id, id) order — exactly the order the rows were written.
+ *
+ * The ALTER branch is BRANCH-LOCAL DEV SALVAGE, not a production upgrade path: the table
+ * is new in this change, so no released database can have the old shape. One cosmetic
+ * consequence is worth knowing about — a fresh database gets `seq INTEGER NOT NULL` from
+ * the CREATE above, while a salvaged dev database gets a NULLABLE `seq`, because SQLite
+ * cannot ADD a NOT NULL column without a default. It is harmless (the service always
+ * supplies `seq`, and UNIQUE (campaign_id, seq) is what actually guards the sequence), and
+ * rewriting the table to tighten the constraint would cost a 12-column copy/drop/rename
+ * for dev databases only. Noted rather than fixed, deliberately.
+ */
+function migrateAiDmTranscriptEventsTable572(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS ai_dm_transcript_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+      seq INTEGER NOT NULL,
+      event_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      actor_user_id TEXT,
+      actor_name TEXT,
+      client_ref TEXT,
+      turn_id TEXT,
+      payload TEXT NOT NULL DEFAULT '{}',
+      visibility TEXT NOT NULL DEFAULT 'all',
+      created_at TEXT NOT NULL
+    );
+  `);
+
+  const columns = sqlite.prepare('PRAGMA table_info(ai_dm_transcript_events)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'turn_id')) {
+    sqlite.exec('ALTER TABLE ai_dm_transcript_events ADD COLUMN turn_id TEXT');
+  }
+  if (!columns.some((c) => c.name === 'seq')) {
+    // SQLite cannot ADD a NOT NULL column without a default: add it nullable, backfill a
+    // dense per-campaign sequence in write order, then let the UNIQUE index enforce it.
+    sqlite.exec('ALTER TABLE ai_dm_transcript_events ADD COLUMN seq INTEGER');
+    sqlite.exec(`
+      UPDATE ai_dm_transcript_events
+      SET seq = (
+        SELECT COUNT(*)
+        FROM ai_dm_transcript_events AS earlier
+        WHERE earlier.campaign_id = ai_dm_transcript_events.campaign_id
+          AND earlier.id <= ai_dm_transcript_events.id
+      )
+      WHERE seq IS NULL
+    `);
+  }
+
+  sqlite.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_dm_transcript_events_campaign_seq
+      ON ai_dm_transcript_events (campaign_id, seq);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_dm_transcript_events_event_id
+      ON ai_dm_transcript_events (campaign_id, event_id);
+  `);
+}
+
+/**
  * Issue #580 — per-intent idempotency records for non-idempotent encounter mutations
  * (HP deltas, turn advancement). Purely additive: a new table plus its indexes, so the
  * whole migration is `CREATE ... IF NOT EXISTS` and is safe to re-run. The `PRAGMA
@@ -3249,18 +3409,46 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // after all of them, so the scheduling lifecycle migration takes the next genuinely
   // free ordinal rather than collide.
   { name: '0111_scheduling_lifecycle_504', run: migrateSchedulingLifecycle504 },
-  // 0116 is assigned to this branch by the merge coordinator, who is holding 0112-0113
-  // for other in-flight work and reassigned the contested 0114/0115 to #501 and #572.
-  // The gap above 0111 is therefore deliberate, not a miscount. Dedup is by the FULL
-  // name rather than the ordinal, so the issue-number suffix is what actually guarantees
-  // this runs exactly once even if a sibling branch lands a colliding ordinal first.
+  // 0112-0113 are held by the merge coordinator for other in-flight work, and 0114 went
+  // to #501; 0115 is this branch's central allocation. The gap above 0111 is deliberate,
+  // not a miscount. Dedup is by the FULL name rather than the ordinal, so the issue-number
+  // suffix is what actually guarantees each runs exactly once even if a sibling branch
+  // lands a colliding ordinal first.
+  { name: '0115_ai_dm_transcript_events_572', run: migrateAiDmTranscriptEventsTable572 },
   { name: '0116_encounter_op_idempotency_580', run: migrateEncounterOpIdempotency580 },
+  // #559 deliberately skips past the contested 0112-0117 band rather than taking the next free
+  // ordinal: this pair has already been renumbered three times by other branches landing first,
+  // and 0114-0117 are spoken for by #501/#572/#580/#601, any of which may merge before this.
+  //
+  // Two invariants, both load-bearing:
+  //   1. These two stay ADJACENT and IN THIS ORDER — create table, then add the column.
+  //   2. Both names must be NEVER-BEFORE-RECORDED. runMigrations skips by exact name string, so
+  //      reusing a name any DB already recorded silently skips the migration and the column is
+  //      never added. This pair has previously shipped as 0107/0108/0111/0112 (create) and
+  //      0112/0113 (backfill); 0118/0119 collide with none of them.
+  { name: '0118_ai_driver_control_state_559', run: migrateAiDriverControlStateTable },
+  { name: '0119_ai_driver_control_state_announced_recovery_559', run: migrateAiDriverControlStateAnnouncedRecovery },
+  // 0112-0115 stay centrally allocated to other in-flight branches (0112/0113 → #1442,
+  // 0114 → #501, 0115 → #572), so this migration takes 0117 rather than computing
+  // "next free" for itself — parallel branches all computing that independently is how
+  // they collide.
+  //
+  // It sits BELOW #559's 0118/0119 in the array despite the lower ordinal: #559 reached
+  // main first, so the merge keeps main's entries ahead of this branch's. Execution order
+  // between them is immaterial — they touch disjoint tables — and the ordinal is a
+  // readability convention only. What actually guarantees run-once is the full NAME
+  // string, which `runMigrations` dedupes on; that is exactly why this is NOT renumbered
+  // to 0120 to look tidy, since renaming a migration a database has already recorded is
+  // the one edit that would break run-once behaviour.
+  { name: '0117_moderation_incidents_601', run: migrateModerationIncidents601 },
   // 0123/0124 are CENTRALLY ALLOCATED to this branch by the merge coordinator.
   // 0112-0122 are held by other in-flight branches, so the gap above is deliberate
   // and these are NOT "the next free ordinal" — do not renumber them to close it.
   // runMigrations dedupes on the FULL name, so the `_588` suffix is what actually
   // guarantees run-once even if a sibling branch lands a colliding ordinal first.
   // The pair must stay adjacent and in this order: 0124 backfills a column 0123 adds.
+  // They sit below main's entries because main reached the merge base first; execution
+  // order between them is immaterial as they touch disjoint tables.
   { name: '0123_organized_play_588', run: migrateOrganizedPlay588 },
   { name: '0124_organized_play_ics_uid_backfill_588', run: migrateOrganizedPlayIcsUidBackfill588 },
 ];

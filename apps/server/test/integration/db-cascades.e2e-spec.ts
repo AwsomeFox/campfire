@@ -189,6 +189,8 @@ describe('campaign purge cascade (real SQLite, no orphan rows)', () => {
     run('INSERT INTO inventory_items (campaign_id, name, created_at, updated_at) VALUES (?, ?, ?, ?)', campaignId, 'Rope', now, now);
     run('INSERT INTO party_treasury (campaign_id, updated_at) VALUES (?, ?)', campaignId, now);
     run('INSERT INTO ai_dm_seats (campaign_id, created_at, updated_at) VALUES (?, ?, ?)', campaignId, now, now);
+    // #559: durable driver control state is campaign-scoped and must be swept by the manual cascade too.
+    run('INSERT INTO ai_driver_control_state (campaign_id, updated_at) VALUES (?, ?)', campaignId, now);
     run('INSERT INTO encounter_events (encounter_id, type, created_at) VALUES (?, ?, ?)', encounterId, 'damage', now);
     run('INSERT INTO api_tokens (user_id, name, scope, campaign_id, token_hash, token_prefix, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', 1, 'tok', 'dm', campaignId, 'tok-hash-235', 'tokpfx', now, now);
 
@@ -214,7 +216,7 @@ describe('campaign purge cascade (real SQLite, no orphan rows)', () => {
         'session_zero', 'npcs', 'factions', 'locations', 'sessions', 'session_shares', 'cast_sessions', 'scheduled_sessions',
         'notes', 'comments', 'entity_revisions', 'campaign_guest_dm_grants', 'campaign_members', 'campaign_invites', 'api_tokens',
         'proposals', 'attachments', 'encounters', 'dice_rolls', 'notifications', 'inventory_items',
-        'party_treasury', 'ai_dm_seats', 'session_series',
+        'party_treasury', 'ai_dm_seats', 'ai_driver_control_state', 'session_series',
       ];
       for (const table of campaignScoped) {
         expect({ table, rows: countRows(after, table, `campaign_id = ${campaignId}`) }).toEqual({ table, rows: 0 });

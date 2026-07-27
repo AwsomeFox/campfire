@@ -1,5 +1,5 @@
-import { ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, asc, desc, eq, isNull } from 'drizzle-orm';
+import { ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { and, asc, desc, eq, isNotNull, isNull } from 'drizzle-orm';
 import type { EntityRevision, RevisionAuthorSource, Role, RevisionEntityType } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import {
@@ -23,6 +23,7 @@ import { fromJsonText, toJsonText } from '../../common/json';
 import { nextUpdatedAt } from '../../common/stale-write';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
+import { ModerationService, type ModerationTx } from '../moderation/moderation.service';
 
 /**
  * Prose revision history + optimistic-concurrency guard (issue #157 / #813 / #513).
@@ -45,6 +46,13 @@ import type { RequestUser } from '../../common/user.types';
  * entity service — the recording direction is one-way (entity service → RevisionsService),
  * so there is no cycle. A restore skips entity-specific side effects (e.g. recap_posted
  * notifications) on purpose: re-applying old text is not a fresh post.
+ *
+ * Issue #601 adds the one exception that direct write makes necessary: because a
+ * restore bypasses CommentsService/NotesService, it also bypasses their pre-mutation
+ * abuse-evidence hooks, so this service injects ModerationService and fires the hook
+ * itself. ModerationService depends on neither this service nor any entity service
+ * (its two visibility rules live in `common/`), so the edge stays acyclic. The same
+ * dependency enforces the quarantine gate on reading and restoring history.
  *
  * Restore itself is one synchronous better-sqlite3 transaction (issue #513): the
  * pre-restore snapshot, entity prose update, new revision tip, and audit row either
@@ -122,7 +130,13 @@ export function revisionActorProvenance(user: RequestUser): {
 
 @Injectable()
 export class RevisionsService {
-  constructor(@Inject(DB) private readonly db: DrizzleDb) {}
+  constructor(
+    @Inject(DB) private readonly db: DrizzleDb,
+    // Issue #601: a restore mutates the live prose, so it must trip the same
+    // pre-mutation evidence hook as an ordinary edit. The dependency runs one way
+    // (revisions -> moderation); ModerationService never injects this service back.
+    private readonly moderation: ModerationService,
+  ) {}
 
   /**
    * Optimistic-concurrency guard (tier 1). When `expectedUpdatedAt` is supplied and it
@@ -402,10 +416,86 @@ export class RevisionsService {
   }
 
   /**
+   * Issue #601 — moderation quarantine is a gate on PROSE, and a revision is prose.
+   *
+   * Quarantine is enforced on the live row (CommentsService.toDomain swaps the body
+   * for a placeholder; NotesService drops the row from every read), but revision
+   * history is a wholly separate table reached through a wholly separate controller.
+   * Without this guard a DM could `GET /revisions/comment/:id` and read the exact
+   * words they had just withheld, and — worse — `POST .../restore` would write a
+   * pre-quarantine revision back into the live row, lifting the quarantine through a
+   * route that never touches CommentsService.assertNotQuarantined. The comment's own
+   * `assertNotQuarantined` guards only the paths that go through that service.
+   *
+   * Placed on the two RevisionsService chokepoints rather than in the controller so
+   * every caller inherits it, including CommentsService.listRevisions.
+   *
+   * Takes its own reader so `restore` can run it a second time INSIDE its write
+   * transaction, against the row the prose write will actually touch. Called only
+   * before the transaction, it would be a check on a row read earlier — and a
+   * quarantine landing in that window would not stop the restore from putting the
+   * withheld prose straight back into the live row, which is the whole reason this
+   * guard exists. Reads are synchronous under better-sqlite3, so one method serves
+   * both the pre-flight (fail fast) and the in-transaction (binding) call.
+   */
+  private assertTargetNotQuarantined(
+    reader: SyncDb,
+    entityType: RevisionEntityType,
+    entityId: number,
+  ): void {
+    if (entityType === 'comment') {
+      const row = reader
+        .select({ quarantinedAt: comments.quarantinedAt })
+        .from(comments)
+        .where(eq(comments.id, entityId))
+        .limit(1)
+        .get();
+      if (row?.quarantinedAt != null) {
+        // 403, matching CommentsService: the author wrote it and the placeholder
+        // already tells every reader it is under review, so a 404 would buy no
+        // privacy and only confuse.
+        throw new ForbiddenException(
+          'This comment is withheld pending moderation review; its revision history is unavailable.',
+        );
+      }
+      return;
+    }
+    if (entityType === 'note') {
+      const row = reader
+        .select({ quarantinedAt: notes.quarantinedAt })
+        .from(notes)
+        .where(eq(notes.id, entityId))
+        .limit(1)
+        .get();
+      // 404, matching NotesService.getRow: a quarantined note reads as nonexistent
+      // on every path, so its history must not confirm otherwise.
+      if (row?.quarantinedAt != null) throw new NotFoundException(`note ${entityId} not found`);
+    }
+  }
+
+  /**
+   * Pre-mutation abuse-evidence capture for a restore (issue #601). A no-op unless the
+   * target is a comment or note that some unresolved report already names — the same
+   * "only snapshot what is needed" bound the CommentsService/NotesService hooks apply.
+   */
+  private snapshotModeratedTargetTx(tx: ModerationTx, entityType: RevisionEntityType, entityId: number): void {
+    if (entityType === 'comment') {
+      const [row] = tx.select().from(comments).where(eq(comments.id, entityId)).limit(1).all();
+      if (row) this.moderation.snapshotCommentIfWatched(tx, row, 'pre_edit');
+      return;
+    }
+    if (entityType === 'note') {
+      const [row] = tx.select().from(notes).where(eq(notes.id, entityId)).limit(1).all();
+      if (row) this.moderation.snapshotNoteIfWatched(tx, row, 'pre_edit');
+    }
+  }
+
+  /**
    * An entity's superseded versions, newest-first. Omits the live tip (replacedAt
    * null) — history is prior canon, not the current editor buffer.
    */
   async listForEntity(entityType: RevisionEntityType, entityId: number): Promise<EntityRevision[]> {
+    this.assertTargetNotQuarantined(this.db, entityType, entityId);
     const rows = await this.db
       .select()
       .from(entityRevisions)
@@ -414,14 +504,42 @@ export class RevisionsService {
     return rows.filter((r) => r.replacedAt != null).map((r) => this.toDomain(r));
   }
 
-  /** Every revision row for a campaign (including live tips) — used by export/import (#813). */
+  /**
+   * Every revision row for a campaign (including live tips) — used by export/import (#813).
+   *
+   * Issue #601: revisions belonging to a QUARANTINED comment or note are omitted.
+   * Unlike listForEntity this path takes no entity id to guard, and it is what the
+   * campaign export ships — both the JSON payload and the per-revision markdown files
+   * in the ZIP. Because a live tip's snapshot holds the entity's CURRENT prose, an
+   * unfiltered export would carry the exact body the quarantine withholds, verbatim,
+   * for any comment or note that had ever been edited. Dropping the rows rather than
+   * blanking them keeps the export a faithful record of what is readable.
+   */
   async listForCampaign(campaignId: number): Promise<EntityRevision[]> {
-    const rows = await this.db
-      .select()
-      .from(entityRevisions)
-      .where(eq(entityRevisions.campaignId, campaignId))
-      .orderBy(asc(entityRevisions.id));
-    return rows.map((r) => this.toDomain(r));
+    const [rows, quarantinedComments, quarantinedNotes] = await Promise.all([
+      this.db
+        .select()
+        .from(entityRevisions)
+        .where(eq(entityRevisions.campaignId, campaignId))
+        .orderBy(asc(entityRevisions.id)),
+      this.db
+        .select({ id: comments.id })
+        .from(comments)
+        .where(and(eq(comments.campaignId, campaignId), isNotNull(comments.quarantinedAt))),
+      this.db
+        .select({ id: notes.id })
+        .from(notes)
+        .where(and(eq(notes.campaignId, campaignId), isNotNull(notes.quarantinedAt))),
+    ]);
+    const withheldComments = new Set(quarantinedComments.map((r) => r.id));
+    const withheldNotes = new Set(quarantinedNotes.map((r) => r.id));
+    return rows
+      .filter(
+        (r) =>
+          !(r.entityType === 'comment' && withheldComments.has(r.entityId))
+          && !(r.entityType === 'note' && withheldNotes.has(r.entityId)),
+      )
+      .map((r) => this.toDomain(r));
   }
 
   /** Load the current prose + campaignId + updatedAt for a target entity, or null if it's gone. */
@@ -552,12 +670,18 @@ export class RevisionsService {
    * (notes don't share the uniform dm-only edit path of the world-building entities). A
    * trashed note (soft-deleted, #116) reads as gone — same as its normal GET — so its
    * history/restore is unreachable while it sits in the Trash. Returns null when absent.
+   *
+   * A QUARANTINED note (issue #601) reads as gone for the same reason and more
+   * urgently: `canSee` deliberately knows nothing about quarantine, so without this
+   * the generic /revisions route would hand the withheld prose back to the author,
+   * the whisper recipient and every DM, and let the author restore a prior revision
+   * straight into the live row — bypassing NotesService entirely.
    */
   async loadNoteAccess(
     entityId: number,
   ): Promise<{ campaignId: number; authorUserId: string; visibility: string; recipientUserId: string | null } | null> {
     const [row] = await this.db.select().from(notes).where(eq(notes.id, entityId)).limit(1);
-    if (!row || row.deletedAt != null) return null;
+    if (!row || row.deletedAt != null || row.quarantinedAt != null) return null;
     return {
       campaignId: row.campaignId,
       authorUserId: row.authorUserId,
@@ -725,6 +849,11 @@ export class RevisionsService {
     role: Role,
     opts?: { expectedUpdatedAt?: string },
   ): Promise<{ entityType: RevisionEntityType; entityId: number; updatedAt: string; revisions: EntityRevision[] }> {
+    // Issue #601 — restoring a pre-quarantine revision would put the withheld prose
+    // straight back into the live row. See assertTargetNotQuarantined. This is the
+    // fail-fast pre-flight; the binding check is the identical call inside the write
+    // transaction below, against the row the prose write actually touches.
+    this.assertTargetNotQuarantined(this.db, entityType, entityId);
     const revision = this.db
       .select()
       .from(entityRevisions)
@@ -833,7 +962,22 @@ export class RevisionsService {
 
       const target = this.loadTarget(tx, entityType, entityId);
       if (!target) throw new NotFoundException(`${entityType} ${entityId} not found`);
+      // Issue #601 — the binding quarantine check: same gate as the pre-flight above,
+      // but reading inside this transaction so a quarantine that landed in between
+      // still stops the restore rather than merely preceding it. Throwing here rolls
+      // the whole restore back, evidence snapshot included.
+      this.assertTargetNotQuarantined(tx, entityType, entityId);
       this.assertNotStale(target, opts?.expectedUpdatedAt);
+
+      // Issue #601 — a restore REWRITES the live prose, so for a comment or note it is
+      // a mutation like any other and must trip the same pre-mutation evidence hook.
+      // Without this, restore is the one edit path that escapes it: CommentsService and
+      // NotesService capture on update/remove, but a restore reaches writeProseCas
+      // through this service without passing through either. That would leave a hole in
+      // the guarantee snapshotCommentIfWatched states plainly — that once an incident is
+      // open, no further mutation of its subject goes unrecorded. Captured inside this
+      // same synchronous transaction, so it carries the identical race guarantee.
+      this.snapshotModeratedTargetTx(tx, entityType, entityId);
 
       // Capture the current content as a closed version FIRST so restore is reversible, then
       // open a new tip for the restored prose. Only record when it actually differs — a

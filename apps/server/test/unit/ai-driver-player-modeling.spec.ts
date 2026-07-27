@@ -15,6 +15,7 @@ describe('ai-driver-player-modeling', () => {
   let encounters: any;
   let members: any;
   let characters: any;
+  let transcript: any;
   let driver: AiDriverService;
 
   beforeEach(() => {
@@ -49,8 +50,12 @@ describe('ai-driver-player-modeling', () => {
     characters = {
       getOrThrow: jest.fn(),
     };
+    // Transcript recording (#572) is a no-op for the two paths under test here (system-prompt
+    // assembly and the seat's action-queue depth), so a recording spy keeps this spec focused
+    // while still failing loudly if either path starts writing transcript events.
+    transcript = { record: jest.fn() };
     driver = new AiDriverService(
-      aiDm, mcpTools, audit, stream, notifications, supportPreferences, resolver, campaigns, rules, encounters, members, characters
+      aiDm, mcpTools, audit, stream, notifications, supportPreferences, resolver, campaigns, rules, encounters, members, characters, transcript
     );
     // Mock resolveProviderForExecution inside ai-driver.service by spying? No, we can just mock resolver
     // Wait, resolveProviderForExecution is not a class method, it's imported. So we need to mock it.
@@ -77,6 +82,8 @@ describe('ai-driver-player-modeling', () => {
   it('Action queue depth configurable from seat settings', async () => {
     const depth = await (driver as any).getActionQueueDepth(1);
     expect(depth).toBe(2);
+    // Neither read is a table event — reading the seat must not append to the transcript.
+    expect(transcript.record).not.toHaveBeenCalled();
   });
 
 });

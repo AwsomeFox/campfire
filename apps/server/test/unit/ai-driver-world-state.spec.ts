@@ -128,6 +128,10 @@ describe('AiDriverService.assembleSystemPrompt (#1048)', () => {
       undefined as unknown as Ctor[9],
       members as unknown as Ctor[10],
       characters as unknown as Ctor[11],
+      // transcript (#572) — assembleSystemPrompt never records a transcript event, so an
+      // inert stub keeps this spec about prompt assembly. The Ctor[] cast still makes a
+      // future signature change a compile error rather than a silent `never`.
+      undefined as unknown as Ctor[12],
     );
     return { svc, call, mcpTools, supportPreferences, campaigns };
   }

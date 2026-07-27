@@ -1,7 +1,12 @@
+import { randomUUID } from 'node:crypto';
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
+import { eq } from 'drizzle-orm';
 import { buildMcpEnvelope } from '../../common/api-error.envelope';
 import { auditActor, roleAtLeast, type RequestUser } from '../../common/user.types';
 import { nowIso } from '../../common/time';
+import { fromJsonText, toJsonText } from '../../common/json';
+import { DB, type DrizzleDb } from '../../db/db.module';
+import { aiDriverControlState } from '../../db/schema';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService, excerpt } from '../notifications/notifications.service';
 import { AiDmService, type AiDmTokenReservation } from '../ai-dm/ai-dm.service';
@@ -25,6 +30,7 @@ import { AiProviderError } from '../ai-dm/providers/errors';
 import { DEFAULT_IDLE_TIMEOUT_MS } from '../ai-dm/providers/http';
 import { AI_PROVIDER_RESOLVER, resolveProviderForExecution, type AiProviderResolver } from './ai-provider-resolver';
 import { AiDmStreamService } from './ai-driver-stream.service';
+import { AiDmTranscriptService } from './ai-driver-transcript.service';
 import { extractToolResourceIdentity, type ToolResourceIdentity } from './ai-dm-tool-resource';
 import {
   checkDriverPolicyRateLimits,
@@ -336,6 +342,37 @@ export interface RunTurnOptions {
   proactive?: boolean;
   characterId?: number;
   narrationLanguage?: NarrationLanguage;
+  /**
+   * Optimistic-echo correlation token minted by the submitting client (#572). Echoed back
+   * verbatim on the persisted `player.action` transcript event so the sender REPLACES its
+   * local optimistic entry rather than rendering the action twice. Every other client sees
+   * a plain new line. Deliberately a token, not content equality: two players typing "I
+   * attack" in the same round must still produce two transcript lines.
+   */
+  clientRef?: string;
+  /** Display name for the transcript's player-action line (falls back to the user's name). */
+  actorName?: string;
+  /** Character the action was spoken as, recorded on the transcript line for attribution. */
+  characterName?: string;
+  /**
+   * What the player actually TYPED (#572). `input` is what the model receives and carries a
+   * speaker prefix (#317) plus, for proactive/lever turns, synthesized framing; the shared
+   * transcript should read as the player wrote it. Falls back to `input`.
+   */
+  displayText?: string;
+  /**
+   * INTERNAL (#572): this turn is a queued action being drained, whose `player.action`
+   * transcript row was already written when it was accepted onto the queue. Suppresses a
+   * duplicate row. Never set by a client — the DTO does not accept it.
+   */
+  dequeued?: boolean;
+  /**
+   * INTERNAL (#572): this turn is a stuck-ladder lever REPLAYING an earlier action rather
+   * than a new one. `input` here is model machinery — the replayed action still carrying
+   * its #317 speaker prefix, plus injected framing like the dispute block — and must never
+   * reach the shared table log. The lever records its own clean `control` event instead.
+   */
+  lever?: 'nudge' | 'flag';
 }
 
 interface ActionQueueEntry {
@@ -347,6 +384,132 @@ interface ActionQueueEntry {
   reject: (error: any) => void;
   queuedAt: number;
 }
+
+type AiDriverControlStateRow = typeof aiDriverControlState.$inferSelect;
+
+/**
+ * Hydration allowlists for the persisted enums (#559). These are keyed off an EXHAUSTIVE
+ * `Record<Union, true>` on purpose: `new Set<Union>([...])` happily accepts a subset, so a
+ * future member added to `AiDmStuckReason` / `AiDmLadderState` / `AiDmSessionStatus` would be
+ * silently discarded on restart (a stuck seat would come back healthy). With a Record, omitting
+ * a member is a compile error instead of a data-loss bug.
+ */
+function allowlist<T extends string>(members: Record<T, true>): ReadonlySet<string> {
+  return new Set(Object.keys(members));
+}
+
+const SESSION_STATUSES = allowlist<AiDmSessionStatus>({ idle: true, running: true, paused: true });
+const LADDER_STATES = allowlist<AiDmLadderState>({
+  running: true,
+  awaiting_players: true,
+  paused: true,
+  human_control: true,
+});
+const STUCK_REASONS = allowlist<AiDmStuckReason>({
+  tool_error: true,
+  budget_exhausted: true,
+  max_steps: true,
+  no_narration: true,
+  loop: true,
+  dispute: true,
+  provider_error: true,
+});
+
+function recordOf(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function stringOrNull(value: unknown): string | null {
+  return typeof value === 'string' ? value : null;
+}
+
+function isStoredStuckInfo(value: unknown): value is AiDmStuckInfo {
+  const rec = recordOf(value);
+  return !!rec
+    && typeof rec.reason === 'string'
+    && STUCK_REASONS.has(rec.reason)
+    && typeof rec.detail === 'string'
+    && typeof rec.since === 'string'
+    && Number.isInteger(rec.turn);
+}
+
+function isStoredActingDmGrant(value: unknown): value is AiDmActingDmGrant {
+  const rec = recordOf(value);
+  return !!rec
+    && typeof rec.memberId === 'string'
+    && typeof rec.grantedBy === 'string'
+    && typeof rec.grantedAt === 'string'
+    && (rec.note === null || typeof rec.note === 'string');
+}
+
+function isStoredTableVote(value: unknown): value is AiDmTableVote {
+  const rec = recordOf(value);
+  const ballots = recordOf(rec?.ballots);
+  return !!rec
+    && (rec.kind === 'override' || rec.kind === 'pause')
+    && typeof rec.id === 'string'
+    && typeof rec.openedBy === 'string'
+    && typeof rec.openedAt === 'string'
+    && !!ballots
+    && Object.values(ballots).every((v) => typeof v === 'boolean')
+    && Number.isInteger(rec.threshold)
+    && Number.isInteger(rec.eligibleVoters)
+    && typeof rec.expiresAt === 'string'
+    && typeof rec.resolved === 'boolean'
+    && (rec.outcome === 'passed' || rec.outcome === 'failed' || rec.outcome === null);
+}
+
+function persistedStatusFor(session: AiDmSessionState): AiDmSessionStatus {
+  if (session.state === 'paused' || session.state === 'human_control' || session.status === 'paused') return 'paused';
+  // A turn in flight is written as `running` on purpose: it is the ONLY durable marker that the
+  // process died mid-generation. Hydration treats a stored `running` as an interrupted turn and
+  // parks the seat paused, so recovery needs an explicit, audited resume rather than silently
+  // accepting new input against a half-finished turn (#559 acceptance criteria).
+  return session.status === 'running' ? 'running' : 'idle';
+}
+
+/** Why a hydrated session came back in a non-default shape — announced to the table on recovery (#559). */
+type ControlStateRecovery = 'interrupted_turn' | 'paused' | 'human_control' | 'stuck' | 'open_vote';
+
+const RECOVERY_SHAPES = allowlist<ControlStateRecovery>({
+  interrupted_turn: true,
+  paused: true,
+  human_control: true,
+  stuck: true,
+  open_vote: true,
+});
+
+interface HydratedControlState {
+  session: AiDmSessionState;
+  /** What the table is TOLD came back, or null when the seat came back clean. */
+  recovery: ControlStateRecovery | null;
+  /**
+   * The STEADY shape the seat settled into — what a later boot will recompute once the one-shot
+   * crash marker is gone. Recorded in `announced_recovery`. Equals `recovery` except for an
+   * interrupted turn, which announces its own reason but settles into `paused`.
+   */
+  settled: ControlStateRecovery | null;
+  /**
+   * True only when `recovery` is a genuine TRANSITION away from the shape the table was last
+   * told about. A seat left deliberately paused (or under human control, stuck, or mid-vote)
+   * keeps hydrating into that same shape on every subsequent boot; announcing it each time
+   * would bury the one notice that matters — `interrupted_turn` — under restart noise.
+   */
+  announce: boolean;
+  /** True when hydration reconciled the row (interrupted turn, lapsed vote, impossible ladder). */
+  dirty: boolean;
+}
+
+/** The synthetic actor for recovery notifications: no human triggered a restart. */
+const RECOVERY_ACTOR: RequestUser = { id: 'ai-dm-recovery', name: 'Campfire', serverRole: 'user' };
+
+const RECOVERY_SUMMARY: Record<ControlStateRecovery, string> = {
+  interrupted_turn: 'A restart interrupted an AI DM turn mid-generation. The seat is paused until a DM resumes it.',
+  paused: 'The AI DM seat came back paused — the pause in effect before the restart was preserved.',
+  human_control: 'A human still holds the AI DM seat after the restart. Hand back to release it.',
+  stuck: 'The AI DM seat came back stuck, awaiting the table. The recovery levers are available.',
+  open_vote: 'A table vote was still open when the server restarted and has been restored.',
+};
 
 /**
  * Grounding / anti-hallucination preamble prepended to every driver system prompt.
@@ -911,13 +1074,20 @@ interface ActiveGeneration {
 @Injectable()
 export class AiDriverService {
   private readonly logger = new Logger(AiDriverService.name);
-  /** In-memory per-campaign session state (single-instance deploy, like CampaignEventsService). */
+  /** Per-campaign session cache; restart-safe control fields are hydrated from ai_driver_control_state (#559). */
   private readonly sessions = new Map<number, AiDmSessionState>();
   /** Abort handles for each campaign's active generation (#558). */
   private readonly activeGenerations = new Map<number, ActiveGeneration>();
   /** Last player input per campaign — replayed by the retry/nudge/flag levers (#314). */
   private readonly lastInputs = new Map<number, string>();
   private readonly actionQueues = new Map<number, ActionQueueEntry[]>();
+  /**
+   * Correlation id of the turn currently narrating in each campaign (#572). Stamped onto
+   * every transcript row a turn produces (narration steps, tool summaries, the turn-end
+   * record) so a client rebuilding scrollback from a REST page groups them into the SAME
+   * DM bubble the live stream produced, instead of one bubble per narration step.
+   */
+  private readonly currentTurnIds = new Map<number, string>();
   private voteSeq = 0;
   private confirmationSeq = 0;
 
@@ -934,13 +1104,226 @@ export class AiDriverService {
     private readonly encounters: EncountersService,
     private readonly members: MembersService,
     private readonly characters: CharactersService,
+    private readonly transcript: AiDmTranscriptService,
+    // Optional, so it must stay last in the parameter list (#559).
+    @Inject(DB) private readonly db?: DrizzleDb,
   ) {
     // Mode-switch teardown without an AiDm→AiDriver DI edge (forwardRef blows the stack here).
     this.aiDm.registerDriverSessionTeardown((campaignId) => this.teardownSession(campaignId));
   }
 
   getSession(campaignId: number): AiDmSessionState {
-    return this.sessions.get(campaignId) ?? this.freshSession(campaignId);
+    return this.ensureSession(campaignId);
+  }
+
+  private loadPersistedControlState(campaignId: number): HydratedControlState {
+    const fresh = this.freshSession(campaignId);
+    if (!this.db) return { session: fresh, recovery: null, settled: null, announce: false, dirty: false };
+
+    // Reading the control state is best-effort in exactly the way writing it is: `ensureSession`
+    // sits under EVERY driver endpoint (including the read-only GET /session), so a failed read
+    // must degrade to a fresh in-memory session rather than 500 the whole seat.
+    let row: AiDriverControlStateRow | undefined;
+    try {
+      row = this.db
+        .select()
+        .from(aiDriverControlState)
+        .where(eq(aiDriverControlState.campaignId, campaignId))
+        .limit(1)
+        .get() as AiDriverControlStateRow | undefined;
+    } catch (err) {
+      this.logger.error(`Failed to load AI driver control state for campaign ${campaignId}`, err);
+      return { session: fresh, recovery: null, settled: null, announce: false, dirty: false };
+    }
+    if (!row) return { session: fresh, recovery: null, settled: null, announce: false, dirty: false };
+
+    const storedState = LADDER_STATES.has(row.state) ? row.state as AiDmLadderState : 'running';
+    fresh.state = storedState;
+    // A stored `running` status means the process died while a turn was generating (#559). The
+    // turn itself is unrecoverable — it lived in process memory — so the seat is *uncertain*, and
+    // an uncertain seat must come back frozen rather than pretending the turn simply never ran.
+    const interruptedTurn = row.status === 'running';
+    let voteExpiredOnLoad = false;
+    fresh.status = SESSION_STATUSES.has(row.status) ? row.status as AiDmSessionStatus : 'idle';
+    if (fresh.status === 'running') fresh.status = 'paused';
+    fresh.scene = row.scene ?? null;
+    fresh.lastNarration = row.lastNarration ?? null;
+    fresh.lastTurnAt = row.lastTurnAt ?? null;
+    fresh.turnCount = Math.max(0, row.turnCount ?? 0);
+    const stuck = fromJsonText<unknown>(row.stuck, null);
+    fresh.stuck = isStoredStuckInfo(stuck) ? stuck : null;
+    const actingDm = fromJsonText<unknown>(row.actingDm, null);
+    fresh.actingDm = isStoredActingDmGrant(actingDm) ? actingDm : null;
+    const vote = fromJsonText<unknown>(row.vote, null);
+    fresh.vote = isStoredTableVote(vote) ? vote : null;
+    if (fresh.vote) {
+      const seq = Number(/^vote-(\d+)$/.exec(fresh.vote.id)?.[1] ?? 0);
+      if (seq > this.voteSeq) this.voteSeq = seq;
+      // Downtime still burns the vote's TTL (#382/#559): a ballot window that lapsed while the
+      // server was down must come back FAILED, not as a live vote the table can still be counted
+      // into. Restoring it open would resurrect an expired decision and block every future vote
+      // until someone happened to touch a vote endpoint.
+      if (!fresh.vote.resolved && Date.parse(fresh.vote.expiresAt) <= Date.now()) {
+        fresh.vote = { ...fresh.vote, resolved: true, outcome: 'failed' };
+        voteExpiredOnLoad = true;
+      }
+    }
+    fresh.takeoverRequestedBy = row.takeoverRequestedBy ?? null;
+
+    if (row.lastInput) this.lastInputs.set(campaignId, row.lastInput);
+    if (fresh.state === 'awaiting_players' && !fresh.stuck) fresh.state = 'running';
+    if (fresh.state === 'human_control' && !fresh.actingDm) fresh.state = 'running';
+    if (fresh.status === 'paused' && fresh.state === 'running') fresh.state = 'paused';
+    if (fresh.state === 'paused' || fresh.state === 'human_control') fresh.status = 'paused';
+    else fresh.status = 'idle';
+    // An interrupted turn outranks whatever ladder state the row carried: freeze the seat. The
+    // stuck info (if any) is kept, so an explicit resume drops back to `awaiting_players` with
+    // the recovery levers intact rather than losing the ladder.
+    if (interruptedTurn) {
+      fresh.state = 'paused';
+      fresh.status = 'paused';
+    }
+    fresh.levers = this.leversFor(fresh);
+
+    // The STEADY shape: what a later boot will recompute from the reconciled session once the
+    // one-shot crash marker is gone. This — not `recovery` — is what gets recorded, because it is
+    // what the next hydration will compare against.
+    let settled: ControlStateRecovery | null = null;
+    if (fresh.state === 'human_control') settled = 'human_control';
+    else if (fresh.state === 'paused') settled = 'paused';
+    else if (fresh.stuck) settled = 'stuck';
+    else if (fresh.vote && !fresh.vote.resolved) settled = 'open_vote';
+
+    // What the table is TOLD. Differs from `settled` only for an interrupted turn, which has its
+    // own one-time reason but settles into `paused`.
+    const recovery: ControlStateRecovery | null = interruptedTurn ? 'interrupted_turn' : settled;
+
+    // Announce only on a genuine transition. `announced_recovery` records the steady shape the
+    // table has already been informed about; a seat that keeps hydrating into that same shape
+    // across restarts is a steady state, not news. Without this, a table that deliberately left
+    // the AI paused got a fresh "came back paused" notice on every deploy, forever.
+    //
+    // Comparing `settled` (not `recovery`) is what keeps the interrupted-turn path honest. That
+    // path is the one case where the announced shape and the persisted status deliberately
+    // disagree: the crash is announced as `interrupted_turn`, but the row is reconciled to
+    // `status='paused'`, so the NEXT boot recomputes `paused`. Recording `interrupted_turn` would
+    // make that next boot look like a transition and fire a redundant "came back paused" notice
+    // for a freeze the table was just told about — the very bug this marker exists to prevent,
+    // moved one boot along. Recording `settled` closes it, and a genuinely new interrupted turn
+    // still announces, because reserving a turn writes the marker back to null.
+    const lastAnnounced = RECOVERY_SHAPES.has(row.announcedRecovery ?? '')
+      ? row.announcedRecovery as ControlStateRecovery
+      : null;
+    const announce = recovery !== null && settled !== lastAnnounced;
+
+    // Anything reconciliation changed relative to the row must be written back, or the next
+    // restart re-derives it from the same stale bytes — an expired vote in particular would look
+    // freshly open again to any reader that goes straight to the table. The announced-shape
+    // marker is part of that: if it is not persisted, every boot looks like a transition again.
+    const dirty = interruptedTurn
+      || voteExpiredOnLoad
+      || settled !== lastAnnounced
+      || fresh.state !== storedState
+      || fresh.status !== row.status;
+    return { session: fresh, recovery, settled, announce, dirty };
+  }
+
+  /**
+   * Announce a recovered control state to the table (#559): wake open stream clients, audit the
+   * recovery, and notify the campaign. This function does NOT write to the DB — persisting the
+   * reconciled row (including the `announced_recovery` marker that stops a steady state being
+   * re-announced) is the `if (dirty) this.persistControlState(s)` step in `ensureSession`, which
+   * runs immediately before this. Everything here is best-effort: a failure to announce must
+   * never stop the session from being served.
+   *
+   * Called ONLY on a genuine transition (`HydratedControlState.announce`), so both the audit row
+   * and the player-visible notification describe a real recovery event rather than the fact that
+   * the process restarted while the seat sat in a state the table already knows about.
+   */
+  private announceRecoveredState(session: AiDmSessionState, recovery: ControlStateRecovery): void {
+    this.stream.emit({ type: 'state', campaignId: session.campaignId, state: session.state });
+    void this.audit
+      .log({
+        actor: `ai-dm-seat:${session.campaignId}`,
+        actorRole: 'dm',
+        action: 'ai-dm.driver.control_state.recovered',
+        entityType: 'ai-dm',
+        campaignId: session.campaignId,
+        detail: `recovered ${recovery} after restart — state=${session.state} status=${session.status}`,
+      })
+      .catch((err) => this.logger.error(`Driver recovery audit failed for campaign ${session.campaignId}`, err));
+    void this.notify(session.campaignId, RECOVERY_ACTOR, 'AI DM state recovered', RECOVERY_SUMMARY[recovery]);
+  }
+
+  /**
+   * Write the session's control state to disk.
+   *
+   * `announced` records which recovery shape the table has been told about. It defaults to null,
+   * which is the correct value for every runtime control lever: a human just acted, so whatever
+   * shape the seat lands in is news again the next time the process comes back. Only the
+   * hydration write-back in `ensureSession` passes a non-null value, to mark a steady state as
+   * already announced.
+   */
+  private persistControlState(session: AiDmSessionState, announced: ControlStateRecovery | null = null): void {
+    if (!this.db || session.detached) return;
+
+    const ts = nowIso();
+    const values = {
+      campaignId: session.campaignId,
+      announcedRecovery: announced,
+      status: persistedStatusFor(session),
+      state: session.state,
+      scene: stringOrNull(session.scene),
+      lastNarration: stringOrNull(session.lastNarration),
+      lastTurnAt: stringOrNull(session.lastTurnAt),
+      turnCount: Math.max(0, session.turnCount ?? 0),
+      stuck: session.stuck ? toJsonText(session.stuck) : null,
+      actingDm: session.actingDm ? toJsonText(session.actingDm) : null,
+      vote: session.vote ? toJsonText(session.vote) : null,
+      takeoverRequestedBy: stringOrNull(session.takeoverRequestedBy),
+      lastInput: this.lastInputs.get(session.campaignId) ?? null,
+      updatedAt: ts,
+    };
+
+    // Durability is best-effort, exactly like `notify` and `meterTurn`. This runs from inside the
+    // `runTurn` finally block, where an escaping throw would skip `turn.end` + `drainQueue` and
+    // leave every SSE client's composer locked forever. A SQLITE_BUSY / disk-full here must cost
+    // restart-safety for one write, never the live turn.
+    try {
+      this.db
+        .insert(aiDriverControlState)
+        .values(values)
+        .onConflictDoUpdate({
+          target: aiDriverControlState.campaignId,
+          set: {
+            status: values.status,
+            state: values.state,
+            scene: values.scene,
+            lastNarration: values.lastNarration,
+            lastTurnAt: values.lastTurnAt,
+            turnCount: values.turnCount,
+            stuck: values.stuck,
+            actingDm: values.actingDm,
+            vote: values.vote,
+            takeoverRequestedBy: values.takeoverRequestedBy,
+            lastInput: values.lastInput,
+            announcedRecovery: values.announcedRecovery,
+            updatedAt: values.updatedAt,
+          },
+        })
+        .run();
+    } catch (err) {
+      this.logger.error(`Failed to persist AI driver control state for campaign ${session.campaignId}`, err);
+    }
+  }
+
+  private deletePersistedControlState(campaignId: number): void {
+    if (!this.db) return;
+    try {
+      this.db.delete(aiDriverControlState).where(eq(aiDriverControlState.campaignId, campaignId)).run();
+    } catch (err) {
+      this.logger.error(`Failed to clear AI driver control state for campaign ${campaignId}`, err);
+    }
   }
 
   /**
@@ -967,6 +1350,7 @@ export class AiDriverService {
     const fresh = this.freshSession(campaignId);
     this.sessions.set(campaignId, fresh);
     this.lastInputs.delete(campaignId);
+    this.deletePersistedControlState(campaignId);
     this.stream.emit({ type: 'state', campaignId, state: fresh.state });
     return fresh;
   }
@@ -1024,6 +1408,80 @@ export class AiDriverService {
     return 'ok';
   }
 
+  // ---- Authoritative table transcript (#572) ------------------------------------
+  // Every durable table event funnels through these three helpers so the persisted
+  // transcript and the SSE broadcast can never drift apart: the row is written first and
+  // the frame is emitted from inside AiDmTranscriptService.record, after the commit.
+
+  /** The correlation id of the turn currently narrating, if any. */
+  private turnIdFor(campaignId: number): string | null {
+    return this.currentTurnIds.get(campaignId) ?? null;
+  }
+
+  /**
+   * Persist + broadcast an ACCEPTED player action (#572) — the event this whole issue is
+   * about. Before this, the action existed only as a local optimistic entry in the sending
+   * browser, so every other player watched the AI answer a prompt they never saw.
+   *
+   * `clientRef` is echoed straight back so the sender swaps its optimistic entry for the
+   * authoritative one instead of rendering both.
+   */
+  private recordPlayerAction(
+    campaignId: number,
+    triggeredBy: RequestUser,
+    input: string,
+    opts: RunTurnOptions,
+  ): void {
+    // A proactive turn has no player behind it — the AI acted on its own (#1044). Recording
+    // one would attribute the system's prompt to a human at the table.
+    if (opts.proactive) return;
+    // A retry / dispute REPLAYS an action that is already in the transcript; it is not a new
+    // one. Recording it again would both duplicate the line and — because `input` on these
+    // paths is the model prompt, not what anyone typed — publish the speaker prefix and the
+    // injected dispute framing to every player at the table. The lever writes its own
+    // `control` event carrying only the player-authored text.
+    if (opts.lever) return;
+    this.transcript.record({
+      campaignId,
+      kind: 'player.action',
+      actorUserId: triggeredBy.id,
+      actorName: opts.actorName ?? triggeredBy.name ?? null,
+      clientRef: opts.clientRef ?? null,
+      payload: {
+        text: opts.displayText ?? input,
+        ...(opts.characterName ? { characterName: opts.characterName } : {}),
+        ...(opts.characterId !== undefined ? { characterId: opts.characterId } : {}),
+      },
+    });
+  }
+
+  /** Persist + broadcast one aggregated narration step (never a raw token delta). */
+  private recordNarration(campaignId: number, text: string): void {
+    if (!text) return;
+    this.transcript.record({
+      campaignId,
+      kind: 'narration',
+      turnId: this.turnIdFor(campaignId),
+      payload: { text },
+    });
+  }
+
+  /**
+   * Persist + broadcast a table control change — pause/resume, stuck/recovered, human
+   * takeover, handback, seat state (#572). Thin by design: `payload` names the transition
+   * and clients refetch GET /ai-dm/session for authoritative state, exactly like the
+   * pre-existing signal frames.
+   */
+  private recordControl(campaignId: number, payload: Record<string, unknown>, actor?: RequestUser): void {
+    this.transcript.record({
+      campaignId,
+      kind: 'control',
+      actorUserId: actor?.id ?? null,
+      actorName: actor?.name ?? null,
+      payload,
+    });
+  }
+
   private emitTurnEnd(
     campaignId: number,
     stopReason: AiDmStopReason,
@@ -1048,8 +1506,17 @@ export class AiDriverService {
         budgetRemaining,
       });
     }
+    const turnId = this.turnIdFor(campaignId);
     if (shouldEmitTurnCancelled(stopReason)) {
       this.stream.emit({ type: 'turn.cancelled', campaignId, narration, stopReason });
+      // #572: a cancellation is a durable table event — a late joiner must be able to see
+      // that a turn was stopped, not just that narration trailed off.
+      this.transcript.record({
+        campaignId,
+        kind: 'turn.cancelled',
+        turnId,
+        payload: { stopReason, ...(narration ? { narration } : {}) },
+      });
     }
     this.stream.emit({
       type: 'turn.end',
@@ -1060,6 +1527,23 @@ export class AiDriverService {
       ...(tokensUsageUnknown ? { tokensUsageUnknown: true } : {}),
       budgetRemaining,
     });
+    this.transcript.record({
+      campaignId,
+      kind: 'turn.ended',
+      turnId,
+      payload: {
+        stopReason,
+        steps,
+        tokensUsed,
+        budgetRemaining,
+        ...(tokensUsageUnknown ? { tokensUsageUnknown: true } : {}),
+        ...(stopReason === 'provider_error'
+          ? { errorMessage: providerError?.message ?? describeStuck('provider_error') }
+          : {}),
+      },
+    });
+    // The turn is over: nothing further may claim its correlation id.
+    this.currentTurnIds.delete(campaignId);
   }
 
   /** Pause/resume the seat — a paused seat rejects new turns until resumed (explicit stop condition). */
@@ -1075,7 +1559,11 @@ export class AiDriverService {
       session.state = session.stuck ? 'awaiting_players' : 'running';
     }
     session.levers = this.leversFor(session);
+    this.persistControlState(session);
     this.stream.emit({ type: 'state', campaignId, state: session.state });
+    // #572: pause/resume is a control change the whole table must see in the log, not just
+    // as a transient banner that a reloading client loses.
+    this.recordControl(campaignId, { control: paused ? 'paused' : 'resumed', state: session.state });
     return session;
   }
 
@@ -1126,8 +1614,16 @@ export class AiDriverService {
   private ensureSession(campaignId: number): AiDmSessionState {
     let s = this.sessions.get(campaignId);
     if (!s) {
-      s = this.freshSession(campaignId);
+      const { session, recovery, settled, announce, dirty } = this.loadPersistedControlState(campaignId);
+      s = session;
+      // Publish BEFORE persisting/announcing: both re-enter this service, and the map entry must
+      // already be the canonical object so nothing hydrates a second time.
       this.sessions.set(campaignId, s);
+      // Record `settled`, not `recovery`: the marker must match what the NEXT boot recomputes, and
+      // it must be written even when `announce` is false, or a steady state looks like a fresh
+      // transition every time.
+      if (dirty) this.persistControlState(s, settled);
+      if (announce && recovery) this.announceRecoveredState(s, recovery);
     }
     return s;
   }
@@ -1240,6 +1736,10 @@ export class AiDriverService {
           `Action queue is full (${maxDepth} pending). Wait for the current turn to finish.`,
         );
       }
+      // The action IS accepted — it just runs later. Broadcast it NOW so the whole table
+      // sees who queued what while the current turn is still narrating (#572). Recording it
+      // only when it dequeues would recreate the original bug for queued actions.
+      this.recordPlayerAction(campaignId, triggeredBy, input, opts);
       return new Promise((resolve, reject) => {
         queue.push({ input, characterId: opts.characterId, user: triggeredBy, opts, resolve, reject, queuedAt: Date.now() });
         this.actionQueues.set(campaignId, queue);
@@ -1249,8 +1749,14 @@ export class AiDriverService {
     // that already cleared assertRunnable sees `running` at the guard above and is rejected.
     session.status = 'running';
 
+    // #572: the action cleared every gate (flag, seat, budget, pause, human control, queue),
+    // so it is now an ACCEPTED table event — persist + broadcast it before the AI answers.
+    // A queued action was already recorded above and must not be recorded twice on dequeue.
+    if (!opts.dequeued) this.recordPlayerAction(campaignId, triggeredBy, input, opts);
+
     // Remember the input so the retry / nudge / flag levers can replay this turn (#314).
     this.lastInputs.set(campaignId, input);
+    this.persistControlState(session);
     const prevNarration = session.lastNarration;
 
     // Resolve the provider AND the executable model through the execution-time choke
@@ -1261,6 +1767,7 @@ export class AiDriverService {
     if (!execution) {
       // Release the reserved slot (compare-and-set): only if nothing else grabbed the seat meanwhile.
       if (session.status === 'running') session.status = 'idle';
+      this.persistControlState(session);
       throw new ServiceUnavailableException(
         'No AI provider is configured. A server admin or the DM must set one via the AI provider config (issue #310).',
       );
@@ -1331,7 +1838,11 @@ export class AiDriverService {
 
     // status is already 'running' (reserved synchronously above, #381).
     if (opts.scene !== undefined) session.scene = opts.scene;
+    this.persistControlState(session);
     resetDriverTurnCounters(session);
+    // #572: one correlation id for everything this turn persists, so a client rebuilding
+    // scrollback from REST groups the same rows into the same DM bubble the live stream did.
+    this.currentTurnIds.set(campaignId, randomUUID());
     this.stream.emit({
       type: 'turn.start',
       campaignId,
@@ -1594,6 +2105,9 @@ export class AiDriverService {
         if (text) {
           finalNarration = text;
           this.stream.emit({ type: 'narration.message', campaignId, text });
+          // #572: the aggregated step is the authoritative narration line — persist it so a
+          // late joiner / reconnect rebuilds the same bubble. Raw deltas stay ephemeral.
+          this.recordNarration(campaignId, text);
         }
 
         const toolCalls = result?.toolCalls ?? [];
@@ -1659,6 +2173,7 @@ export class AiDriverService {
         session.lastNarration = finalNarration || session.lastNarration;
         session.lastTurnAt = nowIso();
         session.turnCount += 1;
+        this.persistControlState(session);
       }
     }
 
@@ -1733,7 +2248,9 @@ export class AiDriverService {
 
     // Execute the next queued turn
     try {
-      const result = await this.runTurn(campaignId, next.user, next.input, next.opts);
+      // `dequeued` suppresses a SECOND player.action transcript row: the action was already
+      // persisted + broadcast when it was accepted onto the queue (#572).
+      const result = await this.runTurn(campaignId, next.user, next.input, { ...next.opts, dequeued: true });
       next.resolve(result);
     } catch (err) {
       next.reject(err);
@@ -2274,6 +2791,22 @@ export class AiDriverService {
       ...(identity.encounterId !== undefined ? { encounterId: identity.encounterId } : {}),
       ...(identity.encounterHidden !== undefined ? { encounterHidden: identity.encounterHidden } : {}),
     });
+    // #572: one durable tool summary per call. `encounterHidden` is stored so the read /
+    // broadcast boundary can strip a DM-prep encounter's id for non-DMs on EVERY delivery
+    // path (live frame, REST page, export) — not just the live one.
+    this.transcript.record({
+      campaignId,
+      kind: 'tool',
+      turnId: this.turnIdFor(campaignId),
+      payload: {
+        name,
+        isError,
+        proposed,
+        ...(pendingConfirmation ? { pendingConfirmation: true } : {}),
+        ...(identity.encounterId !== undefined ? { encounterId: identity.encounterId } : {}),
+        ...(identity.encounterHidden !== undefined ? { encounterHidden: identity.encounterHidden } : {}),
+      },
+    });
   }
 
   private queueToolConfirmation(
@@ -2324,6 +2857,7 @@ export class AiDriverService {
     session.status = 'paused';
     session.state = 'paused';
     session.levers = this.leversFor(session);
+    this.persistControlState(session);
     await this.audit.log({
       actor,
       actorRole: 'dm',
@@ -2333,6 +2867,7 @@ export class AiDriverService {
       detail: reason,
     });
     this.stream.emit({ type: 'state', campaignId, state: session.state });
+    this.recordControl(campaignId, { control: 'emergency-pause', state: session.state, reason });
   }
 
   // ===================================================================================
@@ -2358,6 +2893,7 @@ export class AiDriverService {
     // human freeze outranks whatever this turn concluded. Bail without touching state.
     if (session.state === 'paused' || session.state === 'human_control') {
       session.levers = this.leversFor(session);
+      this.persistControlState(session);
       return;
     }
     const reason = classifyStuck(ctx);
@@ -2366,7 +2902,9 @@ export class AiDriverService {
       session.state = 'awaiting_players';
       session.stuck = { reason, detail, since: nowIso(), turn: session.turnCount };
       session.levers = this.leversFor(session);
+      this.persistControlState(session);
       this.stream.emit({ type: 'stuck', campaignId, reason, detail, state: session.state, levers: session.levers });
+      this.recordControl(campaignId, { control: 'stuck', reason, detail, state: session.state });
       await this.audit.log({
         actor: `ai-dm-seat:${campaignId}`,
         actorRole: 'dm',
@@ -2383,7 +2921,11 @@ export class AiDriverService {
     session.stuck = null;
     session.state = 'running';
     session.levers = this.leversFor(session);
-    if (wasStuck) this.stream.emit({ type: 'recovered', campaignId, state: session.state });
+    this.persistControlState(session);
+    if (wasStuck) {
+      this.stream.emit({ type: 'recovered', campaignId, state: session.state });
+      this.recordControl(campaignId, { control: 'recovered', state: session.state });
+    }
   }
 
   /** The player levers currently offered given the session state (#314). */
@@ -2409,9 +2951,9 @@ export class AiDriverService {
 
   // ===================================================================================
   // Secret-read approval gate (#557): a DM files a narrowly-scoped, single-use approval
-  // letting the autonomous seat read ONE secret entity under the DM principal. Mirrors the
-  // in-memory, per-campaign pattern of the table vote (#382); not a persisted review queue
-  // (a one-shot narrate-time read is not the same lifecycle as a canon proposal).
+  // letting the autonomous seat read ONE secret entity under the DM principal. This remains
+  // an in-process, narrate-time capability; it is not the restart-safe control state from #559
+  // and is not a persisted review queue (unlike canon proposals).
   // ===================================================================================
 
   /** The active (unconsumed) secret-read approvals for a campaign (issue #557). */
@@ -2482,6 +3024,17 @@ export class AiDriverService {
       detail: `granted secret-read ${tool}#${entityId} by ${granter.id}${note ? ` — ${excerpt(note, 160)}` : ''}`,
     });
     this.stream.emit({ type: 'secret-approval', campaignId, action: 'granted', tool, entityId });
+    // #572 + #557: a secret-read approval NAMES a hidden entity, so this control line is
+    // DM-only at the row level — withheld from players and viewers on every delivery path
+    // (SSE frame, REST page, export), not merely hidden in their UI.
+    this.transcript.record({
+      campaignId,
+      kind: 'control',
+      actorUserId: granter.id,
+      actorName: granter.name ?? null,
+      visibility: 'dm',
+      payload: { control: 'secret-approval', action: 'granted', tool, entityId },
+    });
     return approval;
   }
 
@@ -2510,6 +3063,14 @@ export class AiDriverService {
         detail: `revoked secret-read ${tool}#${entityId} by ${granter.id}`,
       });
       this.stream.emit({ type: 'secret-approval', campaignId, action: 'revoked', tool, entityId });
+      this.transcript.record({
+        campaignId,
+        kind: 'control',
+        actorUserId: granter.id,
+        actorName: granter.name ?? null,
+        visibility: 'dm',
+        payload: { control: 'secret-approval', action: 'revoked', tool, entityId },
+      });
     }
     return session;
   }
@@ -2654,7 +3215,15 @@ export class AiDriverService {
       campaignId,
       detail: hint ? `nudge with hint by ${user.id}` : `retry by ${user.id}`,
     });
-    return this.runTurn(campaignId, user, input);
+    // #572: the table sees that someone asked the DM to try again, and the hint they gave —
+    // never the replayed prompt. A retry is a lever on the existing action, not a new one,
+    // so no second `player.action` line is written for it.
+    this.recordControl(
+      campaignId,
+      { control: 'retry', ...(hint ? { hint } : {}) },
+      user,
+    );
+    return this.runTurn(campaignId, user, input, { lever: 'nudge' });
   }
 
   /**
@@ -2701,7 +3270,11 @@ export class AiDriverService {
       detail: `dispute by ${user.id}: ${excerpt(objection, 160)}`,
     });
     await this.notify(campaignId, user, 'A ruling was disputed', `${excerpt(objection, 160)} — the AI is re-deciding.`);
-    return this.runTurn(campaignId, user, input);
+    // #572: the objection is player-authored and belongs in the shared log; the surrounding
+    // "[A player DISPUTES that ruling…]" instruction block is machinery for the model and
+    // must not be. Recorded as a control line rather than a duplicate player action.
+    this.recordControl(campaignId, { control: 'dispute', objection }, user);
+    return this.runTurn(campaignId, user, input, { lever: 'flag' });
   }
 
   /**
@@ -2764,6 +3337,14 @@ export class AiDriverService {
       throw new ConflictException('A table vote is already open. Resolve it before opening another.');
     }
     const eligible = this.eligibleVoterCount(await this.notifications.memberRoles(campaignId));
+    // Re-check AFTER the await (#559): `memberRoles` is the only suspension point between the
+    // guard above and the write below, so two concurrent `action:open` requests could both clear
+    // the guard and the second would overwrite — and now also PERSIST — a vote the table had
+    // already started casting ballots on, silently discarding them. Recheck before writing.
+    this.expireStaleVote(session);
+    if (session.vote && !session.vote.resolved) {
+      throw new ConflictException('A table vote is already open. Resolve it before opening another.');
+    }
     const threshold = Math.max(1, Math.floor(eligible / 2) + 1);
     session.vote = {
       id: `vote-${++this.voteSeq}`,
@@ -2778,6 +3359,7 @@ export class AiDriverService {
       expiresAt: new Date(Date.now() + VOTE_TTL_MS).toISOString(),
     };
     session.levers = this.leversFor(session);
+    this.persistControlState(session);
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -2787,6 +3369,13 @@ export class AiDriverService {
       detail: `${kind} vote opened by ${user.id} (threshold ${threshold}/${eligible} eligible)`,
     });
     this.stream.emit({ type: 'vote', campaignId, action: 'opened', kind });
+    this.transcript.record({
+      campaignId,
+      kind: 'vote',
+      actorUserId: user.id,
+      actorName: user.name ?? null,
+      payload: { action: 'opened', kind },
+    });
     await this.notify(campaignId, user, 'A table vote was called', `Vote to ${kind} the AI DM's last ruling — cast your ballot.`);
     return session;
   }
@@ -2805,6 +3394,7 @@ export class AiDriverService {
     const vote = session.vote;
     if (!vote || vote.resolved) throw new ConflictException('No open table vote to cast on.');
     vote.ballots[user.id] = choice;
+    this.persistControlState(session);
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -2814,6 +3404,13 @@ export class AiDriverService {
       detail: `${user.id} voted ${choice ? 'yes' : 'no'} on ${vote.kind}`,
     });
     this.stream.emit({ type: 'vote', campaignId, action: 'cast', kind: vote.kind });
+    this.transcript.record({
+      campaignId,
+      kind: 'vote',
+      actorUserId: user.id,
+      actorName: user.name ?? null,
+      payload: { action: 'cast', kind: vote.kind },
+    });
 
     const ballots = Object.values(vote.ballots);
     const yes = ballots.filter(Boolean).length;
@@ -2862,6 +3459,7 @@ export class AiDriverService {
       }
     }
     session.levers = this.leversFor(session);
+    this.persistControlState(session);
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -2871,6 +3469,7 @@ export class AiDriverService {
       detail: `${vote.kind} vote ${outcome.toUpperCase()} (${yes}/${vote.threshold})`,
     });
     this.stream.emit({ type: 'vote', campaignId, action: 'resolved', kind: vote.kind, outcome });
+    this.transcript.record({ campaignId, kind: 'vote', payload: { action: 'resolved', kind: vote.kind, outcome } });
     if (outcome === 'passed') {
       await this.notify(campaignId, user, 'Table vote passed', `The table voted to ${vote.kind} the AI DM.`);
     }
@@ -2891,7 +3490,13 @@ export class AiDriverService {
       vote.resolved = true;
       vote.outcome = 'failed';
       session.levers = this.leversFor(session);
+      this.persistControlState(session);
       this.stream.emit({ type: 'vote', campaignId: session.campaignId, action: 'resolved', kind: vote.kind, outcome: 'failed' });
+      this.transcript.record({
+        campaignId: session.campaignId,
+        kind: 'vote',
+        payload: { action: 'resolved', kind: vote.kind, outcome: 'failed' },
+      });
     }
   }
 
@@ -2900,6 +3505,7 @@ export class AiDriverService {
     const session = this.ensureSession(campaignId);
     session.takeoverRequestedBy = user.id;
     session.levers = this.leversFor(session);
+    this.persistControlState(session);
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -2909,6 +3515,7 @@ export class AiDriverService {
       detail: `human takeover requested by ${user.id}`,
     });
     this.stream.emit({ type: 'takeover', campaignId, action: 'requested', memberId: user.id });
+    this.recordControl(campaignId, { control: 'takeover', action: 'requested', memberId: user.id }, user);
     await this.notify(campaignId, user, 'Human takeover requested', `${user.id} is offering to run the table for the AI DM.`);
     return session;
   }
@@ -2953,6 +3560,7 @@ export class AiDriverService {
     session.stuck = null; // human control supersedes the stuck ladder (#560)
     session.takeoverRequestedBy = null;
     session.levers = this.leversFor(session);
+    this.persistControlState(session);
     await this.audit.log({
       actor: auditActor(granter),
       actorRole: role,
@@ -2962,6 +3570,7 @@ export class AiDriverService {
       detail: `acting-DM seat granted to ${holder} by ${granter.id}`,
     });
     this.stream.emit({ type: 'takeover', campaignId, action: 'granted', memberId: holder });
+    this.recordControl(campaignId, { control: 'takeover', action: 'granted', memberId: holder }, granter);
     await this.notify(campaignId, granter, 'A human took the DM seat', `${holder} is now acting DM. The AI is paused.`);
     return session;
   }
@@ -2996,6 +3605,7 @@ export class AiDriverService {
     session.status = 'idle';
     session.state = 'running';
     session.levers = this.leversFor(session);
+    this.persistControlState(session);
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -3005,6 +3615,11 @@ export class AiDriverService {
       detail: `seat handed back to the AI by ${prior?.memberId ?? user.id}${note ? ` — ruling: ${excerpt(note, 200)}` : ''}`,
     });
     this.stream.emit({ type: 'takeover', campaignId, action: 'handback', memberId: prior?.memberId ?? user.id });
+    this.recordControl(
+      campaignId,
+      { control: 'takeover', action: 'handback', memberId: prior?.memberId ?? user.id },
+      user,
+    );
     await this.notify(campaignId, user, 'The AI DM resumed', `${prior?.memberId ?? user.id} handed the seat back to the AI.`);
     return session;
   }

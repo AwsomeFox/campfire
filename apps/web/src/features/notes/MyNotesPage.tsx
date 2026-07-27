@@ -28,6 +28,7 @@ import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { useAnnounce } from '../../components/Announcer';
 import { Markdown } from '../../components/Markdown';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
+import { ReportButton } from '../moderation/ReportDialog';
 import { EntityPicker, type EntityLink } from './EntityPicker';
 import { GameIcon } from '../../components/GameIcon';
 import { ENTITY_ICON, NOTE_VISIBILITY_ICON } from '../../lib/uiIcons';
@@ -778,6 +779,17 @@ function NoteCard({
                 <button onClick={onDelete} className="text-[11px] text-secondary hover:text-rose-400">
                   delete
                 </button>
+              )}
+              {/* Issue #601 — report someone ELSE'S note or whisper. Hidden on your own
+                  notes (reporting yourself is noise) and on your own whispers. The
+                  server applies the same visibility rule again before accepting it. */}
+              {!editable && myUserId && liveNote.authorUserId !== myUserId && (
+                <ReportButton
+                  campaignId={campaignId}
+                  targetType={isWhisper ? 'whisper' : 'note'}
+                  targetId={liveNote.id}
+                  className="text-[11px] text-secondary hover:text-rose-400"
+                />
               )}
             </div>
           </div>
