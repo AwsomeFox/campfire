@@ -103,7 +103,7 @@ export function CharacterStatCard({
   campaignId?: number;
   onError?: (msg: string | null) => void;
   /** Called with a rolled damage total so the encounter can apply it to a target combatant. */
-  onApplyDamage?: (amount: number, label: string) => void;
+  onApplyDamage?: (amount: number, label: string, diceTotal?: number) => void;
   /** Issue #414: open the structured action Use flow for a resolvable action index. */
   onUseAction?: (actionIndex: number) => void;
 }) {
