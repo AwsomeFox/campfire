@@ -281,7 +281,23 @@ export async function downloadServerBackup(options?: {
   const filename = parseDownloadFilename(res.headers.get('Content-Disposition'));
   const totalBytes = contentLength(res);
   const reader = res.body?.getReader();
-  if (!reader) throw new Error('The browser did not provide a readable backup response stream.');
+  if (!reader) {
+    if (totalBytes !== null && totalBytes > MAX_BROWSER_BACKUP_BUFFER_BYTES) {
+      throw new BackupDownloadLimitError(
+        `This browser must buffer the archive in memory and only supports backups up to ${MAX_BROWSER_BACKUP_BUFFER_BYTES / 1024 / 1024} MiB. Use a browser with File System Access support or download with curl.`,
+      );
+    }
+    const blob = await res.blob();
+    if (blob.size > MAX_BROWSER_BACKUP_BUFFER_BYTES) {
+      throw new BackupDownloadLimitError(
+        `This browser must buffer the archive in memory and only supports backups up to ${MAX_BROWSER_BACKUP_BUFFER_BYTES / 1024 / 1024} MiB. The partial download was discarded.`,
+      );
+    }
+    options?.onPhase?.('finalizing');
+    triggerBrowserDownload(blob, filename);
+    options?.onProgress?.({ receivedBytes: blob.size, totalBytes });
+    return { filename, bytes: blob.size, destination: 'browser-memory' };
+  }
 
   let receivedBytes = 0;
   const report = () => options?.onProgress?.({ receivedBytes, totalBytes });
