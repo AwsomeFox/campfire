@@ -55,6 +55,7 @@ import {
   inventoryItems,
   partyTreasury,
   aiDmSeats,
+  aiDriverControlState,
   aiScribeConfigs,
   encounterEvents,
   auditLog,
@@ -3232,6 +3233,7 @@ export class CampaignsService {
         tx.delete(notifications).where(eq(notifications.campaignId, id)).run();
         tx.delete(inventoryItems).where(eq(inventoryItems.campaignId, id)).run();
         tx.delete(partyTreasury).where(eq(partyTreasury.campaignId, id)).run();
+        tx.delete(aiDriverControlState).where(eq(aiDriverControlState.campaignId, id)).run();
         tx.delete(aiDmSeats).where(eq(aiDmSeats.campaignId, id)).run();
 
         tx.delete(campaigns).where(eq(campaigns.id, id)).run();
