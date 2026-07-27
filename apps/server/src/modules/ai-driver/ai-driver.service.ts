@@ -22,10 +22,8 @@ import {
   AI_DM_PROMPT_HISTORY_MAX_DIGEST,
   AI_DM_PROMPT_HISTORY_MAX_MESSAGES,
   buildNarrationLanguageContract,
-  DND5E_ADAPTER_ID,
-  isOsrSlug,
-  osrMechanicsProfile,
   resolveNarrationLanguage,
+  resolverImplementsSystemMath,
   ruleSystemAdapter,
   TABLE_SAFETY_HOLD_ERROR_CODE,
 } from '@campfire/schema';
@@ -728,47 +726,39 @@ const RECOVERY_SUMMARY: Record<ControlStateRecovery, string> = {
  * driver-grounding.ts, which never takes the model's word for anything.
  */
 /**
- * Does the SERVER's attack classifier implement this campaign's to-hit rule (#1053 review)?
+ * May this campaign be told to resolve attacks and saves server-side (#1053 review)?
  *
- * `classifyAttackOutcome` compares `total >= targetAc` — ascending AC, meet-or-beat. That is
- * right for 5e and its d20 descendants, and PF2e/SF2e route through `degreeOfSuccess` instead.
- * It is WRONG for an OSR variant that uses DESCENDING armour class: those store descending AC
- * in `armorClass` and hit on `roll >= thac0 - descendingAc` (`osrAttackHits`). Against
- * descending AC 2 the ascending comparison calls almost any positive total a hit, and with
- * `commit:true` that writes wrong HP — so the guidance must not send those tables here.
+ * ONE gate for both, because both are known-wrong for at least one supported system, and one of
+ * them being an allowlist while the other stayed a blocklist would just relocate the hazard.
+ * The answer comes from the adapter's own {@link ResolverMathProfile} declaration rather than
+ * from a slug list here: a slug list is a blocklist wearing an allowlist's clothes — it still
+ * needs editing whenever a system is added, and forgetting still fails open.
  *
- * This is a GUIDANCE gate, not a fix: the resolver is still 5e-shaped for those systems. Making
- * classification adapter-owned is tracked separately (see the follow-up issue from #1053); until
- * then a descending-AC table is told to hand the to-hit to its human DM, which is wrong-free.
+ * **Why opt-in.** The first version of this gate excluded only descending-AC OSR, on the theory
+ * that everything else was d20-ish enough. Review then found Open Legend (exploding attribute
+ * dice pools, not a d20) and PF2e action saves (`proficiencyBonus` returns 0 for every non-5e
+ * adapter, so a trained character's total is understated and a wrong degree-of-success branch
+ * can be selected and committed). Each round found one more, which is what a blocklist does.
+ * Inverted, an unaudited system withholds guidance — the failure mode becomes "the AI was not
+ * told resolve_action exists", not "the AI committed HP that never should have been lost".
+ *
+ * Today this is true for 5e alone, plus the unknown/empty/homebrew slugs `ruleSystemAdapter`
+ * deliberately resolves to the 5e adapter (5e maths is genuinely what those campaigns get).
+ * The adapter work that widens it is tracked in #1598 and #1599.
  */
-export function resolverKnowsAttackRule(ruleSystem?: string | null): boolean {
-  return !(isOsrSlug(ruleSystem) && osrMechanicsProfile(ruleSystem).acMode === 'descending');
-}
-
-/**
- * Does the standalone `saving_throw` tool compute THIS campaign's save maths (#1053 review)?
- *
- * `saving_throw` (#1040) hardcodes the 5e formula — `d20 + floor((score - 10) / 2)` plus a
- * level-based proficiency bonus — as its own tool description says. PF2e adds level plus a
- * proficiency-RANK bonus; OSR saves are category target numbers, not ability DCs. So the tool
- * is correct exactly for the campaigns that resolve to the 5e adapter (which includes the
- * unknown/empty/homebrew slugs `ruleSystemAdapter` deliberately falls back to 5e for).
- *
- * Again a guidance gate, not a fix. Routing the tool through the adapter is tracked separately.
- */
-export function saveToolKnowsSaveRule(ruleSystem?: string | null): boolean {
-  return ruleSystemAdapter(ruleSystem).id === DND5E_ADAPTER_ID;
+export function resolverSpeaksCampaignSystem(ruleSystem?: string | null): boolean {
+  return resolverImplementsSystemMath(ruleSystemAdapter(ruleSystem));
 }
 
 /**
  * Build the grounding preamble for one campaign's rule system (#1053 review).
  *
- * Everything except the attack / saving-throw lines is system-neutral. Those two ARE gated,
- * because the implementations behind them are not yet adapter-aware everywhere and a blanket
- * "always call resolve_action / saving_throw" is actively harmful where they disagree with the
- * table's rules — it commits wrong HP and reports wrong save totals rather than merely being
- * unhelpful. Where the server cannot do the maths, the model is told to say so and defer to the
- * human DM. That is less capable than the ungated text and strictly more correct.
+ * Everything except the attack / saving-throw block is system-neutral. That block is gated on
+ * {@link resolverSpeaksCampaignSystem}, because a blanket "always call resolve_action /
+ * saving_throw" is not merely unhelpful where the server's maths is not the table's — it
+ * commits wrong HP and reports wrong save results. Where the server cannot do the maths the
+ * model is told so plainly and told to defer to the human DM: less capable than the ungated
+ * text, and strictly more correct.
  */
 export function buildGroundingPreamble(ruleSystem?: string | null): string {
   return [
@@ -806,27 +796,26 @@ export function buildGroundingPreamble(ruleSystem?: string | null): string {
   // campaign whatever its rule system, so any concrete arithmetic in it would be wrong for
   // some table. The server reads the rule from the campaign's adapter; the model is told the
   // rule is applied for it and is told what to report, which is the resolver's own numbers.
-  ...(resolverKnowsAttackRule(ruleSystem)
+  //
+  // #1053 review: the whole attack/save block below is gated. `saving_throw` (#1040) is the
+  // right SHAPE for a standalone save — it needs only a character and a DC, where resolve_action
+  // needs an encounter, an actor combatant, targets and an outcome spec — but its maths, like
+  // the resolver's d20-vs-ascending-AC and level-based proficiency, is 5e's. So the split
+  // between a standalone save and an action-embedded one is only worth teaching to a table
+  // whose rules that maths actually is.
+  '- roll_dice is for rolls with no target and no consequence — a random table, a morale roll. It does NOT apply anything. Never use it to hand-roll an attack, a save, or damage.',
+  ...(resolverSpeaksCampaignSystem(ruleSystem)
     ? [
         '- To resolve an ATTACK, call resolve_action — never hand-roll one. It rolls the d20 with the right modifier, compares the target’s AC, classifies hit/miss/crit under THIS campaign’s rule system, rolls damage and applies that system’s own critical rule, applies damage-type resistance/immunity, writes the result, and returns an undo token. Pass commit:true to resolve and apply in ONE call. Narrate the totals it returns — never recompute a crit yourself, and never assume one system’s crit maths applies at this table.',
         '- resolve_action needs no pre-authored action: for a monster swing or an improvised attack pass an inline `spec`. A minimal one looks like {"mode":"attack","attack":{"bonus":"+5"},"outcomes":{"hit":{"damage":[{"formula":"1d8","flat":3,"type":"slashing"}]}}}. Put ONLY dice in `formula` and the modifier in `flat` (negative for a penalty: `1d8-1` is {"formula":"1d8","flat":-1}) — that split is what lets the server apply this system’s critical rule to the right half, so "1d8+3" as a formula gives wrong crit damage.',
+        '- For a STANDALONE saving throw ("make a DC 15 Dexterity save", a hazard or a trap, in or out of combat), call saving_throw with the character and the DC: it reads their real ability score and proficiency. Use resolve_action instead only when the save is part of an action you are resolving — a spell or effect whose outcome spec already carries the DC and its success/failure branches — because it rolls the save AND applies the branch in the same call.',
       ]
     : [
-        // This table uses DESCENDING AC / THAC0 and the resolver's classifier does not. Sending
-        // an attack through it with commit:true would write HP off a comparison that is not this
-        // system's rule, so the honest instruction is to stop before the to-hit, not to guess.
-        '- This table uses DESCENDING armour class (THAC0). Server-side attack resolution does NOT implement that convention yet, so do NOT call resolve_action to decide whether an attack hits — it would compare the totals the wrong way round and could apply damage that never landed. Narrate the swing, state the attacker’s THAC0 and the target’s AC, and let the human DM call the hit. Never assert a hit or a miss yourself.',
+        // The server's resolver maths is not this system's. Sending an attack or a save through
+        // it with commit:true would write HP off arithmetic this table does not use, so the
+        // honest instruction is to stop before the roll that decides, not to guess well.
+        '- Server-side resolution (resolve_action) and the saving_throw tool implement D&D 5e maths — one d20 plus a flat modifier, compared against ascending armour class, with a level-based proficiency bonus. This campaign uses a DIFFERENT rule system, so do NOT use them to decide whether an attack hits or whether a save succeeds: the totals would be computed the wrong way and could apply damage that never landed. Narrate the action, state the numbers from the statblock or sheet, and let the human DM make the call. Never assert a hit, a miss, or a save result yourself.',
       ]),
-  // #1053 review: `saving_throw` (#1040) is a character-aware tool that derives the real
-  // ability modifier and proficiency from the sheet, and needs nothing but a character and a
-  // DC. `resolve_action` needs an encounter, an actor combatant, targets and an outcome spec —
-  // so steering "make a DC 15 Dex save" at it asks for a call the model cannot construct.
-  // The line splits on whether the save is a STANDALONE ask or a consequence of an action —
-  // and, since `saving_throw`'s maths is 5e's, on whether that maths is this table's.
-  '- roll_dice is for rolls with no target and no consequence — a random table, a morale roll. It does NOT apply anything. Never use it to hand-roll an attack, a save, or damage.',
-  saveToolKnowsSaveRule(ruleSystem)
-    ? '- For a STANDALONE saving throw ("make a DC 15 Dexterity save", a hazard or a trap, in or out of combat), call saving_throw with the character and the DC: it reads their real ability score and proficiency. Use resolve_action instead only when the save is part of an action you are resolving — a spell or effect whose outcome spec already carries the DC and its success/failure branches — because it rolls the save AND applies the branch in the same call.'
-    : '- The saving_throw tool computes 5e save maths (ability modifier plus a level-based proficiency bonus), which is NOT this campaign’s rule, so do not use it for a standalone save — describe the danger and ask the human DM for the roll. When the save is part of an action you are resolving — a spell or effect whose outcome spec already carries the DC and its success/failure branches — use resolve_action, which reads the save modifier and degrees of success through this system’s adapter.',
   '- Respect the session-zero charter (lines/veils/safety tools) below at all times.',
   ].join('\n');
 }

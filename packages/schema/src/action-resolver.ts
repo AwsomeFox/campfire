@@ -69,6 +69,11 @@ export interface ResolverAdapter {
    * exactly as it did before this seam existed.
    */
   readonly criticalDamage?: CriticalDamageRule;
+  /**
+   * OPTIONAL, OPT-IN — see {@link ResolverMathProfile}. An adapter that does not declare it is
+   * treated as NOT implemented by the structured resolver, which is the safe direction.
+   */
+  readonly resolverMath?: ResolverMathProfile;
 }
 
 /**
@@ -78,6 +83,48 @@ export interface ResolverAdapter {
  */
 export function criticalDamageRuleForAdapter(adapter: Pick<ResolverAdapter, 'criticalDamage'>): CriticalDamageRule {
   return adapter.criticalDamage ?? 'double-dice';
+}
+
+/**
+ * The one set of mechanics the structured resolver's own maths actually implements
+ * (issue #1053 review). Named for what it IS rather than for a system, so declaring it is a
+ * factual claim an adapter author can check rather than a badge:
+ *
+ *  - the attack roll is a single **d20** plus a flat modifier;
+ *  - it is compared against **ascending** armour class, meet-or-beat;
+ *  - proficiency is 5e's **level-based** bonus (`dnd5eProficiencyBonus`).
+ *
+ * Every one of those is load-bearing and every one is violated by some supported system:
+ * Open Legend rolls exploding **attribute dice pools**, not a d20; the OSR variants on the
+ * descending convention compare the other way round (`osrAttackHits`); PF2e/SF2e proficiency is
+ * level **plus a rank bonus**, and `ActionResolverService.proficiencyBonus` returns 0 for every
+ * non-5e adapter, so a trained PF2e save total is understated and can select the wrong
+ * degree-of-success branch. Today exactly one adapter can honestly declare this: 5e.
+ */
+export type ResolverMathProfile = 'd20-ascending-ac-5e-proficiency';
+
+/** The only {@link ResolverMathProfile} that exists today. */
+export const RESOLVER_MATH_D20_5E: ResolverMathProfile = 'd20-ascending-ac-5e-proficiency';
+
+/**
+ * Does the structured resolver implement THIS system's attack and save maths (#1053 review)?
+ *
+ * **Opt-in, and deliberately so.** An earlier revision of this gate was a blocklist of the
+ * systems known to break, whose default was "resolver is fine" — so every system nobody had
+ * audited yet was wrong until someone noticed, and three review rounds each found one more.
+ * The failure mode of getting this wrong is `resolve_action` with `commit:true` writing HP off
+ * arithmetic that is not the table's rules, so the default has to be closed: an adapter that
+ * has not declared {@link ResolverAdapter.resolverMath} is treated as unsupported, and a newly
+ * added system withholds until someone checks it rather than failing open.
+ *
+ * Note this is a claim about the resolver's **own** maths, not about the whole resolver. The
+ * adapter-owned parts (degrees of success, {@link CriticalDamageRule}) are correct for the
+ * systems that declare them; it is the d20 roll, the AC comparison and the proficiency bonus
+ * that are still 5e-shaped. Fixing those is tracked in #1598 / #1599; this predicate exists to
+ * keep callers from claiming universality until they are.
+ */
+export function resolverImplementsSystemMath(adapter: Pick<ResolverAdapter, 'resolverMath'>): boolean {
+  return adapter.resolverMath === RESOLVER_MATH_D20_5E;
 }
 
 // ---------------------------------------------------------------------------
@@ -556,13 +603,14 @@ export function computeSaveDc(
  *  - Otherwise (5e / d20): a natural 20 is a crit, a natural 1 is an automatic miss (critMiss),
  *    else total ≥ AC hits.
  *
- * LIMIT (#1053 review): "total ≥ AC" assumes ASCENDING armour class. An OSR variant on the
- * DESCENDING convention stores descending AC in `armorClass` and hits on
- * `roll >= thac0 - descendingAc` (`osrAttackHits` in osr-adapter.ts), so this comparison runs
- * the wrong way round for those tables — against descending AC 2 nearly any positive total
- * reads as a hit. Until classification is adapter-owned (tracked in the follow-up issue from
- * #1053) the AI Driver's guidance does not send descending-AC campaigns down this path; see
- * `resolverKnowsAttackRule` in ai-driver.service.ts.
+ * LIMIT (#1053 review): "total ≥ AC" assumes ASCENDING armour class, and the caller assumes the
+ * roll is a d20. An OSR variant on the DESCENDING convention hits on `roll >= thac0 -
+ * descendingAc` (`osrAttackHits` in osr-adapter.ts), so the comparison runs the wrong way round
+ * — against descending AC 2 nearly any positive total reads as a hit. Open Legend does not roll
+ * a d20 at all. Rather than enumerate the systems that break, ask
+ * {@link resolverImplementsSystemMath}: only an adapter that declares
+ * {@link ResolverMathProfile} is claimed to be served by this path, so an unaudited system
+ * withholds instead of failing open. Widening it is tracked in #1598.
  */
 export function classifyAttackOutcome(
   adapter: ResolverAdapter,

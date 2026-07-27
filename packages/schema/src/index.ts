@@ -32,7 +32,7 @@ import {
   sortOrderAscTiebreak,
   type InitiativeTiebreakCombatant,
 } from './initiative-tiebreak';
-import { ActionSpec, type CriticalDamageRule } from './action-resolver';
+import { ActionSpec, RESOLVER_MATH_D20_5E, type CriticalDamageRule, type ResolverMathProfile } from './action-resolver';
 import { RestModel } from './rest';
 import { CharacterAction } from './character-action';
 import { CombatantStatblock } from './combatant-statblock';
@@ -2988,9 +2988,22 @@ export interface RuleSystemAdapter {
    *
    * Only the systems whose rule has been confirmed are declared today — 5e (by omission) and
    * PF2e/SF2e. The remaining adapters are unaudited and therefore left on the 5e default
-   * rather than guessed at; see the follow-up issue linked from #1053.
+   * rather than guessed at; declaring one is a one-line change once a system's rule is confirmed.
    */
   readonly criticalDamage?: CriticalDamageRule;
+  /**
+   * OPTIONAL, OPT-IN — declare this only if the structured action resolver's OWN maths is this
+   * system's maths (issue #1053 review): a single d20 plus a flat modifier, compared against
+   * ascending armour class, with 5e's level-based proficiency bonus. See
+   * {@link ResolverMathProfile} for why each clause matters and which systems break which one.
+   *
+   * Omitting it means "the resolver does not speak this system", and omission is the DEFAULT on
+   * purpose. Callers ask {@link resolverImplementsSystemMath}; an adapter that has not been
+   * audited withholds rather than being assumed d20-compatible, because the cost of a wrong
+   * assumption here is `resolve_action` committing HP off the wrong arithmetic. Declaring it is
+   * a factual claim — check the three clauses against the system's rules first.
+   */
+  readonly resolverMath?: ResolverMathProfile;
   /** Map a monster rule-entry's `dataJson` to canonical statblock fields (AC/HP/CR/abilities/…). */
   mapStatblock(data: Record<string, unknown>): MonsterStatblockData;
   /** Resolve a monster's numeric max HP from its `dataJson`, or null when unavailable. */
@@ -3170,6 +3183,11 @@ export const DND5E_PACK_SLUG = 'open5e-srd';
 export const Dnd5eAdapter: RuleSystemAdapter = {
   id: DND5E_ADAPTER_ID,
   label: 'D&D 5e',
+  // The structured resolver's attack/save maths IS 5e's — d20 + flat modifier vs ascending AC,
+  // level-based proficiency — so 5e is the one adapter that can declare this today (#1053).
+  // Unknown / empty / homebrew slugs resolve to this adapter via `ruleSystemAdapter`, so they
+  // inherit the declaration, which is correct: 5e maths is exactly what those campaigns get.
+  resolverMath: RESOLVER_MATH_D20_5E,
   presentation: DND5E_STATBLOCK_PRESENTATION,
   characterSheet: {
     abilityFields: STANDARD_D20_ABILITY_FIELDS,

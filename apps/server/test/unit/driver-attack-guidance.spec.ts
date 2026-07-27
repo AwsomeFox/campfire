@@ -1,8 +1,7 @@
 import {
   buildGroundingPreamble,
   GROUNDING_PREAMBLE,
-  resolverKnowsAttackRule,
-  saveToolKnowsSaveRule,
+  resolverSpeaksCampaignSystem,
 } from '../../src/modules/ai-driver/ai-driver.service';
 import {
   ActionSpec,
@@ -10,6 +9,8 @@ import {
   Dnd5eAdapter,
   isResolvableSpec,
   Pf2eAdapter,
+  RESOLVER_MATH_D20_5E,
+  resolverImplementsSystemMath,
   rollBranchDamage,
   Sf2eAdapter,
   type OutcomeBranch,
@@ -98,76 +99,76 @@ describe('driver system prompt names the server-side attack path (#1053)', () =>
 });
 
 /**
- * #1053 review — the guidance is only as correct as the code behind it.
+ * #1053 review — the guidance is only as correct as the code behind it, and the gate that
+ * enforces that must FAIL CLOSED.
  *
- * Two implementations named by this preamble are still 5e-shaped:
+ * Three implementations named by this preamble are 5e-shaped:
+ *  - `resolveOneTarget` always rolls exactly `1d20` plus a flat modifier. Open Legend resolves
+ *    attacks with exploding ATTRIBUTE DICE POOLS, so the roll itself is wrong there.
  *  - `classifyAttackOutcome` compares `total >= targetAc`, ASCENDING AC. An OSR variant on the
  *    DESCENDING convention hits on `roll >= thac0 - descendingAc`, so against descending AC 2
  *    the ascending comparison calls almost any positive total a hit — and `commit:true` then
  *    writes that damage. Wrong HP at a live table, not a cosmetic mismatch.
- *  - `saving_throw` (#1040) hardcodes the 5e ability modifier and level-based proficiency, which
- *    understates a trained PF2e character (level + proficiency rank) and means nothing at all
- *    for an OSR save-category target number.
+ *  - proficiency is 5e's level-based bonus. `ActionResolverService.proficiencyBonus` returns 0
+ *    for every non-5e adapter, so a trained PF2e character's save total is understated and can
+ *    select the wrong degree-of-success branch; the standalone `saving_throw` tool (#1040)
+ *    hardcodes the same 5e formula.
  *
- * The fix for both is to make those layers adapter-owned, which is its own change. What this PR
- * owes is not to CLAIM they are universal — the same standard it already applied to the crit
- * rule. So the preamble is gated: a table whose rules the server cannot compute is told to
- * defer to its human DM instead of being pointed at a tool that will confidently be wrong.
+ * The first version of this gate was a BLOCKLIST — descending-AC OSR only — and review found one
+ * more broken system per round, because a blocklist's default is "guidance on". It is now an
+ * ALLOWLIST derived from the adapter's own `resolverMath` declaration: unlisted means withheld,
+ * so a newly added system is safe before anyone has audited it. The failure mode of a mistake
+ * here is committing HP off the wrong arithmetic, which is why the default has to be closed.
+ *
+ * These assertions pin the POLARITY. A future edit that reintroduces a "known-bad" list should
+ * fail here rather than at a live table.
  */
-describe('attack / save guidance is gated on what the server actually implements (#1053)', () => {
-  describe('attacks', () => {
-    it('serves 5e, PF2e and ASCENDING-AC OSR — the conventions the classifier matches', () => {
-      // Unknown/empty slugs fall back to the 5e adapter, so they get the 5e-correct guidance.
-      for (const slug of ['', null, 'dnd5e', 'pf2e', 'sf2e', 'swords-wizardry', 'ose']) {
-        expect(resolverKnowsAttackRule(slug)).toBe(true);
-        expect(buildGroundingPreamble(slug)).toMatch(/To resolve an ATTACK, call resolve_action/);
-      }
-    });
-
-    it('withholds resolve_action from DESCENDING-AC OSR tables', () => {
-      for (const slug of ['basic-fantasy', 'osric', 'labyrinth-lord']) {
-        expect(resolverKnowsAttackRule(slug)).toBe(false);
-        const gated = buildGroundingPreamble(slug);
-        // The dangerous instruction must be absent, not merely qualified elsewhere.
-        expect(gated).not.toMatch(/To resolve an ATTACK, call resolve_action/);
-        expect(gated).toMatch(/DESCENDING armour class \(THAC0\)/);
-        expect(gated).toMatch(/do NOT call resolve_action to decide whether an attack hits/);
-        expect(gated).toMatch(/let the human DM call the hit/i);
-      }
-    });
-
-    it('never leaves a descending-AC table with no instruction at all', () => {
-      // A gate that just deletes the sentence would drop the model back to the manual chain
-      // silently — the exact failure #1053 was filed about. It must say what to do instead.
-      const gated = buildGroundingPreamble('basic-fantasy');
-      expect(gated).toMatch(/Never assert a hit or a miss yourself/);
-    });
+describe('attack / save guidance is gated on an adapter capability, and fails closed (#1053)', () => {
+  it('serves the campaigns whose maths the resolver actually implements — 5e, and the slugs that fall back to it', () => {
+    for (const slug of ['', null, 'dnd5e', 'open5e-srd', 'not-a-real-system']) {
+      expect(resolverSpeaksCampaignSystem(slug)).toBe(true);
+      const text = buildGroundingPreamble(slug);
+      expect(text).toMatch(/To resolve an ATTACK, call resolve_action/);
+      expect(text).toMatch(/STANDALONE saving throw[^\n]*saving_throw/);
+    }
   });
 
-  describe('standalone saves', () => {
-    it('names saving_throw only where its 5e maths IS the table’s maths', () => {
-      for (const slug of ['', null, 'dnd5e']) {
-        expect(saveToolKnowsSaveRule(slug)).toBe(true);
-        expect(buildGroundingPreamble(slug)).toMatch(/STANDALONE saving throw[^\n]*saving_throw/);
-      }
-    });
-
-    it('warns non-5e tables off it instead, and keeps action-embedded saves on resolve_action', () => {
-      for (const slug of ['pf2e', 'sf2e', 'basic-fantasy', 'ose']) {
-        expect(saveToolKnowsSaveRule(slug)).toBe(false);
-        const gated = buildGroundingPreamble(slug);
-        expect(gated).not.toMatch(/STANDALONE saving throw[^\n]*call saving_throw/);
-        expect(gated).toMatch(/saving_throw tool computes 5e save maths/);
-        expect(gated).toMatch(/ask the human DM for the roll/);
-        // resolve_action DOES read save modifiers and degrees through the adapter, so the
-        // action-embedded half survives the gate — the gate is narrower than "no saves".
-        expect(gated).toMatch(/use resolve_action, which reads the save modifier/);
-      }
-    });
+  it('withholds it from every system nobody has declared — including ones no reviewer has looked at', () => {
+    // pf2e/sf2e: proficiency understated. open-legend: not a d20 at all. basic-fantasy/osric:
+    // descending AC. pathfinder-1e/archmage: simply unaudited — and that is the point, they are
+    // withheld WITHOUT anyone having had to notice them first.
+    for (const slug of ['pf2e', 'sf2e', 'open-legend', 'basic-fantasy', 'osric', 'ose', 'pathfinder-1e']) {
+      expect(resolverSpeaksCampaignSystem(slug)).toBe(false);
+      const gated = buildGroundingPreamble(slug);
+      // The dangerous instructions must be ABSENT, not merely qualified elsewhere.
+      expect(gated).not.toMatch(/To resolve an ATTACK, call resolve_action/);
+      expect(gated).not.toMatch(/call saving_throw with the character and the DC/);
+      expect(gated).not.toMatch(/commit\s*:\s*true/i);
+    }
   });
 
-  it('gates ONLY the two lines it has to — everything else is system-neutral', () => {
-    const gated = buildGroundingPreamble('basic-fantasy');
+  it('is opt-in at the adapter, so an adapter that declares nothing is withheld by construction', () => {
+    // The polarity itself. `resolverImplementsSystemMath` is what the driver asks; an adapter
+    // object with no `resolverMath` is unsupported without any list needing to mention it.
+    expect(resolverImplementsSystemMath({})).toBe(false);
+    expect(resolverImplementsSystemMath({ resolverMath: RESOLVER_MATH_D20_5E })).toBe(true);
+    expect(resolverImplementsSystemMath(Dnd5eAdapter)).toBe(true);
+    expect(resolverImplementsSystemMath(Pf2eAdapter)).toBe(false);
+    expect(resolverImplementsSystemMath(Sf2eAdapter)).toBe(false);
+  });
+
+  it('tells a withheld table what to do INSTEAD, rather than going quiet', () => {
+    // A gate that only deletes sentences drops the model back to the manual chain silently —
+    // the exact failure #1053 was filed about. It must name the limit and hand over to the DM.
+    const gated = buildGroundingPreamble('pf2e');
+    expect(gated).toMatch(/implement D&D 5e maths/);
+    expect(gated).toMatch(/do NOT use them to decide whether an attack hits or whether a save succeeds/);
+    expect(gated).toMatch(/let the human DM make the call/);
+    expect(gated).toMatch(/Never assert a hit, a miss, or a save result yourself/);
+  });
+
+  it('gates ONLY the attack/save block — everything else is system-neutral', () => {
+    const gated = buildGroundingPreamble('pf2e');
     for (const shared of [
       'Never invent rules',
       'You MAY author encounters',
