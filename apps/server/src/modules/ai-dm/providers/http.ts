@@ -117,6 +117,12 @@ export interface PostJsonOptions {
   signal?: AbortSignal;
   sleep?: Sleep;
   rand?: () => number;
+  /**
+   * When true, {@link postWithRetry} calls full timeout cleanup after a successful finalize.
+   * Used by {@link postAndReadJson} once the body has been consumed; omitted for
+   * {@link postJson}, which may still stream the body and needs the abort listener linked.
+   */
+  finalizeConsumesBody?: boolean;
 }
 
 /**
@@ -154,7 +160,9 @@ export function postAndReadJson<T>(
   bodyObj: unknown,
   opts: PostJsonOptions,
 ): Promise<T> {
-  return postWithRetry(fetchImpl, url, headers, bodyObj, opts, (res) => readJsonBody<T>(res, opts.provider, opts.signal));
+  return postWithRetry(fetchImpl, url, headers, bodyObj, { ...opts, finalizeConsumesBody: true }, (res) =>
+    readJsonBody<T>(res, opts.provider, opts.signal),
+  );
 }
 
 /**
@@ -202,7 +210,9 @@ async function postWithRetry<T>(
       if (res.body) t.clearTimer();
       else t.cleanup();
       try {
-        return await finalize(res);
+        const result = await finalize(res);
+        if (opts.finalizeConsumesBody) t.cleanup();
+        return result;
       } catch (cause) {
         t.cleanup();
         // #1602: `finalize` is contractually typed (readJsonBody, or the identity used by
