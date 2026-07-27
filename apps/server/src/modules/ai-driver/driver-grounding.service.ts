@@ -6,7 +6,7 @@ import { nowIso } from '../../common/time';
 import { auditActor, type RequestUser } from '../../common/user.types';
 import type { Role } from '@campfire/schema';
 import { AuditService } from '../audit/audit.service';
-import type { EvaluatedCitation, GroundingVerdict } from './driver-grounding';
+import { projectGroundingClaimForRole, type EvaluatedCitation, type GroundingVerdict } from './driver-grounding';
 
 /** One persisted claim + the server's verdict on it, as returned to API clients. */
 export interface AiDriverGroundingClaimRecord {
@@ -129,15 +129,24 @@ export class DriverGroundingService {
     }
   }
 
-  /** Recent claims for a campaign, newest first. */
-  async listForCampaign(campaignId: number, limit = 50): Promise<AiDriverGroundingClaimRecord[]> {
+  /**
+   * Recent claims for a campaign, newest first, PROJECTED for the reading role.
+   *
+   * The role is not optional. This endpoint is member-readable by design, but a supported
+   * citation can be backed by a DM-only id (a hidden encounter, or an entity behind a #557
+   * secret-read approval); handing that to a player would leak DM prep through the grounding
+   * card. Projection happens here rather than in the controller so no future caller can reach
+   * the unprojected rows by accident — the same reason #1524 projects inside the transcript
+   * service instead of at the edge.
+   */
+  async listForCampaign(campaignId: number, role: Role, limit = 50): Promise<AiDriverGroundingClaimRecord[]> {
     const rows = await this.db
       .select()
       .from(aiDriverGroundingClaims)
       .where(eq(aiDriverGroundingClaims.campaignId, campaignId))
       .orderBy(desc(aiDriverGroundingClaims.id))
       .limit(Math.max(1, Math.min(limit, 200)));
-    return rows.map(toRecord);
+    return rows.map((row) => projectGroundingClaimForRole(toRecord(row), role));
   }
 
   /**

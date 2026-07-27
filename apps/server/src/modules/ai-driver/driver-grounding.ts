@@ -99,6 +99,13 @@ export interface EvaluatedCitation {
   retrievedBy?: string;
   /** Deep link to the cited entity so a human can check the AI's work. */
   href?: string;
+  /**
+   * The backing id came from a DM-scoped read (#557), so it may name a hidden entity. The
+   * verdict stays visible to everyone; the id/link are stripped for non-DMs (#825).
+   */
+  dmOnly?: boolean;
+  /** Set on a projected copy whose DM-only id/link were withheld from this reader. */
+  redacted?: boolean;
 }
 
 /** One validated claim. */
@@ -132,6 +139,15 @@ export interface RetrievalRecord {
   id: number;
   tool: string;
   ok: boolean;
+  /**
+   * True when the id was retrieved under the DM-scoped SEAT principal rather than the
+   * player-scoped context principal — i.e. a mutating call, or a read the DM narrowly approved
+   * for one secret entity (#557). Such an id may name a hidden encounter or a hidden NPC, which
+   * #825 forbids putting in front of a non-DM on ANY delivery path. It stays citeable (the model
+   * really did read it, so flagging its citation would cry wolf), but the id and its evidence
+   * link are projected out for non-DM readers — see {@link projectGroundingClaimForRole}.
+   */
+  dmOnly: boolean;
 }
 
 function ledgerKey(type: string, id: number): string {
@@ -148,17 +164,24 @@ function ledgerKey(type: string, id: number): string {
 export class RetrievalLedger {
   private readonly entries = new Map<string, RetrievalRecord>();
 
-  /** Record one retrieved id. `ok:false` marks an errored retrieval (cited → unsupported). */
-  record(type: GroundingSourceType, id: number, tool: string, ok = true): void {
+  /**
+   * Record one retrieved id. `ok:false` marks an errored retrieval (cited → unsupported).
+   * `dmOnly:true` marks an id that only a DM-scoped principal could see (#557/#825).
+   */
+  record(type: GroundingSourceType, id: number, tool: string, ok = true, dmOnly = false): void {
     if (!Number.isInteger(id) || id <= 0) return;
     const key = ledgerKey(type, id);
     const existing = this.entries.get(key);
     if (existing) {
       // A successful read outranks a failed one; the first successful tool keeps attribution.
-      if (ok && !existing.ok) this.entries.set(key, { type, id, tool, ok: true });
+      if (ok && !existing.ok) this.entries.set(key, { type, id, tool, ok: true, dmOnly: existing.dmOnly && dmOnly });
+      // `dmOnly` is sticky-FALSE: if ANY player-scoped read this turn also returned this id, the
+      // players can already see it, so there is nothing left to protect. Only an id that was
+      // never surfaced by a player-visible read stays marked.
+      else if (!dmOnly && existing.dmOnly) this.entries.set(key, { ...existing, dmOnly: false });
       return;
     }
-    this.entries.set(key, { type, id, tool, ok });
+    this.entries.set(key, { type, id, tool, ok, dmOnly });
   }
 
   get(type: string, id: number): RetrievalRecord | undefined {
@@ -251,6 +274,8 @@ export function harvestRetrievals(
   args: Record<string, unknown> | undefined,
   resultText: string | undefined,
   ok = true,
+  /** True when the call ran under the DM-scoped seat principal — see {@link RetrievalRecord.dmOnly}. */
+  dmOnly = false,
 ): void {
   const primary = TOOL_PRIMARY_TYPE.get(toolName);
 
@@ -260,7 +285,7 @@ export function harvestRetrievals(
     for (const [key, value] of Object.entries(args)) {
       if (!/Id$/.test(key) || typeof value !== 'number') continue;
       const argType = ARG_NAME_TYPE.get(key);
-      if (argType) ledger.record(argType, value, toolName, ok);
+      if (argType) ledger.record(argType, value, toolName, ok, dmOnly);
     }
   }
 
@@ -281,7 +306,7 @@ export function harvestRetrievals(
       return;
     }
     const obj = node as Record<string, unknown>;
-    if (type && typeof obj.id === 'number') ledger.record(type, obj.id, toolName, ok);
+    if (type && typeof obj.id === 'number') ledger.record(type, obj.id, toolName, ok, dmOnly);
     for (const [key, value] of Object.entries(obj)) {
       if (value === null || typeof value !== 'object') continue;
       const childType = COLLECTION_KEY_TYPE.get(key) ?? (key === 'results' || key === 'entries' || key === 'items' ? type : undefined);
@@ -335,19 +360,28 @@ export interface ParsedGrounding {
  */
 export function parseGroundingBlock(raw: string): ParsedGrounding {
   if (!raw) return { narration: '', claims: [], present: false, malformed: false };
-  const start = raw.lastIndexOf(GROUNDING_BLOCK_START);
+  // The narration cut MUST use the FIRST fence, because that is exactly where
+  // GroundingDeltaFilter stopped broadcasting. Taking the last fence here (as this originally
+  // did) let a model that emitted `[[GROUNDING]]` twice put prose into the persisted transcript
+  // and the turn result that the live table never saw — along with a raw protocol marker. The
+  // stored record must be what the table watched, so the two cuts are the same cut.
+  const start = raw.indexOf(GROUNDING_BLOCK_START);
   if (start === -1) return { narration: raw, claims: [], present: false, malformed: false };
-  const endMarker = raw.indexOf(GROUNDING_BLOCK_END, start);
-  const bodyStart = start + GROUNDING_BLOCK_START.length;
+  const narration = raw.slice(0, start).trim();
+
+  // The BODY, by contrast, comes from the LAST fence: the contract says exactly one block at the
+  // very end of the reply, so on a stray-fence reply the trailing one is the real block. Anything
+  // between the two was never broadcast and is dropped from both views alike.
+  const bodyFence = raw.lastIndexOf(GROUNDING_BLOCK_START);
+  const endMarker = raw.indexOf(GROUNDING_BLOCK_END, bodyFence);
+  const bodyStart = bodyFence + GROUNDING_BLOCK_START.length;
   // A truncated stream can cut the closing fence; treat the tail as the body rather than
   // leaving a dangling `[[GROUNDING]]{...` in the broadcast narration.
   const body = endMarker === -1 ? raw.slice(bodyStart) : raw.slice(bodyStart, endMarker);
-  const after = endMarker === -1 ? '' : raw.slice(endMarker + GROUNDING_BLOCK_END.length);
-  const narration = `${raw.slice(0, start)}${after}`.trim();
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(body.trim());
+    parsed = JSON.parse(stripCodeFence(body));
   } catch {
     return { narration, claims: [], present: true, malformed: true };
   }
@@ -381,6 +415,28 @@ export function parseGroundingBlock(raw: string): ParsedGrounding {
     claims.push({ text, kind, cites });
   }
   return { narration, claims, present: true, malformed: false };
+}
+
+/**
+ * Unwrap a markdown code fence around the block body.
+ *
+ * Models wrap JSON in ```json fences reflexively, and without this a perfectly cooperative reply
+ * parses as `block_malformed` — which is an UNSUPPORTED claim, which parks the seat in
+ * `awaiting_players`. That would fire on essentially every turn for some providers, and a
+ * mechanism that fires constantly gets switched off, at which point it protects nothing. The
+ * fence is presentation, not content, so unwrapping it does not weaken any check: the claims
+ * inside are still validated against the ledger exactly as before.
+ */
+function stripCodeFence(body: string): string {
+  const trimmed = body.trim();
+  if (!trimmed.startsWith('```')) return trimmed;
+  const firstNewline = trimmed.indexOf('\n');
+  if (firstNewline === -1) return trimmed;
+  // Only the opening fence's info string (```json) is skipped; a missing closing fence just
+  // leaves the tail in place and JSON.parse still decides.
+  const withoutOpen = trimmed.slice(firstNewline + 1);
+  const closing = withoutOpen.lastIndexOf('```');
+  return (closing === -1 ? withoutOpen : withoutOpen.slice(0, closing)).trim();
 }
 
 /**
@@ -625,6 +681,53 @@ function evaluateCitation(campaignId: number, cite: GroundingCitation, ledger: R
     reason: 'ok',
     retrievedBy: record.tool,
     href: citationHref(campaignId, type, cite.id),
+    ...(record.dmOnly ? { dmOnly: true } : {}),
+  };
+}
+
+/**
+ * Project one stored claim for the role that is reading it (#577, following #825/#1524).
+ *
+ * `GET /ai-dm/grounding` is member-readable on purpose — the table is the audience for an
+ * unverified ruling — but a SUPPORTED citation can be backed by an id only a DM was ever
+ * allowed to see: a hidden encounter, or an entity behind a narrow DM secret-read approval
+ * (#557). Publishing that id (and a deep link straight to it) to every player would leak the
+ * existence of DM prep through the very mechanism that is supposed to make the AI trustworthy.
+ *
+ * Note WHICH way this redacts. The verdict, the reason, the claim text, and the provenance are
+ * unchanged for every reader, so a player still sees that the ruling checked out and can still
+ * dispute it. Only the identity of the DM-only source is withheld. `projectTranscriptEventForRole`
+ * makes the same trade for a hidden encounter id inside a tool payload.
+ */
+export function projectGroundingCitationForRole(citation: EvaluatedCitation, role: string): EvaluatedCitation {
+  if (role === 'dm' || !citation.dmOnly) return citation;
+  const { href: _href, dmOnly: _dmOnly, ...rest } = citation;
+  // Keep `type` — "backed by an NPC the DM can see" is not itself sensitive and keeps the card
+  // legible — but drop the id and the link, which are the parts that name the hidden entity.
+  return { ...rest, id: 0, redacted: true };
+}
+
+/** Project every citation on a claim for the reading role. */
+export function projectGroundingClaimForRole<T extends { citations: EvaluatedCitation[] }>(claim: T, role: string): T {
+  if (role === 'dm') return claim;
+  return { ...claim, citations: claim.citations.map((c) => projectGroundingCitationForRole(c, role)) };
+}
+
+/**
+ * Project a whole turn verdict for the role receiving it.
+ *
+ * `POST /ai-dm/message` is player-callable and returns this verbatim, so it is a second delivery
+ * path for exactly the ids {@link projectGroundingClaimForRole} guards on the REST read. The raw
+ * `retrievals` ledger is the wider hole of the two: it lists EVERY id the turn retrieved whether
+ * or not the model cited any of them, so a player could dump the DM's hidden prep just by taking
+ * a turn. Non-DM readers get the player-visible retrievals only.
+ */
+export function projectGroundingVerdictForRole(verdict: GroundingVerdict, role: string): GroundingVerdict {
+  if (role === 'dm') return verdict;
+  return {
+    ...verdict,
+    claims: verdict.claims.map((c) => projectGroundingClaimForRole(c, role)),
+    retrievals: verdict.retrievals.filter((r) => !r.dmOnly),
   };
 }
 

@@ -34,6 +34,12 @@ export interface GroundingCitation {
   reason: string;
   retrievedBy?: string;
   href?: string;
+  /**
+   * The server withheld this citation's id and evidence link because the backing entity is
+   * DM-only — a hidden encounter, or an entity behind a #557 secret-read approval (#825). The
+   * verdict is still shown; only the source's identity is hidden. `id` arrives as 0.
+   */
+  redacted?: boolean;
 }
 
 /** One claim plus the server's verdict, from GET /ai-dm/grounding. */
@@ -161,7 +167,13 @@ export function GroundingPanel({ campaignId, isDm }: GroundingPanelProps) {
               <ul className="flex flex-wrap gap-2 list-none p-0 m-0">
                 {claim.citations.map((cite, i) => (
                   <li key={`${cite.type}:${cite.id}:${i}`} className="text-[11px]">
-                    {cite.href && cite.status === 'supported' ? (
+                    {cite.redacted ? (
+                      // No id and no link: rendering "npc #0" would be noise, and the whole point
+                      // is that this reader may not know WHICH entity backed the claim.
+                      <span className="text-secondary">
+                        {cite.type} — {t('table.grounding.dmOnlySource')}
+                      </span>
+                    ) : cite.href && cite.status === 'supported' ? (
                       <Link to={cite.href} className="underline">
                         {cite.type} #{cite.id}
                       </Link>

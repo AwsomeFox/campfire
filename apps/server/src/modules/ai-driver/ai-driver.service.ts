@@ -434,6 +434,10 @@ const STUCK_REASONS = allowlist<AiDmStuckReason>({
   loop: true,
   dispute: true,
   provider_error: true,
+  // #577 — a turn parked because the server could not trace a factual claim to an authorized
+  // read. Must be listed here or a restart would hydrate that seat back to healthy and drop
+  // the very signal the grounding ladder exists to raise.
+  unsupported_claim: true,
 });
 
 function recordOf(value: unknown): Record<string, unknown> | null {
@@ -2868,7 +2872,12 @@ export class AiDriverService {
       // having survived the permission-checked tool layer for THIS campaign. `ok` is false for an
       // errored call, which makes a citation of it resolve to `retrieval_failed` rather than
       // silently passing. Harvested from `cleanedText` — what the model was actually shown.
-      harvestRetrievals(ledger, call.name, args, cleanedText, !res.isError);
+      //
+      // `useSeatPrincipal` marks the id DM-only: this call ran under the DM-scoped seat rather
+      // than the player-scoped context principal, so it can return a hidden encounter or an
+      // entity behind a narrow secret-read approval (#557). Such an id stays citeable — the
+      // model genuinely read it — but is projected out of every non-DM view (#825).
+      harvestRetrievals(ledger, call.name, args, cleanedText, !res.isError, useSeatPrincipal);
       const identity = await this.resolveToolResourceIdentity(
         campaignId,
         call.name,

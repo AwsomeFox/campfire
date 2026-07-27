@@ -1,5 +1,5 @@
 import request from 'supertest';
-import { createAiEvalHarness, dm, player, type AiEvalHarness } from './ai-eval-harness';
+import { createAiEvalHarness, dm, player, viewer, type AiEvalHarness } from './ai-eval-harness';
 import { AiDmStreamService, type AiDmStreamEvent } from '../src/modules/ai-driver/ai-driver-stream.service';
 import {
   GROUNDING_BLOCK_END,
@@ -242,6 +242,146 @@ describe('ai-dm driver — grounding: creative narration vs. factual claims (#57
       .set(dm)
       .send({ claimId, correction: 'not yours' });
     expect(wrongCampaign.status).toBe(404);
+  });
+
+
+  /**
+   * REVIEW REGRESSION (#577 / #825 / #557).
+   *
+   * The #557 secret-read approval is the DM deliberately letting the AI read ONE hidden entity
+   * so it can reason about it. That read runs under the DM-scoped SEAT principal, so the id it
+   * returns is one no player may see. If the model then does the cooperative thing and CITES
+   * what it read, the citation is genuinely supported — and before this fix the supported
+   * citation (id + a deep link straight to the hidden entity) was published verbatim to every
+   * member through GET /ai-dm/grounding and to any player through the turn result.
+   *
+   * The AI behaving correctly was what leaked the DM's prep.
+   */
+  it('never publishes a DM-only cited id to a player, on either delivery path', async () => {
+    const campaignId = await armedCampaign('Grounding DM-only citation');
+
+    // A HIDDEN NPC: invisible to the player-scoped context principal the prompt is built with.
+    const npc = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/npcs`)
+      .set(dm)
+      .send({ name: 'The Whisperer', body: 'Secretly the party patron.', hidden: true });
+    expect(npc.status).toBe(201);
+    const npcId = npc.body.id as number;
+
+    // The DM narrowly approves ONE secret read of that entity.
+    const grant = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/ai-dm/secret-approval`)
+      .set(dm)
+      .send({ action: 'grant', tool: 'get_npc', entityId: npcId, note: 'may reason about the patron' });
+    expect(grant.status).toBe(201);
+
+    // Turn 1: the model performs the approved read, then cites it.
+    h.script(
+      { toolCalls: [{ id: 'c1', name: 'get_npc', arguments: { npcId } }] },
+      {
+        text:
+          'A cloaked figure watches from the gallery.' +
+          groundingBlock([
+            { text: 'The patron is watching.', kind: 'canon', cites: [{ type: 'npc', id: npcId }] },
+          ]),
+      },
+    );
+    const res = await h.sendMessage(campaignId, { input: 'Who is watching us?' }, player);
+    expect(res.status).toBe(201);
+
+    // The citation IS supported — the model really did read it. We are not crying wolf.
+    expect(res.body.grounding.status).toBe('clean');
+
+    // ...but the player's copy of the turn result must not name the hidden entity, and the raw
+    // retrieval ledger must not hand them the DM's prep either.
+    const playerTurn = JSON.stringify(res.body.grounding);
+    expect(playerTurn).not.toContain(`/npcs/${npcId}`);
+    expect(res.body.grounding.claims[0].citations[0]).toMatchObject({ status: 'supported', id: 0, redacted: true });
+    expect(res.body.grounding.retrievals.some((r: { id: number }) => r.id === npcId)).toBe(false);
+
+    // Same on the member-readable review endpoint.
+    const asPlayer = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/grounding`).set(player);
+    expect(asPlayer.status).toBe(200);
+    expect(asPlayer.body[0].citations[0]).toMatchObject({ status: 'supported', id: 0, redacted: true });
+    expect(asPlayer.body[0].citations[0].href).toBeUndefined();
+    expect(JSON.stringify(asPlayer.body)).not.toContain(`/npcs/${npcId}`);
+
+    // A viewer is at least as restricted as a player.
+    const asViewer = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/grounding`).set(viewer);
+    expect(asViewer.status).toBe(200);
+    expect(JSON.stringify(asViewer.body)).not.toContain(`/npcs/${npcId}`);
+
+    // The DM — who owns the secret — still gets the id and the evidence link to check the work.
+    const asDm = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/grounding`).set(dm);
+    expect(asDm.status).toBe(200);
+    expect(asDm.body[0].citations[0]).toMatchObject({
+      status: 'supported',
+      id: npcId,
+      href: `/c/${campaignId}/npcs/${npcId}`,
+    });
+  });
+
+  it('the stored narration is exactly the prose the table watched stream by stream', async () => {
+    const campaignId = await armedCampaign('Grounding narration parity');
+    const streamSvc = h.ctx.app.get(AiDmStreamService);
+    const events: AiDmStreamEvent[] = [];
+    const sub = streamSvc.streamFor(campaignId).subscribe((e) => events.push(e));
+
+    // A model that emits the fence token inside its prose before the real block. The streaming
+    // filter stops at the FIRST fence, so anything after it was never broadcast and must not
+    // reappear in the persisted transcript or the turn result.
+    h.script({
+      text: `The lantern swings. ${GROUNDING_BLOCK_START} was never meant to be prose. Smuggled.` + groundingBlock([]),
+      streamChunks: 9,
+    });
+    const res = await h.sendMessage(campaignId, { input: 'I raise the lantern.' });
+    sub.unsubscribe();
+    expect(res.status).toBe(201);
+
+    const streamed = events
+      .filter((e) => e.type === 'narration.delta')
+      .map((e) => (e.type === 'narration.delta' ? e.text : ''))
+      .join('')
+      .trim();
+
+    expect(streamed).toBe('The lantern swings.');
+    expect(res.body.narration).toBe(streamed);
+    expect(res.body.narration).not.toContain('Smuggled');
+    expect(res.body.narration).not.toContain('GROUNDING');
+
+    // The persisted transcript is the third delivery path and must agree with the other two.
+    const transcript = await request(h.server)
+      .get(`/api/v1/campaigns/${campaignId}/ai-dm/transcript`)
+      .set(dm);
+    expect(transcript.status).toBe(200);
+    const narrationRows = (transcript.body.items as { kind: string; payload: { text?: string } }[])
+      .filter((e) => e.kind === 'narration');
+    expect(narrationRows.length).toBeGreaterThan(0);
+    for (const row of narrationRows) {
+      expect(row.payload.text).not.toContain('GROUNDING');
+      expect(row.payload.text).not.toContain('Smuggled');
+    }
+  });
+
+  it('a markdown-fenced citation block is honoured rather than parked as malformed', async () => {
+    const campaignId = await armedCampaign('Grounding fenced block');
+    // Models wrap JSON in ```json reflexively. Treating that as malformed would flag an
+    // unsupported claim and park the seat on EVERY turn, and a mechanism that fires constantly
+    // gets switched off.
+    h.script({
+      text:
+        'Mist rolls off the water.\n' +
+        `${GROUNDING_BLOCK_START}\n\`\`\`json\n${JSON.stringify({ claims: [] })}\n\`\`\`\n${GROUNDING_BLOCK_END}`,
+    });
+    const res = await h.sendMessage(campaignId, { input: 'I watch the river.' });
+    expect(res.status).toBe(201);
+    expect(res.body.grounding.status).toBe('clean');
+    expect(res.body.grounding.claims).toHaveLength(0);
+    expect(res.body.narration).toBe('Mist rolls off the water.');
+
+    const session = await h.getDriverSession(campaignId);
+    expect(session.body.state).toBe('running');
+    expect(session.body.stuck).toBeNull();
   });
 
   it('the system prompt states the narration/claim split and the citation contract', async () => {

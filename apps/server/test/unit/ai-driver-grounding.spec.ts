@@ -10,6 +10,8 @@ import {
   harvestRetrievals,
   hasAppliedWrite,
   parseGroundingBlock,
+  projectGroundingClaimForRole,
+  projectGroundingVerdictForRole,
   RetrievalLedger,
   type AppliedToolSummary,
   type ParsedGrounding,
@@ -412,7 +414,10 @@ describe('#577 — provenance and evidence links', () => {
     const ledger = new RetrievalLedger();
     harvestRetrievals(ledger, 'lookup_rule', {}, JSON.stringify([{ id: 501 }]));
     const verdict = verdictFor(`x\n${block({ claims: [] })}`, ledger);
-    expect(verdict.retrievals).toEqual([{ type: 'rule', id: 501, tool: 'lookup_rule', ok: true }]);
+    expect(verdict.retrievals).toEqual([
+      // `dmOnly:false` — a default read runs under the player-scoped context principal.
+      { type: 'rule', id: 501, tool: 'lookup_rule', ok: true, dmOnly: false },
+    ]);
   });
 });
 
@@ -487,5 +492,152 @@ describe('#577 — the prompt contract states the split and the enforcement', ()
     expect(GROUNDING_CITATION_CONTRACT).toContain(GROUNDING_BLOCK_START);
     expect(GROUNDING_CITATION_CONTRACT).toContain('the server checks every one of them');
     expect(GROUNDING_CITATION_CONTRACT).toContain('PROPOSALS');
+  });
+});
+
+/**
+ * REVIEW REGRESSIONS (#577)
+ *
+ * Three defects found reviewing the merged branch. Each block below fails against the
+ * pre-fix implementation.
+ */
+describe('#577 review — a DM-only retrieval never leaks its id to a non-DM', () => {
+  /**
+   * The setup is the #557 workflow working exactly as intended: the DM grants a narrow,
+   * single-use approval so the AI may read ONE hidden entity and reason about it without
+   * narrating it. The read runs under the DM-scoped seat principal, so the id it returns is
+   * one no player is allowed to see (#825 treats a hidden encounter id as sensitive on every
+   * delivery path). The model then does the cooperative thing and cites what it read.
+   */
+  function dmOnlyLedger(): RetrievalLedger {
+    const ledger = new RetrievalLedger();
+    harvestRetrievals(
+      ledger,
+      'get_encounter',
+      { encounterId: 77 },
+      JSON.stringify({ id: 77, name: 'Ambush in the tunnel', hidden: true }),
+      true,
+      true, // ran under the DM seat principal
+    );
+    return ledger;
+  }
+
+  const narration = `The tunnel ahead is quiet.\n\n${block({
+    claims: [{ text: 'An ambush is staged here.', kind: 'canon', cites: [{ type: 'encounter', id: 77 }] }],
+  })}`;
+
+  it('still counts the citation as supported — the model really did read it', () => {
+    const verdict = verdictFor(narration, dmOnlyLedger());
+    expect(verdict.status).toBe('clean');
+    expect(verdict.claims[0].citations[0]).toMatchObject({ status: 'supported', id: 77, dmOnly: true });
+  });
+
+  it('withholds the hidden id and its evidence link from a player', () => {
+    const verdict = verdictFor(narration, dmOnlyLedger());
+    const projected = projectGroundingClaimForRole(verdict.claims[0], 'player');
+    expect(projected.citations[0].id).toBe(0);
+    expect(projected.citations[0].href).toBeUndefined();
+    expect(projected.citations[0].redacted).toBe(true);
+    // The verdict itself is NOT hidden: a player must still see that the ruling checked out.
+    expect(projected.citations[0].status).toBe('supported');
+    expect(JSON.stringify(projected)).not.toContain('77');
+  });
+
+  it('keeps the id for the DM, who is the one allowed to check the work', () => {
+    const verdict = verdictFor(narration, dmOnlyLedger());
+    const projected = projectGroundingClaimForRole(verdict.claims[0], 'dm');
+    expect(projected.citations[0].id).toBe(77);
+    expect(projected.citations[0].href).toBe(`/c/${CAMPAIGN}/encounters/77`);
+  });
+
+  it('strips DM-only rows from the raw retrieval ledger on the player-callable turn result', () => {
+    const ledger = dmOnlyLedger();
+    // A second, player-scoped read in the same turn — this one is safe to show.
+    harvestRetrievals(ledger, 'get_npc', { npcId: 4 }, JSON.stringify({ id: 4, name: 'Kaeda' }), true, false);
+    const verdict = verdictFor(narration, ledger);
+    expect(verdict.retrievals).toHaveLength(2);
+
+    const forPlayer = projectGroundingVerdictForRole(verdict, 'player');
+    expect(forPlayer.retrievals.map((r) => r.id)).toEqual([4]);
+    expect(JSON.stringify(forPlayer.retrievals)).not.toContain('77');
+    // Counts are unchanged — projection hides identity, never the verdict.
+    expect(forPlayer.supportedCount).toBe(verdict.supportedCount);
+    expect(forPlayer.unsupportedCount).toBe(verdict.unsupportedCount);
+  });
+
+  it('stops marking an id DM-only once a player-scoped read returns it too', () => {
+    const ledger = new RetrievalLedger();
+    harvestRetrievals(ledger, 'get_npc', { npcId: 9 }, JSON.stringify({ id: 9 }), true, true);
+    // The campaign summary is assembled through the player-scoped context principal, so an id
+    // it hands back is already visible to the whole table — nothing left to protect.
+    harvestRetrievals(ledger, 'get_campaign_summary', { campaignId: CAMPAIGN }, JSON.stringify({ npcs: [{ id: 9 }] }), true, false);
+    expect(ledger.get('npc', 9)?.dmOnly).toBe(false);
+  });
+});
+
+describe('#577 review — the stored narration is exactly what the table watched', () => {
+  function streamed(raw: string, chunk: number): string {
+    const filter = new GroundingDeltaFilter();
+    let out = '';
+    for (let i = 0; i < raw.length; i += chunk) out += filter.push(raw.slice(i, i + chunk));
+    return out + filter.flush();
+  }
+
+  /**
+   * The streaming filter stops broadcasting at the FIRST fence. If the parser cut at the LAST
+   * one, a model could put prose — and a raw protocol marker — into the persisted transcript
+   * and the turn result that the live table never saw. The two cuts must be the same cut.
+   */
+  it('agrees with the streaming filter when the fence appears twice', () => {
+    const raw = `The door creaks open. ${GROUNDING_BLOCK_START} is my marker. Rats scatter. ${block({ claims: [] })}`;
+    expect(parseGroundingBlock(raw).narration).toBe(streamed(raw, 7).trim());
+    expect(parseGroundingBlock(raw).narration).toBe('The door creaks open.');
+    expect(parseGroundingBlock(raw).narration).not.toContain('GROUNDING');
+  });
+
+  it('agrees with the streaming filter across a range of delta boundaries', () => {
+    const raw = `Dust settles.\n\n${block({
+      claims: [{ text: 'Kaeda leads the guild.', kind: 'canon', cites: [{ type: 'npc', id: 3 }] }],
+    })}`;
+    for (const chunk of [1, 2, 3, 5, 8, 13, 64]) {
+      expect(parseGroundingBlock(raw).narration).toBe(streamed(raw, chunk).trim());
+    }
+  });
+
+  it('drops trailing prose the model appended after the closing fence, which was never broadcast', () => {
+    const raw = `Real narration.\n${block({ claims: [] })}\nSmuggled epilogue.`;
+    expect(parseGroundingBlock(raw).narration).toBe('Real narration.');
+    expect(parseGroundingBlock(raw).narration).toBe(streamed(raw, 4).trim());
+  });
+});
+
+describe('#577 review — a markdown-fenced block is not treated as malformed', () => {
+  /**
+   * Models wrap JSON in ```json reflexively. Treating that as `block_malformed` makes it an
+   * unsupported claim, which parks the seat in `awaiting_players` — on essentially every turn
+   * for some providers. A mechanism that fires constantly gets switched off, and then it
+   * protects nothing.
+   */
+  it('parses a body wrapped in a ```json fence', () => {
+    const raw = `Prose.\n${GROUNDING_BLOCK_START}\n\`\`\`json\n{"claims":[{"text":"a","kind":"narration","cites":[]}]}\n\`\`\`\n${GROUNDING_BLOCK_END}`;
+    const parsed = parseGroundingBlock(raw);
+    expect(parsed.malformed).toBe(false);
+    expect(parsed.claims).toHaveLength(1);
+    expect(parsed.narration).toBe('Prose.');
+  });
+
+  it('parses a body wrapped in a bare ``` fence', () => {
+    const raw = `Prose.\n${GROUNDING_BLOCK_START}\n\`\`\`\n{"claims":[]}\n\`\`\`\n${GROUNDING_BLOCK_END}`;
+    expect(parseGroundingBlock(raw).malformed).toBe(false);
+  });
+
+  it('does not turn a genuinely broken body into a clean parse', () => {
+    const raw = `Prose.\n${GROUNDING_BLOCK_START}\n\`\`\`json\nnot json at all\n\`\`\`\n${GROUNDING_BLOCK_END}`;
+    expect(parseGroundingBlock(raw).malformed).toBe(true);
+  });
+
+  it('still flags a fenced block whose claims key is missing', () => {
+    const raw = `Prose.\n${GROUNDING_BLOCK_START}\n\`\`\`json\n{"notclaims":[]}\n\`\`\`\n${GROUNDING_BLOCK_END}`;
+    expect(parseGroundingBlock(raw).malformed).toBe(true);
   });
 });

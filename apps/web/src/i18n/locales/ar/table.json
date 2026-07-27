@@ -71,6 +71,7 @@
       "hint": "The AI stated something as fact that the server could not trace to a source it actually read this turn. The narration is unchanged \u2014 this is a label, not a deletion.",
       "unverified": "Unverified",
       "corrected": "Corrected",
+      "dmOnlySource": "Source visible to the DM only",
       "provenance": "Turn {{turn}} \u00b7 {{provider}} \u00b7 {{model}}",
       "unknownProvider": "unknown provider",
       "unknownModel": "unknown model",
