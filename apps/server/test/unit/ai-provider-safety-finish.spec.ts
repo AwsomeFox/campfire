@@ -227,6 +227,72 @@ describe('Gemini — safety finish reasons (#598)', () => {
       expect(isWithheldFinishReason(result.finishReason)).toBe(true);
     },
   );
+
+  /**
+   * The OTHER Gemini block shape, and the one the candidate-level cases above cannot reach.
+   *
+   * When Gemini blocks the PROMPT it refuses before generating: the payload carries
+   * `promptFeedback.blockReason`, NO candidate, and therefore no candidate `finishReason` for
+   * the mapping to read. So the #598 finish-reason work was never invoked on this path —
+   * streaming kept its `stop` default and non-streaming threw `invalid_request`, and the driver
+   * filed the result as `no_narration` / `provider_error`. Both put the plumbing sentence and
+   * the plumbing levers in front of the table for what is actually the safety layer working.
+   */
+  describe('prompt-level blocks (no candidate at all)', () => {
+    const promptBlock = (blockReason: string) => ({
+      promptFeedback: { blockReason },
+      usageMetadata: { promptTokenCount: 7, candidatesTokenCount: 0, totalTokenCount: 7 },
+    });
+
+    it.each(['SAFETY', 'BLOCKLIST', 'PROHIBITED_CONTENT', 'IMAGE_SAFETY', 'OTHER'])(
+      'non-streaming: promptFeedback.blockReason %s is content_filter, not a thrown invalid_request',
+      async (reason) => {
+        const { fetchImpl } = fakeFetch(jsonResponse(promptBlock(reason)));
+        const p = new GeminiProvider({ apiKey: 'k', model: 'm', fetchImpl });
+        const result = await p.generate(req);
+        expect(result.finishReason).toBe('content_filter');
+        expect(isWithheldFinishReason(result.finishReason)).toBe(true);
+        expect(result.text).toBe('');
+        expect(result.toolCalls).toEqual([]);
+        // Usage still travels: the prompt tokens were spent whether or not anything came back.
+        expect(result.usage.totalTokens).toBe(7);
+      },
+    );
+
+    it('streaming: a prompt-block chunk is content_filter rather than the `stop` default', async () => {
+      const frames = [`data: ${JSON.stringify(promptBlock('SAFETY'))}\n\n`, 'data: [DONE]\n\n'];
+      const { fetchImpl } = fakeFetch(streamResponse(frames));
+      const p = new GeminiProvider({ apiKey: 'k', model: 'm', fetchImpl });
+      const events = await collect(p.stream(req));
+      const done = events.find((e) => e.type === 'done');
+      // `stop` is a DELIVERABLE disposition. Defaulting to it here is the fail-open.
+      expect(done && done.type === 'done' && done.result.finishReason).toBe('content_filter');
+      expect(events.some((e) => e.type === 'text')).toBe(false);
+    });
+
+    it('streaming: a prompt block is sticky — a later frame cannot make the turn deliverable', async () => {
+      const frames = [
+        `data: ${JSON.stringify(promptBlock('SAFETY'))}\n\n`,
+        // A trailing chunk that looks like an ordinary clean finish. The policy layer refused
+        // the request; nothing arriving afterwards re-opens that decision.
+        `data: ${JSON.stringify({ candidates: [{ finishReason: 'STOP', content: { parts: [{ text: 'hi' }] } }] })}\n\n`,
+        'data: [DONE]\n\n',
+      ];
+      const { fetchImpl } = fakeFetch(streamResponse(frames));
+      const p = new GeminiProvider({ apiKey: 'k', model: 'm', fetchImpl });
+      const events = await collect(p.stream(req));
+      const done = events.find((e) => e.type === 'done');
+      expect(done && done.type === 'done' && done.result.finishReason).toBe('content_filter');
+    });
+
+    it('a response with no candidates AND no blockReason is still a malformed-payload error', async () => {
+      // The two are different failures and must stay so: an empty payload is a broken provider
+      // (retry / diagnose), not a refusal (retry with different framing).
+      const { fetchImpl } = fakeFetch(jsonResponse({ usageMetadata: { totalTokenCount: 1 } }));
+      const p = new GeminiProvider({ apiKey: 'k', model: 'm', fetchImpl });
+      await expect(p.generate(req)).rejects.toThrow(/no candidates/i);
+    });
+  });
 });
 
 describe('Local / self-hosted models with no safety layer (#598)', () => {
