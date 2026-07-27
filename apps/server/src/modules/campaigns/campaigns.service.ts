@@ -95,6 +95,7 @@ import { ATTACHMENT_STATE_COMMITTED } from '../attachments/attachment.constants'
 import { sanitizeAttachmentFilename } from '../attachments/filename';
 import { APP_VERSION } from '../../common/build-metadata';
 import { CURRENT_SCHEMA_REVISION } from '../backup/backup-manifest';
+import { freshAiSeatCounters, portableAiSeat, readPortableAiSeat } from '../ai-dm/ai-seat-portability';
 import {
   assertCompendiumImportAllowed,
   buildResolutionMap,
@@ -1737,14 +1738,11 @@ export class CampaignsService {
       if (aiSeatRow) {
         tx.insert(aiDmSeats).values({
           campaignId: cloneId,
-          mode: aiSeatRow.mode,
-          enabled: aiSeatRow.enabled,
-          model: aiSeatRow.model,
-          instructions: aiSeatRow.instructions,
-          tokenBudget: aiSeatRow.tokenBudget,
-          tokensUsed: 0,
-          turnCount: 0,
-          lastTurnAt: null,
+          // #1049: one classification, three call sites. Counters are zeroed explicitly rather
+          // than left to column defaults so "this clone starts its own accounting" is a stated
+          // decision, not an accident of which fields the insert happened to omit.
+          ...portableAiSeat(aiSeatRow),
+          ...freshAiSeatCounters(),
           createdAt: ts,
           updatedAt: ts,
         }).run();
@@ -2782,14 +2780,10 @@ export class CampaignsService {
       if (aiSeatSrc && Object.keys(aiSeatSrc).length > 0) {
         tx.insert(aiDmSeats).values({
           campaignId: cid,
-          mode: str(aiSeatSrc.mode, 'off'),
-          enabled: boolOf(aiSeatSrc.enabled),
-          model: str(aiSeatSrc.model),
-          instructions: str(aiSeatSrc.instructions),
-          tokenBudget: Math.max(0, intOr(aiSeatSrc.tokenBudget, 0)),
-          tokensUsed: 0,
-          turnCount: 0,
-          lastTurnAt: null,
+          // #1049: same classification as clone/export, but read through coercers — this side
+          // parses untrusted JSON from an uploaded archive, not a typed row.
+          ...readPortableAiSeat(aiSeatSrc as Record<string, unknown>, { str, boolOf, intOr }),
+          ...freshAiSeatCounters(),
           createdAt: ts,
           updatedAt: ts,
         }).run();
