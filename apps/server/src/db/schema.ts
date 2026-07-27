@@ -1447,6 +1447,14 @@ export const aiDriverControlState = sqliteTable('ai_driver_control_state', {
   lastInput: text('last_input'),
   /** The recovery shape last announced to the table — suppresses re-announcing a steady state. */
   announcedRecovery: text('announced_recovery'),
+  /**
+   * #1042 — JSON map of unconsumed secret-read approvals (#557) and queued confirm-policy tool
+   * calls (#474). Persisted to be REVOKED loudly on the next boot, never to be restored: both
+   * are grants of authority made to a room whose composition the server cannot re-verify after
+   * a restart. Hydration audits each, signals the table, and clears the column.
+   */
+  secretReadApprovals: text('secret_read_approvals'),
+  pendingToolConfirmations: text('pending_tool_confirmations'),
   updatedAt: text('updated_at').notNull(),
 });
 

@@ -1230,6 +1230,17 @@ CREATE TABLE IF NOT EXISTS ai_driver_control_state (
   -- state (paused / human_control / stuck / open vote) is announced once, not re-announced
   -- on every subsequent restart.
   announced_recovery TEXT,
+  -- Issue #1042. These two are persisted so they can be REVOKED LOUDLY, not so they can be
+  -- resurrected. Both are grants of authority scoped to a room the server can no longer verify
+  -- after a restart: secret_read_approvals lets the AI seat read ONE named hidden entity under
+  -- the DM principal (#557), and pending_tool_confirmations holds irreversible live-play tool
+  -- calls awaiting a DM's explicit approval (#474). Hydration reads them, audits each one as
+  -- revoked/discarded, tells the table, and then CLEARS them -- it never puts them back on the
+  -- session. Before this they lived only in process memory, so a restart dropped them with no
+  -- audit row and no signal, which is the silence issue #1042 is actually about: you cannot
+  -- audit a revocation you have no record of.
+  secret_read_approvals TEXT,
+  pending_tool_confirmations TEXT,
   updated_at TEXT NOT NULL
 );
 
