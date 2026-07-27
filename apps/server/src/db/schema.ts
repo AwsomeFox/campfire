@@ -2008,6 +2008,64 @@ export const campaignModuleSnapshots = sqliteTable('campaign_module_snapshots', 
   rolledBackAt: text('rolled_back_at'),
 });
 
+// Issue #598: the incident trail for AI driver turns WITHHELD by a provider content filter or
+// a model refusal.
+//
+// Every column here is a count or a piece of provenance, and that is the entire design. There
+// is deliberately NO column for the withheld text, and no digest of it either: copying prose a
+// provider just refused to stand behind into an audit table gives it a longer-lived, exportable
+// home than the live stream it was kept off, which recreates the exposure this feature exists
+// to prevent — and a hash of a short passage is a guessable commitment, i.e. the same thing
+// with extra steps.
+//
+// What the counts DO answer: did any of it reach the table before the terminal frame arrived
+// (`released_chars` — the residual the quarantine window did not cover), how much the delay
+// line still had in hand (`withheld_chars`), did the same response also try to run tools
+// (`suppressed_tool_calls`), which provider/model/turn, and whose action provoked it. That is
+// enough for a DM to notice a pattern and act on it without anyone re-reading the content.
+//
+// READ `released_chars` FIRST. It is the exposure. `withheld_chars` is bounded by the
+// quarantine window (~240 chars), so on a long refused reply it is small BECAUSE most of the
+// reply had already aged out of the window and been broadcast — not because little was
+// refused. The two together are roughly what the model generated; neither alone is.
+export const aiDriverWithheldTurns = sqliteTable(
+  'ai_driver_withheld_turns',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    campaignId: integer('campaign_id').notNull(),
+    /** The driver session's turn counter when the withhold fired. */
+    turn: integer('turn').notNull(),
+    /** Which tool-loop step of that turn was withheld (1-based). */
+    step: integer('step').notNull(),
+    /** Normalized terminal state: 'content_filter' (vendor policy) or 'refusal' (the model). */
+    finishReason: text('finish_reason').notNull(),
+    /** Provider NAME only — never the key, base URL, or headers. */
+    provider: text('provider').notNull().default(''),
+    /** The model id actually served for the step. */
+    model: text('model').notNull().default(''),
+    /**
+     * Characters still inside the quarantine delay line when the refusal landed, and so never
+     * broadcast. LENGTH ONLY — the text itself is discarded. BOUNDED BY THE WINDOW: this is
+     * how much was held back AT THE CUT-OFF, not the total the model produced. See the note
+     * above the table.
+     *
+     * NOT A REASSURANCE NUMBER. A small value on a long refusal means the reply OUTRAN the
+     * window and most of it had already gone out — the opposite of "the model barely said
+     * anything". `released_chars` is what says how much reached the table, and is the field to
+     * read first.
+     */
+    withheldChars: integer('withheld_chars').notNull().default(0),
+    /** Characters already broadcast when the refusal arrived — the residual exposure. */
+    releasedChars: integer('released_chars').notNull().default(0),
+    /** Tool calls carried by the same response. None were dispatched; this is how many. */
+    suppressedToolCalls: integer('suppressed_tool_calls').notNull().default(0),
+    /** Member whose action provoked the turn; NULL for a proactive/system turn. */
+    triggeredByUserId: text('triggered_by_user_id'),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => ({ campaignIdx: index('idx_ai_driver_withheld_campaign').on(t.campaignId, t.id) }),
+);
+
 /**
  * Issue #587: a server operator's REQUEST that a campaign be exported.
  *
