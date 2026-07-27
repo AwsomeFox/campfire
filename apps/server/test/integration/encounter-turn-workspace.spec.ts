@@ -478,8 +478,14 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
       .where(eq(combatants.id, c2))
       .run();
 
-    const damaged = await service.updateCombatant(encounterId, c1, { hpDelta: -25 }, dmUser, 'dm');
-    expect(damaged.concentrationCheck).toEqual({ damage: 20, dc: 10 });
+    const damaged = await service.updateCombatant(encounterId, c1, { hpDelta: -12 }, dmUser, 'dm');
+    expect(damaged.concentrationCheck).toEqual({ damage: 12, dc: 10 });
+
+    const replayed = await service.updateCombatant(encounterId, c1, { hpDelta: -4, idempotencyKey: 'concentration-replay' }, dmUser, 'dm');
+    const replay = await service.updateCombatant(encounterId, c1, { hpDelta: -4, idempotencyKey: 'concentration-replay' }, dmUser, 'dm');
+    expect(replayed.concentrationCheck).toEqual({ damage: 4, dc: 10 });
+    expect(replay.concentrationCheck).toEqual(replayed.concentrationCheck);
+    expect((await service.getWithCombatantsOrThrow(encounterId, 'dm', dmUser.id)).combatants.find((combatant) => combatant.id === c1)?.hpCurrent).toBe(4);
 
     await service.updateCombatantTurnState(encounterId, c1, { concentration: null }, dmUser, 'dm');
     const [target] = orm.select().from(combatants).where(eq(combatants.id, c2)).all();
