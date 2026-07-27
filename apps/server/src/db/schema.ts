@@ -1,5 +1,5 @@
 import { sqliteTable, text, integer, real, index, uniqueIndex, primaryKey } from 'drizzle-orm/sqlite-core';
-import type { AiDmProactiveSettings } from '@campfire/schema';
+import type { AiDmProactiveSettings, AiDmStylePresets } from '@campfire/schema';
 
 /**
  * Drizzle table definitions mirroring @campfire/schema entities.
@@ -1438,6 +1438,10 @@ export const aiDmSeats = sqliteTable('ai_dm_seats', {
   lastTurnAt: text('last_turn_at'),
   /** Proactive DM settings per campaign (#1044). */
   proactiveSettings: text('proactive_settings', { mode: 'json' }).$type<AiDmProactiveSettings>().default({} as any),
+  /** Structured table style (#1049): tone/pacing/verbosity/combat/NPC depth, JSON-encoded.
+   *  One JSON column rather than five scalars, matching `proactive_settings` above — the whole
+   *  block is read, written and (for #1070's cross-campaign reuse) copied as one value. */
+  stylePresets: text('style_presets', { mode: 'json' }).$type<AiDmStylePresets>().default({} as any),
   /** Depth cap for the FIFO action queue when turns are submitted while running (#1045). */
   actionQueueDepth: integer('action_queue_depth').default(8),
   createdAt: text('created_at').notNull(),
