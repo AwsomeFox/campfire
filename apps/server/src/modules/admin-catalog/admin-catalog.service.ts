@@ -680,32 +680,53 @@ export class AdminCatalogService {
           )
           .limit(1);
         if (pending) return 'an export request is already pending for this campaign';
+        // The column is documented as "numeric user id as text when the requester was a
+        // real account; '' otherwise", so test for that directly rather than excluding
+        // the one decorated prefix we happen to remember. `auditActor` returns a bare
+        // `String(users.id)` for a real account, but `token:<name>` on the PAT path and
+        // `dev:<name>` on the header-auth path — and only the first of those was being
+        // filtered, so a dev-auth principal wrote `dev:alice` into a column every reader
+        // is entitled to treat as an id. Any future actor shape is now excluded by
+        // construction instead of by enumeration.
+        const requestedByUserId = /^\d+$/.test(actor.actor) ? actor.actor : '';
+        const justification = (req.reason ?? '').slice(0, 2000);
         return {
           summary: { field: 'exportRequest', before: 'none', after: `pending(${profile})` },
           apply: () => {
             this.db.transaction((tx) => {
-              tx.insert(campaignExportRequests)
-                .values({
-                  campaignId: id,
-                  requestedBy: actor.actor,
-                  // The column is documented as "numeric user id as text when the
-                  // requester was a real account; '' otherwise", so test for that
-                  // directly rather than excluding the one decorated prefix we happen
-                  // to remember. `auditActor` returns a bare `String(users.id)` for a
-                  // real account, but `token:<name>` on the PAT path and `dev:<name>`
-                  // on the header-auth path — and only the first of those was being
-                  // filtered, so a dev-auth principal wrote `dev:alice` into a column
-                  // every reader is entitled to treat as an id. Any future actor shape
-                  // is now excluded by construction instead of by enumeration.
-                  requestedByUserId: /^\d+$/.test(actor.actor) ? actor.actor : '',
-                  profile,
-                  justification: (req.reason ?? '').slice(0, 2000),
-                  status: 'pending',
-                  decisionNote: '',
-                  createdAt: ts,
-                  updatedAt: ts,
-                })
-                .run();
+              // THE INSERT CARRIES THE ONE-PENDING-REQUEST RULE, NOT JUST THE PRE-CHECK.
+              //
+              // The check above is a read with an await before this write, so two
+              // concurrent `request_export` calls both saw no pending row and both got
+              // here — leaving the campaign with duplicate pending asks and both batches
+              // reporting `applied`. Same read-then-write race the decision path had,
+              // one step earlier in the workflow.
+              //
+              // `INSERT … SELECT … WHERE NOT EXISTS` re-tests the rule inside the single
+              // statement that performs the write, so SQLite evaluates it atomically and
+              // no interleaving can slip between the test and the insert. Chosen over a
+              // partial unique index because it needs no DDL and no migration ordinal:
+              // the rule lives in the statement that enforces it, exactly as the
+              // decision fix put it in the UPDATE predicate.
+              const inserted = tx.run(sql`
+                INSERT INTO campaign_export_requests
+                  (campaign_id, requested_by, requested_by_user_id, profile, justification,
+                   status, decision_note, created_at, updated_at)
+                SELECT ${id}, ${actor.actor}, ${requestedByUserId}, ${profile}, ${justification},
+                       'pending', '', ${ts}, ${ts}
+                WHERE NOT EXISTS (
+                  SELECT 1 FROM campaign_export_requests
+                  WHERE campaign_id = ${id} AND status = 'pending'
+                )
+              `);
+
+              // Zero rows means another request won the race between the pre-check and
+              // here. Throwing rolls this transaction back and surfaces the item as
+              // `failed` with this reason, rather than reporting `applied` for a row
+              // that was never written.
+              if (inserted.changes === 0) {
+                throw new Error('an export request is already pending for this campaign');
+              }
             });
           },
         };
@@ -803,25 +824,60 @@ export class AdminCatalogService {
       throw new ConflictException('Another DM decided this export request first');
     }
 
-    await this.audit.log({
-      actor,
-      actorRole: 'dm',
-      action: `campaign.export_request.${decision.decision}`,
-      entityType: 'campaign_export_request',
-      entityId: requestId,
-      campaignId,
-      detail: `profile=${row.profile}, requestedBy=${row.requestedBy || 'server-admin'}`,
-    });
-    // Server-scoped mirror so the operator who asked can see the answer in the
-    // server-admin trail, which excludes campaign rows.
-    await this.audit.log({
-      actor,
-      actorRole: 'dm',
-      action: `campaign.export_request.${decision.decision}`,
-      entityType: 'campaign_export_request',
-      entityId: requestId,
-      detail: `campaign=${campaignId}, profile=${row.profile}`,
-    });
+    // THE DECISION HAS COMMITTED. Everything below is record-keeping, and record-keeping
+    // must not be able to turn a recorded consent decision into a reported failure.
+    //
+    // Same shape as the bulk path's per-item write, and the consequence is sharper here
+    // because this is CONSENT. A DM who approved an export and is handed a 500 either
+    // approves again — and is refused with "already decided" — or concludes it did not
+    // happen. Both leave them wrong about whether their campaign's data is now
+    // exportable, which is the one thing this workflow exists to make unambiguous.
+    //
+    // Atomicity is not available without restructuring AuditService: `log()` writes
+    // through its own db handle and cannot join a transaction opened here. So the
+    // truthful decision state is returned and the audit failure is made loud rather than
+    // fatal. The two mirrors are attempted independently so one failing cannot suppress
+    // the other — a partial trail beats no trail when reconstructing who consented.
+    const auditMirrors: Array<[string, Parameters<AuditService['log']>[0]]> = [
+      [
+        'campaign',
+        {
+          actor,
+          actorRole: 'dm',
+          action: `campaign.export_request.${decision.decision}`,
+          entityType: 'campaign_export_request',
+          entityId: requestId,
+          campaignId,
+          detail: `profile=${row.profile}, requestedBy=${row.requestedBy || 'server-admin'}`,
+        },
+      ],
+      // Server-scoped mirror so the operator who asked can see the answer in the
+      // server-admin trail, which excludes campaign rows.
+      [
+        'server-admin',
+        {
+          actor,
+          actorRole: 'dm',
+          action: `campaign.export_request.${decision.decision}`,
+          entityType: 'campaign_export_request',
+          entityId: requestId,
+          detail: `campaign=${campaignId}, profile=${row.profile}`,
+        },
+      ],
+    ];
+
+    for (const [mirror, entry] of auditMirrors) {
+      try {
+        await this.audit.log(entry);
+      } catch (err) {
+        // Surfaced, never swallowed: an unaudited consent decision is itself an incident.
+        this.logger.error(
+          `export request ${requestId} for campaign ${campaignId} was ${decision.decision}, ` +
+            `but its ${mirror} audit row failed to write`,
+          err instanceof Error ? err.stack : String(err),
+        );
+      }
+    }
 
     return this.toExportRequest(updated);
   }

@@ -627,6 +627,45 @@ describe('Issue #587: campaign catalog paging, filtering and bulk lifecycle (e2e
       expect(again.status).toBe(400); // already decided
     });
 
+    it('returns the truthful decision when the audit write fails after it committed', async () => {
+      // The decision commits before either audit mirror is written. A failure there used
+      // to surface as a 500 while the request really was approved — so the DM's client
+      // still showed `pending`, retrying got "already decided", and they were left unable
+      // to tell whether their campaign's data was now exportable. For a CONSENT decision
+      // that ambiguity is exactly what the workflow exists to prevent.
+      const target = aIds[2];
+      const raise = await bulk({
+        operation: 'request_export',
+        campaignIds: [target],
+        exportProfile: 'backup',
+        dryRun: false,
+        reason: 'audit failure drill for the decision path',
+      });
+      expect(raise.status).toBe(201);
+
+      const inbox = await dmA.get(`/api/v1/campaigns/${target}/catalog/export-requests`);
+      const pending = (inbox.body as Array<{ id: number; status: string }>).find((r) => r.status === 'pending');
+      expect(pending).toBeDefined();
+
+      const audit = ctx.app.get(AuditService);
+      const spy = jest.spyOn(audit, 'log').mockRejectedValue(new Error('audit table is unavailable'));
+      try {
+        const decide = await dmA
+          .post(`/api/v1/campaigns/${target}/catalog/export-requests/${pending!.id}/decision`)
+          .send({ decision: 'approved', note: 'consent recorded despite the audit outage' });
+        // Not a 500, and the answer is the decision that actually landed.
+        expect(decide.status).toBe(201);
+        expect(decide.body.status).toBe('approved');
+      } finally {
+        spy.mockRestore();
+      }
+
+      // The decision genuinely persisted, so `approved` was the truthful reply.
+      const after = await dmA.get(`/api/v1/campaigns/${target}/catalog/export-requests`);
+      const stored = (after.body as Array<{ id: number; status: string }>).find((r) => r.id === pending!.id);
+      expect(stored!.status).toBe('approved');
+    });
+
     it('lets exactly one of two concurrent decisions win', async () => {
       // The status pre-check is a read with an await before the write. Without the
       // precondition in the UPDATE predicate both callers pass that check, both update,
@@ -681,6 +720,42 @@ describe('Issue #587: campaign catalog paging, filtering and bulk lifecycle (e2e
       );
       expect(stored!.status).toBe(winner.status);
       expect(stored!.decisionNote).toBe(winner.decisionNote);
+    });
+
+    it('creates only one pending request when two are raised concurrently', async () => {
+      // The one-pending-request rule was checked in an awaited read and enforced nowhere
+      // else, so two overlapping `request_export` calls both saw no pending row and both
+      // inserted — leaving duplicate pending asks and both batches reporting `applied`.
+      //
+      // Driven at the service layer for the same reason as the decision race: two
+      // overlapping HTTP requests do NOT reproduce it, because supertest serialises them
+      // on one agent and better-sqlite3 is synchronous, so the second pre-check runs
+      // after the first insert has committed and catches it. Starting both service calls
+      // before awaiting either interleaves them at the pre-check, which is the state the
+      // INSERT … WHERE NOT EXISTS has to survive.
+      const target = bId; // untouched by the other export-request tests
+      const svc = ctx.app.get(AdminCatalogService);
+      const operator = { id: '1', name: 'cat2-admin', serverRole: 'admin' } as RequestUser;
+      const req = {
+        operation: 'request_export' as const,
+        campaignIds: [target],
+        dryRun: false,
+        reason: 'concurrency drill for raising an export request',
+        exportProfile: 'backup' as const,
+      };
+
+      const [a, b] = await Promise.all([svc.bulk(operator, req), svc.bulk(operator, req)]);
+
+      // Exactly one batch may claim it applied; the other must not report success for a
+      // row it never wrote.
+      const applied = [a, b].filter((r) => r.applied === 1);
+      expect(applied).toHaveLength(1);
+
+      // And the campaign has exactly ONE pending request, which is the actual invariant.
+      const inbox = await dmB.get(`/api/v1/campaigns/${target}/catalog/export-requests`);
+      expect(inbox.status).toBe(200);
+      const stillPending = (inbox.body as Array<{ status: string }>).filter((r) => r.status === 'pending');
+      expect(stillPending).toHaveLength(1);
     });
 
     it('does not let a non-DM member or an outsider decide', async () => {
