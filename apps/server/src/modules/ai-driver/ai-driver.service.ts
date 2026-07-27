@@ -194,7 +194,17 @@ export type AiDmSessionStatus = 'idle' | 'running' | 'paused';
  * drive. `running` is healthy; `awaiting_players` means detection tripped and the table must
  * pull a lever; `paused` is a deliberate freeze; `human_control` means a human holds the seat.
  */
-export type AiDmLadderState = 'running' | 'awaiting_players' | 'paused' | 'human_control';
+export type AiDmLadderState =
+  | 'running'
+  | 'awaiting_players'
+  | 'paused'
+  | 'human_control'
+  // #1051 — collaborative handoff: the AI still narrates, but mechanical commits defer to a DM.
+  // Deliberately NOT a frozen state (see isMidTurnFrozenState): the whole point is that the AI
+  // keeps running. It is a MODE wearing a ladder state's clothes, which is why the durable
+  // truth is `AiDmSessionState.collaborative` and this value is derived from it — see
+  // `deriveLadderState`.
+  | 'collaborative';
 
 /**
  * Mid-turn freeze guard (#1057). `session.state` is mutable across awaits; TypeScript narrows
@@ -203,6 +213,19 @@ export type AiDmLadderState = 'running' | 'awaiting_players' | 'paused' | 'human
  */
 export function isMidTurnFrozenState(state: AiDmLadderState | string): boolean {
   return state === 'paused' || state === 'human_control';
+}
+
+/**
+ * Resolve the ladder state a healthy seat should display (#1051).
+ *
+ * Only ever converts `running` ⇄ `collaborative`. Every other value is an urgent condition —
+ * paused, stuck, under human control — and those outrank the mode in the display slot while the
+ * `collaborative` flag keeps the mode itself alive underneath.
+ */
+function deriveLadderState(state: AiDmLadderState, collaborative: boolean): AiDmLadderState {
+  if (collaborative && state === 'running') return 'collaborative';
+  if (!collaborative && state === 'collaborative') return 'running';
+  return state;
 }
 
 /**
@@ -263,6 +286,20 @@ export interface AiDmSessionState {
   status: AiDmSessionStatus;
   /** Stuck-ladder lifecycle state (#314) — what the player levers act on. */
   state: AiDmLadderState;
+  /**
+   * Collaborative handoff is ON (#1051) — the durable truth behind `state === 'collaborative'`.
+   *
+   * A SEPARATE FLAG RATHER THAN JUST THE LADDER VALUE, because `state` is a single slot that
+   * urgent conditions legitimately take over: a pause, a takeover, or a stuck seat all overwrite
+   * it. If the mode lived only there, a DM who paused for five minutes would resume to a seat
+   * that had silently gone back to applying damage on its own — a safety-relevant downgrade,
+   * arrived at by a control that says nothing about autonomy. The flag is the memory; `state`
+   * is the display, restored from the flag whenever the urgent condition clears.
+   *
+   * It is also what the TOOL POLICY reads, so a collaborative table defers mechanics even while
+   * it is stuck or paused — the modes compose instead of one silently cancelling the other.
+   */
+  collaborative: boolean;
   scene: string | null;
   lastNarration: string | null;
   lastTurnAt: string | null;
@@ -302,6 +339,15 @@ export interface AiDmSessionState {
    * stay off-limits so hidden handouts cannot be exposed via update_encounter.
    */
   driverGeneratedMapIds?: number[];
+  /**
+   * Encounter ids the seat CREATED during this session (#1022). The reshape half of encounter
+   * authoring (name / location / quest / session links on update_encounter) is confined to this
+   * set: authoring your own creation is authoring, editing the DM's prepped fight is
+   * overwriting it. Deliberately NOT persisted across a restart — same as
+   * driverGeneratedMapIds — because the containment must fail CLOSED: after a restart the seat
+   * simply cannot reshape anything, which is the safe direction to be wrong in.
+   */
+  driverAuthoredEncounterIds?: number[];
   /** generate_map calls consumed this turn — reset at turn start (#488 / #474). */
   generateMapCallsThisTurn?: number;
   /** Confirm-policy tool attempts consumed this turn (#474). */
@@ -325,6 +371,7 @@ export interface AiDmSessionState {
 type AiDmSessionPrivateGuardFields =
   | 'secretReadApprovals'
   | 'driverGeneratedMapIds'
+  | 'driverAuthoredEncounterIds'
   | 'generateMapCallsThisTurn'
   | 'confirmToolAttemptsThisTurn'
   | 'policyViolationsThisTurn'
@@ -339,6 +386,7 @@ export function toPublicAiDmSessionState(session: AiDmSessionState): AiDmPublicS
   const {
     secretReadApprovals: _approvals,
     driverGeneratedMapIds: _mapIds,
+    driverAuthoredEncounterIds: _authoredEncounters,
     generateMapCallsThisTurn: _mapCalls,
     confirmToolAttemptsThisTurn: _confirmAttempts,
     policyViolationsThisTurn: _violations,
@@ -454,6 +502,7 @@ const LADDER_STATES = allowlist<AiDmLadderState>({
   awaiting_players: true,
   paused: true,
   human_control: true,
+  collaborative: true, // #1051
 });
 const STUCK_REASONS = allowlist<AiDmStuckReason>({
   tool_error: true,
@@ -663,6 +712,14 @@ const GROUNDING_PREAMBLE = [
   '- Never invent NPCs, quests, locations, or party facts — read them (get_campaign_summary, get_npc, …) and cite the entity.',
   '- To change the world (a new NPC/quest/location, edits to canon), call the matching tool. Those are submitted as PROPOSALS for the human DM to approve — do not claim a canon change happened until it is applied.',
   '- You MAY resolve live play directly: roll dice, apply HP/conditions, advance turns, reveal map regions.',
+  // #1022 — advertise encounter AUTHORING, not just encounter operation. Without this the model
+  // does not know it can originate a fight, so it narrates an ambush it never actually creates
+  // and the table ends up with prose but no combat tracker.
+  '- You MAY author encounters: call create_encounter to originate a fight (a wandering monster, an ambush),',
+  '  then add_combatant per creature and begin_encounter to run it. Encounters you create are DM-only prep',
+  '  until the human DM reveals them, and you cannot change that — never tell players an encounter is hidden',
+  '  or describe a roster you have only prepped. You may rename or re-link an encounter YOU created this',
+  '  session; encounters the human DM prepared are theirs — ask them rather than editing.',
   '- Respect the session-zero charter (lines/veils/safety tools) below at all times.',
 ].join('\n');
 
@@ -715,6 +772,47 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'saving_throw', // #1040: character-aware save resolution using real stats + proficiency
   // encounter / turn flow — includes create_encounter so the AI can originate a fight
   // during play (#1075).
+  //
+  // ENCOUNTER AUTHORING: ALLOW-LIST, NOT PROPOSALS (#1022)
+  // -----------------------------------------------------
+  // #1022 asked for either a guarded allow-list entry or proposal-capable
+  // create_encounter/update_encounter. The decision is the allow-list, with argument-level
+  // containment in guardDriverLivePlayArgs. The reasoning, recorded here because this is
+  // where the next person will look:
+  //
+  //  1. A PROPOSAL DOES NOT SLOW ENCOUNTER AUTHORING DOWN — IT BREAKS IT. A proposal is a
+  //     deferred draft: the row does not exist until a DM approves it, so the model's very
+  //     next call (add_combatant, begin_encounter) has no id to act on. "Roll a random ambush
+  //     and start it" cannot be expressed as a proposal at all. Contrast the tools that ARE
+  //     proposal-capable — NPCs, quests, locations — where the delay costs nothing because
+  //     nothing in the same turn depends on the row existing.
+  //  2. AN ENCOUNTER IS PLAY STATE, NOT CANON. The proposal queue exists for durable facts
+  //     about the world that outlive the session. A wandering-monster fight spun up mid-scene
+  //     is closer to a dice roll than to a canon fact; reviewing it after the session is
+  //     reviewing something that already happened. `commit_encounter` (#412) already made
+  //     exactly this call for a GENERATED roster.
+  //  3. CREATING DESTROYS NOTHING. The additive half of authoring has no blast radius: a new
+  //     row a DM can delete. What actually needs bounding is DISCLOSURE and OVERWRITING, and
+  //     those are argument-level distinctions that a per-tool policy class cannot express —
+  //     which is why they live in guardDriverLivePlayArgs rather than in
+  //     PROFILE_TOOL_OVERRIDES:
+  //       - `hidden` is an OBSERVABILITY boundary (#262/#754). A seat that could create a
+  //         visible encounter, or flip `hidden` on an existing one, could publish the DM's
+  //         roster and difficulty to the table. The seat is driven by UNTRUSTED player input
+  //         (#317), so "what are we about to fight?" is exactly the prompt that would induce
+  //         it. The guard forces every driver-created encounter to DM-only prep and refuses
+  //         `hidden` on update outright — reveal is a human act, mirroring the seat being
+  //         denied attach_generated_map while allowed to generate map candidates.
+  //       - RESHAPING SOMEONE ELSE'S PREP IS OVERWRITING, NOT AUTHORING. The seat may rename
+  //         and re-link ONLY encounters it created this session, the same containment shape
+  //         update_encounter already uses for mapAttachmentId (session-generated ids only).
+  //         The DM's own prepped fight is untouchable; the model is told to ask instead.
+  //
+  // Why not `confirm` (#474) for these: the policy classes are PER-TOOL, and update_encounter
+  // is also the live fog/grid/AoE path (#488). Making the tool confirm-gated would put a DM
+  // approval in front of every mid-combat fog reveal — a regression in the flow #488 shipped —
+  // while still not distinguishing a rename from a reveal. The guard draws the line where the
+  // risk actually is; the profile machinery keeps its existing overrides untouched.
   'create_encounter',
   // commit_encounter (#412): the driver may commit a GENERATED roster as a hidden, preparing
   // encounter during prep — the same prep-only latitude as generate_map (it never reveals to
@@ -736,8 +834,20 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   // character live state
   'update_character_hp',
   'set_character_conditions',
+  // #1039 — spell-slot expenditure. The seat could already spend HP, conditions and XP but had
+  // no way to deduct a slot, so casting was effectively free: the model narrated the spell and
+  // nothing was consumed. Safe to grant only because an overspend is now a hard tool error
+  // rather than a silent clamp — a tool that fails open on "no slots left" would have made
+  // unlimited casting look sanctioned instead of merely unmodelled.
+  'adjust_spell_slots',
   'award_xp',
   'level_up_character',
+  // #1041 — rest is core live play, and these REPLACE a long chain of raw HP/slot/condition
+  // writes with one atomic call. Giving the seat the atomic version is strictly safer than
+  // leaving it to reconstruct a rest from primitives it already has: the chain is what could
+  // half-apply, not the tool.
+  'long_rest',
+  'short_rest',
   // scene / exploration / world consequences
   'reveal_map_region',
   'check_objective',
@@ -767,6 +877,12 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   // table notes the DM jots during play
   'add_note',
 ]);
+
+/**
+ * The live-play allowlist as a plain array, for tests and tooling that need to assert
+ * membership without reaching into the Set (#1041).
+ */
+export const DRIVER_LIVE_PLAY_TOOL_NAMES: readonly string[] = [...DRIVER_LIVE_PLAY_TOOLS];
 
 export {
   DRIVER_GENERATE_MAP_BUDGET_PER_TURN,
@@ -803,9 +919,9 @@ export function formatDriverLootCombatLogDetail(toolName: string, args: Record<s
 }
 
 /**
- * update_encounter fields the driver may set — VTT overlays only. Prep fields (name, links,
- * hidden) and arbitrary map linkage are stripped at execution so hidden handouts cannot be
- * exposed without update_attachment.
+ * update_encounter fields the driver may set on ANY encounter it can see — VTT overlays only
+ * (#488). Arbitrary map linkage is still restricted to session-generated maps below, so hidden
+ * handouts cannot be exposed without update_attachment.
  */
 const DRIVER_UPDATE_ENCOUNTER_VTT_FIELDS = new Set([
   'encounterId',
@@ -826,6 +942,20 @@ const DRIVER_UPDATE_ENCOUNTER_VTT_FIELDS = new Set([
   'fog',
   'aoe',
 ]);
+
+/**
+ * update_encounter fields the driver may set ONLY on an encounter it created this session
+ * (#1022) — the "reshape" half of encounter authoring. Renaming a fight or re-pointing its
+ * where/why/when links is authoring when it is your own creation and overwriting when it is
+ * the DM's prep, and the server can tell the two apart because it recorded which ids the seat
+ * made (session.driverAuthoredEncounterIds).
+ *
+ * `hidden` is deliberately absent from BOTH sets and can never be written by the seat, on its
+ * own creations or anyone's: revealing an encounter discloses its roster and difficulty to the
+ * table (#262/#754), and the seat takes instructions from untrusted player input (#317). A
+ * reveal must have a human behind it.
+ */
+const DRIVER_UPDATE_ENCOUNTER_AUTHORING_FIELDS = new Set(['name', 'locationId', 'questId', 'sessionId']);
 
 export type DriverLivePlayArgGuardResult =
   | { ok: true; args: Record<string, unknown> }
@@ -848,6 +978,19 @@ export function recordDriverGeneratedMap(session: AiDmSessionState, attachmentId
 }
 
 /**
+ * Track an encounter id the seat CREATED this session (#1022), unlocking the authoring fields
+ * of update_encounter for that id only. Recorded from the tool RESULT rather than from the
+ * model's arguments — the model does not choose which ids it owns, the server observes which
+ * ones it actually made.
+ */
+export function recordDriverAuthoredEncounter(session: AiDmSessionState, encounterId: number): void {
+  session.driverAuthoredEncounterIds = session.driverAuthoredEncounterIds ?? [];
+  if (!session.driverAuthoredEncounterIds.includes(encounterId)) {
+    session.driverAuthoredEncounterIds.push(encounterId);
+  }
+}
+
+/**
  * Execution-time guards for battle-map live-play tools (#488 / #474 policy-lite):
  *  - generate_map: bounded to {@link DRIVER_GENERATE_MAP_BUDGET_PER_TURN} per turn.
  *  - update_encounter: VTT fields only; mapAttachmentId must be null (detach/undo) or a
@@ -859,7 +1002,10 @@ export function recordDriverGeneratedMap(session: AiDmSessionState, attachmentId
 export function guardDriverLivePlayArgs(
   toolName: string,
   args: Record<string, unknown>,
-  session: Pick<AiDmSessionState, 'driverGeneratedMapIds' | 'generateMapCallsThisTurn'>,
+  session: Pick<
+    AiDmSessionState,
+    'driverGeneratedMapIds' | 'generateMapCallsThisTurn' | 'driverAuthoredEncounterIds'
+  >,
 ): DriverLivePlayArgGuardResult {
   // Both the procedural (#306) and genuine-AI (#410) map generators share one per-turn
   // budget so an autonomous seat cannot burn provider/image cost by spamming generation.
@@ -875,15 +1021,64 @@ export function guardDriverLivePlayArgs(
     return { ok: true, args: { ...args } };
   }
 
+  // Issue #1022: encounter CREATION is additive and therefore safe to allow directly — except
+  // for one field. `hidden` decides whether the table can see the roster and difficulty
+  // (#262/#754), so the seat is not permitted to choose it: a driver-created encounter is
+  // always DM-only prep, and the human DM reveals it. Rather than refuse a `hidden:false`
+  // call (which would just teach the model to retry), the field is DROPPED and creation
+  // proceeds — `resolveCreateHidden(undefined)` in EncountersService then applies the
+  // private-by-default rule, so the outcome is identical to the model having omitted it.
+  if (toolName === 'create_encounter') {
+    const { hidden: _discardedHidden, ...rest } = args;
+    return { ok: true, args: rest };
+  }
+
   if (toolName === 'update_encounter') {
-    const rejected = Object.keys(args).filter((key) => !DRIVER_UPDATE_ENCOUNTER_VTT_FIELDS.has(key));
+    // `hidden` is refused rather than dropped, and that asymmetry with create is deliberate:
+    // on create, dropping it yields the safe default and the call still does what the model
+    // wanted (a fight exists). On update, silently dropping a reveal would let the model — and
+    // the DM reading the transcript — believe the encounter had been revealed when it had not,
+    // which is a worse failure than a clear refusal. Nothing is disclosed by refusing: the
+    // seat already knows the encounter exists.
+    if ('hidden' in args) {
+      return {
+        ok: false,
+        code: 'forbidden_encounter_reveal',
+        message:
+          'The driver may not change an encounter\'s hidden state. Revealing an encounter discloses its roster ' +
+          'and difficulty to players and must be done by the human DM.',
+      };
+    }
+    const authoringKeys = Object.keys(args).filter((key) => DRIVER_UPDATE_ENCOUNTER_AUTHORING_FIELDS.has(key));
+    const rejected = Object.keys(args).filter(
+      (key) => !DRIVER_UPDATE_ENCOUNTER_VTT_FIELDS.has(key) && !DRIVER_UPDATE_ENCOUNTER_AUTHORING_FIELDS.has(key),
+    );
     if (rejected.length > 0) {
       return {
         ok: false,
         code: 'forbidden_encounter_field',
         message:
-          `The driver may only set VTT fields on update_encounter (fog, grid, aoe, mapAttachmentId). Rejected: ${rejected.join(', ')}.`,
+          'The driver may set VTT fields on any encounter (fog, grid, aoe, mapAttachmentId), and name/location/' +
+          `quest/session links on encounters it created this session. Rejected: ${rejected.join(', ')}.`,
       };
+    }
+    // The reshape half is confined to the seat's OWN creations (#1022). An encounter the human
+    // DM prepared is theirs: renaming or re-linking it is overwriting their work with no diff
+    // for them to review, which is precisely what the proposal queue exists for and precisely
+    // what this tool cannot offer (it is also the live fog path — see the note on
+    // DRIVER_LIVE_PLAY_TOOLS).
+    if (authoringKeys.length > 0) {
+      const encounterId = Number(args.encounterId);
+      const authored = session.driverAuthoredEncounterIds ?? [];
+      if (!Number.isFinite(encounterId) || !authored.includes(encounterId)) {
+        return {
+          ok: false,
+          code: 'forbidden_encounter_reshape',
+          message:
+            'The driver may only rename or re-link an encounter it created this session. Ask the DM to change ' +
+            `their own prepared encounters. Rejected: ${authoringKeys.join(', ')}.`,
+        };
+      }
     }
     if ('mapAttachmentId' in args && args.mapAttachmentId !== null && args.mapAttachmentId !== undefined) {
       const id = Number(args.mapAttachmentId);
@@ -1338,11 +1533,23 @@ export class AiDriverService {
     const confirmationsDiscarded = storedGrantMap(row.pendingToolConfirmations, isStoredPendingConfirmation);
 
     if (row.lastInput) this.lastInputs.set(campaignId, row.lastInput);
+    // #1051: the MODE is restored before the ladder value is reconciled, because the
+    // reconciliation below needs to know whether `running` should read as `collaborative`.
+    fresh.collaborative = row.collaborative === true;
+    // These two drop an impossible ladder value back to the baseline; `deriveLadderState` at the
+    // end of this block is what turns that baseline back into `collaborative` when the mode is on.
     if (fresh.state === 'awaiting_players' && !fresh.stuck) fresh.state = 'running';
     if (fresh.state === 'human_control' && !fresh.actingDm) fresh.state = 'running';
-    if (fresh.status === 'paused' && fresh.state === 'running') fresh.state = 'paused';
+    // A stored pause must survive hydration whatever the ladder slot happens to hold. This was
+    // `fresh.state === 'running'` before #1051; a collaborative seat that was paused would have
+    // fallen through both branches and come back `status: 'idle'` — silently un-paused, which is
+    // the one thing restart handling must never do.
+    if (fresh.status === 'paused' && (fresh.state === 'running' || fresh.state === 'collaborative')) {
+      fresh.state = 'paused';
+    }
     if (fresh.state === 'paused' || fresh.state === 'human_control') fresh.status = 'paused';
     else fresh.status = 'idle';
+    fresh.state = deriveLadderState(fresh.state, fresh.collaborative);
     // An interrupted turn outranks whatever ladder state the row carried: freeze the seat. The
     // stuck info (if any) is kept, so an explicit resume drops back to `awaiting_players` with
     // the recovery levers intact rather than losing the ladder.
@@ -1590,6 +1797,7 @@ export class AiDriverService {
       // seat with nothing outstanding leaves no reconciliation work for the next boot.
       secretReadApprovals: nonEmptyJson(session.secretReadApprovals),
       pendingToolConfirmations: nonEmptyJson(session.pendingToolConfirmations),
+      collaborative: session.collaborative, // #1051
       updatedAt: ts,
     };
 
@@ -1618,6 +1826,7 @@ export class AiDriverService {
             announcedRecovery: values.announcedRecovery,
             secretReadApprovals: values.secretReadApprovals,
             pendingToolConfirmations: values.pendingToolConfirmations,
+            collaborative: values.collaborative,
             updatedAt: values.updatedAt,
           },
         })
@@ -1870,7 +2079,12 @@ export class AiDriverService {
       session.state = 'paused';
       this.cancelGeneration(campaignId);
     } else if (session.state === 'paused') {
-      session.state = session.stuck ? 'awaiting_players' : 'running';
+      // #1051: resuming restores the MODE, not a bare `running`. Without this, a DM who paused
+      // for five minutes would come back to a seat quietly applying damage on its own again —
+      // an autonomy change made by a control that says nothing about autonomy.
+      session.state = session.stuck
+        ? 'awaiting_players'
+        : deriveLadderState('running', session.collaborative);
     }
     session.levers = this.leversFor(session);
     this.persistControlState(session);
@@ -1881,11 +2095,44 @@ export class AiDriverService {
     return session;
   }
 
+  /**
+   * Turn collaborative handoff on or off (#1051) — DM only, enforced at the controller.
+   *
+   * Idempotent, and deliberately does NOT touch `status`, the stuck ladder, or a human takeover.
+   * This is a statement about who decides mechanics, not about whether the seat may run: a
+   * paused table stays paused, a stuck table stays stuck, and both come back into the mode when
+   * their urgent condition clears, because the flag is what persists.
+   *
+   * WHAT PERSISTS AND WHAT DOES NOT. The MODE is durable (its own column, restored on boot). The
+   * DEFERRALS it produces are queued confirm-policy grants, which on this branch live only in
+   * process memory and are dropped by a restart with no audit row and no signal — the gap issue
+   * #1042 is about, and which #1042 fixes for every confirm-policy grant at once by persisting
+   * them in order to revoke them loudly. Deliberately NOT re-solved here: a second mechanism
+   * beside that one would be the "third store" that issue exists to prevent. Until it lands, a
+   * restart mid-session silently discards whatever the DM had not yet approved, and the mode's
+   * own durability makes that MORE likely to bite, because the table comes back still deferring.
+   */
+  setCollaborative(campaignId: number, enabled: boolean): AiDmSessionState {
+    const session = this.ensureSession(campaignId);
+    if (session.collaborative === enabled) return session;
+    session.collaborative = enabled;
+    session.state = deriveLadderState(session.state, enabled);
+    session.levers = this.leversFor(session);
+    this.persistControlState(session);
+    this.stream.emit({ type: 'state', campaignId, state: session.state });
+    // #572: an autonomy change belongs in the durable table log. A player who joins late must be
+    // able to see that the AI stopped deciding mechanics on its own, not infer it from the fact
+    // that damage stopped landing.
+    this.recordControl(campaignId, { control: enabled ? 'collaborative' : 'collaborative_ended', state: session.state });
+    return session;
+  }
+
   private freshSession(campaignId: number): AiDmSessionState {
     return {
       campaignId,
       status: 'idle',
       state: 'running',
+      collaborative: false,
       scene: null,
       lastNarration: null,
       lastTurnAt: null,
@@ -1917,11 +2164,13 @@ export class AiDriverService {
   private policyForTool(
     profile: DriverSessionProfile,
     tool: Pick<DriverTool, 'name' | 'mutating' | 'proposalCapable'>,
+    collaborative = false,
   ) {
     return resolveDriverToolPolicy({
       profile,
       tool,
       onLivePlayAllowList: DRIVER_LIVE_PLAY_TOOLS.has(tool.name),
+      collaborative,
     });
   }
 
@@ -2126,8 +2375,11 @@ export class AiDriverService {
         name: t.name,
         description:
           t.name === 'update_encounter'
-            ? 'DM only: adjust battle-map VTT overlays for an encounter — fog, grid config, AoE templates, and mapAttachmentId ' +
-              '(session-generated maps only; null detaches). Prep fields (name, location/quest/session links, hidden) are NOT available to the driver seat.'
+            ? 'DM only: adjust battle-map VTT overlays for ANY encounter — fog, grid config, AoE templates, and ' +
+              'mapAttachmentId (session-generated maps only; null detaches). You may ALSO set name and the ' +
+              'location/quest/session links, but only on an encounter YOU created this session (issue #1022) — the ' +
+              "DM's own prepared encounters are theirs, so ask them instead of editing. `hidden` is never available " +
+              'to the driver seat: revealing an encounter shows its roster and difficulty to players and is the DM\'s call.'
             : t.description,
         parameters: t.inputSchema,
       }));
@@ -2928,7 +3180,7 @@ export class AiDriverService {
         return { toolErrored: false, authorityStop: authority };
       }
 
-      const rateLimit = checkDriverPolicyRateLimits(session);
+      const rateLimit = checkDriverPolicyRateLimits(session, { collaborative: session.collaborative });
       if (!rateLimit.ok) {
         if (rateLimit.emergencyPause) {
           await this.triggerEmergencyPause(campaignId, session, actor, rateLimit.message);
@@ -2945,7 +3197,9 @@ export class AiDriverService {
       }
 
       const tool = seatToolset.get(call.name) ?? contextToolset.get(call.name);
-      const policyDecision = tool ? this.policyForTool(sessionProfile, tool) : null;
+      // #1051: read the FLAG, not `session.state` — a collaborative table that is also stuck
+      // shows `awaiting_players` in the ladder slot but must still defer its mechanics.
+      const policyDecision = tool ? this.policyForTool(sessionProfile, tool, session.collaborative) : null;
 
       // (0) Tool-scoping (#317/#378/#474): default-deny at EXECUTION so a hallucinated or
       // injection-induced forbidden call never reaches a service.
@@ -3085,6 +3339,13 @@ export class AiDriverService {
             `queued ${call.name} profile=${sessionProfile} confirmation=${pending.id} ` +
             `(triggered by ${triggeredBy.id})`,
         });
+        // #1558: the SSE signal only reaches a DM who has the AI Table open. The stall is
+        // otherwise silent for exactly the DM who most needs to know — the one who stepped away,
+        // or who is on the encounter screen. A notification is the only channel that reaches them
+        // there, and `ai_dm_alert` is the right type: its category is `security`, which is
+        // always-on and never deferred into a digest, and its deep link already points at
+        // /c/:id/table, which is where the panel that resolves this lives.
+        void this.notifyDmsOfPendingConfirmation(campaignId, call.name);
         this.stream.emit({
           type: 'tool-confirmation',
           campaignId,
@@ -3162,6 +3423,19 @@ export class AiDriverService {
           if (typeof parsed.attachmentId === 'number') recordDriverGeneratedMap(session, parsed.attachmentId);
         } catch {
           // Non-JSON tool payload — skip tracking.
+        }
+      }
+
+      // #1022 — record the id of an encounter the seat actually created, which is what unlocks
+      // the authoring fields of update_encounter for that id (guardDriverLivePlayArgs). Taken
+      // from the RESULT, never from the model's arguments: ownership is something the server
+      // observed, not something the model may assert.
+      if (call.name === 'create_encounter' && !res.isError) {
+        try {
+          const parsed = JSON.parse(res.text) as { id?: unknown };
+          if (typeof parsed.id === 'number') recordDriverAuthoredEncounter(session, parsed.id);
+        } catch {
+          // Non-JSON tool payload — skip tracking; the seat simply cannot reshape this one.
         }
       }
 
@@ -3319,6 +3593,37 @@ export class AiDriverService {
     });
   }
 
+  /**
+   * A queued confirmation was pushed out by the per-session cap (#1558).
+   *
+   * Deliberately NOT a time-based expiry. A pending confirmation does not block the turn — the
+   * model is told `pending_dm_confirmation` and narration carries on — so a TTL would unblock
+   * nothing and would only add a THIRD way for a grant to die, on top of the two that already
+   * exist (restart, handled loudly by #1042; and this cap). The consistent answer, and the one
+   * #1042 established, is that a grant may be discarded but never in silence.
+   */
+  private announceEvictedConfirmation(campaignId: number, evicted: AiDmPendingToolConfirmation): void {
+    void this.audit
+      .log({
+        actor: `ai-dm-seat:${campaignId}`,
+        actorRole: 'dm',
+        action: 'ai-dm.driver.confirmation.evicted',
+        entityType: 'ai-dm',
+        campaignId,
+        detail:
+          `pending confirmation ${evicted.id} for ${evicted.tool} (queued ${evicted.requestedAt}, turn ` +
+          `${evicted.turnNumber}) was dropped: the queue reached its ${MAX_PENDING_TOOL_CONFIRMATIONS}-item cap — never executed`,
+      })
+      .catch((err) => this.logger.error(`Confirmation-eviction audit failed for campaign ${campaignId}`, err));
+    this.stream.emit({
+      type: 'tool-confirmation',
+      campaignId,
+      action: 'rejected',
+      confirmationId: evicted.id,
+      tool: evicted.tool,
+    });
+  }
+
   private queueToolConfirmation(
     session: AiDmSessionState,
     call: AiToolCall,
@@ -3338,7 +3643,15 @@ export class AiDriverService {
     );
     while (keysByAge.length >= MAX_PENDING_TOOL_CONFIRMATIONS) {
       const oldest = keysByAge.shift()!;
+      const evicted = session.pendingToolConfirmations[oldest];
       delete session.pendingToolConfirmations[oldest];
+      // #1558 — EVICTION MUST BE LOUD. This is the same failure #1042 found for grants lost to a
+      // restart: an irreversible write a DM was asked to approve, dropped with no audit row and
+      // no signal. It used to be near-unreachable at 20 pending; collaborative handoff (#1051)
+      // queues roughly four per combat turn, so five turns of an inattentive DM now silently
+      // discards their oldest decision. Same treatment as #1042's discarded grants: one audit
+      // row naming the call, and a signal that reconciles the DM's queue.
+      if (evicted) this.announceEvictedConfirmation(session.campaignId, evicted);
     }
 
     const pending: AiDmPendingToolConfirmation = {
@@ -3440,7 +3753,9 @@ export class AiDriverService {
     // Clean turn: if we were stuck, announce the recovery.
     const wasStuck = session.stuck !== null || session.state === 'awaiting_players';
     session.stuck = null;
-    session.state = 'running';
+    // #1051: recovering from stuck returns to the MODE, not a bare `running`. Getting unstuck is
+    // not a decision about autonomy.
+    session.state = deriveLadderState('running', session.collaborative);
     session.levers = this.leversFor(session);
     this.persistControlState(session);
     if (wasStuck) {
@@ -3463,10 +3778,14 @@ export class AiDriverService {
           return ['retry', 'continue_without_ai', 'nudge', 'flag', 'vote', 'rules_lookup', 'request_takeover', 'pause'];
         }
         return ['retry', 'nudge', 'flag', 'vote', 'rules_lookup', 'request_takeover', 'pause'];
+      case 'collaborative':
+        // #1051 — a healthy, running seat with mechanics deferred, so it keeps the full
+        // healthy-play set and adds the lever that takes the table back to full autonomy.
+        return ['nudge', 'flag', 'vote', 'rules_lookup', 'request_takeover', 'pause', 'end_collaborative'];
       case 'running':
       default:
         // Levers are available in healthy play too (flag a ruling, call a vote, etc.).
-        return ['nudge', 'flag', 'vote', 'rules_lookup', 'request_takeover', 'pause'];
+        return ['nudge', 'flag', 'vote', 'rules_lookup', 'request_takeover', 'pause', 'collaborative'];
     }
   }
 
@@ -3993,7 +4312,9 @@ export class AiDriverService {
       } else {
         // override: discard the disputed ruling and let play resume.
         session.stuck = null;
-        session.state = session.status === 'paused' ? 'paused' : 'running';
+        session.state = session.status === 'paused'
+          ? 'paused'
+          : deriveLadderState('running', session.collaborative); // #1051
         session.lastNarration = null;
       }
     }
@@ -4142,7 +4463,12 @@ export class AiDriverService {
     session.actingDm = null;
     session.stuck = null;
     session.status = 'idle';
-    session.state = 'running';
+    // #1051: hand back into the MODE the table was in, not a bare `running`. A human taking the
+    // seat and giving it back says nothing about whether the AI may decide mechanics on its own,
+    // so it must not be the thing that grants that authority back. Same reasoning as the resume
+    // path in setPaused — every control that releases an urgent condition has to restore the
+    // mode underneath it, or autonomy widens as a side effect of an unrelated lever.
+    session.state = deriveLadderState('running', session.collaborative);
     session.levers = this.leversFor(session);
     this.persistControlState(session);
     await this.audit.log({
@@ -4172,6 +4498,35 @@ export class AiDriverService {
   }
 
   /** Best-effort table notification for a stuck/lever event (#263 + #314). Never throws. */
+  /**
+   * Tell the campaign's DMs that a tool call is waiting on them (#1558).
+   *
+   * DM-ONLY delivery, not `notifyCampaign`. A pending confirmation names a live-play tool the AI
+   * wants to run, and the queue itself is a DM-only read — pushing it to every player would both
+   * leak that surface and hand the table a notification nobody but the DM can act on. Roles come
+   * from `memberRoles`, the same source the vote-eligibility threshold uses.
+   *
+   * Best-effort in full: a notification failure must never break the turn that queued the call.
+   */
+  private async notifyDmsOfPendingConfirmation(campaignId: number, tool: string): Promise<void> {
+    try {
+      const roles = await this.notifications.memberRoles(campaignId);
+      const dms = [...roles.entries()].filter(([, role]) => role === 'dm').map(([userId]) => userId);
+      for (const userId of dms) {
+        await this.notifications.notifyUser(userId, campaignId, null, {
+          type: 'ai_dm_alert',
+          title: 'The AI DM is waiting on you',
+          body: `${tool} needs your approval before it runs. Open the AI Table to approve or reject it.`,
+          entityType: null,
+          entityId: null,
+          actorName: '',
+        });
+      }
+    } catch (err) {
+      this.logger.warn(`Pending-confirmation notify failed for campaign ${campaignId}: ${String(err)}`);
+    }
+  }
+
   private async notify(campaignId: number, actor: RequestUser, title: string, body: string): Promise<void> {
     try {
       await this.notifications.notifyCampaign(campaignId, actor, {
@@ -4229,6 +4584,29 @@ export class AiDriverService {
 
     const sessionZero = await safeRead(contextToolset, 'get_session_zero', { campaignId });
     if (sessionZero) parts.push(`## Session-zero charter (safety boundaries — MUST respect)\n${sessionZero}`);
+
+    // #1051 — collaborative handoff. THE HONESTY CLAUSE is the important half. The runtime
+    // already defers the mechanics (the tool returns `pending_dm_confirmation` and the turn
+    // carries on), so without this the model would narrate "the blade bites deep for nine
+    // damage" while the board never changed — a silent divergence between what the table heard
+    // and what is true, which is a worse failure than the autonomy it was meant to remove.
+    if (this.ensureSession(campaignId).collaborative) {
+      parts.push(
+        [
+          '## Collaborative handoff (ACTIVE)',
+          'A human at this table decides the mechanics. You narrate; they rule.',
+          '- Call the mechanical tools exactly as you normally would. They will come back',
+          '  `pending_dm_confirmation` instead of executing — that is expected, not an error, and',
+          '  you must not retry, work around it, or reach for a different tool to get the same',
+          '  effect.',
+          '- When a call is pending, narrate the action as ATTEMPTED or IMMINENT, never as',
+          '  resolved. "She swings for the gap in its armour" — not "she hits for nine damage".',
+          '  Do not state a number, a condition, or an outcome the DM has not confirmed.',
+          '- Never claim a turn advanced, a creature fell, or a fight began until you have seen it',
+          '  succeed. If you are unsure whether something landed, say so and hand back to the DM.',
+        ].join('\n'),
+      );
+    }
 
     // #1048: dynamic world-state context — inject the LIVE game state into the prompt so the
     // AI can narrate coherently without needing to chain read tools every turn. All reads go

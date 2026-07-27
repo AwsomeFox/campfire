@@ -46,10 +46,37 @@ class MemoryStorage {
 }
 
 const store = new MemoryStorage();
-// transcript.ts reads `window.localStorage`; install a window before importing it.
-(globalThis as unknown as { window: { localStorage: Storage } }).window = {
-  localStorage: store as unknown as Storage,
-};
+
+// This stub used to be assigned at MODULE SCOPE, with the note "install a window before
+// importing it". That premise was wrong — transcript.ts touches `window` only inside its
+// functions, never while loading — and the assignment was quietly the most destructive
+// line in the tier.
+//
+// The unit tier runs every spec in ONE worker and Playwright loads all files before
+// running any test, so a module-scope global here becomes the `window` that every later
+// spec's imports observe. Two separate failures came out of that: `src/i18n/locale.ts`
+// attaches `languagechange`/`storage` listeners at import behind a bare
+// `typeof window !== 'undefined'`, so a stub without addEventListener killed six specs at
+// load; and `detail-list-origin` reads `window.scrollY`, which is a clean `0` when there
+// is no window but `undefined` on a partial one — an order-dependent failure that moved
+// as unrelated files changed. Completing the stub property-by-property is whack-a-mole:
+// the fix is not to leak it at all.
+//
+// Installed per-file instead, so outside these tests `window` stays undefined and every
+// `typeof window !== 'undefined'` guard in src/ takes its real Node branch.
+const HAD_WINDOW = 'window' in globalThis;
+const PREVIOUS_WINDOW = (globalThis as { window?: Window }).window;
+
+test.beforeAll(() => {
+  (globalThis as unknown as { window: { localStorage: Storage } }).window = {
+    localStorage: store as unknown as Storage,
+  };
+});
+
+test.afterAll(() => {
+  if (HAD_WINDOW) (globalThis as { window?: Window }).window = PREVIOUS_WINDOW;
+  else delete (globalThis as { window?: Window }).window;
+});
 
 import {
   emptyTranscript,

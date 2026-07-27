@@ -33,6 +33,10 @@ test:
 test-watch:
     npm run test:watch -w apps/server
 
+# Web unit tier: apps/web/e2e/tests/*.unit.spec.ts (Playwright runner, no browser needed)
+test-unit-web:
+    npm run test:unit:web
+
 # Browser E2E across roles (Playwright — builds the app, needs chromium: just e2e-install)
 test-e2e:
     npm run test:e2e

@@ -114,6 +114,13 @@ export const characters = sqliteTable('characters', {
   deathSaveSuccesses: integer('death_save_successes').notNull().default(0),
   deathSaveFailures: integer('death_save_failures').notNull().default(0),
   conditions: text('conditions').notNull().default('[]'),
+  // Issue #1047: structured condition instances as a JSON ConditionInstance[] blob, the
+  // sheet-scoped counterpart to combatants.condition_instances. Nullable; added by
+  // migration 0132 on older DBs. NULL = derive from the legacy `conditions` names
+  // (common/conditions.ts readConditionInstances), which is what keeps years of bare
+  // strings readable without a rewrite. Round/turn-scoped fields are always null here —
+  // see toSheetConditionInstance for why.
+  conditionInstances: text('condition_instances'),
   saveProficiencies: text('save_proficiencies').notNull().default('[]'),
   skills: text('skills').notNull().default('{}'),
   actions: text('actions').notNull().default('[]'),
@@ -1463,6 +1470,8 @@ export const aiDriverControlState = sqliteTable('ai_driver_control_state', {
    */
   secretReadApprovals: text('secret_read_approvals'),
   pendingToolConfirmations: text('pending_tool_confirmations'),
+  /** #1051 — collaborative handoff: the AI narrates, a DM confirms mechanical commits. */
+  collaborative: integer('collaborative', { mode: 'boolean' }).notNull().default(false),
   updatedAt: text('updated_at').notNull(),
 });
 

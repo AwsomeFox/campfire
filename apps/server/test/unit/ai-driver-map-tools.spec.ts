@@ -58,6 +58,7 @@ describe('guardDriverLivePlayArgs — battle-map execution guards (#488)', () =>
     return {
       campaignId: 1,
       status: 'idle',
+      collaborative: false, // #1051 — mode off by default.
       state: 'running',
       scene: null,
       lastNarration: null,
@@ -89,7 +90,13 @@ describe('guardDriverLivePlayArgs — battle-map execution guards (#488)', () =>
     expect(guardDriverLivePlayArgs('generate_map', { campaignId: 1, kind: 'cave' }, s).ok).toBe(true);
   });
 
-  it('rejects prep fields on update_encounter instead of silently dropping them', () => {
+  /**
+   * #1022 narrowed this rule rather than removing it: `hidden` is now refused on its OWN
+   * dedicated code, ahead of the field partition, because a reveal is a disclosure act rather
+   * than an unrecognized field. Renaming is refused too here — this session did not create
+   * encounter 7 — but for the reshape reason, which ai-driver-encounter-authoring.spec.ts owns.
+   */
+  it('rejects a hidden toggle on update_encounter instead of silently dropping it', () => {
     const s = session({ driverGeneratedMapIds: [42] });
     const result = guardDriverLivePlayArgs(
       'update_encounter',
@@ -104,9 +111,22 @@ describe('guardDriverLivePlayArgs — battle-map execution guards (#488)', () =>
     );
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.code).toBe('forbidden_encounter_field');
-      expect(result.message).toContain('name');
+      expect(result.code).toBe('forbidden_encounter_reveal');
       expect(result.message).toContain('hidden');
+    }
+  });
+
+  it('still rejects a field that is neither VTT nor encounter authoring', () => {
+    const s = session({ driverGeneratedMapIds: [42] });
+    const result = guardDriverLivePlayArgs(
+      'update_encounter',
+      { encounterId: 7, status: 'running', fog: { enabled: true, revealed: [] } },
+      s,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe('forbidden_encounter_field');
+      expect(result.message).toContain('status');
     }
   });
 
@@ -192,6 +212,7 @@ describe('toPublicAiDmSessionState', () => {
     const session: AiDmSessionState = {
       campaignId: 1,
       status: 'idle',
+      collaborative: false,
       state: 'running',
       scene: null,
       lastNarration: null,
@@ -210,6 +231,7 @@ describe('toPublicAiDmSessionState', () => {
     expect(toPublicAiDmSessionState(session)).toEqual({
       campaignId: 1,
       status: 'idle',
+      collaborative: false, // #1051 — member-visible, so it survives the projection.
       state: 'running',
       scene: null,
       lastNarration: null,

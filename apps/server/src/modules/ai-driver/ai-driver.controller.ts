@@ -32,8 +32,8 @@ import { AiDmStreamService } from './ai-driver-stream.service';
 import { ProactiveService } from './proactive.service';
 import { DriverGroundingService } from './driver-grounding.service';
 import { projectGroundingVerdictForRole } from './driver-grounding';
-import { projectAiDmToolEventForRole } from './ai-dm-tool-resource';
-import { AiDmTranscriptService, projectTranscriptEventForRole } from './ai-driver-transcript.service';
+import { AiDmTranscriptService } from './ai-driver-transcript.service';
+import { projectAiDmStreamEventForRole } from './ai-driver-stream-projection';
 
 /** Player action submitted to the AI DM seat (POST /ai-dm/message). */
 const AiDmMessageRequest = z
@@ -145,6 +145,14 @@ const AiDmRulesLookupRequest = z
   .object({ query: z.string().min(1).max(200).describe('The rules question to look up in the compendium.') })
   .strict();
 class AiDmRulesLookupDto extends createZodDto(AiDmRulesLookupRequest) {}
+
+/** Turn collaborative handoff on/off (POST /ai-dm/collaborative, #1051). */
+const AiDmCollaborativeRequest = z
+  .object({
+    enabled: z.boolean().describe('true = the AI narrates but a DM confirms every mechanical commit.'),
+  })
+  .strict();
+class AiDmCollaborativeDto extends createZodDto(AiDmCollaborativeRequest) {}
 
 /**
  * Grant or revoke a narrowly-scoped secret-read approval (POST /ai-dm/secret-approval, #557).
@@ -296,6 +304,30 @@ export class AiDriverController {
   async resume(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     await this.access.requireRole(user, id, 'dm');
     return toPublicAiDmSessionState(this.driver.setPaused(id, false));
+  }
+
+  @Post('collaborative')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Turn collaborative handoff on or off (AI narrates, DM decides mechanics)',
+    description:
+      'DM only. A middle rung between full autonomy and a full human takeover: the AI keeps ' +
+      'narrating and keeps calling tools, but every call that would COMMIT a mechanical outcome — ' +
+      'applying an action, changing HP or conditions, advancing the turn, changing who is on the ' +
+      'board — routes to the existing confirm-policy queue (#474) instead of executing, and a DM ' +
+      'resolves it via POST /ai-dm/tool-confirmation. Dice rolls, reads and undo stay automatic. ' +
+      'Idempotent. Survives pause, takeover, stuck states and restarts, so autonomy is never ' +
+      'restored as a side effect of some unrelated control.',
+  })
+  @ApiResponse({ status: 200, description: 'The updated session state.' })
+  @ApiResponse({ status: 403, description: 'Not a DM.' })
+  async collaborative(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: AiDmCollaborativeDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    await this.access.requireRole(user, id, 'dm');
+    return toPublicAiDmSessionState(this.driver.setCollaborative(id, body.enabled));
   }
 
   @Post('trigger')
@@ -616,20 +648,14 @@ export class AiDriverController {
     );
     return merge(
       this.stream.streamFor(id).pipe(
-        // #572: role redaction is enforced HERE, at the broadcast boundary. A withheld
-        // transcript event is DROPPED from this subscriber's stream entirely — a player is
-        // never handed a DM-only event and merely trusted not to render it.
-        map((event) => {
-          if (event.type !== 'transcript') return event;
-          const projected = projectTranscriptEventForRole(event.event, event.visibility, role);
-          // Strip the internal `visibility` hint: it never leaves the server.
-          return projected === null ? null : { type: 'transcript' as const, campaignId: event.campaignId, event: projected, at: event.at };
-        }),
+        // Role redaction is enforced HERE, at the broadcast boundary (#572), for EVERY frame
+        // type rather than the two that used to be named inline (#1552). A withheld frame is
+        // DROPPED from this subscriber's stream entirely — a player is never handed a DM-only
+        // event and merely trusted not to render it. `projectAiDmStreamEventForRole` fails
+        // closed: an unclassified frame type does not compile, and does not reach the wire.
+        map((event) => projectAiDmStreamEventForRole(event, role)),
         filter((event): event is NonNullable<typeof event> => event !== null),
-        map((event): MessageEvent => ({
-          // Role-project tool frames so hidden encounter ids never reach non-DMs (#825 / #262).
-          data: event.type === 'tool' ? projectAiDmToolEventForRole(event, role) : event,
-        })),
+        map((event): MessageEvent => ({ data: event })),
       ),
       interval(HEARTBEAT_MS).pipe(map((): MessageEvent => ({ data: { type: 'ping' } }))),
     ).pipe(takeUntil(closed));
