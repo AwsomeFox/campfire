@@ -3033,6 +3033,71 @@ function migrateCastSessionsTable(sqlite: Database.Database): void {
 }
 
 /**
+ * Issue #572: the authoritative multi-player AI-DM table transcript.
+ *
+ * New table only — no existing table is touched, so the migration is CREATE ... IF NOT
+ * EXISTS plus a defensive column probe. The probe matters because an early build of this
+ * branch shipped the table WITHOUT the per-campaign `seq` / `turn_id` columns (it used
+ * the global row id as the cursor); a dev database created from that build must gain the
+ * columns and a backfilled per-campaign `seq` rather than silently failing every insert.
+ * `seq` is backfilled in (campaign_id, id) order — exactly the order the rows were written.
+ *
+ * The ALTER branch is BRANCH-LOCAL DEV SALVAGE, not a production upgrade path: the table
+ * is new in this change, so no released database can have the old shape. One cosmetic
+ * consequence is worth knowing about — a fresh database gets `seq INTEGER NOT NULL` from
+ * the CREATE above, while a salvaged dev database gets a NULLABLE `seq`, because SQLite
+ * cannot ADD a NOT NULL column without a default. It is harmless (the service always
+ * supplies `seq`, and UNIQUE (campaign_id, seq) is what actually guards the sequence), and
+ * rewriting the table to tighten the constraint would cost a 12-column copy/drop/rename
+ * for dev databases only. Noted rather than fixed, deliberately.
+ */
+function migrateAiDmTranscriptEventsTable572(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS ai_dm_transcript_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+      seq INTEGER NOT NULL,
+      event_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      actor_user_id TEXT,
+      actor_name TEXT,
+      client_ref TEXT,
+      turn_id TEXT,
+      payload TEXT NOT NULL DEFAULT '{}',
+      visibility TEXT NOT NULL DEFAULT 'all',
+      created_at TEXT NOT NULL
+    );
+  `);
+
+  const columns = sqlite.prepare('PRAGMA table_info(ai_dm_transcript_events)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'turn_id')) {
+    sqlite.exec('ALTER TABLE ai_dm_transcript_events ADD COLUMN turn_id TEXT');
+  }
+  if (!columns.some((c) => c.name === 'seq')) {
+    // SQLite cannot ADD a NOT NULL column without a default: add it nullable, backfill a
+    // dense per-campaign sequence in write order, then let the UNIQUE index enforce it.
+    sqlite.exec('ALTER TABLE ai_dm_transcript_events ADD COLUMN seq INTEGER');
+    sqlite.exec(`
+      UPDATE ai_dm_transcript_events
+      SET seq = (
+        SELECT COUNT(*)
+        FROM ai_dm_transcript_events AS earlier
+        WHERE earlier.campaign_id = ai_dm_transcript_events.campaign_id
+          AND earlier.id <= ai_dm_transcript_events.id
+      )
+      WHERE seq IS NULL
+    `);
+  }
+
+  sqlite.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_dm_transcript_events_campaign_seq
+      ON ai_dm_transcript_events (campaign_id, seq);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_dm_transcript_events_event_id
+      ON ai_dm_transcript_events (campaign_id, event_id);
+  `);
+}
+
+/**
  * Issue #580 — per-intent idempotency records for non-idempotent encounter mutations
  * (HP deltas, turn advancement). Purely additive: a new table plus its indexes, so the
  * whole migration is `CREATE ... IF NOT EXISTS` and is safe to re-run. The `PRAGMA
@@ -3185,11 +3250,12 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // after all of them, so the scheduling lifecycle migration takes the next genuinely
   // free ordinal rather than collide.
   { name: '0111_scheduling_lifecycle_504', run: migrateSchedulingLifecycle504 },
-  // 0116 is assigned to this branch by the merge coordinator, who is holding 0112-0113
-  // for other in-flight work and reassigned the contested 0114/0115 to #501 and #572.
-  // The gap above 0111 is therefore deliberate, not a miscount. Dedup is by the FULL
-  // name rather than the ordinal, so the issue-number suffix is what actually guarantees
-  // this runs exactly once even if a sibling branch lands a colliding ordinal first.
+  // 0112-0113 are held by the merge coordinator for other in-flight work, and 0114 went
+  // to #501; 0115 is this branch's central allocation. The gap above 0111 is deliberate,
+  // not a miscount. Dedup is by the FULL name rather than the ordinal, so the issue-number
+  // suffix is what actually guarantees each runs exactly once even if a sibling branch
+  // lands a colliding ordinal first.
+  { name: '0115_ai_dm_transcript_events_572', run: migrateAiDmTranscriptEventsTable572 },
   { name: '0116_encounter_op_idempotency_580', run: migrateEncounterOpIdempotency580 },
   // #559 deliberately skips past the contested 0112-0117 band rather than taking the next free
   // ordinal: this pair has already been renumbered three times by other branches landing first,

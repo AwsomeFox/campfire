@@ -5522,6 +5522,111 @@ export const AiDmUsageHistoryResponse = z.object({
 });
 export type AiDmUsageHistoryResponse = z.infer<typeof AiDmUsageHistoryResponse>;
 
+// ── Authoritative multi-player AI-DM table transcript (issue #572) ────────────
+// Before #572 the transcript was assembled client-side from the SSE stream plus a
+// local echo of that one client's own submissions. Only the sender ever saw the
+// player action an AI answer was responding to, and a reload / late join / reconnect
+// produced a DIFFERENT transcript per browser. The server now stores one ordered,
+// durable transcript per campaign and every table surface reads it.
+//
+// ORDERING. `seq` is a per-campaign monotonic counter the server assigns INSIDE the
+// same synchronous better-sqlite3 transaction as the insert. It is deliberately NOT a
+// wall-clock timestamp (two actions in the same millisecond have no total order) and
+// deliberately NOT the global row id (which interleaves across campaigns and would leak
+// server-wide write volume). It is the pagination cursor AND the reconnect watermark:
+// "I have through seq N, give me the rest" has exactly one answer, gap-free within the
+// retained window (retention is bounded — see AI_DM_TRANSCRIPT_RETENTION_MAX_EVENTS — so
+// a client offline past the pruned edge is served what still exists, not events already
+// deleted).
+export const AiDmTranscriptEventKind = z.enum([
+  'player.action',   // an accepted player submission — the gap #572 is about
+  'narration',       // one aggregated narration step (never a raw narration.delta)
+  'tool',            // a tool the AI invoked (thin signal; refetch via REST)
+  'turn.cancelled',  // a stop control aborted mid-generation (#558)
+  'turn.ended',      // a turn finished, with its stop reason
+  'vote',            // a table vote was opened / cast / resolved (#314)
+  'control',         // seat control changed: pause, takeover, handback, state
+]);
+export type AiDmTranscriptEventKind = z.infer<typeof AiDmTranscriptEventKind>;
+
+/**
+ * Row-level role redaction for a transcript event, enforced server-side at BOTH the
+ * REST read and the SSE broadcast boundary (never by client-side filtering — a player
+ * must not merely fail to render a DM-only event they already received).
+ *  - `all` : every campaign member may read it.
+ *  - `dm`  : DM-only. Withheld entirely from players and viewers.
+ */
+export const AiDmTranscriptVisibility = z.enum(['all', 'dm']);
+export type AiDmTranscriptVisibility = z.infer<typeof AiDmTranscriptVisibility>;
+
+/** Max length of the client-supplied optimistic-echo correlation token (#572). */
+export const AI_DM_TRANSCRIPT_CLIENT_REF_MAX = 64;
+
+/**
+ * RETENTION (#572). A campaign keeps at most this many transcript events; the oldest
+ * are pruned inside the same transaction as each insert, so the table is self-bounding
+ * without a sweeper job. ~2k events is several long sessions of scrollback at the
+ * observed event rate (one player action + a handful of narration/tool rows per turn).
+ * Beyond that, the run is history a DM should export, not live table scrollback.
+ * The rows also cascade-delete with the campaign, and a DM can purge on demand via
+ * DELETE /campaigns/:id/ai-dm/transcript.
+ */
+export const AI_DM_TRANSCRIPT_RETENTION_MAX_EVENTS = 2_000;
+
+export const AiDmTranscriptEvent = z.object({
+  /** Stable, client-visible event identity (unique per campaign) — the idempotent merge key. */
+  eventId: z.string(),
+  /** Authoritative per-campaign order AND cursor. Strictly increasing, assigned server-side. */
+  seq: z.number().int().positive(),
+  campaignId: Id,
+  kind: AiDmTranscriptEventKind,
+  /** The user whose action this was, when there is one (null for AI/system events). */
+  actorUserId: z.string().nullable(),
+  /** Display name captured at write time so the transcript reads correctly after a rename. */
+  actorName: z.string().nullable(),
+  /**
+   * The sender's optimistic-echo correlation token, echoed back verbatim so the
+   * submitting client REPLACES its local optimistic entry instead of duplicating it.
+   * A client-generated token, NOT content equality — two players typing the same words
+   * in the same second must still produce two distinct transcript lines.
+   * Null for every event the client did not originate.
+   */
+  clientRef: z.string().nullable(),
+  /**
+   * Groups the narration/tool/turn-end events of ONE driver turn so a client rebuilding
+   * the transcript from a REST page produces the same DM bubble the live stream did.
+   */
+  turnId: z.string().nullable(),
+  /** Kind-specific body (text, tool name, stop reason, …). Role-projected before it ships. */
+  payload: z.record(z.unknown()),
+  at: IsoDate,
+});
+export type AiDmTranscriptEvent = z.infer<typeof AiDmTranscriptEvent>;
+
+/** Default page size for the transcript list — one screen of scrollback. */
+export const AI_DM_TRANSCRIPT_LIST_DEFAULT_LIMIT = 50;
+/** Hard cap for `?limit=` on the transcript list. */
+export const AI_DM_TRANSCRIPT_LIST_MAX_LIMIT = 200;
+
+export const AiDmTranscriptPage = CursorListPage(AiDmTranscriptEvent);
+export type AiDmTranscriptPage = z.infer<typeof AiDmTranscriptPage>;
+
+/**
+ * DM-facing export of the retained transcript (#572), role-projected exactly like the
+ * paged read — a redacted export is a redacted export, not a back door.
+ */
+export const AiDmTranscriptExport = z.object({
+  campaignId: Id,
+  exportedAt: IsoDate,
+  /** How many events the campaign retains at most (see AI_DM_TRANSCRIPT_RETENTION_MAX_EVENTS). */
+  retentionMaxEvents: z.number().int().positive(),
+  events: z.array(AiDmTranscriptEvent),
+});
+export type AiDmTranscriptExport = z.infer<typeof AiDmTranscriptExport>;
+
+/** Result of DELETE /campaigns/:id/ai-dm/transcript — the DM's right-to-erase lever. */
+export const AiDmTranscriptDeleteResult = z.object({ deleted: z.number().int().nonnegative() });
+export type AiDmTranscriptDeleteResult = z.infer<typeof AiDmTranscriptDeleteResult>;
 export const AiDmReadinessCheckKey = z.enum([
   'serverFlag',
   'serverCap',

@@ -1,31 +1,71 @@
 /**
- * Client-side AI-DM transcript store (#338 foundation).
+ * AI-DM transcript view model (#338 foundation, made authoritative by #572).
  *
- * Server truth is thin: the backend keeps only lightweight session state (scene,
- * lastNarration, status…). The running transcript every player watches is assembled
- * HERE, from the SSE stream (see lib/useAiDmStream.ts) plus a local echo of this
- * client's own submissions, and persisted per campaign in localStorage (bounded, so a
- * long session can't grow the store without limit). A late joiner has no server
- * transcript API to page through — they seed from `scene` + `lastNarration` behind a
- * "joined mid-session" divider.
+ * ORIGINALLY this store WAS the transcript: assembled in the browser from the SSE stream
+ * plus a local echo of this one client's own submissions, and cached in localStorage. That
+ * is the bug #572 fixes — the server never broadcast the player action an AI answer was
+ * responding to, so only the sender ever saw it, and a reload / late join / reconnect
+ * produced a materially different transcript in every browser at the table.
  *
- * This module is a PURE reducer plus small (de)serialization helpers — no React, no
- * network — so it is trivially unit-testable and reusable by the Table page (#339) and
- * every surface that renders the narration.
+ * NOW the server owns one ordered, durable transcript per campaign. This module is the
+ * VIEW MODEL over it: it folds authoritative server events (`serverEvents`, and the live
+ * `transcript` SSE frame) into renderable entries, keyed by the server's stable `eventId`
+ * so the same event arriving twice — live frame plus a REST page after a reconnect —
+ * merges instead of duplicating. `seq` gives every server-backed entry a total order, so
+ * out-of-order arrival self-corrects.
+ *
+ * The ephemeral token stream still flows through the old `stream` path: `narration.delta`
+ * is what makes the DM appear to type and is deliberately never persisted. Once ANY
+ * authoritative data has been applied, {@link TranscriptState.authoritative} flips and the
+ * reducer stops folding the thin signal frames (`narration.message`, `tool`, `vote`,
+ * `state`, …) that now have durable transcript counterparts — otherwise every line would
+ * render twice. Surfaces that never fetch the server transcript (e.g. the dashboard
+ * activity chip) leave the flag false and keep the original behaviour exactly.
+ *
+ * Still a PURE reducer plus small (de)serialization helpers — no React, no network.
  */
+import type { AiDmTranscriptEvent } from '@campfire/schema';
 import type { AiDmStreamEvent } from '../../lib/useAiDmStream';
 
 /** Max entries retained per campaign; the oldest are dropped past this (design: ~200). */
 export const MAX_TRANSCRIPT_ENTRIES = 200;
 
-/** localStorage key for a campaign's persisted transcript. */
-export function transcriptStorageKey(campaignId: number): string {
-  return `cf.aiDm.transcript.${campaignId}`;
+/**
+ * Which surface owns a cached transcript (#572).
+ *
+ * Two surfaces are mounted at once on the Table route: the page itself, which reads the
+ * server's AUTHORITATIVE transcript (`dm:<turnId>` bubble ids, every entry carrying a
+ * `seq`), and the Layout-level live-activity provider, which is non-authoritative and folds
+ * the legacy signal frames into bubbles with client-minted random ids and no `seq`. Those
+ * two formats are not interchangeable: a legacy snapshot loaded by the authoritative page
+ * cannot be matched by `eventId` or `dm:<turnId>`, so the same narration would render in
+ * two coexisting bubbles.
+ *
+ * They therefore get separate keys. Namespacing is preferred over having either surface
+ * detect the other's writes, because it is the only option that does not require the two to
+ * know about each other — whichever one is mounted, it reads back exactly what it wrote.
+ */
+export type TranscriptStorageScope = 'table' | 'activity';
+
+/**
+ * localStorage key for a campaign's cached transcript.
+ *
+ * Since #572 this is a PAINT CACHE, not the source of truth — the server transcript is
+ * refetched on mount and reconciled over it. The `v2` generation deliberately orphans
+ * caches written before #572: those entries carry client-minted random ids that would
+ * duplicate against the server's stable `eventId`s instead of merging with them.
+ * (Namespacing this key per USER is issue #573 and is NOT solved here.)
+ */
+export function transcriptStorageKey(campaignId: number, scope: TranscriptStorageScope = 'table'): string {
+  return scope === 'table' ? `cf.aiDm.transcript.v2.${campaignId}` : `cf.aiDm.transcript.v2.${scope}.${campaignId}`;
 }
 
 // ---- Entry shapes ---------------------------------------------------------
 
-/** A player action, echoed locally on submit and rendered with speaker identity. */
+/**
+ * A player action. Optimistically echoed on submit, then REPLACED in place by the
+ * authoritative server event that carries the same {@link PlayerEntry.clientRef} (#572).
+ */
 export interface PlayerEntry {
   id: string;
   kind: 'player';
@@ -34,6 +74,15 @@ export interface PlayerEntry {
   /** The character they play, when acting in-character (design point 3). */
   characterName?: string;
   text: string;
+  /** Authoritative per-campaign order, once the server event has landed (#572). */
+  seq?: number;
+  /**
+   * Optimistic-echo correlation token this client minted for its own submission (#572).
+   * The server echoes it back on the persisted event, and the sender swaps its local entry
+   * for the authoritative one. A token, not content equality: two players typing "I attack"
+   * in the same round must still produce two lines.
+   */
+  clientRef?: string;
   at: string;
 }
 
@@ -62,6 +111,14 @@ export interface DmEntry {
   live: string;
   status: 'streaming' | 'done';
   meta?: DmTurnMeta;
+  /** Authoritative order of the newest server event folded into this bubble (#572). */
+  seq?: number;
+  /**
+   * `eventId`s of the narration steps already committed here (#572). A bubble spans a whole
+   * turn, so it absorbs several server events; this is what makes re-delivery (live frame
+   * then a REST page after reconnect) idempotent rather than doubling the narration.
+   */
+  eventIds?: string[];
   at: string;
 }
 
@@ -74,6 +131,8 @@ export interface ToolEntry {
   proposed: boolean;
   /** Server-derived encounter identity when the tool mutated a fight (#825). Persisted with the transcript. */
   encounterId?: number;
+  /** Authoritative per-campaign order (#572). */
+  seq?: number;
   at: string;
 }
 
@@ -90,6 +149,8 @@ export interface SystemEntry {
   text?: string;
   /** Optional structured payload (e.g. the stuck reason, vote outcome) for the page. */
   data?: Record<string, string>;
+  /** Authoritative per-campaign order (#572). */
+  seq?: number;
   at: string;
 }
 
@@ -97,6 +158,19 @@ export type TranscriptEntry = PlayerEntry | DmEntry | ToolEntry | SystemEntry;
 
 export interface TranscriptState {
   entries: TranscriptEntry[];
+  /**
+   * OPT-IN (#572): this surface reads the server's authoritative transcript, so durable
+   * events are the source of truth here. While true the reducer folds `transcript` frames
+   * and IGNORES the thin signal frames that now have durable counterparts, so every line
+   * renders exactly once. Surfaces that never fetch the transcript (the dashboard activity
+   * chip, the encounter driver dock) leave it false: they keep folding the signal frames
+   * and ignore `transcript` frames entirely, behaving exactly as they did before #572.
+   * Must be turned on explicitly — inferring it from the first server event would let a
+   * non-authoritative surface fold both copies of that turn's narration.
+   */
+  authoritative?: boolean;
+  /** Highest server `seq` folded in — the reconnect watermark ("give me the rest"). */
+  lastSeq?: number;
 }
 
 export const emptyTranscript: TranscriptState = { entries: [] };
@@ -111,8 +185,29 @@ export function dmEntryText(entry: DmEntry): string {
 export type TranscriptAction =
   /** Fold one SSE event into the transcript. */
   | { type: 'stream'; event: AiDmStreamEvent }
+  /**
+   * Declare that this surface reads the server's authoritative transcript (#572). Must be
+   * dispatched before `transcript` SSE frames will be folded — see
+   * {@link TranscriptState.authoritative}.
+   */
+  | { type: 'authoritative' }
+  /**
+   * Fold authoritative server transcript events (#572) — from a REST page (initial load,
+   * scroll-back, or reconnect gap-fill) or from a live `transcript` SSE frame. Idempotent:
+   * events are merged by their stable `eventId`, so re-delivery never duplicates a line.
+   */
+  | { type: 'serverEvents'; events: AiDmTranscriptEvent[] }
   /** Echo this client's own submission immediately (before/independent of the stream). */
-  | { type: 'localPlayer'; memberName: string; characterName?: string; text: string; id?: string; at?: string }
+  | {
+      type: 'localPlayer';
+      memberName: string;
+      characterName?: string;
+      text: string;
+      id?: string;
+      /** Correlation token so the authoritative echo REPLACES this entry rather than duplicating it (#572). */
+      clientRef?: string;
+      at?: string;
+    }
   /**
    * Drop a locally-originated system line into the transcript (e.g. a rules-lookup answer,
    * which is a retrieval result this client requested rather than a broadcast SSE signal).
@@ -145,10 +240,87 @@ function openBubbleIndex(entries: TranscriptEntry[]): number {
   return -1;
 }
 
+/**
+ * Where an authoritative event for `turnId` should fold (#572), or -1 to open a new bubble.
+ *
+ * Prefers the bubble already keyed to this turn. Failing that it may adopt the bubble the
+ * LIVE stream opened at `turn.start`, which has a generated id because the client does not
+ * learn the turn id until the first durable event arrives.
+ *
+ * It must NOT adopt a bubble already claimed by a different turn. A `dm:<turnId>` id means
+ * claimed, and a claimed bubble can still be `streaming` — a REST replay carries narration
+ * before the matching `turn.ended`, and a cancelled turn may never get one at all. Without
+ * this guard the next turn's narration merged into the previous turn's bubble, silently
+ * fusing two turns into one and dragging its ordering anchor back to the older turn.
+ */
+function foldTargetIndex(entries: TranscriptEntry[], id: string): number {
+  const keyed = indexOfId(entries, id);
+  if (keyed !== -1) return keyed;
+  const open = openBubbleIndex(entries);
+  if (open === -1) return -1;
+  return (entries[open] as DmEntry).id.startsWith('dm:') ? -1 : open;
+}
+
 /** Append an entry, enforcing the bounded cap by dropping the oldest. */
 function push(entries: TranscriptEntry[], entry: TranscriptEntry): TranscriptEntry[] {
   const next = [...entries, entry];
   return next.length > MAX_TRANSCRIPT_ENTRIES ? next.slice(next.length - MAX_TRANSCRIPT_ENTRIES) : next;
+}
+
+/**
+ * Ordering sentinel for pre-join seed context (#572): the joined-mid-session divider, the
+ * seeded scene label, and the `lastNarration` bubble.
+ *
+ * Those entries have no server row and therefore no real `seq`, but they are HISTORY, not
+ * live activity — they must sit above everything the session goes on to record. Treating
+ * them like the other seq-less entries sorted them to the tail, pinning the marker that
+ * introduces the log underneath every line it introduces, permanently.
+ *
+ * 0 is safe as a sentinel rather than a value the server could collide with: the server
+ * assigns `(MAX(seq) ?? 0) + 1`, so the first row of a campaign is seq 1, and the wire
+ * schema declares `seq` as `z.number().int().positive()` — 0 is not representable on the
+ * wire at all. Note that entries are partitioned on `=== undefined`, never truthiness, so
+ * a 0 here sorts as a number instead of being mistaken for "no seq".
+ */
+export const SEED_SEQ = 0;
+
+/**
+ * Total order over merged entries (#572).
+ *
+ * Server-backed entries sort by `seq`, the authoritative per-campaign sequence — NOT by
+ * timestamp, which cannot order two actions taken in the same millisecond. Pre-join seed
+ * context carries {@link SEED_SEQ} so it leads the log.
+ *
+ * Entries with NO `seq` are the genuinely live ones — an optimistic echo whose server event
+ * has not landed yet, and the still-open DM bubble — and stay at the tail in arrival order,
+ * which is exactly where the newest activity belongs. Stable: entries that compare equal
+ * keep their relative order, so the divider/scene/lastNarration triple holds its shape.
+ */
+function orderBySeq(entries: TranscriptEntry[]): TranscriptEntry[] {
+  const sequenced: TranscriptEntry[] = [];
+  const pending: TranscriptEntry[] = [];
+  for (const entry of entries) (entry.seq === undefined ? pending : sequenced).push(entry);
+  sequenced.sort((a, b) => (a.seq as number) - (b.seq as number));
+  const merged = [...sequenced, ...pending];
+  return merged.length > MAX_TRANSCRIPT_ENTRIES ? merged.slice(merged.length - MAX_TRANSCRIPT_ENTRIES) : merged;
+}
+
+/**
+ * The ordering anchor when folding a server event into an existing DM bubble (#572).
+ *
+ * Normally the bubble keeps its FIRST event's seq so it cannot drift below its own turn's
+ * tool chips. The one value it must not keep is {@link SEED_SEQ}: that marks pre-join
+ * history, and a bubble carrying it would pin live narration above the entire log. The seed
+ * bubble is created `done`, so `foldTargetIndex` cannot currently select it — this is
+ * insurance against that becoming untrue, since the failure would be silent and baffling.
+ */
+function foldAnchorSeq(bubble: DmEntry, eventSeq: number): number {
+  return bubble.seq === undefined || bubble.seq === SEED_SEQ ? eventSeq : bubble.seq;
+}
+
+/** Index of the entry with this id, or -1. */
+function indexOfId(entries: TranscriptEntry[], id: string): number {
+  return entries.findIndex((e) => e.id === id);
 }
 
 /**
@@ -158,10 +330,29 @@ function push(entries: TranscriptEntry[], entry: TranscriptEntry): TranscriptEnt
 function applyStream(state: TranscriptState, event: AiDmStreamEvent): TranscriptState {
   const { entries } = state;
 
+  // #572: once the authoritative server transcript is in play, the durable event IS the
+  // line. These thin signal frames each have a persisted counterpart that arrives as a
+  // `transcript` frame (or in a REST page), so folding both would render everything twice.
+  // Only the ephemeral turn/typing frames below stay client-side: `narration.delta` is the
+  // token stream that makes the DM appear to type and is deliberately never persisted.
+  if (
+    state.authoritative
+    && (event.type === 'narration.message'
+      || event.type === 'tool'
+      || event.type === 'stuck'
+      || event.type === 'recovered'
+      || event.type === 'state'
+      || event.type === 'vote'
+      || event.type === 'takeover')
+  ) {
+    return state;
+  }
+
   switch (event.type) {
     case 'turn.start':
       // Open a fresh bubble the deltas will fill.
       return {
+        ...state,
         entries: push(entries, {
           id: makeId(),
           kind: 'dm',
@@ -177,6 +368,7 @@ function applyStream(state: TranscriptState, event: AiDmStreamEvent): Transcript
       if (idx === -1) {
         // A delta with no open bubble (missed turn.start) — open one lazily.
         return {
+          ...state,
           entries: push(entries, {
             id: makeId(),
             kind: 'dm',
@@ -190,7 +382,7 @@ function applyStream(state: TranscriptState, event: AiDmStreamEvent): Transcript
       const bubble = entries[idx] as DmEntry;
       const next = entries.slice();
       next[idx] = { ...bubble, live: bubble.live + event.text };
-      return { entries: next };
+      return { ...state, entries: next };
     }
 
     case 'narration.message': {
@@ -198,6 +390,7 @@ function applyStream(state: TranscriptState, event: AiDmStreamEvent): Transcript
       const idx = openBubbleIndex(entries);
       if (idx === -1) {
         return {
+          ...state,
           entries: push(entries, {
             id: makeId(),
             kind: 'dm',
@@ -215,7 +408,7 @@ function applyStream(state: TranscriptState, event: AiDmStreamEvent): Transcript
         committed: event.text ? [...bubble.committed, event.text] : bubble.committed,
         live: '',
       };
-      return { entries: next };
+      return { ...state, entries: next };
     }
 
     case 'turn.error':
@@ -240,11 +433,12 @@ function applyStream(state: TranscriptState, event: AiDmStreamEvent): Transcript
         status: 'done',
         meta,
       };
-      return { entries: next };
+      return { ...state, entries: next };
     }
 
     case 'tool':
       return {
+        ...state,
         entries: push(entries, {
           id: makeId(),
           kind: 'tool',
@@ -258,6 +452,7 @@ function applyStream(state: TranscriptState, event: AiDmStreamEvent): Transcript
 
     case 'stuck':
       return {
+        ...state,
         entries: push(entries, {
           id: makeId(),
           kind: 'system',
@@ -270,6 +465,7 @@ function applyStream(state: TranscriptState, event: AiDmStreamEvent): Transcript
 
     case 'recovered':
       return {
+        ...state,
         entries: push(entries, {
           id: makeId(),
           kind: 'system',
@@ -284,6 +480,7 @@ function applyStream(state: TranscriptState, event: AiDmStreamEvent): Transcript
       const variant: SystemEntry['variant'] =
         event.state === 'paused' ? 'paused' : event.state === 'running' ? 'resumed' : 'info';
       return {
+        ...state,
         entries: push(entries, {
           id: makeId(),
           kind: 'system',
@@ -296,6 +493,7 @@ function applyStream(state: TranscriptState, event: AiDmStreamEvent): Transcript
 
     case 'vote':
       return {
+        ...state,
         entries: push(entries, {
           id: makeId(),
           kind: 'system',
@@ -311,6 +509,7 @@ function applyStream(state: TranscriptState, event: AiDmStreamEvent): Transcript
 
     case 'takeover':
       return {
+        ...state,
         entries: push(entries, {
           id: makeId(),
           kind: 'system',
@@ -319,6 +518,16 @@ function applyStream(state: TranscriptState, event: AiDmStreamEvent): Transcript
           at: event.at,
         }),
       };
+
+    case 'transcript':
+      // A live authoritative event — same fold as a REST page, so the two are interchangeable.
+      // Ignored on surfaces that have not opted in: they still fold the legacy signal frames,
+      // and folding both would render this turn's narration twice.
+      return state.authoritative ? applyServerEvent(state, event.event) : state;
+
+    case 'transcript.reset':
+      // The DM erased the transcript and `seq` restarted; a stale watermark would strand us.
+      return state.authoritative ? { ...emptyTranscript, authoritative: true } : state;
 
     default: {
       // Exhaustiveness guard — a new event kind must be handled explicitly.
@@ -329,26 +538,261 @@ function applyStream(state: TranscriptState, event: AiDmStreamEvent): Transcript
   }
 }
 
+// ---- Authoritative server events (#572) -----------------------------------
+
+function asText(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
+function asStringMap(payload: Record<string, unknown>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(payload)) {
+    if (typeof value === 'string') out[key] = value;
+    else if (typeof value === 'number' || typeof value === 'boolean') out[key] = String(value);
+  }
+  return out;
+}
+
+/**
+ * Fold one authoritative server transcript event into the view model (#572).
+ *
+ * Every branch is IDEMPOTENT — the same event may arrive twice (a live `transcript` frame
+ * and then a REST page after a reconnect) and must merge, not duplicate. Standalone kinds
+ * key on the server `eventId`; narration and turn-end fold into the DM bubble for their
+ * `turnId`, which is why the server stamps one, and that bubble tracks the `eventId`s it
+ * has already absorbed.
+ */
+function applyServerEvent(state: TranscriptState, event: AiDmTranscriptEvent): TranscriptState {
+  const base: TranscriptState = {
+    ...state,
+    authoritative: true,
+    lastSeq: Math.max(state.lastSeq ?? 0, event.seq),
+  };
+  const entries = state.entries;
+  const bubbleId = event.turnId ? `dm:${event.turnId}` : null;
+
+  /** Replace an entry in place (id-keyed merge), or append when it is new. */
+  const upsert = (entry: TranscriptEntry): TranscriptState => {
+    const idx = indexOfId(entries, entry.id);
+    if (idx === -1) return { ...base, entries: orderBySeq(push(entries, entry)) };
+    const next = entries.slice();
+    next[idx] = entry;
+    return { ...base, entries: orderBySeq(next) };
+  };
+
+  switch (event.kind) {
+    case 'player.action': {
+      // Dedup the SENDER's optimistic echo: match on the correlation token this client
+      // minted, never on text — two players typing the same words are two real lines.
+      const localIdx = event.clientRef
+        ? entries.findIndex((e) => e.kind === 'player' && e.clientRef === event.clientRef && e.id !== event.eventId)
+        : -1;
+      const entry: PlayerEntry = {
+        id: event.eventId,
+        kind: 'player',
+        memberName: event.actorName ?? '',
+        characterName: asText(event.payload.characterName) || undefined,
+        text: asText(event.payload.text),
+        seq: event.seq,
+        ...(event.clientRef ? { clientRef: event.clientRef } : {}),
+        at: event.at,
+      };
+      if (localIdx !== -1) {
+        const next = entries.slice();
+        next[localIdx] = entry;
+        return { ...base, entries: orderBySeq(next) };
+      }
+      return upsert(entry);
+    }
+
+    case 'narration': {
+      const text = asText(event.payload.text);
+      if (!text) return base;
+      const id = bubbleId ?? `dm:${event.eventId}`;
+      // Adopt the bubble the live token stream already opened, so the typing effect and the
+      // authoritative text are the same bubble rather than two stacked ones — but never a
+      // bubble that already belongs to another turn (see foldTargetIndex).
+      const idx = foldTargetIndex(entries, id);
+      if (idx === -1) {
+        return {
+          ...base,
+          entries: orderBySeq(
+            push(entries, {
+              id,
+              kind: 'dm',
+              committed: [text],
+              live: '',
+              status: 'streaming',
+              seq: event.seq,
+              eventIds: [event.eventId],
+              at: event.at,
+            }),
+          ),
+        };
+      }
+      const bubble = entries[idx] as DmEntry;
+      if (bubble.eventIds?.includes(event.eventId)) return base; // already folded in
+      const next = entries.slice();
+      next[idx] = {
+        ...bubble,
+        id,
+        committed: [...bubble.committed, text],
+        live: '',
+        // ANCHOR the bubble at its FIRST event, never the latest. A bubble spans a whole
+        // turn, but the server records each narration step BEFORE the tools that step
+        // invoked; advancing the bubble's seq on every fold would push it past its own
+        // turn's tool chips and render "what the AI did" above "what the AI said" — in the
+        // one feature whose point is an ordered log. Anchoring also matches the pre-#572
+        // live behaviour, where the bubble opened at turn.start and chips appended below.
+        seq: foldAnchorSeq(bubble, event.seq),
+        eventIds: [...(bubble.eventIds ?? []), event.eventId],
+      };
+      return { ...base, entries: orderBySeq(next) };
+    }
+
+    case 'turn.ended': {
+      const id = bubbleId ?? `dm:${event.eventId}`;
+      const idx = foldTargetIndex(entries, id);
+      const meta: DmTurnMeta = {
+        stopReason: asText(event.payload.stopReason),
+        steps: typeof event.payload.steps === 'number' ? event.payload.steps : 0,
+        tokensUsed: typeof event.payload.tokensUsed === 'number' ? event.payload.tokensUsed : 0,
+        budgetRemaining: typeof event.payload.budgetRemaining === 'number' ? event.payload.budgetRemaining : 0,
+        ...(event.payload.tokensUsageUnknown === true ? { tokensUsageUnknown: true } : {}),
+        ...(typeof event.payload.errorMessage === 'string' ? { errorMessage: event.payload.errorMessage } : {}),
+      };
+      if (idx === -1) {
+        // A turn whose narration never landed here (late join mid-turn) still gets its
+        // closing bubble, so the transcript records that a turn happened and how it ended.
+        return {
+          ...base,
+          entries: orderBySeq(
+            push(entries, { id, kind: 'dm', committed: [], live: '', status: 'done', meta, seq: event.seq, at: event.at }),
+          ),
+        };
+      }
+      const bubble = entries[idx] as DmEntry;
+      const next = entries.slice();
+      next[idx] = {
+        ...bubble,
+        id,
+        // Commit any trailing live deltas the aggregated narration never repaired.
+        committed: bubble.live ? [...bubble.committed, bubble.live] : bubble.committed,
+        live: '',
+        status: 'done',
+        meta,
+        // turn.ended is the LAST event of a turn; adopting its seq would sort the bubble
+        // below every tool chip the turn produced. Keep the anchor (see the narration fold).
+        seq: foldAnchorSeq(bubble, event.seq),
+      };
+      return { ...base, entries: orderBySeq(next) };
+    }
+
+    case 'turn.cancelled':
+      return upsert({
+        id: event.eventId,
+        kind: 'system',
+        variant: 'info',
+        text: asText(event.payload.narration) || undefined,
+        data: { stopReason: asText(event.payload.stopReason) },
+        seq: event.seq,
+        at: event.at,
+      });
+
+    case 'tool':
+      return upsert({
+        id: event.eventId,
+        kind: 'tool',
+        name: asText(event.payload.name),
+        isError: event.payload.isError === true,
+        proposed: event.payload.proposed === true,
+        ...(typeof event.payload.encounterId === 'number' ? { encounterId: event.payload.encounterId } : {}),
+        seq: event.seq,
+        at: event.at,
+      });
+
+    case 'vote':
+      return upsert({
+        id: event.eventId,
+        kind: 'system',
+        variant: 'vote',
+        data: asStringMap(event.payload),
+        seq: event.seq,
+        at: event.at,
+      });
+
+    case 'control': {
+      const control = asText(event.payload.control);
+      const variant: SystemEntry['variant'] =
+        control === 'paused'
+          ? 'paused'
+          : control === 'resumed'
+            ? 'resumed'
+            : control === 'takeover'
+              ? 'takeover'
+              : control === 'stuck'
+                ? 'stuck'
+                : control === 'recovered'
+                  ? 'recovered'
+                  : 'info';
+      return upsert({
+        id: event.eventId,
+        kind: 'system',
+        variant,
+        text: asText(event.payload.detail) || undefined,
+        data: asStringMap(event.payload),
+        seq: event.seq,
+        at: event.at,
+      });
+    }
+
+    default:
+      // Forward-compatible: an unknown future kind is ignored rather than breaking the feed,
+      // but its `seq` is still absorbed so the reconnect watermark cannot stall on it.
+      return base;
+  }
+}
+
 /** The pure transcript reducer. */
 export function transcriptReducer(state: TranscriptState, action: TranscriptAction): TranscriptState {
   switch (action.type) {
     case 'stream':
       return applyStream(state, action.event);
 
-    case 'localPlayer':
+    case 'authoritative':
+      return state.authoritative ? state : { ...state, authoritative: true };
+
+    case 'serverEvents': {
+      // Apply in ascending seq so a batch (a REST page, or events replayed after a
+      // reconnect) lands in the authoritative order regardless of how it was delivered.
+      const ordered = [...action.events].sort((a, b) => a.seq - b.seq);
+      return ordered.reduce(applyServerEvent, state);
+    }
+
+    case 'localPlayer': {
+      // Dedup the OTHER direction (#572): the authoritative event can beat the POST's own
+      // HTTP response back over SSE, in which case the line is already on screen and this
+      // optimistic echo must not append a second copy.
+      if (action.clientRef && state.entries.some((e) => e.kind === 'player' && e.clientRef === action.clientRef)) {
+        return state;
+      }
       return {
+        ...state,
         entries: push(state.entries, {
           id: action.id ?? makeId(),
           kind: 'player',
           memberName: action.memberName,
           characterName: action.characterName,
           text: action.text,
+          ...(action.clientRef ? { clientRef: action.clientRef } : {}),
           at: action.at ?? new Date().toISOString(),
         }),
       };
+    }
 
     case 'localSystem':
       return {
+        ...state,
         entries: push(state.entries, {
           id: action.id ?? makeId(),
           kind: 'system',
@@ -361,11 +805,13 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
 
     case 'seed': {
       const at = action.at ?? new Date().toISOString();
+      // SEED_SEQ marks these as pre-join history so they lead the log rather than sinking
+      // below the session's own events (see the constant for why 0 cannot collide).
       const entries: TranscriptEntry[] = [
-        { id: makeId(), kind: 'system', variant: 'divider', at },
+        { id: makeId(), kind: 'system', variant: 'divider', seq: SEED_SEQ, at },
       ];
       if (action.scene) {
-        entries.push({ id: makeId(), kind: 'system', variant: 'scene', text: action.scene, at });
+        entries.push({ id: makeId(), kind: 'system', variant: 'scene', text: action.scene, seq: SEED_SEQ, at });
       }
       if (action.lastNarration) {
         entries.push({
@@ -374,10 +820,11 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
           committed: [action.lastNarration],
           live: '',
           status: 'done',
+          seq: SEED_SEQ,
           at,
         });
       }
-      return { entries };
+      return { ...state, entries };
     }
 
     case 'hydrate':
@@ -392,6 +839,19 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
       return state;
     }
   }
+}
+
+/**
+ * Mint an optimistic-echo correlation token for a submission (#572).
+ *
+ * The composer sends this with the action; the server echoes it back verbatim on the
+ * persisted `player.action` event so the SENDER replaces its local entry rather than
+ * rendering the action twice, while every other player simply gets a new line. A token,
+ * not a content hash: two players typing "I attack" in the same round are two real lines
+ * and any content-equality heuristic would wrongly collapse them.
+ */
+export function newClientRef(): string {
+  return makeId();
 }
 
 /**
@@ -415,10 +875,10 @@ function hasStorage(): boolean {
 }
 
 /** Load a campaign's persisted transcript, or the empty state on miss/parse error. */
-export function loadTranscript(campaignId: number): TranscriptState {
+export function loadTranscript(campaignId: number, scope: TranscriptStorageScope = 'table'): TranscriptState {
   if (!hasStorage()) return emptyTranscript;
   try {
-    const raw = window.localStorage.getItem(transcriptStorageKey(campaignId));
+    const raw = window.localStorage.getItem(transcriptStorageKey(campaignId, scope));
     if (!raw) return emptyTranscript;
     const parsed: unknown = JSON.parse(raw);
     if (parsed && typeof parsed === 'object' && Array.isArray((parsed as TranscriptState).entries)) {
@@ -432,25 +892,38 @@ export function loadTranscript(campaignId: number): TranscriptState {
   }
 }
 
-/** Persist a campaign's transcript (best-effort; a full/blocked store is swallowed). */
-export function saveTranscript(campaignId: number, state: TranscriptState): void {
+/**
+ * Persist a campaign's transcript cache (best-effort; a full/blocked store is swallowed).
+ *
+ * An EMPTY state never overwrites a non-empty cache (#572). Several surfaces share this
+ * key, and a component that has not hydrated yet — or that re-hydrates on a driver-mode
+ * flip — transiently holds zero entries; letting that write through erased the scrollback
+ * another surface was about to load. Clearing is an explicit operation
+ * ({@link clearTranscript}), never a side effect of a mount race.
+ */
+export function saveTranscript(
+  campaignId: number,
+  state: TranscriptState,
+  scope: TranscriptStorageScope = 'table',
+): void {
   if (!hasStorage()) return;
+  if (state.entries.length === 0 && loadTranscript(campaignId, scope).entries.length > 0) return;
   try {
     const bounded =
       state.entries.length > MAX_TRANSCRIPT_ENTRIES
         ? { entries: state.entries.slice(state.entries.length - MAX_TRANSCRIPT_ENTRIES) }
         : state;
-    window.localStorage.setItem(transcriptStorageKey(campaignId), JSON.stringify(bounded));
+    window.localStorage.setItem(transcriptStorageKey(campaignId, scope), JSON.stringify(bounded));
   } catch {
     /* quota / privacy mode — transcript is best-effort, not authoritative */
   }
 }
 
 /** Remove a campaign's persisted transcript. */
-export function clearTranscript(campaignId: number): void {
+export function clearTranscript(campaignId: number, scope: TranscriptStorageScope = 'table'): void {
   if (!hasStorage()) return;
   try {
-    window.localStorage.removeItem(transcriptStorageKey(campaignId));
+    window.localStorage.removeItem(transcriptStorageKey(campaignId, scope));
   } catch {
     /* ignore */
   }

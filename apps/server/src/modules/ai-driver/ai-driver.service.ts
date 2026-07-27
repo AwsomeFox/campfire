@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
 import { eq } from 'drizzle-orm';
 import { buildMcpEnvelope } from '../../common/api-error.envelope';
@@ -29,6 +30,7 @@ import { AiProviderError } from '../ai-dm/providers/errors';
 import { DEFAULT_IDLE_TIMEOUT_MS } from '../ai-dm/providers/http';
 import { AI_PROVIDER_RESOLVER, resolveProviderForExecution, type AiProviderResolver } from './ai-provider-resolver';
 import { AiDmStreamService } from './ai-driver-stream.service';
+import { AiDmTranscriptService } from './ai-driver-transcript.service';
 import { extractToolResourceIdentity, type ToolResourceIdentity } from './ai-dm-tool-resource';
 import {
   checkDriverPolicyRateLimits,
@@ -340,6 +342,37 @@ export interface RunTurnOptions {
   proactive?: boolean;
   characterId?: number;
   narrationLanguage?: NarrationLanguage;
+  /**
+   * Optimistic-echo correlation token minted by the submitting client (#572). Echoed back
+   * verbatim on the persisted `player.action` transcript event so the sender REPLACES its
+   * local optimistic entry rather than rendering the action twice. Every other client sees
+   * a plain new line. Deliberately a token, not content equality: two players typing "I
+   * attack" in the same round must still produce two transcript lines.
+   */
+  clientRef?: string;
+  /** Display name for the transcript's player-action line (falls back to the user's name). */
+  actorName?: string;
+  /** Character the action was spoken as, recorded on the transcript line for attribution. */
+  characterName?: string;
+  /**
+   * What the player actually TYPED (#572). `input` is what the model receives and carries a
+   * speaker prefix (#317) plus, for proactive/lever turns, synthesized framing; the shared
+   * transcript should read as the player wrote it. Falls back to `input`.
+   */
+  displayText?: string;
+  /**
+   * INTERNAL (#572): this turn is a queued action being drained, whose `player.action`
+   * transcript row was already written when it was accepted onto the queue. Suppresses a
+   * duplicate row. Never set by a client — the DTO does not accept it.
+   */
+  dequeued?: boolean;
+  /**
+   * INTERNAL (#572): this turn is a stuck-ladder lever REPLAYING an earlier action rather
+   * than a new one. `input` here is model machinery — the replayed action still carrying
+   * its #317 speaker prefix, plus injected framing like the dispute block — and must never
+   * reach the shared table log. The lever records its own clean `control` event instead.
+   */
+  lever?: 'nudge' | 'flag';
 }
 
 interface ActionQueueEntry {
@@ -1048,6 +1081,13 @@ export class AiDriverService {
   /** Last player input per campaign — replayed by the retry/nudge/flag levers (#314). */
   private readonly lastInputs = new Map<number, string>();
   private readonly actionQueues = new Map<number, ActionQueueEntry[]>();
+  /**
+   * Correlation id of the turn currently narrating in each campaign (#572). Stamped onto
+   * every transcript row a turn produces (narration steps, tool summaries, the turn-end
+   * record) so a client rebuilding scrollback from a REST page groups them into the SAME
+   * DM bubble the live stream produced, instead of one bubble per narration step.
+   */
+  private readonly currentTurnIds = new Map<number, string>();
   private voteSeq = 0;
   private confirmationSeq = 0;
 
@@ -1064,6 +1104,8 @@ export class AiDriverService {
     private readonly encounters: EncountersService,
     private readonly members: MembersService,
     private readonly characters: CharactersService,
+    private readonly transcript: AiDmTranscriptService,
+    // Optional, so it must stay last in the parameter list (#559).
     @Inject(DB) private readonly db?: DrizzleDb,
   ) {
     // Mode-switch teardown without an AiDm→AiDriver DI edge (forwardRef blows the stack here).
@@ -1366,6 +1408,80 @@ export class AiDriverService {
     return 'ok';
   }
 
+  // ---- Authoritative table transcript (#572) ------------------------------------
+  // Every durable table event funnels through these three helpers so the persisted
+  // transcript and the SSE broadcast can never drift apart: the row is written first and
+  // the frame is emitted from inside AiDmTranscriptService.record, after the commit.
+
+  /** The correlation id of the turn currently narrating, if any. */
+  private turnIdFor(campaignId: number): string | null {
+    return this.currentTurnIds.get(campaignId) ?? null;
+  }
+
+  /**
+   * Persist + broadcast an ACCEPTED player action (#572) — the event this whole issue is
+   * about. Before this, the action existed only as a local optimistic entry in the sending
+   * browser, so every other player watched the AI answer a prompt they never saw.
+   *
+   * `clientRef` is echoed straight back so the sender swaps its optimistic entry for the
+   * authoritative one instead of rendering both.
+   */
+  private recordPlayerAction(
+    campaignId: number,
+    triggeredBy: RequestUser,
+    input: string,
+    opts: RunTurnOptions,
+  ): void {
+    // A proactive turn has no player behind it — the AI acted on its own (#1044). Recording
+    // one would attribute the system's prompt to a human at the table.
+    if (opts.proactive) return;
+    // A retry / dispute REPLAYS an action that is already in the transcript; it is not a new
+    // one. Recording it again would both duplicate the line and — because `input` on these
+    // paths is the model prompt, not what anyone typed — publish the speaker prefix and the
+    // injected dispute framing to every player at the table. The lever writes its own
+    // `control` event carrying only the player-authored text.
+    if (opts.lever) return;
+    this.transcript.record({
+      campaignId,
+      kind: 'player.action',
+      actorUserId: triggeredBy.id,
+      actorName: opts.actorName ?? triggeredBy.name ?? null,
+      clientRef: opts.clientRef ?? null,
+      payload: {
+        text: opts.displayText ?? input,
+        ...(opts.characterName ? { characterName: opts.characterName } : {}),
+        ...(opts.characterId !== undefined ? { characterId: opts.characterId } : {}),
+      },
+    });
+  }
+
+  /** Persist + broadcast one aggregated narration step (never a raw token delta). */
+  private recordNarration(campaignId: number, text: string): void {
+    if (!text) return;
+    this.transcript.record({
+      campaignId,
+      kind: 'narration',
+      turnId: this.turnIdFor(campaignId),
+      payload: { text },
+    });
+  }
+
+  /**
+   * Persist + broadcast a table control change — pause/resume, stuck/recovered, human
+   * takeover, handback, seat state (#572). Thin by design: `payload` names the transition
+   * and clients refetch GET /ai-dm/session for authoritative state, exactly like the
+   * pre-existing signal frames.
+   */
+  private recordControl(campaignId: number, payload: Record<string, unknown>, actor?: RequestUser): void {
+    this.transcript.record({
+      campaignId,
+      kind: 'control',
+      actorUserId: actor?.id ?? null,
+      actorName: actor?.name ?? null,
+      payload,
+    });
+  }
+
   private emitTurnEnd(
     campaignId: number,
     stopReason: AiDmStopReason,
@@ -1390,8 +1506,17 @@ export class AiDriverService {
         budgetRemaining,
       });
     }
+    const turnId = this.turnIdFor(campaignId);
     if (shouldEmitTurnCancelled(stopReason)) {
       this.stream.emit({ type: 'turn.cancelled', campaignId, narration, stopReason });
+      // #572: a cancellation is a durable table event — a late joiner must be able to see
+      // that a turn was stopped, not just that narration trailed off.
+      this.transcript.record({
+        campaignId,
+        kind: 'turn.cancelled',
+        turnId,
+        payload: { stopReason, ...(narration ? { narration } : {}) },
+      });
     }
     this.stream.emit({
       type: 'turn.end',
@@ -1402,6 +1527,23 @@ export class AiDriverService {
       ...(tokensUsageUnknown ? { tokensUsageUnknown: true } : {}),
       budgetRemaining,
     });
+    this.transcript.record({
+      campaignId,
+      kind: 'turn.ended',
+      turnId,
+      payload: {
+        stopReason,
+        steps,
+        tokensUsed,
+        budgetRemaining,
+        ...(tokensUsageUnknown ? { tokensUsageUnknown: true } : {}),
+        ...(stopReason === 'provider_error'
+          ? { errorMessage: providerError?.message ?? describeStuck('provider_error') }
+          : {}),
+      },
+    });
+    // The turn is over: nothing further may claim its correlation id.
+    this.currentTurnIds.delete(campaignId);
   }
 
   /** Pause/resume the seat — a paused seat rejects new turns until resumed (explicit stop condition). */
@@ -1419,6 +1561,9 @@ export class AiDriverService {
     session.levers = this.leversFor(session);
     this.persistControlState(session);
     this.stream.emit({ type: 'state', campaignId, state: session.state });
+    // #572: pause/resume is a control change the whole table must see in the log, not just
+    // as a transient banner that a reloading client loses.
+    this.recordControl(campaignId, { control: paused ? 'paused' : 'resumed', state: session.state });
     return session;
   }
 
@@ -1591,6 +1736,10 @@ export class AiDriverService {
           `Action queue is full (${maxDepth} pending). Wait for the current turn to finish.`,
         );
       }
+      // The action IS accepted — it just runs later. Broadcast it NOW so the whole table
+      // sees who queued what while the current turn is still narrating (#572). Recording it
+      // only when it dequeues would recreate the original bug for queued actions.
+      this.recordPlayerAction(campaignId, triggeredBy, input, opts);
       return new Promise((resolve, reject) => {
         queue.push({ input, characterId: opts.characterId, user: triggeredBy, opts, resolve, reject, queuedAt: Date.now() });
         this.actionQueues.set(campaignId, queue);
@@ -1599,6 +1748,11 @@ export class AiDriverService {
     // Reserve the turn slot NOW, synchronously, before any further await — so a concurrent caller
     // that already cleared assertRunnable sees `running` at the guard above and is rejected.
     session.status = 'running';
+
+    // #572: the action cleared every gate (flag, seat, budget, pause, human control, queue),
+    // so it is now an ACCEPTED table event — persist + broadcast it before the AI answers.
+    // A queued action was already recorded above and must not be recorded twice on dequeue.
+    if (!opts.dequeued) this.recordPlayerAction(campaignId, triggeredBy, input, opts);
 
     // Remember the input so the retry / nudge / flag levers can replay this turn (#314).
     this.lastInputs.set(campaignId, input);
@@ -1686,6 +1840,9 @@ export class AiDriverService {
     if (opts.scene !== undefined) session.scene = opts.scene;
     this.persistControlState(session);
     resetDriverTurnCounters(session);
+    // #572: one correlation id for everything this turn persists, so a client rebuilding
+    // scrollback from REST groups the same rows into the same DM bubble the live stream did.
+    this.currentTurnIds.set(campaignId, randomUUID());
     this.stream.emit({
       type: 'turn.start',
       campaignId,
@@ -1948,6 +2105,9 @@ export class AiDriverService {
         if (text) {
           finalNarration = text;
           this.stream.emit({ type: 'narration.message', campaignId, text });
+          // #572: the aggregated step is the authoritative narration line — persist it so a
+          // late joiner / reconnect rebuilds the same bubble. Raw deltas stay ephemeral.
+          this.recordNarration(campaignId, text);
         }
 
         const toolCalls = result?.toolCalls ?? [];
@@ -2088,7 +2248,9 @@ export class AiDriverService {
 
     // Execute the next queued turn
     try {
-      const result = await this.runTurn(campaignId, next.user, next.input, next.opts);
+      // `dequeued` suppresses a SECOND player.action transcript row: the action was already
+      // persisted + broadcast when it was accepted onto the queue (#572).
+      const result = await this.runTurn(campaignId, next.user, next.input, { ...next.opts, dequeued: true });
       next.resolve(result);
     } catch (err) {
       next.reject(err);
@@ -2629,6 +2791,22 @@ export class AiDriverService {
       ...(identity.encounterId !== undefined ? { encounterId: identity.encounterId } : {}),
       ...(identity.encounterHidden !== undefined ? { encounterHidden: identity.encounterHidden } : {}),
     });
+    // #572: one durable tool summary per call. `encounterHidden` is stored so the read /
+    // broadcast boundary can strip a DM-prep encounter's id for non-DMs on EVERY delivery
+    // path (live frame, REST page, export) — not just the live one.
+    this.transcript.record({
+      campaignId,
+      kind: 'tool',
+      turnId: this.turnIdFor(campaignId),
+      payload: {
+        name,
+        isError,
+        proposed,
+        ...(pendingConfirmation ? { pendingConfirmation: true } : {}),
+        ...(identity.encounterId !== undefined ? { encounterId: identity.encounterId } : {}),
+        ...(identity.encounterHidden !== undefined ? { encounterHidden: identity.encounterHidden } : {}),
+      },
+    });
   }
 
   private queueToolConfirmation(
@@ -2689,6 +2867,7 @@ export class AiDriverService {
       detail: reason,
     });
     this.stream.emit({ type: 'state', campaignId, state: session.state });
+    this.recordControl(campaignId, { control: 'emergency-pause', state: session.state, reason });
   }
 
   // ===================================================================================
@@ -2725,6 +2904,7 @@ export class AiDriverService {
       session.levers = this.leversFor(session);
       this.persistControlState(session);
       this.stream.emit({ type: 'stuck', campaignId, reason, detail, state: session.state, levers: session.levers });
+      this.recordControl(campaignId, { control: 'stuck', reason, detail, state: session.state });
       await this.audit.log({
         actor: `ai-dm-seat:${campaignId}`,
         actorRole: 'dm',
@@ -2742,7 +2922,10 @@ export class AiDriverService {
     session.state = 'running';
     session.levers = this.leversFor(session);
     this.persistControlState(session);
-    if (wasStuck) this.stream.emit({ type: 'recovered', campaignId, state: session.state });
+    if (wasStuck) {
+      this.stream.emit({ type: 'recovered', campaignId, state: session.state });
+      this.recordControl(campaignId, { control: 'recovered', state: session.state });
+    }
   }
 
   /** The player levers currently offered given the session state (#314). */
@@ -2841,6 +3024,17 @@ export class AiDriverService {
       detail: `granted secret-read ${tool}#${entityId} by ${granter.id}${note ? ` — ${excerpt(note, 160)}` : ''}`,
     });
     this.stream.emit({ type: 'secret-approval', campaignId, action: 'granted', tool, entityId });
+    // #572 + #557: a secret-read approval NAMES a hidden entity, so this control line is
+    // DM-only at the row level — withheld from players and viewers on every delivery path
+    // (SSE frame, REST page, export), not merely hidden in their UI.
+    this.transcript.record({
+      campaignId,
+      kind: 'control',
+      actorUserId: granter.id,
+      actorName: granter.name ?? null,
+      visibility: 'dm',
+      payload: { control: 'secret-approval', action: 'granted', tool, entityId },
+    });
     return approval;
   }
 
@@ -2869,6 +3063,14 @@ export class AiDriverService {
         detail: `revoked secret-read ${tool}#${entityId} by ${granter.id}`,
       });
       this.stream.emit({ type: 'secret-approval', campaignId, action: 'revoked', tool, entityId });
+      this.transcript.record({
+        campaignId,
+        kind: 'control',
+        actorUserId: granter.id,
+        actorName: granter.name ?? null,
+        visibility: 'dm',
+        payload: { control: 'secret-approval', action: 'revoked', tool, entityId },
+      });
     }
     return session;
   }
@@ -3013,7 +3215,15 @@ export class AiDriverService {
       campaignId,
       detail: hint ? `nudge with hint by ${user.id}` : `retry by ${user.id}`,
     });
-    return this.runTurn(campaignId, user, input);
+    // #572: the table sees that someone asked the DM to try again, and the hint they gave —
+    // never the replayed prompt. A retry is a lever on the existing action, not a new one,
+    // so no second `player.action` line is written for it.
+    this.recordControl(
+      campaignId,
+      { control: 'retry', ...(hint ? { hint } : {}) },
+      user,
+    );
+    return this.runTurn(campaignId, user, input, { lever: 'nudge' });
   }
 
   /**
@@ -3060,7 +3270,11 @@ export class AiDriverService {
       detail: `dispute by ${user.id}: ${excerpt(objection, 160)}`,
     });
     await this.notify(campaignId, user, 'A ruling was disputed', `${excerpt(objection, 160)} — the AI is re-deciding.`);
-    return this.runTurn(campaignId, user, input);
+    // #572: the objection is player-authored and belongs in the shared log; the surrounding
+    // "[A player DISPUTES that ruling…]" instruction block is machinery for the model and
+    // must not be. Recorded as a control line rather than a duplicate player action.
+    this.recordControl(campaignId, { control: 'dispute', objection }, user);
+    return this.runTurn(campaignId, user, input, { lever: 'flag' });
   }
 
   /**
@@ -3155,6 +3369,13 @@ export class AiDriverService {
       detail: `${kind} vote opened by ${user.id} (threshold ${threshold}/${eligible} eligible)`,
     });
     this.stream.emit({ type: 'vote', campaignId, action: 'opened', kind });
+    this.transcript.record({
+      campaignId,
+      kind: 'vote',
+      actorUserId: user.id,
+      actorName: user.name ?? null,
+      payload: { action: 'opened', kind },
+    });
     await this.notify(campaignId, user, 'A table vote was called', `Vote to ${kind} the AI DM's last ruling — cast your ballot.`);
     return session;
   }
@@ -3183,6 +3404,13 @@ export class AiDriverService {
       detail: `${user.id} voted ${choice ? 'yes' : 'no'} on ${vote.kind}`,
     });
     this.stream.emit({ type: 'vote', campaignId, action: 'cast', kind: vote.kind });
+    this.transcript.record({
+      campaignId,
+      kind: 'vote',
+      actorUserId: user.id,
+      actorName: user.name ?? null,
+      payload: { action: 'cast', kind: vote.kind },
+    });
 
     const ballots = Object.values(vote.ballots);
     const yes = ballots.filter(Boolean).length;
@@ -3241,6 +3469,7 @@ export class AiDriverService {
       detail: `${vote.kind} vote ${outcome.toUpperCase()} (${yes}/${vote.threshold})`,
     });
     this.stream.emit({ type: 'vote', campaignId, action: 'resolved', kind: vote.kind, outcome });
+    this.transcript.record({ campaignId, kind: 'vote', payload: { action: 'resolved', kind: vote.kind, outcome } });
     if (outcome === 'passed') {
       await this.notify(campaignId, user, 'Table vote passed', `The table voted to ${vote.kind} the AI DM.`);
     }
@@ -3263,6 +3492,11 @@ export class AiDriverService {
       session.levers = this.leversFor(session);
       this.persistControlState(session);
       this.stream.emit({ type: 'vote', campaignId: session.campaignId, action: 'resolved', kind: vote.kind, outcome: 'failed' });
+      this.transcript.record({
+        campaignId: session.campaignId,
+        kind: 'vote',
+        payload: { action: 'resolved', kind: vote.kind, outcome: 'failed' },
+      });
     }
   }
 
@@ -3281,6 +3515,7 @@ export class AiDriverService {
       detail: `human takeover requested by ${user.id}`,
     });
     this.stream.emit({ type: 'takeover', campaignId, action: 'requested', memberId: user.id });
+    this.recordControl(campaignId, { control: 'takeover', action: 'requested', memberId: user.id }, user);
     await this.notify(campaignId, user, 'Human takeover requested', `${user.id} is offering to run the table for the AI DM.`);
     return session;
   }
@@ -3335,6 +3570,7 @@ export class AiDriverService {
       detail: `acting-DM seat granted to ${holder} by ${granter.id}`,
     });
     this.stream.emit({ type: 'takeover', campaignId, action: 'granted', memberId: holder });
+    this.recordControl(campaignId, { control: 'takeover', action: 'granted', memberId: holder }, granter);
     await this.notify(campaignId, granter, 'A human took the DM seat', `${holder} is now acting DM. The AI is paused.`);
     return session;
   }
@@ -3379,6 +3615,11 @@ export class AiDriverService {
       detail: `seat handed back to the AI by ${prior?.memberId ?? user.id}${note ? ` — ruling: ${excerpt(note, 200)}` : ''}`,
     });
     this.stream.emit({ type: 'takeover', campaignId, action: 'handback', memberId: prior?.memberId ?? user.id });
+    this.recordControl(
+      campaignId,
+      { control: 'takeover', action: 'handback', memberId: prior?.memberId ?? user.id },
+      user,
+    );
     await this.notify(campaignId, user, 'The AI DM resumed', `${prior?.memberId ?? user.id} handed the seat back to the AI.`);
     return session;
   }
