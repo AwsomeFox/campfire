@@ -218,13 +218,20 @@ export class OpenAiProvider implements AiProvider {
 
   private parseResponsesResult(json: ResponsesApiResponse, requestedModel: string): AiGenerateResult {
     let text = '';
+    let refused = false;
     const toolCalls: AiToolCall[] = [];
 
     for (const item of json.output ?? []) {
       if (item.type === 'message') {
         for (const part of item.content ?? []) {
           if (part.type === 'output_text') text += part.text ?? '';
+          // #598: a `refusal` part is the model declining. Its text is deliberately NOT
+          // concatenated into `text` — a refusal is not narration, and this adapter's job is
+          // to report the terminal state, not to hand the driver something to broadcast.
+          else if (part.type === 'refusal') refused = true;
         }
+      } else if (item.type === 'refusal') {
+        refused = true;
       } else if (item.type === 'function_call') {
         toolCalls.push({
           id: item.call_id ?? item.id ?? `call_${toolCalls.length}`,
@@ -242,7 +249,11 @@ export class OpenAiProvider implements AiProvider {
         completionTokens: json.usage?.output_tokens ?? 0,
         totalTokens: (json.usage?.input_tokens ?? 0) + (json.usage?.output_tokens ?? 0),
       },
-      finishReason: toolCalls.length > 0 ? 'tool_calls' : mapResponsesStatus(json.status),
+      // #598: the SAFETY terminal state outranks `tool_calls`. A response that both refused
+      // (or tripped the filter) and asked for tools previously reported `tool_calls`, which
+      // erased the refusal entirely and let the driver dispatch the very calls that came
+      // packaged with it. Resolve safety first, and only fall back to tool_calls.
+      finishReason: resolveResponsesFinish(json, refused, toolCalls.length),
       model: json.model ?? requestedModel,
     };
   }
@@ -327,13 +338,43 @@ function toResponsesTool(t: AiToolSchema): ResponsesTool {
   };
 }
 
-function mapResponsesStatus(status: string | undefined): AiFinishReason {
+/**
+ * Map a Responses-API terminal status onto a normalized finish reason.
+ *
+ * `incompleteReason` is load-bearing (#598). The Responses protocol reports BOTH "ran out of
+ * output tokens" and "the content filter stopped this" as `status: 'incomplete'`, and tells
+ * them apart only in `incomplete_details.reason`. Ignoring that field — which is what this
+ * adapter did — reported a filtered turn as `length`, i.e. as an ordinary truncation, so the
+ * safety terminal state simply did not exist on this protocol. The Chat Completions path had
+ * `finish_reason: 'content_filter'` all along; this closes the gap between the two.
+ */
+function mapResponsesStatus(status: string | undefined, incompleteReason?: string | null): AiFinishReason {
   switch (status) {
     case 'completed': return 'stop';
-    case 'incomplete': return 'length';
-    case 'failed': return 'unknown';
+    case 'incomplete': return incompleteReason === 'content_filter' ? 'content_filter' : 'length';
+    case 'failed': return incompleteReason === 'content_filter' ? 'content_filter' : 'unknown';
     default: return 'stop';
   }
+}
+
+/**
+ * Resolve a Responses-API finish reason with SAFETY FIRST (#598).
+ *
+ * Order matters and is the point of this helper: an explicit refusal, then a filter status,
+ * then tool calls, then whatever the status said. The old inline expression put `tool_calls`
+ * first, so a filtered/refused response that happened to carry tool calls reported
+ * `tool_calls` — the driver would then have dispatched tools from a response the provider had
+ * just declined to stand behind.
+ */
+function resolveResponsesFinish(
+  json: ResponsesApiResponse,
+  refused: boolean,
+  toolCallCount: number,
+): AiFinishReason {
+  if (refused) return 'refusal';
+  const mapped = mapResponsesStatus(json.status, json.incomplete_details?.reason);
+  if (mapped === 'content_filter') return 'content_filter';
+  return toolCallCount > 0 ? 'tool_calls' : mapped;
 }
 
 function mapFinishReason(reason: string | null | undefined): AiFinishReason {
@@ -432,9 +473,14 @@ class ResponsesStreamAccumulator {
   private text = '';
   private readonly toolAcc = new Map<string, { id: string; name: string; args: string }>();
   private usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
-  private finishReason: AiFinishReason = 'stop';
   private model: string;
   private currentToolCallId = '';
+  /** Terminal status from the last response.{completed,incomplete,failed} frame (#598). */
+  private status: string | undefined;
+  /** `incomplete_details.reason` — the only place this protocol says "content filter" (#598). */
+  private incompleteReason: string | null = null;
+  /** The model emitted a refusal part/delta this response (#598). */
+  private refused = false;
 
   constructor(requestedModel: string) {
     this.model = requestedModel;
@@ -473,7 +519,21 @@ class ResponsesStreamAccumulator {
         };
         break;
       }
-      case 'response.completed': {
+      // #598: the model declining. A refusal delta is NOT forwarded as a text delta — it is
+      // not narration, and forwarding it would put the decline into the table's DM bubble.
+      // Recording the terminal state is the whole job here.
+      case 'response.refusal.delta':
+      case 'response.refusal.done': {
+        this.refused = true;
+        break;
+      }
+      // #598: `response.completed` is not the only terminal frame. A filtered or failed
+      // response ends on `response.incomplete` / `response.failed`, neither of which this
+      // accumulator looked at — so the stream simply ended with the default `stop` and the
+      // safety signal never reached the driver.
+      case 'response.completed':
+      case 'response.incomplete':
+      case 'response.failed': {
         const resp = event.response;
         if (resp?.usage) {
           this.usage = {
@@ -484,7 +544,8 @@ class ResponsesStreamAccumulator {
           yield { type: 'usage', usage: this.usage };
         }
         if (resp?.model) this.model = resp.model;
-        this.finishReason = mapResponsesStatus(resp?.status);
+        this.status = resp?.status;
+        this.incompleteReason = resp?.incomplete_details?.reason ?? null;
         break;
       }
     }
@@ -500,7 +561,13 @@ class ResponsesStreamAccumulator {
       text: this.text,
       toolCalls,
       usage: this.usage,
-      finishReason: this.finishReason,
+      // Same safety-first resolution as the non-streaming path (#598), so the two protocols
+      // and the two transports cannot disagree about whether a turn was withheld.
+      finishReason: resolveResponsesFinish(
+        { status: this.status, incomplete_details: { reason: this.incompleteReason } },
+        this.refused,
+        toolCalls.length,
+      ),
       model: this.model,
     };
   }
@@ -570,9 +637,17 @@ interface ResponsesApiResponse {
   id?: string;
   model?: string;
   status?: string;
+  /**
+   * Why an `incomplete` response stopped (#598). Without this the adapter could only see
+   * `status: 'incomplete'` and reported every one as `length`, so a content-filtered turn on
+   * this protocol was indistinguishable from one that merely ran out of output tokens.
+   */
+  incomplete_details?: { reason?: string | null };
   output?: {
-    type: 'message' | 'function_call';
-    content?: { type: string; text?: string }[];
+    // `refusal` is a first-class output/content part on this protocol: the model declines and
+    // the decline text comes back in its own part rather than as `output_text` (#598).
+    type: 'message' | 'function_call' | 'refusal';
+    content?: { type: string; text?: string; refusal?: string }[];
     id?: string;
     call_id?: string;
     name?: string;

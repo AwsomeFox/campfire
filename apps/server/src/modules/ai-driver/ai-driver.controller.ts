@@ -556,6 +556,25 @@ export class AiDriverController {
     return this.groundingStore.listForCampaign(id, role);
   }
 
+  @Get('withheld-turns')
+  @ApiOperation({
+    summary: 'List AI DM turns withheld by a provider content filter or refusal',
+    description:
+      'DM only (#598). One entry per turn the server refused to deliver because the provider reported a content ' +
+      'filter or the model refused. Every field is a COUNT or provenance — how much was withheld, how much had ' +
+      'already been broadcast when the refusal arrived, how many tool calls were suppressed, which provider/model, ' +
+      'and whose action provoked it. The withheld text is never stored, and no digest of it is stored either: ' +
+      'persisting prose the provider just declined to stand behind would give it a longer-lived, exportable home ' +
+      'than the live stream it was kept off. DM-only because “how often is this table getting filtered, and on ' +
+      'whose turns” is table management, not play.',
+  })
+  @ApiResponse({ status: 200, description: 'Recent withheld-turn incidents, newest first.' })
+  @ApiResponse({ status: 403, description: 'Not a DM of this campaign.' })
+  async withheldTurns(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    await this.access.requireRole(user, id, 'dm');
+    return this.driver.listWithheldIncidents(id);
+  }
+
   @Post('grounding/correct')
   @ApiOperation({
     summary: 'Correct one of the AI DM’s claims',
@@ -582,7 +601,9 @@ export class AiDriverController {
     description:
       'Requires campaign membership. Server-sent stream of AiDmStreamEvent JSON in `data`: turn.start, narration.delta ' +
       '(token-by-token), narration.message, tool (thin signals with optional encounterId for encounter mutations — ' +
-      'refetch through REST; hidden encounter ids are stripped for non-DMs, #825), and turn.end. Periodic ' +
+      'refetch through REST; hidden encounter ids are stripped for non-DMs, #825), narration.withheld (a provider ' +
+      'content filter or refusal ended the turn — no narration.message will follow, and clients MUST discard the ' +
+      'deltas they have buffered for the open bubble, #598), and turn.end. Periodic ' +
       '`{"type":"ping"}` keepalives should be ignored. The stream closes automatically when the subscriber is removed ' +
       'from the campaign (issue #527); a reconnect then receives 403.',
   })

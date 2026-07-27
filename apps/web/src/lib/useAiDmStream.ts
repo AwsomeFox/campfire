@@ -18,6 +18,21 @@ export type AiDmStreamEvent =
   | { type: 'turn.start'; campaignId: number; at: string }
   | { type: 'narration.delta'; campaignId: number; text: string; at: string }
   | { type: 'narration.message'; campaignId: number; text: string; at: string }
+  /**
+   * #598 — the turn was WITHHELD: a provider content filter or a model refusal ended it, so no
+   * `narration.message` follows and nothing was persisted server-side. Two jobs for the client:
+   * DISCARD the buffered `narration.delta` text for the open bubble (otherwise `turn.end`
+   * promotes those trailing deltas into the permanent transcript), and show a neutral line
+   * saying a reply was withheld rather than letting the bubble trail off unexplained.
+   * `message` deliberately does not describe WHAT was withheld.
+   */
+  | {
+      type: 'narration.withheld';
+      campaignId: number;
+      reason: 'content_filter' | 'refusal';
+      message: string;
+      at: string;
+    }
   | {
       type: 'tool';
       campaignId: number;
@@ -126,6 +141,14 @@ export function parseAiDmStreamEvent(value: unknown): AiDmStreamEvent | null {
     case 'narration.message':
       if (typeof v.text !== 'string') return null;
       return { type, campaignId: v.campaignId as number, text: v.text, at: v.at as string };
+    case 'narration.withheld': {
+      // #598: an unrecognized reason is NOT dropped — a frame this client cannot fully model is
+      // still a retraction it must honour, and returning null here would leave the withheld
+      // deltas sitting in the bubble. Fall back to the more conservative label instead.
+      if (typeof v.message !== 'string') return null;
+      const reason = v.reason === 'refusal' ? 'refusal' : 'content_filter';
+      return { type, campaignId: v.campaignId as number, reason, message: v.message, at: v.at as string };
+    }
     case 'tool': {
       if (typeof v.name !== 'string' || typeof v.isError !== 'boolean' || typeof v.proposed !== 'boolean') return null;
       // Optional encounterId (#825): accept a positive int, ignore malformed values so an

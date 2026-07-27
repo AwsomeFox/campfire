@@ -3258,6 +3258,63 @@ function migrateCampaignModules585(sqlite: Database.Database): void {
   addColumn('detached_at', 'detached_at TEXT');
 }
 
+/**
+ * Issue #598 — the incident trail for AI driver turns withheld by a provider content filter or
+ * a model refusal.
+ *
+ * Purely additive: one new table plus its index, so the body is `CREATE ... IF NOT EXISTS` and
+ * re-running it is a no-op. The `sqlite_master` / `PRAGMA table_info` probe is the belt for the
+ * one case IF NOT EXISTS cannot cover — an install carrying an EARLIER shape of the table from
+ * a pre-release build of this branch. Dropping in that case is deliberate and cheap: the rows
+ * are an operational review trail of counts, never campaign canon, and the alternative
+ * (guessing which columns to ALTER in) is how a half-migrated table ships.
+ *
+ * Note what is NOT here: any column that could hold the withheld text. See the schema comment.
+ */
+function migrateAiDriverWithheldTurns598(sqlite: Database.Database): void {
+  const existing = sqlite
+    .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='ai_driver_withheld_turns'`)
+    .all();
+  if (existing.length > 0) {
+    const cols = sqlite.prepare(`PRAGMA table_info(ai_driver_withheld_turns)`).all() as Array<{ name: string }>;
+    const names = new Set(cols.map((c) => c.name));
+    const expected = [
+      'id',
+      'campaign_id',
+      'turn',
+      'step',
+      'finish_reason',
+      'provider',
+      'model',
+      'withheld_chars',
+      'released_chars',
+      'suppressed_tool_calls',
+      'triggered_by_user_id',
+      'created_at',
+    ];
+    if (expected.every((c) => names.has(c))) return;
+    sqlite.exec(`DROP TABLE ai_driver_withheld_turns`);
+  }
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS ai_driver_withheld_turns (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+      turn INTEGER NOT NULL,
+      step INTEGER NOT NULL,
+      finish_reason TEXT NOT NULL,
+      provider TEXT NOT NULL DEFAULT '',
+      model TEXT NOT NULL DEFAULT '',
+      withheld_chars INTEGER NOT NULL DEFAULT 0,
+      released_chars INTEGER NOT NULL DEFAULT 0,
+      suppressed_tool_calls INTEGER NOT NULL DEFAULT 0,
+      triggered_by_user_id TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_ai_driver_withheld_campaign
+      ON ai_driver_withheld_turns(campaign_id, id);
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
   { name: '0001_users_oidc', run: migrateUsersTableForOidc },
   { name: '0002_campaigns_rule_system', run: migrateCampaignsTableForRuleSystem },
@@ -3428,6 +3485,14 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // contiguous or sorted. That is also why nothing is renumbered to look tidy: renaming a
   // migration a database has already recorded is the one edit that breaks run-once.
   { name: '0120_campaign_modules_585', run: migrateCampaignModules585 },
+  // 0129 was CENTRALLY ALLOCATED to issue #598 by the merge coordinator. 0122-0128 are held by
+  // other in-flight branches, so the gap above is deliberate and must NOT be "tidied" into the
+  // next free ordinal — several branches each computing "next free" in parallel is precisely
+  // how they collide. runMigrations applies entries in ARRAY order and dedupes on the FULL name
+  // string, so the `_598` suffix is what actually guarantees this runs exactly once, and
+  // renaming it later (a database that already recorded this name would silently skip it) is
+  // the one edit that breaks run-once.
+  { name: '0129_ai_driver_withheld_turns_598', run: migrateAiDriverWithheldTurns598 },
 ];
 
 /**

@@ -1,0 +1,268 @@
+import request from 'supertest';
+import { createAiEvalHarness, dm, player, type AiEvalHarness } from './ai-eval-harness';
+import { AiDmStreamService, type AiDmStreamEvent } from '../src/modules/ai-driver/ai-driver-stream.service';
+import { NARRATION_QUARANTINE_CHARS } from '../src/modules/ai-driver/driver-safety';
+
+/**
+ * #598 — a provider content filter / refusal is a WITHHELD TURN, not successful narration.
+ *
+ * The bug: both adapters already normalized `content_filter` onto the result, and the driver
+ * ignored it. A refused response with no tool calls took the `complete` exit — broadcast,
+ * committed to the #572 transcript, seat left healthy. On a mixed-age table that is unreviewed
+ * partial prose delivered as an ordinary DM turn.
+ *
+ * These cases drive the REAL HTTP surface with a scripted model, because the interesting part
+ * is not the boolean — it is everything the turn loop does AROUND it: what reaches the SSE
+ * channel, what reaches the durable transcript, whether tool calls that arrived in the same
+ * response are dispatched, where the ladder lands, and what the incident record does and does
+ * not contain.
+ */
+
+/** Collect the driver's SSE frames for a campaign while `fn` runs. */
+async function withStream<T>(
+  h: AiEvalHarness,
+  campaignId: number,
+  fn: () => Promise<T>,
+): Promise<{ result: T; events: AiDmStreamEvent[] }> {
+  const streamSvc = h.ctx.app.get(AiDmStreamService);
+  const events: AiDmStreamEvent[] = [];
+  const sub = streamSvc.streamFor(campaignId).subscribe((e) => events.push(e));
+  try {
+    return { result: await fn(), events };
+  } finally {
+    sub.unsubscribe();
+  }
+}
+
+const UNSAFE = 'THIS_PROSE_MUST_NEVER_REACH_THE_TABLE';
+
+describe('ai-dm driver — provider content filters / refusals are withheld turns (#598)', () => {
+  let h: AiEvalHarness;
+
+  beforeAll(async () => {
+    h = await createAiEvalHarness({ model: 'driver-model' });
+    await h.enableExperimental();
+  });
+
+  beforeEach(() => {
+    h.resetMock();
+  });
+
+  afterAll(async () => {
+    await h.close();
+  });
+
+  async function armedCampaign(name: string): Promise<number> {
+    const campaignId = await h.createCampaign(name);
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 50_000 });
+    return campaignId;
+  }
+
+  function transcript(campaignId: number) {
+    return request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/transcript`).set(dm);
+  }
+
+  function incidents(campaignId: number) {
+    return request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/withheld-turns`).set(dm);
+  }
+
+  it('a filtered reply is never delivered, never committed, and never persisted as narration', async () => {
+    const campaignId = await armedCampaign('Withheld basic');
+    // Shorter than the quarantine window, so the delay line alone keeps ALL of it off the wire.
+    h.script({ text: `${UNSAFE} the alley narrows.`, finishReason: 'content_filter' });
+
+    const { result: res, events } = await withStream(h, campaignId, () =>
+      h.sendMessage(campaignId, { input: 'I follow him into the alley.' }),
+    );
+
+    expect(res.status).toBe(201);
+    // Not `complete` — that is the defect this issue names.
+    expect(res.body.stopReason).toBe('content_withheld');
+    expect(res.body.narration).toBe('');
+
+    // Nothing on the live channel carries the prose: no deltas escaped the window, and the
+    // aggregated commit frame was never emitted at all.
+    const wire = JSON.stringify(events);
+    expect(wire).not.toContain(UNSAFE);
+    expect(events.some((e) => e.type === 'narration.message')).toBe(false);
+
+    // The neutral retraction fired, and says nothing about what was withheld.
+    const withheld = events.find((e) => e.type === 'narration.withheld');
+    expect(withheld).toBeDefined();
+    if (withheld?.type === 'narration.withheld') {
+      expect(withheld.reason).toBe('content_filter');
+      expect(withheld.message).toMatch(/withheld/i);
+      expect(withheld.message).not.toContain(UNSAFE);
+    }
+
+    // #572: the durable transcript must not gain a narration row for a turn nobody may read.
+    const log = await transcript(campaignId);
+    expect(log.status).toBe(200);
+    expect(JSON.stringify(log.body)).not.toContain(UNSAFE);
+    expect(log.body.items.some((e: { kind: string }) => e.kind === 'narration')).toBe(false);
+    const ended = log.body.items.find((e: { kind: string }) => e.kind === 'turn.ended');
+    expect(ended?.payload?.stopReason).toBe('content_withheld');
+  });
+
+  it('parks the seat on the EXISTING stuck ladder with the human recovery levers', async () => {
+    const campaignId = await armedCampaign('Withheld ladder');
+    h.script({ text: 'refused', finishReason: 'refusal' });
+    await h.sendMessage(campaignId, { input: 'go' });
+
+    const session = await h.getDriverSession(campaignId);
+    expect(session.body.state).toBe('awaiting_players');
+    expect(session.body.stuck).toMatchObject({ reason: 'content_withheld' });
+    // Retry / edit-the-framing (nudge) / continue without AI — the three moves the acceptance
+    // criteria name, all already implemented by the ladder rather than duplicated.
+    expect(session.body.levers).toEqual(
+      expect.arrayContaining(['retry', 'nudge', 'continue_without_ai', 'request_takeover']),
+    );
+    expect(session.body.stuck.detail).not.toMatch(/provider failed/i);
+  });
+
+  it('dispatches NO tool call that arrived in the same response as the refusal', async () => {
+    const campaignId = await armedCampaign('Withheld tool mixture');
+    // The dangerous shape: the model asks to mutate live state in the very response the
+    // provider refused. The guard must precede dispatch, not follow it.
+    h.script({
+      text: `${UNSAFE} you strike him down.`,
+      finishReason: 'content_filter',
+      toolCalls: [{ id: 'call_1', name: 'roll_dice', arguments: { campaignId, expr: '1d20' } }],
+    });
+
+    const { result: res, events } = await withStream(h, campaignId, () =>
+      h.sendMessage(campaignId, { input: 'I attack.' }),
+    );
+
+    expect(res.body.stopReason).toBe('content_withheld');
+    expect(res.body.toolCalls).toEqual([]);
+    expect(events.some((e) => e.type === 'tool')).toBe(false);
+
+    // The incident says how many calls were stopped, which is the number an operator wants.
+    const list = await incidents(campaignId);
+    expect(list.body[0]).toMatchObject({ finishReason: 'content_filter', suppressedToolCalls: 1 });
+  });
+
+  it('records privacy-minimized incident metadata — counts and provenance, never the prose', async () => {
+    const campaignId = await armedCampaign('Withheld incident');
+    h.script({ text: `${UNSAFE} more text`, finishReason: 'refusal' });
+    await h.sendMessage(campaignId, { input: 'go' });
+
+    const list = await incidents(campaignId);
+    expect(list.status).toBe(200);
+    expect(list.body).toHaveLength(1);
+    const row = list.body[0];
+    expect(row).toMatchObject({
+      campaignId,
+      finishReason: 'refusal',
+      provider: 'mock',
+      withheldChars: expect.any(Number),
+      releasedChars: expect.any(Number),
+      suppressedToolCalls: 0,
+    });
+    expect(row.withheldChars).toBeGreaterThan(0);
+    // The whole point: the record is actionable without recreating the exposure. No field on
+    // the row — and no digest, which would be the same content with extra steps — carries it.
+    expect(JSON.stringify(row)).not.toContain(UNSAFE);
+    // Enough to act on: which member's action provoked it.
+    expect(row.triggeredByUserId).toBeTruthy();
+  });
+
+  it('is DM-only — a player cannot read the table’s withheld-turn incidents', async () => {
+    const campaignId = await armedCampaign('Withheld incident acl');
+    const res = await request(h.server)
+      .get(`/api/v1/campaigns/${campaignId}/ai-dm/withheld-turns`)
+      .set(player);
+    expect(res.status).toBe(403);
+  });
+
+  it('the quarantine window bounds the residual: only text that aged out of it was ever sent', async () => {
+    const campaignId = await armedCampaign('Withheld quarantine');
+    // Deliberately longer than the window so SOME prose legitimately escapes — the mitigation
+    // is bounded, not a proof, and the test says so rather than pretending otherwise.
+    const safeHead = 'A. '.repeat(Math.ceil((NARRATION_QUARANTINE_CHARS * 1.5) / 3));
+    h.script({ text: `${safeHead}${UNSAFE}`, finishReason: 'content_filter', streamChunks: 30 });
+
+    const { result: res, events } = await withStream(h, campaignId, () =>
+      h.sendMessage(campaignId, { input: 'go' }),
+    );
+    expect(res.body.stopReason).toBe('content_withheld');
+
+    const delivered = events
+      .filter((e): e is Extract<AiDmStreamEvent, { type: 'narration.delta' }> => e.type === 'narration.delta')
+      .map((e) => e.text)
+      .join('');
+
+    // The tail — where a provider's classifier fires — never left the server.
+    expect(delivered).not.toContain(UNSAFE);
+    expect(delivered.length).toBeGreaterThan(0); // honest: some prose DID reach the table
+    expect(delivered.length).toBeLessThanOrEqual(safeHead.length);
+    // ...and exactly that much is what the incident reports as the residual.
+    const row = (await incidents(campaignId)).body[0];
+    expect(row.releasedChars).toBe(delivered.length);
+    expect(row.withheldChars).toBeGreaterThanOrEqual(UNSAFE.length);
+  });
+
+  it('a LOCAL unfiltered model is not covered — a plain `stop` still completes normally', async () => {
+    const campaignId = await armedCampaign('Withheld local model');
+    // Ollama / llama.cpp / LM Studio report `stop` for everything they generate. This feature
+    // relays a provider signal; it does not classify content. Asserting the non-protection
+    // keeps the docs honest — a filter believed to cover something it does not is worse than
+    // no filter at all.
+    h.script({ text: 'The alley narrows and the lamp gutters.', finishReason: 'stop' });
+
+    const { result: res, events } = await withStream(h, campaignId, () =>
+      h.sendMessage(campaignId, { input: 'go' }),
+    );
+    expect(res.body.stopReason).toBe('complete');
+    expect(res.body.narration).toBe('The alley narrows and the lamp gutters.');
+    expect(events.some((e) => e.type === 'narration.withheld')).toBe(false);
+    expect(events.some((e) => e.type === 'narration.message')).toBe(true);
+    expect((await incidents(campaignId)).body).toHaveLength(0);
+
+    const session = await h.getDriverSession(campaignId);
+    expect(session.body.state).toBe('running');
+  });
+
+  it('an earlier step’s legitimate narration survives; only the refused step is withheld', async () => {
+    const campaignId = await armedCampaign('Withheld multi step');
+    h.script(
+      // Step 1: a clean narration plus a tool call, so the loop continues.
+      { text: 'You roll for it.', toolCalls: [{ id: 'c1', name: 'roll_dice', arguments: { campaignId, expr: '1d20' } }] },
+      // Step 2: the provider refuses.
+      { text: `${UNSAFE} the result is grim.`, finishReason: 'content_filter' },
+    );
+
+    const { result: res, events } = await withStream(h, campaignId, () =>
+      h.sendMessage(campaignId, { input: 'I roll.' }),
+    );
+
+    expect(res.body.stopReason).toBe('content_withheld');
+    // Step 1 is real history: it was delivered and committed before the refusal existed, and
+    // retroactively deleting it would be a worse lie than leaving it.
+    expect(res.body.narration).toBe('You roll for it.');
+    expect(JSON.stringify(events)).not.toContain(UNSAFE);
+
+    const log = await transcript(campaignId);
+    const narrations = log.body.items.filter((e: { kind: string }) => e.kind === 'narration');
+    expect(narrations).toHaveLength(1);
+    expect(narrations[0].payload.text).toBe('You roll for it.');
+    expect((await incidents(campaignId)).body[0].step).toBe(2);
+  });
+
+  it('audits the withhold with counts only, and not as a provider failure', async () => {
+    const campaignId = await armedCampaign('Withheld audit');
+    h.script({ text: `${UNSAFE}`, finishReason: 'refusal' });
+    await h.sendMessage(campaignId, { input: 'go' });
+
+    const audit = await h.getAudit(campaignId);
+    const entries = (audit.body.items ?? audit.body) as Array<{ action: string; detail: string }>;
+    const withheld = entries.find((e) => e.action === 'ai-dm.driver.content_withheld');
+    expect(withheld).toBeDefined();
+    expect(withheld!.detail).toContain('refusal');
+    expect(withheld!.detail).not.toContain(UNSAFE);
+    // A refusal is not plumbing failure; misfiling it would put the wrong lever set and the
+    // wrong sentence in front of the table.
+    expect(entries.some((e) => e.action === 'ai-dm.driver.provider_error')).toBe(false);
+  });
+});

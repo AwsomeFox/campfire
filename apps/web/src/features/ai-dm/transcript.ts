@@ -161,7 +161,19 @@ export interface ToolEntry {
 export interface SystemEntry {
   id: string;
   kind: 'system';
-  variant: 'divider' | 'scene' | 'stuck' | 'recovered' | 'paused' | 'resumed' | 'takeover' | 'vote' | 'rules' | 'info';
+  variant:
+    | 'divider'
+    | 'scene'
+    | 'stuck'
+    | 'recovered'
+    | 'paused'
+    | 'resumed'
+    | 'takeover'
+    | 'vote'
+    | 'rules'
+    /** #598 — a turn a provider content filter / refusal withheld. Neutral; carries no content. */
+    | 'withheld'
+    | 'info';
   /** Optional raw text (e.g. a seeded scene label or a stuck detail) for the page to render. */
   text?: string;
   /** Optional structured payload (e.g. the stuck reason, vote outcome) for the page. */
@@ -426,6 +438,42 @@ function applyStream(state: TranscriptState, event: AiDmStreamEvent): Transcript
         live: '',
       };
       return { ...state, entries: next };
+    }
+
+    // #598 — RETRACTION. The server withheld this turn after some deltas had already been
+    // broadcast, so drop the open bubble's live buffer before `turn.end` can promote it into
+    // `committed` (see the turn.end case below, which commits any trailing live text). That
+    // promotion is the difference between "text a player glimpsed" and "text permanently in
+    // this table's transcript", and it is the one part of the exposure a client can still undo.
+    //
+    // Deliberately handled ABOVE the authoritative-surface early-return at the top of this
+    // function: the durable `control` row that #572 records covers the visible LINE, but only
+    // this frame can clear an ephemeral delta buffer that was never persisted anywhere.
+    case 'narration.withheld': {
+      const idx = openBubbleIndex(entries);
+      const cleared =
+        idx === -1
+          ? entries
+          : (() => {
+              const next = entries.slice();
+              const bubble = entries[idx] as DmEntry;
+              next[idx] = { ...bubble, live: '' };
+              return next;
+            })();
+      // On an authoritative surface the persisted control row renders the line, exactly as it
+      // does for `stuck`; folding both would print it twice.
+      if (state.authoritative) return { ...state, entries: cleared };
+      return {
+        ...state,
+        entries: push(cleared, {
+          id: makeId(),
+          kind: 'system',
+          variant: 'withheld',
+          text: event.message,
+          data: { reason: event.reason },
+          at: event.at,
+        }),
+      };
     }
 
     case 'turn.error':
@@ -747,18 +795,25 @@ function applyServerEvent(state: TranscriptState, event: AiDmTranscriptEvent): T
 
     case 'control': {
       const control = asText(event.payload.control);
+      // #598: a withhold reaches the durable log as an ordinary `stuck` control row (the safety
+      // terminal state is a rung on the existing ladder, not a parallel mechanism). Give it its
+      // own variant anyway — "the AI DM got stuck" is the wrong sentence for a reply that was
+      // generated and deliberately not shown.
+      const withheld = control === 'stuck' && asText(event.payload.reason) === 'content_withheld';
       const variant: SystemEntry['variant'] =
-        control === 'paused'
-          ? 'paused'
-          : control === 'resumed'
-            ? 'resumed'
-            : control === 'takeover'
-              ? 'takeover'
-              : control === 'stuck'
-                ? 'stuck'
-                : control === 'recovered'
-                  ? 'recovered'
-                  : 'info';
+        withheld
+          ? 'withheld'
+          : control === 'paused'
+            ? 'paused'
+            : control === 'resumed'
+              ? 'resumed'
+              : control === 'takeover'
+                ? 'takeover'
+                : control === 'stuck'
+                  ? 'stuck'
+                  : control === 'recovered'
+                    ? 'recovered'
+                    : 'info';
       return upsert({
         id: event.eventId,
         kind: 'system',

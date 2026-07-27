@@ -97,8 +97,25 @@ export interface AiUsage {
   totalTokens: number;
 }
 
-/** Why generation stopped — normalized across providers. */
-export type AiFinishReason = 'stop' | 'length' | 'tool_calls' | 'content_filter' | 'unknown';
+/**
+ * Why generation stopped — normalized across providers.
+ *
+ * Two of these members are SAFETY TERMINAL STATES rather than descriptions of a finished
+ * reply (#598):
+ *   - `content_filter` — a provider-side classifier stopped the generation (OpenAI
+ *     `finish_reason: content_filter` / a Responses `incomplete_details.reason` of the same,
+ *     Gemini `SAFETY` / `RECITATION` / `PROHIBITED_CONTENT`).
+ *   - `refusal`        — the MODEL declined (Anthropic `stop_reason: refusal`, an OpenAI
+ *     Responses `refusal` output part).
+ *
+ * They are kept DISTINCT because they mean different things to a human reviewing an
+ * incident — a filter is the vendor's policy layer firing, a refusal is the model's own —
+ * and collapsing them loses that. Consumers that only care whether a turn may be delivered
+ * must not switch on the strings by hand: use the exhaustive disposition map in
+ * `ai-driver/driver-safety.ts`, which is a `Record<AiFinishReason, …>` so that adding a
+ * member here is a COMPILE error at every decision point rather than a silent fail-open.
+ */
+export type AiFinishReason = 'stop' | 'length' | 'tool_calls' | 'content_filter' | 'refusal' | 'unknown';
 
 /** The complete result of a (possibly streamed) generation. */
 export interface AiGenerateResult {

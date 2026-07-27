@@ -289,8 +289,16 @@ function mapFinishReason(reason: string): AiGenerateResult['finishReason'] {
     case 'STOP':
     case 'MAX_TOKENS':
       return reason.toUpperCase() === 'STOP' ? 'stop' : 'length';
+    // #598: every one of these is Gemini's policy layer stopping the generation. The newer
+    // members (PROHIBITED_CONTENT / SPII / BLOCKLIST / IMAGE_SAFETY) were falling through to
+    // `unknown`, which the driver treats as a deliverable turn — the exact fail-open this
+    // issue is about, just on a third protocol.
     case 'SAFETY':
     case 'RECITATION':
+    case 'PROHIBITED_CONTENT':
+    case 'SPII':
+    case 'BLOCKLIST':
+    case 'IMAGE_SAFETY':
       return 'content_filter';
     default:
       return 'unknown';

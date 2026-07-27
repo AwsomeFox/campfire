@@ -52,6 +52,7 @@
     "systemScene": "Scene: {{text}}",
     "systemPaused": "The AI DM was paused.",
     "systemResumed": "The AI DM resumed.",
+    "systemWithheld": "The AI DM's reply was withheld.",
     "systemStuck": "The AI DM got stuck.",
     "systemRecovered": "The AI DM recovered.",
     "systemTakeover": "A human took over the DM seat.",

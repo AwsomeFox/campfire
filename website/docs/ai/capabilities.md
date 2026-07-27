@@ -124,6 +124,44 @@ If a driver stalls or makes a call the table disputes, players have recovery lev
 open a **table vote** (to override or pause), or **request a human takeover**. The DM
 can pause and resume the seat at any time.
 
+### When a provider refuses or filters a reply
+
+If the AI provider reports that it **stopped a reply on safety grounds** — a content
+filter tripping, or the model declining — Campfire treats that turn as **withheld**, not
+as narration:
+
+- the reply is **never committed**: no DM message is posted, nothing is written to the
+  table transcript, and the text is not carried into the AI's context for the next turn;
+- **no tool runs**, even if the AI asked for one in that same reply, so a refused turn
+  cannot change HP, dice, canon, or anything else;
+- the table sees a **neutral notice** that a reply was withheld. It deliberately does not
+  say what was withheld;
+- the seat parks on the usual recovery ladder with **Retry**, **Nudge** (retry with
+  different framing), and **Continue without AI**;
+- a DM can review the incident trail at **AI DM → withheld turns**. It records counts and
+  provenance only — how much was stopped, how much had already streamed, how many tool
+  calls were suppressed, which provider and model, and whose action prompted it. **The
+  withheld text itself is never stored anywhere**, and neither is a fingerprint of it.
+
+**About live streaming.** Narration streams to the table token by token, and a provider
+only reports a refusal at the *end* of a reply. Campfire holds back a short trailing
+window of narration (a couple of sentences) so the newest text is still on the server when
+that signal arrives — in practice the offending passage and the refusal arrive within a few
+frames of each other, so usually **nothing reaches the table at all**. If a reply was long
+enough that some text had already streamed, clients are told to discard it. That is a
+real mitigation with a real bound, not a guarantee: text a player already read cannot be
+unread, and the incident record tells a DM exactly how much that was.
+
+!!! warning "Local and self-hosted models are not covered by this"
+
+    This protection **relays a safety signal from your provider**. Campfire does not
+    classify content itself. A self-hosted or local model with no safety layer — Ollama,
+    llama.cpp, LM Studio, a bare vLLM endpoint, and many OpenAI-compatible proxies — will
+    simply report that it finished normally, and **nothing here will fire**. If your table
+    needs this protection, it has to come from a provider that performs the check. The
+    session-zero charter, the proposal gate on canon writes, the tool allowlist, and human
+    review all still apply either way.
+
 ### The scheduled AI scribe
 
 A companion **AI scribe** can **draft session recaps** — after a scheduled session ends,

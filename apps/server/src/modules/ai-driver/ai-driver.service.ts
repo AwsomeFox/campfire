@@ -1,12 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
-import { eq } from 'drizzle-orm';
+import { and, desc, eq, lt } from 'drizzle-orm';
 import { buildMcpEnvelope } from '../../common/api-error.envelope';
 import { auditActor, roleAtLeast, type RequestUser } from '../../common/user.types';
 import { nowIso } from '../../common/time';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { aiDriverControlState } from '../../db/schema';
+import { aiDriverControlState, aiDriverWithheldTurns } from '../../db/schema';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService, excerpt } from '../notifications/notifications.service';
 import { AiDmService, type AiDmTokenReservation } from '../ai-dm/ai-dm.service';
@@ -70,6 +70,16 @@ import {
   type ParsedGrounding,
 } from './driver-grounding';
 import { DriverGroundingService } from './driver-grounding.service';
+// Safety (#598): the provider refusal / content-filter boundary. Pure and dependency-free so
+// the delivery decision and the quarantine delay line are unit-testable without a provider,
+// a database, or a session — the same split #577 uses for grounding.
+import {
+  describeWithheldTurn,
+  isWithheldFinishReason,
+  NarrationQuarantine,
+  type WithheldFinishReason,
+  type WithheldTurnIncident,
+} from './driver-safety';
 
 /** Default per-provider-call output cap for a driver step; clamped to remaining budget. */
 const DEFAULT_STEP_MAX_TOKENS = 1024;
@@ -100,7 +110,13 @@ export type AiDmStopReason =
   | 'aborted' // seat left Driver mid-turn; session was torn down (#1071)
   | 'frozen' // a DM pause or human takeover landed mid-turn; abort early (#1057)
   | 'cancelled' // kill switch or stop control aborted the in-flight provider request (#558)
-  | 'provider_error'; // provider threw / idle-timed-out mid-stream (#1046 / #1063)
+  | 'provider_error' // provider threw / idle-timed-out mid-stream (#1046 / #1063)
+  // #598 — SAFETY TERMINAL STATE. The provider reported a content filter or a refusal, so the
+  // step's prose was never committed, never persisted, and its tool calls were never
+  // dispatched. Deliberately NOT a flavour of `provider_error`: that reason is retryable
+  // plumbing failure and is surfaced to the table as "the AI provider failed", which is both
+  // untrue here and the wrong lever set. It is equally not `complete` — that is the bug.
+  | 'content_withheld';
 
 /** Abort reason wired into provider AbortSignals when a stop control fires (#558). */
 export const GENERATION_STOP_ABORT = 'generation_stop';
@@ -159,6 +175,42 @@ function pickExecutedIdentity(identity: ToolResourceIdentity): Pick<AiDmExecuted
   return identity.encounterId !== undefined ? { encounterId: identity.encounterId } : {};
 }
 
+/**
+ * What {@link AiDriverService.streamStep} reports when a provider safety terminal state ended
+ * the step (#598). Carries only counts — the withheld prose is dropped on the floor inside
+ * streamStep and is never returned, logged, or persisted anywhere.
+ */
+/**
+ * Rows kept per campaign in the withheld-turn incident trail (#598). Mirrors #577's grounding
+ * retention: this is an operational review trail, not canon, so an unbounded log on a long
+ * campaign would be pure cost.
+ */
+const MAX_WITHHELD_INCIDENTS_PER_CAMPAIGN = 200;
+
+/** One persisted withheld-turn incident as returned to API clients (#598). Counts only. */
+export interface AiDriverWithheldTurnRecord {
+  id: number;
+  campaignId: number;
+  turn: number;
+  step: number;
+  finishReason: string;
+  provider: string;
+  model: string;
+  withheldChars: number;
+  releasedChars: number;
+  suppressedToolCalls: number;
+  triggeredByUserId: string | null;
+  createdAt: string;
+}
+
+export interface WithheldStreamOutcome {
+  finishReason: WithheldFinishReason;
+  /** Characters the quarantine window was still holding, and therefore never broadcast. */
+  quarantinedChars: number;
+  /** Characters already broadcast when the terminal frame arrived — the residual exposure. */
+  releasedChars: number;
+}
+
 export interface AiDmTurnRunResult {
   narration: string;
   stopReason: AiDmStopReason;
@@ -212,7 +264,8 @@ export type AiDmStuckReason =
   | 'loop' // the model repeated its previous narration verbatim
   | 'dispute' // a player flagged the AI's last ruling as wrong/unfair
   | 'provider_error' // provider failed or stalled mid-stream (#1046 / #1063)
-  | 'unsupported_claim'; // the turn asserted rules/canon the server could not verify (#577)
+  | 'unsupported_claim' // the turn asserted rules/canon the server could not verify (#577)
+  | 'content_withheld'; // a provider content filter / refusal withheld the turn (#598)
 
 /** Snapshot of the current stuck condition; null when the seat is healthy. */
 export interface AiDmStuckInfo {
@@ -438,6 +491,11 @@ const STUCK_REASONS = allowlist<AiDmStuckReason>({
   // read. Must be listed here or a restart would hydrate that seat back to healthy and drop
   // the very signal the grounding ladder exists to raise.
   unsupported_claim: true,
+  // #598 — a turn a provider content filter / refusal withheld. It MUST hydrate: a seat that
+  // came back "healthy" after a restart would drop the very signal that says a human still
+  // owes this table a decision, and would happily accept the next action as if the refused
+  // turn had never happened.
+  content_withheld: true,
 });
 
 function recordOf(value: unknown): Record<string, unknown> | null {
@@ -554,6 +612,15 @@ const GROUNDING_PREAMBLE = [
   '- To change the world (a new NPC/quest/location, edits to canon), call the matching tool. Those are submitted as PROPOSALS for the human DM to approve — do not claim a canon change happened until it is applied.',
   '- You MAY resolve live play directly: roll dice, apply HP/conditions, advance turns, reveal map regions.',
   '- Respect the session-zero charter (lines/veils/safety tools) below at all times.',
+  // #598 — the OUTPUT POLICY half of the charter. Campfire's own rule is that the charter
+  // governs what may be narrated, and that steering AROUND a line beats generating it and
+  // relying on a downstream filter: a filtered turn costs the table its whole turn.
+  //
+  // Prompt text is a request, not a control (see the note above) — the enforcement is the
+  // server-side withhold in driver-safety.ts, which runs on the provider's terminal state no
+  // matter what this paragraph asked for. This line exists so the model's instructions and the
+  // server's behaviour say the same thing, not because it is load-bearing on its own.
+  '- The charter is your OUTPUT POLICY, not just scene guidance: if answering would require content a line or veil forbids, do not write it. Cut away, summarize at a distance, or say plainly that the scene moves on — then keep the story going.',
 ].join('\n');
 
 /** Markers the untrusted player message is fenced with in the user turn (#317). */
@@ -1952,9 +2019,7 @@ export class AiDriverService {
 
           const maxTokens = reservation.tokensReserved;
           steps = stepNumber;
-          let step:
-            | { ok: true; text: string; result: AiGenerateResult | undefined; aborted: boolean; cancelled: boolean }
-            | { ok: false; text: string; result: AiGenerateResult | undefined; error: AiProviderError };
+          let step: Awaited<ReturnType<AiDriverService['streamStep']>>;
           try {
             step = await this.streamStep(campaignId, provider, session, generationSignal, {
               system,
@@ -2057,6 +2122,29 @@ export class AiDriverService {
             action: 'ai-dm.driver.turn',
             detail: `step ${stepNumber} model=${servedModel || 'default'} +${usage} tokens by ${triggeredBy.id}`,
           }, reservation);
+          // #598 — SAFETY FIRST, and deliberately ahead of every other post-stream branch.
+          //
+          // The abort / freeze / stopped branches below all propagate `text` outward, where the
+          // caller calls setNarration() on it and `turn.cancelled` carries it onto the wire AND
+          // into a durable transcript row. A response the provider refused must not reach any
+          // of those paths, so the withhold is resolved before them: the prose stops here and
+          // only counts travel on. Metering already happened — the provider billed for the
+          // tokens whether or not the table ever sees them, and quietly not charging for a
+          // refused turn would let a loop of refusals run the budget gate open.
+          if (step.withheld) {
+            return {
+              kind: 'withheld' as const,
+              seat: metered.seat,
+              budgetRemaining: metered.budgetRemaining,
+              metered,
+              withheld: step.withheld,
+              // Tool calls that arrived in the SAME response as the refusal. They are counted
+              // and dropped — see the dispatch guard in the caller.
+              suppressedToolCalls: result?.toolCalls?.length ?? 0,
+              servedModel,
+              step: stepNumber,
+            };
+          }
           // streamStep sets `aborted` on mode-switch detach and `cancelled` on stop-control abort (#558).
           if (aborted || cancelled || session.detached) {
             const postAuth = await this.checkGenerationAuthority(campaignId, session, generationSignal);
@@ -2096,6 +2184,31 @@ export class AiDriverService {
           latestSeat = spend.seat;
           budgetRemaining = spend.budgetRemaining;
           stopReason = 'budget_exhausted';
+          break;
+        }
+        // #598 — the provider content filter / refusal path. Placed FIRST among the outcome
+        // branches for the same reason the withhold is resolved first inside the lock: every
+        // other branch here either commits prose or feeds it onward.
+        //
+        // What deliberately does NOT happen below: no setNarration (so `finalNarration` keeps
+        // whatever EARLIER steps legitimately committed and never gains the refused text), no
+        // `narration.message`, no transcript narration row, no assistant message pushed back
+        // into `messages`, and no executeToolCalls — the loop breaks before reaching any of it.
+        if (spend.kind === 'withheld') {
+          latestSeat = spend.seat;
+          budgetRemaining = spend.budgetRemaining;
+          totalTokens += spend.metered?.tokensUsed ?? 0;
+          stopReason = 'content_withheld';
+          await this.handleWithheldTurn(campaignId, session, {
+            withheld: spend.withheld,
+            step: spend.step,
+            suppressedToolCalls: spend.suppressedToolCalls,
+            provider: provider.name,
+            model: spend.servedModel || execModel,
+            actor,
+            triggeredBy,
+            proactive: opts.proactive === true,
+          });
           break;
         }
         if (spend.kind === 'stopped') {
@@ -2289,6 +2402,171 @@ export class AiDriverService {
   }
 
   /**
+   * Everything that happens AROUND a withheld turn (#598) — the prose itself is already gone.
+   *
+   * Four side effects, in this order, all best-effort except the first:
+   *   1. `narration.withheld` on the SSE channel — the retraction. Clients drop the
+   *      in-progress bubble, which also stops the web reducer promoting the trailing live
+   *      deltas into the permanent transcript when `turn.end` arrives moments later.
+   *   2. an audit entry, so the withhold is visible to the same operator tooling as every
+   *      other driver decision;
+   *   3. a privacy-minimized incident row (counts + provenance, never the text);
+   *   4. nothing else — the seat transition itself is the stuck ladder's job, driven from the
+   *      `content_withheld` stop reason by the normal `detectAndTransition` at the end of the
+   *      turn. #598 deliberately reuses that ladder rather than standing up a parallel
+   *      recovery mechanism: the levers a table needs here (retry, nudge with different
+   *      framing, continue without the AI, hand to a human) are exactly the ones it already
+   *      offers, and a second mechanism would be a second thing to get wrong.
+   */
+  private async handleWithheldTurn(
+    campaignId: number,
+    session: AiDmSessionState,
+    ctx: {
+      withheld: WithheldStreamOutcome;
+      step: number;
+      suppressedToolCalls: number;
+      provider: string;
+      model: string;
+      actor: string;
+      triggeredBy: RequestUser;
+      proactive: boolean;
+    },
+  ): Promise<void> {
+    const { finishReason, quarantinedChars, releasedChars } = ctx.withheld;
+    const detail = describeWithheldTurn(finishReason);
+
+    // A detached session (#1071) has been replaced; emitting onto its channel would splice a
+    // frame into a table that already moved on.
+    if (!session.detached) {
+      this.stream.emit({ type: 'narration.withheld', campaignId, reason: finishReason, message: detail });
+    }
+
+    await this.audit
+      .log({
+        actor: ctx.actor,
+        actorRole: 'dm',
+        action: 'ai-dm.driver.content_withheld',
+        entityType: 'ai-dm',
+        campaignId,
+        // Counts and provenance only — never a fragment of what was withheld.
+        detail:
+          `${finishReason}: withheld ${quarantinedChars} chars (${releasedChars} already broadcast), ` +
+          `suppressed ${ctx.suppressedToolCalls} tool call(s) on step ${ctx.step} ` +
+          `provider=${ctx.provider} model=${ctx.model} (triggered by ${ctx.triggeredBy.id})`,
+      })
+      .catch((err) => this.logger.warn(`Failed to audit withheld AI DM turn on campaign ${campaignId}: ${String(err)}`));
+
+    await this.recordWithheldIncident({
+      campaignId,
+      turn: session.turnCount,
+      step: ctx.step,
+      finishReason,
+      provider: ctx.provider,
+      model: ctx.model,
+      withheldChars: quarantinedChars,
+      releasedChars,
+      suppressedToolCalls: ctx.suppressedToolCalls,
+      // A proactive turn had no human behind it; attributing the incident to whoever happened
+      // to trigger the scheduler would be a false accusation in the one record a DM reads to
+      // decide whether a player needs a conversation.
+      triggeredByUserId: ctx.proactive ? null : ctx.triggeredBy.id,
+    });
+
+    this.logger.warn(
+      `AI DM turn withheld on campaign ${campaignId} (${finishReason}, step ${ctx.step}): ` +
+        `${quarantinedChars} chars quarantined, ${releasedChars} already broadcast, ` +
+        `${ctx.suppressedToolCalls} tool call(s) suppressed`,
+    );
+  }
+
+  /**
+   * Persist one withheld-turn incident (#598). Best-effort, like every other bookkeeping write
+   * on this path: a storage failure must not turn a correctly-withheld turn into a 500 (the
+   * table is already protected by the time this runs), so it is logged and dropped.
+   *
+   * Written straight through `this.db` rather than via a new injected store on purpose: the
+   * driver's constructor is positional and hand-constructed by several specs, and adding a
+   * parameter to it has broken CI more than once. The row shape here is a flat counter record
+   * with no read-modify-write, so a dedicated service would buy nothing.
+   */
+  private async recordWithheldIncident(incident: WithheldTurnIncident): Promise<void> {
+    if (!this.db) return;
+    try {
+      await this.db.insert(aiDriverWithheldTurns).values({
+        campaignId: incident.campaignId,
+        turn: incident.turn,
+        step: incident.step,
+        finishReason: incident.finishReason,
+        provider: incident.provider,
+        model: incident.model,
+        withheldChars: incident.withheldChars,
+        releasedChars: incident.releasedChars,
+        suppressedToolCalls: incident.suppressedToolCalls,
+        triggeredByUserId: incident.triggeredByUserId,
+        createdAt: nowIso(),
+      });
+      await this.pruneWithheldIncidents(incident.campaignId);
+    } catch (err) {
+      this.logger.warn(
+        `Failed to record withheld-turn incident for campaign ${incident.campaignId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
+  /** Keep a campaign's incident trail bounded, mirroring #577's grounding-claim retention. */
+  private async pruneWithheldIncidents(campaignId: number): Promise<void> {
+    if (!this.db) return;
+    try {
+      const [cutoff] = await this.db
+        .select({ id: aiDriverWithheldTurns.id })
+        .from(aiDriverWithheldTurns)
+        .where(eq(aiDriverWithheldTurns.campaignId, campaignId))
+        .orderBy(desc(aiDriverWithheldTurns.id))
+        .limit(1)
+        .offset(MAX_WITHHELD_INCIDENTS_PER_CAMPAIGN - 1);
+      if (!cutoff) return;
+      await this.db
+        .delete(aiDriverWithheldTurns)
+        .where(and(eq(aiDriverWithheldTurns.campaignId, campaignId), lt(aiDriverWithheldTurns.id, cutoff.id)));
+    } catch (err) {
+      this.logger.warn(`Failed to prune withheld-turn incidents for campaign ${campaignId}: ${String(err)}`);
+    }
+  }
+
+  /**
+   * The campaign's recent withheld-turn incidents, newest first (#598).
+   *
+   * DM-only at the controller. Every field here is already non-content — this is counts and
+   * provenance — but "how often does the AI get filtered on this table, and on whose turns"
+   * is table-management information, not play information.
+   */
+  async listWithheldIncidents(campaignId: number, limit = 50): Promise<AiDriverWithheldTurnRecord[]> {
+    if (!this.db) return [];
+    const rows = await this.db
+      .select()
+      .from(aiDriverWithheldTurns)
+      .where(eq(aiDriverWithheldTurns.campaignId, campaignId))
+      .orderBy(desc(aiDriverWithheldTurns.id))
+      .limit(Math.max(1, Math.min(limit, 200)));
+    return rows.map((row) => ({
+      id: row.id,
+      campaignId: row.campaignId,
+      turn: row.turn,
+      step: row.step,
+      finishReason: row.finishReason,
+      provider: row.provider,
+      model: row.model,
+      withheldChars: row.withheldChars,
+      releasedChars: row.releasedChars,
+      suppressedToolCalls: row.suppressedToolCalls,
+      triggeredByUserId: row.triggeredByUserId ?? null,
+      createdAt: row.createdAt,
+    }));
+  }
+
+  /**
    * Evaluate, broadcast, audit, and persist one turn's grounding verdict (#577).
    *
    * Kept as its own method rather than inlined into the turn loop so the loop's diff stays
@@ -2419,6 +2697,14 @@ export class AiDriverService {
    * Stream one provider call, forwarding text deltas to the SSE channel; returns the aggregated
    * text + result. Passes an AbortSignal so a stalled mid-body stream (no chunk within
    * {@link DRIVER_STREAM_IDLE_TIMEOUT_MS}) aborts instead of wedging the campaign (#1063).
+   *
+   * DELTA PIPELINE (order matters):
+   *   raw provider delta → GroundingDeltaFilter (#577, strips the citation block)
+   *                      → NarrationQuarantine (#598, trailing delay line)
+   *                      → `narration.delta` on the wire
+   * One chain, one place where a byte becomes visible to the table. #598 composes with #577's
+   * interceptor rather than adding a second one, so there is no path that reaches the SSE
+   * channel past either filter.
    */
   private async streamStep(
     campaignId: number,
@@ -2427,7 +2713,15 @@ export class AiDriverService {
     generationSignal: AbortSignal,
     req: { system: string; messages: AiMessage[]; model: string; maxTokens: number; tools: AiToolSchema[] },
   ): Promise<
-    | { ok: true; text: string; result: AiGenerateResult | undefined; aborted: boolean; cancelled: boolean }
+    | {
+        ok: true;
+        text: string;
+        result: AiGenerateResult | undefined;
+        aborted: boolean;
+        cancelled: boolean;
+        /** #598 — set when the provider reported a safety terminal state; null otherwise. */
+        withheld: WithheldStreamOutcome | null;
+      }
     | { ok: false; text: string; result: AiGenerateResult | undefined; error: AiProviderError }
   > {
     let text = '';
@@ -2437,6 +2731,15 @@ export class AiDriverService {
     // this filter the table would watch the DM "type" raw JSON at the end of every turn. `text`
     // still accumulates the FULL raw output — the block is parsed off it once the step lands.
     const deltaFilter = new GroundingDeltaFilter();
+    // #598: the trailing delay line. Narration is broadcast only once enough further text has
+    // arrived behind it, so the most recently generated prose is still server-side when the
+    // terminal frame (which carries the finish reason) lands.
+    const quarantine = new NarrationQuarantine();
+    /** Characters that actually reached the table — the residual exposure if this is withheld. */
+    let releasedChars = 0;
+    /** Characters the quarantine window swallowed when a withhold fired. */
+    let quarantinedChars = 0;
+    let withheld: WithheldStreamOutcome | null = null;
     const toolAcc = new Map<number, { id?: string; name?: string; args: string }>();
     let aborted = false;
     let cancelled = false;
@@ -2529,7 +2832,11 @@ export class AiDriverService {
         if (ev.type === 'text') {
           text += ev.delta;
           const visible = deltaFilter.push(ev.delta);
-          if (visible) this.stream.emit({ type: 'narration.delta', campaignId, text: visible });
+          const released = visible ? quarantine.push(visible) : '';
+          if (released) {
+            releasedChars += released.length;
+            this.stream.emit({ type: 'narration.delta', campaignId, text: released });
+          }
         } else if (ev.type === 'usage') {
           streamUsage = ev.usage;
         } else if (ev.type === 'tool_call') {
@@ -2559,12 +2866,29 @@ export class AiDriverService {
       clearIdle();
       // #577: release any tail the fence detector was holding back but that never became a
       // grounding block, so a reply ending in "[" is not silently truncated for the table.
+      // It goes through the quarantine like every other byte — a bypass here would be a hole
+      // in the delay line for exactly the LAST characters of the reply, which are the ones
+      // most likely to have triggered a filter.
       const tail = deltaFilter.flush();
-      if (tail && !session.detached) this.stream.emit({ type: 'narration.delta', campaignId, text: tail });
+      const pending = quarantine.push(tail) + quarantine.flush();
+      // #598: the terminal frame has landed by now, so the finish reason is known BEFORE the
+      // held tail goes out. This is the whole reason the delay line exists.
+      const filtered = isWithheldFinishReason(result?.finishReason);
+      if (filtered) {
+        quarantinedChars = pending.length;
+        withheld = {
+          finishReason: result!.finishReason as WithheldFinishReason,
+          quarantinedChars,
+          releasedChars,
+        };
+      } else if (pending && !session.detached) {
+        releasedChars += pending.length;
+        this.stream.emit({ type: 'narration.delta', campaignId, text: pending });
+      }
     }
     // A provider that only streamed deltas (no `done`) still yields its text.
     if (result && !result.text && text) result = { ...result, text };
-    return { ok: true, text, result, aborted, cancelled };
+    return { ok: true, text, result, aborted, cancelled, withheld };
   }
 
   /**
@@ -3127,6 +3451,13 @@ export class AiDriverService {
         // set remains so the table is never without a way forward.
         if (session.stuck?.reason === 'provider_error') {
           return ['retry', 'continue_without_ai', 'nudge', 'flag', 'vote', 'rules_lookup', 'request_takeover', 'pause'];
+        }
+        // #598 — a withheld turn offers the same three human moves the acceptance criteria
+        // name: retry as-is, `nudge` (replay with a hint — the "edit the framing" lever this
+        // seat already has), or carry on with no AI at all. `flag` is dropped from the front
+        // of the list because there is no ruling to dispute: the table never saw one.
+        if (session.stuck?.reason === 'content_withheld') {
+          return ['retry', 'nudge', 'continue_without_ai', 'vote', 'rules_lookup', 'request_takeover', 'pause'];
         }
         return ['retry', 'nudge', 'flag', 'vote', 'rules_lookup', 'request_takeover', 'pause'];
       case 'running':
@@ -4174,6 +4505,11 @@ export function classifyStuck(ctx: {
   // #1057 / #558: a deliberate freeze or kill-switch cancel is not a stuck condition.
   if (ctx.stopReason === 'frozen') return null;
   if (ctx.stopReason === 'cancelled') return null;
+  // #598 — a safety terminal state outranks every diagnostic below it. A withheld turn also
+  // produces no narration, so without this it would classify as `no_narration` and tell the
+  // table "the AI produced no narration this turn" — technically true, and exactly the wrong
+  // thing to say when the truth is that a reply was generated and deliberately not shown.
+  if (ctx.stopReason === 'content_withheld') return 'content_withheld';
   if (ctx.stopReason === 'tool_error') return 'tool_error';
   if (ctx.stopReason === 'budget_exhausted') return 'budget_exhausted';
   if (ctx.stopReason === 'max_steps') return 'max_steps';
@@ -4207,6 +4543,9 @@ function describeStuck(reason: AiDmStuckReason): string {
       return 'The AI provider failed or stalled mid-response.';
     case 'unsupported_claim':
       return 'The AI stated a rule or a fact about the world that it could not back with a source — it is marked unverified until a human checks it.';
+    case 'content_withheld':
+      // Neutral and non-specific on purpose (#598) — see describeWithheldTurn in driver-safety.ts.
+      return 'The AI’s reply was withheld before it reached the table — nothing was posted or saved. A human can retry, nudge with different framing, or continue without the AI.';
     default:
       return 'The AI needs help.';
   }

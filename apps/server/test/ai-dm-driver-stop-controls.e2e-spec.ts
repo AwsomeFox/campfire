@@ -3,6 +3,10 @@ import { createAiEvalHarness, dm, type AiEvalHarness } from './ai-eval-harness';
 import { AiDriverService } from '../src/modules/ai-driver/ai-driver.service';
 import { AiDmStreamService, type AiDmStreamEvent } from '../src/modules/ai-driver/ai-driver-stream.service';
 import { AiConsoleService } from '../src/modules/ai-console/ai-console.service';
+import {
+  NARRATION_QUARANTINE_CHARS,
+  setNarrationQuarantineCharsForTests,
+} from '../src/modules/ai-driver/driver-safety';
 
 /**
  * Issue #558 — stop controls cancel in-flight generation and block pending tool calls.
@@ -14,6 +18,12 @@ describe('ai-dm driver — stop controls cancel generation (#558)', () => {
   beforeAll(async () => {
     h = await createAiEvalHarness({ model: 'stop-ctrl-model' });
     await h.enableExperimental();
+    // #598: every case below intervenes MID-STREAM by reacting to the first `narration.delta`.
+    // The safety quarantine is a trailing delay line, so a short scripted reply emits no delta
+    // at all until the stream ends, and these stop controls would have nothing to fire on.
+    // Switching the window off keeps this suite testing what it is about (#558 cancellation);
+    // the window's own behaviour is covered by driver-safety.spec.ts and the #598 e2e suite.
+    setNarrationQuarantineCharsForTests(0);
   });
 
   beforeEach(() => {
@@ -21,6 +31,7 @@ describe('ai-dm driver — stop controls cancel generation (#558)', () => {
   });
 
   afterAll(async () => {
+    setNarrationQuarantineCharsForTests(NARRATION_QUARANTINE_CHARS);
     await h.close();
   });
 

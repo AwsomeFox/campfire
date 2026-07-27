@@ -24,6 +24,22 @@ export type AiDmStreamEvent =
   | { type: 'turn.start'; campaignId: number; at: string }
   | { type: 'narration.delta'; campaignId: number; text: string; at: string }
   | { type: 'narration.message'; campaignId: number; text: string; at: string }
+  // #598 — the turn just streamed was WITHHELD: a provider content filter or model refusal
+  // ended it, so no `narration.message` will follow and no transcript row was written. Two
+  // jobs: tell the table, in neutral terms, that a reply was withheld rather than letting the
+  // bubble simply trail off; and instruct clients to DISCARD the in-progress narration deltas
+  // they have buffered. The second matters because `turn.end` otherwise promotes trailing live
+  // deltas into the client's permanent transcript. `reason` is the normalized terminal state
+  // (`content_filter` = the vendor's policy layer, `refusal` = the model itself) and `message`
+  // is neutral copy that deliberately says nothing about WHAT was withheld — describing it
+  // would hand the table the very content the withhold exists to keep from them.
+  | {
+      type: 'narration.withheld';
+      campaignId: number;
+      reason: 'content_filter' | 'refusal';
+      message: string;
+      at: string;
+    }
   | {
       type: 'tool';
       campaignId: number;

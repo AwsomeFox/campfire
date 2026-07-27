@@ -1475,6 +1475,25 @@ CREATE TABLE IF NOT EXISTS ai_driver_grounding_claims (
   corrected_at TEXT
 );
 
+-- Issue #598: incident trail for AI driver turns withheld by a provider content filter or a
+-- model refusal. Counts and provenance ONLY — there is deliberately no column for the withheld
+-- text, nor a digest of it: persisting prose a provider just refused to stand behind would give
+-- it a longer-lived, exportable home than the live stream it was kept off.
+CREATE TABLE IF NOT EXISTS ai_driver_withheld_turns (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  turn INTEGER NOT NULL,
+  step INTEGER NOT NULL,
+  finish_reason TEXT NOT NULL,
+  provider TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '',
+  withheld_chars INTEGER NOT NULL DEFAULT 0,
+  released_chars INTEGER NOT NULL DEFAULT 0,
+  suppressed_tool_calls INTEGER NOT NULL DEFAULT 0,
+  triggered_by_user_id TEXT,
+  created_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_users_oidc_sub ON users(oidc_sub);
 CREATE INDEX IF NOT EXISTS idx_characters_campaign ON characters(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_quests_campaign ON quests(campaign_id);
@@ -1588,6 +1607,9 @@ CREATE INDEX IF NOT EXISTS idx_encounter_op_idempotency_encounter ON encounter_o
 -- #577: the grounding review card reads a campaign's most recent claims, newest first.
 CREATE INDEX IF NOT EXISTS idx_ai_driver_grounding_campaign
   ON ai_driver_grounding_claims(campaign_id, id);
+-- #598: the withheld-turn incident list reads a campaign's most recent incidents, newest first.
+CREATE INDEX IF NOT EXISTS idx_ai_driver_withheld_campaign
+  ON ai_driver_withheld_turns(campaign_id, id);
 ${CAMPAIGN_MODULES_DDL}`;
 
 /**
