@@ -14,7 +14,8 @@
       "url": "https://github.com/AwsomeFox/campfire/pull/1562",
       "headBranch": "fix/issue-600",
       "baseBranch": "main",
-      "updatedAt": "2026-07-27T17:05:00Z"
+      "updatedAt": "2026-07-27T17:04:33Z",
+      "note": "Pushed ack-covers-earlier + preview_policy CHECK; waiting on CI/reviews/merge gates"
     }
   ]
 }
