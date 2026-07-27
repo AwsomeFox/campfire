@@ -269,6 +269,84 @@ describe('buildMarkdownZip — filename collisions (issues #530 / #863)', () => 
     expect(zip.file('campaign.json')).not.toBeNull();
   });
 
+  it('uses live attachment paths for streamed backup ZIPs', async () => {
+    const sourceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'export-backup-path-'));
+    const source = path.join(sourceDir, 'attachment.png');
+    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0, 0x49, 0x45, 0x4e, 0x44, 0, 0, 0, 0]);
+    fs.writeFileSync(source, bytes);
+    const service = buildService({});
+    const attachments = (service as any).attachments;
+    attachments.listRowsForCampaign = async () => [{
+      id: 9, campaignId: 1, kind: 'image', filename: 'backup.png', mime: 'image/png', size: bytes.length, createdAt: new Date(0).toISOString(),
+    }];
+    attachments.hasBytesOnDisk = () => true;
+    const exportPath = jest.fn(() => source);
+    const readBytes = jest.fn();
+    attachments.exportPathIfPresent = exportPath;
+    attachments.readBytesIfPresent = readBytes;
+    const output = new PassThrough();
+    const chunks: Buffer[] = [];
+    output.on('data', (chunk: Buffer) => chunks.push(chunk));
+    try {
+      await service.streamMarkdownZip(output, new AbortController().signal, 1, USER, { profile: 'backup' });
+      const zip = await JSZip.loadAsync(Buffer.concat(chunks));
+      expect(exportPath).toHaveBeenCalledTimes(1);
+      expect(readBytes).not.toHaveBeenCalled();
+      expect(await zip.file('uploads/9.png')!.async('nodebuffer')).toEqual(bytes);
+    } finally {
+      fs.rmSync(sourceDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each(['handoff', 'publish'] as const)('stages sanitized %s bytes without probing live paths', async (profile) => {
+    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0, 0x49, 0x45, 0x4e, 0x44, 0, 0, 0, 0]);
+    const service = buildService({});
+    const attachments = (service as any).attachments;
+    attachments.listRowsForCampaign = async () => [{
+      id: 9, campaignId: 1, kind: 'image', filename: 'private-name.png', mime: 'image/png', size: bytes.length, createdAt: new Date(0).toISOString(),
+    }];
+    attachments.hasBytesOnDisk = () => true;
+    const exportPath = jest.fn(() => { throw new Error('redacted profiles must not inspect source paths'); });
+    const readBytes = jest.fn(() => bytes);
+    attachments.exportPathIfPresent = exportPath;
+    attachments.readBytesIfPresent = readBytes;
+    const output = new PassThrough();
+    const chunks: Buffer[] = [];
+    output.on('data', (chunk: Buffer) => chunks.push(chunk));
+
+    await service.streamMarkdownZip(output, new AbortController().signal, 1, USER, { profile });
+
+    const zip = await JSZip.loadAsync(Buffer.concat(chunks));
+    expect(exportPath).not.toHaveBeenCalled();
+    expect(readBytes).toHaveBeenCalledTimes(1);
+    expect(await zip.file('uploads/9.png')!.async('nodebuffer')).toEqual(bytes);
+  });
+
+  it('withholds unreadable handoff attachment bytes instead of aborting the stream', async () => {
+    const service = buildService({});
+    const attachments = (service as any).attachments;
+    attachments.listRowsForCampaign = async () => [{
+      id: 9, campaignId: 1, kind: 'image', filename: 'unreadable.png', mime: 'image/png', size: 21, createdAt: new Date(0).toISOString(),
+    }];
+    attachments.hasBytesOnDisk = () => true;
+    const exportPath = jest.fn(() => { throw new Error('handoff must not probe source paths'); });
+    const readBytes = jest.fn(() => null);
+    attachments.exportPathIfPresent = exportPath;
+    attachments.readBytesIfPresent = readBytes;
+    const output = new PassThrough();
+    const chunks: Buffer[] = [];
+    output.on('data', (chunk: Buffer) => chunks.push(chunk));
+
+    await expect(service.streamMarkdownZip(output, new AbortController().signal, 1, USER, { profile: 'handoff' })).resolves.toBeDefined();
+
+    const zip = await JSZip.loadAsync(Buffer.concat(chunks));
+    const campaign = JSON.parse(await zip.file('campaign.json')!.async('string'));
+    expect(exportPath).not.toHaveBeenCalled();
+    expect(readBytes).toHaveBeenCalledTimes(1);
+    expect(campaign.attachments[0]).toMatchObject({ present: false, bytesWithheldReason: 'file missing on disk' });
+    expect(zip.file('uploads/9.png')).toBeNull();
+  });
+
   it('classifies a live source that vanishes after planning before any ZIP bytes flow', async () => {
     const sourceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'export-race-'));
     const source = path.join(sourceDir, 'attachment.png');

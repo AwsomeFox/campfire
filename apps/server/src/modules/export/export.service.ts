@@ -989,9 +989,12 @@ export class ExportService {
     opts: { profile?: ExportProfile; options?: ExportProfileOptions } = {},
     streamAttachments = false,
   ): Promise<{ warnings: string[]; inventory: ExportInventory }> {
-    const profileResult = await this.buildProfileExport(campaignId, user, opts.profile ?? DEFAULT_EXPORT_PROFILE, opts.options ?? {}, {
+    const resolvedProfile = opts.profile ?? DEFAULT_EXPORT_PROFILE;
+    const profileResult = await this.buildProfileExport(campaignId, user, resolvedProfile, opts.options ?? {}, {
       inspectAttachmentBytes: true,
-      attachmentPaths: streamAttachments,
+      // Only the backup profile may stream original live paths. Redacted profiles
+      // must read, sanitize, and stage bytes before archiver sees them.
+      attachmentPaths: streamAttachments && resolvedProfile === 'backup',
       stageAttachmentBytes: streamAttachments ? writer.stageAttachment : undefined,
       format: 'mdzip',
     });
