@@ -1,0 +1,20 @@
+{
+  "tracked": [
+    {
+      "pr": 1556,
+      "status": "babysitting",
+      "url": "https://github.com/AwsomeFox/campfire/pull/1556",
+      "headBranch": "fix/issue-1052",
+      "baseBranch": "main",
+      "updatedAt": "2026-07-27T16:56:00Z"
+    },
+    {
+      "pr": 1562,
+      "status": "babysitting",
+      "url": "https://github.com/AwsomeFox/campfire/pull/1562",
+      "headBranch": "fix/issue-600",
+      "baseBranch": "main",
+      "updatedAt": "2026-07-27T17:05:00Z"
+    }
+  ]
+}
