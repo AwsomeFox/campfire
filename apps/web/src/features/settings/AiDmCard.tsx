@@ -46,7 +46,7 @@ export const MODES: { value: AiDmMode; label: string; blurb: string }[] = [
     value: 'driver',
     label: 'Driver',
     blurb:
-      'Acts. The AI holds the DM seat and runs the session directly — it narrates, rolls dice, applies HP and conditions, awards XP, advances turns, reveals map regions, and jots table notes within the budget you set. Canon edits (new NPCs, quests, locations) still become proposals for your review. Requires the experimental server flag, a positive token budget, and a configured provider.',
+      'Acts. The AI holds the DM seat and runs the session directly — it narrates, rolls dice, applies HP and conditions, awards XP, advances turns, creates an encounter when the scene calls for one (always as DM-only prep, hidden until you reveal it), reveals map regions, and jots table notes within the budget you set. Canon edits (new NPCs, quests, locations) still become proposals for your review. Requires the experimental server flag, a positive token budget, and a configured provider.',
   },
 ];
 

@@ -302,6 +302,15 @@ export interface AiDmSessionState {
    * stay off-limits so hidden handouts cannot be exposed via update_encounter.
    */
   driverGeneratedMapIds?: number[];
+  /**
+   * Encounter ids the seat CREATED during this session (#1022). The reshape half of encounter
+   * authoring (name / location / quest / session links on update_encounter) is confined to this
+   * set: authoring your own creation is authoring, editing the DM's prepped fight is
+   * overwriting it. Deliberately NOT persisted across a restart — same as
+   * driverGeneratedMapIds — because the containment must fail CLOSED: after a restart the seat
+   * simply cannot reshape anything, which is the safe direction to be wrong in.
+   */
+  driverAuthoredEncounterIds?: number[];
   /** generate_map calls consumed this turn — reset at turn start (#488 / #474). */
   generateMapCallsThisTurn?: number;
   /** Confirm-policy tool attempts consumed this turn (#474). */
@@ -325,6 +334,7 @@ export interface AiDmSessionState {
 type AiDmSessionPrivateGuardFields =
   | 'secretReadApprovals'
   | 'driverGeneratedMapIds'
+  | 'driverAuthoredEncounterIds'
   | 'generateMapCallsThisTurn'
   | 'confirmToolAttemptsThisTurn'
   | 'policyViolationsThisTurn'
@@ -339,6 +349,7 @@ export function toPublicAiDmSessionState(session: AiDmSessionState): AiDmPublicS
   const {
     secretReadApprovals: _approvals,
     driverGeneratedMapIds: _mapIds,
+    driverAuthoredEncounterIds: _authoredEncounters,
     generateMapCallsThisTurn: _mapCalls,
     confirmToolAttemptsThisTurn: _confirmAttempts,
     policyViolationsThisTurn: _violations,
@@ -663,6 +674,14 @@ const GROUNDING_PREAMBLE = [
   '- Never invent NPCs, quests, locations, or party facts — read them (get_campaign_summary, get_npc, …) and cite the entity.',
   '- To change the world (a new NPC/quest/location, edits to canon), call the matching tool. Those are submitted as PROPOSALS for the human DM to approve — do not claim a canon change happened until it is applied.',
   '- You MAY resolve live play directly: roll dice, apply HP/conditions, advance turns, reveal map regions.',
+  // #1022 — advertise encounter AUTHORING, not just encounter operation. Without this the model
+  // does not know it can originate a fight, so it narrates an ambush it never actually creates
+  // and the table ends up with prose but no combat tracker.
+  '- You MAY author encounters: call create_encounter to originate a fight (a wandering monster, an ambush),',
+  '  then add_combatant per creature and begin_encounter to run it. Encounters you create are DM-only prep',
+  '  until the human DM reveals them, and you cannot change that — never tell players an encounter is hidden',
+  '  or describe a roster you have only prepped. You may rename or re-link an encounter YOU created this',
+  '  session; encounters the human DM prepared are theirs — ask them rather than editing.',
   '- Respect the session-zero charter (lines/veils/safety tools) below at all times.',
 ].join('\n');
 
@@ -715,6 +734,47 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'saving_throw', // #1040: character-aware save resolution using real stats + proficiency
   // encounter / turn flow — includes create_encounter so the AI can originate a fight
   // during play (#1075).
+  //
+  // ENCOUNTER AUTHORING: ALLOW-LIST, NOT PROPOSALS (#1022)
+  // -----------------------------------------------------
+  // #1022 asked for either a guarded allow-list entry or proposal-capable
+  // create_encounter/update_encounter. The decision is the allow-list, with argument-level
+  // containment in guardDriverLivePlayArgs. The reasoning, recorded here because this is
+  // where the next person will look:
+  //
+  //  1. A PROPOSAL DOES NOT SLOW ENCOUNTER AUTHORING DOWN — IT BREAKS IT. A proposal is a
+  //     deferred draft: the row does not exist until a DM approves it, so the model's very
+  //     next call (add_combatant, begin_encounter) has no id to act on. "Roll a random ambush
+  //     and start it" cannot be expressed as a proposal at all. Contrast the tools that ARE
+  //     proposal-capable — NPCs, quests, locations — where the delay costs nothing because
+  //     nothing in the same turn depends on the row existing.
+  //  2. AN ENCOUNTER IS PLAY STATE, NOT CANON. The proposal queue exists for durable facts
+  //     about the world that outlive the session. A wandering-monster fight spun up mid-scene
+  //     is closer to a dice roll than to a canon fact; reviewing it after the session is
+  //     reviewing something that already happened. `commit_encounter` (#412) already made
+  //     exactly this call for a GENERATED roster.
+  //  3. CREATING DESTROYS NOTHING. The additive half of authoring has no blast radius: a new
+  //     row a DM can delete. What actually needs bounding is DISCLOSURE and OVERWRITING, and
+  //     those are argument-level distinctions that a per-tool policy class cannot express —
+  //     which is why they live in guardDriverLivePlayArgs rather than in
+  //     PROFILE_TOOL_OVERRIDES:
+  //       - `hidden` is an OBSERVABILITY boundary (#262/#754). A seat that could create a
+  //         visible encounter, or flip `hidden` on an existing one, could publish the DM's
+  //         roster and difficulty to the table. The seat is driven by UNTRUSTED player input
+  //         (#317), so "what are we about to fight?" is exactly the prompt that would induce
+  //         it. The guard forces every driver-created encounter to DM-only prep and refuses
+  //         `hidden` on update outright — reveal is a human act, mirroring the seat being
+  //         denied attach_generated_map while allowed to generate map candidates.
+  //       - RESHAPING SOMEONE ELSE'S PREP IS OVERWRITING, NOT AUTHORING. The seat may rename
+  //         and re-link ONLY encounters it created this session, the same containment shape
+  //         update_encounter already uses for mapAttachmentId (session-generated ids only).
+  //         The DM's own prepped fight is untouchable; the model is told to ask instead.
+  //
+  // Why not `confirm` (#474) for these: the policy classes are PER-TOOL, and update_encounter
+  // is also the live fog/grid/AoE path (#488). Making the tool confirm-gated would put a DM
+  // approval in front of every mid-combat fog reveal — a regression in the flow #488 shipped —
+  // while still not distinguishing a rename from a reveal. The guard draws the line where the
+  // risk actually is; the profile machinery keeps its existing overrides untouched.
   'create_encounter',
   // commit_encounter (#412): the driver may commit a GENERATED roster as a hidden, preparing
   // encounter during prep — the same prep-only latitude as generate_map (it never reveals to
@@ -803,9 +863,9 @@ export function formatDriverLootCombatLogDetail(toolName: string, args: Record<s
 }
 
 /**
- * update_encounter fields the driver may set — VTT overlays only. Prep fields (name, links,
- * hidden) and arbitrary map linkage are stripped at execution so hidden handouts cannot be
- * exposed without update_attachment.
+ * update_encounter fields the driver may set on ANY encounter it can see — VTT overlays only
+ * (#488). Arbitrary map linkage is still restricted to session-generated maps below, so hidden
+ * handouts cannot be exposed without update_attachment.
  */
 const DRIVER_UPDATE_ENCOUNTER_VTT_FIELDS = new Set([
   'encounterId',
@@ -826,6 +886,20 @@ const DRIVER_UPDATE_ENCOUNTER_VTT_FIELDS = new Set([
   'fog',
   'aoe',
 ]);
+
+/**
+ * update_encounter fields the driver may set ONLY on an encounter it created this session
+ * (#1022) — the "reshape" half of encounter authoring. Renaming a fight or re-pointing its
+ * where/why/when links is authoring when it is your own creation and overwriting when it is
+ * the DM's prep, and the server can tell the two apart because it recorded which ids the seat
+ * made (session.driverAuthoredEncounterIds).
+ *
+ * `hidden` is deliberately absent from BOTH sets and can never be written by the seat, on its
+ * own creations or anyone's: revealing an encounter discloses its roster and difficulty to the
+ * table (#262/#754), and the seat takes instructions from untrusted player input (#317). A
+ * reveal must have a human behind it.
+ */
+const DRIVER_UPDATE_ENCOUNTER_AUTHORING_FIELDS = new Set(['name', 'locationId', 'questId', 'sessionId']);
 
 export type DriverLivePlayArgGuardResult =
   | { ok: true; args: Record<string, unknown> }
@@ -848,6 +922,19 @@ export function recordDriverGeneratedMap(session: AiDmSessionState, attachmentId
 }
 
 /**
+ * Track an encounter id the seat CREATED this session (#1022), unlocking the authoring fields
+ * of update_encounter for that id only. Recorded from the tool RESULT rather than from the
+ * model's arguments — the model does not choose which ids it owns, the server observes which
+ * ones it actually made.
+ */
+export function recordDriverAuthoredEncounter(session: AiDmSessionState, encounterId: number): void {
+  session.driverAuthoredEncounterIds = session.driverAuthoredEncounterIds ?? [];
+  if (!session.driverAuthoredEncounterIds.includes(encounterId)) {
+    session.driverAuthoredEncounterIds.push(encounterId);
+  }
+}
+
+/**
  * Execution-time guards for battle-map live-play tools (#488 / #474 policy-lite):
  *  - generate_map: bounded to {@link DRIVER_GENERATE_MAP_BUDGET_PER_TURN} per turn.
  *  - update_encounter: VTT fields only; mapAttachmentId must be null (detach/undo) or a
@@ -859,7 +946,10 @@ export function recordDriverGeneratedMap(session: AiDmSessionState, attachmentId
 export function guardDriverLivePlayArgs(
   toolName: string,
   args: Record<string, unknown>,
-  session: Pick<AiDmSessionState, 'driverGeneratedMapIds' | 'generateMapCallsThisTurn'>,
+  session: Pick<
+    AiDmSessionState,
+    'driverGeneratedMapIds' | 'generateMapCallsThisTurn' | 'driverAuthoredEncounterIds'
+  >,
 ): DriverLivePlayArgGuardResult {
   // Both the procedural (#306) and genuine-AI (#410) map generators share one per-turn
   // budget so an autonomous seat cannot burn provider/image cost by spamming generation.
@@ -875,15 +965,64 @@ export function guardDriverLivePlayArgs(
     return { ok: true, args: { ...args } };
   }
 
+  // Issue #1022: encounter CREATION is additive and therefore safe to allow directly — except
+  // for one field. `hidden` decides whether the table can see the roster and difficulty
+  // (#262/#754), so the seat is not permitted to choose it: a driver-created encounter is
+  // always DM-only prep, and the human DM reveals it. Rather than refuse a `hidden:false`
+  // call (which would just teach the model to retry), the field is DROPPED and creation
+  // proceeds — `resolveCreateHidden(undefined)` in EncountersService then applies the
+  // private-by-default rule, so the outcome is identical to the model having omitted it.
+  if (toolName === 'create_encounter') {
+    const { hidden: _discardedHidden, ...rest } = args;
+    return { ok: true, args: rest };
+  }
+
   if (toolName === 'update_encounter') {
-    const rejected = Object.keys(args).filter((key) => !DRIVER_UPDATE_ENCOUNTER_VTT_FIELDS.has(key));
+    // `hidden` is refused rather than dropped, and that asymmetry with create is deliberate:
+    // on create, dropping it yields the safe default and the call still does what the model
+    // wanted (a fight exists). On update, silently dropping a reveal would let the model — and
+    // the DM reading the transcript — believe the encounter had been revealed when it had not,
+    // which is a worse failure than a clear refusal. Nothing is disclosed by refusing: the
+    // seat already knows the encounter exists.
+    if ('hidden' in args) {
+      return {
+        ok: false,
+        code: 'forbidden_encounter_reveal',
+        message:
+          'The driver may not change an encounter\'s hidden state. Revealing an encounter discloses its roster ' +
+          'and difficulty to players and must be done by the human DM.',
+      };
+    }
+    const authoringKeys = Object.keys(args).filter((key) => DRIVER_UPDATE_ENCOUNTER_AUTHORING_FIELDS.has(key));
+    const rejected = Object.keys(args).filter(
+      (key) => !DRIVER_UPDATE_ENCOUNTER_VTT_FIELDS.has(key) && !DRIVER_UPDATE_ENCOUNTER_AUTHORING_FIELDS.has(key),
+    );
     if (rejected.length > 0) {
       return {
         ok: false,
         code: 'forbidden_encounter_field',
         message:
-          `The driver may only set VTT fields on update_encounter (fog, grid, aoe, mapAttachmentId). Rejected: ${rejected.join(', ')}.`,
+          'The driver may set VTT fields on any encounter (fog, grid, aoe, mapAttachmentId), and name/location/' +
+          `quest/session links on encounters it created this session. Rejected: ${rejected.join(', ')}.`,
       };
+    }
+    // The reshape half is confined to the seat's OWN creations (#1022). An encounter the human
+    // DM prepared is theirs: renaming or re-linking it is overwriting their work with no diff
+    // for them to review, which is precisely what the proposal queue exists for and precisely
+    // what this tool cannot offer (it is also the live fog path — see the note on
+    // DRIVER_LIVE_PLAY_TOOLS).
+    if (authoringKeys.length > 0) {
+      const encounterId = Number(args.encounterId);
+      const authored = session.driverAuthoredEncounterIds ?? [];
+      if (!Number.isFinite(encounterId) || !authored.includes(encounterId)) {
+        return {
+          ok: false,
+          code: 'forbidden_encounter_reshape',
+          message:
+            'The driver may only rename or re-link an encounter it created this session. Ask the DM to change ' +
+            `their own prepared encounters. Rejected: ${authoringKeys.join(', ')}.`,
+        };
+      }
     }
     if ('mapAttachmentId' in args && args.mapAttachmentId !== null && args.mapAttachmentId !== undefined) {
       const id = Number(args.mapAttachmentId);
@@ -2126,8 +2265,11 @@ export class AiDriverService {
         name: t.name,
         description:
           t.name === 'update_encounter'
-            ? 'DM only: adjust battle-map VTT overlays for an encounter — fog, grid config, AoE templates, and mapAttachmentId ' +
-              '(session-generated maps only; null detaches). Prep fields (name, location/quest/session links, hidden) are NOT available to the driver seat.'
+            ? 'DM only: adjust battle-map VTT overlays for ANY encounter — fog, grid config, AoE templates, and ' +
+              'mapAttachmentId (session-generated maps only; null detaches). You may ALSO set name and the ' +
+              'location/quest/session links, but only on an encounter YOU created this session (issue #1022) — the ' +
+              "DM's own prepared encounters are theirs, so ask them instead of editing. `hidden` is never available " +
+              'to the driver seat: revealing an encounter shows its roster and difficulty to players and is the DM\'s call.'
             : t.description,
         parameters: t.inputSchema,
       }));
@@ -3162,6 +3304,19 @@ export class AiDriverService {
           if (typeof parsed.attachmentId === 'number') recordDriverGeneratedMap(session, parsed.attachmentId);
         } catch {
           // Non-JSON tool payload — skip tracking.
+        }
+      }
+
+      // #1022 — record the id of an encounter the seat actually created, which is what unlocks
+      // the authoring fields of update_encounter for that id (guardDriverLivePlayArgs). Taken
+      // from the RESULT, never from the model's arguments: ownership is something the server
+      // observed, not something the model may assert.
+      if (call.name === 'create_encounter' && !res.isError) {
+        try {
+          const parsed = JSON.parse(res.text) as { id?: unknown };
+          if (typeof parsed.id === 'number') recordDriverAuthoredEncounter(session, parsed.id);
+        } catch {
+          // Non-JSON tool payload — skip tracking; the seat simply cannot reshape this one.
         }
       }
 
