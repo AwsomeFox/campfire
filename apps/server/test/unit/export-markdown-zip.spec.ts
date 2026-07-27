@@ -170,7 +170,8 @@ describe('buildMarkdownZip — filename collisions (issues #530 / #863)', () => 
       { id: 9, mime: 'application/pdf', filename: 'third.pdf' },
     ];
     const bytes = new Map(attachments.map((attachment) => [attachment.id, Buffer.alloc(256 * 1024, attachment.id)]));
-    (service as any).attachments.readBytesIfPresent = jest.fn(({ id }: { id: number }) => bytes.get(id));
+    const readBytes = jest.fn(({ id }: { id: number }) => bytes.get(id));
+    (service as any).attachments.readBytesIfPresent = readBytes;
     const policy = resolveExportPolicy('handoff');
 
     const decisions = (service as any).planAttachmentBytes(
@@ -189,6 +190,7 @@ describe('buildMarkdownZip — filename collisions (issues #530 / #863)', () => 
       expect.objectContaining({ id: 9, bytes: null, available: true }),
     ]));
     expect([...decisions.values()].every((decision) => decision.bytes === null)).toBe(true);
+    expect(readBytes).toHaveBeenCalledTimes(3);
     expect((service as any).attachmentInventory({ attachments }, policy, decisions, 'mdzip', true)).toMatchObject({
       included: 3,
       bytesWithheld: 0,
@@ -204,6 +206,53 @@ describe('buildMarkdownZip — filename collisions (issues #530 / #863)', () => 
     expect(build).toHaveBeenCalledWith(1, USER, 'handoff', {}, expect.objectContaining({
       inspectAttachmentBytes: true,
       format: 'mdzip',
+      retainAttachmentBytes: false,
+    }));
+  });
+
+  it('uses paths, not bytes, for backup Markdown ZIP preview presence and inventory', async () => {
+    const service = serviceWithCollisions();
+    const attachments = [
+      { id: 7, mime: 'application/pdf', filename: 'present.pdf', present: true },
+      { id: 8, mime: 'application/pdf', filename: 'missing.pdf', present: true },
+    ];
+    const exportPath = jest.fn(({ id }: { id: number }) => id === 7 ? '/live/present.pdf' : null);
+    const readBytes = jest.fn();
+    (service as any).attachments.exportPathIfPresent = exportPath;
+    (service as any).attachments.readBytesIfPresent = readBytes;
+    jest.spyOn(service, 'buildExport').mockResolvedValue({ attachments } as any);
+
+    const result = await (service as any).buildProfileExport(
+      1,
+      USER,
+      'backup',
+      {},
+      { inspectAttachmentBytes: true, format: 'mdzip', attachmentPaths: true, retainAttachmentBytes: false },
+    );
+
+    expect(exportPath).toHaveBeenCalledTimes(2);
+    expect(readBytes).not.toHaveBeenCalled();
+    expect(result.attachmentBytes.get(7)).toMatchObject({ sourcePath: '/live/present.pdf', bytes: null });
+    expect(result.attachmentBytes.get(8)).toMatchObject({ bytes: null, withheldReason: 'file missing on disk' });
+    expect(result.data.attachments).toEqual([
+      expect.objectContaining({ id: 7, present: true }),
+      expect.objectContaining({ id: 8, present: false, bytesWithheldReason: 'file missing on disk' }),
+    ]);
+    expect(result.inventory.attachments).toMatchObject({
+      included: 2,
+      bytesWithheld: 1,
+    });
+  });
+
+  it('asks backup Markdown ZIP previews to use attachment paths', async () => {
+    const service = serviceWithCollisions();
+    const build = jest.spyOn(service as any, 'buildProfileExport').mockResolvedValue({ inventory: { profile: 'backup' } });
+
+    await service.buildExportInventory(1, USER, 'backup', {}, 'mdzip');
+
+    expect(build).toHaveBeenCalledWith(1, USER, 'backup', {}, expect.objectContaining({
+      inspectAttachmentBytes: true,
+      attachmentPaths: true,
       retainAttachmentBytes: false,
     }));
   });

@@ -557,6 +557,10 @@ export class ExportService {
     const { inventory } = await this.buildProfileExport(campaignId, user, profile, options, {
       inspectAttachmentBytes: format === 'mdzip',
       format,
+      // Backup never sanitizes attachment bytes. For its Markdown ZIP preview,
+      // filesystem paths tell us both presence and what the streaming archive
+      // would include without opening every attachment.
+      attachmentPaths: format === 'mdzip' && profile === 'backup',
       // Preview needs inspection results, not payloads. Keeping one sanitized
       // Buffer per attachment here would turn a large campaign preview into a
       // cumulative heap allocation even though it emits no archive bytes.
@@ -621,8 +625,10 @@ export class ExportService {
     const rows = Array.isArray(raw.attachments) ? (raw.attachments as Array<{ id: number; mime: string; filename: string }>) : [];
     for (const row of rows) {
       const sourcePath = preferPaths ? this.attachments.exportPathIfPresent({ campaignId, id: row.id, mime: row.mime }) : null;
-      if (sourcePath && !policy.sanitizeAttachmentBytes) {
-        decisions.set(row.id, { id: row.id, bytes: null, sourcePath, metadataStripped: false });
+      if (preferPaths && !policy.sanitizeAttachmentBytes) {
+        decisions.set(row.id, sourcePath
+          ? { id: row.id, bytes: null, sourcePath, metadataStripped: false }
+          : { id: row.id, bytes: null, metadataStripped: false, withheldReason: 'file missing on disk' });
         continue;
       }
       const original = this.attachments.readBytesIfPresent({ campaignId, id: row.id, mime: row.mime });
