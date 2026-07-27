@@ -1860,10 +1860,15 @@ export const campaignModuleSnapshots = sqliteTable('campaign_module_snapshots', 
 // with extra steps.
 //
 // What the counts DO answer: did any of it reach the table before the terminal frame arrived
-// (`released_chars` — the residual the quarantine window did not cover), how much was stopped
-// (`withheld_chars`), did the same response also try to run tools (`suppressed_tool_calls`),
-// which provider/model/turn, and whose action provoked it. That is enough for a DM to notice a
-// pattern and act on it without anyone re-reading the content.
+// (`released_chars` — the residual the quarantine window did not cover), how much the delay
+// line still had in hand (`withheld_chars`), did the same response also try to run tools
+// (`suppressed_tool_calls`), which provider/model/turn, and whose action provoked it. That is
+// enough for a DM to notice a pattern and act on it without anyone re-reading the content.
+//
+// READ `released_chars` FIRST. It is the exposure. `withheld_chars` is bounded by the
+// quarantine window (~240 chars), so on a long refused reply it is small BECAUSE most of the
+// reply had already aged out of the window and been broadcast — not because little was
+// refused. The two together are roughly what the model generated; neither alone is.
 export const aiDriverWithheldTurns = sqliteTable(
   'ai_driver_withheld_turns',
   {
@@ -1879,7 +1884,12 @@ export const aiDriverWithheldTurns = sqliteTable(
     provider: text('provider').notNull().default(''),
     /** The model id actually served for the step. */
     model: text('model').notNull().default(''),
-    /** Characters generated and never broadcast. LENGTH ONLY — the text itself is discarded. */
+    /**
+     * Characters still inside the quarantine delay line when the refusal landed, and so never
+     * broadcast. LENGTH ONLY — the text itself is discarded. BOUNDED BY THE WINDOW: this is
+     * "how much the delay line caught", not the length of the refused reply. See the note above
+     * the table.
+     */
     withheldChars: integer('withheld_chars').notNull().default(0),
     /** Characters already broadcast when the refusal arrived — the residual exposure. */
     releasedChars: integer('released_chars').notNull().default(0),

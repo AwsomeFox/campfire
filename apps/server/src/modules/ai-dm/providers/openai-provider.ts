@@ -171,7 +171,13 @@ export class OpenAiProvider implements AiProvider {
           continue;
         }
         for (const ev of acc.push(event)) yield ev;
-        if (event.type === 'response.completed') break;
+        // #598: break on EVERY terminal frame, not just the happy one. A content-filtered or
+        // failed response ends on `response.incomplete` / `response.failed`; leaving the loop
+        // spinning after one of those made the adapter depend on a trailing `[DONE]` to stop.
+        // Real OpenAI sends it, but an OpenAI-compatible proxy that does not would hang here
+        // until the idle timeout — and the frame it would be hanging after is precisely the one
+        // that says the turn was refused, so the retraction would be delayed by that timeout.
+        if (event.type === 'response.completed' || event.type === 'response.incomplete' || event.type === 'response.failed') break;
       }
       yield { type: 'done', result: acc.finish() };
     } else {

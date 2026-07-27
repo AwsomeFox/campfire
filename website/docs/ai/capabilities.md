@@ -149,8 +149,8 @@ they granted is gone, or that the AI is waiting on a confirmation that no longer
 ### When a provider refuses or filters a reply
 
 If the AI provider reports that it **stopped a reply on safety grounds** — a content
-filter tripping, or the model declining — Campfire treats that turn as **withheld**, not
-as narration:
+filter tripping, the model declining, or the provider blocking the prompt outright before
+it generated anything — Campfire treats that turn as **withheld**, not as narration:
 
 - the reply is **never committed**: no DM message is posted, nothing is written to the
   table transcript, and the text is not carried into the AI's context for the next turn;
@@ -161,9 +161,13 @@ as narration:
 - the seat parks on the usual recovery ladder with **Retry**, **Nudge** (retry with
   different framing), and **Continue without AI**;
 - a DM can review the incident trail at **AI DM → withheld turns**. It records counts and
-  provenance only — how much was stopped, how much had already streamed, how many tool
-  calls were suppressed, which provider and model, and whose action prompted it. **The
-  withheld text itself is never stored anywhere**, and neither is a fingerprint of it.
+  provenance only — how much had already streamed, how much the trailing window still had
+  in hand, how many tool calls were suppressed, which provider and model, and whose action
+  prompted it. **The withheld text itself is never stored anywhere**, and neither is a
+  fingerprint of it. Read *"already streamed"* first: it is the number that says how much
+  of the reply reached the table. The other one is capped by the size of the window, so on
+  a long refused reply it is small because most of the reply had already gone out — not
+  because little was refused.
 
 **About live streaming.** Narration streams to the table token by token, and a provider
 only reports a refusal at the *end* of a reply. Campfire holds back a short trailing
