@@ -76,6 +76,19 @@ describe('BackupArchiveReader', () => {
     reader.close();
   });
 
+  it('normalizes a corrupt local entry header as an invalid archive', async () => {
+    const file = zip([{ name: 'db', data: Buffer.from('valid') }]);
+    const descriptor = fs.openSync(file, 'r+');
+    try {
+      fs.writeSync(descriptor, Buffer.alloc(4), 0, 4, 0);
+    } finally {
+      fs.closeSync(descriptor);
+    }
+    const reader = await BackupArchiveReader.open(file, undefined, low);
+    await expect(reader.readBuffer(reader.get('db')!, 8)).rejects.toBeInstanceOf(BadRequestException);
+    reader.close();
+  });
+
   it('enforces actual total bytes across streamed entries', async () => {
     const file = zip([{ name: 'a', data: Buffer.alloc(7) }, { name: 'b', data: Buffer.alloc(7) }]);
     const reader = await BackupArchiveReader.open(file, undefined, { ...low, maxEntryUncompressedBytes: 8, maxTotalUncompressedBytes: 20 });
@@ -128,6 +141,44 @@ describe('BackupArchiveReader', () => {
     opened!(null, source);
     await expect(pending).rejects.toBeInstanceOf(BadRequestException);
     expect(source.destroyed).toBe(true);
+  });
+
+  it('does not create an extraction destination before the ZIP source opens', async () => {
+    let opened: ((error: Error | null, stream?: PassThrough) => void) | undefined;
+    const fakeZip = {
+      openReadStream: jest.fn((_entry: unknown, callback: (error: Error | null, stream?: PassThrough) => void) => {
+        opened = callback;
+      }),
+      close: jest.fn(),
+    };
+    const reader = new (BackupArchiveReader as unknown as new (
+      zip: typeof fakeZip,
+      entries: readonly unknown[],
+      limits: BackupArchiveReaderLimits,
+    ) => BackupArchiveReader)(fakeZip, [], {
+      ...low,
+      maxCompressedBytes: 1024,
+      maxEntries: 3,
+      maxEntryUncompressedBytes: 8,
+      maxTotalUncompressedBytes: 12,
+    });
+    const createOutput = jest.spyOn(fs, 'createWriteStream');
+    const destination = path.join(tmp, `${crypto.randomUUID()}.db`);
+    try {
+      const pending = reader.extractToFile({ fileName: 'delayed' } as never, destination);
+      while (!opened) await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(createOutput).not.toHaveBeenCalled();
+      const source = new PassThrough();
+      opened(null, source);
+      source.end('ok');
+      await expect(pending).resolves.toEqual({
+        bytes: 2,
+        sha256: crypto.createHash('sha256').update('ok').digest('hex'),
+      });
+    } finally {
+      createOutput.mockRestore();
+      fs.rmSync(destination, { force: true });
+    }
   });
 
   it('closes a ZIP opened after its cancellation signal fired', async () => {
