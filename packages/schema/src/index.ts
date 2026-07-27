@@ -8167,7 +8167,7 @@ export const CombatantUpdate = z.object({
   // Direct encounter damage metadata (issue #605).  These fields are meaningful only
   // for negative hpDelta values; the server derives the final delta from the target's
   // statblock defences so REST, MCP, and the encounter UI use one rules path.
-  damageType: z.string().trim().max(24).optional(),
+  damageType: z.string().trim().min(1).max(24).optional(),
   saveOutcome: DamageSaveOutcome.optional(),
   isCrit: z.boolean().optional(),
   // The dice-only portion of hpDelta.  On a critical hit the engine adds this once,

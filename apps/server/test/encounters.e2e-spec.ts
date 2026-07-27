@@ -432,6 +432,19 @@ describe('encounters (e2e)', () => {
         .send({ hpDelta: -4, damageType: 'laser' });
       expect(unknownType.status).toBe(400);
 
+      const meaninglessDiceSubtotal = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${targetId}`)
+        .set(dm)
+        .send({ hpDelta: -4, damageDice: 4 });
+      expect(meaninglessDiceSubtotal.status).toBe(400);
+      expect(meaninglessDiceSubtotal.body.message).toContain('requires a critical hit');
+
+      const emptyDamageType = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${targetId}`)
+        .set(dm)
+        .send({ hpDelta: -4, damageType: '   ' });
+      expect(emptyDamageType.status).toBe(400);
+
       const [qualifiedEntry] = await db
         .insert(ruleEntries)
         .values({

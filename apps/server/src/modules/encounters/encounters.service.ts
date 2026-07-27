@@ -3093,6 +3093,9 @@ export class EncountersService {
     if (damageMetadataTouched && (patch.hpDelta === undefined || patch.hpDelta >= 0)) {
       throw new BadRequestException('Damage type, save outcome, and critical metadata require a negative hpDelta');
     }
+    if (patch.damageDice !== undefined && patch.isCrit !== true) {
+      throw new BadRequestException('The dice-only damage subtotal requires a critical hit');
+    }
     if (patch.isCrit && patch.damageDice === undefined) {
       throw new BadRequestException('Critical damage requires the dice-only damage subtotal');
     }

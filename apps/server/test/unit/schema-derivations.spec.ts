@@ -5,6 +5,7 @@ import {
   normalizeStats,
   DiceExprPattern,
   XpAward,
+  CombatantUpdate,
 } from '@campfire/schema';
 
 /**
@@ -102,5 +103,13 @@ describe('schema — DiceExprPattern', () => {
 
   it.each(['', 'd', '20', '1d', 'notdice', '1d20+'])('rejects invalid %p', (expr) => {
     expect(DiceExprPattern.test(expr)).toBe(false);
+  });
+});
+
+describe('schema — direct encounter damage metadata (issue #605)', () => {
+  it('accepts a trimmed non-empty damage type and rejects blank values', () => {
+    expect(CombatantUpdate.parse({ hpDelta: -4, damageType: ' fire ' }).damageType).toBe('fire');
+    expect(CombatantUpdate.safeParse({ hpDelta: -4, damageType: '' }).success).toBe(false);
+    expect(CombatantUpdate.safeParse({ hpDelta: -4, damageType: '   ' }).success).toBe(false);
   });
 });

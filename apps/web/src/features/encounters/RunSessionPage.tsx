@@ -1480,13 +1480,19 @@ export default function RunSessionPage() {
         `${API}/encounters/${eid}/combatants/${combatantId}`,
         hpPatchWithActor({ hpDelta: delta, damageType, saveOutcome, isCrit, damageDice, idempotencyKey }, actorId, combatantId, isDm),
       ),
-    onMutate: async ({ combatantId, delta, damageType, saveOutcome, isCrit }) => {
+    onMutate: async ({ combatantId, delta, damageType, saveOutcome, isCrit, damageDice }) => {
       setActionError(null);
       await queryClient.cancelQueries({ queryKey: queryKeys.encounter(eid) });
       const previous = queryClient.getQueryData<EncounterWithCombatants>(queryKeys.encounter(eid));
       // Defence data lives in the server's authoritative statblock.  Do not briefly
       // show an incorrect local HP total when damage rules are active; refetch settles it.
-      if (previous && damageType === undefined && saveOutcome === undefined && isCrit === undefined) {
+      if (
+        previous &&
+        damageType === undefined &&
+        saveOutcome === undefined &&
+        isCrit === undefined &&
+        damageDice === undefined
+      ) {
         queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), {
           ...previous,
           combatants: previous.combatants.map((c) => (c.id === combatantId ? applyHpDelta(c, delta, ruleSystem) : c)),
@@ -1523,7 +1529,13 @@ export default function RunSessionPage() {
       await queryClient.cancelQueries({ queryKey: queryKeys.encounter(eid) });
       const previous = queryClient.getQueryData<EncounterWithCombatants>(queryKeys.encounter(eid));
       const targets = new Set(combatantIds);
-      if (previous && damage.damageType === undefined && damage.saveOutcome === undefined && damage.isCrit === undefined) {
+      if (
+        previous &&
+        damage.damageType === undefined &&
+        damage.saveOutcome === undefined &&
+        damage.isCrit === undefined &&
+        damage.damageDice === undefined
+      ) {
         queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), {
           ...previous,
           combatants: previous.combatants.map((c) =>
