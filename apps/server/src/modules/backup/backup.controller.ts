@@ -138,7 +138,11 @@ export class BackupController {
     } catch (error) {
       // A client disconnect is expected during a streamed download. Preserve
       // unrelated failures even if the request happened to close at the same time.
-      if (!isBackupDownloadCancellation(error, operation.signal)) throw error;
+      if (isBackupDownloadCancellation(error, operation.signal)) return;
+      // Once streaming begins, pipeline teardown owns the response. Do not let
+      // Nest attempt a second JSON error response over a partial ZIP.
+      if (res.headersSent || res.destroyed) return;
+      throw error;
     } finally {
       operation.dispose();
     }
