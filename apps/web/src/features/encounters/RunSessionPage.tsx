@@ -16,6 +16,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { DetailPageWayfinding } from '../../components/DetailPageWayfinding';
 import { PrintControl } from '../../components/PrintControl';
+import { PrintOnly } from '../../components/PrintOnly';
 import { useKeyboardCommandHint, useKeyboardGuardedAction } from '../../components/KeyboardCommandProvider';
 import type {
   ActionSpec,
@@ -1957,26 +1958,33 @@ export default function RunSessionPage() {
 
   return (
     <div className="cf-print-root cf-print-encounter reading-surface max-w-4xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" {...entityTargetProps('encounter', encounter.id)}>
-      <section className="cf-print-only cf-print-paper" aria-label="Encounter reference sheet">
-        <h1>{encounter.name}</h1>
-        <p><strong>Status:</strong> {STATUS_LABEL[encounter.status]} · <strong>Round:</strong> {encounter.round}</p>
-        <table className="cf-print-roster">
-          <thead><tr><th>Initiative / order</th><th>Combatant</th><th>Type</th><th>AC</th><th>Current / max / temp HP</th><th>Conditions / status</th><th>Notes / tracking</th></tr></thead>
-          <tbody>{orderedCombatants.map((combatant, index) => (
-            <tr key={combatant.id}>
-              <td>{combatant.initiative ?? '—'} / {index + 1}</td>
-              <td>{combatant.name}</td>
-              <td>{combatant.kind}</td>
-              <td>{combatant.eac != null || combatant.kac != null
-                ? [combatant.eac != null ? `EAC ${combatant.eac}` : null, combatant.kac != null ? `KAC ${combatant.kac}` : null].filter(Boolean).join(' / ')
-                : combatant.statblock?.ac ?? '—'}</td>
-              <td>{combatant.hpCurrent == null || combatant.hpMax == null ? '—' : `${combatant.hpCurrent} / ${combatant.hpMax} / ${combatant.hpTemp ?? 0}`}</td>
-              <td>{[...combatant.conditions, combatant.deathState !== 'none' ? combatant.deathState : ''].filter(Boolean).join(', ') || '—'}</td>
-              <td aria-label={`Notes for ${combatant.name}`} />
-            </tr>
-          ))}</tbody>
-        </table>
-      </section>
+      <PrintOnly>
+        <section className="cf-print-only cf-print-paper" aria-label="Encounter reference sheet">
+          <h1>{encounter.name}</h1>
+          <p><strong>Status:</strong> {STATUS_LABEL[encounter.status]} · <strong>Round:</strong> {encounter.round}</p>
+          <table className="cf-print-roster">
+            <thead><tr><th>Initiative / order</th><th>Combatant</th><th>Type</th><th>AC</th><th>Current / max / temp HP</th><th>Conditions / status</th><th>Notes / tracking</th></tr></thead>
+            <tbody>{orderedCombatants.map((combatant, index) => (
+              <tr key={combatant.id}>
+                <td>{combatant.initiative ?? '—'} / {index + 1}</td>
+                <td>{combatant.name}</td>
+                <td>{combatant.kind}</td>
+                <td>{combatant.eac != null || combatant.kac != null
+                  ? [combatant.eac != null ? `EAC ${combatant.eac}` : null, combatant.kac != null ? `KAC ${combatant.kac}` : null].filter(Boolean).join(' / ')
+                  : combatant.statblock?.ac ?? '—'}</td>
+                <td>{combatant.hpCurrent == null || combatant.hpMax == null ? '—' : `${combatant.hpCurrent} / ${combatant.hpMax} / ${combatant.hpTemp ?? 0}`}</td>
+                <td>{[
+                  ...combatant.conditions,
+                  combatant.deathState !== 'none'
+                    ? (DEATH_STATE_LABEL[combatant.deathState] ?? combatant.deathState)
+                    : '',
+                ].filter(Boolean).join(', ') || '—'}</td>
+                <td aria-label={`Notes for ${combatant.name}`} />
+              </tr>
+            ))}</tbody>
+          </table>
+        </section>
+      </PrintOnly>
       <DetailPageWayfinding
         campaignId={cid}
         defaultPath={`/c/${cid}/encounters`}
@@ -2049,7 +2057,7 @@ export default function RunSessionPage() {
           </span>
         )}
         <DifficultyBadge difficulty={difficulty} />
-        {isDm && <PrintControl className="ml-auto" />}
+        {isDm && <PrintControl resetKey={encounter.id} className="ml-auto" />}
         <span
           className={`cf-chip ${encounterSyncChipClass(encounterSync)}`}
           data-testid="encounter-sync-chip"

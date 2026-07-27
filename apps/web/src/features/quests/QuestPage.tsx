@@ -24,10 +24,12 @@ import {
   EmptyState,
   Skeleton,
   ErrorNote,
+  DmPanel,
 } from '../../components/ui';
 import { QuestStatusBadge } from '../../components/EntitySemanticBadges';
 import { Markdown } from '../../components/Markdown';
 import { PrintControl } from '../../components/PrintControl';
+import { PrintOnly } from '../../components/PrintOnly';
 import { NotFoundState } from '../../components/NotFoundState';
 import { NotesRail } from '../../components/NotesRail';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
@@ -485,20 +487,26 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
         defaultPath={`/c/${campaignId}/quests`}
         defaultLabel={t('quests.backToQuests')}
       /></div>
-      <section className="cf-print-only cf-print-paper">
-        <h1>{quest.title}</h1>
-        <p><strong>Status:</strong> {quest.status}</p>
-        <Markdown>{quest.body || 'No description yet.'}</Markdown>
-        <h2>{t('quests.objectives')}</h2>
-        <ul>{quest.objectives.map((objective) => <li key={objective.id}>{objective.done ? 'Done — ' : 'Open — '}{objective.text}</li>)}</ul>
-        <p><strong>{t('quests.reward')}:</strong> {quest.reward || '—'} · <strong>{t('quests.givenBy')}:</strong> {giver?.name || '—'}</p>
-        {isDm && quest.dmSecret && <div className="cf-print-secret"><p>{quest.dmSecret}</p></div>}
-      </section>
+      <PrintOnly>
+        <section className="cf-print-only cf-print-paper">
+          <h1>{quest.title}</h1>
+          <p><strong>Status:</strong> {questStatusWord(t, quest.status)}</p>
+          <Markdown>{quest.body || 'No description yet.'}</Markdown>
+          <h2>{t('quests.objectives')}</h2>
+          <ul>{quest.objectives.map((objective) => <li key={objective.id}>{objective.done ? 'Done — ' : 'Open — '}{objective.text}</li>)}</ul>
+          <p><strong>{t('quests.reward')}:</strong> {quest.reward || '—'} · <strong>{t('quests.givenBy')}:</strong> {giver?.name || '—'}</p>
+          {isDm && quest.dmSecret && <div className="cf-print-secret"><DmPanel>{quest.dmSecret}</DmPanel></div>}
+        </section>
+      </PrintOnly>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         <h3 className="min-w-0 break-words" style={{ margin: 0 }}>{quest.title}</h3>
         <QuestStatusBadge status={quest.status} />
-        <PrintControl allowSecrets={isDm && Boolean(quest.dmSecret)} className="ml-auto" />
+        <PrintControl
+          resetKey={quest.id}
+          allowSecrets={isDm && Boolean(quest.dmSecret)}
+          className="ml-auto"
+        />
         {isDm && quest.hidden && <Chip variant="failed">{t('quests.hiddenChip')}</Chip>}
         {canDmWrite && (
           <div className="cf-print-hide flex items-center gap-2">

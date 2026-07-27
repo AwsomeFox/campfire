@@ -17,6 +17,8 @@ import { NpcDispositionBadge, QuestStatusBadge } from '../../components/EntitySe
 import { NotFoundState } from '../../components/NotFoundState';
 import { Markdown } from '../../components/Markdown';
 import { PrintControl } from '../../components/PrintControl';
+import { PrintOnly } from '../../components/PrintOnly';
+import { npcDispositionPresentation } from '../../components/entitySemantics';
 import { NotesRail } from '../../components/NotesRail';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
@@ -332,13 +334,15 @@ export default function NpcPage() {
         defaultPath={`/c/${cid}/npcs`}
         defaultLabel="← Back to NPCs"
       /></div>
-      <section className="cf-print-only cf-print-paper">
-        <h1>{npc.name}</h1>
-        {npc.role && <p>{npc.role} · {npc.disposition}</p>}
-        <Markdown>{npc.body || 'No description yet.'}</Markdown>
-        <p><strong>Faction:</strong> {factionName || 'None'} · <strong>Last seen:</strong> {locationName || 'Unknown'}</p>
-        {isDm && npc.dmSecret && <div className="cf-print-secret"><DmPanel>{npc.dmSecret}</DmPanel></div>}
-      </section>
+      <PrintOnly>
+        <section className="cf-print-only cf-print-paper">
+          <h1>{npc.name}</h1>
+          {npc.role && <p>{npc.role} · {npcDispositionPresentation(npc.disposition).label}</p>}
+          <Markdown>{npc.body || 'No description yet.'}</Markdown>
+          <p><strong>Faction:</strong> {factionName || 'None'} · <strong>Last seen:</strong> {locationName || 'Unknown'}</p>
+          {isDm && npc.dmSecret && <div className="cf-print-secret"><DmPanel>{npc.dmSecret}</DmPanel></div>}
+        </section>
+      </PrintOnly>
 
       {error && <div className="cf-print-hide"><ErrorNote message={error} onRetry={load} /></div>}
       {actionError && <div className="cf-print-hide"><ErrorNote message={actionError} onRetry={() => setActionError(null)} /></div>}
@@ -402,10 +406,14 @@ export default function NpcPage() {
               {npc.role && <p className="text-sm text-slate-400 break-words">{npc.role}</p>}
             </div>
             <NpcDispositionBadge disposition={npc.disposition} />
-            <PrintControl allowSecrets={isDm && Boolean(npc.dmSecret)} className="ml-auto" />
+            <PrintControl
+              resetKey={npc.id}
+              allowSecrets={isDm && Boolean(npc.dmSecret)}
+              className="ml-auto"
+            />
             {isDm && npc.hidden && <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players</span></Chip>}
             {canDmWrite && (
-              <div className="cf-print-hide flex gap-2 ml-auto">
+              <div className="cf-print-hide flex gap-2">
                 <EntitySecrecyControls
                   entityKind="npc"
                   entityName={npc.name}
@@ -426,7 +434,7 @@ export default function NpcPage() {
               </div>
             )}
             {!isDm && role !== null && (
-              <div className="cf-print-hide flex gap-2 ml-auto">
+              <div className="cf-print-hide flex gap-2">
                 <Btn
                   ghost
                   className="!min-h-0 !py-1.5 text-xs"

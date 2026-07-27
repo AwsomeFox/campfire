@@ -4,11 +4,21 @@ type PrintControlProps = {
   /** Only DMs can choose to add secret content to a paper copy. */
   allowSecrets?: boolean;
   className?: string;
+  /**
+   * Identity of the entity being printed. When it changes (same route, new id),
+   * the secrets opt-in resets so the choice never carries across reference pages.
+   */
+  resetKey?: string | number;
 };
 
 /** A deliberately local print preference: it never survives a page unmount. */
-export function PrintControl({ allowSecrets = false, className = '' }: PrintControlProps) {
+export function PrintControl({ allowSecrets = false, className = '', resetKey }: PrintControlProps) {
   const [includeSecrets, setIncludeSecrets] = useState(false);
+
+  // Route components are reused when only :id changes, so reset explicitly.
+  useEffect(() => {
+    setIncludeSecrets(false);
+  }, [resetKey]);
 
   // Keep the root marker in sync while the page is mounted. This makes Ctrl/Cmd+P
   // honor an explicit choice too; cleanup makes the preference navigation-local.

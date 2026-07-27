@@ -31,6 +31,7 @@ import { LocationStatusLabel, LOCATION_STATUS_LABEL } from '../../components/Loc
 import { NotFoundState } from '../../components/NotFoundState';
 import { Markdown } from '../../components/Markdown';
 import { PrintControl } from '../../components/PrintControl';
+import { PrintOnly } from '../../components/PrintOnly';
 import { NotesRail } from '../../components/NotesRail';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
 import { ImageUpload, attachmentFileUrl } from '../../components/ImageUpload';
@@ -514,13 +515,15 @@ export default function LocationPage() {
         }
         currentLabel={!editing ? location.name : undefined}
       /></div>
-      <section className="cf-print-only cf-print-paper">
-        <h1>{location.name}</h1>
-        <p>{location.kind || 'Location'} · {LOCATION_STATUS_LABEL[location.status]}</p>
-        <Markdown>{location.body || 'No description yet.'}</Markdown>
-        <p><strong>Within:</strong> {ancestors.length > 0 ? ancestors[ancestors.length - 1].name : '—'}</p>
-        {isDm && location.dmSecret && <div className="cf-print-secret"><DmPanel>{location.dmSecret}</DmPanel></div>}
-      </section>
+      <PrintOnly>
+        <section className="cf-print-only cf-print-paper">
+          <h1>{location.name}</h1>
+          <p>{location.kind || 'Location'} · {LOCATION_STATUS_LABEL[location.status]}</p>
+          <Markdown>{location.body || 'No description yet.'}</Markdown>
+          <p><strong>Within:</strong> {ancestors.length > 0 ? ancestors[ancestors.length - 1].name : '—'}</p>
+          {isDm && location.dmSecret && <div className="cf-print-secret"><DmPanel>{location.dmSecret}</DmPanel></div>}
+        </section>
+      </PrintOnly>
 
       {error && <div className="cf-print-hide"><ErrorNote message={error} onRetry={load} /></div>}
       {actionError && <div className="cf-print-hide"><ErrorNote message={actionError} onRetry={() => setActionError(null)} /></div>}
@@ -562,7 +565,11 @@ export default function LocationPage() {
             )}
             <h1 className="text-2xl font-extrabold text-white min-w-0 break-words">{location.name}</h1>
             <Chip variant={statusVariant(location.status)}><LocationStatusLabel status={location.status} /></Chip>
-            <PrintControl allowSecrets={isDm && Boolean(location.dmSecret)} className="ml-auto" />
+            <PrintControl
+              resetKey={location.id}
+              allowSecrets={isDm && Boolean(location.dmSecret)}
+              className="ml-auto"
+            />
             {isDm && location.status === 'unexplored' && (
               <Chip variant="failed" className="!ml-0"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players</span></Chip>
             )}
@@ -590,7 +597,7 @@ export default function LocationPage() {
               </Btn>
             )}
             {!isDm && role !== null && (
-              <div className="cf-print-hide flex gap-2 shrink-0 ml-auto">
+              <div className="cf-print-hide flex gap-2 shrink-0">
                 <Btn
                   ghost
                   className="!min-h-0 !py-1.5 text-xs"
@@ -602,7 +609,7 @@ export default function LocationPage() {
               </div>
             )}
             {canDmWrite && (
-              <div className="cf-print-hide flex gap-2 shrink-0 ml-auto">
+              <div className="cf-print-hide flex gap-2 shrink-0">
                 <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={startEdit}>
                   ✎ Edit
                 </Btn>

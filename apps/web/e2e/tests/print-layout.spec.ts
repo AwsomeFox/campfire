@@ -166,6 +166,29 @@ test.describe('print layouts (#667)', () => {
       await dmPage.emulateMedia({ media: 'screen' });
       await dmPage.goto(`/c/${campaignId}/quests/${navigation.questId}`);
       await expect.poll(() => dmPage.evaluate(() => document.documentElement.classList.contains('cf-print-include-secrets'))).toBe(false);
+
+      // Same route component reuse (NPC → NPC) must also require a fresh opt-in.
+      const otherNpc = await dmPage.request.post(`/api/v1/campaigns/${campaignId}/npcs`, {
+        data: {
+          name: 'Print secret neighbor',
+          role: 'Test double',
+          disposition: 'neutral',
+          body: 'Another printable NPC.',
+          dmSecret: 'NEIGHBOR DM SECRET',
+        },
+      });
+      expect(otherNpc.ok()).toBe(true);
+      const otherNpcId = (await otherNpc.json() as { id: number }).id;
+      try {
+        await dmPage.goto(`/c/${campaignId}/npcs/${navigation.npcId}`);
+        await dmPage.getByLabel('Include DM secrets').check();
+        await expect.poll(() => dmPage.evaluate(() => document.documentElement.classList.contains('cf-print-include-secrets'))).toBe(true);
+        await dmPage.goto(`/c/${campaignId}/npcs/${otherNpcId}`);
+        await expect.poll(() => dmPage.evaluate(() => document.documentElement.classList.contains('cf-print-include-secrets'))).toBe(false);
+        await expect(dmPage.getByLabel('Include DM secrets')).not.toBeChecked();
+      } finally {
+        await dmPage.request.delete(`/api/v1/npcs/${otherNpcId}`);
+      }
     } finally {
       await dmPage.request.patch(`/api/v1/npcs/${navigation.npcId}`, { data: { dmSecret: previousSecret } });
       await dmContext.close();
