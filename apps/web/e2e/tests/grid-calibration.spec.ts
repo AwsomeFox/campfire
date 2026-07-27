@@ -10,7 +10,24 @@
  *    exposes a Reset, and the Calibrate tool shows draggable anchors.
  */
 import { expect, test, type Page, type Request } from '@playwright/test';
-import { PNG_16_9, seed, stateFor } from './seed';
+import { seed, stateFor } from './seed';
+
+/**
+ * A real, decodable 16:9 PNG (16x9, RGB, correct chunk CRCs).
+ *
+ * Deliberately NOT the shared `PNG_16_9` from ./seed: that buffer has a corrupt IHDR CRC and a
+ * malformed IDAT header, which is invisible to the specs that hand it straight to
+ * `route.fulfill` but makes the upload endpoint reject it 400 ("Input buffer has corrupt
+ * header: pngload_buffer: invalid chunk checksum") because the server decodes uploads to
+ * derive dimensions. This spec posts the bytes through the real attachment API, so they have
+ * to survive a real decode. 16:9 matches the battle-map surface's aspect ratio, so the map
+ * fills the surface and the calibration overlay's contained-rect maths has no letterboxing to
+ * account for.
+ */
+const CALIBRATION_MAP_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAABAAAAAJCAIAAAC0SDtlAAAA/klEQVR42gXBMQFAERRA0RdBAIMIRuOPYBBAhBfhBjCIYDSKYBBAhBdBhH+OiOCEIEThE7JQBRUQujCEJWzhCiY8QcTjPMETPZ8ne6pHPXi6Z3iWZ3uuxzzPI5JwiZCIiS+REzWhCRI9MRIrsRM3YYmXECm4QijEwlfIhVrQAoVeGIVV2IVbsMIriChOCUpUPiUrVVEFpStDWcpWrmLKU0QarhEasfE1cqM2tEGjN0ZjNXbjNqzxGiITNwmTOPkmeVInOmHSJ2OyJntyJzZ5E5GDO4RDPHyHfKgHPXDoh3FYh324Bzu8g4jhjGBE4zOyUQ01MLoxjGVs4xpmPOMHGqHKgaBDFtMAAAAASUVORK5CYII=',
+  'base64',
+);
 
 interface EncounterResponse {
   id: number;
@@ -21,8 +38,6 @@ interface EncounterResponse {
   gridRotation: number;
   gridOpacity: number;
 }
-
-const CALIBRATION_MAP_ID = 417_001;
 
 function encounterUrl(encounterId: number): string {
   return `/c/${seed().campaignId}/encounters/${encounterId}`;
@@ -117,23 +132,35 @@ test.describe('grid calibration — issue #417', () => {
 
     async function openGridPanel(page: Page, name: string): Promise<number> {
       const id = await createEncounter(page, name);
-      // Enable the grid so the calibration controls render.
-      const enabled = await page.request.patch(`/api/v1/encounters/${id}`, { data: { gridSize: 8 } });
-      expect(enabled.ok()).toBe(true);
 
-      // Inject a map so the battle-map surface (and its Grid & fog controls) render.
-      await page.route(`**/api/v1/attachments/${CALIBRATION_MAP_ID}/file`, (route) =>
-        route.fulfill({ status: 200, contentType: 'image/png', body: PNG_16_9 }),
-      );
-      await page.route(`**/api/v1/encounters/${id}`, async (route) => {
-        if (route.request().method() !== 'GET') {
-          await route.continue();
-          return;
-        }
-        const response = await route.fetch();
-        const enc = (await response.json()) as EncounterResponse;
-        await route.fulfill({ response, json: { ...enc, mapAttachmentId: CALIBRATION_MAP_ID } });
+      // The battle-map surface (and with it the Grid & fog controls) only renders once the
+      // encounter actually carries a map, so give it a REAL committed attachment rather than
+      // proxying the encounter GET to splice `mapAttachmentId` into the response (issue #1595).
+      //
+      // The proxy version installed a `page.route` that did a full `route.fetch()` round trip
+      // and was never unrouted. RunSessionPage polls the encounter query on a 5s
+      // `refetchInterval` and re-invalidates it after every calibration PATCH, so a refetch was
+      // routinely still inside that handler when the test body finished; `route.fetch()` /
+      // `apiResponse.json()` then rejected against the disposed context ("Response has been
+      // disposed"). Because nothing awaited the handler the rejection was attributed to
+      // whichever test the runner happened to be executing, not to the one that installed the
+      // route. Seeding the real field removes the handler — and therefore the window — instead
+      // of racing to close it.
+      const { campaignId } = seed();
+      const upload = await page.request.post(`/api/v1/campaigns/${campaignId}/attachments`, {
+        multipart: {
+          kind: 'map',
+          file: { name: 'calibration-map.png', mimeType: 'image/png', buffer: CALIBRATION_MAP_PNG },
+        },
       });
+      expect(upload.ok()).toBe(true);
+      const mapAttachmentId = ((await upload.json()) as { id: number }).id;
+
+      // One PATCH: enable the grid (so the calibration controls render) and attach the map.
+      const enabled = await page.request.patch(`/api/v1/encounters/${id}`, {
+        data: { gridSize: 8, mapAttachmentId },
+      });
+      expect(enabled.ok()).toBe(true);
 
       await page.goto(encounterUrl(id));
       await expect(page.getByRole('heading', { name })).toBeVisible();
@@ -168,8 +195,7 @@ test.describe('grid calibration — issue #417', () => {
 
       // Each labelled control drives a calibration PATCH — the numeric/keyboard alternative to
       // dragging the anchors. (Round-trip persistence is asserted in the persistence-contract
-      // suite; here we assert the UI emits the right mutations without re-reading through the
-      // route that injects the map.)
+      // suite; here we only assert the UI emits the right mutations.)
       await page.getByLabel('Grid origin X offset (percent of map width)').fill('10');
       await page.getByLabel('Grid origin X offset (percent of map width)').blur();
       await expect.poll(() => patches.some((p) => p.gridOffsetX === 10)).toBe(true);
