@@ -217,7 +217,13 @@ function AdminCatalog() {
     () => bulkPayloadFingerprint(operation, selectedEntries.map((c) => c.id), reason, bulkArgs),
     [operation, selectedEntries, reason, bulkArgs],
   );
-  const previewStale = preview !== null && previewKey !== currentBulkKey;
+  // SCOPED TO AN ACTUAL PREVIEW. After a real run, `preview` is deliberately kept so the
+  // per-item results stay on screen, but `previewKey` is cleared and the selection is
+  // emptied — which made the fingerprint comparison report a just-completed apply as
+  // "out of date" and tell the operator to re-run a dry run for work that had already
+  // succeeded. The fingerprint answers "does this preview still describe what Apply
+  // would do", a question that only means anything while the result IS a preview.
+  const previewStale = preview !== null && preview.dryRun === true && previewKey !== currentBulkKey;
 
   // What (if anything) stops this run, as a translation key. The server re-validates
   // everything; this only keeps the page from dispatching a request it can already see

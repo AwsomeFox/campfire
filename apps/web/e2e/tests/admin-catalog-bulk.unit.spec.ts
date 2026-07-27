@@ -178,6 +178,41 @@ test.describe('Apply cannot run a batch that was never previewed', () => {
       key('archive', [1], 'r', args()),
     );
   });
+
+  test('a completed apply is not reported as stale', () => {
+    // REGRESSION in the fingerprint itself. After a real run the result is deliberately
+    // KEPT so the per-item outcomes stay on screen, while the stored key is cleared and
+    // the selection emptied. Comparing fingerprints unconditionally therefore called a
+    // just-succeeded apply "out of date" and told the operator to re-run a dry run for
+    // work that had already happened — beside the results proving it had.
+    //
+    // The staleness question only means anything about a PREVIEW, so it is scoped to
+    // one. Mirrors the `preview.dryRun === true` guard on the page.
+    const isStale = (previewDryRun: boolean, storedKey: string | null, current: string) =>
+      previewDryRun === true && storedKey !== current;
+
+    const afterApply = key('archive', [], 'r', args()); // selection cleared by the run
+    // An applied result with a cleared key must NOT read as stale…
+    expect(isStale(false, null, afterApply)).toBe(false);
+    // …while a real preview whose inputs moved on still must…
+    expect(isStale(true, key('archive', [1], 'r', args()), afterApply)).toBe(true);
+    // …and an untouched preview still must not.
+    expect(isStale(true, afterApply, afterApply)).toBe(false);
+  });
+
+  test('aiExternalContentPolicy passes the chosen value through rather than coercing', () => {
+    // Cheap guard, not a current bug: the form treats this as "'' means unchanged, else
+    // send it". If a third member were added to the enum, a boolean-ish or two-valued
+    // shortcut here would silently misreport it as one of the existing two. Pinning
+    // pass-through means that change fails a test instead of mislabelling a policy.
+    for (const policy of ['disabled', 'member_consent'] as const) {
+      const body = buildBulkPayload('set_policy', [1], true, 'r', args({ aiExternalContentPolicy: policy }));
+      expect(body.aiExternalContentPolicy).toBe(policy);
+    }
+    // '' is the only value that means "leave it alone", and it is omitted entirely.
+    const untouched = buildBulkPayload('set_policy', [1], true, 'r', args({ closePublicInvites: true }));
+    expect('aiExternalContentPolicy' in untouched).toBe(false);
+  });
 });
 
 test.describe('the operation chooser cannot display one verb and dispatch another', () => {
