@@ -1479,6 +1479,30 @@ export class BackupService implements OnApplicationBootstrap {
     }
   }
 
+  /** Ensure v3 metadata describes the committed rows in the staged snapshot. */
+  private validateManifestAttachmentsAgainstSnapshot(manifest: BackupManifest, dbPath: string): void {
+    const byId = new Map(manifest.attachments.map((record) => [record.id, record]));
+    const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    let count = 0;
+    try {
+      for (const row of db.prepare(
+        `SELECT id, campaign_id AS campaignId, mime, size, hidden FROM attachments WHERE state = 'committed'`,
+      ).iterate() as Iterable<{ id: number; campaignId: number; mime: string; size: number; hidden: number }>) {
+        const record = byId.get(row.id);
+        const expectedPath = path.relative(uploadsRoot(resolveDataDir()), this.attachments.filePath(row)).split(path.sep).join('/');
+        if (!record || record.campaignId !== row.campaignId || record.mime !== row.mime ||
+          record.size !== row.size || record.hidden !== (row.hidden === 1) || record.path !== expectedPath) {
+          throw new BadRequestException('Invalid backup archive — manifest attachments do not match database snapshot');
+        }
+        byId.delete(row.id);
+        count++;
+      }
+    } finally { db.close(); }
+    if (count !== manifest.attachments.length || byId.size !== 0) {
+      throw new BadRequestException('Invalid backup archive — manifest attachments do not match database snapshot');
+    }
+  }
+
   /**
    * Validate every payload an archive promises without applying it. This is used
    * by inspect and therefore scheduled-backup verification; entries are hashed
@@ -1547,6 +1571,7 @@ export class BackupService implements OnApplicationBootstrap {
         if (err instanceof BadRequestException) throw err;
         throw new BadRequestException('Invalid backup archive — database could not be opened');
       }
+      this.validateManifestAttachmentsAgainstSnapshot(manifest, stagedDbPath);
 
       const expectedAttachments = this.expectedAttachmentChecksums(manifest);
       const foundAttachments = new Set<string>();
@@ -1685,6 +1710,8 @@ export class BackupService implements OnApplicationBootstrap {
         if (err instanceof BadRequestException) throw err;
         throw new BadRequestException('Invalid backup archive — database could not be opened');
       }
+
+      this.validateManifestAttachmentsAgainstSnapshot(manifest, stagedDbPath);
 
       if (restoredKeyBytes) {
         validateStagedAiCredentialDecryptability(
