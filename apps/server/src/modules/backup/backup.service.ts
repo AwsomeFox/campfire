@@ -263,6 +263,15 @@ async function hashFile(filePath: string): Promise<{ bytes: number; sha256: stri
   return { bytes, sha256: hash.digest('hex') };
 }
 
+/** Keep the historical bounded retry contract for files rewritten during backup. */
+export const MAX_ATTACHMENT_RETRIES = 3;
+
+export class AttachmentCaptureChangedError extends Error {
+  constructor(readonly sourcePath: string) {
+    super(`Attachment changed during capture after ${MAX_ATTACHMENT_RETRIES} attempts: ${sourcePath}`);
+  }
+}
+
 /** Make an immutable per-run attachment copy while calculating its manifest hash. */
 async function stageAndHashFile(
   sourcePath: string,
@@ -281,6 +290,39 @@ async function stageAndHashFile(
     { signal },
   );
   return { bytes, sha256: hash.digest('hex') };
+}
+
+/**
+ * Stage an attachment only when an attempt observes a stable source size before
+ * and after streaming it. Failed attempts remove their partial/stale stage so
+ * archiver can never consume bytes from an unstable capture.
+ */
+export async function stageAndHashFileWithRetry(
+  sourcePath: string,
+  stagedPath: string,
+  signal?: AbortSignal,
+): Promise<{ bytes: number; sha256: string }> {
+  for (let attempt = 0; attempt < MAX_ATTACHMENT_RETRIES; attempt += 1) {
+    assertBackupNotCancelled(signal);
+    const before = safeFileBytes(sourcePath);
+    if (before === 0 && !fs.existsSync(sourcePath)) {
+      const error = new Error(`Attachment disappeared during capture: ${sourcePath}`) as NodeJS.ErrnoException;
+      error.code = 'ENOENT';
+      throw error;
+    }
+    await fs.promises.rm(stagedPath, { force: true });
+    try {
+      const captured = await stageAndHashFile(sourcePath, stagedPath, signal);
+      const after = safeFileBytes(sourcePath);
+      if (before === after && captured.bytes === before) return captured;
+    } catch (err) {
+      await fs.promises.rm(stagedPath, { force: true });
+      throw err;
+    }
+    await fs.promises.rm(stagedPath, { force: true });
+    assertBackupNotCancelled(signal);
+  }
+  throw new AttachmentCaptureChangedError(sourcePath);
 }
 
 function assertBackupNotCancelled(signal?: AbortSignal): void {
@@ -1084,7 +1126,7 @@ export class BackupService implements OnApplicationBootstrap {
         const staged = path.join(tmpDir, 'uploads', rel);
         let captured: { bytes: number; sha256: string };
         try {
-          captured = await stageAndHashFile(abs, staged, options?.signal);
+          captured = await stageAndHashFileWithRetry(abs, staged, options?.signal);
         } catch (err) {
           // The file can be deleted between the existsSync above and the read stream
           // opening. Letting a raw ENOENT escape here would abort mid-loop with no
@@ -1093,6 +1135,10 @@ export class BackupService implements OnApplicationBootstrap {
           // the pre-check produces so the failure stays legible and complete.
           if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
             missing++;
+            continue;
+          }
+          if (err instanceof AttachmentCaptureChangedError) {
+            changed++;
             continue;
           }
           throw err;
@@ -1108,8 +1154,7 @@ export class BackupService implements OnApplicationBootstrap {
             `Backup contents exceed the ${MAX_ARCHIVE_UNCOMPRESSED_BYTES} byte restore archive limit`,
           );
         }
-        const after = safeFileBytes(abs);
-        if (before !== after || captured.bytes !== before || captured.bytes !== row.size) changed++;
+        if (captured.bytes !== row.size) changed++;
         // Do not retain attachment bytes: the ZIP producer reads this file as
         // its downstream consumer has capacity.
         zip.file(staged, { name: `${UPLOADS_PREFIX}${rel}` });

@@ -3,7 +3,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { DbHolder, type DrizzleDb } from '../../src/db/db.module';
-import { ArchiveOperationBusyError, BackupService } from '../../src/modules/backup/backup.service';
+import {
+  ArchiveOperationBusyError,
+  AttachmentCaptureChangedError,
+  BackupService,
+  MAX_ATTACHMENT_RETRIES,
+  stageAndHashFileWithRetry,
+} from '../../src/modules/backup/backup.service';
 import { AuditService } from '../../src/modules/audit/audit.service';
 import { SettingsService } from '../../src/modules/settings/settings.service';
 import { AttachmentsService } from '../../src/modules/attachments/attachments.service';
@@ -39,6 +45,61 @@ describe('backup streaming writer (#603)', () => {
       { invalidateCachedKey: jest.fn() } as unknown as AiProviderConfigService,
     );
   }
+
+  it('retries a transient attachment rewrite and keeps only the stable staged copy', async () => {
+    const source = path.join(dataDir, 'source.bin');
+    const staged = path.join(dataDir, 'stage', 'source.bin');
+    fs.writeFileSync(source, Buffer.alloc(10, 1));
+    const actualStat = fs.statSync.bind(fs);
+    let reads = 0;
+    const stat = jest.spyOn(fs, 'statSync').mockImplementation(((target: fs.PathLike, ...args: unknown[]) => {
+      const result = actualStat(target, ...(args as []));
+      if (String(target) !== source) return result;
+      reads += 1;
+      // First attempt changes between before/after; second is stable.
+      const size = reads === 2 ? 11 : 10;
+      return Object.assign(Object.create(Object.getPrototypeOf(result)), result, { size });
+    }) as typeof fs.statSync);
+    try {
+      const captured = await stageAndHashFileWithRetry(source, staged);
+      expect(captured.bytes).toBe(10);
+      expect(reads).toBe(4);
+      expect(fs.readFileSync(staged)).toEqual(Buffer.alloc(10, 1));
+    } finally {
+      stat.mockRestore();
+    }
+  });
+
+  it('fails after bounded unstable attempts and removes every staged copy', async () => {
+    const source = path.join(dataDir, 'moving.bin');
+    const staged = path.join(dataDir, 'stage', 'moving.bin');
+    fs.writeFileSync(source, Buffer.alloc(10, 2));
+    const actualStat = fs.statSync.bind(fs);
+    let reads = 0;
+    const stat = jest.spyOn(fs, 'statSync').mockImplementation(((target: fs.PathLike, ...args: unknown[]) => {
+      const result = actualStat(target, ...(args as []));
+      if (String(target) !== source) return result;
+      reads += 1;
+      return Object.assign(Object.create(Object.getPrototypeOf(result)), result, { size: reads % 2 === 0 ? 11 : 10 });
+    }) as typeof fs.statSync);
+    try {
+      await expect(stageAndHashFileWithRetry(source, staged)).rejects.toBeInstanceOf(AttachmentCaptureChangedError);
+      expect(reads).toBe(MAX_ATTACHMENT_RETRIES * 2);
+      expect(fs.existsSync(staged)).toBe(false);
+    } finally {
+      stat.mockRestore();
+    }
+  });
+
+  it('stops retry capture immediately when cancelled', async () => {
+    const source = path.join(dataDir, 'cancelled.bin');
+    const staged = path.join(dataDir, 'stage', 'cancelled.bin');
+    fs.writeFileSync(source, Buffer.alloc(10));
+    const controller = new AbortController();
+    controller.abort();
+    await expect(stageAndHashFileWithRetry(source, staged, controller.signal)).rejects.toThrow('cancelled');
+    expect(fs.existsSync(staged)).toBe(false);
+  });
 
   it('writes a valid archive to a Writable without producing a response buffer', async () => {
     const output = new PassThrough();
