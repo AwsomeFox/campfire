@@ -896,11 +896,18 @@ describe('ai-dm driver — provider failure termination + partial usage (#560)',
     const events: AiDmStreamEvent[] = [];
     const sub = streamSvc.streamFor(campaignId).subscribe((e) => events.push(e));
 
-    h.script({
+    // #1052: a `transport` failure with nothing on the wire is now RETRIED, so a single
+    // scripted failure would be recovered from and this case would no longer reach the
+    // terminal path it exists to test. Script enough failures to exhaust the attempt budget
+    // (2 against the primary, with no fallback configured on this harness) — what #560 is
+    // about is what happens once the provider is genuinely unavailable, not how many tries
+    // it took to establish that.
+    const offline = () => ({
       text: 'Never delivered.',
       throwAfterChunks: 0,
       throwError: new AiProviderError('transport', 'mock: connection reset', { provider: 'mock' }),
     });
+    h.script(offline(), offline());
 
     const res = await h.sendMessage(campaignId, { input: 'Hello?' });
     sub.unsubscribe();
@@ -989,10 +996,13 @@ describe('ai-dm driver — provider failure termination + partial usage (#560)',
     const campaignId = await h.createCampaign('Driver Continue Without AI');
     await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
 
-    h.script({
+    // #1052: two failures, so the retry budget is exhausted and the seat genuinely lands on
+    // the stuck ladder — which is the precondition this lever test needs.
+    const offline = () => ({
       throwAfterChunks: 0,
       throwError: new AiProviderError('transport', 'mock: offline', { provider: 'mock' }),
     });
+    h.script(offline(), offline());
     await h.sendMessage(campaignId, { input: 'Any action.' });
 
     const cont = await h.lever(campaignId, 'continue-without-ai');

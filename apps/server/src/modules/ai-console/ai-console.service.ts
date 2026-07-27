@@ -1,5 +1,5 @@
 import { BadRequestException, Inject, Injectable } from '@nestjs/common';
-import { asc, eq, inArray } from 'drizzle-orm';
+import { and, asc, eq, inArray } from 'drizzle-orm';
 import type { z } from 'zod';
 import type {
   AiCapsUpdate,
@@ -325,7 +325,12 @@ export class AiConsoleService {
       })
       .from(aiProviderConfigs)
       .leftJoin(campaigns, eq(campaigns.id, aiProviderConfigs.campaignId))
-      .where(eq(aiProviderConfigs.scope, 'campaign'));
+      // #1052: PRIMARY rows only. A campaign with a fallback configured has two rows, and
+      // this loop keys on campaignId while `testConnection(campaignId)` re-resolves the
+      // effective config — so without the filter the health list would show the SAME probe
+      // twice for that campaign, and `AiProviderHealthEntry.scope` has no value that could
+      // tell the two entries apart.
+      .where(and(eq(aiProviderConfigs.scope, 'campaign'), eq(aiProviderConfigs.role, 'primary')));
 
     for (const o of overrides) {
       if (o.campaignId == null) continue;
