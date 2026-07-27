@@ -2,11 +2,12 @@
   "tracked": [
     {
       "pr": 1556,
-      "status": "babysitting",
+      "status": "merged",
       "url": "https://github.com/AwsomeFox/campfire/pull/1556",
       "headBranch": "fix/issue-1052",
       "baseBranch": "main",
-      "updatedAt": "2026-07-27T16:56:00Z"
+      "updatedAt": "2026-07-27T17:37:00Z",
+      "notes": "No conflicts; 0 unresolved threads; CI green (coverage ~39m). Merged (squash) once required checks passed."
     }
   ]
 }
