@@ -213,6 +213,14 @@ export class BackupArchiveReader {
     const source = await new Promise<Readable>((resolve, reject) => this.zip.openReadStream(entry, (err, stream) => err || !stream ? reject(err ?? new Error('Cannot open entry')) : resolve(stream)));
     const abort = () => source.destroy(new Error('aborted'));
     signal?.addEventListener('abort', abort, { once: true });
+    // Cancellation can occur while openReadStream's callback is pending. Abort
+    // events are not replayed to a listener registered after they fire, so
+    // close the newly opened source before any restore bytes are consumed.
+    if (signal?.aborted) {
+      source.destroy();
+      signal.removeEventListener('abort', abort);
+      invalid('archive read was cancelled');
+    }
     try { await consume(source); }
     catch (err) {
       if (err instanceof BadRequestException) throw err;

@@ -205,7 +205,9 @@ type SaveFilePicker = (options: {
 
 function saveFilePicker(): SaveFilePicker | null {
   const picker = (window as Window & { showSaveFilePicker?: SaveFilePicker }).showSaveFilePicker;
-  return picker ?? null;
+  // WebIDL methods require their Window receiver; keep this safe for native APIs
+  // while still allowing browser-provided stubs to be feature-detected.
+  return picker ? picker.bind(window) : null;
 }
 
 function contentLength(res: Response): number | null {
