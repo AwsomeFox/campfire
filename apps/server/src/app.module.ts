@@ -47,6 +47,7 @@ import { McpModule } from './modules/mcp/mcp.module';
 import { OAuthModule } from './modules/oauth/oauth.module';
 import { AttachmentsModule } from './modules/attachments/attachments.module';
 import { EncountersModule } from './modules/encounters/encounters.module';
+import { TableSafetyModule } from './modules/safety/table-safety.module';
 import { MapsModule } from './modules/maps/maps.module';
 import { AiMapModule } from './modules/ai-map/ai-map.module';
 import { EventsModule } from './modules/events/events.module';
@@ -173,6 +174,10 @@ function serveStaticImports(): DynamicModule[] {
     OAuthModule,
     AttachmentsModule,
     EncountersModule,
+    // #599 — participant-activated table safety hold (X-Card). Registered explicitly rather
+    // than only transitively so its controller is mounted even if a future refactor drops the
+    // encounters/ai-driver edges.
+    TableSafetyModule,
     MapsModule,
     AiMapModule,
     EventsModule,

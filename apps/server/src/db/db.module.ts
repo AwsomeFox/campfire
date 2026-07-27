@@ -3258,6 +3258,62 @@ function migrateCampaignModules585(sqlite: Database.Database): void {
   addColumn('detached_at', 'detached_at TEXT');
 }
 
+/**
+ * Issue #599 — the table safety hold (X-Card): one row per campaign carrying whether play
+ * is frozen right now, plus who released the last hold and how.
+ *
+ * Purely additive (one new table, no index — every access is the PK lookup), so the body is
+ * `CREATE TABLE IF NOT EXISTS` and re-running it is a no-op. The `sqlite_master` /
+ * `PRAGMA table_info` probe is the belt for the case IF NOT EXISTS cannot cover: an install
+ * carrying an EARLIER shape of this table. Dropping in that case is deliberate and safe here
+ * in a way it would not be for campaign canon — the row is live table state, and the only
+ * consequence of losing it is that a campaign which was mid-hold comes back un-held. That is
+ * visible and instantly recoverable (any participant simply taps again), unlike the silently
+ * half-migrated table that guessing at ALTERs produces.
+ *
+ * The table is deliberately not append-only and deliberately has no activated_by_user_id;
+ * see the rationale comments in bootstrap.sql.ts and db/schema.ts.
+ */
+function migrateTableSafetyHolds599(sqlite: Database.Database): void {
+  const existing = sqlite
+    .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='table_safety_holds'`)
+    .all();
+  if (existing.length > 0) {
+    const cols = sqlite.prepare(`PRAGMA table_info(table_safety_holds)`).all() as Array<{ name: string }>;
+    const names = new Set(cols.map((c) => c.name));
+    const expected = [
+      'campaign_id',
+      'active',
+      'activated_at',
+      'activated_by_name',
+      'anonymous',
+      'activation_count',
+      'released_at',
+      'released_by',
+      'recovery',
+      'facilitator_note',
+      'updated_at',
+    ];
+    if (expected.every((c) => names.has(c))) return;
+    sqlite.exec(`DROP TABLE table_safety_holds`);
+  }
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS table_safety_holds (
+      campaign_id INTEGER PRIMARY KEY REFERENCES campaigns(id) ON DELETE CASCADE,
+      active INTEGER NOT NULL DEFAULT 0,
+      activated_at TEXT,
+      activated_by_name TEXT,
+      anonymous INTEGER NOT NULL DEFAULT 1,
+      activation_count INTEGER NOT NULL DEFAULT 0,
+      released_at TEXT,
+      released_by TEXT,
+      recovery TEXT,
+      facilitator_note TEXT,
+      updated_at TEXT NOT NULL
+    );
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
   { name: '0001_users_oidc', run: migrateUsersTableForOidc },
   { name: '0002_campaigns_rule_system', run: migrateCampaignsTableForRuleSystem },
@@ -3428,6 +3484,14 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // contiguous or sorted. That is also why nothing is renumbered to look tidy: renaming a
   // migration a database has already recorded is the one edit that breaks run-once.
   { name: '0120_campaign_modules_585', run: migrateCampaignModules585 },
+  // 0130 was CENTRALLY ALLOCATED to issue #599 by the merge coordinator. 0122-0129 are held by
+  // other in-flight branches, so the gap above is deliberate and must not be "tidied" down to
+  // the next free ordinal — every branch computing "next free" for itself is exactly how these
+  // collide. runMigrations dedupes on the FULL name string, so the `_599` suffix is what
+  // guarantees this runs exactly once even if a sibling lands a colliding ordinal, and it is
+  // why this is never renumbered: renaming a migration a database has already recorded is the
+  // one edit that silently breaks run-once.
+  { name: '0130_table_safety_holds_599', run: migrateTableSafetyHolds599 },
 ];
 
 /**
