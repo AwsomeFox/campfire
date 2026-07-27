@@ -624,6 +624,87 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     }
   });
 
+  it('0131 adds the AI-driver grant columns on a legacy control-state table (#1042)', () => {
+    expect(MIGRATION_NAMES).toContain('0131_ai_driver_session_persistence_1042');
+    // It must run AFTER 0118 creates the table — runMigrations executes in array order, and an
+    // ALTER against a table that does not exist yet would be a no-op that never retries.
+    expect(MIGRATION_NAMES.indexOf('0131_ai_driver_session_persistence_1042')).toBeGreaterThan(
+      MIGRATION_NAMES.indexOf('0118_ai_driver_control_state_559'),
+    );
+
+    const upgradedDir = makeTempDataDir();
+    dataDir = makeTempDataDir();
+    try {
+      const fresh = openDatabase(dataDir);
+      let freshCols: string[];
+      try {
+        freshCols = columnNames(fresh.sqlite, 'ai_driver_control_state');
+        expect(freshCols).toContain('secret_read_approvals');
+        expect(freshCols).toContain('pending_tool_confirmations');
+      } finally {
+        fresh.sqlite.close();
+      }
+
+      // A database carrying #559's control-state table WITHOUT the new columns — the shape every
+      // existing install has. A separate migration name is what makes this reachable at all: a
+      // column folded into 0118 would never run here, because 0118 is already recorded.
+      writeOldSchemaDb(upgradedDir);
+      const seeded = openDatabase(upgradedDir);
+      try {
+        seeded.sqlite.exec('DROP TABLE IF EXISTS ai_driver_control_state');
+        seeded.sqlite.exec(`
+          CREATE TABLE ai_driver_control_state (
+            campaign_id INTEGER PRIMARY KEY,
+            status TEXT NOT NULL DEFAULT 'idle',
+            state TEXT NOT NULL DEFAULT 'running',
+            scene TEXT, last_narration TEXT, last_turn_at TEXT,
+            turn_count INTEGER NOT NULL DEFAULT 0,
+            stuck TEXT, acting_dm TEXT, vote TEXT,
+            takeover_requested_by TEXT, last_input TEXT, announced_recovery TEXT,
+            updated_at TEXT NOT NULL
+          );
+        `);
+        seeded.sqlite
+          .prepare(
+            `INSERT INTO ai_driver_control_state (campaign_id, status, state, updated_at)
+             VALUES (1, 'paused', 'human_control', '2026-01-01T00:00:00.000Z')`,
+          )
+          .run();
+        // Mark 0131 un-run so reopening exercises the ALTER against the legacy shape.
+        seeded.sqlite.prepare('DELETE FROM __migrations WHERE name = ?').run('0131_ai_driver_session_persistence_1042');
+      } finally {
+        seeded.sqlite.close();
+      }
+
+      const upgraded = openDatabase(upgradedDir);
+      try {
+        const cols = columnNames(upgraded.sqlite, 'ai_driver_control_state');
+        expect(cols).toContain('secret_read_approvals');
+        expect(cols).toContain('pending_tool_confirmations');
+        expect([...cols].sort()).toEqual([...freshCols].sort());
+        // ADD COLUMN, never a rebuild: the existing takeover grant is still there. Losing a row
+        // to "fix" its shape would recreate the exact silent-revocation bug #1042 is about.
+        const row = upgraded.sqlite
+          .prepare('SELECT state, secret_read_approvals FROM ai_driver_control_state WHERE campaign_id = 1')
+          .get() as { state: string; secret_read_approvals: string | null } | undefined;
+        expect(row?.state).toBe('human_control');
+        expect(row?.secret_read_approvals).toBeNull();
+      } finally {
+        upgraded.sqlite.close();
+      }
+
+      // Re-running is a no-op (the per-column PRAGMA probe), not a duplicate-column error.
+      const again = openDatabase(upgradedDir);
+      try {
+        expect(countRows(again.sqlite, 'ai_driver_control_state')).toBe(1);
+      } finally {
+        again.sqlite.close();
+      }
+    } finally {
+      fs.rmSync(upgradedDir, { recursive: true, force: true });
+    }
+  });
+
   it('0070 adds notifications.data on a legacy table and preserves JSON payloads', () => {
     dataDir = makeTempDataDir();
     const seeded = openDatabase(dataDir);
@@ -1224,6 +1305,118 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     const again = openDatabase(dataDir);
     try {
       expect(columnNames(again.sqlite, 'ai_driver_control_state')).toContain('announced_recovery');
+    } finally {
+      again.sqlite.close();
+    }
+  });
+  /**
+   * Issue #597 — the migration posture, asserted rather than described.
+   *
+   * The tightening's DEFAULT is read-only (interactive_guest 0), but applying that
+   * unmodified to an existing install would silently gag viewers who have been posting
+   * at live tables. 0127 therefore grandfathers, and grandfathers NARROWLY: only viewer
+   * seats that have already authored OUTBOUND content in that same campaign, only once,
+   * and with an audit row per seat so a DM can see and reverse it.
+   */
+  it('0127 adds the viewer capability and grandfathers only viewers who had already posted (#597)', () => {
+    dataDir = makeTempDataDir();
+    const first = openDatabase(dataDir);
+    first.sqlite.close();
+
+    // Rewind to the pre-#597 shape: campaign_members without interactive_guest,
+    // notifications without actor_user_id, and the migration un-recorded.
+    const rewound = new Database(dbFilePath(dataDir));
+    try {
+      rewound.pragma('foreign_keys = OFF');
+      rewound.exec('DROP TABLE campaign_members');
+      rewound.exec(`
+        CREATE TABLE campaign_members (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          campaign_id INTEGER NOT NULL,
+          user_id INTEGER NOT NULL,
+          role TEXT NOT NULL,
+          character_id INTEGER,
+          ai_external_use_consent INTEGER NOT NULL DEFAULT 0,
+          is_primary_owner INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+      `);
+      const ts = '2026-01-01T00:00:00.000Z';
+      const seat = rewound.prepare(
+        'INSERT INTO campaign_members (campaign_id, user_id, role, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+      );
+      seat.run(1, 101, 'viewer', ts, ts); // has commented -> grandfathered
+      seat.run(1, 102, 'viewer', ts, ts); // only a PRIVATE note -> stays read-only
+      seat.run(1, 103, 'viewer', ts, ts); // silent -> stays read-only
+      seat.run(1, 104, 'player', ts, ts); // role is already interactive; flag irrelevant
+
+      rewound
+        .prepare(
+          `INSERT INTO comments (campaign_id, entity_type, entity_id, author_user_id, author_name, body, created_at, updated_at)
+           VALUES (1, 'session', 1, '101', 'Chatty Viewer', 'I have been talking here for months', ?, ?)`,
+        )
+        .run(ts, ts);
+      rewound
+        .prepare(
+          `INSERT INTO notes (campaign_id, author_user_id, author_name, kind, visibility, body, resolved, resolved_note, created_at, updated_at)
+           VALUES (1, '102', 'Quiet Viewer', 'note', 'private', 'just for me', 0, '', ?, ?)`,
+        )
+        .run(ts, ts);
+
+      rewound.prepare('DELETE FROM __migrations WHERE name = ?').run('0127_safety_controls_597');
+      expect(columnNames(rewound, 'campaign_members')).not.toContain('interactive_guest');
+    } finally {
+      rewound.close();
+    }
+
+    const upgraded = openDatabase(dataDir);
+    try {
+      expect(MIGRATION_NAMES).toContain('0127_safety_controls_597');
+      expect(columnNames(upgraded.sqlite, 'campaign_members')).toContain('interactive_guest');
+      expect(columnNames(upgraded.sqlite, 'notifications')).toContain('actor_user_id');
+      expect(columnNames(upgraded.sqlite, 'notification_digest_queue')).toContain('actor_user_id');
+
+      const flagOf = (userId: number) =>
+        (
+          upgraded.sqlite
+            .prepare('SELECT interactive_guest AS f FROM campaign_members WHERE user_id = ?')
+            .get(userId) as { f: number }
+        ).f;
+      expect(flagOf(101)).toBe(1); // had commented -> keeps taking part
+      expect(flagOf(102)).toBe(0); // private notes only -> never needed the capability
+      expect(flagOf(103)).toBe(0); // silent viewer -> read-only, as documented
+      expect(flagOf(104)).toBe(0); // player: interactive by role, flag stays off
+
+      // Every grandfathered seat leaves a trail the DM can find and reverse.
+      const audited = upgraded.sqlite
+        .prepare("SELECT COUNT(*) AS c FROM audit_log WHERE action = 'member.interactive_guest.grandfathered'")
+        .get() as { c: number };
+      expect(audited.c).toBe(1);
+    } finally {
+      upgraded.sqlite.close();
+    }
+
+    // Re-running must not re-grandfather a seat a DM has since revoked, and must not
+    // duplicate the audit row. This is why the migration name is never renamed.
+    const revoked = new Database(dbFilePath(dataDir));
+    try {
+      revoked.prepare('UPDATE campaign_members SET interactive_guest = 0 WHERE user_id = 101').run();
+    } finally {
+      revoked.close();
+    }
+    const again = openDatabase(dataDir);
+    try {
+      const flag = (
+        again.sqlite.prepare('SELECT interactive_guest AS f FROM campaign_members WHERE user_id = ?').get(101) as {
+          f: number;
+        }
+      ).f;
+      expect(flag).toBe(0);
+      const audited = again.sqlite
+        .prepare("SELECT COUNT(*) AS c FROM audit_log WHERE action = 'member.interactive_guest.grandfathered'")
+        .get() as { c: number };
+      expect(audited.c).toBe(1);
     } finally {
       again.sqlite.close();
     }

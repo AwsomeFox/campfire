@@ -22,6 +22,7 @@ import {
   storyBeats,
   timelineEvents,
 } from '../../db/schema';
+import { blockedTargetsOf } from '../../common/safety-controls';
 import { NpcsService } from '../npcs/npcs.service';
 import { FactionsService } from '../factions/factions.service';
 import { QuestsService } from '../quests/quests.service';
@@ -624,6 +625,11 @@ export class SearchService {
         notDeleted(notes.quarantinedAt),
       ));
       const noteEntityNames = await this.resolveNoteEntityNames(campaignId, rows);
+      // Issue #597: a personal block hides the blocked member's notes from the blocker's
+      // reads, and full-text search must honour the same rule — otherwise the one place
+      // blocked content stays reachable is a search box, which is the surface most likely
+      // to surface it out of context. Mirrors the filter in NotesService.listForCampaign.
+      const blockedAuthors = await blockedTargetsOf(this.db, user.id, campaignId);
       for (const note of rows) {
         const canSee =
           note.visibility === 'party_shared'
@@ -631,6 +637,7 @@ export class SearchService {
           || (role === 'dm' && (note.visibility === 'dm_shared' || note.visibility === 'whisper'))
           || (note.visibility === 'whisper' && note.recipientUserId === user.id);
         if (!canSee) continue;
+        if (note.authorUserId !== user.id && blockedAuthors.has(note.authorUserId)) continue;
         const entityName = note.entityType && note.entityId != null
           ? noteEntityNames.get(`${note.entityType}:${note.entityId}`) ?? null
           : null;

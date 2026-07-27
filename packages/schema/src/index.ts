@@ -5432,6 +5432,58 @@ export const OidcTestLoginStart = z.object({
 });
 export type OidcTestLoginStart = z.infer<typeof OidcTestLoginStart>;
 
+// ---------- effective permissions (issue #597) ----------
+
+/**
+ * What a seat can actually DO, resolved from role + the interactive-guest capability.
+ *
+ * Exists because "Viewer" was documented as read-only while the server gated notes and
+ * comments on bare membership, so a Viewer could comment on anything and whisper any
+ * member. Rather than leave the word and the behaviour disagreeing, the capability is
+ * now explicit and separately grantable, and this object is what the invite preview and
+ * the roster render — so nobody has to infer their authority from a role name again.
+ *
+ * `canKeepPrivateNotes` is deliberately true even for a read-only Viewer: a private note
+ * reaches nobody. The read-only boundary this issue enforces is about content that lands
+ * in someone ELSE's view or bell, which is every other flag here.
+ */
+export const EffectivePermissions = z.object({
+  role: Role,
+  /** true when this seat may not send anything that reaches another member. */
+  readOnly: z.boolean(),
+  /** The explicit capability that lets a Viewer take part in discussion. */
+  interactiveGuest: z.boolean(),
+  canKeepPrivateNotes: z.boolean(),
+  canComment: z.boolean(),
+  canShareNotes: z.boolean(),
+  canWhisper: z.boolean(),
+  canSubmitToDmInbox: z.boolean(),
+  canEditCampaignContent: z.boolean(),
+  canModerate: z.boolean(),
+});
+export type EffectivePermissions = z.infer<typeof EffectivePermissions>;
+
+/**
+ * Resolve a seat's capabilities. Single source of truth: the server gates on it, the
+ * invite preview renders it, and the roster shows it, so the three can never drift into
+ * telling three different stories about the same seat.
+ */
+export function effectivePermissionsFor(role: Role, interactiveGuest: boolean): EffectivePermissions {
+  const interactive = role !== 'viewer' || interactiveGuest;
+  return {
+    role,
+    readOnly: !interactive,
+    interactiveGuest: role === 'viewer' && interactiveGuest,
+    canKeepPrivateNotes: true,
+    canComment: interactive,
+    canShareNotes: interactive,
+    canWhisper: interactive,
+    canSubmitToDmInbox: interactive,
+    canEditCampaignContent: role === 'dm' || role === 'player',
+    canModerate: role === 'dm',
+  };
+}
+
 export const CampaignMember = z.object({
   id: Id,
   campaignId: Id,
@@ -5450,6 +5502,12 @@ export const CampaignMember = z.object({
   // The protected campaign owner/creator seat. Ordinary DM and temporary guest
   // authority cannot demote/remove this seat; see MembersService (#545).
   primaryOwner: z.boolean().default(false),
+  // Issue #597: the explicit "interactive guest" capability. Meaningful only on a
+  // viewer seat — a viewer WITHOUT it is genuinely read-only (no comments, no shared
+  // notes, no whispers, no DM-inbox posts); a viewer WITH it may take part in
+  // discussion without gaining any authority over campaign content. Players and DMs
+  // are interactive by role, so the flag is not consulted for them.
+  interactiveGuest: z.boolean().default(false),
   username: z.string().default(''), // denormalized for display
   displayName: z.string().default(''),
   disabled: z.boolean().default(false), // unusable accounts never count as DM authority (#849)
@@ -5473,6 +5531,8 @@ export const MemberUpdate = z.object({
   role: Role.optional(),
   characterId: Id.nullable().optional(),
   confirmTransfer: z.boolean().optional(),
+  // Issue #597: grant/revoke the interactive-guest capability on a viewer seat.
+  interactiveGuest: z.boolean().optional(),
 });
 
 export const MemberAiConsentUpdate = z.object({
@@ -5602,6 +5662,11 @@ export const InvitePreview = z.object({
   campaignName: z.string(),
   role: InviteRole,
   expiresAt: IsoDate,
+  // Issue #597: the join page must say what the seat can DO, not just name its role.
+  // "Viewer" told a joiner nothing verifiable — and until this issue it was actively
+  // misleading. An invite always seats a read-only viewer or a full player; the
+  // interactive-guest capability is granted afterwards by a DM, never by a link.
+  permissions: EffectivePermissions,
 });
 export type InvitePreview = z.infer<typeof InvitePreview>;
 
@@ -5999,6 +6064,13 @@ export const AI_DM_MODE_CAPABILITIES: Readonly<
       { label: 'applies HP and conditions', copyKeyword: 'HP' },
       { label: 'awards XP and levels', copyKeyword: 'XP' },
       { label: 'advances combat turns', copyKeyword: 'turn' },
+      // #1022: the seat can ORIGINATE a fight, not just run one a human built. That is a
+      // materially different authority from "advances combat turns" and a DM deciding whether
+      // to enable Driver mode deserves to see it named, so it carries a real copyKeyword.
+      // What it CANNOT do is decide visibility: every encounter it creates is DM-only prep
+      // until the human DM reveals it (guardDriverLivePlayArgs), which is why the copy says
+      // "prepped" rather than implying the table sees them.
+      { label: 'creates encounters as DM-only prep', copyKeyword: 'encounter' },
       { label: 'reveals map regions', copyKeyword: 'map' },
       // Capabilities the seat has but the trust-copy summary does not enumerate by name.
       // Listed so the manifest stays a complete mirror of DRIVER_LIVE_PLAY_TOOLS; their
@@ -6238,6 +6310,48 @@ export const AI_DM_TRANSCRIPT_CLIENT_REF_MAX = 64;
  * DELETE /campaigns/:id/ai-dm/transcript.
  */
 export const AI_DM_TRANSCRIPT_RETENTION_MAX_EVENTS = 2_000;
+
+/**
+ * CONVERSATION MEMORY (#1038). The driver built a fresh one-message array per turn, so the
+ * model had amnesia between turns even though #572 had already made the table transcript
+ * durable and ordered. These constants bound how much of that transcript is replayed back
+ * into the prompt. There is deliberately NO second turn log: `ai_dm_transcript_events` is
+ * already the per-campaign, densely-sequenced record of what happened, and a `driver_turns`
+ * table beside it would be a second source of truth to keep in sync.
+ *
+ * The budget is EXPLICIT CONSTANTS rather than a fraction of the model's context window on
+ * purpose. Every token here is paid on every turn AND on every retry/fallback attempt
+ * (#1052), so "remember more" has to be a legible, reviewable cost rather than something
+ * that scales silently with whichever model a campaign is pointed at.
+ *
+ * Two tiers, because recency is worth more than completeness:
+ *  - the newest {@link AI_DM_PROMPT_HISTORY_MAX_MESSAGES} events replay VERBATIM as real
+ *    conversation turns, so the model sees exact prior wording;
+ *  - older events that still fit are COMPACTED to one line each in the `## Recent history`
+ *    system-prompt section — the gist survives, the token cost collapses.
+ */
+export const AI_DM_PROMPT_HISTORY_MAX_MESSAGES = 20;
+
+/**
+ * How many older events may be compacted into the `## Recent history` digest, beyond the
+ * verbatim window. Bounded separately so a long session cannot grow the system prompt
+ * without limit — past this, history is genuinely out of the model's view.
+ */
+export const AI_DM_PROMPT_HISTORY_MAX_DIGEST = 40;
+
+/**
+ * Token ceiling for everything #1038 adds to a turn (verbatim replay + digest), measured
+ * with the repo's existing ~4-chars-per-token estimator. Whichever limit binds first — this
+ * or the event counts above — wins, so a table of very long posts degrades by dropping the
+ * OLDEST context rather than by silently inflating the prompt.
+ */
+export const AI_DM_PROMPT_HISTORY_MAX_TOKENS = 1_500;
+
+/** Longest single history entry replayed verbatim; longer ones are truncated with an ellipsis. */
+export const AI_DM_PROMPT_HISTORY_ENTRY_MAX_CHARS = 1_200;
+
+/** Longest single line in the compacted `## Recent history` digest. */
+export const AI_DM_PROMPT_HISTORY_DIGEST_LINE_MAX_CHARS = 200;
 
 export const AiDmTranscriptEvent = z.object({
   /** Stable, client-visible event identity (unique per campaign) — the idempotent merge key. */
@@ -9435,6 +9549,90 @@ export const ModerationRetentionPolicyUpdate = z.object({
   autoRedactEnabled: z.boolean().optional(),
 });
 export type ModerationRetentionPolicyUpdate = z.infer<typeof ModerationRetentionPolicyUpdate>;
+
+/**
+ * Issue #597: a DM silencing a member DIRECTLY, without a report to hang it on.
+ * #601 could only mute through the queue's `mute` verb, which requires an incident;
+ * a table often needs "stop, cool off for an hour" before anyone has filed anything,
+ * and forcing a report first either manufactures a permanent accusation record or
+ * leaves the DM with removal as their only tool. `hours` omitted = indefinite until
+ * lifted; removal remains a separate, harsher act (DELETE the membership).
+ */
+export const ModerationSilenceCreate = z
+  .object({
+    userId: z.string().min(1).max(120),
+    hours: z
+      .number()
+      .int()
+      .min(1)
+      .max(24 * 365)
+      .optional(),
+    reason: z.string().max(500).optional(),
+  })
+  .strict();
+export type ModerationSilenceCreate = z.infer<typeof ModerationSilenceCreate>;
+
+// ---------- personal safety controls (issue #597) ----------
+
+/**
+ * The three personal (member-owned, not moderator-owned) safety relationships.
+ *
+ *  - `block`       — the strongest: the blocked member can no longer reach the owner.
+ *                    Nothing they send is delivered to the owner, and none of their
+ *                    content is shown to the owner. Deliberately account-wide, not
+ *                    per-campaign: a block is a statement about a PERSON, and having
+ *                    to re-block the same harasser at every shared table is exactly
+ *                    the friction that makes people stop using the control.
+ *  - `mute_sender` — noise control, not safety: their content stays fully visible,
+ *                    they simply stop generating notifications for the owner.
+ *  - `mute_thread` — same, scoped to one anchored discussion rather than a person.
+ *
+ * Distinct from ModerationMute (issue #601), which is a DM/moderator SANCTION that
+ * stops the muted member posting at all. These are the recipient's own settings and
+ * are never disclosed to their subject.
+ */
+export const SafetyControlKind = z.enum(['block', 'mute_sender', 'mute_thread']);
+export type SafetyControlKind = z.infer<typeof SafetyControlKind>;
+
+export const SafetyControl = z.object({
+  id: Id,
+  kind: SafetyControlKind,
+  /** null for an account-wide control (every `block` is account-wide). */
+  campaignId: Id.nullable().default(null),
+  ownerUserId: z.string().max(120),
+  /** null for `mute_thread`. */
+  targetUserId: z.string().max(120).nullable().default(null),
+  /** Display label for the target, resolved at read time — never stored. */
+  targetName: z.string().default(''),
+  /** Set for `mute_thread` only. */
+  threadEntityType: EntityType.nullable().default(null),
+  threadEntityId: Id.nullable().default(null),
+  reason: z.string().max(500).default(''),
+  createdAt: IsoDate,
+});
+export type SafetyControl = z.infer<typeof SafetyControl>;
+
+export const SafetyBlockCreate = z
+  .object({
+    targetUserId: z.string().min(1).max(120),
+    reason: z.string().max(500).optional(),
+  })
+  .strict();
+export type SafetyBlockCreate = z.infer<typeof SafetyBlockCreate>;
+
+/**
+ * Either a person mute (`targetUserId`) or a thread mute (`entityType` + `entityId`),
+ * never both — the service rejects a body that supplies neither or both.
+ */
+export const SafetyMuteCreate = z
+  .object({
+    targetUserId: z.string().min(1).max(120).optional(),
+    entityType: EntityType.optional(),
+    entityId: Id.optional(),
+    reason: z.string().max(500).optional(),
+  })
+  .strict();
+export type SafetyMuteCreate = z.infer<typeof SafetyMuteCreate>;
 
 // ---------- admin observability (issue #22) ----------
 // Server-wide operational snapshot for the admin console (GET /admin/metrics,
