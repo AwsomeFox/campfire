@@ -4,11 +4,10 @@ import type { z } from 'zod';
 import { CommentCreate, CommentUpdate, EntityType } from '@campfire/schema';
 import type { Comment, CommentReplyPage, CommentThread, CommentThreadPage, Role, PageParams } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { attachments, campaigns, characters, comments, encounters, factions, locations, npcs, quests, sessions } from '../../db/schema';
+import { attachments, characters, comments } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { historicalAvatarAttachmentId, safeHistoricalAvatarUrl } from '../../common/avatar-url';
 import { notDeleted } from '../../common/soft-delete';
-import { isVisibleTo } from '../../common/redact';
 import { applyPage } from '../../common/pagination';
 import {
   clampCommentsReplyLimit,
@@ -23,6 +22,8 @@ import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { nextUpdatedAt, staleWrite } from '../../common/stale-write';
 import { RevisionsService } from '../revisions/revisions.service';
+import { assertAnchorVisible as assertAnchorVisibleShared } from '../../common/anchor-visibility';
+import { ModerationService, QUARANTINE_BODY } from '../moderation/moderation.service';
 
 type CommentCreateInput = z.infer<typeof CommentCreate>;
 type CommentUpdateInput = z.infer<typeof CommentUpdate>;
@@ -43,8 +44,25 @@ const TOMBSTONE_BODY = '[deleted]';
  * it via parentId) without leaking the original prose. updatedAt is NOT bumped on
  * tombstone (it records content edits, not lifecycle), so the placeholder sits at
  * the original timestamp.
+ *
+ * Moderation quarantine (issue #601) redacts the same way, with a DIFFERENT
+ * placeholder and a higher precedence: a quarantined comment reads as withheld for
+ * EVERY caller — its author, and the DM who quarantined it, included. There is no
+ * role that reads the original prose back through this function; the only path to
+ * it is the separately-gated, always-audited evidence endpoint. This function is
+ * the single chokepoint every comment read path funnels through, which is what
+ * makes "quarantine actually withholds the content" enforceable in one place
+ * rather than at each of a dozen call sites.
  */
 function toDomain(row: typeof comments.$inferSelect): Comment {
+  const base = toDomainRaw(row);
+  // Quarantine takes precedence over the tombstone placeholder: if a comment is
+  // both removed and under review, "withheld pending moderation review" is the
+  // more accurate statement of why nobody can read it.
+  return row.quarantinedAt != null ? { ...base, body: QUARANTINE_BODY } : base;
+}
+
+function toDomainRaw(row: typeof comments.$inferSelect): Comment {
   const tombstoned = row.deletedAt != null;
   return {
     id: row.id,
@@ -66,6 +84,10 @@ function toDomain(row: typeof comments.$inferSelect): Comment {
     // UI can honestly render "edited by DM Y" without overwriting the author.
     editedAt: row.editedAt,
     editedBy: row.editedBy,
+    // Moderation quarantine (issue #601). Surfaced deliberately: a reader who sees
+    // a placeholder deserves to know whether the author withdrew the post or a
+    // moderator withheld it. It carries no information about WHO reported it or WHY.
+    quarantinedAt: row.quarantinedAt,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -91,20 +113,13 @@ export class CommentsService {
     private readonly audit: AuditService,
     private readonly notifications: NotificationsService,
     private readonly revisions: RevisionsService,
+    // Issue #601: pre-mutation abuse-evidence capture + mute enforcement. The
+    // dependency runs one way (comments -> moderation); ModerationService never
+    // injects this service back, which is why the anchor-visibility rule below now
+    // lives in common/ where both can reach it.
+    private readonly moderation: ModerationService,
   ) {}
 
-  /**
-   * Anchored-entity secrecy gate (issue #230). Before listing/posting on
-   * (entityType, entityId) — and before editing/deleting a comment anchored to one —
-   * the caller must be able to SEE that entity. We resolve it within THIS campaign and
-   * apply the SAME rule the entity's own GET uses (issue #42): a hidden quest/npc/
-   * faction or an unexplored location is 404 for a non-DM, indistinguishable from a
-   * nonexistent one — so a thread can never leak that a secret entity exists (or expose
-   * its comments). Types with no entity-level secrecy (session, character, campaign,
-   * encounter) are visible to any member; a nonexistent, trashed, or foreign-campaign
-   * anchor 404s for everyone (a comment can only hang off a live entity in its own
-   * campaign). The 404 message is uniform so a hidden entity is byte-for-byte a missing one.
-   */
   /**
    * Boolean form of {@link assertAnchorVisible} used by campaign-wide reads
    * (search). Returns false where assert would 404, so a hidden-entity thread is
@@ -161,90 +176,20 @@ export class CommentsService {
     return out;
   }
 
+  /**
+   * Thin delegate onto the shared rule in `common/anchor-visibility.ts`. The body
+   * moved there verbatim for issue #601 so the moderation module can apply the
+   * IDENTICAL check when authorizing "may this reporter report this comment" —
+   * reporting must never become a probe for hidden entities — without depending on
+   * this service (which now depends on ModerationService). Behaviour is unchanged.
+   */
   private async assertAnchorVisible(
     campaignId: number,
     entityType: EntityTypeValue,
     entityId: number,
     role: Role,
   ): Promise<void> {
-    const notFound = () => new NotFoundException(`${entityType} ${entityId} not found`);
-    switch (entityType) {
-      case 'quest': {
-        const [row] = await this.db
-          .select({ hidden: quests.hidden })
-          .from(quests)
-          .where(and(eq(quests.id, entityId), eq(quests.campaignId, campaignId), notDeleted(quests.deletedAt)))
-          .limit(1);
-        if (!row || !isVisibleTo(row, role)) throw notFound();
-        return;
-      }
-      case 'npc': {
-        const [row] = await this.db
-          .select({ hidden: npcs.hidden })
-          .from(npcs)
-          .where(and(eq(npcs.id, entityId), eq(npcs.campaignId, campaignId), notDeleted(npcs.deletedAt)))
-          .limit(1);
-        if (!row || !isVisibleTo(row, role)) throw notFound();
-        return;
-      }
-      case 'faction': {
-        const [row] = await this.db
-          .select({ hidden: factions.hidden })
-          .from(factions)
-          .where(and(eq(factions.id, entityId), eq(factions.campaignId, campaignId)))
-          .limit(1);
-        if (!row || !isVisibleTo(row, role)) throw notFound();
-        return;
-      }
-      case 'location': {
-        const [row] = await this.db
-          .select({ status: locations.status })
-          .from(locations)
-          .where(and(eq(locations.id, entityId), eq(locations.campaignId, campaignId), notDeleted(locations.deletedAt)))
-          .limit(1);
-        // Unexplored → hidden from non-DM (mirrors LocationsService.isHiddenFrom, issue #42).
-        if (!row || (role !== 'dm' && row.status === 'unexplored')) throw notFound();
-        return;
-      }
-      case 'session': {
-        const [row] = await this.db
-          .select({ id: sessions.id })
-          .from(sessions)
-          .where(and(eq(sessions.id, entityId), eq(sessions.campaignId, campaignId), notDeleted(sessions.deletedAt)))
-          .limit(1);
-        if (!row) throw notFound();
-        return;
-      }
-      case 'character': {
-        const [row] = await this.db
-          .select({ id: characters.id })
-          .from(characters)
-          .where(and(eq(characters.id, entityId), eq(characters.campaignId, campaignId), notDeleted(characters.deletedAt)))
-          .limit(1);
-        if (!row) throw notFound();
-        return;
-      }
-      case 'encounter': {
-        const [row] = await this.db
-          .select({ id: encounters.id })
-          .from(encounters)
-          .where(and(eq(encounters.id, entityId), eq(encounters.campaignId, campaignId)))
-          .limit(1);
-        if (!row) throw notFound();
-        return;
-      }
-      case 'campaign': {
-        // A comment can only anchor to its OWN campaign; a foreign campaign id 404s.
-        if (entityId !== campaignId) throw notFound();
-        const [row] = await this.db
-          .select({ id: campaigns.id })
-          .from(campaigns)
-          .where(and(eq(campaigns.id, campaignId), notDeleted(campaigns.deletedAt)))
-          .limit(1);
-        if (!row) throw notFound();
-        return;
-      }
-    }
+    return assertAnchorVisibleShared(this.db, campaignId, entityType, entityId, role);
   }
 
   /**
@@ -569,6 +514,10 @@ export class CommentsService {
   async create(campaignId: number, input: CommentCreateInput, user: RequestUser, role: Role): Promise<Comment> {
     const entityType = input.entityType as EntityTypeValue;
     const entityId = input.entityId;
+    // Issue #601: a moderation mute has to actually stop the muted member posting,
+    // or the DM queue's `mute` verb is theatre. Checked before any other work so a
+    // muted member's request does no writes at all.
+    await this.moderation.assertNotMuted(campaignId, user);
     // Can't post on a thread you can't see — hidden/secret entities 404 (issue #230).
     await this.assertAnchorVisible(campaignId, entityType, entityId, role);
     let parentId: number | null = null;
@@ -629,6 +578,7 @@ export class CommentsService {
     if (existing.authorUserId !== user.id && role !== 'dm') {
       throw new ForbiddenException('Only the author or a DM may edit this comment');
     }
+    this.assertNotQuarantined(existing);
     const moderatorEdit = existing.authorUserId !== user.id;
     if (input.inCharacter !== undefined && input.inCharacter !== existing.inCharacter) {
       throw new BadRequestException('In-character attribution is immutable after posting');
@@ -646,20 +596,62 @@ export class CommentsService {
       patch.editedBy = auditActor(user);
     }
 
-    const updated = await this.db
-      .update(comments)
-      .set(patch)
-      .where(
-        opts?.expectedUpdatedAt
-          ? and(eq(comments.id, id), eq(comments.updatedAt, opts.expectedUpdatedAt))
-          : eq(comments.id, id),
-      )
-      .returning();
-    if (!updated[0]) {
+    // Issue #601: capture the pre-edit abuse-evidence snapshot INSIDE the same
+    // transaction as the write, reading the row as it exists in that transaction —
+    // not the `existing` row fetched above. If a snapshot were taken outside this
+    // window, a concurrent delete or a second edit could land between the read and
+    // the write and the evidence would record content that is not what was actually
+    // overwritten. better-sqlite3 is synchronous and SQLite serializes write
+    // transactions, so nothing can interleave here. The capture is a no-op unless
+    // an unresolved report already names this comment (see snapshotCommentIfWatched
+    // for why we do not snapshot every edit).
+    //
+    // Everything the write is conditional on is therefore ALSO decided in here,
+    // against `current`, in this order and for these reasons:
+    //
+    //  1. Quarantine. `assertNotQuarantined(existing)` above runs against a row read
+    //     before the transaction opened. A DM who quarantines this comment in the
+    //     window between that read and this write would not actually have stopped
+    //     the edit — the very race quarantine exists to win (the subject rewriting
+    //     the words under an open report). Re-checked here so the gate and the write
+    //     observe the same row. The pre-transaction check is kept because it fails
+    //     fast, before any of the validation work above; this one is what binds.
+    //  2. Staleness. Decided BEFORE the snapshot, not by letting the CAS in the
+    //     WHERE clause come up empty afterwards: a rejected stale write commits no
+    //     edit, so recording a `pre_edit` snapshot for it would file evidence of a
+    //     mutation that never happened. Evidence is only worth having if the trail
+    //     matches what the content actually did, so the capture belongs strictly on
+    //     the path that commits. Throwing here also rolls the transaction back, so
+    //     even a snapshot taken by some future reordering could not survive.
+    const updated = this.db.transaction((tx) => {
+      const [current] = tx.select().from(comments).where(eq(comments.id, id)).limit(1).all();
+      if (!current) return undefined;
+      this.assertNotQuarantined(current);
+      if (opts?.expectedUpdatedAt && current.updatedAt !== opts.expectedUpdatedAt) {
+        throw staleWrite(opts.expectedUpdatedAt, current.updatedAt);
+      }
+      this.moderation.snapshotCommentIfWatched(tx, current, 'pre_edit');
+      const rows = tx
+        .update(comments)
+        .set(patch)
+        .where(
+          opts?.expectedUpdatedAt
+            ? and(eq(comments.id, id), eq(comments.updatedAt, opts.expectedUpdatedAt))
+            : eq(comments.id, id),
+        )
+        .returning()
+        .all();
+      return rows[0];
+    });
+    // Reached only when the row vanished entirely between the two reads (a campaign
+    // purge's CASCADE): getRowOrThrow 404s. The staleWrite fallback is kept as a
+    // belt-and-braces for a CAS that somehow came up empty without the in-transaction
+    // check firing; it should be unreachable now that staleness is decided above.
+    if (!updated) {
       const current = await this.getRowOrThrow(id);
       throw staleWrite(opts?.expectedUpdatedAt, current.updatedAt);
     }
-    const row = updated[0];
+    const row = updated;
     await this.revisions.commitProseVersion({
       entityType: 'comment',
       entityId: id,
@@ -680,6 +672,28 @@ export class CommentsService {
     return toDomain(row);
   }
 
+  /**
+   * Issue #601: a quarantined comment is frozen to its author. Reads still resolve
+   * (to the placeholder), but every ordinary MUTATION is refused, for two reasons:
+   *
+   *  1. Editing a quarantined comment would commit its withheld body into
+   *     entity_revisions (#157), where the author and any DM can read it back —
+   *     quietly undoing the withholding through the revision history side door.
+   *  2. A quarantine is a moderation decision about specific words. Letting the
+   *     author rewrite or delete them out from under an open report turns the DM's
+   *     "hold this while I review it" into "the subject controls the evidence".
+   *
+   * 403 rather than 404 here on purpose: unlike the secrecy 404s elsewhere in this
+   * service, the author already knows the comment exists — they wrote it, and the
+   * placeholder tells them it is under review. Pretending it vanished would be a
+   * worse experience with no privacy gain. Only the moderation queue lifts this.
+   */
+  private assertNotQuarantined(row: typeof comments.$inferSelect): void {
+    if (row.quarantinedAt != null) {
+      throw new ForbiddenException('This comment is withheld pending moderation review and cannot be changed.');
+    }
+  }
+
   async listRevisions(id: number, user: RequestUser, role: Role) {
     const existing = await this.getRowOrThrow(id);
     await this.assertAnchorVisible(existing.campaignId, existing.entityType as EntityTypeValue, existing.entityId, role);
@@ -695,6 +709,7 @@ export class CommentsService {
     if (existing.authorUserId !== user.id && role !== 'dm') {
       throw new ForbiddenException('Only the author or a DM may restore this comment history');
     }
+    this.assertNotQuarantined(existing);
     return this.revisions.restore('comment', id, revisionId, user, role);
   }
 
@@ -720,12 +735,32 @@ export class CommentsService {
     if (existing.authorUserId !== user.id && role !== 'dm') {
       throw new ForbiddenException('Only the author or a DM may delete this comment');
     }
+    this.assertNotQuarantined(existing);
     const ts = nowIso();
-    const [row] = await this.db
-      .update(comments)
-      .set({ deletedAt: ts, deletedBy: auditActor(user) })
-      .where(eq(comments.id, id))
-      .returning();
+    // Issue #601: same atomic snapshot-then-mutate as update(). Deleting is the
+    // sharper case — an abuser racing a victim's report must not be able to remove
+    // the message between the report reading it and the report recording it. The row
+    // is re-read inside the transaction and snapshotted there, so the evidence is
+    // whatever the delete is about to hide, captured in the same exclusive window.
+    //
+    // The quarantine gate is re-applied against that same in-transaction row: the
+    // `assertNotQuarantined(existing)` above read the comment before the transaction
+    // opened, so on its own it would let a delete through that a DM quarantined in
+    // between — handing the subject of an open report exactly the "remove the
+    // evidence" move the quarantine was taken to prevent.
+    const row = this.db.transaction((tx) => {
+      const [current] = tx.select().from(comments).where(eq(comments.id, id)).limit(1).all();
+      if (!current) throw new NotFoundException(`Comment ${id} not found`);
+      this.assertNotQuarantined(current);
+      this.moderation.snapshotCommentIfWatched(tx, current, 'pre_delete');
+      const rows = tx
+        .update(comments)
+        .set({ deletedAt: ts, deletedBy: auditActor(user) })
+        .where(eq(comments.id, id))
+        .returning()
+        .all();
+      return rows[0];
+    });
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -758,16 +793,32 @@ export class CommentsService {
     if (existing.authorUserId !== user.id && role !== 'dm') {
       throw new ForbiddenException('Only the author or a DM may restore this comment');
     }
+    this.assertNotQuarantined(existing);
     // Restore is a LIFECYCLE event, not a content edit — do not bump updatedAt.
     // The web UI shows an "edited" badge when updatedAt !== createdAt, so bumping
     // here would falsely mark a restored comment as edited. Provenance of the
     // tombstone (who deleted it, when) is preserved in the audit log, not on the
     // row (deletedAt/deletedBy are cleared so the comment reads as live again).
-    const [row] = await this.db
-      .update(comments)
-      .set({ deletedAt: null, deletedBy: null })
-      .where(eq(comments.id, id))
-      .returning();
+    //
+    // Issue #601: the gate and the write share one transaction, for the same reason
+    // as update()/remove(). Restore is the one that would hurt most if it slipped —
+    // it puts a withheld comment back into everyone's view, so a quarantine landing
+    // between the pre-read above and this write would be undone by the very request
+    // it was meant to stop. Both the tombstone precondition and the quarantine check
+    // are re-decided here against the row the write will actually touch.
+    const row = this.db.transaction((tx) => {
+      const [current] = tx.select().from(comments).where(eq(comments.id, id)).limit(1).all();
+      if (!current) throw new NotFoundException(`Comment ${id} not found`);
+      if (current.deletedAt == null) throw new NotFoundException(`Comment ${id} is not tombstoned`);
+      this.assertNotQuarantined(current);
+      const rows = tx
+        .update(comments)
+        .set({ deletedAt: null, deletedBy: null })
+        .where(eq(comments.id, id))
+        .returning()
+        .all();
+      return rows[0];
+    });
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,

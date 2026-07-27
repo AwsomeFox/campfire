@@ -1121,6 +1121,99 @@ describe('ai-provider-config server default is admin-gated (e2e, no dev auth)', 
   });
 });
 
+/**
+ * Issue #501 — the two resolvers that decide "will this campaign send content off-box?"
+ * must never disagree.
+ *
+ * `ScribeService.resolveEgress` predicts local-vs-external from
+ * `getEffectiveView().configured` BEFORE material is assembled; the actual send resolves
+ * `resolveEffectiveConfigWithEndpointScope`. The ordering interlock only fires on a
+ * predicted-`local` run, so if these ever diverged — one calling a keyless or
+ * environment-credentialled row "configured" while the other returned a null config —
+ * a run could assemble UNFILTERED material and still reach an external endpoint with the
+ * interlock silent.
+ *
+ * Both key on the same `primary = campaignRow ?? serverRow`, and resolution always yields
+ * a config when `primary` exists (its final branch is an unconditional fallback). This
+ * pins that equivalence across the keyless / env-key permutations — this PR was already
+ * bitten once by two resolvers disagreeing about what "campaign scope" meant.
+ */
+describe('provider resolvers agree on configured-vs-null (#501)', () => {
+  let ctx: TestAppContext;
+  let server: ReturnType<TestAppContext['app']['getHttpServer']>;
+  let configs: AiProviderConfigService;
+  let campaignId: number;
+  const savedOpenAi = process.env.OPENAI_API_KEY;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    server = ctx.app.getHttpServer();
+    configs = ctx.app.get(AiProviderConfigService);
+    const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Resolver Agreement' });
+    campaignId = camp.body.id;
+  });
+
+  afterAll(async () => {
+    restoreEnv('OPENAI_API_KEY', savedOpenAi);
+    await closeTestApp(ctx);
+  });
+
+  /** `configured` (the egress predictor) must equal "a config resolves" (the actual send). */
+  async function assertAgreement(label: string): Promise<void> {
+    const view = await configs.getEffectiveView(campaignId);
+    const { config, endpointScope } = await configs.resolveEffectiveConfigWithEndpointScope(campaignId);
+    expect({ label, configured: view.configured }).toEqual({ label, configured: config !== null });
+    // endpointScope is null exactly when config is null — the documented contract.
+    expect(endpointScope === null).toBe(config === null);
+  }
+
+  it('agrees with no provider rows at all (the no-op seam)', async () => {
+    await request(server).delete('/api/v1/settings/ai-provider').set(dm);
+    await request(server).delete(`/api/v1/campaigns/${campaignId}/ai-provider`).set(dm);
+    delete process.env.OPENAI_API_KEY;
+    await assertAgreement('no rows');
+
+    // Sanity: this really is the local seam, so the assertion above is not vacuous.
+    expect((await configs.getEffectiveView(campaignId)).configured).toBe(false);
+  });
+
+  it('agrees for a server row with a stored key', async () => {
+    await request(server)
+      .put('/api/v1/settings/ai-provider')
+      .set(dm)
+      .send({ providerType: 'mock', model: 'mock-1', apiKey: 'sk-agree-0001' });
+    await assertAgreement('server keyed');
+  });
+
+  it('agrees for a KEYLESS campaign override over a keyed server row', async () => {
+    await request(server)
+      .put(`/api/v1/campaigns/${campaignId}/ai-provider`)
+      .set(dm)
+      .send({ providerType: 'mock', model: 'mock-1' });
+    await assertAgreement('keyless override');
+
+    // …and the endpoint is attributed to the SERVER row that actually supplied it.
+    const { endpointScope } = await configs.resolveEffectiveConfigWithEndpointScope(campaignId);
+    expect(endpointScope).toBe('server');
+  });
+
+  it('agrees for a keyless campaign override with only an ENVIRONMENT server credential', async () => {
+    await request(server).delete('/api/v1/settings/ai-provider/key').set(dm);
+    process.env.OPENAI_API_KEY = 'sk-env-agree-0001';
+    await assertAgreement('env credential');
+  });
+
+  it('agrees for a campaign override with no server row at all', async () => {
+    await request(server).delete('/api/v1/settings/ai-provider').set(dm);
+    delete process.env.OPENAI_API_KEY;
+    await assertAgreement('campaign only');
+
+    // The campaign owns its own endpoint here, so the scope is genuinely 'campaign'.
+    const { endpointScope } = await configs.resolveEffectiveConfigWithEndpointScope(campaignId);
+    expect(endpointScope).toBe('campaign');
+  });
+});
+
 function restoreEnv(name: 'OPENAI_API_KEY' | 'ANTHROPIC_API_KEY', value: string | undefined): void {
   if (value === undefined) delete process.env[name];
   else process.env[name] = value;

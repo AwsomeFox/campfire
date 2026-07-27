@@ -20,6 +20,7 @@ function proposal(
     proposer: 'Player',
     proposerUserId: '7',
     proposerToken: null,
+    generationProvenance: null,
     status: 'pending',
     resolvedBy: '',
     note: '',

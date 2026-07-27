@@ -422,7 +422,12 @@ export class SearchService {
       OR (campaign_search_fts.entity_type = 'note' AND EXISTS (
         SELECT 1 FROM notes n
         WHERE n.id = campaign_search_fts.entity_id AND n.campaign_id = campaign_search_fts.campaign_id
-          AND n.kind = 'note' AND n.deleted_at IS NULL AND ${noteVisibility}
+          -- quarantined_at IS NULL (issue #601): same reasoning as the comment branch
+          -- below. The note visibility rule deliberately knows nothing about quarantine,
+          -- so a withheld note or whisper would otherwise come back here as a body
+          -- snippet — to the whole campaign for a party_shared note, and to the very
+          -- recipient the quarantine exists to shield for a whisper.
+          AND n.kind = 'note' AND n.deleted_at IS NULL AND n.quarantined_at IS NULL AND ${noteVisibility}
       ))
       OR (campaign_search_fts.entity_type = 'timeline' AND EXISTS (
         SELECT 1 FROM timeline_events t
@@ -436,7 +441,13 @@ export class SearchService {
       OR (campaign_search_fts.entity_type = 'comment' AND EXISTS (
         SELECT 1 FROM comments c
         WHERE c.id = campaign_search_fts.entity_id AND c.campaign_id = campaign_search_fts.campaign_id
-          AND c.deleted_at IS NULL AND ${commentAnchorVisible}
+          -- quarantined_at IS NULL (issue #601): a moderation quarantine must withhold
+          -- the body from SEARCH too, not just from the thread view. The FTS index still
+          -- holds the original prose (it mirrors the row, and reindexing on every
+          -- moderation action would be a second source of truth to keep in sync), so the
+          -- withholding has to happen in this visibility predicate — otherwise a snippet
+          -- of the abusive text would come back through the search results.
+          AND c.deleted_at IS NULL AND c.quarantined_at IS NULL AND ${commentAnchorVisible}
       ))
       OR (${role === 'dm' ? sql`1 = 1` : sql`0 = 1`} AND campaign_search_fts.entity_type = 'arc' AND EXISTS (
         SELECT 1 FROM story_arcs a
@@ -607,6 +618,10 @@ export class SearchService {
         inArray(notes.id, noteIds),
         eq(notes.kind, 'note'),
         notDeleted(notes.deletedAt),
+        // Issue #601 — this hydration reads `note.body` straight off the row and the
+        // inlined canSee below knows nothing about quarantine, so the filter has to be
+        // repeated here exactly as it is for comments further down.
+        notDeleted(notes.quarantinedAt),
       ));
       const noteEntityNames = await this.resolveNoteEntityNames(campaignId, rows);
       for (const note of rows) {
@@ -669,6 +684,12 @@ export class SearchService {
         eq(comments.campaignId, campaignId),
         inArray(comments.id, commentIds),
         notDeleted(comments.deletedAt),
+        // Issue #601 — this hydration path reads `comment.body` straight off the row,
+        // bypassing CommentsService.toDomain's placeholder, so the quarantine filter
+        // has to be repeated here. Dropping the row entirely (rather than substituting
+        // the placeholder) is right for search: a hit that only matches withheld text
+        // is not a useful result, and returning it would confirm what the text said.
+        notDeleted(comments.quarantinedAt),
       ));
       for (const comment of rows) {
         addHit({

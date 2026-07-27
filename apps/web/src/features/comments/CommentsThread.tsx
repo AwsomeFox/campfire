@@ -31,6 +31,7 @@ import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { entityTargetProps } from '../../lib/entityLinks';
 import { StaleWriteConflict, type ConflictField } from '../../components/StaleWriteConflict';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
+import { ReportButton } from '../moderation/ReportDialog';
 
 interface CommentDraft { body: string }
 const COMMENT_CONFLICT_FIELDS: Array<ConflictField<CommentDraft>> = [{ key: 'body', label: 'Comment', merge: true }];
@@ -280,6 +281,7 @@ export function CommentsThread({
             <li key={root.id} className="space-y-2">
               <CommentCard
                 comment={root}
+                campaignId={campaignId}
                 canModerate={canModerate(root)}
                 onReply={canMemberWrite ? () => setReplyTo(replyTo === root.id ? null : root.id) : undefined}
                 onDelete={() => setConfirmingDelete(root.id)}
@@ -291,6 +293,7 @@ export function CommentsThread({
                     <li key={reply.id}>
                       <CommentCard
                         comment={reply}
+                        campaignId={campaignId}
                         canModerate={canModerate(reply)}
                         onDelete={() => setConfirmingDelete(reply.id)}
                         onChanged={load}
@@ -375,12 +378,14 @@ export function CommentsThread({
 
 function CommentCard({
   comment,
+  campaignId,
   canModerate,
   onReply,
   onDelete,
   onChanged,
 }: {
   comment: Comment;
+  campaignId: number;
   canModerate: boolean;
   onReply?: () => void;
   onDelete: () => void;
@@ -523,6 +528,12 @@ function CommentCard({
             <button onClick={onDelete} className="text-rose-400 hover:text-rose-300">
               Delete
             </button>
+          )}
+          {/* Issue #601 — the report affordance. Offered on live comments only:
+              there is nothing to report about a comment already removed or
+              withheld, and the evidence for those is captured elsewhere. */}
+          {comment.deletedAt === null && comment.quarantinedAt === null && (
+            <ReportButton campaignId={campaignId} targetType="comment" targetId={comment.id} />
           )}
         </div>
       )}

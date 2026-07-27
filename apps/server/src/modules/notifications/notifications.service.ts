@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger, NotFoundException, type OnApplicationBootstrap } from '@nestjs/common';
-import { and, count, desc, eq, exists, gte, inArray, isNotNull, isNull, lt, lte, sql } from 'drizzle-orm';
+import { and, count, desc, eq, exists, gte, inArray, isNotNull, isNull, lt, lte, sql, type SQL } from 'drizzle-orm';
 import {
   NOTIFICATION_CATEGORIES,
   QuietHours,
@@ -590,6 +590,27 @@ export class NotificationsService implements OnApplicationBootstrap {
 
   // ---------- recipient-facing reads ----------
 
+  /**
+   * Issue #601 — hide notifications that point at a QUARANTINED comment.
+   *
+   * A notification's `body` is an EXCERPT of the comment, copied at post time and
+   * never revisited. Quarantine withholds the comment itself, but without this
+   * predicate the first ~100 characters of the abusive text stay sitting in the bell
+   * menu of the very person the quarantine exists to shield. Digest delivery inserts
+   * into this same table, so filtering on read covers that path too.
+   *
+   * The row is dropped rather than blanked: a notification whose only purpose is to
+   * point at content nobody may now read has no purpose left. Applied to the unread
+   * COUNT as well as the list, so the badge cannot advertise an item the list will
+   * never show — a phantom unread the user can never clear.
+   */
+  private static quarantinedCommentFilter(): SQL {
+    return sql`(${notifications.commentId} IS NULL OR NOT EXISTS (
+      SELECT 1 FROM comments c
+      WHERE c.id = ${notifications.commentId} AND c.quarantined_at IS NOT NULL
+    ))`;
+  }
+
   async listForUser(
     user: RequestUser,
     opts: ListNotificationsOptions = {},
@@ -603,6 +624,7 @@ export class NotificationsService implements OnApplicationBootstrap {
     const conditions = [
       eq(notifications.userId, userId),
       isNull(campaigns.deletedAt),
+      NotificationsService.quarantinedCommentFilter(),
     ];
     if (opts.unreadOnly) conditions.push(isNull(notifications.readAt));
     if (opts.campaignId) conditions.push(eq(notifications.campaignId, opts.campaignId));
@@ -656,7 +678,14 @@ export class NotificationsService implements OnApplicationBootstrap {
       .select({ value: count() })
       .from(notifications)
       .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
-      .where(and(eq(notifications.userId, userId), isNull(notifications.readAt), isNull(campaigns.deletedAt)));
+      .where(
+        and(
+          eq(notifications.userId, userId),
+          isNull(notifications.readAt),
+          isNull(campaigns.deletedAt),
+          NotificationsService.quarantinedCommentFilter(),
+        ),
+      );
     return row?.value ?? 0;
   }
 

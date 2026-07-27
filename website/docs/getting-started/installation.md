@@ -105,6 +105,7 @@ the server as a blind SSRF proxy on a shared multi-tenant host.
 | `AI_PROVIDER_BASEURL_ALLOW_HOSTS` | *(unset)* | Optional comma-separated hostname allowlist. When set, only listed hosts are accepted (metadata / link-local still blocked). Prefer this over the blanket private opt-in when you know the exact local hostname |
 | `AI_PROVIDER_BASEURL_ALLOW_CIDRS` | *(unset)* | Optional comma-separated CIDR allowlist (e.g. `192.168.1.0/24`). Private addresses in these ranges are permitted without the blanket private opt-in. Metadata / link-local / multicast stay blocked |
 | `AI_PROVIDER_BASEURL_DENY_HOSTS` | *(unset)* | Optional comma-separated hostname denylist — always rejected |
+| `AI_PROVIDER_ENDPOINT_IS_LOCAL` | *(unset)* | Set to `1` to declare that your configured AI provider endpoint is **on-box / operator-controlled**, so generations through it are not treated as external use and member consent is not required for scribe source notes. Defaults to off (fail-closed). Distinct from `AI_PROVIDER_ALLOW_PRIVATE_HOSTS`, which only permits a private host as a *destination* — see [Member consent for external AI use](../ai/capabilities.md#member-consent-for-external-ai-use) |
 
 **Backups** — see [Backups & upgrades](../administration/operations.md).
 

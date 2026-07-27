@@ -92,10 +92,16 @@ export function buildCampaignNavGroups(
         { key: 'proposals', label: t('nav.proposals'), to: `${base}/proposals`, badge: pendingProposals, termId: 'proposals' },
         { key: 'trash', label: t('nav.trash'), to: `${base}/trash`, badge: trashCount },
         { key: 'members', label: t('nav.members'), to: `${base}/members` },
+        // Issue #601 — the DM's abuse-report queue. Sits in Manage next to Members
+        // and Audit because it is campaign governance, not campaign content.
+        { key: 'moderation', label: t('nav.moderation'), to: `${base}/moderation` },
         { key: 'audit', label: 'Audit log', to: `${base}/audit` },
       ]
     : [
         { key: 'proposals', label: t('nav.myProposals'), to: `${base}/proposals`, termId: 'proposals' },
+        // Non-DMs get the same route, which shows only the reports they filed —
+        // someone who reported abuse must be able to check whether anything happened.
+        { key: 'moderation', label: t('nav.myReports'), to: `${base}/moderation` },
         // Issue #479 — player data rights: export/leave live on MembersPage but were
         // only reachable by URL; surface them in Manage for every non-DM role.
         { key: 'membership', label: t('nav.yourData'), to: `${base}/members` },

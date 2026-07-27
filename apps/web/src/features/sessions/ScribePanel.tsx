@@ -16,12 +16,13 @@ import { useTranslation } from 'react-i18next';
  */
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import type { ScribeConfig, ScribeJob, ScribeJobStatus, ScribeRunResult, ScribeTrigger } from '@campfire/schema';
+import type { ScribeConfig, ScribeJob, ScribeJobStatus, ScribeRunResult, ScribeSourceStats, ScribeTrigger } from '@campfire/schema';
 import { api, API, translateApiError } from '../../lib/api';
 import { useAiDmSeat } from '../../lib/query';
 import { Card, Btn, EmptyState, Skeleton, SkeletonConditionalRegion, ErrorNote } from '../../components/ui';
 import { conditionalRegionPhase } from '../../components/loadingSkeletonState';
 import { Markdown } from '../../components/Markdown';
+import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { useDialog } from '../../components/useDialog';
 import { useDisclosure } from '../../components/useDisclosure';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
@@ -33,6 +34,24 @@ const TRIGGER_LABEL: Record<ScribeTrigger, string> = {
   post_session: 'Post-session sweep',
   cron: 'Cron sweep',
 };
+
+/**
+ * The DM-facing sentence for material the external-use gate held back (#501).
+ *
+ * Kept as one phrase so every surface — filed, previewed, and nothing-drafted — says the
+ * same thing, and so the count is never rendered without the reason or the remedy.
+ *
+ * The remedy depends on WHY the gate fired, and the two belong to different people.
+ */
+function withheldNote(count: number, policy: ScribeSourceStats['campaignPolicy']): string {
+  const notes = `${count} note${count === 1 ? '' : 's'}`;
+  // Under a `disabled` policy the gate rejects every member-authored note whatever its
+  // author consented to, so pointing players at the consent checkbox hands them a control
+  // that will appear broken when they use it. Only a DM changing the policy has any effect.
+  return policy === 'disabled'
+    ? `${notes} withheld: this campaign's AI content policy disallows external use of member-authored notes. A DM can change that in campaign settings.`
+    : `${notes} withheld pending author consent for external AI use — each author can opt in from the members page.`;
+}
 
 /** Tag class + human label for a recorded job's status. A dry-run "succeeded" job never
  * carries a proposalId (nothing was filed), so it's told apart from a real, filed run. */
@@ -98,6 +117,14 @@ export function ScribePanel({ campaignId, isDm }: { campaignId: number; isDm: bo
   const [outcome, setOutcome] = useState<Outcome | null>(null);
   const [busy, setBusy] = useState<'run' | 'preview' | 'filing' | null>(null);
   const [preview, setPreview] = useState<{ text: string } | null>(null);
+  // Pending external-send confirmation. Replaces a native `window.confirm`, which was both
+  // off-pattern for this codebase and invisible to Playwright (which auto-dismisses native
+  // dialogs unless a spec registers a handler, so a driven run would silently no-op).
+  const [confirmingRun, setConfirmingRun] = useState<{ dryRun: boolean } | null>(null);
+  // Whether a run would really reach an external endpoint, derived server-side (#501).
+  // Fail closed while the config is still loading or failed to load: an unknown state
+  // shows the strict external-send warning rather than a reassurance we cannot back up.
+  const externalSend = config?.externalSend ?? true;
 
   const load = useCallback(async () => {
     setLoadError(null);
@@ -136,17 +163,43 @@ export function ScribePanel({ campaignId, isDm }: { campaignId: number; isDm: bo
       const result = await api.post<ScribeRunResult>(`${API}/campaigns/${campaignId}/scribe/run`, { dryRun });
       void load(); // refresh history + (if a config-side effect ever touches it) config
       const { job } = result;
+      // How many member-authored notes the external-use gate held back. Never let this pass
+      // silently: a recap that quietly omits half the table's notes, or an empty one,
+      // otherwise reads as "the scribe is broken" (#501).
+      const withheld = job.sourceStats?.excludedInboxByConsent ?? 0;
+      const withheldPolicy = job.sourceStats?.campaignPolicy;
+      const withheldSuffix = withheld > 0 ? ` ${withheldNote(withheld, withheldPolicy)}` : '';
+      // Send them where the fix actually lives: campaign settings owns the policy, the
+      // members page owns per-member consent.
+      const withheldHref =
+        withheldPolicy === 'disabled' ? `/c/${campaignId}/settings` : `/c/${campaignId}/members`;
+      const withheldHrefLabel =
+        withheldPolicy === 'disabled' ? 'Open campaign AI settings' : 'Open consent settings';
+
       if (job.status === 'succeeded') {
         if (dryRun) {
           setPreview({ text: result.preview ?? '' });
+          if (withheld > 0) {
+            setOutcome({
+              kind: 'info',
+              text: withheldNote(withheld, withheldPolicy),
+              href: withheldHref,
+              hrefLabel: withheldHrefLabel,
+            });
+          }
           return;
         }
         setPreview(null);
         const pid = result.proposalIds[0];
         setOutcome(
           pid
-            ? { kind: 'success', text: `Recap drafted and filed as a pending proposal.`, href: `/c/${campaignId}/proposals`, hrefLabel: 'Review the proposal' }
-            : { kind: 'success', text: 'Recap drafted.' },
+            ? {
+                kind: withheld > 0 ? 'info' : 'success',
+                text: `Recap drafted and filed as a pending proposal.${withheldSuffix}`,
+                href: withheld > 0 ? withheldHref : `/c/${campaignId}/proposals`,
+                hrefLabel: withheld > 0 ? withheldHrefLabel : 'Review the proposal',
+              }
+            : { kind: withheld > 0 ? 'info' : 'success', text: `Recap drafted.${withheldSuffix}` },
         );
         return;
       }
@@ -161,7 +214,20 @@ export function ScribePanel({ campaignId, isDm }: { campaignId: number; isDm: bo
         return;
       }
       if (job.status === 'no_material') {
-        setOutcome({ kind: 'info', text: 'Nothing to recap yet — resolve some inbox threads or run an encounter first.' });
+        // The important distinction: "there is genuinely nothing" vs "everything there was
+        // got withheld by the external-use gate". The second is fixable — by a member or by
+        // the DM depending on cause — and telling them to go resolve more inbox threads
+        // would be actively misleading.
+        setOutcome(
+          withheld > 0
+            ? {
+                kind: 'info',
+                text: `No recap drafted. ${withheldNote(withheld, withheldPolicy)}`,
+                href: withheldHref,
+                hrefLabel: withheldHrefLabel,
+              }
+            : { kind: 'info', text: 'Nothing to recap yet — resolve some inbox threads or run an encounter first.' },
+        );
         return;
       }
       if (GATE_FAILURE_STATUSES.includes(job.status)) {
@@ -207,15 +273,26 @@ export function ScribePanel({ campaignId, isDm }: { campaignId: number; isDm: bo
             Drafts a session recap from resolved inbox notes and encounters that were run, and files it as a{' '}
             <strong>pending proposal</strong> for you to review — nothing is ever published automatically.
           </p>
+          {externalSend ? (
+            <p className="text-[11px] text-amber-200 m-0">
+              External-send notice: generation sends the prompt to the configured AI provider. Member-authored inbox
+              notes are included only when the campaign policy allows it and that member has opted in.
+            </p>
+          ) : (
+            <p className="text-[11px] text-secondary m-0">
+              No external AI provider is in effect — recaps are generated on this server and no campaign content leaves
+              it, so member consent is not required. Private and whisper notes are excluded either way.
+            </p>
+          )}
 
           {loadError && <ErrorNote message={loadError} onRetry={load} />}
 
           {canDmWrite && (
             <div className="flex items-center gap-2 flex-wrap">
-              <Btn className="!min-h-0 !py-1.5 text-xs" onClick={() => void run(false)} disabled={busy !== null}>
+              <Btn className="!min-h-0 !py-1.5 text-xs" onClick={() => setConfirmingRun({ dryRun: false })} disabled={busy !== null}>
                 {busy === 'run' ? 'Drafting…' : 'Draft recap with AI'}
               </Btn>
-              <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => void run(true)} disabled={busy !== null}>
+              <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setConfirmingRun({ dryRun: true })} disabled={busy !== null}>
                 {busy === 'preview' ? 'Generating preview…' : 'Preview first'}
               </Btn>
               <Btn ghost className="!min-h-0 !py-1.5 text-xs" {...configDisclosure.buttonProps}>
@@ -250,10 +327,57 @@ export function ScribePanel({ campaignId, isDm }: { campaignId: number; isDm: bo
         </div>
       )}
 
+      {confirmingRun && (
+        <ConfirmDialog
+          // The server decides whether a run actually leaves the box (#501); say what will
+          // really happen. Warning about an external send that cannot occur is a false
+          // alarm, and a DM who learns this dialog overstates will stop reading it before
+          // the run where it genuinely matters. Unknown config ⇒ assume external.
+          title={externalSend ? 'Send source material to the AI provider?' : 'Draft a recap on this server?'}
+          body={
+            externalSend ? (
+              <>
+                <p className="m-0">
+                  {confirmingRun.dryRun
+                    ? 'Previewing is not a local dry run: the server still sends the prompt to the configured AI provider and only skips filing the proposal.'
+                    : 'The AI scribe sends allowed campaign source material to the configured AI provider.'}
+                </p>
+                <p className="m-0">
+                  Only resolved inbox notes from members who opted in are included; private, whisper, and opted-out
+                  notes are excluded.
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="m-0">
+                  No external AI provider is in effect for this campaign, so the recap is generated on this server and
+                  no campaign content leaves it.
+                  {confirmingRun.dryRun ? ' Previewing additionally skips filing the proposal.' : ''}
+                </p>
+                <p className="m-0">
+                  Because nothing is sent externally, member consent is not required — but private and whisper notes are
+                  still excluded.
+                </p>
+              </>
+            )
+          }
+          confirmLabel={confirmingRun.dryRun ? 'Generate preview' : 'Draft recap'}
+          danger={false}
+          onConfirm={() => {
+            const { dryRun } = confirmingRun;
+            setConfirmingRun(null);
+            void run(dryRun);
+          }}
+          onCancel={() => setConfirmingRun(null)}
+        />
+      )}
+
       {preview && (
         <PreviewModal
           text={preview.text}
           filing={busy === 'filing'}
+          // Filing does re-run generation, but against the SAME material and the SAME
+          // endpoint the DM just confirmed and read the output of, so it does not re-prompt.
           onFile={() => void run(false)}
           onDiscard={() => {
             setPreview(null);

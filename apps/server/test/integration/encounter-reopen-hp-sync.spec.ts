@@ -4,6 +4,7 @@ import { ConflictException } from '@nestjs/common';
 import { openDatabase } from '../../src/db/db.module';
 import { auditLog, campaigns, characters, combatants, encounters } from '../../src/db/schema';
 import { AuditService } from '../../src/modules/audit/audit.service';
+import { ModerationService } from '../../src/modules/moderation/moderation.service';
 import { CampaignEventsService } from '../../src/modules/events/campaign-events.service';
 import { RollsService } from '../../src/modules/rolls/rolls.service';
 import { RevisionsService } from '../../src/modules/revisions/revisions.service';
@@ -40,7 +41,10 @@ describe('encounter reopen HP sync (issue #466, service layer)', () => {
     const audit = new AuditService(orm);
     const events = new CampaignEventsService();
     const rolls = new RollsService(orm);
-    const revisions = new RevisionsService(orm);
+    // Issue #601: RevisionsService fires the moderation pre-mutation evidence hook
+    // on restore, so it takes a real ModerationService. Deliberately not optional —
+    // an absent hook would silently stop capturing abuse evidence.
+    const revisions = new RevisionsService(orm, new ModerationService(orm, audit));
     const attachments = new AttachmentsService(orm, audit, new FsDeletionService(orm, audit), new AttachmentDerivativesService(orm));
     const campaignLibrary = new CampaignLibraryService(orm, audit);
     const encountersService = new EncountersService(orm, audit, events, rolls, revisions, attachments, campaignLibrary);

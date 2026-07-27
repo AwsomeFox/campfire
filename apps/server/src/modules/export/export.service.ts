@@ -3,7 +3,7 @@ import JSZip from 'jszip';
 import { eq } from 'drizzle-orm';
 import type { EncounterEvent, EncounterWithCombatants } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { aiDmSeats, aiScribeConfigs } from '../../db/schema';
+import { aiDmSeats, aiScribeConfigs, aiScribeJobs } from '../../db/schema';
 import { loadCompendiumExportContext } from '../campaigns/compendium-import';
 import { CampaignsService } from '../campaigns/campaigns.service';
 import { QuestsService } from '../quests/quests.service';
@@ -84,6 +84,15 @@ export function uniqueFilename(seen: Set<string>, base: string): string {
   const name = `${base}-${n}`;
   seen.add(name);
   return name;
+}
+
+function jsonOrNull(raw: string | null): unknown {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
 }
 
 /** Re-export path helpers so unit tests can import from the service module. */
@@ -284,9 +293,10 @@ export class ExportService {
     // AI seat + scribe config (issue #1078): export the DM's hand-authored steering
     // and trigger settings. Runtime counters (tokensUsed, turnCount, lastTurnAt) and
     // provider keys (aiProviderConfigs — encrypted, install-specific) are excluded.
-    const [[aiSeatRow], [aiScribeConfigRow]] = await Promise.all([
+    const [[aiSeatRow], [aiScribeConfigRow], aiScribeJobRows] = await Promise.all([
       this.db.select().from(aiDmSeats).where(eq(aiDmSeats.campaignId, campaignId)).limit(1),
       this.db.select().from(aiScribeConfigs).where(eq(aiScribeConfigs.campaignId, campaignId)).limit(1),
+      this.db.select().from(aiScribeJobs).where(eq(aiScribeJobs.campaignId, campaignId)),
     ]);
 
     // members "sans anything sensitive" — CampaignMember already carries no
@@ -298,6 +308,7 @@ export class ExportService {
       userId: m.userId,
       role: m.role,
       characterId: m.characterId,
+      aiExternalUseConsent: m.aiExternalUseConsent,
       username: m.username,
       displayName: m.displayName,
       disabled: m.disabled,
@@ -368,6 +379,22 @@ export class ExportService {
             budgetPerRun: aiScribeConfigRow.budgetPerRun,
           }
         : null,
+      aiScribeJobs: aiScribeJobRows.map((row) => ({
+        id: row.id,
+        trigger: row.trigger,
+        status: row.status,
+        sourceHash: row.sourceHash,
+        proposalId: row.proposalId,
+        proposalCount: row.proposalCount,
+        tokensUsed: row.tokensUsed,
+        provider: row.provider,
+        detail: row.detail,
+        scheduledSessionId: row.scheduledSessionId,
+        sourceStats: jsonOrNull(row.sourceStats),
+        generationProvenance: jsonOrNull(row.generationProvenance),
+        createdBy: row.createdBy,
+        createdAt: row.createdAt,
+      })),
       attachments,
       attachmentsNote:
         'campaign.mapAttachmentId references attachments[].id; each character.portraitUrl, ' +
@@ -962,6 +989,14 @@ export class ExportService {
       },
       aiSeat: { kind: 'markdown-file', path: 'ai.md' },
       aiScribeConfig: { kind: 'markdown-file', path: 'ai.md' },
+      aiScribeJobs: {
+        kind: 'embedded',
+        path: 'campaign.json',
+        // Issue #501: the scribe job log carries generationProvenance (provider/model/
+        // endpoint/source ids/prompt hash/consent). It is machine-only — exported so
+        // provenance survives export, not rendered to markdown.
+        note: 'AI scribe job log with generation provenance; machine copy in campaign.json.',
+      },
       proposals: { kind: 'markdown-folder', path: 'proposals/' },
       encounters: { kind: 'markdown-folder', path: 'encounters/' },
       factions: { kind: 'markdown-folder', path: 'factions/' },

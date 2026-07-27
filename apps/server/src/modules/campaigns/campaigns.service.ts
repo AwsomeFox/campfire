@@ -14,6 +14,7 @@ import {
   CampaignPurge,
   CampaignUpdate,
   CAMPAIGN_CLONE_PREVIEW_FORMAT_VERSION,
+  AiExternalContentPolicy,
   NarrationLanguage,
 } from '@campfire/schema';
 import type { Campaign, CampaignClonePreview, CampaignSummary, Role, TrashedEntity, CampaignImportPreflight, OnUnresolvedCompendium } from '@campfire/schema';
@@ -270,6 +271,7 @@ function toDomain(row: typeof campaigns.$inferSelect): Campaign {
     publicRecapSharingEnabled: row.publicRecapSharingEnabled,
     publicInvitesEnabled: row.publicInvitesEnabled,
     narrationLanguage: (row.narrationLanguage ?? 'en') as Campaign['narrationLanguage'],
+    aiExternalContentPolicy: (row.aiExternalContentPolicy ?? 'member_consent') as Campaign['aiExternalContentPolicy'],
     sessionCount: row.sessionCount,
     ruleSystem: row.ruleSystem,
     mapAttachmentId: row.mapAttachmentId,
@@ -523,6 +525,7 @@ export class CampaignsService {
         // DM both unarchives and deliberately re-enables invites (#857).
         publicInvitesEnabled: (input.status ?? 'active') === 'active',
         narrationLanguage: input.narrationLanguage ?? 'en',
+        aiExternalContentPolicy: input.aiExternalContentPolicy ?? 'member_consent',
         sessionCount: 0,
         ruleSystem: input.ruleSystem ?? '',
         mapAttachmentId: input.mapAttachmentId ?? null,
@@ -718,9 +721,20 @@ export class CampaignsService {
       this.db.select().from(quests).where(and(eq(quests.campaignId, id), notDeleted(quests.deletedAt))),
       this.db.select().from(characters).where(and(eq(characters.campaignId, id), notDeleted(characters.deletedAt))),
       this.db.select().from(sessions).where(and(eq(sessions.campaignId, id), notDeleted(sessions.deletedAt))),
-      this.db.select().from(notes).where(and(eq(notes.campaignId, id), notDeleted(notes.deletedAt))),
+      // notDeleted(quarantinedAt) on notes and comments (issue #601): a clone copies the
+      // prose verbatim into a brand-new campaign that carries none of the reports
+      // justifying the quarantine, and the copy loops do not carry the quarantine columns
+      // either — so without this filter "clone the campaign" is a one-click way to launder
+      // withheld abusive content back into readable form. Skipped rather than
+      // copied-with-the-flag: the incident belongs to the original campaign, and a copy of
+      // withheld content in an unrelated campaign is neither evidence nor wanted. Applied
+      // to the preview query too, so the advertised counts match what a clone would copy.
+      this.db
+        .select()
+        .from(notes)
+        .where(and(eq(notes.campaignId, id), notDeleted(notes.deletedAt), notDeleted(notes.quarantinedAt))),
       this.db.select().from(encounters).where(and(eq(encounters.campaignId, id), notDeleted(encounters.deletedAt))),
-      this.db.select().from(comments).where(eq(comments.campaignId, id)),
+      this.db.select().from(comments).where(and(eq(comments.campaignId, id), notDeleted(comments.quarantinedAt))),
       this.db.select().from(storyArcs).where(and(eq(storyArcs.campaignId, id), notDeleted(storyArcs.deletedAt))),
       this.db.select().from(timelineEvents).where(eq(timelineEvents.campaignId, id)),
       this.db.select().from(timelineCalendars).where(eq(timelineCalendars.campaignId, id)).limit(1),
@@ -985,9 +999,20 @@ export class CampaignsService {
       this.db.select().from(quests).where(and(eq(quests.campaignId, id), notDeleted(quests.deletedAt))),
       this.db.select().from(characters).where(and(eq(characters.campaignId, id), notDeleted(characters.deletedAt))),
       this.db.select().from(sessions).where(and(eq(sessions.campaignId, id), notDeleted(sessions.deletedAt))),
-      this.db.select().from(notes).where(and(eq(notes.campaignId, id), notDeleted(notes.deletedAt))),
+      // notDeleted(quarantinedAt) on notes and comments (issue #601): a clone copies the
+      // prose verbatim into a brand-new campaign that carries none of the reports
+      // justifying the quarantine, and the copy loops do not carry the quarantine columns
+      // either — so without this filter "clone the campaign" is a one-click way to launder
+      // withheld abusive content back into readable form. Skipped rather than
+      // copied-with-the-flag: the incident belongs to the original campaign, and a copy of
+      // withheld content in an unrelated campaign is neither evidence nor wanted. Applied
+      // to the preview query too, so the advertised counts match what a clone would copy.
+      this.db
+        .select()
+        .from(notes)
+        .where(and(eq(notes.campaignId, id), notDeleted(notes.deletedAt), notDeleted(notes.quarantinedAt))),
       this.db.select().from(encounters).where(and(eq(encounters.campaignId, id), notDeleted(encounters.deletedAt))),
-      this.db.select().from(comments).where(eq(comments.campaignId, id)),
+      this.db.select().from(comments).where(and(eq(comments.campaignId, id), notDeleted(comments.quarantinedAt))),
       this.db.select().from(storyArcs).where(and(eq(storyArcs.campaignId, id), notDeleted(storyArcs.deletedAt))),
       this.db.select().from(timelineEvents).where(eq(timelineEvents.campaignId, id)),
       this.db.select().from(timelineCalendars).where(eq(timelineCalendars.campaignId, id)).limit(1),
@@ -1087,6 +1112,7 @@ export class CampaignsService {
           publicRecapSharingEnabled: source.publicRecapSharingEnabled,
           publicInvitesEnabled: source.publicInvitesEnabled,
           narrationLanguage: source.narrationLanguage ?? 'en',
+          aiExternalContentPolicy: source.aiExternalContentPolicy ?? 'member_consent',
           sessionCount: template ? 0 : source.sessionCount,
           ruleSystem: source.ruleSystem,
           mapAttachmentId: null, // remapped below once attachment rows exist (#435)
@@ -1849,6 +1875,10 @@ export class CampaignsService {
     }
     const narrationLanguageParsed = NarrationLanguage.safeParse(campaignSrc.narrationLanguage);
     const narrationLanguage = narrationLanguageParsed.success ? narrationLanguageParsed.data : 'en';
+    const aiExternalContentPolicyParsed = AiExternalContentPolicy.safeParse(campaignSrc.aiExternalContentPolicy);
+    const aiExternalContentPolicy = aiExternalContentPolicyParsed.success
+      ? aiExternalContentPolicyParsed.data
+      : 'member_consent';
 
     const locationRows = asArr(doc.locations);
     const npcRows = asArr(doc.npcs);
@@ -2000,6 +2030,7 @@ export class CampaignsService {
           publicRecapSharingEnabled: campaignSrc.publicRecapSharingEnabled !== false,
           publicInvitesEnabled: campaignSrc.publicInvitesEnabled !== false,
           narrationLanguage,
+          aiExternalContentPolicy,
           sessionCount: Math.max(0, intOr(campaignSrc.sessionCount, 0)),
           ruleSystem,
           mapAttachmentId: null, // remapped below once attachment rows have fresh ids

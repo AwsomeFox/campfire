@@ -1,5 +1,6 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, desc, eq, isNull } from 'drizzle-orm';
+import { AiGenerationProvenance } from '@campfire/schema';
 import type { EntityType, Proposal, ProposalAction, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { proposals, quests, npcs, locations, sessions, characters, factions, storyBeats, auditLog } from '../../db/schema';
@@ -53,6 +54,11 @@ export function toDomain(row: typeof proposals.$inferSelect): Proposal {
     proposer: row.proposer,
     proposerUserId: row.proposerUserId ?? '',
     proposerToken: row.proposerToken ?? null,
+    // Validated on read (#501): a shape-drifted or hand-edited blob degrades to "no
+    // provenance recorded" instead of emitting a malformed object in the API response.
+    generationProvenance: AiGenerationProvenance.nullable()
+      .catch(null)
+      .parse(fromJsonText<unknown>(row.generationProvenance, null)),
     status: row.status as Proposal['status'],
     resolvedBy: row.resolvedBy,
     note: row.note,
@@ -88,14 +94,19 @@ export class ProposalRecordsService {
     // author is the AI seat + model, NOT the DM who triggered the draft — so the review
     // queue attributes them to the AI, not a raw token/user name. Omitted ⇒ the write's
     // actual user (the normal member/PAT propose path).
-    attribution?: { proposer: string; proposerUserId?: string; proposerToken?: string | null },
+    attribution?: {
+      proposer: string;
+      proposerUserId?: string;
+      proposerToken?: string | null;
+      generationProvenance?: AiGenerationProvenance | null;
+    },
   ): Promise<Proposal> {
     // AI provenance (issue #383): the driver seat carries its AI attribution on the principal
     // (`user.proposalAttribution`) rather than passing it explicitly at every mcp tool call site.
     // An explicit `attribution` argument (co-DM authoring) still wins; otherwise fall back to the
     // principal's default so a driver-forced proposal badges as an AI author, never the seat's
     // audit-actor id. Real users carry no proposalAttribution, so their path is unchanged.
-    const attr = attribution ?? user.proposalAttribution;
+    const attr = (attribution ?? user.proposalAttribution) as typeof attribution | undefined;
 
     // Capture the target's current state so the DM review UI can show a real
     // before/after diff (issue #3). Creates have no "before"; snapshot stays null.
@@ -132,6 +143,7 @@ export class ProposalRecordsService {
         proposer: attr ? attr.proposer : user.name,
         proposerUserId: attr?.proposerUserId ?? user.id,
         proposerToken: attr ? (attr.proposerToken ?? null) : user.tokenContext ? user.tokenContext.name : null,
+        generationProvenance: attr?.generationProvenance ? toJsonText(attr.generationProvenance) : null,
         status: 'pending',
         resolvedBy: '',
         note: '',
