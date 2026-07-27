@@ -1,8 +1,8 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { and, count, eq } from 'drizzle-orm';
 import type { z } from 'zod';
-import { GuestDmGrantCreate, MemberCreate, MemberUpdate } from '@campfire/schema';
-import type { CampaignMember, GuestDmGrant, GuestDmGrantScope } from '@campfire/schema';
+import { GuestDmGrantCreate, MemberAiConsentUpdate, MemberCreate, MemberUpdate } from '@campfire/schema';
+import type { CampaignMember, GuestDmGrant, GuestDmGrantScope, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import {
   campaignGuestDmGrants,
@@ -21,6 +21,7 @@ import type { RequestUser } from '../../common/user.types';
 
 type MemberCreateInput = z.infer<typeof MemberCreate>;
 type MemberUpdateInput = z.infer<typeof MemberUpdate>;
+type MemberAiConsentUpdateInput = z.infer<typeof MemberAiConsentUpdate>;
 type GuestDmGrantCreateInput = z.infer<typeof GuestDmGrantCreate>;
 type SyncDb = DrizzleDb | Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
 const MAX_GUEST_DM_GRANT_MS = 30 * 24 * 60 * 60 * 1000;
@@ -60,6 +61,7 @@ export class MembersService {
         userId: campaignMembers.userId,
         role: campaignMembers.role,
         characterId: campaignMembers.characterId,
+        aiExternalUseConsent: campaignMembers.aiExternalUseConsent,
         primaryOwner: campaignMembers.primaryOwner,
         createdAt: campaignMembers.createdAt,
         updatedAt: campaignMembers.updatedAt,
@@ -77,6 +79,7 @@ export class MembersService {
       userId: r.userId,
       role: r.role as CampaignMember['role'],
       characterId: r.characterId,
+      aiExternalUseConsent: r.aiExternalUseConsent,
       primaryOwner: r.primaryOwner,
       username: r.username ?? '',
       displayName: r.displayName ?? '',
@@ -84,6 +87,28 @@ export class MembersService {
       createdAt: r.createdAt,
       updatedAt: r.updatedAt,
     }));
+  }
+
+  /**
+   * Hide other members' AI-consent state from a non-DM viewer (issue #501).
+   *
+   * `listForCampaign` is also an INTERNAL read (member mutations, guest-DM handoff), so
+   * this is an explicit projection applied at the API boundary rather than a change to the
+   * query — internal callers must keep seeing the true value.
+   *
+   * The DM needs every member's state to understand why a recap withheld material, and a
+   * member needs their own to render their consent control. Nobody else does, and consent
+   * is a personal preference in a way that a role is not.
+   */
+  redactOthersAiConsent(
+    members: CampaignMember[],
+    viewerRole: Role,
+    viewerUserId: string,
+  ): CampaignMember[] {
+    if (viewerRole === 'dm') return members;
+    return members.map((member) =>
+      String(member.userId) === viewerUserId ? member : { ...member, aiExternalUseConsent: null },
+    );
   }
 
   async getRowOrThrow(campaignId: number, memberId: number) {
@@ -94,6 +119,40 @@ export class MembersService {
       .limit(1);
     if (!row) throw new NotFoundException(`Member ${memberId} not found`);
     return row;
+  }
+
+  async updateOwnAiConsent(
+    campaignId: number,
+    input: MemberAiConsentUpdateInput,
+    actor: RequestUser,
+  ): Promise<CampaignMember> {
+    const actorUserId = Number(actor.id);
+    if (!Number.isInteger(actorUserId)) {
+      throw new ForbiddenException('Only a campaign member with a persisted account can update AI consent');
+    }
+    const ts = nowIso();
+    const [row] = await this.db
+      .update(campaignMembers)
+      .set({ aiExternalUseConsent: input.aiExternalUseConsent, updatedAt: ts })
+      .where(and(eq(campaignMembers.campaignId, campaignId), eq(campaignMembers.userId, actorUserId)))
+      .returning();
+    if (!row) throw new NotFoundException('Membership not found');
+
+    await this.audit.log({
+      actor: auditActor(actor),
+      actorRole: row.role as CampaignMember['role'],
+      action: 'member.ai_consent',
+      entityType: 'campaign_member',
+      entityId: row.id,
+      campaignId,
+      detail: JSON.stringify({ aiExternalUseConsent: input.aiExternalUseConsent }),
+    });
+
+    const full = (await this.listForCampaign(campaignId)).find((member) => member.id === row.id);
+    // The row was updated inside this request so it should always be present; if a
+    // concurrent delete raced us, 404 rather than returning `undefined` as a 200 body.
+    if (!full) throw new NotFoundException('Membership not found');
+    return full;
   }
 
   /** Count only DM seats whose account can actually authenticate (#849). */

@@ -157,6 +157,8 @@ export const ExpectedUpdatedAt = z
 
 // ---------- campaign ----------
 export const DangerLevel = z.enum(['low', 'moderate', 'high', 'deadly']);
+export const AiExternalContentPolicy = z.enum(['disabled', 'member_consent']);
+export type AiExternalContentPolicy = z.infer<typeof AiExternalContentPolicy>;
 
 export const Campaign = z.object({
   id: Id,
@@ -192,6 +194,10 @@ export const Campaign = z.object({
   // Issue #635: language contract for AI-generated campaign content (Driver, co-DM,
   // Scribe). Distinct from the client UI locale — only governs model narration output.
   narrationLanguage: NarrationLanguage.default('en'),
+  // Issue #501: campaign-level policy for sending member-authored campaign source
+  // material (currently scribe inbox notes) to external AI providers. Even when
+  // enabled, each member must separately opt in on their own membership row.
+  aiExternalContentPolicy: AiExternalContentPolicy.default('member_consent'),
   sessionCount: z.number().int().nonnegative().default(0),
   ruleSystem: z.string().max(80).default(''), // slug of the installed rule pack (see RulePack), or '' if none picked
   mapAttachmentId: Id.nullable().default(null), // Attachment (kind='map') rendered as the campaign map background
@@ -209,7 +215,7 @@ export const Campaign = z.object({
   ...timestamps,
 });
 export type Campaign = z.infer<typeof Campaign>;
-export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true, storageQuotaBytes: true, deletedAt: true, publicRecapSharingEnabled: true, publicInvitesEnabled: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, dmControlsProgression: true, dmControlsTurns: true, requireDmTurnConfirmation: true, narrationLanguage: true, ruleSystem: true, mapAttachmentId: true });
+export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true, storageQuotaBytes: true, deletedAt: true, publicRecapSharingEnabled: true, publicInvitesEnabled: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, dmControlsProgression: true, dmControlsTurns: true, requireDmTurnConfirmation: true, narrationLanguage: true, aiExternalContentPolicy: true, ruleSystem: true, mapAttachmentId: true });
 export const CampaignUpdate = CampaignCreate.partial();
 
 /**
@@ -5318,6 +5324,15 @@ export const CampaignMember = z.object({
   userId: Id,
   role: Role, // dm | player | viewer — per campaign
   characterId: Id.nullable().default(null),
+  // Issue #501: this member's explicit consent for their authored campaign source
+  // material to be included in prompts sent to external AI providers. DMs cannot
+  // widen this on behalf of another member; the self-consent endpoint owns writes.
+  //
+  // `null` means "not disclosed to you". Consent is a personal preference in a way that a
+  // role is not, so the roster reveals it only to the DM — who needs it to understand why
+  // material was withheld from a recap — and to the member themselves. A player has no
+  // need to learn which of their tablemates declined AI processing.
+  aiExternalUseConsent: z.boolean().nullable().default(false),
   // The protected campaign owner/creator seat. Ordinary DM and temporary guest
   // authority cannot demote/remove this seat; see MembersService (#545).
   primaryOwner: z.boolean().default(false),
@@ -5345,6 +5360,11 @@ export const MemberUpdate = z.object({
   characterId: Id.nullable().optional(),
   confirmTransfer: z.boolean().optional(),
 });
+
+export const MemberAiConsentUpdate = z.object({
+  aiExternalUseConsent: z.boolean(),
+});
+export type MemberAiConsentUpdate = z.infer<typeof MemberAiConsentUpdate>;
 
 export const GuestDmGrantScope = z.enum(['dm', 'membership_admin', 'destructive']);
 export type GuestDmGrantScope = z.infer<typeof GuestDmGrantScope>;
@@ -5665,6 +5685,63 @@ export const ProposalAction = z.enum(['create', 'update', 'delete']);
 // (a DM decision) so provenance/history stays honest about who ended it.
 export const ProposalStatus = z.enum(['pending', 'approved', 'rejected', 'withdrawn']);
 
+export const AiGenerationProvenance = z.object({
+  source: z.enum(['ai_scribe', 'co_dm', 'ai_dm_driver', 'map_generation']),
+  provider: z.string().max(120),
+  providerType: z.string().max(80).nullable().default(null),
+  model: z.string().max(200),
+  endpoint: z.object({
+    scope: z.enum(['campaign', 'server', 'injected', 'none']).default('none'),
+    baseUrl: z.string().max(1000).nullable().default(null),
+  }),
+  sourceIds: z.record(z.string(), z.array(z.union([Id, z.string()])).or(Id).or(z.string()).or(z.null())).default({}),
+  sourceHash: z.string().nullable().default(null),
+  promptVersion: z.string().max(80),
+  promptHash: z.string(),
+  consent: z.object({
+    campaignPolicy: AiExternalContentPolicy,
+    /**
+     * Whether this generation actually handed content to an endpoint OFF this server,
+     * and therefore whether the member EXTERNAL-use consent gate applied to the material.
+     *
+     * `false` means the text came from the built-in no-op/injected seam, or from an
+     * endpoint the operator explicitly declared local — nothing left the deployment, so
+     * external-use consent was not the applicable gate (issue #501 is scoped to external
+     * use). Without this flag a stored blob reading `excludedInboxByConsent: 0` is
+     * ambiguous between "every author consented" and "no consent gate was applied";
+     * provenance must not be ambiguous about that.
+     *
+     * Defaults to `true`: fail-closed for an unrecognised blob, and historically accurate
+     * for rows written before the flag existed (the filter always ran, sends were external).
+     *
+     * Known edge: this records the egress resolved at ASSEMBLY time. If the provider row is
+     * removed between assembly and generation, the run falls back to the local seam while
+     * this stays `true` — an over-report. That drift direction is deliberately tolerated;
+     * the reverse (assembled local, then sent externally) is refused outright by the
+     * ordering interlock in `ScribeService.run`.
+     */
+    externalSend: z.boolean().default(true),
+    includedAuthorUserIds: z.array(z.string()).default([]),
+    excludedAuthorUserIds: z.array(z.string()).default([]),
+    includedInboxCount: z.number().int().nonnegative().default(0),
+    /**
+     * Notes the EXTERNAL-USE gate withheld — for either reason it can fire.
+     *
+     * Read `campaignPolicy` for the cause, which fully determines it: under `disabled` the
+     * gate rejects every shareable note regardless of who consented, so all of these are
+     * policy-excluded and none are consent-excluded; under `member_consent` the reverse.
+     * They never mix, which is why this is one truthful total rather than two counters
+     * where one is always zero. The distinction matters because the remedies differ — a
+     * disabled policy is the DM's to change, and no amount of member opt-in affects it.
+     */
+    excludedInboxByConsent: z.number().int().nonnegative().default(0),
+    excludedInboxPrivate: z.number().int().nonnegative().default(0),
+  }).optional(),
+  retentionNotice: z.string().max(1000),
+  createdAt: IsoDate,
+});
+export type AiGenerationProvenance = z.infer<typeof AiGenerationProvenance>;
+
 export const Proposal = z.object({
   id: Id,
   campaignId: Id,
@@ -5700,6 +5777,10 @@ export const Proposal = z.object({
   // Secondary provenance: the token name when submitted via a PAT, else null. Lets the
   // DM see "acting as <user> via token <name>" without losing the human attribution.
   proposerToken: z.string().max(200).nullable().default(null),
+  // AI generation provenance (issue #501). Null for manual/collab proposals and
+  // legacy rows. AI-authored proposals keep the model/provider/source/prompt/consent
+  // record durably so approval, audit, and exports remain explainable later.
+  generationProvenance: AiGenerationProvenance.nullable().default(null),
   status: ProposalStatus.default('pending'),
   resolvedBy: z.string().max(200).default(''),
   note: z.string().max(1000).default(''),
@@ -6580,6 +6661,17 @@ export const ScribeConfig = z.object({
   budgetPerRun: z.number().int().min(1).max(200_000).default(2000), // per-run output-token cap
   // Durable cursor for cron/incremental runs — only material newer than this is assembled (#499).
   sourceCursorAt: IsoDate.nullable().default(null),
+  /**
+   * DERIVED, read-only: whether a run right now would actually send content OFF this
+   * server (issue #501). True when a provider config is resolved and the operator has not
+   * declared the endpoint local; false for the built-in no-op/injected seam.
+   *
+   * Not part of `ScribeConfigUpdate` — it is computed per read, never stored. It exists so
+   * the DM-facing external-send confirmation can describe what will really happen instead
+   * of warning about a vendor call that will not occur. Defaults to `true` (fail-closed),
+   * so a client that cannot read it still shows the strict warning.
+   */
+  externalSend: z.boolean().default(true),
   ...timestamps,
 });
 export type ScribeConfig = z.infer<typeof ScribeConfig>;
@@ -6596,6 +6688,20 @@ export const ScribeSourceStats = z.object({
   resolvedInbox: z.number().int().nonnegative().default(0),
   encounters: z.number().int().nonnegative().default(0),
   diceRolls: z.number().int().nonnegative().default(0),
+  excludedInboxByConsent: z.number().int().nonnegative().default(0),
+  excludedInboxPrivate: z.number().int().nonnegative().default(0),
+  /**
+   * The AI content policy in force when this run assembled (#501).
+   *
+   * Archived because it is the CAUSE behind `excludedInboxByConsent`, and the two remedies
+   * are different people's: under `member_consent` each author opts in for themselves,
+   * under `disabled` only the DM can change the policy. Telling a DM to chase member
+   * consent on a disabled-policy campaign sends everyone to a control that cannot help.
+   *
+   * Optional: rows archived before this field existed do not carry it, and a `no_material`
+   * run records no provenance, so this is the only place the UI can read the policy from.
+   */
+  campaignPolicy: AiExternalContentPolicy.optional(),
   scheduledSessionId: Id.optional(),
   windowStart: IsoDate.optional(),
   windowEnd: IsoDate.optional(),
@@ -6623,6 +6729,7 @@ export const ScribeJob = z.object({
   sourceHash: z.string().nullable().default(null), // sha256 of assembled source — idempotency archive
   scheduledSessionId: Id.nullable().default(null), // post_session: exactly which game night (#499)
   sourceStats: ScribeSourceStats.nullable().default(null), // archived assembly counts
+  generationProvenance: AiGenerationProvenance.nullable().default(null), // provider/model/source/prompt/consent metadata (#501)
   createdBy: z.string().default(''),
   createdAt: IsoDate,
 });

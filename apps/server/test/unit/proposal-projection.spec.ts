@@ -26,6 +26,7 @@ function baseProposal(over: Partial<Proposal> = {}): Proposal {
     proposer: 'Ada',
     proposerUserId: '3',
     proposerToken: null,
+    generationProvenance: null,
     status: 'pending',
     resolvedBy: '',
     note: '',

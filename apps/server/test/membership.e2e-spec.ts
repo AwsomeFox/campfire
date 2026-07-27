@@ -83,6 +83,38 @@ describe('membership + effective roles (e2e, real cookie sessions)', () => {
     expect(roles).toEqual(['dm', 'player']);
   });
 
+  /**
+   * Issue #501 — AI consent is a personal preference in a way a role is not, so the roster
+   * discloses it only to the DM (who needs it to understand why a recap withheld material)
+   * and to the member themselves (who needs it to render their own consent control).
+   */
+  it('discloses AI consent to the dm for every member', async () => {
+    const res = await userA.get(`/api/v1/campaigns/${campaignId}/members`);
+    expect(res.status).toBe(200);
+    expect(res.body.length).toBeGreaterThan(1);
+    for (const member of res.body) {
+      expect(typeof member.aiExternalUseConsent).toBe('boolean');
+    }
+  });
+
+  it("hides other members' AI consent from a player, but not their own", async () => {
+    // B opts in, so their own value is a distinguishable `true`, not the shared default.
+    const consent = await userB
+      .patch(`/api/v1/campaigns/${campaignId}/members/me/ai-consent`)
+      .send({ aiExternalUseConsent: true });
+    expect(consent.status).toBe(200);
+
+    const res = await userB.get(`/api/v1/campaigns/${campaignId}/members`);
+    expect(res.status).toBe(200);
+
+    const self = res.body.find((m: { userId: number }) => m.userId === userBId);
+    const other = res.body.find((m: { userId: number }) => m.userId === userAId);
+    expect(self.aiExternalUseConsent).toBe(true);
+    // `null` means "not disclosed to you" — deliberately not `false`, which would be a lie
+    // that reads as an explicit opt-out by that member.
+    expect(other.aiExternalUseConsent).toBeNull();
+  });
+
   it('removing the last dm is refused (409)', async () => {
     const membersRes = await userA.get(`/api/v1/campaigns/${campaignId}/members`);
     const dmMember = membersRes.body.find((m: { role: string }) => m.role === 'dm');
@@ -181,6 +213,50 @@ describe('membership + effective roles (e2e, real cookie sessions)', () => {
       expect(meAfterExpiry.body.memberships.find((m: { campaignId: number }) => m.campaignId === campaignId).role).toBe('player');
       const afterExpiry = await guest.post(`/api/v1/campaigns/${campaignId}/quests`).send({ title: 'Expired scene' });
       expect(afterExpiry.status).toBe(403);
+    });
+
+    /**
+     * Issue #501 — the consent redaction keys off the role `requireMember` returns, which
+     * is the EFFECTIVE role (`baseOrGrantedEffectiveRole`), not the base membership row.
+     * A guest DM must therefore see everyone's consent while the grant is live, and lose
+     * that visibility when it lapses — otherwise the redaction fires against exactly the
+     * person who needs the data to explain a withheld recap.
+     */
+    it('a guest DM sees member AI consent while granted, and stops seeing it after handback', async () => {
+      const createGuest = await adminAgent
+        .post('/api/v1/users')
+        .send({ username: 'guest-consent-501', password: 'password-guest-501', serverRole: 'user' });
+      expect(createGuest.status).toBe(201);
+      const guestId = createGuest.body.id;
+      const guest = request.agent(ctx.app.getHttpServer());
+      await guest.post('/api/v1/auth/login').send({ username: 'guest-consent-501', password: 'password-guest-501' });
+
+      expect(
+        (await userA.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: guestId, role: 'player' })).status,
+      ).toBe(201);
+
+      // As a plain player, other members' consent is withheld.
+      const asPlayer = await guest.get(`/api/v1/campaigns/${campaignId}/members`);
+      expect(asPlayer.status).toBe(200);
+      expect(asPlayer.body.find((m: { userId: number }) => m.userId === userAId).aiExternalUseConsent).toBeNull();
+
+      const grant = await userA
+        .post(`/api/v1/campaigns/${campaignId}/members/grants`)
+        .send({ granteeUserId: guestId, expiresAt: new Date(Date.now() + 60_000).toISOString() });
+      expect(grant.status).toBe(201);
+
+      // With DM authority the roster is fully disclosed.
+      const asGuestDm = await guest.get(`/api/v1/campaigns/${campaignId}/members`);
+      expect(asGuestDm.status).toBe(200);
+      for (const member of asGuestDm.body) {
+        expect(typeof member.aiExternalUseConsent).toBe('boolean');
+      }
+
+      // Handing the seat back drops the elevation, and the redaction returns.
+      expect((await guest.post(`/api/v1/campaigns/${campaignId}/members/grants/${grant.body.id}/handback`).send({})).status).toBe(201);
+      const afterHandback = await guest.get(`/api/v1/campaigns/${campaignId}/members`);
+      expect(afterHandback.status).toBe(200);
+      expect(afterHandback.body.find((m: { userId: number }) => m.userId === userAId).aiExternalUseConsent).toBeNull();
     });
 
     it('owner revoke and grantee handback end temporary authority early', async () => {

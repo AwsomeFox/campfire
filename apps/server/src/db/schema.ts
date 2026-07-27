@@ -32,6 +32,9 @@ export const campaigns = sqliteTable('campaigns', {
   // Issue #635: AI narration output language (Driver / co-DM / Scribe). Distinct from
   // the client UI locale. Nullable in older DBs pre-migration; see db.module.ts.
   narrationLanguage: text('narration_language').notNull().default('en'),
+  // Issue #501: campaign-level policy for member-authored material leaving the server
+  // for external AI generation. Paired with campaignMembers.aiExternalUseConsent.
+  aiExternalContentPolicy: text('ai_external_content_policy').notNull().default('member_consent'),
   sessionCount: integer('session_count').notNull().default(0),
   // Slug of the installed rule pack (see rulePacks.slug) powering this campaign, or '' if unset.
   // Nullable in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
@@ -887,6 +890,9 @@ export const campaignMembers = sqliteTable('campaign_members', {
   userId: integer('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
   role: text('role').notNull(),
   characterId: integer('character_id'),
+  // Issue #501: member-owned consent for including their authored source material
+  // in prompts sent to external AI providers. Defaults false on upgraded DBs.
+  aiExternalUseConsent: integer('ai_external_use_consent', { mode: 'boolean' }).notNull().default(false),
   // Issue #545: protected campaign owner/creator marker. This is a seat-level
   // invariant, not a role; temporary guest DMs and ordinary co-DMs cannot remove
   // or demote it.
@@ -1167,6 +1173,10 @@ export const proposals = sqliteTable('proposals', {
   proposerUserId: text('proposer_user_id').notNull().default(''),
   // Token name when submitted via a PAT (secondary provenance), else NULL.
   proposerToken: text('proposer_token'),
+  // Issue #501: structured, non-secret AI generation provenance for AI-authored
+  // proposals (provider/model/endpoint/source IDs/prompt hash/consent). NULL for
+  // manual/collab and legacy proposals.
+  generationProvenance: text('generation_provenance'),
   status: text('status').notNull().default('pending'),
   resolvedBy: text('resolved_by').notNull().default(''),
   note: text('note').notNull().default(''),
@@ -1607,6 +1617,9 @@ export const aiScribeJobs = sqliteTable('ai_scribe_jobs', {
   // Post-session exactly-once binding + archived assembly counts (#499).
   scheduledSessionId: integer('scheduled_session_id'),
   sourceStats: text('source_stats'),
+  // Issue #501: same generation provenance as the filed proposal, retained even
+  // for dry-run/no-proposal results.
+  generationProvenance: text('generation_provenance'),
   createdBy: text('created_by').notNull().default(''),
   createdAt: text('created_at').notNull(),
 });
