@@ -372,7 +372,8 @@ describe('encounters (e2e)', () => {
           body: '',
           dataJson: JSON.stringify({
             hitPoints: 100,
-            damage_resistances: ['fire'],
+            // A simple statblock string is an unconditional canonical list.
+            damage_resistances: ' Fire, LIGHTNING ',
             damage_vulnerabilities: ['cold'],
             damage_immunities: ['poison'],
           }),
@@ -406,6 +407,45 @@ describe('encounters (e2e)', () => {
       res = await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${targetId}`).set(dm)
         .send({ hpDelta: -8, damageType: 'slashing', isCrit: true, damageDice: 5 });
       expect(res.body.hpCurrent).toBe(71); // (5 dice × 2) + 3 flat modifier
+
+      // API/MCP callers get the adapter's canonical vocabulary, normalized before
+      // defence math and the combat log (not arbitrary free-form strings).
+      res = await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${targetId}`).set(dm)
+        .send({ hpDelta: -4, damageType: 'FIRE' });
+      expect(res.status).toBe(200);
+      expect(res.body.hpCurrent).toBe(69); // uppercase FIRE normalizes and resists to 2
+      const normalizedEvents = await request(server).get(`/api/v1/encounters/${encounterId}/events`).set(dm);
+      expect(normalizedEvents.body.some((event: { detail: string }) => /4 fire.*resistant/.test(event.detail))).toBe(true);
+
+      const unknownType = await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${targetId}`).set(dm)
+        .send({ hpDelta: -4, damageType: 'laser' });
+      expect(unknownType.status).toBe(400);
+
+      const [qualifiedEntry] = await db
+        .insert(ruleEntries)
+        .values({
+          packId: source!.packId,
+          slug: `qualified-defense-${Date.now()}`,
+          name: 'Qualified defense target',
+          type: 'monster',
+          summary: '',
+          body: '',
+          dataJson: JSON.stringify({ hitPoints: 100, damage_resistances: 'slashing from nonmagical attacks' }),
+          createdAt: ts,
+          updatedAt: ts,
+        })
+        .returning();
+      const qualifiedTarget = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', ruleEntryId: qualifiedEntry.id });
+      expect(qualifiedTarget.status).toBe(201);
+      const qualifiedHit = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${qualifiedTarget.body.id}`)
+        .set(dm)
+        .send({ hpDelta: -10, damageType: 'slashing' });
+      expect(qualifiedHit.status).toBe(200);
+      expect(qualifiedHit.body.hpCurrent).toBe(90); // source tags are not modeled, so no unconditional resistance
 
       const invalid = await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${targetId}`).set(dm)
         .send({ hpDelta: -8, isCrit: true });

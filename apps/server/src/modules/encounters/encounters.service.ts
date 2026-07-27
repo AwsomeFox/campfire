@@ -691,12 +691,13 @@ export class EncountersService {
         const value = data[key];
         const values = Array.isArray(value) ? value.map(String) : typeof value === 'string' ? [value] : [];
         for (const raw of values) {
-          const text = raw.toLowerCase();
-          // Open5e and hand-entered statblocks commonly store prose such as
-          // "bludgeoning, piercing, and slashing from nonmagical attacks".
-          // Extract the canonical type words instead of requiring synthetic one-token arrays.
-          for (const type of DND5E_DAMAGE_TYPES) {
-            if (new RegExp(`\\b${type}\\b`, 'i').test(text)) normalized.push(type);
+          // Only accept standalone canonical types or a simple comma-separated list.
+          // Qualified prose (for example, "slashing from nonmagical attacks") needs
+          // source tags that direct tracker damage does not carry yet, so treating it
+          // as unconditional would silently apply the wrong resistance.
+          const types = raw.split(',').map((item) => item.trim().toLowerCase());
+          if (types.length > 0 && types.every((type) => (DND5E_DAMAGE_TYPES as readonly string[]).includes(type))) {
+            normalized.push(...types);
           }
         }
         if (normalized.length > 0) return [...new Set(normalized)];
@@ -3106,6 +3107,12 @@ export class EncountersService {
     if (damageMetadataTouched && !adapter.supportsDirectDamageRules) {
       throw new BadRequestException('The active rule system does not support typed direct-damage rules');
     }
+    const damageType = patch.damageType === undefined
+      ? undefined
+      : adapter.damageTypes?.find((type) => type.toLowerCase() === patch.damageType!.trim().toLowerCase());
+    if (patch.damageType !== undefined && damageType === undefined) {
+      throw new BadRequestException(`Unknown damage type for this rule system: ${JSON.stringify(patch.damageType)}`);
+    }
     if (damageMetadataTouched && (patch.hpDelta === undefined || patch.hpDelta >= 0)) {
       throw new BadRequestException('Damage type, save outcome, and critical metadata require a negative hpDelta');
     }
@@ -3355,12 +3362,12 @@ export class EncountersService {
             const criticalTotal = -patch.hpDelta + (patch.isCrit ? patch.damageDice ?? 0 : 0);
             const { final, applied } = applyDamageModifiers(
               criticalTotal,
-              patch.damageType ?? '',
+              damageType ?? '',
               this.targetDamageDefenses(fresh),
               { half: patch.saveOutcome === 'half' },
             );
             if (damageMetadataTouched) {
-              const type = patch.damageType?.trim() || 'untyped';
+              const type = damageType ?? 'untyped';
               const parts = [`${criticalTotal} ${type}`];
               if (patch.isCrit) parts.push('critical');
               if (patch.saveOutcome === 'half') parts.push('saved for half');
