@@ -286,6 +286,34 @@ export class AiDmService implements OnApplicationBootstrap {
   }
 
   /**
+   * Announce a seat row that was written OUTSIDE {@link configure} (#1049 review).
+   *
+   * `ProactiveService`'s watcher is in-memory and starts only when the callback above fires,
+   * and the ONLY thing that fires it is `configure`. Clone and import do not go through
+   * `configure` — they insert into `ai_dm_seats` directly, inside the campaign-copy
+   * transaction — so a campaign cloned from one with `proactiveSettings.enabled: true` came out
+   * the far side with the settings faithfully copied and no subscription behind them. The seat
+   * read back as ON, the UI drew it as ON, and no proactive turn would ever fire: the same
+   * "reports success, has no effect" shape as the dropped `stylePresets` this PR is about, one
+   * layer down.
+   *
+   * Call this AFTER the writing transaction commits — it re-reads the stored row, so an
+   * uncommitted seat would announce stale settings. Deliberately reads the row rather than
+   * taking settings from the caller: the value that matters is what the copy actually persisted
+   * (post-coercion, post-clamp), not what the archive claimed.
+   *
+   * No-ops when no seat exists, and announces a DISABLED seat too — that path stops any watcher
+   * left over from a previous campaign at the same id, which matters after an import into a
+   * recycled id far more than it costs.
+   */
+  async syncProactiveWatcher(campaignId: number): Promise<void> {
+    const row = await this.findRow(campaignId);
+    if (!row) return;
+    const seat = toDomain(row);
+    this.proactiveSettingsCallback?.(campaignId, seat.proactiveSettings, seat.enabled);
+  }
+
+  /**
    * Run one provider-spend operation while holding the campaign's advisory
    * mutex (#1058). The queue is planted before awaiting its predecessor, so
    * simultaneous waiters cannot wake and both become owners. Cleanup lives in
@@ -1091,6 +1119,16 @@ export class AiDmService implements OnApplicationBootstrap {
         // ignored it — the same "reports success, has no effect" signature this issue is about.
         // This is the same narration, just a different entry point, so leaving it out was the
         // hardest exclusion to defend.
+        //
+        // EVERY kind, `recap` included — reviewed, not overlooked. It is a fair question, since
+        // the scribe also produces "a recap" and deliberately carries no style (see
+        // ScribeService's prompt assembly, which states the other half of this decision). The
+        // two are different products with different speakers: this is the AI DM talking to the
+        // table live, where `kind` steers framing rather than who is speaking, and the scribe
+        // replaces the speaker outright with "You are the campaign scribe" to file a record.
+        // Excluding `recap` here would give one kind a different persona from the other two on
+        // the same endpoint and the same seat — a sharper inconsistency, hit far more often,
+        // than the cross-service one it would resolve.
         instructions: withTableStyle(seat.instructions, seat.stylePresets),
         model: execModel,
         maxTokens: reservation.tokensReserved,

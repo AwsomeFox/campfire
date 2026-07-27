@@ -3665,9 +3665,11 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // on a database that has already recorded it would silently re-run the grandfather
   // backfill against seats a DM may since have deliberately revoked.
   { name: '0127_safety_controls_597', run: migrateSafetyControls597 },
-  // 0134 was CENTRALLY ALLOCATED to issue #1049 by the merge coordinator; 0126-0133 are held
-  // by other in-flight branches, so the gap above is deliberate and must not be "tidied" down
-  // to the next free ordinal. As with 0121 and 0117, ordinals are presentational —
+  // 0134 was CENTRALLY ALLOCATED to issue #1049 by the merge coordinator; 0126-0133 were held by
+  // other in-flight branches when this entry was written. Several have since landed and are
+  // registered in this same array (0131 → #1042, 0132 → #1047), which changes nothing: the gap
+  // above is still deliberate and must not be "tidied" down to the next free ordinal. As with
+  // 0121 and 0117, ordinals are presentational —
   // `runMigrations` applies entries in ARRAY order and dedupes on the FULL name string, so the
   // `_1049` suffix is what guarantees this runs exactly once even if a sibling branch lands a
   // colliding number. Renaming it after a database has recorded it is the one edit that would

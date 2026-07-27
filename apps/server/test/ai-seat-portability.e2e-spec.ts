@@ -1,8 +1,12 @@
 import request from 'supertest';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
+import { ProactiveService } from '../src/modules/ai-driver/proactive.service';
 import {
   AI_SEAT_FIELD_ROLE,
   PORTABLE_AI_SEAT_FIELDS,
+  portableAiSeat,
+  readPortableAiSeat,
+  type PortableAiSeat,
 } from '../src/modules/ai-dm/ai-seat-portability';
 
 /**
@@ -39,6 +43,59 @@ const PROACTIVE = {
   maxProactiveTokensPerHour: 1_500,
 } as const;
 
+/**
+ * The round-trip fixture: EVERY portable field, each at a distinctly non-default value.
+ *
+ * ── Why `satisfies Record<keyof PortableAiSeat, unknown>` and not a hand-kept list ─────
+ * The previous version of this suite proved the wrong thing. It asserted that the derived
+ * field-NAME list equalled a hard-coded array of eight strings — which restates the
+ * classification instead of testing it, and leaves the original failure mode fully open:
+ * classify a new column, update the expected-names array, and clone/export/import still
+ * silently drop it, because nothing here ever asked whether the two PROJECTIONS return it.
+ *
+ * `keyof PortableAiSeat` is derived from `AI_SEAT_FIELD_ROLE`, so this object is now
+ * exhaustive by compilation: a ninth `config` column makes THIS LINE a compile error until
+ * someone supplies a non-default value for it, and every round-trip assertion below then
+ * covers it automatically. The `PORTABLE_AI_SEAT_FIELDS` check further down is the runtime
+ * half of the same claim — it proves the fixture is complete against the real derived list,
+ * so "the round-trip carried everything in here" means "carried everything portable".
+ */
+const NON_DEFAULT = {
+  mode: 'co_dm',
+  enabled: true,
+  model: 'seat-model',
+  instructions: 'Play it bleak.',
+  tokenBudget: 12_345,
+  proactiveSettings: PROACTIVE,
+  stylePresets: STYLE,
+  actionQueueDepth: 3,
+} satisfies Record<keyof PortableAiSeat, unknown>;
+
+/**
+ * COMPILE-TIME regression test for the guard itself (Codex review, #1049).
+ *
+ * `AI_SEAT_FIELD_ROLE` made it a compile error to forget to CLASSIFY a new column, but
+ * classifying one did not make it portable: `PortableAiSeat` was a hand-written `Pick`, the
+ * two projections were closed object literals, and `PORTABLE_AI_SEAT_FIELDS` carried an
+ * `as Array<keyof PortableAiSeat>` cast that hid the disagreement from the compiler. Four
+ * sources of truth, one of them silently authoritative.
+ *
+ * `ConfigClassifiedField` below re-derives "which columns are config" from the map, here in
+ * the test, with no help from the module. If the module's `PortableAiSeat` is genuinely
+ * derived from the same map, the two agree and this compiles. If the map's values are
+ * type-erased — which is exactly what the old `Record<keyof AiDmSeatRow, AiSeatFieldRole>`
+ * annotation did — nothing is derivable from it, `ConfigClassifiedField` collapses to `never`,
+ * and this fails to compile. ts-jest type-checks specs, so that is a red test, not a silent
+ * lint. It is the ONLY assertion in this file that distinguishes a derived portable set from
+ * a hand-written one that happens to agree today.
+ */
+type ConfigClassifiedField = {
+  [K in keyof typeof AI_SEAT_FIELD_ROLE]: (typeof AI_SEAT_FIELD_ROLE)[K] extends 'config' ? K : never;
+}[keyof typeof AI_SEAT_FIELD_ROLE];
+type Equal<A, B> = (<G>() => G extends A ? 1 : 2) extends <G>() => G extends B ? 1 : 2 ? true : false;
+type Expect<T extends true> = T;
+type _PortableSeatIsDerivedFromTheClassification = Expect<Equal<keyof PortableAiSeat, ConfigClassifiedField>>;
+
 describe('AI seat portability across clone / export / import (#1049)', () => {
   let ctx: TestAppContext;
   let dmAgent: ReturnType<typeof request.agent>;
@@ -56,16 +113,7 @@ describe('AI seat portability across clone / export / import (#1049)', () => {
 
     // A fully-configured seat: every `config` field set to something non-default, so a field
     // that fails to travel comes back visibly wrong rather than coincidentally right.
-    const seat = await dmAgent.put(`/api/v1/campaigns/${campaignId}/ai-dm`).send({
-      enabled: true,
-      mode: 'co_dm',
-      model: 'seat-model',
-      instructions: 'Play it bleak.',
-      tokenBudget: 12_345,
-      actionQueueDepth: 3,
-      stylePresets: STYLE,
-      proactiveSettings: PROACTIVE,
-    });
+    const seat = await dmAgent.put(`/api/v1/campaigns/${campaignId}/ai-dm`).send(NON_DEFAULT);
     expect(seat.status).toBe(200);
   });
 
@@ -77,16 +125,18 @@ describe('AI seat portability across clone / export / import (#1049)', () => {
     return dmAgent.get(`/api/v1/campaigns/${id}/ai-dm`);
   }
 
-  /** Every field the classification calls DM-authored, and what it should read back as. */
-  const expectedConfig = {
-    mode: 'co_dm',
-    model: 'seat-model',
-    instructions: 'Play it bleak.',
-    tokenBudget: 12_345,
-    actionQueueDepth: 3,
-    stylePresets: STYLE,
-    proactiveSettings: PROACTIVE,
-  };
+  /**
+   * Every field the classification calls DM-authored, and what it should read back as — the
+   * SAME object that was written, so "nothing was lost or reset" is asserted field-for-field
+   * rather than restated as a list of names.
+   */
+  const expectedConfig = NON_DEFAULT;
+
+  it('the fixture covers every portable field, so the round-trips below are exhaustive', () => {
+    // The runtime half of the compile-time guard above. Without this, the round-trip suite
+    // could be exhaustive over a fixture that is itself missing a field.
+    expect(Object.keys(NON_DEFAULT).sort()).toEqual([...PORTABLE_AI_SEAT_FIELDS].sort());
+  });
 
   it('the source seat really is configured (guards against a vacuous round-trip)', async () => {
     // Without this, a round-trip assertion could pass because BOTH sides are default.
@@ -99,6 +149,46 @@ describe('AI seat portability across clone / export / import (#1049)', () => {
     expect(cloned.status).toBe(201);
     const seat = await readSeat(cloned.body.id);
     expect(seat.body).toMatchObject(expectedConfig);
+  });
+
+  /**
+   * Carrying `proactiveSettings` is not the same as HONOURING them (#1049 review).
+   *
+   * `ProactiveService`'s watcher is an in-memory rxjs subscription that starts ONLY from the
+   * callback `AiDmService.configure` fires. Clone and import never call `configure` — they
+   * insert into `ai_dm_seats` directly, inside the campaign-copy transaction — so the copied
+   * seat read back `proactiveSettings.enabled: true`, the UI drew it as on, and no proactive
+   * turn could ever fire behind it. A field-equality assertion cannot see that: the DATA was
+   * copied perfectly. Only the subscription was missing.
+   *
+   * The source-campaign assertion is the control. It went through `configure`, so it must be
+   * watched; if it ever is not, these two tests are failing for a harness reason rather than
+   * the defect they are named after.
+   */
+  describe('the proactive watcher, not just the proactive settings', () => {
+    const watcher = () => ctx.app.get(ProactiveService);
+
+    it('the CONFIGURED source campaign is watched (control)', () => {
+      expect(watcher().isWatching(campaignId)).toBe(true);
+    });
+
+    it('a CLONE is actually watched, not merely marked as watching', async () => {
+      const cloned = await dmAgent.post(`/api/v1/campaigns/${campaignId}/clone`).send({ name: 'Watched Clone' });
+      expect(cloned.status).toBe(201);
+      // The settings copied — that much always worked, and is what made this invisible.
+      expect((await readSeat(cloned.body.id)).body.proactiveSettings).toMatchObject({ enabled: true });
+      expect(watcher().isWatching(cloned.body.id)).toBe(true);
+    });
+
+    it('an IMPORT is actually watched too', async () => {
+      const exported = await dmAgent.get(`/api/v1/campaigns/${campaignId}/export`);
+      const imported = await dmAgent
+        .post('/api/v1/campaigns/import')
+        .send({ ...exported.body, campaign: { ...exported.body.campaign, name: 'Watched Import' } });
+      expect(imported.status).toBe(201);
+      expect((await readSeat(imported.body.id)).body.proactiveSettings).toMatchObject({ enabled: true });
+      expect(watcher().isWatching(imported.body.id)).toBe(true);
+    });
   });
 
   it('a clone starts its OWN usage accounting', async () => {
@@ -273,10 +363,29 @@ describe('AI seat portability across clone / export / import (#1049)', () => {
  * fix, and these assertions state in prose what it enforces.
  */
 describe('the seat portability classification (#1049)', () => {
-  it('names every field the three call sites need, in one place', () => {
-    expect([...PORTABLE_AI_SEAT_FIELDS].sort()).toEqual(
-      ['actionQueueDepth', 'enabled', 'instructions', 'mode', 'model', 'proactiveSettings', 'stylePresets', 'tokenBudget'].sort(),
-    );
+  /**
+   * Naming the fields was never the property that mattered. The old assertion here compared
+   * `PORTABLE_AI_SEAT_FIELDS` to a hard-coded array of eight strings, which a person adding a
+   * column would simply edit — and the field would still be dropped, because neither
+   * projection had been asked about it. These two check what the call sites actually RECEIVE.
+   */
+  const FAKE_ROW = Object.fromEntries(
+    Object.keys(AI_SEAT_FIELD_ROLE).map((key) => [key, null]),
+  ) as unknown as Parameters<typeof portableAiSeat>[0];
+
+  it('the TRUSTED-row projection returns every field the classification lists', () => {
+    expect(Object.keys(portableAiSeat(FAKE_ROW)).sort()).toEqual([...PORTABLE_AI_SEAT_FIELDS].sort());
+  });
+
+  it('the UNTRUSTED-archive reader returns every field the classification lists', () => {
+    // The import path is a separate closed literal from the export/clone one, so it can drop a
+    // field the other carries — a defect invisible to any assertion about names.
+    const read = readPortableAiSeat({}, {
+      str: (value, fallback = '') => (typeof value === 'string' ? value : fallback),
+      boolOf: (value) => value === true,
+      intOr: (value, fallback) => (typeof value === 'number' ? value : fallback),
+    });
+    expect(Object.keys(read).sort()).toEqual([...PORTABLE_AI_SEAT_FIELDS].sort());
   });
 
   it('classifies the three fields that were being silently dropped as config', () => {

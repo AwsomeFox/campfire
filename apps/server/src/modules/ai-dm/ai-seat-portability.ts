@@ -21,10 +21,26 @@ import { AiDmProactiveSettings, AiDmStylePresets } from '@campfire/schema';
  * So this was a pattern, not an instance, and a fourth column would have joined them.
  *
  * ── Why an exhaustive Record and not just a wider literal ─────────────────────────────
- * {@link AI_SEAT_FIELD_ROLE} is `Record<keyof AiDmSeatRow, AiSeatFieldRole>`. Adding a column
- * to `ai_dm_seats` is therefore a COMPILE ERROR here until someone says what it is — which is
- * the only mechanism that actually stops the next silent drop. A wider literal would fix
- * today's three fields and leave the mechanism that swallowed them intact.
+ * {@link AI_SEAT_FIELD_ROLE} is checked against `Record<keyof AiDmSeatRow, AiSeatFieldRole>`.
+ * Adding a column to `ai_dm_seats` is therefore a COMPILE ERROR here until someone says what it
+ * is — which is the only mechanism that actually stops the next silent drop. A wider literal
+ * would fix today's three fields and leave the mechanism that swallowed them intact.
+ *
+ * ── Classifying is not enough; the PROJECTIONS must derive from the classification ────
+ * The first cut of this file classified correctly and still did not guard (Codex review). The
+ * classification was one source of truth and there were three more beside it: a hand-written
+ * `Pick` naming the portable columns, and two closed object literals (`portableAiSeat`,
+ * `readPortableAiSeat`) enumerating them again — plus an `as Array<keyof PortableAiSeat>` cast
+ * that told the compiler the derived name list and the hand-written `Pick` agreed, whether or
+ * not they did. So the sequence the abstraction exists to prevent still worked end to end:
+ * add a column, classify it `config`, and clone/export/import drop it in silence.
+ *
+ * The `satisfies` on the map below is what closes that. It keeps the exhaustiveness check
+ * while PRESERVING each field's literal role, so {@link PortableAiSeat} can be computed from
+ * the map rather than restated next to it. Both projections are annotated with that computed
+ * type, which makes a missing field a compile error in the two functions that would otherwise
+ * have dropped it — the failure moves from "a DM notices their style is gone" to `tsc`. The
+ * cast is gone with it; nothing here now asserts an agreement it does not check.
  *
  * ── Classification is not validation ─────────────────────────────────────────────────
  * {@link AI_SEAT_FIELD_ROLE} makes it a compile error to forget to CLASSIFY a new column. It
@@ -58,8 +74,14 @@ export type AiSeatFieldRole = 'config' | 'runtime' | 'identity';
  * EXHAUSTIVE by construction — see the header. Do not replace with a list of portable field
  * names: a list cannot tell you that a NEW column is unclassified, which is the entire failure
  * this file exists to prevent.
+ *
+ * `as const satisfies` rather than a `Record<…>` type ANNOTATION, and the difference is the
+ * whole guard. An annotation widens every value to `AiSeatFieldRole`, which erases which role
+ * each column actually has — leaving nothing for {@link PortableAiSeat} to be derived FROM, so
+ * it had to be hand-written and could drift. `satisfies` performs the same exhaustiveness check
+ * against the same `Record` while keeping the literal roles, so the derivation below is real.
  */
-export const AI_SEAT_FIELD_ROLE: Record<keyof AiDmSeatRow, AiSeatFieldRole> = {
+export const AI_SEAT_FIELD_ROLE = {
   campaignId: 'identity',
   createdAt: 'identity',
   updatedAt: 'identity',
@@ -103,25 +125,51 @@ export const AI_SEAT_FIELD_ROLE: Record<keyof AiDmSeatRow, AiSeatFieldRole> = {
   tokensOverage: 'runtime',
   turnCount: 'runtime',
   lastTurnAt: 'runtime',
-};
+} as const satisfies Record<keyof AiDmSeatRow, AiSeatFieldRole>;
 
-/** The seat fields that travel. Derived from the map, so it can never disagree with it. */
-export type PortableAiSeat = Pick<
-  AiDmSeatRow,
-  'mode' | 'enabled' | 'model' | 'instructions' | 'tokenBudget' | 'proactiveSettings' | 'stylePresets' | 'actionQueueDepth'
->;
+/** The column names carrying a given role, computed from the map — never restated beside it. */
+type AiSeatFieldsWithRole<R extends AiSeatFieldRole> = {
+  [K in keyof typeof AI_SEAT_FIELD_ROLE]: (typeof AI_SEAT_FIELD_ROLE)[K] extends R ? K : never;
+}[keyof typeof AI_SEAT_FIELD_ROLE];
 
-/** Field names with role `config`, for tests and for the coercing import reader. */
+/** The seat columns classified `config`. */
+export type PortableAiSeatField = AiSeatFieldsWithRole<'config'>;
+
+/** The runtime counters an insert must zero. */
+export type RuntimeAiSeatField = AiSeatFieldsWithRole<'runtime'>;
+
+/**
+ * The seat fields that travel — DERIVED from the classification, not restated alongside it.
+ *
+ * This being computed is what makes classifying a column sufficient rather than merely
+ * necessary: widening the map widens this type, which breaks both projections below until they
+ * carry the new field. When it was a hand-written `Pick`, classification and portability were
+ * independent edits and only the first was enforced.
+ */
+export type PortableAiSeat = Pick<AiDmSeatRow, PortableAiSeatField>;
+
+/**
+ * Field names with role `config`, for tests and for the coercing import reader.
+ *
+ * The type predicate replaces an `as Array<keyof PortableAiSeat>` cast. It looks similar but is
+ * not: the cast claimed the runtime filter and a SEPARATE hand-written type agreed, and hid it
+ * when they did not. `PortableAiSeatField` is now computed from the very map being filtered, so
+ * the predicate narrows to the same set the filter selects. The load-bearing guard is no longer
+ * here in any case — it is the return type shared by the two projections below.
+ */
 export const PORTABLE_AI_SEAT_FIELDS = (Object.keys(AI_SEAT_FIELD_ROLE) as Array<keyof AiDmSeatRow>).filter(
-  (key) => AI_SEAT_FIELD_ROLE[key] === 'config',
-) as Array<keyof PortableAiSeat>;
+  (key): key is PortableAiSeatField => AI_SEAT_FIELD_ROLE[key] === 'config',
+);
 
 /**
  * Project a stored seat row down to what travels (export + clone).
  *
  * Written field-by-field rather than by iterating {@link PORTABLE_AI_SEAT_FIELDS} so the result
- * is a precisely-typed `PortableAiSeat` instead of a partial index type — the exhaustive Record
- * above is what guards against omission, and this stays readable.
+ * is a precisely-typed `PortableAiSeat` instead of a partial index type. That annotation is not
+ * decoration: because `PortableAiSeat` is computed from {@link AI_SEAT_FIELD_ROLE}, classifying
+ * a new column `config` makes this literal incomplete, and TypeScript rejects an object literal
+ * that is missing a property of its declared return type. Forgetting a field is a build failure
+ * here rather than a field that quietly comes back as its column default two installs later.
  */
 export function portableAiSeat(row: AiDmSeatRow): PortableAiSeat {
   return {
@@ -136,11 +184,15 @@ export function portableAiSeat(row: AiDmSeatRow): PortableAiSeat {
   };
 }
 
-/** The runtime counters an insert must zero, so a clone/import starts its own accounting. */
-export function freshAiSeatCounters(): Pick<
-  AiDmSeatRow,
-  'tokensUsed' | 'tokensReserved' | 'tokensRefunded' | 'tokensUnknown' | 'tokensOverage' | 'turnCount' | 'lastTurnAt'
-> {
+/**
+ * The runtime counters an insert must zero, so a clone/import starts its own accounting.
+ *
+ * Derived from the same classification for the same reason as {@link portableAiSeat}: a new
+ * `runtime` column left out of this literal would fall to its schema default, which is the
+ * right answer only by luck. Naming it here keeps "the copy starts its own accounting" a
+ * decision the compiler enforces rather than an accident of which fields the insert omitted.
+ */
+export function freshAiSeatCounters(): Pick<AiDmSeatRow, RuntimeAiSeatField> {
   return {
     tokensUsed: 0,
     tokensReserved: 0,
@@ -168,6 +220,11 @@ const ACTION_QUEUE_DEPTH_DEFAULT = 8;
 
 /**
  * Read the portable seat fields out of an untrusted export payload.
+ *
+ * Returns `PortableAiSeat`, so this literal is held to the same derived key set as
+ * {@link portableAiSeat}. That matters more here than there: this is the SECOND independent
+ * enumeration, and the failure it used to permit was asymmetric — a field could travel fine on
+ * export and clone and vanish only on import, which no export-side assertion would ever see.
  *
  * ── Shape is not enough; VALUES must be parsed ────────────────────────────────────────
  * Fixing the silent drop inherited its side effect. Before #1049 these three fields did not

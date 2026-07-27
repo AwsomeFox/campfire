@@ -61,6 +61,34 @@ describe('table style reaches the narration surfaces it should (#1049)', () => {
     expect(system).toContain('Persona line.');
   });
 
+  /**
+   * `kind: 'recap'` is styled like every other turn kind — a DECISION, questioned in review
+   * (Devin) because the scribe also produces "a recap" and deliberately carries no style.
+   *
+   * Kept, because the two are different products with different SPEAKERS:
+   *
+   *  - `takeTurn` is the AI DM talking to the table, live, through `POST /ai-dm/turn` or the
+   *    MCP `ai_dm_narrate` tool. `kind` steers framing — recap the scene, run the fight,
+   *    narrate — not who is speaking. Excluding one kind would give `recap` a different
+   *    persona from `narrate` on the SAME endpoint and the same seat, which is a worse and
+   *    far more frequently-hit inconsistency than the cross-service one it would resolve.
+   *  - the scribe REPLACES the speaker. Its system prompt is "You are the campaign scribe",
+   *    and it produces a filed proposal a DM reviews — a record of the session, not a turn in
+   *    it. It borrows `seat.instructions` for setting continuity and stops there.
+   *
+   * The block's own text settles it: it opens "How the DM of this table wants the game
+   * narrated", and two of its five axes (`combatStyle`, `npcDepth`) steer how to RUN combat
+   * and PLAY NPCs. A post-session summary does neither, so on the scribe path nearly half the
+   * block would be instruction with nothing to apply to.
+   */
+  it('a recap TURN is styled, like every other kind on this endpoint', async () => {
+    const res = await h.takeTurn(campaignId, { prompt: 'Where were we?', kind: 'recap' });
+    expect(res.status).toBe(201);
+    const system = h.mock.received[0].system ?? '';
+    expect(system).toContain(TABLE_STYLE_HEADING);
+    expect(system).toContain('Persona line.');
+  });
+
   it('an unconfigured seat sends a byte-identical prompt to the pre-#1049 one', async () => {
     // The feature costs zero tokens until a DM opts in; a default seat must render NOTHING.
     const plain = await h.createCampaign('Unstyled');
@@ -72,5 +100,47 @@ describe('table style reaches the narration surfaces it should (#1049)', () => {
     const system = h.mock.received[0].system ?? '';
     expect(system).not.toContain(TABLE_STYLE_HEADING);
     expect(system).toBe('Just persona.');
+  });
+
+  /**
+   * The other half of the recap decision, asserted rather than left implicit.
+   *
+   * A SCRIBE recap carries the seat's persona and NOT the table style. That difference is the
+   * one review asked about, so it is pinned here: whichever way a future change goes, it must
+   * go deliberately, with this test failing first. Asserting only the `takeTurn` side would
+   * leave the scribe free to drift into style — or out of the persona — unnoticed.
+   */
+  it('a SCRIBE recap carries the persona but NOT the table style', async () => {
+    const ownerAgent = request.agent(h.server);
+    const setup = await ownerAgent
+      .post('/api/v1/auth/setup')
+      .send({ username: 'style-scribe-owner', password: 'style-scribe-password' });
+    expect(setup.status).toBe(201);
+
+    const created = await ownerAgent.post('/api/v1/campaigns').send({ name: 'Scribed Table' });
+    const scribed = created.body.id as number;
+    // The scribe only sends material the owner consented to share externally (#501).
+    await ownerAgent.patch(`/api/v1/campaigns/${scribed}/members/me/ai-consent`).send({ aiExternalUseConsent: true });
+
+    await h.configureSeat(scribed, { tokenBudget: 100_000 });
+    await request(h.server)
+      .put(`/api/v1/campaigns/${scribed}/ai-dm`)
+      .set(dm)
+      .send({ enabled: true, stylePresets: STYLE, instructions: 'Persona line.' });
+
+    // Resolvable source material, or the run has nothing to recap.
+    const note = await ownerAgent.post(`/api/v1/campaigns/${scribed}/inbox`).send({ body: 'The party rested at the inn.' });
+    await ownerAgent.post(`/api/v1/notes/${note.body.id}/resolve`).send({ resolvedNote: 'handled in play' });
+
+    h.script({ text: 'A quiet night at the inn.' });
+    const run = await request(h.server).post(`/api/v1/campaigns/${scribed}/scribe/run`).set(dm).send({});
+    expect(run.status).toBe(201);
+
+    const system = h.mock.received.at(-1)?.system ?? '';
+    // It IS the scribe speaking, with the DM's persona for continuity...
+    expect(system).toContain('You are the campaign scribe');
+    expect(system).toContain('Persona line.');
+    // ...and without the table's narration voice, which steers live play rather than a record.
+    expect(system).not.toContain(TABLE_STYLE_HEADING);
   });
 });

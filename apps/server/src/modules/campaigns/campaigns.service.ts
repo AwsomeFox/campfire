@@ -96,6 +96,7 @@ import { sanitizeAttachmentFilename } from '../attachments/filename';
 import { APP_VERSION } from '../../common/build-metadata';
 import { CURRENT_SCHEMA_REVISION } from '../backup/backup-manifest';
 import { freshAiSeatCounters, portableAiSeat, readPortableAiSeat } from '../ai-dm/ai-seat-portability';
+import { AiDmService } from '../ai-dm/ai-dm.service';
 import {
   assertCompendiumImportAllowed,
   buildResolutionMap,
@@ -308,6 +309,10 @@ export class CampaignsService {
     private readonly invites: InvitesService,
     private readonly fsDeletion: FsDeletionService,
     private readonly events: CampaignEventsService,
+    // #1049 review: clone and import write `ai_dm_seats` directly, so they owe the AI-DM
+    // module a nudge afterwards — see syncProactiveWatcher. AiDmModule imports nothing that
+    // leads back to CampaignsModule, so this edge is acyclic.
+    private readonly aiDm: AiDmService,
   ) {}
 
   /**
@@ -1791,6 +1796,13 @@ export class CampaignsService {
       campaignId: newId,
       detail: `cloned from campaign ${id} (${template ? 'template' : 'full'})`,
     });
+
+    // #1049 review: carrying `proactiveSettings` is not the same as HONOURING them. The watcher
+    // is in-memory and starts only from AiDmService.configure's callback, which this path
+    // bypasses by inserting the seat row directly inside the copy transaction — so without this
+    // the clone reads back proactive ON and never fires a proactive turn. Called AFTER commit
+    // deliberately: the sync re-reads the persisted row.
+    await this.aiDm.syncProactiveWatcher(newId);
     return this.getOrThrow(newId);
   }
 
@@ -2898,6 +2910,11 @@ export class CampaignsService {
         );
       }
     }
+
+    // #1049 review: same gap as clone — the seat row was inserted directly inside the import
+    // transaction, so nothing told the in-memory proactive watcher it exists. An archive
+    // carrying `proactiveSettings.enabled: true` would otherwise import as ON-but-inert.
+    await this.aiDm.syncProactiveWatcher(newId);
 
     const campaign = await this.getOrThrow(newId);
     return {
