@@ -209,6 +209,10 @@ export class OpenAiProvider implements AiProvider {
       name: tc.function?.name ?? '',
       arguments: parseJsonArgs(tc.function?.arguments),
     }));
+    // #598 — a Chat Completions refusal, which reports `finish_reason: 'stop'`. Its text is
+    // deliberately NOT folded into `text`: a refusal is not narration, and this adapter's job
+    // is to report the terminal state rather than hand the driver something to broadcast.
+    const refused = typeof msg?.refusal === 'string' && msg.refusal.length > 0;
     return {
       text: msg?.content ?? '',
       toolCalls,
@@ -217,7 +221,10 @@ export class OpenAiProvider implements AiProvider {
         completionTokens: json.usage?.completion_tokens ?? 0,
         totalTokens: json.usage?.total_tokens ?? (json.usage ? (json.usage.prompt_tokens ?? 0) + (json.usage.completion_tokens ?? 0) : 0),
       },
-      finishReason: mapFinishReason(choice?.finish_reason),
+      // Safety-first precedence, matching the Responses path: a refusal outranks the wire's
+      // `stop` (which it is always paired with) AND outranks `tool_calls`, so a response that
+      // both declined and asked for tools can never dispatch them.
+      finishReason: resolveChatFinish(choice?.finish_reason, refused, toolCalls.length),
       model: json.model ?? requestedModel,
     };
   }
@@ -383,6 +390,35 @@ function resolveResponsesFinish(
   return toolCallCount > 0 ? 'tool_calls' : mapped;
 }
 
+/**
+ * Resolve a CHAT COMPLETIONS finish reason with the same safety-first precedence (#598).
+ *
+ * The Chat Completions twin of the Responses gap above, and a nastier one. On this protocol a
+ * model refusal is reported in `message.refusal` (or streamed `delta.refusal`) while
+ * `finish_reason` stays **`stop`** — the identical terminal state as a perfectly good answer.
+ * So unlike a content filter, there is no value of `finish_reason` that betrays it: an adapter
+ * that reads only that field cannot distinguish a refusal from success, and the driver files
+ * the turn as ordinary narration or `no_narration` rather than as a withheld incident.
+ *
+ * `refused` therefore outranks the wire's own finish reason rather than merely competing with
+ * it, and — as on the Responses path — outranks `tool_calls`, so a response that both declined
+ * and asked for tools can never dispatch them.
+ *
+ * @param wireReason the raw `finish_reason`, when the caller has one to map.
+ * @param alreadyMapped a pre-mapped reason (the streaming accumulator maps as chunks arrive).
+ */
+function resolveChatFinish(
+  wireReason: string | null | undefined,
+  refused: boolean,
+  toolCallCount: number,
+  alreadyMapped?: AiFinishReason,
+): AiFinishReason {
+  if (refused) return 'refusal';
+  const mapped = alreadyMapped ?? mapFinishReason(wireReason);
+  if (mapped === 'content_filter') return 'content_filter';
+  return toolCallCount > 0 && mapped === 'stop' ? 'tool_calls' : mapped;
+}
+
 function mapFinishReason(reason: string | null | undefined): AiFinishReason {
   switch (reason) {
     case 'stop':
@@ -416,6 +452,8 @@ export function parseJsonArgs(raw: string | undefined | null): Record<string, un
  */
 class OpenAiStreamAccumulator {
   private text = '';
+  /** #598 — a `delta.refusal` arrived. Sticky: nothing later re-opens that decision. */
+  private refused = false;
   private readonly toolAcc = new Map<number, { id?: string; name?: string; args: string }>();
   private usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
   private finishReason: AiFinishReason = 'stop';
@@ -440,6 +478,10 @@ class OpenAiStreamAccumulator {
     if (choice.finish_reason) this.finishReason = mapFinishReason(choice.finish_reason);
     const delta = choice.delta;
     if (!delta) return;
+    // #598 — a streamed refusal. Sticky, and NOT emitted as a text delta: the whole point of
+    // the withhold is that refusal prose never reaches the table, so forwarding it here would
+    // put it on the wire ahead of the terminal frame that says it was refused.
+    if (typeof delta.refusal === 'string' && delta.refusal.length > 0) this.refused = true;
     if (typeof delta.content === 'string' && delta.content.length > 0) {
       this.text += delta.content;
       yield { type: 'text', delta: delta.content };
@@ -469,7 +511,8 @@ class OpenAiStreamAccumulator {
       text: this.text,
       toolCalls,
       usage: this.usage,
-      finishReason: this.finishReason,
+      // Safety-first precedence, as on the non-streaming path.
+      finishReason: resolveChatFinish(undefined, this.refused, toolCalls.length, this.finishReason),
       model: this.model,
     };
   }
@@ -603,6 +646,15 @@ interface OpenAiCompletion {
     finish_reason?: string | null;
     message?: {
       content?: string | null;
+      /**
+       * #598 — the model declining, on the Chat Completions protocol.
+       *
+       * The trap is that this arrives alongside `finish_reason: 'stop'` — the SAME terminal
+       * state as an ordinary successful answer. Reading only `finish_reason` therefore
+       * classifies a refusal as deliverable, and the driver files it as a normal or empty
+       * turn instead of a withheld one. The refusal is knowable ONLY from this field.
+       */
+      refusal?: string | null;
       tool_calls?: { id: string; function?: { name?: string; arguments?: string } }[];
     };
   }[];
@@ -614,6 +666,8 @@ interface OpenAiChunk {
     finish_reason?: string | null;
     delta?: {
       content?: string | null;
+      /** #598 — streamed counterpart of `message.refusal`, with the same `stop` trap. */
+      refusal?: string | null;
       tool_calls?: { index?: number; id?: string; function?: { name?: string; arguments?: string } }[];
     };
   }[];

@@ -44,6 +44,26 @@
  *      live deltas on `turn.end`, so without an explicit retraction the withheld prose would
  *      be promoted into the client's permanent transcript by the very event that ends the turn.
  *
+ * ── Where each transport hides its refusal ───────────────────────────────────────────
+ * Three of the adapters reported a refusal in a field nobody read, and the pattern was the
+ * same every time: the adapter MODELLED the shape, then only consulted it on whichever path
+ * someone happened to test. If you are adding a provider, this is the table you owe.
+ *
+ *   Transport                 | Signal                                 | Read in
+ *   --------------------------|----------------------------------------|-------------------------
+ *   OpenAI Chat Completions   | `message.refusal` / `delta.refusal`    | resolveChatFinish()
+ *                             |   …WITH `finish_reason: 'stop'`        |
+ *   OpenAI Chat Completions   | `finish_reason: 'content_filter'`      | mapFinishReason()
+ *   OpenAI Responses          | `refusal` output part / item           | resolveResponsesFinish()
+ *   OpenAI Responses          | `incomplete_details.reason`            | mapResponsesStatus()
+ *   Anthropic                 | `stop_reason: 'refusal'`               | mapStopReason()
+ *   Gemini — response blocked | candidate `finishReason` (SAFETY, …)   | mapFinishReason()
+ *   Gemini — prompt blocked   | `promptFeedback.blockReason`, NO cand. | isPromptBlocked()
+ *
+ * The Chat Completions refusal is the one to internalize: `finish_reason` stays `'stop'`, so
+ * there is NO value of the field an adapter normally keys on that separates a refusal from a
+ * perfectly good answer. On that protocol, reading the obvious field is not enough.
+ *
  * ── What this does NOT cover ─────────────────────────────────────────────────────────
  * This mechanism RELAYS a provider's signal. It does not classify content itself. A local or
  * self-hosted model with no safety layer (Ollama, llama.cpp, LM Studio, a bare vLLM endpoint)

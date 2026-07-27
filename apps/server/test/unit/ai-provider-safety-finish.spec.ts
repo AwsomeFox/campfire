@@ -57,6 +57,117 @@ describe('OpenAI Chat Completions — content_filter (#598)', () => {
   });
 });
 
+/**
+ * The Chat Completions refusal — the nastiest of the three transports.
+ *
+ * A content filter at least changes `finish_reason` to something recognisable. A model
+ * REFUSAL on this protocol does not: OpenAI reports it in `message.refusal` (or streamed
+ * `delta.refusal`) while `finish_reason` stays **`stop`** — at that field, byte-identical to
+ * a perfectly good answer. An adapter reading only `finish_reason` cannot tell the two apart,
+ * so the driver files a refusal as ordinary narration or as `no_narration`.
+ *
+ * Third transport, same shape as the other two: the provider signalled a refusal in a field
+ * the adapter modelled but never consulted.
+ */
+describe('OpenAI Chat Completions — message.refusal / delta.refusal (#598)', () => {
+  it('non-streaming: a refusal is withheld even though finish_reason is `stop`', async () => {
+    const { fetchImpl } = fakeFetch(
+      jsonResponse({
+        model: 'gpt-4o-mini',
+        choices: [{ finish_reason: 'stop', message: { content: null, refusal: 'I can’t help with that.' } }],
+        usage: { prompt_tokens: 5, completion_tokens: 4, total_tokens: 9 },
+      }),
+    );
+    const p = new OpenAiProvider({ apiKey: 'k', model: 'm', endpointMode: 'chat_completions', fetchImpl });
+    const result = await p.generate(req);
+    expect(result.finishReason).toBe('refusal');
+    expect(isWithheldFinishReason(result.finishReason)).toBe(true);
+    // Refusal prose is NOT narration and must never be handed to the driver to broadcast.
+    expect(result.text).toBe('');
+  });
+
+  it('non-streaming: a refusal outranks tool calls in the same response', async () => {
+    // Otherwise the driver dispatches tools from a response the model just declined to stand
+    // behind — the same precedence bug already closed on the Responses path.
+    const { fetchImpl } = fakeFetch(
+      jsonResponse({
+        model: 'gpt-4o-mini',
+        choices: [
+          {
+            finish_reason: 'tool_calls',
+            message: {
+              content: null,
+              refusal: 'No.',
+              tool_calls: [{ id: 'call_1', function: { name: 'roll_dice', arguments: '{}' } }],
+            },
+          },
+        ],
+      }),
+    );
+    const p = new OpenAiProvider({ apiKey: 'k', model: 'm', endpointMode: 'chat_completions', fetchImpl });
+    const result = await p.generate(req);
+    expect(result.finishReason).toBe('refusal');
+    expect(isWithheldFinishReason(result.finishReason)).toBe(true);
+  });
+
+  it('streaming: delta.refusal is withheld, and its text never becomes a narration delta', async () => {
+    const frames = [
+      `data: ${JSON.stringify({ choices: [{ delta: { refusal: 'I can’t ' } }] })}\n\n`,
+      `data: ${JSON.stringify({ choices: [{ delta: { refusal: 'help with that.' } }] })}\n\n`,
+      `data: ${JSON.stringify({ choices: [{ finish_reason: 'stop', delta: {} }] })}\n\n`,
+      'data: [DONE]\n\n',
+    ];
+    const { fetchImpl } = fakeFetch(streamResponse(frames));
+    const p = new OpenAiProvider({ apiKey: 'k', model: 'm', endpointMode: 'chat_completions', fetchImpl });
+    const events = await collect(p.stream(req));
+
+    const done = events.find((e) => e.type === 'done');
+    expect(done && done.type === 'done' && done.result.finishReason).toBe('refusal');
+    // The refusal must never reach the delta stream. Forwarding it would put refused text on
+    // the wire AHEAD of the terminal frame saying it was refused — the one ordering the
+    // quarantine window cannot rescue, because the text arrives before the signal exists.
+    expect(events.some((e) => e.type === 'text')).toBe(false);
+    expect(JSON.stringify(events)).not.toContain('help with that.');
+  });
+
+  it('streaming: a refusal is sticky — a later clean finish cannot revive the turn', async () => {
+    const frames = [
+      `data: ${JSON.stringify({ choices: [{ delta: { refusal: 'No.' } }] })}\n\n`,
+      `data: ${JSON.stringify({ choices: [{ delta: { content: 'Actually, here you go…' } }] })}\n\n`,
+      `data: ${JSON.stringify({ choices: [{ finish_reason: 'stop', delta: {} }] })}\n\n`,
+      'data: [DONE]\n\n',
+    ];
+    const { fetchImpl } = fakeFetch(streamResponse(frames));
+    const p = new OpenAiProvider({ apiKey: 'k', model: 'm', endpointMode: 'chat_completions', fetchImpl });
+    const events = await collect(p.stream(req));
+    const done = events.find((e) => e.type === 'done');
+    expect(done && done.type === 'done' && done.result.finishReason).toBe('refusal');
+  });
+
+  it('an ordinary `stop` with no refusal field is still delivered', async () => {
+    // The control. The check must key on the FIELD, not on anything about `stop`, or every
+    // successful Chat Completions turn would be withheld.
+    const { fetchImpl } = fakeFetch(
+      jsonResponse({ model: 'm', choices: [{ finish_reason: 'stop', message: { content: 'The alley narrows.' } }] }),
+    );
+    const p = new OpenAiProvider({ apiKey: 'k', model: 'm', endpointMode: 'chat_completions', fetchImpl });
+    const result = await p.generate(req);
+    expect(result.finishReason).toBe('stop');
+    expect(isWithheldFinishReason(result.finishReason)).toBe(false);
+    expect(result.text).toBe('The alley narrows.');
+  });
+
+  it('an empty-string refusal is not a refusal', async () => {
+    // Some OpenAI-compatible servers emit `refusal: ""` or `null` on every message. Keying on
+    // presence-of-key would withhold every turn those servers produce.
+    const { fetchImpl } = fakeFetch(
+      jsonResponse({ model: 'm', choices: [{ finish_reason: 'stop', message: { content: 'hi', refusal: '' } }] }),
+    );
+    const p = new OpenAiProvider({ apiKey: 'k', model: 'm', endpointMode: 'chat_completions', fetchImpl });
+    expect((await p.generate(req)).finishReason).toBe('stop');
+  });
+});
+
 describe('OpenAI Responses — incomplete_details + refusal parts (#598)', () => {
   it('non-streaming: status=incomplete + reason=content_filter is a FILTER, not a length truncation', async () => {
     const { fetchImpl } = fakeFetch(
