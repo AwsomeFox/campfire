@@ -62,6 +62,7 @@ import {
   partyTreasury,
   aiDmSeats,
   aiDriverControlState,
+  tableSafetyHolds,
   aiScribeConfigs,
   encounterEvents,
   auditLog,
@@ -3288,6 +3289,9 @@ export class CampaignsService {
         tx.delete(inventoryItems).where(eq(inventoryItems.campaignId, id)).run();
         tx.delete(partyTreasury).where(eq(partyTreasury.campaignId, id)).run();
         tx.delete(aiDriverControlState).where(eq(aiDriverControlState.campaignId, id)).run();
+        // #599 — the table safety hold row. Explicit like every other campaign-scoped table:
+        // legacy databases predate the FK cascade, so purge cannot rely on it.
+        tx.delete(tableSafetyHolds).where(eq(tableSafetyHolds.campaignId, id)).run();
         tx.delete(aiDmSeats).where(eq(aiDmSeats.campaignId, id)).run();
 
         tx.delete(campaigns).where(eq(campaigns.id, id)).run();

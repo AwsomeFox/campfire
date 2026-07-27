@@ -570,6 +570,9 @@ function CharterView({ charter }: { charter: SessionZero }) {
       </Section>
       <Section title={t('sessionZero.charter.safetyTools.title')} hint={t('sessionZero.charter.safetyTools.hint')}>
         <ChipList items={charter.safetyTools} />
+        {/* #599 — the charter records the tools a table AGREED to use; this points at the one
+            Campfire actually implements, so "X-Card" here stops being a word nobody can act on. */}
+        <p className="text-muted">{t('sessionZero.charter.safetyTools.builtIn')}</p>
       </Section>
       {charter.houseRules.trim() !== '' && (
         <Section title={t('sessionZero.charter.houseRules.title')}>

@@ -2067,6 +2067,124 @@ export const SessionZeroUpdate = z.object({
 });
 export type SessionZeroUpdate = z.infer<typeof SessionZeroUpdate>;
 
+// ---------- table safety hold / X-Card (issue #599) ----------
+//
+// Session zero (above) records the safety tools a table AGREED to use as free text.
+// This is the tool itself: one immediate, unilateral, reason-free stop that any member
+// of the campaign can pull mid-play, freezing encounter advancement and the AI seat's
+// input, output, and tool dispatch until a facilitator recovers the table.
+//
+// THREE PROPERTIES ARE LOAD-BEARING AND EVERYTHING ELSE BENDS AROUND THEM.
+//
+//  1. NO GATE ON ACTIVATION. No vote, no reason field, no minimum role. `requireMember`
+//     is the only check — a viewer at the table can stop play exactly like a player can.
+//     A mechanism that asks you to justify yourself has already failed at the moment it
+//     matters, which is why there is no `reason` on the activation request: the note
+//     field lives on the facilitator's RELEASE, where a human is explaining a recovery
+//     rather than a participant explaining a need.
+//
+//  2. IDEMPOTENT, NEVER-FAILING ACTIVATION. Activating a hold that is already active
+//     succeeds and changes nothing (the FIRST activation's timestamp is what the table
+//     keeps). Two participants tapping at once both get 200 and the table pauses once.
+//     Pausing twice is harmless; a state machine that can reject a pause is not.
+//
+//  3. ASYMMETRIC RECOVERY. Anyone pauses; only a facilitator (`dm`) releases. That
+//     asymmetry — not a role check on activation — is what makes the mechanism safe to
+//     leave unguarded.
+//
+// ANONYMITY. `anonymous` (default TRUE) suppresses attribution: the server stores no
+// user id and no display name for the activation, writes the audit row under a synthetic
+// actor with the request correlation id stripped, and notifies EVERY member including
+// the activator. See the note on TableSafetyHold.activatedByName for the residual
+// exposure this does NOT close.
+export const SafetyHoldRecovery = z.enum([
+  'resume',       // pick play back up where it stopped
+  'rewind',       // undo the last beat and replay it differently
+  'veil',         // the content stays in the fiction but moves off-screen
+  'scene_change', // cut away to a different scene
+  'end',          // stop the session here
+]);
+export type SafetyHoldRecovery = z.infer<typeof SafetyHoldRecovery>;
+
+/**
+ * The table's current safety-hold state — one row per campaign, readable by every member.
+ *
+ * A released hold keeps its `releasedAt` / `recovery` / `facilitatorNote` so the table can
+ * see how the last stop was resolved; `active: false` is what ungates play.
+ */
+export const TableSafetyHold = z.object({
+  campaignId: Id,
+  /** True while play is frozen. The single field every gate reads. */
+  active: z.boolean(),
+  /** When the CURRENT hold was raised (first activation wins; re-activation does not move it). */
+  activatedAt: IsoDate.nullable(),
+  /**
+   * Display name of the participant who raised it, or null.
+   *
+   * NULL IS DELIBERATELY AMBIGUOUS — it means "anonymous" and it means "no hold", and no
+   * API distinguishes them. There is no companion `activatedByUserId` on this contract or
+   * in the database for an anonymous hold: the identity is dropped at the controller
+   * boundary and never reaches storage, so there is no projection to forget to redact.
+   *
+   * WHAT THIS DOES NOT HIDE, stated plainly because "anonymous" must not overclaim:
+   *  - The server operator. Reverse proxy access logs, the structured request log (which
+   *    carries the authenticated actor), and a debugger all see the HTTP request. Anonymity
+   *    here is anonymity from the TABLE, not from whoever runs the box.
+   *  - Deduction from table size. At a two-person table an anonymous hold the facilitator
+   *    did not raise was raised by the other person. No server-side design fixes that.
+   *  - A participant who tells the table it was them.
+   */
+  activatedByName: z.string().nullable(),
+  /** Whether the CURRENT (or most recent) hold was raised anonymously. */
+  anonymous: z.boolean(),
+  /**
+   * How many holds this campaign has recorded, ever. A count is not attributable and is
+   * what makes "we keep stopping in this arc" visible without naming anyone.
+   */
+  activationCount: z.number().int().nonnegative(),
+  releasedAt: IsoDate.nullable(),
+  /** The facilitator who released it — release is never anonymous; it is an accountable act. */
+  releasedByName: z.string().nullable(),
+  /** How the facilitator recovered the table, or null while a hold is active. */
+  recovery: SafetyHoldRecovery.nullable(),
+  /** The facilitator's optional note on the recovery. Never the participant's words. */
+  facilitatorNote: z.string().nullable(),
+  updatedAt: IsoDate,
+});
+export type TableSafetyHold = z.infer<typeof TableSafetyHold>;
+
+/**
+ * POST /campaigns/:id/safety/hold. Note what is NOT here: no reason, no severity, no
+ * target, no role. The only decision the activating participant makes is whether to
+ * attach their name, and the default is that they do not have to.
+ */
+export const TableSafetyHoldActivate = z
+  .object({
+    anonymous: z.boolean().default(true),
+  })
+  // `.strict()` is load-bearing, not hygiene: it means a client cannot smuggle a `reason` past
+  // this endpoint, so no UI can grow a "why did you stop us?" prompt against it by accident.
+  .strict();
+export type TableSafetyHoldActivate = z.infer<typeof TableSafetyHoldActivate>;
+
+/** POST /campaigns/:id/safety/release — facilitator only. */
+export const TableSafetyHoldRelease = z.object({
+  recovery: SafetyHoldRecovery,
+  /** The facilitator's own note about the recovery (audited, shown to the table). */
+  note: z.string().max(500).optional(),
+  /**
+   * Only meaningful with `recovery: 'veil'` — appended to the session-zero charter's veils
+   * so a stop that produced a new soft limit actually changes what the table (and the AI,
+   * which reads the same charter) plays going forward, instead of being a banner nobody
+   * revisits.
+   */
+  veil: z.string().min(1).max(500).optional(),
+}).strict();
+export type TableSafetyHoldRelease = z.infer<typeof TableSafetyHoldRelease>;
+
+/** Error code returned (409) by every play-advancement path while a hold is active. */
+export const TABLE_SAFETY_HOLD_ERROR_CODE = 'TABLE_SAFETY_HOLD';
+
 // ---------- participant-owned access-support preferences (issue #877) ----------
 // Practical participation support belongs to the participant who supplied it. Human
 // visibility and model use are intentionally separate decisions: facilitator-only does
@@ -2449,6 +2567,12 @@ export const NotificationType = z.enum([
   // The driver AI-DM got stuck / a recovery lever was pulled (issue #314): AI errored/looped,
   // budget exhausted, a ruling was disputed, a table vote resolved, or a human took the seat.
   'ai_dm_alert',
+  // Issue #599: a table safety hold (X-Card) was raised or resolved. Its own type rather than
+  // a reuse of ai_dm_alert because it fires on tables with no AI seat at all, and because
+  // "AI DM Alert" is the wrong thing to show someone whose table just stopped for safety.
+  // Maps to the always-on `security` category below: a safety stop must not be mutable by a
+  // notification preference or deferrable into a digest.
+  'safety_hold',
 ]);
 export type NotificationType = z.infer<typeof NotificationType>;
 
@@ -2500,7 +2624,7 @@ export const NotificationCategory = z.enum([
   'proposals', // proposal_submitted, proposal_resolved
   'inbox', // inbox_submitted
   'access', // added_to_campaign, character_reassigned — ALWAYS ON (access control)
-  'security', // ai_dm_alert — ALWAYS ON (security/recovery)
+  'security', // ai_dm_alert, safety_hold — ALWAYS ON (security/recovery)
 ]);
 export type NotificationCategory = z.infer<typeof NotificationCategory>;
 
@@ -2545,6 +2669,7 @@ export const NOTIFICATION_TYPE_CATEGORY: Record<NotificationType, NotificationCa
   proposal_resolved: 'proposals',
   inbox_submitted: 'inbox',
   ai_dm_alert: 'security',
+  safety_hold: 'security',
 };
 
 /** Resolve the category a notification type belongs to. */
@@ -9042,6 +9167,12 @@ export const CampaignEventType = z.enum([
   // stream on the campaign (control signal — filtered from the data path like
   // membership.revoked). A reconnect hits requireMember and 404s.
   'campaign.trashed',
+  // Issue #599: a table safety hold (X-Card) was raised or released. Carries `active`
+  // and NOTHING else — not who, not why. Every client refetches GET /campaigns/:id/safety
+  // for the rest, exactly like the other thin ticks, and that endpoint is what enforces
+  // the anonymity rules. Putting the actor on the wire would hand every connected browser
+  // the one field the whole feature exists to withhold.
+  'safety.hold',
 ]);
 export type CampaignEventType = z.infer<typeof CampaignEventType>;
 export const CampaignEvent = z.discriminatedUnion('type', [
@@ -9156,6 +9287,14 @@ export const CampaignEvent = z.discriminatedUnion('type', [
     // SSE controllers complete every open stream; filtered from the data path.
     type: z.literal('campaign.trashed'),
     campaignId: Id,
+    at: IsoDate,
+  }),
+  z.object({
+    // Issue #599: safety hold raised (`active: true`) or released (`active: false`).
+    // Deliberately actor-free — see the note on 'safety.hold' in CampaignEventType.
+    type: z.literal('safety.hold'),
+    campaignId: Id,
+    active: z.boolean(),
     at: IsoDate,
   }),
 ]);

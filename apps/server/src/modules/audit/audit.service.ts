@@ -251,6 +251,15 @@ export class AuditService implements OnApplicationBootstrap {
     entityId?: number | null;
     campaignId?: number | null;
     detail?: string;
+    /**
+     * Overrides the ambient correlation id (#684). Pass `null` to write a row with NO
+     * requestId — the deliberate de-correlation path for issue #599's anonymous safety
+     * holds. `requestId` is a DM-queryable filter on the audit list, so an intentionally
+     * unattributed row that still carries the correlation id of the request that produced
+     * it is one join away from being attributed the moment any other row is ever written
+     * under that same request. Omit the field entirely for normal rows.
+     */
+    requestId?: string | null;
   }): Promise<void> {
     await this.db.insert(auditLog).values({
       campaignId: params.campaignId ?? null,
@@ -260,7 +269,7 @@ export class AuditService implements OnApplicationBootstrap {
       entityType: params.entityType ?? null,
       entityId: params.entityId ?? null,
       detail: params.detail ?? '',
-      requestId: getRequestId() ?? null,
+      requestId: params.requestId !== undefined ? params.requestId : (getRequestId() ?? null),
       createdAt: nowIso(),
     });
   }

@@ -81,6 +81,13 @@ function isCampaignEvent(value: unknown): value is CampaignEvent {
     // the shape so the guard stays honest if filtering ever changes.
     return true;
   }
+  // Issue #599: the table safety hold flipped. `active` is the ENTIRE payload — no actor, no
+  // reason — because this frame reaches every connected browser and an anonymous hold that put
+  // the activator on the wire would not be anonymous. Clients refetch GET /campaigns/:id/safety,
+  // which is where the anonymity rules are actually enforced.
+  if (v.type === 'safety.hold') {
+    return typeof v.active === 'boolean';
+  }
   return false;
 }
 
