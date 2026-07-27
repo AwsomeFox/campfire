@@ -6,8 +6,8 @@
       "url": "https://github.com/AwsomeFox/campfire/pull/1617",
       "headBranch": "fix/issue-670",
       "baseBranch": "main",
-      "updatedAt": "2026-07-27T21:14:31Z",
-      "notes": "Head c0670520 (+ test tweak). DM-only encounter roster gated; Devin SEC thread resolved. Waiting CI after follow-up push."
+      "updatedAt": "2026-07-27T21:18:23Z",
+      "notes": "Head c1ec467f. Merged main (activity rail) resolving RunSessionPage conflict. MERGEABLE. Waiting CI."
     }
   ]
 }
