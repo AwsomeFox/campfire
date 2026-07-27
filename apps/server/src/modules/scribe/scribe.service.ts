@@ -717,6 +717,16 @@ export class ScribeService implements OnApplicationBootstrap {
         const supportGuidance = aiSupports.length > 0
           ? `\n\nParticipant-authorized practical supports (apply respectfully; do not infer diagnoses):\n${JSON.stringify(aiSupports)}`
           : '';
+        // The seat's PERSONA travels here; the seat's TABLE STYLE deliberately does not (#1049).
+        //
+        // `AiDmService.takeTurn` applies `withTableStyle` to every turn kind, `recap` included,
+        // so two paths that both produce "a recap" disagree on purpose. The scribe is a
+        // different product: the line below replaces the speaker — this is the campaign scribe
+        // writing a record that gets filed as a proposal for the DM to review, not the AI DM
+        // taking a turn at the table. The style block announces itself as "How the DM of this
+        // table wants the game NARRATED", and two of its five axes (combatStyle, npcDepth)
+        // steer how to run combat and play NPCs, neither of which a post-session summary does.
+        // Asserted in ai-dm-table-style-surfaces.e2e-spec.ts so this stays a decision.
         system =
           (seatAfterLock.instructions ? `${seatAfterLock.instructions}\n\n` : '') +
           'You are the campaign scribe. Write a concise, in-voice session recap from the source material below. ' +
