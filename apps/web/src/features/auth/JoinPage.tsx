@@ -15,6 +15,7 @@ import { loginHrefWithReturn } from '../../lib/safeInternalPath';
 import { useAuth } from '../../app/auth';
 import { PasswordInput } from '../../components/PasswordInput';
 import { BrandMark } from '../../components/BrandMark';
+import { CharterPreviewPanel } from '../session-zero/CharterPreviewPanel';
 import {
   AUTH_ERROR_IDS,
   AUTH_FIELD_IDS,
@@ -47,6 +48,11 @@ export function JoinPage() {
   const [confirm, setConfirm] = useState('');
   const [error, setError] = useState<AuthErrorState | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  // Issue #600: consent must be an explicit act, so the join button stays disabled until
+  // the box is ticked. The server enforces the same gate — this is the affordance, not
+  // the control.
+  const [charterAccepted, setCharterAccepted] = useState(false);
+  const [declined, setDeclined] = useState(false);
 
   useLayoutEffect(() => {
     if (error) focusAuthError(error);
@@ -110,12 +116,31 @@ export function JoinPage() {
   // invite preview instead of losing the link (issue #478).
   const loginHref = loginHrefWithReturn(`/join/${code}`);
 
+  /** Issue #600: a recorded refusal rather than a closed tab. */
+  async function declineInvite() {
+    setError(null);
+    setSubmitting(true);
+    try {
+      await api.post(`${API}/invites/${encodeURIComponent(code)}/decline`, { note: '' });
+      setDeclined(true);
+    } catch (err) {
+      setError({
+        kind: 'form',
+        message: err instanceof ApiError ? err.message : AUTH_GENERIC_ERROR,
+      });
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
   async function joinAsCurrentUser() {
     if (!preview) return;
     setError(null);
     setSubmitting(true);
     try {
-      await api.post(`${API}/invites/${encodeURIComponent(code)}/join`);
+      await api.post(`${API}/invites/${encodeURIComponent(code)}/join`, {
+        acknowledgeVersion: preview.charter ? preview.charter.version : undefined,
+      });
       await refresh();
       navigate(`/c/${preview.campaignId}`, { replace: true });
     } catch (err) {
@@ -239,6 +264,40 @@ export function JoinPage() {
                     : `Joining as ${ROLE_BLURB[preview.role]}.`}
                 </p>
               </div>
+
+              {/*
+                Issue #600 — the boundaries, before the commitment. `charter` is null for a
+                campaign that never published a version, in which case this whole block is
+                absent and the join flow is exactly what it was.
+              */}
+              {preview.charter && !alreadyMember && (
+                <div className="w-full flex flex-col gap-3">
+                  <CharterPreviewPanel charter={preview.charter} />
+                  <label className="flex items-start gap-2 text-sm" style={{ textAlign: 'start' }}>
+                    <input
+                      type="checkbox"
+                      checked={charterAccepted}
+                      onChange={(e) => setCharterAccepted(e.target.checked)}
+                      style={{ marginTop: 3 }}
+                    />
+                    <span>I have read the table&rsquo;s boundaries and agree to play within them.</span>
+                  </label>
+                  {declined ? (
+                    <p className="text-muted" style={{ margin: 0, fontSize: 13 }}>
+                      Your decline has been recorded and the DM can see it. You have not joined.
+                    </p>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn"
+                      disabled={submitting}
+                      onClick={declineInvite}
+                    >
+                      Decline
+                    </button>
+                  )}
+                </div>
+              )}
 
               {me ? (
                 <div className="w-full flex flex-col gap-3">

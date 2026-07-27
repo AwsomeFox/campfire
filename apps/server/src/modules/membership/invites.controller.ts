@@ -11,7 +11,13 @@ import { SESSION_COOKIE_NAME } from '../auth/auth.constants';
 import { sessionCookieOptions } from '../auth/session-cookie';
 import { CampaignAccessService } from './campaign-access.service';
 import { InvitesService } from './invites.service';
-import { InviteCreateDto, InviteAcceptDto, InvitePolicyUpdateDto } from './invites.dto';
+import {
+  InviteCreateDto,
+  InviteAcceptDto,
+  InviteDeclineDto,
+  InviteJoinDto,
+  InvitePolicyUpdateDto,
+} from './invites.dto';
 
 /**
  * Same strict per-IP cap as the @Public auth routes (see auth.controller.ts):
@@ -105,7 +111,17 @@ export class JoinController {
   @Public()
   @INVITE_THROTTLE
   @Get(':code')
-  @ApiOperation({ summary: 'Preview an invite', description: 'Unauthenticated. Resolves a join code to the campaign name + role it grants. Unknown, expired, exhausted, revoked, suspended (archived/trashed/policy-off), and missing codes all return the same 404.' })
+  @ApiOperation({
+    summary: "Preview an invite, including the table's session-zero charter",
+    description:
+      'Unauthenticated. Resolves a join code to the campaign name, the role it grants, and (issue #600) the ' +
+      "PUBLISHED session-zero charter, so a person can read the table's lines, veils, safety tools and AI policy " +
+      'BEFORE committing rather than after. The charter is a narrow projection: a published version only (never ' +
+      "the DM's working draft), never private boundary submissions, and never member names or counts. `charter` is " +
+      'null and `consentRequired` false for a campaign that never published, whose join flow is unchanged. Unknown, ' +
+      'expired, exhausted, revoked, suspended (archived/trashed/policy-off), and missing codes all still return the ' +
+      'same 404.',
+  })
   @ApiResponse({ status: 200, description: 'Valid invite.' })
   @ApiResponse({ status: 404, description: 'Invalid or no longer active.' })
   async preview(@Param('code') code: string): Promise<InvitePreview> {
@@ -138,8 +154,31 @@ export class JoinController {
   @ApiOperation({ summary: 'Accept an invite as the current user', description: 'Adds the authenticated user to the campaign at the invite\'s role.' })
   @ApiResponse({ status: 201, description: 'Joined; returns the refreshed Me.' })
   @ApiResponse({ status: 404, description: 'Invite invalid or no longer active.' })
-  @ApiResponse({ status: 409, description: 'Already a member of this campaign.' })
-  async join(@Param('code') code: string, @CurrentUser() user: RequestUser): Promise<Me & { campaignId: number }> {
-    return this.invites.join(code, user);
+  @ApiResponse({ status: 409, description: 'Already a member, or charter acknowledgment missing/stale.' })
+  async join(
+    @Param('code') code: string,
+    @Body() body: InviteJoinDto,
+    @CurrentUser() user: RequestUser,
+  ): Promise<Me & { campaignId: number }> {
+    return this.invites.join(code, user, body.acknowledgeVersion);
+  }
+
+  @Post(':code/decline')
+  @ApiOperation({
+    summary: 'Decline an invite, on the record',
+    description:
+      'Issue #600. Records a refusal against the exact charter version the person was shown, WITHOUT creating a ' +
+      'membership. A decline that merely closed the tab told the DM nothing and left somebody who bounced off a ' +
+      'specific line indistinguishable from somebody who never opened the link. Returns `recorded: false` for a ' +
+      'campaign with no published charter — there is nothing concrete to decline against.',
+  })
+  @ApiResponse({ status: 201, description: 'Refusal recorded (or no charter to record against).' })
+  @ApiResponse({ status: 404, description: 'Invite invalid or no longer active.' })
+  async decline(
+    @Param('code') code: string,
+    @Body() body: InviteDeclineDto,
+    @CurrentUser() user: RequestUser,
+  ): Promise<{ recorded: boolean }> {
+    return this.invites.decline(code, user, body.note);
   }
 }

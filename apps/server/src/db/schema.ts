@@ -233,9 +233,123 @@ export const sessionZero = sqliteTable('session_zero', {
   safetyTools: text('safety_tools').notNull().default('[]'),
   houseRules: text('house_rules').notNull().default(''),
   toneAndExpectations: text('tone_and_expectations').notNull().default(''),
+  // Issue #600: how much of the PUBLISHED charter a not-yet-member sees at an invite link.
+  // 'boundaries' (default) | 'full'. Absent in older DBs pre-migration; see
+  // db/db.module.ts migrateSessionZeroConsent600().
+  previewPolicy: text('preview_policy').notNull().default('boundaries'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
+
+/**
+ * Issue #600: immutable published charter versions.
+ *
+ * `session_zero` above is the DM's mutable WORKING DRAFT. Publishing snapshots it here,
+ * and rows in this table are never updated afterwards — the service has no update path
+ * for them. That immutability is the feature, not an implementation detail: an
+ * acknowledgment points at one `id`, so "what did they actually agree to" stays
+ * answerable after the DM has revised the charter five more times.
+ */
+export const sessionZeroCharterVersions = sqliteTable(
+  'session_zero_charter_versions',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    campaignId: integer('campaign_id').notNull(),
+    /** 1-based per campaign, gapless. */
+    version: integer('version').notNull(),
+    lines: text('lines').notNull().default('[]'),
+    veils: text('veils').notNull().default('[]'),
+    safetyTools: text('safety_tools').notNull().default('[]'),
+    houseRules: text('house_rules').notNull().default(''),
+    toneAndExpectations: text('tone_and_expectations').notNull().default(''),
+    /** Whether this version WITHDREW a protection vs its predecessor. Frozen at publish. */
+    material: integer('material', { mode: 'boolean' }).notNull().default(false),
+    changeSummary: text('change_summary').notNull().default(''),
+    publishedBy: text('published_by').notNull().default(''),
+    publishedAt: text('published_at').notNull(),
+  },
+  (t) => ({
+    campaignVersionUnique: uniqueIndex('idx_charter_versions_campaign_version').on(t.campaignId, t.version),
+    campaignIdx: index('idx_charter_versions_campaign').on(t.campaignId, t.version),
+  }),
+);
+
+/** Issue #600: one participant's answer to ONE immutable version. */
+export const sessionZeroAcknowledgments = sqliteTable(
+  'session_zero_acknowledgments',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    campaignId: integer('campaign_id').notNull(),
+    versionId: integer('version_id').notNull(),
+    userId: text('user_id').notNull(),
+    userName: text('user_name').notNull().default(''),
+    /** 'acknowledged' | 'discuss' | 'declined'. Only the first clears the consent gate. */
+    state: text('state').notNull(),
+    note: text('note').notNull().default(''),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (t) => ({
+    versionUserUnique: uniqueIndex('idx_charter_acks_version_user').on(t.versionId, t.userId),
+    versionIdx: index('idx_charter_acks_version').on(t.versionId),
+  }),
+);
+
+/**
+ * Issue #600: a boundary sent privately to the facilitator.
+ *
+ * Never readable by other participants, never exported, never sent to a model. When
+ * `anonymous`, every facilitator-facing read path drops the submitter columns rather
+ * than merely declining to render them.
+ */
+export const sessionZeroBoundarySubmissions = sqliteTable(
+  'session_zero_boundary_submissions',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    campaignId: integer('campaign_id').notNull(),
+    kind: text('kind').notNull(),
+    text: text('text').notNull(),
+    anonymous: integer('anonymous', { mode: 'boolean' }).notNull().default(false),
+    /** Retained even when anonymous, solely so the submitter can withdraw their own row. */
+    submitterUserId: text('submitter_user_id').notNull(),
+    submitterName: text('submitter_name').notNull().default(''),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (t) => ({ campaignIdx: index('idx_charter_boundary_campaign').on(t.campaignId, t.id) }),
+);
+
+/**
+ * Issue #600: guardian consent, carrying NO date of birth.
+ *
+ * There is no birth date, age, or birth year column here, and there must never be one.
+ * `minorAttested` is an assertion, not a measurement — the point of the requirement is
+ * that the identifier is never collected, and a column that stored a date in order to
+ * compute this boolean would have already done the harm.
+ */
+export const sessionZeroGuardianConsents = sqliteTable(
+  'session_zero_guardian_consents',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    campaignId: integer('campaign_id').notNull(),
+    userId: text('user_id').notNull(),
+    userName: text('user_name').notNull().default(''),
+    versionId: integer('version_id').notNull(),
+    guardianName: text('guardian_name').notNull().default(''),
+    guardianEmail: text('guardian_email').notNull().default(''),
+    guardianRelationship: text('guardian_relationship').notNull().default(''),
+    minorAttested: integer('minor_attested', { mode: 'boolean' }).notNull().default(true),
+    status: text('status').notNull().default('pending'),
+    decisionNote: text('decision_note').notNull().default(''),
+    decidedAt: text('decided_at'),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (t) => ({
+    campaignUserUnique: uniqueIndex('idx_charter_guardian_campaign_user').on(t.campaignId, t.userId),
+    campaignIdx: index('idx_charter_guardian_campaign').on(t.campaignId, t.status),
+  }),
+);
 
 // Participant-owned practical access supports (issue #877). owner_user_id uses
 // the same identity space as notes/characters (real numeric ids serialized as

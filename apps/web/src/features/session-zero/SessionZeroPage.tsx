@@ -41,6 +41,7 @@ import { PageTitle } from '../../components/PageTitle';
 import { TermHelp } from '../../components/TermHelp';
 import { StaleWriteConflict, type ConflictField } from '../../components/StaleWriteConflict';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
+import { CharterConsentPanel } from './CharterConsentPanel';
 
 type Draft = SessionZeroCharterDraft;
 
@@ -381,6 +382,16 @@ export default function SessionZeroPage() {
             </Btn>
           </div>
         </>
+      )}
+
+      {/*
+        Issue #600 — versions and the consent gate. Shown to EVERY member, not just the
+        DM: the whole point is that a participant can see which version the table is
+        operating under and answer the one awaiting them. The DM additionally gets the
+        publish control and the outstanding list from inside the panel.
+      */}
+      {!loading && !editing && cid !== null && (
+        <CharterConsentPanel campaignId={cid} isDm={isDm} onPublished={() => void load()} />
       )}
 
       {isDm && charter && !editing && (

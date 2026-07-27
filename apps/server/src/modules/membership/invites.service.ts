@@ -8,7 +8,7 @@ import {
 import { and, asc, eq, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import { InviteCreate } from '@campfire/schema';
-import type { CampaignInvite, InvitePreview, InviteRole, Me } from '@campfire/schema';
+import type { CampaignInvite, InvitePreview, InviteRole, Me, SessionZeroCharterVersion } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { campaignInvites, campaignMembers, campaigns, users } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -17,9 +17,16 @@ import { auditActor, type RequestUser } from '../../common/user.types';
 import { AuditService } from '../audit/audit.service';
 import { AuthService, type SessionIssueResult } from '../auth/auth.service';
 import { SettingsService } from '../settings/settings.service';
+import { SessionZeroConsentService } from '../session-zero/session-zero-consent.service';
 
 type InviteCreateInput = z.infer<typeof InviteCreate>;
-type InviteAcceptInput = { username: string; password: string; displayName?: string };
+type InviteAcceptInput = {
+  username: string;
+  password: string;
+  displayName?: string;
+  /** Issue #600: the charter version NUMBER the joiner is agreeing to, when one is published. */
+  acknowledgeVersion?: number;
+};
 type CampaignJoinGate = {
   id: number;
   name: string;
@@ -60,6 +67,8 @@ export class InvitesService {
     private readonly audit: AuditService,
     private readonly auth: AuthService,
     private readonly settings: SettingsService,
+    // Issue #600: the pre-join charter preview and the acknowledgment gate.
+    private readonly consent: SessionZeroConsentService,
   ) {}
 
   private toDomain(row: typeof campaignInvites.$inferSelect): CampaignInvite {
@@ -319,15 +328,75 @@ export class InvitesService {
     return { invite: row, campaign };
   }
 
-  /** Public preview for the join page: what campaign, joining as what, until when. */
+  /**
+   * Public preview for the join page: what campaign, joining as what, until when — and
+   * (issue #600) WHAT THE TABLE HAS AGREED TO.
+   *
+   * The charter is the reason this endpoint exists in its current form. Previously a
+   * prospective player could learn a campaign's name and their role and nothing else, so
+   * the only way to discover the table's lines and veils was to join — which is exactly
+   * the commitment those boundaries were supposed to inform.
+   *
+   * `previewForInvite` is a deliberately narrow projection: a PUBLISHED version only
+   * (never the DM's working draft), no private boundary submissions, no member names or
+   * counts, and nothing outside the charter tables. It returns null for a campaign that
+   * has never published, and `consentRequired` is then false — such a campaign's join
+   * flow is byte-for-byte what it was before this issue, which is what keeps every
+   * existing invite working.
+   *
+   * Note this runs BEFORE any authentication, on a throttled public route, and inherits
+   * getValidInvite's uniform 404: a caller still cannot distinguish an unknown code from
+   * an expired one, and now cannot use the charter's presence to distinguish them either.
+   */
   async preview(code: string): Promise<InvitePreview> {
     const { invite, campaign } = await this.getValidInvite(code);
+    const charter = await this.consent.previewForInvite(campaign.id);
     return {
       campaignId: campaign.id,
       campaignName: campaign.name,
       role: invite.role as InviteRole,
       expiresAt: invite.expiresAt,
+      charter,
+      consentRequired: charter !== null,
     };
+  }
+
+  /**
+   * Record a refusal WITHOUT creating a membership (issue #600).
+   *
+   * "Decline" that merely closes the tab tells the DM nothing, and leaves a person who
+   * bounced off a specific line indistinguishable from one who never opened the link. An
+   * authenticated decline is stored against the exact charter version the person was
+   * shown, so the objection points at something concrete.
+   */
+  async decline(code: string, user: RequestUser, note: string): Promise<{ recorded: boolean }> {
+    const { campaign } = await this.getValidInvite(code);
+    const version = await this.consent.latestVersion(campaign.id);
+    if (version === null) return { recorded: false };
+    await this.consent.recordAcknowledgment(campaign.id, version, user, 'declined', note);
+    return { recorded: true };
+  }
+
+  /**
+   * Enforce the pre-join consent gate.
+   *
+   * A campaign with a published charter requires the joiner to name the version they are
+   * agreeing to, and it must be the CURRENT one — accepting a stale id would let a link
+   * shared before a material change carry consent forward across it, which is the whole
+   * failure mode this issue is about. Campaigns that never published skip this entirely.
+   */
+  private async assertCharterAcknowledged(
+    campaignId: number,
+    acknowledgeVersion?: number,
+  ): Promise<SessionZeroCharterVersion | null> {
+    const latest = await this.consent.latestVersion(campaignId);
+    if (latest === null) return null;
+    if (acknowledgeVersion !== latest.version) {
+      throw new ConflictException(
+        'This table has a session-zero charter you must acknowledge before joining. Reload the invite to see the current version.',
+      );
+    }
+    return latest;
   }
 
   /**
@@ -349,6 +418,10 @@ export class InvitesService {
     if (!(await this.settings.getAllowLocalLogin())) {
       throw new ForbiddenException('Local sign-in is disabled on this server — ask the admin for an account');
     }
+
+    // Issue #600: same gate as join(), applied before the account is created so a
+    // refused acceptance does not leave a stranded user row.
+    const gatedVersion = await this.assertCharterAcknowledged(early.campaign.id, input.acknowledgeVersion);
 
     const passwordHash = hashPassword(input.password);
     const ts = nowIso();
@@ -412,12 +485,24 @@ export class InvitesService {
       detail: `user=${seated.userId} role=${seated.role} (new account)`,
     });
 
+    // Issue #600: record the acknowledgment against the brand-new account, now that it
+    // has an id to attach to. The gate itself was enforced before the transaction.
+    if (gatedVersion !== null) {
+      await this.consent.recordAcknowledgment(
+        seated.campaignId,
+        gatedVersion,
+        { id: String(seated.userId), name: input.displayName || input.username, serverRole: 'user' },
+        'acknowledged',
+        '',
+      );
+    }
+
     const session = await this.auth.issueSessionFor(seated.userId);
     return { ...session, campaignId: seated.campaignId };
   }
 
   /** Accept as an already-authenticated user: just adds the membership. */
-  async join(code: string, user: RequestUser): Promise<Me & { campaignId: number }> {
+  async join(code: string, user: RequestUser, acknowledgeVersion?: number): Promise<Me & { campaignId: number }> {
     const userId = Number(user.id);
     if (!Number.isInteger(userId)) {
       // dev:* header users have no DB row to attach a membership to.
@@ -426,11 +511,23 @@ export class InvitesService {
 
     const { invite, campaign } = await this.getValidInvite(code);
 
+    // Issue #600: a table with a published charter will not seat somebody who has not
+    // named the version they are agreeing to. Checked BEFORE the membership insert, so a
+    // refused join leaves no trace of a seat that briefly existed.
+    const gatedVersion = await this.assertCharterAcknowledged(campaign.id, acknowledgeVersion);
+
     // The already-a-member check is folded into addMembership's transaction so a
     // concurrent accept/join can't slip a membership in between this read and the
     // insert below (the UNIQUE(campaign_id, user_id) index is the final backstop,
     // but surfacing a clean 409 here avoids relying on a raw constraint error).
     await this.addMembership(invite, userId, { rejectIfMember: true });
+
+    // Recorded after the seat exists: the acknowledgment is a fact about a member, and
+    // writing it for somebody whose join then failed would leave a consent record with
+    // nobody behind it.
+    if (gatedVersion !== null) {
+      await this.consent.recordAcknowledgment(campaign.id, gatedVersion, user, 'acknowledged', '');
+    }
 
     await this.audit.log({
       actor: auditActor(user),

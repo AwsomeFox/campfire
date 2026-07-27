@@ -3258,6 +3258,189 @@ function migrateCampaignModules585(sqlite: Database.Database): void {
   addColumn('detached_at', 'detached_at TEXT');
 }
 
+/**
+ * Issue #600: session-zero consent lifecycle.
+ *
+ * Five pieces, all probe-before-act and all idempotent:
+ *
+ *  1. `session_zero.preview_policy` — ADD COLUMN with a constant NOT NULL default, so
+ *     existing charters backfill to the conservative 'boundaries' value in one statement.
+ *     No table rebuild.
+ *  2-5. Four brand-new tables. House style (see migrateAiDriverGroundingClaims577):
+ *     probe sqlite_master, verify the expected column set, DROP/recreate only when an
+ *     earlier partial shape is found, and leave a correct pre-existing table untouched.
+ *
+ * The tables are created in FK dependency order — versions before acknowledgments and
+ * guardian consents, which reference it — because SQLite validates a REFERENCES clause
+ * against the parent table at CREATE time when foreign_keys is on.
+ *
+ * Fresh DBs never take any of these paths; BOOTSTRAP_SQL already declares all five
+ * correctly. test/integration/db-migrations.spec.ts asserts fresh/upgraded parity.
+ */
+function migrateSessionZeroConsent600(sqlite: Database.Database): void {
+  const tableExists = (name: string): boolean =>
+    sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(name) !== undefined;
+
+  if (tableExists('session_zero')) {
+    const columns = sqlite.prepare('PRAGMA table_info(session_zero)').all() as Array<{ name: string }>;
+    if (!columns.some((c) => c.name === 'preview_policy')) {
+      sqlite.exec("ALTER TABLE session_zero ADD COLUMN preview_policy TEXT NOT NULL DEFAULT 'boundaries'");
+    }
+  }
+
+  /** Drop a table whose shape predates this migration; leave a correct one alone. */
+  const needsCreate = (table: string, expected: string[]): boolean => {
+    if (!tableExists(table)) return true;
+    const cols = sqlite.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    const names = new Set(cols.map((c) => c.name));
+    if (expected.every((c) => names.has(c))) return false;
+    sqlite.exec(`DROP TABLE ${table}`);
+    return true;
+  };
+
+  if (
+    needsCreate('session_zero_charter_versions', [
+      'id',
+      'campaign_id',
+      'version',
+      'lines',
+      'veils',
+      'safety_tools',
+      'house_rules',
+      'tone_and_expectations',
+      'material',
+      'change_summary',
+      'published_by',
+      'published_at',
+    ])
+  ) {
+    sqlite.exec(`
+      CREATE TABLE IF NOT EXISTS session_zero_charter_versions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+        version INTEGER NOT NULL,
+        lines TEXT NOT NULL DEFAULT '[]',
+        veils TEXT NOT NULL DEFAULT '[]',
+        safety_tools TEXT NOT NULL DEFAULT '[]',
+        house_rules TEXT NOT NULL DEFAULT '',
+        tone_and_expectations TEXT NOT NULL DEFAULT '',
+        material INTEGER NOT NULL DEFAULT 0 CHECK (material IN (0, 1)),
+        change_summary TEXT NOT NULL DEFAULT '',
+        published_by TEXT NOT NULL DEFAULT '',
+        published_at TEXT NOT NULL,
+        UNIQUE(campaign_id, version)
+      );
+      CREATE INDEX IF NOT EXISTS idx_charter_versions_campaign
+        ON session_zero_charter_versions(campaign_id, version);
+    `);
+  }
+
+  if (
+    needsCreate('session_zero_acknowledgments', [
+      'id',
+      'campaign_id',
+      'version_id',
+      'user_id',
+      'user_name',
+      'state',
+      'note',
+      'created_at',
+      'updated_at',
+    ])
+  ) {
+    sqlite.exec(`
+      CREATE TABLE IF NOT EXISTS session_zero_acknowledgments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+        version_id INTEGER NOT NULL REFERENCES session_zero_charter_versions(id) ON DELETE CASCADE,
+        user_id TEXT NOT NULL,
+        user_name TEXT NOT NULL DEFAULT '',
+        state TEXT NOT NULL CHECK (state IN ('acknowledged', 'discuss', 'declined')),
+        note TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(version_id, user_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_charter_acks_version ON session_zero_acknowledgments(version_id);
+      CREATE INDEX IF NOT EXISTS idx_charter_acks_campaign_user
+        ON session_zero_acknowledgments(campaign_id, user_id);
+    `);
+  }
+
+  if (
+    needsCreate('session_zero_boundary_submissions', [
+      'id',
+      'campaign_id',
+      'kind',
+      'text',
+      'anonymous',
+      'submitter_user_id',
+      'submitter_name',
+      'created_at',
+      'updated_at',
+    ])
+  ) {
+    sqlite.exec(`
+      CREATE TABLE IF NOT EXISTS session_zero_boundary_submissions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL CHECK (kind IN ('line', 'veil')),
+        text TEXT NOT NULL,
+        anonymous INTEGER NOT NULL DEFAULT 0 CHECK (anonymous IN (0, 1)),
+        submitter_user_id TEXT NOT NULL,
+        submitter_name TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_charter_boundary_campaign
+        ON session_zero_boundary_submissions(campaign_id, id);
+    `);
+  }
+
+  // Deliberately NO birth-date column, here or anywhere in this flow — see the table
+  // comment in bootstrap.sql.ts and the assertion in test/unit/session-zero-consent.spec.ts.
+  if (
+    needsCreate('session_zero_guardian_consents', [
+      'id',
+      'campaign_id',
+      'user_id',
+      'user_name',
+      'version_id',
+      'guardian_name',
+      'guardian_email',
+      'guardian_relationship',
+      'minor_attested',
+      'status',
+      'decision_note',
+      'decided_at',
+      'created_at',
+      'updated_at',
+    ])
+  ) {
+    sqlite.exec(`
+      CREATE TABLE IF NOT EXISTS session_zero_guardian_consents (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+        user_id TEXT NOT NULL,
+        user_name TEXT NOT NULL DEFAULT '',
+        version_id INTEGER NOT NULL REFERENCES session_zero_charter_versions(id) ON DELETE CASCADE,
+        guardian_name TEXT NOT NULL DEFAULT '',
+        guardian_email TEXT NOT NULL DEFAULT '',
+        guardian_relationship TEXT NOT NULL DEFAULT '',
+        minor_attested INTEGER NOT NULL DEFAULT 1 CHECK (minor_attested IN (0, 1)),
+        status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'granted', 'declined', 'withdrawn')),
+        decision_note TEXT NOT NULL DEFAULT '',
+        decided_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(campaign_id, user_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_charter_guardian_campaign
+        ON session_zero_guardian_consents(campaign_id, status);
+    `);
+  }
+}
+
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
   { name: '0001_users_oidc', run: migrateUsersTableForOidc },
   { name: '0002_campaigns_rule_system', run: migrateCampaignsTableForRuleSystem },
@@ -3428,6 +3611,13 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // contiguous or sorted. That is also why nothing is renumbered to look tidy: renaming a
   // migration a database has already recorded is the one edit that breaks run-once.
   { name: '0120_campaign_modules_585', run: migrateCampaignModules585 },
+  // 0127 was CENTRALLY ALLOCATED to issue #600 by the merge coordinator; the gap above
+  // (0122-0126) is held by other in-flight branches and must not be "tidied" down to the
+  // next free ordinal. runMigrations dedupes on the FULL name string, so the `_600` suffix
+  // is what guarantees this runs exactly once even if a sibling branch lands a colliding
+  // ordinal — and renaming this entry after a database has recorded it is the one edit
+  // that silently re-runs it.
+  { name: '0127_session_zero_consent_600', run: migrateSessionZeroConsent600 },
 ];
 
 /**

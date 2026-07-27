@@ -553,6 +553,128 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     }
   });
 
+  it('0127 creates the session-zero consent tables identically on fresh and upgraded DBs (#600)', () => {
+    expect(MIGRATION_NAMES).toContain('0127_session_zero_consent_600');
+
+    const expected = {
+      session_zero_charter_versions: [
+        'id',
+        'campaign_id',
+        'version',
+        'lines',
+        'veils',
+        'safety_tools',
+        'house_rules',
+        'tone_and_expectations',
+        'material',
+        'change_summary',
+        'published_by',
+        'published_at',
+      ].sort(),
+      session_zero_acknowledgments: [
+        'id',
+        'campaign_id',
+        'version_id',
+        'user_id',
+        'user_name',
+        'state',
+        'note',
+        'created_at',
+        'updated_at',
+      ].sort(),
+      session_zero_boundary_submissions: [
+        'id',
+        'campaign_id',
+        'kind',
+        'text',
+        'anonymous',
+        'submitter_user_id',
+        'submitter_name',
+        'created_at',
+        'updated_at',
+      ].sort(),
+      session_zero_guardian_consents: [
+        'id',
+        'campaign_id',
+        'user_id',
+        'user_name',
+        'version_id',
+        'guardian_name',
+        'guardian_email',
+        'guardian_relationship',
+        'minor_attested',
+        'status',
+        'decision_note',
+        'decided_at',
+        'created_at',
+        'updated_at',
+      ].sort(),
+    };
+
+    const upgradedDir = makeTempDataDir();
+    dataDir = makeTempDataDir();
+    try {
+      const fresh = openDatabase(dataDir);
+      const freshCols: Record<string, string[]> = {};
+      try {
+        for (const table of Object.keys(expected)) {
+          freshCols[table] = [...columnNames(fresh.sqlite, table)].sort();
+        }
+        expect(columnNames(fresh.sqlite, 'session_zero')).toContain('preview_policy');
+      } finally {
+        fresh.sqlite.close();
+      }
+
+      writeOldSchemaDb(upgradedDir);
+      const upgraded = openDatabase(upgradedDir);
+      try {
+        for (const [table, cols] of Object.entries(expected)) {
+          const upgradedCols = [...columnNames(upgraded.sqlite, table)].sort();
+          expect(upgradedCols).toEqual(cols);
+          // Fresh and upgraded must agree — the classic failure for this convention is
+          // bootstrap.sql and the migration drifting apart.
+          expect(upgradedCols).toEqual(freshCols[table]);
+        }
+
+        // The ADD COLUMN backfills the conservative value rather than leaving NULL,
+        // which would read as "no policy" and fail the enum on the way out.
+        expect(columnNames(upgraded.sqlite, 'session_zero')).toContain('preview_policy');
+        const policies = upgraded.sqlite
+          .prepare('SELECT preview_policy FROM session_zero')
+          .all() as Array<{ preview_policy: string }>;
+        for (const row of policies) expect(row.preview_policy).toBe('boundaries');
+
+        // The guardian table must carry NO age identifier on the upgraded path either —
+        // the requirement is that the column never exists, not that the API declines to
+        // populate it.
+        const guardianCols = columnNames(upgraded.sqlite, 'session_zero_guardian_consents');
+        expect(guardianCols.filter((c) => /birth|dob|age|year/i.test(c))).toEqual([]);
+
+        upgraded.sqlite
+          .prepare(
+            `INSERT INTO session_zero_charter_versions
+               (campaign_id, version, lines, veils, safety_tools, house_rules, tone_and_expectations, material, change_summary, published_by, published_at)
+             VALUES (1, 1, '[]', '[]', '[]', '', '', 0, '', '1', '2026-01-01T00:00:00.000Z')`,
+          )
+          .run();
+        expect(countRows(upgraded.sqlite, 'session_zero_charter_versions')).toBe(1);
+      } finally {
+        upgraded.sqlite.close();
+      }
+
+      // Re-opening must not drop or recreate anything (probe-before-act + name dedupe).
+      const again = openDatabase(upgradedDir);
+      try {
+        expect(countRows(again.sqlite, 'session_zero_charter_versions')).toBe(1);
+        expect(columnNames(again.sqlite, 'session_zero')).toContain('preview_policy');
+      } finally {
+        again.sqlite.close();
+      }
+    } finally {
+      fs.rmSync(upgradedDir, { recursive: true, force: true });
+    }
+  });
+
   it('0070 adds notifications.data on a legacy table and preserves JSON payloads', () => {
     dataDir = makeTempDataDir();
     const seeded = openDatabase(dataDir);

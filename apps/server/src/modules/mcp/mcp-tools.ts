@@ -134,6 +134,7 @@ import { AiDmService } from '../ai-dm/ai-dm.service';
 import { CoDmService } from '../ai-dm/co-dm.service';
 import { AttachmentsService } from '../attachments/attachments.service';
 import { SessionZeroService } from '../session-zero/session-zero.service';
+import { SessionZeroConsentService } from '../session-zero/session-zero-consent.service';
 import { SupportPreferencesService } from '../session-zero/support-preferences.service';
 import { InventoryService } from '../inventory/inventory.service';
 import { TimelineService } from '../timeline/timeline.service';
@@ -413,7 +414,47 @@ export class McpToolsService {
     private readonly actionResolver: ActionResolverService,
     private readonly invites: InvitesService,
     private readonly notifications: NotificationsService,
+    // Issue #600: resolves the ACCEPTED effective charter version. Appended LAST on
+    // purpose — test/unit/mcp-rest-parity.spec.ts constructs this service positionally
+    // with placeholder arguments, so inserting a parameter in the middle would silently
+    // shift every dependency after it rather than failing loudly.
+    private readonly sessionZeroConsent: SessionZeroConsentService,
   ) {}
+
+  /**
+   * The charter every AI surface is bound by (issue #600).
+   *
+   * This is the ONE place the "AI uses the accepted effective version" criterion is
+   * enforced, and it is enforced here rather than in the Driver on purpose: the Driver,
+   * the co-DM, Scribe and any external MCP client all read the charter through this tool,
+   * so binding it at the tool means none of them can drift onto the draft independently.
+   *
+   * Falls back to the DM's draft only when a campaign has published nothing at all —
+   * such a table has no consent record to honour, and this keeps every pre-#600 campaign
+   * behaving exactly as it did. When a newer version is awaiting acknowledgment, the
+   * model keeps operating under the last version everybody agreed to, which is the safe
+   * direction: an unacknowledged version is typically one that WITHDREW a protection.
+   */
+  // Public so the #600 e2e can assert the exact code path the AI reads through, rather
+  // than re-deriving the answer beside it and proving only that the test agrees with
+  // itself. Callers other than get_session_zero should not use it — go through the tool.
+  async effectiveSessionZero(campaignId: number) {
+    const draft = await this.sessionZero.get(campaignId);
+    const accepted = await this.sessionZeroConsent.effectiveCharter(campaignId);
+    if (!accepted) {
+      return { ...draft, charterVersion: 0, charterSource: 'draft' as const };
+    }
+    return {
+      ...draft,
+      lines: accepted.lines,
+      veils: accepted.veils,
+      safetyTools: accepted.safetyTools,
+      houseRules: accepted.houseRules,
+      toneAndExpectations: accepted.toneAndExpectations,
+      charterVersion: accepted.version,
+      charterSource: 'accepted' as const,
+    };
+  }
 
   buildServer(user: RequestUser, collector?: Map<string, DriverTool>): McpServer {
     const server = new McpServer(SERVER_INFO, {
@@ -714,11 +755,13 @@ export class McpToolsService {
       "The campaign's session-zero charter — lines (hard limits: content that never appears), veils (soft limits: " +
         'kept off-screen), the safety tools the table agreed to use (X-Card, Open Door, …), house rules, and tone/' +
         'content expectations. Any AI running or assisting at this table MUST respect these boundaries. Read-only over ' +
-        'MCP; a campaign that never ran session zero returns empty fields.',
+        'MCP; a campaign that never ran session zero returns empty fields. Returns the ACCEPTED charter version ' +
+        '(issue #600) — the one participants actually agreed to — not the DM’s unpublished draft and not a newer ' +
+        'version still awaiting acknowledgment. `charterVersion` and `charterSource` say which you got.',
       { campaignId: CampaignIdArg },
       async ({ campaignId }) => {
         await this.access.requireMember(user, campaignId as number);
-        return this.sessionZero.get(campaignId as number);
+        return this.effectiveSessionZero(campaignId as number);
       },
     );
 

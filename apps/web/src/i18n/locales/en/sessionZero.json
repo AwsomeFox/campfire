@@ -11,7 +11,10 @@
       "load": "Couldn't load the session-zero charter.",
       "save": "Couldn't save the charter.",
       "saveSupport": "Couldn't save your support preference.",
-      "deleteSupport": "Couldn't delete your support preference."
+      "deleteSupport": "Couldn't delete your support preference.",
+      "loadConsent": "Couldn't load charter consent.",
+      "acknowledge": "Couldn't record your answer.",
+      "publish": "Couldn't publish the charter version."
     },
     "savedSupport": "Your support preference was saved.",
     "deletedSupport": "Your support preference was deleted.",
@@ -50,6 +53,46 @@
         "formHelp": "Optional markdown for grit vs. heroism, comedy vs. seriousness, spotlight and PvP norms.",
         "placeholder": "Gritty vs. heroic, comedic vs. serious, spotlight & PvP norms…"
       }
+    },
+    "preview": {
+      "heading": "This table's boundaries",
+      "intro": "Agreed by the table as charter version {{version}}. Read it before you join — you can decline.",
+      "noneRecorded": "None recorded.",
+      "boundariesOnly": "House rules and tone are shared with the table after you join.",
+      "aiHeading": "AI and your words",
+      "aiDisabled": "This table does not send member-authored material to external AI providers.",
+      "aiMemberConsent": "This table may send member-authored material to external AI providers, but only for members who separately opt in."
+    },
+    "consent": {
+      "heading": "Charter versions & consent",
+      "noVersionsDm": "No version published yet. Publish the draft so the table can acknowledge it, and so AI is bound by an agreed version.",
+      "noVersionsPlayer": "The DM has not published a charter version yet.",
+      "effective": "The table is playing under version {{version}}.",
+      "noneEffective": "No version has been agreed yet.",
+      "latest": "latest published: v{{version}}",
+      "awaitingMaterial": "A newer version withdrew a protection. It does not take effect until everyone acknowledges it.",
+      "awaitingRoutine": "A newer version is published and awaiting acknowledgment.",
+      "removedLines": "Lines removed:",
+      "removedVeils": "Veils removed:",
+      "removedSafetyTools": "Safety tools removed:",
+      "addedLines": "Lines added:",
+      "addedVeils": "Veils added:",
+      "addedSafetyTools": "Safety tools added:",
+      "dmNote": "DM's note: {{note}}",
+      "yours": {
+        "acknowledged": "You have acknowledged the latest version.",
+        "discuss": "You asked to discuss the latest version.",
+        "declined": "You declined the latest version."
+      },
+      "yoursNone": "You have not answered the latest version yet.",
+      "noteLabel": "Note (required to discuss or decline)",
+      "summaryLabel": "What changed and why (shown to the table)",
+      "acknowledge": "Acknowledge",
+      "discuss": "Discuss",
+      "decline": "Decline",
+      "outstanding": "Still to answer: {{names}}",
+      "publish": "Publish draft as new version",
+      "publishHint": "Snapshots the draft. Removing a line, veil or safety tool requires everyone to acknowledge again."
     }
   }
 }
