@@ -51,6 +51,7 @@ describe('backup streaming writer (#603)', () => {
   it('rejects an overlapping whole-server backup', async () => {
     const svc = service();
     const output = new PassThrough();
+    output.resume();
     const first = svc.buildBackup(undefined, output);
     await expect(svc.buildBackup()).rejects.toThrow('already in progress');
     await first;

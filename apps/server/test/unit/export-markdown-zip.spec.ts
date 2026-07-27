@@ -146,6 +146,18 @@ describe('buildMarkdownZip — filename collisions (issues #530 / #863)', () => 
     expect(zip.file('campaign.json')).not.toBeNull();
   });
 
+  it('rejects a pre-aborted streaming export without writing output', async () => {
+    const service = serviceWithCollisions();
+    const controller = new AbortController();
+    const output = new PassThrough();
+    const chunks: Buffer[] = [];
+    output.on('data', (chunk: Buffer) => chunks.push(chunk));
+    controller.abort(new Error('cancelled by test'));
+
+    await expect(service.streamMarkdownZip(output, controller.signal, 1, USER)).rejects.toThrow('cancelled by test');
+    expect(chunks).toHaveLength(0);
+  });
+
   it('produces one zip entry per source entity in every folder', async () => {
     const service = serviceWithCollisions();
     const { buffer } = await service.buildMarkdownZip(1, USER);

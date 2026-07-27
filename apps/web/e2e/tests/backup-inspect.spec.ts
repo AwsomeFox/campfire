@@ -197,7 +197,7 @@ test.describe('server backup workflow UI (issues #514 / #444)', () => {
       Object.defineProperty(window, 'showSaveFilePicker', { value: undefined, configurable: true });
       const nativeFetch = window.fetch.bind(window);
       window.fetch = (input, init) => {
-        const url = typeof input === 'string' ? input : input.url;
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
         if (!url.endsWith('/api/v1/backup')) return nativeFetch(input, init);
         const stream = new ReadableStream<Uint8Array>({
           start(controller) {

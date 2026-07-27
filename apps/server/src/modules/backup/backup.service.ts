@@ -14,7 +14,6 @@ import {
   type OnApplicationBootstrap,
 } from '@nestjs/common';
 import Database from 'better-sqlite3';
-import JSZip from 'jszip';
 import { BackupArchiveReader, MAX_KEY_ENVELOPE_BYTES, MAX_MANIFEST_BYTES } from './backup-archive-reader';
 import { DB_HOLDER, DbHolder, dbFilePath, resolveDataDir } from '../../db/db.module';
 import { decryptSecret } from '../../common/crypto';
@@ -235,57 +234,6 @@ function looksLikeSqlite(buf: Buffer): boolean {
   return buf.length >= SQLITE_MAGIC.length && buf.subarray(0, SQLITE_MAGIC.length).equals(SQLITE_MAGIC);
 }
 
-/** Max attempts to read an attachment file whose size is changing (#828). */
-const MAX_ATTACHMENT_RETRIES = 3;
-
-/**
- * Read a file with retry-on-size-change (#828). If the file's size differs between two
- * reads (indicating a concurrent overwrite), retry up to {@link MAX_ATTACHMENT_RETRIES}
- * times. Returns the final captured bytes and whether the size changed at any point.
- * Returns null if the file is truly absent (ENOENT after retries).
- */
-function readWithRetry(absPath: string): { bytes: Buffer; changed: boolean } | null {
-  let priorSize = -1;
-  let changed = false;
-  for (let attempt = 0; attempt < MAX_ATTACHMENT_RETRIES; attempt++) {
-    try {
-      const stat = fs.statSync(absPath);
-      const bytes = fs.readFileSync(absPath);
-      // Detect an in-flight overwrite: if the size we read differs from the previous
-      // stat, or if the current stat differs from the just-read bytes' length, the file
-      // was rewritten mid-read. Retry once more to catch a stable read.
-      if (priorSize >= 0 && stat.size !== priorSize) {
-        changed = true;
-      }
-      if (bytes.length !== stat.size) {
-        // The file grew or shrank between stat and read — retry with a fresh stat.
-        priorSize = stat.size;
-        changed = true;
-        continue;
-      }
-      return { bytes, changed };
-    } catch (err) {
-      const e = err as NodeJS.ErrnoException;
-      if (e.code === 'ENOENT') return null;
-      // Any other error (permissions etc.) is fatal for THIS file — treat as missing
-      // and let the caller record it in reconciliation. Log at the caller.
-      return null;
-    }
-  }
-  // Retries exhausted with the size still moving — capture whatever we can get now.
-  try {
-    const bytes = fs.readFileSync(absPath);
-    return { bytes, changed: true };
-  } catch {
-    return null;
-  }
-}
-
-/** sha256 hex digest for a byte buffer. */
-function sha256Hex(bytes: Buffer): string {
-  return createHash('sha256').update(bytes).digest('hex');
-}
-
 /** Hash a file without retaining its contents in the V8 heap. */
 async function hashFile(filePath: string): Promise<{ bytes: number; sha256: string }> {
   const hash = createHash('sha256');
@@ -301,14 +249,27 @@ async function hashFile(filePath: string): Promise<{ bytes: number; sha256: stri
 }
 
 /** Make an immutable per-run attachment copy while calculating its manifest hash. */
-async function stageAndHashFile(sourcePath: string, stagedPath: string): Promise<{ bytes: number; sha256: string }> {
+async function stageAndHashFile(
+  sourcePath: string,
+  stagedPath: string,
+  signal?: AbortSignal,
+): Promise<{ bytes: number; sha256: string }> {
   const hash = createHash('sha256');
   let bytes = 0;
   const tap = new PassThrough();
   tap.on('data', (chunk: Buffer) => { bytes += chunk.length; hash.update(chunk); });
   fs.mkdirSync(path.dirname(stagedPath), { recursive: true });
-  await pipeline(fs.createReadStream(sourcePath), tap, fs.createWriteStream(stagedPath, { flags: 'wx', mode: 0o600 }));
+  await pipeline(
+    fs.createReadStream(sourcePath),
+    tap,
+    fs.createWriteStream(stagedPath, { flags: 'wx', mode: 0o600 }),
+    { signal },
+  );
   return { bytes, sha256: hash.digest('hex') };
+}
+
+function assertBackupNotCancelled(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new Error('Backup generation cancelled');
 }
 
 /** Normalize on-disk keyfile bytes (64-hex UTF-8) or raw 32-byte material. */
@@ -387,8 +348,8 @@ export class BackupService implements OnApplicationBootstrap {
    * and re-checked under it, so only one scheduled run is ever in flight.
    */
   private scheduledRunning = false;
-  /** A VACUUM/snapshot archive is intentionally serialized across HTTP and cron. */
-  private backupRunning = false;
+  /** Whole-server archive creation and destructive restore share one serialized lane. */
+  private archiveOperation: 'backup' | 'restore' | null = null;
 
   constructor(
     @Inject(DB_HOLDER) private readonly holder: DbHolder,
@@ -397,6 +358,19 @@ export class BackupService implements OnApplicationBootstrap {
     private readonly attachments: AttachmentsService,
     private readonly aiProviderConfig: AiProviderConfigService,
   ) {}
+
+  private beginArchiveOperation(kind: 'backup' | 'restore'): void {
+    if (this.archiveOperation) {
+      throw new ServiceUnavailableException(
+        `A whole-server ${this.archiveOperation} operation is already in progress; retry shortly`,
+      );
+    }
+    this.archiveOperation = kind;
+  }
+
+  private endArchiveOperation(kind: 'backup' | 'restore'): void {
+    if (this.archiveOperation === kind) this.archiveOperation = null;
+  }
 
   /**
    * #496: Detect where the running server sourced its AI credential
@@ -747,15 +721,14 @@ export class BackupService implements OnApplicationBootstrap {
   private async verifyScheduledArchive(
     filePath: string,
   ): Promise<{ verified: boolean; checksum: string | null; error: string }> {
-    let buffer: Buffer;
+    let checksum: string;
     try {
-      buffer = fs.readFileSync(filePath);
+      checksum = (await hashFile(filePath)).sha256;
     } catch (err) {
       return { verified: false, checksum: null, error: err instanceof Error ? err.message : String(err) };
     }
-    const checksum = createHash('sha256').update(buffer).digest('hex');
     try {
-      const inspect = await this.inspect(buffer);
+      const inspect = await this.inspectFile(filePath);
       if (inspect.reconciliation && !inspect.reconciliation.clean) {
         return { verified: false, checksum, error: 'archive reconciliation is not clean' };
       }
@@ -945,22 +918,29 @@ export class BackupService implements OnApplicationBootstrap {
   async buildBackup(options?: BuildBackupOptions): Promise<Buffer>;
   async buildBackup(options: BuildBackupOptions | undefined, output: Writable): Promise<void>;
   async buildBackup(options?: BuildBackupOptions, output?: Writable): Promise<Buffer | void> {
-    if (this.backupRunning) {
-      throw new ServiceUnavailableException('A whole-server backup is already in progress; retry shortly');
-    }
-    this.backupRunning = true;
-    const dataDir = resolveDataDir();
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'campfire-backup-'));
-    const snapshotPath = path.join(tmpDir, 'campfire.db');
+    this.beginArchiveOperation('backup');
+    let tmpDir: string | null = null;
     try {
+      assertBackupNotCancelled(options?.signal);
+      const dataDir = resolveDataDir();
+      const estimatedBytes = this.estimateFallbackBackupBytes();
+      const tempDisk = this.probeDisk(os.tmpdir(), parseBackupMinFreeBytes(), estimatedBytes);
+      if (tempDisk?.lowSpace) {
+        throw new ServiceUnavailableException(
+          `Backup staging skipped: low temporary disk space ` +
+            `(free ${tempDisk.freeBytes}B, estimate ${estimatedBytes}B, reserve ${tempDisk.reserveBytes}B)`,
+        );
+      }
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'campfire-backup-'));
+      const snapshotPath = path.join(tmpDir, 'campfire.db');
       // VACUUM INTO requires the target file NOT to exist (tmpDir is empty). Escape the
       // path for the SQL string literal. This is our generation boundary — every read
       // below is against this snapshot, not the live DB.
       this.holder.raw.exec(`VACUUM INTO '${snapshotPath.replace(/'/g, "''")}'`);
+      assertBackupNotCancelled(options?.signal);
       const zip = archiver('zip', { zlib: { level: 6 } });
-      // JSZip accepts node streams.  Keep the snapshot on disk and let its ZIP
-      // entry pull from disk under output backpressure rather than materializing
-      // the database in the V8 heap.
+      // Keep the snapshot on disk and let the ZIP writer pull from it under
+      // output backpressure instead of materializing the database in the V8 heap.
       const dbSize = safeFileBytes(snapshotPath);
       zip.file(snapshotPath, { name: DB_ENTRY });
 
@@ -1011,7 +991,7 @@ export class BackupService implements OnApplicationBootstrap {
         // Concurrent overwrite OR captured bytes disagree with the snapshot row size
         // → restored DB would be internally inconsistent with the archived file.
         const staged = path.join(tmpDir, 'uploads', rel);
-        const captured = await stageAndHashFile(abs, staged);
+        const captured = await stageAndHashFile(abs, staged, options?.signal);
         const after = safeFileBytes(abs);
         if (before !== after || captured.bytes !== before || captured.bytes !== row.size) changed++;
         // Do not retain attachment bytes: the ZIP producer reads this file as
@@ -1131,31 +1111,27 @@ export class BackupService implements OnApplicationBootstrap {
       }
 
       const archive = zip;
-      if (options?.signal) {
-        const abort = () => archive.destroy(new Error('Backup generation cancelled'));
-        if (options.signal.aborted) abort();
-        else options.signal.addEventListener('abort', abort, { once: true });
-      }
-      if (output) {
-        archive.once('error', (err) => output.destroy(err));
-        archive.pipe(output);
-        const done = finished(output);
-        await archive.finalize();
-        await done;
-        return;
-      }
       const chunks: Buffer[] = [];
-      const sink = new PassThrough();
+      const sink = output ?? new PassThrough();
       archive.once('error', (err) => sink.destroy(err));
       archive.pipe(sink);
-      sink.on('data', (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+      if (!output) {
+        sink.on('data', (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+      }
+      const abort = () => archive.destroy(new Error('Backup generation cancelled'));
+      options?.signal?.addEventListener('abort', abort, { once: true });
       const done = finished(sink);
-      await archive.finalize();
-      await done;
-      return Buffer.concat(chunks);
+      try {
+        assertBackupNotCancelled(options?.signal);
+        await archive.finalize();
+        await done;
+        return output ? undefined : Buffer.concat(chunks);
+      } finally {
+        options?.signal?.removeEventListener('abort', abort);
+      }
     } finally {
-      fs.rmSync(tmpDir, { recursive: true, force: true });
-      this.backupRunning = false;
+      if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+      this.endArchiveOperation('backup');
     }
   }
 
@@ -1225,9 +1201,11 @@ export class BackupService implements OnApplicationBootstrap {
       );
     }
 
-    const zip = await BackupArchiveReader.open(archivePath, options?.signal);
+    this.beginArchiveOperation('restore');
     try {
-    const manifest = await this.readManifestFromArchive(zip, options?.signal);
+      const zip = await BackupArchiveReader.open(archivePath, options?.signal);
+      try {
+        const manifest = await this.readManifestFromArchive(zip, options?.signal);
 
     const envelopeEntry = zip.get(KEY_ENVELOPE_ENTRY);
     if (manifest.aiKeyIncluded && !envelopeEntry) {
@@ -1429,14 +1407,11 @@ export class BackupService implements OnApplicationBootstrap {
     } finally {
       fs.rmSync(stageDir, { recursive: true, force: true });
     }
-    } finally { zip.close(); }
-  }
-
-  private async loadBackupZip(buffer: Buffer): Promise<JSZip> {
-    try {
-      return await JSZip.loadAsync(buffer);
-    } catch {
-      throw new BadRequestException('Invalid backup archive — not a readable zip file');
+      } finally {
+        zip.close();
+      }
+    } finally {
+      this.endArchiveOperation('restore');
     }
   }
 
@@ -1473,38 +1448,4 @@ export class BackupService implements OnApplicationBootstrap {
     return { manifest: parseBackupManifest(parsed), sourceFormatVersion };
   }
 
-  private async readManifestFromZip(zip: JSZip): Promise<BackupManifest> {
-    const manifestFile = zip.file(MANIFEST_ENTRY);
-    if (!manifestFile) throw new BadRequestException('Invalid backup archive — manifest.json is missing');
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(await manifestFile.async('string'));
-    } catch {
-      throw new BadRequestException('Invalid backup archive — manifest.json is not valid JSON');
-    }
-    return parseBackupManifest(parsed);
-  }
-
-  /**
-   * Like readManifestFromZip, but also returns the raw source format version
-   * from the archive (before normalization). Used by inspect() to surface the
-   * original version to operators (issue #997 fix 3).
-   */
-  private async readManifestFromZipWithSource(zip: JSZip): Promise<{ manifest: BackupManifest; sourceFormatVersion: number }> {
-    const manifestFile = zip.file(MANIFEST_ENTRY);
-    if (!manifestFile) throw new BadRequestException('Invalid backup archive — manifest.json is missing');
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(await manifestFile.async('string'));
-    } catch {
-      throw new BadRequestException('Invalid backup archive — manifest.json is not valid JSON');
-    }
-    // Capture raw version before parseBackupManifest normalizes it.
-    const rawVersion = (parsed as Record<string, unknown>)?.version;
-    const sourceFormatVersion = typeof rawVersion === 'number' && Number.isInteger(rawVersion) && rawVersion >= 0
-      ? rawVersion
-      : 0; // missing/null → legacy format 0
-    const manifest = parseBackupManifest(parsed);
-    return { manifest, sourceFormatVersion };
-  }
 }

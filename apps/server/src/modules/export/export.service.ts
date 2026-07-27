@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Transform, type Writable } from 'node:stream';
-import { pipeline } from 'node:stream/promises';
+import { finished, pipeline } from 'node:stream/promises';
 import { eq } from 'drizzle-orm';
 import type { EncounterEvent, EncounterWithCombatants } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -736,23 +736,6 @@ export class ExportService {
   }
 
   /**
-   * Renders the same export data as a zip of markdown files (issue #863).
-   *
-   * Entity paths use collision-proof `{stem}__{type}-{id}.md` names that preserve
-   * Unicode display stems. A versioned `archive-manifest.json` records app/schema
-   * version, secrecy profile, per-type counts, checksums, exclusions/truncations,
-   * and asserts every machine-export module is represented or declared excluded.
-   *
-   * Returns `{ buffer, warnings }`: warnings are informational (shared display
-   * stems, skipped attachment bytes) and also written as `warnings.txt` when
-   * non-empty. They never enter `campaign.json` (the import round-trip payload).
-   *
-   * Issue #586: `opts.profile` selects the redaction profile. Under a redacted
-   * profile every markdown file is rendered FROM THE ALREADY-REDACTED PAYLOAD (not
-   * from the raw export), so there is exactly one redaction boundary to reason about
-   * — nothing can be rendered from data the projection dropped.
-   */
-  /**
    * Compatibility API for programmatic callers and the older unit tests. HTTP
    * downloads use `streamMarkdownZip` below and never call this collector.
    */
@@ -781,29 +764,25 @@ export class ExportService {
     if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('Export aborted');
     const archive = archiver('zip', { zlib: { level: 9 } });
     const stagingDir = fs.mkdtempSync(path.join(os.tmpdir(), 'campfire-export-'));
-    const abort = () => archive.destroy(signal.reason instanceof Error ? signal.reason : new Error('Export aborted'));
     let stageNumber = 0;
     let archiveError: Error | undefined;
-    let resolveOutput!: () => void;
-    let rejectOutput!: (error: Error) => void;
-    const outputComplete = new Promise<void>((resolve, reject) => {
-      resolveOutput = resolve;
-      rejectOutput = reject;
-    });
+    const outputComplete = finished(destination, { cleanup: true });
+    // Attach a rejection handler immediately: an output can fail while an
+    // attachment is still being staged, before the main flow reaches its await.
+    void outputComplete.catch(() => undefined);
+    const destroy = (error: Error) => {
+      archive.destroy(error);
+      if (!destination.destroyed && !destination.writableEnded) destination.destroy(error);
+    };
+    const abort = () => destroy(signal.reason instanceof Error ? signal.reason : new Error('Export aborted'));
     const onArchiveError = (err: Error) => {
       archiveError = err;
       if (!destination.destroyed) destination.destroy(err);
-      rejectOutput(err);
     };
-    const onDestinationError = (err: Error) => {
-      archive.destroy(err);
-      rejectOutput(err);
-    };
-    const onDestinationFinish = () => resolveOutput();
+    const onDestinationError = (err: Error) => archive.destroy(err);
     signal.addEventListener('abort', abort, { once: true });
     archive.once('error', onArchiveError);
     destination.once('error', onDestinationError);
-    destination.once('finish', onDestinationFinish);
     archive.pipe(destination);
     try {
       const result = await this.writeMarkdownZip(
@@ -843,11 +822,19 @@ export class ExportService {
       await outputComplete;
       if (archiveError) throw archiveError;
       return result;
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      destroy(error);
+      try {
+        await outputComplete;
+      } catch {
+        // Preserve the operation's primary failure (abort, staging, or archiver).
+      }
+      throw error;
     } finally {
       signal.removeEventListener('abort', abort);
       archive.removeListener('error', onArchiveError);
       destination.removeListener('error', onDestinationError);
-      destination.removeListener('finish', onDestinationFinish);
       fs.rmSync(stagingDir, { recursive: true, force: true });
     }
   }

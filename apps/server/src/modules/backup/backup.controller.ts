@@ -46,6 +46,23 @@ async function removeUpload(file: MulterFile | undefined): Promise<void> {
   await fs.promises.rm(file.path, { force: true });
 }
 
+function requestAbort(req: Request, res: Response): { signal: AbortSignal; dispose: () => void } {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  const abortOnClose = () => {
+    if (!res.writableEnded) abort();
+  };
+  req.once('aborted', abort);
+  res.once('close', abortOnClose);
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      req.removeListener('aborted', abort);
+      res.removeListener('close', abortOnClose);
+    },
+  };
+}
+
 @ApiTags('backup')
 @Controller('backup')
 @ServerRoles('admin')
@@ -94,12 +111,7 @@ export class BackupController {
   }
 
   private async sendBackup(req: Request, res: Response, keyPassphrase?: string): Promise<void> {
-    const controller = new AbortController();
-    const abort = () => controller.abort();
-    req.once('aborted', abort);
-    res.once('close', () => {
-      if (!res.writableEnded) abort();
-    });
+    const operation = requestAbort(req, res);
     res
       .status(200)
       .set({
@@ -108,10 +120,14 @@ export class BackupController {
         // Issue #730: never let browsers / the PWA Cache Storage retain a whole-server archive.
         'Cache-Control': 'private, no-store',
       });
-    await this.backup.buildBackup(
-      { ...(keyPassphrase && keyPassphrase.length > 0 ? { keyPassphrase } : {}), signal: controller.signal },
-      res,
-    );
+    try {
+      await this.backup.buildBackup(
+        { ...(keyPassphrase && keyPassphrase.length > 0 ? { keyPassphrase } : {}), signal: operation.signal },
+        res,
+      );
+    } finally {
+      operation.dispose();
+    }
   }
 
   @Post('inspect')
@@ -126,10 +142,19 @@ export class BackupController {
   @ApiResponse({ status: 400, description: 'Malformed or invalid archive.' })
   @ApiResponse({ status: 403, description: 'Not a server admin.' })
   @UseInterceptors(FileInterceptor('file', { storage: uploadStorage, limits: { fileSize: MAX_RESTORE_BYTES } }))
-  async inspect(@UploadedFile() file: MulterFile | undefined) {
+  async inspect(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+    @UploadedFile() file: MulterFile | undefined,
+  ) {
     if (!file) throw new BadRequestException('Missing backup archive (multipart field "file")');
-    try { return await this.backup.inspectFile(file.path); }
-    finally { await removeUpload(file); }
+    const operation = requestAbort(req, res);
+    try {
+      return await this.backup.inspectFile(file.path, operation.signal);
+    } finally {
+      operation.dispose();
+      await removeUpload(file);
+    }
   }
 
   @Post('restore')
@@ -149,12 +174,15 @@ export class BackupController {
   @ApiResponse({ status: 403, description: 'Not a server admin.' })
   @UseInterceptors(FileInterceptor('file', { storage: uploadStorage, limits: { fileSize: MAX_RESTORE_BYTES } }))
   async restore(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
     @UploadedFile() file: MulterFile | undefined,
     @Body('confirm') confirm: string | undefined,
     @Body('keyPassphrase') keyPassphrase: string | undefined,
     @CurrentUser() user: RequestUser,
   ) {
     if (!file) throw new BadRequestException('Missing backup archive (multipart field "file")');
+    const operation = requestAbort(req, res);
     try {
       const fields = BackupRestoreBody.safeParse({ confirm, keyPassphrase });
       if (!fields.success) {
@@ -163,8 +191,14 @@ export class BackupController {
       }
       return await this.backup.restoreFile(
         file.path, fields.data.confirm, user,
-        fields.data.keyPassphrase ? { keyPassphrase: fields.data.keyPassphrase } : undefined,
+        {
+          ...(fields.data.keyPassphrase ? { keyPassphrase: fields.data.keyPassphrase } : {}),
+          signal: operation.signal,
+        },
       );
-    } finally { await removeUpload(file); }
+    } finally {
+      operation.dispose();
+      await removeUpload(file);
+    }
   }
 }
