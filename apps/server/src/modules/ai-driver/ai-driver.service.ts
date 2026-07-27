@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, Logger, Optional, ServiceUnavailableException } from '@nestjs/common';
 import { eq } from 'drizzle-orm';
 import { buildMcpEnvelope } from '../../common/api-error.envelope';
 import { auditActor, roleAtLeast, type RequestUser } from '../../common/user.types';
@@ -16,12 +16,14 @@ import { RulesService } from '../rules/rules.service';
 import { EncountersService } from '../encounters/encounters.service';
 import { MembersService } from '../membership/members.service';
 import { CharactersService } from '../characters/characters.service';
+import { TableSafetyService } from '../safety/table-safety.service';
 import type { AiDmSeat, NarrationLanguage, Role, RuleEntry, RulePack } from '@campfire/schema';
 import {
   AI_DM_PROMPT_HISTORY_MAX_DIGEST,
   AI_DM_PROMPT_HISTORY_MAX_MESSAGES,
   buildNarrationLanguageContract,
   resolveNarrationLanguage,
+  TABLE_SAFETY_HOLD_ERROR_CODE,
 } from '@campfire/schema';
 import type {
   AiProvider,
@@ -619,7 +621,18 @@ function persistedStatusFor(session: AiDmSessionState): AiDmSessionStatus {
 }
 
 /** Why a hydrated session came back in a non-default shape — announced to the table on recovery (#559). */
-type ControlStateRecovery = 'interrupted_turn' | 'paused' | 'human_control' | 'stuck' | 'open_vote';
+type ControlStateRecovery =
+  | 'interrupted_turn'
+  | 'paused'
+  | 'human_control'
+  | 'stuck'
+  | 'open_vote'
+  // #599 — a participant safety hold was standing when the process died. Deliberately distinct
+  // from `paused`: the two are the same `session.state` with different provenance, but they
+  // need different recovery. A plain pause is cleared with POST /ai-dm/resume; a safety hold is
+  // not, and telling a returning facilitator "the seat came back paused" would send them to a
+  // lever that now 409s at them.
+  | 'safety_hold';
 
 const RECOVERY_SHAPES = allowlist<ControlStateRecovery>({
   interrupted_turn: true,
@@ -627,6 +640,7 @@ const RECOVERY_SHAPES = allowlist<ControlStateRecovery>({
   human_control: true,
   stuck: true,
   open_vote: true,
+  safety_hold: true,
 });
 
 /**
@@ -694,6 +708,8 @@ const RECOVERY_SUMMARY: Record<ControlStateRecovery, string> = {
   human_control: 'A human still holds the AI DM seat after the restart. Hand back to release it.',
   stuck: 'The AI DM seat came back stuck, awaiting the table. The recovery levers are available.',
   open_vote: 'A table vote was still open when the server restarted and has been restored.',
+  safety_hold:
+    'A table safety hold was in effect when the server restarted and is still in effect. Play stays paused until a facilitator resolves it.',
 };
 
 /**
@@ -1446,9 +1462,23 @@ export class AiDriverService {
     private readonly groundingStore: DriverGroundingService,
     // Optional, so it must stay last in the parameter list (#559).
     @Inject(DB) private readonly db?: DrizzleDb,
+    /**
+     * #599 — the table safety hold. Appended AFTER #559's optional `db` on purpose. Several
+     * specs construct this service POSITIONALLY (ai-driver-control-state-persistence.spec.ts
+     * among them), so a parameter inserted anywhere earlier silently shifts every argument in
+     * those files. Appending leaves them constructing a service with no safety wiring, which is
+     * the correct degraded shape for a unit test of restart hydration and is exactly what the
+     * `?.` guards on every use below express.
+     */
+    @Optional() private readonly safety?: TableSafetyService,
   ) {
     // Mode-switch teardown without an AiDm→AiDriver DI edge (forwardRef blows the stack here).
     this.aiDm.registerDriverSessionTeardown((campaignId) => this.teardownSession(campaignId));
+    // #599: the safety module owns the durable hold and knows nothing about this service. The
+    // module edge runs one way (AiDriverModule -> TableSafetyModule) and this callback is how a
+    // participant's stop reaches the live session. Same shape as the teardown registration
+    // above, and for the same reason.
+    this.safety?.registerFreezeHook((campaignId, held) => this.applySafetyHold(campaignId, held));
   }
 
   getSession(campaignId: number): AiDmSessionState {
@@ -1484,7 +1514,27 @@ export class AiDriverService {
       this.logger.error(`Failed to load AI driver control state for campaign ${campaignId}`, err);
       return { session: fresh, reconciliation: NOTHING_DISCARDED, recovery: null, settled: null, announce: false, dirty: false };
     }
-    if (!row) return { session: fresh, reconciliation: NOTHING_DISCARDED, recovery: null, settled: null, announce: false, dirty: false };
+    // #599: a participant's safety hold is durable in its OWN table, so it survives a restart
+    // even for a campaign the driver has no control-state row for — the table might have raised
+    // it before the AI seat was ever used, or the freeze hook might have failed after the hold
+    // was written. Either way the seat must come back frozen: the one thing a restart must never
+    // do is quietly un-pause a table that stopped for safety.
+    //
+    // Orthogonal to the #1042 reconciliation carried alongside it: a hold describes the SHAPE the
+    // seat came back in, while `reconciliation` reports what the restart DESTROYED. A campaign
+    // with no control-state row had nothing to discard either way, so both no-row exits report
+    // NOTHING_DISCARDED — but the hold must still freeze the seat.
+    const safetyHeld = this.safety?.isHeld(campaignId) === true;
+    if (!row) {
+      if (!safetyHeld) {
+        return { session: fresh, reconciliation: NOTHING_DISCARDED, recovery: null, settled: null, announce: false, dirty: false };
+      }
+      fresh.state = 'paused';
+      fresh.status = 'paused';
+      fresh.levers = this.leversFor(fresh);
+      return { session: fresh, reconciliation: NOTHING_DISCARDED, recovery: 'safety_hold', settled: 'safety_hold', announce: false, dirty: true };
+    }
+
 
     const storedState = LADDER_STATES.has(row.state) ? row.state as AiDmLadderState : 'running';
     fresh.state = storedState;
@@ -1558,13 +1608,25 @@ export class AiDriverService {
       fresh.state = 'paused';
       fresh.status = 'paused';
     }
+    // #599: an active safety hold outranks everything except a human holding the seat (which is
+    // already frozen and whose grant is not the safety mechanism's to revoke). It re-freezes a
+    // seat whose stored ladder state says `running` — the case where the process died between
+    // the hold being written and the freeze hook landing.
+    if (safetyHeld && fresh.state !== 'human_control') {
+      fresh.state = 'paused';
+      fresh.status = 'paused';
+    }
     fresh.levers = this.leversFor(fresh);
 
     // The STEADY shape: what a later boot will recompute from the reconciled session once the
     // one-shot crash marker is gone. This — not `recovery` — is what gets recorded, because it is
     // what the next hydration will compare against.
     let settled: ControlStateRecovery | null = null;
-    if (fresh.state === 'human_control') settled = 'human_control';
+    // The safety hold is checked FIRST among the paused-shaped states: `paused` and `safety_hold`
+    // are the same `session.state`, and reporting the generic one would point the facilitator at
+    // POST /ai-dm/resume, which refuses while a hold stands.
+    if (safetyHeld && fresh.state !== 'human_control') settled = 'safety_hold';
+    else if (fresh.state === 'human_control') settled = 'human_control';
     else if (fresh.state === 'paused') settled = 'paused';
     else if (fresh.stuck) settled = 'stuck';
     else if (fresh.vote && !fresh.vote.resolved) settled = 'open_vote';
@@ -1589,7 +1651,17 @@ export class AiDriverService {
     const lastAnnounced = RECOVERY_SHAPES.has(row.announcedRecovery ?? '')
       ? row.announcedRecovery as ControlStateRecovery
       : null;
-    const announce = recovery !== null && settled !== lastAnnounced;
+    // #599: a safety hold NEVER fires the restart-recovery notification. Two reasons, both
+    // about not crying wolf. First, hydration also runs on the very first freeze — the hook
+    // fires after the hold row is written, so the session hydrates with the hold already in
+    // place — and announcing there would send "the AI DM state recovered after a restart" to a
+    // table that just watched someone press a button. Second, on a GENUINE restart the hold is
+    // already communicated better than a one-shot toast could: the safety bar is on screen on
+    // every campaign route for as long as the hold stands, and GET /campaigns/:id/safety is
+    // authoritative. The `safety_hold` shape still exists so the marker bookkeeping stays
+    // correct and so the seat is never described to a facilitator as merely `paused`, which
+    // would point them at a resume lever that now refuses.
+    const announce = recovery !== null && recovery !== 'safety_hold' && settled !== lastAnnounced;
 
     // Anything reconciliation changed relative to the row must be written back, or the next
     // restart re-derives it from the same stale bytes — an expired vote in particular would look
@@ -2072,6 +2144,17 @@ export class AiDriverService {
 
   /** Pause/resume the seat — a paused seat rejects new turns until resumed (explicit stop condition). */
   setPaused(campaignId: number, paused: boolean): AiDmSessionState {
+    // #599: a resume must not lift a participant's safety hold as a side effect. The DM pause
+    // and the safety hold are the SAME session state with different provenance, so without this
+    // the seat's own resume would be an unaudited back door around the one lever that is
+    // supposed to require an explicit facilitator recovery. The error names the right door.
+    if (!paused && this.safety?.isHeld(campaignId)) {
+      throw new ConflictException({
+        code: TABLE_SAFETY_HOLD_ERROR_CODE,
+        message:
+          'The table is paused by a safety hold. Resolve it (POST /campaigns/:id/safety/release) before resuming the AI seat.',
+      });
+    }
     const session = this.ensureSession(campaignId);
     session.status = paused ? 'paused' : 'idle';
     // A pause is a deliberate ladder state; resuming clears it (but never steals the seat back
@@ -2094,6 +2177,90 @@ export class AiDriverService {
     // as a transient banner that a reloading client loses.
     this.recordControl(campaignId, { control: paused ? 'paused' : 'resumed', state: session.state });
     return session;
+  }
+
+  /**
+   * A participant raised (or a facilitator resolved) the table safety hold — issue #599.
+   *
+   * Invoked from {@link TableSafetyService} via the freeze hook registered in the constructor,
+   * AFTER the durable hold row is written. This is the part with teeth: stopping NEW turns is
+   * the easy half, and everything below exists for the half that is not.
+   *
+   * WHAT FREEZING AN IN-FLIGHT TURN ACTUALLY REQUIRES, in the order it takes effect:
+   *
+   *  1. `state = 'paused'` makes {@link isFrozen} true. Every step of the tool loop re-checks
+   *     {@link checkGenerationAuthority} — BEFORE the provider call, before the lock, after the
+   *     stream, after the step, and critically once per tool call inside `executeToolCalls` —
+   *     so a model that already emitted six tool calls executes none of the ones it has not
+   *     reached. This is why the freeze is expressed as session state and not as a boolean
+   *     somewhere else: the loop already interrogates that state at every dispatch point.
+   *
+   *  2. `cancelGeneration` aborts the provider AbortSignal. The streaming loop breaks on
+   *     `generationSignal.aborted` on its very next chunk, and the provider's own fetch is
+   *     torn down, so tokens the model is mid-way through producing never reach the table.
+   *     Without this the turn would run to completion and only *then* notice it was frozen —
+   *     the table would watch the AI finish narrating the scene someone just asked it to stop.
+   *
+   *  3. `flushActionQueue` rejects everything already accepted onto the turn queue. Those are
+   *     player actions that cleared the pause gate seconds ago and would otherwise drain into
+   *     new turns the moment the current one ends — a queue is a delayed input channel, and
+   *     "freeze AI input" that does not drain the queue freezes nothing.
+   *
+   * Deliberately NOT a toggle: releasing does not resume. A `held: false` call only re-arms the
+   * seat's own resume path (which {@link setPaused} was refusing while the hold stood); the
+   * facilitator still resumes explicitly. Resuming automatically would mean the table starts
+   * narrating again at the instant the hold clears, before anyone has said "are we good?".
+   *
+   * Idempotent and total: freezing an already-frozen seat is a no-op that still re-fires the
+   * cancel and the queue flush, which is what makes a second X-Card tap repair a table whose
+   * first tap wrote the row but whose freeze did not land.
+   */
+  applySafetyHold(campaignId: number, held: boolean): void {
+    const session = this.ensureSession(campaignId);
+    if (!held) {
+      // The hold is gone; the seat stays paused until a facilitator resumes it. Persist so a
+      // restart does not resurrect a `safety_hold` recovery announcement for a resolved stop.
+      this.persistControlState(session);
+      this.stream.emit({ type: 'state', campaignId, state: session.state });
+      this.recordControl(campaignId, { control: 'safety_hold_released', state: session.state });
+      return;
+    }
+    session.status = 'paused';
+    // A human holding the seat is ALREADY frozen for AI purposes, and demoting `human_control`
+    // to `paused` would silently revoke their grant — the takeover handback owns that
+    // transition. Both states satisfy `isMidTurnFrozenState`, so the freeze holds either way.
+    if (session.state !== 'human_control') session.state = 'paused';
+    session.levers = this.leversFor(session);
+    this.cancelGeneration(campaignId);
+    this.flushActionQueue(campaignId);
+    this.persistControlState(session);
+    this.stream.emit({ type: 'state', campaignId, state: session.state });
+    // #572: the table log carries the stop, with NO actor — `recordControl`'s actor argument is
+    // omitted rather than passed-and-ignored, so an anonymous hold cannot leak through the
+    // transcript the way it would through a naive "who paused" field.
+    this.recordControl(campaignId, { control: 'safety_hold', state: session.state });
+  }
+
+  /**
+   * Reject every action sitting on the turn queue (#599).
+   *
+   * A queued action already passed the pause gate; leaving it queued means the freeze lasts
+   * exactly until the current turn ends and then the AI answers the very prompts the table just
+   * stopped. Rejecting is right rather than silently dropping: each entry is a live HTTP request
+   * whose caller is awaiting a promise, and they get a 503 naming the reason instead of a
+   * request that hangs until the client times out.
+   */
+  private flushActionQueue(campaignId: number): void {
+    const queue = this.actionQueues.get(campaignId);
+    if (!queue || queue.length === 0) return;
+    this.actionQueues.delete(campaignId);
+    for (const entry of queue) {
+      entry.reject(
+        new ServiceUnavailableException(
+          'The table is paused by a safety hold. Your queued action was not sent to the AI DM.',
+        ),
+      );
+    }
   }
 
   /**
@@ -2285,6 +2452,18 @@ export class AiDriverService {
     const seat = await this.aiDm.assertRunnable(campaignId);
 
     const session = this.ensureSession(campaignId);
+    // #599: the safety hold is checked FIRST and against the durable row, not against session
+    // state. Two reasons. It must outrank `human_control` — a human at the seat is not a reason
+    // to keep taking input after someone stopped the table. And reading the row rather than
+    // `session.status` closes the window where the hold is written but the freeze hook has not
+    // yet landed on this session object: the input gate should never be the last thing to hear.
+    // The distinct message matters too, because "resume it" is wrong advice here — the seat's
+    // resume refuses while a hold stands.
+    if (this.safety?.isHeld(campaignId)) {
+      throw new ServiceUnavailableException(
+        'The table is paused by a safety hold. A facilitator must resolve it before the AI DM takes input again.',
+      );
+    }
     if (session.state === 'human_control') {
       throw new ServiceUnavailableException(
         `A human (${session.actingDm?.memberId ?? 'acting DM'}) is running the table. Hand the seat back (POST /ai-dm/handback) before the AI takes turns again.`,
@@ -3142,8 +3321,18 @@ export class AiDriverService {
       clearIdle();
       // #577: release any tail the fence detector was holding back but that never became a
       // grounding block, so a reply ending in "[" is not silently truncated for the table.
+      //
+      // #599: NOT when a stop control fired. `generationSignal.aborted` means a safety hold, a
+      // DM pause, a takeover, or the kill switch tore this stream down — and the grounding
+      // filter can be sitting on several buffered characters at that moment. Flushing them here
+      // would push one last fragment of the AI's prose onto the table's screen *after* the stop,
+      // which is exactly the output someone raised the X-Card to not see. Truncating the tail is
+      // the correct loss: a cancelled turn is already incomplete, and the client renders it as
+      // cancelled either way.
       const tail = deltaFilter.flush();
-      if (tail && !session.detached) this.stream.emit({ type: 'narration.delta', campaignId, text: tail });
+      if (tail && !session.detached && !generationSignal.aborted) {
+        this.stream.emit({ type: 'narration.delta', campaignId, text: tail });
+      }
     }
     // A provider that only streamed deltas (no `done`) still yields its text.
     if (result && !result.text && text) result = { ...result, text };
