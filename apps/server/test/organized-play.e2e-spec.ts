@@ -1115,6 +1115,168 @@ describe('organized play (e2e)', () => {
     }
   });
 
+  it('refuses to address a series through a campaign it does not belong to', async () => {
+    const theirs = await api()
+      .post(`/api/v1/campaigns/${otherCampaignId}/series`)
+      .set(dm)
+      .send({ title: 'Not Yours', timezone: 'UTC', startDate: '2099-07-14', startTime: '18:00', freq: 'weekly', count: 1 });
+    expect(theirs.status).toBe(201);
+    const id = theirs.body.id;
+
+    // Being a DM of campaignId and the series existing are two separately-correct
+    // facts that do NOT compose into authorization. Every campaign-scoped series
+    // handler must reject the mismatch, so the guard's PLACEMENT is what is
+    // asserted here rather than one handler's behaviour.
+    expect((await api().get(`/api/v1/campaigns/${campaignId}/series/${id}`).set(dm)).status).toBe(404);
+    expect((await api().patch(`/api/v1/campaigns/${campaignId}/series/${id}`).set(dm).send({ title: 'Hijacked' })).status).toBe(404);
+    expect((await api().post(`/api/v1/campaigns/${campaignId}/series/${id}/extend`).set(dm).send({ addCount: 1 })).status).toBe(404);
+    expect((await api().delete(`/api/v1/campaigns/${campaignId}/series/${id}`).set(dm).send({})).status).toBe(404);
+
+    // 404 and not 403: the status code itself must not become a cross-campaign
+    // existence probe.
+    expect((await api().get(`/api/v1/campaigns/${campaignId}/series/99999999`).set(dm)).status).toBe(404);
+
+    // Nothing was written through the mismatched route, and the owning campaign
+    // still works normally.
+    const owner = await api().get(`/api/v1/campaigns/${otherCampaignId}/series/${id}`).set(dm);
+    expect(owner.status).toBe(200);
+    expect(owner.body.title).toBe('Not Yours');
+    expect(owner.body.occurrences).toHaveLength(1);
+    expect(owner.body.status).toBe('active');
+  });
+
+  it('rejects renaming a room onto a sibling name with 400, not a constraint 500', async () => {
+    const venue = await api().post('/api/v1/organized-play/venues').set(dm).send({ name: 'Rename Hall', timezone: 'UTC' });
+    const a = await api().post(`/api/v1/organized-play/venues/${venue.body.id}/rooms`).set(dm).send({ name: 'Alpha' });
+    const b = await api().post(`/api/v1/organized-play/venues/${venue.body.id}/rooms`).set(dm).send({ name: 'Beta' });
+
+    // The create path validated this and the update path did not, so the raw
+    // UNIQUE(venue_id, name) index surfaced as a 500 on identical bad input.
+    const clash = await api().patch(`/api/v1/organized-play/rooms/${b.body.id}`).set(dm).send({ name: 'Alpha' });
+    expect(clash.status).toBe(400);
+
+    // Renaming to its own name is not a clash, and neither is a free name.
+    expect((await api().patch(`/api/v1/organized-play/rooms/${b.body.id}`).set(dm).send({ name: 'Beta', capacity: 7 })).status).toBe(200);
+    expect((await api().patch(`/api/v1/organized-play/rooms/${b.body.id}`).set(dm).send({ name: 'Gamma' })).status).toBe(200);
+    // A same-named room in a DIFFERENT venue is fine — the constraint is per-venue.
+    const other = await api().post('/api/v1/organized-play/venues').set(dm).send({ name: 'Other Hall', timezone: 'UTC' });
+    const elsewhere = await api().post(`/api/v1/organized-play/venues/${other.body.id}/rooms`).set(dm).send({ name: 'Zeta' });
+    expect((await api().patch(`/api/v1/organized-play/rooms/${elsewhere.body.id}`).set(dm).send({ name: 'Alpha' })).status).toBe(200);
+    expect(a.body.name).toBe('Alpha');
+  });
+
+  it('a DM-only series edit does not re-flag the room it left alone', async () => {
+    const quietRoom = (await api().post(`/api/v1/organized-play/venues/${venueId}/rooms`).set(dm).send({ name: 'Quiet Room' })).body;
+    // Occurrences that genuinely overlap (24h local tables across spring-forward),
+    // already holding BOTH a room and a DM. Forced, so the overlap is on the record.
+    const series = await api()
+      .post(`/api/v1/campaigns/${campaignId}/series`)
+      .set(dm)
+      .send({
+        title: 'Already Overlapping',
+        timezone: 'America/New_York',
+        startDate: '2099-03-06',
+        startTime: '19:00',
+        durationMinutes: 1440,
+        freq: 'daily',
+        count: 4,
+        roomId: quietRoom.id,
+        assignedDmUserId: 'dev:quiet-dm',
+        force: true,
+      });
+    expect(series.status).toBe(201);
+
+    // Unassigning the DM changes only the DM. The room is untouched and must not be
+    // re-probed: the intra-batch scan groups by room as well as by DM, so passing
+    // the unchanged room would flag the series against ITSELF over an overlap this
+    // edit did not introduce, pushing the coordinator into forcing a no-op.
+    const dmOnly = await api()
+      .patch(`/api/v1/campaigns/${campaignId}/series/${series.body.id}`)
+      .set(dm)
+      .send({ assignedDmUserId: '' });
+    expect(dmOnly.status).toBe(200);
+    expect(dmOnly.body.conflicts).toEqual([]);
+    expect(dmOnly.body.occurrences.every((o: { assignedDmUserId: string }) => o.assignedDmUserId === '')).toBe(true);
+    // …and the room really was left alone rather than cleared.
+    expect(dmOnly.body.occurrences.every((o: { roomId: number | null }) => o.roomId === quietRoom.id)).toBe(true);
+
+    // Positive control: the fix NARROWED the check, it did not disable it. Putting
+    // one DM back onto these overlapping tables is a real clash and still 409s.
+    const realClash = await api()
+      .patch(`/api/v1/campaigns/${campaignId}/series/${series.body.id}`)
+      .set(dm)
+      .send({ assignedDmUserId: 'dev:quiet-dm' });
+    expect(realClash.status).toBe(409);
+    expect(realClash.body.conflicts.some((c: { kind: string }) => c.kind === 'dm')).toBe(true);
+  });
+
+  it('reports what a forced series booking overbooked, on create and on extend', async () => {
+    const contested = (await api().post(`/api/v1/organized-play/venues/${venueId}/rooms`).set(dm).send({ name: 'Contested Room' })).body;
+    const incumbent = await api()
+      .post(`/api/v1/campaigns/${otherCampaignId}/series`)
+      .set(dm)
+      .send({ title: 'Incumbent', timezone: 'UTC', startDate: '2099-12-01', startTime: '18:00', durationMinutes: 180, freq: 'weekly', count: 2, roomId: contested.id });
+    expect(incumbent.status).toBe(201);
+
+    // `force` is only defensible if the caller can SEE what they overrode, so a
+    // forced create must report it rather than returning a bare 201.
+    const forcedCreate = await api()
+      .post(`/api/v1/campaigns/${campaignId}/series`)
+      .set(dm)
+      .send({ title: 'Forced Over', timezone: 'UTC', startDate: '2099-12-01', startTime: '18:00', durationMinutes: 180, freq: 'weekly', count: 1, roomId: contested.id, force: true });
+    expect(forcedCreate.status).toBe(201);
+    expect(forcedCreate.body.conflicts.length).toBeGreaterThan(0);
+    expect(forcedCreate.body.conflicts.some((c: { kind: string }) => c.kind === 'room')).toBe(true);
+
+    // …and so must a forced extend, onto the incumbent's second week.
+    const forcedExtend = await api()
+      .post(`/api/v1/campaigns/${campaignId}/series/${forcedCreate.body.id}/extend`)
+      .set(dm)
+      .send({ addCount: 1, force: true });
+    expect(forcedExtend.status).toBe(201);
+    expect(forcedExtend.body.conflicts.some((c: { kind: string }) => c.kind === 'room')).toBe(true);
+
+    // A read never forces anything, so it reports nothing.
+    const read = await api().get(`/api/v1/campaigns/${campaignId}/series/${forcedCreate.body.id}`).set(dm);
+    expect(read.body.conflicts).toEqual([]);
+    // An unforced, uncontested create likewise.
+    const clean = await api()
+      .post(`/api/v1/campaigns/${campaignId}/series`)
+      .set(dm)
+      .send({ title: 'Uncontested', timezone: 'UTC', startDate: '2099-12-22', startTime: '09:00', freq: 'weekly', count: 1 });
+    expect(clean.body.conflicts).toEqual([]);
+  });
+
+  it('keeps a cancelled occurrence current without pushing it a fresh SEQUENCE', async () => {
+    const series = await api()
+      .post(`/api/v1/campaigns/${campaignId}/series`)
+      .set(dm)
+      .send({ title: 'Seq Policy', timezone: 'UTC', startDate: '2099-11-02', startTime: '18:00', freq: 'weekly', count: 2 });
+    expect(series.status).toBe(201);
+    const cancelled = series.body.occurrences[0];
+    const live = series.body.occurrences[1];
+
+    expect((await api().delete(`/api/v1/schedule/${cancelled.id}`).set(dm).send({ reason: 'skip' })).status).toBe(200);
+    const seqAfterCancel = (await api().get(`/api/v1/schedule/${cancelled.id}`).set(dm)).body.icsSequence;
+
+    const edited = await api()
+      .patch(`/api/v1/campaigns/${campaignId}/series/${series.body.id}`)
+      .set(dm)
+      .send({ title: 'Seq Policy (renamed)' });
+    expect(edited.status).toBe(200);
+
+    const byId = new Map(edited.body.occurrences.map((o: { id: number }) => [o.id, o]));
+    // Metadata IS applied, so a later restore brings the night back current
+    // rather than carrying whatever the series said on the day it was cancelled.
+    expect(byId.get(cancelled.id)).toMatchObject({ title: 'Seq Policy (renamed)' });
+    // …but SEQUENCE does not move: the feed publishes this row as
+    // STATUS:CANCELLED, so a revision would describe an event that is not
+    // happening and whose visible content did not change.
+    expect((byId.get(cancelled.id) as { icsSequence: number }).icsSequence).toBe(seqAfterCancel);
+    // The live sibling gets both.
+    expect(byId.get(live.id)).toMatchObject({ title: 'Seq Policy (renamed)', icsSequence: live.icsSequence + 1 });
+  });
+
   it('restoring a cancelled occurrence re-books its room and refuses a taken one', async () => {
     const room = (await api().post(`/api/v1/organized-play/venues/${venueId}/rooms`).set(dm).send({ name: 'Restore Room' })).body;
     const mine = await api()

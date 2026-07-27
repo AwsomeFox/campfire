@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, asc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, ne, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import {
   MAX_SERIES_OCCURRENCES,
@@ -339,6 +339,20 @@ export class OrganizedPlayService {
 
   async updateRoom(id: number, input: PlayRoomUpdate, user: RequestUser): Promise<PlayRoom> {
     const existing = await this.getRoomOrThrow(id);
+    // The same sibling-name check createRoom runs, excluding this row. Without it
+    // a rename onto a sibling's name reached the raw UNIQUE(venue_id, name) index
+    // and surfaced as a 500 — the create path validated and the update path did
+    // not, so identical bad input produced a clean 400 or an opaque server error
+    // depending on which endpoint you used.
+    if (input.name !== undefined) {
+      const name = input.name.trim();
+      const [clash] = await this.db
+        .select({ id: playRooms.id })
+        .from(playRooms)
+        .where(and(eq(playRooms.venueId, existing.venueId), eq(playRooms.name, name), ne(playRooms.id, existing.id)))
+        .limit(1);
+      if (clash) throw new BadRequestException(`Venue already has a room named "${name}"`);
+    }
     const [row] = await this.db
       .update(playRooms)
       .set({
@@ -679,7 +693,58 @@ export class OrganizedPlayService {
       ...seriesToDomain(row),
       occurrences: occurrences.map(scheduledSessionToDomain),
       exceptions: exceptions.map(exceptionToDomain),
+      // Reads never force anything; only a forced write populates this.
+      conflicts: [],
     };
+  }
+
+  /**
+   * Fetch a series that MUST belong to `campaignId`.
+   *
+   * The single choke point for every campaign-scoped series route. Being a DM of
+   * the campaign in the URL and the series existing are two separately-correct
+   * facts that do not compose into authorization: without this, `PATCH
+   * /campaigns/A/series/<id-from-B>` passed both checks and then wrote to B. That
+   * is the classic IDOR shape — the route parameter never validated against the
+   * object's owner — and it punches through the boundary this module's privacy
+   * rule rests on, which is that another campaign's game is ABSENT from a scope
+   * that may not read it, not merely redacted.
+   *
+   * 404, not 403: a series in a campaign the caller did not name must not be
+   * distinguishable from one that does not exist, or the error code itself
+   * becomes a cross-campaign existence probe.
+   *
+   * Deliberately a method here rather than four inline comparisons in the
+   * controller, so the next campaign-scoped series handler inherits it.
+   */
+  /**
+   * Attach the redacted conflict list a FORCED write overrode.
+   *
+   * `force` is only defensible if the caller can see what they overrode, so every
+   * forcible series write returns this rather than a bare 200 (see the
+   * `conflicts` field on SessionSeriesWithOccurrences). Redaction is the same
+   * rule as the 409 path: a coordinator learns the room and window they took, not
+   * whose game was in it.
+   */
+  private async withForcedConflicts(
+    series: SessionSeriesWithOccurrences,
+    raw: RawConflict[],
+    batch: ScheduleConflict[],
+    user: RequestUser,
+  ): Promise<SessionSeriesWithOccurrences> {
+    if (raw.length === 0 && batch.length === 0) return series;
+    const scope = await this.roles.accessibleCampaignIds(user);
+    const names = await this.lookupNames(
+      raw.map((r) => r.campaignId),
+      raw.flatMap((r) => (r.roomId != null ? [r.roomId] : [])),
+    );
+    return { ...series, conflicts: [...this.redactConflicts(raw, scope, names), ...batch] };
+  }
+
+  async getSeriesRowInCampaignOrThrow(campaignId: number, id: number): Promise<SeriesRow> {
+    const row = await this.getSeriesRowOrThrow(id);
+    if (row.campaignId !== campaignId) throw new NotFoundException(`Session series ${id} not found`);
+    return row;
   }
 
   async getSeriesRowOrThrow(id: number): Promise<SeriesRow> {
@@ -740,6 +805,7 @@ export class OrganizedPlayService {
       })),
     );
 
+    let forced: RawConflict[] = [];
     const created = this.db.transaction((tx) => {
       const conflicts: RawConflict[] = [];
       for (const occ of occurrences) {
@@ -757,6 +823,7 @@ export class OrganizedPlayService {
         // Rolls the transaction back: nothing is written on a rejected booking.
         throw new SeriesConflictSignal(conflicts, batchConflicts);
       }
+      forced = conflicts;
 
       const [series] = tx
         .insert(sessionSeries)
@@ -803,7 +870,7 @@ export class OrganizedPlayService {
       detail: `occurrences=${occurrences.length} tz=${input.timezone}`,
     });
     this.events.emit({ type: 'schedule.updated', campaignId, scheduleId: created.id });
-    return this.getSeries(created.id);
+    return this.withForcedConflicts(await this.getSeries(created.id), forced, batchConflicts, user);
   }
 
   /** Insert one materialized occurrence row. Sync: called inside a transaction. */
@@ -914,7 +981,20 @@ export class OrganizedPlayService {
     const nextDm = input.assignedDmUserId === undefined ? existing.assignedDmUserId : input.assignedDmUserId;
     const roomChanged = nextRoomId !== existing.roomId;
     const dmChanged = nextDm !== existing.assignedDmUserId;
+    // Only the resources actually CHANGING are probed. Re-confirming a resource
+    // the occurrence already holds would report its own neighbours as if this
+    // edit had caused them — and, in the intra-batch scan, would flag the series
+    // against ITSELF over a room the edit never touched, pushing the coordinator
+    // into forcing an edit that introduced no new clash.
+    //
+    // Built ONCE and shared by both checks below. The two answer the same
+    // question about the same inputs, so they must not each construct their own
+    // view of what changed: that is precisely how they drifted apart before.
+    const probeRoomId = roomChanged ? nextRoomId : null;
+    const probeDm = dmChanged ? nextDm : '';
 
+    let forced: RawConflict[] = [];
+    let forcedBatch: ScheduleConflict[] = [];
     this.db.transaction((tx) => {
       const future = tx
         .select()
@@ -950,8 +1030,8 @@ export class OrganizedPlayService {
           affected.map((occ) => ({
             startsAt: occ.scheduledAt,
             endsAt: endInstant(occ.scheduledAt, occ.durationMinutes),
-            roomId: nextRoomId,
-            dm: nextDm,
+            roomId: probeRoomId,
+            dm: probeDm,
             campaignId: occ.campaignId,
             title: occ.title,
           })),
@@ -962,12 +1042,8 @@ export class OrganizedPlayService {
             ...this.findConflictRows(tx, {
               startsAt: occ.scheduledAt,
               endsAt: endInstant(occ.scheduledAt, occ.durationMinutes),
-              // Only the resources actually CHANGING are probed: re-confirming a
-              // room the occurrence already holds would report its own
-              // neighbours as if this edit had caused them (reassignOccurrence
-              // makes the same distinction, for the same reason).
-              roomId: roomChanged ? nextRoomId : null,
-              assignedDmUserId: dmChanged ? nextDm : '',
+              roomId: probeRoomId,
+              assignedDmUserId: probeDm,
               memberUserIds: [],
               excludeScheduleId: occ.id,
             }),
@@ -978,6 +1054,8 @@ export class OrganizedPlayService {
         if ((conflicts.length > 0 || batchConflicts.length > 0) && !input.force) {
           throw new SeriesConflictSignal(conflicts, batchConflicts);
         }
+        forced = conflicts;
+        forcedBatch = batchConflicts;
       }
 
       tx.update(sessionSeries)
@@ -1000,11 +1078,23 @@ export class OrganizedPlayService {
         // below, so it belongs in this predicate exactly as title and location do
         // (see calendarFieldChanged in SchedulingService.update for the same rule
         // on the one-off path).
+        //
+        // A CANCELLED occurrence still receives the metadata but never a SEQUENCE
+        // bump. Both halves are deliberate. It keeps the metadata so a night that
+        // is later restored comes back current instead of carrying whatever the
+        // series said on the day it was cancelled — the same stale-forever trap as
+        // treating lifecycle entries as overrides. It skips the bump because the
+        // feed publishes this row as STATUS:CANCELLED, so a fresh SEQUENCE would
+        // push subscribers a revision of an event that is not happening and whose
+        // visible content did not change. Restore bumps SEQUENCE itself, which is
+        // when the accumulated metadata legitimately reaches subscribers. Raw
+        // status, not effective: it is the raw column the ICS emitter branches on.
         const renders =
-          (input.title !== undefined && input.title !== occ.title)
-          || (input.location !== undefined && input.location !== occ.location)
-          || (input.notes !== undefined && input.notes !== occ.notes)
-          || (input.roomId !== undefined && input.roomId !== occ.roomId);
+          occ.status !== 'cancelled'
+          && ((input.title !== undefined && input.title !== occ.title)
+            || (input.location !== undefined && input.location !== occ.location)
+            || (input.notes !== undefined && input.notes !== occ.notes)
+            || (input.roomId !== undefined && input.roomId !== occ.roomId));
         tx.update(scheduledSessions)
           .set({
             ...(input.title !== undefined ? { title: input.title } : {}),
@@ -1032,7 +1122,7 @@ export class OrganizedPlayService {
       campaignId: existing.campaignId,
     });
     this.events.emit({ type: 'schedule.updated', campaignId: existing.campaignId, scheduleId: id });
-    return this.getSeries(id);
+    return this.withForcedConflicts(await this.getSeries(id), forced, forcedBatch, user);
   }
 
   /**
@@ -1084,6 +1174,7 @@ export class OrganizedPlayService {
     );
 
     const ts = nowIso();
+    let forced: RawConflict[] = [];
     this.db.transaction((tx) => {
       const conflicts: RawConflict[] = [];
       for (const occ of fresh) {
@@ -1100,6 +1191,7 @@ export class OrganizedPlayService {
       if ((conflicts.length > 0 || batchConflicts.length > 0) && !force) {
         throw new SeriesConflictSignal(conflicts, batchConflicts);
       }
+      forced = conflicts;
       tx.update(sessionSeries).set({ count: nextCount, updatedAt: ts }).where(eq(sessionSeries.id, id)).run();
       for (const occ of fresh) this.insertOccurrence(tx, { ...existing, count: nextCount }, occ, ts);
     });
@@ -1114,7 +1206,7 @@ export class OrganizedPlayService {
       detail: `added=${fresh.length}`,
     });
     this.events.emit({ type: 'schedule.updated', campaignId: existing.campaignId, scheduleId: id });
-    return this.getSeries(id);
+    return this.withForcedConflicts(await this.getSeries(id), forced, batchConflicts, user);
   }
 
   /**

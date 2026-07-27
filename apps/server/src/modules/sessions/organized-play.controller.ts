@@ -374,8 +374,10 @@ export class CampaignSeriesController {
     @CurrentUser() user: RequestUser,
   ): Promise<SessionSeriesWithOccurrences> {
     await this.access.requireMember(user, campaignId);
-    const row = await this.organizedPlay.getSeriesRowOrThrow(id);
-    await this.access.requireMember(user, row.campaignId);
+    // The series must belong to the campaign in the PATH — see
+    // getSeriesRowInCampaignOrThrow. Holding rights in some campaign is not
+    // authorization to address a series in another one.
+    await this.organizedPlay.getSeriesRowInCampaignOrThrow(campaignId, id);
     return this.organizedPlay.getSeries(id);
   }
 
@@ -397,8 +399,7 @@ export class CampaignSeriesController {
     @CurrentUser() user: RequestUser,
   ): Promise<SessionSeriesWithOccurrences> {
     const role = await this.access.requireRole(user, campaignId, 'dm');
-    const row = await this.organizedPlay.getSeriesRowOrThrow(id);
-    await this.access.requireRole(user, row.campaignId, 'dm');
+    await this.organizedPlay.getSeriesRowInCampaignOrThrow(campaignId, id);
     try {
       return await this.organizedPlay.updateSeries(id, body, user, role);
     } catch (err) {
@@ -422,8 +423,7 @@ export class CampaignSeriesController {
     @CurrentUser() user: RequestUser,
   ): Promise<SessionSeriesWithOccurrences> {
     const role = await this.access.requireRole(user, campaignId, 'dm');
-    const row = await this.organizedPlay.getSeriesRowOrThrow(id);
-    await this.access.requireRole(user, row.campaignId, 'dm');
+    await this.organizedPlay.getSeriesRowInCampaignOrThrow(campaignId, id);
     try {
       return await this.organizedPlay.extendSeries(id, body.addCount, user, role, body.force);
     } catch (err) {
@@ -446,8 +446,7 @@ export class CampaignSeriesController {
     @CurrentUser() user: RequestUser,
   ): Promise<SessionSeriesWithOccurrences> {
     const role = await this.access.requireRole(user, campaignId, 'dm');
-    const row = await this.organizedPlay.getSeriesRowOrThrow(id);
-    await this.access.requireRole(user, row.campaignId, 'dm');
+    await this.organizedPlay.getSeriesRowInCampaignOrThrow(campaignId, id);
     return this.organizedPlay.cancelSeries(id, (body?.reason ?? '').trim(), user, role);
   }
 }

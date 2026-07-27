@@ -1596,12 +1596,6 @@ export const SeriesException = z.object({
 });
 export type SeriesException = z.infer<typeof SeriesException>;
 
-export const SessionSeriesWithOccurrences = SessionSeries.extend({
-  occurrences: z.array(ScheduledSession),
-  exceptions: z.array(SeriesException),
-});
-export type SessionSeriesWithOccurrences = z.infer<typeof SessionSeriesWithOccurrences>;
-
 /** Move ONE occurrence without disturbing the rest of its series. */
 export const OccurrenceReschedule = z.object({
   /** New wall clock. Combined with the occurrence's zone (or `timezone`). */
@@ -1657,6 +1651,23 @@ export const ScheduleConflict = z.object({
   title: z.string().max(200).nullable().default(null),
 });
 export type ScheduleConflict = z.infer<typeof ScheduleConflict>;
+
+export const SessionSeriesWithOccurrences = SessionSeries.extend({
+  occurrences: z.array(ScheduledSession),
+  exceptions: z.array(SeriesException),
+  /**
+   * Conflicts a coordinator FORCED past on the write that returned this payload
+   * (#588). Empty on reads, and empty on any write that was not forced.
+   *
+   * The whole justification for `force` is that overriding is a decision the
+   * caller makes knowingly — so create, extend and the metadata fan-out have to
+   * report what they overbooked, exactly as applyTemplate and the per-occurrence
+   * endpoints already did. A 200 that silently double-books is an override the
+   * caller cannot tell they took.
+   */
+  conflicts: z.array(ScheduleConflict).default([]),
+});
+export type SessionSeriesWithOccurrences = z.infer<typeof SessionSeriesWithOccurrences>;
 
 /** Ask "would this booking collide?" without writing anything. */
 export const ScheduleConflictQuery = z.object({
