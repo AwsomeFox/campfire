@@ -614,7 +614,7 @@ export class EncountersController {
     summary: 'Declare / resolve turn state on a combatant (issue #413)',
     description:
       'Track the current turn’s action economy and effects: use/release/set an action-economy slot, spend movement, ' +
-      'set/clear concentration, add/remove a structured active effect (duration + save timing), or mark a combatant ' +
+      'set/clear concentration, resolve the first pending concentration save, add/remove a structured active effect, or mark a combatant ' +
       'delaying / readying an action. The DM may edit any combatant; a player only a combatant linked to a character ' +
       'they own. Changes compose atomically under concurrency.',
   })

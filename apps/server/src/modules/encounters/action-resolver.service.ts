@@ -24,6 +24,7 @@ import {
   computeAttackModifier,
   computeSaveDc,
   CombatantStatblock,
+  CombatantTurnState,
   criticalDamageRuleForAdapter,
   dnd5eProficiencyBonus,
   expandStatblockActions,
@@ -37,6 +38,7 @@ import {
   type ActionRollFn,
   type CharacterAction,
   type OutcomeKey,
+  type PendingConcentrationCheck,
   type ResolverAdapter,
   type RuleSystemAdapter,
   type TargetDefenses,
@@ -48,12 +50,17 @@ import { CampaignEventsService } from '../events/campaign-events.service';
 import { AuditService } from '../audit/audit.service';
 import { TableSafetyService } from '../safety/table-safety.service';
 import { fromJsonText, toJsonText } from '../../common/json';
-import { conditionWriteSetFromNames, sheetConditionWriteSetFromNames } from '../../common/conditions';
+import { conditionWriteSetFromNames, readConditionInstances, sheetConditionWriteSetFromNames } from '../../common/conditions';
 import { nowIso } from '../../common/time';
 import { rollDice } from '../../common/dice';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
-import { applyCombatantHp, type CombatantHpState } from './encounters.logic';
+import {
+  applyCombatantHp,
+  concentrationCheckForDamage,
+  enqueueConcentrationCheck,
+  type CombatantHpState,
+} from './encounters.logic';
 
 /**
  * Structured action resolver (issue #414) — the server orchestration around the pure,
@@ -806,9 +813,53 @@ export class ActionResolverService {
     const ruleSystem = this.adapterForCampaign(encounter.campaignId).id;
     const undoTargets: ActionUndoToken['targets'] = [];
     let concentrationBefore: string | null = null;
+    let pendingConcentrationChecksBefore: PendingConcentrationCheck[] = [];
     const consequenceLogs: Array<{ type: 'damage' | 'heal' | 'condition' | 'death' | 'effect' | 'note' | 'resource_changed'; target?: string; targetId?: number; detail: string }> = [];
 
     this.db.transaction((tx) => {
+      // Snapshot concentration BEFORE any target consequences. The actor can target itself,
+      // and target processing may enqueue a check for this very action; that generated check
+      // is not part of the pre-apply state an undo must restore.
+      const actorBeforeTargets = tx
+        .select({ turnState: combatants.turnState })
+        .from(combatants)
+        .where(eq(combatants.id, actor.id))
+        .limit(1)
+        .get();
+      if (actorBeforeTargets) {
+        const actorTurnStateBefore = CombatantTurnState.parse(
+          fromJsonText<unknown>(actorBeforeTargets.turnState, null) ?? {},
+        );
+        concentrationBefore = actorTurnStateBefore.concentration;
+        pendingConcentrationChecksBefore = actorTurnStateBefore.pendingConcentrationChecks.map(
+          (check) => ({ ...check }),
+        );
+      }
+
+      const concentratingCombatantIds = new Set<number>();
+      if (ruleSystem === DND5E_ADAPTER_ID && resolution.targets.some((target) => target.totalDamage > 0)) {
+        const encounterCombatants = tx
+          .select({
+            id: combatants.id,
+            turnState: combatants.turnState,
+            conditions: combatants.conditions,
+            conditionInstances: combatants.conditionInstances,
+          })
+          .from(combatants)
+          .where(eq(combatants.encounterId, encounter.id))
+          .all();
+        for (const candidate of encounterCombatants) {
+          if (fromJsonText<{ concentration?: string | null }>(candidate.turnState, {}).concentration != null) {
+            concentratingCombatantIds.add(candidate.id);
+          }
+          for (const condition of readConditionInstances(candidate.conditionInstances, candidate.conditions)) {
+            if (condition.isConcentration && condition.sourceCombatantId != null) {
+              concentratingCombatantIds.add(condition.sourceCombatantId);
+            }
+          }
+        }
+      }
+
       for (const t of resolution.targets) {
         const fresh = tx.select().from(combatants).where(eq(combatants.id, t.combatantId)).limit(1).all()[0];
         if (!fresh) continue;
@@ -841,6 +892,17 @@ export class ActionResolverService {
           // Temp HP doesn't stack — take the higher of current and the grant.
           hpTemp: t.tempHp > 0 ? Math.max(fresh.hpTemp, t.tempHp) : undefined,
         });
+        const concentrationCheck = concentrationCheckForDamage(
+          concentratingCombatantIds.has(fresh.id),
+          t.totalDamage,
+        );
+        const targetTurnState = CombatantTurnState.parse(fromJsonText<unknown>(fresh.turnState, null) ?? {});
+        const nextTargetTurnState = concentrationCheck
+          ? enqueueConcentrationCheck(targetTurnState, {
+              id: `action-${chainId}-${fresh.id}`,
+              ...concentrationCheck,
+            })
+          : targetTurnState;
 
         // Conditions: union (idempotent).
         const conditions = new Set(conditionsBefore);
@@ -872,6 +934,7 @@ export class ActionResolverService {
             deathState: result.deathState,
             deathSaveSuccesses: result.deathSaveSuccesses,
             deathSaveFailures: result.deathSaveFailures,
+            turnState: toJsonText(nextTargetTurnState),
             // Structured instances must move with the names (see common/conditions.ts):
             // a resolved action that removes a condition has to drop its instance too.
             ...conditionWriteSetFromNames([...conditions], fresh.conditionInstances),
@@ -918,16 +981,16 @@ export class ActionResolverService {
       // Spend the actor's resources: action-economy slot, spell slot, concentration.
       const actorFresh = tx.select().from(combatants).where(eq(combatants.id, actor.id)).limit(1).all()[0];
       if (actorFresh) {
-        const turnState = fromJsonText<{ used?: Record<string, number>; movementUsedFt?: number; concentration?: string | null; delaying?: boolean; readied?: string | null }>(
-          actorFresh.turnState,
-          {},
-        );
-        turnState.used = turnState.used ?? {};
+        const turnState = CombatantTurnState.parse(fromJsonText<unknown>(actorFresh.turnState, null) ?? {});
         if (resolution.costSlot && resolution.costCount > 0) {
           turnState.used[resolution.costSlot] = (turnState.used[resolution.costSlot] ?? 0) + resolution.costCount;
         }
-        concentrationBefore = turnState.concentration ?? null;
-        if (resolution.startsConcentration) turnState.concentration = resolution.actionName;
+        if (resolution.startsConcentration) {
+          // Starting this action's effect replaces the prior concentration; queued saves
+          // were created for that prior effect and must not be allowed to break the new one.
+          turnState.pendingConcentrationChecks = [];
+          turnState.concentration = resolution.actionName;
+        }
         tx.update(combatants).set({ turnState: toJsonText(turnState) }).where(eq(combatants.id, actor.id)).run();
       }
       if (resolution.spellLevelSpent > 0 && actor.characterId !== null) {
@@ -971,6 +1034,7 @@ export class ActionResolverService {
       costCount: resolution.costCount,
       spellLevelSpent: resolution.spellLevelSpent,
       concentrationBefore,
+      pendingConcentrationChecksBefore,
       startedConcentration: resolution.startsConcentration,
     });
   }
@@ -997,6 +1061,13 @@ export class ActionResolverService {
         if (!fresh) continue;
         const effects = fromJsonText<Array<Record<string, unknown>>>(fresh.activeEffects, []);
         const keptEffects = effects.filter((e) => !t.effectIdsAdded.includes(String(e.id)));
+        const targetTurnState = CombatantTurnState.parse(fromJsonText<unknown>(fresh.turnState, null) ?? {});
+        if (token.chainId) {
+          const checkId = `action-${token.chainId}-${fresh.id}`;
+          targetTurnState.pendingConcentrationChecks = targetTurnState.pendingConcentrationChecks.filter(
+            (check) => check.id !== checkId,
+          );
+        }
         tx.update(combatants)
           .set({
             hpCurrent: t.hpBefore,
@@ -1010,6 +1081,7 @@ export class ActionResolverService {
             // model for why. Roll both columns back together (see common/conditions.ts).
             ...conditionWriteSetFromNames(t.conditionsBefore, fresh.conditionInstances),
             activeEffects: toJsonText(keptEffects),
+            turnState: toJsonText(targetTurnState),
           })
           .where(eq(combatants.id, fresh.id))
           .run();
@@ -1039,12 +1111,16 @@ export class ActionResolverService {
       // Refund the actor's resources.
       const actorFresh = tx.select().from(combatants).where(eq(combatants.id, actor.id)).limit(1).all()[0];
       if (actorFresh) {
-        const turnState = fromJsonText<{ used?: Record<string, number>; concentration?: string | null }>(actorFresh.turnState, {});
-        turnState.used = turnState.used ?? {};
+        const turnState = CombatantTurnState.parse(fromJsonText<unknown>(actorFresh.turnState, null) ?? {});
         if (token.costSlot && token.costCount > 0) {
           turnState.used[token.costSlot] = Math.max(0, (turnState.used[token.costSlot] ?? 0) - token.costCount);
         }
-        if (token.startedConcentration) turnState.concentration = token.concentrationBefore;
+        if (token.startedConcentration) {
+          turnState.concentration = token.concentrationBefore;
+          turnState.pendingConcentrationChecks = token.pendingConcentrationChecksBefore.map((check) => ({
+            ...check,
+          }));
+        }
         tx.update(combatants).set({ turnState: toJsonText(turnState) }).where(eq(combatants.id, actor.id)).run();
       }
       if (token.spellLevelSpent > 0 && actor.characterId !== null) {

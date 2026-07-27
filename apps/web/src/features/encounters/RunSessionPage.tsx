@@ -1483,7 +1483,7 @@ export default function RunSessionPage() {
       damageDice?: number;
       idempotencyKey: string;
     }) =>
-      api.patch(
+      api.patch<Combatant>(
         `${API}/encounters/${eid}/combatants/${combatantId}`,
         hpPatchWithActor({ hpDelta: delta, damageType, saveOutcome, isCrit, damageDice, idempotencyKey }, actorId, combatantId, isDm),
       ),
@@ -1564,7 +1564,7 @@ export default function RunSessionPage() {
       const bulkOperationId = newOperationId();
       try {
         for (const { combatantId, damage } of applications) {
-          await api.patch(
+          await api.patch<Combatant>(
             `${API}/encounters/${eid}/combatants/${combatantId}`,
             hpPatchWithActor(
               { hpDelta: delta, ...damage, idempotencyKey: `${bulkOperationId}:${combatantId}` },
@@ -1949,6 +1949,23 @@ export default function RunSessionPage() {
   // `turnIndex % length` guesswork that desyncs the moment a combatant is added or
   // removed mid-fight.
   const orderedCombatants = encounter.combatants;
+  // Prefer a combatant the viewer can resolve. Fall back only to character combatants
+  // (party HP is shared table knowledge); never surface monster/NPC concentration
+  // queues to non-resolvers — those embed secret exact damage/DC (#43 / #606).
+  const concentrationCheckCombatant =
+    orderedCombatants.find(
+      (combatant) =>
+        combatant.turnState.pendingConcentrationChecks.length > 0 &&
+        canEditCombatantPermission(combatant),
+    ) ??
+    orderedCombatants.find(
+      (combatant) =>
+        combatant.kind === 'character' &&
+        combatant.turnState.pendingConcentrationChecks.length > 0,
+    );
+  const pendingConcentrationCheck = concentrationCheckCombatant?.turnState.pendingConcentrationChecks[0] ?? null;
+  const canResolveConcentrationCheck =
+    concentrationCheckCombatant != null && canEditCombatantPermission(concentrationCheckCombatant);
   // Issue #420: DM header actions come from an explicit lifecycle matrix (not
   // ad-hoc status !== 'ended' checks) so Preparing never offers the invalid End.
   const lifecycle = dmLifecycleActions(encounter.status);
@@ -2445,6 +2462,59 @@ export default function RunSessionPage() {
         />
       )}
 
+      {concentrationCheckCombatant && pendingConcentrationCheck && (
+        <div className="card border border-warning" role="alert" aria-live="assertive" style={{ padding: 12 }} data-testid="concentration-check-prompt">
+          <strong>{concentrationCheckCombatant.name} must make a Constitution saving throw.</strong>
+          <p className="text-muted" style={{ margin: '4px 0 10px' }}>
+            Concentration check: DC {pendingConcentrationCheck.dc} ({pendingConcentrationCheck.damage} damage).
+          </p>
+          {canResolveConcentrationCheck ? (
+            <div className="flex gap-2">
+              <button
+                type="button"
+                className="btn btn-ghost"
+                disabled={combatantTurnState.isPending}
+                onClick={() =>
+                  combatantTurnState.mutate({
+                    combatantId: concentrationCheckCombatant.id,
+                    patch: {
+                      resolveConcentrationCheck: {
+                        id: pendingConcentrationCheck.id,
+                        outcome: 'pass',
+                      },
+                    },
+                  })
+                }
+              >
+                Passed
+              </button>
+              <button
+                type="button"
+                className="btn btn-danger"
+                disabled={combatantTurnState.isPending}
+                onClick={() =>
+                  combatantTurnState.mutate({
+                    combatantId: concentrationCheckCombatant.id,
+                    patch: {
+                      resolveConcentrationCheck: {
+                        id: pendingConcentrationCheck.id,
+                        outcome: 'fail',
+                      },
+                    },
+                  })
+                }
+              >
+                Failed — end concentration
+              </button>
+            </div>
+          ) : (
+            <p className="text-muted" style={{ margin: 0 }}>
+              Waiting for the DM or this combatant&apos;s owner to resolve the save.
+            </p>
+          )}
+        </div>
+      )}
+
       {pendingActionUse && (
         <ActionUsePanel
           encounterId={eid}
@@ -2458,7 +2528,7 @@ export default function RunSessionPage() {
           applyDisabled={riskyBlocked}
           onDismiss={() => setPendingActionUse(null)}
           onError={surfaceActionError}
-          onApplied={(token, _policy) => {
+          onApplied={(token) => {
             void invalidateEncounter(queryClient, eid);
             setPendingActionUse(null);
             setActionUndo({ token, label: pendingActionUse.actionName });
