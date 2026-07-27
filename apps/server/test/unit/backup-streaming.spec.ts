@@ -8,6 +8,7 @@ import {
   ArchiveOperationBusyError,
   AttachmentCaptureChangedError,
   BackupService,
+  captureFileBytesOrNullIfMissing,
   MAX_ATTACHMENT_RETRIES,
   stageAndHashFileWithRetry,
 } from '../../src/modules/backup/backup.service';
@@ -100,6 +101,32 @@ describe('backup streaming writer (#603)', () => {
     controller.abort();
     await expect(stageAndHashFileWithRetry(source, staged, controller.signal)).rejects.toThrow('cancelled');
     expect(fs.existsSync(staged)).toBe(false);
+  });
+
+  it('reports the size of a present attachment, including an empty file', () => {
+    const source = path.join(dataDir, 'empty.bin');
+    fs.writeFileSync(source, '');
+    expect(captureFileBytesOrNullIfMissing(source)).toBe(0);
+  });
+
+  it('maps only ENOENT to a missing attachment', () => {
+    const source = path.join(dataDir, 'missing.bin');
+    expect(captureFileBytesOrNullIfMissing(source)).toBeNull();
+  });
+
+  it.each(['EACCES', 'EPERM', 'EIO'])('preserves %s while statting an attachment', (code) => {
+    const source = path.join(dataDir, 'protected.bin');
+    const error = Object.assign(new Error(`stat failed: ${code}`), { code });
+    const actualStat = fs.statSync.bind(fs);
+    const stat = jest.spyOn(fs, 'statSync').mockImplementation(((target: fs.PathLike, ...args: unknown[]) => {
+      if (String(target) === source) throw error;
+      return actualStat(target, ...(args as []));
+    }) as typeof fs.statSync);
+    try {
+      expect(() => captureFileBytesOrNullIfMissing(source)).toThrow(error);
+    } finally {
+      stat.mockRestore();
+    }
   });
 
   it('writes a valid archive to a Writable without producing a response buffer', async () => {

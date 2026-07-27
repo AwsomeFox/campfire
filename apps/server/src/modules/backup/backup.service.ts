@@ -239,6 +239,21 @@ function safeFileBytes(filePath: string): number {
   }
 }
 
+/**
+ * Read an attachment's size for capture/reconciliation. Unlike the best-effort
+ * size helper above, this preserves permission and I/O failures: only a proven
+ * ENOENT means the attachment disappeared.
+ */
+export function captureFileBytesOrNullIfMissing(filePath: string): number | null {
+  try {
+    const stat = fs.statSync(filePath);
+    return stat.isFile() ? stat.size : 0;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
 function directoryBytes(root: string): number {
   return listFilesRecursive(root).reduce((sum, rel) => sum + safeFileBytes(path.join(root, rel)), 0);
 }
@@ -310,8 +325,8 @@ export async function stageAndHashFileWithRetry(
 ): Promise<{ bytes: number; sha256: string }> {
   for (let attempt = 0; attempt < MAX_ATTACHMENT_RETRIES; attempt += 1) {
     assertBackupNotCancelled(signal);
-    const before = safeFileBytes(sourcePath);
-    if (before === 0 && !fs.existsSync(sourcePath)) {
+    const before = captureFileBytesOrNullIfMissing(sourcePath);
+    if (before === null) {
       const error = new Error(`Attachment disappeared during capture: ${sourcePath}`) as NodeJS.ErrnoException;
       error.code = 'ENOENT';
       throw error;
@@ -319,7 +334,12 @@ export async function stageAndHashFileWithRetry(
     await fs.promises.rm(stagedPath, { force: true });
     try {
       const captured = await stageAndHashFile(sourcePath, stagedPath, signal);
-      const after = safeFileBytes(sourcePath);
+      const after = captureFileBytesOrNullIfMissing(sourcePath);
+      if (after === null) {
+        const error = new Error(`Attachment disappeared during capture: ${sourcePath}`) as NodeJS.ErrnoException;
+        error.code = 'ENOENT';
+        throw error;
+      }
       if (before === after && captured.bytes === before) return captured;
     } catch (err) {
       await fs.promises.rm(stagedPath, { force: true });
@@ -1147,8 +1167,8 @@ export class BackupService implements OnApplicationBootstrap {
         // extensions the app would not have written.
         const abs = this.attachments.filePath(row);
         const rel = path.relative(uploads, abs).split(path.sep).join('/');
-        const before = safeFileBytes(abs);
-        if (before === 0 && !fs.existsSync(abs)) {
+        const before = captureFileBytesOrNullIfMissing(abs);
+        if (before === null) {
           // The file is truly gone (ENOENT after retries). Do NOT add the file to the
           // zip — a restore that references a missing file would fail on read; the
           // reconciliation section signals the problem loudly.
