@@ -120,6 +120,9 @@ describe('AiDriverService — secret-read approvals are bounded (#1059)', () => 
       undefined as unknown as Ctor[10], // members (#1045)
       undefined as unknown as Ctor[11], // characters (#1045)
       transcript as unknown as Ctor[12], // transcript (#572) — real service, in-memory rows
+      // groundingStore (#577) — the approval lifecycle records no verdict, but
+      // assembleSystemPrompt reads corrections, so an inert stub beats `undefined`.
+      { correctionsForPrompt: async () => [] } as unknown as Ctor[13],
     );
     return { svc, audit, stream, transcriptRows: rows };
   }

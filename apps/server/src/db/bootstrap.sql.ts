@@ -1355,6 +1355,39 @@ CREATE TABLE IF NOT EXISTS encounter_op_idempotency (
   PRIMARY KEY (actor_id, operation, key)
 );
 
+-- Issue #577: the AI driver's factual claims and whether the server could verify them.
+--
+-- One row per claim the driver made in a turn (rules rulings and assertions about existing
+-- canon; purely creative narration needs no source and is recorded only when the model itself
+-- declares it as invention). The status column is the SERVER's verdict, never the model's self-report:
+-- a citation counts as supported only when the referenced id was actually returned by an
+-- authorized, campaign-scoped read during that same turn. Unsupported claims are kept and
+-- published marked unverified rather than deleted — the table has to be able to see what the
+-- AI asserted in order to argue with it.
+--
+-- provider/model record the ruling's provenance for the review card. Deliberately narrow: the
+-- provider NAME and the served model id only, never a key, base URL, or header.
+--
+-- correction/corrected_by/corrected_at close the human loop: a DM's correction both re-labels
+-- the claim and is replayed into subsequent turns' system prompts as authoritative.
+CREATE TABLE IF NOT EXISTS ai_driver_grounding_claims (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  turn INTEGER NOT NULL,
+  claim_index INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  claim_text TEXT NOT NULL,
+  status TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  citations_json TEXT NOT NULL DEFAULT '[]',
+  provider TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  correction TEXT,
+  corrected_by TEXT,
+  corrected_at TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_users_oidc_sub ON users(oidc_sub);
 CREATE INDEX IF NOT EXISTS idx_characters_campaign ON characters(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_quests_campaign ON quests(campaign_id);
@@ -1465,6 +1498,9 @@ CREATE INDEX IF NOT EXISTS idx_inventory_qty_idempotency_item ON inventory_qty_i
 CREATE INDEX IF NOT EXISTS idx_inventory_qty_idempotency_created ON inventory_qty_idempotency(created_at);
 CREATE INDEX IF NOT EXISTS idx_encounter_op_idempotency_created ON encounter_op_idempotency(created_at);
 CREATE INDEX IF NOT EXISTS idx_encounter_op_idempotency_encounter ON encounter_op_idempotency(encounter_id);
+-- #577: the grounding review card reads a campaign's most recent claims, newest first.
+CREATE INDEX IF NOT EXISTS idx_ai_driver_grounding_campaign
+  ON ai_driver_grounding_claims(campaign_id, id);
 `;
 
 /**

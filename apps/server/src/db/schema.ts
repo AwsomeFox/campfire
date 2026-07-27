@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer, real, uniqueIndex, primaryKey } from 'drizzle-orm/sqlite-core';
+import { sqliteTable, text, integer, real, index, uniqueIndex, primaryKey } from 'drizzle-orm/sqlite-core';
 import type { AiDmProactiveSettings } from '@campfire/schema';
 
 /**
@@ -1674,4 +1674,45 @@ export const encounterOpIdempotency = sqliteTable(
     createdAt: text('created_at').notNull(),
   },
   (t) => ({ pk: primaryKey({ columns: [t.actorId, t.operation, t.key] }) }),
+);
+
+// Issue #577: server-side verdicts on the AI driver's factual claims.
+//
+// The driver's narration used to be accepted wholesale — an uncited free-form response with no
+// retrieval completed the turn and was broadcast as authoritative DM narration. Each row here is
+// one factual claim (a rules ruling or an assertion about existing canon) plus the SERVER's
+// verdict on it. `status` is never the model's self-report: a claim is `supported` only when
+// every id it cited was actually returned by an authorized, campaign-scoped read during the same
+// turn, which is simultaneously an existence, scope, and authorized-retrieval proof.
+//
+// Rows are retained (not deleted) when unsupported: the table sees the claim labelled unverified
+// and can dispute it. `correction` is the human's rebuttal, replayed into later system prompts.
+export const aiDriverGroundingClaims = sqliteTable(
+  'ai_driver_grounding_claims',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    campaignId: integer('campaign_id').notNull(),
+    /** The driver session's turn counter at the time the claim was made. */
+    turn: integer('turn').notNull(),
+    /** Position of the claim within that turn's verdict (stable ordering for the review card). */
+    claimIndex: integer('claim_index').notNull(),
+    /** 'rule' | 'canon' | 'narration'. */
+    kind: text('kind').notNull(),
+    claimText: text('claim_text').notNull(),
+    /** 'supported' | 'unsupported' | 'corrected'. */
+    status: text('status').notNull(),
+    /** A GroundingReason code, e.g. 'not_retrieved' / 'no_citation' / 'false_application_claim'. */
+    reason: text('reason').notNull(),
+    /** JSON array of EvaluatedCitation — type/id/status/reason plus the evidence href. */
+    citationsJson: text('citations_json').notNull().default('[]'),
+    /** Provider NAME only — never the key or base URL. */
+    provider: text('provider').notNull().default(''),
+    /** The model id actually served for the turn. */
+    model: text('model').notNull().default(''),
+    createdAt: text('created_at').notNull(),
+    correction: text('correction'),
+    correctedBy: text('corrected_by'),
+    correctedAt: text('corrected_at'),
+  },
+  (t) => ({ campaignIdx: index('idx_ai_driver_grounding_campaign').on(t.campaignId, t.id) }),
 );

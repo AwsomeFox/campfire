@@ -55,7 +55,10 @@ describe('ai-driver-player-modeling', () => {
     // while still failing loudly if either path starts writing transcript events.
     transcript = { record: jest.fn() };
     driver = new AiDriverService(
-      aiDm, mcpTools, audit, stream, notifications, supportPreferences, resolver, campaigns, rules, encounters, members, characters, transcript
+      aiDm, mcpTools, audit, stream, notifications, supportPreferences, resolver, campaigns, rules, encounters, members, characters,
+      transcript,
+      // #577 — grounding store: assembleSystemPrompt asks it for human corrections to replay.
+      { correctionsForPrompt: async () => [] } as any,
     );
     // Mock resolveProviderForExecution inside ai-driver.service by spying? No, we can just mock resolver
     // Wait, resolveProviderForExecution is not a class method, it's imported. So we need to mock it.
