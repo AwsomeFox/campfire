@@ -772,19 +772,34 @@ export class AdminCatalogService {
           // ROLE is unchanged, nothing in the cached /me differs, and MembersService is
           // equally quiet in that case.
           //
-          // A BRAND-NEW SEAT ALSO NEEDS AN ACCOUNT-WIDE SIGNAL, BECAUSE THE SSE EVENT
-          // CANNOT REACH IT. `CampaignEventsService.streamFor` filters by campaignId and
-          // the web client subscribes only for the campaign it is currently displaying,
-          // so a user who had NO membership here could not have had this stream open —
-          // by definition, since the subscription is membership-gated. Emitting only the
-          // campaign event would send the notification down a channel the recipient
-          // provably cannot be listening on, and the campaign would stay invisible to an
-          // already-open session until a manual reload.
+          // EVERY PROMOTED TARGET NEEDS THE ACCOUNT-WIDE SIGNAL, NOT JUST A NEW SEAT.
           //
-          // So a newly inserted seat also gets the account-wide notification
-          // `MembersService.create` sends for exactly this case. The SSE event is still
-          // emitted alongside it: it costs nothing, and it does reach any OTHER session
-          // that happens to be viewing this campaign.
+          // The first version of this fix sent the account-wide notification only for a
+          // newly INSERTED seat, reasoning that an existing member "already had the
+          // campaign in their /me, so the SSE event reaches them". That conflates being
+          // a MEMBER with being a LISTENER — which is the exact confusion the original
+          // defect was built from, surviving inside the branch the fix declared safe.
+          //
+          // `CampaignEventsService.streamFor` filters by campaignId, and the client
+          // subscribes only for the campaign it is currently VIEWING. A player promoted
+          // to owner while looking at a different campaign (or at no campaign) has no
+          // subscriber for this event either. Membership is necessary for the
+          // subscription, not sufficient for it to be open.
+          //
+          // So both branches now signal. Self-suppression on reassign-to-self is
+          // orthogonal and kept: `actor.actor` is `String(users.id)` for a real account,
+          // matching the rule `notifyUser` applies when handed a RequestUser. Done here
+          // because `planChange` carries the audit Actor rather than the RequestUser.
+          //
+          // KNOWN GAP, MEASURED NOT ASSUMED: this notification updates the notification
+          // UI and does NOT by itself refresh AuthProvider's /me memberships. The only
+          // client path that refreshes them is `useMembershipLiveSync`, which is driven
+          // by the campaign SSE stream and therefore carries the same viewing
+          // requirement. There is no account-wide push channel on the server at all —
+          // the sole `@Sse()` endpoint is campaign-scoped and notifications are polled.
+          // Closing that last step means teaching a shared auth/notification surface to
+          // refresh `/me` when a membership-affecting notification arrives, which is a
+          // change outside this module. Tracked separately; see the PR body.
           afterCommit:
             existingSeat?.role === 'dm'
               ? undefined
@@ -796,12 +811,7 @@ export class AdminCatalogService {
                     memberId: eventMemberId,
                     role: 'dm',
                   });
-                  // `actor.actor` is `String(users.id)` for a real account, so this is the
-                  // same self-suppression `notifyUser` applies when given a RequestUser —
-                  // an operator who reassigns a campaign to themselves does not need to be
-                  // told they did it. Done here because `planChange` carries the audit
-                  // Actor, not the RequestUser that method would want.
-                  if (!existingSeat && actor.actor !== String(toUserId)) {
+                  if (actor.actor !== String(toUserId)) {
                     // Best-effort inside NotificationsService, and awaited by nobody:
                     // `afterCommit` is sync by design (see the plan type) and a
                     // notification must never delay or fail a committed lifecycle change.

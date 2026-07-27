@@ -483,76 +483,62 @@ describe('Issue #587: campaign catalog paging, filtering and bulk lifecycle (e2e
       expect(promotion!.role).toBe('dm');
     });
 
-    it('notifies a BRAND-NEW owner, who cannot have been on the campaign SSE stream', async () => {
-      // `CampaignEventsService.streamFor` filters by campaignId and the web client
-      // subscribes only for the campaign it is displaying — a subscription that is
-      // membership-gated. A user given a seat they did not previously have therefore
-      // provably could not have been listening, so the SSE event alone is sent down a
-      // channel the recipient cannot receive on and the campaign stays invisible to an
-      // already-open session until a manual reload.
-      const target = aIds[1];
+    it('signals EVERY promoted target, whether the seat was new or already existed', async () => {
+      // The property, not the mechanism. Both branches must tell the promoted user
+      // out-of-band, because `CampaignEventsService.streamFor` filters by campaignId and
+      // the client subscribes only for the campaign it is VIEWING. Being a member is
+      // necessary for that subscription, not sufficient for it to be open — a player
+      // promoted while looking at a different campaign has no subscriber either, which
+      // is why the earlier "existing seats are already covered" split was wrong.
       const notifications = ctx.app.get(NotificationsService);
-      const sent: Array<{ userId: number | string; campaignId: number; type: string }> = [];
-      const spy = jest
-        .spyOn(notifications, 'notifyUser')
-        .mockImplementation(async (userId, campaignId, _actor, event) => {
-          sent.push({ userId, campaignId, type: (event as { type: string }).type });
-        });
-      try {
-        // dmB has no seat on this campaign of dmA's, so this INSERTS one.
-        const res = await bulk({
-          operation: 'reassign_owner',
-          campaignIds: [target],
-          toUserId: dmBId,
-          dryRun: false,
-          reason: 'brand-new owner notification drill',
-        });
-        expect(res.status).toBe(201);
-        expect(res.body.applied).toBe(1);
-      } finally {
-        spy.mockRestore();
-      }
 
-      const notice = sent.find((s) => s.campaignId === target);
-      expect(notice).toBeDefined();
-      expect(String(notice!.userId)).toBe(String(dmBId));
-      expect(notice!.type).toBe('added_to_campaign');
-    });
+      const signalledFor = async (target: number, toUserId: number) => {
+        const seen: Array<{ userId: number | string; campaignId: number }> = [];
+        const spy = jest
+          .spyOn(notifications, 'notifyUser')
+          .mockImplementation(async (userId, campaignId) => {
+            seen.push({ userId, campaignId });
+          });
+        try {
+          const res = await bulk({
+            operation: 'reassign_owner',
+            campaignIds: [target],
+            toUserId,
+            dryRun: false,
+            reason: 'promotion signal drill',
+          });
+          expect(res.status).toBe(201);
+          expect(res.body.applied).toBe(1);
+        } finally {
+          spy.mockRestore();
+        }
+        return seen.some((x) => x.campaignId === target && String(x.userId) === String(toUserId));
+      };
 
-    it('does not notify when the seat already existed, only when one is created', async () => {
-      // Promoting an EXISTING player seat is a role change: that user already had the
-      // campaign in their /me, so the SSE event genuinely can reach them and an
-      // account-wide notification would be redundant noise.
-      const target = aIds[2];
+      // (a) A brand-new seat: dmB has no membership on this campaign of dmA's.
+      expect(await signalledFor(aIds[1], dmBId)).toBe(true);
+
+      // (b) An EXISTING seat promoted from player to dm — the case that used to be
+      // silent on the theory that the SSE event would reach them.
+      const existingTarget = aIds[2];
       const db = new Database(path.join(ctx.dataDir, 'campfire.db'));
       try {
         db.prepare(
           `INSERT INTO campaign_members (campaign_id, user_id, role, is_primary_owner, created_at, updated_at)
            VALUES (?, ?, 'player', 0, ?, ?)`,
-        ).run(target, dmBId, new Date().toISOString(), new Date().toISOString());
+        ).run(existingTarget, dmBId, new Date().toISOString(), new Date().toISOString());
       } finally {
         db.close();
       }
+      expect(await signalledFor(existingTarget, dmBId)).toBe(true);
 
-      const notifications = ctx.app.get(NotificationsService);
-      const sent: number[] = [];
-      const spy = jest.spyOn(notifications, 'notifyUser').mockImplementation(async (_u, campaignId) => {
-        sent.push(campaignId);
-      });
-      try {
-        const res = await bulk({
-          operation: 'reassign_owner',
-          campaignIds: [target],
-          toUserId: dmBId,
-          dryRun: false,
-          reason: 'existing seat promotion',
-        });
-        expect(res.status).toBe(201);
-        expect(res.body.applied).toBe(1);
-      } finally {
-        spy.mockRestore();
-      }
-      expect(sent).not.toContain(target);
+      // And the seat really is a dm now, so the signal describes a real change.
+      const members = await dmB.get(`/api/v1/campaigns/${existingTarget}/members`);
+      expect(members.status).toBe(200);
+      const seat = (members.body as Array<{ userId: number; role: string; primaryOwner?: boolean }>).find(
+        (m) => m.userId === dmBId,
+      );
+      expect(seat).toMatchObject({ role: 'dm', primaryOwner: true });
     });
 
     it('sets and clears a storage quota, and reports overQuota', async () => {
