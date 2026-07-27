@@ -54,16 +54,16 @@ export interface BackupInspectResult {
   formatVersion: number;
   appVersion: string | null;
   schemaVersion: number | null;
-  createdAt: string | null;
-  dbEntry: string | null;
-  dbBytes: number | null;
-  uploadCount: number | null;
+  createdAt: string;
+  dbEntry: string;
+  dbBytes: number;
+  uploadCount: number;
   uploads: string[];
-  aiKeySource: 'env' | 'keyfile' | null;
+  aiKeySource: 'env' | 'keyfile';
   aiKeyIncluded: boolean;
   aiCredentialCount: number | null;
   attachmentChecksums: BackupInspectAttachmentChecksum[];
-  reconciliation: BackupInspectReconciliation | null;
+  reconciliation: BackupInspectReconciliation;
 }
 
 export interface BackupOnDiskEntry {

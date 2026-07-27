@@ -119,7 +119,18 @@ describe('backup manifest size contract', () => {
 describe('manifestToInspectView', () => {
   it('returns the single native format version without a legacy source field', () => {
     const view = manifestToInspectView(parseBackupManifest(baseV3), []);
-    expect(view.formatVersion).toBe(BACKUP_FORMAT_VERSION);
+    expect(view).toMatchObject({
+      formatVersion: BACKUP_FORMAT_VERSION,
+      createdAt: baseV3.createdAt,
+      dbEntry: DB_ENTRY,
+      dbBytes: baseV3.dbBytes,
+      uploadCount: baseV3.uploadCount,
+      aiKeySource: baseV3.aiKeySource,
+      reconciliation: {
+        generation: baseV3.reconciliation.generation,
+        clean: true,
+      },
+    });
     expect(view).not.toHaveProperty('sourceFormatVersion');
   });
 

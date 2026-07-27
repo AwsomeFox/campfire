@@ -12,7 +12,7 @@ const MOCK_INSPECT = {
   dbBytes: 2048000,
   uploadCount: 2,
   uploads: ['campaigns/1/portraits/hero.png', 'campaigns/1/maps/world.jpg'],
-  aiKeySource: null,
+  aiKeySource: 'keyfile',
   aiKeyIncluded: false,
   aiCredentialCount: null,
   attachmentChecksums: [

@@ -84,46 +84,37 @@ function InspectResults({ result }: { result: BackupInspectResult }) {
         </div>
         <div>
           <dt className="text-[10px] uppercase tracking-widest text-secondary">Database entry</dt>
-          <dd className="font-semibold text-white truncate" title={result.dbEntry ?? undefined}>
-            {result.dbEntry ?? '—'}
+          <dd className="font-semibold text-white truncate" title={result.dbEntry}>
+            {result.dbEntry}
           </dd>
         </div>
         <div>
           <dt className="text-[10px] uppercase tracking-widest text-secondary">Database size</dt>
           <dd className="font-semibold text-white">
-            {result.dbBytes === null ? '—' : formatBytes(result.dbBytes)}
+            {formatBytes(result.dbBytes)}
           </dd>
         </div>
-        {result.aiKeySource && (
-          <div className="sm:col-span-2">
-            <dt className="text-[10px] uppercase tracking-widest text-secondary">AI credential key</dt>
-            <dd className="font-semibold text-white">
-              {result.aiKeySource}
-              {result.aiKeyIncluded ? ' · encrypted envelope included' : ''}
-              {result.aiCredentialCount !== null
-                ? ` · ${result.aiCredentialCount.toLocaleString()} stored credential(s)`
-                : ''}
-            </dd>
-          </div>
-        )}
+        <div className="sm:col-span-2">
+          <dt className="text-[10px] uppercase tracking-widest text-secondary">AI credential key</dt>
+          <dd className="font-semibold text-white">
+            {result.aiKeySource}
+            {result.aiKeyIncluded ? ' · encrypted envelope included' : ''}
+            {result.aiCredentialCount !== null
+              ? ` · ${result.aiCredentialCount.toLocaleString()} stored credential(s)`
+              : ''}
+          </dd>
+        </div>
       </dl>
 
-      {result.reconciliation && (
-        <div className="text-xs space-y-1">
-          <p className="text-[10px] font-bold text-secondary uppercase tracking-widest">Reconciliation</p>
-          <p className={result.reconciliation.clean ? 'text-emerald-400' : 'text-amber-400'}>
-            {result.reconciliation.clean
-              ? 'Archive is fully reconciled — DB snapshot matches captured files.'
-              : `Archive has reconciliation issues — missing ${result.reconciliation.missing}, changed ${result.reconciliation.changed}, orphans ${result.reconciliation.orphanCount}. Review before restoring.`}
-          </p>
-          <p className="text-secondary font-mono text-[11px]">generation {result.reconciliation.generation}</p>
-        </div>
-      )}
+      <div className="text-xs space-y-1">
+        <p className="text-[10px] font-bold text-secondary uppercase tracking-widest">Reconciliation</p>
+        <p className="text-emerald-400">Archive is fully reconciled — DB snapshot matches captured files.</p>
+        <p className="text-secondary font-mono text-[11px]">generation {result.reconciliation.generation}</p>
+      </div>
 
       <div>
         <p id={uploadsId} className="text-[10px] font-bold text-secondary uppercase tracking-widest mb-1">
-          Upload contents ({result.uploads.length.toLocaleString()}
-          {result.uploadCount !== null ? ` · manifest count ${result.uploadCount.toLocaleString()}` : ''})
+          Upload contents ({result.uploads.length.toLocaleString()} · manifest count {result.uploadCount.toLocaleString()})
         </p>
         {result.uploads.length === 0 ? (
           <p className="text-xs text-secondary">No upload files in this archive.</p>

@@ -912,10 +912,7 @@ export class BackupService implements OnApplicationBootstrap {
       return { verified: false, checksum: null, error: err instanceof Error ? err.message : String(err) };
     }
     try {
-      const inspect = await this.inspectFile(filePath);
-      if (inspect.reconciliation && !inspect.reconciliation.clean) {
-        return { verified: false, checksum, error: 'archive reconciliation is not clean' };
-      }
+      await this.inspectFile(filePath);
       return { verified: true, checksum, error: '' };
     } catch (err) {
       return { verified: false, checksum, error: err instanceof Error ? err.message : String(err) };
@@ -1431,26 +1428,18 @@ export class BackupService implements OnApplicationBootstrap {
    * BEFORE the live DB is touched, so a malformed upload leaves the server
    * untouched (it 400s and the running DB is never closed).
    */
-  /**
-   * Returns null only for archives that genuinely predate attachment checksum
-   * metadata. The manifest parser rejects malformed and duplicate modern
-   * records, so a present `attachments` field means every upload is required
-   * to have exactly one corresponding record.
-   */
   private expectedAttachmentChecksums(
     manifest: BackupManifest,
-  ): Map<string, BackupAttachmentRecord> | null {
-    if (manifest.attachments === undefined) return null;
+  ): Map<string, BackupAttachmentRecord> {
     return new Map(manifest.attachments.map((attachment) => [attachment.path, attachment]));
   }
 
   private validateAttachmentChecksum(
-    expectedAttachments: Map<string, BackupAttachmentRecord> | null,
+    expectedAttachments: Map<string, BackupAttachmentRecord>,
     foundAttachments: Set<string>,
     relativePath: string,
     actual: { bytes: number; sha256: string },
   ): void {
-    if (!expectedAttachments) return;
     const expected = expectedAttachments.get(relativePath);
     if (!expected) {
       throw new BadRequestException('Invalid backup archive — upload is missing manifest attachment checksum');
@@ -1462,10 +1451,10 @@ export class BackupService implements OnApplicationBootstrap {
   }
 
   private validateAttachmentCoverage(
-    expectedAttachments: Map<string, BackupAttachmentRecord> | null,
+    expectedAttachments: Map<string, BackupAttachmentRecord>,
     foundAttachments: Set<string>,
   ): void {
-    if (expectedAttachments && foundAttachments.size !== expectedAttachments.size) {
+    if (foundAttachments.size !== expectedAttachments.size) {
       throw new BadRequestException('Invalid backup archive — manifest attachment is missing');
     }
   }

@@ -149,19 +149,19 @@ export interface BackupInspectResult {
   formatVersion: number;
   appVersion: string | null;
   schemaVersion: number | null;
-  createdAt: string | null;
-  dbEntry: string | null;
-  dbBytes: number | null;
-  uploadCount: number | null;
+  createdAt: string;
+  dbEntry: string;
+  dbBytes: number;
+  uploadCount: number;
   uploads: string[];
   /** AI credential encryption key posture recorded at backup time (#496). */
-  aiKeySource: AiKeySource | null;
+  aiKeySource: AiKeySource;
   aiKeyIncluded: boolean;
   aiCredentialCount: number | null;
-  /** Attachment checksums from the manifest when present (#444). */
+  /** Attachment checksums from the v3 manifest (#444). */
   attachmentChecksums: BackupInspectAttachmentChecksum[];
-  /** Reconciliation summary from the manifest when present (#444). */
-  reconciliation: BackupInspectReconciliation | null;
+  /** Reconciliation summary from the v3 manifest (#444). */
+  reconciliation: BackupInspectReconciliation;
 }
 
 /** Enforce the shared writer/reader manifest entry ceiling. */
@@ -190,10 +190,8 @@ function asNonEmptyString(value: unknown): string | null {
 }
 
 /**
- * Attachment checksum metadata is an all-or-nothing capability. Archives made
- * before #828 omit `attachments` entirely; once an archive claims the field,
- * every record must be safe and complete so callers cannot accidentally treat
- * a partially corrupt modern manifest as a legacy archive.
+ * Format v3 requires complete attachment checksum metadata. Every record must
+ * be safe and complete so restore validation can require exact archive coverage.
  */
 function parseAttachmentRecords(raw: Record<string, unknown>): BackupAttachmentRecord[] {
   if (!Object.prototype.hasOwnProperty.call(raw, 'attachments')) {
@@ -375,19 +373,17 @@ export function parseBackupManifest(raw: unknown): BackupManifest {
 }
 
 export function manifestToInspectView(manifest: BackupManifest, uploads: string[]): BackupInspectResult {
-  const reconciliation = manifest.reconciliation
-    ? {
-        generation: manifest.reconciliation.generation,
-        totalAttachments: manifest.reconciliation.totalAttachments,
-        missing: manifest.reconciliation.missing,
-        changed: manifest.reconciliation.changed,
-        orphanCount: manifest.reconciliation.orphanCount,
-        clean: manifest.reconciliation.clean,
-        orphans: manifest.reconciliation.orphans,
-      }
-    : null;
+  const reconciliation = {
+    generation: manifest.reconciliation.generation,
+    totalAttachments: manifest.reconciliation.totalAttachments,
+    missing: manifest.reconciliation.missing,
+    changed: manifest.reconciliation.changed,
+    orphanCount: manifest.reconciliation.orphanCount,
+    clean: manifest.reconciliation.clean,
+    orphans: manifest.reconciliation.orphans,
+  };
 
-  const attachmentChecksums = (manifest.attachments ?? [])
+  const attachmentChecksums = manifest.attachments
     .slice(0, BACKUP_INSPECT_CHECKSUM_CAP)
     .map((entry) => ({ path: entry.path, size: entry.size, sha256: entry.sha256 }));
 
@@ -397,10 +393,10 @@ export function manifestToInspectView(manifest: BackupManifest, uploads: string[
     formatVersion: manifest.version,
     appVersion: manifest.appVersion ?? null,
     schemaVersion: manifest.schemaVersion ?? null,
-    createdAt: manifest.createdAt ?? null,
-    dbEntry: manifest.db ?? null,
-    dbBytes: manifest.dbBytes ?? null,
-    uploadCount: manifest.uploadCount ?? null,
+    createdAt: manifest.createdAt,
+    dbEntry: manifest.db,
+    dbBytes: manifest.dbBytes,
+    uploadCount: manifest.uploadCount,
     uploads,
     aiKeySource: manifest.aiKeySource,
     aiKeyIncluded: manifest.aiKeyIncluded,
