@@ -14,14 +14,48 @@
  * invalidates, so these assertions hold `phase` to the same contract.
  */
 import { expect, test } from '@playwright/test';
+import type { AiDmTranscriptEvent } from '@campfire/schema';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parseAiDmStreamEvent } from '../../src/lib/useAiDmStream';
+import {
+  emptyTranscript,
+  transcriptReducer,
+  type SystemEntry,
+} from '../../src/features/ai-dm/transcript';
 
 const TABLE = resolve(__dirname, '../../src/features/ai-dm/AiTablePage.tsx');
 const ACTIVITY = resolve(__dirname, '../../src/features/ai-dm/useAiDmLiveActivity.tsx');
+const TRANSCRIPT_UI = resolve(__dirname, '../../src/features/ai-dm/AiDmTranscriptUi.tsx');
 
 const at = '2026-07-27T10:00:00.000Z';
+
+function controlEvent(seq: number, payload: Record<string, unknown>): AiDmTranscriptEvent {
+  return {
+    campaignId: 1,
+    kind: 'control',
+    seq,
+    eventId: `e${seq}`,
+    actorUserId: null,
+    actorName: null,
+    clientRef: null,
+    turnId: null,
+    payload,
+    at,
+  } as AiDmTranscriptEvent;
+}
+
+function systemEntries(events: AiDmTranscriptEvent[]): SystemEntry[] {
+  return transcriptReducer(emptyTranscript, { type: 'serverEvents', events })
+    .entries.filter((e): e is SystemEntry => e.kind === 'system');
+}
+
+function catalog(lng: string): Record<string, unknown> {
+  const parsed = JSON.parse(
+    readFileSync(resolve(__dirname, `../../src/i18n/locales/${lng}/table.json`), 'utf8'),
+  ) as { table: Record<string, unknown> };
+  return parsed.table;
+}
 
 test.describe('session lifecycle phase — client wiring (#1043)', () => {
   test('the parser returns the phase frame instead of dropping it', () => {
@@ -74,14 +108,60 @@ test.describe('session lifecycle phase — client wiring (#1043)', () => {
     expect(src).toMatch(/const ended = phase === 'ended'/);
     expect(src).toMatch(/locked = streaming \|\| paused \|\| humanControl \|\| awaiting \|\| ended/);
     expect(src).toMatch(/composerLockedEnded/);
-    // Start Session is still rendered while `ended`, so the lock is never a dead end.
-    expect(src).toMatch(/phase !== 'greeting' && phase !== 'wrap_up'/);
+    // Start Session is still rendered while `ended`, so the lock is never a dead end...
+    expect(src).toMatch(/canCompose && phase !== 'greeting' && phase !== 'wrap_up'/);
+    // ...but only for roles the server would actually accept. A viewer shown a button that
+    // always 403s is the same "control that cannot succeed" defect as the unlocked composer.
+    expect(src).toMatch(/const canCompose = role === 'dm' \|\| role === 'player'/);
 
     for (const lng of ['en', 'ar']) {
-      const cat = JSON.parse(
-        readFileSync(resolve(__dirname, `../../src/i18n/locales/${lng}/table.json`), 'utf8'),
-      ) as { table: Record<string, string> };
-      expect(cat.table.composerLockedEnded).toBeTruthy();
+      expect(catalog(lng).composerLockedEnded).toBeTruthy();
+    }
+  });
+
+  test('the durable phase control rows fold to their own variant, not to the generic info line', () => {
+    // THE BUG. Every successful lifecycle turn writes TWO `control: 'phase'` transcript rows —
+    // one for the transient phase, one for the settled one. `foldServerEvent` recognised neither
+    // control, so both fell through to the `info` variant, whose copy is `State: {{state}}`, and
+    // these rows carry `phase`, not `state`. The result was two blank `State:` lines in the
+    // durable, shared, replayed-on-reload transcript for every session that opened or closed.
+    //
+    // NOTE the live `{type:'phase'}` SSE FRAME is a different thing and is correctly dropped by
+    // `foldStreamEvent` — it exists to trigger invalidation, and folding it too would double the
+    // line. That the frame is handled says nothing about whether the ROW is.
+    const entries = systemEntries([
+      controlEvent(1, { control: 'phase', phase: 'greeting' }),
+      controlEvent(2, { control: 'phase', phase: 'active' }),
+      controlEvent(3, { control: 'phase_interrupted', interrupted: 'wrap_up', phase: 'active' }),
+    ]);
+    expect(entries.map((e) => e.variant)).toEqual(['phase', 'phase', 'phaseInterrupted']);
+    // And the data the renderer needs actually arrives with them.
+    expect(entries[0].data?.phase).toBe('greeting');
+    expect(entries[2].data?.interrupted).toBe('wrap_up');
+    // `info` remains the fallback for controls nobody has taught the client about.
+    expect(systemEntries([controlEvent(4, { control: 'intermission' })])[0].variant).toBe('info');
+  });
+
+  test('every phase variant has copy in every catalog, in both directions', () => {
+    // A variant without copy renders a missing-key placeholder, which is the blank `State:` line
+    // wearing a different hat. `systemText` must have a case for each, and both catalogs must
+    // carry a line for each phase the server can publish.
+    const src = readFileSync(TRANSCRIPT_UI, 'utf8');
+    expect(src).toMatch(/case 'phase':/);
+    expect(src).toMatch(/case 'phaseInterrupted':/);
+
+    for (const lng of ['en', 'ar']) {
+      const cat = catalog(lng);
+      const systemPhase = cat.systemPhase as Record<string, string>;
+      const phaseName = cat.phaseName as Record<string, string>;
+      for (const phase of ['active', 'greeting', 'wrap_up', 'ended']) {
+        expect(systemPhase?.[phase], `${lng}.systemPhase.${phase}`).toBeTruthy();
+        expect(phaseName?.[phase], `${lng}.phaseName.${phase}`).toBeTruthy();
+      }
+      // The forward-compatible fallbacks: a phase a newer server invents must still read as a
+      // sentence rather than as a raw key.
+      expect(cat.systemPhaseUnknown, `${lng}.systemPhaseUnknown`).toBeTruthy();
+      expect(cat.systemPhaseInterrupted, `${lng}.systemPhaseInterrupted`).toBeTruthy();
     }
   });
 });

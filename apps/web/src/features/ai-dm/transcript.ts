@@ -161,7 +161,20 @@ export interface ToolEntry {
 export interface SystemEntry {
   id: string;
   kind: 'system';
-  variant: 'divider' | 'scene' | 'stuck' | 'recovered' | 'paused' | 'resumed' | 'takeover' | 'vote' | 'rules' | 'info';
+  variant:
+    | 'divider'
+    | 'scene'
+    | 'stuck'
+    | 'recovered'
+    | 'paused'
+    | 'resumed'
+    | 'takeover'
+    | 'vote'
+    | 'rules'
+    // #1043 — the durable session-lifecycle control rows.
+    | 'phase'
+    | 'phaseInterrupted'
+    | 'info';
   /** Optional raw text (e.g. a seeded scene label or a stuck detail) for the page to render. */
   text?: string;
   /** Optional structured payload (e.g. the stuck reason, vote outcome) for the page. */
@@ -773,7 +786,17 @@ function applyServerEvent(state: TranscriptState, event: AiDmTranscriptEvent): T
                 ? 'stuck'
                 : control === 'recovered'
                   ? 'recovered'
-                  : 'info';
+                  // #1043 — the two lifecycle controls the server records. Without these they
+                  // fell through to `info`, whose copy is `State: {{state}}`, and the phase rows
+                  // carry `phase`/`interrupted` rather than `state` — so every successful
+                  // greeting and wrap-up wrote two blank `State:` lines into the durable
+                  // transcript. `phase_interrupted` is kept distinct because it reports a
+                  // transition that DIED, which is not the same news as one that landed.
+                  : control === 'phase'
+                    ? 'phase'
+                    : control === 'phase_interrupted'
+                      ? 'phaseInterrupted'
+                      : 'info';
       return upsert({
         id: event.eventId,
         kind: 'system',

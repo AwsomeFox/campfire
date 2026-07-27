@@ -89,6 +89,20 @@
     "systemVote": "Table vote: {{action}}",
     "systemRules": "Rules answer: {{text}}",
     "systemRulesEmpty": "Rules answer",
+    "systemPhase": {
+      "active": "The session is under way.",
+      "greeting": "The AI is opening the session.",
+      "wrap_up": "The AI is wrapping up the session.",
+      "ended": "The session has ended."
+    },
+    "systemPhaseUnknown": "The session phase changed.",
+    "systemPhaseInterrupted": "A restart interrupted the {{phase}} phase.",
+    "phaseName": {
+      "active": "play",
+      "greeting": "opening",
+      "wrap_up": "wrap-up",
+      "ended": "ended"
+    },
     "systemInfo": "State: {{state}}",
 
     "offTitle": "The AI DM is off",

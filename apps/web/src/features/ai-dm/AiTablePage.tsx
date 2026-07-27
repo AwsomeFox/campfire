@@ -951,8 +951,13 @@ export default function AiTablePage() {
             {/* #1043 — session lifecycle. Start Session is player+ (sitting down to play is a
                 table act); Wrap Up is DM-only (closing a session is a decision). Both are hidden
                 while a lifecycle turn is mid-flight rather than merely disabled, so the header
-                does not offer an action the server is about to 409. */}
-            {phase !== 'greeting' && phase !== 'wrap_up' && (
+                does not offer an action the server is about to 409.
+
+                `canCompose` (dm | player) mirrors the server's player+ gate on start-session. A
+                VIEWER was previously shown the button and got a 403 on click — the same "control
+                that cannot succeed" defect as the ended composer, and against this block's own
+                stated intent. Wrap Up keeps its additional `isDm` check on top. */}
+            {canCompose && phase !== 'greeting' && phase !== 'wrap_up' && (
               <div className="flex gap-1.5">
                 <Btn ghost onClick={() => void onLifecycle('start-session')} disabled={lifecycleBusy}>
                   {t('table.startSession')}

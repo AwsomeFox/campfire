@@ -237,6 +237,19 @@ function isTransientPhase(phase: AiDmSessionPhase): boolean {
 }
 
 /**
+ * Where a transient phase LANDS when its turn returns (#1043) — the single definition of the
+ * two transitions, so `startSession`, `wrapUpSession` and the retry/nudge replay cannot drift
+ * into disagreeing about what a greeting or a wrap-up ends as.
+ *
+ * A settled phase is its own destination: nothing about it is in flight.
+ */
+function settledPhaseFor(phase: AiDmSessionPhase): AiDmSessionPhase {
+  if (phase === 'greeting') return 'active';
+  if (phase === 'wrap_up') return 'ended';
+  return phase;
+}
+
+/**
  * The stuck-ladder session state (#314). Distinct from the low-level `status` (which the
  * turn loop / pause gate use): `state` is the player-facing lifecycle the recovery levers
  * drive. `running` is healthy; `awaiting_players` means detection tripped and the table must
@@ -1563,6 +1576,21 @@ export class AiDriverService {
   private readonly activeGenerations = new Map<number, ActiveGeneration>();
   /** Last player input per campaign — replayed by the retry/nudge/flag levers (#314). */
   private readonly lastInputs = new Map<number, string>();
+  /**
+   * #1043 — the lifecycle phase the {@link lastInputs} entry was run under, if it was a
+   * lifecycle turn, so retry/nudge can replay the TRANSITION rather than an ordinary turn.
+   *
+   * Kept in exact lockstep with `lastInputs` (written and cleared at the same one place) because
+   * it only ever answers a question about that string: "what was this input for". Without it a
+   * retry after a failed greeting replays the server-authored greeting prompt as an ordinary
+   * active turn — no OPENING direction, no recap — and a retry after a failed wrap-up is refused
+   * outright by the `ended` gate, so the lever the stuck ladder offers cannot work.
+   *
+   * In-memory, like `lastInputs` itself is beyond the single `lastInput` column: a restart ends
+   * the transient phase anyway (see {@link HydratedControlState.phaseInterrupted}), so a replay
+   * that survived one would be replaying a transition the table has already been told died.
+   */
+  private readonly lastLifecycle = new Map<number, AiDmSessionPhase>();
   private readonly actionQueues = new Map<number, ActionQueueEntry[]>();
   /**
    * Correlation id of the turn currently narrating in each campaign (#572). Stamped onto
@@ -2132,6 +2160,7 @@ export class AiDriverService {
     const fresh = this.freshSession(campaignId);
     this.sessions.set(campaignId, fresh);
     this.lastInputs.delete(campaignId);
+    this.lastLifecycle.delete(campaignId); // #1043 — lockstep with `lastInputs`.
     this.deletePersistedControlState(campaignId);
     this.stream.emit({ type: 'state', campaignId, state: fresh.state });
     return fresh;
@@ -2382,11 +2411,12 @@ export class AiDriverService {
    * safety hold all apply unchanged. A greeting is a turn; there is no privileged path around
    * the things that stop turns.
    *
-   * The phase is set BEFORE the turn — it has to be, because the prompt assembly reads it to
-   * decide which direction block and whether to fetch the recap — and a refused turn RESTORES
-   * it in the catch. Net effect: a start request that bounces off a paused seat leaves the
-   * lifecycle exactly where it was, rather than stranding the table in `greeting` with nothing
-   * having greeted them.
+   * The phase is NOT staged on the session before the turn. It travels as a request parameter
+   * (`opts.lifecycle`) to the prompt assembly that needs it, and `session.phase` moves only
+   * inside `runTurn`, after every gate has passed, in the same breath as it is published. Net
+   * effect: a start request that bounces off a paused seat changes nothing observable at all —
+   * no field, no SSE frame, no transcript row, nothing on disk — rather than stranding the table
+   * in `greeting` with nothing having greeted them. See {@link runLifecycleTurn}.
    *
    * The phase then advances to `active` when the turn RETURNS — whatever its stop reason. A
    * greeting that hit the budget cap, errored, or was frozen mid-sentence still ends the opening
@@ -2404,7 +2434,7 @@ export class AiDriverService {
         `The table is already in the ${session.phase === 'greeting' ? 'opening' : 'wrap-up'} phase. Wait for it to finish.`,
       );
     }
-    return this.runLifecycleTurn(campaignId, user, role, 'greeting', GREETING_PROMPT, 'active');
+    return this.runLifecycleTurn(campaignId, user, role, 'greeting', GREETING_PROMPT, settledPhaseFor('greeting'));
   }
 
   /**
@@ -2425,7 +2455,7 @@ export class AiDriverService {
     if (session.phase === 'ended') {
       throw new ConflictException('This session has already ended. Start a new one before wrapping up again.');
     }
-    return this.runLifecycleTurn(campaignId, user, role, 'wrap_up', WRAP_UP_PROMPT, 'ended');
+    return this.runLifecycleTurn(campaignId, user, role, 'wrap_up', WRAP_UP_PROMPT, settledPhaseFor('wrap_up'));
   }
 
   /**
@@ -2946,6 +2976,12 @@ export class AiDriverService {
 
     // Remember the input so the retry / nudge / flag levers can replay this turn (#314).
     this.lastInputs.set(campaignId, input);
+    // #1043 — and remember WHAT IT WAS FOR, in the same breath, so the two can never disagree.
+    // A lever replaying this input must reproduce the turn, and a lifecycle turn is not
+    // reproducible from its prompt string alone: the phase is what selects the direction block
+    // and lifts the `ended` gate. An ordinary turn clears the marker for the same reason.
+    if (opts.lifecycle) this.lastLifecycle.set(campaignId, opts.lifecycle);
+    else this.lastLifecycle.delete(campaignId);
     this.persistControlState(session);
     const prevNarration = session.lastNarration;
 
@@ -2982,6 +3018,14 @@ export class AiDriverService {
     const toolSchemas: AiToolSchema[] = seatToolset.tools
       .filter((t) => {
         if (!isDriverToolAllowed(t) || DRIVER_DM_ONLY_AGGREGATE_TOOLS.has(t.name)) return false;
+        // #1043 — a lifecycle turn is NARRATION ONLY, and that is enforced by the schema, not by
+        // the phase direction's prose. The directions tell the model not to resolve scenes; a
+        // model that ignored them would otherwise reach the ordinary live-play toolset and
+        // actually apply damage or advance the turn order during a hello. Withholding is the
+        // enforcement that prose cannot be: a tool the model never sees cannot be called, and
+        // there is no rejection envelope to reason around either. Reads stay — a closing summary
+        // needs to look at the party to summarise it.
+        if (opts.lifecycle && t.mutating) return false;
         return this.policyForTool(sessionProfile, t).offer;
       })
       .map((t) => ({
@@ -3379,6 +3423,7 @@ export class AiDriverService {
           messages,
           executed,
           ledger,
+          opts.lifecycle !== undefined,
         );
         if (authorityStop) {
           stopReason = generationAuthorityStopReason(authorityStop);
@@ -3797,6 +3842,12 @@ export class AiDriverService {
     executed: AiDmExecutedTool[],
     /** #577 — records the ids each authorized call actually returned, for citation validation. */
     ledger: RetrievalLedger,
+    /**
+     * #1043 — true when this turn is a lifecycle transition (greeting / wrap-up), whose mutating
+     * tools were withheld from the schema. Re-checked here for the same reason every other
+     * scoping rule is: a provider can emit a call for a tool it was never offered.
+     */
+    lifecycle = false,
   ): Promise<{ toolErrored: boolean; authorityStop: Exclude<GenerationAuthority, 'ok'> | null }> {
     let toolErrored = false;
     for (const call of toolCalls) {
@@ -3828,11 +3879,20 @@ export class AiDriverService {
 
       // (0) Tool-scoping (#317/#378/#474): default-deny at EXECUTION so a hallucinated or
       // injection-induced forbidden call never reaches a service.
-      if (tool && (!isDriverToolAllowed(tool) || policyDecision?.policy === 'deny')) {
-        const code = policyDecision?.policy === 'deny' ? 'forbidden_tool_policy' : 'forbidden_tool';
-        const message =
-          policyDecision?.reason ??
-          `The AI DM seat is not permitted to call ${call.name} during ${sessionProfile} play.`;
+      // #1043: a lifecycle turn narrates and does not change the world. The mutating tools were
+      // withheld from its schema above, so reaching here means the provider called something it
+      // was never shown — refuse before the service runs.
+      const lifecycleWithheld = lifecycle && tool?.mutating === true;
+      if (tool && (!isDriverToolAllowed(tool) || lifecycleWithheld || policyDecision?.policy === 'deny')) {
+        const code = lifecycleWithheld
+          ? 'forbidden_tool_lifecycle'
+          : policyDecision?.policy === 'deny'
+            ? 'forbidden_tool_policy'
+            : 'forbidden_tool';
+        const message = lifecycleWithheld
+          ? `The AI DM seat may not call ${call.name} while opening or closing a session — that turn only narrates.`
+          : (policyDecision?.reason ??
+            `The AI DM seat is not permitted to call ${call.name} during ${sessionProfile} play.`);
         const text = JSON.stringify(buildMcpEnvelope(new ForbiddenException({ code, message })));
         messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: text });
         const blockedIdentity = await this.resolveToolResourceIdentity(
@@ -4706,6 +4766,24 @@ export class AiDriverService {
       { control: 'retry', ...(hint ? { hint } : {}) },
       user,
     );
+    // #1043 — if the turn being replayed was a lifecycle transition, replay it AS ONE.
+    //
+    // A lifecycle turn is not reproducible from its prompt string: without the phase the
+    // greeting prompt assembles as an ordinary active turn (no OPENING direction, no recap —
+    // the table gets a stranger's idea of a hello), and the wrap-up prompt is refused outright
+    // by the `ended` gate, because the failed wrap-up settled the phase there on its way out.
+    // That is the lever the stuck ladder offers first after a `provider_error` not working at
+    // all — the one case it exists for.
+    //
+    // Delegating to `runLifecycleTurn` rather than passing `lifecycle` through to `runTurn`
+    // directly is what keeps the transition WHOLE: the same publish-once-after-the-gates
+    // sequencing, the same catch that takes a published phase back, and above all the same
+    // `finally` that settles the phase afterwards. Setting `opts.lifecycle` by hand here would
+    // move the table into `greeting` with nothing to move it out again.
+    const replayPhase = this.lastLifecycle.get(campaignId);
+    if (replayPhase) {
+      return this.runLifecycleTurn(campaignId, user, role, replayPhase, input, settledPhaseFor(replayPhase));
+    }
     return this.runTurn(campaignId, user, input, { lever: 'nudge' });
   }
 

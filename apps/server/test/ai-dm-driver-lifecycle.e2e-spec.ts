@@ -194,9 +194,102 @@ describe('ai-dm driver — session lifecycle phases (#1043)', () => {
     expect(nudged.status).toBe(201);
     expect(nudged.body.narration).toContain('Welcome back');
 
+    // ...and it re-runs it AS A GREETING. `lastInput` alone is not enough: the prompt string is
+    // the server's greeting text, but the PHASE is what selects the OPENING direction block and
+    // pulls in the DM-approved recap. Replaying the string under `active` produced a turn that
+    // read the greeting prompt with none of the instructions that make it a greeting — the
+    // table's first impression of the session, assembled wrong.
+    expect(lastSystem()).toContain('Session phase: OPENING');
+    expect(lastSystem()).toContain('Previous session recap');
+
     const session = (await h.getDriverSession(campaignId)).body;
     expect(session.stuck).toBeNull();
+    // Still bounded by its turn: the replay is a transition, so it settles like one.
     expect(session.phase).toBe('active');
+  });
+
+  it('lets the retry lever replay a failed WRAP-UP, which the `ended` gate would otherwise refuse', async () => {
+    const campaignId = await armed('Stuck Wrap Up Levers');
+    h.script({ throwError: new Error('provider exploded'), text: '' });
+    expect((await wrapUp(campaignId, dm)).status).toBe(201);
+
+    // The trap this closes. A failed wrap-up still settles the phase in `ended`, because the
+    // transient phase is bounded by its turn. The stuck ladder then offers `retry`/`nudge` — and
+    // an ordinary replay of that input is refused by the `ended` gate, so the one lever the table
+    // is pointed at cannot run, and the session is closed on a closing summary nobody heard.
+    expect(await phaseOf(campaignId)).toBe('ended');
+    const stuck = (await h.getDriverSession(campaignId)).body;
+    expect(stuck.state).toBe('awaiting_players');
+    expect(stuck.levers).toContain('retry');
+
+    h.script({ text: 'You make camp. Until next time.', usage: { promptTokens: 6, completionTokens: 5, totalTokens: 11 } });
+    const nudged = await h.lever(campaignId, 'nudge', {}, dm);
+    expect(nudged.status).toBe(201);
+    expect(nudged.body.narration).toContain('Until next time');
+    expect(lastSystem()).toContain('Session phase: WRAPPING UP');
+
+    // And it lands where a wrap-up lands, rather than leaving the table in a phase its own
+    // replay walked back.
+    expect(await phaseOf(campaignId)).toBe('ended');
+  });
+
+  it('withholds every mutating tool from a lifecycle turn, so prose is not the only thing stopping it', async () => {
+    const campaignId = await armed('Lifecycle Tool Schema');
+
+    // Baseline: an ordinary turn IS offered the live-play write tools.
+    h.script({ text: 'The road forks.', usage: { promptTokens: 4, completionTokens: 4, totalTokens: 8 } });
+    await h.sendMessage(campaignId, { input: 'we travel' });
+    const ordinaryTools = (h.mock.received.at(-1)?.tools ?? []).map((t) => t.name);
+    expect(ordinaryTools).toContain('update_character_hp');
+    expect(ordinaryTools).toContain('next_turn');
+
+    // The greeting is offered none of them. THE PHASE DIRECTIONS ARE PROSE, and this feature's
+    // own notes say prompt text is not enforcement: a provider that ignored "do not resolve
+    // scenes" would otherwise reach the ordinary live-play toolset and actually apply damage or
+    // advance the turn order during a hello. A tool the model is never shown cannot be called —
+    // that is a property of the request, not of the model's compliance.
+    h.script({ text: 'Welcome back, everyone.', usage: { promptTokens: 6, completionTokens: 4, totalTokens: 10 } });
+    expect((await start(campaignId, player)).status).toBe(201);
+    const greetingTools = (h.mock.received.at(-1)?.tools ?? []).map((t) => t.name);
+    expect(greetingTools).not.toContain('update_character_hp');
+    expect(greetingTools).not.toContain('next_turn');
+    expect(greetingTools).not.toContain('award_xp');
+    // Reads survive: a closing summary has to look at the party to summarise it, and a greeting
+    // recaps what happened. Withholding writes is the point; blinding the turn is not.
+    expect(greetingTools.length).toBeGreaterThan(0);
+  });
+
+  it('refuses a damage call during a greeting instead of applying it', async () => {
+    const campaignId = await armed('Greeting Cannot Damage');
+
+    // A provider emitting a call it was never offered — a hallucination, or an injection riding
+    // in on campaign text. The schema is the first line; this is the second, for the same reason
+    // every other scoping rule in this service is enforced twice.
+    h.script({
+      text: 'Welcome back.',
+      toolCalls: [{ id: 'c1', name: 'update_character_hp', arguments: { characterId: 1, hpDelta: -7 } }],
+      usage: { promptTokens: 6, completionTokens: 4, totalTokens: 10 },
+    });
+    h.script({ text: 'Shall we begin?', usage: { promptTokens: 4, completionTokens: 3, totalTokens: 7 } });
+
+    const res = await start(campaignId, player);
+    expect(res.status).toBe(201);
+
+    const hp = (res.body.toolCalls as Array<{ name: string; isError?: boolean; pendingConfirmation?: boolean }>)
+      .find((c) => c.name === 'update_character_hp');
+    expect(hp).toBeDefined();
+    expect(hp?.isError).toBe(true);
+    // NOT QUEUED FOR A DM EITHER. A confirmation would be a damage application sitting in a
+    // review queue, waiting to be approved out of a turn that had no business proposing one.
+    expect(hp?.pendingConfirmation).toBeFalsy();
+    const queued = await request(h.server)
+      .get(`/api/v1/campaigns/${campaignId}/ai-dm/tool-confirmations`)
+      .set(dm);
+    expect(queued.body).toHaveLength(0);
+
+    // The greeting still finished and still settled — a refused tool call must not strand the
+    // table any more than a failed one does.
+    expect(await phaseOf(campaignId)).toBe('active');
   });
 
   it('broadcasts a thin phase frame the table can follow', async () => {
