@@ -21,6 +21,9 @@ import {
   formatCheckBreakdown,
   sortCheckCatalog,
   pf2eDegreeOfSuccess,
+  // #1039 — the single definition of "how many slots remain" and when a spend must fail.
+  applySpellSlotDelta,
+  spellSlotsRemaining,
   // Rest mechanics (#1041): the pure planner. Nothing here rolls its own dice or touches the
   // database — the service plans, validates the WHOLE party, then writes once.
   describeRestForLog,
@@ -37,6 +40,7 @@ import { auditLog, campaigns, characters, checkRequests, combatants, encounters 
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { fromJsonText, toJsonText } from '../../common/json';
+import { conditionWriteSetFromNames } from '../../common/conditions';
 import { redactSecret, redactSecrets } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
@@ -589,7 +593,13 @@ export class CharactersService {
       await this.db
         .update(combatants)
         .set({
-          conditions: conditionsJson,
+          // Reconcile the structured copy too, or a sheet-side REMOVAL leaves its instance
+          // behind and the next tracker write derives the condition straight back (#423 ×
+          // #486). See common/conditions.ts.
+          ...conditionWriteSetFromNames(
+            fromJsonText<string[]>(conditionsJson, []),
+            combatant.conditionInstances,
+          ),
           ...(sheetSyncedUpdatedAt != null ? { sheetSyncedUpdatedAt } : {}),
         })
         .where(eq(combatants.id, combatant.id));
@@ -1240,24 +1250,64 @@ export class CharactersService {
     return redactSecret(toDomain(row), role);
   }
 
-  /** Spend (+delta) or restore (-delta) slots at one spell level; `used` is clamped to [0, max]. */
+  /**
+   * Spend (+delta) or restore (-delta) slots at one spell level (#1039).
+   *
+   * BEHAVIOUR CHANGE: an overspend now FAILS instead of clamping. Previously, casting at a
+   * level with `used === max` returned 201 with an unchanged sheet — a confusing no-op for a
+   * human clicking a pip, and the unlimited-casting hole for the AI DM, which reads a success
+   * and narrates the spell as cast. Its sibling `adjustResource` (#422, thirty lines below)
+   * has always thrown on the same condition; this brings the two into agreement, and the safe
+   * one was not previously the one guarding spells.
+   *
+   * Restores still clamp at zero. See the asymmetry note in packages/schema/src/spell-slots.ts:
+   * a restore cannot invent a slot, and `used = 0` is the state a long rest produces anyway.
+   *
+   * CONCURRENCY. The read, the decision, and the write happen inside ONE
+   * `this.db.transaction`, and the row is RE-READ inside it rather than reusing the row fetched
+   * for the permission check. better-sqlite3 runs a transaction synchronously to completion
+   * with no JS yield, so two concurrent casts on the same character cannot interleave between
+   * the read and the write within this process — the same single-process argument
+   * `AiDmTranscriptService` documents for its `MAX(seq) + 1` allocation. The previous shape
+   * (`getRowOrThrow` … `await db.update`) had an `await` between read and write, so two casts
+   * resolving in the same turn silently lost one deduction, which is the same unlimited-casting
+   * abuse arriving through the back door.
+   *
+   * A SQL-side `json_set` delta was the alternative. It was rejected because it cannot express
+   * "fail when insufficient" in one statement — it would have to clamp, which is the bug.
+   */
   async patchSpellSlots(id: number, patch: SpellSlotPatchInput, user: RequestUser, role: Role): Promise<Character> {
     const existing = await this.getRowOrThrow(id);
     this.assertCanWrite(existing, user, role);
 
-    const slots = fromJsonText<Record<string, SpellSlotLevel>>(existing.spellSlots, {});
-    const key = String(patch.level);
-    const slot = slots[key];
-    if (!slot || slot.max <= 0) {
-      throw new BadRequestException(`No spell slots at level ${patch.level} — set the level's max via PATCH spellSlots first`);
-    }
-    slots[key] = { max: slot.max, used: Math.max(0, Math.min(slot.max, slot.used + patch.delta)) };
+    let row!: typeof characters.$inferSelect;
+    let outcome!: ReturnType<typeof applySpellSlotDelta>;
+    this.db.transaction((tx) => {
+      const [fresh] = tx.select().from(characters).where(eq(characters.id, id)).limit(1).all();
+      if (!fresh || fresh.deletedAt !== null) throw new NotFoundException(`Character ${id} not found`);
 
-    const [row] = await this.db
-      .update(characters)
-      .set({ spellSlots: toJsonText(slots), updatedAt: nowIso() })
-      .where(eq(characters.id, id))
-      .returning();
+      const slots = fromJsonText<Record<string, SpellSlotLevel>>(fresh.spellSlots, {});
+      outcome = applySpellSlotDelta(slots, patch.level, patch.delta);
+      if (!outcome.ok) {
+        // Thrown from INSIDE the transaction so the read is rolled back with the decision —
+        // nothing is written on the failure path.
+        throw new BadRequestException({
+          code: outcome.reason,
+          message: outcome.message,
+          level: outcome.level,
+          remaining: outcome.remaining,
+          max: outcome.max,
+        });
+      }
+
+      const [updated] = tx
+        .update(characters)
+        .set({ spellSlots: toJsonText(outcome.slots), updatedAt: nowIso() })
+        .where(eq(characters.id, id))
+        .returning()
+        .all();
+      row = updated;
+    });
 
     await this.audit.log({
       actor: auditActor(user),
@@ -1266,10 +1316,21 @@ export class CharactersService {
       entityType: 'character',
       entityId: id,
       campaignId: existing.campaignId,
-      detail: JSON.stringify(patch),
+      detail: JSON.stringify({
+        ...patch,
+        usedBefore: outcome.ok ? outcome.usedBefore : undefined,
+        usedAfter: outcome.ok ? outcome.usedAfter : undefined,
+        remaining: outcome.ok ? outcome.remaining : undefined,
+      }),
     });
     this.emitCharacterUpdated(existing.campaignId, id, user.id);
     return toDomain(row);
+  }
+
+  /** Slots remaining at one level — read-only, for callers that want to check before spending. */
+  async spellSlotsLeft(id: number, level: number): Promise<number> {
+    const existing = await this.getRowOrThrow(id);
+    return spellSlotsRemaining(fromJsonText<Record<string, SpellSlotLevel>>(existing.spellSlots, {}), level);
   }
 
   /** Spend, restore, or configure a bounded character resource (issue #422). */
@@ -1282,30 +1343,55 @@ export class CharactersService {
     const existing = await this.getRowOrThrow(id);
     this.assertCanWrite(existing, user, role);
 
-    const resources = fromJsonText<Record<string, { max: number; used: number; name?: string; recharge?: string }>>(existing.resources, {});
-    const current = resources[patch.key] ?? { max: patch.max ?? 1, used: 0, name: patch.name || patch.key, recharge: patch.recharge || 'long-rest' };
+    /**
+     * #1073 — READ, DECIDE AND WRITE IN ONE SYNCHRONOUS TRANSACTION.
+     *
+     * This used to read the row, compute the new `used` across an `await`, and write it back.
+     * Two concurrent spends of the same resource both read `used: 0`, both decide `1`, and the
+     * second write lands on the first: one spend is FREE. For a resource whose whole purpose is
+     * that you pay for a reroll, a lost update is not a rounding error — it is the AI narrating
+     * a reroll nobody paid for, which is the #1039 failure mode exactly.
+     *
+     * The row is re-read INSIDE the transaction (`tx`), not reused from the `existing` snapshot
+     * above, because that snapshot is precisely the stale value the race turns on. `existing`
+     * still serves the permission check, which is not order-sensitive. better-sqlite3 runs the
+     * transaction synchronously to completion with no JS yield, so nothing can interleave.
+     */
+    const row = this.db.transaction((tx) => {
+      const fresh = tx.select().from(characters).where(eq(characters.id, id)).get();
+      if (!fresh) throw new NotFoundException(`Character ${id} not found`);
 
-    const max = patch.max !== undefined ? Math.min(100, Math.max(0, patch.max)) : current.max;
-    let used = patch.used !== undefined ? patch.used : current.used;
-    if (patch.delta !== undefined) {
-      used += patch.delta;
-    }
-    if (used < 0 || used > max) {
-      throw new BadRequestException(`Resource '${patch.key}' overspend/overrestore: resulting used (${used}) must be in [0, max (${max})]`);
-    }
+      const resources = fromJsonText<Record<string, { max: number; used: number; name?: string; recharge?: string }>>(fresh.resources, {});
+      const current = resources[patch.key] ?? { max: patch.max ?? 1, used: 0, name: patch.name || patch.key, recharge: patch.recharge || 'long-rest' };
 
-    resources[patch.key] = {
-      max,
-      used,
-      name: patch.name ?? current.name ?? patch.key,
-      recharge: patch.recharge ?? current.recharge ?? 'long-rest',
-    };
+      const max = patch.max !== undefined ? Math.min(100, Math.max(0, patch.max)) : current.max;
+      let used = patch.used !== undefined ? patch.used : current.used;
+      if (patch.delta !== undefined) {
+        used += patch.delta;
+      }
+      // Deliberately an ERROR, never a clamp (#1039): spending a resource you do not have must
+      // fail loudly. A silent clamp to the bound would report success for a spend that never
+      // happened, and the caller — increasingly an AI narrating the result — would describe an
+      // effect it never paid for. Over-restoring is rejected for the mirror reason.
+      if (used < 0 || used > max) {
+        throw new BadRequestException(`Resource '${patch.key}' overspend/overrestore: resulting used (${used}) must be in [0, max (${max})]`);
+      }
 
-    const [row] = await this.db
-      .update(characters)
-      .set({ resources: toJsonText(resources), updatedAt: nowIso() })
-      .where(eq(characters.id, id))
-      .returning();
+      resources[patch.key] = {
+        max,
+        used,
+        name: patch.name ?? current.name ?? patch.key,
+        recharge: patch.recharge ?? current.recharge ?? 'long-rest',
+      };
+
+      const [written] = tx
+        .update(characters)
+        .set({ resources: toJsonText(resources), updatedAt: nowIso() })
+        .where(eq(characters.id, id))
+        .returning()
+        .all();
+      return written;
+    });
 
     await this.audit.log({
       actor: auditActor(user),

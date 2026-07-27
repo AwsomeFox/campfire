@@ -96,6 +96,7 @@ import {
   InviteCreate,
   InvitePolicyUpdate,
   SpellSlotPatch,
+  spellSlotsRemaining,
   EncounterReopen,
   ProposalRevise,
   ProposalBatchResolve,
@@ -2773,18 +2774,40 @@ export class McpToolsService {
       server,
       user,
       'adjust_spell_slots',
-      'Spend (+delta) or restore (-delta) spell slots at one level for a character — dm or the owning player. `used` is ' +
-        'clamped to [0, max]. 400 if the character has no slots at that level.',
+      'Spend (+delta) or restore (-delta) spell slots at one level for a character — dm or the owning player. ' +
+        'A spend that exceeds the slots remaining FAILS with an error carrying `remaining` and `max`, so it is safe ' +
+        'to treat success as "the slot was consumed" — do not narrate a spell as cast if this call errored. ' +
+        'Restores clamp at zero. 400 if the character has no slots configured at that level.',
       { characterId: Id.describe('Character id'), ...SpellSlotPatch.shape },
       async ({ characterId, level, delta }) => {
         const row = await this.characters.getRowOrThrow(characterId as number);
         const role = await this.access.requireRole(user, row.campaignId, 'player');
-        return this.characters.patchSpellSlots(
+        const before = await this.characters.spellSlotsLeft(characterId as number, level as number);
+        const updated = await this.characters.patchSpellSlots(
           characterId as number,
           { level: level as number, delta: delta as number },
           user,
           role,
         );
+        // Combat-logged at the TOOL boundary, not inside CharactersService: that module has no
+        // EncountersService edge, and both the rest tools and the driver's loot tools (#1021)
+        // already log here. Best-effort and post-commit — a log failure must not undo a spend.
+        const after = spellSlotsRemaining(
+          (updated.spellSlots ?? {}) as Record<string, { max: number; used: number }>,
+          level as number,
+        );
+        if (after !== before) {
+          const spent = after < before;
+          const count = Math.abs(after - before);
+          await this.encounters
+            .appendActiveEncounterNote(
+              row.campaignId,
+              `${spent ? 'spent' : 'restored'} ${count} level ${level} spell ${count === 1 ? 'slot' : 'slots'} (${after} remaining)`,
+              updated.name,
+            )
+            .catch(() => undefined);
+        }
+        return updated;
       },
     );
 
