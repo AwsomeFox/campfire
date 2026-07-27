@@ -69,8 +69,13 @@ interrupted write.
 
 ### Which export profiles stream
 
-Whole-server backups and campaign exports under the **backup** profile hand attachment files
-to the archive as filesystem paths, so their bytes never enter the server heap.
+Whole-server backups and campaign downloads under the **backup** profile preflight-stage
+immutable attachment copies on temporary disk before emitting any ZIP entries. The archive then
+reads those filesystem paths, keeping attachment bytes out of the server heap. Size server
+temporary disk for the staged copies. Campaign downloads stream the ZIP to the browser or other
+archive destination without retaining that final archive on server disk, so that destination needs
+the final-archive capacity; scheduled whole-server backups instead retain the final archive in
+`BACKUP_DIR`, which needs that capacity in addition to staging space.
 
 The **handoff** and **publish** profiles must strip embedded metadata (EXIF/XMP) before an
 attachment may travel, and bytes cannot be sanitized without being read. Each attachment is

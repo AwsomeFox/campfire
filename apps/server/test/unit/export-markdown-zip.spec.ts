@@ -162,6 +162,52 @@ describe('buildMarkdownZip — filename collisions (issues #530 / #863)', () => 
     });
   });
 
+  it('releases inspected preview attachment buffers while preserving their inventory', () => {
+    const service = serviceWithCollisions();
+    const attachments = [
+      { id: 7, mime: 'application/pdf', filename: 'first.pdf' },
+      { id: 8, mime: 'application/pdf', filename: 'second.pdf' },
+      { id: 9, mime: 'application/pdf', filename: 'third.pdf' },
+    ];
+    const bytes = new Map(attachments.map((attachment) => [attachment.id, Buffer.alloc(256 * 1024, attachment.id)]));
+    (service as any).attachments.readBytesIfPresent = jest.fn(({ id }: { id: number }) => bytes.get(id));
+    const policy = resolveExportPolicy('handoff');
+
+    const decisions = (service as any).planAttachmentBytes(
+      1,
+      { attachments },
+      policy,
+      [],
+      false,
+      undefined,
+      false,
+    );
+
+    expect([...decisions.values()]).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 7, bytes: null, available: true }),
+      expect.objectContaining({ id: 8, bytes: null, available: true }),
+      expect.objectContaining({ id: 9, bytes: null, available: true }),
+    ]));
+    expect([...decisions.values()].every((decision) => decision.bytes === null)).toBe(true);
+    expect((service as any).attachmentInventory({ attachments }, policy, decisions, 'mdzip', true)).toMatchObject({
+      included: 3,
+      bytesWithheld: 0,
+    });
+  });
+
+  it('asks Markdown ZIP previews to inspect attachments without retaining bytes', async () => {
+    const service = serviceWithCollisions();
+    const build = jest.spyOn(service as any, 'buildProfileExport').mockResolvedValue({ inventory: { profile: 'handoff' } });
+
+    await service.buildExportInventory(1, USER, 'handoff', {}, 'mdzip');
+
+    expect(build).toHaveBeenCalledWith(1, USER, 'handoff', {}, expect.objectContaining({
+      inspectAttachmentBytes: true,
+      format: 'mdzip',
+      retainAttachmentBytes: false,
+    }));
+  });
+
   it('streams a readable ZIP without invoking the compatibility buffer builder', async () => {
     const service = serviceWithCollisions();
     const legacy = jest.spyOn(service, 'buildMarkdownZip');

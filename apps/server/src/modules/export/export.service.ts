@@ -124,6 +124,8 @@ type ProfileExportData = Omit<ExportData, 'notes' | 'comments' | 'characters' | 
 type AttachmentByteDecision = {
   id: number;
   bytes: Buffer | null;
+  /** Bytes passed policy inspection but were deliberately not retained (preview only). */
+  available?: boolean;
   /** Original immutable attachment source, used only by the streaming backup path. */
   sourcePath?: string;
   /** Present when sourcePath was already staged from sanitized bytes. */
@@ -461,6 +463,7 @@ export class ExportService {
       format?: 'json' | 'mdzip';
       attachmentPaths?: boolean;
       stageAttachmentBytes?: (content: Buffer) => { path: string; checksum: string };
+      retainAttachmentBytes?: boolean;
     } = {},
   ): Promise<ProfileExportResult & { projection: ExportProjection; attachmentBytes: Map<number, AttachmentByteDecision> }> {
     const policy = resolveExportPolicy(profile, options);
@@ -477,6 +480,7 @@ export class ExportService {
           scannable,
           opts.attachmentPaths === true,
           opts.stageAttachmentBytes,
+          opts.retainAttachmentBytes !== false,
         )
       : new Map<number, AttachmentByteDecision>();
 
@@ -485,7 +489,7 @@ export class ExportService {
     if (opts.inspectAttachmentBytes && Array.isArray(projection.data.attachments)) {
       for (const entry of projection.data.attachments as Array<Record<string, unknown>>) {
         const decision = attachmentBytes.get(Number(entry.id));
-        if (!decision || (decision.bytes == null && !decision.sourcePath)) {
+        if (!decision || (decision.bytes == null && !decision.sourcePath && !decision.available)) {
           entry.present = false;
           if (decision?.withheldReason) entry.bytesWithheldReason = decision.withheldReason;
         }
@@ -553,6 +557,10 @@ export class ExportService {
     const { inventory } = await this.buildProfileExport(campaignId, user, profile, options, {
       inspectAttachmentBytes: format === 'mdzip',
       format,
+      // Preview needs inspection results, not payloads. Keeping one sanitized
+      // Buffer per attachment here would turn a large campaign preview into a
+      // cumulative heap allocation even though it emits no archive bytes.
+      retainAttachmentBytes: false,
     });
     return inventory;
   }
@@ -607,6 +615,7 @@ export class ExportService {
     identifiers: string[],
     preferPaths = false,
     stageAttachmentBytes?: (content: Buffer) => { path: string; checksum: string },
+    retainBytes = true,
   ): Map<number, AttachmentByteDecision> {
     const decisions = new Map<number, AttachmentByteDecision>();
     const rows = Array.isArray(raw.attachments) ? (raw.attachments as Array<{ id: number; mime: string; filename: string }>) : [];
@@ -622,7 +631,12 @@ export class ExportService {
         continue;
       }
       if (!policy.sanitizeAttachmentBytes) {
-        decisions.set(row.id, { id: row.id, bytes: original, metadataStripped: false });
+        decisions.set(row.id, {
+          id: row.id,
+          bytes: retainBytes ? original : null,
+          available: !retainBytes,
+          metadataStripped: false,
+        });
         continue;
       }
       const result = stripImageMetadata(row.mime, original);
@@ -654,7 +668,12 @@ export class ExportService {
           metadataStripped: result.stripped,
         });
       } else {
-        decisions.set(row.id, { id: row.id, bytes: result.bytes, metadataStripped: result.stripped });
+        decisions.set(row.id, {
+          id: row.id,
+          bytes: retainBytes ? result.bytes : null,
+          available: !retainBytes,
+          metadataStripped: result.stripped,
+        });
       }
     }
     return decisions;
@@ -685,7 +704,7 @@ export class ExportService {
     let stripped = 0;
     for (const row of rows) {
       const decision = decisions.get(row.id);
-      if (!decision || (decision.bytes == null && !decision.sourcePath)) withheld += 1;
+      if (!decision || (decision.bytes == null && !decision.sourcePath && !decision.available)) withheld += 1;
       if (decision?.metadataStripped) stripped += 1;
     }
     const unsanitizable = rows.filter((r) => !SANITIZABLE_MIMES.has(r.mime)).length;
