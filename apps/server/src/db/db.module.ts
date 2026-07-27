@@ -3258,6 +3258,85 @@ function migrateCampaignModules585(sqlite: Database.Database): void {
   addColumn('detached_at', 'detached_at TEXT');
 }
 
+/**
+ * Issue #587: server-admin campaign metadata catalog.
+ *
+ * Two independent pieces, both idempotent and both probe-before-act:
+ *
+ *  1. `campaigns.catalog_privacy` — a campaign's OWN opt-out from having its name and
+ *     description disclosed in the catalog. NOT NULL DEFAULT 'inherit', so the ADD COLUMN
+ *     backfills every existing row to the server-default-following value in one statement
+ *     (SQLite materialises a constant non-null default for existing rows on ALTER TABLE
+ *     ADD COLUMN, and 'inherit' is constant). No table rebuild. No REFERENCES clause is
+ *     involved, so the #69 convention about omitting FKs on ALTER does not apply here.
+ *
+ *  2. `campaign_export_requests` — an operator's ASK that a campaign's DMs produce an
+ *     export. Brand-new table, so the current house style (see
+ *     migrateAiDriverGroundingClaims577 above) applies: probe sqlite_master, verify the
+ *     expected column set, and DROP/recreate only if an earlier partial shape is found.
+ *     A pre-existing table carrying all expected columns is left completely alone.
+ *
+ * Fresh DBs never take either path — BOOTSTRAP_SQL already declares both correctly. The
+ * classic failure for this convention is bootstrap.sql and the migration drifting apart,
+ * leaving an upgraded install with a subtly different table than a fresh one;
+ * test/integration/db-migrations.spec.ts asserts fresh/upgraded parity for both pieces.
+ */
+function migrateAdminCampaignCatalog587(sqlite: Database.Database): void {
+  const hasCampaigns = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaigns'")
+    .get();
+  if (hasCampaigns) {
+    const columns = sqlite.prepare('PRAGMA table_info(campaigns)').all() as Array<{ name: string }>;
+    if (!columns.some((c) => c.name === 'catalog_privacy')) {
+      sqlite.exec("ALTER TABLE campaigns ADD COLUMN catalog_privacy TEXT NOT NULL DEFAULT 'inherit'");
+    }
+  }
+
+  const existing = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaign_export_requests'")
+    .all();
+  if (existing.length > 0) {
+    const cols = sqlite.prepare('PRAGMA table_info(campaign_export_requests)').all() as Array<{ name: string }>;
+    const names = new Set(cols.map((c) => c.name));
+    const expected = [
+      'id',
+      'campaign_id',
+      'requested_by',
+      'requested_by_user_id',
+      'profile',
+      'justification',
+      'status',
+      'decided_by',
+      'decided_at',
+      'decision_note',
+      'created_at',
+      'updated_at',
+    ];
+    if (expected.every((c) => names.has(c))) return;
+    sqlite.exec('DROP TABLE campaign_export_requests');
+  }
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS campaign_export_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+      requested_by TEXT NOT NULL,
+      requested_by_user_id TEXT NOT NULL DEFAULT '',
+      profile TEXT NOT NULL DEFAULT '',
+      justification TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'pending',
+      decided_by TEXT,
+      decided_at TEXT,
+      decision_note TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_campaign_export_requests_campaign
+      ON campaign_export_requests(campaign_id, id);
+    CREATE INDEX IF NOT EXISTS idx_campaign_export_requests_status
+      ON campaign_export_requests(status, id);
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
   { name: '0001_users_oidc', run: migrateUsersTableForOidc },
   { name: '0002_campaigns_rule_system', run: migrateCampaignsTableForRuleSystem },
@@ -3428,6 +3507,13 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // contiguous or sorted. That is also why nothing is renumbered to look tidy: renaming a
   // migration a database has already recorded is the one edit that breaks run-once.
   { name: '0120_campaign_modules_585', run: migrateCampaignModules585 },
+  // 0126 was CENTRALLY ALLOCATED to issue #587 by the merge coordinator; 0122-0125 are held
+  // by other in-flight branches, so the gap above is deliberate and must not be "tidied" down
+  // to the next free ordinal. runMigrations dedupes on the FULL name string, so the `_587`
+  // suffix is what guarantees this runs exactly once even if a sibling branch lands a
+  // colliding ordinal — and renaming this entry after a database has recorded it is the one
+  // edit that silently re-runs it.
+  { name: '0126_admin_campaign_catalog_587', run: migrateAdminCampaignCatalog587 },
 ];
 
 /**

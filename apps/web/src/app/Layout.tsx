@@ -743,6 +743,7 @@ function LayoutContent() {
     ? [
         { key: 'admin-overview', label: t('nav.adminOverview'), to: '/admin' },
         { key: 'admin-users', label: t('nav.adminUsers'), to: '/admin/users' },
+        { key: 'admin-campaigns', label: t('nav.adminCampaigns'), to: '/admin/campaigns' },
         { key: 'admin-rules', label: t('nav.adminRules'), to: '/admin/rules' },
         { key: 'admin-ai', label: t('nav.adminAi'), to: '/admin/ai' },
         { key: 'admin-auth', label: t('nav.adminAuth'), to: '/admin/auth' },

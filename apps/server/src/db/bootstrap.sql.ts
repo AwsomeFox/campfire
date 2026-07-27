@@ -142,6 +142,12 @@ CREATE TABLE IF NOT EXISTS campaigns (
   ics_token_expires_at TEXT,
   storage_quota_bytes INTEGER,
   active_encounter_id INTEGER REFERENCES encounters(id) ON DELETE SET NULL,
+  -- Issue #587: this campaign's own opt-out from having its NAME and DESCRIPTION
+  -- disclosed in the server-admin metadata catalog. 'inherit' follows the server
+  -- default; 'redacted' overrides it toward privacy. TIGHTEN-ONLY, and writable
+  -- only by the campaign's DM — a server admin who could clear this would make
+  -- the opt-out decorative. See modules/admin-catalog/.
+  catalog_privacy TEXT NOT NULL DEFAULT 'inherit',
   deleted_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -1475,6 +1481,35 @@ CREATE TABLE IF NOT EXISTS ai_driver_grounding_claims (
   corrected_at TEXT
 );
 
+-- Issue #587: a server operator's REQUEST that a campaign be exported.
+--
+-- The point of the metadata catalog is that an operator can locate and administer
+-- a campaign without being able to read it. "Bulk export requests" would destroy
+-- that in one step if the operator received the artifact, because a campaign
+-- export contains every quest, note, session-zero line and DM secret there is.
+-- So this table stores an ASK, addressed to the campaign's own DMs, who approve
+-- or deny it and who alone can then run the existing DM-gated export route. There
+-- is no column here that ever holds exported content.
+--
+-- CASCADE: campaign_id DOES cascade, unlike moderation evidence. A request is
+-- administrative correspondence about a campaign, not a record of harm done to a
+-- person inside it; when the campaign is purged there is nothing left to export
+-- and nothing a retained request row could protect.
+CREATE TABLE IF NOT EXISTS campaign_export_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  requested_by TEXT NOT NULL,
+  requested_by_user_id TEXT NOT NULL DEFAULT '',
+  profile TEXT NOT NULL DEFAULT '',
+  justification TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending',
+  decided_by TEXT,
+  decided_at TEXT,
+  decision_note TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_users_oidc_sub ON users(oidc_sub);
 CREATE INDEX IF NOT EXISTS idx_characters_campaign ON characters(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_quests_campaign ON quests(campaign_id);
@@ -1588,6 +1623,18 @@ CREATE INDEX IF NOT EXISTS idx_encounter_op_idempotency_encounter ON encounter_o
 -- #577: the grounding review card reads a campaign's most recent claims, newest first.
 CREATE INDEX IF NOT EXISTS idx_ai_driver_grounding_campaign
   ON ai_driver_grounding_claims(campaign_id, id);
+-- #587: the admin catalog's per-campaign aggregates are served by indexes that already
+-- exist above and are NOT re-declared here: attachment bytes/counts use
+-- idx_attachments_campaign_state (see the attachments block), and "next scheduled
+-- session" uses idx_scheduled_sessions_campaign_at (see the scheduling block). Both are
+-- exactly the (campaign_id, ...) shape the catalog aggregates need, so #587 adds no index
+-- for them -- a second CREATE INDEX IF NOT EXISTS with the same name is a silent no-op
+-- that reads like coverage while providing none.
+-- #587: a DM's pending export-request inbox, and the admin's per-campaign view.
+CREATE INDEX IF NOT EXISTS idx_campaign_export_requests_campaign
+  ON campaign_export_requests(campaign_id, id);
+CREATE INDEX IF NOT EXISTS idx_campaign_export_requests_status
+  ON campaign_export_requests(status, id);
 ${CAMPAIGN_MODULES_DDL}`;
 
 /**

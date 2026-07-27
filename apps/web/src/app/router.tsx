@@ -219,6 +219,13 @@ export const router = createBrowserRouter(
             element: lazyPage(() => import('../features/admin/AdminPage')),
           },
           {
+            // Server-admin campaign catalog (issue #587). Spans every campaign on the
+            // server, including ones the operator is not a member of — metadata only,
+            // and server-paged, unlike the member-scoped tile grid on HomePage.
+            path: '/admin/campaigns',
+            element: lazyPage(() => import('../features/admin/AdminCatalogPage')),
+          },
+          {
             // /admin/* sub-pages (issue #350) — each re-parents a slice of the
             // cards that used to all stack on the single /admin overview page.
             path: '/admin/users',

@@ -8,12 +8,13 @@
  * pages) and MembersPage's audit list — out of scope here to avoid duplicating
  * owned surfaces; this page covers the General + Rule system + Danger tab.
  */
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import type {
   AiExternalContentPolicy,
   Campaign,
+  CampaignCatalogPrivacySetting,
   CampaignCloneMode,
   CampaignClonePreview,
   CampaignInvite,
@@ -295,6 +296,7 @@ export default function CampaignSettingsPage() {
                   await refreshCampaigns();
                 }}
               />
+              <CatalogPrivacyCard key={`catalog-privacy-${campaign.id}`} campaign={campaign} />
               <CastSessionsCard key={`cast-${campaign.id}`} campaign={campaign} />
             </SettingsCategory>
 
@@ -663,6 +665,112 @@ function PublicInvitesCard({ campaign, onChanged }: { campaign: Campaign; onChan
           onConfirm={() => void revokeAll()}
         />
       )}
+    </div>
+  );
+}
+
+/**
+ * Catalog privacy (issue #587) — the campaign's own control over being listed to
+ * server operators.
+ *
+ * Server admins now have a metadata catalog spanning every campaign, including ones
+ * they are not members of. It shows no campaign content, but a NAME can itself be
+ * sensitive — a support-adjacent table's name may disclose more than its description
+ * ever would — so the DM gets to withhold it. Withholding replaces the name with
+ * `Campaign #<id>`, derived from the id the operator can already see, so it discloses
+ * nothing further while still letting them administer the row.
+ *
+ * Deliberately DM-only and unreachable from any admin route: an opt-out that the party
+ * it protects against can clear is not an opt-out.
+ */
+function CatalogPrivacyCard({ campaign }: { campaign: Campaign }) {
+  const [setting, setSetting] = useState<CampaignCatalogPrivacySetting | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      setSetting(await api.get<CampaignCatalogPrivacySetting>(`${API}/campaigns/${campaign.id}/catalog/privacy`));
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't load catalog privacy.");
+    }
+  }, [campaign.id]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  async function save(next: 'inherit' | 'redacted') {
+    setBusy(true);
+    setError(null);
+    try {
+      setSetting(
+        await api.put<CampaignCatalogPrivacySetting>(`${API}/campaigns/${campaign.id}/catalog/privacy`, {
+          catalogPrivacy: next,
+        }),
+      );
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't update catalog privacy.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const redacted = setting?.catalogPrivacy === 'redacted';
+  const effective = setting?.effective;
+
+  return (
+    <div
+      id="catalog-privacy"
+      className="card elev-sm settings-anchor"
+      tabIndex={-1}
+      data-testid="catalog-privacy-settings"
+      aria-labelledby="catalog-privacy-heading"
+    >
+      <div className="flex items-center gap-2 flex-wrap">
+        <span id="catalog-privacy-heading" className="card-kicker" style={{ margin: 0 }}>
+          Server catalog listing
+        </span>
+        <span className={`tag ${redacted ? 'tag-neutral' : 'tag-accent'}`}>
+          {redacted ? 'name withheld' : 'follows server default'}
+        </span>
+      </div>
+      <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
+        Server admins can browse a catalog of every campaign on this server in order to find and administer
+        it. That catalog shows operational details only — member counts, storage, next session, status — and
+        never quests, notes, attachments, session zero, or DM secrets. You can additionally withhold this
+        campaign&apos;s name and description; admins then see only &ldquo;Campaign #{campaign.id}&rdquo;.
+      </p>
+      {effective && (
+        <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
+          Right now admins see: name <strong>{effective.names}</strong>, description{' '}
+          <strong>{effective.descriptions}</strong>.
+          {setting?.catalogPrivacy === 'inherit' && setting.serverDefault
+            ? ` (Server default: names ${setting.serverDefault.names}, descriptions ${setting.serverDefault.descriptions}.)`
+            : ''}
+        </p>
+      )}
+      <div className="flex flex-col sm:flex-row gap-2">
+        {redacted ? (
+          <button className="btn" disabled={busy} aria-busy={busy || undefined} onClick={() => void save('inherit')}>
+            Follow the server default
+          </button>
+        ) : (
+          <button
+            className="btn btn-primary"
+            disabled={busy}
+            aria-busy={busy || undefined}
+            onClick={() => void save('redacted')}
+          >
+            Withhold name &amp; description
+          </button>
+        )}
+      </div>
+      <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
+        Withholding only ever tightens privacy. If the server default already withholds names, following the
+        default will not reveal yours.
+      </p>
+      {error && <p className="text-sm text-red-400 m-0" role="alert">{error}</p>}
     </div>
   );
 }

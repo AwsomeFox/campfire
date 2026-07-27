@@ -7,6 +7,10 @@ import { useTranslation } from 'react-i18next';
  * 10 most recent audit entries, and quick links) — the full cards live on
  * their owning /admin/* sub-page:
  *   /admin/users   — UsersCard, ResetRequestsCard, SettingsCard
+ *   /admin/campaigns — AdminCatalogPage (issue #587): the metadata catalog and bulk
+ *                    lifecycle controls, spanning campaigns the operator is not a
+ *                    member of. Its own page rather than a card here because it is
+ *                    server-paged and needs the width.
  *   /admin/rules   — RulePacksCard
  *   /admin/ai      — AiConsoleCard
  *   /admin/auth    — OidcCard, TokensCard
@@ -39,6 +43,7 @@ function formatBytes(bytes: number): string {
 
 const QUICK_LINKS: Array<{ to: string; icon: string; label: string; hint: string }> = [
   { to: '/admin/users', icon: 'person', label: 'Users', hint: 'Accounts, password resets, sign-in settings' },
+  { to: '/admin/campaigns', icon: 'scroll-quill', label: 'Campaigns', hint: 'Metadata catalog & bulk lifecycle controls' },
   { to: '/admin/rules', icon: 'spell-book', label: 'Rule packs', hint: 'Install and manage rule packs' },
   { to: '/admin/ai', icon: 'robot-golem', label: 'AI console', hint: 'AI provider configuration & usage' },
   { to: '/admin/auth', icon: 'padlock', label: 'Auth', hint: 'OIDC/SSO & API tokens' },

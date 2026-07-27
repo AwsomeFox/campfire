@@ -9214,3 +9214,302 @@ export const MentionTarget = z.object({
   name: z.string(), // quest/session title, or entity name — what to match & display
 });
 export type MentionTarget = z.infer<typeof MentionTarget>;
+
+// ---------- server-admin campaign metadata catalog (issue #587) ----------
+//
+// The premise of #587, and the only thing that makes this surface defensible:
+// an operator must be able to FIND and MANAGE a campaign without being able to
+// READ it. Everything below is therefore an explicit, enumerated projection of
+// operational metadata. It is NOT "the campaigns row minus a few fields" —
+// `SELECT campaigns.*` would already ship `ics_token` (a live capability secret
+// for the public calendar feed) today, and would silently ship whatever column
+// lands next. Adding a field here is a deliberate act with a review attached.
+//
+// What is deliberately absent, and must stay absent: quests, notes, comments,
+// attachments' bytes or filenames, session-zero lines/veils/safety tools, any
+// `dmSecret`, `icsToken`, `currentLocationId`, `activeEncounterId`, and the
+// campaign's own recap/session prose. See the negative tests in
+// test/admin-campaign-catalog-isolation.e2e-spec.ts.
+
+/**
+ * Whether a catalog row's human-authored strings are disclosed to the operator.
+ *
+ * A campaign NAME can itself be sensitive ("Tuesday Trauma Processing Group"),
+ * which is why #587 asks for this to be configurable rather than assumed public.
+ */
+export const CampaignCatalogFieldVisibility = z.enum(['visible', 'redacted']);
+export type CampaignCatalogFieldVisibility = z.infer<typeof CampaignCatalogFieldVisibility>;
+
+/**
+ * A campaign's OWN opt-out, set by its DM (see PUT /campaigns/:id/catalog-privacy).
+ *
+ * TIGHTEN-ONLY, on purpose. `inherit` follows the server default; `redacted`
+ * overrides it toward privacy. There is deliberately no per-campaign value that
+ * forces disclosure when the server default is `redacted`, and — more
+ * importantly — a server admin cannot move a campaign back to `inherit`. If an
+ * operator could un-redact a table that opted out, the opt-out would be
+ * decorative.
+ */
+export const CampaignCatalogPrivacy = z.enum(['inherit', 'redacted']);
+export type CampaignCatalogPrivacy = z.infer<typeof CampaignCatalogPrivacy>;
+
+/**
+ * Server-wide default disclosure for catalog strings.
+ *
+ * `descriptions` defaults to `redacted` and `names` to `visible`: a name is the
+ * handle an operator needs in order to talk to a DM about their campaign at all,
+ * while a description is free prose that routinely carries pitch, premise, and
+ * content warnings — i.e. the thing the issue is worried about. Operators who
+ * want either treated differently flip it here, and it is audited when they do.
+ */
+export const CampaignCatalogPrivacyPolicy = z.object({
+  names: CampaignCatalogFieldVisibility,
+  descriptions: CampaignCatalogFieldVisibility,
+  /** 'default' until an operator stores an override, then 'settings'. */
+  source: z.enum(['default', 'settings']),
+});
+export type CampaignCatalogPrivacyPolicy = z.infer<typeof CampaignCatalogPrivacyPolicy>;
+
+export const CampaignCatalogPrivacyPolicyUpdate = z.object({
+  names: CampaignCatalogFieldVisibility.optional(),
+  descriptions: CampaignCatalogFieldVisibility.optional(),
+});
+export type CampaignCatalogPrivacyPolicyUpdate = z.infer<typeof CampaignCatalogPrivacyPolicyUpdate>;
+
+/** The installed rule pack ("module") powering a campaign, as the catalog reports it. */
+export const CampaignCatalogModule = z.object({
+  /** campaigns.rule_system — the slug the campaign asked for. '' when unset. */
+  slug: z.string().max(120).default(''),
+  /** Display name of the installed pack, or '' when nothing with this slug is installed. */
+  name: z.string().max(200).default(''),
+  /** Installed pack version, or '' when unknown/uninstalled. */
+  version: z.string().max(60).default(''),
+  /**
+   * False when `slug` is non-empty but no rule pack with that slug is installed —
+   * the campaign is pinned to a module this server cannot serve. This is the
+   * fleet-wide condition the `update_module` bulk operation exists to fix.
+   */
+  installed: z.boolean().default(false),
+});
+export type CampaignCatalogModule = z.infer<typeof CampaignCatalogModule>;
+
+/** The primary owner / DM of record, identified only well enough to contact them. */
+export const CampaignCatalogOwner = z.object({
+  userId: Id,
+  displayName: z.string().max(200).default(''),
+  username: z.string().max(200).default(''),
+  /** True when resolved from campaign_members.is_primary_owner rather than "first dm". */
+  primaryOwner: z.boolean().default(false),
+});
+export type CampaignCatalogOwner = z.infer<typeof CampaignCatalogOwner>;
+
+/**
+ * ONE catalog row. Every field here is either operational (counts, bytes, dates,
+ * policy flags) or an explicitly privacy-gated string. Nothing here is campaign
+ * content, and nothing here is derived from campaign content.
+ */
+export const CampaignCatalogEntry = z.object({
+  id: Id,
+  /**
+   * The campaign name, or a non-identifying placeholder when redacted.
+   *
+   * The placeholder is derived SOLELY from the id (`Campaign #42`), which the
+   * row already discloses — so it reveals exactly zero additional bits. It is
+   * deliberately not blank (an operator must still be able to tell two rows
+   * apart and act on one) and deliberately not a truncation, initialism, or
+   * length hint, all of which leak the very string being withheld.
+   */
+  name: z.string().max(200),
+  nameRedacted: z.boolean().default(false),
+  /** '' whenever `descriptionRedacted` is true — a redacted description has no placeholder. */
+  description: z.string().max(10_000).default(''),
+  descriptionRedacted: z.boolean().default(false),
+  /** The campaign's own opt-out, so an operator can see WHY a row is redacted. */
+  catalogPrivacy: CampaignCatalogPrivacy,
+  status: z.enum(['active', 'paused', 'completed']),
+  /** paused/completed — the campaign is read-only for its members. */
+  archived: z.boolean().default(false),
+  /** Soft-deleted (issue #116). Excluded from the catalog unless explicitly requested. */
+  trashed: z.boolean().default(false),
+  module: CampaignCatalogModule,
+  primaryDm: CampaignCatalogOwner.nullable().default(null),
+  memberCount: z.number().int().nonnegative().default(0),
+  dmCount: z.number().int().nonnegative().default(0),
+  /** Logged sessions (campaigns.session_count) — a play-volume signal, not session content. */
+  sessionCount: z.number().int().nonnegative().default(0),
+  /** Earliest still-scheduled future session, or null. Timestamp only — no title, no notes. */
+  nextSessionAt: IsoDate.nullable().default(null),
+  /** max(campaigns.updated_at, newest audit row for the campaign). Never an entity body. */
+  lastActivityAt: IsoDate.nullable().default(null),
+  /** Sum of committed attachment sizes. Bytes only — never a filename or a mime type. */
+  storageBytes: z.number().int().nonnegative().default(0),
+  attachmentCount: z.number().int().nonnegative().default(0),
+  storageQuotaBytes: z.number().int().nonnegative().nullable().default(null),
+  /** True when a quota is set and storageBytes exceeds it. */
+  overQuota: z.boolean().default(false),
+  publicInvitesEnabled: z.boolean().default(true),
+  aiExternalContentPolicy: AiExternalContentPolicy,
+  createdAt: IsoDate,
+  updatedAt: IsoDate,
+});
+export type CampaignCatalogEntry = z.infer<typeof CampaignCatalogEntry>;
+
+/** Default page size for the admin catalog. */
+export const CAMPAIGN_CATALOG_DEFAULT_LIMIT = 25;
+/** Hard cap for `?limit=` — the catalog is paged in SQL, never bulk-dumped. */
+export const CAMPAIGN_CATALOG_MAX_LIMIT = 100;
+
+export const CampaignCatalogSort = z.enum(['name', 'status', 'storage', 'activity', 'nextSession', 'created', 'id']);
+export type CampaignCatalogSort = z.infer<typeof CampaignCatalogSort>;
+
+/**
+ * Offset pagination rather than a keyset cursor, and that is a considered choice:
+ * the catalog is an operator table with SEVEN user-selectable sort keys, most of
+ * them non-unique aggregates (storage bytes, activity timestamps). A keyset
+ * cursor over a non-unique, mutable aggregate silently skips or repeats rows.
+ * LIMIT/OFFSET is honest about being a snapshot, and `total` is a real COUNT(*)
+ * over the same predicates. Both are pushed into SQL — see the issue's complaint
+ * about campaigns.service.ts loading every row and filtering in memory.
+ */
+export const CampaignCatalogPage = z.object({
+  items: z.array(CampaignCatalogEntry),
+  total: z.number().int().nonnegative(),
+  hasMore: z.boolean(),
+  limit: z.number().int().positive(),
+  offset: z.number().int().nonnegative(),
+  /** Echoed so an operator (and the audit row) can see exactly which slice this was. */
+  sort: CampaignCatalogSort,
+  order: z.enum(['asc', 'desc']),
+});
+export type CampaignCatalogPage = z.infer<typeof CampaignCatalogPage>;
+
+// ---- bulk lifecycle operations (issue #587 bullet 3) ----
+
+/**
+ * Every bulk operation the catalog offers. Deliberately a closed enum: an
+ * operator acting across campaigns they are not a member of gets exactly these
+ * verbs and no generic "patch arbitrary columns" escape hatch.
+ */
+export const CampaignCatalogBulkOperation = z.enum([
+  'archive',
+  'pause',
+  'activate',
+  'reassign_owner',
+  'set_quota',
+  'set_policy',
+  'request_export',
+  'update_module',
+]);
+export type CampaignCatalogBulkOperation = z.infer<typeof CampaignCatalogBulkOperation>;
+
+export const CampaignCatalogBulkOutcome = z.enum(['would_apply', 'applied', 'skipped', 'failed']);
+export type CampaignCatalogBulkOutcome = z.infer<typeof CampaignCatalogBulkOutcome>;
+
+export const CampaignCatalogBulkItemResult = z.object({
+  campaignId: Id,
+  outcome: CampaignCatalogBulkOutcome,
+  /** Human-readable "why" — always set for skipped/failed, often set for applied. */
+  reason: z.string().max(500).default(''),
+  /** The field the operation would change, before → after. Omitted when nothing changes. */
+  field: z.string().max(60).default(''),
+  before: z.string().max(200).default(''),
+  after: z.string().max(200).default(''),
+});
+export type CampaignCatalogBulkItemResult = z.infer<typeof CampaignCatalogBulkItemResult>;
+
+export const CampaignCatalogBulkRequest = z
+  .object({
+    operation: CampaignCatalogBulkOperation,
+    campaignIds: z.array(Id).min(1).max(200),
+    /**
+     * Defaults TRUE. A bulk lifecycle change across campaigns the operator cannot
+     * read should require typing `"dryRun": false`, not merely forgetting a flag.
+     */
+    dryRun: z.boolean().default(true),
+    /** Recorded verbatim in the audit trail for real runs. */
+    reason: z.string().max(500).default(''),
+    /** reassign_owner: the user who becomes dm + primary owner. */
+    toUserId: Id.optional(),
+    /** set_quota: bytes, or null to clear the quota. */
+    storageQuotaBytes: z.number().int().nonnegative().nullable().optional(),
+    /** set_policy: public invite links on/off. */
+    publicInvitesEnabled: z.boolean().optional(),
+    /** set_policy: external-AI content policy. */
+    aiExternalContentPolicy: AiExternalContentPolicy.optional(),
+    /** update_module: the rule-pack slug to move campaigns onto. */
+    ruleSystem: z.string().max(120).optional(),
+    /** request_export: which export profile the DM is being asked to produce. */
+    exportProfile: z.string().max(40).optional(),
+  })
+  .strict();
+export type CampaignCatalogBulkRequest = z.infer<typeof CampaignCatalogBulkRequest>;
+
+export const CampaignCatalogBulkResult = z.object({
+  operation: CampaignCatalogBulkOperation,
+  dryRun: z.boolean(),
+  requested: z.number().int().nonnegative(),
+  wouldApply: z.number().int().nonnegative(),
+  applied: z.number().int().nonnegative(),
+  skipped: z.number().int().nonnegative(),
+  failed: z.number().int().nonnegative(),
+  results: z.array(CampaignCatalogBulkItemResult),
+});
+export type CampaignCatalogBulkResult = z.infer<typeof CampaignCatalogBulkResult>;
+
+// ---- admin-initiated export REQUESTS (issue #587 bullet 3) ----
+//
+// An operator can ask for an export; they cannot take one. The catalog's whole
+// premise collapses if "request export" hands the requester a file containing
+// every quest, note and DM secret in the campaign. So the request is a durable
+// ASK addressed to the campaign's DMs, who approve or deny it and who alone can
+// then run the existing DM-gated export route. The admin-facing views of these
+// rows carry status and timestamps — never an artifact, never content.
+
+export const CampaignExportRequestStatus = z.enum(['pending', 'approved', 'denied', 'cancelled']);
+export type CampaignExportRequestStatus = z.infer<typeof CampaignExportRequestStatus>;
+
+export const CampaignExportRequest = z.object({
+  id: Id,
+  campaignId: Id,
+  /** Audit-actor string of the requesting operator (`token:<name>` or a user id). */
+  requestedBy: z.string().max(200),
+  requestedByUserId: z.string().max(120).default(''),
+  /** Which export profile was asked for (see the export module's profiles). */
+  profile: z.string().max(40).default(''),
+  /** Why the operator is asking. Required, and shown to the DM who decides. */
+  justification: z.string().max(2000).default(''),
+  status: CampaignExportRequestStatus,
+  decidedBy: z.string().max(200).nullable().default(null),
+  decidedAt: IsoDate.nullable().default(null),
+  decisionNote: z.string().max(2000).default(''),
+  createdAt: IsoDate,
+  updatedAt: IsoDate,
+});
+export type CampaignExportRequest = z.infer<typeof CampaignExportRequest>;
+
+export const CampaignExportRequestDecision = z
+  .object({
+    decision: z.enum(['approved', 'denied']),
+    note: z.string().max(2000).default(''),
+  })
+  .strict();
+export type CampaignExportRequestDecision = z.infer<typeof CampaignExportRequestDecision>;
+
+/** A campaign's own catalog-privacy opt-out, as its DM reads and writes it. */
+export const CampaignCatalogPrivacySetting = z.object({
+  campaignId: Id,
+  catalogPrivacy: CampaignCatalogPrivacy,
+  /** The server default in force, so a DM can see what `inherit` currently means. */
+  serverDefault: CampaignCatalogPrivacyPolicy,
+  /** What the catalog actually discloses for this campaign right now. */
+  effective: z.object({
+    names: CampaignCatalogFieldVisibility,
+    descriptions: CampaignCatalogFieldVisibility,
+  }),
+});
+export type CampaignCatalogPrivacySetting = z.infer<typeof CampaignCatalogPrivacySetting>;
+
+export const CampaignCatalogPrivacyUpdate = z
+  .object({ catalogPrivacy: CampaignCatalogPrivacy })
+  .strict();
+export type CampaignCatalogPrivacyUpdate = z.infer<typeof CampaignCatalogPrivacyUpdate>;

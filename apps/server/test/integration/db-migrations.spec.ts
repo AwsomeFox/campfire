@@ -553,6 +553,91 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     }
   });
 
+  it('0126 adds campaigns.catalog_privacy and campaign_export_requests on both paths (#587)', () => {
+    // Same fresh-vs-upgraded parity contract as 0121 above, but this migration has TWO
+    // halves — an ADD COLUMN on an existing table and a brand-new table — so both are
+    // checked, plus the default backfill that decides what an un-migrated campaign's
+    // catalog privacy means.
+    expect(MIGRATION_NAMES).toContain('0126_admin_campaign_catalog_587');
+
+    const expected = [
+      'id',
+      'campaign_id',
+      'requested_by',
+      'requested_by_user_id',
+      'profile',
+      'justification',
+      'status',
+      'decided_by',
+      'decided_at',
+      'decision_note',
+      'created_at',
+      'updated_at',
+    ].sort();
+
+    const upgradedDir = makeTempDataDir();
+    dataDir = makeTempDataDir();
+    try {
+      const fresh = openDatabase(dataDir);
+      let freshCols: string[];
+      try {
+        freshCols = columnNames(fresh.sqlite, 'campaign_export_requests');
+        expect(columnNames(fresh.sqlite, 'campaigns')).toContain('catalog_privacy');
+        expect(
+          (fresh.sqlite.pragma('index_list(campaign_export_requests)') as Array<{ name: string }>).map((i) => i.name),
+        ).toEqual(
+          expect.arrayContaining([
+            'idx_campaign_export_requests_campaign',
+            'idx_campaign_export_requests_status',
+          ]),
+        );
+      } finally {
+        fresh.sqlite.close();
+      }
+
+      writeOldSchemaDb(upgradedDir);
+      const upgraded = openDatabase(upgradedDir);
+      try {
+        const upgradedCols = [...columnNames(upgraded.sqlite, 'campaign_export_requests')].sort();
+        expect(upgradedCols).toEqual(expected);
+        expect(upgradedCols).toEqual([...freshCols].sort());
+        expect(columnNames(upgraded.sqlite, 'campaigns')).toContain('catalog_privacy');
+
+        // The seeded legacy campaign predates the column; the NOT NULL DEFAULT must have
+        // backfilled it to 'inherit' rather than leaving a NULL that would read as an
+        // opt-out (or fail the enum on the way out).
+        const backfilled = upgraded.sqlite
+          .prepare('SELECT catalog_privacy FROM campaigns')
+          .all() as Array<{ catalog_privacy: string }>;
+        expect(backfilled.length).toBeGreaterThan(0);
+        for (const row of backfilled) expect(row.catalog_privacy).toBe('inherit');
+
+        upgraded.sqlite
+          .prepare(
+            `INSERT INTO campaign_export_requests
+               (campaign_id, requested_by, requested_by_user_id, profile, justification, status, decision_note, created_at, updated_at)
+             VALUES (1, '1', '1', 'backup', 'season rollover', 'pending', '', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+          )
+          .run();
+        expect(countRows(upgraded.sqlite, 'campaign_export_requests')).toBe(1);
+      } finally {
+        upgraded.sqlite.close();
+      }
+
+      // Re-opening must not drop or re-create the table, nor re-run the ADD COLUMN
+      // (probe-before-act + run-once dedupe on the full migration name).
+      const again = openDatabase(upgradedDir);
+      try {
+        expect(countRows(again.sqlite, 'campaign_export_requests')).toBe(1);
+        expect(columnNames(again.sqlite, 'campaigns')).toContain('catalog_privacy');
+      } finally {
+        again.sqlite.close();
+      }
+    } finally {
+      fs.rmSync(upgradedDir, { recursive: true, force: true });
+    }
+  });
+
   it('0070 adds notifications.data on a legacy table and preserves JSON payloads', () => {
     dataDir = makeTempDataDir();
     const seeded = openDatabase(dataDir);

@@ -1,0 +1,1030 @@
+import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lte, sql, type SQL } from 'drizzle-orm';
+import type {
+  CampaignCatalogBulkItemResult,
+  CampaignCatalogBulkRequest,
+  CampaignCatalogBulkResult,
+  CampaignCatalogEntry,
+  CampaignCatalogPage,
+  CampaignCatalogPrivacy,
+  CampaignCatalogPrivacyPolicy,
+  CampaignCatalogPrivacyPolicyUpdate,
+  CampaignCatalogPrivacySetting,
+  CampaignCatalogSort,
+  CampaignExportRequest,
+  CampaignExportRequestDecision,
+} from '@campfire/schema';
+import { CAMPAIGN_CATALOG_DEFAULT_LIMIT, CAMPAIGN_CATALOG_MAX_LIMIT } from '@campfire/schema';
+import { DB, type DrizzleDb } from '../../db/db.module';
+import {
+  campaignExportRequests,
+  campaignMembers,
+  campaigns,
+  rulePacks,
+  users,
+} from '../../db/schema';
+import { AuditService } from '../audit/audit.service';
+import { SettingsService } from '../settings/settings.service';
+import { auditActor, auditActorRole, type RequestUser } from '../../common/user.types';
+import { nowIso } from '../../common/time';
+import { clampListLimit } from '../../common/cursor-pagination';
+import {
+  CATALOG_CAMPAIGN_COLUMNS,
+  CATALOG_PRIVACY_DEFAULTS,
+  CATALOG_PRIVACY_SETTINGS_KEY,
+  effectiveVisibility,
+  nameSortExpression,
+  redactedCampaignName,
+  searchPredicate,
+} from './catalog-projection';
+
+/** Parsed, validated query for a catalog page. Every field becomes a real SQL predicate. */
+export type CatalogQuery = {
+  limit?: number;
+  offset?: number;
+  sort?: CampaignCatalogSort;
+  order?: 'asc' | 'desc';
+  q?: string;
+  status?: 'active' | 'paused' | 'completed';
+  ruleSystem?: string;
+  packageVersion?: string;
+  moduleInstalled?: boolean;
+  primaryDmUserId?: number;
+  nextSessionAfter?: string;
+  nextSessionBefore?: string;
+  activityAfter?: string;
+  activityBefore?: string;
+  minStorageBytes?: number;
+  overQuota?: boolean;
+  trashed?: boolean;
+};
+
+/** Actor identity for audit rows, resolved once per request. */
+type Actor = { actor: string; actorRole: ReturnType<typeof auditActorRole> };
+
+const COMMITTED = 'committed';
+
+/**
+ * Server-admin campaign metadata catalog (issue #587).
+ *
+ * THE PREMISE
+ * -----------
+ * A coordinator overseeing dozens of tables currently has to JOIN a campaign — gaining
+ * full content visibility — merely to find it or archive it. This service gives them a
+ * way to locate and administer a campaign WITHOUT being able to read it. That trade is
+ * only honest if the second half actually holds, so every read here goes through the
+ * enumerated projection in catalog-projection.ts and no method on this class ever
+ * touches quests, notes, comments, attachments' names or bytes, session-zero, or any
+ * `dm_secret` column. `admin-catalog.isolation.e2e-spec.ts` asserts that empirically by
+ * seeding markers into all of them and grepping every response.
+ *
+ * REAL SQL, NOT IN-MEMORY FILTERING
+ * ---------------------------------
+ * The issue names `campaigns.service.ts` `listForUser` — `SELECT *` over every campaign
+ * followed by a `Set.has` in JS — as the thing to not repeat. So pagination, search,
+ * every filter, and every sort key here are SQL predicates over indexed columns, and
+ * `total` is a real `COUNT(*)` over the same WHERE. The per-campaign aggregates
+ * (attachment bytes, member counts, next session, last activity) are correlated
+ * subqueries served by indexes that already exist: `idx_attachments_campaign_state`,
+ * `idx_scheduled_sessions_campaign_at`, `idx_campaign_members_campaign`,
+ * `idx_audit_log_campaign`. The only per-page JS work is resolving the primary DM for
+ * the <=100 rows actually returned, which is one extra query, not N+1.
+ */
+@Injectable()
+export class AdminCatalogService {
+  constructor(
+    @Inject(DB) private readonly db: DrizzleDb,
+    private readonly audit: AuditService,
+    private readonly settings: SettingsService,
+  ) {}
+
+  // ---------------------------------------------------------------- privacy policy
+
+  /** The server-wide disclosure default, merged over CATALOG_PRIVACY_DEFAULTS. */
+  async getPrivacyPolicy(): Promise<CampaignCatalogPrivacyPolicy> {
+    const stored = await this.settings.getJson<unknown>(CATALOG_PRIVACY_SETTINGS_KEY);
+    const raw = stored && typeof stored === 'object' ? (stored as Record<string, unknown>) : null;
+    const names = raw?.names === 'visible' || raw?.names === 'redacted' ? raw.names : undefined;
+    const descriptions =
+      raw?.descriptions === 'visible' || raw?.descriptions === 'redacted' ? raw.descriptions : undefined;
+    return {
+      names: names ?? CATALOG_PRIVACY_DEFAULTS.names,
+      descriptions: descriptions ?? CATALOG_PRIVACY_DEFAULTS.descriptions,
+      source: names === undefined && descriptions === undefined ? 'default' : 'settings',
+    };
+  }
+
+  async updatePrivacyPolicy(
+    update: CampaignCatalogPrivacyPolicyUpdate,
+    actor: Actor,
+  ): Promise<CampaignCatalogPrivacyPolicy> {
+    const current = await this.getPrivacyPolicy();
+    const next = {
+      names: update.names ?? current.names,
+      descriptions: update.descriptions ?? current.descriptions,
+    };
+    await this.settings.setJson(CATALOG_PRIVACY_SETTINGS_KEY, next);
+    const policy = await this.getPrivacyPolicy();
+    // Server-scoped row (campaignId null): this changes what EVERY operator can see
+    // about EVERY campaign, which is exactly the kind of act the server-admin trail
+    // exists for.
+    await this.audit.log({
+      actor: actor.actor,
+      actorRole: actor.actorRole,
+      action: 'campaign.catalog.privacy.update',
+      entityType: 'settings',
+      detail: `names=${policy.names}, descriptions=${policy.descriptions}`,
+    });
+    return policy;
+  }
+
+  // ---------------------------------------------------------------- catalog reads
+
+  /**
+   * One page of the catalog.
+   *
+   * Browsing is a privileged read, so the listing itself is audited (issue bullet 5
+   * says "audit catalog access and operations", not just operations) — with the exact
+   * slice recorded, so a reviewer can reconstruct what the operator actually saw
+   * rather than merely that they looked. Post-commit and best-effort in the house
+   * sense: the audit write happens after the reads, outside any transaction.
+   */
+  async listCatalog(user: RequestUser, query: CatalogQuery): Promise<CampaignCatalogPage> {
+    const policy = await this.getPrivacyPolicy();
+    const limit = clampListLimit(query.limit, CAMPAIGN_CATALOG_DEFAULT_LIMIT, CAMPAIGN_CATALOG_MAX_LIMIT);
+    const offset = Math.max(0, Math.floor(query.offset ?? 0));
+    const sort: CampaignCatalogSort = query.sort ?? 'activity';
+    const order: 'asc' | 'desc' = query.order ?? (sort === 'name' ? 'asc' : 'desc');
+
+    const where = this.buildWhere(query, policy);
+    const orderBy = this.buildOrderBy(sort, order, policy);
+
+    const rows = await this.db
+      .select({
+        ...CATALOG_CAMPAIGN_COLUMNS,
+        packName: rulePacks.name,
+        packVersion: rulePacks.version,
+        storageBytes: this.storageBytesExpr(),
+        attachmentCount: this.attachmentCountExpr(),
+        memberCount: this.memberCountExpr(),
+        dmCount: this.dmCountExpr(),
+        nextSessionAt: this.nextSessionExpr(),
+        lastActivityAt: this.lastActivityExpr(),
+      })
+      .from(campaigns)
+      .leftJoin(rulePacks, eq(rulePacks.slug, campaigns.ruleSystem))
+      .where(where)
+      .orderBy(...orderBy)
+      .limit(limit)
+      .offset(offset);
+
+    const [{ total }] = await this.db
+      .select({ total: sql<number>`count(*)` })
+      .from(campaigns)
+      .leftJoin(rulePacks, eq(rulePacks.slug, campaigns.ruleSystem))
+      .where(where);
+
+    const dms = await this.resolvePrimaryDms(rows.map((r) => r.id));
+    const items = rows.map((row) => this.toEntry(row, policy, dms.get(row.id) ?? null));
+
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: auditActorRole(user),
+      action: 'campaign.catalog.list',
+      entityType: 'campaign',
+      detail:
+        `returned=${items.length}, total=${total}, limit=${limit}, offset=${offset}, ` +
+        `sort=${sort}:${order}, filters=${this.describeFilters(query)}`,
+    });
+
+    return { items, total: Number(total), hasMore: offset + items.length < Number(total), limit, offset, sort, order };
+  }
+
+  /** One catalog row by id. Audited both server-scoped and campaign-scoped. */
+  async getCatalogEntry(user: RequestUser, campaignId: number): Promise<CampaignCatalogEntry> {
+    const policy = await this.getPrivacyPolicy();
+    const rows = await this.db
+      .select({
+        ...CATALOG_CAMPAIGN_COLUMNS,
+        packName: rulePacks.name,
+        packVersion: rulePacks.version,
+        storageBytes: this.storageBytesExpr(),
+        attachmentCount: this.attachmentCountExpr(),
+        memberCount: this.memberCountExpr(),
+        dmCount: this.dmCountExpr(),
+        nextSessionAt: this.nextSessionExpr(),
+        lastActivityAt: this.lastActivityExpr(),
+      })
+      .from(campaigns)
+      .leftJoin(rulePacks, eq(rulePacks.slug, campaigns.ruleSystem))
+      .where(eq(campaigns.id, campaignId))
+      .limit(1);
+
+    if (rows.length === 0) throw new NotFoundException('Campaign not found');
+    const dms = await this.resolvePrimaryDms([campaignId]);
+    const entry = this.toEntry(rows[0], policy, dms.get(campaignId) ?? null);
+
+    const actor = auditActor(user);
+    const actorRole = auditActorRole(user);
+    // Campaign-scoped: the campaign's own trail must show that an outsider looked at
+    // it. Mirrors the moderation break-glass double-write (#601) — the server-admin
+    // trail excludes campaign rows, so one row alone would be invisible to one of the
+    // two audiences.
+    await this.audit.log({
+      actor,
+      actorRole,
+      action: 'campaign.catalog.read',
+      entityType: 'campaign',
+      entityId: campaignId,
+      campaignId,
+      detail: `metadata-only; nameRedacted=${entry.nameRedacted}, descriptionRedacted=${entry.descriptionRedacted}`,
+    });
+    await this.audit.log({
+      actor,
+      actorRole,
+      action: 'campaign.catalog.read',
+      entityType: 'campaign',
+      entityId: campaignId,
+      detail: `campaign=${campaignId}, metadata-only`,
+    });
+    return entry;
+  }
+
+  // ---------------------------------------------------------------- bulk lifecycle
+
+  /**
+   * Bulk lifecycle operations, with a dry run that defaults ON.
+   *
+   * ATOMICITY IS PER ITEM, DELIBERATELY. A single transaction around the whole batch
+   * would mean one bad campaign rolls back 199 good ones; no transaction at all would
+   * mean a half-applied batch plus a 500 and no record of where it stopped. So each
+   * campaign is applied in its own transaction and reported individually, and the batch
+   * as a whole always returns 200 with a per-item verdict. The operator learns exactly
+   * which items applied — that is what makes a partial outcome recoverable instead of
+   * mysterious.
+   *
+   * A dry run performs the same reads and the same eligibility checks as the real run
+   * and reports `would_apply` / `skipped` per item, so "nothing surprising here" is
+   * something the operator can verify before typing `"dryRun": false`.
+   */
+  async bulk(user: RequestUser, req: CampaignCatalogBulkRequest): Promise<CampaignCatalogBulkResult> {
+    this.validateBulkArgs(req);
+    const actor = auditActor(user);
+    const actorRole = auditActorRole(user);
+    const results: CampaignCatalogBulkItemResult[] = [];
+
+    // De-duplicate while preserving order: the same id twice in one batch would
+    // otherwise produce two audit rows and a nonsensical "before → after" on the second.
+    const ids = [...new Set(req.campaignIds)];
+
+    for (const campaignId of ids) {
+      try {
+        results.push(await this.applyOne(campaignId, req, { actor, actorRole }));
+      } catch (err) {
+        // A single failing item never aborts the batch — see the method docblock.
+        results.push({
+          campaignId,
+          outcome: 'failed',
+          reason: err instanceof Error ? err.message.slice(0, 500) : 'unknown error',
+          field: '',
+          before: '',
+          after: '',
+        });
+      }
+    }
+
+    const tally = (outcome: CampaignCatalogBulkItemResult['outcome']) =>
+      results.filter((r) => r.outcome === outcome).length;
+    const result: CampaignCatalogBulkResult = {
+      operation: req.operation,
+      dryRun: req.dryRun,
+      requested: ids.length,
+      wouldApply: tally('would_apply'),
+      applied: tally('applied'),
+      skipped: tally('skipped'),
+      failed: tally('failed'),
+      results,
+    };
+
+    // One server-scoped summary row for the batch itself. Dry runs are audited too:
+    // enumerating which campaigns an operator is contemplating acting on is itself
+    // worth a record, and it is cheap.
+    await this.audit.log({
+      actor,
+      actorRole,
+      action: req.dryRun ? 'campaign.catalog.bulk.dryrun' : 'campaign.catalog.bulk',
+      entityType: 'campaign',
+      detail:
+        `op=${req.operation}, requested=${result.requested}, applied=${result.applied}, ` +
+        `wouldApply=${result.wouldApply}, skipped=${result.skipped}, failed=${result.failed}` +
+        (req.reason ? `, reason=${req.reason.slice(0, 300)}` : ''),
+    });
+
+    return result;
+  }
+
+  private validateBulkArgs(req: CampaignCatalogBulkRequest): void {
+    switch (req.operation) {
+      case 'reassign_owner':
+        if (req.toUserId === undefined) throw new BadRequestException('`toUserId` is required for reassign_owner');
+        break;
+      case 'set_quota':
+        if (req.storageQuotaBytes === undefined) {
+          throw new BadRequestException('`storageQuotaBytes` is required for set_quota (use null to clear)');
+        }
+        break;
+      case 'set_policy':
+        if (req.publicInvitesEnabled === undefined && req.aiExternalContentPolicy === undefined) {
+          throw new BadRequestException(
+            '`publicInvitesEnabled` and/or `aiExternalContentPolicy` is required for set_policy',
+          );
+        }
+        break;
+      case 'update_module':
+        if (!req.ruleSystem) throw new BadRequestException('`ruleSystem` is required for update_module');
+        break;
+      case 'request_export':
+        // A justification is not optional: the operator is asking a DM to hand over a
+        // bundle containing every secret in their campaign. `reason` carries it.
+        if (!req.reason || req.reason.trim().length < 10) {
+          throw new BadRequestException('`reason` of at least 10 characters is required for request_export');
+        }
+        break;
+      default:
+        break;
+    }
+  }
+
+  /** Apply (or dry-run) one campaign, in its own transaction. */
+  private async applyOne(
+    campaignId: number,
+    req: CampaignCatalogBulkRequest,
+    actor: Actor,
+  ): Promise<CampaignCatalogBulkItemResult> {
+    const skip = (reason: string): CampaignCatalogBulkItemResult => ({
+      campaignId,
+      outcome: 'skipped',
+      reason,
+      field: '',
+      before: '',
+      after: '',
+    });
+
+    const [row] = await this.db
+      .select({
+        id: campaigns.id,
+        status: campaigns.status,
+        ruleSystem: campaigns.ruleSystem,
+        storageQuotaBytes: campaigns.storageQuotaBytes,
+        publicInvitesEnabled: campaigns.publicInvitesEnabled,
+        aiExternalContentPolicy: campaigns.aiExternalContentPolicy,
+        deletedAt: campaigns.deletedAt,
+      })
+      .from(campaigns)
+      .where(eq(campaigns.id, campaignId))
+      .limit(1);
+
+    if (!row) return skip('campaign not found');
+    // A trashed campaign is on its way out; lifecycle edits to it would resurrect
+    // confusion rather than resolve it. Restoring is a separate, deliberate act.
+    if (row.deletedAt) return skip('campaign is in the trash');
+
+    const plan = await this.planChange(row, req, actor);
+    if (plan === null) return skip('already in the requested state');
+    if (typeof plan === 'string') return skip(plan);
+
+    if (req.dryRun) {
+      return { campaignId, outcome: 'would_apply', reason: '', ...plan.summary };
+    }
+
+    plan.apply();
+
+    await this.audit.log({
+      actor: actor.actor,
+      actorRole: actor.actorRole,
+      action: `campaign.catalog.${req.operation}`,
+      entityType: 'campaign',
+      entityId: campaignId,
+      campaignId,
+      detail:
+        `${plan.summary.field}: ${plan.summary.before} -> ${plan.summary.after}` +
+        (req.reason ? ` (${req.reason.slice(0, 300)})` : ''),
+    });
+
+    return { campaignId, outcome: 'applied', reason: '', ...plan.summary };
+  }
+
+  /**
+   * Decide what one operation would do to one campaign.
+   *
+   * Returns `null` for a no-op, a string for "skip with this reason", or a plan whose
+   * `apply()` performs the whole change inside a single transaction.
+   */
+  private async planChange(
+    row: {
+      id: number;
+      status: string;
+      ruleSystem: string;
+      storageQuotaBytes: number | null;
+      publicInvitesEnabled: boolean;
+      aiExternalContentPolicy: string;
+    },
+    req: CampaignCatalogBulkRequest,
+    actor: Actor,
+  ): Promise<null | string | { summary: { field: string; before: string; after: string }; apply: () => void }> {
+    const ts = nowIso();
+    const id = row.id;
+
+    const statusChange = (next: 'active' | 'paused' | 'completed') => {
+      if (row.status === next) return null;
+      return {
+        summary: { field: 'status', before: row.status, after: next },
+        apply: () => {
+          this.db.transaction((tx) => {
+            // Moving a campaign out of `active` also closes public invites, mirroring
+            // the DM-facing update path in campaigns.service.ts — an archived campaign
+            // that still accepts new joiners via a live link is the inconsistency that
+            // migration 0059 exists to prevent. Both writes are in one transaction, so
+            // the pair can never half-apply.
+            tx.update(campaigns)
+              .set({
+                status: next,
+                ...(next === 'active' ? {} : { publicInvitesEnabled: false }),
+                updatedAt: ts,
+              })
+              .where(eq(campaigns.id, id))
+              .run();
+          });
+        },
+      };
+    };
+
+    switch (req.operation) {
+      case 'archive':
+        return statusChange('completed');
+      case 'pause':
+        return statusChange('paused');
+      case 'activate':
+        return statusChange('active');
+
+      case 'set_quota': {
+        const next = req.storageQuotaBytes ?? null;
+        if ((row.storageQuotaBytes ?? null) === next) return null;
+        return {
+          summary: {
+            field: 'storageQuotaBytes',
+            before: row.storageQuotaBytes === null ? 'unset' : String(row.storageQuotaBytes),
+            after: next === null ? 'unset' : String(next),
+          },
+          apply: () => {
+            this.db.transaction((tx) => {
+              tx.update(campaigns).set({ storageQuotaBytes: next, updatedAt: ts }).where(eq(campaigns.id, id)).run();
+            });
+          },
+        };
+      }
+
+      case 'set_policy': {
+        const changes: string[] = [];
+        const set: Record<string, unknown> = { updatedAt: ts };
+        if (req.publicInvitesEnabled !== undefined && req.publicInvitesEnabled !== row.publicInvitesEnabled) {
+          set.publicInvitesEnabled = req.publicInvitesEnabled;
+          changes.push(`publicInvitesEnabled=${row.publicInvitesEnabled}->${req.publicInvitesEnabled}`);
+        }
+        if (
+          req.aiExternalContentPolicy !== undefined &&
+          req.aiExternalContentPolicy !== row.aiExternalContentPolicy
+        ) {
+          set.aiExternalContentPolicy = req.aiExternalContentPolicy;
+          changes.push(`aiExternalContentPolicy=${row.aiExternalContentPolicy}->${req.aiExternalContentPolicy}`);
+        }
+        if (changes.length === 0) return null;
+        return {
+          summary: { field: 'policy', before: '', after: changes.join(' ') },
+          apply: () => {
+            this.db.transaction((tx) => {
+              tx.update(campaigns).set(set).where(eq(campaigns.id, id)).run();
+            });
+          },
+        };
+      }
+
+      case 'update_module': {
+        const next = req.ruleSystem ?? '';
+        if (row.ruleSystem === next) return null;
+        // Refuse to pin a campaign to a pack this server cannot serve. The operation
+        // exists to FIX the "campaign points at a missing module" condition the catalog
+        // surfaces; letting it create that condition would be perverse.
+        const [pack] = await this.db
+          .select({ slug: rulePacks.slug })
+          .from(rulePacks)
+          .where(eq(rulePacks.slug, next))
+          .limit(1);
+        if (!pack) return `rule pack '${next}' is not installed on this server`;
+        return {
+          summary: { field: 'ruleSystem', before: row.ruleSystem || 'unset', after: next },
+          apply: () => {
+            this.db.transaction((tx) => {
+              tx.update(campaigns).set({ ruleSystem: next, updatedAt: ts }).where(eq(campaigns.id, id)).run();
+            });
+          },
+        };
+      }
+
+      case 'reassign_owner': {
+        const toUserId = req.toUserId as number;
+        const [target] = await this.db
+          .select({ id: users.id, username: users.username, disabled: users.disabled })
+          .from(users)
+          .where(eq(users.id, toUserId))
+          .limit(1);
+        if (!target) return `user ${toUserId} not found`;
+        if (target.disabled) return `user ${toUserId} is disabled`;
+
+        const existing = await this.db
+          .select({ id: campaignMembers.id, userId: campaignMembers.userId, primaryOwner: campaignMembers.primaryOwner })
+          .from(campaignMembers)
+          .where(eq(campaignMembers.campaignId, id));
+        const currentOwner = existing.find((m) => m.primaryOwner);
+        if (currentOwner?.userId === toUserId) return null;
+
+        return {
+          summary: {
+            field: 'primaryOwner',
+            before: currentOwner ? String(currentOwner.userId) : 'none',
+            after: String(toUserId),
+          },
+          apply: () => {
+            this.db.transaction((tx) => {
+              // Demote the incumbent, then install the new owner — as one unit, so the
+              // campaign is never left with two primary owners or none.
+              tx.update(campaignMembers)
+                .set({ primaryOwner: false, updatedAt: ts })
+                .where(eq(campaignMembers.campaignId, id))
+                .run();
+              const seat = existing.find((m) => m.userId === toUserId);
+              if (seat) {
+                tx.update(campaignMembers)
+                  .set({ role: 'dm', primaryOwner: true, updatedAt: ts })
+                  .where(eq(campaignMembers.id, seat.id))
+                  .run();
+              } else {
+                tx.insert(campaignMembers)
+                  .values({
+                    campaignId: id,
+                    userId: toUserId,
+                    role: 'dm',
+                    primaryOwner: true,
+                    createdAt: ts,
+                    updatedAt: ts,
+                  })
+                  .run();
+              }
+            });
+          },
+        };
+      }
+
+      case 'request_export': {
+        const profile = req.exportProfile ?? 'backup';
+        const [pending] = await this.db
+          .select({ id: campaignExportRequests.id })
+          .from(campaignExportRequests)
+          .where(
+            and(eq(campaignExportRequests.campaignId, id), eq(campaignExportRequests.status, 'pending')),
+          )
+          .limit(1);
+        if (pending) return 'an export request is already pending for this campaign';
+        return {
+          summary: { field: 'exportRequest', before: 'none', after: `pending(${profile})` },
+          apply: () => {
+            this.db.transaction((tx) => {
+              tx.insert(campaignExportRequests)
+                .values({
+                  campaignId: id,
+                  requestedBy: actor.actor,
+                  requestedByUserId: actor.actor.startsWith('token:') ? '' : actor.actor,
+                  profile,
+                  justification: (req.reason ?? '').slice(0, 2000),
+                  status: 'pending',
+                  decisionNote: '',
+                  createdAt: ts,
+                  updatedAt: ts,
+                })
+                .run();
+            });
+          },
+        };
+      }
+
+      default:
+        return `unsupported operation`;
+    }
+  }
+
+  // ---------------------------------------------------------------- export requests
+
+  /** Admin view of export requests. Status and timestamps only — never an artifact. */
+  async listExportRequests(campaignId?: number): Promise<CampaignExportRequest[]> {
+    const rows = await this.db
+      .select()
+      .from(campaignExportRequests)
+      .where(campaignId === undefined ? undefined : eq(campaignExportRequests.campaignId, campaignId))
+      .orderBy(desc(campaignExportRequests.id))
+      .limit(CAMPAIGN_CATALOG_MAX_LIMIT);
+    return rows.map((r) => this.toExportRequest(r));
+  }
+
+  /** The DM-facing inbox for one campaign. */
+  async listExportRequestsForCampaign(campaignId: number): Promise<CampaignExportRequest[]> {
+    return this.listExportRequests(campaignId);
+  }
+
+  /**
+   * A DM approves or denies an operator's export request.
+   *
+   * Approving grants NOTHING to the requester by itself — it records the DM's consent.
+   * Producing the bundle remains the existing DM-gated `GET /campaigns/:id/export`
+   * route, run by a DM. That separation is what stops "request export" from becoming a
+   * one-call bypass of the entire catalog premise: a campaign export carries every
+   * quest, note, session-zero line and dmSecret there is, and no admin route in this
+   * module returns one.
+   */
+  async decideExportRequest(
+    requestId: number,
+    decision: CampaignExportRequestDecision,
+    user: RequestUser,
+    campaignId: number,
+  ): Promise<CampaignExportRequest> {
+    const [row] = await this.db
+      .select()
+      .from(campaignExportRequests)
+      .where(eq(campaignExportRequests.id, requestId))
+      .limit(1);
+    if (!row) throw new NotFoundException('Export request not found');
+    if (row.campaignId !== campaignId) throw new NotFoundException('Export request not found');
+    if (row.status !== 'pending') {
+      throw new BadRequestException(`Export request is already ${row.status}`);
+    }
+
+    const ts = nowIso();
+    const actor = auditActor(user);
+    const [updated] = await this.db
+      .update(campaignExportRequests)
+      .set({
+        status: decision.decision,
+        decidedBy: actor,
+        decidedAt: ts,
+        decisionNote: decision.note.slice(0, 2000),
+        updatedAt: ts,
+      })
+      .where(eq(campaignExportRequests.id, requestId))
+      .returning();
+
+    await this.audit.log({
+      actor,
+      actorRole: 'dm',
+      action: `campaign.export_request.${decision.decision}`,
+      entityType: 'campaign_export_request',
+      entityId: requestId,
+      campaignId,
+      detail: `profile=${row.profile}, requestedBy=${row.requestedBy || 'server-admin'}`,
+    });
+    // Server-scoped mirror so the operator who asked can see the answer in the
+    // server-admin trail, which excludes campaign rows.
+    await this.audit.log({
+      actor,
+      actorRole: 'dm',
+      action: `campaign.export_request.${decision.decision}`,
+      entityType: 'campaign_export_request',
+      entityId: requestId,
+      detail: `campaign=${campaignId}, profile=${row.profile}`,
+    });
+
+    return this.toExportRequest(updated);
+  }
+
+  // ---------------------------------------------------------------- per-campaign opt-out
+
+  /** What a DM sees about their own campaign's catalog exposure. */
+  async getCampaignPrivacy(campaignId: number): Promise<CampaignCatalogPrivacySetting> {
+    const [row] = await this.db
+      .select({ id: campaigns.id, catalogPrivacy: campaigns.catalogPrivacy })
+      .from(campaigns)
+      .where(eq(campaigns.id, campaignId))
+      .limit(1);
+    if (!row) throw new NotFoundException('Campaign not found');
+    const policy = await this.getPrivacyPolicy();
+    const privacy = this.normalizePrivacy(row.catalogPrivacy);
+    return {
+      campaignId,
+      catalogPrivacy: privacy,
+      serverDefault: policy,
+      effective: effectiveVisibility(policy, privacy),
+    };
+  }
+
+  /**
+   * A DM sets their own campaign's opt-out.
+   *
+   * Reachable ONLY from the campaign-scoped, DM-gated route — deliberately not from any
+   * admin bulk operation. An opt-out that the party it protects against can clear is
+   * decorative, so `set_policy` in the bulk enum cannot touch this column, and there is
+   * no admin route that writes it.
+   */
+  async setCampaignPrivacy(
+    campaignId: number,
+    next: CampaignCatalogPrivacy,
+    user: RequestUser,
+  ): Promise<CampaignCatalogPrivacySetting> {
+    const ts = nowIso();
+    const [row] = await this.db
+      .update(campaigns)
+      .set({ catalogPrivacy: next, updatedAt: ts })
+      .where(eq(campaigns.id, campaignId))
+      .returning({ id: campaigns.id, catalogPrivacy: campaigns.catalogPrivacy });
+    if (!row) throw new NotFoundException('Campaign not found');
+
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: 'dm',
+      action: 'campaign.catalog.privacy.set',
+      entityType: 'campaign',
+      entityId: campaignId,
+      campaignId,
+      detail: `catalogPrivacy=${next}`,
+    });
+    return this.getCampaignPrivacy(campaignId);
+  }
+
+  // ---------------------------------------------------------------- internals
+
+  private normalizePrivacy(raw: string | null | undefined): CampaignCatalogPrivacy {
+    return raw === 'redacted' ? 'redacted' : 'inherit';
+  }
+
+  /** Committed attachment bytes. Bytes only — never a filename, never a mime type. */
+  private storageBytesExpr(): SQL<number> {
+    return sql<number>`(SELECT COALESCE(SUM(a.size), 0) FROM attachments a
+      WHERE a.campaign_id = ${campaigns.id} AND a.state = ${COMMITTED})`;
+  }
+
+  private attachmentCountExpr(): SQL<number> {
+    return sql<number>`(SELECT COUNT(*) FROM attachments a
+      WHERE a.campaign_id = ${campaigns.id} AND a.state = ${COMMITTED})`;
+  }
+
+  private memberCountExpr(): SQL<number> {
+    return sql<number>`(SELECT COUNT(*) FROM campaign_members m WHERE m.campaign_id = ${campaigns.id})`;
+  }
+
+  private dmCountExpr(): SQL<number> {
+    return sql<number>`(SELECT COUNT(*) FROM campaign_members m
+      WHERE m.campaign_id = ${campaigns.id} AND m.role = 'dm')`;
+  }
+
+  /**
+   * Earliest still-scheduled FUTURE session. A timestamp and nothing else — the
+   * scheduled_sessions row also carries title, location and notes, all of which are
+   * campaign content and none of which are read here.
+   */
+  private nextSessionExpr(): SQL<string | null> {
+    return sql<string | null>`(SELECT MIN(s.scheduled_at) FROM scheduled_sessions s
+      WHERE s.campaign_id = ${campaigns.id} AND s.status = 'scheduled' AND s.scheduled_at >= ${nowIso()})`;
+  }
+
+  /**
+   * Freshest of the campaign row's own updated_at and its newest audit entry. Audit
+   * TIMESTAMPS only — never an action, entity, actor or detail, all of which describe
+   * what happened inside the campaign. ISO-8601 sorts lexically, so SQLite's two-arg
+   * scalar max() is the right comparison.
+   */
+  private lastActivityExpr(): SQL<string | null> {
+    return sql<string | null>`MAX(${campaigns.updatedAt},
+      COALESCE((SELECT MAX(al.created_at) FROM audit_log al WHERE al.campaign_id = ${campaigns.id}), ''))`;
+  }
+
+  private buildWhere(query: CatalogQuery, policy: CampaignCatalogPrivacyPolicy): SQL | undefined {
+    const clauses: SQL[] = [];
+
+    // Trashed campaigns are excluded unless explicitly requested — the catalog is an
+    // operational view of live tables, and a purge queue is a different job.
+    clauses.push(query.trashed ? isNotNull(campaigns.deletedAt) : isNull(campaigns.deletedAt));
+
+    if (query.status) clauses.push(eq(campaigns.status, query.status));
+    if (query.ruleSystem !== undefined) clauses.push(eq(campaigns.ruleSystem, query.ruleSystem));
+    if (query.packageVersion !== undefined) clauses.push(eq(rulePacks.version, query.packageVersion));
+    if (query.moduleInstalled !== undefined) {
+      clauses.push(
+        query.moduleInstalled
+          ? sql`${rulePacks.slug} IS NOT NULL`
+          : sql`(${campaigns.ruleSystem} <> '' AND ${rulePacks.slug} IS NULL)`,
+      );
+    }
+    if (query.primaryDmUserId !== undefined) {
+      clauses.push(
+        sql`EXISTS (SELECT 1 FROM campaign_members m
+          WHERE m.campaign_id = ${campaigns.id} AND m.user_id = ${query.primaryDmUserId} AND m.role = 'dm')`,
+      );
+    }
+    if (query.nextSessionAfter) clauses.push(gte(this.nextSessionExpr(), query.nextSessionAfter));
+    if (query.nextSessionBefore) clauses.push(lte(this.nextSessionExpr(), query.nextSessionBefore));
+    if (query.activityAfter) clauses.push(gte(this.lastActivityExpr(), query.activityAfter));
+    if (query.activityBefore) clauses.push(lte(this.lastActivityExpr(), query.activityBefore));
+    if (query.minStorageBytes !== undefined) clauses.push(gte(this.storageBytesExpr(), query.minStorageBytes));
+    if (query.overQuota !== undefined) {
+      const over = sql`(${campaigns.storageQuotaBytes} IS NOT NULL
+        AND ${this.storageBytesExpr()} > ${campaigns.storageQuotaBytes})`;
+      clauses.push(query.overQuota ? over : sql`NOT ${over}`);
+    }
+
+    const search = searchPredicate(query.q, policy);
+    if (search) clauses.push(search);
+
+    return clauses.length === 0 ? undefined : and(...clauses);
+  }
+
+  private buildOrderBy(
+    sort: CampaignCatalogSort,
+    order: 'asc' | 'desc',
+    policy: CampaignCatalogPrivacyPolicy,
+  ): SQL[] {
+    const dir = order === 'asc' ? asc : desc;
+    // `campaigns.id` is appended to every sort as a tiebreaker: without it, rows with
+    // equal aggregates (storage bytes, identical timestamps) have no defined order and
+    // OFFSET paging can repeat or skip them between pages.
+    const tiebreak = asc(campaigns.id);
+    switch (sort) {
+      case 'name':
+        return [dir(nameSortExpression(policy.names === 'visible')), tiebreak];
+      case 'status':
+        return [dir(campaigns.status), tiebreak];
+      case 'storage':
+        return [dir(this.storageBytesExpr()), tiebreak];
+      case 'nextSession':
+        return [dir(this.nextSessionExpr()), tiebreak];
+      case 'created':
+        return [dir(campaigns.createdAt), tiebreak];
+      case 'id':
+        return [dir(campaigns.id)];
+      case 'activity':
+      default:
+        return [dir(this.lastActivityExpr()), tiebreak];
+    }
+  }
+
+  /**
+   * Primary DM per campaign for the rows on this page — ONE query, not N+1.
+   * Prefers the seat flagged `is_primary_owner`; falls back to the lowest-id dm seat so
+   * an operator always has somebody to contact.
+   */
+  private async resolvePrimaryDms(
+    campaignIds: number[],
+  ): Promise<Map<number, { userId: number; displayName: string; username: string; primaryOwner: boolean }>> {
+    const out = new Map<number, { userId: number; displayName: string; username: string; primaryOwner: boolean }>();
+    if (campaignIds.length === 0) return out;
+
+    const rows = await this.db
+      .select({
+        campaignId: campaignMembers.campaignId,
+        userId: campaignMembers.userId,
+        primaryOwner: campaignMembers.primaryOwner,
+        seatId: campaignMembers.id,
+        username: users.username,
+        displayName: users.displayName,
+      })
+      .from(campaignMembers)
+      .innerJoin(users, eq(users.id, campaignMembers.userId))
+      .where(and(inArray(campaignMembers.campaignId, campaignIds), eq(campaignMembers.role, 'dm')))
+      .orderBy(desc(campaignMembers.primaryOwner), asc(campaignMembers.id));
+
+    for (const row of rows) {
+      if (out.has(row.campaignId)) continue; // ordering above already put the best first
+      out.set(row.campaignId, {
+        userId: row.userId,
+        displayName: row.displayName,
+        username: row.username,
+        primaryOwner: row.primaryOwner,
+      });
+    }
+    return out;
+  }
+
+  /** Map one projected row + policy into the wire shape, applying redaction. */
+  private toEntry(
+    row: {
+      id: number;
+      name: string;
+      description: string;
+      status: string;
+      catalogPrivacy: string;
+      ruleSystem: string;
+      sessionCount: number;
+      storageQuotaBytes: number | null;
+      publicInvitesEnabled: boolean;
+      aiExternalContentPolicy: string;
+      deletedAt: string | null;
+      createdAt: string;
+      updatedAt: string;
+      packName: string | null;
+      packVersion: string | null;
+      storageBytes: number;
+      attachmentCount: number;
+      memberCount: number;
+      dmCount: number;
+      nextSessionAt: string | null;
+      lastActivityAt: string | null;
+    },
+    policy: CampaignCatalogPrivacyPolicy,
+    dm: { userId: number; displayName: string; username: string; primaryOwner: boolean } | null,
+  ): CampaignCatalogEntry {
+    const privacy = this.normalizePrivacy(row.catalogPrivacy);
+    const visibility = effectiveVisibility(policy, privacy);
+    const nameRedacted = visibility.names === 'redacted';
+    const descriptionRedacted = visibility.descriptions === 'redacted';
+    const storageBytes = Number(row.storageBytes ?? 0);
+    const status = (['active', 'paused', 'completed'] as const).includes(row.status as 'active')
+      ? (row.status as 'active' | 'paused' | 'completed')
+      : 'active';
+
+    return {
+      id: row.id,
+      name: nameRedacted ? redactedCampaignName(row.id) : row.name,
+      nameRedacted,
+      // A redacted description gets NO placeholder: unlike a name, nothing operational
+      // depends on having a stand-in, so the honest answer is to send nothing.
+      description: descriptionRedacted ? '' : row.description,
+      descriptionRedacted,
+      catalogPrivacy: privacy,
+      status,
+      archived: status !== 'active',
+      trashed: row.deletedAt !== null,
+      module: {
+        slug: row.ruleSystem,
+        name: row.packName ?? '',
+        version: row.packVersion ?? '',
+        installed: row.packName !== null,
+      },
+      primaryDm: dm
+        ? {
+            userId: dm.userId,
+            displayName: dm.displayName,
+            username: dm.username,
+            primaryOwner: dm.primaryOwner,
+          }
+        : null,
+      memberCount: Number(row.memberCount ?? 0),
+      dmCount: Number(row.dmCount ?? 0),
+      sessionCount: row.sessionCount,
+      nextSessionAt: row.nextSessionAt ?? null,
+      lastActivityAt: row.lastActivityAt || null,
+      storageBytes,
+      attachmentCount: Number(row.attachmentCount ?? 0),
+      storageQuotaBytes: row.storageQuotaBytes,
+      overQuota: row.storageQuotaBytes !== null && storageBytes > row.storageQuotaBytes,
+      publicInvitesEnabled: row.publicInvitesEnabled,
+      aiExternalContentPolicy: row.aiExternalContentPolicy === 'disabled' ? 'disabled' : 'member_consent',
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    };
+  }
+
+  private toExportRequest(row: typeof campaignExportRequests.$inferSelect): CampaignExportRequest {
+    const status = (['pending', 'approved', 'denied', 'cancelled'] as const).includes(row.status as 'pending')
+      ? (row.status as CampaignExportRequest['status'])
+      : 'pending';
+    return {
+      id: row.id,
+      campaignId: row.campaignId,
+      requestedBy: row.requestedBy,
+      requestedByUserId: row.requestedByUserId,
+      profile: row.profile,
+      justification: row.justification,
+      status,
+      decidedBy: row.decidedBy,
+      decidedAt: row.decidedAt,
+      decisionNote: row.decisionNote,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    };
+  }
+
+  /** Compact, reviewable rendering of the filters that produced an audited page. */
+  private describeFilters(query: CatalogQuery): string {
+    const parts: string[] = [];
+    if (query.q) parts.push(`q=${query.q.slice(0, 80)}`);
+    if (query.status) parts.push(`status=${query.status}`);
+    if (query.ruleSystem !== undefined) parts.push(`ruleSystem=${query.ruleSystem}`);
+    if (query.packageVersion !== undefined) parts.push(`version=${query.packageVersion}`);
+    if (query.moduleInstalled !== undefined) parts.push(`moduleInstalled=${query.moduleInstalled}`);
+    if (query.primaryDmUserId !== undefined) parts.push(`dm=${query.primaryDmUserId}`);
+    if (query.nextSessionAfter) parts.push(`nextSessionAfter=${query.nextSessionAfter}`);
+    if (query.nextSessionBefore) parts.push(`nextSessionBefore=${query.nextSessionBefore}`);
+    if (query.activityAfter) parts.push(`activityAfter=${query.activityAfter}`);
+    if (query.activityBefore) parts.push(`activityBefore=${query.activityBefore}`);
+    if (query.minStorageBytes !== undefined) parts.push(`minStorageBytes=${query.minStorageBytes}`);
+    if (query.overQuota !== undefined) parts.push(`overQuota=${query.overQuota}`);
+    if (query.trashed) parts.push('trashed=true');
+    return parts.length === 0 ? 'none' : parts.join(' ');
+  }
+}
