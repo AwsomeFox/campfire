@@ -3034,6 +3034,15 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
     { key: 'actionSurge', name: 'Action Surge', recharge: 'short-rest' },
     { key: 'kiPoints', name: 'Focus / Ki Points', recharge: 'short-rest' },
     { key: 'recharge', name: 'Recharge Feature', recharge: 'turn-start' },
+    // #1073 — inspiration is a COUNTED resource, not a free-text condition, so the AI (and the
+    // sheet) can award and spend it instead of writing prose about it.
+    //
+    // `recharge: 'special'` is a real statement, not a shrug: 5e inspiration is DM-AWARDED and
+    // survives rests untouched, so every rest cadence would be wrong — a long-rest recharge
+    // would hand it out for free every night, which is precisely the opposite of how it works.
+    // `defaultMax: 1` because you either have inspiration or you do not (2014 PHB, and 2024
+    // heroic inspiration likewise); a second award while holding one is not a second point.
+    { key: 'inspiration', name: 'Inspiration', recharge: 'special', defaultMax: 1 },
   ],
   // 5e caps character level at 20 (PHB). The cap lives here, not hardcoded in `levelUp`, so a
   // non-5e system enforces its own ceiling (issue #535): 13th Age (10), an uncapped OSR game, etc.
@@ -4098,6 +4107,12 @@ export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
   resources: [
     { key: 'focusPoints', name: 'Focus Points', recharge: 'refocus', defaultMax: 3 },
     { key: 'hitDice', name: 'Hit Dice / Stamina', recharge: 'long-rest' },
+    // #1073 — PF2e hero points are a DIFFERENT ECONOMY from 5e inspiration, which is why each
+    // system declares its own rather than one being modelled as the other. They accrue during
+    // a SESSION (1 at the start, more for heroic deeds), reset between sessions rather than on
+    // any rest, and spending ALL of them at once is the "avoid death" move — hence `defaultMax: 3`
+    // and, again, `recharge: 'special'` because no rest cadence describes a session boundary.
+    { key: 'heroPoints', name: 'Hero Points', recharge: 'special', defaultMax: 3 },
   ],
   // PF2e characters cap at level 20 (Core Rulebook), the same ceiling as 5e.
   maxLevel: 20,

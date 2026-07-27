@@ -1233,30 +1233,55 @@ export class CharactersService {
     const existing = await this.getRowOrThrow(id);
     this.assertCanWrite(existing, user, role);
 
-    const resources = fromJsonText<Record<string, { max: number; used: number; name?: string; recharge?: string }>>(existing.resources, {});
-    const current = resources[patch.key] ?? { max: patch.max ?? 1, used: 0, name: patch.name || patch.key, recharge: patch.recharge || 'long-rest' };
+    /**
+     * #1073 — READ, DECIDE AND WRITE IN ONE SYNCHRONOUS TRANSACTION.
+     *
+     * This used to read the row, compute the new `used` across an `await`, and write it back.
+     * Two concurrent spends of the same resource both read `used: 0`, both decide `1`, and the
+     * second write lands on the first: one spend is FREE. For a resource whose whole purpose is
+     * that you pay for a reroll, a lost update is not a rounding error — it is the AI narrating
+     * a reroll nobody paid for, which is the #1039 failure mode exactly.
+     *
+     * The row is re-read INSIDE the transaction (`tx`), not reused from the `existing` snapshot
+     * above, because that snapshot is precisely the stale value the race turns on. `existing`
+     * still serves the permission check, which is not order-sensitive. better-sqlite3 runs the
+     * transaction synchronously to completion with no JS yield, so nothing can interleave.
+     */
+    const row = this.db.transaction((tx) => {
+      const fresh = tx.select().from(characters).where(eq(characters.id, id)).get();
+      if (!fresh) throw new NotFoundException(`Character ${id} not found`);
 
-    const max = patch.max !== undefined ? Math.min(100, Math.max(0, patch.max)) : current.max;
-    let used = patch.used !== undefined ? patch.used : current.used;
-    if (patch.delta !== undefined) {
-      used += patch.delta;
-    }
-    if (used < 0 || used > max) {
-      throw new BadRequestException(`Resource '${patch.key}' overspend/overrestore: resulting used (${used}) must be in [0, max (${max})]`);
-    }
+      const resources = fromJsonText<Record<string, { max: number; used: number; name?: string; recharge?: string }>>(fresh.resources, {});
+      const current = resources[patch.key] ?? { max: patch.max ?? 1, used: 0, name: patch.name || patch.key, recharge: patch.recharge || 'long-rest' };
 
-    resources[patch.key] = {
-      max,
-      used,
-      name: patch.name ?? current.name ?? patch.key,
-      recharge: patch.recharge ?? current.recharge ?? 'long-rest',
-    };
+      const max = patch.max !== undefined ? Math.min(100, Math.max(0, patch.max)) : current.max;
+      let used = patch.used !== undefined ? patch.used : current.used;
+      if (patch.delta !== undefined) {
+        used += patch.delta;
+      }
+      // Deliberately an ERROR, never a clamp (#1039): spending a resource you do not have must
+      // fail loudly. A silent clamp to the bound would report success for a spend that never
+      // happened, and the caller — increasingly an AI narrating the result — would describe an
+      // effect it never paid for. Over-restoring is rejected for the mirror reason.
+      if (used < 0 || used > max) {
+        throw new BadRequestException(`Resource '${patch.key}' overspend/overrestore: resulting used (${used}) must be in [0, max (${max})]`);
+      }
 
-    const [row] = await this.db
-      .update(characters)
-      .set({ resources: toJsonText(resources), updatedAt: nowIso() })
-      .where(eq(characters.id, id))
-      .returning();
+      resources[patch.key] = {
+        max,
+        used,
+        name: patch.name ?? current.name ?? patch.key,
+        recharge: patch.recharge ?? current.recharge ?? 'long-rest',
+      };
+
+      const [written] = tx
+        .update(characters)
+        .set({ resources: toJsonText(resources), updatedAt: nowIso() })
+        .where(eq(characters.id, id))
+        .returning()
+        .all();
+      return written;
+    });
 
     await this.audit.log({
       actor: auditActor(user),
