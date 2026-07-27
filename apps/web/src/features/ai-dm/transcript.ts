@@ -161,7 +161,20 @@ export interface ToolEntry {
 export interface SystemEntry {
   id: string;
   kind: 'system';
-  variant: 'divider' | 'scene' | 'stuck' | 'recovered' | 'paused' | 'resumed' | 'takeover' | 'vote' | 'rules' | 'info';
+  variant:
+    | 'divider'
+    | 'scene'
+    | 'stuck'
+    | 'recovered'
+    | 'paused'
+    | 'resumed'
+    | 'takeover'
+    | 'vote'
+    | 'rules'
+    // #1043 — the durable session-lifecycle control rows.
+    | 'phase'
+    | 'phaseInterrupted'
+    | 'info';
   /** Optional raw text (e.g. a seeded scene label or a stuck detail) for the page to render. */
   text?: string;
   /** Optional structured payload (e.g. the stuck reason, vote outcome) for the page. */
@@ -558,6 +571,15 @@ function applyStream(state: TranscriptState, event: AiDmStreamEvent): Transcript
     // Folding it here would also read as narration in the scrollback long after it was resolved.
     case 'tool-confirmation':
       return state;
+    // #1043: the lifecycle phase is TABLE STATE, not a thing that was said — the same split as
+    // `grounding` and `tool-confirmation` above. It already has two homes: the dedicated phase
+    // note on the AI Table, which reconciles off its own refetch on this same signal, and the
+    // durable `control` row the server records, which reaches authoritative surfaces as a
+    // `transcript` frame. Folding this frame too would double the line there, and would invent a
+    // client-only system entry on the surfaces that have no durable copy. What this frame is FOR
+    // is the invalidation its consumers now do.
+    case 'phase':
+      return state;
 
     default: {
       // Exhaustiveness guard — a new event kind must be handled explicitly.
@@ -764,7 +786,17 @@ function applyServerEvent(state: TranscriptState, event: AiDmTranscriptEvent): T
                 ? 'stuck'
                 : control === 'recovered'
                   ? 'recovered'
-                  : 'info';
+                  // #1043 — the two lifecycle controls the server records. Without these they
+                  // fell through to `info`, whose copy is `State: {{state}}`, and the phase rows
+                  // carry `phase`/`interrupted` rather than `state` — so every successful
+                  // greeting and wrap-up wrote two blank `State:` lines into the durable
+                  // transcript. `phase_interrupted` is kept distinct because it reports a
+                  // transition that DIED, which is not the same news as one that landed.
+                  : control === 'phase'
+                    ? 'phase'
+                    : control === 'phase_interrupted'
+                      ? 'phaseInterrupted'
+                      : 'info';
       return upsert({
         id: event.eventId,
         kind: 'system',

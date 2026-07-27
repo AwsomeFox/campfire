@@ -174,6 +174,8 @@ export default function AiTablePage() {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [pauseError, setPauseError] = useState<string | null>(null);
   const [pauseBusy, setPauseBusy] = useState(false);
+  const [lifecycleError, setLifecycleError] = useState<string | null>(null);
+  const [lifecycleBusy, setLifecycleBusy] = useState(false);
 
   // Party roster — resolves this member's character name for speaker attribution, and
   // is also a live surface refreshed by party-touching tool events.
@@ -456,10 +458,16 @@ export default function AiTablePage() {
           event.type === 'stuck' ||
           event.type === 'recovered' ||
           event.type === 'vote' ||
-          event.type === 'takeover'
+          event.type === 'takeover' ||
+          event.type === 'phase'
         ) {
           // Lifecycle signals move the thin server truth — reconcile the session/seat reads
           // so the header + composer-lock reflect the new state (#340 reads the same truth).
+          // #1043: `phase` belongs here for the same reason as its siblings, and more sharply.
+          // Only the member who pressed Start Session / Wrap Up gets a response carrying the new
+          // phase; everyone else learns it from this frame alone. Without the refetch they keep a
+          // stale phase and can type into an ended session, collecting a 409 nothing warned them
+          // about.
           invalidateAiDm(queryClient, campaignId);
           if (event.type === 'state' && event.state !== 'running') setStreaming(false);
         }
@@ -653,13 +661,31 @@ export default function AiTablePage() {
 
   // Composer lock: streaming OR a state the stuck-ladder issue (#340) owns.
   const paused = session?.state === 'paused';
+  // #1043 — default to `active` while the session read is in flight, so the lifecycle controls
+  // render in their normal state rather than flickering through a phase nobody is in.
+  const phase = session?.phase ?? 'active';
   const humanControl = session?.state === 'human_control';
   // #1051. This flag only reports the MODE. The approval surface for the calls it defers is
   // #1558's `ToolConfirmationsPanel`, mounted above the transcript on this same page — so a DM
   // who sees this status also sees, and resolves, the queue the mode fills.
   const collaborative = session?.state === 'collaborative';
   const awaiting = session?.state === 'awaiting_players';
-  const locked = streaming || paused || humanControl || awaiting;
+  // #1043 — an ENDED session locks the composer too.
+  //
+  // This was deliberately left unlocked at first, on the reasoning that `locked` is the
+  // seat-UNAVAILABLE lock and `ended` is one click from cleared, so grey-ing it out would frame an
+  // affordance as a permission problem. That reasoning does not survive the actual consequence:
+  // after a normal wrap-up EVERY up-to-date client shows a composer whose submit the server
+  // ALWAYS rejects with AI_DM_SESSION_ENDED. An input that cannot succeed is not an affordance,
+  // it is a trap, and it springs on everyone rather than only on a client that missed a frame.
+  //
+  // The distinction that was really being drawn is preserved by `lockReason`, not by leaving the
+  // box enabled: the lock states its cause in the composer's own help text and placeholder, the
+  // phase note repeats it, and Start Session stays visible in the header — player+, so any member
+  // still clears it in one click. The seat is not what is unavailable; the session is over, and
+  // now the composer says so instead of letting you find out by being refused.
+  const ended = phase === 'ended';
+  const locked = streaming || paused || humanControl || awaiting || ended;
   const lockReason = streaming
     ? t('table.composerLockedStreaming')
     : paused
@@ -668,7 +694,9 @@ export default function AiTablePage() {
         ? t('table.composerLockedHuman')
         : awaiting
           ? t('table.composerLockedAwaiting')
-          : null;
+          : ended
+            ? t('table.composerLockedEnded')
+            : null;
 
   // #1077: SR live regions. The visible transcript mutates token-by-token, so a
   // mirror only gains finished additions (turn.end / player / system). Status
@@ -776,6 +804,28 @@ export default function AiTablePage() {
       setSubmitError(translateApiError(err, t));
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  /**
+   * Session lifecycle (#1043). Both run a real AI turn server-side, so they go through every
+   * gate a player action does — a paused or frozen seat refuses them and the phase is left
+   * alone. The button is disabled while a lifecycle turn is in flight, but the server is the
+   * authority: it 409s a second start rather than trusting this.
+   */
+  async function onLifecycle(action: 'start-session' | 'wrap-up') {
+    if (campaignId === undefined) return;
+    setLifecycleBusy(true);
+    setLifecycleError(null);
+    try {
+      await api.post(`${API}/campaigns/${campaignId}/ai-dm/${action}`);
+      invalidateAiDm(queryClient, campaignId);
+    } catch (err) {
+      setLifecycleError(
+        err instanceof ApiError && err.message ? err.message : t('table.lifecycleFailed'),
+      );
+    } finally {
+      setLifecycleBusy(false);
     }
   }
 
@@ -898,9 +948,36 @@ export default function AiTablePage() {
                 {paused ? t('table.resume') : t('table.pause')}
               </Btn>
             )}
+            {/* #1043 — session lifecycle. Start Session is player+ (sitting down to play is a
+                table act); Wrap Up is DM-only (closing a session is a decision). Both are hidden
+                while a lifecycle turn is mid-flight rather than merely disabled, so the header
+                does not offer an action the server is about to 409.
+
+                `canCompose` (dm | player) mirrors the server's player+ gate on start-session. A
+                VIEWER was previously shown the button and got a 403 on click — the same "control
+                that cannot succeed" defect as the ended composer, and against this block's own
+                stated intent. Wrap Up keeps its additional `isDm` check on top. */}
+            {canCompose && phase !== 'greeting' && phase !== 'wrap_up' && (
+              <div className="flex gap-1.5">
+                <Btn ghost onClick={() => void onLifecycle('start-session')} disabled={lifecycleBusy}>
+                  {t('table.startSession')}
+                </Btn>
+                {isDm && phase !== 'ended' && (
+                  <Btn ghost onClick={() => void onLifecycle('wrap-up')} disabled={lifecycleBusy}>
+                    {t('table.wrapUp')}
+                  </Btn>
+                )}
+              </div>
+            )}
           </div>
         </div>
+        {phase !== 'active' && (
+          <p className="text-xs text-secondary mt-2" data-testid="ai-phase-note">
+            {t(`table.phaseNote.${phase}`)}
+          </p>
+        )}
         {pauseError && <p className="text-xs text-rose-400 mt-2">{pauseError}</p>}
+        {lifecycleError && <p className="text-xs text-rose-400 mt-2">{lifecycleError}</p>}
       </Card>
 
       {/* #1558 — pending AI tool confirmations. Mounted HIGH, directly under the header and above
