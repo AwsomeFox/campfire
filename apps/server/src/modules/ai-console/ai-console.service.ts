@@ -323,10 +323,14 @@ export class AiConsoleService {
         asOf: e.asOf,
         updatedAt: now,
       })),
+      // `updatedBy` deliberately stays the USER id: the pricing view shows who owns the
+      // current figures, and a token is a credential a person acted through, not an author.
       user.id,
     );
     await this.audit.log({
-      actor: user.id,
+      // The audit log answers a different question — what performed this write — so it uses
+      // the token-aware label every other audited action in this file uses.
+      actor: auditActor(user),
       actorRole: 'admin',
       action: 'ai.pricing.update',
       entityType: 'settings',

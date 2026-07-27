@@ -15,8 +15,6 @@
       "completedBy": "Done by {{actor}}",
       "todoBy": "Needs {{actor}}",
       "costTitle": "Estimated cost before the next run",
-      "costBody": "Plan for up to {{tokens}} tokens (about {{prompt}} prompt + {{completion}} completion). USD estimate: {{usd}}.",
-      "costUnknownUsd": "unknown for this provider/model",
       "fixServerAi": "Open AI console",
       "fixProvider": "Configure provider",
       "fixMode": "Choose a mode",
@@ -133,16 +131,18 @@
           "notYet": "Once Driver mode is on, a Table tab appears for every member — that's where the session is played."
         }
       },
-      "costTokens": "Plan for up to {{tokens}} tokens (about {{prompt}} prompt + {{completion}} completion)."
+      "costTokens": "Plan for up to {{tokens}} tokens (about {{prompt}} prompt + {{completion}} completion).",
+      "costTokensTotal": "Plan for up to {{tokens}} tokens per turn."
     },
     "runCost": {
       "label": "Estimated next AI turn:",
       "summary": "up to {{tokens}} tokens ({{prompt}} prompt + {{completion}} completion).",
+      "summaryTotal": "up to {{tokens}} tokens.",
       "usdUnknown": "USD varies by provider/model.",
       "usdKnown": "About {{usd}}.",
       "notes": {
-        "metered": "Per-turn estimate from this campaign’s recent metered turns. Actual usage depends on context, tools, and model pricing.",
-        "noData": "Best-effort per-turn estimate before sending to the provider — this campaign has no metered turns yet. Actual usage depends on context, tools, and model pricing."
+        "metered": "Per-turn token estimate from this campaign’s recent metered turns. Metering records a turn’s total only, so the dollar range spans an all-input to an all-output split. Actual usage depends on context, tools, and model pricing.",
+        "noData": "Best-effort per-turn estimate before sending to the provider — this campaign has no metered turns yet. The dollar range spans an all-input to an all-output split. Actual usage depends on context, tools, and model pricing."
       }
     },
     "dashboard": {

@@ -31,6 +31,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import {
   AiPricingTable,
   AI_COST_BASIS_UNKNOWN,
+  aiPricingIdentityKey,
   type AiCostBasis,
   type AiModelPrice,
 } from '@campfire/schema';
@@ -122,12 +123,13 @@ export function resolveBasisFrom(table: AiPricingTable, target: PricingTarget): 
   if (table.entries.length === 0) return AI_COST_BASIS_UNKNOWN;
 
   const baseUrl = (target.baseUrl ?? '').trim();
-  const match = table.entries.find(
-    (e) =>
-      e.providerType.trim().toLowerCase() === providerType.toLowerCase() &&
-      e.model.trim().toLowerCase() === model.toLowerCase() &&
-      (e.baseUrl ?? '').trim().toLowerCase() === baseUrl.toLowerCase(),
-  );
+  // One shared definition of the identity, with the write boundary that rejects duplicates
+  // (`AiPricingUpdate`) and the admin editor that flags them. When each spelled the
+  // comparison out separately they drifted: this resolver matched case-insensitively while
+  // nothing stopped two rows differing only in case from being stored, so which price a
+  // campaign got came down to array order.
+  const wanted = aiPricingIdentityKey({ providerType, model, baseUrl });
+  const match = table.entries.find((e) => aiPricingIdentityKey(e) === wanted);
   if (!match) {
     // Distinguish "you are on a custom endpoint and have not priced it" from "this model is
     // not in your table", because the fix is different and the first is easy to overlook.

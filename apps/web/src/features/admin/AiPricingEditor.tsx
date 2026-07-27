@@ -20,7 +20,7 @@
  */
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import type { AiPricingView } from '@campfire/schema';
+import { AI_PRICING_MAX_ENTRIES, aiPricingDuplicateIndices, type AiPricingView } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { Btn } from '../../components/ui';
 
@@ -61,7 +61,6 @@ interface RowError {
 /** A row is saveable when it names a model and both prices parse as non-negative numbers. */
 function rowErrors(rows: Row[]): RowError[] {
   const errors: RowError[] = [];
-  const seen = new Set<string>();
   rows.forEach((r, i) => {
     const n = i + 1;
     if (!r.providerType.trim()) errors.push({ key: 'admin.pricing.errProvider', params: { n } });
@@ -72,11 +71,20 @@ function rowErrors(rows: Row[]): RowError[] {
         errors.push({ key: 'admin.pricing.errPrice', params: { n, field } });
       }
     }
-    // The natural key. Two rows for the same target would make resolution order-dependent.
-    const key = `${r.providerType.trim().toLowerCase()}|${r.model.trim().toLowerCase()}|${r.baseUrl.trim().toLowerCase()}`;
-    if (seen.has(key)) errors.push({ key: 'admin.pricing.errDuplicate', params: { n } });
-    seen.add(key);
   });
+  // Duplicate detection comes from the SCHEMA, so the check that blocks Save here and the
+  // one the server enforces on write are the same function, not two implementations that
+  // agree until someone edits one. It also skips rows whose key fields are still blank:
+  // pressing "Add model" twice used to collapse two empty rows to the same key and stack a
+  // phantom duplicate error on top of the required-field errors already being shown.
+  for (const index of aiPricingDuplicateIndices(rows)) {
+    errors.push({ key: 'admin.pricing.errDuplicate', params: { n: index + 1 } });
+  }
+  // The server caps the list at the same number. Enforced here too so an admin hits the
+  // limit while adding a row rather than after typing out a table the save will reject.
+  if (rows.length > AI_PRICING_MAX_ENTRIES) {
+    errors.push({ key: 'admin.pricing.errTooMany', params: { max: AI_PRICING_MAX_ENTRIES } });
+  }
   return errors;
 }
 
@@ -138,8 +146,11 @@ export function AiPricingEditor({ onError }: { onError: (msg: string | null) => 
         source: 'reference',
         asOf: view.referenceAsOf,
       }));
-    if (additions.length === 0) return;
-    setRows((prev) => [...prev, ...additions]);
+    // Clamped to the same ceiling the server enforces — prefill is the one action that can
+    // add many rows at once, so it is the one that could walk an admin past the cap.
+    const room = AI_PRICING_MAX_ENTRIES - rows.length;
+    if (additions.length === 0 || room <= 0) return;
+    setRows((prev) => [...prev, ...additions.slice(0, room)]);
     setSaved(false);
   }
 
@@ -192,7 +203,18 @@ export function AiPricingEditor({ onError }: { onError: (msg: string | null) => 
       <p className="text-[11px] text-slate-400">{t('admin.pricing.intro')}</p>
       <p className="text-[11px] text-slate-400">{t('admin.pricing.endpointNote')}</p>
 
-      <div className="overflow-x-auto">
+      {/*
+        `relative` is load-bearing, not decoration. The Actions column header below is an
+        `sr-only` cell, and `sr-only` is `position: absolute`. A scroll container only clips
+        descendants it is a CONTAINING BLOCK for, so with no positioned ancestor that cell
+        resolved against the initial containing block, escaped the scroll box, and pushed the
+        whole PAGE out to its own right edge — 689px at the 320px viewport of a 400% zoom,
+        breaking reflow for every panel on the admin AI screen, not just this table. The
+        table's own 640px minimum was never the problem: it scrolls inside this box correctly
+        either way. Positioning this element puts the hidden cell back under the scroll
+        container's clip, which is where the rest of the table already was.
+      */}
+      <div className="relative overflow-x-auto">
         <table className="w-full text-[11px] min-w-[640px]">
           <thead className="text-slate-400">
             <tr>
@@ -286,6 +308,7 @@ export function AiPricingEditor({ onError }: { onError: (msg: string | null) => 
         <Btn
           className="!min-h-0 !py-1.5 text-xs"
           ghost
+          disabled={rows.length >= AI_PRICING_MAX_ENTRIES}
           onClick={() => {
             setRows((prev) => [
               ...prev,

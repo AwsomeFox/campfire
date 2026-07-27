@@ -6378,6 +6378,59 @@ export const AiModelPrice = z.object({
 export type AiModelPrice = z.infer<typeof AiModelPrice>;
 
 /**
+ * THE pricing identity, in one function.
+ *
+ * `(providerType, model, baseUrl)` is the table's documented key, and three places have to
+ * agree on what it means: the write-side validator that rejects a duplicate, the resolver
+ * that matches a campaign against a row, and the editor that flags a duplicate before the
+ * admin can save one. When each implemented its own comparison they drifted — the resolver
+ * matched case-insensitively while nothing stopped two rows differing only in case from
+ * being stored, which made the resolved price depend on array order.
+ *
+ * Trimmed and lowercased on all three parts: an admin typing `OpenAI` and `openai`, or
+ * pasting a base URL with a trailing space, means the same row both times. ` ` as the
+ * separator because it cannot occur in any of the three fields, so no combination of values
+ * can collide by containing the separator.
+ */
+export function aiPricingIdentityKey(entry: {
+  providerType: string;
+  model: string;
+  baseUrl?: string | null;
+}): string {
+  const norm = (s: string | null | undefined) => (s ?? '').trim().toLowerCase();
+  return `${norm(entry.providerType)} ${norm(entry.model)} ${norm(entry.baseUrl)}`;
+}
+
+/**
+ * Indices of entries whose identity repeats an earlier one. Empty means the list is a valid
+ * table. Shared by the schema refinement and the admin editor so "duplicate" cannot mean two
+ * different things at the two ends of the same round trip.
+ *
+ * Rows whose provider or model is still blank are SKIPPED rather than compared: a half-typed
+ * row is already reported as missing required fields, and treating two blank rows as
+ * duplicates of each other stacks a second, misleading error on top of that.
+ */
+export function aiPricingDuplicateIndices(
+  entries: readonly { providerType: string; model: string; baseUrl?: string | null }[],
+): number[] {
+  const seen = new Set<string>();
+  const duplicates: number[] = [];
+  entries.forEach((entry, index) => {
+    if (!entry.providerType.trim() || !entry.model.trim()) return;
+    const key = aiPricingIdentityKey(entry);
+    if (seen.has(key)) duplicates.push(index);
+    else seen.add(key);
+  });
+  return duplicates;
+}
+
+/**
+ * Ceiling on the price list. Exported so the admin editor stops an admin AT the limit rather
+ * than letting them type past it and discover the cap when the save 400s.
+ */
+export const AI_PRICING_MAX_ENTRIES = 500;
+
+/**
  * The server-wide pricing table, stored as ONE JSON blob under a settings key.
  *
  * Server-wide rather than per-campaign for the reason above, and in the generic settings k/v
@@ -6388,7 +6441,7 @@ export type AiModelPrice = z.infer<typeof AiModelPrice>;
  */
 export const AiPricingTable = z.object({
   version: z.literal(1).default(1),
-  entries: z.array(AiModelPrice).max(500).default([]),
+  entries: z.array(AiModelPrice).max(AI_PRICING_MAX_ENTRIES).default([]),
   updatedAt: z.string().nullable().default(null),
   updatedBy: z.string().default(''),
 });
@@ -6416,10 +6469,12 @@ export type AiCostUnknownReason = z.infer<typeof AiCostUnknownReason>;
  * in driver-safety.ts: a shape that makes the unsafe state unreachable beats a convention
  * that the unsafe state is handled.
  *
- * Every dollar figure in the product is derived from this via {@link estimateUsdRange} or
- * {@link estimateUsdForSplit}, both of which return null on `unknown`. There is no other
- * supported way to turn tokens into money, which is what makes the guarantee structural
- * rather than a rule someone has to remember.
+ * Every dollar figure in the product is derived from this via {@link estimateUsdRange}, which
+ * returns null on `unknown`. That is the ONLY supported way to turn tokens into money — there
+ * is deliberately no point-estimate counterpart, because no caller has a genuinely measured
+ * prompt/completion split to give one, and an entry point that accepts an assumed split is an
+ * entry point for publishing a guess as a measurement. What makes the guarantee structural
+ * rather than a rule someone has to remember is that there is nothing else to call.
  */
 export const AiCostBasis = z.discriminatedUnion('kind', [
   z.object({
@@ -6462,35 +6517,38 @@ export function estimateUsdRange(tokens: number, basis: AiCostBasis): { low: num
   return a <= b ? { low: a, high: b } : { low: b, high: a };
 }
 
-/**
- * Dollar figure for a KNOWN prompt/completion split, or null when we cannot say.
- *
- * Used for the per-turn estimate, where the split is estimated from this campaign's own
- * metered turns rather than unknown — so a point value is derivable here in a way it is not
- * for a raw budget. Still a best-effort figure over an estimated split; the UI renders it
- * with limited significant figures and says what it assumed.
- */
-export function estimateUsdForSplit(
-  promptTokens: number,
-  completionTokens: number,
-  basis: AiCostBasis,
-): number | null {
-  if (basis.kind !== 'priced') return null;
-  return (
-    (Math.max(0, promptTokens) / 1_000_000) * basis.inputUsdPerMTok +
-    (Math.max(0, completionTokens) / 1_000_000) * basis.outputUsdPerMTok
-  );
-}
-
 export const AiDmEstimatedCost = z.object({
-  estimatedPromptTokens: z.number().int().nonnegative(),
-  estimatedCompletionTokens: z.number().int().nonnegative(),
-  estimatedTotalTokens: z.number().int().nonnegative(),
-  estimatedUsd: z.number().nonnegative().nullable().default(null),
   /**
-   * #1065 — what the dollar figure above is (or is not) based on. `estimatedUsd` is DERIVED
-   * from this and is null whenever `basis.kind === 'unknown'`; the basis is what the UI reads
-   * to decide between showing a number and showing the cannot-estimate disclosure.
+   * The assumed prompt/completion split, or null when it is NOT known.
+   *
+   * Null is the metered case, and that is not a gap in the data — it is the data. Metering
+   * records one `tokensUsed` total per turn, so a campaign with history knows what a turn
+   * costs in tokens and knows nothing about how that total divided. Reporting a split here
+   * anyway (an earlier draft multiplied the total by a fixed 57.7%) dressed a constant up as
+   * a measurement, which is precisely what {@link AiCostBasis}'s `unknown` variant exists to
+   * stop one layer down. Non-null only when the numbers ARE our own stated assumption,
+   * i.e. the campaign has no metered turns yet.
+   */
+  estimatedPromptTokens: z.number().int().nonnegative().nullable().default(null),
+  estimatedCompletionTokens: z.number().int().nonnegative().nullable().default(null),
+  estimatedTotalTokens: z.number().int().nonnegative(),
+  /**
+   * #1065 — the money, as a RANGE, or null when we cannot say.
+   *
+   * A range because the split above is generally unknown and output tokens are priced several
+   * times higher than input on most providers: a point value would be an invented ratio
+   * carried to two significant figures. The span between all-input and all-output pricing is
+   * the honest statement of what we actually know, and its top is the number a DM should
+   * budget against.
+   */
+  estimatedUsdRange: z
+    .object({ low: z.number().nonnegative(), high: z.number().nonnegative() })
+    .nullable()
+    .default(null),
+  /**
+   * #1065 — what the dollar range above is (or is not) based on. `estimatedUsdRange` is
+   * DERIVED from this and is null whenever `basis.kind === 'unknown'`; the basis is what the
+   * UI reads to decide between showing a figure and showing the cannot-estimate disclosure.
    */
   basis: AiCostBasis.default(AI_COST_BASIS_UNKNOWN),
   /**
@@ -6916,7 +6974,22 @@ export const AiPricingUpdate = z
           })
           .strict(),
       )
-      .max(500),
+      .max(AI_PRICING_MAX_ENTRIES)
+      // The identity is the table's key, so the write boundary is where it has to hold.
+      // Without this the store accepted two rows for the same target and `resolveBasisFrom`
+      // silently priced against whichever happened to come first — an estimate that depended
+      // on array order. Rejecting here also means the editor's duplicate check and the
+      // server's agree by construction: both call `aiPricingDuplicateIndices`.
+      .superRefine((entries, ctx) => {
+        for (const index of aiPricingDuplicateIndices(entries)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: [index],
+            message:
+              'Duplicate pricing entry: another entry already covers this provider, model and base URL.',
+          });
+        }
+      }),
   })
   .strict();
 export type AiPricingUpdate = z.infer<typeof AiPricingUpdate>;

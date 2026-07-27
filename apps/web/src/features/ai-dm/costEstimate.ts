@@ -35,8 +35,14 @@ export function formatApproxUsd(usd: number): string {
   if (v >= 10) return `≈$${Math.round(v).toLocaleString()}`;
   if (v >= 1) return `≈$${v.toFixed(1)}`;
   if (v >= 0.01) return `≈$${v.toFixed(2)}`;
-  // Below a cent, two significant figures — `toFixed` alone would render "$0.00".
-  return `≈$${v.toPrecision(2).replace(/0+$/, '').replace(/\.$/, '')}`;
+  // Below a cent, two significant figures — `toFixed(2)` alone would render "$0.00".
+  //
+  // Derived as a decimal-place count rather than via `toPrecision(2)`, which switches to
+  // exponential notation once the exponent drops past -7: a reachable per-turn figure like
+  // 0.00000015 came out as "≈$1.5e-7". Scientific notation in a price is not a price anyone
+  // can read, and keeping money legible is the entire job of this function.
+  const decimals = Math.min(100, 1 - Math.floor(Math.log10(v)));
+  return `≈$${v.toFixed(decimals).replace(/0+$/, '').replace(/\.$/, '')}`;
 }
 
 /**
@@ -51,7 +57,17 @@ export function formatApproxUsd(usd: number): string {
  * noise, not honesty.
  */
 export function formatUsdRange(tokens: number, basis: AiCostBasis): string | null {
-  const range = estimateUsdRange(tokens, basis);
+  return formatUsdRangeValue(estimateUsdRange(tokens, basis));
+}
+
+/**
+ * The same rendering for a range the SERVER already computed (readiness `estimatedUsdRange`).
+ *
+ * Split out so the client-derived budget figure and the server-derived per-turn figure format
+ * identically — one place decides how a money span reads, and `null` in still means the
+ * disclosure out.
+ */
+export function formatUsdRangeValue(range: { low: number; high: number } | null): string | null {
   if (!range) return null;
   const low = formatApproxUsd(range.low);
   const high = formatApproxUsd(range.high);

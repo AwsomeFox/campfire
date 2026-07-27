@@ -109,6 +109,7 @@
       "errModel": "Row {{n}}: enter a model ID.",
       "errPrice": "Row {{n}}: {{field}} price must be a number of dollars per million tokens (0 or more).",
       "errDuplicate": "Row {{n}}: duplicate provider + model + endpoint.",
+      "errTooMany": "Too many entries: at most {{max}} model prices can be saved.",
       "fieldInput": "input",
       "fieldOutput": "output",
       "saveFailed": "Could not save model pricing.",

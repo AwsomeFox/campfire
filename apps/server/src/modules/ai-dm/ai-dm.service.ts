@@ -15,7 +15,7 @@ import {
   AiDmProactiveSettings,
   AiDmSeatDefaults,
   AiDmStylePresets,
-  estimateUsdForSplit,
+  estimateUsdRange,
 } from '@campfire/schema';
 import type {
   AiDmMode,
@@ -57,9 +57,6 @@ const DEFAULT_MAX_TOKENS = 512;
  */
 const DEFAULT_ESTIMATED_PROMPT_TOKENS = 750;
 const DEFAULT_ESTIMATED_COMPLETION_TOKENS = 1024;
-/** Share of a turn's tokens attributed to completion when only a total is known. */
-const DEFAULT_COMPLETION_SHARE =
-  DEFAULT_ESTIMATED_COMPLETION_TOKENS / (DEFAULT_ESTIMATED_PROMPT_TOKENS + DEFAULT_ESTIMATED_COMPLETION_TOKENS);
 /** How many recent metered turns the readiness estimate averages over. */
 const READINESS_USAGE_SAMPLE = 20;
 
@@ -770,14 +767,22 @@ export class AiDmService implements OnApplicationBootstrap {
     // next edit, and this value is a spend estimate a DM makes decisions on.
     const estimatedTotalTokens =
       recentUsage ?? (DEFAULT_ESTIMATED_PROMPT_TOKENS + DEFAULT_ESTIMATED_COMPLETION_TOKENS);
-    const estimatedCompletionTokens = Math.round(estimatedTotalTokens * DEFAULT_COMPLETION_SHARE);
-    const estimatedPromptTokens = estimatedTotalTokens - estimatedCompletionTokens;
+    // The prompt/completion split is reported ONLY when it is our own stated assumption.
+    // `meterTurn` records ONE total per turn, so a campaign with history tells us what a turn
+    // costs and nothing about how that total divided. An earlier draft multiplied the metered
+    // total by a fixed ratio and priced the two halves — output tokens cost several times
+    // input on most providers, so that figure could be far off while the UI described it as
+    // coming from the operator's own metering. Null is the honest value here, and the money
+    // below is a range rather than a point for exactly the same reason.
+    const splitIsAssumed = recentUsage === null;
+    const estimatedPromptTokens = splitIsAssumed ? DEFAULT_ESTIMATED_PROMPT_TOKENS : null;
+    const estimatedCompletionTokens = splitIsAssumed ? DEFAULT_ESTIMATED_COMPLETION_TOKENS : null;
 
     // #1065 — the MONEY dimension. A token budget is not a spending limit, and every surface
     // here was token-only, so a DM sized a budget with no idea what it would cost.
     //
     // `basis` is a discriminated union whose `unknown` variant is the only state reachable
-    // without an actual matched price, and `estimateUsdForSplit` returns null on it. So the
+    // without an actual matched price, and `estimateUsdRange` returns null on it. So the
     // dollar figure below cannot be non-null unless a price was genuinely resolved — a new
     // provider, a renamed model, or a proxied endpoint falls into the DISCLOSURE rather than
     // into a confident wrong number. That is the failure this issue is really about: a DM
@@ -790,7 +795,10 @@ export class AiDmService implements OnApplicationBootstrap {
     // only the provider type and model, never the URL (#373).
     const pricingIdentity = await this.providerConfig.getPricingIdentity(campaignId);
     const basis = await this.pricing.resolveBasis(pricingIdentity);
-    const estimatedUsd = estimateUsdForSplit(estimatedPromptTokens, estimatedCompletionTokens, basis);
+    // Priced off the TOTAL, spanning all-input to all-output. That span is what we can
+    // actually defend: the split is either unknown (metered) or a stated assumption (no
+    // metering), and neither justifies a single number to two significant figures.
+    const estimatedUsdRange = estimateUsdRange(estimatedTotalTokens, basis);
     // The note is split English-for-logs / key-for-clients, the same way `detail`/`detailKey`
     // is on every readiness check — server prose rendered raw in a localized UI was the
     // existing wart here, and growing it would have made money the one untranslated string.
@@ -809,12 +817,12 @@ export class AiDmService implements OnApplicationBootstrap {
       estimatedCost: {
         estimatedPromptTokens,
         estimatedCompletionTokens,
-        estimatedTotalTokens: estimatedPromptTokens + estimatedCompletionTokens,
-        estimatedUsd,
+        estimatedTotalTokens,
+        estimatedUsdRange,
         basis,
         note: recentUsage
-          ? 'Per-turn estimate from this campaign’s recent metered turns. Actual usage depends on context, tools, and model pricing.'
-          : 'Best-effort per-turn estimate before sending to the provider — this campaign has no metered turns yet. Actual usage depends on context, tools, and model pricing.',
+          ? 'Per-turn token estimate from this campaign’s recent metered turns. Metering records a turn’s total only, so the dollar range spans an all-input to an all-output split. Actual usage depends on context, tools, and model pricing.'
+          : 'Best-effort per-turn estimate before sending to the provider — this campaign has no metered turns yet. The dollar range spans an all-input to an all-output split. Actual usage depends on context, tools, and model pricing.',
         noteKey,
         noteParams: {},
       },

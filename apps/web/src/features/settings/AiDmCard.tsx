@@ -479,8 +479,13 @@ function BudgetSection({
     queryFn: () => api.get<AiDmReadiness>(`${API}/campaigns/${campaignId}/ai-dm/readiness`),
   });
   const costBasis: AiCostBasis = readinessQuery.data?.estimatedCost.basis ?? AI_COST_BASIS_UNKNOWN;
-  // Price the number being TYPED when it is valid, otherwise the saved one.
-  const typedBudget = Number(tokenBudget);
+  // Price the number being TYPED when it is valid, otherwise the saved one. A BLANK field is
+  // not a valid zero: `Number('')` is 0, so clearing the box to retype it made the estimate
+  // read "≈$0.00" — an answer to a question the DM had not finished asking, and the one
+  // number in this feature that must never appear without a basis behind it. Whitespace is
+  // handled the same way, and `Number(' ')` is 0 too.
+  const trimmedBudget = tokenBudget.trim();
+  const typedBudget = trimmedBudget === '' ? Number.NaN : Number(trimmedBudget);
   const budgetForEstimate = Number.isFinite(typedBudget) && typedBudget >= 0 ? typedBudget : seat.tokenBudget;
 
   async function save() {

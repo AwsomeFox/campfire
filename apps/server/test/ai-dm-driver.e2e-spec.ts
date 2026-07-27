@@ -92,8 +92,12 @@ describe('ai-dm driver runtime — session loop + streamed narration + tool exec
     );
     expect(ready.body.estimatedCost).toEqual(
       expect.objectContaining({
+        // No metered turns yet, so the split IS our stated assumption and is reported.
+        estimatedPromptTokens: 750,
         estimatedCompletionTokens: 1024,
-        estimatedTotalTokens: expect.any(Number),
+        estimatedTotalTokens: 1774,
+        // No pricing table on this server, so there is no money to report (#1065).
+        estimatedUsdRange: null,
       }),
     );
   });

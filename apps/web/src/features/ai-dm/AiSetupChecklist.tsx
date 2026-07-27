@@ -30,7 +30,7 @@ import { CopyControl } from '../../components/CopyControl';
 import { GameIcon } from '../../components/GameIcon';
 import { Btn, Card } from '../../components/ui';
 import { CostDisclosure } from './CostDisclosure';
-import { formatApproxUsd } from './costEstimate';
+import { formatUsdRangeValue } from './costEstimate';
 
 /** One computed checklist step. `done: null` = state is unknown (e.g. flag, for a non-admin). */
 interface Step {
@@ -145,21 +145,25 @@ export function AiSetupChecklist({
           dollar figure is an interpretation of them, not a replacement. */}
       <div className="cf-inset p-3 text-xs text-[var(--color-neutral-300)]">
         <p className="font-semibold text-[var(--color-neutral-200)] m-0">{t('aiOnboarding.checklist.costTitle')}</p>
+        {/* The prompt/completion breakdown appears only when the server actually has one to
+            give. Metered turns record a total, so claiming a split there would be inventing
+            the more specific half of the sentence. */}
         <p className="m-0 mt-1">
-          {t('aiOnboarding.checklist.costTokens', {
-            tokens: readiness.estimatedCost.estimatedTotalTokens.toLocaleString(),
-            prompt: readiness.estimatedCost.estimatedPromptTokens.toLocaleString(),
-            completion: readiness.estimatedCost.estimatedCompletionTokens.toLocaleString(),
-          })}
+          {readiness.estimatedCost.estimatedPromptTokens === null ||
+          readiness.estimatedCost.estimatedCompletionTokens === null
+            ? t('aiOnboarding.checklist.costTokensTotal', {
+                tokens: readiness.estimatedCost.estimatedTotalTokens.toLocaleString(),
+              })
+            : t('aiOnboarding.checklist.costTokens', {
+                tokens: readiness.estimatedCost.estimatedTotalTokens.toLocaleString(),
+                prompt: readiness.estimatedCost.estimatedPromptTokens.toLocaleString(),
+                completion: readiness.estimatedCost.estimatedCompletionTokens.toLocaleString(),
+              })}
         </p>
         <CostDisclosure
           className="mt-1.5"
           basis={readiness.estimatedCost.basis}
-          amount={
-            readiness.estimatedCost.estimatedUsd === null
-              ? null
-              : formatApproxUsd(readiness.estimatedCost.estimatedUsd)
-          }
+          amount={formatUsdRangeValue(readiness.estimatedCost.estimatedUsdRange)}
           scopeKey="aiOnboarding.cost.scopePerTurn"
         />
         {/* Server prose is the API/log rendering; localized clients prefer `noteKey` and fall

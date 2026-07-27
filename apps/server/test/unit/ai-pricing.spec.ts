@@ -1,6 +1,5 @@
 import {
   AI_COST_BASIS_UNKNOWN,
-  estimateUsdForSplit,
   estimateUsdRange,
   type AiPricingTable,
 } from '@campfire/schema';
@@ -102,11 +101,11 @@ describe('turning a basis into money (#1065)', () => {
   const priced = resolveBasisFrom(table([gpt4o]), { providerType: 'openai', model: 'gpt-4o' });
 
   it('returns null for every unpriced basis — there is no way to get a number out', () => {
-    // This is the structural guarantee the whole feature rests on: the estimate helpers are
-    // the only supported path from tokens to money, and neither has a branch that produces a
-    // figure without a matched price.
+    // This is the structural guarantee the whole feature rests on: `estimateUsdRange` is the
+    // ONLY supported path from tokens to money, and it has no branch that produces a figure
+    // without a matched price. There is deliberately no point-estimate counterpart to it —
+    // an entry point taking an assumed split is an entry point for publishing a guess.
     expect(estimateUsdRange(1_000_000, AI_COST_BASIS_UNKNOWN)).toBeNull();
-    expect(estimateUsdForSplit(1000, 1000, AI_COST_BASIS_UNKNOWN)).toBeNull();
     expect(estimateUsdRange(1_000_000, { kind: 'unknown', reason: 'custom_endpoint_not_priced' })).toBeNull();
   });
 
@@ -126,13 +125,7 @@ describe('turning a basis into money (#1065)', () => {
     expect(estimateUsdRange(1_000_000, inverted)).toEqual({ low: 1, high: 9 });
   });
 
-  it('prices a known prompt/completion split as a point value', () => {
-    // 1M prompt @ $2.5 + 1M completion @ $10.
-    expect(estimateUsdForSplit(1_000_000, 1_000_000, priced)).toBeCloseTo(12.5, 6);
-  });
-
   it('never returns a negative figure for nonsense input', () => {
-    expect(estimateUsdForSplit(-5, -5, priced)).toBe(0);
     expect(estimateUsdRange(-1, priced)).toEqual({ low: 0, high: 0 });
   });
 });

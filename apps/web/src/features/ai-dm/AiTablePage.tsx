@@ -91,7 +91,7 @@ import { Field } from '../../components/Field';
 import { Toggle } from '../../components/Toggle';
 import { AI_TABLE_FIELD, AI_TABLE_PREFIX } from '../../components/formFieldLabels';
 import { Btn, Card, Chip, EmptyState, Skeleton, type ChipVariant } from '../../components/ui';
-import { formatApproxUsd } from './costEstimate';
+import { formatUsdRangeValue } from './costEstimate';
 
 /** Seat status → chip variant for the header status pill. */
 const STATUS_VARIANT: Record<'idle' | 'narrating' | 'paused' | 'human' | 'collaborative', ChipVariant> = {
@@ -127,6 +127,8 @@ export default function AiTablePage() {
     enabled: campaignId !== undefined && isDriver && isDm,
   });
   const readiness = readinessQuery.data ?? null;
+  // #1065 — null here means "no price on file", which is a rendered sentence, not a blank.
+  const runCostUsd = formatUsdRangeValue(readiness?.estimatedCost.estimatedUsdRange ?? null);
 
   // The transcript VIEW MODEL (see transcript.ts). The authoritative log lives on the
   // server since #572; localStorage is only a paint cache so a reload has something on
@@ -1061,19 +1063,24 @@ export default function AiTablePage() {
           {isDm && readiness && (
             <div className="cf-inset p-2 text-[11px] text-secondary" data-testid="ai-run-cost-estimate">
               <span className="font-semibold text-[var(--color-neutral-300)]">{t('aiOnboarding.runCost.label')}</span>{' '}
-              {t('aiOnboarding.runCost.summary', {
-                tokens: readiness.estimatedCost.estimatedTotalTokens.toLocaleString(),
-                prompt: readiness.estimatedCost.estimatedPromptTokens.toLocaleString(),
-                completion: readiness.estimatedCost.estimatedCompletionTokens.toLocaleString(),
-              })}{' '}
+              {/* Prompt/completion only when the server has a real split to report. On a
+                  campaign with metered turns it has a total and nothing more. */}
+              {readiness.estimatedCost.estimatedPromptTokens === null ||
+              readiness.estimatedCost.estimatedCompletionTokens === null
+                ? t('aiOnboarding.runCost.summaryTotal', {
+                    tokens: readiness.estimatedCost.estimatedTotalTokens.toLocaleString(),
+                  })
+                : t('aiOnboarding.runCost.summary', {
+                    tokens: readiness.estimatedCost.estimatedTotalTokens.toLocaleString(),
+                    prompt: readiness.estimatedCost.estimatedPromptTokens.toLocaleString(),
+                    completion: readiness.estimatedCost.estimatedCompletionTokens.toLocaleString(),
+                  })}{' '}
               {/* #1065 — the same money line as the settings card, from the same basis. It
                   used to render `toFixed(4)` against a hardcoded-null figure: five decimal
                   places of implied accuracy on an estimate that did not exist. */}
-              {readiness.estimatedCost.estimatedUsd === null
+              {runCostUsd === null
                 ? t('aiOnboarding.runCost.usdUnknown')
-                : t('aiOnboarding.runCost.usdKnown', {
-                    usd: formatApproxUsd(readiness.estimatedCost.estimatedUsd),
-                  })}
+                : t('aiOnboarding.runCost.usdKnown', { usd: runCostUsd })}
             </div>
           )}
           {isDm && (
