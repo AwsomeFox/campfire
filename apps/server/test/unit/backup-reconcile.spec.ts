@@ -23,7 +23,7 @@ describe('Backup manifest reconciliation (#828)', () => {
         size: 1024,
         mime: 'image/png',
         hidden: false,
-        sha256: 'abc123',
+        sha256: 'a'.repeat(64),
       },
       {
         id: 2,
@@ -32,7 +32,7 @@ describe('Backup manifest reconciliation (#828)', () => {
         size: 2048,
         mime: 'image/jpeg',
         hidden: true,
-        sha256: 'def456',
+        sha256: 'b'.repeat(64),
       },
     ];
     const reconciliation: BackupReconciliation = {
@@ -73,27 +73,55 @@ describe('Backup manifest reconciliation (#828)', () => {
     expect(manifest.reconciliation).toBeUndefined();
   });
 
-  it('filters malformed attachment records', () => {
-    const manifest = parseBackupManifest({
+  it('rejects malformed attachment records instead of downgrading to legacy validation', () => {
+    const valid = {
+      id: 2, campaignId: 42, path: '42/2.jpg', size: 100,
+      mime: 'image/jpeg', hidden: false, sha256: 'a'.repeat(64),
+    };
+    for (const attachment of [
+      { ...valid, size: undefined },
+      { ...valid, path: '../outside.jpg' },
+      { ...valid, sha256: 'not-a-sha256' },
+    ]) {
+      expect(() => parseBackupManifest({
+        app: 'campfire',
+        kind: 'server-backup',
+        version: 1,
+        createdAt: '2026-07-23T10:00:00Z',
+        db: 'db/campfire.db',
+        dbBytes: 4096,
+        uploadCount: 1,
+        attachments: [attachment],
+      })).toThrow(/attachment record is invalid/i);
+    }
+  });
+
+  it('rejects duplicate attachment paths and preserves an explicitly empty modern record set', () => {
+    const base = {
+      app: 'campfire', kind: 'server-backup', version: 1,
+      createdAt: '2026-07-23T10:00:00Z', db: 'db/campfire.db', dbBytes: 4096, uploadCount: 0,
+    };
+    expect(() => parseBackupManifest({
+      ...base,
+      attachments: [
+        { id: 1, campaignId: 42, path: '42/1.png', size: 100, mime: 'image/png', hidden: false, sha256: 'a'.repeat(64) },
+        { id: 2, campaignId: 42, path: '42/1.png', size: 100, mime: 'image/png', hidden: false, sha256: 'b'.repeat(64) },
+      ],
+    })).toThrow(/paths must be unique/i);
+    expect(parseBackupManifest({ ...base, attachments: [] }).attachments).toEqual([]);
+  });
+
+  it('does not let a reconciliation marker downgrade missing checksum metadata to legacy', () => {
+    expect(() => parseBackupManifest({
       app: 'campfire',
       kind: 'server-backup',
       version: 1,
       createdAt: '2026-07-23T10:00:00Z',
       db: 'db/campfire.db',
       dbBytes: 4096,
-      uploadCount: 1,
-      attachments: [
-        // valid
-        { id: 1, campaignId: 42, path: '42/1.png', size: 100, mime: 'image/png', hidden: false, sha256: 'abc' },
-        // malformed — missing size
-        { id: 2, campaignId: 42, path: '42/2.jpg', mime: 'image/jpeg', hidden: false, sha256: 'def' },
-        // malformed — wrong type
-        'not an object',
-        null,
-      ],
-    });
-    expect(manifest.attachments).toHaveLength(1);
-    expect(manifest.attachments?.[0].id).toBe(1);
+      uploadCount: 0,
+      reconciliation: { generation: 'g' },
+    })).toThrow(/reconciliation requires attachment checksum metadata/i);
   });
 
   it('rejects malformed reconciliation object', () => {
@@ -105,6 +133,7 @@ describe('Backup manifest reconciliation (#828)', () => {
       db: 'db/campfire.db',
       dbBytes: 4096,
       uploadCount: 0,
+      attachments: [],
       // reconciliation missing required fields — parse should drop it
       reconciliation: { generation: 'x' },
     });
@@ -125,6 +154,7 @@ describe('Backup manifest reconciliation (#828)', () => {
       db: 'db/campfire.db',
       dbBytes: 4096,
       uploadCount: 0,
+      attachments: [],
       reconciliation: {
         generation: 'g',
         totalAttachments: 5,
@@ -145,6 +175,7 @@ describe('Backup manifest reconciliation (#828)', () => {
       db: 'db/campfire.db',
       dbBytes: 4096,
       uploadCount: 0,
+      attachments: [],
       reconciliation: {
         generation: 'g',
         totalAttachments: 5,
@@ -158,4 +189,3 @@ describe('Backup manifest reconciliation (#828)', () => {
     expect(clean.reconciliation?.clean).toBe(true);
   });
 });
-

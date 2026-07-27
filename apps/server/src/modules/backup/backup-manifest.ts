@@ -190,6 +190,63 @@ function asNonEmptyString(value: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+/**
+ * Attachment checksum metadata is an all-or-nothing capability. Archives made
+ * before #828 omit `attachments` entirely; once an archive claims the field,
+ * every record must be safe and complete so callers cannot accidentally treat
+ * a partially corrupt modern manifest as a legacy archive.
+ */
+function parseAttachmentRecords(raw: Record<string, unknown>): BackupAttachmentRecord[] | undefined {
+  if (!Object.prototype.hasOwnProperty.call(raw, 'attachments')) return undefined;
+  if (!Array.isArray(raw.attachments)) {
+    throw new BadRequestException('Invalid backup archive — manifest attachments must be an array');
+  }
+
+  const seenPaths = new Set<string>();
+  return raw.attachments.map((entry): BackupAttachmentRecord => {
+    if (!entry || typeof entry !== 'object') {
+      throw new BadRequestException('Invalid backup archive — manifest attachment record is invalid');
+    }
+    const record = entry as Record<string, unknown>;
+    const validPath =
+      typeof record.path === 'string' &&
+      record.path.length > 0 &&
+      !record.path.startsWith('/') &&
+      !record.path.includes('\\') &&
+      !record.path.split('/').some((part) => part === '' || part === '.' || part === '..');
+    const validSha256 = typeof record.sha256 === 'string' && /^[a-f0-9]{64}$/i.test(record.sha256);
+    if (
+      typeof record.id !== 'number' || !Number.isInteger(record.id) || record.id < 0 ||
+      typeof record.campaignId !== 'number' || !Number.isInteger(record.campaignId) || record.campaignId < 0 ||
+      !validPath ||
+      typeof record.size !== 'number' || !Number.isInteger(record.size) || record.size < 0 ||
+      !asNonEmptyString(record.mime) ||
+      typeof record.hidden !== 'boolean' ||
+      !validSha256
+    ) {
+      throw new BadRequestException('Invalid backup archive — manifest attachment record is invalid');
+    }
+    // The checks above establish these string types; keep local names so the
+    // validation boundary is also clear to TypeScript.
+    const attachmentPath = record.path as string;
+    const mime = record.mime as string;
+    const sha256 = record.sha256 as string;
+    if (seenPaths.has(attachmentPath)) {
+      throw new BadRequestException('Invalid backup archive — manifest attachment paths must be unique');
+    }
+    seenPaths.add(attachmentPath);
+    return {
+      id: record.id,
+      campaignId: record.campaignId,
+      path: attachmentPath,
+      size: record.size,
+      mime,
+      hidden: record.hidden,
+      sha256,
+    };
+  });
+}
+
 /** Expected db entry path for format version 1 archives (issue #997 fix 2). */
 export const DB_ENTRY_V1 = 'db/campfire.db';
 
@@ -236,34 +293,27 @@ function normalizeManifestV1(raw: Record<string, unknown>, sourceVersion = 1): B
       ? rawCredentialCount
       : undefined;
 
-  // #828: preserve optional reconciliation fields when re-reading a manifest.
-  const attachments = Array.isArray(raw.attachments)
-    ? (raw.attachments as unknown[])
-        .map((entry): BackupAttachmentRecord | null => {
-          if (!entry || typeof entry !== 'object') return null;
-          const rec = entry as Record<string, unknown>;
-          if (
-            typeof rec.id !== 'number' ||
-            typeof rec.campaignId !== 'number' ||
-            typeof rec.path !== 'string' ||
-            typeof rec.size !== 'number' ||
-            typeof rec.mime !== 'string' ||
-            typeof rec.sha256 !== 'string'
-          ) {
-            return null;
-          }
-          return {
-            id: rec.id,
-            campaignId: rec.campaignId,
-            path: rec.path,
-            size: rec.size,
-            mime: rec.mime,
-            hidden: rec.hidden === true,
-            sha256: rec.sha256,
-          };
-        })
-        .filter((r): r is BackupAttachmentRecord => r !== null)
-    : undefined;
+  // #828: legacy archives genuinely omit this field. A claimed field is
+  // strict: filtering malformed rows here would allow checksum coverage to be
+  // silently downgraded when uploadCount still happens to match.
+  const attachments = parseAttachmentRecords(raw);
+  // Format 2 was introduced after attachment reconciliation. Unlike v0/v1,
+  // it can never be a genuinely pre-checksum archive, even if a repackager
+  // strips both modern metadata fields.
+  if (attachments === undefined && sourceVersion >= 2) {
+    throw new BadRequestException(
+      `Invalid backup archive — format version ${sourceVersion} requires attachment checksum metadata`,
+    );
+  }
+  // Reconciliation and attachment checksums were introduced together. Its
+  // presence proves this is a checksum-era archive, so accepting a missing
+  // `attachments` field here would let a repackaged modern archive downgrade
+  // itself to the legacy compatibility path.
+  if (attachments === undefined && Object.prototype.hasOwnProperty.call(raw, 'reconciliation')) {
+    throw new BadRequestException(
+      'Invalid backup archive — manifest reconciliation requires attachment checksum metadata',
+    );
+  }
 
   let reconciliation: BackupReconciliation | undefined;
   if (raw.reconciliation && typeof raw.reconciliation === 'object') {
@@ -303,7 +353,7 @@ function normalizeManifestV1(raw: Record<string, unknown>, sourceVersion = 1): B
     ...(aiKeySource ? { aiKeySource } : {}),
     ...(aiKeyIncluded !== undefined ? { aiKeyIncluded } : {}),
     ...(aiCredentialCount !== undefined ? { aiCredentialCount } : {}),
-    ...(attachments && attachments.length > 0 ? { attachments } : {}),
+    ...(attachments !== undefined ? { attachments } : {}),
     ...(reconciliation ? { reconciliation } : {}),
   };
 }

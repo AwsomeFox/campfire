@@ -34,6 +34,7 @@ describe('parseBackupManifest (issue #514)', () => {
         version: 2,
         aiKeySource: 'keyfile',
         aiKeyIncluded: true,
+        attachments: [],
       }),
     ).toMatchObject({ version: 2, aiKeySource: 'keyfile', aiKeyIncluded: true });
   });
@@ -46,6 +47,15 @@ describe('parseBackupManifest (issue #514)', () => {
     expect(() =>
       parseBackupManifest({ ...baseV1, version: 2, aiKeySource: 'keyfile' }),
     ).toThrow(/aiKeyIncluded=true/);
+  });
+
+  it('rejects format version 2 when checksum-era metadata is stripped', () => {
+    expect(() => parseBackupManifest({
+      ...baseV1,
+      version: 2,
+      aiKeySource: 'keyfile',
+      aiKeyIncluded: true,
+    })).toThrow(/format version 2 requires attachment checksum metadata/i);
   });
 
   it('migrates a pre-version manifest (format 0) to the current shape', () => {

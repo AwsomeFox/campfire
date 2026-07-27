@@ -313,6 +313,105 @@ describe('BackupService AI keyfile envelope (#496, real SQLite)', () => {
     expect(verification.error).toMatch(/upload checksum does not match manifest/i);
   });
 
+  it('requires every upload to have exactly one modern manifest checksum record in inspect and restore', async () => {
+    const service = makeService();
+    const archive = await service.buildBackup();
+    const zip = await JSZip.loadAsync(archive);
+    const manifest = JSON.parse(await zip.file('manifest.json')!.async('string')) as BackupManifest;
+    manifest.uploadCount = 1;
+    manifest.attachments = [];
+    zip.file('uploads/fixture.bin', 'abc');
+    zip.file('manifest.json', JSON.stringify(manifest, null, 2));
+    const tampered = await zip.generateAsync({ type: 'nodebuffer' });
+
+    await expect(service.inspect(tampered)).rejects.toThrow(/missing manifest attachment checksum/i);
+    await expect(service.restore(tampered, RESTORE_CONFIRM_TOKEN, testUser)).rejects.toThrow(
+      /missing manifest attachment checksum/i,
+    );
+  });
+
+  it('rejects malformed or duplicate claimed checksum metadata in inspect and restore', async () => {
+    const validRecord = {
+      id: 1,
+      campaignId: 1,
+      path: 'fixture.bin',
+      size: 3,
+      mime: 'application/octet-stream',
+      hidden: false,
+      sha256: 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
+    };
+    for (const attachments of [
+      [{ ...validRecord, sha256: 'not-a-sha256' }],
+      [validRecord, { ...validRecord, id: 2 }],
+    ]) {
+      const service = makeService();
+      const zip = await JSZip.loadAsync(await service.buildBackup());
+      const manifest = JSON.parse(await zip.file('manifest.json')!.async('string')) as BackupManifest;
+      manifest.uploadCount = 1;
+      (manifest as unknown as Record<string, unknown>).attachments = attachments;
+      zip.file('uploads/fixture.bin', 'abc');
+      zip.file('manifest.json', JSON.stringify(manifest, null, 2));
+      const tampered = await zip.generateAsync({ type: 'nodebuffer' });
+
+      await expect(service.inspect(tampered)).rejects.toThrow(/manifest attachment (record is invalid|paths must be unique)/i);
+      await expect(service.restore(tampered, RESTORE_CONFIRM_TOKEN, testUser)).rejects.toThrow(
+        /manifest attachment (record is invalid|paths must be unique)/i,
+      );
+    }
+  });
+
+  it('rejects a checksum-era reconciliation marker when attachment checksums are removed', async () => {
+    const service = makeService();
+    const zip = await JSZip.loadAsync(await service.buildBackup());
+    const manifest = JSON.parse(await zip.file('manifest.json')!.async('string')) as BackupManifest;
+    delete (manifest as { attachments?: unknown }).attachments;
+    zip.file('manifest.json', JSON.stringify(manifest, null, 2));
+    const tampered = await zip.generateAsync({ type: 'nodebuffer' });
+
+    await expect(service.inspect(tampered)).rejects.toThrow(
+      /reconciliation requires attachment checksum metadata/i,
+    );
+    await expect(service.restore(tampered, RESTORE_CONFIRM_TOKEN, testUser)).rejects.toThrow(
+      /reconciliation requires attachment checksum metadata/i,
+    );
+  });
+
+  it('rejects a format-2 archive when both checksum-era metadata fields are stripped', async () => {
+    const service = makeService();
+    const zip = await JSZip.loadAsync(await service.buildBackup({ keyPassphrase: PASSPHRASE }));
+    const manifest = JSON.parse(await zip.file('manifest.json')!.async('string')) as BackupManifest;
+    expect(manifest.version).toBe(2);
+    delete (manifest as { attachments?: unknown }).attachments;
+    delete (manifest as { reconciliation?: unknown }).reconciliation;
+    zip.file('manifest.json', JSON.stringify(manifest, null, 2));
+    const tampered = await zip.generateAsync({ type: 'nodebuffer' });
+
+    await expect(service.inspect(tampered)).rejects.toThrow(
+      /format version 2 requires attachment checksum metadata/i,
+    );
+    await expect(service.restore(tampered, RESTORE_CONFIRM_TOKEN, testUser, {
+      keyPassphrase: PASSPHRASE,
+    })).rejects.toThrow(/format version 2 requires attachment checksum metadata/i);
+  });
+
+  it('accepts a legacy manifest that genuinely omits attachment checksum metadata', async () => {
+    const service = makeService();
+    const zip = await JSZip.loadAsync(await service.buildBackup());
+    const manifest = JSON.parse(await zip.file('manifest.json')!.async('string')) as BackupManifest;
+    manifest.uploadCount = 1;
+    delete (manifest as { attachments?: unknown }).attachments;
+    delete (manifest as { reconciliation?: unknown }).reconciliation;
+    zip.file('uploads/fixture.bin', 'abc');
+    zip.file('manifest.json', JSON.stringify(manifest, null, 2));
+    const legacy = await zip.generateAsync({ type: 'nodebuffer' });
+
+    await expect(service.inspect(legacy)).resolves.toMatchObject({ uploads: ['fixture.bin'] });
+    await expect(service.restore(legacy, RESTORE_CONFIRM_TOKEN, testUser)).resolves.toMatchObject({
+      ok: true,
+      uploadCount: 1,
+    });
+  });
+
   it('inspect() rejects a physically truncated archive', async () => {
     const service = makeService();
     const archive = await service.buildBackup();

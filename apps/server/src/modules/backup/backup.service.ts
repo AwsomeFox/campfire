@@ -1390,6 +1390,45 @@ export class BackupService implements OnApplicationBootstrap {
   }
 
   /**
+   * Returns null only for archives that genuinely predate attachment checksum
+   * metadata. The manifest parser rejects malformed and duplicate modern
+   * records, so a present `attachments` field means every upload is required
+   * to have exactly one corresponding record.
+   */
+  private expectedAttachmentChecksums(
+    manifest: BackupManifest,
+  ): Map<string, BackupAttachmentRecord> | null {
+    if (manifest.attachments === undefined) return null;
+    return new Map(manifest.attachments.map((attachment) => [attachment.path, attachment]));
+  }
+
+  private validateAttachmentChecksum(
+    expectedAttachments: Map<string, BackupAttachmentRecord> | null,
+    foundAttachments: Set<string>,
+    relativePath: string,
+    actual: { bytes: number; sha256: string },
+  ): void {
+    if (!expectedAttachments) return;
+    const expected = expectedAttachments.get(relativePath);
+    if (!expected) {
+      throw new BadRequestException('Invalid backup archive — upload is missing manifest attachment checksum');
+    }
+    if (expected.size !== actual.bytes || expected.sha256 !== actual.sha256) {
+      throw new BadRequestException('Invalid backup archive — upload checksum does not match manifest');
+    }
+    foundAttachments.add(relativePath);
+  }
+
+  private validateAttachmentCoverage(
+    expectedAttachments: Map<string, BackupAttachmentRecord> | null,
+    foundAttachments: Set<string>,
+  ): void {
+    if (expectedAttachments && foundAttachments.size !== expectedAttachments.size) {
+      throw new BadRequestException('Invalid backup archive — manifest attachment is missing');
+    }
+  }
+
+  /**
    * Validate every payload an archive promises without applying it. This is used
    * by inspect and therefore scheduled-backup verification; entries are hashed
    * as streams so an operator check never accumulates large upload buffers.
@@ -1458,7 +1497,7 @@ export class BackupService implements OnApplicationBootstrap {
         throw new BadRequestException('Invalid backup archive — database could not be opened');
       }
 
-      const expectedAttachments = new Map((manifest.attachments ?? []).map((attachment) => [attachment.path, attachment]));
+      const expectedAttachments = this.expectedAttachmentChecksums(manifest);
       const foundAttachments = new Set<string>();
       const uploads: string[] = [];
       for (const entry of zip.entries) {
@@ -1469,19 +1508,13 @@ export class BackupService implements OnApplicationBootstrap {
           throw new BadRequestException('Invalid backup archive — unsafe upload path');
         }
         const actual = await zip.hashEntry(entry, signal);
-        const expected = expectedAttachments.get(rel);
-        if (expected && (expected.size !== actual.bytes || expected.sha256 !== actual.sha256)) {
-          throw new BadRequestException('Invalid backup archive — upload checksum does not match manifest');
-        }
-        if (expected) foundAttachments.add(rel);
+        this.validateAttachmentChecksum(expectedAttachments, foundAttachments, rel, actual);
         uploads.push(rel);
       }
       if (manifest.uploadCount !== uploads.length) {
         throw new BadRequestException('Invalid backup archive — upload count does not match manifest');
       }
-      if (expectedAttachments.size && foundAttachments.size !== expectedAttachments.size) {
-        throw new BadRequestException('Invalid backup archive — manifest attachment is missing');
-      }
+      this.validateAttachmentCoverage(expectedAttachments, foundAttachments);
       uploads.sort();
       return uploads;
     } finally {
@@ -1630,7 +1663,7 @@ export class BackupService implements OnApplicationBootstrap {
       // --- Collect + path-check uploads, then stage them on disk (#497) ---
       const stagedUploadsDir = path.join(stageDir, 'uploads');
       const uploadEntries: Array<{ rel: string; bytes: number }> = [];
-      const expectedAttachments = new Map((manifest.attachments ?? []).map((attachment) => [attachment.path, attachment]));
+      const expectedAttachments = this.expectedAttachmentChecksums(manifest);
       const foundAttachments = new Set<string>();
       for (const entry of zip.entries) {
         const name = entry.fileName;
@@ -1646,15 +1679,11 @@ export class BackupService implements OnApplicationBootstrap {
           throw new BadRequestException('Invalid backup archive — unsafe upload path');
         }
         const extracted = await zip.extractToFile(entry, dest, options?.signal);
-        const expected = expectedAttachments.get(rel);
-        if (expected && (expected.size !== extracted.bytes || expected.sha256 !== extracted.sha256)) {
-          throw new BadRequestException('Invalid backup archive — upload checksum does not match manifest');
-        }
-        if (expected) foundAttachments.add(rel);
+        this.validateAttachmentChecksum(expectedAttachments, foundAttachments, rel, extracted);
         uploadEntries.push({ rel, bytes: extracted.bytes });
       }
       if (manifest.uploadCount !== uploadEntries.length) throw new BadRequestException('Invalid backup archive — upload count does not match manifest');
-      if (expectedAttachments.size && foundAttachments.size !== expectedAttachments.size) throw new BadRequestException('Invalid backup archive — manifest attachment is missing');
+      this.validateAttachmentCoverage(expectedAttachments, foundAttachments);
       if (restoredKeyBytes && envSetOnHost) {
         this.logger.warn(
           'restore: AI_CONFIG_KEY is set on this host — skipping keyfile write from the archive envelope. ' +
