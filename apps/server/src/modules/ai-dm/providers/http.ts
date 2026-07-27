@@ -238,6 +238,22 @@ export interface ParseSseOptions {
  * so in production which one fires first is a genuine race. That is exactly why they must agree
  * about retryability rather than being two paths with two answers.
  */
+/**
+ * Classify a stream abort into a provider error, from the aborter's `reason`.
+ *
+ * A CONTRACT ON A SHARED FUNCTION, stated here because this is where a third caller will look.
+ * `raceRead` / `parseSse` are used by the OpenAI and Anthropic adapters as well as the driver,
+ * so this rule now applies to every stream any of them opens:
+ *
+ *   ABORTING ONE OF THESE STREAMS WITH AN `AiProviderError` MAKES THAT ERROR THE RESULT —
+ *   including its `retryable` flag, which the driver's step-retry policy will honour.
+ *
+ * Today the only structured reason on the driver path is the idle watchdog's retryable
+ * `timeout`, which is the intent; stop controls abort with the string `GENERATION_STOP_ABORT`
+ * and stay non-retryable. Anyone adding a caller that aborts with a retryable `AiProviderError`
+ * is asking for the step to be re-issued, and should mean it — an abort that must NOT be retried
+ * should pass a string, or nothing.
+ */
 export function streamAbortError(signal: AbortSignal | undefined, provider: string): AiProviderError {
   const reason = signal?.reason;
   // THE ABORTER'S STRUCTURED INTENT WINS (#1052). An `AbortSignal` carries a `reason`, and when

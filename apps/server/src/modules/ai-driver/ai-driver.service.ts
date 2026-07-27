@@ -2672,6 +2672,22 @@ export class AiDriverService {
          * moment an attempt is abandoned, and added once after the loop.
          */
         let carriedTokens = 0;
+        /**
+         * #1052 review — whether any abandoned attempt spent tokens it could NOT measure.
+         *
+         * Carrying `metered.tokensUsed` alone fixed half the problem and made the other half
+         * worse. An attempt that dies BEFORE reporting usage goes through
+         * `markReservationUsageUnknown`, which consumes its reservation with the amount unknown;
+         * that carries no token count to accumulate, so the flag was simply dropped. If a later
+         * attempt then succeeded, `turn.end` and the durable `turn.ended` transcript presented
+         * the final attempt's count as EXACT while the seat had also been charged an unmeasured
+         * amount.
+         *
+         * Under-reporting a number is a wrong number. Reporting it as exact when part of the
+         * spend is unmeasured is a claim of precision that is not true, and the DM has no way to
+         * see it — so this is carried with the same care as the tokens.
+         */
+        let carriedUsageUnknown = false;
         // #1052 — identity of the attempt whose OUTPUT is the one we keep. Tracked per attempt
         // because a failover means the last attempt is not the configured primary.
         let servedName = provider.name;
@@ -2748,6 +2764,7 @@ export class AiDriverService {
           // This attempt is now being ABANDONED. Whatever it metered is spent whether or not we
           // keep its result, so it moves to the carry before `spend` can be overwritten.
           carriedTokens += spend.metered?.tokensUsed ?? 0;
+          carriedUsageUnknown = carriedUsageUnknown || spend.usageUnknown === true;
 
           // A freeze / kill / detach that landed during the backoff must win over the retry;
           // re-check BEFORE sleeping and again after, so a stop control is not made to wait
@@ -2787,6 +2804,9 @@ export class AiDriverService {
         // #1052 — usage from every attempt this step abandoned. Added once, before the terminal
         // handlers add the surviving attempt's own metered usage.
         totalTokens += carriedTokens;
+        // Sticky, and never cleared by a later success: once any part of this turn's spend is
+        // unmeasured, the turn's total is an estimate and must be labelled as one.
+        if (carriedUsageUnknown) tokensUsageUnknown = true;
 
         // #1052 — #577 provenance follows the RETAINED OUTPUT, not merely a successful metered
         // attempt. When both primary attempts fail and the fallback emits visible partial
@@ -2794,7 +2814,14 @@ export class AiDriverService {
         // fallback prose becomes `finalNarration` — so recording the primary here would file the
         // fallback's words under a provider that never wrote them, and grounding would carry that
         // attribution forward.
-        if (spend.kind === 'metered' || ('text' in spend && spend.text)) {
+        // The test is "did THIS step supply the narration we are keeping", not "did it succeed".
+        // `kind === 'metered'` was too loose: in a multi-step turn a later primary step that
+        // completes with only a tool call — or an empty response — returns no text, so
+        // `setNarration` never replaces the fallback's prose, yet the identity flipped back to
+        // the primary anyway and grounding durably filed the fallback's words under a provider
+        // that never wrote them. Non-empty text is exactly the condition under which
+        // `setNarration` runs, on both the terminal branches and the continue path below.
+        if ('text' in spend && spend.text) {
           servedProviderName = servedName;
           servedProviderModel = servedModel;
         }
