@@ -1,0 +1,13 @@
+{
+  "tracked": [
+    {
+      "pr": 1562,
+      "status": "babysitting",
+      "url": "https://github.com/AwsomeFox/campfire/pull/1562",
+      "headBranch": "fix/issue-600",
+      "baseBranch": "main",
+      "updatedAt": "2026-07-27T17:41:00Z",
+      "notes": "MERGEABLE; CI in progress on bd7beb95. Sole open Devin thread (draft fallback) already fixed in 7c2631b5 — resolving. Waiting on required checks."
+    }
+  ]
+}
