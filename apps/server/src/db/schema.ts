@@ -1857,3 +1857,32 @@ export const campaignModuleSnapshots = sqliteTable('campaign_module_snapshots', 
   createdBy: text('created_by').notNull().default(''),
   rolledBackAt: text('rolled_back_at'),
 });
+
+// Table safety hold / X-Card (issue #599). One row per campaign carrying the CURRENT stop
+// state, upserted rather than appended: activation must be idempotent and must never fail
+// on a race, so "two participants tapped at once" resolves to one held table instead of a
+// conflict either of them has to retry.
+//
+// Note the column that is ABSENT: there is no activated_by_user_id. An anonymous activation
+// keeps its promise by never handing the identity to this layer at all, so no projection,
+// export, or audit join can reconstruct it. `activatedByName` is populated only when the
+// participant explicitly chose attribution.
+export const tableSafetyHolds = sqliteTable('table_safety_holds', {
+  campaignId: integer('campaign_id').primaryKey(),
+  /** True while play is frozen. The single field every gate reads. */
+  active: integer('active', { mode: 'boolean' }).notNull().default(false),
+  /** When the current hold was raised. First activation wins; re-activation does not move it. */
+  activatedAt: text('activated_at'),
+  /** Display name, ONLY for an explicitly attributed hold. NULL means anonymous *or* no hold. */
+  activatedByName: text('activated_by_name'),
+  anonymous: integer('anonymous', { mode: 'boolean' }).notNull().default(true),
+  /** Lifetime activation count for this campaign — a count is not attributable. */
+  activationCount: integer('activation_count').notNull().default(0),
+  releasedAt: text('released_at'),
+  /** The facilitator who released it. Always recorded: releasing is an accountable act. */
+  releasedBy: text('released_by'),
+  /** A SafetyHoldRecovery value: resume | rewind | veil | scene_change | end. */
+  recovery: text('recovery'),
+  facilitatorNote: text('facilitator_note'),
+  updatedAt: text('updated_at').notNull(),
+});
