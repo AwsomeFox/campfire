@@ -1955,7 +1955,7 @@ export default function RunSessionPage() {
   const deleteCopy = deleteConfirmCopy(encounter.status);
 
   return (
-    <div className="reading-surface max-w-4xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" {...entityTargetProps('encounter', encounter.id)}>
+    <div className="reading-surface max-w-4xl lg:max-w-6xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" {...entityTargetProps('encounter', encounter.id)}>
       <DetailPageWayfinding
         campaignId={cid}
         defaultPath={`/c/${cid}/encounters`}
@@ -2477,7 +2477,19 @@ export default function RunSessionPage() {
         />
       )}
 
-      <div className="card elev-sm" style={{ padding: '6px 0', gap: 0 }}>
+      {/*
+          Keep the tracker and its live history in the same cockpit on large screens.
+          The source order deliberately remains tracker → logs: on smaller viewports the
+          grid collapses to the existing single-column reading flow, and keyboard users
+          reach the turn order before its supporting history. `lg:sticky` keeps the
+          right rail visible while a long roster (or expanded character cards) scrolls.
+      */}
+      <div
+        data-testid="encounter-cockpit"
+        className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_20rem] lg:items-start"
+      >
+        <div className="space-y-4 min-w-0">
+          <div className="card elev-sm" style={{ padding: '6px 0', gap: 0 }}>
         {sheetsStatusLabel && (
           <p
             className="text-muted"
@@ -2596,26 +2608,30 @@ export default function RunSessionPage() {
             />
           ))
         )}
+          </div>
+
+          {canDmWrite && encounter.status !== 'ended' && (
+            <AddCombatantPanel
+              encounterId={eid}
+              campaignId={cid}
+              characters={characters}
+              existingCombatantCharacterIds={new Set(encounter.combatants.map((c) => c.characterId).filter((id): id is number => id != null))}
+              rulePack={campaign?.ruleSystem || ''}
+              onAdded={() => queryClient.invalidateQueries({ queryKey: queryKeys.encounter(eid) })}
+            />
+          )}
+        </div>
+
+        <aside className="space-y-4 lg:sticky lg:top-4" aria-label="Encounter activity">
+          <CombatLog events={events} />
+
+          <SharedDiceLog campaignId={cid} />
+        </aside>
       </div>
-
-      {canDmWrite && encounter.status !== 'ended' && (
-        <AddCombatantPanel
-          encounterId={eid}
-          campaignId={cid}
-          characters={characters}
-          existingCombatantCharacterIds={new Set(encounter.combatants.map((c) => c.characterId).filter((id): id is number => id != null))}
-          rulePack={campaign?.ruleSystem || ''}
-          onAdded={() => queryClient.invalidateQueries({ queryKey: queryKeys.encounter(eid) })}
-        />
-      )}
-
-      <CombatLog events={events} />
 
       {/* Issue #415: DM control to request a check/save from a character. DM-only; players see
           the resulting prompt above via CheckRequestPrompts. */}
       {canDmWrite && <CheckRequestPanel campaignId={cid} characters={characters} encounterId={eid} onError={surfaceActionError} />}
-
-      <SharedDiceLog campaignId={cid} />
 
       <EntityDiscussion campaignId={cid} entityType="encounter" entityId={encounter.id} />
 
