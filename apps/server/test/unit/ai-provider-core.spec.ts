@@ -109,6 +109,109 @@ describe('parseSse', () => {
   });
 });
 
+/**
+ * #1052 review — A BODY THAT DIES IS A TRANSPORT FAULT, NOT AN UNKNOWN ONE.
+ *
+ * This is the failure step-level retry exists for: the POST returned, headers arrived, and the
+ * connection then reset before the first SSE frame. `reader.read()` rejects with a NATIVE error
+ * there, and forwarding it unchanged made it unclassifiable — `unknown` is `give_up`, so the
+ * canonical case got neither the primary retry nor the configured fallback.
+ *
+ * These tests pin the CLASSIFICATION. That the classification then retries and fails over is
+ * pinned end-to-end in `ai-dm-driver-provider-retry.e2e-spec.ts`, which drives a `transport`
+ * error through the driver's attempt loop onto the fallback provider — so the two together
+ * cover "body errors before the first frame → retried → failed over" without this spec having
+ * to stand up an HTTP server.
+ */
+describe('parseSse — a dead connection classifies as retryable transport (#1052 review)', () => {
+  /** A body that accepts the read, then errors the stream — the post-headers, pre-frame case. */
+  function bodyThatErrors(cause: unknown, framesFirst: string[] = []): ReadableStream<Uint8Array> {
+    const encoder = new TextEncoder();
+    const queue = framesFirst.map((c) => encoder.encode(c));
+    let i = 0;
+    return new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (i < queue.length) controller.enqueue(queue[i++]);
+        else controller.error(cause);
+      },
+    });
+  }
+
+  async function drain(stream: ReadableStream<Uint8Array>, opts = {}): Promise<unknown> {
+    try {
+      for await (const _rec of parseSse(stream, { provider: 'testprov', ...opts })) void _rec;
+      return undefined;
+    } catch (err) {
+      return err;
+    }
+  }
+
+  it('classifies a native read rejection before the first frame as retryable transport', async () => {
+    const err = await drain(bodyThatErrors(new TypeError('terminated')));
+    expect(err).toBeInstanceOf(AiProviderError);
+    const provErr = err as AiProviderError;
+    expect(provErr.kind).toBe('transport');
+    // The retry policy reads this flag as a narrowing veto — false here would refuse the retry.
+    expect(provErr.retryable).toBe(true);
+    expect(provErr.provider).toBe('testprov');
+    // The native error is preserved for logs rather than flattened away.
+    expect((provErr.cause as Error).message).toBe('terminated');
+  });
+
+  it('classifies the same way when frames arrived first, since narration gating is not its job', async () => {
+    const err = (await drain(bodyThatErrors(new TypeError('terminated'), ['data: {"x":1}\n\n']))) as AiProviderError;
+    expect(err.kind).toBe('transport');
+    // Whether a retry is SAFE after prose reached the table is `decideStepRetry`'s
+    // `already_broadcast` guard, not a matter of how the fault is classified. Conflating the
+    // two here would silently make the broadcast guard unreachable.
+    expect(err.retryable).toBe(true);
+  });
+
+  it('classifies on the no-deadline shortcut too, which used to hand back the raw promise', async () => {
+    // `raceRead` returns `read` unchanged when there is no idle deadline and no signal. That
+    // path skipped the race entirely, so a reset socket escaped unclassified through it.
+    const err = await drain(bodyThatErrors(new TypeError('terminated')), { idleTimeoutMs: 0 });
+    expect(err).toBeInstanceOf(AiProviderError);
+    expect((err as AiProviderError).kind).toBe('transport');
+  });
+
+  it('does NOT reclassify an AiProviderError the caller already classified', async () => {
+    // A stop control or the idle watchdog aborts with its own typed, deliberately
+    // NON-retryable error. Overwriting that with a retryable `transport` would re-issue a step
+    // a human just stopped.
+    const stop = new AiProviderError('timeout', 'stopped by a human', { provider: 'testprov', retryable: false });
+    const err = (await drain(bodyThatErrors(stop))) as AiProviderError;
+    expect(err).toBe(stop);
+    expect(err.retryable).toBe(false);
+  });
+
+  it('leaves a PARSER-side failure unclassified, so our own bugs are never retried', async () => {
+    // The boundary that makes this fix safe: only the awaited `reader.read()` is classified.
+    // Decoding and frame parsing happen after that await, so a fault there still escapes as a
+    // native error and still reaches `give_up`. Re-issuing a prompt on the table's budget to
+    // obtain the identical bytes and the identical crash is not resilience.
+    const encoder = new TextEncoder();
+    const boom = new RangeError('parser exploded');
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(encoder.encode('data: {"x":1}\n\n'));
+        controller.close();
+      },
+    });
+    let caught: unknown;
+    try {
+      for await (const _rec of parseSse(stream, { provider: 'testprov' })) {
+        void _rec;
+        throw boom; // stands in for a fault in the consuming/parsing half
+      }
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBe(boom);
+    expect(caught).not.toBeInstanceOf(AiProviderError);
+  });
+});
+
 describe('MCP tool normalization', () => {
   const tools = [
     { name: 'roll_dice', description: 'Roll dice', inputSchema: { type: 'object', properties: { sides: { type: 'number' } } } },

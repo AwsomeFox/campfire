@@ -371,9 +371,86 @@ export interface ParseSseOptions {
 }
 
 /**
+ * Classify a stream abort into a provider error, from the aborter's `reason`.
+ *
+ * A CONTRACT ON A SHARED FUNCTION, stated here because this is where a third caller will look.
+ * `raceRead` / `parseSse` are used by the OpenAI and Anthropic adapters as well as the driver,
+ * so this rule now applies to every stream any of them opens:
+ *
+ *   ABORTING ONE OF THESE STREAMS WITH AN `AiProviderError` MAKES THAT ERROR THE RESULT —
+ *   including its `retryable` flag, which the driver's step-retry policy will honour.
+ *
+ * Today the only structured reason on the driver path is the idle watchdog's retryable
+ * `timeout`, which is the intent; stop controls abort with the string `GENERATION_STOP_ABORT`
+ * and stay non-retryable. Anyone adding a caller that aborts with a retryable `AiProviderError`
+ * is asking for the step to be re-issued, and should mean it — an abort that must NOT be retried
+ * should pass a string, or nothing.
+ */
+export function streamAbortError(signal: AbortSignal | undefined, provider: string): AiProviderError {
+  const reason = signal?.reason;
+  // THE ABORTER'S STRUCTURED INTENT WINS (#1052). An `AbortSignal` carries a `reason`, and when
+  // that reason is already a classified provider error the aborter has told us exactly what
+  // happened — re-describing it here would overwrite a real classification with a guess.
+  //
+  // This is what makes the driver's own idle watchdog work. It aborts with
+  // `AiProviderError('timeout', …)`, whose default retryability is TRUE, and a silent idle stall
+  // is precisely the failure step-level retry exists to recover from. Before this, every signal
+  // abort was flattened to `retryable: false` here, the retry policy's narrowing veto refused it,
+  // and the feature could not fire for its primary case.
+  if (reason instanceof AiProviderError) return reason;
+  // An unstructured abort is a CALLER STOP — a pause, a kill switch, a mode-switch teardown.
+  // Those pass a string reason or none at all, and none of them may be retried: the whole point
+  // was to stop. Not retryable is the right default precisely because it is not a guess about a
+  // fault, it is the correct answer for every abort that did not say otherwise.
+  return new AiProviderError('timeout', `${provider}: stream aborted`, { provider, retryable: false, cause: reason });
+}
+
+/**
+ * Classify a REJECTION OF THE STREAM READ ITSELF (#1052 review).
+ *
+ * When a response body's connection resets, `reader.read()` rejects with a NATIVE error —
+ * `TypeError: terminated` under undici, an `ECONNRESET`-bearing error elsewhere. Those used to
+ * be forwarded unchanged, so nothing downstream could recognise them: `streamStep` re-throws
+ * any non-`AiProviderError`, the driver wrapped it as `unknown`, and `unknown` is `give_up` in
+ * `ERROR_KIND_RETRY`. So a body that died AFTER the headers but BEFORE the first SSE frame —
+ * the most representative instance of the failure step-level retry exists for, and provably
+ * safe to retry because no narration can have been broadcast yet — got neither the primary
+ * retry nor the configured fallback. The feature worked for every failure except its own
+ * canonical one.
+ *
+ * WHERE THE BOUNDARY IS DRAWN, AND WHY IT IS EXACTLY HERE. The only thing classified is the
+ * promise {@link raceRead} was handed, and its sole call site hands it `reader.read()` — a raw
+ * socket read that resolves to bytes. `parseSse`'s decoding and frame parsing run AFTER that
+ * await, in the loop body, so they cannot reach this function: a `TextDecoder` failure or a bug
+ * in the field parser still escapes as a native error, still wraps as `unknown`, and still
+ * refuses to retry. That is deliberate, and it is the whole reason the fix sits here rather
+ * than around the loop. "Re-issue the request because the socket died" is resilience;
+ * "re-issue the request because our own parser threw" would re-send a prompt on the table's
+ * budget to obtain the identical bytes and the identical crash.
+ *
+ * An `AiProviderError` passes through untouched, so a caller that already classified something
+ * keeps its answer — the same precedence rule as {@link streamAbortError} above.
+ */
+export function streamReadError(cause: unknown, provider: string): AiProviderError {
+  if (cause instanceof AiProviderError) return cause;
+  return new AiProviderError('transport', `${provider}: stream connection failed`, { provider, cause });
+}
+
+/**
  * Race a promise against an AbortSignal and an optional idle timer. The idle timer is
  * armed for each call (so callers reset it per chunk). Rejects with `AiProviderError`
- * (`timeout`) when the idle deadline elapses or the signal aborts for an idle reason.
+ * (`timeout`) when the idle deadline elapses or the signal aborts, and with
+ * {@link streamReadError} (`transport`) when the read itself fails.
+ *
+ * TWO TIMEOUTS, DELIBERATELY CLASSIFIED DIFFERENTLY (#1052):
+ *  - THIS function's own `idleTimeoutMs` firing is a transport fault — the provider went quiet.
+ *    Retryable, by `timeout`'s default.
+ *  - A `signal` abort is classified by {@link streamAbortError} from the aborter's reason, so the
+ *    driver's idle watchdog stays retryable while a pause/kill stays not.
+ *
+ * Both deadlines are DEFAULT_IDLE_TIMEOUT_MS and the driver arms its watchdog at the same value,
+ * so in production which one fires first is a genuine race. That is exactly why they must agree
+ * about retryability rather than being two paths with two answers.
  */
 export function raceRead<T>(
   read: Promise<T>,
@@ -387,11 +464,16 @@ export function raceRead<T>(
   const { signal, idleTimeoutMs, provider, onIdle } = opts;
   if (signal?.aborted) {
     onIdle();
-    return Promise.reject(
-      new AiProviderError('timeout', `${provider}: stream aborted`, { provider, retryable: false, cause: signal.reason }),
-    );
+    return Promise.reject(streamAbortError(signal, provider));
   }
-  if (idleTimeoutMs <= 0 && !signal) return read;
+  // #1052 review — this shortcut must classify too. It used to hand the caller the RAW read
+  // promise, so with no idle deadline and no signal a reset socket escaped unclassified through
+  // the one path that skips the race below. Same failure, second door.
+  if (idleTimeoutMs <= 0 && !signal) {
+    return read.catch((err: unknown) => {
+      throw streamReadError(err, provider);
+    });
+  }
 
   return new Promise<T>((resolve, reject) => {
     let settled = false;
@@ -407,9 +489,7 @@ export function raceRead<T>(
 
     const onAbort = () => {
       onIdle();
-      finish(() =>
-        reject(new AiProviderError('timeout', `${provider}: stream aborted`, { provider, retryable: false, cause: signal?.reason })),
-      );
+      finish(() => reject(streamAbortError(signal, provider)));
     };
 
     if (idleTimeoutMs > 0) {
@@ -430,7 +510,10 @@ export function raceRead<T>(
 
     read.then(
       (value) => finish(() => resolve(value)),
-      (err) => finish(() => reject(err)),
+      // #1052 review — classify rather than forward. A native rejection here is the socket
+      // dying under the read; see {@link streamReadError} for why the boundary is this promise
+      // and not `parseSse`'s loop body.
+      (err: unknown) => finish(() => reject(streamReadError(err, provider))),
     );
   });
 }
