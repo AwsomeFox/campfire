@@ -135,7 +135,7 @@ export function HandoutsCard({ campaignId }: { campaignId: number }) {
                       justifyContent: 'center',
                       borderRadius: 6,
                       flexShrink: 0,
-                      background: 'var(--color-surface-raised)',
+                      background: 'var(--color-surface)',
                       fontSize: 10,
                       fontWeight: 600,
                       color: 'var(--color-neutral-500)',

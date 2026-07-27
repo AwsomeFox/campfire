@@ -1,7 +1,7 @@
 # What an AI can do
 
 Once [connected](connect.md), an AI assistant reaches Campfire through its **MCP
-server** (219 tools) and REST API. What it's allowed to do is capped by two
+server** (221 tools) and REST API. What it's allowed to do is capped by two
 independent, server-enforced token dimensions — a **read scope** (dm / player /
 viewer) and a **write mode** (direct / propose / read-only) — exactly like a human
 of that role.
@@ -155,6 +155,41 @@ If a driver stalls or makes a call the table disputes, players have recovery lev
 open a **table vote** (to override or pause), or **request a human takeover**. The DM
 can pause and resume the seat at any time.
 
+### Collaborative handoff: the AI narrates, you rule
+
+Between "the AI runs the table" and "a human takes the seat entirely" there is a middle setting.
+Turn on **collaborative handoff** (DM only) and the AI keeps narrating and keeps playing NPCs,
+but every call that would **commit a mechanical outcome** waits for you:
+
+| Still automatic | Waits for you |
+| --- | --- |
+| Dice rolls, saves, initiative | Applying an action's damage or effects |
+| Reading the world | Changing HP or conditions |
+| Undoing a mistake | Advancing the turn |
+| Proposing canon edits (already a proposal) | Adding, changing or removing combatants |
+| | Starting or committing an encounter |
+
+Dice stay automatic on purpose. A roll produces a *number*; nothing changes until something
+applies it, and a single attack is a roll, a save and an apply — confirming each one would make
+the mode unusable while protecting nothing. Undo stays automatic for the same reason in reverse:
+a confirmation in front of the undo button leaves a wrong result on the board until someone
+approves removing it.
+
+**The AI is told to narrate a waiting action as attempted, not finished** — "she swings for the
+gap in its armour", never "she hits for nine damage". Otherwise the table would hear an outcome
+that never happened.
+
+The mode is sticky in the way that matters: pausing the seat, taking it over and handing it
+back, or getting stuck and recovering all leave it on, and it survives a server restart. Nothing
+except turning it off gives the AI back the authority to change the board on its own.
+
+!!! tip "Approving the waiting actions"
+    Deferred calls land in the AI's pending tool-confirmation queue, which appears at the top of
+    the **AI Table** as soon as something is queued — see [Approving what the AI asks
+    to do](#approving-what-the-ai-asks-to-do) below. Each waiting action is shown as a decision
+    with its arguments one click away, and the campaign's DMs are notified even when nobody is
+    looking at the table.
+
 ### What survives a server restart
 
 The seat's **state** is stored in the database, not in server memory, so a restart or a
@@ -205,6 +240,38 @@ Players are not notified: they cannot act on it, and the queue is DM-only.
     log rather than happening quietly: a server restart discards them, and the queue drops the
     oldest once it reaches its cap. Check the campaign audit log if an action you expected to
     approve is no longer listed.
+
+### Short rests and long rests
+
+The AI DM can run a rest for the whole party in **one atomic call** rather than setting each
+character's HP, resetting each spell-slot level and clearing each condition individually.
+
+A **long rest** restores HP to full, clears temporary HP, resets death saves, restores spell
+slots, and refills every resource whose rule-system recharge cadence is short-rest, long-rest,
+refocus, or dawn. A **short rest** refills short-rest resources and optionally spends hit dice
+for healing (each die rolled plus the CON modifier).
+
+**Recovery is the rule system's to define.** Which resource comes back on which rest is read
+from the recharge cadence your rule system already declares for it, so a 13th Age or Ironsworn
+table does not silently inherit D&D 5e's recovery just because 5e is the default.
+
+!!! note "What a rest does *not* clear"
+
+    A rest removes only the conditions your rule system says a rest removes — under 5e that is
+    exhaustion, unconscious, prone and frightened. Anything else, including a homebrew status a
+    DM typed in themselves, is deliberately **left in place** and reported back, so a night's
+    sleep can never silently delete a curse or a petrification. Conditions on a character sheet
+    carry no duration or source information yet, so the safe direction is to under-clear and
+    tell you, rather than guess and erase.
+
+**Atomicity is the point.** Every named character is validated before anything is written: if
+one of them is dead, lacks the hit dice requested, or has no known hit-die size, the whole rest
+is rejected and *no* character is changed. A rest that healed half the party and then failed
+would be worse than no rest tool at all.
+
+Hit dice need an explicit die size (`d8`, `d10`, …). The class hit die is not stored on the
+character sheet, and guessing one would quietly under-heal the character with no sign it
+happened.
 
 ### When the provider has a bad moment
 

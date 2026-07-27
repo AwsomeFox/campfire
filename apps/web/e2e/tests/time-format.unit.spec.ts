@@ -60,17 +60,28 @@ test.describe('time format preference (issue #634)', () => {
   });
 
   test('omitted options still honor the active time format preference', () => {
-    const instant = new Date('2026-01-15T17:00:00.000Z'); // noon Eastern (EST)
+    const instant = new Date('2026-01-15T17:00:00.000Z');
     const format = createLocaleFormatters(() => LOCALE);
 
+    // These calls deliberately pass NO options, so the formatter falls back to the
+    // AMBIENT time zone. That makes the rendered clock time a property of wherever this
+    // runs, so this test asserts the hour CYCLE (12h → AM/PM, 24h → none) and never a
+    // specific hour: the previous `/12:00:00 PM/` only held in America/New_York and
+    // failed in UTC, which is what kept this whole tier out of CI. Minutes are matched
+    // loosely too — zones like Asia/Kolkata are offset by :30, so even the minute field
+    // is not stable. The zone-dependent rendering (noon/midnight, DST) is covered by the
+    // sibling tests above, which pin `timeZone` explicitly and so can assert exact times.
+    const HMS_12 = /\d{1,2}:\d{2}:\d{2}\s*(AM|PM)/;
+    const HMS_24 = /\d{1,2}:\d{2}:\d{2}/;
+
     setTimeFormatPreference('12h');
-    expect(format.formatDateTime(instant)).toMatch(/12:00:00\s*PM/);
-    expect(format.formatTime(instant)).toMatch(/12:00:00\s*PM/);
+    expect(format.formatDateTime(instant)).toMatch(HMS_12);
+    expect(format.formatTime(instant)).toMatch(HMS_12);
 
     setTimeFormatPreference('24h');
-    expect(format.formatDateTime(instant)).toMatch(/12:00:00/);
+    expect(format.formatDateTime(instant)).toMatch(HMS_24);
     expect(format.formatDateTime(instant)).not.toMatch(/PM|AM/);
-    expect(format.formatTime(instant)).toMatch(/12:00:00/);
+    expect(format.formatTime(instant)).toMatch(HMS_24);
     expect(format.formatTime(instant)).not.toMatch(/PM|AM/);
   });
 
