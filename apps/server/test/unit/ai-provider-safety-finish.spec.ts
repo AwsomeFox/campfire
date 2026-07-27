@@ -503,6 +503,14 @@ describe('Gemini — safety finish reasons (#598)', () => {
       const events = await collect(p.stream(req));
       const done = events.find((e) => e.type === 'done');
       expect(done && done.type === 'done' && done.result.finishReason).toBe('content_filter');
+
+      // Classification being sticky does not by itself stop BYTES going out (#598 review).
+      // The trailing chunk's text belongs to a turn already known to be refused, so it must
+      // never reach the wire — asserting only the finishReason above would not catch a
+      // regression that broadcast it.
+      expect(events.some((e) => e.type === 'text')).toBe(false);
+      // ...but it is still MEASURED, so a refused turn is paid for rather than coming out free.
+      expect(done && done.type === 'done' && done.result.text).toBe('hi');
     });
 
     it('a response with no candidates AND no blockReason is still a malformed-payload error', async () => {

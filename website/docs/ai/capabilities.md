@@ -226,7 +226,9 @@ it generated anything — Campfire treats that turn as **withheld**, not as narr
   say what was withheld;
 - the seat parks on the usual recovery ladder with **Retry**, **Nudge** (retry with
   different framing), and **Continue without AI**;
-- a DM can review the incident trail at **AI DM → withheld turns**. It records counts and
+- an incident trail is recorded for the DM. **There is no in-app screen for it yet** — it
+  is readable only by a DM of the campaign, over the API, at
+  `GET /api/v1/campaigns/:campaignId/ai-dm/withheld-turns`. It records counts and
   provenance only — how much had already streamed, how much the trailing window still had
   in hand, how many tool calls were suppressed, which provider and model, and whose action
   prompted it. **The withheld text itself is never stored anywhere**, and neither is a

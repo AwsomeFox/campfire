@@ -202,13 +202,32 @@ export class GeminiProvider implements AiProvider {
         continue;
       }
       const candidate = chunk.candidates?.[0];
+      // #598: when Gemini blocks the PROMPT it sends no candidate at all — so the parts branch
+      // below never runs, `finishReason` kept its `stop` default, and the driver saw an
+      // ordinary empty turn (`no_narration`) instead of a withheld one. The block reason lives
+      // on `promptFeedback`, which can ride the SAME chunk as a candidate — so it is read
+      // BEFORE the parts loop, not after it, or a chunk carrying both would broadcast its text
+      // before the block was known.
+      if (isPromptBlocked(chunk)) promptBlocked = true;
       if (candidate?.content?.parts) {
         for (const part of candidate.content.parts) {
           // Handle text and functionCall independently (a part could carry both),
           // mirroring the non-streaming parse so the two paths never diverge.
           if (part.text) {
             totalText += part.text;
-            yield { type: 'text', delta: part.text };
+            // NO PATH MAY BROADCAST TEXT FOR A TURN ALREADY KNOWN TO BE WITHHELD — the
+            // invariant driver-safety.ts opens with, applied here the way the OpenAI chat
+            // accumulator applies it after a refusal. Once the block is known every later
+            // delta belongs to a refused turn, so this is not the quarantine's bounded
+            // residual: it would be text released after the very signal the window waits for.
+            //
+            // `totalText` still accumulates, deliberately. It never reaches the table; it is
+            // what the budget estimator measures, and a turn that generated tokens must still
+            // be paid for. Stop the broadcast, keep the measurement.
+            //
+            // Unreachable on today's wire — a prompt block arrives with no candidate and the
+            // stream ends there — so this is defence against a wire change, not a live leak.
+            if (!promptBlocked) yield { type: 'text', delta: part.text };
           }
           if (part.functionCall) {
             // Gemini streams each functionCall as a whole part (not JSON deltas), so
@@ -227,11 +246,6 @@ export class GeminiProvider implements AiProvider {
       if (candidate?.finishReason) {
         finishReason = mapFinishReason(candidate.finishReason);
       }
-      // #598: when Gemini blocks the PROMPT it sends no candidate at all — so the branch above
-      // never runs, `finishReason` kept its `stop` default, and the driver saw an ordinary
-      // empty turn (`no_narration`) instead of a withheld one. The block reason lives on
-      // `promptFeedback` on the same chunk.
-      if (isPromptBlocked(chunk)) promptBlocked = true;
       if (chunk.usageMetadata) {
         usage = mapUsage(chunk.usageMetadata);
       }

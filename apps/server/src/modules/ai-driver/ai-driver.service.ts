@@ -34,6 +34,10 @@ import type {
   AiUsage,
 } from '../ai-dm/providers/ai-provider';
 import { AiProviderError } from '../ai-dm/providers/errors';
+// Defined here originally; moved to a pure module so the Co-DM draft path can settle its
+// reservation off the same helper without closing an import cycle back through
+// `ai-dm.service`. Re-exported at the bottom of this file — the unit suite imports it here.
+import { resolveProviderStepUsage } from '../ai-dm/providers/step-usage';
 import { DEFAULT_IDLE_TIMEOUT_MS } from '../ai-dm/providers/http';
 import { AI_PROVIDER_RESOLVER, resolveProviderForExecution, type AiProviderResolver } from './ai-provider-resolver';
 import { AiDmStreamService } from './ai-driver-stream.service';
@@ -5637,35 +5641,6 @@ export function summarizeToolArgs(args: Record<string, unknown> | undefined | nu
   return parts.join(', ');
 }
 
-/**
- * Resolve billable tokens for a provider step that failed mid-stream (#560). Uses reported
- * provider usage when available; otherwise estimates from partial output. When neither is
- * available, returns `unknown: true` so callers never assume zero usage.
- */
-export function resolveProviderStepUsage(
-  text: string,
-  result: AiGenerateResult | undefined,
-  /**
-   * #598 — output the provider produced that this adapter deliberately did NOT return as
-   * text, in characters. Today that is refusal prose, which is discarded so it can never be
-   * broadcast; the length still has to reach the estimator or a refusal-only turn measures as
-   * nothing. A number, never the text.
-   */
-  extraGeneratedChars = 0,
-): { tokens: number; unknown: boolean } {
-  const reported = result?.usage?.totalTokens ?? 0;
-  if (reported > 0) return { tokens: reported, unknown: false };
-  const outputText = text || result?.text || '';
-  const toolCalls = result?.toolCalls ?? [];
-  const generatedChars = outputText.length + Math.max(0, extraGeneratedChars);
-  if (generatedChars > 0 || toolCalls.length > 0) {
-    const outputChars = generatedChars + JSON.stringify(toolCalls).length;
-    return { tokens: Math.max(1, Math.ceil(outputChars / 4)), unknown: false };
-  }
-  // NOTHING TO MEASURE. Not zero — unknown. The caller settles the reservation as unknown
-  // spend rather than metering zero, which would refund a billable provider call.
-  return { tokens: 0, unknown: true };
-}
 
 /**
  * Map a finished turn onto a stuck reason, or null if the turn was healthy (#314). Order
@@ -5787,3 +5762,7 @@ function renderNoRuleSystem(query: string): string {
     'A DM can pick a rule system in **Campaign Settings → Rule system** to scope rules lookups to an installed pack (e.g. the D&D 5e SRD).',
   ].join('\n');
 }
+
+// Re-exported for the existing unit suite and any caller that has always imported it here
+// (#598 review). The implementation now lives in `ai-dm/providers/step-usage`.
+export { resolveProviderStepUsage };
