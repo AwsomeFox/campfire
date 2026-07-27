@@ -35,7 +35,7 @@ tab-bar slot). Do not add a sixth tab without condensing or replacing an existin
 
 ## Testing — the regression safety net
 
-Four layers run together so a change that breaks combat turn order, leaks a DM
+Five layers run together so a change that breaks combat turn order, leaks a DM
 secret, or regresses a permission check fails CI before it merges — not at
 someone's table.
 
@@ -44,23 +44,43 @@ someone's table.
 | **Server unit** | `apps/server/test/unit/*.spec.ts` | `just test` | Pure logic — dice parsing, `redactSecrets`, token scope-capping, combatant sort / turn math, ability & initiative derivation. No app bootstrap. |
 | **API e2e** | `apps/server/test/*.e2e-spec.ts` | `just test` | Full-app HTTP against a fresh temp SQLite per suite (`test/test-app.ts`) — auth, roles, every route. |
 | **Integration** | `apps/server/test/integration/*` | `just test` | Real-DB concerns — migration idempotency, delete cascades (no orphan rows), concurrent HP writes / WAL, shutdown checkpoint. |
-| **Browser E2E** | `apps/web/e2e/` | `just test-e2e` | Playwright across roles (admin / DM / player / viewer) against the real server serving the built SPA — combat tracker, dmSecret visibility, role gating. |
+| **Web unit** | `apps/web/e2e/tests/*.unit.spec.ts` | `just test-unit-web` | Pure front-end logic and source assertions — nav IA, i18n / locale / time formatting, CSS-token and design-system drift, storage helpers. Playwright's runner, but **no browser and no backend**. |
+| **Browser E2E** | `apps/web/e2e/tests/*.spec.ts` | `just test-e2e` | Playwright across roles (admin / DM / player / viewer) against the real server serving the built SPA — combat tracker, dmSecret visibility, role gating. |
 
 ```bash
 just test          # server: unit + API e2e + integration (Jest, one config)
+just test-unit-web # web unit tier (no browser needed)
 just e2e-install   # one-time: fetch the Playwright chromium browser
 just test-e2e      # browser E2E (builds the app, seeds a per-role backend)
-just test-all      # the whole net: lint + server + web build + Playwright
+just test-all      # the whole net: lint + server + web unit + web build + Playwright
 ```
+
+**Which config runs which web tier.** Both web tiers live under `apps/web/e2e/tests/`
+and are told apart only by filename, so it matters which you are writing:
+
+| File suffix | Config | CI job | Browser? |
+|---|---|---|---|
+| `*.unit.spec.ts` / `*.unit.spec.mts` | `apps/web/playwright.unit.config.ts` | `unit-web` (required) | No |
+| any other `*.spec.ts` | `apps/web/playwright.config.ts` | `e2e-web` | Yes |
+
+The default config `testIgnore`s `*.unit.spec.*` and the unit config `testMatch`es
+only those, so every file belongs to exactly one tier. Name a new pure-logic spec
+`*.unit.spec.ts` and both `just test-unit-web` and the required `unit-web` check
+will run it. Type-checking is not enough on its own to know a spec runs — these
+files compiled cleanly for a long time while no script or workflow executed them
+(issue #1574).
 
 `just test-e2e` / `just test-all` need a Chromium browser — run `just e2e-install`
 once first (CI installs it per run). Everything else is pure Node.
 
 **CI** (`.github/workflows/ci.yml`) enforces all of it on every PR: a `lint` job,
 a `build-test` job (`npm run build` + the full server suite), a `coverage` job
-(re-runs with instrumentation and uploads an lcov/HTML artifact), and an
-`e2e-web` Playwright job. Add tests alongside behaviour changes — the safety net
-only holds if it grows with the code.
+(re-runs with instrumentation and uploads an lcov/HTML artifact), a `unit-web`
+job (the web unit tier — browserless, so it is in the required set), and an
+`e2e-web` Playwright job. The aggregate required check is `ci`; `e2e-web` and
+`pwa-web` run for signal but are deliberately not required, because a browser
+check in the required set would block every PR on a timing race. Add tests
+alongside behaviour changes — the safety net only holds if it grows with the code.
 
 ## What's most wanted
 

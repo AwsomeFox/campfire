@@ -36,6 +36,8 @@ test.describe('campaign settings navigation model', () => {
     expect(settingsSectionForHash('#ai-dm-provider')).toBe('ai');
     expect(settingsSectionForHash('#ai-dm-budget')).toBe('ai');
     expect(settingsSectionForHash('#ai-dm-instructions')).toBe('ai');
+    // #1049 structured table style shares the AI category, so its deep link selects it too.
+    expect(settingsSectionForHash('#ai-dm-style')).toBe('ai');
     expect(settingsSectionForHash('#export')).toBe('data');
     expect(settingsSectionForHash('#duplicate')).toBe('data');
     expect(settingsSectionForHash('#status')).toBe('lifecycle');

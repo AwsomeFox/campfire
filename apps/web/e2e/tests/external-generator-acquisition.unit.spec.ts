@@ -33,9 +33,6 @@ class MemoryStorage {
   }
 }
 
-// Install before importing the module under test (it reads the global `localStorage`).
-(globalThis as unknown as { localStorage: Storage }).localStorage = new MemoryStorage() as unknown as Storage;
-
 import {
   ACQUISITION_TTL_MS,
   MAX_EXPORT_BYTES,
@@ -46,6 +43,34 @@ import {
   loadAcquisition,
   saveAcquisition,
 } from '../../src/components/externalGeneratorAcquisition';
+
+/**
+ * The module under test reads the global `localStorage` lazily, inside a helper — never
+ * while loading — so this stub does NOT have to exist before the import above, despite
+ * the note that used to say so.
+ *
+ * It is installed with defineProperty rather than a plain assignment, and per-file rather
+ * than at module scope, for two different reasons. defineProperty: sibling specs
+ * (api-headers, api-read-timeouts, pwa-cache-exclusions) define `localStorage` with
+ * `{configurable: true, value}` and no `writable`, which leaves the global READ-ONLY, and
+ * a plain `globalThis.localStorage = …` then throws "Cannot assign to read only property"
+ * in strict mode — an order-dependent load failure. Per-file: the unit tier shares one
+ * worker process, so a global left behind here becomes some later spec's environment.
+ */
+const PREVIOUS_LOCAL_STORAGE = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+
+test.beforeAll(() => {
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    writable: true,
+    value: new MemoryStorage() as unknown as Storage,
+  });
+});
+
+test.afterAll(() => {
+  if (PREVIOUS_LOCAL_STORAGE) Object.defineProperty(globalThis, 'localStorage', PREVIOUS_LOCAL_STORAGE);
+  else delete (globalThis as { localStorage?: Storage }).localStorage;
+});
 
 test.beforeEach(() => {
   (globalThis.localStorage as unknown as MemoryStorage).clear();

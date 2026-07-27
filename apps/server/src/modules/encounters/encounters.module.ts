@@ -6,13 +6,24 @@ import { RollsModule } from '../rolls/rolls.module';
 import { RevisionsModule } from '../revisions/revisions.module';
 import { AttachmentsModule } from '../attachments/attachments.module';
 import { CampaignLibraryModule } from '../campaign-library/campaign-library.module';
+import { TableSafetyModule } from '../safety/table-safety.module';
 import { EncountersService } from './encounters.service';
 import { EncounterMapService } from './encounter-map.service';
 import { ActionResolverService } from './action-resolver.service';
 import { CampaignEncountersController, CampaignRollController, EncountersController } from './encounters.controller';
 
 @Module({
-  imports: [AuditModule, RoleAccessModule, EventsModule, RollsModule, RevisionsModule, AttachmentsModule, CampaignLibraryModule],
+  imports: [
+    AuditModule,
+    RoleAccessModule,
+    EventsModule,
+    RollsModule,
+    RevisionsModule,
+    AttachmentsModule,
+    CampaignLibraryModule,
+    // #599 — turn advancement is gated on the table safety hold.
+    TableSafetyModule,
+  ],
   controllers: [CampaignEncountersController, CampaignRollController, EncountersController],
   providers: [EncountersService, EncounterMapService, ActionResolverService],
   // EncounterMapService is exported so the public cast capability (issue #547) can
