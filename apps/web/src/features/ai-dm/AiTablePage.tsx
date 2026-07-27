@@ -169,6 +169,8 @@ export default function AiTablePage() {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [pauseError, setPauseError] = useState<string | null>(null);
   const [pauseBusy, setPauseBusy] = useState(false);
+  const [lifecycleError, setLifecycleError] = useState<string | null>(null);
+  const [lifecycleBusy, setLifecycleBusy] = useState(false);
 
   // Party roster — resolves this member's character name for speaker attribution, and
   // is also a live surface refreshed by party-touching tool events.
@@ -630,6 +632,9 @@ export default function AiTablePage() {
 
   // Composer lock: streaming OR a state the stuck-ladder issue (#340) owns.
   const paused = session?.state === 'paused';
+  // #1043 — default to `active` while the session read is in flight, so the lifecycle controls
+  // render in their normal state rather than flickering through a phase nobody is in.
+  const phase = session?.phase ?? 'active';
   const humanControl = session?.state === 'human_control';
   const awaiting = session?.state === 'awaiting_players';
   const locked = streaming || paused || humanControl || awaiting;
@@ -752,6 +757,28 @@ export default function AiTablePage() {
     }
   }
 
+  /**
+   * Session lifecycle (#1043). Both run a real AI turn server-side, so they go through every
+   * gate a player action does — a paused or frozen seat refuses them and the phase is left
+   * alone. The button is disabled while a lifecycle turn is in flight, but the server is the
+   * authority: it 409s a second start rather than trusting this.
+   */
+  async function onLifecycle(action: 'start-session' | 'wrap-up') {
+    if (campaignId === undefined) return;
+    setLifecycleBusy(true);
+    setLifecycleError(null);
+    try {
+      await api.post(`${API}/campaigns/${campaignId}/ai-dm/${action}`);
+      invalidateAiDm(queryClient, campaignId);
+    } catch (err) {
+      setLifecycleError(
+        err instanceof ApiError && err.message ? err.message : t('table.lifecycleFailed'),
+      );
+    } finally {
+      setLifecycleBusy(false);
+    }
+  }
+
   async function onTogglePause() {
     if (campaignId === undefined) return;
     const action = paused ? 'resume' : 'pause';
@@ -868,9 +895,31 @@ export default function AiTablePage() {
                 {paused ? t('table.resume') : t('table.pause')}
               </Btn>
             )}
+            {/* #1043 — session lifecycle. Start Session is player+ (sitting down to play is a
+                table act); Wrap Up is DM-only (closing a session is a decision). Both are hidden
+                while a lifecycle turn is mid-flight rather than merely disabled, so the header
+                does not offer an action the server is about to 409. */}
+            {phase !== 'greeting' && phase !== 'wrap_up' && (
+              <div className="flex gap-1.5">
+                <Btn ghost onClick={() => void onLifecycle('start-session')} disabled={lifecycleBusy}>
+                  {t('table.startSession')}
+                </Btn>
+                {isDm && phase !== 'ended' && (
+                  <Btn ghost onClick={() => void onLifecycle('wrap-up')} disabled={lifecycleBusy}>
+                    {t('table.wrapUp')}
+                  </Btn>
+                )}
+              </div>
+            )}
           </div>
         </div>
+        {phase !== 'active' && (
+          <p className="text-xs text-secondary mt-2" data-testid="ai-phase-note">
+            {t(`table.phaseNote.${phase}`)}
+          </p>
+        )}
         {pauseError && <p className="text-xs text-rose-400 mt-2">{pauseError}</p>}
+        {lifecycleError && <p className="text-xs text-rose-400 mt-2">{lifecycleError}</p>}
       </Card>
 
       {/* Live-encounter strip (design point 4) */}

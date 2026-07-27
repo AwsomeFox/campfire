@@ -96,6 +96,13 @@ export function invalidateCampaignCheckRequests(client: QueryClient, campaignId:
 /** Low-level turn-loop / pause status (server `AiDmSessionStatus`). */
 export type AiDmSessionStatus = 'idle' | 'running' | 'paused';
 
+/**
+ * Session lifecycle phase (server `AiDmSessionPhase`, #1043). Orthogonal to `status` and
+ * `state`: a seat can be paused during `greeting` or stuck during `wrap_up`. Defaults to
+ * `active`, which is the behaviour every table had before the lifecycle existed.
+ */
+export type AiDmSessionPhase = 'greeting' | 'active' | 'wrap_up' | 'ended';
+
 /** Stuck-ladder lifecycle the player levers act on (server `AiDmLadderState`, #314). */
 export type AiDmLadderState = 'running' | 'awaiting_players' | 'paused' | 'human_control';
 
@@ -137,6 +144,8 @@ export interface AiDmSession {
   campaignId: number;
   status: AiDmSessionStatus;
   state: AiDmLadderState;
+  /** Session lifecycle phase (#1043). */
+  phase: AiDmSessionPhase;
   scene: string | null;
   lastNarration: string | null;
   lastTurnAt: string | null;

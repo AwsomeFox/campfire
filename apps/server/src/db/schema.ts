@@ -1400,6 +1400,8 @@ export const aiDriverControlState = sqliteTable('ai_driver_control_state', {
   lastInput: text('last_input'),
   /** The recovery shape last announced to the table — suppresses re-announcing a steady state. */
   announcedRecovery: text('announced_recovery'),
+  /** #1043 — session lifecycle phase: greeting | active | wrap_up | ended. Defaults to 'active'. */
+  phase: text('phase').notNull().default('active'),
   updatedAt: text('updated_at').notNull(),
 });
 

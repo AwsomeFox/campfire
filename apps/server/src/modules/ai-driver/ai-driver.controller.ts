@@ -293,6 +293,46 @@ export class AiDriverController {
     return toPublicAiDmSessionState(this.driver.setPaused(id, false));
   }
 
+  // ---- Session lifecycle (#1043) ----------------------------------------------------
+
+  @Post('start-session')
+  @Throttle({ ai: { limit: 5, ttl: 60000 } })
+  @ApiOperation({
+    summary: 'Open a session: the AI greets the table and recaps where it left off',
+    description:
+      'Player+ — sitting down to play is a table act, not a DM-only one. Runs ONE greeting turn ' +
+      'through the same gates as any player action (seat enabled, token budget, pause, human ' +
+      'control, turn lock), so a paused or frozen seat refuses it and the lifecycle phase is left ' +
+      'untouched. The recap is the DM-approved `sessions.recap` written by the AI Scribe — the ' +
+      'model is told to use it and to say so plainly when there is none, never to invent one. ' +
+      'The phase moves greeting → active when the turn returns, whatever its stop reason.',
+  })
+  @ApiResponse({ status: 201, description: 'The greeting turn summary.' })
+  @ApiResponse({ status: 409, description: 'A lifecycle turn is already in progress.' })
+  @ApiResponse({ status: 503, description: 'Seat paused, under human control, or no provider configured.' })
+  async startSession(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const role = await this.access.requireRole(user, id, 'player');
+    return this.driver.startSession(id, user, role);
+  }
+
+  @Post('wrap-up')
+  @Throttle({ ai: { limit: 5, ttl: 60000 } })
+  @ApiOperation({
+    summary: 'Close the session: the AI delivers a spoken closing summary',
+    description:
+      'DM only — closing a session is a decision, not an announcement. Runs ONE wrap-up turn and ' +
+      'lands the phase in `ended`, after which player input is refused until someone starts a new ' +
+      'session. This does NOT write a session recap: the AI Scribe owns that, through the DM ' +
+      'proposal queue, and a second unreviewed summary on the campaign record would be a canon ' +
+      'write nobody approved.',
+  })
+  @ApiResponse({ status: 201, description: 'The wrap-up turn summary.' })
+  @ApiResponse({ status: 409, description: 'Already wrapped up, or a lifecycle turn is in progress.' })
+  async wrapUp(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const role = await this.access.requireRole(user, id, 'dm');
+    return this.driver.wrapUpSession(id, user, role);
+  }
+
   @Post('trigger')
   @HttpCode(202)
   @ApiOperation({ summary: 'Manually trigger a proactive DM turn' })

@@ -553,6 +553,84 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     }
   });
 
+  it('0133 backfills ai_driver_control_state.phase to active on a legacy table (#1043)', () => {
+    expect(MIGRATION_NAMES).toContain('0133_ai_session_phase_1043');
+    // ALTERs the table 0118 creates, so it must run after it — runMigrations goes in array order
+    // and an ALTER against a missing table is a no-op that never retries.
+    expect(MIGRATION_NAMES.indexOf('0133_ai_session_phase_1043')).toBeGreaterThan(
+      MIGRATION_NAMES.indexOf('0118_ai_driver_control_state_559'),
+    );
+
+    const upgradedDir = makeTempDataDir();
+    dataDir = makeTempDataDir();
+    try {
+      const fresh = openDatabase(dataDir);
+      let freshCols: string[];
+      try {
+        freshCols = columnNames(fresh.sqlite, 'ai_driver_control_state');
+        expect(freshCols).toContain('phase');
+      } finally {
+        fresh.sqlite.close();
+      }
+
+      // The shape every existing install has: #559's control-state table, no phase column, and
+      // live rows in it.
+      writeOldSchemaDb(upgradedDir);
+      const seeded = openDatabase(upgradedDir);
+      try {
+        seeded.sqlite.exec('DROP TABLE IF EXISTS ai_driver_control_state');
+        seeded.sqlite.exec(`
+          CREATE TABLE ai_driver_control_state (
+            campaign_id INTEGER PRIMARY KEY,
+            status TEXT NOT NULL DEFAULT 'idle',
+            state TEXT NOT NULL DEFAULT 'running',
+            scene TEXT, last_narration TEXT, last_turn_at TEXT,
+            turn_count INTEGER NOT NULL DEFAULT 0,
+            stuck TEXT, acting_dm TEXT, vote TEXT,
+            takeover_requested_by TEXT, last_input TEXT, announced_recovery TEXT,
+            updated_at TEXT NOT NULL
+          );
+        `);
+        seeded.sqlite
+          .prepare(
+            `INSERT INTO ai_driver_control_state (campaign_id, status, state, updated_at)
+             VALUES (1, 'paused', 'human_control', '2026-01-01T00:00:00.000Z')`,
+          )
+          .run();
+        seeded.sqlite.prepare('DELETE FROM __migrations WHERE name = ?').run('0133_ai_session_phase_1043');
+      } finally {
+        seeded.sqlite.close();
+      }
+
+      const upgraded = openDatabase(upgradedDir);
+      try {
+        expect([...columnNames(upgraded.sqlite, 'ai_driver_control_state')].sort()).toEqual([...freshCols].sort());
+        const row = upgraded.sqlite
+          .prepare('SELECT state, phase FROM ai_driver_control_state WHERE campaign_id = 1')
+          .get() as { state: string; phase: string } | undefined;
+        // NOT NULL + DEFAULT is what makes the ALTER safe on a populated table: SQLite backfills
+        // every existing row with 'active', whose behaviour is identical to the pre-#1043 seat.
+        // An upgraded install with live sessions therefore wakes up exactly as it went to sleep,
+        // rather than every campaign in the database landing in a lifecycle phase nobody chose.
+        expect(row?.phase).toBe('active');
+        // ADD COLUMN, never a rebuild — the existing takeover grant is untouched.
+        expect(row?.state).toBe('human_control');
+      } finally {
+        upgraded.sqlite.close();
+      }
+
+      // Re-running is a no-op (the PRAGMA probe), not a duplicate-column error.
+      const again = openDatabase(upgradedDir);
+      try {
+        expect(countRows(again.sqlite, 'ai_driver_control_state')).toBe(1);
+      } finally {
+        again.sqlite.close();
+      }
+    } finally {
+      fs.rmSync(upgradedDir, { recursive: true, force: true });
+    }
+  });
+
   it('0070 adds notifications.data on a legacy table and preserves JSON payloads', () => {
     dataDir = makeTempDataDir();
     const seeded = openDatabase(dataDir);

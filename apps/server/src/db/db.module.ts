@@ -1627,6 +1627,32 @@ function migrateAiDriverControlStateAnnouncedRecovery(sqlite: Database.Database)
 }
 
 /**
+ * Issue #1043 — the AI session lifecycle phase on `ai_driver_control_state`.
+ *
+ * NOT NULL with a DEFAULT, which is exactly what makes the ALTER safe on a populated table:
+ * SQLite backfills every existing row with 'active', and 'active' is the phase whose behaviour
+ * is identical to the pre-#1043 seat. So an upgraded install with live sessions comes back
+ * indistinguishable from before, rather than every campaign in the database waking up in a
+ * lifecycle phase nobody put it in.
+ *
+ * A separate, never-before-recorded migration name rather than a widening of #559's
+ * `migrateAiDriverControlStateTable`, for the reason that migration's own comment gives: a
+ * database that already recorded the CREATE will never re-run it, so a column folded in there
+ * would stay missing forever — and every drizzle read of the table would then throw inside the
+ * best-effort try/catch that swallows it, silently disabling restart-safety with no symptom.
+ */
+function migrateAiDriverSessionPhase1043(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ai_driver_control_state'")
+    .get();
+  if (!hasTable) return;
+  const cols = sqlite.prepare('PRAGMA table_info(ai_driver_control_state)').all() as Array<{ name: string }>;
+  if (!cols.some((c) => c.name === 'phase')) {
+    sqlite.exec("ALTER TABLE ai_driver_control_state ADD COLUMN phase TEXT NOT NULL DEFAULT 'active'");
+  }
+}
+
+/**
  * Migration for DBs created before DM-initiated check requests (issue #415): the
  * `check_requests` table didn't exist. Same "new table" pattern as migrateAiScribeTables —
  * CREATE TABLE / CREATE INDEX IF NOT EXISTS, recorded so upgraded hosts get the table (and its
@@ -3418,6 +3444,15 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // the next free ordinal. runMigrations dedupes on the FULL name string, so the `_577` suffix
   // is what guarantees this runs exactly once even if a sibling branch lands a colliding ordinal.
   { name: '0121_ai_driver_grounding_claims_577', run: migrateAiDriverGroundingClaims577 },
+  // 0133 was CENTRALLY ALLOCATED to issue #1043 by the merge coordinator; 0130/0131/0132 are held
+  // by other in-flight branches, so the gap is deliberate and must not be tidied down to the next
+  // free ordinal — every branch computing "next free" for itself is how they collide.
+  //
+  // Must stay AFTER 0118 (the CREATE) in the array: runMigrations executes in array order, and an
+  // ALTER against a table that does not exist yet is a no-op that never retries. Run-once is
+  // guaranteed by the FULL name string, which is why the `_1043` suffix matters and why renaming
+  // this later would silently skip it on every database that already recorded it.
+  { name: '0133_ai_session_phase_1043', run: migrateAiDriverSessionPhase1043 },
   // Campaign modules take 0120, assigned centrally. The 0114/0115 this branch originally
   // carried were reassigned to #1443 and #1524 as those landed first; 0112/0113 are a
   // permanent gap, since the branch holding them ended up taking 0118/0119.

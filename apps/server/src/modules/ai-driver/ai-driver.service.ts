@@ -179,6 +179,33 @@ export interface AiDmTurnRunResult {
 export type AiDmSessionStatus = 'idle' | 'running' | 'paused';
 
 /**
+ * Where the table is in a SESSION, as opposed to where the seat is in a turn (#1043).
+ *
+ * Orthogonal to both `status` (the turn-loop lock) and `state` (the stuck ladder) on purpose:
+ * a seat can be paused during `greeting`, stuck during `wrap_up`, or under human control at any
+ * phase, and collapsing these into one enum would make every combination a new member.
+ *
+ * `greeting` and `wrap_up` are TRANSIENT: each exists only for the lifetime of the single turn
+ * that drives it, and the turn's RETURN advances the phase regardless of how it went. That is
+ * what stops a failed greeting bricking the session opening — a table whose AI flubbed its
+ * hello can still play — and it is what makes the restart rule below decidable, because a
+ * transient phase found on disk is by construction one whose turn never returned.
+ *
+ * `active` is the default, so a campaign that never touches start-session behaves exactly as it
+ * did before this issue: the lifecycle is opt-in, not a new precondition for play.
+ */
+export type AiDmSessionPhase =
+  | 'greeting'  // the AI is opening the session: hello + a recap of where the table left off
+  | 'active'    // normal play (the default, and the only phase that existed before #1043)
+  | 'wrap_up'   // the AI is producing a closing summary
+  | 'ended';    // the session is closed; player input is refused until someone starts a new one
+
+/** Phases that exist only for the duration of their own turn (#1043). See {@link AiDmSessionPhase}. */
+function isTransientPhase(phase: AiDmSessionPhase): boolean {
+  return phase === 'greeting' || phase === 'wrap_up';
+}
+
+/**
  * The stuck-ladder session state (#314). Distinct from the low-level `status` (which the
  * turn loop / pause gate use): `state` is the player-facing lifecycle the recovery levers
  * drive. `running` is healthy; `awaiting_players` means detection tripped and the table must
@@ -253,6 +280,8 @@ export interface AiDmSessionState {
   status: AiDmSessionStatus;
   /** Stuck-ladder lifecycle state (#314) — what the player levers act on. */
   state: AiDmLadderState;
+  /** Session lifecycle phase (#1043). Defaults to `active`; see {@link AiDmSessionPhase}. */
+  phase: AiDmSessionPhase;
   scene: string | null;
   lastNarration: string | null;
   lastTurnAt: string | null;
@@ -420,6 +449,15 @@ function allowlist<T extends string>(members: Record<T, true>): ReadonlySet<stri
 }
 
 const SESSION_STATUSES = allowlist<AiDmSessionStatus>({ idle: true, running: true, paused: true });
+// #1043. Exhaustive by construction, for the same reason the other three are: a future phase
+// omitted here would be silently discarded on restart and the seat would come back `active` —
+// which for `ended` means a closed session quietly reopening.
+const SESSION_PHASES = allowlist<AiDmSessionPhase>({
+  greeting: true,
+  active: true,
+  wrap_up: true,
+  ended: true,
+});
 const LADDER_STATES = allowlist<AiDmLadderState>({
   running: true,
   awaiting_players: true,
@@ -506,6 +544,19 @@ const RECOVERY_SHAPES = allowlist<ControlStateRecovery>({
 
 interface HydratedControlState {
   session: AiDmSessionState;
+  /**
+   * The transient lifecycle phase (#1043) this boot had to abandon, or null.
+   *
+   * Deliberately NOT a {@link ControlStateRecovery}. That type answers "what SHAPE did the seat
+   * come back in" and is suppressed on repeat by `announced_recovery`, which is right for a
+   * steady state and wrong here: an interrupted wrap-up on a seat that also came back paused
+   * would be swallowed by that suppression, and a seat that came back clean produces
+   * `settled === null` so it would never announce at all. This is a one-shot fact about what
+   * the restart destroyed, announced independently. It needs no suppression marker of its own,
+   * because the reconciled phase is written back in the same pass — the next boot finds
+   * `active` and has nothing to report.
+   */
+  phaseInterrupted: AiDmSessionPhase | null;
   /** What the table is TOLD came back, or null when the seat came back clean. */
   recovery: ControlStateRecovery | null;
   /**
@@ -554,6 +605,59 @@ const GROUNDING_PREAMBLE = [
   '- To change the world (a new NPC/quest/location, edits to canon), call the matching tool. Those are submitted as PROPOSALS for the human DM to approve — do not claim a canon change happened until it is applied.',
   '- You MAY resolve live play directly: roll dice, apply HP/conditions, advance turns, reveal map regions.',
   '- Respect the session-zero charter (lines/veils/safety tools) below at all times.',
+].join('\n');
+
+/**
+ * Per-phase direction appended to the system prompt (#1043).
+ *
+ * PROMPT TEXT IS A REQUEST, NOT A CONTROL — the same caveat #577 puts on the grounding
+ * preamble applies here, and it is why the phase's real teeth are elsewhere: the turn caps in
+ * {@link AiDriverService.startSession} / {@link AiDriverService.wrapUpSession}, the `ended` input
+ * gate, and the tool policy the seat already enforces. This block shapes tone; it does not
+ * enforce anything, and nothing here is relied on to.
+ *
+ * `active` deliberately has NO entry. It is the default phase and the behaviour every existing
+ * table already has, so adding text for it would silently change how every campaign that never
+ * touches this feature is narrated.
+ */
+const PHASE_DIRECTION: Partial<Record<AiDmSessionPhase, string>> = {
+  greeting: [
+    '## Session phase: OPENING',
+    'The table has just sat down. This turn is a welcome, not a scene.',
+    '- Greet the players warmly and briefly, by character name where you know it.',
+    '- Recap where the party left off using ONLY the "Previous session recap" section below and',
+    '  the campaign context. If there is no recap section, say the last session has no written',
+    '  recap yet rather than inventing what happened — a confabulated recap is worse than none,',
+    '  because the table will take it as canon.',
+    '- End by handing control back: ask what the party wants to do. Do NOT open a scene, roll',
+    '  dice, advance a turn, or resolve anything. Nobody has acted yet.',
+  ].join('\n'),
+  wrap_up: [
+    '## Session phase: WRAPPING UP',
+    'The table is closing the session. This turn is a summary, not a scene.',
+    '- Summarise what the party did and decided this session, and where they now stand.',
+    '- Name any thread left dangling so the next session has a hook.',
+    '- Do NOT start anything new, introduce a cliffhanger that requires a response, or ask the',
+    '  players a question. They are packing up.',
+    '- Do NOT write this to the campaign record. The session recap is the AI Scribe\'s job and',
+    '  goes through the DM\'s proposal queue; this is spoken at the table only.',
+  ].join('\n'),
+  ended: [
+    '## Session phase: ENDED',
+    'The session is over. If you are answering at all, keep it to logistics — do not narrate.',
+  ].join('\n'),
+};
+
+/** The server-authored prompt behind POST /ai-dm/start-session (#1043). */
+const GREETING_PROMPT = [
+  'The table has just sat down for a new session. Greet the players and recap where the party',
+  'left off, following the OPENING phase direction in your system prompt exactly.',
+].join('\n');
+
+/** The server-authored prompt behind POST /ai-dm/wrap-up (#1043). */
+const WRAP_UP_PROMPT = [
+  'The table is ending the session. Deliver a closing summary, following the WRAPPING UP phase',
+  'direction in your system prompt exactly.',
 ].join('\n');
 
 /** Markers the untrusted player message is fenced with in the user turn (#317). */
@@ -1151,7 +1255,7 @@ export class AiDriverService {
 
   private loadPersistedControlState(campaignId: number): HydratedControlState {
     const fresh = this.freshSession(campaignId);
-    if (!this.db) return { session: fresh, recovery: null, settled: null, announce: false, dirty: false };
+    if (!this.db) return { session: fresh, phaseInterrupted: null, recovery: null, settled: null, announce: false, dirty: false };
 
     // Reading the control state is best-effort in exactly the way writing it is: `ensureSession`
     // sits under EVERY driver endpoint (including the read-only GET /session), so a failed read
@@ -1166,9 +1270,9 @@ export class AiDriverService {
         .get() as AiDriverControlStateRow | undefined;
     } catch (err) {
       this.logger.error(`Failed to load AI driver control state for campaign ${campaignId}`, err);
-      return { session: fresh, recovery: null, settled: null, announce: false, dirty: false };
+      return { session: fresh, phaseInterrupted: null, recovery: null, settled: null, announce: false, dirty: false };
     }
-    if (!row) return { session: fresh, recovery: null, settled: null, announce: false, dirty: false };
+    if (!row) return { session: fresh, phaseInterrupted: null, recovery: null, settled: null, announce: false, dirty: false };
 
     const storedState = LADDER_STATES.has(row.state) ? row.state as AiDmLadderState : 'running';
     fresh.state = storedState;
@@ -1202,6 +1306,23 @@ export class AiDriverService {
       }
     }
     fresh.takeoverRequestedBy = row.takeoverRequestedBy ?? null;
+
+    // #1043. `greeting` and `wrap_up` last exactly as long as the turn that drives them, and the
+    // turn's return advances the phase — so finding one of them ON DISK means, by construction,
+    // that its turn never returned. The process died mid-greeting, or between writing the phase
+    // and starting the turn.
+    //
+    // Neither can be resumed: the turn lived in process memory and its narration is gone. The
+    // choice is therefore between two honest options, and the dishonest third one is what this
+    // avoids. Coming back still `wrap_up` would tell the table a closing summary is on its way
+    // when nothing is going to produce it. Coming back `active` SILENTLY would erase the DM's
+    // intent to close the session and leave them to notice on their own. So: reconcile to
+    // `active` — the phase in which the table can simply carry on — and say so out loud, with
+    // the phase that was interrupted named, so re-running Wrap Up is an obvious next step rather
+    // than a rediscovery.
+    const storedPhase = SESSION_PHASES.has(row.phase ?? '') ? (row.phase as AiDmSessionPhase) : 'active';
+    const phaseInterrupted = isTransientPhase(storedPhase) ? storedPhase : null;
+    fresh.phase = phaseInterrupted ? 'active' : storedPhase;
 
     if (row.lastInput) this.lastInputs.set(campaignId, row.lastInput);
     if (fresh.state === 'awaiting_players' && !fresh.stuck) fresh.state = 'running';
@@ -1257,8 +1378,11 @@ export class AiDriverService {
       || voteExpiredOnLoad
       || settled !== lastAnnounced
       || fresh.state !== storedState
-      || fresh.status !== row.status;
-    return { session: fresh, recovery, settled, announce, dirty };
+      || fresh.status !== row.status
+      // #1043: the reconciled phase MUST reach disk. Clearing the transient phase is the only
+      // thing that stops the notice repeating on every subsequent boot.
+      || phaseInterrupted !== null;
+    return { session: fresh, phaseInterrupted, recovery, settled, announce, dirty };
   }
 
   /**
@@ -1289,6 +1413,41 @@ export class AiDriverService {
   }
 
   /**
+   * Tell the table that a restart abandoned a transient lifecycle phase (#1043).
+   *
+   * The alternative — resetting to `active` and saying nothing — is the failure this project has
+   * now hit three times in the same state machine: state that cannot survive a process boundary
+   * disappearing without anyone being told. A DM who pressed Wrap Up before a deploy would come
+   * back to a table that had simply forgotten, and would have to work out for themselves that
+   * the closing summary is never arriving.
+   *
+   * Best-effort throughout, like every other announcement here: the phase is already correct on
+   * disk by this point, and a failure to say so must not stop the session being served.
+   */
+  private announceInterruptedPhase(session: AiDmSessionState, interrupted: AiDmSessionPhase): void {
+    const campaignId = session.campaignId;
+    const label = interrupted === 'greeting' ? 'opening the session' : 'wrapping up the session';
+    this.stream.emit({ type: 'phase', campaignId, phase: session.phase });
+    void this.audit
+      .log({
+        actor: `ai-dm-seat:${campaignId}`,
+        actorRole: 'dm',
+        action: 'ai-dm.driver.session.phase_interrupted',
+        entityType: 'ai-dm',
+        campaignId,
+        detail: `a restart interrupted the '${interrupted}' phase — reconciled to '${session.phase}'`,
+      })
+      .catch((err) => this.logger.error(`Phase-interruption audit failed for campaign ${campaignId}`, err));
+    this.recordControl(campaignId, { control: 'phase_interrupted', interrupted, phase: session.phase });
+    void this.notify(
+      campaignId,
+      RECOVERY_ACTOR,
+      'AI DM session phase was interrupted',
+      `A restart interrupted the AI DM while it was ${label}. That turn cannot be recovered, so the table is back in normal play — run it again if you still want it.`,
+    );
+  }
+
+  /**
    * Write the session's control state to disk.
    *
    * `announced` records which recovery shape the table has been told about. It defaults to null,
@@ -1315,6 +1474,7 @@ export class AiDriverService {
       vote: session.vote ? toJsonText(session.vote) : null,
       takeoverRequestedBy: stringOrNull(session.takeoverRequestedBy),
       lastInput: this.lastInputs.get(session.campaignId) ?? null,
+      phase: session.phase, // #1043
       updatedAt: ts,
     };
 
@@ -1341,6 +1501,7 @@ export class AiDriverService {
             takeoverRequestedBy: values.takeoverRequestedBy,
             lastInput: values.lastInput,
             announcedRecovery: values.announcedRecovery,
+            phase: values.phase,
             updatedAt: values.updatedAt,
           },
         })
@@ -1600,10 +1761,138 @@ export class AiDriverService {
     return session;
   }
 
+  /**
+   * Open a session (#1043): the AI greets the table and recaps where it left off.
+   *
+   * Player+, not DM-only — sitting down to play is a table act, and a group waiting on the one
+   * person who can say "we've started" is the small friction this is meant to remove. Wrap-up is
+   * DM-only because closing a session is a decision, not an announcement.
+   *
+   * THE GATES ARE NOT RE-IMPLEMENTED HERE. This runs the greeting through the same
+   * {@link runTurn} every player action goes through, so the seat flag, the token budget, the
+   * pause gate, the human-control gate, the turn lock and (once #599 lands) the participant
+   * safety hold all apply unchanged. A greeting is a turn; there is no privileged path around
+   * the things that stop turns.
+   *
+   * The phase is set BEFORE the turn — it has to be, because the prompt assembly reads it to
+   * decide which direction block and whether to fetch the recap — and a refused turn RESTORES
+   * it in the catch. Net effect: a start request that bounces off a paused seat leaves the
+   * lifecycle exactly where it was, rather than stranding the table in `greeting` with nothing
+   * having greeted them.
+   *
+   * The phase then advances to `active` when the turn RETURNS — whatever its stop reason. A
+   * greeting that hit the budget cap, errored, or was frozen mid-sentence still ends the opening
+   * phase, because the alternative is that a flubbed hello leaves the table unable to start
+   * playing. The stuck ladder is the right place to surface a bad greeting, and it still does:
+   * `stuck` is set by the turn loop independently of the phase, so a seat can be
+   * `phase: 'active', state: 'awaiting_players'` — which reads correctly as "the session is
+   * open, and the AI needs help", rather than conflating a failed greeting with an unopened
+   * session.
+   */
+  async startSession(campaignId: number, user: RequestUser, role: Role = 'player'): Promise<AiDmTurnRunResult> {
+    const session = this.ensureSession(campaignId);
+    if (session.phase === 'greeting' || session.phase === 'wrap_up') {
+      throw new ConflictException(
+        `The table is already in the ${session.phase === 'greeting' ? 'opening' : 'wrap-up'} phase. Wait for it to finish.`,
+      );
+    }
+    return this.runLifecycleTurn(campaignId, user, role, 'greeting', GREETING_PROMPT, 'active');
+  }
+
+  /**
+   * Close a session (#1043): the AI delivers a spoken closing summary and the phase lands
+   * `ended`. DM only.
+   *
+   * This does NOT write a session recap. The AI Scribe (#316) owns that, through the DM's
+   * proposal queue, and a second unreviewed summary landing straight on the campaign record
+   * would be a canon write nobody approved. What this produces is table talk.
+   */
+  async wrapUpSession(campaignId: number, user: RequestUser, role: Role = 'dm'): Promise<AiDmTurnRunResult> {
+    const session = this.ensureSession(campaignId);
+    if (session.phase === 'greeting' || session.phase === 'wrap_up') {
+      throw new ConflictException(
+        `The table is already in the ${session.phase === 'greeting' ? 'opening' : 'wrap-up'} phase. Wait for it to finish.`,
+      );
+    }
+    if (session.phase === 'ended') {
+      throw new ConflictException('This session has already ended. Start a new one before wrapping up again.');
+    }
+    return this.runLifecycleTurn(campaignId, user, role, 'wrap_up', WRAP_UP_PROMPT, 'ended');
+  }
+
+  /**
+   * Shared body of the two lifecycle transitions (#1043).
+   *
+   * `proactive: true` because there is no player action behind either turn: it suppresses the
+   * `player.action` transcript row that would otherwise attribute the system's prompt to whoever
+   * pressed the button, and it skips the untrusted-input fence, which exists for player text and
+   * would be wrong around a server-authored prompt.
+   *
+   * The `finally` is load-bearing. Whatever happens — a provider error, a frozen turn, a thrown
+   * budget rejection — the transient phase must not survive this method, or the table is stuck
+   * in `greeting` with no turn coming and no way to leave except a restart.
+   */
+  private async runLifecycleTurn(
+    campaignId: number,
+    user: RequestUser,
+    role: Role,
+    phase: AiDmSessionPhase,
+    prompt: string,
+    nextPhase: AiDmSessionPhase,
+  ): Promise<AiDmTurnRunResult> {
+    const session = this.ensureSession(campaignId);
+    const previousPhase = session.phase;
+    this.setPhase(session, phase);
+    try {
+      return await this.runTurn(campaignId, user, prompt, {
+        proactive: true,
+        maxSteps: 2,
+        maxTokens: 700,
+        actorName: user.name ?? undefined,
+      });
+    } catch (err) {
+      // The turn never ran (a gate refused it). Restore the phase the table was actually in —
+      // NOT `nextPhase`, which would end a session on the strength of a request that bounced.
+      this.setPhase(session, previousPhase);
+      void this.audit
+        .log({
+          actor: auditActor(user),
+          actorRole: role,
+          action: `ai-dm.driver.session.${phase === 'greeting' ? 'start' : 'wrap_up'}_rejected`,
+          entityType: 'ai-dm',
+          campaignId,
+          detail: `${phase} turn refused: ${err instanceof Error ? err.message : String(err)}`,
+        })
+        .catch(() => undefined);
+      throw err;
+    } finally {
+      // Only advance if the transient phase is still ours. A concurrent teardown, or a wrap-up
+      // racing a start, may have moved it — and stomping that would resurrect a phase the table
+      // has already left.
+      if (this.sessions.get(campaignId) === session && session.phase === phase) {
+        this.setPhase(session, nextPhase);
+      }
+    }
+  }
+
+  /** Set the lifecycle phase, persist it, and tell the table (#1043). */
+  private setPhase(session: AiDmSessionState, phase: AiDmSessionPhase): void {
+    if (session.phase === phase) return;
+    session.phase = phase;
+    this.persistControlState(session);
+    this.stream.emit({ type: 'phase', campaignId: session.campaignId, phase });
+    // #572: the lifecycle belongs in the durable table log, not only in a transient banner — a
+    // player who reloads mid-session should still see that the table formally opened.
+    this.recordControl(session.campaignId, { control: 'phase', phase });
+  }
+
   private freshSession(campaignId: number): AiDmSessionState {
     return {
       campaignId,
       status: 'idle',
+      // #1043: `active`, not `greeting`. A seat that has never run start-session must behave
+      // exactly as it did before the lifecycle existed.
+      phase: 'active',
       state: 'running',
       scene: null,
       lastNarration: null,
@@ -1647,7 +1936,7 @@ export class AiDriverService {
   private ensureSession(campaignId: number): AiDmSessionState {
     let s = this.sessions.get(campaignId);
     if (!s) {
-      const { session, recovery, settled, announce, dirty } = this.loadPersistedControlState(campaignId);
+      const { session, phaseInterrupted, recovery, settled, announce, dirty } = this.loadPersistedControlState(campaignId);
       s = session;
       // Publish BEFORE persisting/announcing: both re-enter this service, and the map entry must
       // already be the canonical object so nothing hydrates a second time.
@@ -1657,6 +1946,11 @@ export class AiDriverService {
       // transition every time.
       if (dirty) this.persistControlState(s, settled);
       if (announce && recovery) this.announceRecoveredState(s, recovery);
+      // #1043: independent of `announce`, and for the same reason the announcement machinery
+      // above cannot be reused — see the note on `HydratedControlState.phaseInterrupted`. Runs
+      // AFTER the write-back so a crash between the two re-announces rather than losing the
+      // notice, which is the direction that costs a duplicate message instead of silence.
+      if (phaseInterrupted) this.announceInterruptedPhase(s, phaseInterrupted);
     }
     return s;
   }
@@ -1755,6 +2049,20 @@ export class AiDriverService {
     }
     if (session.status === 'paused') {
       throw new ServiceUnavailableException('The AI Dungeon Master seat is paused. Resume it before sending input.');
+    }
+    // #1043. `ended` refuses new PLAYER input — and only player input: `opts.proactive` covers
+    // both lifecycle turns and the autonomous triggers, and a wrap-up turn obviously must be
+    // allowed to run while the phase is heading for `ended`.
+    //
+    // This is the one place the lifecycle has teeth beyond prompt text, and it is deliberate: a
+    // phase that changed nothing but tone would be decoration. It is also deliberately the ONLY
+    // place, and it is recoverable by any player in one request — the error names the endpoint —
+    // so a closed session is a speed bump, never a lockout that needs a DM to clear.
+    if (session.phase === 'ended' && !opts.proactive) {
+      throw new ConflictException({
+        code: 'AI_DM_SESSION_ENDED',
+        message: 'This session has been wrapped up. Start a new one (POST /ai-dm/start-session) to keep playing.',
+      });
     }
     // Serialize turns per campaign (#381): reject a concurrent POST /message while a turn is
     // already streaming. Two interleaved turns would splice their narration.delta events onto the
@@ -3875,6 +4183,37 @@ export class AiDriverService {
 
     const sessionZero = await safeRead(contextToolset, 'get_session_zero', { campaignId });
     if (sessionZero) parts.push(`## Session-zero charter (safety boundaries — MUST respect)\n${sessionZero}`);
+
+    // #1043 — session lifecycle. The phase block shapes HOW this turn should read; the recap is
+    // only fetched for a greeting, because it is the one turn that needs it and it is a
+    // non-trivial read to put on every turn of the session.
+    const phase = this.ensureSession(campaignId).phase;
+    const phaseDirection = PHASE_DIRECTION[phase];
+    if (phaseDirection) parts.push(phaseDirection);
+
+    if (phase === 'greeting') {
+      // CONSUMED, NOT REGENERATED. The AI Scribe (#316) already owns recap prose: it drafts one
+      // after a session, files it as a proposal, and a DM's approval lands it on `sessions.recap`.
+      // Asking the model to write a fresh "what happened last time" here would produce a SECOND,
+      // unreviewed account of the same events — ungrounded by construction, contradicting the one
+      // the DM actually approved, and delivered to the table as fact at the exact moment everyone
+      // is calibrating what is true. So the greeting reads the approved recap and nothing else.
+      //
+      // Routed through the player-scoped `contextToolset` like every other context read (#387),
+      // so a recap's `dmSecret` never reaches a prompt whose narration streams to every player,
+      // and harvested into the ledger so a greeting that cites the recap is not flagged
+      // unsupported by #577's grounding check.
+      const recaps = await safeRead(contextToolset, 'get_session_recaps', { campaignId, limit: 1 });
+      const recapText = formatListForPrompt(recaps);
+      if (recapText) {
+        parts.push(`## Previous session recap (the DM-approved record — use THIS, do not invent)\n${recapText}`);
+        if (ledger) harvestRetrievals(ledger, 'get_session_recaps', { campaignId }, recaps ?? undefined);
+      } else {
+        parts.push(
+          '## Previous session recap\nNone on record. Say so plainly instead of inventing what happened last time.',
+        );
+      }
+    }
 
     // #1048: dynamic world-state context — inject the LIVE game state into the prompt so the
     // AI can narrate coherently without needing to chain read tools every turn. All reads go

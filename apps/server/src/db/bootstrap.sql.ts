@@ -1198,6 +1198,12 @@ CREATE TABLE IF NOT EXISTS ai_driver_control_state (
   -- state (paused / human_control / stuck / open vote) is announced once, not re-announced
   -- on every subsequent restart.
   announced_recovery TEXT,
+  -- Issue #1043: the session lifecycle phase (greeting | active | wrap_up | ended). Defaults to
+  -- 'active' so a campaign that never runs start-session keeps behaving exactly as it did before
+  -- the lifecycle existed. The two transient phases last only as long as the turn that drives
+  -- them, so finding one here on boot means that turn never returned; hydration reconciles it to
+  -- 'active' and announces the loss rather than pretending a summary is still coming.
+  phase TEXT NOT NULL DEFAULT 'active',
   updated_at TEXT NOT NULL
 );
 

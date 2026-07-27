@@ -21,6 +21,14 @@
 
     "pause": "Pause",
     "resume": "Resume",
+    "startSession": "Start Session",
+    "wrapUp": "Wrap Up",
+    "lifecycleFailed": "Couldn't change the session phase. Try again.",
+    "phaseNote": {
+      "greeting": "The AI is opening the session\u2026",
+      "wrap_up": "The AI is wrapping up the session\u2026",
+      "ended": "This session has ended. Start a new one to keep playing."
+    },
     "pauseFailed": "Couldn't change the AI DM's pause state.",
 
     "emptyTitle": "The table is quiet",

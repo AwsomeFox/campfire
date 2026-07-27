@@ -124,6 +124,36 @@ If a driver stalls or makes a call the table disputes, players have recovery lev
 open a **table vote** (to override or pause), or **request a human takeover**. The DM
 can pause and resume the seat at any time.
 
+### Session pacing: start and wrap up
+
+By default the AI answers when someone talks to it and does nothing otherwise. Two controls on
+the AI Table give a session a shape:
+
+- **Start Session** — available to **anyone at the table**, because sitting down to play is a
+  group act, not something everyone should wait on the DM for. The AI greets the players and
+  recaps where you left off.
+- **Wrap Up** — **DM only**, because closing a session is a decision. The AI delivers a spoken
+  closing summary and the session is marked ended.
+
+**The greeting recap is the one your DM already approved.** It reads the recap on your most
+recent session — the one the AI Scribe drafted and the DM accepted — rather than writing a fresh
+account of the same events. If there is no recap on record yet, it says so instead of inventing
+what happened. A confabulated "last time on…" is worse than none, because the table takes it as
+canon at exactly the moment everyone is working out what is true.
+
+Neither control is a way around anything. Both run a normal AI turn, so a paused seat, an
+exhausted token budget, or a human holding the DM seat refuses them just as it refuses a player
+action — and a start request that gets refused leaves the session exactly where it was.
+
+After the AI wraps up, player input is refused until someone starts a new session. That is the
+only thing the lifecycle blocks, and any player can clear it in one click.
+
+**If a greeting or wrap-up fails**, the session still opens or closes. A provider hiccup should
+not leave a table unable to start playing; the failure shows up in the AI's recovery levers,
+where failures belong. Likewise, if the server restarts while the AI is mid-greeting or
+mid-wrap-up, that turn is gone — so the table is put back into normal play and **told that it
+happened**, rather than left waiting for a summary that is never coming.
+
 ### The scheduled AI scribe
 
 A companion **AI scribe** can **draft session recaps** — after a scheduled session ends,
