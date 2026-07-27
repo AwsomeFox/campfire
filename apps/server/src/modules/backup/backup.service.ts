@@ -1019,6 +1019,11 @@ export class BackupService implements OnApplicationBootstrap {
       this.holder.raw.exec(`VACUUM INTO '${snapshotPath.replace(/'/g, "''")}'`);
       assertBackupNotCancelled(options?.signal);
       zip = archiver('zip', { zlib: { level: 6 } });
+      // Keep a permanent sink for errors emitted asynchronously after scoped
+      // pipeline listeners are removed during teardown. Other listeners still
+      // receive the same event; this only prevents a late unhandled error from
+      // terminating the server.
+      zip.on('error', () => undefined);
       // Keep the snapshot on disk and let the ZIP writer pull from it under
       // output backpressure instead of materializing the database in the V8 heap.
       const dbSize = safeFileBytes(snapshotPath);
