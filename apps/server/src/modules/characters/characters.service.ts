@@ -21,6 +21,13 @@ import {
   formatCheckBreakdown,
   sortCheckCatalog,
   pf2eDegreeOfSuccess,
+  // Rest mechanics (#1041): the pure planner. Nothing here rolls its own dice or touches the
+  // database — the service plans, validates the WHOLE party, then writes once.
+  describeRestForLog,
+  planPartyRest,
+  type RestAdapter,
+  type RestCharacterState,
+  type RestKind,
 } from '@campfire/schema';
 import type { Character, CharacterAction, CharacterResource, Role, SkillRank, SpellSlotLevel, RollCheckDefinition, CheckRollRequest, CheckRollResponse, CheckRequest, CheckRequestCreate, CheckRequestResolution } from '@campfire/schema';
 import { rollDice } from '../../common/dice';
@@ -113,6 +120,29 @@ export function toDomain(row: typeof characters.$inferSelect): Character {
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
+}
+
+/** Per-character outcome of a party rest (#1041). Counts + rolls, so a table can audit it. */
+export interface RestPartyCharacterResult {
+  characterId: number;
+  name: string;
+  hpBefore: number;
+  hpAfter: number;
+  hitDiceSpent: number;
+  hitDiceRolls: number[];
+  hitDiceRecovered: number;
+  spellSlotLevelsRecovered: string[];
+  resourcesRecovered: string[];
+  conditionsCleared: string[];
+  conditionsKept: string[];
+  logLine: string;
+}
+
+/** The result of one atomic party rest (#1041). */
+export interface RestPartyResult {
+  kind: RestKind;
+  ruleSystem: string;
+  characters: RestPartyCharacterResult[];
 }
 
 @Injectable()
@@ -911,11 +941,30 @@ export class CharactersService {
     return redactSecret(toDomain(row), role);
   }
 
+  /**
+   * Starfinder-style stamina/night rest (SP/RP + HP-equal-to-level).
+   *
+   * #1041 NOTE — this method also accepted `'short'` and `'long'` and quietly treated them as
+   * aliases for `'stamina'` / `'night'`. For a 5e table that meant `POST /characters/:id/rest
+   * {"kind":"long"}` performed a SILENT PARTIAL rest: no spell slots, no class resources, no
+   * conditions, and HP healed by level rather than to full. That is worse than the feature
+   * being absent, because it looks like it worked.
+   *
+   * The two 5e-meaning words now delegate to the real rest engine ({@link restParty}), so one
+   * endpoint no longer means two different things depending on which word you typed. The
+   * Starfinder cadences keep their exact previous behaviour — that is a genuinely different
+   * mechanic (it SPENDS a Resolve Point), not a worse spelling of a short rest.
+   */
   async rest(id: number, restType: 'stamina' | 'night' | 'short' | 'long', user: RequestUser, role: Role): Promise<Character> {
     const existing = await this.getRowOrThrow(id);
     this.assertCanWrite(existing, user, role);
 
-    const isStaminaRest = restType === 'stamina' || restType === 'short';
+    if (restType === 'short' || restType === 'long') {
+      await this.restParty(existing.campaignId, restType, [id], {}, user, role);
+      return redactSecret(toDomain(await this.getRowOrThrow(id)), role);
+    }
+
+    const isStaminaRest = restType === 'stamina';
     let row!: typeof characters.$inferSelect;
     this.db.transaction((tx) => {
       const [fresh] = tx.select().from(characters).where(eq(characters.id, id)).limit(1).all();
@@ -1272,6 +1321,170 @@ export class CharactersService {
   }
 
   /** Execute a short rest, long rest, or refocus on a character sheet (issue #422). */
+  /**
+   * Take a short or long rest for one or more characters, ATOMICALLY (issue #1041).
+   *
+   * Before this existed the AI DM had to set each character's HP, reset each spell-slot level,
+   * and clear each condition with its own tool call — dozens of writes with no transaction, so
+   * a turn that ran out of steps or hit a policy refusal halfway left the party in a state no
+   * single undo reversed.
+   *
+   * The contract is PLAN-THEN-APPLY, and the split is the whole point:
+   *   1. read every character and PLAN the rest purely (no writes);
+   *   2. if ANY character's plan failed — dead, unknown hit die, not enough hit dice — reject
+   *      the entire call and write nothing. A party rest that healed three and rejected the
+   *      fourth is exactly the non-atomic mess this tool exists to remove, reproduced inside it;
+   *   3. apply every plan in ONE transaction;
+   *   4. audit ONCE for the whole rest, and combat-log one line per character.
+   *
+   * Note the failure report lists EVERY problem, not just the first: a DM should learn about
+   * all of them at once rather than discovering them one rejected call at a time.
+   */
+  async restParty(
+    campaignId: number,
+    kind: RestKind,
+    characterIds: number[],
+    perCharacter: Record<number, { spendHitDice?: number; hitDie?: number }>,
+    user: RequestUser,
+    role: Role,
+  ): Promise<RestPartyResult> {
+    if (characterIds.length === 0) {
+      throw new BadRequestException('A rest needs at least one character.');
+    }
+    const adapter = (await this.adapterForCampaign(campaignId)) as unknown as RestAdapter;
+
+    const rows = await this.db
+      .select()
+      .from(characters)
+      .where(and(eq(characters.campaignId, campaignId), notDeleted(characters.deletedAt)));
+    const byId = new Map(rows.map((r) => [r.id, r]));
+
+    const missing = characterIds.filter((id) => !byId.has(id));
+    if (missing.length > 0) {
+      throw new NotFoundException(`No character ${missing.join(', ')} in campaign ${campaignId}.`);
+    }
+    // Permission is checked for EVERY character before anything is planned: a player resting
+    // "the party" must not quietly rest characters they do not own.
+    const targets = characterIds.map((id) => byId.get(id)!);
+    for (const row of targets) this.assertCanWrite(row, user, role);
+
+    const states: RestCharacterState[] = targets.map((row) => ({
+      id: row.id,
+      name: row.name,
+      level: row.level,
+      hpCurrent: row.hpCurrent,
+      hpMax: row.hpMax,
+      hpTemp: row.hpTemp,
+      deathState: row.deathState as RestCharacterState['deathState'],
+      deathSaveSuccesses: row.deathSaveSuccesses,
+      deathSaveFailures: row.deathSaveFailures,
+      conditions: fromJsonText<string[]>(row.conditions, []),
+      stats: fromJsonText<Record<string, number>>(row.stats, {}),
+      spellSlots: fromJsonText<Record<string, SpellSlotLevel>>(row.spellSlots, {}),
+      resources: fromJsonText<Record<string, CharacterResource>>(row.resources, {}),
+    }));
+
+    // Dice come from the shared roller, injected — the planner itself is deterministic and the
+    // rolls are visible in the result, so a table can audit what a hit die actually rolled.
+    const plan = planPartyRest(adapter, states, kind, perCharacter, (sides) => rollDice(`1d${sides}`).total);
+
+    if (plan.failures.length > 0) {
+      throw new BadRequestException({
+        code: 'rest_not_applicable',
+        message: `The ${kind} rest was not applied. ${plan.failures.map((f) => f.detail).join(' ')}`,
+        failures: plan.failures,
+      });
+    }
+
+    const at = nowIso();
+    this.db.transaction((tx) => {
+      for (const p of plan.plans) {
+        tx.update(characters)
+          .set({
+            hpCurrent: p.hpAfter,
+            hpTemp: p.hpTempAfter,
+            deathState: p.deathStateAfter,
+            deathSaveSuccesses: p.deathSaveSuccessesAfter,
+            deathSaveFailures: p.deathSaveFailuresAfter,
+            conditions: toJsonText(p.conditionsAfter),
+            spellSlots: toJsonText(p.spellSlotsAfter),
+            resources: toJsonText(p.resourcesAfter),
+            updatedAt: at,
+          })
+          .where(eq(characters.id, p.characterId))
+          .run();
+      }
+    });
+
+    // Everything below is BEST-EFFORT bookkeeping that runs after the commit. A failed mirror
+    // or log line must not roll back a rest the table has already been told about.
+    for (const p of plan.plans) {
+      // HP/death state and conditions mirror through the two existing seams (#50 / #486), so a
+      // rest taken mid-encounter is reflected on the tracker exactly like a sheet edit.
+      await this.syncActiveCombatants(p.characterId, p.hpAfter, undefined, {
+        campaignId,
+        deathState: p.deathStateAfter,
+      }).catch(() => undefined);
+      await this.syncActiveCombatantConditions(p.characterId, toJsonText(p.conditionsAfter), {
+        campaignId,
+      }).catch(() => undefined);
+    }
+
+    // ONE audit entry for the whole rest, not one per character — the rest is the event.
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: kind === 'long' ? 'character.rest.long' : 'character.rest.short',
+      entityType: 'character',
+      campaignId,
+      detail: JSON.stringify({
+        kind,
+        ruleSystem: plan.ruleSystem,
+        characterIds,
+        hitDiceSpent: plan.plans.reduce((n, p) => n + p.hitDiceSpent, 0),
+        conditionsCleared: plan.plans.flatMap((p) => p.conditionsCleared),
+        conditionsKept: plan.plans.flatMap((p) => p.conditionsKept),
+      }),
+    });
+
+    for (const p of plan.plans) {
+      this.emitCharacterUpdated(campaignId, p.characterId, user.id);
+    }
+
+    return {
+      kind,
+      ruleSystem: plan.ruleSystem,
+      characters: plan.plans.map((p) => ({
+        characterId: p.characterId,
+        name: p.characterName,
+        hpBefore: p.hpBefore,
+        hpAfter: p.hpAfter,
+        hitDiceSpent: p.hitDiceSpent,
+        hitDiceRolls: p.hitDiceRolls,
+        hitDiceRecovered: p.hitDiceRecovered,
+        spellSlotLevelsRecovered: p.spellSlotLevelsRecovered,
+        resourcesRecovered: p.resourcesRecovered,
+        conditionsCleared: p.conditionsCleared,
+        // Surfaced deliberately: the DM must be able to see what a night's sleep did NOT fix
+        // without diffing two sheets. See the allowlist rationale in packages/schema/src/rest.ts.
+        conditionsKept: p.conditionsKept,
+        logLine: describeRestForLog(p, kind),
+      })),
+    };
+  }
+
+  /**
+   * DEPRECATED (#1041) — kept as a thin adapter over {@link restParty}.
+   *
+   * This was dead code: it reset spell slots and resources by recharge cadence but ignored HP,
+   * temp HP, death saves, and conditions, and nothing but a test ever called it. Its cadence
+   * logic now lives in `packages/schema/src/rest.ts`, where it is shared with the real rest
+   * path, so the two can no longer drift. `refocus` has no equivalent in the two-kind rest
+   * model and is left doing exactly what it did — refilling refocus resources only.
+   *
+   * Prefer `restParty`. This exists so an existing caller (and its integration spec) keeps
+   * working rather than being silently deleted along with the behaviour it pinned.
+   */
   async restCharacter(id: number, restType: 'short-rest' | 'long-rest' | 'refocus', user: RequestUser, role: Role): Promise<Character> {
     const existing = await this.getRowOrThrow(id);
     this.assertCanWrite(existing, user, role);

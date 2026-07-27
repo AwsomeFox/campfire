@@ -628,6 +628,12 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'set_character_conditions',
   'award_xp',
   'level_up_character',
+  // #1041 — rest is core live play, and these REPLACE a long chain of raw HP/slot/condition
+  // writes with one atomic call. Giving the seat the atomic version is strictly safer than
+  // leaving it to reconstruct a rest from primitives it already has: the chain is what could
+  // half-apply, not the tool.
+  'long_rest',
+  'short_rest',
   // scene / exploration / world consequences
   'reveal_map_region',
   'check_objective',
@@ -657,6 +663,12 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   // table notes the DM jots during play
   'add_note',
 ]);
+
+/**
+ * The live-play allowlist as a plain array, for tests and tooling that need to assert
+ * membership without reaching into the Set (#1041).
+ */
+export const DRIVER_LIVE_PLAY_TOOL_NAMES: readonly string[] = [...DRIVER_LIVE_PLAY_TOOLS];
 
 export {
   DRIVER_GENERATE_MAP_BUDGET_PER_TURN,
