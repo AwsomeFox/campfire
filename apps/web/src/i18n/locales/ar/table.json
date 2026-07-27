@@ -17,6 +17,18 @@
     "noBudget": "No budget",
     "pause": "Pause",
     "resume": "Resume",
+    "confirmations": {
+      "title": "Waiting on you",
+      "blocked": "The AI proposed these actions and is waiting for your decision. Nothing has been applied yet.",
+      "approve": "Approve",
+      "reject": "Reject",
+      "approved": "Action approved.",
+      "rejected": "Action rejected.",
+      "failed": "Couldn't resolve that. Try again.",
+      "meta": "{{tool}} \u00b7 proposed on turn {{turn}}",
+      "showArgs": "Show arguments",
+      "showArgsMore": "Show arguments ({{count}} more not summarised)"
+    },
     "startSession": "Start Session",
     "wrapUp": "Wrap Up",
     "lifecycleFailed": "Couldn't change the session phase. Try again.",

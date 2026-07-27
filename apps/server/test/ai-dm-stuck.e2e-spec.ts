@@ -14,6 +14,20 @@ import { AiDmStreamService, type AiDmStreamEvent } from '../src/modules/ai-drive
 
 const seat = { mode: 'driver' as const, instructions: 'Be terse.', tokenBudget: 100_000 };
 
+/**
+ * The LIVE prompt of a captured request — the final user message.
+ *
+ * Since #1038 a driver turn is prepended with bounded conversation history, so `messages[0]`
+ * is the replayed earlier action rather than the thing this turn is asking about. These lever
+ * assertions are about what the lever injected into the CURRENT turn, so they read the last
+ * user message; that is what they always meant, and it stays true however much history is
+ * replayed in front of it.
+ */
+function lastUserMessage(req: { messages: { role: string; content?: string }[] }): string {
+  const user = req.messages.filter((m) => m.role === 'user');
+  return user[user.length - 1]?.content ?? '';
+}
+
 /** A scripted turn whose (unknown-)tool call errors → the driver stops with `tool_error`. */
 const TOOL_ERROR_TURN = {
   text: 'I reach for the dice…',
@@ -149,7 +163,7 @@ describe('ai-dm stuck ladder — player levers recover or hand off (e2e)', () =>
     expect(session.body.stuck).toBeNull();
 
     // The hint reached the model (injected into the replayed input) and the nudge is audited.
-    expect(h.mock.received.at(-1)!.messages[0].content).toContain('keep it moving');
+    expect(lastUserMessage(h.mock.received.at(-1)!)).toContain('keep it moving');
     const audit = await h.getAudit(campaignId);
     expect(audit.body.some((e: { action: string }) => e.action === 'ai-dm.driver.nudge')).toBe(true);
   });
@@ -168,9 +182,9 @@ describe('ai-dm stuck ladder — player levers recover or hand off (e2e)', () =>
     expect(flag.body.narration).toBe('On review, a DC 12 Dex save halves it.');
 
     // The dispute was injected into the re-run's user turn, and audited.
-    const reReq = h.mock.received.at(-1)!;
-    expect(reReq.messages[0].content).toContain('DISPUTES');
-    expect(reReq.messages[0].content).toContain('saving throw');
+    const reReq = lastUserMessage(h.mock.received.at(-1)!);
+    expect(reReq).toContain('DISPUTES');
+    expect(reReq).toContain('saving throw');
     const audit = await h.getAudit(campaignId);
     expect(audit.body.some((e: { action: string }) => e.action === 'ai-dm.driver.flag')).toBe(true);
   });

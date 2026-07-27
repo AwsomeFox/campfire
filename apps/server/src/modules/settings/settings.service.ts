@@ -1,11 +1,17 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { eq } from 'drizzle-orm';
 import type { z } from 'zod';
-import { ServerSettings, SettingsUpdate } from '@campfire/schema';
+import { AiDmSeatDefaults, ServerSettings, SettingsUpdate } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { settings } from '../../db/schema';
 
 type SettingsUpdateInput = z.infer<typeof SettingsUpdate>;
+
+/**
+ * `settings` key holding the AI seat defaults (#1070). Namespaced under `ai.` so structured
+ * config blobs cannot collide with the flat ServerSettings keys.
+ */
+const AI_SEAT_DEFAULTS_KEY = 'ai.seatDefaults';
 
 const DEFAULTS: z.infer<typeof ServerSettings> = {
   allowLocalLogin: true,
@@ -58,6 +64,30 @@ export class SettingsService {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * Server-wide AI seat defaults (#1070) — what a campaign that has never configured its AI
+   * seat inherits. Lives here, beside the other server-scope config, rather than in a new
+   * table: it is one JSON value, so this feature needed no migration.
+   *
+   * Owned by SettingsService rather than AiDmService so the admin controller can read and
+   * write it without SettingsModule importing AiDmModule, which already imports this one.
+   *
+   * A malformed or partial stored value degrades per-field through zod instead of throwing —
+   * a bad server default must not be able to break every campaign's seat read.
+   */
+  async getAiSeatDefaults(): Promise<AiDmSeatDefaults> {
+    const stored = await this.getJson<unknown>(AI_SEAT_DEFAULTS_KEY);
+    const parsed = AiDmSeatDefaults.safeParse(stored ?? {});
+    return parsed.success ? parsed.data : AiDmSeatDefaults.parse({});
+  }
+
+  /** Replace the server-wide AI seat defaults. Admin-gated at the controller. */
+  async setAiSeatDefaults(input: AiDmSeatDefaults): Promise<AiDmSeatDefaults> {
+    const next = AiDmSeatDefaults.parse(input);
+    await this.setJson(AI_SEAT_DEFAULTS_KEY, next);
+    return next;
   }
 
   /** Upserts a JSON-encoded value under an arbitrary settings key. */

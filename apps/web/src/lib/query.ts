@@ -57,6 +57,8 @@ export const queryKeys = {
   aiDmReadiness: (campaignId: number) => ['campaign', campaignId, 'ai-dm', 'readiness'] as const,
   /** #577 — the AI's factual claims plus the server's verdict on each (the grounding card). */
   aiDmGrounding: (campaignId: number) => ['campaign', campaignId, 'ai-dm', 'grounding'] as const,
+  /** #1558 — confirm-policy tool calls waiting on a DM's approval. */
+  aiDmToolConfirmations: (campaignId: number) => ['campaign', campaignId, 'ai-dm', 'tool-confirmations'] as const,
 } satisfies Record<string, (...args: never[]) => QueryKey>;
 
 /**
@@ -155,6 +157,12 @@ export interface AiDmSession {
   actingDm: AiDmActingDmGrant | null;
   vote: AiDmTableVote | null;
   takeoverRequestedBy: string | null;
+  /**
+   * How many past table events the AI can draw on for conversation memory (#1038). Derived
+   * server-side from the durable transcript on every read, so it reflects a DM purge or
+   * retention pruning immediately. Optional: a server predating #1038 simply omits it.
+   */
+  historyLength?: number;
 }
 
 /**
@@ -193,6 +201,50 @@ export function useAiDmSeat(campaignId: number | undefined): UseQueryResult<AiDm
  * spends, so it goes stale on exactly the same signals — without this the onboarding checklist
  * and the per-turn cost estimate keep rendering pre-turn numbers (#519).
  */
+/**
+ * One confirm-policy tool call waiting on a DM (#474), as returned by
+ * GET /campaigns/:id/ai-dm/tool-confirmations. DM-only server-side.
+ */
+export interface AiDmToolConfirmation {
+  id: string;
+  tool: string;
+  args: Record<string, unknown>;
+  toolCallId: string;
+  profile: 'prep' | 'live' | 'aftermath';
+  policy: 'auto' | 'confirm' | 'propose' | 'deny';
+  requestedAt: string;
+  actor: string;
+  triggeredBy: string;
+  turnNumber: number;
+}
+
+/**
+ * Watch the pending tool-confirmation queue (#1558).
+ *
+ * `enabled` is the caller's, because the endpoint is DM-only and a player polling it would
+ * generate a steady drip of 403s. A modest poll backs up the SSE signal for the same reason the
+ * safety hold polls: this is a queue whose whole failure mode is a SILENT stall, and a dead SSE
+ * connection is exactly the condition under which the DM most needs the list to still arrive.
+ */
+export function useAiDmToolConfirmations(
+  campaignId: number | undefined,
+  enabled: boolean,
+): UseQueryResult<AiDmToolConfirmation[]> {
+  return useQuery({
+    queryKey:
+      campaignId !== undefined ? queryKeys.aiDmToolConfirmations(campaignId) : ['ai-dm', 'tool-confirmations', 'disabled'],
+    queryFn: () => api.get<AiDmToolConfirmation[]>(`${API}/campaigns/${campaignId}/ai-dm/tool-confirmations`),
+    enabled: enabled && campaignId !== undefined && Number.isFinite(campaignId),
+    staleTime: 0,
+    refetchInterval: 30_000,
+    refetchOnWindowFocus: true,
+  });
+}
+
+export function invalidateAiDmToolConfirmations(client: QueryClient, campaignId: number): void {
+  void client.invalidateQueries({ queryKey: queryKeys.aiDmToolConfirmations(campaignId) });
+}
+
 export function invalidateAiDm(client: QueryClient, campaignId: number): void {
   void client.invalidateQueries({ queryKey: queryKeys.aiDmSession(campaignId) });
   void client.invalidateQueries({ queryKey: queryKeys.aiDmSeat(campaignId) });

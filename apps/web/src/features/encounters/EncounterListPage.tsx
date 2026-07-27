@@ -107,6 +107,21 @@ export default function EncounterListPage() {
     target: 'encounter',
   });
 
+  /**
+   * Encounter ids the reader has already been shown. `null` until the first load completes, so
+   * the initial page render is not announced as a pile of arrivals.
+   */
+  const seenEncounterIds = useRef<Set<number> | null>(null);
+  const [arrivalMessage, setArrivalMessage] = useState('');
+
+  // Changing the status filter or the search term changes WHICH encounters are listed, not
+  // which ones exist. Re-baseline silently so a row coming back into a filter is not announced
+  // as a new arrival — an announcement that cries wolf is worse than none.
+  useEffect(() => {
+    seenEncounterIds.current = null;
+    setArrivalMessage('');
+  }, [id, statusFilter, debouncedSearch]);
+
   const load = useCallback(async () => {
     const gen = ++fetchGeneration.current;
     setLoading(true);
@@ -114,6 +129,17 @@ export default function EncounterListPage() {
     try {
       const data = await api.get<Encounter[]>(encounterListUrl(id, statusFilter, debouncedSearch));
       if (gen !== fetchGeneration.current) return;
+      // Issue #1022: an encounter can now appear here without the DM having done anything —
+      // the AI Driver creates one mid-scene. A sighted DM sees a new card slide in; a screen
+      // reader user previously got only the unchanged "N encounters" count, so the arrival was
+      // silent. Name what actually appeared, into the SAME live region the page already owns
+      // (never a second aria-live region — see CheckRequests.tsx).
+      const previous = seenEncounterIds.current;
+      const arrived = previous === null ? [] : data.filter((e) => !previous.has(e.id));
+      seenEncounterIds.current = new Set(data.map((e) => e.id));
+      setArrivalMessage(
+        arrived.length > 0 ? t('encounters.list.arrived', { count: arrived.length, names: arrived.map((e) => e.name).join(', ') }) : '',
+      );
       setEncounters(data);
     } catch (err) {
       if (gen !== fetchGeneration.current) return;
@@ -129,11 +155,14 @@ export default function EncounterListPage() {
 
   const statusMessage = useMemo(() => {
     if (loading) return '';
+    // An arrival takes precedence over the bare count: "2 encounters" is what the reader
+    // already believed, while "Ambush in the Reeds was added" is the thing that changed.
+    if (arrivalMessage) return arrivalMessage;
     if (encounters.length === 0) {
       return filtersActive ? t('encounters.list.noResults') : t('encounters.empty.title');
     }
     return t('encounters.list.resultCount', { count: encounters.length });
-  }, [encounters.length, filtersActive, loading, t]);
+  }, [arrivalMessage, encounters.length, filtersActive, loading, t]);
 
   if (!Number.isFinite(id)) {
     return (

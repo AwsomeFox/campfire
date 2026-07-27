@@ -50,8 +50,29 @@ const IMAGE_TIMEOUT_MS = 120_000;
 const MAX_JOBS_PER_CAMPAIGN = 20;
 /** Max concurrently-running generation jobs per campaign (concurrency limit). */
 const MAX_CONCURRENT_PER_CAMPAIGN = 2;
-/** Minimum spacing between job STARTS per campaign (rate limit), ms. Mutable for tests. */
-export let AI_MAP_RATE_LIMIT_MS = 1_500;
+/** Default minimum spacing between job STARTS per campaign (rate limit), ms. */
+const DEFAULT_AI_MAP_RATE_LIMIT_MS = 1_500;
+
+/**
+ * Minimum spacing between job STARTS per campaign (rate limit), ms. Mutable for tests.
+ *
+ * Overridable via `CAMPFIRE_AI_MAP_RATE_LIMIT_MS` so the browser e2e harness can switch
+ * it off, the same way it already sets `THROTTLE_DISABLED` for the auth throttler. The
+ * limit is per CAMPAIGN and the e2e suite shares one seeded campaign, so a spec that
+ * generates a map silently charged the next spec's generation — which is how the AI-map
+ * moderation spec came to fail depending on how quickly the preceding spec finished.
+ * Bypassing it there is safe because the limiter itself is covered directly in
+ * `test/unit/ai-map-routing.spec.ts` rather than incidentally by a browser journey.
+ */
+export let AI_MAP_RATE_LIMIT_MS = resolveConfiguredRateLimitMs();
+
+function resolveConfiguredRateLimitMs(): number {
+  const raw = process.env.CAMPFIRE_AI_MAP_RATE_LIMIT_MS;
+  if (raw === undefined || raw.trim() === '') return DEFAULT_AI_MAP_RATE_LIMIT_MS;
+  const parsed = Number(raw);
+  // A malformed value must not silently disable a protective limit.
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_AI_MAP_RATE_LIMIT_MS;
+}
 
 /** Test-only: shrink/disable the per-campaign generation rate limit. */
 export function setAiMapRateLimitMsForTests(ms: number): void {
@@ -199,7 +220,6 @@ export class AiMapService {
     const record: JobRecord = { job: base, request, caller, bytes: new Map(), abort: new AbortController() };
     this.registerJob(record);
     if (idemKey) this.idempotency.set(idemKey, id);
-    this.lastStart.set(campaignId, Date.now());
 
     if (moderation.flagged) {
       await this.audit.log({
@@ -213,6 +233,13 @@ export class AiMapService {
       });
       return record.job;
     }
+
+    // Charge the per-campaign rate-limit slot only once a generation actually STARTS.
+    // Setting it before the moderation early-return above meant a blocked prompt — which
+    // runs no renderer and costs nothing — still locked the campaign out of its next
+    // legitimate generation for the whole window. The limit exists to bound expensive
+    // work, so work that never happened must not spend it.
+    this.lastStart.set(campaignId, Date.now());
 
     await this.runGeneration(record, config, user, role, caller);
     return record.job;

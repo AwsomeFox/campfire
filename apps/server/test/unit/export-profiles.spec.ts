@@ -228,10 +228,18 @@ describe('pseudonymization (#586)', () => {
   });
 
   it('is unlinkable across exports and never reveals the id', () => {
-    const a = new ExportPseudonymizer().label('42');
-    const b = new ExportPseudonymizer().label('42');
+    // The id here is long and non-hex on purpose. The label's tail is 10 random hex
+    // characters, so a short numeric id like '42' turns up inside it by chance roughly
+    // one run in thirty — this assertion used to fail at that rate on unrelated PRs.
+    // An id that cannot fit in the tail, and cannot be spelled with hex digits, makes
+    // "does not embed the raw id" a claim about the implementation rather than a
+    // coin flip: a version that concatenated the id would fail every time.
+    const id = 'user-zz-4242424242424242';
+    const a = new ExportPseudonymizer().label(id);
+    const b = new ExportPseudonymizer().label(id);
     expect(a).not.toBe(b);
-    expect(a).not.toContain('42');
+    expect(a).not.toContain(id);
+    expect(a).toMatch(/^Contributor [0-9a-f]{10}$/);
   });
 
   it('does not crash on an unknown author', () => {

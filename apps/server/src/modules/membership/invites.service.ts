@@ -8,6 +8,7 @@ import {
 import { and, asc, eq, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import { InviteCreate } from '@campfire/schema';
+import { effectivePermissionsFor } from '@campfire/schema';
 import type { CampaignInvite, InvitePreview, InviteRole, Me } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { campaignInvites, campaignMembers, campaigns, users } from '../../db/schema';
@@ -319,14 +320,31 @@ export class InvitesService {
     return { invite: row, campaign };
   }
 
-  /** Public preview for the join page: what campaign, joining as what, until when. */
+  /**
+   * Public preview for the join page: what campaign, joining as what, until when — and,
+   * since issue #597, what that seat can actually DO.
+   *
+   * The role name alone was not an answer. "Viewer" told a joiner nothing they could
+   * verify, and until #597 it was actively misleading: a viewer could comment on any
+   * thread and whisper any member. Someone deciding whether to click a link — or a
+   * parent deciding for a child — is entitled to see the capability list before
+   * accepting, not to discover it afterwards by trying.
+   *
+   * `interactiveGuest` is always FALSE here, and that is a real statement rather than a
+   * placeholder: an invite link can only ever seat a read-only viewer or a full player.
+   * The interactive-guest capability is granted afterwards by a DM, per seat, and is
+   * audited — so a link can never be the thing that hands a stranger a direct-message
+   * channel to the table.
+   */
   async preview(code: string): Promise<InvitePreview> {
     const { invite, campaign } = await this.getValidInvite(code);
+    const role = invite.role as InviteRole;
     return {
       campaignId: campaign.id,
       campaignName: campaign.name,
-      role: invite.role as InviteRole,
+      role,
       expiresAt: invite.expiresAt,
+      permissions: effectivePermissionsFor(role, false),
     };
   }
 
