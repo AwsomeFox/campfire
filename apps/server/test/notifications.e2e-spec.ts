@@ -488,6 +488,10 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
   let ctx: TestAppContext;
   let dm: ReturnType<typeof request.agent>; // campaign creator/dm
   let player: ReturnType<typeof request.agent>; // a player
+  // Venue/room/template MUTATION is @ServerRoles('admin'); applying a template
+  // only needs `dm` on the target campaign. Both agents are therefore needed to
+  // exercise the apply path end to end.
+  let admin: ReturnType<typeof request.agent>;
   let playerId: number;
   let campaignId: number;
 
@@ -514,6 +518,7 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
     const server = ctx.app.getHttpServer();
 
     const adminAgent = request.agent(server);
+    admin = adminAgent;
     await adminAgent.post('/api/v1/auth/setup').send({ username: 'cov-admin', password: 'admin-password-1' });
     await adminAgent.post('/api/v1/users').send({ username: 'cov-dm', password: 'password-dm-1', displayName: 'Dana DM' });
     const createPlayer = await adminAgent
@@ -605,6 +610,115 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
       changeType: 'cancelled',
     });
     expect(afterCancel[0].title).toMatch(/cancelled/i);
+  });
+
+  /**
+   * Issue #588 — the organized-play routes are schedule writes too.
+   *
+   * `PATCH /schedule/:id` now REFUSES to move an occurrence of a series and
+   * points callers at `POST /organized-play/occurrences/:id/reschedule`, so a
+   * path that persisted a notification was replaced by one that emitted only an
+   * ephemeral SSE ping. A member who did not happen to have the app open when the
+   * coordinator moved or cancelled the night learned nothing — no bell, no
+   * digest, no offline catch-up — and would still have turned up.
+   *
+   * One notification per request, anchored on the SOONEST affected night, rather
+   * than one per occurrence: a series action is a single decision, and fanning it
+   * out per row would put up to MAX_SERIES_OCCURRENCES bells in the tray for one
+   * click.
+   */
+  it('organized-play series writes notify the party the same way the one-off path does', async () => {
+    const startDate = new Date(Date.now() + 21 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+    const before = ofType(await listFor(player), 'session_scheduled').length;
+
+    const series = await dm.post(`/api/v1/campaigns/${campaignId}/series`).send({
+      title: 'Organized night',
+      timezone: 'UTC',
+      startDate,
+      startTime: '18:00',
+      freq: 'weekly',
+      count: 3,
+    });
+    expect(series.status).toBe(201);
+    const occurrences = series.body.occurrences as Array<{ id: number; scheduledAt: string }>;
+
+    const afterCreate = ofType(await listFor(player), 'session_scheduled');
+    expect(afterCreate).toHaveLength(before + 1); // one, not three
+    expect(afterCreate[0].data).toMatchObject({
+      kind: 'schedule',
+      scheduleId: occurrences[0].id, // the soonest night
+      changeType: 'created',
+    });
+
+    // Moving ONE occurrence behaves exactly like PATCH /schedule/:id would have.
+    const moved = await dm
+      .post(`/api/v1/organized-play/occurrences/${occurrences[1].id}/reschedule`)
+      .send({ scheduledAt: new Date(Date.parse(occurrences[1].scheduledAt) + 3600 * 1000).toISOString() });
+    expect(moved.status).toBe(201);
+    const afterMove = ofType(await listFor(player), 'session_scheduled');
+    expect(afterMove).toHaveLength(before + 2);
+    expect(afterMove[0].data).toMatchObject({
+      kind: 'schedule',
+      scheduleId: occurrences[1].id,
+      changeType: 'rescheduled',
+      changedFields: ['time'],
+    });
+
+    // A re-seat is the organized-play analogue of a title-only edit: room, DM and
+    // capacity never reach the party's copy of the night, so it stays silent.
+    const reseated = await dm.post(`/api/v1/organized-play/occurrences/${occurrences[2].id}/reassign`).send({ capacity: 4 });
+    expect(reseated.status).toBe(201);
+    expect(ofType(await listFor(player), 'session_scheduled')).toHaveLength(before + 2);
+
+    // Cancelling the series must reach members who are not watching the page.
+    const cancelled = await dm.delete(`/api/v1/campaigns/${campaignId}/series/${series.body.id}`).send({ reason: 'venue flooded' });
+    expect(cancelled.status).toBe(200);
+    const afterCancel2 = ofType(await listFor(player), 'session_scheduled');
+    expect(afterCancel2).toHaveLength(before + 3);
+    expect(afterCancel2[0].data).toMatchObject({ kind: 'schedule', changeType: 'cancelled' });
+    expect(afterCancel2[0].title).toMatch(/cancelled/i);
+    // Reasons are prose the coordinator wrote; the ping carries field names only.
+    expect(JSON.stringify(afterCancel2[0])).not.toMatch(/venue flooded/i);
+  });
+
+  /**
+   * Applying a template is the sixth write path, and the one that can put the
+   * MOST nights on a member's calendar in a single call (slots x occurrences).
+   * The first version of the organized-play fan-out covered the other five and
+   * missed this one — silent by omission, and indistinguishable at the call site
+   * from `reassignOccurrence`, which is silent on purpose. Hence the path table
+   * on `notifyOccurrenceChange` and the explicit markers at every write site.
+   */
+  it('applying a template notifies the party that a block of nights was added', async () => {
+    const venue = await admin.post('/api/v1/organized-play/venues').send({ name: 'Template Hall', timezone: 'UTC' });
+    expect(venue.status).toBe(201);
+    const room = await admin.post(`/api/v1/organized-play/venues/${venue.body.id}/rooms`).send({ name: 'Hall A', capacity: 6 });
+    expect(room.status).toBe(201);
+
+    const startDate = new Date(Date.now() + 28 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+    const weekday = new Date(`${startDate}T00:00:00.000Z`).getUTCDay();
+    const template = await admin.post('/api/v1/organized-play/templates').send({
+      name: 'League Night',
+      venueId: venue.body.id,
+      timezone: 'UTC',
+      freq: 'weekly',
+      interval: 1,
+      count: 3,
+      slots: [{ weekday, title: 'Table 1', roomId: room.body.id, startTime: '18:00', durationMinutes: 180, capacity: 6 }],
+    });
+    expect(template.status).toBe(201);
+
+    const before = ofType(await listFor(player), 'session_scheduled').length;
+    const applied = await dm
+      .post(`/api/v1/organized-play/templates/${template.body.id}/apply`)
+      .send({ campaignId, startDate });
+    expect(applied.status).toBe(201);
+    expect(applied.body.occurrencesCreated).toBe(3);
+
+    const after = ofType(await listFor(player), 'session_scheduled');
+    // One for the request, not one per created night.
+    expect(after).toHaveLength(before + 1);
+    expect(after[0].data).toMatchObject({ kind: 'schedule', changeType: 'created' });
   });
 
   it("a player's RSVP notifies the DM (not the RSVPing player)", async () => {

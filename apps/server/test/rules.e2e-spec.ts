@@ -14,6 +14,7 @@ import {
   type FakeOpen5eWithBadPagination,
   type FakeOpen5eFlaky,
 } from './fake-open5e';
+import { OPEN5E_PACK_VERSION } from '../src/modules/rules/open5e-importer';
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' }; // dev-header users always carry serverRole 'admin'
 const player = { 'x-dev-role': 'player', 'x-dev-user': 'p-1' };
@@ -129,6 +130,7 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
       .set(dm);
     const oldSentinel = searchItems(oldSentinelSearch.body).find((e: { name: string }) => e.name === 'Fixture Sentinel');
     const db = ctx.app.get<DrizzleDb>(DB);
+    db.update(rulePacks).set({ version: 'open5e-v2-pre-defenses' }).where(eq(rulePacks.id, packId)).run();
     db.update(ruleEntries)
       .set({ dataJson: JSON.stringify({ ac: 16, hp: 52 }), updatedAt: new Date().toISOString() })
       .where(eq(ruleEntries.id, oldSentinel.id))
@@ -148,6 +150,7 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
     expect(reJob.skippedExisting).toBe(2 + 2 + 1 + 4 + 2 + 2 + 1);
     expect(reJob.changed).toBe(1);
     expect(reJob.removed).toBe(0);
+    expect(reJob.pack.version).toBe(OPEN5E_PACK_VERSION);
     expect(reJob.preview).toMatchObject({
       added: 0,
       changed: 1,
@@ -198,6 +201,11 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
     // structured mechanics in the shared dataJson returned by search and entry reads.
     const sentinel = searchItems(monsterSearchRes.body).find((e: { name: string }) => e.name === 'Fixture Sentinel');
     const sentinelData = JSON.parse(sentinel.dataJson);
+    expect(sentinelData.resistances_and_immunities).toMatchObject({
+      damage_resistances: [{ name: 'Fire', key: 'fire' }, { name: 'Lightning', key: 'lightning' }],
+      damage_vulnerabilities: [{ name: 'Cold', key: 'cold' }],
+      damage_immunities: [{ name: 'Poison', key: 'poison' }],
+    });
     expect(sentinelData.specialAbilities).toEqual([
       expect.objectContaining({ name: 'Immutable Form', desc: expect.stringContaining('alter its form') }),
     ]);

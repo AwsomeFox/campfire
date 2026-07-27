@@ -52,6 +52,8 @@ describe('MCP REST parity manifest (#683)', () => {
       {} as never,
       {} as never,
       {} as never,
+      // #588: OrganizedPlayService — injected only for toConflictResponse.
+      {} as never,
       {} as never,
       {} as never,
       {} as never,

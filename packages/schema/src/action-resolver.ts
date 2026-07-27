@@ -238,6 +238,76 @@ export type TargetDefenses = z.infer<typeof TargetDefenses>;
 
 export const EMPTY_DEFENSES: TargetDefenses = { resistances: [], vulnerabilities: [], immunities: [] };
 
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function hasMeaningfulQualifier(value: Record<string, unknown>): boolean {
+  const identityKeys = new Set(['name', 'key', 'damage_type', 'damageType', 'type']);
+  return Object.entries(value).some(([key, item]) => {
+    if (identityKeys.has(key) || item === null || item === undefined || item === '' || item === false) return false;
+    if (Array.isArray(item)) return item.length > 0;
+    if (typeof item === 'object') return Object.keys(item as Record<string, unknown>).length > 0;
+    return true;
+  });
+}
+
+/**
+ * Read statblock damage defences through the aliases used by importers and hand-entered
+ * entries, including Open5e v2's `resistances_and_immunities` object. When a vocabulary
+ * is supplied, retain only unconditional canonical types. Structured qualifier/exception
+ * metadata and qualified display prose are deliberately excluded until attack source tags
+ * are part of direct-damage requests.
+ */
+export function damageDefensesFromStatblock(data: Record<string, unknown> | null | undefined, vocabulary?: readonly string[]): TargetDefenses {
+  const nested = recordValue(data?.resistances_and_immunities) ?? recordValue(data?.resistancesAndImmunities);
+  // An adapter may support direct-damage rules before declaring a closed vocabulary.
+  // Treat an empty list as best-effort parsing, not as "no type is canonical".
+  const canonical = vocabulary && vocabulary.length > 0
+    ? vocabulary.map((type) => type.toLowerCase())
+    : undefined;
+  const normalizeStrings = (raw: string): string[] => {
+    return raw.split(';').flatMap((clause) => {
+      const parts = clause.split(',').map((item) => item.trim()).filter(Boolean);
+      if (!canonical) return parts;
+      const normalized = parts.map((entry) => entry.toLowerCase().replace(/^and\s+/, ''));
+      return normalized.length > 0 && normalized.every((entry) => canonical.includes(entry)) ? normalized : [];
+    });
+  };
+  const readList = (nestedKey: string, ...keys: string[]): string[] => {
+    if (!data) return [];
+    const direct = keys.map((key) => data[key]).find((value) => value !== undefined && value !== null);
+    const value = direct ?? nested?.[nestedKey];
+    const values = Array.isArray(value) ? value : value === undefined || value === null ? [] : [value];
+    const display = nested?.[`${nestedKey}_display`];
+    const displayedTypes = canonical && typeof display === 'string' && display.trim()
+      ? new Set(normalizeStrings(display))
+      : null;
+    const entries = values.flatMap((item) => {
+      if (typeof item === 'string') {
+        const types = normalizeStrings(item);
+        return displayedTypes ? types.filter((type) => displayedTypes.has(type)) : types;
+      }
+      const record = recordValue(item);
+      if (!record || hasMeaningfulQualifier(record)) return [];
+      const typeRecord = recordValue(record.damage_type) ?? recordValue(record.damageType) ?? recordValue(record.type) ?? record;
+      const type = String(typeRecord.key ?? typeRecord.name ?? '').trim();
+      if (!type) return [];
+      if (!canonical) return [type];
+      const normalized = type.toLowerCase();
+      return canonical.includes(normalized) && (!displayedTypes || displayedTypes.has(normalized)) ? [normalized] : [];
+    });
+    return [...new Set(entries)];
+  };
+  return {
+    resistances: readList('damage_resistances', 'damage_resistances', 'damageResistances', 'resistances'),
+    vulnerabilities: readList('damage_vulnerabilities', 'damage_vulnerabilities', 'damageVulnerabilities', 'vulnerabilities'),
+    immunities: readList('damage_immunities', 'damage_immunities', 'damageImmunities', 'immunities'),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Resolution result types (shared by API + MCP + web). Player-safe vs DM-only
 // text is separated so the monster-HP redaction (issue #43) is preserved.

@@ -169,6 +169,18 @@ describe('campaign purge cascade (real SQLite, no orphan rows)', () => {
     run('INSERT INTO session_attendees (session_id, character_id, created_at) VALUES (?, ?, ?)', sessionId, characterId, now);
     const scheduledId = run('INSERT INTO scheduled_sessions (campaign_id, scheduled_at, created_at, updated_at) VALUES (?, ?, ?, ?)', campaignId, now, now, now);
     run('INSERT INTO session_rsvps (scheduled_session_id, user_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)', scheduledId, 'u1', 'yes', now, now);
+    // #588: a recurring series is campaign-scoped, and its exception ledger is a
+    // two-hop child keyed off series_id. play_venues / play_rooms are deliberately
+    // absent here — they are install-level shared resources that MUST survive a
+    // campaign purge, or purging one campaign would delete another's room.
+    const seriesId = run(
+      'INSERT INTO session_series (campaign_id, timezone, start_date, start_time, series_uid, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      campaignId, 'UTC', '2026-01-06', '19:00', 'series-uid-588', now, now,
+    );
+    run(
+      'INSERT INTO series_exceptions (series_id, occurrence_id, kind, created_at) VALUES (?, ?, ?, ?)',
+      seriesId, scheduledId, 'cancel', now,
+    );
     run('INSERT INTO comments (campaign_id, entity_type, entity_id, author_user_id, body, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)', campaignId, 'quest', questId, 'u1', 'hi', now, now);
     run('INSERT INTO entity_revisions (campaign_id, entity_type, entity_id, created_at) VALUES (?, ?, ?, ?)', campaignId, 'quest', questId, now);
     run('INSERT INTO campaign_invites (campaign_id, code, role, expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)', campaignId, 'code-235', 'player', now, now, now);
@@ -220,7 +232,7 @@ describe('campaign purge cascade (real SQLite, no orphan rows)', () => {
         'session_zero', 'npcs', 'factions', 'locations', 'sessions', 'session_shares', 'cast_sessions', 'scheduled_sessions',
         'notes', 'comments', 'entity_revisions', 'campaign_guest_dm_grants', 'campaign_members', 'campaign_invites', 'api_tokens',
         'proposals', 'attachments', 'encounters', 'dice_rolls', 'notifications', 'inventory_items',
-        'party_treasury', 'ai_dm_seats', 'ai_driver_control_state',
+        'party_treasury', 'ai_dm_seats', 'ai_driver_control_state', 'session_series',
         'campaign_module_installs', 'campaign_module_artifacts', 'campaign_module_snapshots',
       ];
       for (const table of campaignScoped) {
@@ -232,6 +244,7 @@ describe('campaign purge cascade (real SQLite, no orphan rows)', () => {
       expect({ t: 'encounter_events', rows: countRows(after, 'encounter_events', `encounter_id = ${encounterId}`) }).toEqual({ t: 'encounter_events', rows: 0 });
       expect({ t: 'session_attendees', rows: countRows(after, 'session_attendees', `session_id = ${sessionId}`) }).toEqual({ t: 'session_attendees', rows: 0 });
       expect({ t: 'session_rsvps', rows: countRows(after, 'session_rsvps', `scheduled_session_id = ${scheduledId}`) }).toEqual({ t: 'session_rsvps', rows: 0 });
+      expect({ t: 'series_exceptions', rows: countRows(after, 'series_exceptions', `series_id = ${seriesId}`) }).toEqual({ t: 'series_exceptions', rows: 0 });
       expect({ t: 'story_branches', rows: countRows(after, 'story_branches', `beat_id = ${beatId}`) }).toEqual({ t: 'story_branches', rows: 0 });
       // The campaign row itself is gone.
       expect(countRows(after, 'campaigns', `id = ${campaignId}`)).toBe(0);

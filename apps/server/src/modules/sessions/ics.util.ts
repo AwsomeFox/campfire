@@ -89,6 +89,32 @@ export function foldIcsContentLine(line: string): string {
 }
 
 /**
+ * The UID this feed has emitted since issue #13, from before
+ * `scheduled_sessions.ics_uid` existed (#588). Still the canonical UID for every
+ * one-off night, and the exact value migration 0124 backfills, because every
+ * already-subscribed calendar holds this string: minting a different one would
+ * read as "that event was deleted, here is an unrelated new one" in all of them.
+ */
+export function legacyIcsUid(campaignId: number, scheduleId: number): string {
+  return `campfire-c${campaignId}-s${scheduleId}@campfire`;
+}
+
+/**
+ * The UID for one occurrence of a recurring series (#588). Keyed on the series'
+ * random uid plus the occurrence INDEX — deliberately never on its date — so
+ * rescheduling an occurrence updates the subscriber's existing event (same UID,
+ * higher SEQUENCE) instead of leaving a ghost on the old night beside a new one.
+ */
+export function seriesIcsUid(seriesUid: string, occurrenceIndex: number): string {
+  return `campfire-series-${seriesUid}-${occurrenceIndex}@campfire`;
+}
+
+/** The stored UID, falling back to the legacy derivation for pre-#588 rows. */
+function icsUidFor(campaignId: number, schedule: ScheduledSession): string {
+  return schedule.icsUid || legacyIcsUid(campaignId, schedule.id);
+}
+
+/**
  * Build the full VCALENDAR document for a campaign's scheduled sessions.
  * All schedules are included (past and future) — calendar clients handle
  * history fine and it keeps previously-synced events from vanishing.
@@ -111,13 +137,28 @@ export function buildCampaignIcs(campaign: { id: number; name: string }, schedul
     const endIso = new Date(startMs + durationMinutes * 60_000).toISOString();
     lines.push(
       'BEGIN:VEVENT',
-      // Stable per schedule row so clients update-in-place across polls.
-      `UID:campfire-c${campaign.id}-s${s.id}@campfire`,
+      // Stable per schedule row so clients update-in-place across polls. Since
+      // #588 the UID is stored on the row (and backfilled to this same legacy
+      // string for pre-#588 rows), so it survives reschedules and re-seatings.
+      `UID:${icsUidFor(campaign.id, s)}`,
       `DTSTAMP:${now}`,
+      // DTSTART is a UTC instant, not a TZID-qualified wall clock, and that is
+      // correct: an occurrence is materialized from its series' wall clock at
+      // write time, so the DST arithmetic is already baked in. Emitting TZID
+      // would additionally require shipping a VTIMEZONE component per zone with
+      // no gain for a read-only PUBLISH feed.
       `DTSTART:${toIcsUtc(s.scheduledAt)}`,
       `DTEND:${toIcsUtc(endIso)}`,
+      // RFC 5545 §3.8.7.4: a client applies an update only when SEQUENCE is at
+      // least as high as the copy it holds. Without this, a rescheduled night
+      // keeps its old DTSTART in a subscribed calendar forever — the exact
+      // failure "stable UIDs" is supposed to prevent.
+      `SEQUENCE:${Math.max(0, Number.isFinite(s.icsSequence) ? s.icsSequence : 0)}`,
       `SUMMARY:${icsEscape(s.title || `${campaign.name} — D&D session`)}`,
     );
+    // A cancelled night is PUBLISHED as cancelled rather than dropped from the
+    // feed: a vanished VEVENT leaves the event sitting in every subscriber's
+    // calendar forever, because a PUBLISH feed has no way to say "this is gone".
     if (s.status === 'cancelled') lines.push('STATUS:CANCELLED');
     if (s.location) lines.push(`LOCATION:${icsEscape(s.location)}`);
     if (s.notes) lines.push(`DESCRIPTION:${icsEscape(s.notes)}`);

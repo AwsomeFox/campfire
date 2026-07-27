@@ -17,6 +17,7 @@ import {
   Role,
   UsableAction,
   applyDamageModifiers,
+  damageDefensesFromStatblock,
   classifyAttackOutcome,
   classifySaveOutcome,
   combatantActionsFromStatblock,
@@ -183,22 +184,12 @@ export class ActionResolverService {
   }
 
   /** Damage-type defences for a target from its statblock/sheet (best-effort; empty when none). */
-  private targetDefenses(row: typeof combatants.$inferSelect): TargetDefenses {
+  private targetDefenses(
+    row: typeof combatants.$inferSelect,
+    damageTypes?: readonly string[],
+  ): TargetDefenses {
     const data = this.statblockData(row);
-    const readList = (...keys: string[]): string[] => {
-      if (!data) return [];
-      for (const k of keys) {
-        const v = data[k];
-        if (Array.isArray(v)) return v.map((x) => String(x)).filter(Boolean);
-        if (typeof v === 'string' && v.trim() !== '') return v.split(/[,;]/).map((s) => s.trim()).filter(Boolean);
-      }
-      return [];
-    };
-    return {
-      resistances: readList('damage_resistances', 'damageResistances', 'resistances'),
-      vulnerabilities: readList('damage_vulnerabilities', 'damageVulnerabilities', 'vulnerabilities'),
-      immunities: readList('damage_immunities', 'damageImmunities', 'immunities'),
-    };
+    return damageDefensesFromStatblock(data, damageTypes?.length ? damageTypes : undefined);
   }
 
   /** A target's saving-throw modifier for one ability (character: mod + prof; monster: statblock mod). */
@@ -535,7 +526,13 @@ export class ActionResolverService {
 
     // Select the outcome branch (with crit → hit / degree fallbacks) and roll its damage.
     const branch = pickOutcomeBranch(spec, outcome);
-    const defenses = this.targetDefenses(target);
+    // A closed adapter vocabulary lets the shared parser conservatively exclude
+    // qualified Open5e display clauses instead of flattening them into unconditional
+    // resistance during structured action resolution.
+    const defenses = this.targetDefenses(
+      target,
+      (adapter as unknown as RuleSystemAdapter).damageTypes,
+    );
     if (branch) {
       // Save-for-half: a branch flagged halfDamage with NO damage of its own borrows the
       // failure branch's damage at half (the common "save for half" authoring shape).

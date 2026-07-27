@@ -9,6 +9,7 @@ import { EncountersModule } from '../encounters/encounters.module';
 import { SessionsService } from './sessions.service';
 import { SessionSharesService } from './session-shares.service';
 import { SchedulingService } from './scheduling.service';
+import { OrganizedPlayService } from './organized-play.service';
 import { SessionRemindersService } from './session-reminders.service';
 import { CampaignSessionsController, SessionsController } from './sessions.controller';
 import { CampaignSessionSharesController, SessionSharesController, SharedRecapController } from './session-shares.controller';
@@ -18,6 +19,7 @@ import {
   CampaignCalendarFeedController,
   CalendarFeedController,
 } from './scheduling.controller';
+import { CampaignSeriesController, OrganizedPlayController } from './organized-play.controller';
 
 @Module({
   imports: [AuditModule, NotificationsModule, RoleAccessModule, ProposalRecordsModule, RevisionsModule, EventsModule, EncountersModule],
@@ -31,8 +33,12 @@ import {
     ScheduleController,
     CampaignCalendarFeedController,
     CalendarFeedController,
+    // Issue #588 — organized play. Registered AFTER ScheduleController so the
+    // static `/organized-play/...` prefixes cannot shadow `/schedule/:id`.
+    OrganizedPlayController,
+    CampaignSeriesController,
   ],
-  providers: [SessionsService, SessionSharesService, SchedulingService, SessionRemindersService],
-  exports: [SessionsService, SessionSharesService, SchedulingService, SessionRemindersService],
+  providers: [SessionsService, SessionSharesService, SchedulingService, OrganizedPlayService, SessionRemindersService],
+  exports: [SessionsService, SessionSharesService, SchedulingService, OrganizedPlayService, SessionRemindersService],
 })
 export class SessionsModule {}
