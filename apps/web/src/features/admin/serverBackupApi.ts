@@ -194,6 +194,7 @@ export type BackupDownloadResult = {
 };
 
 type WritableFileHandle = {
+  name: string;
   createWritable(): Promise<{ write(chunk: Uint8Array): Promise<void>; close(): Promise<void>; abort(): Promise<void> }>;
 };
 
@@ -269,10 +270,15 @@ export async function downloadServerBackup(options?: {
       }
       options?.onPhase?.('finalizing');
       await writable.close();
-      return { filename, bytes: receivedBytes, destination: 'file-system-access' };
+      return { filename: fileHandle.name, bytes: receivedBytes, destination: 'file-system-access' };
     } catch (error) {
-      // Abort removes the partial file where supported by the browser's writable stream.
-      await writable?.abort().catch(() => undefined);
+      // Abort removes the partial file where supported, and cancelling the fetch
+      // propagates back to the server instead of generating an archive nobody
+      // can receive after the destination has failed.
+      await Promise.allSettled([
+        writable?.abort(),
+        reader.cancel(),
+      ]);
       throw error;
     }
   }

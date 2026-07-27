@@ -238,6 +238,7 @@ test.describe('server backup workflow UI (issues #514 / #444)', () => {
       Object.defineProperty(window, 'showSaveFilePicker', {
         configurable: true,
         value: async () => ({
+          name: 'chosen-backup.zip',
           createWritable: async () => ({
             write: async () => {
               (window as Window & { __backupWrites?: number }).__backupWrites! += 1;
@@ -260,8 +261,53 @@ test.describe('server backup workflow UI (issues #514 / #444)', () => {
     await page.goto('/admin/storage');
     const card = page.locator('.server-backup-workflow-card');
     await card.getByRole('button', { name: 'Create & download backup' }).click();
-    await expect(card.getByText(/Saved streamed\.zip .*directly to the selected file/i)).toBeVisible();
+    await expect(card.getByText(/Saved chosen-backup\.zip .*directly to the selected file/i)).toBeVisible();
     await expect.poll(() => page.evaluate(() => (window as Window & { __backupWrites?: number }).__backupWrites)).toBeGreaterThan(0);
+  });
+
+  test('cancels the response stream when the selected destination fails', async ({ page }) => {
+    await page.addInitScript(() => {
+      (window as Window & { __backupResponseCancelled?: boolean }).__backupResponseCancelled = false;
+      Object.defineProperty(window, 'showSaveFilePicker', {
+        configurable: true,
+        value: async () => ({
+          name: 'full-disk.zip',
+          createWritable: async () => ({
+            write: async () => { throw new Error('disk full'); },
+            close: async () => undefined,
+            abort: async () => undefined,
+          }),
+        }),
+      });
+      const nativeFetch = window.fetch.bind(window);
+      window.fetch = (input, init) => {
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        if (!url.endsWith('/api/v1/backup')) return nativeFetch(input, init);
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('zip'));
+          },
+          cancel() {
+            (window as Window & { __backupResponseCancelled?: boolean }).__backupResponseCancelled = true;
+          },
+        });
+        return Promise.resolve(new Response(stream, {
+          headers: {
+            'Content-Type': 'application/zip',
+            'Content-Disposition': 'attachment; filename="server.zip"',
+          },
+        }));
+      };
+    });
+    await page.route('**/api/v1/backup/status', (route) => route.fulfill({ status: 200, json: MOCK_STATUS }));
+
+    await page.goto('/admin/storage');
+    const card = page.locator('.server-backup-workflow-card');
+    await card.getByRole('button', { name: 'Create & download backup' }).click();
+    await expect(card.getByRole('alert')).toContainText("Couldn't load data.");
+    await expect.poll(() =>
+      page.evaluate(() => (window as Window & { __backupResponseCancelled?: boolean }).__backupResponseCancelled),
+    ).toBe(true);
   });
 
   test('confirms cancellation and announces the aborted request', async ({ page }) => {
