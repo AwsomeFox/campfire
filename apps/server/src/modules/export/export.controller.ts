@@ -111,9 +111,25 @@ export class ExportController {
     @CurrentUser() user: RequestUser,
     @Res() res: Response,
   ): Promise<void> {
+    // Install cancellation before the authorization/campaign lookups: either can
+    // be slow, and a client that leaves during them must never start ZIP work.
+    const abortController = format === 'mdzip' ? new AbortController() : null;
+    const onClose = () => {
+      if (!res.writableEnded) abortController?.abort(new Error('Export client disconnected'));
+    };
+    if (abortController) {
+      res.once('close', onClose);
+      if (res.destroyed || res.writableEnded) {
+        abortController.abort(new Error('Export client disconnected'));
+      }
+    }
+    try {
+    if (abortController?.signal.aborted) return;
     // allowArchived: exporting an archived (read-only) campaign is a primary archive use case.
     await this.access.requireRole(user, campaignId, 'dm', { allowArchived: true });
+    if (abortController?.signal.aborted) return;
     const campaign = await this.campaigns.getOrThrow(campaignId);
+    if (abortController?.signal.aborted) return;
     const profile = parseProfile(profileQuery);
     const options: ExportProfileOptions = {
       includeDmSecrets: boolQuery(dmSecrets),
@@ -146,17 +162,10 @@ export class ExportController {
       // Do not buffer a whole archive in the request path. `close` also fires for
       // a browser cancelling a download, allowing the service to tear down the
       // archiver and its per-export staging directory promptly.
-      const abortController = new AbortController();
-      const onClose = () => {
-        // Express emits `close` after a successful response too; only an early
-        // close is a cancelled download.
-        if (!res.writableEnded) abortController.abort(new Error('Export client disconnected'));
-      };
-      res.once('close', onClose);
       try {
-        await this.exportService.streamMarkdownZip(res, abortController.signal, campaignId, user, { profile, options, onFirstByte });
+        await this.exportService.streamMarkdownZip(res, abortController!.signal, campaignId, user, { profile, options, onFirstByte });
       } catch (err) {
-        if (abortController.signal.aborted) return;
+        if (abortController!.signal.aborted) return;
         // Once streaming has started, the service has already destroyed the
         // failed response. Do not ask Nest to write a second JSON error response
         // over committed ZIP headers.
@@ -168,8 +177,6 @@ export class ExportController {
         res.removeHeader('Content-Disposition');
         res.removeHeader('X-Campfire-Export-Profile');
         throw err;
-      } finally {
-        res.off('close', onClose);
       }
       return;
     }
@@ -186,6 +193,9 @@ export class ExportController {
         'X-Campfire-Export-Profile': profile,
       })
       .send(JSON.stringify(data));
+    } finally {
+      if (abortController) res.off('close', onClose);
+    }
   }
 
   @Get('me')

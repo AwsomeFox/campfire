@@ -38,6 +38,50 @@ function controller(streamMarkdownZip: jest.Mock): ExportController {
 }
 
 describe('ExportController markdown ZIP streaming', () => {
+  it('does not begin preliminary lookups for an already-ended response', async () => {
+    const streamMarkdownZip = jest.fn();
+    const access = { requireRole: jest.fn() } as unknown as CampaignAccessService;
+    const campaigns = { getOrThrow: jest.fn() } as unknown as CampaignsService;
+    const subject = new ExportController(
+      { exportFilename: jest.fn(), streamMarkdownZip } as unknown as ExportService,
+      access,
+      campaigns,
+    );
+    const res = response({ destroyed: true, writableEnded: true });
+
+    await expect(subject.export(1, 'mdzip', undefined, undefined, undefined, undefined, USER, res)).resolves.toBeUndefined();
+    expect(access.requireRole).not.toHaveBeenCalled();
+    expect(campaigns.getOrThrow).not.toHaveBeenCalled();
+    expect(streamMarkdownZip).not.toHaveBeenCalled();
+  });
+
+  it('cancels before campaign lookup when the client closes during authorization', async () => {
+    let releaseRole!: () => void;
+    const requireRole = jest.fn(() => new Promise<void>((resolve) => { releaseRole = resolve; }));
+    const getOrThrow = jest.fn().mockResolvedValue({ name: 'Campaign' });
+    const streamMarkdownZip = jest.fn();
+    const exportService = { exportFilename: jest.fn(), streamMarkdownZip } as unknown as ExportService;
+    const res = response();
+    let onClose!: () => void;
+    (res.once as unknown as jest.Mock).mockImplementation((event: string, listener: () => void) => {
+      if (event === 'close') onClose = listener;
+      return res;
+    });
+    const subject = new ExportController(
+      exportService,
+      { requireRole } as unknown as CampaignAccessService,
+      { getOrThrow } as unknown as CampaignsService,
+    );
+
+    const pending = subject.export(1, 'mdzip', undefined, undefined, undefined, undefined, USER, res);
+    onClose();
+    releaseRole();
+    await expect(pending).resolves.toBeUndefined();
+    expect(getOrThrow).not.toHaveBeenCalled();
+    expect(streamMarkdownZip).not.toHaveBeenCalled();
+    expect(res.off).toHaveBeenCalledWith('close', onClose);
+  });
+
   it('clears attachment headers before rethrowing a pre-stream failure', async () => {
     const failure = new BadRequestException('projection failed');
     const res = response();
