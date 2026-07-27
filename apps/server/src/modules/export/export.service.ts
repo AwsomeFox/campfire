@@ -35,10 +35,27 @@ import {
   sha256Hex,
   stemCollisionWarnings,
   typedRecordId,
+  type ArchiveExclusion,
   type ArchiveModuleRepresentation,
   type ArchiveRecordEntry,
+  type ArchiveRedactionDisclosure,
   type ArchiveTruncation,
 } from './markdown-archive';
+import {
+  DEFAULT_EXPORT_PROFILE,
+  EXPORT_INVENTORY_FORMAT_VERSION,
+  bytesContainIdentifier,
+  exportLimitations,
+  partitionIdentifiers,
+  resolveExportPolicy,
+  type ExportAttachmentInventory,
+  type ExportInventory,
+  type ExportProfile,
+  type ExportProfileOptions,
+  type ResolvedExportPolicy,
+} from './export-profiles';
+import { MODULE_EXCLUSION_REASONS, collectPrivateIdentifiers, projectExport, type ExportProjection } from './export-redaction';
+import { SANITIZABLE_MIMES, stripImageMetadata } from './image-metadata';
 
 /** Filesystem/URL-safe ASCII slug for download filenames — lowercase, alnum + hyphens. */
 export function slugify(name: string): string {
@@ -72,6 +89,34 @@ export function uniqueFilename(seen: Set<string>, base: string): string {
 export { archiveDisplayStem, archiveRecordFilename, typedRecordId } from './markdown-archive';
 
 type ExportData = Awaited<ReturnType<ExportService['buildExport']>>;
+
+/**
+ * Shape the markdown renderers actually receive (issue #586). A redacted profile
+ * WITHHOLDS fields (author ids, dmSecret, played state) and ADDS per-export
+ * pseudonyms, so every renderer must treat identity fields as optional. The
+ * structural type below documents that instead of relying on renderer-local casts.
+ */
+type ProfileExportData = Omit<ExportData, 'notes' | 'comments' | 'characters' | 'attachments'> & {
+  notes: Array<ExportData['notes'][number] & { authorPseudonym?: string }>;
+  comments: Array<ExportData['comments'][number] & { authorPseudonym?: string }>;
+  characters: Array<ExportData['characters'][number] & { ownerPseudonym?: string }>;
+  attachments: Array<ExportData['attachments'][number] & { originalFilenameWithheld?: boolean }>;
+};
+
+/** Per-attachment decision taken while assembling a redacted archive. */
+type AttachmentByteDecision = {
+  id: number;
+  bytes: Buffer | null;
+  /** Set when bytes were withheld — surfaced in warnings.txt and the inventory. */
+  withheldReason?: string;
+  metadataStripped: boolean;
+};
+
+export type ProfileExportResult = {
+  data: Record<string, unknown>;
+  policy: ResolvedExportPolicy;
+  inventory: ExportInventory;
+};
 
 @Injectable()
 export class ExportService {
@@ -337,6 +382,227 @@ export class ExportService {
     };
   }
 
+  // ───────────────────────────────────────────────────────────────────────────
+  // Issue #586 — export profiles (backup / handoff / publishable module)
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Run {@link buildExport} through a redaction profile.
+   *
+   * `buildExport` stays the single "everything in this campaign" reader; this method
+   * is the ONLY thing that narrows it. `profile: 'backup'` is a pass-through, so the
+   * existing DM backup is unchanged apart from gaining a `redaction` disclosure block
+   * that states, in machine-readable form, that nothing was redacted.
+   *
+   * `inspectAttachmentBytes` controls whether attachment files are read from disk to
+   * decide (and report) whether their bytes can travel. The zip path and the
+   * pre-export preview need it; the JSON path never embeds bytes so it skips the read.
+   */
+  async buildProfileExport(
+    campaignId: number,
+    user: RequestUser,
+    profile: ExportProfile = DEFAULT_EXPORT_PROFILE,
+    options: ExportProfileOptions = {},
+    opts: { inspectAttachmentBytes?: boolean; format?: 'json' | 'mdzip' } = {},
+  ): Promise<ProfileExportResult & { projection: ExportProjection; attachmentBytes: Map<number, AttachmentByteDecision> }> {
+    const policy = resolveExportPolicy(profile, options);
+    const raw = (await this.buildExport(campaignId, user)) as unknown as Record<string, unknown>;
+    const projection = projectExport(raw, policy);
+
+    const { scannable } = partitionIdentifiers(collectPrivateIdentifiers(raw));
+    const format = opts.format ?? 'json';
+    const attachmentBytes = opts.inspectAttachmentBytes
+      ? this.planAttachmentBytes(campaignId, raw, policy, scannable)
+      : new Map<number, AttachmentByteDecision>();
+
+    // Keep `present` honest: a row whose bytes the policy withholds must not claim the
+    // file is in the archive. Done BEFORE campaign.json is serialized in the zip path.
+    if (opts.inspectAttachmentBytes && Array.isArray(projection.data.attachments)) {
+      for (const entry of projection.data.attachments as Array<Record<string, unknown>>) {
+        const decision = attachmentBytes.get(Number(entry.id));
+        if (!decision || decision.bytes == null) {
+          entry.present = false;
+          if (decision?.withheldReason) entry.bytesWithheldReason = decision.withheldReason;
+        }
+      }
+    }
+
+    const attachmentInventory = this.attachmentInventory(raw, policy, attachmentBytes, format, opts.inspectAttachmentBytes === true);
+
+    const inventory: ExportInventory = {
+      app: 'campfire',
+      kind: 'campaign-export-inventory',
+      formatVersion: EXPORT_INVENTORY_FORMAT_VERSION,
+      campaignId,
+      profile: policy.profile,
+      options: policy.options,
+      secrecyProfile: policy.secrecyProfile,
+      summary: policy.summary,
+      createdAt: new Date().toISOString(),
+      policy: {
+        memberIdentities: policy.memberIdentities,
+        audit: policy.audit,
+        proposals: policy.proposals,
+        operationalHistory: policy.operationalHistory,
+        privateNotes: policy.privateNotes,
+        playerContent: policy.playerContent,
+        playedState: policy.playedState,
+        dmSecrets: policy.dmSecrets,
+        credentials: policy.credentials,
+        allowlistProjection: policy.allowlistProjection,
+        pseudonymizeAuthors: policy.pseudonymizeAuthors,
+        neutralizeAttachmentFilenames: policy.neutralizeAttachmentFilenames,
+        scanFreeText: policy.scanFreeText,
+        sanitizeAttachmentBytes: policy.sanitizeAttachmentBytes,
+        requireSanitizedAttachments: policy.requireSanitizedAttachments,
+      },
+      rows: projection.rows,
+      attachments: attachmentInventory,
+      identifiers: {
+        scanned: projection.scannedIdentifiers.length,
+        unscannable: projection.unscannableIdentifiers,
+        occurrencesRedacted: projection.occurrencesRedacted,
+      },
+      pseudonyms: { contributors: projection.contributors },
+      limitations: exportLimitations(policy),
+    };
+
+    // The disclosure travels INSIDE the document too, so a JSON export that is
+    // detached from its zip manifest still says what was removed from it.
+    const data: Record<string, unknown> = {
+      ...projection.data,
+      redaction: this.redactionDisclosure(inventory),
+    };
+
+    return { data, policy, inventory, projection, attachmentBytes };
+  }
+
+  /** Pre-export inventory (issue #586) — what would travel, what would be redacted. */
+  async buildExportInventory(
+    campaignId: number,
+    user: RequestUser,
+    profile: ExportProfile,
+    options: ExportProfileOptions,
+    format: 'json' | 'mdzip',
+  ): Promise<ExportInventory> {
+    const { inventory } = await this.buildProfileExport(campaignId, user, profile, options, {
+      inspectAttachmentBytes: format === 'mdzip',
+      format,
+    });
+    return inventory;
+  }
+
+  /** Machine-readable redaction block embedded in the payload and the archive manifest. */
+  private redactionDisclosure(inventory: ExportInventory): ArchiveRedactionDisclosure {
+    return {
+      profile: inventory.profile,
+      options: { ...inventory.options },
+      policy: { ...inventory.policy },
+      rows: inventory.rows,
+      attachments: inventory.attachments,
+      identifiers: inventory.identifiers,
+      pseudonyms: inventory.pseudonyms,
+      limitations: inventory.limitations,
+    };
+  }
+
+  /**
+   * Decide, per attachment, whether its bytes may travel in a redacted archive.
+   *
+   * Three ways bytes are withheld:
+   *  1. the file is missing on disk (pre-existing #84 behaviour);
+   *  2. the format's embedded metadata cannot be provably stripped by this codebase
+   *     (WebP/PDF/SVG) and the profile requires sanitized bytes — publish omits them
+   *     rather than shipping EXIF/XMP/document metadata it never inspected;
+   *  3. the sanitized bytes STILL contain a known private identifier, which means
+   *     something we do not parse is carrying it — drop the file, do not guess.
+   */
+  private planAttachmentBytes(
+    campaignId: number,
+    raw: Record<string, unknown>,
+    policy: ResolvedExportPolicy,
+    identifiers: string[],
+  ): Map<number, AttachmentByteDecision> {
+    const decisions = new Map<number, AttachmentByteDecision>();
+    const rows = Array.isArray(raw.attachments) ? (raw.attachments as Array<{ id: number; mime: string; filename: string }>) : [];
+    for (const row of rows) {
+      const original = this.attachments.readBytesIfPresent({ campaignId, id: row.id, mime: row.mime });
+      if (!original) {
+        decisions.set(row.id, { id: row.id, bytes: null, metadataStripped: false, withheldReason: 'file missing on disk' });
+        continue;
+      }
+      if (!policy.sanitizeAttachmentBytes) {
+        decisions.set(row.id, { id: row.id, bytes: original, metadataStripped: false });
+        continue;
+      }
+      const result = stripImageMetadata(row.mime, original);
+      if (!result.supported && policy.requireSanitizedAttachments) {
+        decisions.set(row.id, {
+          id: row.id,
+          bytes: null,
+          metadataStripped: false,
+          withheldReason: `embedded metadata cannot be stripped for ${row.mime} — bytes omitted from a publish archive`,
+        });
+        continue;
+      }
+      if (bytesContainIdentifier(result.bytes, identifiers)) {
+        decisions.set(row.id, {
+          id: row.id,
+          bytes: null,
+          metadataStripped: result.stripped,
+          withheldReason: 'a known private identifier survived metadata stripping inside the file bytes',
+        });
+        continue;
+      }
+      decisions.set(row.id, { id: row.id, bytes: result.bytes, metadataStripped: result.stripped });
+    }
+    return decisions;
+  }
+
+  private attachmentInventory(
+    raw: Record<string, unknown>,
+    policy: ResolvedExportPolicy,
+    decisions: Map<number, AttachmentByteDecision>,
+    format: 'json' | 'mdzip',
+    inspected: boolean,
+  ): ExportAttachmentInventory {
+    const rows = Array.isArray(raw.attachments) ? (raw.attachments as Array<{ id: number; mime: string }>) : [];
+    const notes: string[] = [];
+    if (format === 'json') {
+      notes.push('JSON exports carry attachment metadata only — no bytes are embedded in any profile.');
+    }
+    if (!inspected) {
+      return {
+        included: rows.length,
+        bytesWithheld: rows.length,
+        filenamesNeutralized: policy.neutralizeAttachmentFilenames ? rows.length : 0,
+        metadataStripped: 0,
+        notes,
+      };
+    }
+    let withheld = 0;
+    let stripped = 0;
+    for (const row of rows) {
+      const decision = decisions.get(row.id);
+      if (!decision || decision.bytes == null) withheld += 1;
+      if (decision?.metadataStripped) stripped += 1;
+    }
+    const unsanitizable = rows.filter((r) => !SANITIZABLE_MIMES.has(r.mime)).length;
+    if (unsanitizable > 0 && policy.sanitizeAttachmentBytes && !policy.requireSanitizedAttachments) {
+      notes.push(
+        `${unsanitizable} attachment(s) are in a format whose embedded metadata this server cannot strip ` +
+          '(WebP/PDF/SVG); their bytes travel unmodified. Review them before sharing the archive.',
+      );
+    }
+    return {
+      included: rows.length,
+      bytesWithheld: withheld,
+      filenamesNeutralized: policy.neutralizeAttachmentFilenames ? rows.length : 0,
+      metadataStripped: stripped,
+      notes,
+    };
+  }
+
   /**
    * Member-scoped export (issue #128 player data rights): the data a SINGLE
    * member authored / owns in a campaign, so a player can take THEIR OWN copy
@@ -389,10 +655,16 @@ export class ExportService {
     return `campfire-${slug}-member-${slugify(userId)}-${date}.json`;
   }
 
-  exportFilename(campaignName: string, extension: 'json' | 'zip'): string {
+  /**
+   * Download filename. The profile is part of the name for anything but `backup`
+   * (issue #586) so a publishable module and a full DM backup of the same campaign
+   * are never confused for one another in a downloads folder.
+   */
+  exportFilename(campaignName: string, extension: 'json' | 'zip', profile: ExportProfile = DEFAULT_EXPORT_PROFILE): string {
     const slug = slugify(campaignName);
     const date = new Date().toISOString().slice(0, 10);
-    return `campfire-${slug}-${date}.${extension}`;
+    const suffix = profile === 'backup' ? '' : `-${profile}`;
+    return `campfire-${slug}${suffix}-${date}.${extension}`;
   }
 
   /**
@@ -406,9 +678,25 @@ export class ExportService {
    * Returns `{ buffer, warnings }`: warnings are informational (shared display
    * stems, skipped attachment bytes) and also written as `warnings.txt` when
    * non-empty. They never enter `campaign.json` (the import round-trip payload).
+   *
+   * Issue #586: `opts.profile` selects the redaction profile. Under a redacted
+   * profile every markdown file is rendered FROM THE ALREADY-REDACTED PAYLOAD (not
+   * from the raw export), so there is exactly one redaction boundary to reason about
+   * — nothing can be rendered from data the projection dropped.
    */
-  async buildMarkdownZip(campaignId: number, user: RequestUser): Promise<{ buffer: Buffer; warnings: string[] }> {
-    const data = await this.buildExport(campaignId, user);
+  async buildMarkdownZip(
+    campaignId: number,
+    user: RequestUser,
+    opts: { profile?: ExportProfile; options?: ExportProfileOptions } = {},
+  ): Promise<{ buffer: Buffer; warnings: string[]; inventory: ExportInventory }> {
+    const profileResult = await this.buildProfileExport(campaignId, user, opts.profile ?? DEFAULT_EXPORT_PROFILE, opts.options ?? {}, {
+      inspectAttachmentBytes: true,
+      format: 'mdzip',
+    });
+    const policy = profileResult.policy;
+    const attachmentBytes = profileResult.attachmentBytes;
+    const inventory = profileResult.inventory;
+    const data = profileResult.data as unknown as ProfileExportData;
     const zip = new JSZip();
     const warnings: string[] = [];
     const fileChecksums: Record<string, string> = {};
@@ -481,7 +769,14 @@ export class ExportService {
     // Encounter combat logs are markdown-only enrichment (not part of campaign.json).
     // Batch-fetch all encounters' events in a single query to avoid an N+1 on large
     // campaigns (issue #863). Export is DM-scoped, so no viewer redaction is needed.
-    const encounterEvents = await this.encounters.listEventsForEncounters(data.encounters.map((e) => e.id));
+    //
+    // Issue #586: the combat log is a blow-by-blow record of what happened at the
+    // table, so it is played state — a profile that withholds played state must not
+    // render it. It is also the one markdown input NOT sourced from the redacted
+    // payload, so it never bypasses the projection: it simply is not read.
+    const encounterEvents = policy.playedState
+      ? await this.encounters.listEventsForEncounters(data.encounters.map((e) => e.id))
+      : new Map<number, EncounterEvent[]>();
 
     const encounterAlloc: Array<{ stem: string; filename: string }> = [];
     for (const e of [...data.encounters].sort((a, b) => a.id - b.id)) {
@@ -515,8 +810,8 @@ export class ExportService {
     }
     warnings.push(...stemCollisionWarnings('timeline-event', timelineAlloc));
 
-    writeFile('session-zero.md', this.sessionZeroMarkdown(data.sessionZero));
-    writeFile('inventory.md', this.inventoryMarkdown(data.inventory, data.treasury));
+    writeFile('session-zero.md', this.sessionZeroMarkdown(data.sessionZero, policy.playerContent));
+    if (policy.playerContent) writeFile('inventory.md', this.inventoryMarkdown(data.inventory, data.treasury));
 
     const noteAlloc: Array<{ stem: string; filename: string }> = [];
     for (const n of [...data.notes].sort((a, b) => a.id - b.id)) {
@@ -532,15 +827,18 @@ export class ExportService {
     }
     warnings.push(...stemCollisionWarnings('comment', commentAlloc));
 
-    writeFile('members.md', this.membersMarkdown(data.members));
+    // Issue #586: identity/operations files are WRITTEN ONLY when the profile carries
+    // them. Rendering an empty members.md into a publishable module would be harmless
+    // but misleading; declaring the module excluded in the manifest is honest.
+    if (policy.memberIdentities) writeFile('members.md', this.membersMarkdown(data.members));
 
     // Only record a truncation when the audit snapshot actually dropped rows. The export
     // path (AuditService.listForCampaignExport) keyset-pages the full retained trail, so
     // `auditMeta.truncated` — not a fixed 500-row cap — is the real omission count
     // (retention pruning during the walk and/or rows appended after the snapshot ceiling).
-    const auditTruncated = data.auditMeta.truncated;
+    const auditTruncated = data.auditMeta?.truncated ?? 0;
     const truncations: ArchiveTruncation[] =
-      auditTruncated > 0
+      policy.audit && auditTruncated > 0 && data.auditMeta
         ? [
             {
               module: 'audit',
@@ -553,34 +851,42 @@ export class ExportService {
             },
           ]
         : [];
-    writeFile('audit.md', this.auditMarkdown(data.audit, auditTruncated));
-    writeFile('dice-rolls.md', this.diceRollsMarkdown(data.diceRolls));
+    if (policy.audit) writeFile('audit.md', this.auditMarkdown(data.audit, auditTruncated));
+    if (policy.operationalHistory) writeFile('dice-rolls.md', this.diceRollsMarkdown(data.diceRolls));
 
     const proposalAlloc: Array<{ stem: string; filename: string }> = [];
-    for (const p of [...data.proposals].sort((a, b) => a.id - b.id)) {
-      const name = `${p.entityType}-${p.entityId ?? 'new'}-${p.status}`;
-      writeRecord('proposals', 'proposal', p.id, name, this.proposalMarkdown(p), proposalAlloc);
+    if (policy.proposals) {
+      for (const p of [...data.proposals].sort((a, b) => a.id - b.id)) {
+        const name = `${p.entityType}-${p.entityId ?? 'new'}-${p.status}`;
+        writeRecord('proposals', 'proposal', p.id, name, this.proposalMarkdown(p), proposalAlloc);
+      }
+      warnings.push(...stemCollisionWarnings('proposal', proposalAlloc));
     }
-    warnings.push(...stemCollisionWarnings('proposal', proposalAlloc));
 
     const revisionAlloc: Array<{ stem: string; filename: string }> = [];
-    for (const r of [...data.revisions].sort((a, b) => a.id - b.id)) {
-      const name = `${r.entityType}-${r.entityId}-${r.id}`;
-      writeRecord('revisions', 'revision', r.id, name, this.revisionMarkdown(r), revisionAlloc);
+    if (policy.operationalHistory) {
+      for (const r of [...data.revisions].sort((a, b) => a.id - b.id)) {
+        const name = `${r.entityType}-${r.entityId}-${r.id}`;
+        writeRecord('revisions', 'revision', r.id, name, this.revisionMarkdown(r), revisionAlloc);
+      }
+      warnings.push(...stemCollisionWarnings('revision', revisionAlloc));
     }
-    warnings.push(...stemCollisionWarnings('revision', revisionAlloc));
 
     // Issue #87 / #863: embed attachment bytes; build references from every owner type
     // (campaign map, character portraits, encounter battle maps).
+    // Issue #586: the decision of WHICH bytes may travel (and whether their metadata
+    // was stripped) was taken in planAttachmentBytes; here we only place them.
     const skipped: typeof data.attachments = [];
     for (const a of data.attachments) {
-      const bytes = this.attachments.readBytesIfPresent({ campaignId, id: a.id, mime: a.mime });
-      if (bytes) {
-        zip.file(a.file, bytes);
-        fileChecksums[a.file] = sha256Hex(bytes);
+      const decision = attachmentBytes.get(a.id);
+      if (decision?.bytes) {
+        zip.file(a.file, decision.bytes);
+        fileChecksums[a.file] = sha256Hex(decision.bytes);
       } else {
         skipped.push(a);
-        warnings.push(`Attachment ${a.id} (${a.filename}) missing on disk — bytes omitted from uploads/.`);
+        warnings.push(
+          `Attachment ${a.id} (${a.filename}) — bytes omitted from uploads/: ${decision?.withheldReason ?? 'file missing on disk'}.`,
+        );
       }
     }
     writeFile(
@@ -590,7 +896,11 @@ export class ExportService {
 
     // AI DM seat + scribe config (issue #1078) are first-class exported data, so give
     // them a human-readable file rather than leaving them only in campaign.json.
-    writeFile('ai.md', this.aiConfigMarkdown(data.aiSeat, data.aiScribeConfig));
+    if (policy.credentials) writeFile('ai.md', this.aiConfigMarkdown(data.aiSeat, data.aiScribeConfig));
+
+    // Human-readable redaction disclosure (issue #586) — the DM-facing counterpart to
+    // the `redaction` block in campaign.json / archive-manifest.json.
+    writeFile('redaction.md', this.redactionMarkdown(inventory));
 
     const modules: Record<string, ArchiveModuleRepresentation> = {
       campaign: { kind: 'markdown-file', path: 'campaign.md' },
@@ -657,7 +967,44 @@ export class ExportService {
         reason:
           'Participant-owned access-support preferences are intentionally excluded from campaign exports; use GET /campaigns/:id/export/me or full-server backup.',
       },
+      redaction: { kind: 'markdown-file', path: 'redaction.md' },
     };
+
+    // Issue #586: whatever the policy dropped is DECLARED, not silently absent. Driving
+    // this off the policy switches (rather than off "did we happen to emit zero rows")
+    // means an empty campaign and a redacted campaign are distinguishable, and the
+    // manifest invariant forces a contributor adding a module to pick a gate for it.
+    const profileExclusions: ArchiveExclusion[] = [];
+    const gates: Array<[module: string, carried: boolean]> = [
+      ['members', policy.memberIdentities],
+      ['audit', policy.audit],
+      ['auditMeta', policy.audit],
+      ['proposals', policy.proposals],
+      ['revisions', policy.operationalHistory],
+      ['scheduledSessions', policy.operationalHistory],
+      ['sessionAttendance', policy.operationalHistory],
+      ['diceRolls', policy.operationalHistory],
+      ['aiSeat', policy.credentials],
+      ['aiScribeConfig', policy.credentials],
+      ['sessions', policy.playedState],
+      ['characters', policy.playerContent],
+      ['comments', policy.playerContent],
+      ['inventory', policy.playerContent],
+      ['treasury', policy.playerContent],
+    ];
+    for (const [module, carried] of gates) {
+      if (carried) continue;
+      const reason = MODULE_EXCLUSION_REASONS[module] ?? 'Excluded by the export redaction policy.';
+      modules[module] = { kind: 'excluded', reason };
+      profileExclusions.push({ module, reason });
+    }
+    if (!policy.audit) {
+      modules.auditNote = {
+        kind: 'embedded',
+        path: 'campaign.json',
+        note: 'States that audit history was redacted out of this profile.',
+      };
+    }
 
     const counts: Record<string, number> = {
       quests: data.quests.length,
@@ -700,12 +1047,15 @@ export class ExportService {
       campaignJson,
       fileChecksums,
       modules,
+      secrecyProfile: policy.secrecyProfile,
+      redaction: this.redactionDisclosure(inventory),
       exclusions: [
         {
           module: 'participantSupportNote',
           reason:
             'Participant-owned access-support preferences are intentionally excluded from campaign exports; use GET /campaigns/:id/export/me or full-server backup.',
         },
+        ...profileExclusions,
       ],
       truncations,
       // Locale-independent code-unit sort so record order is identical across machines
@@ -715,7 +1065,7 @@ export class ExportService {
     });
     zip.file('archive-manifest.json', JSON.stringify(manifest, null, 2));
 
-    return { buffer: await zip.generateAsync({ type: 'nodebuffer' }), warnings };
+    return { buffer: await zip.generateAsync({ type: 'nodebuffer' }), warnings, inventory };
   }
 
   /**
@@ -733,7 +1083,16 @@ export class ExportService {
       .trim();
   }
 
-  private buildBacklinkIndex(data: ExportData): Map<string, string[]> {
+  /**
+   * Display label for an authored row. Redacted profiles withhold `authorUserId`
+   * and `authorName` entirely and supply a per-export pseudonym instead (issue #586),
+   * so this must never fall through to a raw id when a pseudonym is present.
+   */
+  private authorLabel(row: { authorName?: string | null; authorUserId?: string | null; authorPseudonym?: string | null }): string {
+    return row.authorPseudonym || row.authorName || row.authorUserId || '_unattributed_';
+  }
+
+  private buildBacklinkIndex(data: ProfileExportData): Map<string, string[]> {
     const index = new Map<string, string[]>();
     const push = (type: string, id: number | null | undefined, label: string) => {
       if (id == null) return;
@@ -803,9 +1162,9 @@ export class ExportService {
    */
   private attachmentsManifestMarkdown(
     campaign: ExportData['campaign'],
-    characters: ExportData['characters'],
+    characters: ProfileExportData['characters'],
     encounters: ExportData['encounters'],
-    attachments: ExportData['attachments'],
+    attachments: ProfileExportData['attachments'],
     skipped: { id: number; file: string; filename: string }[],
   ): string {
     const lines = ['# Attachments', ''];
@@ -847,7 +1206,75 @@ export class ExportService {
     return lines.join('\n') + '\n';
   }
 
-  private campaignMarkdown(campaign: ExportData['campaign'], notes: ExportData['notes']): string {
+  /**
+   * Human-readable redaction disclosure (issue #586). A DM about to publish a module
+   * should be able to read, in one file, exactly what was withheld and what this
+   * feature does NOT protect against.
+   */
+  private redactionMarkdown(inventory: ExportInventory): string {
+    const yes = (b: boolean) => (b ? 'included' : 'REDACTED');
+    const lines = [
+      '# Redaction policy',
+      '',
+      `- Profile: \`${inventory.profile}\` (${inventory.secrecyProfile})`,
+      `- Generated: ${inventory.createdAt}`,
+      '',
+      inventory.summary,
+      '',
+      '## Options',
+      '',
+      `- DM secrets: ${inventory.options.includeDmSecrets ? 'included' : 'excluded'}`,
+      `- Played state: ${inventory.options.includePlayedState ? 'included' : 'excluded'}`,
+      `- Player-authored content: ${inventory.options.includePlayerContent ? 'included' : 'excluded'}`,
+      '',
+      '## Policy',
+      '',
+      '| Category | Status |',
+      '| --- | --- |',
+      `| Member identities | ${yes(inventory.policy.memberIdentities)} |`,
+      `| Audit history | ${yes(inventory.policy.audit)} |`,
+      `| Proposals | ${yes(inventory.policy.proposals)} |`,
+      `| Operational history (RSVPs, attendance, dice log, revisions) | ${yes(inventory.policy.operationalHistory)} |`,
+      `| Private / whisper notes | ${yes(inventory.policy.privateNotes)} |`,
+      `| Player-authored content | ${yes(inventory.policy.playerContent)} |`,
+      `| Played state | ${yes(inventory.policy.playedState)} |`,
+      `| DM secrets | ${yes(inventory.policy.dmSecrets)} |`,
+      `| Credentials / capabilities | ${yes(inventory.policy.credentials)} |`,
+      '',
+      '## Inventory',
+      '',
+      '| Module | Included | Redacted | Reason |',
+      '| --- | ---: | ---: | --- |',
+    ];
+    for (const row of inventory.rows) {
+      lines.push(`| ${this.mdCell(row.module)} | ${row.included} | ${row.redacted} | ${this.mdCell(row.reason ?? '')} |`);
+    }
+    lines.push(
+      '',
+      '## Attachments',
+      '',
+      `- Listed: ${inventory.attachments.included}`,
+      `- Bytes withheld: ${inventory.attachments.bytesWithheld}`,
+      `- Filenames neutralized: ${inventory.attachments.filenamesNeutralized}`,
+      `- Files with embedded metadata stripped: ${inventory.attachments.metadataStripped}`,
+      ...inventory.attachments.notes.map((n) => `- ${n}`),
+      '',
+      '## Identifier scan',
+      '',
+      `- Known private identifiers swept for: ${inventory.identifiers.scanned}`,
+      `- Literal occurrences redacted: ${inventory.identifiers.occurrencesRedacted}`,
+      `- Not swept (too short to match safely): ${inventory.identifiers.unscannable.length}`,
+      `- Distinct contributors pseudonymized: ${inventory.pseudonyms.contributors}`,
+      '',
+      '## Limitations',
+      '',
+      ...inventory.limitations.map((l) => `- ${l}`),
+      '',
+    );
+    return lines.join('\n');
+  }
+
+  private campaignMarkdown(campaign: ProfileExportData['campaign'], notes: ProfileExportData['notes']): string {
     const lines = [
       ...this.identityHeader('campaign', campaign.id, campaign.name),
       `- Status: ${campaign.status}`,
@@ -862,7 +1289,7 @@ export class ExportService {
     if (notes.length) {
       lines.push('', '## Notes', '', `_${notes.length} note(s) — see \`notes/\` for full bodies._`, '');
       for (const n of notes) {
-        lines.push(`- \`${typedRecordId('note', n.id)}\` (${n.visibility}) by ${n.authorName || n.authorUserId}`);
+        lines.push(`- \`${typedRecordId('note', n.id)}\` (${n.visibility}) by ${this.authorLabel(n)}`);
       }
     }
     return lines.join('\n') + '\n';
@@ -959,7 +1386,7 @@ export class ExportService {
   }
 
   private characterMarkdown(
-    c: ExportData['characters'][number],
+    c: ProfileExportData['characters'][number],
     backlinks: Map<string, string[]>,
   ): string {
     const lines = [
@@ -1186,11 +1613,19 @@ export class ExportService {
     return lines.join('\n') + '\n';
   }
 
-  private sessionZeroMarkdown(sz: ExportData['sessionZero']): string {
+  private sessionZeroMarkdown(sz: ExportData['sessionZero'], includePlayerContent = true): string {
     if (!sz) {
       return ['# Session zero', '', '_No session-zero charter configured._', ''].join('\n');
     }
-    const list = (items: string[]) => (items.length ? items.map((i) => `- ${i}`).join('\n') : '_none_');
+    // Lines/veils/safety tools are the group's own words about their own limits — the
+    // redaction policy treats them as participant-authored (issue #586), so a profile
+    // that withholds player content renders a placeholder rather than the list.
+    const list = (items: string[] | undefined) =>
+      !includePlayerContent
+        ? '_withheld by the export redaction policy_'
+        : items?.length
+          ? items.map((i) => `- ${i}`).join('\n')
+          : '_none_';
     return [
       '# Session zero',
       '',
@@ -1257,11 +1692,11 @@ export class ExportService {
     return lines.join('\n');
   }
 
-  private noteMarkdown(n: ExportData['notes'][number]): string {
+  private noteMarkdown(n: ProfileExportData['notes'][number]): string {
     return [
       ...this.identityHeader('note', n.id, `Note ${n.id}`),
       `- Visibility: ${n.visibility}`,
-      `- Author: ${n.authorName || n.authorUserId}`,
+      `- Author: ${this.authorLabel(n)}`,
       `- Anchor: ${n.entityType && n.entityId != null ? typedRecordId(n.entityType, n.entityId) : '_unanchored_'}`,
       '',
       '## Body',
@@ -1271,10 +1706,10 @@ export class ExportService {
     ].join('\n');
   }
 
-  private commentMarkdown(c: ExportData['comments'][number]): string {
+  private commentMarkdown(c: ProfileExportData['comments'][number]): string {
     return [
       ...this.identityHeader('comment', c.id, `Comment ${c.id}`),
-      `- Author: ${c.authorName || c.authorUserId}`,
+      `- Author: ${this.authorLabel(c)}`,
       `- Anchor: ${typedRecordId(c.entityType, c.entityId)}`,
       `- Parent: ${c.parentId != null ? typedRecordId('comment', c.parentId) : '_none_'}`,
       `- In character: ${c.inCharacter ? 'yes' : 'no'}`,

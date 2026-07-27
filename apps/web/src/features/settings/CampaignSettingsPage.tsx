@@ -19,6 +19,8 @@ import type {
   CastSession,
   CastSessionCreated,
   DangerLevel,
+  ExportInventory,
+  ExportProfile,
   RulePack,
 } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
@@ -1562,23 +1564,182 @@ function RuleSystemCard({
   );
 }
 
+/**
+ * Export card (issue #586). The export used to be one button whose copy promised
+ * "take everything with you" — which was accurate, and exactly the problem: the only
+ * artifact on offer was a full DM backup carrying every member's identity, the audit
+ * trail, private notes and DM secrets, with nothing to hand a stranger.
+ *
+ * Three profiles now, with a pre-export inventory the DM reads BEFORE downloading.
+ * Publish deliberately starts with everything optional turned off.
+ */
+const EXPORT_PROFILE_LABELS: Record<ExportProfile, { title: string; blurb: string }> = {
+  backup: {
+    title: 'Backup',
+    blurb: 'Everything, unredacted — member identities, audit history, proposals, private notes and DM secrets. Treat the file like the database.',
+  },
+  handoff: {
+    title: 'Handoff',
+    blurb: 'For a new DM taking over. Keeps the world, DM secrets and play state; drops member identities and operational history. Retained authors are pseudonymized.',
+  },
+  publish: {
+    title: 'Publishable module',
+    blurb: 'For sharing with strangers. Identities, audit, proposals, private notes, RSVPs, attendance and credentials are excluded. Choose what else to include below.',
+  },
+};
+
 function ExportCard({ campaignId }: { campaignId: number }) {
+  const [profile, setProfile] = useState<ExportProfile>('backup');
+  const [dmSecrets, setDmSecrets] = useState(false);
+  const [playedState, setPlayedState] = useState(false);
+  const [playerContent, setPlayerContent] = useState(false);
+  const [preview, setPreview] = useState<ExportInventory | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+
+  const optionQuery =
+    profile === 'publish'
+      ? `&dmSecrets=${dmSecrets}&playedState=${playedState}&playerContent=${playerContent}`
+      : '';
+
+  useEffect(() => {
+    let cancelled = false;
+    setPreviewLoading(true);
+    setPreviewError(null);
+    void api
+      .get<ExportInventory>(`${API}/campaigns/${campaignId}/export/preview?profile=${profile}&format=mdzip${optionQuery}`)
+      .then((data) => {
+        if (!cancelled) setPreview(data);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setPreview(null);
+          setPreviewError(err instanceof ApiError ? err.message : "Couldn't load the export preview.");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setPreviewLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [campaignId, profile, optionQuery]);
+
+  const redactedRows = preview?.rows.filter((r) => r.redacted > 0) ?? [];
+  const includedRows = preview?.rows.filter((r) => r.included > 0) ?? [];
+
   return (
     <div
       id="export"
       className="card elev-sm settings-anchor"
       tabIndex={-1}
       aria-labelledby="export-heading"
+      data-testid="export-settings"
     >
       <span id="export-heading" className="card-kicker">Export campaign</span>
       <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
-        Take everything with you — no lock-in. Includes quests, NPCs, locations, characters, sessions and notes.
+        No lock-in — but a backup and a publishable module are not the same file. Pick what this export is for.
       </p>
+
+      <fieldset style={{ border: 0, padding: 0, margin: 0 }}>
+        <legend className="text-muted" style={{ fontSize: 11.5, padding: 0 }}>Export profile</legend>
+        <div className="flex flex-col gap-2" style={{ marginTop: 6 }}>
+          {(Object.keys(EXPORT_PROFILE_LABELS) as ExportProfile[]).map((key) => (
+            <label key={key} className="flex gap-2" style={{ alignItems: 'flex-start', fontSize: 12.5 }}>
+              <input
+                type="radio"
+                name="export-profile"
+                value={key}
+                checked={profile === key}
+                onChange={() => setProfile(key)}
+                style={{ marginTop: 3 }}
+              />
+              <span>
+                <strong>{EXPORT_PROFILE_LABELS[key].title}</strong>
+                <span className="text-muted" style={{ display: 'block', fontSize: 11.5 }}>
+                  {EXPORT_PROFILE_LABELS[key].blurb}
+                </span>
+              </span>
+            </label>
+          ))}
+        </div>
+      </fieldset>
+
+      {profile === 'publish' && (
+        <fieldset style={{ border: 0, padding: 0, margin: 0 }} data-testid="export-publish-options">
+          <legend className="text-muted" style={{ fontSize: 11.5, padding: 0 }}>Include in the published module</legend>
+          <div className="flex flex-col gap-1" style={{ marginTop: 6 }}>
+            <label className="flex gap-2" style={{ alignItems: 'center', fontSize: 12.5 }}>
+              <input type="checkbox" checked={dmSecrets} onChange={(e) => setDmSecrets(e.target.checked)} />
+              DM secrets (secret prose and unrevealed staging flags)
+            </label>
+            <label className="flex gap-2" style={{ alignItems: 'center', fontSize: 12.5 }}>
+              <input type="checkbox" checked={playedState} onChange={(e) => setPlayedState(e.target.checked)} />
+              Played state (session recaps, played dates, live combat state)
+            </label>
+            <label className="flex gap-2" style={{ alignItems: 'center', fontSize: 12.5 }}>
+              <input type="checkbox" checked={playerContent} onChange={(e) => setPlayerContent(e.target.checked)} />
+              Player-authored content (characters, comments, party notes, inventory, safety charter)
+            </label>
+          </div>
+        </fieldset>
+      )}
+
+      <div data-testid="export-preview" aria-live="polite">
+        {previewLoading && <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>Checking what would be included…</p>}
+        {previewError && <p className="text-sm" style={{ color: '#f87171', margin: 0 }}>{previewError}</p>}
+        {preview && !previewLoading && (
+          <>
+            <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>{preview.summary}</p>
+            <p style={{ margin: '6px 0 0', fontSize: 12.5 }}>
+              <strong>Included:</strong>{' '}
+              {includedRows.length
+                ? includedRows.map((r) => `${r.module} (${r.included})`).join(', ')
+                : 'nothing'}
+            </p>
+            {redactedRows.length > 0 && (
+              <p style={{ margin: '4px 0 0', fontSize: 12.5 }}>
+                <strong>Redacted:</strong>{' '}
+                {redactedRows.map((r) => `${r.module} (${r.redacted})`).join(', ')}
+              </p>
+            )}
+            <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 11.5 }}>
+              Attachments: {preview.attachments.included} listed, {preview.attachments.bytesWithheld} with bytes withheld,{' '}
+              {preview.attachments.metadataStripped} with embedded metadata stripped
+              {preview.attachments.filenamesNeutralized > 0 ? ', filenames replaced' : ''}.
+            </p>
+            {preview.identifiers.scanned > 0 && (
+              <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 11.5 }}>
+                Scanned for {preview.identifiers.scanned} known private identifier(s); redacted{' '}
+                {preview.identifiers.occurrencesRedacted} occurrence(s). {preview.pseudonyms.contributors} contributor(s)
+                pseudonymized.
+              </p>
+            )}
+            {preview.limitations.length > 0 && (
+              <details style={{ marginTop: 6 }}>
+                <summary style={{ fontSize: 11.5, cursor: 'pointer' }}>What this redaction does not do</summary>
+                <ul className="text-muted" style={{ fontSize: 11.5, margin: '4px 0 0', paddingLeft: 18 }}>
+                  {preview.limitations.map((l) => <li key={l}>{l}</li>)}
+                </ul>
+              </details>
+            )}
+          </>
+        )}
+      </div>
+
       <div className="flex gap-2 flex-wrap">
-        <a className="btn btn-secondary" style={{ fontSize: 12.5 }} href={`${API}/campaigns/${campaignId}/export?format=json`}>
+        <a
+          className="btn btn-secondary"
+          style={{ fontSize: 12.5 }}
+          href={`${API}/campaigns/${campaignId}/export?format=json&profile=${profile}${optionQuery}`}
+        >
           ⬇ JSON export
         </a>
-        <a className="btn btn-secondary" style={{ fontSize: 12.5 }} href={`${API}/campaigns/${campaignId}/export?format=mdzip`}>
+        <a
+          className="btn btn-secondary"
+          style={{ fontSize: 12.5 }}
+          href={`${API}/campaigns/${campaignId}/export?format=mdzip&profile=${profile}${optionQuery}`}
+        >
           ⬇ Markdown zip
         </a>
       </div>
