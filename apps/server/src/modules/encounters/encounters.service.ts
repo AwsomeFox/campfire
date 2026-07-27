@@ -684,7 +684,7 @@ export class EncountersService {
   /** Statblock-derived damage defences for direct tracker damage (issue #605). */
   private targetDamageDefenses(
     row: typeof combatants.$inferSelect,
-    damageTypes: readonly string[],
+    damageTypes: readonly string[] | undefined,
     db: SyncDb = this.db,
   ): TargetDefenses {
     if (row.ruleEntryId === null) return { resistances: [], vulnerabilities: [], immunities: [] };
@@ -3350,7 +3350,13 @@ export class EncountersService {
               damageType ?? '',
               // Untyped damage cannot use a defence, so avoid an unnecessary statblock
               // lookup for the tracker’s frequent raw HP adjustments.
-              damageType ? this.targetDamageDefenses(fresh, adapter.damageTypes ?? [], tx) : { resistances: [], vulnerabilities: [], immunities: [] },
+              damageType
+                ? this.targetDamageDefenses(
+                    fresh,
+                    adapter.damageTypes?.length ? adapter.damageTypes : undefined,
+                    tx,
+                  )
+                : { resistances: [], vulnerabilities: [], immunities: [] },
               { half: patch.saveOutcome === 'half' },
             );
             if (damageMetadataTouched) {

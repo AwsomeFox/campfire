@@ -98,4 +98,11 @@ describe('Open5e creature importer', () => {
     };
     expect(damageDefensesFromStatblock(data, DND5E_DAMAGE_TYPES).resistances).toEqual([]);
   });
+
+  it('treats an empty adapter vocabulary as best-effort parsing', () => {
+    expect(damageDefensesFromStatblock(
+      { damage_resistances: ['fire', 'cold'] },
+      [],
+    ).resistances).toEqual(['fire', 'cold']);
+  });
 });

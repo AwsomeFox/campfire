@@ -263,7 +263,11 @@ function hasMeaningfulQualifier(value: Record<string, unknown>): boolean {
  */
 export function damageDefensesFromStatblock(data: Record<string, unknown> | null | undefined, vocabulary?: readonly string[]): TargetDefenses {
   const nested = recordValue(data?.resistances_and_immunities) ?? recordValue(data?.resistancesAndImmunities);
-  const canonical = vocabulary?.map((type) => type.toLowerCase());
+  // An adapter may support direct-damage rules before declaring a closed vocabulary.
+  // Treat an empty list as best-effort parsing, not as "no type is canonical".
+  const canonical = vocabulary && vocabulary.length > 0
+    ? vocabulary.map((type) => type.toLowerCase())
+    : undefined;
   const normalizeStrings = (raw: string): string[] => {
     return raw.split(';').flatMap((clause) => {
       const parts = clause.split(',').map((item) => item.trim()).filter(Boolean);
