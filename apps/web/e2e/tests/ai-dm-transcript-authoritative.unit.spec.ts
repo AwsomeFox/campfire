@@ -340,11 +340,10 @@ test('the authoritative page and the live-activity provider cache under separate
   // provider writes the legacy format (random ids, no seq). Sharing one key made the last
   // writer before a reload win — and a legacy snapshot hydrated by the authoritative page
   // cannot be merged by eventId, so each narration line rendered twice.
-  expect(transcriptStorageKey(7)).toBe('cf.aiDm.transcript.v2.7');
-  expect(transcriptStorageKey(7, 'table')).toBe(transcriptStorageKey(7));
-  expect(transcriptStorageKey(7, 'activity')).not.toBe(transcriptStorageKey(7, 'table'));
+  expect(transcriptStorageKey(1, 7, 'table')).toBe(transcriptStorageKey(1, 7));
+  expect(transcriptStorageKey(1, 7, 'activity')).not.toBe(transcriptStorageKey(1, 7, 'table'));
   // Distinct per campaign as well, so two tables never share a cache either.
-  expect(transcriptStorageKey(7, 'activity')).not.toBe(transcriptStorageKey(8, 'activity'));
+  expect(transcriptStorageKey(1, 7, 'activity')).not.toBe(transcriptStorageKey(1, 8, 'activity'));
 });
 
 

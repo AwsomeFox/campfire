@@ -3016,8 +3016,23 @@ export class EncountersService {
       }
       // Combat-log actor attribution is DM-authored (apply-damage UI). A player
       // patching their own combatant must not spoof who dealt the damage/heal.
+      //
+      // This stays an ABSOLUTE rule (issue #1478): the field is rejected outright,
+      // never ignored-when-redundant. A player never needs to send it — omitting
+      // `actorId` makes resolveCombatLogActor() attribute the event to the
+      // current-turn combatant, which is exactly what an honest client would have
+      // named. A "tolerate it when it equals the current turn" carve-out would also
+      // be racy, since the client's notion of the current turn is a cached read that
+      // goes stale the moment the turn advances.
+      //
+      // Carries an explicit error code so the player-facing UI can explain the
+      // refusal instead of rendering a bare 403.
       if (patch.actorId !== undefined) {
-        throw new ForbiddenException('Only dm may set combat log actor');
+        throw new ForbiddenException({
+          code: 'COMBAT_LOG_ACTOR_DM_ONLY',
+          message:
+            'Only a DM may set the combat-log actor. Omit actorId — damage is attributed to the current-turn combatant automatically.',
+        });
       }
       if (patch.name !== undefined || patch.hpMax !== undefined || patch.initMod !== undefined || patch.tokenSize !== undefined) {
         throw new ForbiddenException('Only dm may edit a combatant’s name, hpMax, initMod, or tokenSize');
