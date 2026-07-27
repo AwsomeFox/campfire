@@ -175,8 +175,9 @@ function wrapNodeResponse(res: IncomingMessage): FetchResponse {
         return Array.isArray(val) ? val[0] ?? null : val;
       },
     },
+    // #1602: no `json()` — `FetchResponse` no longer declares one, so that adapters
+    // cannot parse a body outside the classifying `readJsonBody` helper.
     text: readBuffered,
-    json: async () => JSON.parse(await readBuffered()) as unknown,
     body,
   };
 }

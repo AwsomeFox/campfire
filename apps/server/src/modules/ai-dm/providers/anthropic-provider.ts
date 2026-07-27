@@ -31,6 +31,7 @@ import {
   DEFAULT_TIMEOUT_MS,
   DEFAULT_IDLE_TIMEOUT_MS,
   postJson,
+  postAndReadJson,
   parseSse,
 } from './http';
 
@@ -105,13 +106,12 @@ export class AnthropicProvider implements AiProvider {
   }
 
   async generate(req: AiGenerateRequest, opts?: AiGenerateOptions): Promise<AiGenerateResult> {
-    const res = await postJson(this.fetchImpl, this.url(), this.authHeaders(), this.buildBody(req, false), {
+    const json = await postAndReadJson<AnthropicMessage>(this.fetchImpl, this.url(), this.authHeaders(), this.buildBody(req, false), {
       provider: this.name,
       timeoutMs: opts?.timeoutMs ?? this.timeoutMs,
       retry: this.retry,
       signal: opts?.signal,
     });
-    const json = (await res.json()) as AnthropicMessage;
     return parseAnthropicMessage(json, req.model || this.opts.model);
   }
 

@@ -5,6 +5,8 @@
  *     the live network),
  *   - per-request timeout composed with the caller's AbortSignal,
  *   - bounded retries with exponential backoff + jitter for retryable failures,
+ *   - a classifying JSON body read (`readJsonBody`, #1602) so no native parse error
+ *     escapes an adapter,
  *   - a line-oriented SSE parser shared by both streaming paths.
  */
 
@@ -24,13 +26,20 @@ export interface FetchInit {
   signal?: AbortSignal;
 }
 
-/** The response surface the adapters read — a structural subset of the global `Response`. */
+/**
+ * The response surface the adapters read — a structural subset of the global `Response`.
+ *
+ * Issue #1602: `json()` is deliberately absent. The real `Response` has it, and every
+ * adapter reached for it, which is exactly how native `SyntaxError`s ended up escaping
+ * the taxonomy. Leaving it off the interface makes that call unavailable to adapter code
+ * and routes every body read through {@link readJsonBody}, which classifies the failure.
+ * Do not add it back.
+ */
 export interface FetchResponse {
   ok: boolean;
   status: number;
   headers: { get(name: string): string | null };
   text(): Promise<string>;
-  json(): Promise<unknown>;
   body: ReadableStream<Uint8Array> | null;
 }
 
@@ -101,19 +110,66 @@ export function backoffDelayMs(attempt: number, cfg: RetryConfig, retryAfterMs?:
   return Math.floor(exp * (0.5 + 0.5 * rand())); // 50–100% of the exponential ceiling
 }
 
+export interface PostJsonOptions {
+  provider: string;
+  timeoutMs: number;
+  retry: RetryConfig;
+  signal?: AbortSignal;
+  sleep?: Sleep;
+  rand?: () => number;
+}
+
 /**
  * Perform a JSON POST with timeout + bounded retries, mapping transport/timeout faults
  * to typed errors. Retries only on retryable typed errors (5xx/429/transport/timeout).
  * The 4xx classification (auth/context/invalid) is thrown immediately. Callers that
- * need the raw stream body pass `stream: true` and read `.body` themselves.
+ * need the raw stream body read `.body` off the returned response themselves.
  */
-export async function postJson(
+export function postJson(
   fetchImpl: FetchLike,
   url: string,
   headers: Record<string, string>,
   bodyObj: unknown,
-  opts: { provider: string; timeoutMs: number; retry: RetryConfig; signal?: AbortSignal; sleep?: Sleep; rand?: () => number },
+  opts: PostJsonOptions,
 ): Promise<FetchResponse> {
+  return postWithRetry(fetchImpl, url, headers, bodyObj, opts, async (res) => res);
+}
+
+/**
+ * Issue #1602: the non-streaming sibling of {@link postJson} — POST, then consume the
+ * body through {@link readJsonBody} INSIDE the retry loop.
+ *
+ * Reading inside the loop is the whole point. `postJson` + a parse at the call site puts
+ * the body read outside every retry, so a connection that dies mid-body could only ever
+ * fail the turn, never be re-attempted — the same shape of defect #1556 fixed for
+ * `reader.read()` on the streaming path. Because `readJsonBody` marks a mid-body fault
+ * `transport` (retryable) and an unparseable body `invalid_response` (not), the existing
+ * `retryable` gate below sorts the two automatically: the socket case gets its backoff,
+ * the garbage-body case throws out on the first attempt.
+ */
+export function postAndReadJson<T>(
+  fetchImpl: FetchLike,
+  url: string,
+  headers: Record<string, string>,
+  bodyObj: unknown,
+  opts: PostJsonOptions,
+): Promise<T> {
+  return postWithRetry(fetchImpl, url, headers, bodyObj, opts, (res) => readJsonBody<T>(res, opts.provider));
+}
+
+/**
+ * The shared POST/timeout/backoff loop behind {@link postJson} and {@link postAndReadJson}.
+ * `finalize` turns a 2xx response into the caller's result; it may reject with a typed
+ * `AiProviderError`, and a retryable one re-enters the loop exactly like a failed fetch.
+ */
+async function postWithRetry<T>(
+  fetchImpl: FetchLike,
+  url: string,
+  headers: Record<string, string>,
+  bodyObj: unknown,
+  opts: PostJsonOptions,
+  finalize: (res: FetchResponse) => Promise<T>,
+): Promise<T> {
   const sleep = opts.sleep ?? realSleep;
   const body = JSON.stringify(bodyObj);
   let lastErr: AiProviderError | undefined;
@@ -145,7 +201,22 @@ export async function postJson(
       // no further reads, so full cleanup is safe.
       if (res.body) t.clearTimer();
       else t.cleanup();
-      return res;
+      try {
+        return await finalize(res);
+      } catch (cause) {
+        t.cleanup();
+        // #1602: `finalize` is contractually typed (readJsonBody, or the identity used by
+        // postJson, which cannot throw). Anything else is a bug in a finalizer, not a
+        // provider fault — surface it typed rather than letting it escape raw, which is
+        // the very guarantee this issue is about.
+        lastErr =
+          cause instanceof AiProviderError
+            ? cause
+            : new AiProviderError('unknown', `${opts.provider}: failed to consume response body`, { provider: opts.provider, cause });
+        if (!lastErr.retryable || attempt === opts.retry.maxRetries) throw lastErr;
+        await sleep(backoffDelayMs(attempt, opts.retry, lastErr.retryAfterMs, opts.rand));
+        continue;
+      }
     }
 
     t.cleanup();
@@ -195,6 +266,64 @@ export async function getJson(
         : new AiProviderError('transport', `${opts.provider}: network error`, { provider: opts.provider, cause });
   } finally {
     t.cleanup();
+  }
+}
+
+/** Cap on how much of an unparseable body we keep for triage (see {@link readJsonBody}). */
+const MAX_RAW_BODY_CHARS = 1000;
+
+/**
+ * Issue #1602: THE single place the adapters turn a 2xx response body into JSON.
+ *
+ * `await res.json()` is two failures wearing one coat, and the taxonomy needs them apart:
+ *
+ *  1. The connection died before the body finished arriving. Rejects (a `TypeError` under
+ *     undici, something else under another runtime) from the socket read. Retryable — the
+ *     next attempt may land a whole body.
+ *  2. The bytes all arrived and are not JSON. Deterministic — an HTML error page from an
+ *     intercepting proxy, an empty 200, a payload the upstream cut short at the
+ *     application layer. Re-requesting cannot change the answer.
+ *
+ * Splitting them on the thrown error's *type* is the tempting lever and the wrong one:
+ * which native error `.json()` raises for which fault is a runtime implementation detail,
+ * not a spec guarantee, and Campfire runs against undici plus whatever a self-hoster's
+ * Node ships. So we split on *sequence* instead. Reading the body as text first isolates
+ * fault (1) — `res.text()` is a raw socket read whose only failure mode is the transfer
+ * not completing, exactly like `reader.read()` in {@link parseSse} (#1556). Once `text()`
+ * resolves the transfer is provably complete, so a `JSON.parse` failure can only be
+ * fault (2). The cost is one extra string copy on a body `.json()` would have buffered
+ * whole anyway — `postJson` already pays it on the non-2xx path via `safeText`.
+ *
+ * The thrown message is sanitized (byte count, no content) because it reaches the table
+ * verbatim as `turn.error.message`; the offending prefix goes to `rawBody` and the server
+ * log, truncated, so a provider streaming megabytes of HTML cannot flood either.
+ */
+export async function readJsonBody<T>(res: FetchResponse, provider: string): Promise<T> {
+  let text: string;
+  try {
+    text = await res.text();
+  } catch (cause) {
+    // A guarded fetch already speaks the taxonomy — do not re-wrap and lose its kind.
+    if (cause instanceof AiProviderError) throw cause;
+    throw new AiProviderError('transport', `${provider}: connection closed before the response body was complete`, {
+      provider,
+      status: res.status,
+      cause,
+    });
+  }
+  try {
+    return JSON.parse(text) as T;
+  } catch (cause) {
+    const rawBody = truncate(text, MAX_RAW_BODY_CHARS);
+    httpLogger.warn(
+      `requestId=${getRequestId() ?? 'none'} AI provider (${provider}) returned HTTP ${res.status} with a non-JSON body (${text.length} bytes). Raw body: ${rawBody}`,
+    );
+    throw new AiProviderError('invalid_response', `${provider}: response body was not valid JSON (${text.length} bytes)`, {
+      provider,
+      status: res.status,
+      rawBody,
+      cause,
+    });
   }
 }
 

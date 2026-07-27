@@ -22,7 +22,7 @@ import {
   type RetryConfig,
   DEFAULT_RETRY,
   DEFAULT_TIMEOUT_MS,
-  postJson,
+  postAndReadJson,
 } from './http';
 
 export interface OpenAiImageProviderOptions {
@@ -82,13 +82,12 @@ export class OpenAiImageProvider implements AiImageProvider {
       size: `${req.width}x${req.height}`,
       response_format: 'b64_json',
     };
-    const res = await postJson(this.fetchImpl, this.url('/images/generations'), this.authHeaders(), body, {
+    const json = await postAndReadJson<OpenAiImageResponse>(this.fetchImpl, this.url('/images/generations'), this.authHeaders(), body, {
       provider: this.name,
       timeoutMs: opts?.timeoutMs ?? this.timeoutMs,
       retry: this.retry,
       signal: opts?.signal,
     });
-    const json = (await res.json()) as OpenAiImageResponse;
     return this.parse(json, req);
   }
 
