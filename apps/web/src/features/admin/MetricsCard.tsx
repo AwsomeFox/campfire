@@ -56,6 +56,7 @@ export function MetricsCard() {
   const { t } = useTranslation();
   const [metrics, setMetrics] = useState<AdminMetrics | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [scanning, setScanning] = useState(false);
 
   const load = useCallback(async () => {
     setError(null);
@@ -65,6 +66,13 @@ export function MetricsCard() {
       setError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     }
   }, []);
+
+  const runCheck = useCallback(async (kind: 'quick-check' | 'integrity-check') => {
+    setScanning(true);
+    try { await api.post(`${API}/admin/metrics/diagnostics/${kind}`); await load(); }
+    catch (err) { setError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' })); }
+    finally { setScanning(false); }
+  }, [load, t]);
 
   useEffect(() => {
     void load();
@@ -110,10 +118,27 @@ export function MetricsCard() {
 
       {/* Top-line operational stats */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-        <Stat label="Database size" value={formatBytes(metrics.database.sizeBytes)} />
+        <Stat label="SQLite allocated pages" value={formatBytes(metrics.database.sizeBytes)} />
+        <Stat label="DB file" value={metrics.database.dbFileBytes === null ? 'Unknown' : formatBytes(metrics.database.dbFileBytes)} />
+        <Stat label="WAL" value={metrics.database.walBytes === null ? 'None' : formatBytes(metrics.database.walBytes)} />
+        <Stat label="Free disk" value={metrics.storage.freeBytes === null ? 'Unknown' : formatBytes(metrics.storage.freeBytes)} />
         <Stat label="DB pages" value={metrics.database.pageCount.toLocaleString()} />
         <Stat label="Active sessions" value={metrics.activeSessions.toLocaleString()} />
         <Stat label="Started" value={new Date(metrics.startedAt).toLocaleString()} />
+      </div>
+
+      {metrics.storage.status !== 'ok' && (
+        <p className="text-xs text-amber-300">Storage diagnostics: {metrics.storage.status}. Quick check: {metrics.storage.quickCheck.status}.</p>
+      )}
+      <div className="flex items-center gap-2">
+        <button className="cf-btn text-xs" disabled={scanning} onClick={() => void runCheck('quick-check')}>Run quick check</button>
+        <button className="cf-btn text-xs" disabled={scanning} onClick={() => void runCheck('integrity-check')}>Run full integrity check</button>
+        <span className="text-[11px] text-secondary">Last quick check: {metrics.storage.quickCheck.checkedAt ? new Date(metrics.storage.quickCheck.checkedAt).toLocaleString() : 'never'}</span>
+      </div>
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+        <Stat label="Uploads" value={metrics.storage.uploadsBytes === null ? 'Unknown' : formatBytes(metrics.storage.uploadsBytes)} />
+        <Stat label="Backups" value={metrics.storage.backupsBytes === null ? 'Unknown' : formatBytes(metrics.storage.backupsBytes)} />
+        <Stat label="Campfire temp" value={metrics.storage.tempBytes === null ? 'Unknown' : formatBytes(metrics.storage.tempBytes)} />
       </div>
 
       {/* Entity counts */}

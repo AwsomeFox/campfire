@@ -1,14 +1,13 @@
-import { Controller, Get, Inject, ServiceUnavailableException } from '@nestjs/common';
+import { Controller, Get, ServiceUnavailableException } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
-import { sql } from 'drizzle-orm';
 import { Public } from '../../common/decorators/public.decorator';
 import { APP_VERSION } from '../../common/build-metadata';
-import { DB, type DrizzleDb } from '../../db/db.module';
+import { StorageDiagnosticsService } from './storage-diagnostics.service';
 
 @ApiTags('health')
 @Controller()
 export class HealthController {
-  constructor(@Inject(DB) private readonly db: DrizzleDb) {}
+  constructor(private readonly diagnostics: StorageDiagnosticsService) {}
 
   @Public()
   @Get('healthz')
@@ -23,21 +22,15 @@ export class HealthController {
   @ApiOperation({
     summary: 'Readiness check',
     description:
-      'Unauthenticated. Runs a real `SELECT 1` against SQLite — 503 when the DB is locked, corrupted or its volume is unavailable. ' +
+      'Unauthenticated. Performs bounded database, rollback-only write, schema, and storage-identity checks — 503 when serving is unsafe. ' +
       'The Docker HEALTHCHECK targets this endpoint so a broken DB marks the container unhealthy (issue #52).',
   })
   @ApiResponse({ status: 200, description: 'Server is up and the database answers queries.' })
   @ApiResponse({ status: 503, description: 'Database is unavailable (locked/corrupted/unmounted volume).' })
   readyz() {
-    try {
-      // Cheap but real round-trip through the better-sqlite3 driver — throws
-      // synchronously if the connection is closed/broken (e.g. locked file,
-      // corrupted DB, unmounted /data volume).
-      this.db.get(sql`SELECT 1`);
-    } catch {
-      // Body shape mirrors healthz (`ok`/`version`) so probes can parse both alike.
-      throw new ServiceUnavailableException({ ok: false, version: APP_VERSION, error: 'database unavailable' });
-    }
-    return { ok: true, version: APP_VERSION };
+    const result = this.diagnostics.readiness();
+    const body = { ok: result.ready, version: APP_VERSION, degraded: false, checks: Object.fromEntries(Object.entries(result.checks).map(([key, value]) => [key, value.code])) };
+    if (!result.ready) throw new ServiceUnavailableException(body);
+    return body;
   }
 }

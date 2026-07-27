@@ -1,7 +1,8 @@
-import { Controller, Get } from '@nestjs/common';
+import { Controller, Get, Post } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { ServerRoles } from '../../common/decorators/server-roles.decorator';
 import { ObservabilityService } from './observability.service';
+import { StorageDiagnosticsService } from '../health/storage-diagnostics.service';
 
 /**
  * Admin observability dashboard (issue #22). Server-admin only — the whole
@@ -14,7 +15,7 @@ import { ObservabilityService } from './observability.service';
 @Controller('admin/metrics')
 @ServerRoles('admin')
 export class ObservabilityController {
-  constructor(private readonly observability: ObservabilityService) {}
+  constructor(private readonly observability: ObservabilityService, private readonly diagnostics: StorageDiagnosticsService) {}
 
   @Get()
   @ApiOperation({
@@ -26,4 +27,13 @@ export class ObservabilityController {
   get() {
     return this.observability.getMetrics();
   }
+
+  @Get('diagnostics')
+  diagnosticsSnapshot() { return this.diagnostics.snapshot(); }
+
+  @Post('diagnostics/quick-check')
+  async quickCheck() { const result = await this.diagnostics.runIntegrity('quick'); this.diagnostics.snapshot(); return result; }
+
+  @Post('diagnostics/integrity-check')
+  async integrityCheck() { const result = await this.diagnostics.runIntegrity('full'); this.diagnostics.snapshot(); return result; }
 }

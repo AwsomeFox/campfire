@@ -15,6 +15,7 @@ export {
   assertDataMount,
   DataMountGuardError,
   sentinelFilePath,
+  readInstallSentinel,
   SENTINEL_FILENAME,
   ALLOW_FRESH_DB_ENV,
   type InstallSentinel,
