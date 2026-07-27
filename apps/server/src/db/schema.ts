@@ -1,5 +1,5 @@
 import { sqliteTable, text, integer, real, index, uniqueIndex, primaryKey } from 'drizzle-orm/sqlite-core';
-import type { AiDmProactiveSettings } from '@campfire/schema';
+import type { AiDmProactiveSettings, AiDmStylePresets } from '@campfire/schema';
 
 /**
  * Drizzle table definitions mirroring @campfire/schema entities.
@@ -106,6 +106,13 @@ export const characters = sqliteTable('characters', {
   deathSaveSuccesses: integer('death_save_successes').notNull().default(0),
   deathSaveFailures: integer('death_save_failures').notNull().default(0),
   conditions: text('conditions').notNull().default('[]'),
+  // Issue #1047: structured condition instances as a JSON ConditionInstance[] blob, the
+  // sheet-scoped counterpart to combatants.condition_instances. Nullable; added by
+  // migration 0132 on older DBs. NULL = derive from the legacy `conditions` names
+  // (common/conditions.ts readConditionInstances), which is what keeps years of bare
+  // strings readable without a rewrite. Round/turn-scoped fields are always null here —
+  // see toSheetConditionInstance for why.
+  conditionInstances: text('condition_instances'),
   saveProficiencies: text('save_proficiencies').notNull().default('[]'),
   skills: text('skills').notNull().default('{}'),
   actions: text('actions').notNull().default('[]'),
@@ -1537,6 +1544,10 @@ export const aiDmSeats = sqliteTable('ai_dm_seats', {
   lastTurnAt: text('last_turn_at'),
   /** Proactive DM settings per campaign (#1044). */
   proactiveSettings: text('proactive_settings', { mode: 'json' }).$type<AiDmProactiveSettings>().default({} as any),
+  /** Structured table style (#1049): tone/pacing/verbosity/combat/NPC depth, JSON-encoded.
+   *  One JSON column rather than five scalars, matching `proactive_settings` above — the whole
+   *  block is read, written and (for #1070's cross-campaign reuse) copied as one value. */
+  stylePresets: text('style_presets', { mode: 'json' }).$type<AiDmStylePresets>().default({} as any),
   /** Depth cap for the FIFO action queue when turns are submitted while running (#1045). */
   actionQueueDepth: integer('action_queue_depth').default(8),
   createdAt: text('created_at').notNull(),
@@ -1569,6 +1580,8 @@ export const aiDriverControlState = sqliteTable('ai_driver_control_state', {
    */
   secretReadApprovals: text('secret_read_approvals'),
   pendingToolConfirmations: text('pending_tool_confirmations'),
+  /** #1051 — collaborative handoff: the AI narrates, a DM confirms mechanical commits. */
+  collaborative: integer('collaborative', { mode: 'boolean' }).notNull().default(false),
   updatedAt: text('updated_at').notNull(),
 });
 
@@ -1961,4 +1974,33 @@ export const campaignModuleSnapshots = sqliteTable('campaign_module_snapshots', 
   createdAt: text('created_at').notNull(),
   createdBy: text('created_by').notNull().default(''),
   rolledBackAt: text('rolled_back_at'),
+});
+
+// Table safety hold / X-Card (issue #599). One row per campaign carrying the CURRENT stop
+// state, upserted rather than appended: activation must be idempotent and must never fail
+// on a race, so "two participants tapped at once" resolves to one held table instead of a
+// conflict either of them has to retry.
+//
+// Note the column that is ABSENT: there is no activated_by_user_id. An anonymous activation
+// keeps its promise by never handing the identity to this layer at all, so no projection,
+// export, or audit join can reconstruct it. `activatedByName` is populated only when the
+// participant explicitly chose attribution.
+export const tableSafetyHolds = sqliteTable('table_safety_holds', {
+  campaignId: integer('campaign_id').primaryKey(),
+  /** True while play is frozen. The single field every gate reads. */
+  active: integer('active', { mode: 'boolean' }).notNull().default(false),
+  /** When the current hold was raised. First activation wins; re-activation does not move it. */
+  activatedAt: text('activated_at'),
+  /** Display name, ONLY for an explicitly attributed hold. NULL means anonymous *or* no hold. */
+  activatedByName: text('activated_by_name'),
+  anonymous: integer('anonymous', { mode: 'boolean' }).notNull().default(true),
+  /** Lifetime activation count for this campaign — a count is not attributable. */
+  activationCount: integer('activation_count').notNull().default(0),
+  releasedAt: text('released_at'),
+  /** The facilitator who released it. Always recorded: releasing is an accountable act. */
+  releasedBy: text('released_by'),
+  /** A SafetyHoldRecovery value: resume | rewind | veil | scene_change | end. */
+  recovery: text('recovery'),
+  facilitatorNote: text('facilitator_note'),
+  updatedAt: text('updated_at').notNull(),
 });

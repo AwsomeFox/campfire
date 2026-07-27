@@ -60,6 +60,7 @@ import {
   partyTreasury,
   aiDmSeats,
   aiDriverControlState,
+  tableSafetyHolds,
   aiScribeConfigs,
   encounterEvents,
   auditLog,
@@ -95,6 +96,8 @@ import { ATTACHMENT_STATE_COMMITTED } from '../attachments/attachment.constants'
 import { sanitizeAttachmentFilename } from '../attachments/filename';
 import { APP_VERSION } from '../../common/build-metadata';
 import { CURRENT_SCHEMA_REVISION } from '../backup/backup-manifest';
+import { freshAiSeatCounters, portableAiSeat, readPortableAiSeat } from '../ai-dm/ai-seat-portability';
+import { AiDmService } from '../ai-dm/ai-dm.service';
 import {
   assertCompendiumImportAllowed,
   buildResolutionMap,
@@ -307,6 +310,10 @@ export class CampaignsService {
     private readonly invites: InvitesService,
     private readonly fsDeletion: FsDeletionService,
     private readonly events: CampaignEventsService,
+    // #1049 review: clone and import write `ai_dm_seats` directly, so they owe the AI-DM
+    // module a nudge afterwards — see syncProactiveWatcher. AiDmModule imports nothing that
+    // leads back to CampaignsModule, so this edge is acyclic.
+    private readonly aiDm: AiDmService,
   ) {}
 
   /**
@@ -1737,14 +1744,11 @@ export class CampaignsService {
       if (aiSeatRow) {
         tx.insert(aiDmSeats).values({
           campaignId: cloneId,
-          mode: aiSeatRow.mode,
-          enabled: aiSeatRow.enabled,
-          model: aiSeatRow.model,
-          instructions: aiSeatRow.instructions,
-          tokenBudget: aiSeatRow.tokenBudget,
-          tokensUsed: 0,
-          turnCount: 0,
-          lastTurnAt: null,
+          // #1049: one classification, three call sites. Counters are zeroed explicitly rather
+          // than left to column defaults so "this clone starts its own accounting" is a stated
+          // decision, not an accident of which fields the insert happened to omit.
+          ...portableAiSeat(aiSeatRow),
+          ...freshAiSeatCounters(),
           createdAt: ts,
           updatedAt: ts,
         }).run();
@@ -1793,6 +1797,13 @@ export class CampaignsService {
       campaignId: newId,
       detail: `cloned from campaign ${id} (${template ? 'template' : 'full'})`,
     });
+
+    // #1049 review: carrying `proactiveSettings` is not the same as HONOURING them. The watcher
+    // is in-memory and starts only from AiDmService.configure's callback, which this path
+    // bypasses by inserting the seat row directly inside the copy transaction — so without this
+    // the clone reads back proactive ON and never fires a proactive turn. Called AFTER commit
+    // deliberately: the sync re-reads the persisted row.
+    await this.aiDm.syncProactiveWatcher(newId);
     return this.getOrThrow(newId);
   }
 
@@ -2782,14 +2793,17 @@ export class CampaignsService {
       if (aiSeatSrc && Object.keys(aiSeatSrc).length > 0) {
         tx.insert(aiDmSeats).values({
           campaignId: cid,
-          mode: str(aiSeatSrc.mode, 'off'),
-          enabled: boolOf(aiSeatSrc.enabled),
-          model: str(aiSeatSrc.model),
-          instructions: str(aiSeatSrc.instructions),
-          tokenBudget: Math.max(0, intOr(aiSeatSrc.tokenBudget, 0)),
-          tokensUsed: 0,
-          turnCount: 0,
-          lastTurnAt: null,
+          // #1049: same classification as clone/export, but read through coercers — this side
+          // parses untrusted JSON from an uploaded archive, not a typed row.
+          ...readPortableAiSeat(aiSeatSrc as Record<string, unknown>, {
+            str,
+            boolOf,
+            intOr,
+            // An illegal block falls back to defaults rather than failing the whole archive —
+            // but never silently, or the operator has no way to know their style was dropped.
+            warn: (field, detail) => importLog.warn(`campaign ${cid}: ${detail} (${field})`),
+          }),
+          ...freshAiSeatCounters(),
           createdAt: ts,
           updatedAt: ts,
         }).run();
@@ -2897,6 +2911,11 @@ export class CampaignsService {
         );
       }
     }
+
+    // #1049 review: same gap as clone — the seat row was inserted directly inside the import
+    // transaction, so nothing told the in-memory proactive watcher it exists. An archive
+    // carrying `proactiveSettings.enabled: true` would otherwise import as ON-but-inert.
+    await this.aiDm.syncProactiveWatcher(newId);
 
     const campaign = await this.getOrThrow(newId);
     return {
@@ -3274,6 +3293,9 @@ export class CampaignsService {
         tx.delete(inventoryItems).where(eq(inventoryItems.campaignId, id)).run();
         tx.delete(partyTreasury).where(eq(partyTreasury.campaignId, id)).run();
         tx.delete(aiDriverControlState).where(eq(aiDriverControlState.campaignId, id)).run();
+        // #599 — the table safety hold row. Explicit like every other campaign-scoped table:
+        // legacy databases predate the FK cascade, so purge cannot rely on it.
+        tx.delete(tableSafetyHolds).where(eq(tableSafetyHolds.campaignId, id)).run();
         tx.delete(aiDmSeats).where(eq(aiDmSeats.campaignId, id)).run();
 
         tx.delete(campaigns).where(eq(campaigns.id, id)).run();

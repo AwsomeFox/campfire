@@ -9,7 +9,13 @@ import {
 } from '@nestjs/common';
 import { and, desc, eq, gt, gte, sql } from 'drizzle-orm';
 import type { z } from 'zod';
-import { AiDmProactiveSettings } from '@campfire/schema';
+import {
+  AI_DM_SEAT_INHERITED_FIELDS,
+  AI_DM_STYLE_PRESET_DEFAULTS,
+  AiDmProactiveSettings,
+  AiDmSeatDefaults,
+  AiDmStylePresets,
+} from '@campfire/schema';
 import type {
   AiDmMode,
   AiDmReadiness,
@@ -34,6 +40,7 @@ import { SessionZeroService } from '../session-zero/session-zero.service';
 import { SupportPreferencesService } from '../session-zero/support-preferences.service';
 import { providerCapabilities } from './providers';
 import type { AiProviderConfig } from './providers/factory';
+import { renderTableStyleSection } from '../ai-driver/driver-style';
 
 type AiDmSeatUpdateInput = z.infer<typeof AiDmSeatUpdate>;
 type AiDmTurnRequestInput = z.infer<typeof AiDmTurnRequest>;
@@ -99,19 +106,37 @@ function toDomain(row: typeof aiDmSeats.$inferSelect): AiDmSeat {
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     proactiveSettings: AiDmProactiveSettings.parse(row.proactiveSettings ?? {}),
+    // #1049: '{}' on an upgraded row parses to the all-`default` preset, i.e. "no preference",
+    // so a seat that predates this feature renders no style section at all.
+    stylePresets: AiDmStylePresets.parse(row.stylePresets ?? {}),
+    // #1070: a persisted seat inherits nothing. Detach is whole-seat on first configure,
+    // matching the provider's row-granularity override, so a configured campaign is its own
+    // truth and must not report otherwise.
+    inheritedFields: [],
   };
 }
 
-/** In-memory default seat for a campaign that has never configured one — never persisted. */
-function defaultSeat(campaignId: number): AiDmSeat {
+/**
+ * In-memory default seat for a campaign that has never configured one — never persisted.
+ *
+ * `defaults` are the server-wide values from {@link AiDmService.getSeatDefaults} (#1070).
+ * Passing them makes this seat the LIVE inherited view: a campaign with no row tracks the
+ * server defaults until the moment it saves, exactly as a campaign with no provider override
+ * tracks the server provider row. `inheritedFields` names what came from there, so a DM can
+ * see an inherited token budget BEFORE enabling the seat — the point at which it could spend.
+ *
+ * Called with no `defaults` it behaves exactly as it did before #1070, which is what keeps
+ * the pure/unit call sites (and any caller that has no DB handle) working unchanged.
+ */
+function defaultSeat(campaignId: number, defaults?: AiDmSeatDefaults): AiDmSeat {
   const ts = nowIso();
   return {
     campaignId,
-    mode: 'off',
-    enabled: false,
+    mode: defaults?.mode ?? 'off',
+    enabled: false, // never inherited: switching a seat on is a human's decision (#1070)
     model: '',
-    instructions: '',
-    tokenBudget: 0,
+    instructions: defaults?.instructions ?? '',
+    tokenBudget: defaults?.tokenBudget ?? 0,
     tokensUsed: 0,
     tokensReserved: 0,
     tokensRefunded: 0,
@@ -126,10 +151,23 @@ function defaultSeat(campaignId: number): AiDmSeat {
       cooldownSeconds: 300,
       maxProactiveTokensPerHour: 5000,
     },
-    actionQueueDepth: 8,
+    stylePresets: { ...AI_DM_STYLE_PRESET_DEFAULTS },
+    // #1070 supplies actionQueueDepth from the server defaults; #1049's stylePresets stays a
+    // built-in all-`default` value because a server default for style does not exist yet.
+    actionQueueDepth: defaults?.actionQueueDepth ?? 8,
+    // Only report a field as inherited when a server default actually supplied a value that
+    // differs from the built-in fallback — otherwise every untouched install would claim to
+    // be inheriting the same zeros it would have produced anyway.
+    inheritedFields: defaults ? inheritedFieldsFor(defaults) : [],
     createdAt: ts,
     updatedAt: ts,
   };
+}
+
+/** Which server defaults actually differ from the built-in fallbacks (#1070). */
+function inheritedFieldsFor(defaults: AiDmSeatDefaults): string[] {
+  const fallback = AiDmSeatDefaults.parse({});
+  return AI_DM_SEAT_INHERITED_FIELDS.filter((field) => defaults[field] !== fallback[field]);
 }
 
 /**
@@ -146,6 +184,20 @@ function defaultSeat(campaignId: number): AiDmSeat {
  *   2. the per-campaign seat's `enabled` flag (turns only).
  * Plus a per-campaign token budget that a turn is metered against.
  */
+/**
+ * Append the rendered `## Table style` section to a seat's freeform instructions (#1049).
+ *
+ * AUGMENTS, never replaces: the DM's hand-written persona stays first and the style block is
+ * added under it, matching the Driver's own prompt assembly. Returns the instructions unchanged
+ * when no style is configured, so an unstyled seat produces a byte-identical prompt to the one
+ * it produced before #1049 — the feature costs zero tokens until a DM opts in.
+ */
+function withTableStyle(instructions: string, presets: AiDmSeat['stylePresets']): string {
+  const section = renderTableStyleSection(presets);
+  if (!section) return instructions;
+  return instructions ? `${instructions}\n\n${section}` : section;
+}
+
 @Injectable()
 export class AiDmService implements OnApplicationBootstrap {
   private readonly logger = new Logger(AiDmService.name);
@@ -231,6 +283,34 @@ export class AiDmService implements OnApplicationBootstrap {
     fn: (campaignId: number, settings?: AiDmProactiveSettings, seatEnabled?: boolean) => void,
   ): void {
     this.proactiveSettingsCallback = fn;
+  }
+
+  /**
+   * Announce a seat row that was written OUTSIDE {@link configure} (#1049 review).
+   *
+   * `ProactiveService`'s watcher is in-memory and starts only when the callback above fires,
+   * and the ONLY thing that fires it is `configure`. Clone and import do not go through
+   * `configure` — they insert into `ai_dm_seats` directly, inside the campaign-copy
+   * transaction — so a campaign cloned from one with `proactiveSettings.enabled: true` came out
+   * the far side with the settings faithfully copied and no subscription behind them. The seat
+   * read back as ON, the UI drew it as ON, and no proactive turn would ever fire: the same
+   * "reports success, has no effect" shape as the dropped `stylePresets` this PR is about, one
+   * layer down.
+   *
+   * Call this AFTER the writing transaction commits — it re-reads the stored row, so an
+   * uncommitted seat would announce stale settings. Deliberately reads the row rather than
+   * taking settings from the caller: the value that matters is what the copy actually persisted
+   * (post-coercion, post-clamp), not what the archive claimed.
+   *
+   * No-ops when no seat exists, and announces a DISABLED seat too — that path stops any watcher
+   * left over from a previous campaign at the same id, which matters after an import into a
+   * recycled id far more than it costs.
+   */
+  async syncProactiveWatcher(campaignId: number): Promise<void> {
+    const row = await this.findRow(campaignId);
+    if (!row) return;
+    const seat = toDomain(row);
+    this.proactiveSettingsCallback?.(campaignId, seat.proactiveSettings, seat.enabled);
   }
 
   /**
@@ -358,7 +438,23 @@ export class AiDmService implements OnApplicationBootstrap {
   /** Read the seat (its configured, un-metered default when none exists yet). No experimental gate — reads are inert. */
   async getSeat(campaignId: number): Promise<AiDmSeat> {
     const row = await this.findRow(campaignId);
-    return row ? toDomain(row) : defaultSeat(campaignId);
+    // #1070: the server-defaults read happens ONLY on the inheritance path — a campaign that
+    // has configured its seat resolves from its own row and never touches `settings`. That
+    // matters because SettingsService.getJson hits SQLite on every call (no cache), and the
+    // per-turn hot path must not gain a query for a value it cannot use.
+    return row ? toDomain(row) : defaultSeat(campaignId, await this.getSeatDefaults());
+  }
+
+  /**
+   * Server-wide AI seat defaults (#1070), or the built-in fallbacks when an admin has set none.
+   *
+   * Stored as one JSON value in the existing `settings` key/value table rather than a new
+   * table, so this needed no migration at all. A malformed or partial stored value falls back
+   * per-field through zod rather than throwing — a bad default must not be able to break every
+   * campaign's seat read.
+   */
+  async getSeatDefaults(): Promise<AiDmSeatDefaults> {
+    return this.settings.getAiSeatDefaults();
   }
 
   /**
@@ -798,7 +894,10 @@ export class AiDmService implements OnApplicationBootstrap {
           : undefined;
 
     if (!existing) {
-      const base = defaultSeat(campaignId);
+      // #1070: seed the new row from the server defaults for every field this call did not
+      // specify. Detaching is whole-seat, so without seeding the act of saving ONE field
+      // would silently revert the others to the built-in zeros the DM never chose.
+      const base = defaultSeat(campaignId, await this.getSeatDefaults());
       await this.db.insert(aiDmSeats).values({
         campaignId,
         mode: input.mode ?? base.mode,
@@ -817,6 +916,7 @@ export class AiDmService implements OnApplicationBootstrap {
         createdAt: ts,
         updatedAt: ts,
         proactiveSettings: (input.proactiveSettings ?? base.proactiveSettings) as any,
+        stylePresets: (input.stylePresets ?? base.stylePresets) as any,
       });
     } else {
       await this.db
@@ -828,6 +928,7 @@ export class AiDmService implements OnApplicationBootstrap {
           ...(input.instructions !== undefined ? { instructions: input.instructions } : {}),
           ...(input.tokenBudget !== undefined ? { tokenBudget: input.tokenBudget } : {}),
           ...(input.proactiveSettings !== undefined ? { proactiveSettings: input.proactiveSettings as any } : {}),
+          ...(input.stylePresets !== undefined ? { stylePresets: input.stylePresets as any } : {}),
           ...(input.actionQueueDepth !== undefined ? { actionQueueDepth: input.actionQueueDepth } : {}),
           updatedAt: ts,
         })
@@ -1010,7 +1111,25 @@ export class AiDmService implements OnApplicationBootstrap {
         campaignId,
         kind: input.kind,
         prompt: input.prompt,
-        instructions: seat.instructions,
+        // #1049: the table style travels with the persona on THIS surface too.
+        //
+        // `renderTableStyleSection` was originally spliced only into the Driver's
+        // `assembleSystemPrompt`, so a DM who configured a style, saved it, and then narrated
+        // through POST /ai-dm/turn (or the MCP `ai_dm_narrate` tool) got a prompt that silently
+        // ignored it — the same "reports success, has no effect" signature this issue is about.
+        // This is the same narration, just a different entry point, so leaving it out was the
+        // hardest exclusion to defend.
+        //
+        // EVERY kind, `recap` included — reviewed, not overlooked. It is a fair question, since
+        // the scribe also produces "a recap" and deliberately carries no style (see
+        // ScribeService's prompt assembly, which states the other half of this decision). The
+        // two are different products with different speakers: this is the AI DM talking to the
+        // table live, where `kind` steers framing rather than who is speaking, and the scribe
+        // replaces the speaker outright with "You are the campaign scribe" to file a record.
+        // Excluding `recap` here would give one kind a different persona from the other two on
+        // the same endpoint and the same seat — a sharper inconsistency, hit far more often,
+        // than the cross-service one it would resolve.
+        instructions: withTableStyle(seat.instructions, seat.stylePresets),
         model: execModel,
         maxTokens: reservation.tokensReserved,
       });

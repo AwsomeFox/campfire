@@ -18,7 +18,7 @@
  * only owns caching, dedupe, polling, and optimistic writes on top of it.
  */
 import { QueryClient, useQuery, type QueryKey, type UseQueryResult } from '@tanstack/react-query';
-import type { AiDmSeat } from '@campfire/schema';
+import type { AiDmSeat, TableSafetyHold } from '@campfire/schema';
 import { api, API, ApiError } from './api';
 
 /**
@@ -57,6 +57,10 @@ export const queryKeys = {
   aiDmReadiness: (campaignId: number) => ['campaign', campaignId, 'ai-dm', 'readiness'] as const,
   /** #577 — the AI's factual claims plus the server's verdict on each (the grounding card). */
   aiDmGrounding: (campaignId: number) => ['campaign', campaignId, 'ai-dm', 'grounding'] as const,
+  /** #1558 — confirm-policy tool calls waiting on a DM's approval. */
+  aiDmToolConfirmations: (campaignId: number) => ['campaign', campaignId, 'ai-dm', 'tool-confirmations'] as const,
+  /** #599 — the table safety hold (X-Card). Read by every campaign surface, not just the table. */
+  tableSafety: (campaignId: number) => ['campaign', campaignId, 'safety'] as const,
 } satisfies Record<string, (...args: never[]) => QueryKey>;
 
 /**
@@ -97,7 +101,13 @@ export function invalidateCampaignCheckRequests(client: QueryClient, campaignId:
 export type AiDmSessionStatus = 'idle' | 'running' | 'paused';
 
 /** Stuck-ladder lifecycle the player levers act on (server `AiDmLadderState`, #314). */
-export type AiDmLadderState = 'running' | 'awaiting_players' | 'paused' | 'human_control';
+export type AiDmLadderState =
+  | 'running'
+  | 'awaiting_players'
+  | 'paused'
+  | 'human_control'
+  /** #1051 — the AI narrates, a DM confirms every mechanical commit. Not a frozen state. */
+  | 'collaborative';
 
 /** Snapshot of the current stuck condition; null when healthy (server `AiDmStuckInfo`, #314). */
 export interface AiDmStuckInfo {
@@ -190,6 +200,76 @@ export function useAiDmSeat(campaignId: number | undefined): UseQueryResult<AiDm
  * spends, so it goes stale on exactly the same signals — without this the onboarding checklist
  * and the per-turn cost estimate keep rendering pre-turn numbers (#519).
  */
+/**
+ * One confirm-policy tool call waiting on a DM (#474), as returned by
+ * GET /campaigns/:id/ai-dm/tool-confirmations. DM-only server-side.
+ */
+export interface AiDmToolConfirmation {
+  id: string;
+  tool: string;
+  args: Record<string, unknown>;
+  toolCallId: string;
+  profile: 'prep' | 'live' | 'aftermath';
+  policy: 'auto' | 'confirm' | 'propose' | 'deny';
+  requestedAt: string;
+  actor: string;
+  triggeredBy: string;
+  turnNumber: number;
+}
+
+/**
+ * Watch the pending tool-confirmation queue (#1558).
+ *
+ * `enabled` is the caller's, because the endpoint is DM-only and a player polling it would
+ * generate a steady drip of 403s. A modest poll backs up the SSE signal for the same reason the
+ * safety hold polls: this is a queue whose whole failure mode is a SILENT stall, and a dead SSE
+ * connection is exactly the condition under which the DM most needs the list to still arrive.
+ */
+export function useAiDmToolConfirmations(
+  campaignId: number | undefined,
+  enabled: boolean,
+): UseQueryResult<AiDmToolConfirmation[]> {
+  return useQuery({
+    queryKey:
+      campaignId !== undefined ? queryKeys.aiDmToolConfirmations(campaignId) : ['ai-dm', 'tool-confirmations', 'disabled'],
+    queryFn: () => api.get<AiDmToolConfirmation[]>(`${API}/campaigns/${campaignId}/ai-dm/tool-confirmations`),
+    enabled: enabled && campaignId !== undefined && Number.isFinite(campaignId),
+    staleTime: 0,
+    refetchInterval: 30_000,
+    refetchOnWindowFocus: true,
+  });
+}
+
+export function invalidateAiDmToolConfirmations(client: QueryClient, campaignId: number): void {
+  void client.invalidateQueries({ queryKey: queryKeys.aiDmToolConfirmations(campaignId) });
+}
+
+/**
+ * Watch the table safety hold (#599).
+ *
+ * `refetchInterval` is deliberate and deliberately short. Every other read in this file is
+ * happy to wait for an SSE tick, because being a few seconds stale about a quest title costs
+ * nothing. Being stale about whether the table has stopped costs the exact thing the feature
+ * exists to buy, and SSE is the layer most likely to be quietly dead (a sleeping laptop, a
+ * proxy that dropped the stream, a tab restored from bfcache). The poll is the floor under the
+ * event: the event makes it feel instant, the poll makes it eventually true regardless.
+ */
+export function useTableSafety(campaignId: number | undefined): UseQueryResult<TableSafetyHold> {
+  return useQuery({
+    queryKey: campaignId !== undefined ? queryKeys.tableSafety(campaignId) : ['safety', 'disabled'],
+    queryFn: () => api.get<TableSafetyHold>(`${API}/campaigns/${campaignId}/safety`),
+    enabled: campaignId !== undefined && Number.isFinite(campaignId),
+    staleTime: 0,
+    refetchInterval: 20_000,
+    refetchOnWindowFocus: true,
+  });
+}
+
+/** Mark the table safety hold stale (SSE `safety.hold` tick, or after activating/releasing). */
+export function invalidateTableSafety(client: QueryClient, campaignId: number): void {
+  void client.invalidateQueries({ queryKey: queryKeys.tableSafety(campaignId) });
+}
+
 export function invalidateAiDm(client: QueryClient, campaignId: number): void {
   void client.invalidateQueries({ queryKey: queryKeys.aiDmSession(campaignId) });
   void client.invalidateQueries({ queryKey: queryKeys.aiDmSeat(campaignId) });

@@ -96,6 +96,7 @@ import {
   InviteCreate,
   InvitePolicyUpdate,
   SpellSlotPatch,
+  spellSlotsRemaining,
   EncounterReopen,
   ProposalRevise,
   ProposalBatchResolve,
@@ -117,7 +118,7 @@ import { FactionsService } from '../factions/factions.service';
 import { LocationsService } from '../locations/locations.service';
 import { SessionsService, buildRecapDraft } from '../sessions/sessions.service';
 import { SessionSharesService } from '../sessions/session-shares.service';
-import { CharactersService } from '../characters/characters.service';
+import { CharactersService, type RestPartyResult } from '../characters/characters.service';
 import { NotesService } from '../notes/notes.service';
 import { MembersService } from '../membership/members.service';
 import { ProposalRecordsService } from '../proposals/proposal-records.service';
@@ -679,6 +680,29 @@ export class McpToolsService {
    *    the equivalent non-@Proposable endpoints.
    * Read tools keep using this.tool() directly and are never gated.
    */
+  /**
+   * Combat-log one line per character after a rest (#1041).
+   *
+   * Logged from the TOOL layer, not from CharactersService, on purpose: the characters module
+   * has no EncountersService edge and adding one to write a log line would be a new
+   * cross-module dependency for a side effect. Both services are already injected here, and
+   * the AI driver's loot tools (#1021) already append their combat-log notes at this same
+   * boundary — so this follows the established seam instead of opening a new one.
+   *
+   * BEST-EFFORT, and after the rest has committed: a combat-log failure must never roll back
+   * a rest the party has already been told about. `appendActiveEncounterNote` is itself a
+   * no-op when no encounter is running, which is the common case for a rest.
+   */
+  private async logRestToCombatLog(campaignId: number, result: RestPartyResult): Promise<void> {
+    for (const character of result.characters) {
+      // The character's NAME goes in the `actor` field, never interpolated into `detail` —
+      // the combat log redacts names per role and forbids name-bearing detail text (#869).
+      await this.encounters
+        .appendActiveEncounterNote(campaignId, character.logLine, character.name)
+        .catch(() => undefined);
+    }
+  }
+
   private writeTool(
     server: McpServer,
     user: RequestUser,
@@ -2793,18 +2817,40 @@ export class McpToolsService {
       server,
       user,
       'adjust_spell_slots',
-      'Spend (+delta) or restore (-delta) spell slots at one level for a character — dm or the owning player. `used` is ' +
-        'clamped to [0, max]. 400 if the character has no slots at that level.',
+      'Spend (+delta) or restore (-delta) spell slots at one level for a character — dm or the owning player. ' +
+        'A spend that exceeds the slots remaining FAILS with an error carrying `remaining` and `max`, so it is safe ' +
+        'to treat success as "the slot was consumed" — do not narrate a spell as cast if this call errored. ' +
+        'Restores clamp at zero. 400 if the character has no slots configured at that level.',
       { characterId: Id.describe('Character id'), ...SpellSlotPatch.shape },
       async ({ characterId, level, delta }) => {
         const row = await this.characters.getRowOrThrow(characterId as number);
         const role = await this.access.requireRole(user, row.campaignId, 'player');
-        return this.characters.patchSpellSlots(
+        const before = await this.characters.spellSlotsLeft(characterId as number, level as number);
+        const updated = await this.characters.patchSpellSlots(
           characterId as number,
           { level: level as number, delta: delta as number },
           user,
           role,
         );
+        // Combat-logged at the TOOL boundary, not inside CharactersService: that module has no
+        // EncountersService edge, and both the rest tools and the driver's loot tools (#1021)
+        // already log here. Best-effort and post-commit — a log failure must not undo a spend.
+        const after = spellSlotsRemaining(
+          (updated.spellSlots ?? {}) as Record<string, { max: number; used: number }>,
+          level as number,
+        );
+        if (after !== before) {
+          const spent = after < before;
+          const count = Math.abs(after - before);
+          await this.encounters
+            .appendActiveEncounterNote(
+              row.campaignId,
+              `${spent ? 'spent' : 'restored'} ${count} level ${level} spell ${count === 1 ? 'slot' : 'slots'} (${after} remaining)`,
+              updated.name,
+            )
+            .catch(() => undefined);
+        }
+        return updated;
       },
     );
 
@@ -2879,6 +2925,90 @@ export class McpToolsService {
         const row = await this.characters.getRowOrThrow(characterId as number);
         const role = await this.access.requireRole(user, row.campaignId, 'player');
         return this.characters.levelUp(characterId as number, { ...(hpMax !== undefined ? { hpMax: hpMax as number } : {}) }, user, role);
+      },
+    );
+
+    // ── Rest mechanics (#1041) ────────────────────────────────────────────────────────
+    //
+    // ATOMIC BY CONTRACT. Before these existed the only way to run a rest was to set each
+    // character's HP, reset each spell-slot level and clear each condition with its own call —
+    // dozens of writes with no transaction, so a turn that ran out of steps left the party
+    // half-rested. Both tools plan the WHOLE party first and reject the entire call if any
+    // character's rest is not applicable, so there is no partial outcome to unpick.
+    this.writeTool(
+      server,
+      user,
+      'long_rest',
+      'Take a LONG rest for one or more characters, atomically: HP to full, temp HP cleared, ' +
+        'death saves reset, spell slots restored, resources refilled by their rule-system recharge cadence, ' +
+        'and the conditions this rule system says a long rest ends. Conditions it does NOT recognise are ' +
+        'deliberately LEFT in place and reported, so a curse or a homebrew status is never silently deleted ' +
+        'by a night\'s sleep. Rejects the whole rest (writing nothing) if any named character is dead.',
+      {
+        campaignId: Id.describe('Campaign the party belongs to'),
+        characterIds: z
+          .array(Id)
+          .min(1)
+          .max(20)
+          .describe('Characters taking the rest. Every one is validated before ANYTHING is written.'),
+      },
+      async ({ campaignId, characterIds }) => {
+        const role = await this.access.requireRole(user, campaignId as number, 'player');
+        const result = await this.characters.restParty(campaignId as number, 'long', characterIds as number[], {}, user, role);
+        await this.logRestToCombatLog(campaignId as number, result);
+        return result;
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'short_rest',
+      'Take a SHORT rest for one or more characters, atomically. Restores resources whose recharge ' +
+        'cadence is short-rest, and optionally spends hit dice for HP recovery (each die rolled + CON ' +
+        'modifier). Hit dice require an explicit `hitDie` size — the class die is not stored on the sheet, ' +
+        'and guessing one would silently under-heal. Rejects the whole rest (writing nothing) if any ' +
+        'character lacks the hit dice requested or is dead.',
+      {
+        campaignId: Id.describe('Campaign the party belongs to'),
+        characterIds: z
+          .array(Id)
+          .min(1)
+          .max(20)
+          .describe('Characters taking the rest. Every one is validated before ANYTHING is written.'),
+        hitDice: z
+          .array(
+            z.object({
+              characterId: Id.describe('Character spending hit dice'),
+              dice: z.number().int().min(1).max(20).describe('How many hit dice to spend'),
+              hitDie: z
+                .number()
+                .int()
+                .min(2)
+                .max(100)
+                .describe('Die size, e.g. 8 for a d8. Required — the sheet does not store the class hit die.'),
+            }),
+          )
+          .max(20)
+          .optional()
+          .describe('Per-character hit-dice spend. Characters omitted here simply spend none.'),
+      },
+      async ({ campaignId, characterIds, hitDice }) => {
+        const role = await this.access.requireRole(user, campaignId as number, 'player');
+        const perCharacter: Record<number, { spendHitDice?: number; hitDie?: number }> = {};
+        for (const entry of (hitDice ?? []) as Array<{ characterId: number; dice: number; hitDie: number }>) {
+          perCharacter[entry.characterId] = { spendHitDice: entry.dice, hitDie: entry.hitDie };
+        }
+        const result = await this.characters.restParty(
+          campaignId as number,
+          'short',
+          characterIds as number[],
+          perCharacter,
+          user,
+          role,
+        );
+        await this.logRestToCombatLog(campaignId as number, result);
+        return result;
       },
     );
 

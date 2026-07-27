@@ -28,6 +28,9 @@ describe('notification category mapping (issue #789)', () => {
       'session_scheduled', 'session_rsvp', 'session_reminder', 'rsvp_nudge',
       'quest_updated', 'proposal_submitted', 'proposal_resolved',
       'inbox_submitted', 'ai_dm_alert',
+      // #599 — the table safety hold. Critical/always-on: a safety stop must not be mutable by
+      // a notification preference or deferrable into a digest.
+      'safety_hold',
     ];
     for (const type of types) {
       expect(NOTIFICATION_CATEGORIES).toContain(notificationCategory(type));
@@ -38,6 +41,7 @@ describe('notification category mapping (issue #789)', () => {
     expect(notificationCategory('added_to_campaign')).toBe('access');
     expect(notificationCategory('character_reassigned')).toBe('access');
     expect(notificationCategory('ai_dm_alert')).toBe('security');
+    expect(notificationCategory('safety_hold')).toBe('security');
     expect(isCriticalNotificationCategory('access')).toBe(true);
     expect(isCriticalNotificationCategory('security')).toBe(true);
     expect(CRITICAL_NOTIFICATION_CATEGORIES).toEqual(['access', 'security']);

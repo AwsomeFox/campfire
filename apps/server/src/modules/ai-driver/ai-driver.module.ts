@@ -12,6 +12,7 @@ import { RulesModule } from '../rules/rules.module';
 import { EncountersModule } from '../encounters/encounters.module';
 import { MembershipModule } from '../membership/membership.module';
 import { CharactersModule } from '../characters/characters.module';
+import { TableSafetyModule } from '../safety/table-safety.module';
 import { AiDriverService } from './ai-driver.service';
 import { AiDriverController } from './ai-driver.controller';
 import { AiDmStreamService } from './ai-driver-stream.service';
@@ -56,6 +57,9 @@ import { AI_PROVIDER_RESOLVER, ConfigAiProviderResolver } from './ai-provider-re
     EncountersModule,
     MembershipModule,
     CharactersModule,
+    // #599 — the participant safety hold. One-way edge: the safety module never imports this
+    // one; AiDriverService registers a freeze hook into it at construction.
+    TableSafetyModule,
   ],
   controllers: [AiDriverController],
   providers: [
