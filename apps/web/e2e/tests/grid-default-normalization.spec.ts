@@ -176,7 +176,9 @@ test.describe('battle-grid default normalization — issue #865', () => {
       },
     });
     expect(upload.ok()).toBe(true);
-    const mapAttachmentId = ((await upload.json()) as { id: number }).id;
+    const uploadBody = await upload.json();
+    expect(uploadBody).toMatchObject({ id: expect.any(Number) });
+    const mapAttachmentId = (uploadBody as { id: number }).id;
 
     // One PATCH: the non-default grid config this test starts from, plus the map. Attaching the
     // map here rather than in a second PATCH keeps the encounter.update audit trail — which
