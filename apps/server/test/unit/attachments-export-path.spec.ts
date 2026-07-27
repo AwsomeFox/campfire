@@ -1,4 +1,7 @@
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { PassThrough } from 'node:stream';
 import { AuditService } from '../../src/modules/audit/audit.service';
 import { AttachmentDerivativesService } from '../../src/modules/attachments/attachment-derivatives.service';
 import { AttachmentsService } from '../../src/modules/attachments/attachments.service';
@@ -16,7 +19,7 @@ function service(): AttachmentsService {
   );
 }
 
-describe('AttachmentsService.exportPathIfPresent', () => {
+describe('AttachmentsService export source opening', () => {
   afterEach(() => jest.restoreAllMocks());
 
   function withSourcePath(): AttachmentsService {
@@ -25,37 +28,81 @@ describe('AttachmentsService.exportPathIfPresent', () => {
     return attachments;
   }
 
-  it('returns the source for a present regular file', () => {
+  it('opens without following symlinks, fstats the descriptor, and streams that descriptor', () => {
     const attachments = withSourcePath();
-    jest.spyOn(fs, 'lstatSync').mockReturnValue({ isFile: () => true } as fs.Stats);
+    const stream = new PassThrough() as unknown as fs.ReadStream;
+    jest.spyOn(fs, 'openSync').mockReturnValue(42);
+    jest.spyOn(fs, 'fstatSync').mockReturnValue({ isFile: () => true } as fs.Stats);
+    const createStream = jest.spyOn(fs, 'createReadStream').mockReturnValue(stream);
 
-    expect(attachments.exportPathIfPresent(ROW)).toBe(SOURCE);
+    expect(attachments.openExportStreamIfPresent(ROW)).toBe(stream);
+    expect(fs.openSync).toHaveBeenCalledWith(
+      SOURCE,
+      fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW,
+    );
+    expect(createStream).toHaveBeenCalledWith(SOURCE, { fd: 42, autoClose: true });
   });
 
-  it('does not follow a row-backed symlink', () => {
+  it('probes a regular file and closes the validated descriptor', () => {
     const attachments = withSourcePath();
-    jest.spyOn(fs, 'lstatSync').mockReturnValue({
-      isFile: () => false,
-      isSymbolicLink: () => true,
-    } as fs.Stats);
+    jest.spyOn(fs, 'openSync').mockReturnValue(43);
+    jest.spyOn(fs, 'fstatSync').mockReturnValue({ isFile: () => true } as fs.Stats);
+    const close = jest.spyOn(fs, 'closeSync').mockImplementation(() => undefined);
 
-    expect(attachments.exportPathIfPresent(ROW)).toBeNull();
+    expect(attachments.hasExportFile(ROW)).toBe(true);
+    expect(close).toHaveBeenCalledWith(43);
   });
 
-  it('returns null only when the source is absent', () => {
+  it.each(['ENOENT', 'ELOOP'])('returns null for %s while securely opening the source', (code) => {
     const attachments = withSourcePath();
-    jest.spyOn(fs, 'lstatSync').mockImplementation(() => {
-      throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+    jest.spyOn(fs, 'openSync').mockImplementation(() => {
+      throw Object.assign(new Error(code), { code });
     });
 
-    expect(attachments.exportPathIfPresent(ROW)).toBeNull();
+    expect(attachments.openExportStreamIfPresent(ROW)).toBeNull();
   });
 
-  it.each(['EACCES', 'EPERM'])('propagates %s from lstat', (code) => {
+  it('refuses an actual row-backed symlink', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'attachment-export-symlink-'));
+    const target = path.join(dir, 'outside-secret');
+    const link = path.join(dir, '2.png');
+    fs.writeFileSync(target, 'secret');
+    fs.symlinkSync(target, link, 'file');
+    const attachments = service();
+    jest.spyOn(attachments, 'filePath').mockReturnValue(link);
+    try {
+      expect(attachments.openExportStreamIfPresent(ROW)).toBeNull();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('closes and rejects a descriptor that is not a regular file', () => {
+    const attachments = withSourcePath();
+    jest.spyOn(fs, 'openSync').mockReturnValue(44);
+    jest.spyOn(fs, 'fstatSync').mockReturnValue({ isFile: () => false } as fs.Stats);
+    const close = jest.spyOn(fs, 'closeSync').mockImplementation(() => undefined);
+
+    expect(attachments.openExportStreamIfPresent(ROW)).toBeNull();
+    expect(close).toHaveBeenCalledWith(44);
+  });
+
+  it('closes the descriptor when fstat fails', () => {
+    const attachments = withSourcePath();
+    const error = new Error('fstat failed');
+    jest.spyOn(fs, 'openSync').mockReturnValue(45);
+    jest.spyOn(fs, 'fstatSync').mockImplementation(() => { throw error; });
+    const close = jest.spyOn(fs, 'closeSync').mockImplementation(() => undefined);
+
+    expect(() => attachments.openExportStreamIfPresent(ROW)).toThrow(error);
+    expect(close).toHaveBeenCalledWith(45);
+  });
+
+  it.each(['EACCES', 'EPERM'])('propagates %s from open', (code) => {
     const attachments = withSourcePath();
     const error = Object.assign(new Error('access denied'), { code });
-    jest.spyOn(fs, 'lstatSync').mockImplementation(() => { throw error; });
+    jest.spyOn(fs, 'openSync').mockImplementation(() => { throw error; });
 
-    expect(() => attachments.exportPathIfPresent(ROW)).toThrow(error);
+    expect(() => attachments.openExportStreamIfPresent(ROW)).toThrow(error);
   });
 });

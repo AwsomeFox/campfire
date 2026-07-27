@@ -141,7 +141,6 @@ describe('buildMarkdownZip — filename collisions (issues #530 / #863)', () => 
   it('stages sanitized streaming attachments instead of retaining their buffers', async () => {
     const service = serviceWithCollisions();
     const bytes = Buffer.from('%PDF-without-private-identifiers');
-    (service as any).attachments.exportPathIfPresent = jest.fn(() => '/live/source.pdf');
     (service as any).attachments.readBytesIfPresent = jest.fn(() => bytes);
     const stage = jest.fn(async () => ({ path: '/staged/sanitized.pdf', checksum: 'abc123' }));
 
@@ -241,15 +240,15 @@ describe('buildMarkdownZip — filename collisions (issues #530 / #863)', () => 
     }));
   });
 
-  it('uses paths, not bytes, for backup Markdown ZIP preview presence and inventory', async () => {
+  it('uses secure source availability, not bytes, for backup Markdown ZIP previews', async () => {
     const service = serviceWithCollisions();
     const attachments = [
       { id: 7, mime: 'application/pdf', filename: 'present.pdf', present: true },
       { id: 8, mime: 'application/pdf', filename: 'missing.pdf', present: true },
     ];
-    const exportPath = jest.fn(({ id }: { id: number }) => id === 7 ? '/live/present.pdf' : null);
+    const hasExportFile = jest.fn(({ id }: { id: number }) => id === 7);
     const readBytes = jest.fn();
-    (service as any).attachments.exportPathIfPresent = exportPath;
+    (service as any).attachments.hasExportFile = hasExportFile;
     (service as any).attachments.readBytesIfPresent = readBytes;
     jest.spyOn(service, 'buildExport').mockResolvedValue({ attachments } as any);
 
@@ -261,9 +260,12 @@ describe('buildMarkdownZip — filename collisions (issues #530 / #863)', () => 
       { inspectAttachmentBytes: true, format: 'mdzip', attachmentPaths: true, retainAttachmentBytes: false },
     );
 
-    expect(exportPath).toHaveBeenCalledTimes(2);
+    expect(hasExportFile).toHaveBeenCalledTimes(2);
     expect(readBytes).not.toHaveBeenCalled();
-    expect(result.attachmentBytes.get(7)).toMatchObject({ sourcePath: '/live/present.pdf', bytes: null });
+    expect(result.attachmentBytes.get(7)).toMatchObject({
+      liveSource: { campaignId: 1, id: 7, mime: 'application/pdf' },
+      bytes: null,
+    });
     expect(result.attachmentBytes.get(8)).toMatchObject({ bytes: null, withheldReason: 'file missing on disk' });
     expect(result.data.attachments).toEqual([
       expect.objectContaining({ id: 7, present: true }),
@@ -300,7 +302,7 @@ describe('buildMarkdownZip — filename collisions (issues #530 / #863)', () => 
     expect(zip.file('campaign.json')).not.toBeNull();
   });
 
-  it('uses live attachment paths for streamed backup ZIPs', async () => {
+  it('securely opens live attachments for streamed backup ZIPs', async () => {
     const sourceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'export-backup-path-'));
     const source = path.join(sourceDir, 'attachment.png');
     const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0, 0x49, 0x45, 0x4e, 0x44, 0, 0, 0, 0]);
@@ -311,9 +313,11 @@ describe('buildMarkdownZip — filename collisions (issues #530 / #863)', () => 
       id: 9, campaignId: 1, kind: 'image', filename: 'backup.png', mime: 'image/png', size: bytes.length, createdAt: new Date(0).toISOString(),
     }];
     attachments.hasBytesOnDisk = () => true;
-    const exportPath = jest.fn(() => source);
+    const hasExportFile = jest.fn(() => true);
+    const openExportStream = jest.fn(() => fs.createReadStream(source));
     const readBytes = jest.fn();
-    attachments.exportPathIfPresent = exportPath;
+    attachments.hasExportFile = hasExportFile;
+    attachments.openExportStreamIfPresent = openExportStream;
     attachments.readBytesIfPresent = readBytes;
     const output = new PassThrough();
     const chunks: Buffer[] = [];
@@ -321,7 +325,8 @@ describe('buildMarkdownZip — filename collisions (issues #530 / #863)', () => 
     try {
       await service.streamMarkdownZip(output, new AbortController().signal, 1, USER, { profile: 'backup' });
       const zip = await JSZip.loadAsync(Buffer.concat(chunks));
-      expect(exportPath).toHaveBeenCalledTimes(1);
+      expect(hasExportFile).toHaveBeenCalledTimes(1);
+      expect(openExportStream).toHaveBeenCalledTimes(1);
       expect(readBytes).not.toHaveBeenCalled();
       expect(await zip.file('uploads/9.png')!.async('nodebuffer')).toEqual(bytes);
     } finally {
@@ -337,9 +342,11 @@ describe('buildMarkdownZip — filename collisions (issues #530 / #863)', () => 
       id: 9, campaignId: 1, kind: 'image', filename: 'private-name.png', mime: 'image/png', size: bytes.length, createdAt: new Date(0).toISOString(),
     }];
     attachments.hasBytesOnDisk = () => true;
-    const exportPath = jest.fn(() => { throw new Error('redacted profiles must not inspect source paths'); });
+    const hasExportFile = jest.fn(() => { throw new Error('redacted profiles must not probe live files'); });
+    const openExportStream = jest.fn(() => { throw new Error('redacted profiles must not open live files'); });
     const readBytes = jest.fn(() => bytes);
-    attachments.exportPathIfPresent = exportPath;
+    attachments.hasExportFile = hasExportFile;
+    attachments.openExportStreamIfPresent = openExportStream;
     attachments.readBytesIfPresent = readBytes;
     const output = new PassThrough();
     const chunks: Buffer[] = [];
@@ -348,7 +355,8 @@ describe('buildMarkdownZip — filename collisions (issues #530 / #863)', () => 
     await service.streamMarkdownZip(output, new AbortController().signal, 1, USER, { profile });
 
     const zip = await JSZip.loadAsync(Buffer.concat(chunks));
-    expect(exportPath).not.toHaveBeenCalled();
+    expect(hasExportFile).not.toHaveBeenCalled();
+    expect(openExportStream).not.toHaveBeenCalled();
     expect(readBytes).toHaveBeenCalledTimes(1);
     expect(await zip.file('uploads/9.png')!.async('nodebuffer')).toEqual(bytes);
   });
@@ -360,9 +368,11 @@ describe('buildMarkdownZip — filename collisions (issues #530 / #863)', () => 
       id: 9, campaignId: 1, kind: 'image', filename: 'unreadable.png', mime: 'image/png', size: 21, createdAt: new Date(0).toISOString(),
     }];
     attachments.hasBytesOnDisk = () => true;
-    const exportPath = jest.fn(() => { throw new Error('handoff must not probe source paths'); });
+    const hasExportFile = jest.fn(() => { throw new Error('handoff must not probe live files'); });
+    const openExportStream = jest.fn(() => { throw new Error('handoff must not open live files'); });
     const readBytes = jest.fn(() => null);
-    attachments.exportPathIfPresent = exportPath;
+    attachments.hasExportFile = hasExportFile;
+    attachments.openExportStreamIfPresent = openExportStream;
     attachments.readBytesIfPresent = readBytes;
     const output = new PassThrough();
     const chunks: Buffer[] = [];
@@ -372,7 +382,8 @@ describe('buildMarkdownZip — filename collisions (issues #530 / #863)', () => 
 
     const zip = await JSZip.loadAsync(Buffer.concat(chunks));
     const campaign = JSON.parse(await zip.file('campaign.json')!.async('string'));
-    expect(exportPath).not.toHaveBeenCalled();
+    expect(hasExportFile).not.toHaveBeenCalled();
+    expect(openExportStream).not.toHaveBeenCalled();
     expect(readBytes).toHaveBeenCalledTimes(1);
     expect(campaign.attachments[0]).toMatchObject({ present: false, bytesWithheldReason: 'file missing on disk' });
     expect(zip.file('uploads/9.png')).toBeNull();
@@ -388,9 +399,10 @@ describe('buildMarkdownZip — filename collisions (issues #530 / #863)', () => 
       id: 9, campaignId: 1, kind: 'image', filename: 'race.png', mime: 'image/png', size: 14, createdAt: new Date(0).toISOString(),
     }];
     attachments.hasBytesOnDisk = () => true;
-    attachments.exportPathIfPresent = () => {
+    attachments.hasExportFile = () => true;
+    attachments.openExportStreamIfPresent = () => {
       fs.rmSync(source);
-      return source;
+      return null;
     };
     const output = new PassThrough();
     const chunks: Buffer[] = [];
@@ -410,40 +422,25 @@ describe('buildMarkdownZip — filename collisions (issues #530 / #863)', () => 
     }
   });
 
-  it('treats only an ENOENT restat as a vanished live attachment source', () => {
-    const service = serviceWithCollisions();
-    const stat = jest.spyOn(fs, 'statSync').mockImplementation(() => {
-      throw Object.assign(new Error('gone'), { code: 'ENOENT' });
-    });
+  it('propagates secure live-source open failures before archive bytes flow', async () => {
+    const service = buildService({});
+    const attachments = (service as any).attachments;
+    attachments.listRowsForCampaign = async () => [{
+      id: 9, campaignId: 1, kind: 'image', filename: 'restricted.png', mime: 'image/png',
+      size: 14, createdAt: new Date(0).toISOString(),
+    }];
+    attachments.hasBytesOnDisk = () => true;
+    attachments.hasExportFile = () => true;
+    attachments.openExportStreamIfPresent = () => {
+      throw Object.assign(new Error('access denied'), { code: 'EACCES' });
+    };
+    const output = new PassThrough();
+    const chunks: Buffer[] = [];
+    output.on('data', (chunk: Buffer) => chunks.push(chunk));
 
-    expect(() => (service as any).rethrowUnlessLiveAttachmentIsMissing('/missing/attachment', new Error('staging failed')))
-      .not.toThrow();
-
-    stat.mockRestore();
-  });
-
-  it.each(['EACCES', 'EPERM'])('preserves the staging error when restat returns %s', (code) => {
-    const service = serviceWithCollisions();
-    const stagingError = new Error('staging failed');
-    const stat = jest.spyOn(fs, 'statSync').mockImplementation(() => {
-      throw Object.assign(new Error('access denied'), { code });
-    });
-
-    expect(() => (service as any).rethrowUnlessLiveAttachmentIsMissing('/restricted/attachment', stagingError))
-      .toThrow(stagingError);
-
-    stat.mockRestore();
-  });
-
-  it('preserves the staging error when the live attachment still exists', () => {
-    const service = serviceWithCollisions();
-    const stagingError = new Error('staging failed');
-    const stat = jest.spyOn(fs, 'statSync').mockReturnValue({} as fs.Stats);
-
-    expect(() => (service as any).rethrowUnlessLiveAttachmentIsMissing('/present/attachment', stagingError))
-      .toThrow(stagingError);
-
-    stat.mockRestore();
+    await expect(service.streamMarkdownZip(output, new AbortController().signal, 1, USER))
+      .rejects.toThrow('access denied');
+    expect(chunks).toHaveLength(0);
   });
 
   it('rejects a pre-aborted streaming export without writing output', async () => {

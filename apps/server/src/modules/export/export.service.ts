@@ -126,7 +126,9 @@ type AttachmentByteDecision = {
   bytes: Buffer | null;
   /** Bytes passed policy inspection but were deliberately not retained (preview only). */
   available?: boolean;
-  /** Original immutable attachment source, used only by the streaming backup path. */
+  /** Live row-backed source opened just-in-time by the streaming backup path. */
+  liveSource?: { campaignId: number; id: number; mime: string };
+  /** Immutable staged attachment source. */
   sourcePath?: string;
   /** Present when sourcePath was already staged from sanitized bytes. */
   sourceChecksum?: string;
@@ -140,8 +142,10 @@ type MarkdownZipWriter = {
   /** Deliberately distinct from `file`: streaming exports hand archiver a pathname. */
   attachment?(path: string, content: Buffer): Promise<void>;
   stageAttachment?(content: Buffer): Promise<{ path: string; checksum: string }>;
-  /** Stages a live source before any archive entries are appended. */
-  stageLiveAttachment?(source: string): Promise<{ path: string; checksum: string }>;
+  /** Securely opens and stages a live source before any archive entries are appended. */
+  stageLiveAttachment?(
+    source: { campaignId: number; id: number; mime: string },
+  ): Promise<{ path: string; checksum: string } | null>;
   attachmentPath?(
     path: string,
     source: string,
@@ -491,7 +495,12 @@ export class ExportService {
     if (opts.inspectAttachmentBytes && Array.isArray(projection.data.attachments)) {
       for (const entry of projection.data.attachments as Array<Record<string, unknown>>) {
         const decision = attachmentBytes.get(Number(entry.id));
-        if (!decision || (decision.bytes == null && !decision.sourcePath && !decision.available)) {
+        if (!decision || (
+          decision.bytes == null &&
+          !decision.liveSource &&
+          !decision.sourcePath &&
+          !decision.available
+        )) {
           entry.present = false;
           if (decision?.withheldReason) entry.bytesWithheldReason = decision.withheldReason;
         }
@@ -630,10 +639,12 @@ export class ExportService {
       if (signal?.aborted) {
         throw signal.reason instanceof Error ? signal.reason : new Error('Export aborted');
       }
-      const sourcePath = preferPaths ? this.attachments.exportPathIfPresent({ campaignId, id: row.id, mime: row.mime }) : null;
-      if (preferPaths && !policy.sanitizeAttachmentBytes) {
-        decisions.set(row.id, sourcePath
-          ? { id: row.id, bytes: null, sourcePath, metadataStripped: false }
+      const liveSource = { campaignId, id: row.id, mime: row.mime };
+      const useLiveSource = preferPaths && !policy.sanitizeAttachmentBytes;
+      const sourceAvailable = useLiveSource ? this.attachments.hasExportFile(liveSource) : false;
+      if (useLiveSource) {
+        decisions.set(row.id, sourceAvailable
+          ? { id: row.id, bytes: null, liveSource, metadataStripped: false }
           : { id: row.id, bytes: null, metadataStripped: false, withheldReason: 'file missing on disk' });
         continue;
       }
@@ -716,7 +727,9 @@ export class ExportService {
     let stripped = 0;
     for (const row of rows) {
       const decision = decisions.get(row.id);
-      if (!decision || (decision.bytes == null && !decision.sourcePath && !decision.available)) withheld += 1;
+      if (!decision || (decision.bytes == null && !decision.liveSource && !decision.sourcePath && !decision.available)) {
+        withheld += 1;
+      }
       if (decision?.metadataStripped) stripped += 1;
     }
     const unsanitizable = rows.filter((r) => !SANITIZABLE_MIMES.has(r.mime)).length;
@@ -899,6 +912,8 @@ export class ExportService {
             return { path: staged, checksum: sha256Hex(content) };
           },
           stageLiveAttachment: async (source) => {
+            const input = this.attachments.openExportStreamIfPresent(source);
+            if (!input) return null;
             const staged = path.join(stagingDir, `${stageNumber++}.attachment`);
             const hash = crypto.createHash('sha256');
             const hashing = new Transform({
@@ -907,7 +922,7 @@ export class ExportService {
                 callback(null, chunk);
               },
             });
-            await pipeline(fs.createReadStream(source), hashing, fs.createWriteStream(staged, { flags: 'wx' }), { signal });
+            await pipeline(input, hashing, fs.createWriteStream(staged, { flags: 'wx' }), { signal });
             if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('Export aborted');
             return { path: staged, checksum: hash.digest('hex') };
           },
@@ -975,19 +990,6 @@ export class ExportService {
     }
   }
 
-  /**
-   * Only an ENOENT from a fresh stat proves the source disappeared after it was
-   * planned. Every other outcome must preserve the original staging failure.
-   */
-  private rethrowUnlessLiveAttachmentIsMissing(sourcePath: string, stagingError: unknown): void {
-    try {
-      fs.statSync(sourcePath);
-    } catch (statError: unknown) {
-      if ((statError as NodeJS.ErrnoException).code === 'ENOENT') return;
-    }
-    throw stagingError;
-  }
-
   private async writeMarkdownZip(
     writer: MarkdownZipWriter,
     campaignId: number,
@@ -1022,28 +1024,24 @@ export class ExportService {
     if (writer.stageLiveAttachment) {
       for (const attachment of data.attachments) {
         const decision = attachmentBytes.get(attachment.id);
-        if (!decision?.sourcePath || decision.sourceChecksum) continue;
+        if (!decision?.liveSource) continue;
         try {
-          const staged = await writer.stageLiveAttachment(decision.sourcePath);
+          const staged = await writer.stageLiveAttachment(decision.liveSource);
+          decision.liveSource = undefined;
+          if (!staged) {
+            decision.bytes = null;
+            decision.withheldReason = 'file missing on disk';
+            attachment.present = false;
+            (attachment as Record<string, unknown>).bytesWithheldReason = decision.withheldReason;
+            inventory.attachments.bytesWithheld += 1;
+            (data as Record<string, unknown>).redaction = this.redactionDisclosure(inventory);
+            continue;
+          }
           decision.sourcePath = staged.path;
           decision.sourceChecksum = staged.checksum;
         } catch (err) {
-          // A stream-open ENOENT may be wrapped by pipeline. Classify only a
-          // genuinely absent source as the established warning/skip outcome.
-          // existsSync() also returns false for permission and other I/O errors,
-          // which would incorrectly turn a staging failure into a missing-file
-          // warning. statSync lets us distinguish an actual ENOENT race.
-          this.rethrowUnlessLiveAttachmentIsMissing(decision.sourcePath, err);
-          decision.sourcePath = undefined;
-          decision.bytes = null;
-          decision.withheldReason = 'file missing on disk';
-          attachment.present = false;
-          (attachment as Record<string, unknown>).bytesWithheldReason = decision.withheldReason;
-          // Inventory and its embedded disclosure were calculated before this
-          // last-moment filesystem race. Keep every archive representation
-          // honest without re-running the (potentially expensive) projection.
-          inventory.attachments.bytesWithheld += 1;
-          (data as Record<string, unknown>).redaction = this.redactionDisclosure(inventory);
+          decision.liveSource = undefined;
+          throw err;
         }
       }
     }
