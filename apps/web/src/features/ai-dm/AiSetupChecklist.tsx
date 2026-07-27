@@ -21,7 +21,7 @@ import { useId, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useQuery } from '@tanstack/react-query';
-import { aiDmReadinessProgress, aiDmSetupComplete, type AiDmReadiness } from '@campfire/schema';
+import { AI_COST_BASIS_UNKNOWN, aiDmReadinessProgress, aiDmSetupComplete, type AiDmReadiness } from '@campfire/schema';
 import { api, API } from '../../lib/api';
 import { queryKeys, useAiDmSeat } from '../../lib/query';
 import { classifyAiGate } from './aiGate';
@@ -162,7 +162,11 @@ export function AiSetupChecklist({
         </p>
         <CostDisclosure
           className="mt-1.5"
-          basis={readiness.estimatedCost.basis}
+          // `?? AI_COST_BASIS_UNKNOWN` matches BudgetSection. The schema default already
+          // supplies it on a same-version response, so this is not defending against a gap —
+          // it keeps the two sibling call sites reading the same, so the convention the next
+          // reader copies is the one that also holds against an older or partial payload.
+          basis={readiness.estimatedCost.basis ?? AI_COST_BASIS_UNKNOWN}
           amount={formatUsdRangeValue(readiness.estimatedCost.estimatedUsdRange)}
           scopeKey="aiOnboarding.cost.scopePerTurn"
         />

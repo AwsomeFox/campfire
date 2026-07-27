@@ -231,56 +231,6 @@ export class AiProviderConfigService {
     };
   }
 
-  /**
-   * The identity a PRICE is keyed on (issue #1065): provider type, model, and endpoint.
-   *
-   * Deliberately separate from {@link getEffectiveView}, which omits `baseUrl` on purpose —
-   * surfacing an inherited server endpoint to a campaign DM discloses a URL they cannot
-   * otherwise obtain (#373). This method is SERVER-SIDE ONLY and its `baseUrl` must never be
-   * serialized to a client; the cost basis built from it echoes back only the provider type
-   * and model, never the endpoint.
-   *
-   * DERIVED BY CALLING THE EXECUTION RESOLVER, NOT BY RE-DERIVING FROM ROWS.
-   *
-   * An earlier version selected the owning row itself, from `credentialSource`. That is the
-   * mistake this comment exists to prevent anyone repeating: `credentialSource` answers WHAT
-   * KIND OF CREDENTIAL is in use, and `'server'` is its only scope-bearing member. Reading it
-   * as a row selector is a category error, and it does not merely mis-handle an edge case —
-   * `'environment'` does not say WHOSE row supplied the environment key. A campaign override
-   * on `anthropic` with no key, under a server row on `openai` with `OPENAI_API_KEY` set,
-   * yields `'environment'`, and execution then runs OPENAI at the server's endpoint. Any
-   * mapping of that enum to a row prices `anthropic` for an `openai` call — a $0-for-a-paid-
-   * call estimate reached through a different enum value than the one first reported.
-   *
-   * There is no ordering of those branches that is correct, because the executed provider,
-   * endpoint AND model are a property of the RESOLUTION, not of any single row. So this asks
-   * the resolver rather than imitating it: one derivation, and a pricing identity that cannot
-   * drift from what the turn will actually contact.
-   *
-   * The cost of that is a `decryptSecret` on a render path, which an earlier note here
-   * objected to. It is worth paying and it is contained: the key is decrypted into a local
-   * that is dropped on the next line and never returned, logged, or serialized. Weigh that
-   * against the alternative this replaces, which was a second implementation of the endpoint
-   * decision that was already wrong in two configurations.
-   *
-   * `baseUrl` is SERVER-SIDE ONLY and must never be serialized to a client — surfacing an
-   * inherited server endpoint to a campaign DM discloses a URL they cannot otherwise obtain
-   * (#373). The cost basis built from it echoes back only the provider type and model.
-   */
-  async getPricingIdentity(
-    campaignId: number,
-  ): Promise<{ providerType: AiProviderType | null; model: string | null; baseUrl: string }> {
-    const { config } = await this.resolveEffectiveConfigWithEndpointScope(campaignId);
-    if (!config) return { providerType: null, model: null, baseUrl: '' };
-    // Everything but the three identity fields is dropped here — in particular `apiKey`,
-    // which must not travel any further towards a cost estimator.
-    return {
-      providerType: config.providerType,
-      model: config.model,
-      baseUrl: (config.baseUrl ?? '').trim(),
-    };
-  }
-
   // ── writes ───────────────────────────────────────────────────────────────────
 
   /** Upsert the server-default config (admin-gated at the controller). */

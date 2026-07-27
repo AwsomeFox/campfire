@@ -18,6 +18,7 @@ import {
   estimateUsdRange,
 } from '@campfire/schema';
 import type {
+  AiCostBasis,
   AiDmMode,
   AiDmReadiness,
   AiDmReadinessCheck,
@@ -586,6 +587,18 @@ export class AiDmService implements OnApplicationBootstrap {
       : 'Choose the model that will execute AI requests.';
     let modelDetailKey = provider.model ? 'model.selected' : 'model.choose';
     let modelDetailParams: Record<string, string | number> = { model: provider.model ?? '' };
+    // #1065 — the resolved config is captured here and REUSED for the cost basis below.
+    // Resolving a second time down there was three bugs at once: it decrypted the stored
+    // credential again on every render of a page a DM may poll, it sat outside this
+    // try/catch so an undecryptable key turned the whole readiness GET into a 500 — losing
+    // the operator the exact diagnostic screen they opened to find out why their key stopped
+    // working — and it made this feature's own "pricing never decrypts" claim false. One
+    // resolution, already error-handled, threaded through.
+    let executionConfig: AiProviderConfig | null = null;
+    // Distinguishes "nothing is configured" from "configuration exists but could not be
+    // resolved". Both leave us unable to price, for different reasons the operator fixes
+    // differently, and the disclosure says which.
+    let executionFailed = false;
     try {
       // Readiness is a plain GET that a settings UI may poll, and it sends NOTHING outbound,
       // so it must not drag the DNS-resolving half of the baseUrl gate onto the read path —
@@ -596,12 +609,14 @@ export class AiDmService implements OnApplicationBootstrap {
       const execution = await this.providerConfig.resolveExecutionModel(campaignId, { resolveDns: false });
       modelOk = !!execution;
       if (execution) {
+        executionConfig = execution.config;
         modelDetail = `Execution model ${execution.model} passes the server allowlist.`;
         modelDetailKey = 'model.allowed';
         modelDetailParams = { model: execution.model };
       }
     } catch (err) {
       modelOk = false;
+      executionFailed = true;
       modelDetail = err instanceof Error ? err.message : 'The selected model is not executable.';
       // The rejection reason is composed by the allowlist policy at throw time and has no
       // enumerable id, so this variant carries the server sentence through as a parameter.
@@ -789,12 +804,29 @@ export class AiDmService implements OnApplicationBootstrap {
     // shown "$3.10" and billed $31 was misled by us, whereas one told we cannot estimate goes
     // and reads their provider's billing page, which is the right thing to do regardless.
     //
-    // Uses the pricing IDENTITY (which includes the endpoint) rather than the client-facing
-    // provider view, because a model name behind a custom endpoint does not imply the
-    // vendor's price. Resolving here also keeps `baseUrl` server-side: the basis echoes back
-    // only the provider type and model, never the URL (#373).
-    const pricingIdentity = await this.providerConfig.getPricingIdentity(campaignId);
-    const basis = await this.pricing.resolveBasis(pricingIdentity);
+    // Keyed on the EXECUTED config captured by the model check above — which includes the
+    // endpoint, because a model name behind a custom endpoint does not imply the vendor's
+    // price — rather than the client-facing provider view. `baseUrl` stays server-side: the
+    // basis echoes back only the provider type and model, never the URL (#373).
+    //
+    // No provider resolution happens here. That is the point: the one resolution this
+    // request performs already ran inside the model check's try/catch, so a credential that
+    // cannot be decrypted degrades to the disclosure exactly like every other unpriceable
+    // state instead of taking the readiness endpoint down with a 500.
+    const basis: AiCostBasis = executionConfig
+      ? await this.pricing.resolveBasis({
+          providerType: executionConfig.providerType,
+          model: executionConfig.model,
+          baseUrl: executionConfig.baseUrl ?? '',
+        })
+      : {
+          kind: 'unknown',
+          // A resolution that THREW is a different problem from one that found nothing, and
+          // the operator fixes them differently — a lost `AI_CONFIG_KEY` versus an unset
+          // provider. The `model` check above carries the specific sentence; this points at
+          // it rather than repeating a reason it does not own.
+          reason: executionFailed ? 'provider_unresolved' : 'no_provider',
+        };
     // Priced off the TOTAL, spanning all-input to all-output. That span is what we can
     // actually defend: the split is either unknown (metered) or a stated assumption (no
     // metering), and neither justifies a single number to two significant figures.

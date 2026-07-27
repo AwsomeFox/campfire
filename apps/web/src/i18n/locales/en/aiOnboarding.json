@@ -138,7 +138,6 @@
       "label": "Estimated next AI turn:",
       "summary": "up to {{tokens}} tokens ({{prompt}} prompt + {{completion}} completion).",
       "summaryTotal": "up to {{tokens}} tokens.",
-      "usdUnknown": "USD varies by provider/model.",
       "usdKnown": "About {{usd}}.",
       "notes": {
         "metered": "Per-turn token estimate from this campaign’s recent metered turns. Metering records a turn’s total only, so the dollar range spans an all-input to an all-output split. Actual usage depends on context, tools, and model pricing.",
@@ -213,6 +212,7 @@
         "modelNotPriced": "No price is on file for this provider and model. A server admin can add one in the AI console.",
         "customEndpointNotPriced": "This campaign uses a custom endpoint, and a model name behind a proxy or self-hosted server does not imply the vendor’s price. A server admin can add a price for this endpoint in the AI console.",
         "noProvider": "No provider and model are configured yet, so there is nothing to price.",
+        "providerUnresolved": "This campaign’s AI provider is configured but could not be resolved, so there is nothing to price. See the Executable model check above for the reason — a stored key that can no longer be decrypted after the server’s AI_CONFIG_KEY changed is the usual cause.",
         "generic": "No price is on file for this configuration."
       },
       "scopePerTurn": "per AI turn, estimated",

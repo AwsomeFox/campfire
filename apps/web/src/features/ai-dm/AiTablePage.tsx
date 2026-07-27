@@ -29,6 +29,7 @@ import { Link, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
+  AI_COST_BASIS_UNKNOWN,
   AI_DM_TRANSCRIPT_LIST_MAX_LIMIT,
   type AiDmReadiness,
   type AiDmTranscriptPage,
@@ -92,6 +93,7 @@ import { Toggle } from '../../components/Toggle';
 import { AI_TABLE_FIELD, AI_TABLE_PREFIX } from '../../components/formFieldLabels';
 import { Btn, Card, Chip, EmptyState, Skeleton, type ChipVariant } from '../../components/ui';
 import { formatUsdRangeValue } from './costEstimate';
+import { CostDisclosure } from './CostDisclosure';
 
 /** Seat status → chip variant for the header status pill. */
 const STATUS_VARIANT: Record<'idle' | 'narrating' | 'paused' | 'human' | 'collaborative', ChipVariant> = {
@@ -1078,9 +1080,20 @@ export default function AiTablePage() {
               {/* #1065 — the same money line as the settings card, from the same basis. It
                   used to render `toFixed(4)` against a hardcoded-null figure: five decimal
                   places of implied accuracy on an estimate that did not exist. */}
-              {runCostUsd === null
-                ? t('aiOnboarding.runCost.usdUnknown')
-                : t('aiOnboarding.runCost.usdKnown', { usd: runCostUsd })}
+              {runCostUsd !== null && t('aiOnboarding.runCost.usdKnown', { usd: runCostUsd })}
+              {/* The full reason-specific disclosure, not the generic "USD varies by
+                  provider/model" this used to show. The DM standing at the composer about to
+                  spend money is the person best placed to act on "this campaign uses a custom
+                  endpoint and nobody has priced it" — telling them less than the settings card
+                  does, at the moment it matters most, was the wrong way round. */}
+              {runCostUsd === null && (
+                <CostDisclosure
+                  className="mt-1"
+                  basis={readiness.estimatedCost.basis ?? AI_COST_BASIS_UNKNOWN}
+                  amount={null}
+                  scopeKey="aiOnboarding.cost.scopePerTurn"
+                />
+              )}
             </div>
           )}
           {isDm && (

@@ -117,7 +117,14 @@ export function AiPricingEditor({ onError }: { onError: (msg: string | null) => 
   );
 
   function update(i: number, patch: Partial<Row>) {
-    setRows((prev) => prev.map((r, idx) => (idx === i ? { ...r, ...patch, source: 'manual' } : r)));
+    // Touching a row makes it the admin's own figure, so the provenance pair moves TOGETHER:
+    // `source` back to 'manual' AND `asOf` cleared. `asOf` dates the reference list a row was
+    // prefilled from; once the admin has edited the row it dates nothing, and leaving it
+    // behind put a verification date on a number that list never contained — staleness
+    // signalling in reverse, which is worse than none.
+    setRows((prev) =>
+      prev.map((r, idx) => (idx === i ? { ...r, ...patch, source: 'manual', asOf: null } : r)),
+    );
     setSaved(false);
   }
 

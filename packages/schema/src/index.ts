@@ -6489,6 +6489,17 @@ export const AiCostUnknownReason = z.enum([
   'custom_endpoint_not_priced',
   /** No provider/model is resolved yet, so there is nothing to price. */
   'no_provider',
+  /**
+   * A provider IS configured, but resolving it failed — most often a stored credential that
+   * can no longer be decrypted after `AI_CONFIG_KEY` was lost or rotated, and also a model
+   * pushed off a tightened allowlist or a stored endpoint that now fails host policy.
+   *
+   * Distinct from `no_provider` because the fix is different and much less obvious: nothing
+   * in the configuration LOOKS wrong, so "no provider is configured yet" would send an
+   * operator to re-enter settings that are already correct. The readiness `model` check
+   * carries the specific server sentence; this reason points there.
+   */
+  'provider_unresolved',
 ]);
 export type AiCostUnknownReason = z.infer<typeof AiCostUnknownReason>;
 

@@ -88,6 +88,7 @@ export function costUnknownReasonKey(reason: AiCostUnknownReason | string): stri
     model_not_priced: 'aiOnboarding.cost.unknown.modelNotPriced',
     custom_endpoint_not_priced: 'aiOnboarding.cost.unknown.customEndpointNotPriced',
     no_provider: 'aiOnboarding.cost.unknown.noProvider',
+    provider_unresolved: 'aiOnboarding.cost.unknown.providerUnresolved',
   };
   return known[reason] ?? 'aiOnboarding.cost.unknown.generic';
 }
