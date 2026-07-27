@@ -5,6 +5,7 @@ import {
   Get,
   HttpCode,
   Post,
+  Req,
   Res,
   UploadedFile,
   UseInterceptors,
@@ -12,6 +13,7 @@ import {
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiConsumes, ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import type { Response } from 'express';
+import type { Request } from 'express';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { ServerRoles } from '../../common/decorators/server-roles.decorator';
 import type { RequestUser } from '../../common/user.types';
@@ -50,8 +52,8 @@ export class BackupController {
       'Without the envelope, a restore to a fresh DATA_DIR cannot decrypt stored provider API keys unless the operator has set AI_CONFIG_KEY out-of-band.',
   })
   @ApiResponse({ status: 200, description: 'Zip file download (application/zip, Content-Disposition attachment).' })
-  async download(@Res() res: Response): Promise<void> {
-    await this.sendBackup(res);
+  async download(@Req() req: Request, @Res() res: Response): Promise<void> {
+    await this.sendBackup(req, res);
   }
 
   @Post('download')
@@ -64,26 +66,32 @@ export class BackupController {
   })
   @ApiResponse({ status: 200, description: 'Zip file download (application/zip, Content-Disposition attachment).' })
   async downloadWithKeyEnvelope(
+    @Req() req: Request,
     @Res() res: Response,
     @Body() body: BackupDownloadDto,
   ): Promise<void> {
-    await this.sendBackup(res, body.keyPassphrase);
+    await this.sendBackup(req, res, body.keyPassphrase);
   }
 
-  private async sendBackup(res: Response, keyPassphrase?: string): Promise<void> {
-    const buffer = await this.backup.buildBackup(
-      keyPassphrase && keyPassphrase.length > 0 ? { keyPassphrase } : undefined,
-    );
+  private async sendBackup(req: Request, res: Response, keyPassphrase?: string): Promise<void> {
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    req.once('aborted', abort);
+    res.once('close', () => {
+      if (!res.writableEnded) abort();
+    });
     res
       .status(200)
       .set({
         'Content-Type': 'application/zip',
         'Content-Disposition': `attachment; filename="${this.backup.backupFilename()}"`,
-        'Content-Length': String(buffer.length),
         // Issue #730: never let browsers / the PWA Cache Storage retain a whole-server archive.
         'Cache-Control': 'private, no-store',
-      })
-      .end(buffer);
+      });
+    await this.backup.buildBackup(
+      { ...(keyPassphrase && keyPassphrase.length > 0 ? { keyPassphrase } : {}), signal: controller.signal },
+      res,
+    );
   }
 
   @Post('inspect')
