@@ -769,6 +769,53 @@ describe('campaign modules (e2e, real cookie sessions)', () => {
     expect(after.objectives.find((o) => o.text === 'Find the cartographer')!.done).toBe(false);
   });
 
+  it('keeps the tick on the right one of two identically-worded objectives after a reorder', async () => {
+    // `done` carry-over across the delete+insert rewrite is matched on objective TEXT, so
+    // two objectives worded the same are distinguishable only by position. The carry-over
+    // read must therefore be ordered the SAME way the projected list is (sortOrder, then
+    // text) — an unordered read hands back rows in rowid order, which stops matching
+    // sortOrder the moment the DM reorders, moving the tick to the wrong objective.
+    const cid = (await dm.post(api('/campaigns')).send({ name: 'Duplicate Objective Table' })).body.id as number;
+    const dupes = v1Artifacts();
+    (dupes[4].data as Record<string, unknown>).objectives = [
+      { text: 'Search the flooded cellar', sortOrder: 0 },
+      { text: 'Search the flooded cellar', sortOrder: 1 },
+    ];
+    const install = (await dm.post(api(`/campaigns/${cid}/modules`)).send({ package: buildPackage('1.0.0', dupes) }))
+      .body.id as number;
+
+    const quests = (await dm.get(api(`/campaigns/${cid}/quests`))).body as Array<Record<string, unknown>>;
+    const qid = quests.find((q) => q.title === 'Rescue the Cartographer')!.id as number;
+    const detail = (await dm.get(api(`/quests/${qid}`))).body as { objectives: Array<{ id: number }> };
+    const [first, second] = detail.objectives;
+
+    // The party ticks the SECOND one, then the DM drags it to the top. Reordering rewrites
+    // sortOrder without touching rowid, so rowid order and sortOrder order now disagree.
+    await dm.patch(api(`/quests/${qid}/objectives/${second.id}`)).send({ done: true });
+    await dm.post(api(`/quests/${qid}/objectives/reorder`)).send({ objectiveIds: [second.id, first.id] });
+
+    // Both objectives share their text, so this reorder is invisible to the projection —
+    // the quest still compares equal to its baseline and the update applies cleanly.
+    const next = v1Artifacts();
+    (next[4].data as Record<string, unknown>).objectives = [
+      { text: 'Search the flooded cellar', sortOrder: 0 },
+      { text: 'Search the flooded cellar', sortOrder: 1 },
+    ];
+    (next[4].data as Record<string, unknown>).reward = '350gp';
+    const applied = await dm
+      .post(api(`/campaigns/${cid}/modules/${install}/update`))
+      .send({ package: buildPackage('1.1.0', next) });
+    expect(applied.body.applied).toBe(true);
+
+    const after = (await dm.get(api(`/quests/${qid}`))).body as {
+      reward: string;
+      objectives: Array<{ done: boolean }>;
+    };
+    expect(after.reward).toBe('350gp');
+    // The ticked objective was moved to the top, so the tick belongs on the top one.
+    expect(after.objectives.map((o) => o.done)).toEqual([true, false]);
+  });
+
   it("keeps a table's link to one of their OWN entities, which the portable model cannot name", async () => {
     const cid = (await dm.post(api('/campaigns')).send({ name: 'Homebrew Table' })).body.id as number;
     const install = (await dm.post(api(`/campaigns/${cid}/modules`)).send({ package: buildPackage('1.0.0', v1Artifacts()) }))

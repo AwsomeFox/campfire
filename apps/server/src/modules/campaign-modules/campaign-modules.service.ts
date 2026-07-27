@@ -496,13 +496,21 @@ export class CampaignModulesService {
    * progress on it. Carry-over is matched on the objective TEXT: an objective that was only
    * reordered keeps its tick, one whose wording the publisher actually changed is a
    * different objective and starts untucked. Duplicated text is matched positionally.
+   *
+   * That positional match makes the ORDER of the carry-over read load-bearing: it has to be
+   * the same order the projected list is in, or the Nth duplicate is paired with the wrong
+   * row's tick. An unordered select returns rowid order, which stops agreeing with sortOrder
+   * as soon as the DM reorders the objectives (reorder rewrites sort_order, not rowid), so
+   * the read is sorted with the SAME comparator the projection uses.
    */
   private writeObjectives(db: Db, questId: number, content: PortableContent): void {
     const list = Array.isArray(content.objectives)
       ? (content.objectives as Array<{ text: string; sortOrder: number }>)
       : [];
     const doneByText = new Map<string, boolean[]>();
-    for (const row of db.select().from(questObjectives).where(eq(questObjectives.questId, questId)).all()) {
+    const existing = db.select().from(questObjectives).where(eq(questObjectives.questId, questId)).all();
+    existing.sort(compareObjectives);
+    for (const row of existing) {
       const queue = doneByText.get(row.text) ?? [];
       queue.push(row.done);
       doneByText.set(row.text, queue);
