@@ -2,12 +2,13 @@
   "tracked": [
     {
       "pr": 1615,
-      "status": "babysitting",
+      "status": "merged",
       "url": "https://github.com/AwsomeFox/campfire/pull/1615",
       "headBranch": "fix/issue-669",
       "baseBranch": "main",
-      "updatedAt": "2026-07-27T20:27:43Z",
-      "notes": "Pushed b2749dff + CombatLog min-w-0 wrap hardening. Waiting CI after combat-log-accessibility mobile overflow failure."
+      "updatedAt": "2026-07-27T21:10:30Z",
+      "notes": "Merged via squash 0040f22a at 2026-07-27T21:10:22Z. Fixed mobile cockpit overflow (b2749dff/fa4a9212). CI 30302679625 green; no open review threads.",
+      "mergeCommit": "0040f22ac43c946cee6b8e699e370ffc0eb1d9cc"
     }
   ]
 }
