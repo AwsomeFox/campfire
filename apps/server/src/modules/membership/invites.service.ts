@@ -8,7 +8,14 @@ import {
 import { and, asc, eq, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import { InviteCreate } from '@campfire/schema';
-import type { CampaignInvite, InvitePreview, InviteRole, Me, SessionZeroCharterVersion } from '@campfire/schema';
+import { effectivePermissionsFor } from '@campfire/schema';
+import type {
+  CampaignInvite,
+  InvitePreview,
+  InviteRole,
+  Me,
+  SessionZeroCharterVersion,
+} from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { campaignInvites, campaignMembers, campaigns, users } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -329,19 +336,32 @@ export class InvitesService {
   }
 
   /**
-   * Public preview for the join page: what campaign, joining as what, until when — and
-   * (issue #600) WHAT THE TABLE HAS AGREED TO.
+   * Public preview for the join page: what campaign, joining as what, until when —
+   * since issue #597 what that seat can actually DO, and since issue #600 WHAT THE TABLE
+   * HAS AGREED TO.
    *
-   * The charter is the reason this endpoint exists in its current form. Previously a
-   * prospective player could learn a campaign's name and their role and nothing else, so
-   * the only way to discover the table's lines and veils was to join — which is exactly
-   * the commitment those boundaries were supposed to inform.
+   * The role name alone was not an answer. "Viewer" told a joiner nothing they could
+   * verify, and until #597 it was actively misleading: a viewer could comment on any
+   * thread and whisper any member. Someone deciding whether to click a link — or a
+   * parent deciding for a child — is entitled to see the capability list before
+   * accepting, not to discover it afterwards by trying.
+   *
+   * `interactiveGuest` is always FALSE here, and that is a real statement rather than a
+   * placeholder: an invite link can only ever seat a read-only viewer or a full player.
+   * The interactive-guest capability is granted afterwards by a DM, per seat, and is
+   * audited — so a link can never be the thing that hands a stranger a direct-message
+   * channel to the table.
+   *
+   * The charter is the other half of that same question. Previously a prospective player
+   * could learn a campaign's name and their role and nothing else, so the only way to
+   * discover the table's lines and veils was to join — which is exactly the commitment
+   * those boundaries were supposed to inform.
    *
    * `previewForInvite` is a deliberately narrow projection: a PUBLISHED version only
    * (never the DM's working draft), no private boundary submissions, no member names or
    * counts, and nothing outside the charter tables. It returns null for a campaign that
    * has never published, and `consentRequired` is then false — such a campaign's join
-   * flow is byte-for-byte what it was before this issue, which is what keeps every
+   * flow is byte-for-byte what it was before that issue, which is what keeps every
    * existing invite working.
    *
    * Note this runs BEFORE any authentication, on a throttled public route, and inherits
@@ -350,12 +370,14 @@ export class InvitesService {
    */
   async preview(code: string): Promise<InvitePreview> {
     const { invite, campaign } = await this.getValidInvite(code);
+    const role = invite.role as InviteRole;
     const charter = await this.consent.previewForInvite(campaign.id);
     return {
       campaignId: campaign.id,
       campaignName: campaign.name,
-      role: invite.role as InviteRole,
+      role,
       expiresAt: invite.expiresAt,
+      permissions: effectivePermissionsFor(role, false),
       charter,
       consentRequired: charter !== null,
     };

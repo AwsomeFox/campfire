@@ -899,8 +899,46 @@ export const campaignMembers = sqliteTable('campaign_members', {
   // invariant, not a role; temporary guest DMs and ordinary co-DMs cannot remove
   // or demote it.
   primaryOwner: integer('is_primary_owner', { mode: 'boolean' }).notNull().default(false),
+  // Issue #597: the explicit "interactive guest" capability. Only consulted on a
+  // viewer seat; a viewer without it may not comment, share/whisper notes, or post to
+  // the DM inbox. Defaults FALSE so every NEW viewer is read-only, which is what the
+  // role has always claimed to be. Existing viewers who had already been taking part
+  // are grandfathered to TRUE by migration 0127 — see migrateSafetyControls597.
+  interactiveGuest: integer('interactive_guest', { mode: 'boolean' }).notNull().default(false),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
+});
+
+/**
+ * Issue #597 — personal, member-owned safety controls: `block`, `mute_sender`,
+ * `mute_thread` (SafetyControlKind in @campfire/schema).
+ *
+ * Deliberately NOT the same table as moderation_mutes (#601). That one is a moderator
+ * SANCTION against a member and is DM-visible; this one is the protected member's own
+ * setting and must never be disclosed to its subject — different owner, different
+ * audience, different lifecycle. Conflating them would make a personal block
+ * discoverable from the DM's mute list, which is exactly the disclosure #597 forbids.
+ *
+ * Ids are stored as TEXT to match the note-identity convention (`String(users.id)`, or
+ * `dev:<name>` under DEV_AUTH) already used by notes.author_user_id,
+ * notes.recipient_user_id, and moderation_mutes.user_id. No FK, for the same reason the
+ * moderation tables have none: a safety control must survive the account row it names.
+ *
+ * `campaign_id` is NULL for an account-wide control — every `block` is account-wide,
+ * because a block is a statement about a PERSON rather than about one table. Enforcement
+ * therefore always matches `campaign_id IS NULL OR campaign_id = ?`.
+ */
+export const memberSafetyControls = sqliteTable('member_safety_controls', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  campaignId: integer('campaign_id'),
+  kind: text('kind').notNull(), // 'block' | 'mute_sender' | 'mute_thread'
+  ownerUserId: text('owner_user_id').notNull(),
+  targetUserId: text('target_user_id'),
+  threadEntityType: text('thread_entity_type'),
+  threadEntityId: integer('thread_entity_id'),
+  reason: text('reason').notNull().default(''),
+  createdAt: text('created_at').notNull(),
+  liftedAt: text('lifted_at'),
 });
 
 // Issue #545: time-bounded guest/co-DM authority. `scopes` is a JSON string[]
@@ -1314,6 +1352,12 @@ export const notifications = sqliteTable('notifications', {
   // Issue #820: optional JSON blob (ScheduleNotificationData for session_scheduled).
   data: text('data'),
   actorName: text('actor_name').notNull().default(''),
+  // Issue #597: WHO caused this row, as a note-identity id (String(users.id) or
+  // `dev:<name>`). Until now only the display NAME was kept, so a recipient who later
+  // blocked someone could not have their existing bell items filtered — a name is not
+  // an identity and two members may share one. Nullable/'' for rows written before
+  // this column existed and for system-generated events with no human actor.
+  actorUserId: text('actor_user_id'),
   readAt: text('read_at'),
   createdAt: text('created_at').notNull(),
 });
@@ -1379,6 +1423,9 @@ export const notificationDigestQueue = sqliteTable('notification_digest_queue', 
   commentId: integer('comment_id'),
   data: text('data'),
   actorName: text('actor_name').notNull().default(''),
+  // Issue #597: carried through the deferral so a flushed digest row lands in
+  // `notifications` with the same actor identity an immediate row would have had.
+  actorUserId: text('actor_user_id'),
   reason: text('reason').notNull().default('digest'), // 'digest' | 'quiet_hours'
   createdAt: text('created_at').notNull(),
 });
@@ -1514,6 +1561,14 @@ export const aiDriverControlState = sqliteTable('ai_driver_control_state', {
   lastInput: text('last_input'),
   /** The recovery shape last announced to the table — suppresses re-announcing a steady state. */
   announcedRecovery: text('announced_recovery'),
+  /**
+   * #1042 — JSON map of unconsumed secret-read approvals (#557) and queued confirm-policy tool
+   * calls (#474). Persisted to be REVOKED loudly on the next boot, never to be restored: both
+   * are grants of authority made to a room whose composition the server cannot re-verify after
+   * a restart. Hydration audits each, signals the table, and clears the column.
+   */
+  secretReadApprovals: text('secret_read_approvals'),
+  pendingToolConfirmations: text('pending_tool_confirmations'),
   updatedAt: text('updated_at').notNull(),
 });
 

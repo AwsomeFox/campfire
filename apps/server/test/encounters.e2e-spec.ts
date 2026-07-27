@@ -1262,6 +1262,144 @@ describe('encounters (e2e)', () => {
   });
 
   // ------------------------------------------------------------------
+  // A player applying damage to their OWN combatant (issue #1478)
+  // ------------------------------------------------------------------
+  /**
+   * The apply-damage bar used to attach `actorId` whenever the current-turn combatant
+   * differed from the target, and the server 403s any non-DM patch carrying that field.
+   * So a player damaging their own character failed whenever it was not that character's
+   * turn — roughly half the time, decided by initiative.
+   *
+   * Both turn orders are pinned explicitly here (never rolled), so the case that used to
+   * fail is exercised on every run rather than every other one. The anti-spoofing rule
+   * itself is unchanged and is asserted below.
+   */
+  describe('player apply-damage to their own combatant (issue #1478)', () => {
+    /** Fresh campaign + a player-owned character + a monster, with the turn order pinned. */
+    async function setupOwnedFight(name: string, initiative: { hero: number; monster: number }) {
+      const server = ctx.app.getHttpServer();
+      const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name });
+      const campId = campRes.body.id;
+
+      const charRes = await request(server)
+        .post(`/api/v1/campaigns/${campId}/characters`)
+        .send({ name: 'Brixi', stats: { DEX: 14 }, hpCurrent: 45, hpMax: 45, ownerUserId: 'dev:p-1' })
+        .set(dm);
+      expect(charRes.status).toBe(201);
+
+      // Creating an encounter auto-adds the party, so Brixi's combatant already exists.
+      const encRes = await request(server).post(`/api/v1/campaigns/${campId}/encounters`).set(dm).send({ name: 'Drill', hidden: false });
+      expect(encRes.status).toBe(201);
+      const encId = encRes.body.id;
+      const heroId = (encRes.body.combatants as Array<{ id: number; characterId: number | null }>).find(
+        (c) => c.characterId === charRes.body.id,
+      )?.id;
+      expect(heroId).toBeTruthy();
+
+      const monsterRes = await request(server)
+        .post(`/api/v1/encounters/${encId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'Straw Dummy', hpMax: 30 });
+      expect(monsterRes.status).toBe(201);
+      const monsterId = monsterRes.body.id;
+
+      // Pin the turn order: /start orders by initiative descending, so these two writes
+      // fully determine who holds the turn. No d20 anywhere in this setup.
+      await request(server).patch(`/api/v1/encounters/${encId}/combatants/${heroId}`).set(dm).send({ initiative: initiative.hero });
+      await request(server).patch(`/api/v1/encounters/${encId}/combatants/${monsterId}`).set(dm).send({ initiative: initiative.monster });
+
+      const start = await request(server).post(`/api/v1/encounters/${encId}/start`).set(dm);
+      expect(start.status).toBe(201);
+      // Guard the premise — if initiative ordering ever changes, fail here, loudly.
+      expect(start.body.currentCombatantId).toBe(initiative.hero > initiative.monster ? heroId : monsterId);
+
+      return { encId, heroId: heroId as number, monsterId: monsterId as number };
+    }
+
+    it('succeeds while a MONSTER holds the turn, attributing the hit to the current-turn combatant', async () => {
+      const server = ctx.app.getHttpServer();
+      // The exact repro: the monster holds the turn, so the old client attached
+      // actorId=<monster> and ate a 403. The player now omits the field entirely.
+      const { encId, heroId } = await setupOwnedFight('Owned Fight — monster turn', { hero: 4, monster: 20 });
+
+      const patch = await request(server)
+        .patch(`/api/v1/encounters/${encId}/combatants/${heroId}`)
+        .set(player)
+        .send({ hpDelta: -7 });
+      expect(patch.status).toBe(200);
+      expect(patch.body.hpCurrent).toBe(38);
+
+      // Attribution is unchanged by dropping the field: the server derives the actor from
+      // the current turn, which is the identical combatant the client used to name.
+      const res = await request(server).get(`/api/v1/encounters/${encId}/events`).set(dm);
+      const damage = (res.body as Array<{ type: string; actor: string | null; target: string | null }>).filter((e) => e.type === 'damage');
+      expect(damage).toHaveLength(1);
+      expect(damage[0].actor).toBe('Straw Dummy');
+      expect(damage[0].target).toBe('Brixi');
+    });
+
+    it('still succeeds while the player’s OWN character holds the turn (regression guard)', async () => {
+      const server = ctx.app.getHttpServer();
+      // The half that always passed, because actor === target made the client omit actorId.
+      const { encId, heroId } = await setupOwnedFight('Owned Fight — own turn', { hero: 20, monster: 4 });
+
+      const patch = await request(server)
+        .patch(`/api/v1/encounters/${encId}/combatants/${heroId}`)
+        .set(player)
+        .send({ hpDelta: -7 });
+      expect(patch.status).toBe(200);
+      expect(patch.body.hpCurrent).toBe(38);
+
+      // Actor collapses to null: the current-turn combatant IS the target, so the log keeps
+      // its "Brixi took 7 damage" phrasing rather than "Brixi: took 7 damage".
+      const res = await request(server).get(`/api/v1/encounters/${encId}/events`).set(dm);
+      const damage = (res.body as Array<{ type: string; actor: string | null; target: string | null }>).filter((e) => e.type === 'damage');
+      expect(damage).toHaveLength(1);
+      expect(damage[0].actor).toBeNull();
+      expect(damage[0].target).toBe('Brixi');
+    });
+
+    it('still REJECTS a non-DM patch that carries an explicit actorId (anti-spoofing intact)', async () => {
+      const server = ctx.app.getHttpServer();
+      // The client-side fix must not have weakened the server rule. A player naming the
+      // attacker is refused outright — including when the id they name is exactly the
+      // current-turn combatant the server would have derived anyway. The field is
+      // rejected, never ignored-when-redundant: tolerating it would be racy (the client's
+      // notion of the current turn is a cached read) and would blur an absolute rule.
+      const { encId, heroId, monsterId } = await setupOwnedFight('Owned Fight — spoof attempt', { hero: 4, monster: 20 });
+
+      const spoof = await request(server)
+        .patch(`/api/v1/encounters/${encId}/combatants/${heroId}`)
+        .set(player)
+        .send({ hpDelta: -7, actorId: monsterId });
+      expect(spoof.status).toBe(403);
+      // A machine-readable code so the UI can explain the refusal instead of a bare 403.
+      expect(spoof.body.code).toBe('COMBAT_LOG_ACTOR_DM_ONLY');
+
+      // Rejected means rejected: no HP moved and nothing reached the combat log.
+      const after = await request(server).get(`/api/v1/encounters/${encId}`).set(dm);
+      expect((after.body.combatants as Array<{ id: number; hpCurrent: number }>).find((c) => c.id === heroId)?.hpCurrent).toBe(45);
+      const events = await request(server).get(`/api/v1/encounters/${encId}/events`).set(dm);
+      expect((events.body as Array<{ type: string }>).filter((e) => e.type === 'damage')).toHaveLength(0);
+    });
+
+    it('rejects an explicit actorId from a non-DM even when it names the target itself', async () => {
+      const server = ctx.app.getHttpServer();
+      // `actorId === targetId` resolves to "no attribution" for a DM, so it is tempting to
+      // treat it as harmless. It is still refused: the rule is about who may set the field
+      // at all, not about which values happen to be inert.
+      const { encId, heroId } = await setupOwnedFight('Owned Fight — self actor', { hero: 20, monster: 4 });
+
+      const res = await request(server)
+        .patch(`/api/v1/encounters/${encId}/combatants/${heroId}`)
+        .set(player)
+        .send({ hpDelta: -7, actorId: heroId });
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('COMBAT_LOG_ACTOR_DM_ONLY');
+    });
+  });
+
+  // ------------------------------------------------------------------
   // Combatant statblock exposure (issue #56)
   // ------------------------------------------------------------------
   describe('combatant statblock exposure (issue #56)', () => {

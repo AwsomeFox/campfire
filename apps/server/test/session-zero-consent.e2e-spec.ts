@@ -355,8 +355,21 @@ describe('Issue #600: session-zero consent lifecycle (e2e)', () => {
       // searching for it proves nothing either way. Pin the SHAPE instead — the preview
       // is an enumerated projection, so anything that could identify a person would have
       // to arrive as a key that is not on these lists.
+      // `permissions` (issue #597) belongs on this list because it is derived purely from
+      // the invite's role — effectivePermissionsFor(role, false) — so it carries no
+      // per-person state and cannot identify a member. It still has to be enumerated here:
+      // the point of the assertion is that a NEW key is a deliberate decision rather than a
+      // silent addition.
       expect(Object.keys(res.body).sort()).toEqual(
-        ['campaignId', 'campaignName', 'charter', 'consentRequired', 'expiresAt', 'role'].sort(),
+        [
+          'campaignId',
+          'campaignName',
+          'charter',
+          'consentRequired',
+          'expiresAt',
+          'permissions',
+          'role',
+        ].sort(),
       );
       expect(Object.keys(res.body.charter).sort()).toEqual(
         [
