@@ -4,6 +4,7 @@ import request from 'supertest';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
 import { AuditService } from '../src/modules/audit/audit.service';
 import { CampaignEventsService } from '../src/modules/events/campaign-events.service';
+import { NotificationsService } from '../src/modules/notifications/notifications.service';
 import { AdminCatalogService } from '../src/modules/admin-catalog/admin-catalog.service';
 import type { RequestUser } from '../src/common/user.types';
 
@@ -482,6 +483,78 @@ describe('Issue #587: campaign catalog paging, filtering and bulk lifecycle (e2e
       expect(promotion!.role).toBe('dm');
     });
 
+    it('notifies a BRAND-NEW owner, who cannot have been on the campaign SSE stream', async () => {
+      // `CampaignEventsService.streamFor` filters by campaignId and the web client
+      // subscribes only for the campaign it is displaying — a subscription that is
+      // membership-gated. A user given a seat they did not previously have therefore
+      // provably could not have been listening, so the SSE event alone is sent down a
+      // channel the recipient cannot receive on and the campaign stays invisible to an
+      // already-open session until a manual reload.
+      const target = aIds[1];
+      const notifications = ctx.app.get(NotificationsService);
+      const sent: Array<{ userId: number | string; campaignId: number; type: string }> = [];
+      const spy = jest
+        .spyOn(notifications, 'notifyUser')
+        .mockImplementation(async (userId, campaignId, _actor, event) => {
+          sent.push({ userId, campaignId, type: (event as { type: string }).type });
+        });
+      try {
+        // dmB has no seat on this campaign of dmA's, so this INSERTS one.
+        const res = await bulk({
+          operation: 'reassign_owner',
+          campaignIds: [target],
+          toUserId: dmBId,
+          dryRun: false,
+          reason: 'brand-new owner notification drill',
+        });
+        expect(res.status).toBe(201);
+        expect(res.body.applied).toBe(1);
+      } finally {
+        spy.mockRestore();
+      }
+
+      const notice = sent.find((s) => s.campaignId === target);
+      expect(notice).toBeDefined();
+      expect(String(notice!.userId)).toBe(String(dmBId));
+      expect(notice!.type).toBe('added_to_campaign');
+    });
+
+    it('does not notify when the seat already existed, only when one is created', async () => {
+      // Promoting an EXISTING player seat is a role change: that user already had the
+      // campaign in their /me, so the SSE event genuinely can reach them and an
+      // account-wide notification would be redundant noise.
+      const target = aIds[2];
+      const db = new Database(path.join(ctx.dataDir, 'campfire.db'));
+      try {
+        db.prepare(
+          `INSERT INTO campaign_members (campaign_id, user_id, role, is_primary_owner, created_at, updated_at)
+           VALUES (?, ?, 'player', 0, ?, ?)`,
+        ).run(target, dmBId, new Date().toISOString(), new Date().toISOString());
+      } finally {
+        db.close();
+      }
+
+      const notifications = ctx.app.get(NotificationsService);
+      const sent: number[] = [];
+      const spy = jest.spyOn(notifications, 'notifyUser').mockImplementation(async (_u, campaignId) => {
+        sent.push(campaignId);
+      });
+      try {
+        const res = await bulk({
+          operation: 'reassign_owner',
+          campaignIds: [target],
+          toUserId: dmBId,
+          dryRun: false,
+          reason: 'existing seat promotion',
+        });
+        expect(res.status).toBe(201);
+        expect(res.body.applied).toBe(1);
+      } finally {
+        spy.mockRestore();
+      }
+      expect(sent).not.toContain(target);
+    });
+
     it('sets and clears a storage quota, and reports overQuota', async () => {
       const target = aIds[0];
       const set = await bulk({
@@ -896,6 +969,86 @@ describe('Issue #587: campaign catalog paging, filtering and bulk lifecycle (e2e
       // rather than merely that somebody looked.
       expect(read[0].detail).toMatch(/returned=\d+/);
       expect(read[0].detail).toMatch(/total=\d+/);
+    });
+
+    it('records a CAMPAIGN-SCOPED read in the server-admin trail too, not instead', async () => {
+      // The audit row used to take its scope from the query string
+      // (`campaignId: opts.campaignId ?? null`). `listServerAdmin` returns only rows
+      // WHERE campaign_id IS NULL, so the unfiltered read landed in the server-admin
+      // trail and the FILTERED one vanished from it — backwards, since reading one named
+      // campaign's export requests is the more targeted act, not the less accountable.
+      const target = aIds[3];
+      const before = await admin.get('/api/v1/admin/audit').query({ limit: 100 });
+      const countIn = (body: unknown) =>
+        ((Array.isArray(body) ? body : (body as { items: unknown[] }).items) as Array<{ action: string }>).filter(
+          (e) => e.action === 'campaign.catalog.export_requests.list',
+        ).length;
+      const baseline = countIn(before.body);
+
+      const scoped = await admin.get('/api/v1/admin/campaigns/export-requests').query({ campaignId: target });
+      expect(scoped.status).toBe(200);
+
+      // The server-admin trail gained a row for this scoped read.
+      const after = await admin.get('/api/v1/admin/audit').query({ limit: 100 });
+      expect(countIn(after.body)).toBe(baseline + 1);
+
+      // …and the campaign's OWN trail records that an outsider read its export requests,
+      // which is the second audience the double-write exists for.
+      const campaignTrail = await dmA.get(`/api/v1/campaigns/${target}/audit`).query({ limit: 50 });
+      expect(campaignTrail.status).toBe(200);
+      const campaignRows = (
+        Array.isArray(campaignTrail.body) ? campaignTrail.body : campaignTrail.body.items
+      ) as Array<{ action: string }>;
+      expect(campaignRows.some((r) => r.action === 'campaign.catalog.export_requests.list')).toBe(true);
+    });
+
+    it('reading a campaign does not make it look recently active', async () => {
+      // OBSERVER EFFECT. `lastActivityExpr` took the newest campaign-scoped audit row as
+      // activity, and `getCatalogEntry` writes a campaign-scoped `campaign.catalog.read`.
+      // So merely OPENING a dormant campaign's entry bumped its lastActivityAt, floating
+      // it up the default `activity` sort and into `activityAfter` filters — the act of
+      // inspecting changed the measurement, self-reinforcingly.
+      const target = aIds[3];
+      const before = await admin.get(`/api/v1/admin/campaigns/${target}`);
+      expect(before.status).toBe(200);
+      const activityBefore = before.body.lastActivityAt as string | null;
+
+      // Read it several more times; each writes another campaign-scoped read row.
+      for (let i = 0; i < 3; i += 1) await admin.get(`/api/v1/admin/campaigns/${target}`);
+
+      const after = await admin.get(`/api/v1/admin/campaigns/${target}`);
+      expect(after.body.lastActivityAt).toBe(activityBefore);
+
+      // The same row seen through the LIST path agrees — the filter and the projection
+      // share the expression, so both must ignore reads.
+      const listed = await catalog({ limit: 100 });
+      const row = (listed.items as Array<{ id: number; lastActivityAt: string | null }>).find(
+        (c) => c.id === target,
+      );
+      expect(row?.lastActivityAt).toBe(activityBefore);
+
+      // But a real administrative WRITE still counts, or the column would be inert.
+      // Pick the operation that is genuinely a change from the CURRENT status: an
+      // earlier test in this file may already have paused this campaign, and a no-op
+      // bulk run writes nothing, which would make this assertion pass vacuously in the
+      // wrong direction.
+      const status = String(after.body.status);
+      const change = status === 'paused' ? 'activate' : 'pause';
+      const undo = change === 'activate' ? 'pause' : 'activate';
+
+      const applied = await bulk({
+        operation: change,
+        campaignIds: [target],
+        dryRun: false,
+        reason: 'activity should move for a real change',
+      });
+      expect(applied.status).toBe(201);
+      expect(applied.body.applied).toBe(1); // a skip here would prove nothing below
+
+      const moved = await admin.get(`/api/v1/admin/campaigns/${target}`);
+      expect(String(moved.body.lastActivityAt) > String(activityBefore)).toBe(true);
+
+      await bulk({ operation: undo, campaignIds: [target], dryRun: false, reason: 'undo' });
     });
 
     it('does not let a non-DM member or an outsider decide', async () => {

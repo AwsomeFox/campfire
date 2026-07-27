@@ -33,6 +33,7 @@ import {
 } from '../../db/schema';
 import { AuditService } from '../audit/audit.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { SettingsService } from '../settings/settings.service';
 import { auditActor, auditActorRole, type RequestUser } from '../../common/user.types';
 import { nowIso } from '../../common/time';
@@ -107,6 +108,7 @@ export class AdminCatalogService {
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
     private readonly events: CampaignEventsService,
+    private readonly notifications: NotificationsService,
     private readonly settings: SettingsService,
   ) {}
 
@@ -698,6 +700,16 @@ export class AdminCatalogService {
         const currentOwner = existing.find((m) => m.primaryOwner);
         if (currentOwner?.userId === toUserId) return null;
 
+        // Only for the notification below, and only sent to the incoming OWNER — who by
+        // the time it is delivered holds a dm seat on this campaign and may read far more
+        // than its name. This is not a widening of the catalog's projection.
+        const [campaignRow] = await this.db
+          .select({ name: campaigns.name })
+          .from(campaigns)
+          .where(eq(campaigns.id, id))
+          .limit(1);
+        const campaignName = campaignRow?.name ?? '';
+
         const existingSeat = existing.find((m) => m.userId === toUserId);
         // The seat id the event carries. Known up front when a seat already exists;
         // filled in from the INSERT when one does not, which is why it is a `let`.
@@ -759,6 +771,20 @@ export class AdminCatalogService {
           // dm seat merely gaining `primaryOwner` is deliberately silent — the member's
           // ROLE is unchanged, nothing in the cached /me differs, and MembersService is
           // equally quiet in that case.
+          //
+          // A BRAND-NEW SEAT ALSO NEEDS AN ACCOUNT-WIDE SIGNAL, BECAUSE THE SSE EVENT
+          // CANNOT REACH IT. `CampaignEventsService.streamFor` filters by campaignId and
+          // the web client subscribes only for the campaign it is currently displaying,
+          // so a user who had NO membership here could not have had this stream open —
+          // by definition, since the subscription is membership-gated. Emitting only the
+          // campaign event would send the notification down a channel the recipient
+          // provably cannot be listening on, and the campaign would stay invisible to an
+          // already-open session until a manual reload.
+          //
+          // So a newly inserted seat also gets the account-wide notification
+          // `MembersService.create` sends for exactly this case. The SSE event is still
+          // emitted alongside it: it costs nothing, and it does reach any OTHER session
+          // that happens to be viewing this campaign.
           afterCommit:
             existingSeat?.role === 'dm'
               ? undefined
@@ -770,6 +796,22 @@ export class AdminCatalogService {
                     memberId: eventMemberId,
                     role: 'dm',
                   });
+                  // `actor.actor` is `String(users.id)` for a real account, so this is the
+                  // same self-suppression `notifyUser` applies when given a RequestUser —
+                  // an operator who reassigns a campaign to themselves does not need to be
+                  // told they did it. Done here because `planChange` carries the audit
+                  // Actor, not the RequestUser that method would want.
+                  if (!existingSeat && actor.actor !== String(toUserId)) {
+                    // Best-effort inside NotificationsService, and awaited by nobody:
+                    // `afterCommit` is sync by design (see the plan type) and a
+                    // notification must never delay or fail a committed lifecycle change.
+                    void this.notifications.notifyUser(toUserId, id, null, {
+                      type: 'added_to_campaign',
+                      title: `You were made the owner of ${campaignName || 'a campaign'}`,
+                      entityType: 'campaign',
+                      entityId: id,
+                    });
+                  }
                 },
         };
       }
@@ -882,19 +924,42 @@ export class AdminCatalogService {
       .where(where);
 
     const items = rows.map((r) => this.toExportRequest(r));
+    const actor = auditActor(user);
+    const actorRole = auditActorRole(user);
+    const slice = `returned=${items.length}, total=${total}, limit=${limit}, offset=${offset}`;
 
+    // THE SERVER-ADMIN ROW IS UNCONDITIONAL. THE CAMPAIGN ROW IS THE EXTRA ONE.
+    //
+    // This previously wrote a single row whose scope depended on the query string:
+    // `campaignId: opts.campaignId ?? null`. `AuditService.listServerAdmin` returns only
+    // rows WHERE campaign_id IS NULL, so the unfiltered read landed in the server-admin
+    // trail and the FILTERED one vanished from it — exactly backwards, since reading the
+    // export requests of one named campaign is the more targeted act, not the less
+    // accountable one.
+    //
+    // Follows `getCatalogEntry`'s double-write (itself following the moderation
+    // break-glass pattern in #601) rather than inventing a third convention: the
+    // server-admin trail always records that an operator read this listing, and when the
+    // read was scoped to a campaign that campaign's OWN trail additionally records that
+    // an outsider looked at its export requests. Two audiences, two rows, neither able
+    // to hide the act from the other.
     await this.audit.log({
-      actor: auditActor(user),
-      actorRole: auditActorRole(user),
+      actor,
+      actorRole,
       action: 'campaign.catalog.export_requests.list',
       entityType: 'campaign_export_request',
-      // Scoped to a campaign only when the operator asked for one, so the server-admin
-      // trail keeps spanning campaigns the way the listing itself does.
-      campaignId: opts.campaignId ?? null,
-      detail:
-        `returned=${items.length}, total=${total}, limit=${limit}, offset=${offset}` +
-        (opts.campaignId === undefined ? '' : `, campaign=${opts.campaignId}`),
+      detail: slice + (opts.campaignId === undefined ? ', scope=all-campaigns' : `, campaign=${opts.campaignId}`),
     });
+    if (opts.campaignId !== undefined) {
+      await this.audit.log({
+        actor,
+        actorRole,
+        action: 'campaign.catalog.export_requests.list',
+        entityType: 'campaign_export_request',
+        campaignId: opts.campaignId,
+        detail: slice,
+      });
+    }
 
     return {
       items,
@@ -1162,10 +1227,40 @@ export class AdminCatalogService {
    * TIMESTAMPS only — never an action, entity, actor or detail, all of which describe
    * what happened inside the campaign. ISO-8601 sorts lexically, so SQLite's two-arg
    * scalar max() is the right comparison.
+   *
+   * WHAT COUNTS AS ACTIVITY: writes, not reads.
+   *
+   * Every campaign-scoped audit row used to count, which made this an observer effect —
+   * opening a dormant campaign's single-entry view wrote `campaign.catalog.read` against
+   * that campaign and bumped its `lastActivityAt`, floating it to the top of the default
+   * `activity` sort and into `activityAfter` filters. Self-reinforcing (the campaigns you
+   * looked at look active, so they stay in front of you) and asymmetric (the LIST read is
+   * server-scoped and never did this, only the per-entry read did). "Recently active"
+   * drifted toward meaning "recently administered" rather than "recently played", which
+   * is close to the inverse of what an operator hunting dormant tables needs.
+   *
+   * So catalog READS are excluded and everything else is kept. Administrative WRITES —
+   * `campaign.catalog.archive`/`pause`/`activate`/`set_quota`/`set_policy`/
+   * `update_module`, the export-request decisions, the DM's own privacy opt-out — all
+   * still count, because those genuinely changed the campaign and an operator triaging it
+   * should see that. So does every audit row written by every other module, which is the
+   * real signal this column exists to surface.
+   *
+   * The exclusion is an explicit list rather than a `LIKE` pattern on purpose: a pattern
+   * such as `%.list` or `%.read` would silently swallow a future WRITE action that
+   * happened to be named that way, and this rule is one whose failure is invisible —
+   * nobody notices a timestamp that is quietly too old. Adding a catalog read action
+   * means adding it here, in the same commit, or the observer effect comes back.
+   *
+   * Both entries are campaign-scoped reads written by this module; `campaign.catalog.list`
+   * and `moderation.admin.list` are server-scoped (campaign_id NULL) and so were never
+   * part of this subquery in the first place.
    */
   private lastActivityExpr(): SQL<string | null> {
     return sql<string | null>`MAX(${campaigns.updatedAt},
-      COALESCE((SELECT MAX(al.created_at) FROM audit_log al WHERE al.campaign_id = ${campaigns.id}), ''))`;
+      COALESCE((SELECT MAX(al.created_at) FROM audit_log al
+        WHERE al.campaign_id = ${campaigns.id}
+          AND al.action NOT IN ('campaign.catalog.read', 'campaign.catalog.export_requests.list')), ''))`;
   }
 
   private buildWhere(query: CatalogQuery, policy: CampaignCatalogPrivacyPolicy): SQL | undefined {

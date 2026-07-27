@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { AuditModule } from '../audit/audit.module';
 import { EventsModule } from '../events/events.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { RoleAccessModule } from '../membership/role-access.module';
 import { SettingsModule } from '../settings/settings.module';
 import { AdminCatalogService } from './admin-catalog.service';
@@ -17,13 +18,19 @@ import { CampaignCatalogController } from './campaign-catalog.controller';
  * or ExportService cannot accidentally grow a route that leaks one, and a reviewer can
  * confirm the containment by reading this file rather than by auditing every query.
  *
- * WHY EventsModule IS ON THAT LIST AND MembershipModule IS NOT. The line the docblock
+ * WHY EventsModule AND NotificationsModule ARE ON THAT LIST AND MembershipModule IS NOT. The line the docblock
  * draws is "no module that can reach campaign CONTENT", not "no imports". EventsModule
  * is infrastructure of the same kind as AuditModule: a fan-out bus whose only dependency
  * is RoleAccessModule, which this module already imports. It carries no content and
  * opens no route to any. It is here because the bulk path writes membership rows
  * directly and therefore owes the same `membership.updated` announcement MembersService
  * makes, so a promoted owner's open tabs stop rendering player-only navigation.
+ * NotificationsModule is the same case and its own docblock says so outright — "Leaf
+ * module (only depends on the global DbModule) ... mirroring RoleAccessModule". It is
+ * here because the campaign SSE stream is membership-gated, so a user given a BRAND-NEW
+ * owner seat provably cannot have been listening on it; the account-wide notification is
+ * the only channel that reaches them, and it is the one MembersService.create already
+ * uses for exactly this case.
  *
  * MembershipModule would have been the other way to get that, and it is refused: it
  * pulls Auth, Events, Users, Settings and Notifications behind it, trading the guarantee
@@ -35,7 +42,7 @@ import { CampaignCatalogController } from './campaign-catalog.controller';
  * control over being seen.
  */
 @Module({
-  imports: [AuditModule, EventsModule, RoleAccessModule, SettingsModule],
+  imports: [AuditModule, EventsModule, NotificationsModule, RoleAccessModule, SettingsModule],
   controllers: [AdminCatalogController, CampaignCatalogController],
   providers: [AdminCatalogService],
   exports: [AdminCatalogService],
