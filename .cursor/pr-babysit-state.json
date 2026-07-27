@@ -1,0 +1,13 @@
+{
+  "tracked": [
+    {
+      "pr": 1562,
+      "url": "https://github.com/AwsomeFox/campfire/pull/1562",
+      "status": "babysitting",
+      "headBranch": "fix/issue-600",
+      "baseBranch": "main",
+      "updatedAt": "2026-07-27T17:05:00Z",
+      "notes": "Initial tracking; assessing conflicts, CI, and review threads"
+    }
+  ]
+}
