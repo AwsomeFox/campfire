@@ -162,6 +162,37 @@ describe('buildMarkdownZip — filename collisions (issues #530 / #863)', () => 
     });
   });
 
+  it('stops sanitized attachment planning between staged files after cancellation', async () => {
+    const service = serviceWithCollisions();
+    const bytes = Buffer.from('%PDF-without-private-identifiers');
+    const readBytes = jest.fn(() => bytes);
+    (service as any).attachments.readBytesIfPresent = readBytes;
+    const controller = new AbortController();
+    const stage = jest.fn(async () => {
+      controller.abort(new Error('client disconnected'));
+      return { path: '/staged/sanitized.pdf', checksum: 'abc123' };
+    });
+
+    await expect((service as any).planAttachmentBytes(
+      1,
+      {
+        attachments: [
+          { id: 7, mime: 'application/pdf', filename: 'first.pdf' },
+          { id: 8, mime: 'application/pdf', filename: 'second.pdf' },
+        ],
+      },
+      resolveExportPolicy('handoff'),
+      [],
+      false,
+      stage,
+      true,
+      controller.signal,
+    )).rejects.toThrow('client disconnected');
+
+    expect(stage).toHaveBeenCalledTimes(1);
+    expect(readBytes).toHaveBeenCalledTimes(1);
+  });
+
   it('releases inspected preview attachment buffers while preserving their inventory', async () => {
     const service = serviceWithCollisions();
     const attachments = [

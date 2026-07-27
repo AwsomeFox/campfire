@@ -464,6 +464,7 @@ export class ExportService {
       attachmentPaths?: boolean;
       stageAttachmentBytes?: (content: Buffer) => Promise<{ path: string; checksum: string }>;
       retainAttachmentBytes?: boolean;
+      signal?: AbortSignal;
     } = {},
   ): Promise<ProfileExportResult & { projection: ExportProjection; attachmentBytes: Map<number, AttachmentByteDecision> }> {
     const policy = resolveExportPolicy(profile, options);
@@ -481,6 +482,7 @@ export class ExportService {
           opts.attachmentPaths === true,
           opts.stageAttachmentBytes,
           opts.retainAttachmentBytes !== false,
+          opts.signal,
         )
       : new Map<number, AttachmentByteDecision>();
 
@@ -620,10 +622,14 @@ export class ExportService {
     preferPaths = false,
     stageAttachmentBytes?: (content: Buffer) => Promise<{ path: string; checksum: string }>,
     retainBytes = true,
+    signal?: AbortSignal,
   ): Promise<Map<number, AttachmentByteDecision>> {
     const decisions = new Map<number, AttachmentByteDecision>();
     const rows = Array.isArray(raw.attachments) ? (raw.attachments as Array<{ id: number; mime: string; filename: string }>) : [];
     for (const row of rows) {
+      if (signal?.aborted) {
+        throw signal.reason instanceof Error ? signal.reason : new Error('Export aborted');
+      }
       const sourcePath = preferPaths ? this.attachments.exportPathIfPresent({ campaignId, id: row.id, mime: row.mime }) : null;
       if (preferPaths && !policy.sanitizeAttachmentBytes) {
         decisions.set(row.id, sourcePath
@@ -884,12 +890,12 @@ export class ExportService {
           file: (entryPath, content) => archive.append(content, { name: entryPath }),
           attachment: async (entryPath, content) => {
             const staged = path.join(stagingDir, `${stageNumber++}.attachment`);
-            await fs.promises.writeFile(staged, content, { flag: 'wx' });
+            await fs.promises.writeFile(staged, content, { flag: 'wx', signal });
             archive.file(staged, { name: entryPath });
           },
           stageAttachment: async (content) => {
             const staged = path.join(stagingDir, `${stageNumber++}.attachment`);
-            await fs.promises.writeFile(staged, content, { flag: 'wx' });
+            await fs.promises.writeFile(staged, content, { flag: 'wx', signal });
             return { path: staged, checksum: sha256Hex(content) };
           },
           stageLiveAttachment: async (source) => {
@@ -929,7 +935,7 @@ export class ExportService {
         },
         campaignId,
         user,
-        opts,
+        { ...opts, signal },
         true,
       );
       if (archiveError) throw archiveError;
@@ -986,7 +992,7 @@ export class ExportService {
     writer: MarkdownZipWriter,
     campaignId: number,
     user: RequestUser,
-    opts: { profile?: ExportProfile; options?: ExportProfileOptions } = {},
+    opts: { profile?: ExportProfile; options?: ExportProfileOptions; signal?: AbortSignal } = {},
     streamAttachments = false,
   ): Promise<{ warnings: string[]; inventory: ExportInventory }> {
     const resolvedProfile = opts.profile ?? DEFAULT_EXPORT_PROFILE;
@@ -996,6 +1002,7 @@ export class ExportService {
       // must read, sanitize, and stage bytes before archiver sees them.
       attachmentPaths: streamAttachments && resolvedProfile === 'backup',
       stageAttachmentBytes: streamAttachments ? writer.stageAttachment : undefined,
+      signal: opts.signal,
       format: 'mdzip',
     });
     const policy = profileResult.policy;
