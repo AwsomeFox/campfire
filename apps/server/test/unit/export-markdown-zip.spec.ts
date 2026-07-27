@@ -437,6 +437,19 @@ describe('buildMarkdownZip — filename collisions (issues #530 / #863)', () => 
     expect(output.destroyed).toBe(false);
   });
 
+  it('finishes encounter-event queries before producing archive bytes', async () => {
+    const service = serviceWithCollisions();
+    jest.spyOn((service as any).encounters, 'listEventsForEncounters')
+      .mockRejectedValue(new Error('encounter events unavailable'));
+    const output = new PassThrough();
+    const onFirstByte = jest.fn();
+    await expect(
+      service.streamMarkdownZip(output, new AbortController().signal, 1, USER, { onFirstByte }),
+    ).rejects.toThrow('encounter events unavailable');
+    expect(onFirstByte).not.toHaveBeenCalled();
+    expect(output.destroyed).toBe(false);
+  });
+
   it('does not signal the caller to commit zip headers when no bytes are produced', async () => {
     const service = serviceWithCollisions();
     jest.spyOn(service as any, 'buildProfileExport').mockRejectedValue(new Error('database unavailable'));

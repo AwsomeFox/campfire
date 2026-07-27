@@ -282,9 +282,9 @@ export async function downloadServerBackup(options?: {
   const totalBytes = contentLength(res);
   const reader = res.body?.getReader();
   if (!reader) {
-    if (totalBytes !== null && totalBytes > MAX_BROWSER_BACKUP_BUFFER_BYTES) {
+    if (totalBytes === null || totalBytes > MAX_BROWSER_BACKUP_BUFFER_BYTES) {
       throw new BackupDownloadLimitError(
-        `This browser must buffer the archive in memory and only supports backups up to ${MAX_BROWSER_BACKUP_BUFFER_BYTES / 1024 / 1024} MiB. Use a browser with File System Access support or download with curl.`,
+        `This browser cannot stream the response and can only safely buffer backups with a known size up to ${MAX_BROWSER_BACKUP_BUFFER_BYTES / 1024 / 1024} MiB. Use a browser with File System Access support or download with curl.`,
       );
     }
     const blob = await res.blob();

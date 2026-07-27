@@ -1002,6 +1002,12 @@ export class ExportService {
     const attachmentBytes = profileResult.attachmentBytes;
     const inventory = profileResult.inventory;
     const data = profileResult.data as unknown as ProfileExportData;
+    // Finish every fallible database read before the first archive entry is
+    // appended. Once archiver produces bytes the HTTP response is committed and
+    // a later query failure can only leave the client with a truncated ZIP.
+    const rawEncounterEvents = policy.playedState
+      ? await this.encounters.listEventsForEncounters(data.encounters.map((e) => e.id))
+      : new Map<number, EncounterEvent[]>();
     // Live files may disappear after planning. Stage every such source before
     // appending any archive entry, so a vanished file is reflected consistently
     // in campaign.json, warnings.txt, and the manifest rather than failing after
@@ -1119,9 +1125,6 @@ export class ExportService {
     // and would have survived verbatim in the combat log two lines below. Push the
     // events through the SAME sweep with the SAME identifier set so there is genuinely
     // one redaction boundary rather than one plus an exception.
-    const rawEncounterEvents = policy.playedState
-      ? await this.encounters.listEventsForEncounters(data.encounters.map((e) => e.id))
-      : new Map<number, EncounterEvent[]>();
     const encounterEvents = policy.scanFreeText
       ? new Map<number, EncounterEvent[]>(
           [...rawEncounterEvents].map(([id, events]) => [
