@@ -1,4 +1,5 @@
 import JSZip from 'jszip';
+import { PassThrough } from 'node:stream';
 import { ExportService } from '../../src/modules/export/export.service';
 import type { RequestUser } from '../../src/common/user.types';
 
@@ -133,6 +134,18 @@ function serviceWithCollisions(): ExportService {
 }
 
 describe('buildMarkdownZip — filename collisions (issues #530 / #863)', () => {
+  it('streams a readable ZIP without invoking the compatibility buffer builder', async () => {
+    const service = serviceWithCollisions();
+    const legacy = jest.spyOn(service, 'buildMarkdownZip');
+    const output = new PassThrough();
+    const chunks: Buffer[] = [];
+    output.on('data', (chunk: Buffer) => chunks.push(chunk));
+    await service.streamMarkdownZip(output, new AbortController().signal, 1, USER);
+    expect(legacy).not.toHaveBeenCalled();
+    const zip = await JSZip.loadAsync(Buffer.concat(chunks));
+    expect(zip.file('campaign.json')).not.toBeNull();
+  });
+
   it('produces one zip entry per source entity in every folder', async () => {
     const service = serviceWithCollisions();
     const { buffer } = await service.buildMarkdownZip(1, USER);

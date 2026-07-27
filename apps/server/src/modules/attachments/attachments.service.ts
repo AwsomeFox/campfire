@@ -405,6 +405,21 @@ export class AttachmentsService implements OnApplicationBootstrap {
   }
 
   /**
+   * Return the canonical on-disk source for a row already selected from the
+   * attachment table, or null when it vanished. The path is derived from the
+   * validated row fields rather than a client filename, and is intentionally
+   * suitable for stream consumers such as archive writers.
+   */
+  exportPathIfPresent(row: { campaignId: number; id: number; mime: string }): string | null {
+    const source = this.filePath(row);
+    try {
+      return fs.statSync(source).isFile() ? source : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Read the stored bytes for an attachment row, or `null` when the file is missing
    * on disk (row-without-file — the same shape #84 guards the GET route against).
    * Callers embedding attachments in an export use this to skip missing files

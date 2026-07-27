@@ -1,5 +1,12 @@
 import { Inject, Injectable } from '@nestjs/common';
+import archiver from 'archiver';
+import crypto from 'node:crypto';
 import JSZip from 'jszip';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { Transform, type Writable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { eq } from 'drizzle-orm';
 import type { EncounterEvent, EncounterWithCombatants } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -117,9 +124,18 @@ type ProfileExportData = Omit<ExportData, 'notes' | 'comments' | 'characters' | 
 type AttachmentByteDecision = {
   id: number;
   bytes: Buffer | null;
+  /** Original immutable attachment source, used only by the streaming backup path. */
+  sourcePath?: string;
   /** Set when bytes were withheld — surfaced in warnings.txt and the inventory. */
   withheldReason?: string;
   metadataStripped: boolean;
+};
+
+type MarkdownZipWriter = {
+  file(path: string, content: string | Buffer): void;
+  /** Deliberately distinct from `file`: streaming exports hand archiver a pathname. */
+  attachment?(path: string, content: Buffer): void;
+  attachmentPath?(path: string, source: string): Promise<{ path: string; checksum: string }>;
 };
 
 export type ProfileExportResult = {
@@ -431,7 +447,7 @@ export class ExportService {
     user: RequestUser,
     profile: ExportProfile = DEFAULT_EXPORT_PROFILE,
     options: ExportProfileOptions = {},
-    opts: { inspectAttachmentBytes?: boolean; format?: 'json' | 'mdzip' } = {},
+    opts: { inspectAttachmentBytes?: boolean; format?: 'json' | 'mdzip'; attachmentPaths?: boolean } = {},
   ): Promise<ProfileExportResult & { projection: ExportProjection; attachmentBytes: Map<number, AttachmentByteDecision> }> {
     const policy = resolveExportPolicy(profile, options);
     const raw = (await this.buildExport(campaignId, user)) as unknown as Record<string, unknown>;
@@ -440,7 +456,7 @@ export class ExportService {
     const { scannable } = partitionIdentifiers(collectPrivateIdentifiers(raw));
     const format = opts.format ?? 'json';
     const attachmentBytes = opts.inspectAttachmentBytes
-      ? this.planAttachmentBytes(campaignId, raw, policy, scannable)
+      ? this.planAttachmentBytes(campaignId, raw, policy, scannable, opts.attachmentPaths === true)
       : new Map<number, AttachmentByteDecision>();
 
     // Keep `present` honest: a row whose bytes the policy withholds must not claim the
@@ -448,7 +464,7 @@ export class ExportService {
     if (opts.inspectAttachmentBytes && Array.isArray(projection.data.attachments)) {
       for (const entry of projection.data.attachments as Array<Record<string, unknown>>) {
         const decision = attachmentBytes.get(Number(entry.id));
-        if (!decision || decision.bytes == null) {
+        if (!decision || (decision.bytes == null && !decision.sourcePath)) {
           entry.present = false;
           if (decision?.withheldReason) entry.bytesWithheldReason = decision.withheldReason;
         }
@@ -568,10 +584,16 @@ export class ExportService {
     raw: Record<string, unknown>,
     policy: ResolvedExportPolicy,
     identifiers: string[],
+    preferPaths = false,
   ): Map<number, AttachmentByteDecision> {
     const decisions = new Map<number, AttachmentByteDecision>();
     const rows = Array.isArray(raw.attachments) ? (raw.attachments as Array<{ id: number; mime: string; filename: string }>) : [];
     for (const row of rows) {
+      const sourcePath = preferPaths ? this.attachments.exportPathIfPresent({ campaignId, id: row.id, mime: row.mime }) : null;
+      if (sourcePath && !policy.sanitizeAttachmentBytes) {
+        decisions.set(row.id, { id: row.id, bytes: null, sourcePath, metadataStripped: false });
+        continue;
+      }
       const original = this.attachments.readBytesIfPresent({ campaignId, id: row.id, mime: row.mime });
       if (!original) {
         decisions.set(row.id, { id: row.id, bytes: null, metadataStripped: false, withheldReason: 'file missing on disk' });
@@ -630,7 +652,7 @@ export class ExportService {
     let stripped = 0;
     for (const row of rows) {
       const decision = decisions.get(row.id);
-      if (!decision || decision.bytes == null) withheld += 1;
+      if (!decision || (decision.bytes == null && !decision.sourcePath)) withheld += 1;
       if (decision?.metadataStripped) stripped += 1;
     }
     const unsanitizable = rows.filter((r) => !SANITIZABLE_MIMES.has(r.mime)).length;
@@ -730,26 +752,128 @@ export class ExportService {
    * from the raw export), so there is exactly one redaction boundary to reason about
    * — nothing can be rendered from data the projection dropped.
    */
+  /**
+   * Compatibility API for programmatic callers and the older unit tests. HTTP
+   * downloads use `streamMarkdownZip` below and never call this collector.
+   */
   async buildMarkdownZip(
     campaignId: number,
     user: RequestUser,
     opts: { profile?: ExportProfile; options?: ExportProfileOptions } = {},
   ): Promise<{ buffer: Buffer; warnings: string[]; inventory: ExportInventory }> {
+    const zip = new JSZip();
+    const result = await this.writeMarkdownZip({ file: (entryPath, content) => zip.file(entryPath, content) }, campaignId, user, opts);
+    return { buffer: await zip.generateAsync({ type: 'nodebuffer' }), ...result };
+  }
+
+  /**
+   * Writes a ZIP directly to `destination`. Attachments are supplied to archiver
+   * as staged filesystem paths, which keeps their bytes out of the JS heap and
+   * makes the manifest digest and archived bytes refer to the same immutable copy.
+   */
+  async streamMarkdownZip(
+    destination: Writable,
+    signal: AbortSignal,
+    campaignId: number,
+    user: RequestUser,
+    opts: { profile?: ExportProfile; options?: ExportProfileOptions } = {},
+  ): Promise<{ warnings: string[]; inventory: ExportInventory }> {
+    if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('Export aborted');
+    const archive = archiver('zip', { zlib: { level: 9 } });
+    const stagingDir = fs.mkdtempSync(path.join(os.tmpdir(), 'campfire-export-'));
+    const abort = () => archive.destroy(signal.reason instanceof Error ? signal.reason : new Error('Export aborted'));
+    let stageNumber = 0;
+    let archiveError: Error | undefined;
+    let resolveOutput!: () => void;
+    let rejectOutput!: (error: Error) => void;
+    const outputComplete = new Promise<void>((resolve, reject) => {
+      resolveOutput = resolve;
+      rejectOutput = reject;
+    });
+    const onArchiveError = (err: Error) => {
+      archiveError = err;
+      if (!destination.destroyed) destination.destroy(err);
+      rejectOutput(err);
+    };
+    const onDestinationError = (err: Error) => {
+      archive.destroy(err);
+      rejectOutput(err);
+    };
+    const onDestinationFinish = () => resolveOutput();
+    signal.addEventListener('abort', abort, { once: true });
+    archive.once('error', onArchiveError);
+    destination.once('error', onDestinationError);
+    destination.once('finish', onDestinationFinish);
+    archive.pipe(destination);
+    try {
+      const result = await this.writeMarkdownZip(
+        {
+          file: (entryPath, content) => archive.append(content, { name: entryPath }),
+          attachment: (entryPath, content) => {
+            const staged = path.join(stagingDir, `${stageNumber++}.attachment`);
+            fs.writeFileSync(staged, content, { flag: 'wx' });
+            archive.file(staged, { name: entryPath });
+          },
+          attachmentPath: async (entryPath, source) => {
+            const staged = path.join(stagingDir, `${stageNumber++}.attachment`);
+            const hash = crypto.createHash('sha256');
+            const hashing = new Transform({
+              transform(chunk: Buffer, _encoding, callback) {
+                hash.update(chunk);
+                callback(null, chunk);
+              },
+            });
+            // Stage and hash one bounded chunk at a time. Archiver only sees the
+            // staged file once this pipeline completes, eliminating the manifest
+            // checksum/source-byte TOCTOU window.
+            await pipeline(fs.createReadStream(source), hashing, fs.createWriteStream(staged, { flags: 'wx' }), { signal });
+            if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('Export aborted');
+            archive.file(staged, { name: entryPath });
+            return { path: staged, checksum: hash.digest('hex') };
+          },
+        },
+        campaignId,
+        user,
+        opts,
+        true,
+      );
+      if (archiveError) throw archiveError;
+      if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('Export aborted');
+      await archive.finalize();
+      await outputComplete;
+      if (archiveError) throw archiveError;
+      return result;
+    } finally {
+      signal.removeEventListener('abort', abort);
+      archive.removeListener('error', onArchiveError);
+      destination.removeListener('error', onDestinationError);
+      destination.removeListener('finish', onDestinationFinish);
+      fs.rmSync(stagingDir, { recursive: true, force: true });
+    }
+  }
+
+  private async writeMarkdownZip(
+    writer: MarkdownZipWriter,
+    campaignId: number,
+    user: RequestUser,
+    opts: { profile?: ExportProfile; options?: ExportProfileOptions } = {},
+    streamAttachments = false,
+  ): Promise<{ warnings: string[]; inventory: ExportInventory }> {
     const profileResult = await this.buildProfileExport(campaignId, user, opts.profile ?? DEFAULT_EXPORT_PROFILE, opts.options ?? {}, {
       inspectAttachmentBytes: true,
+      attachmentPaths: streamAttachments,
       format: 'mdzip',
     });
     const policy = profileResult.policy;
     const attachmentBytes = profileResult.attachmentBytes;
     const inventory = profileResult.inventory;
     const data = profileResult.data as unknown as ProfileExportData;
-    const zip = new JSZip();
     const warnings: string[] = [];
     const fileChecksums: Record<string, string> = {};
     const records: ArchiveRecordEntry[] = [];
 
     const writeFile = (path: string, content: string | Buffer) => {
-      zip.file(path, content);
+      writer.file(path, content);
       fileChecksums[path] = sha256Hex(content);
     };
 
@@ -774,7 +898,7 @@ export class ExportService {
     // every row, and it names each attachment's bytes under uploads/ (attachments[].file)
     // so maps/portraits come back with their references remapped rather than dropped.
     const campaignJson = JSON.stringify(data);
-    zip.file('campaign.json', campaignJson);
+    writer.file('campaign.json', campaignJson);
 
     // Backlink index: notes/comments anchored to entities, plus NPC→faction membership.
     const backlinks = this.buildBacklinkIndex(data);
@@ -942,9 +1066,15 @@ export class ExportService {
     const skipped: typeof data.attachments = [];
     for (const a of data.attachments) {
       const decision = attachmentBytes.get(a.id);
-      if (decision?.bytes) {
-        zip.file(a.file, decision.bytes);
-        fileChecksums[a.file] = sha256Hex(decision.bytes);
+      if (decision?.bytes || decision?.sourcePath) {
+        if (decision.sourcePath && writer.attachmentPath) {
+          const staged = await writer.attachmentPath(a.file, decision.sourcePath);
+          fileChecksums[a.file] = staged.checksum;
+        } else if (decision.bytes) {
+          if (writer.attachment) writer.attachment(a.file, decision.bytes);
+          else writer.file(a.file, decision.bytes);
+          fileChecksums[a.file] = sha256Hex(decision.bytes);
+        }
       } else {
         skipped.push(a);
         warnings.push(
@@ -1134,9 +1264,9 @@ export class ExportService {
       // non-deterministic).
       records: records.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)),
     });
-    zip.file('archive-manifest.json', JSON.stringify(manifest, null, 2));
+    writer.file('archive-manifest.json', JSON.stringify(manifest, null, 2));
 
-    return { buffer: await zip.generateAsync({ type: 'nodebuffer' }), warnings, inventory };
+    return { warnings, inventory };
   }
 
   /**

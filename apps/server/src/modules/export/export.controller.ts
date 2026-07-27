@@ -122,13 +122,6 @@ export class ExportController {
     };
 
     if (format === 'mdzip') {
-      // Issue #530: buildMarkdownZip now returns { buffer, warnings }. The HTTP
-      // contract is a raw binary stream with no JSON envelope, so the buffer is
-      // streamed unchanged and the warnings ride inside the archive as
-      // warnings.txt (when non-empty) for a human to read. The returned array is
-      // also available to any programmatic caller that wants to surface collisions
-      // in a UI; surfacing it in this controller is a documented follow-up.
-      const { buffer: zipBuffer } = await this.exportService.buildMarkdownZip(campaignId, user, { profile, options });
       const filename = this.exportService.exportFilename(campaign.name, 'zip', profile);
       res
         .status(200)
@@ -139,8 +132,24 @@ export class ExportController {
           'Cache-Control': 'private, no-store',
           // Issue #586: the redaction profile is visible without opening the archive.
           'X-Campfire-Export-Profile': profile,
-        })
-        .end(zipBuffer);
+        });
+      // Do not buffer a whole archive in the request path. `close` also fires for
+      // a browser cancelling a download, allowing the service to tear down the
+      // archiver and its per-export staging directory promptly.
+      const abortController = new AbortController();
+      const onClose = () => {
+        // Express emits `close` after a successful response too; only an early
+        // close is a cancelled download.
+        if (!res.writableEnded) abortController.abort(new Error('Export client disconnected'));
+      };
+      res.once('close', onClose);
+      try {
+        await this.exportService.streamMarkdownZip(res, abortController.signal, campaignId, user, { profile, options });
+      } catch (err) {
+        if (!abortController.signal.aborted) throw err;
+      } finally {
+        res.off('close', onClose);
+      }
       return;
     }
 
