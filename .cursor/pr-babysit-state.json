@@ -1,0 +1,13 @@
+{
+  "tracked": [
+    {
+      "pr": 1611,
+      "status": "babysitting",
+      "url": "https://github.com/AwsomeFox/campfire/pull/1611",
+      "headBranch": "fix/issue-1602",
+      "baseBranch": "main",
+      "updatedAt": "2026-07-27T20:26:19Z",
+      "notes": "Added to tracked on babysitting-f889. MERGEABLE; 2 behind main; open Copilot thread on abort cleanup appears fixed in ae914cd — will resolve. CI in progress (run 30302466156)."
+    }
+  ]
+}
