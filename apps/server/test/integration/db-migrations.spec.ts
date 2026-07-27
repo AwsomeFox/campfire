@@ -553,8 +553,8 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     }
   });
 
-  it('0130 adds ai_provider_configs.role and WIDENS the partial uniques so a fallback can exist (#1052)', () => {
-    expect(MIGRATION_NAMES).toContain('0130_ai_provider_config_fallback_role_1052');
+  it('0135 adds ai_provider_configs.role and WIDENS the partial uniques so a fallback can exist (#1052)', () => {
+    expect(MIGRATION_NAMES).toContain('0135_ai_provider_config_fallback_role_1052');
 
     const upgradedDir = makeTempDataDir();
     dataDir = makeTempDataDir();

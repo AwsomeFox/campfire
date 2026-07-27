@@ -3472,15 +3472,21 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // contiguous or sorted. That is also why nothing is renumbered to look tidy: renaming a
   // migration a database has already recorded is the one edit that breaks run-once.
   { name: '0120_campaign_modules_585', run: migrateCampaignModules585 },
-  // 0122-0129 are held by other in-flight branches (0129 is allocated to #598), so this takes
-  // 0130 rather than computing "next free" for itself — several branches each computing that
-  // in parallel is exactly how they collide. `runMigrations` dedupes on the FULL name string,
-  // so the `_1052` suffix is what guarantees run-once, and renaming it later is the one edit
-  // that would break that.
+  // 0135 was CENTRALLY ALLOCATED to this issue. 0126-0134 are held by other in-flight
+  // branches (0126 #587, 0127 #597, 0129 #598, 0130 #599, 0131 #1042, 0132 #1022, 0133 #1043,
+  // 0134 #1049), so the gap above is deliberate and must not be "tidied" into the next free
+  // ordinal — several branches each computing "next free" in parallel is exactly how they
+  // collide, and this entry was itself renumbered off 0130 for that reason before it merged.
+  //
+  // `runMigrations` dedupes on the FULL name string, so two entries sharing an ordinal would
+  // both still run correctly; the ordinal is there so a HUMAN can read this array in order,
+  // which is precisely the property a duplicate destroys. Renaming after a database has
+  // recorded the name is the one edit that breaks run-once, which is why this could only be
+  // fixed pre-merge.
   //
   // This one is NOT purely additive, unlike its neighbours: it REPLACES two partial unique
   // indexes. It must therefore never be reordered above 0040, which creates the originals.
-  { name: '0130_ai_provider_config_fallback_role_1052', run: migrateAiProviderConfigFallbackRole1052 },
+  { name: '0135_ai_provider_config_fallback_role_1052', run: migrateAiProviderConfigFallbackRole1052 },
 ];
 
 /**
