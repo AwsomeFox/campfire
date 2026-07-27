@@ -87,6 +87,8 @@ const RESERVED = 'reserved';
  */
 type CampaignPlanRow = {
   id: number;
+  /** Only ever used in a notification addressed to the incoming OWNER. Not a projection. */
+  name: string;
   status: string;
   ruleSystem: string;
   storageQuotaBytes: number | null;
@@ -109,6 +111,12 @@ type CampaignExportRequestRow = {
   status: string;
   updatedAt: string;
 };
+
+/** The rule pack `update_module` would pin to — `null` when it is not installed here. */
+type RulePackRow = { slug: string } | null;
+
+/** The user `reassign_owner` would hand the campaign to — `null` when there is no such account. */
+type TargetUserRow = { id: number; username: string; disabled: boolean } | null;
 
 /**
  * The tables a bulk operation's plan is derived from.
@@ -138,13 +146,15 @@ type CampaignExportRequestRow = {
  * plan that reaches for an undeclared table does not typecheck, and `satisfies Record<…>`
  * makes a newly added operation with no declaration a compile error too.
  */
-type CatalogDependency = 'campaign' | 'members' | 'exportRequests';
+type CatalogDependency = 'campaign' | 'members' | 'exportRequests' | 'rulePack' | 'targetUser';
 
 /** The rows each dependency contributes to a plan, and the shape a planner may read. */
 type CatalogDependencyRows = {
   campaign: CampaignPlanRow;
   members: CampaignSeatRow[];
   exportRequests: CampaignExportRequestRow[];
+  rulePack: RulePackRow;
+  targetUser: TargetUserRow;
 };
 
 const OPERATION_DEPENDENCIES = {
@@ -153,11 +163,19 @@ const OPERATION_DEPENDENCIES = {
   activate: ['campaign'],
   set_quota: ['campaign'],
   set_policy: ['campaign'],
-  // Reads `rule_packs` too, but a pack's presence is server inventory rather than
-  // campaign state: it is not something a concurrent catalog operation edits underneath a
-  // preview, and re-planning against it can only turn a would_apply into a skip.
-  update_module: ['campaign'],
-  reassign_owner: ['campaign', 'members'],
+  // `rule_packs` IS a dependency, and the argument for leaving it out was wrong twice
+  // over. It said a pack's presence is server inventory that a concurrent catalog
+  // operation cannot edit, and that re-planning against it could only turn a would_apply
+  // into a skip. Both halves fail: packs are installed and removed by other admins on the
+  // same server, and the dangerous direction is the REVERSE one. A preview that skipped
+  // with "rule pack 'x' is not installed" becomes a real rule-system write the moment
+  // somebody installs x — a skip promoted to a write, which is the precise failure this
+  // guard exists to prevent, arriving through the table the guard was told to ignore.
+  update_module: ['campaign', 'rulePack'],
+  // `users` for the same reason: the plan reads `users.disabled`, so a target who is
+  // disabled at preview (skipped) and re-enabled before Apply turns that skip into a live
+  // ownership handover nobody previewed.
+  reassign_owner: ['campaign', 'members', 'targetUser'],
   request_export: ['campaign', 'exportRequests'],
 } as const satisfies Record<CampaignCatalogBulkOperation, readonly CatalogDependency[]>;
 
@@ -173,6 +191,50 @@ type PlanInput = {
     (typeof OPERATION_DEPENDENCIES)[Op][number]
   >;
 }[CampaignCatalogBulkOperation];
+
+/** The transaction handle a plan writes through. It never opens its own. */
+type CatalogTx = Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
+
+/**
+ * Anything the dependency reads can run against: the pooled handle for the first read,
+ * the transaction handle for the revalidation inside the write.
+ */
+type CatalogReader = Pick<DrizzleDb, 'select'>;
+
+/**
+ * What a planner is allowed to reach besides its declared rows.
+ *
+ * Note what is ABSENT: any database handle. That absence is the mechanism — see
+ * `planChange`.
+ */
+type PlanContext = {
+  events: CampaignEventsService;
+  notifications: NotificationsService;
+};
+
+/** A plan: what it would change, how to write it, and what to announce once it has. */
+type CatalogPlan = {
+  summary: { field: string; before: string; after: string };
+  /**
+   * Performs the change in the transaction it is HANDED. A plan that opened its own
+   * transaction would commit outside the precondition check that licenses it.
+   */
+  apply: (tx: CatalogTx) => void;
+  /**
+   * Side effects that must happen AFTER the transaction commits — currently the
+   * live-update events the owning services emit for the same writes. Kept off `apply()`
+   * on purpose: emitting inside the transaction would announce a change that a rollback
+   * then un-does.
+   */
+  afterCommit?: () => void;
+};
+
+/**
+ * Raised when the state a plan was computed from moved before the write could commit.
+ * Carries no reason of its own: the caller turns it into the same `skipped` verdict the
+ * pre-transaction check produces, because it is the same condition caught later.
+ */
+class PlanWentStale extends Error {}
 
 /**
  * Thrown by a plan's `apply()` when the write it guards turned out to be unnecessary —
@@ -719,7 +781,7 @@ export class AdminCatalogService {
       stateVersion,
     });
 
-    const loaded = await this.loadPlanInput(campaignId, req.operation);
+    const loaded = this.readDependencies(this.db, campaignId, req);
     if (!loaded) return skip('campaign not found');
     const { input, stateVersion } = loaded;
     const row = input.campaign;
@@ -754,7 +816,10 @@ export class AdminCatalogService {
       return skip('campaign changed since the preview; run the dry run again', stateVersion);
     }
 
-    const plan = await this.planChange(input, req, actor);
+    const plan = planChange(input, req, actor, {
+      events: this.events,
+      notifications: this.notifications,
+    });
     // Both carry the version too: a no-op or ineligible verdict is still a PLAN the
     // operator saw, and it must be pinnable — the reactivated-campaign case is precisely
     // a `skipped` verdict turning into a real write.
@@ -765,9 +830,37 @@ export class AdminCatalogService {
       return { campaignId, outcome: 'would_apply', reason: '', ...plan.summary, stateVersion };
     }
 
+    // THE CHECK RUNS INSIDE THE TRANSACTION IT GUARDS.
+    //
+    // Everything above — the dependency read, the eligibility decision, the before/after
+    // the operator was shown — came from reads taken OUTSIDE this transaction. Comparing
+    // versions out there narrows the window between decision and write; it does not close
+    // it, and a precondition whose entire purpose is "Apply must not act on state nobody
+    // has seen" is not allowed to be advisory. The concrete consequence: `reassign_owner`
+    // demotes every current primary owner unconditionally, so an owner installed in that
+    // window is silently replaced having never appeared in any preview.
+    //
+    // So the dependencies are re-read on `tx` and the version recomputed by the SAME
+    // function that produced the original, and the write only happens if they still
+    // agree. `plan.apply(tx)` writes through this handle rather than opening its own, so
+    // there is no way to commit a plan whose preconditions were not just verified. On
+    // better-sqlite3 the transaction is synchronous and serialised, so "still agree" here
+    // means what it says.
+    //
+    // This is a CAS, and the failure is a SKIP for the same reason the pre-check's is: a
+    // 200-campaign batch that aborts because one campaign moved is its own bad outcome.
     try {
-      plan.apply();
+      this.db.transaction((tx) => {
+        const fresh = this.readDependencies(tx, campaignId, req);
+        if (!fresh || fresh.stateVersion !== stateVersion) {
+          throw new PlanWentStale();
+        }
+        plan.apply(tx);
+      });
     } catch (err) {
+      if (err instanceof PlanWentStale) {
+        return skip('campaign changed while the change was being applied; run the dry run again', stateVersion);
+      }
       // ONE CONDITION, ONE VERDICT. A duplicate `request_export` caught by the pre-check
       // reports `skipped`; before this, the same duplicate caught by the INSERT's own
       // `WHERE NOT EXISTS` (because it arrived concurrently) escaped as an exception and
@@ -831,14 +924,24 @@ export class AdminCatalogService {
    * can see and the rows the precondition covers cannot drift apart: adding a dependency
    * to read it also adds it to the guard, and a planner cannot read one it did not
    * declare because the property is not on its `PlanInput` variant.
+   *
+   * SYNCHRONOUS, AND THAT IS THE POINT. This runs twice per applied item: once to build
+   * the plan, and again INSIDE the write transaction to revalidate it. Both callers must
+   * compute the identical fingerprint from the identical reads, so there is exactly one
+   * implementation and it takes its handle as an argument — `this.db` for the first call,
+   * the transaction handle for the second. Two functions that had to agree would be one
+   * refactor away from disagreeing silently, which is the failure this whole mechanism is
+   * about.
    */
-  private async loadPlanInput(
+  private readDependencies(
+    db: CatalogReader,
     campaignId: number,
-    operation: CampaignCatalogBulkOperation,
-  ): Promise<{ input: PlanInput; stateVersion: string } | null> {
-    const [campaign] = await this.db
+    req: CampaignCatalogBulkRequest,
+  ): { input: PlanInput; stateVersion: string } | null {
+    const [campaign] = db
       .select({
         id: campaigns.id,
+        name: campaigns.name,
         status: campaigns.status,
         ruleSystem: campaigns.ruleSystem,
         storageQuotaBytes: campaigns.storageQuotaBytes,
@@ -849,10 +952,11 @@ export class AdminCatalogService {
       })
       .from(campaigns)
       .where(eq(campaigns.id, campaignId))
-      .limit(1);
+      .limit(1)
+      .all();
     if (!campaign) return null;
 
-    const dependencies: readonly CatalogDependency[] = OPERATION_DEPENDENCIES[operation];
+    const dependencies: readonly CatalogDependency[] = OPERATION_DEPENDENCIES[req.operation];
     const rows: Partial<CatalogDependencyRows> = { campaign };
     // Fingerprints, in declaration order, so the version string is stable across runs.
     const parts: string[] = [];
@@ -863,7 +967,7 @@ export class AdminCatalogService {
           parts.push(`campaign=${campaign.updatedAt}`);
           break;
         case 'members': {
-          const members = await this.db
+          const members = db
             .select({
               id: campaignMembers.id,
               userId: campaignMembers.userId,
@@ -872,7 +976,8 @@ export class AdminCatalogService {
               updatedAt: campaignMembers.updatedAt,
             })
             .from(campaignMembers)
-            .where(eq(campaignMembers.campaignId, campaignId));
+            .where(eq(campaignMembers.campaignId, campaignId))
+            .all();
           rows.members = members;
           // The SET of seats, not a max(updated_at): a seat that is DELETED changes who
           // owns the campaign without advancing any surviving row's timestamp, and that
@@ -885,18 +990,49 @@ export class AdminCatalogService {
           break;
         }
         case 'exportRequests': {
-          const requests = await this.db
+          const requests = db
             .select({
               id: campaignExportRequests.id,
               status: campaignExportRequests.status,
               updatedAt: campaignExportRequests.updatedAt,
             })
             .from(campaignExportRequests)
-            .where(eq(campaignExportRequests.campaignId, campaignId));
+            .where(eq(campaignExportRequests.campaignId, campaignId))
+            .all();
           rows.exportRequests = requests;
           // Status is in the fingerprint because a DM DECIDING the pending request is the
           // mutation that turns a previewed skip into a live insert.
           parts.push(`exports=${fingerprint(requests.map((r) => `${r.id}:${r.status}:${r.updatedAt}`))}`);
+          break;
+        }
+        case 'rulePack': {
+          // Keyed by the REQUESTED slug, not by the campaign: what the plan reads is
+          // "is the pack this request names installed right now?", so that is what the
+          // version has to pin. Absence is a value here, not a missing dependency.
+          const slug = req.ruleSystem ?? '';
+          const [pack] = db
+            .select({ slug: rulePacks.slug })
+            .from(rulePacks)
+            .where(eq(rulePacks.slug, slug))
+            .limit(1)
+            .all();
+          rows.rulePack = pack ?? null;
+          parts.push(`pack=${slug}:${pack ? 1 : 0}`);
+          break;
+        }
+        case 'targetUser': {
+          const toUserId = req.toUserId ?? 0;
+          const [target] = db
+            .select({ id: users.id, username: users.username, disabled: users.disabled })
+            .from(users)
+            .where(eq(users.id, toUserId))
+            .limit(1)
+            .all();
+          rows.targetUser = target ?? null;
+          // `disabled` is in the fingerprint because the plan branches on it. A target
+          // re-enabled between preview and Apply must invalidate the preview rather than
+          // quietly upgrade a skip into an ownership handover.
+          parts.push(`user=${toUserId}:${target ? 1 : 0}:${target?.disabled ? 1 : 0}`);
           break;
         }
         default: {
@@ -909,9 +1045,9 @@ export class AdminCatalogService {
 
     return {
       // The only cast in the mechanism, and it is discharged by the loop above: `rows`
-      // has been populated for exactly `OPERATION_DEPENDENCIES[operation]`, which is the
-      // key set `PlanInput`'s variant for `operation` requires.
-      input: { operation, ...rows } as PlanInput,
+      // has been populated for exactly `OPERATION_DEPENDENCIES[req.operation]`, which is
+      // the key set `PlanInput`'s variant for that operation requires.
+      input: { operation: req.operation, ...rows } as PlanInput,
       // Digested rather than concatenated: the wire field is capped at 64 characters and
       // the number of dependencies is not. Order is preserved (unlike `fingerprint`,
       // which sorts an unordered row set) because `parts` is built in declaration order.
@@ -925,357 +1061,6 @@ export class AdminCatalogService {
    * Returns `null` for a no-op, a string for "skip with this reason", or a plan whose
    * `apply()` performs the whole change inside a single transaction.
    */
-  private async planChange(
-    input: PlanInput,
-    req: CampaignCatalogBulkRequest,
-    actor: Actor,
-  ): Promise<
-    | null
-    | string
-    | {
-        summary: { field: string; before: string; after: string };
-        apply: () => void;
-        /**
-         * Side effects that must happen AFTER the transaction commits — currently the
-         * live-update events the owning services emit for the same writes. Kept off
-         * `apply()` on purpose: emitting inside the transaction would announce a change
-         * that a rollback then un-does.
-         */
-        afterCommit?: () => void;
-      }
-  > {
-    const ts = nowIso();
-    const row = input.campaign;
-    const id = row.id;
-
-    const statusChange = (next: 'active' | 'paused' | 'completed') => {
-      if (row.status === next) return null;
-      // THE PREVIEW MUST NAME EVERY WRITE, NOT JUST THE HEADLINE ONE.
-      //
-      // Moving out of `active` also closes public invites (see apply()). That mutation
-      // is correct — it mirrors the DM-facing path in CampaignsService.update — but the
-      // dry run reported only `status: active -> completed`, so an operator archiving a
-      // campaign with live join links was never told those links would stop working and
-      // would need a DM to deliberately re-enable them after reactivation. The behaviour
-      // was right and its description was incomplete, which for a dry run is the same
-      // defect: the preview is the only thing the operator consents to.
-      //
-      // Folded into `after` rather than a new field so it flows into the per-campaign
-      // audit detail too — that row is built from this summary, and the trail should not
-      // record less than the preview showed.
-      const closesInvites = next !== 'active' && row.publicInvitesEnabled;
-      return {
-        summary: {
-          field: 'status',
-          before: row.status,
-          after: closesInvites ? `${next} (closes public invites)` : next,
-        },
-        apply: () => {
-          this.db.transaction((tx) => {
-            // Moving a campaign out of `active` also closes public invites, mirroring
-            // the DM-facing update path in campaigns.service.ts — an archived campaign
-            // that still accepts new joiners via a live link is the inconsistency that
-            // migration 0059 exists to prevent. Both writes are in one transaction, so
-            // the pair can never half-apply.
-            tx.update(campaigns)
-              .set({
-                status: next,
-                ...(next === 'active' ? {} : { publicInvitesEnabled: false }),
-                updatedAt: ts,
-              })
-              .where(eq(campaigns.id, id))
-              .run();
-          });
-        },
-      };
-    };
-
-    // Switching on `input.operation` rather than `req.operation` is what makes the
-    // dependency declaration load-bearing: it narrows `input` to the variant carrying
-    // exactly the declared rows, so a case can only read tables the guard also covers.
-    switch (input.operation) {
-      case 'archive':
-        return statusChange('completed');
-      case 'pause':
-        return statusChange('paused');
-      case 'activate':
-        return statusChange('active');
-
-      case 'set_quota': {
-        const next = req.storageQuotaBytes ?? null;
-        if ((row.storageQuotaBytes ?? null) === next) return null;
-        return {
-          summary: {
-            field: 'storageQuotaBytes',
-            before: row.storageQuotaBytes === null ? 'unset' : String(row.storageQuotaBytes),
-            after: next === null ? 'unset' : String(next),
-          },
-          apply: () => {
-            this.db.transaction((tx) => {
-              tx.update(campaigns).set({ storageQuotaBytes: next, updatedAt: ts }).where(eq(campaigns.id, id)).run();
-            });
-          },
-        };
-      }
-
-      case 'set_policy': {
-        const changes: string[] = [];
-        const set: Record<string, unknown> = { updatedAt: ts };
-        if (req.publicInvitesEnabled !== undefined && req.publicInvitesEnabled !== row.publicInvitesEnabled) {
-          set.publicInvitesEnabled = req.publicInvitesEnabled;
-          changes.push(`publicInvitesEnabled=${row.publicInvitesEnabled}->${req.publicInvitesEnabled}`);
-        }
-        if (
-          req.aiExternalContentPolicy !== undefined &&
-          req.aiExternalContentPolicy !== row.aiExternalContentPolicy
-        ) {
-          set.aiExternalContentPolicy = req.aiExternalContentPolicy;
-          changes.push(`aiExternalContentPolicy=${row.aiExternalContentPolicy}->${req.aiExternalContentPolicy}`);
-        }
-        if (changes.length === 0) return null;
-        return {
-          summary: { field: 'policy', before: '', after: changes.join(' ') },
-          apply: () => {
-            this.db.transaction((tx) => {
-              tx.update(campaigns).set(set).where(eq(campaigns.id, id)).run();
-            });
-          },
-        };
-      }
-
-      case 'update_module': {
-        const next = req.ruleSystem ?? '';
-        if (row.ruleSystem === next) return null;
-        // Refuse to pin a campaign to a pack this server cannot serve. The operation
-        // exists to FIX the "campaign points at a missing module" condition the catalog
-        // surfaces; letting it create that condition would be perverse.
-        const [pack] = await this.db
-          .select({ slug: rulePacks.slug })
-          .from(rulePacks)
-          .where(eq(rulePacks.slug, next))
-          .limit(1);
-        if (!pack) return `rule pack '${next}' is not installed on this server`;
-        return {
-          summary: { field: 'ruleSystem', before: row.ruleSystem || 'unset', after: next },
-          apply: () => {
-            this.db.transaction((tx) => {
-              tx.update(campaigns).set({ ruleSystem: next, updatedAt: ts }).where(eq(campaigns.id, id)).run();
-            });
-          },
-        };
-      }
-
-      case 'reassign_owner': {
-        const toUserId = req.toUserId as number;
-        const [target] = await this.db
-          .select({ id: users.id, username: users.username, disabled: users.disabled })
-          .from(users)
-          .where(eq(users.id, toUserId))
-          .limit(1);
-        if (!target) return `user ${toUserId} not found`;
-        if (target.disabled) return `user ${toUserId} is disabled`;
-
-        // The seat table arrives through `input`, which is also what the precondition
-        // fingerprints. Re-reading it here would put the plan back on data the guard does
-        // not cover — the exact split that let an Apply demote an owner installed after
-        // the preview.
-        const existing = input.members;
-        const currentOwner = existing.find((m) => m.primaryOwner);
-        if (currentOwner?.userId === toUserId) return null;
-
-        // Only for the notification below, and only sent to the incoming OWNER — who by
-        // the time it is delivered holds a dm seat on this campaign and may read far more
-        // than its name. This is not a widening of the catalog's projection.
-        const [campaignRow] = await this.db
-          .select({ name: campaigns.name })
-          .from(campaigns)
-          .where(eq(campaigns.id, id))
-          .limit(1);
-        const campaignName = campaignRow?.name ?? '';
-
-        const existingSeat = existing.find((m) => m.userId === toUserId);
-        // The seat id the event carries. Known up front when a seat already exists;
-        // filled in from the INSERT when one does not, which is why it is a `let`.
-        let eventMemberId = existingSeat?.id ?? 0;
-
-        return {
-          summary: {
-            field: 'primaryOwner',
-            before: currentOwner ? String(currentOwner.userId) : 'none',
-            after: String(toUserId),
-          },
-          apply: () => {
-            this.db.transaction((tx) => {
-              // Demote the incumbent, then install the new owner — as one unit, so the
-              // campaign is never left with two primary owners or none.
-              tx.update(campaignMembers)
-                .set({ primaryOwner: false, updatedAt: ts })
-                .where(eq(campaignMembers.campaignId, id))
-                .run();
-              if (existingSeat) {
-                tx.update(campaignMembers)
-                  .set({ role: 'dm', primaryOwner: true, updatedAt: ts })
-                  .where(eq(campaignMembers.id, existingSeat.id))
-                  .run();
-              } else {
-                const inserted = tx
-                  .insert(campaignMembers)
-                  .values({
-                    campaignId: id,
-                    userId: toUserId,
-                    role: 'dm',
-                    primaryOwner: true,
-                    createdAt: ts,
-                    updatedAt: ts,
-                  })
-                  .returning({ id: campaignMembers.id })
-                  .all();
-                eventMemberId = inserted[0]?.id ?? 0;
-              }
-            });
-          },
-          // TELL THE NEW OWNER'S OPEN BROWSERS, THE WAY MembersService DOES.
-          //
-          // `MembersService.update` emits `membership.updated` on a role change so the
-          // affected member's tabs invalidate their cached /me memberships immediately
-          // (issue #437) — promote gains DM nav, demote drops forbidden controls. This
-          // path writes the seat directly and emitted nothing, so a user promoted to
-          // owner kept rendering player-only navigation and could not reach DM settings
-          // until they happened to reload.
-          //
-          // Same sibling-pair root cause as the `set_policy` finding: the bulk path
-          // writing a column that another service owns. There the state itself was
-          // illegitimate, so the fix was to make it inexpressible; here the state is
-          // perfectly legitimate and only the announcement was missing, so the fix is to
-          // announce it.
-          //
-          // Emitted when the seat did not already carry `dm`, which covers both the
-          // promotion of an existing player seat and a newly inserted one. An existing
-          // dm seat merely gaining `primaryOwner` is deliberately silent — the member's
-          // ROLE is unchanged, nothing in the cached /me differs, and MembersService is
-          // equally quiet in that case.
-          //
-          // EVERY PROMOTED TARGET NEEDS THE ACCOUNT-WIDE SIGNAL, NOT JUST A NEW SEAT.
-          //
-          // The first version of this fix sent the account-wide notification only for a
-          // newly INSERTED seat, reasoning that an existing member "already had the
-          // campaign in their /me, so the SSE event reaches them". That conflates being
-          // a MEMBER with being a LISTENER — which is the exact confusion the original
-          // defect was built from, surviving inside the branch the fix declared safe.
-          //
-          // `CampaignEventsService.streamFor` filters by campaignId, and the client
-          // subscribes only for the campaign it is currently VIEWING. A player promoted
-          // to owner while looking at a different campaign (or at no campaign) has no
-          // subscriber for this event either. Membership is necessary for the
-          // subscription, not sufficient for it to be open.
-          //
-          // So both branches now signal. Self-suppression on reassign-to-self is
-          // orthogonal and kept: `actor.actor` is `String(users.id)` for a real account,
-          // matching the rule `notifyUser` applies when handed a RequestUser. Done here
-          // because `planChange` carries the audit Actor rather than the RequestUser.
-          //
-          // KNOWN GAP, MEASURED NOT ASSUMED: this notification updates the notification
-          // UI and does NOT by itself refresh AuthProvider's /me memberships. The only
-          // client path that refreshes them is `useMembershipLiveSync`, which is driven
-          // by the campaign SSE stream and therefore carries the same viewing
-          // requirement. There is no account-wide push channel on the server at all —
-          // the sole `@Sse()` endpoint is campaign-scoped and notifications are polled.
-          // Closing that last step means teaching a shared auth/notification surface to
-          // refresh `/me` when a membership-affecting notification arrives, which is a
-          // change outside this module. Tracked separately; see the PR body.
-          afterCommit:
-            existingSeat?.role === 'dm'
-              ? undefined
-              : () => {
-                  this.events.emit({
-                    type: 'membership.updated',
-                    campaignId: id,
-                    userId: String(toUserId),
-                    memberId: eventMemberId,
-                    role: 'dm',
-                  });
-                  if (actor.actor !== String(toUserId)) {
-                    // Best-effort inside NotificationsService, and awaited by nobody:
-                    // `afterCommit` is sync by design (see the plan type) and a
-                    // notification must never delay or fail a committed lifecycle change.
-                    void this.notifications.notifyUser(toUserId, id, null, {
-                      type: 'added_to_campaign',
-                      title: `You were made the owner of ${campaignName || 'a campaign'}`,
-                      entityType: 'campaign',
-                      entityId: id,
-                    });
-                  }
-                },
-        };
-      }
-
-      case 'request_export': {
-        const profile = req.exportProfile ?? 'backup';
-        // Same rule as `reassign_owner`: the request table arrives through `input` so the
-        // plan and the precondition see the same rows. A DM deciding the pending request
-        // between preview and Apply now invalidates the preview instead of quietly
-        // turning a shown `skipped` into an INSERT.
-        const pending = input.exportRequests.find((r) => r.status === 'pending');
-        if (pending) return 'an export request is already pending for this campaign';
-        // The column is documented as "numeric user id as text when the requester was a
-        // real account; '' otherwise", so test for that directly rather than excluding
-        // the one decorated prefix we happen to remember. `auditActor` returns a bare
-        // `String(users.id)` for a real account, but `token:<name>` on the PAT path and
-        // `dev:<name>` on the header-auth path — and only the first of those was being
-        // filtered, so a dev-auth principal wrote `dev:alice` into a column every reader
-        // is entitled to treat as an id. Any future actor shape is now excluded by
-        // construction instead of by enumeration.
-        const requestedByUserId = /^\d+$/.test(actor.actor) ? actor.actor : '';
-        const justification = (req.reason ?? '').slice(0, 2000);
-        return {
-          summary: { field: 'exportRequest', before: 'none', after: `pending(${profile})` },
-          apply: () => {
-            this.db.transaction((tx) => {
-              // THE INSERT CARRIES THE ONE-PENDING-REQUEST RULE, NOT JUST THE PRE-CHECK.
-              //
-              // The check above is a read with an await before this write, so two
-              // concurrent `request_export` calls both saw no pending row and both got
-              // here — leaving the campaign with duplicate pending asks and both batches
-              // reporting `applied`. Same read-then-write race the decision path had,
-              // one step earlier in the workflow.
-              //
-              // `INSERT … SELECT … WHERE NOT EXISTS` re-tests the rule inside the single
-              // statement that performs the write, so SQLite evaluates it atomically and
-              // no interleaving can slip between the test and the insert. Chosen over a
-              // partial unique index because it needs no DDL and no migration ordinal:
-              // the rule lives in the statement that enforces it, exactly as the
-              // decision fix put it in the UPDATE predicate.
-              const inserted = tx.run(sql`
-                INSERT INTO campaign_export_requests
-                  (campaign_id, requested_by, requested_by_user_id, profile, justification,
-                   status, decision_note, created_at, updated_at)
-                SELECT ${id}, ${actor.actor}, ${requestedByUserId}, ${profile}, ${justification},
-                       'pending', '', ${ts}, ${ts}
-                WHERE NOT EXISTS (
-                  SELECT 1 FROM campaign_export_requests
-                  WHERE campaign_id = ${id} AND status = 'pending'
-                )
-              `);
-
-              // Zero rows means another request won the race between the pre-check and
-              // here. Throwing rolls this transaction back rather than reporting
-              // `applied` for a row that was never written — and it throws the no-op
-              // sentinel, so `applyOne` reports the SAME `skipped` verdict the sequential
-              // pre-check produces for the identical condition. Reporting `failed` here
-              // told an operator to retry an operation whose only correct outcome is to
-              // do nothing.
-              if (inserted.changes === 0) {
-                throw new PlanBecameNoOp('an export request is already pending for this campaign');
-              }
-            });
-          },
-        };
-      }
-
-      default:
-        return `unsupported operation`;
-    }
-  }
 
   // ---------------------------------------------------------------- export requests
 
@@ -1974,5 +1759,359 @@ export class AdminCatalogService {
     if (query.overQuota !== undefined) parts.push(`overQuota=${query.overQuota}`);
     if (query.trashed) parts.push('trashed=true');
     return parts.length === 0 ? 'none' : parts.join(' ');
+  }
+}
+
+/**
+ * Decide what one operation would do to one campaign.
+ *
+ * A MODULE-LEVEL FUNCTION, DELIBERATELY, AND IT TAKES NO DATABASE HANDLE. As a method it
+ * had the service's db handle in scope, so reading a table the operation had not declared
+ * was one line away — which is precisely how `rule_packs` and `users` came to control
+ * plans while contributing nothing to `stateVersion`. A dependency declaration is only
+ * load-bearing if there is no way around it, and a hand-kept list sitting next to an open
+ * database handle has now been wrong twice. Here there is no way around it: `input` is
+ * the only source of rows, and `ctx` carries the two services whose post-commit events
+ * are needed and nothing that can query.
+ *
+ * `apply` RECEIVES the transaction rather than opening one, so the write lands in the
+ * caller's transaction — the same one that revalidates the precondition. A plan cannot
+ * commit outside the check that guards it.
+ *
+ * Returns `null` for a no-op, a string for "skip with this reason", or a plan.
+ */
+function planChange(
+  input: PlanInput,
+  req: CampaignCatalogBulkRequest,
+  actor: Actor,
+  ctx: PlanContext,
+): null | string | CatalogPlan {
+  const ts = nowIso();
+  const row = input.campaign;
+  const id = row.id;
+
+  const statusChange = (next: 'active' | 'paused' | 'completed'): null | CatalogPlan => {
+    if (row.status === next) return null;
+    // THE PREVIEW MUST NAME EVERY WRITE, NOT JUST THE HEADLINE ONE.
+    //
+    // Moving out of `active` also closes public invites (see apply()). That mutation
+    // is correct — it mirrors the DM-facing path in CampaignsService.update — but the
+    // dry run reported only `status: active -> completed`, so an operator archiving a
+    // campaign with live join links was never told those links would stop working and
+    // would need a DM to deliberately re-enable them after reactivation. The behaviour
+    // was right and its description was incomplete, which for a dry run is the same
+    // defect: the preview is the only thing the operator consents to.
+    //
+    // Folded into `after` rather than a new field so it flows into the per-campaign
+    // audit detail too — that row is built from this summary, and the trail should not
+    // record less than the preview showed.
+    const closesInvites = next !== 'active' && row.publicInvitesEnabled;
+    return {
+      summary: {
+        field: 'status',
+        before: row.status,
+        after: closesInvites ? `${next} (closes public invites)` : next,
+      },
+      apply: (tx) => {
+        {
+          // Moving a campaign out of `active` also closes public invites, mirroring
+          // the DM-facing update path in campaigns.service.ts — an archived campaign
+          // that still accepts new joiners via a live link is the inconsistency that
+          // migration 0059 exists to prevent. Both writes are in one transaction, so
+          // the pair can never half-apply.
+          tx.update(campaigns)
+            .set({
+              status: next,
+              ...(next === 'active' ? {} : { publicInvitesEnabled: false }),
+              updatedAt: ts,
+            })
+            .where(eq(campaigns.id, id))
+            .run();
+        }
+      },
+    };
+  };
+
+  // Switching on `input.operation` rather than `req.operation` is what makes the
+  // dependency declaration load-bearing: it narrows `input` to the variant carrying
+  // exactly the declared rows, so a case can only read tables the guard also covers.
+  switch (input.operation) {
+    case 'archive':
+      return statusChange('completed');
+    case 'pause':
+      return statusChange('paused');
+    case 'activate':
+      return statusChange('active');
+
+    case 'set_quota': {
+      const next = req.storageQuotaBytes ?? null;
+      if ((row.storageQuotaBytes ?? null) === next) return null;
+      return {
+        summary: {
+          field: 'storageQuotaBytes',
+          before: row.storageQuotaBytes === null ? 'unset' : String(row.storageQuotaBytes),
+          after: next === null ? 'unset' : String(next),
+        },
+        apply: (tx) => {
+          {
+            tx.update(campaigns).set({ storageQuotaBytes: next, updatedAt: ts }).where(eq(campaigns.id, id)).run();
+          }
+        },
+      };
+    }
+
+    case 'set_policy': {
+      const changes: string[] = [];
+      const set: Record<string, unknown> = { updatedAt: ts };
+      if (req.publicInvitesEnabled !== undefined && req.publicInvitesEnabled !== row.publicInvitesEnabled) {
+        set.publicInvitesEnabled = req.publicInvitesEnabled;
+        changes.push(`publicInvitesEnabled=${row.publicInvitesEnabled}->${req.publicInvitesEnabled}`);
+      }
+      if (
+        req.aiExternalContentPolicy !== undefined &&
+        req.aiExternalContentPolicy !== row.aiExternalContentPolicy
+      ) {
+        set.aiExternalContentPolicy = req.aiExternalContentPolicy;
+        changes.push(`aiExternalContentPolicy=${row.aiExternalContentPolicy}->${req.aiExternalContentPolicy}`);
+      }
+      if (changes.length === 0) return null;
+      return {
+        summary: { field: 'policy', before: '', after: changes.join(' ') },
+        apply: (tx) => {
+          {
+            tx.update(campaigns).set(set).where(eq(campaigns.id, id)).run();
+          }
+        },
+      };
+    }
+
+    case 'update_module': {
+      const next = req.ruleSystem ?? '';
+      if (row.ruleSystem === next) return null;
+      // Refuse to pin a campaign to a pack this server cannot serve. The operation
+      // exists to FIX the "campaign points at a missing module" condition the catalog
+      // surfaces; letting it create that condition would be perverse.
+      //
+      // Read through `input` because this branch DECIDES the plan: "not installed" is a
+      // skip and "installed" is a write, so the pack's presence has to be pinned by the
+      // precondition like any other input. As a direct query it was not, which meant
+      // another admin installing the pack between preview and Apply flipped a shown
+      // skip into an unshown rule-system change.
+      if (!input.rulePack) return `rule pack '${next}' is not installed on this server`;
+      return {
+        summary: { field: 'ruleSystem', before: row.ruleSystem || 'unset', after: next },
+        apply: (tx) => {
+          {
+            tx.update(campaigns).set({ ruleSystem: next, updatedAt: ts }).where(eq(campaigns.id, id)).run();
+          }
+        },
+      };
+    }
+
+    case 'reassign_owner': {
+      const toUserId = req.toUserId as number;
+      // Also through `input`, and for the same reason as the rule pack: `disabled` is a
+      // branch between a skip and a handover, so a target re-enabled after the preview
+      // must invalidate that preview rather than silently qualify for it.
+      const target = input.targetUser;
+      if (!target) return `user ${toUserId} not found`;
+      if (target.disabled) return `user ${toUserId} is disabled`;
+
+      // The seat table arrives through `input`, which is also what the precondition
+      // fingerprints. Re-reading it here would put the plan back on data the guard does
+      // not cover — the exact split that let an Apply demote an owner installed after
+      // the preview.
+      const existing = input.members;
+      const currentOwner = existing.find((m) => m.primaryOwner);
+      if (currentOwner?.userId === toUserId) return null;
+
+      // Only for the notification below, and only sent to the incoming OWNER — who by
+      // the time it is delivered holds a dm seat on this campaign and may read far more
+      // than its name. This is not a widening of the catalog's projection. It comes off
+      // the already-declared campaign row rather than a second query, so this planner
+      // reads nothing the guard does not cover.
+      const campaignName = row.name;
+
+      const existingSeat = existing.find((m) => m.userId === toUserId);
+      // The seat id the event carries. Known up front when a seat already exists;
+      // filled in from the INSERT when one does not, which is why it is a `let`.
+      let eventMemberId = existingSeat?.id ?? 0;
+
+      return {
+        summary: {
+          field: 'primaryOwner',
+          before: currentOwner ? String(currentOwner.userId) : 'none',
+          after: String(toUserId),
+        },
+        apply: (tx) => {
+          {
+            // Demote the incumbent, then install the new owner — as one unit, so the
+            // campaign is never left with two primary owners or none.
+            tx.update(campaignMembers)
+              .set({ primaryOwner: false, updatedAt: ts })
+              .where(eq(campaignMembers.campaignId, id))
+              .run();
+            if (existingSeat) {
+              tx.update(campaignMembers)
+                .set({ role: 'dm', primaryOwner: true, updatedAt: ts })
+                .where(eq(campaignMembers.id, existingSeat.id))
+                .run();
+            } else {
+              const inserted = tx
+                .insert(campaignMembers)
+                .values({
+                  campaignId: id,
+                  userId: toUserId,
+                  role: 'dm',
+                  primaryOwner: true,
+                  createdAt: ts,
+                  updatedAt: ts,
+                })
+                .returning({ id: campaignMembers.id })
+                .all();
+              eventMemberId = inserted[0]?.id ?? 0;
+            }
+          }
+        },
+        // TELL THE NEW OWNER'S OPEN BROWSERS, THE WAY MembersService DOES.
+        //
+        // `MembersService.update` emits `membership.updated` on a role change so the
+        // affected member's tabs invalidate their cached /me memberships immediately
+        // (issue #437) — promote gains DM nav, demote drops forbidden controls. This
+        // path writes the seat directly and emitted nothing, so a user promoted to
+        // owner kept rendering player-only navigation and could not reach DM settings
+        // until they happened to reload.
+        //
+        // Same sibling-pair root cause as the `set_policy` finding: the bulk path
+        // writing a column that another service owns. There the state itself was
+        // illegitimate, so the fix was to make it inexpressible; here the state is
+        // perfectly legitimate and only the announcement was missing, so the fix is to
+        // announce it.
+        //
+        // Emitted when the seat did not already carry `dm`, which covers both the
+        // promotion of an existing player seat and a newly inserted one. An existing
+        // dm seat merely gaining `primaryOwner` is deliberately silent — the member's
+        // ROLE is unchanged, nothing in the cached /me differs, and MembersService is
+        // equally quiet in that case.
+        //
+        // EVERY PROMOTED TARGET NEEDS THE ACCOUNT-WIDE SIGNAL, NOT JUST A NEW SEAT.
+        //
+        // The first version of this fix sent the account-wide notification only for a
+        // newly INSERTED seat, reasoning that an existing member "already had the
+        // campaign in their /me, so the SSE event reaches them". That conflates being
+        // a MEMBER with being a LISTENER — which is the exact confusion the original
+        // defect was built from, surviving inside the branch the fix declared safe.
+        //
+        // `CampaignEventsService.streamFor` filters by campaignId, and the client
+        // subscribes only for the campaign it is currently VIEWING. A player promoted
+        // to owner while looking at a different campaign (or at no campaign) has no
+        // subscriber for this event either. Membership is necessary for the
+        // subscription, not sufficient for it to be open.
+        //
+        // So both branches now signal. Self-suppression on reassign-to-self is
+        // orthogonal and kept: `actor.actor` is `String(users.id)` for a real account,
+        // matching the rule `notifyUser` applies when handed a RequestUser. Done here
+        // because `planChange` carries the audit Actor rather than the RequestUser.
+        //
+        // KNOWN GAP, MEASURED NOT ASSUMED: this notification updates the notification
+        // UI and does NOT by itself refresh AuthProvider's /me memberships. The only
+        // client path that refreshes them is `useMembershipLiveSync`, which is driven
+        // by the campaign SSE stream and therefore carries the same viewing
+        // requirement. There is no account-wide push channel on the server at all —
+        // the sole `@Sse()` endpoint is campaign-scoped and notifications are polled.
+        // Closing that last step means teaching a shared auth/notification surface to
+        // refresh `/me` when a membership-affecting notification arrives, which is a
+        // change outside this module. Tracked separately; see the PR body.
+        afterCommit:
+          existingSeat?.role === 'dm'
+            ? undefined
+            : () => {
+                ctx.events.emit({
+                  type: 'membership.updated',
+                  campaignId: id,
+                  userId: String(toUserId),
+                  memberId: eventMemberId,
+                  role: 'dm',
+                });
+                if (actor.actor !== String(toUserId)) {
+                  // Best-effort inside NotificationsService, and awaited by nobody:
+                  // `afterCommit` is sync by design (see the plan type) and a
+                  // notification must never delay or fail a committed lifecycle change.
+                  void ctx.notifications.notifyUser(toUserId, id, null, {
+                    type: 'added_to_campaign',
+                    title: `You were made the owner of ${campaignName || 'a campaign'}`,
+                    entityType: 'campaign',
+                    entityId: id,
+                  });
+                }
+              },
+      };
+    }
+
+    case 'request_export': {
+      const profile = req.exportProfile ?? 'backup';
+      // Same rule as `reassign_owner`: the request table arrives through `input` so the
+      // plan and the precondition see the same rows. A DM deciding the pending request
+      // between preview and Apply now invalidates the preview instead of quietly
+      // turning a shown `skipped` into an INSERT.
+      const pending = input.exportRequests.find((r) => r.status === 'pending');
+      if (pending) return 'an export request is already pending for this campaign';
+      // The column is documented as "numeric user id as text when the requester was a
+      // real account; '' otherwise", so test for that directly rather than excluding
+      // the one decorated prefix we happen to remember. `auditActor` returns a bare
+      // `String(users.id)` for a real account, but `token:<name>` on the PAT path and
+      // `dev:<name>` on the header-auth path — and only the first of those was being
+      // filtered, so a dev-auth principal wrote `dev:alice` into a column every reader
+      // is entitled to treat as an id. Any future actor shape is now excluded by
+      // construction instead of by enumeration.
+      const requestedByUserId = /^\d+$/.test(actor.actor) ? actor.actor : '';
+      const justification = (req.reason ?? '').slice(0, 2000);
+      return {
+        summary: { field: 'exportRequest', before: 'none', after: `pending(${profile})` },
+        apply: (tx) => {
+          {
+            // THE INSERT CARRIES THE ONE-PENDING-REQUEST RULE, NOT JUST THE PRE-CHECK.
+            //
+            // The check above is a read with an await before this write, so two
+            // concurrent `request_export` calls both saw no pending row and both got
+            // here — leaving the campaign with duplicate pending asks and both batches
+            // reporting `applied`. Same read-then-write race the decision path had,
+            // one step earlier in the workflow.
+            //
+            // `INSERT … SELECT … WHERE NOT EXISTS` re-tests the rule inside the single
+            // statement that performs the write, so SQLite evaluates it atomically and
+            // no interleaving can slip between the test and the insert. Chosen over a
+            // partial unique index because it needs no DDL and no migration ordinal:
+            // the rule lives in the statement that enforces it, exactly as the
+            // decision fix put it in the UPDATE predicate.
+            const inserted = tx.run(sql`
+              INSERT INTO campaign_export_requests
+                (campaign_id, requested_by, requested_by_user_id, profile, justification,
+                 status, decision_note, created_at, updated_at)
+              SELECT ${id}, ${actor.actor}, ${requestedByUserId}, ${profile}, ${justification},
+                     'pending', '', ${ts}, ${ts}
+              WHERE NOT EXISTS (
+                SELECT 1 FROM campaign_export_requests
+                WHERE campaign_id = ${id} AND status = 'pending'
+              )
+            `);
+
+            // Zero rows means another request won the race between the pre-check and
+            // here. Throwing rolls this transaction back rather than reporting
+            // `applied` for a row that was never written — and it throws the no-op
+            // sentinel, so `applyOne` reports the SAME `skipped` verdict the sequential
+            // pre-check produces for the identical condition. Reporting `failed` here
+            // told an operator to retry an operation whose only correct outcome is to
+            // do nothing.
+            if (inserted.changes === 0) {
+              throw new PlanBecameNoOp('an export request is already pending for this campaign');
+            }
+          }
+        },
+      };
+    }
+
+    default:
+      return `unsupported operation`;
   }
 }

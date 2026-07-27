@@ -802,21 +802,42 @@ function ExportRequestsCard({ campaign }: { campaign: Campaign }) {
   const [notes, setNotes] = useState<Record<number, string>>({});
   const [busyId, setBusyId] = useState<number | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [pagesLoaded, setPagesLoaded] = useState(1);
   const [error, setError] = useState<string | null>(null);
 
-  // The inbox is paged (the endpoint orders pending first, so page one always holds
-  // everything actually waiting on this DM). `limit` here is the count already shown, so
-  // "Show earlier requests" re-reads from the top rather than accumulating pages
-  // client-side — a decision recorded in another tab then cannot leave this list showing
-  // a request as pending that is not.
+  // PAGES BY OFFSET, NOT BY GROWING `limit`.
+  //
+  // The first version of this control kept `offset=0` and raised `limit` by 25 a click.
+  // The server clamps `limit` to CAMPAIGN_CATALOG_MAX_LIMIT, so past 100 rows every click
+  // re-fetched the same 100 while the button stayed visible (`requests.length < total`
+  // was still true) — a control that visibly does nothing, which is worse than the cap it
+  // was added to remove.
+  //
+  // Fetching whole pages by offset and re-reading ALL of them keeps two properties at
+  // once: the list grows, and it never shows a request as pending that a decision in
+  // another tab has already answered. The endpoint orders pending-first, so page one
+  // always holds everything actually waiting on this DM however far back the history goes.
   const load = useCallback(
-    async (count = EXPORT_REQUEST_PAGE) => {
+    async (pages = 1) => {
       try {
-        const page = await api.get<CampaignExportRequestPage>(
-          `${API}/campaigns/${campaign.id}/catalog/export-requests?limit=${count}&offset=0`,
-        );
-        setRequests(page.items);
-        setTotal(page.total);
+        const collected: CampaignExportRequest[] = [];
+        let seenTotal = 0;
+        let fetched = 0;
+        for (let i = 0; i < pages; i += 1) {
+          const page = await api.get<CampaignExportRequestPage>(
+            `${API}/campaigns/${campaign.id}/catalog/export-requests` +
+              `?limit=${EXPORT_REQUEST_PAGE}&offset=${i * EXPORT_REQUEST_PAGE}`,
+          );
+          collected.push(...page.items);
+          seenTotal = page.total;
+          fetched += 1;
+          if (!page.hasMore) break;
+        }
+        setRequests(collected);
+        setTotal(seenTotal);
+        // What was actually fetched, so a shrinking inbox cannot leave this asking for
+        // pages that no longer exist.
+        setPagesLoaded(Math.max(1, fetched));
       } catch (err) {
         setError(err instanceof ApiError ? err.message : "Couldn't load export requests.");
       }
@@ -831,7 +852,7 @@ function ExportRequestsCard({ campaign }: { campaign: Campaign }) {
   async function showMore() {
     setLoadingMore(true);
     try {
-      await load((requests?.length ?? 0) + EXPORT_REQUEST_PAGE);
+      await load(pagesLoaded + 1);
     } finally {
       setLoadingMore(false);
     }
@@ -846,7 +867,7 @@ function ExportRequestsCard({ campaign }: { campaign: Campaign }) {
         { decision, note: (notes[requestId] ?? '').trim() },
       );
       // Reload the same window the DM is looking at, not just the first page.
-      await load(Math.max(EXPORT_REQUEST_PAGE, requests?.length ?? 0));
+      await load(pagesLoaded);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't record that decision.");
     } finally {

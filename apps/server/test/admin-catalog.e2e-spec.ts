@@ -1051,9 +1051,17 @@ describe('Issue #587: campaign catalog paging, filtering and bulk lifecycle (e2e
       // Driven at the service layer for the same reason as the decision race: two
       // overlapping HTTP requests do NOT reproduce it, because supertest serialises them
       // on one agent and better-sqlite3 is synchronous, so the second pre-check runs
-      // after the first insert has committed and catches it. Starting both service calls
-      // before awaiting either interleaves them at the pre-check, which is the state the
-      // INSERT … WHERE NOT EXISTS has to survive.
+      // after the first insert has committed and catches it.
+      //
+      // HONEST NOTE ON WHAT THIS STILL PROVES. When it was written, `planChange` awaited
+      // its own reads, so starting both service calls before awaiting either interleaved
+      // them at the pre-check — the state the INSERT … WHERE NOT EXISTS had to survive.
+      // The plan path is now synchronous end to end (reads, decision and write happen
+      // with no await between them), so that interleaving is no longer reachable from
+      // here and this asserts the INVARIANT rather than reproducing the race. The
+      // enforcement of record is the INSERT predicate plus the in-transaction
+      // revalidation, and the interleaving itself is driven directly in
+      // 'will not write a plan whose state moved after the plan was built'.
       const target = bId; // untouched by the other export-request tests
       const svc = ctx.app.get(AdminCatalogService);
       const operator = { id: '1', name: 'cat2-admin', serverRole: 'admin' } as RequestUser;
@@ -1485,6 +1493,177 @@ describe('Issue #587: campaign catalog paging, filtering and bulk lifecycle (e2e
       expect(finalInbox.body.items[0].status).toBe('denied');
     });
 
+    it('refuses a stale update_module preview after the missing pack was installed', async () => {
+      // `rule_packs` was left out of the dependency set on the argument that a pack's
+      // presence is server inventory a concurrent catalog operation cannot edit, and that
+      // re-planning against it could only turn a would_apply into a skip. Both halves are
+      // wrong, and the dangerous direction is the reverse one: a preview that SKIPPED
+      // ("not installed on this server") becomes a real rule-system write the moment
+      // another admin installs that pack.
+      const created = await dmA.post('/api/v1/campaigns').send({ name: 'Guard: module' });
+      const target = created.body.id as number;
+      const slug = 'guard-pack-587';
+
+      const preview = await bulk({
+        operation: 'update_module',
+        campaignIds: [target],
+        ruleSystem: slug,
+        dryRun: true,
+        reason: 'preview pinning a pack that is not here yet',
+      });
+      const item = (preview.body.results as Array<{ outcome: string; reason: string; stateVersion: string }>)[0];
+      expect(item.outcome).toBe('skipped');
+      expect(item.reason).toContain('not installed');
+
+      const before = await admin.get(`/api/v1/admin/campaigns/${target}`);
+      const db = new Database(path.join(ctx.dataDir, 'campfire.db'));
+      try {
+        db.prepare(
+          `INSERT INTO rule_packs (slug, name, version, license, source_url, installed_at, entry_count)
+           VALUES (?, 'Guard Pack', '1.0.0', '', '', ?, 0)`,
+        ).run(slug, new Date().toISOString());
+      } finally {
+        db.close();
+      }
+      const after = await admin.get(`/api/v1/admin/campaigns/${target}`);
+      // Installing a pack touches no campaign row — which is why the old guard let this
+      // through.
+      expect(after.body.updatedAt).toBe(before.body.updatedAt);
+
+      const applied = await bulk({
+        operation: 'update_module',
+        campaignIds: [target],
+        ruleSystem: slug,
+        dryRun: false,
+        reason: 'apply the stale preview',
+        preconditions: [{ campaignId: target, stateVersion: item.stateVersion }],
+      });
+      expect(applied.body.applied).toBe(0);
+      expect(applied.body.skipped).toBe(1);
+      expect(applied.body.results[0].reason).toContain('changed since the preview');
+
+      const entry = await admin.get(`/api/v1/admin/campaigns/${target}`);
+      expect(entry.body.ruleSystem).not.toBe(slug);
+    });
+
+    it('refuses a stale reassign_owner preview after a disabled target was re-enabled', async () => {
+      // Same defect through `users`: the plan branches on `users.disabled`, so a target
+      // who is disabled at preview time (skipped) and re-enabled before Apply turned that
+      // skip into a live ownership handover nobody previewed.
+      const created = await dmA.post('/api/v1/campaigns').send({ name: 'Guard: disabled target' });
+      const target = created.body.id as number;
+      const suspended = await newUser('cat2-dm-d', 'dm-password-4');
+      const setDisabled = (value: 0 | 1) => {
+        const db = new Database(path.join(ctx.dataDir, 'campfire.db'));
+        try {
+          db.prepare('UPDATE users SET disabled = ? WHERE id = ?').run(value, suspended.id);
+        } finally {
+          db.close();
+        }
+      };
+
+      setDisabled(1);
+      const preview = await bulk({
+        operation: 'reassign_owner',
+        campaignIds: [target],
+        toUserId: suspended.id,
+        dryRun: true,
+        reason: 'preview a handover to a suspended account',
+      });
+      const item = (preview.body.results as Array<{ outcome: string; reason: string; stateVersion: string }>)[0];
+      expect(item.outcome).toBe('skipped');
+      expect(item.reason).toContain('disabled');
+
+      const before = await admin.get(`/api/v1/admin/campaigns/${target}`);
+      setDisabled(0);
+      const after = await admin.get(`/api/v1/admin/campaigns/${target}`);
+      expect(after.body.updatedAt).toBe(before.body.updatedAt);
+
+      const applied = await bulk({
+        operation: 'reassign_owner',
+        campaignIds: [target],
+        toUserId: suspended.id,
+        dryRun: false,
+        reason: 'apply the stale preview',
+        preconditions: [{ campaignId: target, stateVersion: item.stateVersion }],
+      });
+      expect(applied.body.applied).toBe(0);
+      expect(applied.body.skipped).toBe(1);
+      expect(applied.body.results[0].reason).toContain('changed since the preview');
+
+      const entry = await admin.get(`/api/v1/admin/campaigns/${target}`);
+      expect((entry.body.primaryDm as { userId: number }).userId).toBe(dmAId);
+    });
+
+    it('will not write a plan whose state moved after the plan was built', async () => {
+      // THE CHECK HAS TO RUN INSIDE THE TRANSACTION IT GUARDS. Widening the dependency
+      // set makes the comparison correct; it does not make it binding. Every read that
+      // decides the plan happens before the write transaction opens, so comparing
+      // versions out there narrows the window rather than closing it — and
+      // `reassign_owner` demotes every current primary owner unconditionally, so an owner
+      // installed inside that window is silently replaced having appeared in no preview.
+      //
+      // The window is driven directly: the FIRST dependency read (the one outside the
+      // transaction) is allowed to complete, ownership is then changed underneath, and
+      // the read inside the transaction must catch it. Nothing here fakes the check —
+      // only the interleaving, which the synchronous read/plan/write path would otherwise
+      // make unreachable from a test.
+      const created = await dmA.post('/api/v1/campaigns').send({ name: 'Guard: in-transaction' });
+      const target = created.body.id as number;
+      const intruder = await newUser('cat2-dm-e', 'dm-password-5');
+
+      const svc = ctx.app.get(AdminCatalogService);
+      const proto = Object.getPrototypeOf(svc) as {
+        readDependencies: (...args: unknown[]) => unknown;
+      };
+      const original = proto.readDependencies;
+      let reads = 0;
+      const spy = jest
+        .spyOn(proto, 'readDependencies')
+        .mockImplementation(function (this: unknown, ...args: unknown[]) {
+          const result = original.apply(this, args);
+          reads += 1;
+          if (reads === 1) {
+            // Between the plan's reads and its write, a second operator installs a
+            // different owner. This is the interleaving Codex named.
+            const db = new Database(path.join(ctx.dataDir, 'campfire.db'));
+            try {
+              db.prepare('UPDATE campaign_members SET is_primary_owner = 0 WHERE campaign_id = ?').run(target);
+              db.prepare(
+                `INSERT INTO campaign_members (campaign_id, user_id, role, is_primary_owner, created_at, updated_at)
+                 VALUES (?, ?, 'dm', 1, ?, ?)`,
+              ).run(target, intruder.id, new Date().toISOString(), new Date().toISOString());
+            } finally {
+              db.close();
+            }
+          }
+          return result;
+        });
+
+      let applied!: Awaited<ReturnType<typeof bulk>>;
+      try {
+        applied = await bulk({
+          operation: 'reassign_owner',
+          campaignIds: [target],
+          toUserId: dmBId,
+          dryRun: false,
+          reason: 'apply against state that moves mid-flight',
+        });
+      } finally {
+        spy.mockRestore();
+      }
+
+      expect(applied.status).toBe(201);
+      expect(applied.body.applied).toBe(0);
+      expect(applied.body.skipped).toBe(1);
+      expect(reads).toBeGreaterThanOrEqual(2); // the guard really did re-read on `tx`
+
+      // The owner installed in the window survives. Without the in-transaction check this
+      // is dmB, demoted from a plan that never mentioned the intruder.
+      const entry = await admin.get(`/api/v1/admin/campaigns/${target}`);
+      expect((entry.body.primaryDm as { userId: number }).userId).toBe(intruder.id);
+    });
+
     it('pages the DM inbox and keeps the requests awaiting a decision on page one', async () => {
       // Capped at 100 with no offset, this had the same silent-truncation defect the
       // cross-campaign listing was fixed for. Ordering by id alone additionally let
@@ -1532,6 +1711,13 @@ describe('Issue #587: campaign catalog paging, filtering and bulk lifecycle (e2e
       // A negative offset 400s here exactly as it does on the catalog listing.
       const negative = await dmA.get(inboxUrl).query({ offset: -1 });
       expect(negative.status).toBe(400);
+
+      // `limit` is CLAMPED, which is why the DM card pages by offset rather than by
+      // raising `limit`: past the cap a growing limit returns the same rows forever while
+      // the "show earlier" control stays visible, doing visibly nothing.
+      const overCap = await dmA.get(inboxUrl).query({ limit: 5000 });
+      expect(overCap.status).toBe(200);
+      expect(overCap.body.limit).toBeLessThanOrEqual(100);
     });
   });
 });
