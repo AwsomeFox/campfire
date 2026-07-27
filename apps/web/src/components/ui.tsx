@@ -431,7 +431,10 @@ export function ErrorNote({
   density?: UiDensity;
 }) {
   return (
-    <div role="alert" className={`cf-inset ${densityClass(density)} text-sm text-[var(--color-neutral-400)]`}>
+    // `data-testid` distinguishes a real error banner from the app's other role="alert"
+    // live regions (turn announcements and the like), so a test can assert "no error"
+    // without tripping over unrelated announcements (issue #1478).
+    <div role="alert" data-testid="error-note" className={`cf-inset ${densityClass(density)} text-sm text-[var(--color-neutral-400)]`}>
       <span>{message}</span>
       {context && (
         <span className="text-[var(--color-neutral-500)]">

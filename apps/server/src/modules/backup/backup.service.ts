@@ -179,6 +179,13 @@ export interface BuildBackupOptions {
   keyPassphrase?: string;
   /** Abort archive generation (for example when an HTTP client disconnects). */
   signal?: AbortSignal;
+  /**
+   * Invoked once, immediately before the first archive byte reaches `output`.
+   * HTTP callers use it to commit download headers only when bytes are genuinely on
+   * their way, so a failure during snapshot/reconciliation still yields a normal error
+   * response rather than a JSON body wearing `Content-Type: application/zip`.
+   */
+  onFirstByte?: () => void;
 }
 
 /** Options accepted by {@link BackupService.restore}. */
@@ -345,6 +352,17 @@ function validateStagedAiCredentialDecryptability(stagedDbPath: string, key: Buf
   }
 }
 
+/**
+ * The single archive lane is already held by another whole-server operation.
+ *
+ * This is a *deferral*, not a fault: an interactive download and a scheduled run
+ * simply cannot overlap. It is a distinct type so schedule-driven callers can tell
+ * "come back shortly" apart from "this backup did not work", instead of matching on
+ * a message. Stamping contention as a failure would raise a false backup alert and
+ * push the next run out by the exponential backoff.
+ */
+export class ArchiveOperationBusyError extends ServiceUnavailableException {}
+
 @Injectable()
 export class BackupService implements OnApplicationBootstrap {
   private readonly logger = new Logger(BackupService.name);
@@ -369,7 +387,7 @@ export class BackupService implements OnApplicationBootstrap {
 
   private beginArchiveOperation(kind: 'backup' | 'restore'): void {
     if (this.archiveOperation) {
-      throw new ServiceUnavailableException(
+      throw new ArchiveOperationBusyError(
         `A whole-server ${this.archiveOperation} operation is already in progress; retry shortly`,
       );
     }
@@ -510,10 +528,12 @@ export class BackupService implements OnApplicationBootstrap {
         previous?.lastSize ?? null,
         stagingBytes,
       );
-      // A scheduled backup can hold both the complete staging generation and
-      // the growing .partial ZIP at once. When both paths share a filesystem,
-      // reserve their combined peak so two individually-successful probes do
-      // not consume the live database's configured free-space reserve.
+      // buildBackup stages a full copy of the DB snapshot and the uploads tree under
+      // os.tmpdir() while the growing .partial ZIP is written into BACKUP_DIR. When the
+      // two share a filesystem both allocations are live at once, so checking each path
+      // separately would pass twice on space that can only satisfy one of them — the run
+      // then fails with ENOSPC partway through, having eaten the free-space reserve the
+      // live database depends on. Reserve their combined peak in that case.
       const scheduledPeakBytes =
         this.pathsShareFilesystem(dir, os.tmpdir()) ? estimatedBytes + stagingBytes : estimatedBytes;
       disk = this.probeDisk(dir, minFreeBytes, scheduledPeakBytes);
@@ -559,13 +579,19 @@ export class BackupService implements OnApplicationBootstrap {
         const descriptor = fs.openSync(partialPath, 'r');
         try { fs.fsyncSync(descriptor); } finally { fs.closeSync(descriptor); }
         const archived = await hashFile(partialPath);
+        // Verify BEFORE publishing the final name. Renaming first would leave an archive
+        // that failed verification sitting under a name indistinguishable from a good
+        // scheduled backup — the inner finally only removes `partialPath` — and an
+        // unrestorable archive that looks healthy is the worst outcome a backup can have.
+        // Verifying here also makes the atomicity note above true: a failed run leaves
+        // only the removable `.partial`.
+        const verification = await this.verifyScheduledArchive(partialPath);
+        if (!verification.verified) {
+          throw new Error(`Scheduled backup failed verification after write: ${verification.error}`);
+        }
         fs.renameSync(partialPath, filePath);
         const size = archived.bytes;
         const checksum = archived.sha256;
-      const verification = await this.verifyScheduledArchive(filePath);
-      if (!verification.verified) {
-        throw new Error(`Scheduled backup failed verification after write: ${verification.error}`);
-      }
       const prune = await this.pruneVerifiedScheduledBackups(dir, retentionPolicy, archiveName, checksum);
       const nextRunAt = new Date(Date.now() + intervalMs).toISOString();
       const metrics = this.metricsAfterSuccess(previous?.metrics, disk, estimatedBytes, prune);
@@ -590,6 +616,15 @@ export class BackupService implements OnApplicationBootstrap {
         fs.rmSync(partialPath, { force: true });
       }
     } catch (err) {
+      if (err instanceof ArchiveOperationBusyError) {
+        // An interactive download or restore holds the archive lane. Recording this as
+        // a failed attempt would invent a backup alert out of a routine admin download
+        // and delay the real run by the failure backoff. Leave the cadence row — and
+        // therefore nextRunAt — untouched so the next scheduler poll simply retries
+        // once the lane frees.
+        this.logger.warn(`Scheduled backup deferred: ${err.message}`);
+        return;
+      }
       const message = err instanceof Error ? err.message : String(err);
       // Stamp the attempt even on failure so the overdue check on the next boot
       // doesn't immediately re-fire (and potentially busy-loop). lastSuccessAt
@@ -960,6 +995,10 @@ export class BackupService implements OnApplicationBootstrap {
   async buildBackup(options?: BuildBackupOptions, output?: Writable): Promise<Buffer | void> {
     this.beginArchiveOperation('backup');
     let tmpDir: string | null = null;
+    // The archiver accumulates queued sources (zip.file(...) keeps a read stream per
+    // attachment) from the moment it is created, but teardown only becomes pipeline()'s
+    // job once streaming starts. Between those two points nothing else owns it, so hold
+    // a reference the outer finally can destroy.
     let zip: ReturnType<typeof archiver> | null = null;
     try {
       assertBackupNotCancelled(options?.signal);
@@ -1038,7 +1077,21 @@ export class BackupService implements OnApplicationBootstrap {
         // Concurrent overwrite OR captured bytes disagree with the snapshot row size
         // → restored DB would be internally inconsistent with the archived file.
         const staged = path.join(tmpDir, 'uploads', rel);
-        const captured = await stageAndHashFile(abs, staged, options?.signal);
+        let captured: { bytes: number; sha256: string };
+        try {
+          captured = await stageAndHashFile(abs, staged, options?.signal);
+        } catch (err) {
+          // The file can be deleted between the existsSync above and the read stream
+          // opening. Letting a raw ENOENT escape here would abort mid-loop with no
+          // reconciliation report — the operator would see an opaque path error instead
+          // of "which attachments went missing". Route it to the same `missing` outcome
+          // the pre-check produces so the failure stays legible and complete.
+          if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
+            missing++;
+            continue;
+          }
+          throw err;
+        }
         if (captured.bytes > MAX_ENTRY_UNCOMPRESSED_BYTES) {
           throw new ServiceUnavailableException(
             `Backup attachment ${rel} exceeds the ${MAX_ENTRY_UNCOMPRESSED_BYTES} byte restore entry limit`,
@@ -1206,8 +1259,10 @@ export class BackupService implements OnApplicationBootstrap {
         sink.on('data', (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
       }
       let compressedBytes = 0;
+      const onFirstByte = options?.onFirstByte;
       const compressedLimit = new Transform({
         transform(chunk: Buffer, _encoding, callback) {
+          if (compressedBytes === 0) onFirstByte?.();
           compressedBytes += chunk.length;
           if (compressedBytes > MAX_ARCHIVE_COMPRESSED_BYTES) {
             callback(new Error(`Backup archive exceeds the ${MAX_ARCHIVE_COMPRESSED_BYTES} byte compressed restore limit`));
@@ -1218,6 +1273,12 @@ export class BackupService implements OnApplicationBootstrap {
       });
       const abort = () => archive.destroy(new Error('Backup generation cancelled'));
       options?.signal?.addEventListener('abort', abort, { once: true });
+      // addEventListener never fires for an already-aborted signal, so a cancellation
+      // landing between archive creation and this line would otherwise leave the
+      // archive alive while the throw below unwinds.
+      if (options?.signal?.aborted) abort();
+      // pipeline() owns teardown from here; the outer finally's !destroyed guard keeps
+      // it from double-destroying an archive this call already tore down.
       const done = pipeline(archive, compressedLimit, sink);
       void done.catch(() => undefined);
       try {
@@ -1230,11 +1291,18 @@ export class BackupService implements OnApplicationBootstrap {
       }
     } finally {
       try {
+        // Failed before streaming started: release the queued attachment read streams
+        // ourselves, otherwise they stay open for the process lifetime and can make the
+        // staging removal below fail on platforms that refuse to unlink open files.
+        // After a completed pipeline the archive is already destroyed, so this is a no-op.
         if (zip && !zip.destroyed) zip.destroy();
       } finally {
         try {
           if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
         } finally {
+          // Releasing the lane must not depend on cleanup succeeding. A single throwing
+          // rmSync would otherwise wedge the guard permanently and every subsequent
+          // backup and restore would 503 for the lifetime of the process.
           this.endArchiveOperation('backup');
         }
       }
@@ -1448,6 +1516,15 @@ export class BackupService implements OnApplicationBootstrap {
       }
 
       // --- Apply with atomic swap + automatic rollback (#497) ---
+      // Last chance to honour a cancellation. Everything above is validation against
+      // staging; everything below replaces the live database and uploads tree. The
+      // signal is polled at each extract, but validation continues afterwards, so an
+      // abort landing in that window would otherwise carry straight through into the
+      // destructive phase. Every other failure in this path costs a temp file; this one
+      // would cost the operator their live data after they pressed cancel.
+      if (options?.signal?.aborted) {
+        throw new BadRequestException('Invalid backup archive — restore was cancelled before it was applied');
+      }
       const progressPhases: RestoreProgressPhase[] = ['validated', 'staging-uploads'];
       options?.onProgress?.('validated');
       options?.onProgress?.('staging-uploads');

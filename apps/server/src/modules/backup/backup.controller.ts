@@ -137,31 +137,46 @@ export class BackupController {
 
   private async sendBackup(req: Request, res: Response, keyPassphrase?: string): Promise<void> {
     const operation = requestAbort(req, res);
-    res
-      .status(200)
-      .set({
-        'Content-Type': 'application/zip',
-        'Content-Disposition': `attachment; filename="${this.backup.backupFilename()}"`,
-        // Issue #730: never let browsers / the PWA Cache Storage retain a whole-server archive.
-        'Cache-Control': 'private, no-store',
-      });
+    // Deferred until the first archive byte. Snapshot, reconciliation and staging all
+    // run before any byte is produced; committing zip headers up front meant a failure
+    // in that window produced a JSON error still labelled `application/zip` with an
+    // attachment disposition. Today's web client uses fetch and can read the status,
+    // but that is a UI detail — a curl or anchor-driven caller would just save the
+    // error body as a corrupt archive.
+    const onFirstByte = () => {
+      res
+        .status(200)
+        .set({
+          'Content-Type': 'application/zip',
+          'Content-Disposition': `attachment; filename="${this.backup.backupFilename()}"`,
+          // Issue #730: never let browsers / the PWA Cache Storage retain a whole-server archive.
+          'Cache-Control': 'private, no-store',
+        });
+    };
     try {
       await this.backup.buildBackup(
-        { ...(keyPassphrase && keyPassphrase.length > 0 ? { keyPassphrase } : {}), signal: operation.signal },
+        {
+          ...(keyPassphrase && keyPassphrase.length > 0 ? { keyPassphrase } : {}),
+          signal: operation.signal,
+          onFirstByte,
+        },
         res,
       );
     } catch (error) {
       // A client disconnect is expected during a streamed download. Preserve
       // unrelated failures even if the request happened to close at the same time.
       if (isBackupDownloadCancellation(error, operation.signal)) return;
-      // Once streaming begins, pipeline teardown owns the response. Do not let
-      // Nest attempt a second JSON error response over a partial ZIP.
-      if (res.headersSent || res.destroyed) return;
-      // A pre-stream validation/reconciliation failure still belongs to Nest's
-      // JSON exception path. Remove attachment headers so clients do not save
-      // that error payload as a corrupt ZIP.
-      res.removeHeader('Content-Type');
-      res.removeHeader('Content-Disposition');
+      // Once bytes are committed the response belongs to the archive. Rethrowing would
+      // have Nest write a JSON error over the in-flight ZIP — the compressed-size ceiling
+      // is enforced mid-stream, so this is the *expected* path for an oversized archive,
+      // not a rare one. Destroy the response instead: a truncated transfer the client can
+      // detect beats a body that is half archive and half error. Mirrors the export path.
+      if (res.headersSent || res.destroyed) {
+        // Destroy rather than merely returning: letting the response end normally would
+        // present a truncated archive as a complete one.
+        if (!res.destroyed) res.destroy(error instanceof Error ? error : new Error(String(error)));
+        return;
+      }
       throw error;
     } finally {
       operation.dispose();

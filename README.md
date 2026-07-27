@@ -93,7 +93,7 @@ unauthenticated request gets a normal 401 — this is also how every e2e test
 boots the app (`test/test-app.ts`'s `createTestApp()` sets it before `AppModule`
 compiles).
 
-Role semantics: `dm` = full write incl. `dmSecret` fields · `player` = read canon, tick objectives, own character + own notes · `viewer` = read-only + inbox quick-capture. Under real auth, campaign role is per-campaign membership (`GET/POST/PATCH/DELETE /campaigns/:id/members`), not a global header.
+Role semantics: `dm` = full write incl. `dmSecret` fields · `player` = read canon, tick objectives, own character + own notes · `viewer` = read-only (private notes and dice only; comments, shared/whispered notes and DM-inbox posts need the separate DM-granted **interactive guest** capability — issue #597). Under real auth, campaign role is per-campaign membership (`GET/POST/PATCH/DELETE /campaigns/:id/members`), not a global header.
 
 ## Architecture notes
 

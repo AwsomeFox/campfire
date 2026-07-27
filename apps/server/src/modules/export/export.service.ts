@@ -790,10 +790,14 @@ export class ExportService {
     signal: AbortSignal,
     campaignId: number,
     user: RequestUser,
-    opts: { profile?: ExportProfile; options?: ExportProfileOptions } = {},
+    opts: { profile?: ExportProfile; options?: ExportProfileOptions; onFirstByte?: () => void } = {},
   ): Promise<{ warnings: string[]; inventory: ExportInventory }> {
     if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('Export aborted');
     const archive = archiver('zip', { zlib: { level: 9 } });
+    // archiver emits 'error' asynchronously, which can land after the scoped handler below
+    // has been removed in the finally. Keep a permanent sink so a torn-down archive can
+    // never raise an unhandled 'error' event and take the process down.
+    archive.on('error', () => undefined);
     const stagingDir = fs.mkdtempSync(path.join(os.tmpdir(), 'campfire-export-'));
     let stageNumber = 0;
     let archiveError: Error | undefined;
@@ -806,20 +810,42 @@ export class ExportService {
     // Attach a rejection handler immediately: an output can fail while an
     // attachment is still being staged, before the main flow reaches its await.
     void outputComplete.catch(() => undefined);
+    /**
+     * Tear the destination down only once bytes are actually committed to it, and report
+     * whether we did.
+     *
+     * Before the first byte the response still belongs to Nest: the DB reads in
+     * buildProfileExport happen after the controller staged headers but before anything
+     * is written, so destroying here would reset the connection and — because the
+     * controller skips rethrowing for an already-destroyed response — the client would
+     * get an opaque failed download instead of a JSON 500. The buffered path did all of
+     * this work before touching the response; preserve that outcome.
+     */
+    const teardownDestination = (error: Error): boolean => {
+      if (!archiveBytesProduced && !destination.writableEnded && !destination.destroyed) return false;
+      if (!destination.destroyed && !destination.writableEnded) destination.destroy(error);
+      return true;
+    };
     const destroy = (error: Error) => {
       archive.destroy(error);
-      if (!destination.destroyed && !destination.writableEnded) destination.destroy(error);
+      teardownDestination(error);
     };
     const abort = () => destroy(signal.reason instanceof Error ? signal.reason : new Error('Export aborted'));
     const onArchiveError = (err: Error) => {
       archiveError = err;
-      if (archiveBytesProduced && !destination.destroyed) destination.destroy(err);
+      teardownDestination(err);
     };
     const onDestinationError = (err: Error) => {
       archiveError = err;
       archive.destroy(err);
     };
-    const onArchiveData = () => { archiveBytesProduced = true; };
+    const onArchiveData = () => {
+      // Registered before archive.pipe(destination) below, so this runs ahead of the
+      // first write and the caller can commit response headers only now that bytes
+      // are genuinely on their way.
+      if (!archiveBytesProduced) opts.onFirstByte?.();
+      archiveBytesProduced = true;
+    };
     signal.addEventListener('abort', abort, { once: true });
     archive.once('error', onArchiveError);
     destination.once('error', onDestinationError);
@@ -874,18 +900,20 @@ export class ExportService {
       return result;
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
-      if (archiveBytesProduced || destination.writableEnded || destination.destroyed) {
-        destroy(error);
+      // Only wait on the destination when we actually tore it down. An untouched response
+      // is left intact for the controller to answer with a normal error, and awaiting
+      // `finished()` on a stream nobody destroyed would simply hang.
+      if (teardownDestination(error)) {
+        archive.destroy(error);
         try {
           await outputComplete;
         } catch {
           // Preserve the operation's primary failure (abort, staging, or archiver).
         }
       } else {
-        // No bytes reached the response: leave it available for Nest's normal
-        // exception handling instead of resetting the client connection. The
-        // primary error is rethrown below, so close archiver without emitting a
-        // second asynchronous error after its listener cleanup.
+        // No bytes reached the response: leave it available for Nest's normal exception
+        // handling instead of resetting the client connection. The primary error is
+        // rethrown below, so close archiver without emitting a second asynchronous error.
         archive.destroy();
       }
       throw error;

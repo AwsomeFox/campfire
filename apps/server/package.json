@@ -11,7 +11,7 @@
     "test:cov": "sh test/run-test-cov.sh",
     "test:watch": "NODE_OPTIONS=--experimental-vm-modules jest --watch",
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.jest.json --rootDir ../.."
   },
   "dependencies": {
     "@campfire/schema": "*",

@@ -205,8 +205,10 @@ type SaveFilePicker = (options: {
 
 function saveFilePicker(): SaveFilePicker | null {
   const picker = (window as Window & { showSaveFilePicker?: SaveFilePicker }).showSaveFilePicker;
-  // WebIDL methods require their Window receiver; keep this safe for native APIs
-  // while still allowing browser-provided stubs to be feature-detected.
+  // Bind to `window`: Chromium's WebIDL window methods reject a detached receiver with
+  // "Illegal invocation". Calling it unbound would fail on exactly the browsers that
+  // support streaming to disk, and — because the picker was detected — would skip the
+  // bounded-memory fallback too, so the download would not degrade, it would just break.
   return picker ? picker.bind(window) : null;
 }
 
@@ -232,9 +234,10 @@ export async function downloadServerBackup(options?: {
   const passphrase = options?.keyPassphrase?.trim();
   const usePost = Boolean(passphrase);
   const headers = devHeaders();
-  // Pick a destination before starting the network request so browsers can preserve
-  // the user gesture. POST downloads cannot be handed to the browser download
-  // manager portably, so use File System Access when it is available.
+  // Pick a destination before starting the network request: browsers only allow the
+  // chooser while the user gesture that started the download is still live. POST
+  // downloads cannot be handed to the browser download manager portably, so use
+  // File System Access when it is available.
   const picker = saveFilePicker();
   let fileHandle: WritableFileHandle | null = null;
   if (picker) {
@@ -244,6 +247,9 @@ export async function downloadServerBackup(options?: {
         types: [{ description: 'Campfire backup archive', accept: { 'application/zip': ['.zip'] } }],
       });
     } catch (error) {
+      // Dismissing the save dialog rejects with AbortError. Reporting that as an API
+      // failure would tell the operator the backup broke when they simply changed their
+      // mind — and no request has even been issued yet.
       if (isAbortError(error)) {
         options?.signal?.throwIfAborted();
         throw new DOMException('The backup download was cancelled before it started.', 'AbortError');

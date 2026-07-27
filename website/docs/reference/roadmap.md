@@ -73,7 +73,7 @@ Honest rough edges that exist but aren't finished:
 
 - 🟡 **Combat mechanical depth** — the tracker covers initiative, turns, HP (incl. temp HP and 5e death saves) and conditions, but deeper 5e mechanics (concentration, legendary/lair actions, automated condition effects) aren't modelled — fine for a tracker, a limit for crunchy tables
 - 🟡 **Mobile live-combat nav** — the run-session screen works on a phone, but reaching it is a couple of taps deep in the "More" menu and the "Live" chip only surfaces on the dashboard
-- 🟡 **Published-adventure import** — you can clone/template a campaign and import a Campfire JSON export, but there's no importer for third-party published adventures/modules
+- 🟡 **Published-adventure import** — you can clone/template a campaign, import a Campfire JSON export, and install a **campaign module** (a versioned package with a stable UUID, semver, authors/license, compatibility range, dependency contract and per-artifact hashes) that a publisher can later ship corrections for — update previews are a real three-way compare against the content as installed, local edits survive as overlays, conflicts surface per field, and a bad update rolls back. What's still missing is an importer for *third-party* adventure formats: modules must be packaged as Campfire module packages today, and a module ships prep text only (locations, NPCs, quests, factions) — no maps or portraits
 
 ## Planned ⬜
 
