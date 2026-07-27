@@ -1,0 +1,167 @@
+import request from 'supertest';
+import { and, eq } from 'drizzle-orm';
+import { createAiEvalHarness, dm, type AiEvalHarness } from './ai-eval-harness';
+import { DB, type DrizzleDb } from '../src/db/db.module';
+import { auditLog, notifications as notificationsTable } from '../src/db/schema';
+import { AiDriverService } from '../src/modules/ai-driver/ai-driver.service';
+import { MAX_PENDING_TOOL_CONFIRMATIONS } from '../src/modules/ai-driver/driver-tool-policy';
+
+/**
+ * Issue #1558 — the two SERVER-side halves of "a stall must never be silent".
+ *
+ * The UI itself is covered by the web suites. What belongs here is the pair of channels that
+ * have to work when the DM is NOT looking at the AI Table: the notification that tells them a
+ * call is waiting, and the audit trail for a queued call that dies without ever being answered.
+ */
+describe('ai-dm tool confirmations — reaching a DM who is not looking (#1558)', () => {
+  let h: AiEvalHarness;
+  let db: DrizzleDb;
+
+  beforeAll(async () => {
+    h = await createAiEvalHarness({ model: 'confirm-ui-model' });
+    await h.enableExperimental();
+    db = h.ctx.app.get<DrizzleDb>(DB);
+  });
+
+  beforeEach(() => h.resetMock());
+  afterAll(async () => h.close());
+
+  const armed = async (name: string): Promise<number> => {
+    const campaignId = await h.createCampaign(name);
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
+    return campaignId;
+  };
+
+  /**
+   * Seat a real DM and a real player.
+   *
+   * The dev-auth harness creates campaigns with no `campaign_members` rows at all, so without
+   * this there is nobody for a role-targeted notification to reach — and the DM-only targeting,
+   * which is the property worth proving, would be vacuous.
+   */
+  const seatMembers = async (campaignId: number): Promise<{ dmUserId: number; playerUserId: number }> => {
+    const { users, campaignMembers } = await import('../src/db/schema');
+    const ts = '2026-07-27T00:00:00.000Z';
+    const mk = async (username: string): Promise<number> => {
+      const [row] = await db
+        .insert(users)
+        .values({ username, passwordHash: 'x', serverRole: 'user', createdAt: ts, updatedAt: ts })
+        .returning({ id: users.id });
+      return row.id;
+    };
+    const dmUserId = await mk(`dm-${campaignId}`);
+    const playerUserId = await mk(`pl-${campaignId}`);
+    await db.insert(campaignMembers).values({ campaignId, userId: dmUserId, role: 'dm', createdAt: ts, updatedAt: ts });
+    await db
+      .insert(campaignMembers)
+      .values({ campaignId, userId: playerUserId, role: 'player', createdAt: ts, updatedAt: ts });
+    return { dmUserId, playerUserId };
+  };
+
+  it('notifies the DM — and only the DM — when a tool call starts waiting on them', async () => {
+    const campaignId = await armed('Notify Pending');
+    const { dmUserId, playerUserId } = await seatMembers(campaignId);
+    // begin_encounter has been confirm-policy in every profile since #474 — the exact tool
+    // #1558 names as unapprovable from the web app.
+    h.script({
+      text: 'Roll for initiative.',
+      toolCalls: [{ id: 'c1', name: 'begin_encounter', arguments: { encounterId: 1 } }],
+      usage: { promptTokens: 6, completionTokens: 4, totalTokens: 10 },
+    });
+    h.script({ text: 'Waiting on the DM.', usage: { promptTokens: 4, completionTokens: 3, totalTokens: 7 } });
+
+    const res = await h.sendMessage(campaignId, { input: 'we fight' });
+    expect(res.status).toBe(201);
+
+    const queue = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/tool-confirmations`).set(dm);
+    expect(queue.body).toHaveLength(1);
+
+    // The SSE signal only reaches a DM with the AI Table open. A DM on the encounter screen — or
+    // away from the keyboard — would otherwise learn nothing, and the failure mode of this whole
+    // mechanism is a silent stall.
+    const rows = await db
+      .select()
+      .from(notificationsTable)
+      .where(and(eq(notificationsTable.campaignId, campaignId), eq(notificationsTable.type, 'ai_dm_alert')));
+    expect(rows.map((r) => r.userId)).toEqual([dmUserId]);
+    expect(String(rows[0].body)).toContain('begin_encounter');
+    // Not the players. The queue is a DM-only read, and a notification nobody but the DM can act
+    // on would both leak that surface and train the table to ignore the bell.
+    expect(rows.some((r) => r.userId === playerUserId)).toBe(false);
+  });
+
+  it('a player cannot read the queue', async () => {
+    const campaignId = await armed('Queue Is DM Only');
+    const res = await request(h.server)
+      .get(`/api/v1/campaigns/${campaignId}/ai-dm/tool-confirmations`)
+      .set({ 'x-dev-role': 'player', 'x-dev-user': 'nosy' });
+    expect(res.status).toBe(403);
+  });
+
+  it('audits a confirmation the queue cap pushes out instead of dropping it in silence', async () => {
+    const campaignId = await armed('Evict Loudly');
+    const driver = h.ctx.app.get(AiDriverService);
+    const session = driver.getSession(campaignId);
+
+    // Fill the queue to its cap by hand — driving 20 real turns would test the model, not this.
+    const pendingMap: Record<string, unknown> = {};
+    for (let i = 0; i < MAX_PENDING_TOOL_CONFIRMATIONS; i += 1) {
+      pendingMap[`apply_action:call_${i}`] = {
+        id: `confirm-seed-${i}`,
+        tool: 'apply_action',
+        args: { n: i },
+        toolCallId: `call_${i}`,
+        profile: 'live',
+        policy: 'confirm',
+        requestedAt: `2026-07-27T10:00:${String(i).padStart(2, '0')}.000Z`,
+        actor: `ai-dm-seat:${campaignId}`,
+        triggeredBy: 'player-1',
+        turnNumber: i,
+      };
+    }
+    (session as unknown as { pendingToolConfirmations: Record<string, unknown> }).pendingToolConfirmations = pendingMap;
+
+    h.script({
+      text: 'One more.',
+      toolCalls: [{ id: 'cN', name: 'begin_encounter', arguments: { encounterId: 1 } }],
+      usage: { promptTokens: 6, completionTokens: 4, totalTokens: 10 },
+    });
+    h.script({ text: 'Queued.', usage: { promptTokens: 4, completionTokens: 3, totalTokens: 7 } });
+    await h.sendMessage(campaignId, { input: 'again' });
+
+    // Eviction used to be near-unreachable at 20 pending. Collaborative handoff (#1051) queues
+    // roughly four per combat turn, so five turns of an inattentive DM now silently discards
+    // their oldest decision — the same failure #1042 found for grants lost to a restart, and it
+    // gets the same treatment: discarded, never in silence.
+    const evicted = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.campaignId, campaignId), eq(auditLog.action, 'ai-dm.driver.confirmation.evicted')));
+    expect(evicted).toHaveLength(1);
+    expect(String(evicted[0].detail)).toContain('confirm-seed-0'); // the oldest
+    expect(String(evicted[0].detail)).toContain('never executed');
+  });
+
+  it('approving through the endpoint the UI now calls actually resolves the queue', async () => {
+    const campaignId = await armed('Resolve Clears');
+    h.script({
+      text: 'Roll for initiative.',
+      toolCalls: [{ id: 'c1', name: 'begin_encounter', arguments: { encounterId: 1 } }],
+      usage: { promptTokens: 6, completionTokens: 4, totalTokens: 10 },
+    });
+    h.script({ text: 'ok', usage: { promptTokens: 4, completionTokens: 3, totalTokens: 7 } });
+    await h.sendMessage(campaignId, { input: 'we fight' });
+
+    const queued = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/tool-confirmations`).set(dm);
+    const id = queued.body[0].id as string;
+
+    const rejected = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/ai-dm/tool-confirmation`)
+      .set(dm)
+      .send({ action: 'reject', confirmationId: id });
+    expect(rejected.status).toBe(201);
+
+    const after = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/tool-confirmations`).set(dm);
+    expect(after.body).toHaveLength(0);
+  });
+});

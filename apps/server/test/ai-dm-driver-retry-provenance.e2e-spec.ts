@@ -105,6 +105,38 @@ describe('ai-dm driver — failover provenance + usage precision (#1052 review)'
     expect(res.body.grounding.model).not.toBe('primary-model');
   });
 
+  it('keeps the unmeasured label when a LATER attempt fails with known usage', async () => {
+    const campaignId = await armed('Carried Unknown Then Known Error');
+    // Devin's reproduction, exactly. No fallback, two attempts:
+    //  1. throws BEFORE its usage frame → reservation consumed with usage unknown, nothing
+    //     broadcast, so a retry is allowed.
+    //  2. reports PARTIAL usage and then fails non-retryably → terminal `provider_error` whose
+    //     own `usageUnknown` is false.
+    // The terminal branch reassigned the per-turn accumulator from that per-step fact and
+    // clobbered the sticky true. Three of the four terminal branches combined correctly; this
+    // was the one that did not, which is why the fix is a write-only-through-a-helper
+    // accumulator rather than a patch at this exit.
+    h.script(
+      { throwError: transient(), throwAfterChunks: 0 },
+      {
+        throwError: new AiProviderError('auth', 'mock: key rejected', { provider: 'mock' }),
+        throwAfterUsage: true,
+        streamTextDeltas: false,
+        usage: { promptTokens: 30, completionTokens: 8, totalTokens: 38 },
+      },
+    );
+
+    const { result: res, events } = await withStream(campaignId, () =>
+      h.sendMessage(campaignId, { input: 'I light the torch.' }),
+    );
+    expect(res.status).toBe(201);
+    expect(res.body.stopReason).toBe('provider_error');
+
+    // The seat was charged an unmeasured amount by attempt 1; the turn must not present its
+    // total as exact.
+    expect(turnEnd(events)?.tokensUsageUnknown).toBe(true);
+  });
+
   it('keeps a turn labelled unmeasured when an abandoned attempt could not report usage', async () => {
     const campaignId = await armed('Carried Usage Unknown');
     // Attempt 1 dies without ever reporting usage: its reservation is consumed with the amount

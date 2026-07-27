@@ -177,6 +177,35 @@ the table log so someone who reconnects later still sees it. Losing the state is
 losing it without telling anyone is not — a DM should never have to *discover* that an approval
 they granted is gone, or that the AI is waiting on a confirmation that no longer exists.
 
+### Approving what the AI asks to do
+
+Some actions the AI proposes do not run straight away — they wait for the DM. `begin_encounter`
+always does, and so do the irreversible ones (ending a fight, removing a combatant, awarding XP,
+levelling a character, moving treasury or inventory).
+
+**Waiting actions appear on the AI Table, at the top, as soon as they are queued.** Each one is
+shown as a decision rather than a function call — "Deal 7 damage to Thorne", not
+`update_character_hp` — with the full arguments one click away. Approve runs it; Reject discards
+it. Names come only from what your browser already loaded, so an entity you cannot see shows as
+an id rather than a name.
+
+**The turn does not stop while one waits.** The AI is told the action is pending and carries on
+narrating, so the scene keeps moving. That is what makes several waiting actions the normal case
+rather than an unusual one — under collaborative handoff a single combat turn can queue four —
+and why the panel is a list.
+
+**If you are not on the AI Table, you still get told.** A pending action raises a notification for
+the campaign's DMs, which is delivered immediately and cannot be muted or batched into a digest.
+Players are not notified: they cannot act on it, and the queue is DM-only.
+
+!!! note "Waiting actions do not expire on a timer"
+    A pending action waits until you answer it. There is deliberately no countdown: nothing is
+    blocked while it waits, so a timer would not release anything — it would only add a third way
+    for a decision to disappear. The two ways one *can* disappear are both recorded in the audit
+    log rather than happening quietly: a server restart discards them, and the queue drops the
+    oldest once it reaches its cap. Check the campaign audit log if an action you expected to
+    approve is no longer listed.
+
 ### When the provider has a bad moment
 
 Providers rate-limit, return 5xx, and drop connections mid-response. Campfire absorbs a

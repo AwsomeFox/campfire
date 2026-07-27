@@ -62,6 +62,19 @@ describe('P1: a token only carries SERVER-admin power when explicitly adminEnabl
         .send({ allowLocalLogin: false });
       expect(settingsRes.status).toBe(403);
 
+      // #1070: the server-wide AI seat defaults sit on the same admin-gated SettingsController.
+      // An install-wide default that a non-admin could move would let one campaign's operator
+      // change where every un-configured campaign starts.
+      const seatDefaultsRead = await request(server)
+        .get('/api/v1/settings/ai-seat-defaults')
+        .set('Authorization', `Bearer ${rawToken}`);
+      expect(seatDefaultsRead.status).toBe(403);
+      const seatDefaultsWrite = await request(server)
+        .put('/api/v1/settings/ai-seat-defaults')
+        .set('Authorization', `Bearer ${rawToken}`)
+        .send({ mode: 'off', instructions: '', tokenBudget: 999, actionQueueDepth: 8 });
+      expect(seatDefaultsWrite.status).toBe(403);
+
       // Exact repro: minting arbitrary tokens via the admin-provisioning route -> must now 403.
       const mintForOtherRes = await request(server)
         .post('/api/v1/users/1/tokens')

@@ -89,6 +89,34 @@ describe('ai-dm driver — retry loop reports accurately (#1052 review)', () => 
     expect(res.body.stopReason).toBe('frozen');
   });
 
+  it('a kill during the backoff terminates the wait promptly instead of serving it out', async () => {
+    const campaignId = await armed('Kill Interrupts Backoff');
+    const driver = h.ctx.app.get(AiDriverService);
+    h.script({ throwError: transient(), throwAfterChunks: 0 }, { text: 'never reached' });
+
+    // A backoff far longer than the real 2s cap, killed the instant it starts. `cancelGeneration`
+    // promises to stop active generation IMMEDIATELY; a plain `await sleepMs(...)` could not
+    // observe the stop until the whole delay had elapsed, so for up to two seconds the API made
+    // a promise it did not keep — to the DM hitting kill during a retry storm, who most needs it.
+    setRetrySleepForTests((ms) => {
+      driver.cancelGeneration(campaignId);
+      return new Promise((r) => setTimeout(r, Math.max(ms, 5_000)));
+    });
+
+    const started = Date.now();
+    const res = await h.sendMessage(campaignId, { input: 'onward' });
+    const elapsed = Date.now() - started;
+
+    expect(res.status).toBe(201);
+    expect(res.body.stopReason).toBe('cancelled');
+    // Racing the delay, not serving it: well under the 5s the hook would otherwise have slept.
+    expect(elapsed).toBeLessThan(3_000);
+
+    setRetrySleepForTests(async () => {
+      duringBackoff?.();
+    });
+  });
+
   it('counts tokens an abandoned attempt already metered', async () => {
     const campaignId = await armed('Retry Token Accounting');
     // Attempt 1 emits its USAGE frame and then fails, with no text on the wire — so it meters a

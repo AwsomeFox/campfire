@@ -224,21 +224,6 @@ export interface ParseSseOptions {
 }
 
 /**
- * Race a promise against an AbortSignal and an optional idle timer. The idle timer is
- * armed for each call (so callers reset it per chunk). Rejects with `AiProviderError`
- * (`timeout`) when the idle deadline elapses or the signal aborts.
- *
- * TWO TIMEOUTS, DELIBERATELY CLASSIFIED DIFFERENTLY (#1052):
- *  - THIS function's own `idleTimeoutMs` firing is a transport fault — the provider went quiet.
- *    Retryable, by `timeout`'s default.
- *  - A `signal` abort is classified by {@link streamAbortError} from the aborter's reason, so the
- *    driver's idle watchdog stays retryable while a pause/kill stays not.
- *
- * Both deadlines are DEFAULT_IDLE_TIMEOUT_MS and the driver arms its watchdog at the same value,
- * so in production which one fires first is a genuine race. That is exactly why they must agree
- * about retryability rather than being two paths with two answers.
- */
-/**
  * Classify a stream abort into a provider error, from the aborter's `reason`.
  *
  * A CONTRACT ON A SHARED FUNCTION, stated here because this is where a third caller will look.
@@ -273,6 +258,21 @@ export function streamAbortError(signal: AbortSignal | undefined, provider: stri
   return new AiProviderError('timeout', `${provider}: stream aborted`, { provider, retryable: false, cause: reason });
 }
 
+/**
+ * Race a promise against an AbortSignal and an optional idle timer. The idle timer is
+ * armed for each call (so callers reset it per chunk). Rejects with `AiProviderError`
+ * (`timeout`) when the idle deadline elapses or the signal aborts.
+ *
+ * TWO TIMEOUTS, DELIBERATELY CLASSIFIED DIFFERENTLY (#1052):
+ *  - THIS function's own `idleTimeoutMs` firing is a transport fault — the provider went quiet.
+ *    Retryable, by `timeout`'s default.
+ *  - A `signal` abort is classified by {@link streamAbortError} from the aborter's reason, so the
+ *    driver's idle watchdog stays retryable while a pause/kill stays not.
+ *
+ * Both deadlines are DEFAULT_IDLE_TIMEOUT_MS and the driver arms its watchdog at the same value,
+ * so in production which one fires first is a genuine race. That is exactly why they must agree
+ * about retryability rather than being two paths with two answers.
+ */
 export function raceRead<T>(
   read: Promise<T>,
   opts: {

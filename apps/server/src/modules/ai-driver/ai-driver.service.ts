@@ -191,6 +191,29 @@ export function linkAbortSignals(...sources: AbortSignal[]): { signal: AbortSign
   };
 }
 
+/**
+ * Resolve as soon as EITHER `work` settles or `signal` aborts (#1052).
+ *
+ * Deliberately resolves rather than rejects on abort: the caller's job after waiting is to
+ * re-check authority, and that check is what decides the outcome. This helper only ensures the
+ * decision is not delayed behind a backoff nobody is waiting for any more. Listener removed on
+ * both paths so a long turn cannot accumulate one per retry.
+ */
+export function raceAbort(work: Promise<unknown>, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', finish);
+      resolve();
+    };
+    signal.addEventListener('abort', finish, { once: true });
+    void work.then(finish, finish);
+  });
+}
+
 /** One tool the AI executed this turn (id-only; details are audited, not returned raw). */
 export interface AiDmExecutedTool {
   name: string;
@@ -835,6 +858,12 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   // character live state
   'update_character_hp',
   'set_character_conditions',
+  // #1039 — spell-slot expenditure. The seat could already spend HP, conditions and XP but had
+  // no way to deduct a slot, so casting was effectively free: the model narrated the spell and
+  // nothing was consumed. Safe to grant only because an overspend is now a hard tool error
+  // rather than a silent clamp — a tool that fails open on "no slots left" would have made
+  // unlimited casting look sanctioned instead of merely unmodelled.
+  'adjust_spell_slots',
   'award_xp',
   'level_up_character',
   // scene / exploration / world consequences
@@ -2421,7 +2450,27 @@ export class AiDriverService {
     let steps = 0;
     const { signal: generationSignal, handle: generationHandle } = this.beginGeneration(campaignId);
     let providerError: AiProviderError | undefined;
-    let tokensUsageUnknown = false;
+    /**
+     * #1052 — "any part of this turn's spend was unmeasured", accumulated across every attempt
+     * and every step.
+     *
+     * WRITE-ONLY-THROUGH-A-HELPER, ON PURPOSE. This started as a plain `let` with a comment
+     * saying it is never cleared, and then a terminal exit fifty lines below cleared it by
+     * writing the obvious thing — `tokensUsageUnknown = spend.usageUnknown` — which reassigns a
+     * per-TURN accumulator from a per-STEP fact. Three of the four terminal branches combined
+     * correctly and one did not, so the invariant held everywhere except the exit nobody
+     * re-read. A comment stating a rule that a later edit can silently break is the same shape
+     * as the false compile-guarantee this PR already removed from driver-retry.ts.
+     *
+     * So there is no longer a variable to assign to: `markUsageUnknown` only ever ORs, and
+     * `usageUnknown()` only reads. A future exit that wants to record unmeasured usage has one
+     * way to do it, and it is the correct one.
+     */
+    let usageUnknownAccum = false;
+    const markUsageUnknown = (unknown: boolean | undefined): void => {
+      usageUnknownAccum = usageUnknownAccum || unknown === true;
+    };
+    const usageUnknown = (): boolean => usageUnknownAccum;
     /**
      * #1052 — how the last step's attempt loop ended. `attempts` counts provider calls made
      * for that step (1 when nothing was retried); `gaveUp` names why no further attempt was
@@ -2789,7 +2838,13 @@ export class AiDriverService {
               `(${spend.error.kind}); retrying in ${decision.delayMs}ms` +
               `${providerForAttempt(decision.attempt, !!fallbackExecution) === 'fallback' ? ' on the FALLBACK provider' : ''}`,
           );
-          await sleepMs(decision.delayMs);
+          // #1052 review — RACE THE BACKOFF. `cancelGeneration` promises to stop active
+          // generation immediately; a plain `await sleepMs(...)` made that promise false for up
+          // to the 2s cap, because the post-sleep authority check could not run until the whole
+          // delay had elapsed. The DM hitting kill during a retry storm is exactly the person
+          // who most needs it honoured. Resolving early does not decide anything — the existing
+          // authority check immediately below still does — it only stops the wait.
+          await raceAbort(sleepMs(decision.delayMs), generationSignal);
           const postSleepAuth = await this.checkGenerationAuthority(campaignId, session, generationSignal);
           if (postSleepAuth !== 'ok') {
             retryOutcome = { attempts: attempt, gaveUp: 'stopped' };
@@ -2806,7 +2861,7 @@ export class AiDriverService {
         totalTokens += carriedTokens;
         // Sticky, and never cleared by a later success: once any part of this turn's spend is
         // unmeasured, the turn's total is an estimate and must be labelled as one.
-        if (carriedUsageUnknown) tokensUsageUnknown = true;
+        markUsageUnknown(carriedUsageUnknown);
 
         // #1052 — #577 provenance follows the RETAINED OUTPUT, not merely a successful metered
         // attempt. When both primary attempts fail and the fallback emits visible partial
@@ -2855,7 +2910,7 @@ export class AiDriverService {
           totalTokens += spend.metered?.tokensUsed ?? 0;
           stopReason = 'provider_error';
           providerError = spend.error;
-          tokensUsageUnknown = spend.usageUnknown;
+          markUsageUnknown(spend.usageUnknown);
           if (spend.text) setNarration(spend.text);
           const detail = spend.error?.message ?? 'provider error';
           await this.audit.log({
@@ -2941,7 +2996,7 @@ export class AiDriverService {
       // locked forever, even though the seat slot is released. Catch here so we still emit
       // turn.error/turn.end with provider_error and park the ladder in awaiting_players for recovery.
       stopReason = 'provider_error';
-      tokensUsageUnknown = true;
+      markUsageUnknown(true);
       providerError = err instanceof AiProviderError ? err : undefined;
       const detail = err instanceof Error ? err.message : String(err);
       this.logger.error(`AI DM provider failure on campaign ${campaignId}: ${detail}`, err instanceof Error ? err.stack : undefined);
@@ -3012,7 +3067,7 @@ export class AiDriverService {
       unsupportedClaims: grounding.unsupportedCount,
     });
 
-    this.emitTurnEnd(campaignId, stopReason, finalNarration, steps, totalTokens, budgetRemaining, providerError, tokensUsageUnknown);
+    this.emitTurnEnd(campaignId, stopReason, finalNarration, steps, totalTokens, budgetRemaining, providerError, usageUnknown());
 
     this.drainQueue(campaignId).catch(err => this.logger.error('Queue drain failed', err));
 
@@ -3534,6 +3589,13 @@ export class AiDriverService {
             `queued ${call.name} profile=${sessionProfile} confirmation=${pending.id} ` +
             `(triggered by ${triggeredBy.id})`,
         });
+        // #1558: the SSE signal only reaches a DM who has the AI Table open. The stall is
+        // otherwise silent for exactly the DM who most needs to know — the one who stepped away,
+        // or who is on the encounter screen. A notification is the only channel that reaches them
+        // there, and `ai_dm_alert` is the right type: its category is `security`, which is
+        // always-on and never deferred into a digest, and its deep link already points at
+        // /c/:id/table, which is where the panel that resolves this lives.
+        void this.notifyDmsOfPendingConfirmation(campaignId, call.name);
         this.stream.emit({
           type: 'tool-confirmation',
           campaignId,
@@ -3781,6 +3843,37 @@ export class AiDriverService {
     });
   }
 
+  /**
+   * A queued confirmation was pushed out by the per-session cap (#1558).
+   *
+   * Deliberately NOT a time-based expiry. A pending confirmation does not block the turn — the
+   * model is told `pending_dm_confirmation` and narration carries on — so a TTL would unblock
+   * nothing and would only add a THIRD way for a grant to die, on top of the two that already
+   * exist (restart, handled loudly by #1042; and this cap). The consistent answer, and the one
+   * #1042 established, is that a grant may be discarded but never in silence.
+   */
+  private announceEvictedConfirmation(campaignId: number, evicted: AiDmPendingToolConfirmation): void {
+    void this.audit
+      .log({
+        actor: `ai-dm-seat:${campaignId}`,
+        actorRole: 'dm',
+        action: 'ai-dm.driver.confirmation.evicted',
+        entityType: 'ai-dm',
+        campaignId,
+        detail:
+          `pending confirmation ${evicted.id} for ${evicted.tool} (queued ${evicted.requestedAt}, turn ` +
+          `${evicted.turnNumber}) was dropped: the queue reached its ${MAX_PENDING_TOOL_CONFIRMATIONS}-item cap — never executed`,
+      })
+      .catch((err) => this.logger.error(`Confirmation-eviction audit failed for campaign ${campaignId}`, err));
+    this.stream.emit({
+      type: 'tool-confirmation',
+      campaignId,
+      action: 'rejected',
+      confirmationId: evicted.id,
+      tool: evicted.tool,
+    });
+  }
+
   private queueToolConfirmation(
     session: AiDmSessionState,
     call: AiToolCall,
@@ -3800,7 +3893,15 @@ export class AiDriverService {
     );
     while (keysByAge.length >= MAX_PENDING_TOOL_CONFIRMATIONS) {
       const oldest = keysByAge.shift()!;
+      const evicted = session.pendingToolConfirmations[oldest];
       delete session.pendingToolConfirmations[oldest];
+      // #1558 — EVICTION MUST BE LOUD. This is the same failure #1042 found for grants lost to a
+      // restart: an irreversible write a DM was asked to approve, dropped with no audit row and
+      // no signal. It used to be near-unreachable at 20 pending; collaborative handoff (#1051)
+      // queues roughly four per combat turn, so five turns of an inattentive DM now silently
+      // discards their oldest decision. Same treatment as #1042's discarded grants: one audit
+      // row naming the call, and a signal that reconciles the DM's queue.
+      if (evicted) this.announceEvictedConfirmation(session.campaignId, evicted);
     }
 
     const pending: AiDmPendingToolConfirmation = {
@@ -4634,6 +4735,35 @@ export class AiDriverService {
   }
 
   /** Best-effort table notification for a stuck/lever event (#263 + #314). Never throws. */
+  /**
+   * Tell the campaign's DMs that a tool call is waiting on them (#1558).
+   *
+   * DM-ONLY delivery, not `notifyCampaign`. A pending confirmation names a live-play tool the AI
+   * wants to run, and the queue itself is a DM-only read — pushing it to every player would both
+   * leak that surface and hand the table a notification nobody but the DM can act on. Roles come
+   * from `memberRoles`, the same source the vote-eligibility threshold uses.
+   *
+   * Best-effort in full: a notification failure must never break the turn that queued the call.
+   */
+  private async notifyDmsOfPendingConfirmation(campaignId: number, tool: string): Promise<void> {
+    try {
+      const roles = await this.notifications.memberRoles(campaignId);
+      const dms = [...roles.entries()].filter(([, role]) => role === 'dm').map(([userId]) => userId);
+      for (const userId of dms) {
+        await this.notifications.notifyUser(userId, campaignId, null, {
+          type: 'ai_dm_alert',
+          title: 'The AI DM is waiting on you',
+          body: `${tool} needs your approval before it runs. Open the AI Table to approve or reject it.`,
+          entityType: null,
+          entityId: null,
+          actorName: '',
+        });
+      }
+    } catch (err) {
+      this.logger.warn(`Pending-confirmation notify failed for campaign ${campaignId}: ${String(err)}`);
+    }
+  }
+
   private async notify(campaignId: number, actor: RequestUser, title: string, body: string): Promise<void> {
     try {
       await this.notifications.notifyCampaign(campaignId, actor, {

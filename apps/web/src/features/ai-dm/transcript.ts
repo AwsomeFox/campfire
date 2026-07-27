@@ -552,6 +552,12 @@ function applyStream(state: TranscriptState, event: AiDmStreamEvent): Transcript
     // against the persisted transcript, which does not carry the claim rows.
     case 'grounding':
       return state;
+    // #1558: a tool confirmation is an ACTION THE DM OWES, not a thing that was said, so it does
+    // not belong in the record of what was said. The ToolConfirmationsPanel owns it and
+    // reconciles off its own refetch on this same signal — the same split as `grounding` above.
+    // Folding it here would also read as narration in the scrollback long after it was resolved.
+    case 'tool-confirmation':
+      return state;
 
     default: {
       // Exhaustiveness guard — a new event kind must be handled explicitly.
