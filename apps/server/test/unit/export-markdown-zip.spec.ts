@@ -1,4 +1,7 @@
 import JSZip from 'jszip';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { ExportService } from '../../src/modules/export/export.service';
 import { resolveExportPolicy } from '../../src/modules/export/export-profiles';
@@ -169,6 +172,38 @@ describe('buildMarkdownZip — filename collisions (issues #530 / #863)', () => 
     expect(legacy).not.toHaveBeenCalled();
     const zip = await JSZip.loadAsync(Buffer.concat(chunks));
     expect(zip.file('campaign.json')).not.toBeNull();
+  });
+
+  it('classifies a live source that vanishes after planning before any ZIP bytes flow', async () => {
+    const sourceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'export-race-'));
+    const source = path.join(sourceDir, 'attachment.png');
+    fs.writeFileSync(source, Buffer.from('not-a-real-png'));
+    const service = buildService({});
+    const attachments = (service as any).attachments;
+    attachments.listRowsForCampaign = async () => [{
+      id: 9, campaignId: 1, kind: 'image', filename: 'race.png', mime: 'image/png', size: 14, createdAt: new Date(0).toISOString(),
+    }];
+    attachments.hasBytesOnDisk = () => true;
+    attachments.exportPathIfPresent = () => {
+      fs.rmSync(source);
+      return source;
+    };
+    const output = new PassThrough();
+    const chunks: Buffer[] = [];
+    output.on('data', (chunk: Buffer) => chunks.push(chunk));
+    try {
+      await service.streamMarkdownZip(output, new AbortController().signal, 1, USER);
+      const zip = await JSZip.loadAsync(Buffer.concat(chunks));
+      const campaign = JSON.parse(await zip.file('campaign.json')!.async('string'));
+      expect(campaign.attachments[0].present).toBe(false);
+      expect(campaign.redaction.attachments.bytesWithheld).toBe(1);
+      expect(await zip.file('warnings.txt')!.async('string')).toMatch(/file missing on disk/);
+      expect(zip.file('uploads/9.png')).toBeNull();
+      const manifest = JSON.parse(await zip.file('archive-manifest.json')!.async('string'));
+      expect(manifest.redaction.attachments.bytesWithheld).toBe(1);
+    } finally {
+      fs.rmSync(sourceDir, { recursive: true, force: true });
+    }
   });
 
   it('rejects a pre-aborted streaming export without writing output', async () => {

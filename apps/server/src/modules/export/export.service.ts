@@ -138,6 +138,8 @@ type MarkdownZipWriter = {
   /** Deliberately distinct from `file`: streaming exports hand archiver a pathname. */
   attachment?(path: string, content: Buffer): void;
   stageAttachment?(content: Buffer): { path: string; checksum: string };
+  /** Stages a live source before any archive entries are appended. */
+  stageLiveAttachment?(source: string): Promise<{ path: string; checksum: string }>;
   attachmentPath?(
     path: string,
     source: string,
@@ -865,6 +867,19 @@ export class ExportService {
             fs.writeFileSync(staged, content, { flag: 'wx' });
             return { path: staged, checksum: sha256Hex(content) };
           },
+          stageLiveAttachment: async (source) => {
+            const staged = path.join(stagingDir, `${stageNumber++}.attachment`);
+            const hash = crypto.createHash('sha256');
+            const hashing = new Transform({
+              transform(chunk: Buffer, _encoding, callback) {
+                hash.update(chunk);
+                callback(null, chunk);
+              },
+            });
+            await pipeline(fs.createReadStream(source), hashing, fs.createWriteStream(staged, { flags: 'wx' }), { signal });
+            if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('Export aborted');
+            return { path: staged, checksum: hash.digest('hex') };
+          },
           attachmentPath: async (entryPath, source, stagedChecksum) => {
             if (stagedChecksum) {
               archive.file(source, { name: entryPath });
@@ -946,6 +961,35 @@ export class ExportService {
     const attachmentBytes = profileResult.attachmentBytes;
     const inventory = profileResult.inventory;
     const data = profileResult.data as unknown as ProfileExportData;
+    // Live files may disappear after planning. Stage every such source before
+    // appending any archive entry, so a vanished file is reflected consistently
+    // in campaign.json, warnings.txt, and the manifest rather than failing after
+    // an HTTP response has already begun.
+    if (writer.stageLiveAttachment) {
+      for (const attachment of data.attachments) {
+        const decision = attachmentBytes.get(attachment.id);
+        if (!decision?.sourcePath || decision.sourceChecksum) continue;
+        try {
+          const staged = await writer.stageLiveAttachment(decision.sourcePath);
+          decision.sourcePath = staged.path;
+          decision.sourceChecksum = staged.checksum;
+        } catch (err) {
+          // A stream-open ENOENT may be wrapped by pipeline. Classify only a
+          // genuinely absent source as the established warning/skip outcome.
+          if (fs.existsSync(decision.sourcePath)) throw err;
+          decision.sourcePath = undefined;
+          decision.bytes = null;
+          decision.withheldReason = 'file missing on disk';
+          attachment.present = false;
+          (attachment as Record<string, unknown>).bytesWithheldReason = decision.withheldReason;
+          // Inventory and its embedded disclosure were calculated before this
+          // last-moment filesystem race. Keep every archive representation
+          // honest without re-running the (potentially expensive) projection.
+          inventory.attachments.bytesWithheld += 1;
+          (data as Record<string, unknown>).redaction = this.redactionDisclosure(inventory);
+        }
+      }
+    }
     const warnings: string[] = [];
     const fileChecksums: Record<string, string> = {};
     const records: ArchiveRecordEntry[] = [];
