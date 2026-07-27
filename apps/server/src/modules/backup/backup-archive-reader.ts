@@ -12,7 +12,17 @@ export const MAX_ARCHIVE_COMPRESSED_BYTES = 1024 * 1024 * 1024;
 export const MAX_ARCHIVE_ENTRIES = 100_000;
 export const MAX_ENTRY_UNCOMPRESSED_BYTES = 512 * 1024 * 1024;
 export const MAX_ARCHIVE_UNCOMPRESSED_BYTES = 4 * 1024 * 1024 * 1024;
-export const MAX_MANIFEST_BYTES = 4 * 1024 * 1024;
+/** Compact JSON budget for one checksum attachment record (ids, path, MIME, hash, and keys). */
+export const MAX_MANIFEST_ATTACHMENT_RECORD_BYTES = 512;
+/** Manifest metadata plus up to 500 reconciliation orphan paths. */
+export const MAX_MANIFEST_FIXED_BYTES = 2 * 1024 * 1024;
+/**
+ * Supports the archive entry ceiling's full attachment scale while remaining a
+ * bounded fraction of the 512 MiB per-entry and 4 GiB total archive limits.
+ * The writer uses this exact value before appending manifest.json.
+ */
+export const MAX_MANIFEST_BYTES =
+  MAX_MANIFEST_FIXED_BYTES + MAX_ARCHIVE_ENTRIES * MAX_MANIFEST_ATTACHMENT_RECORD_BYTES;
 export const MAX_KEY_ENVELOPE_BYTES = 1024 * 1024;
 
 function invalid(message: string): never {

@@ -1,6 +1,7 @@
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, ServiceUnavailableException } from '@nestjs/common';
 import { APP_VERSION } from '../../common/build-metadata';
 import { MIGRATION_NAMES } from '../../db/db.module';
+import { MAX_MANIFEST_BYTES } from './backup-archive-reader';
 
 /** Marks an archive as a Campfire whole-server backup. */
 export const BACKUP_APP = 'campfire';
@@ -179,6 +180,22 @@ export interface BackupInspectResult {
   attachmentChecksums: BackupInspectAttachmentChecksum[];
   /** Reconciliation summary from the manifest when present (#444). */
   reconciliation: BackupInspectReconciliation | null;
+}
+
+/** Enforce the shared writer/reader manifest entry ceiling. */
+export function assertBackupManifestBytes(bytes: number): void {
+  if (bytes > MAX_MANIFEST_BYTES) {
+    throw new ServiceUnavailableException(
+      `Backup manifest exceeds the ${MAX_MANIFEST_BYTES} byte restore manifest limit`,
+    );
+  }
+}
+
+/** Compact serialization keeps checksum metadata practical at the entry cap. */
+export function serializeBackupManifest(manifest: BackupManifest): string {
+  const json = JSON.stringify(manifest);
+  assertBackupManifestBytes(Buffer.byteLength(json));
+  return json;
 }
 
 /** Cap checksum rows returned by inspect so huge archives stay UI-safe. */

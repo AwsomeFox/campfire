@@ -3,9 +3,12 @@ import {
   BACKUP_APP,
   BACKUP_KIND,
   DB_ENTRY_V1,
+  assertBackupManifestBytes,
   manifestToInspectView,
   parseBackupManifest,
+  serializeBackupManifest,
 } from '../../src/modules/backup/backup-manifest';
+import { MAX_ARCHIVE_ENTRIES, MAX_MANIFEST_BYTES } from '../../src/modules/backup/backup-archive-reader';
 
 describe('parseBackupManifest (issue #514)', () => {
   const baseV1 = {
@@ -113,6 +116,42 @@ describe('parseBackupManifest (issue #514)', () => {
     it('accepts a manifest with the canonical db entry', () => {
       expect(parseBackupManifest(baseV1).db).toBe(DB_ENTRY_V1);
     });
+  });
+});
+
+describe('backup manifest size contract', () => {
+  it('serializes and parses a near-entry-limit checksum manifest', () => {
+    // This exceeds the former 4 MiB ceiling while staying just under the
+    // 100k archive-entry limit after db + manifest overhead.
+    const count = MAX_ARCHIVE_ENTRIES - 1_000;
+    const attachments = Array.from({ length: count }, (_, index) => ({
+      id: index + 1,
+      campaignId: 1,
+      path: `1/${index + 1}.bin`,
+      size: index,
+      mime: 'application/octet-stream',
+      hidden: false,
+      sha256: 'a'.repeat(64),
+    }));
+    const manifest = {
+      app: BACKUP_APP,
+      kind: BACKUP_KIND,
+      version: 1,
+      createdAt: '2026-07-20T12:00:00.000Z',
+      db: DB_ENTRY_V1,
+      dbBytes: 12345,
+      uploadCount: count,
+      attachments,
+    };
+
+    const json = serializeBackupManifest(manifest);
+    expect(Buffer.byteLength(json)).toBeGreaterThan(4 * 1024 * 1024);
+    expect(Buffer.byteLength(json)).toBeLessThanOrEqual(MAX_MANIFEST_BYTES);
+    expect(parseBackupManifest(JSON.parse(json)).attachments).toHaveLength(count);
+  });
+
+  it('rejects manifest byte counts above the shared reader/writer ceiling', () => {
+    expect(() => assertBackupManifestBytes(MAX_MANIFEST_BYTES + 1)).toThrow(/manifest exceeds/i);
   });
 });
 

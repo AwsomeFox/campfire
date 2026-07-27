@@ -57,6 +57,7 @@ import {
   DB_ENTRY_V1,
   manifestToInspectView,
   parseBackupManifest,
+  serializeBackupManifest,
   serverAppVersion,
   type AiKeySource,
   type BackupAttachmentRecord,
@@ -1303,13 +1304,8 @@ export class BackupService implements OnApplicationBootstrap {
         attachments: attachmentRecords,
         reconciliation,
       };
-      const manifestJson = JSON.stringify(manifest, null, 2);
+      const manifestJson = serializeBackupManifest(manifest);
       const manifestBytes = Buffer.byteLength(manifestJson);
-      if (manifestBytes > MAX_MANIFEST_BYTES) {
-        throw new ServiceUnavailableException(
-          `Backup manifest exceeds the ${MAX_MANIFEST_BYTES} byte restore manifest limit`,
-        );
-      }
       const entryCount = 2 + attachmentRecords.length + (aiKeyIncluded ? 1 : 0);
       if (entryCount > MAX_ARCHIVE_ENTRIES) {
         throw new ServiceUnavailableException(
