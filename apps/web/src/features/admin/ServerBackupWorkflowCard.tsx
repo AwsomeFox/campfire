@@ -427,7 +427,7 @@ export function ServerBackupWorkflowCard() {
             <p className="text-xs text-slate-300">
               {downloadPhase === 'preparing' && 'Preparing backup and choosing a destination…'}
               {downloadPhase === 'streaming' &&
-                (downloadProgress === null
+                (downloadProgress === null || downloadProgress.receivedBytes === 0
                   ? 'Streaming backup…'
                   : downloadProgress.totalBytes === null
                   ? `Streaming backup — ${formatBytes(downloadProgress.receivedBytes)} received.`
