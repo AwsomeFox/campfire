@@ -259,7 +259,12 @@ export class AiDriverController {
   @Get('session')
   @ApiOperation({
     summary: 'Get the AI DM session state',
-    description: 'Requires campaign membership. Returns the lightweight session state (status, scene, last turn).',
+    description:
+      'Requires campaign membership. Returns the lightweight session state (status, scene, last turn), plus ' +
+      '`historyLength` (#1038) — how many past table events the AI can draw conversation memory from on its next ' +
+      'turn. Derived from the durable transcript on every read, so a DM purge or retention pruning shows up ' +
+      'immediately, and it counts only the narrative events the model may actually be told about rather than every ' +
+      'stored row.',
   })
   @ApiResponse({ status: 200, description: 'The session state.' })
   async session(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
