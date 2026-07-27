@@ -1,4 +1,6 @@
-export type DamageSaveOutcome = 'full' | 'half';
+import type { DamageSaveOutcome as SharedDamageSaveOutcome } from '@campfire/schema';
+
+export type DamageSaveOutcome = SharedDamageSaveOutcome;
 
 export type DirectDamageMetadata = {
   damageType?: string;
