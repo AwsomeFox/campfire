@@ -825,7 +825,7 @@ export class ActionResolverService {
         .from(combatants)
         .where(eq(combatants.id, actor.id))
         .limit(1)
-        .all()[0];
+        .get();
       if (actorBeforeTargets) {
         const actorTurnStateBefore = CombatantTurnState.parse(
           fromJsonText<unknown>(actorBeforeTargets.turnState, null) ?? {},

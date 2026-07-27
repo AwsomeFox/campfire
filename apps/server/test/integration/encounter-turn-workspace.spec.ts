@@ -647,7 +647,7 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
     );
     expect(updated.hpCurrent).toBe(79);
     expect(updated.turnState.pendingConcentrationChecks).toEqual([
-      expect.objectContaining({ damage: 21, dc: 11 }),
+      expect.objectContaining({ damage: 21, dc: 10 }),
     ]);
 
     orm
@@ -675,5 +675,51 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
     orm.update(combatants).set({ conditionInstances: JSON.stringify([{ id: 'focus', name: 'Focus', isConcentration: true, sourceCombatantId: c1 }]) }).where(eq(combatants.id, c2)).run();
     const updated = await service.updateCombatant(encounterId, c1, { hpDelta: -8 }, dmUser, 'dm');
     expect(updated.turnState.pendingConcentrationChecks).toEqual([]);
+  });
+
+  it('redacts monster pending concentration checks from non-DM encounter reads (issue #606 / #43)', async () => {
+    dataDir = makeTempDataDir();
+    const { orm, service } = build();
+    const { encounterId, c1 } = seed(orm);
+    const [monster] = orm
+      .insert(combatants)
+      .values({
+        encounterId,
+        kind: 'monster',
+        name: 'Concentrating Drake',
+        initiative: 5,
+        hpCurrent: 40,
+        hpMax: 40,
+        sortOrder: 2,
+        turnState: JSON.stringify({ concentration: 'Hold Person' }),
+      })
+      .returning()
+      .all();
+
+    await service.updateCombatant(encounterId, monster.id, { hpDelta: -21 }, dmUser, 'dm');
+
+    const dmView = await service.getWithCombatantsOrThrow(encounterId, 'dm', dmUser.id);
+    expect(dmView.combatants.find((combatant) => combatant.id === monster.id)?.turnState.pendingConcentrationChecks).toEqual([
+      expect.objectContaining({ damage: 21, dc: 10 }),
+    ]);
+
+    const playerView = await service.getWithCombatantsOrThrow(encounterId, 'player', player1.id);
+    const playerMonster = playerView.combatants.find((combatant) => combatant.id === monster.id)!;
+    expect(playerMonster.hpCurrent).toBeNull();
+    expect(playerMonster.turnState.pendingConcentrationChecks).toEqual([]);
+
+    // Character combatant checks remain visible to non-DM viewers (shared table knowledge).
+    orm
+      .update(combatants)
+      .set({ turnState: JSON.stringify({ concentration: 'Bless' }) })
+      .where(eq(combatants.id, c1))
+      .run();
+    await service.updateCombatant(encounterId, c1, { hpDelta: -8 }, dmUser, 'dm');
+    const playerPc = (await service.getWithCombatantsOrThrow(encounterId, 'player', player1.id)).combatants.find(
+      (combatant) => combatant.id === c1,
+    )!;
+    expect(playerPc.turnState.pendingConcentrationChecks).toEqual([
+      expect.objectContaining({ damage: 8, dc: 10 }),
+    ]);
   });
 });

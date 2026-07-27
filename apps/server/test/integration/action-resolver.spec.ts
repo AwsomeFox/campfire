@@ -245,7 +245,7 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(persisted.pendingConcentrationChecks).toEqual([
       expect.objectContaining({
         damage,
-        dc: Math.max(10, Math.ceil(damage / 2)),
+        dc: Math.max(10, Math.floor(damage / 2)),
       }),
     ]);
 

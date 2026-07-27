@@ -19,6 +19,7 @@ test.describe('concentration checks (issue #606)', () => {
     expect(source).toContain('canEditCombatantPermission(combatant)');
     expect(source).toContain('canResolveConcentrationCheck');
     expect(source).toContain('Waiting for the DM or this combatant');
+    expect(source).toContain("combatant.kind === 'character'");
   });
 
   test('submits explicit first-request pass and fail resolutions', () => {

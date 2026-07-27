@@ -1949,6 +1949,9 @@ export default function RunSessionPage() {
   // `turnIndex % length` guesswork that desyncs the moment a combatant is added or
   // removed mid-fight.
   const orderedCombatants = encounter.combatants;
+  // Prefer a combatant the viewer can resolve. Fall back only to character combatants
+  // (party HP is shared table knowledge); never surface monster/NPC concentration
+  // queues to non-resolvers — those embed secret exact damage/DC (#43 / #606).
   const concentrationCheckCombatant =
     orderedCombatants.find(
       (combatant) =>
@@ -1956,7 +1959,9 @@ export default function RunSessionPage() {
         canEditCombatantPermission(combatant),
     ) ??
     orderedCombatants.find(
-      (combatant) => combatant.turnState.pendingConcentrationChecks.length > 0,
+      (combatant) =>
+        combatant.kind === 'character' &&
+        combatant.turnState.pendingConcentrationChecks.length > 0,
     );
   const pendingConcentrationCheck = concentrationCheckCombatant?.turnState.pendingConcentrationChecks[0] ?? null;
   const canResolveConcentrationCheck =

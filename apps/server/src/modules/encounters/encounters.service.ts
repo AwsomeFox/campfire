@@ -416,7 +416,16 @@ function redactMonsterHp(c: Combatant): Combatant {
   if (c.kind !== 'monster' && c.kind !== 'npc') return c;
   // Inline homebrew statblocks (issue #425) carry AC, abilities, attacks, and DM notes —
   // withhold from non-DM encounter reads the same way exact HP is banded (issue #43).
-  const redacted = { ...c, statblock: null };
+  // pendingConcentrationChecks also embeds exact post-mitigation damage + DC (#606) —
+  // strip them so non-DM viewers cannot reverse-engineer secret monster HP.
+  const redacted: Combatant = {
+    ...c,
+    statblock: null,
+    turnState: {
+      ...c.turnState,
+      pendingConcentrationChecks: [],
+    },
+  };
   if (redacted.hpCurrent === null || redacted.hpMax === null) return redacted;
   // hpTemp is exact-HP information too — null it alongside hpCurrent/hpMax so a
   // temp-HP buffed monster doesn't leak numbers through the redaction.
@@ -4921,7 +4930,15 @@ export class EncountersService {
       const clearConcentration = (): void => {
         turnState.concentration = null;
         turnState.pendingConcentrationChecks = [];
-        const allRows = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all();
+        const allRows = tx
+          .select({
+            id: combatants.id,
+            conditions: combatants.conditions,
+            conditionInstances: combatants.conditionInstances,
+          })
+          .from(combatants)
+          .where(eq(combatants.encounterId, encounterId))
+          .all();
         const withInstances = allRows.map((r) => ({
           id: r.id,
           conditionInstances: parseConditionInstances(r.conditionInstances, fromJsonText<string[]>(r.conditions, [])),

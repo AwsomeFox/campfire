@@ -766,8 +766,9 @@ export function concentrationCheckForDamage(
   isConcentrating: boolean | undefined,
   damage: number,
 ): ConcentrationCheck | null {
+  // 5e rounds fractions down (PHB), so half of odd damage uses Math.floor.
   return isConcentrating && damage > 0
-    ? { damage, dc: Math.max(10, Math.ceil(damage / 2)) }
+    ? { damage, dc: Math.max(10, Math.floor(damage / 2)) }
     : null;
 }
 

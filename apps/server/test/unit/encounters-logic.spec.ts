@@ -447,9 +447,9 @@ describe('encounters — applyCombatantHp (issue #57 5e HP model)', () => {
       expect(r.concentrationCheck).toEqual({ damage: 8, dc: 10 });
     });
 
-    it('uses half the actual damage, rounded up, and includes damage absorbed by temporary HP', () => {
+    it('uses half the actual damage, rounded down, and includes damage absorbed by temporary HP', () => {
       const r = applyCombatantHp(charState({ isConcentrating: true, hpTemp: 5 }), { hpDelta: -25 });
-      expect(r.concentrationCheck).toEqual({ damage: 25, dc: 13 });
+      expect(r.concentrationCheck).toEqual({ damage: 25, dc: 12 });
     });
 
     it('uses the full effective hit for an overkill concentration check', () => {
@@ -457,7 +457,7 @@ describe('encounters — applyCombatantHp (issue #57 5e HP model)', () => {
         charState({ isConcentrating: true, hpCurrent: 5, hpMax: 5 }),
         { hpDelta: -25 },
       );
-      expect(r.concentrationCheck).toEqual({ damage: 25, dc: 13 });
+      expect(r.concentrationCheck).toEqual({ damage: 25, dc: 12 });
     });
 
     it('does not flag healing or damage for a combatant without concentration', () => {
