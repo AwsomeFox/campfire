@@ -300,7 +300,7 @@ describe('backup streaming writer (#603)', () => {
       probeDisk.mockRestore();
       estimate.mockRestore();
     };
-    return { svc, backupDir, stagingBytes, archiveBytes, probeDisk, createStream, restore };
+    return { svc, backupDir, stagingBytes, archiveBytes, estimateFallback: estimate, probeDisk, createStream, restore };
   }
 
   async function withScheduledEnv(run: () => Promise<void>): Promise<void> {
@@ -376,6 +376,44 @@ describe('backup streaming writer (#603)', () => {
         t.restore();
       }
     });
+  });
+
+  it('does not walk uploads when a known archive is staged on a separate filesystem', () => {
+    const t = runScheduledWithDisk(false);
+    const previousArchiveBytes = 20 * 1024 * 1024;
+    try {
+      const estimate = (t.svc as any).scheduledBackupDiskEstimate(t.backupDir, previousArchiveBytes);
+      expect(t.estimateFallback).not.toHaveBeenCalled();
+      expect(estimate).toEqual({
+        archiveBytes: Math.ceil(previousArchiveBytes * 1.15),
+        requiredBytes: Math.ceil(previousArchiveBytes * 1.15),
+      });
+    } finally {
+      t.restore();
+    }
+  });
+
+  it('still walks uploads for a known archive when staging shares its filesystem', () => {
+    const t = runScheduledWithDisk(true);
+    const previousArchiveBytes = 20 * 1024 * 1024;
+    try {
+      const estimate = (t.svc as any).scheduledBackupDiskEstimate(t.backupDir, previousArchiveBytes);
+      expect(t.estimateFallback).toHaveBeenCalledTimes(1);
+      expect(estimate.requiredBytes).toBe(Math.ceil(previousArchiveBytes * 1.15) + t.stagingBytes);
+    } finally {
+      t.restore();
+    }
+  });
+
+  it('walks uploads when the archive size is unknown, even on a separate filesystem', () => {
+    const t = runScheduledWithDisk(false);
+    try {
+      const estimate = (t.svc as any).scheduledBackupDiskEstimate(t.backupDir, null);
+      expect(t.estimateFallback).toHaveBeenCalledTimes(1);
+      expect(estimate).toEqual({ archiveBytes: t.archiveBytes, requiredBytes: t.archiveBytes });
+    } finally {
+      t.restore();
+    }
   });
 
   it('uses the same disk-requirement calculation for status and scheduled execution', async () => {

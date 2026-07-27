@@ -732,14 +732,22 @@ export class BackupService implements OnApplicationBootstrap {
     backupDir: string,
     previousArchiveBytes: number | null,
   ): { archiveBytes: number; requiredBytes: number } {
+    if (!this.pathsShareFilesystem(backupDir, os.tmpdir())) {
+      // A known prior archive is enough to budget BACKUP_DIR when staging lives
+      // elsewhere. Keep the fallback lazy so status/preflight do not walk every
+      // upload merely to calculate an estimate they will not use.
+      const archiveBytes = estimateNextBackupBytes(
+        previousArchiveBytes,
+        () => this.estimateFallbackBackupBytes(),
+      );
+      return { archiveBytes, requiredBytes: archiveBytes };
+    }
+
+    // Same filesystem means staging and the archive coexist, so we must measure
+    // the source bytes even when a previous archive gives us its archive estimate.
     const stagingBytes = this.estimateFallbackBackupBytes();
     const archiveBytes = estimateNextBackupBytes(previousArchiveBytes, stagingBytes);
-    return {
-      archiveBytes,
-      requiredBytes: this.pathsShareFilesystem(backupDir, os.tmpdir())
-        ? archiveBytes + stagingBytes
-        : archiveBytes,
-    };
+    return { archiveBytes, requiredBytes: archiveBytes + stagingBytes };
   }
 
   private probeDisk(
