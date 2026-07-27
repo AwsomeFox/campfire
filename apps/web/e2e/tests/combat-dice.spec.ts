@@ -1,4 +1,4 @@
-import { test, expect, request } from '@playwright/test';
+import { test, expect, request, type APIRequestContext } from '@playwright/test';
 import { seed, stateFor, restoreSeedEncounter } from './seed';
 import { CREDS } from '../global-setup';
 
@@ -8,118 +8,301 @@ import { CREDS } from '../global-setup';
  * Uses its OWN freshly-created encounter (not the shared seed encounter the
  * combat-tracker spec asserts on) so adding a character/monster here can't perturb
  * that spec's exact-combatant assertions.
+ *
+ * Issue #1478 — this spec no longer ROLLS initiative. It used to call
+ * /roll-initiative and then accept EITHER combat-log phrasing, because a d20 decided
+ * who acted first. That made the test a fair coin, and the coin is precisely what hid
+ * a real bug for as long as it lived: the client attached the DM-only `actorId` field
+ * to the HP patch whenever the current-turn combatant differed from the target, and
+ * the server 403s any non-DM patch carrying that field. A player applying damage to
+ * their OWN character therefore failed outright whenever a monster held the turn —
+ * about half of all runs, which got written off as flakiness.
+ *
+ * Both turn orders are now pinned explicitly and asserted separately, so the case that
+ * used to fail runs on every CI run instead of every other one.
  */
+
+/** Explicit initiatives plus the exact combat-log phrasing each turn order must produce. */
+const TURN_ORDERS = [
+  {
+    label: 'a monster holds the turn',
+    brixiInitiative: 4,
+    dummyInitiative: 20,
+    // Straw Dummy is the current-turn combatant and is NOT the target, so the server
+    // derives the attribution and renders "<actor> to <target>: <detail>". This is the
+    // combination that used to 403: the old client sent `actorId` here. The player now
+    // omits it and the server derives the identical actor from the current turn.
+    expected: /Straw Dummy to Brixi Applybar: took \d+ damage/i,
+    // The unattributed phrasing would mean the current-turn fallback didn't happen.
+    // (It cannot false-match the attributed line above, which has a colon after the name.)
+    forbidden: /Brixi Applybar took \d+ damage/i,
+  },
+  {
+    label: 'the player’s own character holds the turn',
+    brixiInitiative: 20,
+    dummyInitiative: 4,
+    // Brixi is both the current-turn combatant and the target, so attribution collapses
+    // to the established target-only phrasing "<target> <detail>" (issue #620). This is
+    // the half that always passed — kept as the regression guard.
+    expected: /Brixi Applybar took \d+ damage/i,
+    forbidden: /Straw Dummy to Brixi Applybar/i,
+  },
+] as const;
+
+interface Drill {
+  encounterId: number;
+  brixiCombatantId: number;
+  characterId: number;
+}
+
+/**
+ * Create the player-owned character, a monster, and a RUNNING encounter whose turn
+ * order is pinned by explicit initiative values (never rolled).
+ */
+async function startDrill(
+  dm: APIRequestContext,
+  campaignId: number | string,
+  playerUserId: string,
+  initiative: { brixi: number; dummy: number },
+): Promise<Drill> {
+  // A player-owned character with a 2d6+4 attack — always rolls >= 6, so a damage
+  // total is always positive and the apply bar always appears.
+  const character = await (
+    await dm.post(`/api/v1/campaigns/${campaignId}/characters`, {
+      data: {
+        name: 'Brixi Applybar',
+        species: 'Human',
+        className: 'Fighter',
+        level: 5,
+        ownerUserId: playerUserId,
+        ac: 18,
+        hpCurrent: 45,
+        hpMax: 45,
+        stats: { STR: 18, DEX: 14, CON: 16, INT: 10, WIS: 12, CHA: 8 },
+        saveProficiencies: ['STR'],
+        actions: [{ name: 'Greatsword', kind: 'melee', toHit: '+7', damage: '2d6+4 slashing', notes: '' }],
+      },
+    })
+  ).json();
+  expect(character.id).toBeTruthy();
+  const characterId = character.id as number;
+
+  // A fresh encounter auto-adds the active character; add a monster the player can't edit.
+  // Issue #744: a campaign can have at most one live fight. The seeded "Ambush"
+  // encounter is RUNNING and must stay running for the combat-tracker suite, so end
+  // it before this drill starts and reopen it in the finally block below (/reopen
+  // preserves round/turnIndex — the seed fight is still at Round 1 with its seeded
+  // initiatives intact).
+  const live = await (await dm.get(`/api/v1/campaigns/${campaignId}/encounters?status=running`)).json();
+  for (const e of live as { id: number }[]) {
+    await dm.post(`/api/v1/encounters/${e.id}/end`);
+  }
+  const enc = await (
+    await dm.post(`/api/v1/campaigns/${campaignId}/encounters`, { data: { name: 'Apply-bar drill', hidden: false } })
+  ).json();
+  const encounterId = enc.id as number;
+
+  let brixiCombatantId: number | null =
+    (enc.combatants as Array<{ id: number; characterId: number | null }>).find((c) => c.characterId === characterId)?.id ?? null;
+  if (brixiCombatantId == null) {
+    const addRes = await dm.post(`/api/v1/encounters/${encounterId}/combatants`, {
+      data: { kind: 'character', characterId },
+    });
+    expect(addRes.ok(), `add Brixi combatant: ${await addRes.text()}`).toBeTruthy();
+    brixiCombatantId = ((await addRes.json()) as { id: number }).id;
+  }
+
+  const dummyRes = await dm.post(`/api/v1/encounters/${encounterId}/combatants`, {
+    data: { kind: 'monster', name: 'Straw Dummy', hpMax: 30 },
+  });
+  expect(dummyRes.ok(), `add Straw Dummy: ${await dummyRes.text()}`).toBeTruthy();
+  const dummyCombatantId = ((await dummyRes.json()) as { id: number }).id;
+
+  // Issue #1478: PIN the turn order. `initiative` is a DM-only field and /start orders by
+  // it descending, so these writes fully determine who holds the turn — no d20, no coin
+  // flip, no "whichever the roll produced" assertions downstream.
+  //
+  // Every combatant must be covered: creating an encounter auto-adds the whole active
+  // party, so the roster also holds seeded characters this drill does not care about, and
+  // /start rejects the encounter unless all of them have an initiative. They get 1, below
+  // both pinned values, so they can never take the turn away from the intended holder.
+  const roster = (await (await dm.get(`/api/v1/encounters/${encounterId}`)).json()) as {
+    combatants: Array<{ id: number }>;
+  };
+  for (const c of roster.combatants) {
+    const value =
+      c.id === brixiCombatantId ? initiative.brixi : c.id === dummyCombatantId ? initiative.dummy : 1;
+    const res = await dm.patch(`/api/v1/encounters/${encounterId}/combatants/${c.id}`, {
+      data: { initiative: value },
+    });
+    expect(res.ok(), `set initiative ${value} on ${c.id}: ${await res.text()}`).toBeTruthy();
+  }
+
+  const startRes = await dm.post(`/api/v1/encounters/${encounterId}/start`);
+  expect(startRes.ok(), `start encounter: ${await startRes.text()}`).toBeTruthy();
+
+  // Guard the premise of the whole test: assert the intended combatant actually holds
+  // the turn. If initiative ordering ever changes, this fails loudly here rather than
+  // silently turning the two cases below back into one.
+  const started = (await startRes.json()) as { currentCombatantId?: number | null };
+  const expectedCurrent = initiative.brixi > initiative.dummy ? brixiCombatantId : dummyCombatantId;
+  expect(started.currentCombatantId, 'the pinned initiative must decide the current turn').toBe(expectedCurrent);
+
+  return { encounterId, brixiCombatantId, characterId };
+}
+
+async function teardownDrill(dm: APIRequestContext, drill: Drill | null): Promise<void> {
+  // End before delete so a failed DELETE cannot leave a RUNNING fight that
+  // blocks restoreSeedEncounter's /reopen (ENCOUNTER_ALREADY_RUNNING, #744).
+  if (drill != null) {
+    await dm.post(`/api/v1/encounters/${drill.encounterId}/end`).catch(() => undefined);
+    await dm.delete(`/api/v1/encounters/${drill.encounterId}`).catch(() => undefined);
+    await dm.delete(`/api/v1/characters/${drill.characterId}`).catch(() => undefined);
+  }
+  // Issue #744: the seeded "Ambush" encounter was ended above so the drill could
+  // start; restore it so the combat-tracker suite finds it RUNNING again.
+  await restoreSeedEncounter();
+}
+
 test.describe('encounter dice — apply rolled damage', () => {
   test.use({ storageState: stateFor('player') });
 
-  test('a player rolls damage from their card and one-taps it onto an editable target', async ({ page }) => {
+  for (const order of TURN_ORDERS) {
+    test(`a player rolls damage from their card and one-taps it onto an editable target — ${order.label}`, async ({ page }) => {
+      const { baseURL, campaignId } = seed();
+
+      const playerCtx = await request.newContext({ baseURL });
+      const dm = await request.newContext({ baseURL });
+      let drill: Drill | null = null;
+      try {
+        await playerCtx.post('/api/v1/auth/login', { data: CREDS.player });
+        const me = await (await playerCtx.get('/api/v1/me')).json();
+        const playerUserId = String(me.user.id);
+
+        await dm.post('/api/v1/auth/login', { data: CREDS.dm });
+        drill = await startDrill(dm, campaignId, playerUserId, {
+          brixi: order.brixiInitiative,
+          dummy: order.dummyInitiative,
+        });
+
+        await page.goto(`/c/${campaignId}/encounters/${drill.encounterId}`);
+        await expect(page.getByText('Running', { exact: true })).toBeVisible();
+        // Owned card auto-expands; scope the damage control to Brixi's sheet.
+        const brixiCard = page.getByRole('region', { name: /Brixi Applybar character sheet/i });
+        await expect(brixiCard).toBeVisible();
+
+        // Roll the Greatsword damage from the owned (interactive) card.
+        await brixiCard.getByRole('button', { name: '2d6+4 slashing' }).click();
+        const rollToast = page.getByTestId('roll-result-toast');
+        await expect(rollToast).toBeVisible();
+        await expect(rollToast.getByTestId('roll-result-apply')).toBeVisible();
+        await rollToast.getByTestId('roll-result-apply').click();
+
+        const applyBar = page.getByTestId('apply-damage-bar');
+        await expect(applyBar).toBeVisible();
+
+        // A player may only apply to combatants they control — their own character, not the monster.
+        await expect(applyBar.getByRole('button', { name: 'Straw Dummy' })).toHaveCount(0);
+        const brixiTarget = applyBar.getByTestId(`apply-damage-target-${drill.brixiCombatantId}`);
+        await expect(brixiTarget).toBeVisible();
+
+        // Apply → HP drops, the combat log records the damage, and the bar dismisses.
+        await brixiTarget.click();
+        await expect(applyBar).toHaveCount(0);
+
+        // The write must SUCCEED. Before #1478 the monster-holds-the-turn case 403'd here
+        // and the apply bar still dismissed, so the only visible difference was a log line
+        // that never arrived. Assert no error banner as well as the log entry, so a
+        // regression shows up as a failure with a readable cause instead of a timeout.
+        // Target the error banner specifically. `getByRole('alert')` would also match the
+        // app's other live regions — the empty announcement region on every page, and the
+        // "Your turn — round 1, …" notice that appears precisely in the own-turn case.
+        await expect(page.getByTestId('error-note')).toHaveCount(0);
+
+        // Read the whole log textContent so chained/expandable rows still match.
+        const combatLog = page.getByRole('log', { name: 'Combat log' });
+        await expect(combatLog).toBeVisible();
+        await expect
+          .poll(async () => order.expected.test((await combatLog.textContent()) ?? ''), {
+            message: `combat log should contain ${order.expected}`,
+          })
+          .toBe(true);
+        // Assert the OTHER turn order's phrasing is absent, so neither case can quietly
+        // satisfy the other's assertion the way the old "accept either form" check did.
+        expect(order.forbidden.test((await combatLog.textContent()) ?? '')).toBe(false);
+      } finally {
+        await teardownDrill(dm, drill);
+        // Dispose the API contexts so they don't leak across the worker.
+        await playerCtx.dispose();
+        await dm.dispose();
+      }
+    });
+  }
+
+  /**
+   * Issue #1478: a failed apply must be VISIBLE. The apply bar dismisses on click
+   * regardless of the response, so before this test nothing distinguished a rejected
+   * apply from a successful one except a combat-log line that never showed up — which
+   * is exactly how the 403 hid behind "flaky test" for as long as it did.
+   *
+   * The rejection is injected at the network layer rather than provoked for real,
+   * because the client no longer sends the field that used to trigger it. Using the
+   * real COMBAT_LOG_ACTOR_DM_ONLY code also proves the server's new error code is
+   * wired through translateApiError to human-readable copy.
+   */
+  test('a rejected apply-damage surfaces a visible error instead of looking like success', async ({ page }) => {
     const { baseURL, campaignId } = seed();
 
     const playerCtx = await request.newContext({ baseURL });
     const dm = await request.newContext({ baseURL });
-    let characterId: number | null = null;
-    let encounterId: number | null = null;
+    let drill: Drill | null = null;
     try {
       await playerCtx.post('/api/v1/auth/login', { data: CREDS.player });
       const me = await (await playerCtx.get('/api/v1/me')).json();
       const playerUserId = String(me.user.id);
 
       await dm.post('/api/v1/auth/login', { data: CREDS.dm });
-      // A player-owned character with a 2d6+4 attack — always rolls >= 6, so a damage
-      // total is always positive and the apply bar always appears.
-      const character = await (
-        await dm.post(`/api/v1/campaigns/${campaignId}/characters`, {
-          data: {
-            name: 'Brixi Applybar',
-            species: 'Human',
-            className: 'Fighter',
-            level: 5,
-            ownerUserId: playerUserId,
-            ac: 18,
-            hpCurrent: 45,
-            hpMax: 45,
-            stats: { STR: 18, DEX: 14, CON: 16, INT: 10, WIS: 12, CHA: 8 },
-            saveProficiencies: ['STR'],
-            actions: [{ name: 'Greatsword', kind: 'melee', toHit: '+7', damage: '2d6+4 slashing', notes: '' }],
-          },
-        })
-      ).json();
-      expect(character.id).toBeTruthy();
-      characterId = character.id;
-      // A fresh encounter auto-adds the active character; add a monster the player can't edit.
-      // Issue #744: a campaign can have at most one live fight. The seeded "Ambush"
-      // encounter is RUNNING and must stay running for the combat-tracker suite, so end
-      // it before this drill starts and reopen it in the finally block below (/reopen
-      // preserves round/turnIndex — the seed fight is still at Round 1 with its seeded
-      // initiatives intact).
-      const live = await (await dm.get(`/api/v1/campaigns/${campaignId}/encounters?status=running`)).json();
-      for (const e of live as { id: number }[]) {
-        await dm.post(`/api/v1/encounters/${e.id}/end`);
-      }
-      const enc = await (await dm.post(`/api/v1/campaigns/${campaignId}/encounters`, { data: { name: 'Apply-bar drill', hidden: false } })).json();
-      encounterId = enc.id;
-      let brixiCombatantId: number | null = (
-        (enc.combatants as Array<{ id: number; characterId: number | null }>).find((c) => c.characterId === characterId)?.id ?? null
-      );
-      if (brixiCombatantId == null) {
-        const addRes = await dm.post(`/api/v1/encounters/${enc.id}/combatants`, {
-          data: { kind: 'character', characterId },
-        });
-        expect(addRes.ok(), `add Brixi combatant: ${await addRes.text()}`).toBeTruthy();
-        const added = (await addRes.json()) as { id: number };
-        brixiCombatantId = added.id;
-      }
-      await dm.post(`/api/v1/encounters/${enc.id}/combatants`, { data: { kind: 'monster', name: 'Straw Dummy', hpMax: 30 } });
-      const rollInitRes = await dm.post(`/api/v1/encounters/${enc.id}/roll-initiative`);
-      expect(rollInitRes.ok(), `roll initiative: ${await rollInitRes.text()}`).toBeTruthy();
-      const startRes = await dm.post(`/api/v1/encounters/${enc.id}/start`);
-      expect(startRes.ok(), `start encounter: ${await startRes.text()}`).toBeTruthy();
+      drill = await startDrill(dm, campaignId, playerUserId, { brixi: 4, dummy: 20 });
 
-      await page.goto(`/c/${campaignId}/encounters/${enc.id}`);
+      await page.goto(`/c/${campaignId}/encounters/${drill.encounterId}`);
       await expect(page.getByText('Running', { exact: true })).toBeVisible();
-      // Owned card auto-expands; scope the damage control to Brixi's sheet.
+
+      // Reject only the HP patch for Brixi's combatant; every other request is untouched.
+      await page.route(`**/api/v1/encounters/${drill.encounterId}/combatants/${drill.brixiCombatantId}`, async (route) => {
+        if (route.request().method() !== 'PATCH') return route.fallback();
+        await route.fulfill({
+          status: 403,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            type: 'about:blank',
+            title: 'Forbidden',
+            status: 403,
+            code: 'COMBAT_LOG_ACTOR_DM_ONLY',
+            message: 'Only a DM may set the combat-log actor.',
+          }),
+        });
+      });
+
       const brixiCard = page.getByRole('region', { name: /Brixi Applybar character sheet/i });
       await expect(brixiCard).toBeVisible();
-
-      // Roll the Greatsword damage from the owned (interactive) card.
       await brixiCard.getByRole('button', { name: '2d6+4 slashing' }).click();
       const rollToast = page.getByTestId('roll-result-toast');
-      await expect(rollToast).toBeVisible();
       await expect(rollToast.getByTestId('roll-result-apply')).toBeVisible();
       await rollToast.getByTestId('roll-result-apply').click();
 
       const applyBar = page.getByTestId('apply-damage-bar');
       await expect(applyBar).toBeVisible();
+      await applyBar.getByTestId(`apply-damage-target-${drill.brixiCombatantId}`).click();
 
-      // A player may only apply to combatants they control — their own character, not the monster.
-      await expect(applyBar.getByRole('button', { name: 'Straw Dummy' })).toHaveCount(0);
-      const brixiTarget = applyBar.getByTestId(`apply-damage-target-${brixiCombatantId}`);
-      await expect(brixiTarget).toBeVisible();
-
-      // Apply → HP drops, the combat log records the damage, and the bar dismisses.
-      await brixiTarget.click();
+      // The bar dismisses either way — that is the trap. The error banner is what makes
+      // the failure legible, and it must carry the translated cause, not a bare "403".
       await expect(applyBar).toHaveCount(0);
-      // Issue #620/#494: the damage may be attributed to the current-turn combatant (rendered
-      // as "X to Brixi Applybar: took N damage") when Brixi didn't win initiative, or
-      // unattributed ("Brixi Applybar took N damage") when she did. Accept either form.
-      // Read the whole log textContent so chained/expandable rows still match.
-      const combatLog = page.getByRole('log', { name: 'Combat log' });
-      await expect(combatLog).toBeVisible();
-      await expect
-        .poll(async () => /Brixi Applybar[\s\S]*took \d+ damage/i.test((await combatLog.textContent()) ?? ''))
-        .toBe(true);
+      const errorNote = page.getByTestId('error-note');
+      await expect(errorNote).toBeVisible();
+      await expect(errorNote).toContainText(/Only the DM can set who dealt that damage/i);
     } finally {
-      // End before delete so a failed DELETE cannot leave a RUNNING fight that
-      // blocks restoreSeedEncounter's /reopen (ENCOUNTER_ALREADY_RUNNING, #744).
-      if (encounterId != null) {
-        await dm.post(`/api/v1/encounters/${encounterId}/end`).catch(() => undefined);
-        await dm.delete(`/api/v1/encounters/${encounterId}`);
-      }
-      if (characterId != null) await dm.delete(`/api/v1/characters/${characterId}`);
-      // Issue #744: the seeded "Ambush" encounter was ended above so the drill could
-      // start; restore it so the combat-tracker suite finds it RUNNING again.
-      await restoreSeedEncounter();
-      // Dispose the API contexts so they don't leak across the worker.
+      await page.unrouteAll({ behavior: 'ignoreErrors' }).catch(() => undefined);
+      await teardownDrill(dm, drill);
       await playerCtx.dispose();
       await dm.dispose();
     }

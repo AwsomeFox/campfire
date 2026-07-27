@@ -1,6 +1,7 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 import { seed, stateFor } from './seed';
 import { transcriptStorageKey, type TranscriptEntry } from '../../src/features/ai-dm/transcript';
+import { transcriptRememberKey } from '../../src/features/ai-dm/transcriptPrivacy';
 
 test.use({ storageState: stateFor('player') });
 
@@ -73,7 +74,60 @@ function seedLongTranscript(_campaignId: number): TranscriptEntry[] {
   return entries;
 }
 
+/**
+ * Prime the transcript paint cache the way the app itself would (#573).
+ *
+ * Two keys, not one. Since #573 the cache is namespaced by the AUTHENTICATED USER, and it
+ * is only read when that user has opted into remembering transcripts on this device — the
+ * default is off, so seeding the transcript key alone now loads nothing. Reading the id
+ * from `/me` rather than hardcoding it keeps this honest: if namespacing regressed to a
+ * shared key, these specs would still pass, so they have to go through the real key
+ * builder with the real id.
+ */
+async function seedTranscriptCache(page: Page, campaignId: number, entries: TranscriptEntry[]): Promise<void> {
+  const me = await page.request.get('/api/v1/me');
+  expect(me.ok()).toBe(true);
+  const userId: number = (await me.json()).user.id;
+  const key = transcriptStorageKey(userId, campaignId);
+  expect(key).not.toBeNull();
+  const grantKey = transcriptRememberKey(userId);
+  expect(grantKey).not.toBeNull();
+  await page.addInitScript(
+    ({ key: k, grantKey: g, payload }) => {
+      localStorage.setItem(g, '1');
+      localStorage.setItem(k, payload);
+    },
+    { key: key!, grantKey: grantKey!, payload: JSON.stringify({ entries }) },
+  );
+}
+
 test.describe('AI table transcript scroll (#590)', () => {
+/**
+ * Wait until the transcript's MOUNT tail-pin has fully settled (#590).
+ *
+ * `pinTranscriptToTail` suppresses scroll-unpin for two animation frames and then
+ * RE-PINS if follow is still intended. A scroll issued while that window is open is
+ * therefore either ignored outright or undone a frame later, leaving the transcript
+ * pinned, `unreadBelow` reset to 0, and no jump affordance — so any assertion about
+ * leaving the tail races the mount rather than testing the follow state machine.
+ * Settled means: no jump button, and scrollTop within 48px of the maximum.
+ */
+async function expectTailPinned(page: Page, transcript: Locator): Promise<void> {
+  await expect
+    .poll(
+      async () => {
+        const jumpCount = await page.getByTestId('transcript-jump-latest').count();
+        const { top, max } = await transcript.evaluate((node) => ({
+          top: node.scrollTop,
+          max: node.scrollHeight - node.clientHeight,
+        }));
+        return jumpCount === 0 && max > 0 && max - top <= 48;
+      },
+      { timeout: 15_000 },
+    )
+    .toBe(true);
+}
+
   test('opens at the latest line when the transcript is hydrated from storage', async ({ page }) => {
     const { campaignId } = seed();
     const entries = seedLongTranscript(campaignId);
@@ -81,12 +135,7 @@ test.describe('AI table transcript scroll (#590)', () => {
     // banners settle — short 520px viewports crushed clientHeight to ~50px in CI.
     await page.setViewportSize({ width: 800, height: 900 });
     await mockDriverTable(page, campaignId);
-    await page.addInitScript(
-      ({ key, payload }) => {
-        localStorage.setItem(key, payload);
-      },
-      { key: transcriptStorageKey(campaignId), payload: JSON.stringify({ entries }) },
-    );
+    await seedTranscriptCache(page, campaignId, entries);
 
     await page.goto(`/c/${campaignId}/table`);
     const transcript = page.getByRole('log', { name: 'Table transcript' });
@@ -94,14 +143,7 @@ test.describe('AI table transcript scroll (#590)', () => {
     // Wait for mount tail-pin: no jump affordance and scroll near the latest line.
     // Flex layout / font settle on CI can leave the jump button visible for a frame
     // if we assert count===0 before scrollTop catches up (#590).
-    await expect.poll(async () => {
-      const jumpCount = await page.getByTestId('transcript-jump-latest').count();
-      const { top, max } = await transcript.evaluate((node) => ({
-        top: node.scrollTop,
-        max: node.scrollHeight - node.clientHeight,
-      }));
-      return jumpCount === 0 && max > 0 && max - top <= 48;
-    }, { timeout: 15_000 }).toBe(true);
+    await expectTailPinned(page, transcript);
     await expect(transcript.getByText('Earlier table line 80')).toBeVisible();
   });
 
@@ -110,17 +152,20 @@ test.describe('AI table transcript scroll (#590)', () => {
     const entries = seedLongTranscript(campaignId);
     await page.setViewportSize({ width: 800, height: 900 });
     await mockDriverTable(page, campaignId);
-    await page.addInitScript(
-      ({ key, payload }) => {
-        localStorage.setItem(key, payload);
-      },
-      { key: transcriptStorageKey(campaignId), payload: JSON.stringify({ entries }) },
-    );
+    await seedTranscriptCache(page, campaignId, entries);
 
     await page.goto(`/c/${campaignId}/table`);
     const transcript = page.getByRole('log', { name: 'Table transcript' });
     await expect(transcript).toHaveAttribute('aria-live', 'off');
     await expect(page.getByTestId('ai-narration-log')).toHaveAttribute('role', 'log');
+
+    // The sibling test above waits for the mount tail-pin before asserting; this one
+    // scrolled away immediately, so on a slow machine the scroll could land inside
+    // pinTranscriptToTail's two-frame suppression window and be swallowed (or undone by
+    // its trailing re-pin). Follow then stayed engaged, the send below cleared unreadBelow
+    // instead of incrementing it, and the jump-to-latest assertions failed — which is the
+    // shape this spec kept failing in on CI and recovering from on retry.
+    await expectTailPinned(page, transcript);
 
     await transcript.focus();
     await transcript.evaluate((node) => {

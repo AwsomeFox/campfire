@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, ParseIntPipe, Post, Query } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, ParseIntPipe, Post, Query } from '@nestjs/common';
 import { ApiOperation, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { ModerationReportStatus } from '@campfire/schema';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -13,6 +13,7 @@ import {
   ModerationReportCreateDto,
   ModerationReportDto,
   ModerationReportPageDto,
+  ModerationSilenceCreateDto,
 } from './moderation.dto';
 import { parseModerationLimit } from './moderation-pagination';
 
@@ -212,5 +213,46 @@ export class ModerationController {
   async listMutes(@Param('campaignId', ParseIntPipe) campaignId: number, @CurrentUser() user: RequestUser) {
     await this.access.requireRole(user, campaignId, 'dm', { allowArchived: true });
     return this.moderation.listMutes(campaignId);
+  }
+
+  @Post('mutes')
+  @ApiOperation({
+    summary: 'Silence a member temporarily',
+    description:
+      'dm role required. Issue #597: the middle rung between "do nothing" and "remove them from the campaign". ' +
+      'The member keeps their seat, their character, and every read — they simply cannot post comments or notes ' +
+      'until the silence expires or a DM lifts it. Pass `hours` for a bounded cool-off (strongly preferred); ' +
+      'omitting it silences indefinitely until lifted, which is a removal with extra steps if nobody remembers. ' +
+      'Unlike the queue\'s `mute` action this needs no report, so a DM does not have to manufacture a permanent ' +
+      'accusation record to calm a table down. A DM cannot be silenced this way (they could lift it themselves) — ' +
+      'escalate a report instead. Recorded as `moderation.silence`.',
+  })
+  @ApiResponse({ status: 201, description: 'The active silence.' })
+  @ApiResponse({ status: 400, description: 'Target is not a member, is the caller, or holds the dm role.' })
+  async silence(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @Body() body: ModerationSilenceCreateDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    // allowArchived: a paused campaign is exactly when a thread keeps going unmoderated.
+    const role = await this.access.requireRole(user, campaignId, 'dm', { allowArchived: true });
+    return this.moderation.silenceMember(campaignId, body, user, role);
+  }
+
+  @Delete('mutes/:muteId')
+  @ApiOperation({
+    summary: 'Lift a silence',
+    description: 'dm role required. Ends a temporary silence early. Recorded as `moderation.unsilence`.',
+  })
+  @ApiResponse({ status: 200, description: 'Lifted.' })
+  @ApiResponse({ status: 404, description: 'No live silence with that id in this campaign.' })
+  async liftSilence(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @Param('muteId', ParseIntPipe) muteId: number,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const role = await this.access.requireRole(user, campaignId, 'dm', { allowArchived: true });
+    await this.moderation.liftSilence(campaignId, muteId, user, role);
+    return { ok: true };
   }
 }

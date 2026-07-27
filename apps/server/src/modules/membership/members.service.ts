@@ -63,6 +63,7 @@ export class MembersService {
         characterId: campaignMembers.characterId,
         aiExternalUseConsent: campaignMembers.aiExternalUseConsent,
         primaryOwner: campaignMembers.primaryOwner,
+        interactiveGuest: campaignMembers.interactiveGuest,
         createdAt: campaignMembers.createdAt,
         updatedAt: campaignMembers.updatedAt,
         username: users.username,
@@ -81,6 +82,7 @@ export class MembersService {
       characterId: r.characterId,
       aiExternalUseConsent: r.aiExternalUseConsent,
       primaryOwner: r.primaryOwner,
+      interactiveGuest: r.interactiveGuest,
       username: r.username ?? '',
       displayName: r.displayName ?? '',
       disabled: r.disabled ?? true,
@@ -737,6 +739,10 @@ export class MembersService {
     const update: Partial<typeof campaignMembers.$inferInsert> = { updatedAt: ts };
     if (input.role !== undefined) update.role = input.role;
     if (input.characterId !== undefined) update.characterId = input.characterId;
+    // Issue #597: the interactive-guest capability. Stored on every seat but only
+    // CONSULTED on a viewer one, so a DM can pre-grant it before demoting somebody to
+    // viewer and the seat never passes through a read-only window mid-conversation.
+    if (input.interactiveGuest !== undefined) update.interactiveGuest = input.interactiveGuest;
 
     // Re-read the member, count usable DMs, validate references, mutate the role,
     // claim/transfer an exclusive character seat, and sync ownership inside one

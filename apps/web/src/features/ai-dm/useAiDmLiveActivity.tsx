@@ -32,6 +32,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import type { AiDmMode } from '@campfire/schema';
 import { useAiDmSeat, useAiDmSession, invalidateAiDm } from '../../lib/query';
 import { useAiDmStream, type AiDmStreamEvent } from '../../lib/useAiDmStream';
+import { useAuth } from '../../app/auth';
 import { usePendingHydrate } from './usePendingHydrate';
 import { invalidateForToolEvent, resolveToolActivity, toolResource, type ToolChip, type ToolStreamEvent } from './toolActivity';
 import {
@@ -107,55 +108,86 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
   const enabled = mode === 'driver' && campaignId !== undefined;
 
   const [state, setState] = useState(INITIAL_STATE);
-  const [transcript, dispatchTranscript] = useReducer(
-    transcriptReducer,
-    campaignId,
-    // 'activity' scope (#572): this provider is NON-authoritative — it folds the legacy
-    // signal frames into bubbles with random ids and no `seq`. AiTablePage is mounted inside
-    // the same Layout and writes the authoritative format. Sharing one key made the last
-    // writer before a reload win, and a legacy snapshot hydrated by the authoritative page
-    // cannot be merged by eventId, so every narration line rendered twice.
-    (id) => (id !== undefined ? loadTranscript(id, 'activity') : emptyTranscript),
-  );
+  // #573: the reducer starts EMPTY and is hydrated by the key effect below, never by a
+  // lazy initializer. The initializer ran on the very first render — before `/me` had
+  // resolved — so it was structurally incapable of knowing whose cache it was reading.
+  // The cost is that cached scrollback paints one commit later than it used to.
+  const [transcript, dispatchTranscript] = useReducer(transcriptReducer, emptyTranscript);
 
   const seededRef = useRef(false);
   /**
-   * A hydrate dispatched by the key effect below has not been applied yet.
+   * The shared hydrate/identity latch (#572, #573). It owns two things here:
    *
-   * The key effect, the save effect and the seed effect all run in the SAME commit, and
-   * effects see the pre-dispatch `transcript`. Without this latch the seed effect read
-   * `entries.length === 0` on the very pass that queued a hydrate of the cached scrollback,
-   * seeded a 2-line join-context placeholder over it, and then persisted that placeholder —
-   * destroying the cached transcript for every surface sharing the store. Skip exactly one
-   * pass so the seed decision is made against the hydrated state.
+   * (a) A hydrate dispatched by the key effect below has not been applied yet. The key
+   *     effect, the save effect and the seed effect all run in the SAME commit, and
+   *     effects see the pre-dispatch `transcript`. Without this latch the seed effect read
+   *     `entries.length === 0` on the very pass that queued a hydrate of the cached
+   *     scrollback, seeded a 2-line join-context placeholder over it, and then persisted
+   *     that placeholder — destroying the cached transcript for every surface sharing the
+   *     store. Skip exactly one pass so the seed decision is made against hydrated state.
+   *
+   * (b) The established viewer, which is null until `/me` resolves. This provider is
+   *     mounted in `Layout` for every campaign-scoped page, so it is one of the earliest
+   *     things to run after a reload — exactly the window in which a slow auth check used
+   *     to let it read the previous account's cache.
    */
-  const pendingHydrate = usePendingHydrate();
+  const { me, ready } = useAuth();
+  const pendingHydrate = usePendingHydrate({ ready, userId: me?.user.id ?? null });
+  const viewerId = pendingHydrate.viewerId;
 
-  // Reset activity + transcript when campaign or driver mode changes.
-  const prevKeyRef = useRef<string>('');
-  const key = `${campaignId ?? ''}:${enabled}`;
+  // 'activity' scope (#572): this provider is NON-authoritative — it folds the legacy
+  // signal frames into bubbles with random ids and no `seq`. AiTablePage is mounted inside
+  // the same Layout and writes the authoritative format. Sharing one key made the last
+  // writer before a reload win, and a legacy snapshot hydrated by the authoritative page
+  // cannot be merged by eventId, so every narration line rendered twice.
+  const key = `${viewerId ?? ''}:${campaignId ?? ''}:${enabled}`;
+
+  /**
+   * Which `key` the reducer state currently belongs to.
+   *
+   * The save effect is declared — and therefore RUNS — before the key effect that advances
+   * this ref, which is the whole point: on the commit that re-points the reducer, the save
+   * effect still sees the OLD owner, mismatches, and skips. Without it the switch commit
+   * wrote the PREVIOUS key's entries under the NEW key — and since `saveTranscript` never
+   * writes an empty state, the hydrate that followed could not overwrite the mistake when
+   * the new key's own cache was empty, so the wrong transcript stuck. That was already
+   * true across campaigns before #573 (`AiTablePage` has always guarded it this way; this
+   * hook did not); with a user in the key it would have laundered a transcript across
+   * ACCOUNTS, which is the exact leak this issue is about.
+   */
+  const transcriptOwnerRef = useRef<string>('');
+
   useEffect(() => {
-    if (prevKeyRef.current !== key) {
-      prevKeyRef.current = key;
-      setState((s) => ({ ...INITIAL_STATE, mode: s.mode }));
-      seededRef.current = false;
-      pendingHydrate.mark();
-      if (campaignId !== undefined) {
-        dispatchTranscript({ type: 'hydrate', state: enabled ? loadTranscript(campaignId, 'activity') : emptyTranscript });
-      } else {
-        dispatchTranscript({ type: 'reset' });
-      }
+    if (!enabled || campaignId === undefined || viewerId === null) return;
+    if (transcriptOwnerRef.current !== key) return;
+    saveTranscript(viewerId, campaignId, transcript, 'activity');
+  }, [campaignId, enabled, transcript, viewerId, key]);
+
+  // Reset activity + transcript when the viewer, campaign or driver mode changes.
+  const prevKeyRef = useRef<string>('');
+  useEffect(() => {
+    if (prevKeyRef.current === key) return;
+    // Nothing may be hydrated until `/me` has answered; the next pass (once `ready` flips)
+    // re-runs this effect with a real key. Leaving `prevKeyRef` unadvanced is deliberate.
+    if (pendingHydrate.identityPending) return;
+    prevKeyRef.current = key;
+    setState((s) => ({ ...INITIAL_STATE, mode: s.mode }));
+    seededRef.current = false;
+    pendingHydrate.mark();
+    if (campaignId !== undefined && viewerId !== null) {
+      dispatchTranscript({
+        type: 'hydrate',
+        state: enabled ? loadTranscript(viewerId, campaignId, 'activity') : emptyTranscript,
+      });
+    } else {
+      dispatchTranscript({ type: 'reset' });
     }
-  }, [key, campaignId, enabled]);
+    transcriptOwnerRef.current = key;
+  }, [key, campaignId, enabled, viewerId, pendingHydrate.identityPending]);
 
   useEffect(() => {
     setState((s) => (s.mode === mode ? s : { ...s, mode }));
   }, [mode]);
-
-  useEffect(() => {
-    if (!enabled || campaignId === undefined) return;
-    saveTranscript(campaignId, transcript, 'activity');
-  }, [campaignId, enabled, transcript]);
 
   // Seed join-context from thin session state when local transcript is empty.
   useEffect(() => {
@@ -166,8 +198,12 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
     }
     if (seededRef.current) return;
     // A hydrate is queued but not yet applied — deciding "empty, so seed" here would
-    // overwrite the scrollback that hydrate is about to restore.
+    // overwrite the scrollback that hydrate is about to restore. Also covers the identity
+    // change that auto-marks the latch.
     if (pendingHydrate.consume()) return;
+    // #573: a seeded placeholder is still table content, and persisting it under a viewer
+    // we have not established yet is the same leak in the other direction.
+    if (pendingHydrate.identityPending || viewerId === null) return;
     if (!seatQuery.isFetched || !sessionQuery.isFetched) return;
     if (session?.scene || session?.lastNarration) {
       dispatchTranscript({ type: 'seed', scene: session.scene, lastNarration: session.lastNarration });
@@ -180,6 +216,8 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
     seatQuery.isFetched,
     sessionQuery.isFetched,
     session,
+    viewerId,
+    pendingHydrate.identityPending,
   ]);
 
   const stableDispatch = useCallback((action: TranscriptAction) => {

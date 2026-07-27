@@ -64,6 +64,7 @@ import {
 } from './memberControlsA11y';
 import { useDisclosure } from '../../components/useDisclosure';
 import { InviteQrCard } from './InviteQrCard';
+import { SafetyControlsCard } from '../safety/SafetyControlsCard';
 
 const ROLE_CHIP: Record<Role, string> = {
   dm: 'cf-chip-dm',
@@ -178,6 +179,7 @@ export default function MembersPage() {
           <ReadOnlyMemberTable members={members ?? []} />
         </Card>
         <AiConsentCard campaignId={id} members={members ?? []} myUserId={myUserId} onChange={() => load()} />
+        <SafetyControlsCard campaignId={id} members={members ?? []} myUserId={myUserId} />
         <YourMembershipCard campaignId={id} members={members ?? []} myUserId={myUserId} />
       </div>
     );
@@ -204,6 +206,8 @@ export default function MembersPage() {
       />
 
       <AiConsentCard campaignId={id} members={members ?? []} myUserId={myUserId} onChange={() => load()} />
+
+      <SafetyControlsCard campaignId={id} members={members ?? []} myUserId={myUserId} />
 
       <GuestDmGrantsCard
         campaignId={id}
@@ -1191,6 +1195,7 @@ function MemberRow({
   const { t } = useTranslation();
   const announce = useAnnounce();
   const [savingRole, setSavingRole] = useState(false);
+  const [savingGuest, setSavingGuest] = useState(false);
   const [savingChar, setSavingChar] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [confirmingRemove, setConfirmingRemove] = useState(false);
@@ -1214,6 +1219,32 @@ function MemberRow({
       announce(msg, { assertive: true });
     } finally {
       setSavingRole(false);
+    }
+  }
+
+  /**
+   * Issue #597: grant / revoke the interactive-guest capability on a viewer seat.
+   * Only rendered for a viewer, because it is only CONSULTED for a viewer — a player
+   * or DM is interactive by role, and showing a dead toggle beside them would imply
+   * the flag means something there.
+   */
+  async function changeInteractiveGuest(next: boolean) {
+    setSavingGuest(true);
+    onError(null);
+    try {
+      await api.patch(`${API}/campaigns/${campaignId}/members/${member.id}`, { interactiveGuest: next });
+      announce(
+        next
+          ? `${name} can now take part in discussion as an interactive guest.`
+          : `${name} is now a read-only viewer.`,
+      );
+      onChange();
+    } catch (err) {
+      const msg = translateApiError(err, t, { fallbackKey: 'errors.loadFailed' });
+      onError(msg);
+      announce(msg, { assertive: true });
+    } finally {
+      setSavingGuest(false);
     }
   }
 
@@ -1348,6 +1379,25 @@ function MemberRow({
         <option value="player">player</option>
         <option value="viewer">viewer</option>
       </select>
+      {member.role === 'viewer' && (
+        <label
+          className="flex items-center gap-1.5 text-[11px] text-secondary"
+          title={
+            'Issue #597: a viewer seat is read-only by default — no comments, shared notes, whispers, or DM-inbox ' +
+            'posts. Grant this to let a non-player take part in discussion without giving them authority over ' +
+            'campaign content.'
+          }
+        >
+          <input
+            type="checkbox"
+            checked={member.interactiveGuest}
+            disabled={savingGuest}
+            aria-label={`Interactive guest for ${name}`}
+            onChange={(e) => void changeInteractiveGuest(e.target.checked)}
+          />
+          interactive guest
+        </label>
+      )}
       <select
         className="cf-select !min-h-0 !py-1 text-xs"
         style={{ width: 130 }}

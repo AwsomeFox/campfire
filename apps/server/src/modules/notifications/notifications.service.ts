@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger, NotFoundException, type OnApplicationBootstrap } from '@nestjs/common';
-import { and, count, desc, eq, exists, gte, inArray, isNotNull, isNull, lt, lte, sql, type SQL } from 'drizzle-orm';
+import { and, count, desc, eq, exists, gte, inArray, isNotNull, isNull, lt, lte, notInArray, or, sql, type SQL } from 'drizzle-orm';
 import {
   NOTIFICATION_CATEGORIES,
   QuietHours,
@@ -27,6 +27,7 @@ import {
 } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import type { RequestUser } from '../../common/user.types';
+import { blockedTargetsOf, suppressedRecipients } from '../../common/safety-controls';
 import { decideDelivery, isWithinQuietHours } from './notification-preferences.util';
 
 /**
@@ -169,7 +170,7 @@ export class NotificationsService implements OnApplicationBootstrap {
     if (recipient === null) return;
     if (actor && recipient === numericUserId(actor.id)) return;
     try {
-      await this.dispatch([recipient], campaignId, event);
+      await this.dispatch([recipient], campaignId, event, actor?.id ?? null);
     } catch (err) {
       this.logger.warn(`notifyUser failed for user ${recipient} in campaign ${campaignId}: ${String(err)}`);
     }
@@ -188,7 +189,7 @@ export class NotificationsService implements OnApplicationBootstrap {
     const recipient = numericUserId(userId);
     if (recipient === null) return;
     if (actor && recipient === numericUserId(actor.id)) return;
-    await this.dispatch([recipient], campaignId, event);
+    await this.dispatch([recipient], campaignId, event, actor?.id ?? null);
   }
 
   /** Notify every campaign member except the actor (e.g. "recap posted"). */
@@ -200,7 +201,7 @@ export class NotificationsService implements OnApplicationBootstrap {
         .where(eq(campaignMembers.campaignId, campaignId));
       const actorId = actor ? numericUserId(actor.id) : null;
       const recipients = members.map((m) => m.userId).filter((id) => actorId === null || id !== actorId);
-      await this.dispatch(recipients, campaignId, event);
+      await this.dispatch(recipients, campaignId, event, actor?.id ?? null);
     } catch (err) {
       this.logger.warn(`notifyCampaign failed for campaign ${campaignId}: ${String(err)}`);
     }
@@ -212,24 +213,65 @@ export class NotificationsService implements OnApplicationBootstrap {
    * at most two preference lookups regardless of recipient count (no N+1), and
    * critical categories short-circuit the lookups entirely.
    */
-  private async dispatch(recipients: number[], campaignId: number, event: NotificationEvent): Promise<void> {
+  private async dispatch(
+    recipients: number[],
+    campaignId: number,
+    event: NotificationEvent,
+    actorUserId: string | null,
+  ): Promise<void> {
     if (recipients.length === 0) return;
     const category = notificationCategory(event.type);
 
-    // Critical categories are always delivered immediately — no gating.
+    // ISSUE #597 — THE ONE PLACE A BLOCK STOPS A NOTIFICATION.
+    //
+    // Enforcement sits here, at the recipient-side fan-out chokepoint, and NOT on the
+    // sender's request path. That placement is the whole design:
+    //
+    //  - The sender's write does exactly the same work whether or not they are blocked.
+    //    Their whisper is created, their comment is posted, the response is a normal
+    //    201 with a normal body. There is no error to read, no status to compare, and
+    //    no delivery receipt to inspect — the API has never told a sender whether a
+    //    bell rang.
+    //  - "No row was written for this recipient" is ALREADY an ordinary outcome here:
+    //    a recipient whose category mode is `muted` produces exactly the same absence
+    //    (see decideDelivery below), and has since #789. A block therefore adds no new
+    //    observable state — it reuses one the sender could never see and could never
+    //    distinguish from a preference they have no access to.
+    //  - The alternative — refusing the whisper at `resolveWhisperTarget` with "not a
+    //    member" or a 403 — was rejected precisely because it IS an oracle: it tells a
+    //    harasser they have been blocked, by whom, and exactly when, which is the
+    //    moment escalation moves off-platform. A control that announces itself to the
+    //    person it protects against is worse than no control.
+    //
+    // Timing is not a side channel either: the suppression query runs for EVERY
+    // dispatch, before the delivery decision, so a blocked and an unblocked send do the
+    // same number of round trips. The only difference is which ids come back.
+    const suppressed = await suppressedRecipients(this.db, recipients.map(String), {
+      campaignId,
+      actorUserId,
+      entityType: event.entityType ?? null,
+      entityId: event.entityId ?? null,
+    });
+    const allowed = suppressed.size === 0 ? recipients : recipients.filter((id) => !suppressed.has(String(id)));
+    if (allowed.length === 0) return;
+
+    // Critical categories are always delivered immediately — no gating. Note that the
+    // safety filter above applies even here: `access`/`security` bypass a recipient's
+    // *preferences*, which are convenience settings, but a block is a safety decision
+    // and an abuser must not be able to reach a blocker by choosing an event type.
     if (isCriticalNotificationCategory(category)) {
-      await this.insertRows(recipients, campaignId, event);
+      await this.insertRows(allowed, campaignId, event, actorUserId);
       return;
     }
 
     const now = Date.now();
-    const modeByUser = await this.loadModes(recipients, campaignId, category);
-    const quietByUser = await this.loadQuietHours(recipients, campaignId);
+    const modeByUser = await this.loadModes(allowed, campaignId, category);
+    const quietByUser = await this.loadQuietHours(allowed, campaignId);
 
     const immediate: number[] = [];
     const digest: number[] = [];
     const quiet: number[] = [];
-    for (const userId of recipients) {
+    for (const userId of allowed) {
       const decision = decideDelivery(category, modeByUser.get(userId), quietByUser.get(userId) ?? null, now);
       if (decision.action === 'immediate') immediate.push(userId);
       else if (decision.action === 'muted') continue;
@@ -239,9 +281,9 @@ export class NotificationsService implements OnApplicationBootstrap {
 
     if (immediate.length > 0 || digest.length > 0 || quiet.length > 0) {
       this.db.transaction((tx) => {
-        if (immediate.length > 0) this.insertRowsTx(tx, immediate, campaignId, event);
-        if (digest.length > 0) this.enqueueDeferredTx(tx, digest, campaignId, event, 'digest');
-        if (quiet.length > 0) this.enqueueDeferredTx(tx, quiet, campaignId, event, 'quiet_hours');
+        if (immediate.length > 0) this.insertRowsTx(tx, immediate, campaignId, event, actorUserId);
+        if (digest.length > 0) this.enqueueDeferredTx(tx, digest, campaignId, event, 'digest', actorUserId);
+        if (quiet.length > 0) this.enqueueDeferredTx(tx, quiet, campaignId, event, 'quiet_hours', actorUserId);
       });
     }
   }
@@ -285,7 +327,13 @@ export class NotificationsService implements OnApplicationBootstrap {
     };
   }
 
-  private insertRowsTx(tx: SyncDb, recipients: number[], campaignId: number, event: NotificationEvent): void {
+  private insertRowsTx(
+    tx: SyncDb,
+    recipients: number[],
+    campaignId: number,
+    event: NotificationEvent,
+    actorUserId: string | null,
+  ): void {
     if (recipients.length === 0) return;
     const ts = nowIso();
     const dataJson = event.data == null ? null : JSON.stringify(event.data);
@@ -302,6 +350,9 @@ export class NotificationsService implements OnApplicationBootstrap {
           commentId: event.commentId ?? null,
           data: dataJson,
           actorName: event.actorName ?? '',
+          // Issue #597: persist WHO, not just their display name, so a block filed
+          // later can filter bell items that already exist.
+          actorUserId: actorUserId ?? null,
           readAt: null,
           createdAt: ts,
         })),
@@ -309,8 +360,13 @@ export class NotificationsService implements OnApplicationBootstrap {
       .run();
   }
 
-  private async insertRows(recipients: number[], campaignId: number, event: NotificationEvent): Promise<void> {
-    this.insertRowsTx(this.db, recipients, campaignId, event);
+  private async insertRows(
+    recipients: number[],
+    campaignId: number,
+    event: NotificationEvent,
+    actorUserId: string | null,
+  ): Promise<void> {
+    this.insertRowsTx(this.db, recipients, campaignId, event, actorUserId);
   }
 
   /** Persist deferred notifications for later flush (digest cadence / after quiet hours). */
@@ -320,6 +376,7 @@ export class NotificationsService implements OnApplicationBootstrap {
     campaignId: number,
     event: NotificationEvent,
     reason: 'digest' | 'quiet_hours',
+    actorUserId: string | null,
   ): void {
     if (recipients.length === 0) return;
     const ts = nowIso();
@@ -337,6 +394,7 @@ export class NotificationsService implements OnApplicationBootstrap {
           commentId: event.commentId ?? null,
           data: dataJson,
           actorName: event.actorName ?? '',
+          actorUserId: actorUserId ?? null,
           reason,
           createdAt: ts,
         })),
@@ -349,8 +407,9 @@ export class NotificationsService implements OnApplicationBootstrap {
     campaignId: number,
     event: NotificationEvent,
     reason: 'digest' | 'quiet_hours',
+    actorUserId: string | null = null,
   ): Promise<void> {
-    this.enqueueDeferredTx(this.db, recipients, campaignId, event, reason);
+    this.enqueueDeferredTx(this.db, recipients, campaignId, event, reason, actorUserId);
   }
 
   /**
@@ -396,6 +455,7 @@ export class NotificationsService implements OnApplicationBootstrap {
               commentId: row.commentId,
               data: row.data,
               actorName: row.actorName,
+              actorUserId: row.actorUserId,
               readAt: null,
               createdAt: row.createdAt,
             });
@@ -611,6 +671,25 @@ export class NotificationsService implements OnApplicationBootstrap {
     ))`;
   }
 
+  /**
+   * Issue #597: bell items whose actor the reader now BLOCKS are dropped from the list
+   * AND from the unread count — same "never advertise what the list will not show"
+   * rule the quarantine filter above follows, so a block cannot leave behind a phantom
+   * unread badge the reader can only clear by looking at the thing they blocked.
+   *
+   * Backward-looking on purpose: dispatch already stops NEW items, but the point of
+   * blocking somebody is usually that they have already been in your inbox. Rows
+   * predating the actor_user_id column carry NULL and are left alone — the server
+   * cannot honestly attribute them, and guessing from the display name would be a
+   * misattribution risk (two members may share a name).
+   *
+   * A sender-side `mute_sender` is deliberately NOT applied here: a mute means "stop
+   * pinging me", not "erase what you already sent me".
+   */
+  private static blockedActorFilter(blockedActorIds: string[]): SQL {
+    return or(isNull(notifications.actorUserId), notInArray(notifications.actorUserId, blockedActorIds))!;
+  }
+
   async listForUser(
     user: RequestUser,
     opts: ListNotificationsOptions = {},
@@ -626,6 +705,8 @@ export class NotificationsService implements OnApplicationBootstrap {
       isNull(campaigns.deletedAt),
       NotificationsService.quarantinedCommentFilter(),
     ];
+    const blocked = await blockedTargetsOf(this.db, user.id, null);
+    if (blocked.size > 0) conditions.push(NotificationsService.blockedActorFilter([...blocked]));
     if (opts.unreadOnly) conditions.push(isNull(notifications.readAt));
     if (opts.campaignId) conditions.push(eq(notifications.campaignId, opts.campaignId));
     if (opts.type) conditions.push(eq(notifications.type, opts.type));
@@ -674,18 +755,19 @@ export class NotificationsService implements OnApplicationBootstrap {
   async unreadCount(user: RequestUser): Promise<number> {
     const userId = numericUserId(user.id);
     if (userId === null) return 0;
+    const blocked = await blockedTargetsOf(this.db, user.id, null);
+    const conditions: SQL[] = [
+      eq(notifications.userId, userId),
+      isNull(notifications.readAt),
+      isNull(campaigns.deletedAt),
+      NotificationsService.quarantinedCommentFilter(),
+    ];
+    if (blocked.size > 0) conditions.push(NotificationsService.blockedActorFilter([...blocked]));
     const [row] = await this.db
       .select({ value: count() })
       .from(notifications)
       .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
-      .where(
-        and(
-          eq(notifications.userId, userId),
-          isNull(notifications.readAt),
-          isNull(campaigns.deletedAt),
-          NotificationsService.quarantinedCommentFilter(),
-        ),
-      );
+      .where(and(...conditions));
     return row?.value ?? 0;
   }
 
