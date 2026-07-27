@@ -186,7 +186,6 @@ export class BackupArchiveReader {
 
   async extractToFile(entry: Entry, destination: string, signal?: AbortSignal): Promise<{ bytes: number; sha256: string }> {
     await fs.promises.mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
-    const output = fs.createWriteStream(destination, { flags: 'wx', mode: 0o600 });
     let actual = 0;
     const hash = createHash('sha256');
     try {
@@ -202,11 +201,16 @@ export class BackupArchiveReader {
             callback(null, chunk);
           },
         });
-        await pipeline(source, limiter, output);
+        // Create the destination only as pipeline takes ownership, after the
+        // ZIP source has opened, so every filesystem error has a listener.
+        await pipeline(
+          source,
+          limiter,
+          fs.createWriteStream(destination, { flags: 'wx', mode: 0o600 }),
+        );
       }, signal);
       return { bytes: actual, sha256: hash.digest('hex') };
     } catch (err) {
-      output.destroy();
       await fs.promises.rm(destination, { force: true });
       throw err;
     }
@@ -214,18 +218,20 @@ export class BackupArchiveReader {
 
   private async stream(entry: Entry, consume: (source: Readable) => Promise<void>, signal?: AbortSignal): Promise<void> {
     if (signal?.aborted) invalid('archive read was cancelled');
-    const source = await new Promise<Readable>((resolve, reject) => this.zip.openReadStream(entry, (err, stream) => err || !stream ? reject(err ?? new Error('Cannot open entry')) : resolve(stream)));
-    const abort = () => source.destroy(new Error('aborted'));
-    signal?.addEventListener('abort', abort, { once: true });
-    // Cancellation can occur while openReadStream's callback is pending. Abort
-    // events are not replayed to a listener registered after they fire, so
-    // close the newly opened source before any restore bytes are consumed.
-    if (signal?.aborted) {
-      source.destroy();
-      signal.removeEventListener('abort', abort);
-      invalid('archive read was cancelled');
+    let source: Readable | null = null;
+    const abort = () => source?.destroy(new Error('aborted'));
+    try {
+      source = await new Promise<Readable>((resolve, reject) => this.zip.openReadStream(entry, (err, stream) => err || !stream ? reject(err ?? new Error('Cannot open entry')) : resolve(stream)));
+      signal?.addEventListener('abort', abort, { once: true });
+      // Cancellation can occur while openReadStream's callback is pending. Abort
+      // events are not replayed to a listener registered after they fire, so
+      // close the newly opened source before any restore bytes are consumed.
+      if (signal?.aborted) {
+        source.destroy();
+        invalid('archive read was cancelled');
+      }
+      await consume(source);
     }
-    try { await consume(source); }
     catch (err) {
       if (err instanceof BadRequestException) throw err;
       if (isSystemIoError(err)) throw err;

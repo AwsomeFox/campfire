@@ -131,6 +131,9 @@ describe('backup streaming writer (#603)', () => {
     const estimate = jest
       .spyOn(svc as any, 'estimateFallbackBackupBytes')
       .mockReturnValue(stagingBytes);
+    const sameFilesystem = jest
+      .spyOn(svc as any, 'pathsShareFilesystem')
+      .mockReturnValue(true);
     const probeDisk = jest.spyOn(svc as any, 'probeDisk');
     const statfs = jest.spyOn(fs, 'statfsSync').mockReturnValue({
       type: 0,
@@ -155,6 +158,7 @@ describe('backup streaming writer (#603)', () => {
       createStream.mockRestore();
       statfs.mockRestore();
       probeDisk.mockRestore();
+      sameFilesystem.mockRestore();
       estimate.mockRestore();
       if (previousBackupDir === undefined) delete process.env.BACKUP_DIR;
       else process.env.BACKUP_DIR = previousBackupDir;
