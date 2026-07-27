@@ -345,6 +345,17 @@ function validateStagedAiCredentialDecryptability(stagedDbPath: string, key: Buf
   }
 }
 
+/**
+ * The single archive lane is already held by another whole-server operation.
+ *
+ * This is a *deferral*, not a fault: an interactive download and a scheduled run
+ * simply cannot overlap. It is a distinct type so schedule-driven callers can tell
+ * "come back shortly" apart from "this backup did not work", instead of matching on
+ * a message. Stamping contention as a failure would raise a false backup alert and
+ * push the next run out by the exponential backoff.
+ */
+export class ArchiveOperationBusyError extends ServiceUnavailableException {}
+
 @Injectable()
 export class BackupService implements OnApplicationBootstrap {
   private readonly logger = new Logger(BackupService.name);
@@ -369,7 +380,7 @@ export class BackupService implements OnApplicationBootstrap {
 
   private beginArchiveOperation(kind: 'backup' | 'restore'): void {
     if (this.archiveOperation) {
-      throw new ServiceUnavailableException(
+      throw new ArchiveOperationBusyError(
         `A whole-server ${this.archiveOperation} operation is already in progress; retry shortly`,
       );
     }
@@ -574,6 +585,15 @@ export class BackupService implements OnApplicationBootstrap {
         fs.rmSync(partialPath, { force: true });
       }
     } catch (err) {
+      if (err instanceof ArchiveOperationBusyError) {
+        // An interactive download or restore holds the archive lane. Recording this as
+        // a failed attempt would invent a backup alert out of a routine admin download
+        // and delay the real run by the failure backoff. Leave the cadence row — and
+        // therefore nextRunAt — untouched so the next scheduler poll simply retries
+        // once the lane frees.
+        this.logger.warn(`Scheduled backup deferred: ${err.message}`);
+        return;
+      }
       const message = err instanceof Error ? err.message : String(err);
       // Stamp the attempt even on failure so the overdue check on the next boot
       // doesn't immediately re-fire (and potentially busy-loop). lastSuccessAt
@@ -933,6 +953,11 @@ export class BackupService implements OnApplicationBootstrap {
   async buildBackup(options?: BuildBackupOptions, output?: Writable): Promise<Buffer | void> {
     this.beginArchiveOperation('backup');
     let tmpDir: string | null = null;
+    // The archiver accumulates queued sources (zip.file(...) keeps a read stream per
+    // attachment) from the moment it is created, but teardown only becomes pipeline()'s
+    // job once streaming starts. Between those two points nothing else owns it, so hold
+    // a reference the outer finally can destroy.
+    let pendingArchive: archiver.Archiver | null = null;
     try {
       assertBackupNotCancelled(options?.signal);
       const dataDir = resolveDataDir();
@@ -952,6 +977,7 @@ export class BackupService implements OnApplicationBootstrap {
       this.holder.raw.exec(`VACUUM INTO '${snapshotPath.replace(/'/g, "''")}'`);
       assertBackupNotCancelled(options?.signal);
       const zip = archiver('zip', { zlib: { level: 6 } });
+      pendingArchive = zip;
       // Keep the snapshot on disk and let the ZIP writer pull from it under
       // output backpressure instead of materializing the database in the V8 heap.
       const dbSize = safeFileBytes(snapshotPath);
@@ -1184,7 +1210,13 @@ export class BackupService implements OnApplicationBootstrap {
       });
       const abort = () => archive.destroy(new Error('Backup generation cancelled'));
       options?.signal?.addEventListener('abort', abort, { once: true });
+      // addEventListener never fires for an already-aborted signal, so a cancellation
+      // landing between archive creation and this line would otherwise leave the
+      // archive alive while the throw below unwinds.
+      if (options?.signal?.aborted) abort();
       const done = pipeline(archive, compressedLimit, sink);
+      // pipeline() owns teardown from here; the outer finally must not double-destroy.
+      pendingArchive = null;
       void done.catch(() => undefined);
       try {
         assertBackupNotCancelled(options?.signal);
@@ -1195,8 +1227,18 @@ export class BackupService implements OnApplicationBootstrap {
         options?.signal?.removeEventListener('abort', abort);
       }
     } finally {
-      if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
-      this.endArchiveOperation('backup');
+      // Failed before streaming started: release the queued attachment read streams
+      // ourselves, otherwise they stay open for the process lifetime and can make the
+      // staging removal below fail on platforms that refuse to unlink open files.
+      pendingArchive?.destroy();
+      try {
+        if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+      } finally {
+        // Releasing the lane must not depend on cleanup succeeding. A single throwing
+        // rmSync would otherwise wedge the guard permanently and every subsequent
+        // backup and restore would 503 for the lifetime of the process.
+        this.endArchiveOperation('backup');
+      }
     }
   }
 

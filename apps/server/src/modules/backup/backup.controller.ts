@@ -130,6 +130,11 @@ export class BackupController {
         { ...(keyPassphrase && keyPassphrase.length > 0 ? { keyPassphrase } : {}), signal: operation.signal },
         res,
       );
+    } catch (err) {
+      // A cancelled download is a normal outcome, not a server error. Rethrowing would
+      // log noise and ask Nest to write an error body onto a response whose zip headers
+      // have already gone out. Mirrors the mdzip export path.
+      if (!operation.signal.aborted) throw err;
     } finally {
       operation.dispose();
     }

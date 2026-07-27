@@ -171,7 +171,11 @@ test.describe('server backup workflow UI (issues #514 / #444)', () => {
     await expect(card.getByText(/buffered the archive in memory/i)).toBeVisible();
   });
 
-  test('rejects oversized fallback downloads with recovery copy', async ({ page }) => {
+  // Precondition: a declared Content-Length. Campfire streams the archive and cannot know
+  // its size up front, so this pre-stream guard only fires behind a buffering reverse proxy
+  // that adds the header. The per-chunk ceiling below is what bounds memory against the
+  // bare server, and it is covered separately.
+  test('rejects oversized fallback downloads up front when a proxy declares Content-Length', async ({ page }) => {
     await page.addInitScript(() => {
       Object.defineProperty(window, 'showSaveFilePicker', { value: undefined, configurable: true });
     });

@@ -15,6 +15,7 @@ import { ConfirmDestructiveDialog } from '../../components/ConfirmDestructiveDia
 import {
   RESTORE_CONFIRM_TOKEN,
   KEY_ENVELOPE_MIN_PASSPHRASE_LEN,
+  BackupDownloadCancelledError,
   BackupDownloadLimitError,
   downloadServerBackup,
   fetchBackupStatus,
@@ -251,7 +252,7 @@ export function ServerBackupWorkflowCard() {
           : `Downloaded ${result.filename} (${formatBytes(result.bytes)}). This browser buffered the archive in memory because direct file streaming is unavailable.`,
       );
     } catch (err) {
-      if (controller.signal.aborted) {
+      if (controller.signal.aborted || err instanceof BackupDownloadCancelledError) {
         setDownloadNote('Download cancelled.');
       } else {
         setDownloadError(

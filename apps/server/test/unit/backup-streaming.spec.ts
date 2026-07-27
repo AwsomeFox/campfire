@@ -78,20 +78,59 @@ describe('backup streaming writer (#603)', () => {
     }
   });
 
-  it('destroys a scheduled output when backup setup fails before piping', async () => {
+  it('destroys a scheduled output and defers when the archive lane is held', async () => {
     const backupDir = path.join(dataDir, 'backups');
     const previous = process.env.BACKUP_DIR;
     process.env.BACKUP_DIR = backupDir;
     const svc = service();
+    const seeded = {
+      lastAttemptAt: '2026-07-01T00:00:00.000Z',
+      lastSuccessAt: '2026-07-01T00:00:00.000Z',
+      nextRunAt: '2026-07-02T00:00:00.000Z',
+      lastSize: 1024,
+      lastChecksum: 'a'.repeat(64),
+      lastError: '',
+      consecutiveFailures: 0,
+    };
+    await (svc as any).writeCadence(seeded);
+    // Stand in for an admin download streaming while the scheduler fires.
     (svc as any).archiveOperation = 'backup';
     const createStream = jest.spyOn(fs, 'createWriteStream');
     try {
-      await expect((svc as any).runScheduledBackup(60 * 60 * 1000)).rejects.toThrow('already in progress');
+      await expect((svc as any).runScheduledBackup(60 * 60 * 1000)).resolves.toBeUndefined();
       const partial = createStream.mock.results.at(-1)?.value as fs.WriteStream;
       expect(partial.destroyed).toBe(true);
+      // Contention is a deferral. Recording it as a failure would raise a backup alert
+      // out of a routine download and push the real run out by the failure backoff —
+      // corrupting the one signal an operator must be able to trust.
+      const after = await (svc as any).readCadence();
+      expect(after.consecutiveFailures ?? 0).toBe(0);
+      expect(after.lastError).toBe('');
+      expect(after.nextRunAt).toBe(seeded.nextRunAt);
+      expect(after.lastSuccessAt).toBe(seeded.lastSuccessAt);
     } finally {
       createStream.mockRestore();
       (svc as any).archiveOperation = null;
+      if (previous === undefined) delete process.env.BACKUP_DIR;
+      else process.env.BACKUP_DIR = previous;
+    }
+  });
+
+  it('still records a genuine scheduled failure as a failure', async () => {
+    const backupDir = path.join(dataDir, 'backups');
+    const previous = process.env.BACKUP_DIR;
+    process.env.BACKUP_DIR = backupDir;
+    const svc = service();
+    // Guards the deferral branch above: only lane contention is exempt, so a real
+    // fault must still stamp lastError and advance consecutiveFailures.
+    jest.spyOn(svc, 'buildBackup').mockRejectedValue(new Error('vacuum exploded') as never);
+    try {
+      await expect((svc as any).runScheduledBackup(60 * 60 * 1000)).rejects.toThrow('vacuum exploded');
+      const after = await (svc as any).readCadence();
+      expect(after.consecutiveFailures).toBe(1);
+      expect(after.lastError).toContain('vacuum exploded');
+    } finally {
+      jest.restoreAllMocks();
       if (previous === undefined) delete process.env.BACKUP_DIR;
       else process.env.BACKUP_DIR = previous;
     }

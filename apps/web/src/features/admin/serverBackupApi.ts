@@ -181,6 +181,9 @@ export const MAX_BROWSER_BACKUP_BUFFER_BYTES = 512 * 1024 * 1024;
 /** Deliberately user-actionable download constraints that should remain verbatim. */
 export class BackupDownloadLimitError extends Error {}
 
+/** The operator dismissed the save dialog. A choice, not a failure. */
+export class BackupDownloadCancelledError extends Error {}
+
 export interface BackupDownloadProgress {
   receivedBytes: number;
   totalBytes: number | null;
@@ -226,16 +229,28 @@ export async function downloadServerBackup(options?: {
   const passphrase = options?.keyPassphrase?.trim();
   const usePost = Boolean(passphrase);
   const headers = devHeaders();
-  // This runs before the first await so browsers that require a user gesture can show
-  // the destination chooser. POST downloads cannot be handed to the browser download
-  // manager portably, so use File System Access when it is available.
+  // Run the picker before the network request: browsers only allow the destination
+  // chooser while the user gesture that started the download is still live. POST
+  // downloads cannot be handed to the browser download manager portably, so use
+  // File System Access when it is available.
   const picker = saveFilePicker();
-  const fileHandle = picker
-    ? await picker({
+  let fileHandle: WritableFileHandle | null = null;
+  if (picker) {
+    try {
+      fileHandle = await picker({
         suggestedName: 'campfire-backup.zip',
         types: [{ description: 'Campfire backup archive', accept: { 'application/zip': ['.zip'] } }],
-      })
-    : null;
+      });
+    } catch (err) {
+      // Dismissing the save dialog rejects with AbortError. Reporting that as an API
+      // failure would tell the operator the backup broke when they simply changed
+      // their mind — and no request has even been issued yet.
+      if (err instanceof Error && err.name === 'AbortError') {
+        throw new BackupDownloadCancelledError('Backup download cancelled before a destination was chosen.');
+      }
+      throw err;
+    }
+  }
   const res = await fetch(usePost ? `${API}/backup/download` : `${API}/backup`, {
     method: usePost ? 'POST' : 'GET',
     credentials: 'include',
