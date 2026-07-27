@@ -66,6 +66,26 @@ describe('parseBackupManifest (v3 only)', () => {
     })).toThrow(/reconciliation is invalid/i);
   });
 
+  it('rejects NUL bytes in attachment paths at the manifest boundary', () => {
+    expect(() => parseBackupManifest({
+      ...baseV3,
+      uploadCount: 1,
+      attachments: [{
+        id: 1,
+        campaignId: 3,
+        path: '3/a\0b.png',
+        size: 100,
+        mime: 'image/png',
+        hidden: false,
+        sha256: 'a'.repeat(64),
+      }],
+      reconciliation: {
+        ...baseV3.reconciliation,
+        totalAttachments: 1,
+      },
+    })).toThrow(/attachment record is invalid/i);
+  });
+
   it('requires a keyfile envelope posture to be represented by the archive payload', () => {
     const parsed = parseBackupManifest({
       ...baseV3, aiKeySource: 'keyfile', aiKeyIncluded: true,

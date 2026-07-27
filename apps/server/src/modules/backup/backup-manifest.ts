@@ -212,6 +212,7 @@ function parseAttachmentRecords(raw: Record<string, unknown>): BackupAttachmentR
       record.path.length > 0 &&
       !record.path.startsWith('/') &&
       !record.path.includes('\\') &&
+      !record.path.includes('\0') &&
       !record.path.split('/').some((part) => part === '' || part === '.' || part === '..');
     const validSha256 = typeof record.sha256 === 'string' && /^[a-f0-9]{64}$/i.test(record.sha256);
     if (

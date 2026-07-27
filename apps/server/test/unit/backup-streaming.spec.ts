@@ -262,6 +262,40 @@ describe('backup streaming writer (#603)', () => {
     }
   });
 
+  it('awaits a pending scheduled output open before deleting its partial', async () => {
+    const backupDir = path.join(dataDir, 'backups');
+    const previous = process.env.BACKUP_DIR;
+    process.env.BACKUP_DIR = backupDir;
+    const svc = service();
+    class DelayedOpenOutput extends PassThrough {
+      constructor(private readonly target: string) {
+        super();
+      }
+
+      override _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
+        setImmediate(() => {
+          fs.writeFileSync(this.target, '');
+          callback(error);
+        });
+      }
+    }
+    jest.spyOn(fs, 'createWriteStream').mockImplementation(
+      ((target: fs.PathLike) => new DelayedOpenOutput(String(target)) as unknown as fs.WriteStream) as typeof fs.createWriteStream,
+    );
+    jest
+      .spyOn(svc, 'buildBackup')
+      .mockRejectedValue(new ArchiveOperationBusyError('A whole-server backup operation is already in progress') as never);
+    try {
+      await expect((svc as any).runScheduledBackup(60 * 60 * 1000)).resolves.toBeUndefined();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(fs.readdirSync(backupDir).filter((name) => name.endsWith('.partial'))).toEqual([]);
+    } finally {
+      jest.restoreAllMocks();
+      if (previous === undefined) delete process.env.BACKUP_DIR;
+      else process.env.BACKUP_DIR = previous;
+    }
+  });
+
   it('still records a genuine scheduled failure as a failure', async () => {
     const backupDir = path.join(dataDir, 'backups');
     const previous = process.env.BACKUP_DIR;

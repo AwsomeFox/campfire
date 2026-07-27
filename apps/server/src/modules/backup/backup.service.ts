@@ -688,6 +688,7 @@ export class BackupService implements OnApplicationBootstrap {
         );
       } finally {
         if (!partialOutput.destroyed && !partialOutput.writableFinished) partialOutput.destroy();
+        await finished(partialOutput, { cleanup: true }).catch(() => undefined);
         fs.rmSync(partialPath, { force: true });
       }
     } catch (err) {
