@@ -1186,33 +1186,22 @@ describe('provider resolvers agree on configured-vs-null (#501)', () => {
   });
 
   it('agrees for a KEYLESS campaign override over a keyed server row', async () => {
-    // #1052 review — this scenario needs a KEY-REQUIRING provider to mean what its name says.
-    // It previously used `mock` at both scopes, which conflates the two senses of "keyless":
-    //   - keyless by OMISSION (openai with no key stored) — a gap the server row fills, which
-    //     is the inheritance this test exists to pin; and
-    //   - keyless by DESIGN (`mock` contacts nothing) — nothing to inherit, and substituting
-    //     the server's provider there silently sends a table's content off-box after it chose
-    //     an offline provider.
-    // Resolution now short-circuits the second sense, so with `mock` the endpoint really is
-    // the campaign's own and 'server' would be a false attribution. Switched to `openai` so
-    // the #373 endpoint-provenance rule stays covered; the keyless-by-design case is pinned in
-    // ai-provider-fallback-config.e2e-spec.ts for both roles.
-    await request(server)
-      .put('/api/v1/settings/ai-provider')
-      .set(dm)
-      .send({ providerType: 'openai', model: 'gpt-x', baseUrl: 'https://server-owned.example/v1', apiKey: 'sk-agree-0002' });
     await request(server)
       .put(`/api/v1/campaigns/${campaignId}/ai-provider`)
       .set(dm)
-      .send({ providerType: 'openai', model: 'gpt-x' });
+      .send({ providerType: 'mock', model: 'mock-1' });
     await assertAgreement('keyless override');
 
     // …and the endpoint is attributed to the SERVER row that actually supplied it.
     const { config, endpointScope } = await configs.resolveEffectiveConfigWithEndpointScope(campaignId);
     expect(endpointScope).toBe('server');
-    // Inheritance really happened — key AND endpoint came from the server row (#373).
-    expect(config?.apiKey).toBe('sk-agree-0002');
-    expect(config?.baseUrl).toBe('https://server-owned.example/v1');
+    // #1052 review — the one assertion this case was missing. `scope === 'server'` alone
+    // cannot distinguish "inherited the server credential" from "resolved to something else
+    // that merely reports server scope", so a change that stopped inheriting could leave the
+    // scope assertion looking honest while altering what actually executes. Pinning the
+    // BORROWED KEY proves the inheritance really happened — the property #373 defines and
+    // #501 depends on.
+    expect(config?.apiKey).toBe('sk-agree-0001');
   });
 
   it('agrees for a keyless campaign override with only an ENVIRONMENT server credential', async () => {

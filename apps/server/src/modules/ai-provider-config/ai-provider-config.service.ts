@@ -545,41 +545,6 @@ export class AiProviderConfigService {
     /** The endpoint belongs to whichever row supplied the baseUrl below. */
     const primaryScope: 'campaign' | 'server' = camp ? 'campaign' : 'server';
 
-    // #1052 review — A PROVIDER THAT NEEDS NO CREDENTIAL NEVER INHERITS ONE.
-    //
-    // This must come BEFORE every inheritance branch below, and it is a statement about the
-    // general rule rather than about one provider name. Those branches answer "the row that
-    // was selected has no key of its own — where does its key come from?", and that question
-    // only has meaning when the selected provider actually NEEDS a key. When it does not,
-    // there is nothing to inherit, and the branches did not merely add a credential: they
-    // replaced `providerType` and `baseUrl` too, because #373 correctly binds a key to its
-    // own endpoint. So a campaign that chose the offline `mock` was resolved to the SERVER's
-    // external provider, at the server's URL, on the server's key.
-    //
-    // That is a trust defect, not a config nicety. Choosing `mock` is how someone says "no
-    // external calls" — local development, a privacy-sensitive table, testing without
-    // spending tokens — and the substitution made the stated configuration disagree with
-    // where the table's content actually went. On the failover path it was also invisible.
-    //
-    // The two layers already disagreed and the VIEW was right: `campaignCredentialSource`
-    // returns 'not-required' for a keyless provider before it ever consults the server row.
-    // This makes resolution agree with what the GET has been reporting all along.
-    //
-    // Applies to BOTH roles because this function is role-agnostic — the primary slot had the
-    // identical hole and it predates the fallback slot entirely.
-    if (!providerRequiresApiKey(primary.providerType as AiProviderType)) {
-      return {
-        config: {
-          providerType: primary.providerType as AiProviderType,
-          model: primary.model,
-          apiKey: undefined,
-          baseUrl: primary.baseUrl ?? undefined,
-          params: safeJson(primary.params, {}),
-        },
-        endpointScope: primaryScope,
-      };
-    }
-
     // The scope that supplies the key also supplies the endpoint + providerType.
     // When the primary scope has its own key, key+endpoint+type are self-consistent.
     if (primary.encryptedApiKey) {
@@ -954,8 +919,12 @@ export class AiProviderConfigService {
     };
     const candidateApiKey = input.apiKey?.trim();
 
-    // Mock never consumes a credential, even if a stale/typed key exists.
-    if (input.providerType === 'mock') {
+    // A keyless provider never consumes a credential, even if a stale/typed key exists.
+    // #1052 review — the shared predicate rather than a third open-coded `=== 'mock'`.
+    // Semantics are unchanged: this probes the DRAFT AS TYPED (`testedTarget` and the
+    // 'candidate' source say so), not what resolution would run, so the candidate's own
+    // provider type is the right thing to ask about here.
+    if (!providerRequiresApiKey(input.providerType)) {
       return {
         config: candidate,
         testedTarget: campaignId === null ? 'server-default' : 'campaign-override',
@@ -1094,8 +1063,7 @@ function environmentApiKey(providerType: string): string | undefined {
 
 function localCredentialSource(row: Row): AiProviderCredentialSource {
   if (row.encryptedApiKey) return 'stored';
-  // #1052 review — one shared predicate rather than a third open-coded `=== 'mock'`. The
-  // copies of this question had already drifted: resolution never asked it at all.
+  // #1052 review — one shared predicate rather than an open-coded `=== 'mock'`.
   if (!providerRequiresApiKey(row.providerType as AiProviderType)) return 'not-required';
   return environmentApiKey(row.providerType) ? 'environment' : 'none';
 }
@@ -1106,17 +1074,50 @@ function inheritedServerCredentialSource(row: Row): AiProviderTestCredentialSour
   return source === 'stored' ? 'server' : source;
 }
 
+/**
+ * What credential a campaign override will ACTUALLY run on.
+ *
+ * Environment keys are operator credentials. A campaign row may use its own stored key, but it
+ * may not pair an environment key with its DM-controlled baseUrl, so environment fallback is
+ * only inherited through an admin-controlled server-default row.
+ *
+ * #1052 review — THIS MIRRORS `resolveEffectiveConfigWithEndpointScope`'S PRECEDENCE, AND THE
+ * ORDER IS THE WHOLE POINT.
+ *
+ * `not-required` used to be answered SECOND, before the server row was consulted at all, so a
+ * campaign override set to the offline `mock` reported "needs no credential" while resolution
+ * went on to inherit the server's key, endpoint and provider type and ran the turn against an
+ * external vendor. The stated configuration and the executed one disagreed, and the DM was
+ * shown the reassuring half.
+ *
+ * The fix belongs HERE and not in resolution, and that was tried the other way round first.
+ * A keyless campaign override is a MODEL-ONLY override by design (#373): its providerType and
+ * baseUrl are discarded in favour of whoever owns the key. Short-circuiting that for keyless
+ * provider types looks like the tidier fix and is the wrong one, for two reasons.
+ *
+ * It makes "which row's endpoint serves this turn" depend on the campaign row's providerType —
+ * a DM-controlled field, and precisely the input #373 removed from the endpoint decision. The
+ * exemption is safe only for as long as a hard-coded set of "contacts nothing" types stays
+ * correct; a type wrongly listed there hands a DM the endpoint choice back.
+ *
+ * And it breaks the #501 provenance contract, which `scribe` and `co-dm` each assert
+ * independently: `endpointScope` must name where the request REALLY went, so a keyless
+ * override reports `server`. Short-circuiting made it report `campaign` — the configuration's
+ * scope rather than the execution's — which misleads exactly the operator asking which
+ * endpoint saw their table's content.
+ *
+ * So resolution keeps its behaviour and the VIEW stops misreporting it: the server's credential
+ * is checked first, and `not-required` is reached only when nothing is inherited and the
+ * campaign's own keyless provider really is what runs. A DM who wants no external calls at all
+ * still needs the ADMIN to clear the server row; what changes here is that the DM is no longer
+ * told otherwise.
+ */
 function campaignCredentialSource(campaign: Row, server: Row | undefined): AiProviderCredentialSource {
-  // Environment keys are operator credentials. A campaign row may use its own
-  // stored key (and a keyless mock needs none), but it may not pair an environment
-  // key with its DM-controlled baseUrl. Environment fallback is therefore only
-  // inherited through an admin-controlled server-default row.
   if (campaign.encryptedApiKey) return 'stored';
+  const inherited = server ? localCredentialSource(server) : 'none';
+  if (inherited === 'stored') return 'server';
+  if (inherited === 'environment') return 'environment';
   if (!providerRequiresApiKey(campaign.providerType as AiProviderType)) return 'not-required';
-  if (!server) return 'none';
-  const fallback = localCredentialSource(server);
-  if (fallback === 'stored') return 'server';
-  if (fallback === 'environment') return 'environment';
   return 'none';
 }
 

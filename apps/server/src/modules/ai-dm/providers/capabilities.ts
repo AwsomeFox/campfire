@@ -69,10 +69,14 @@ const KEYLESS_PROVIDER_TYPES: ReadonlySet<AiProviderType> = new Set<AiProviderTy
  * Does a provider of this type need an API key to serve a turn? (#1052 review)
  *
  * The single definition of "needs a credential", because the answer had been open-coded as
- * `providerType === 'mock'` in three places and consulted in a fourth by omission — and the
- * copies had already drifted into disagreeing about the same config. The credential-source
- * VIEW said a keyless provider needs nothing; credential RESOLUTION never asked, and handed a
- * campaign that chose `mock` the server's provider, endpoint and key instead.
+ * `providerType === 'mock'` in three separate places that were free to drift apart.
+ *
+ * It answers a question about a CONFIGURED ROW ONLY. It deliberately says nothing about which
+ * row's endpoint a turn runs against: a keyless campaign override is a model-only override
+ * whose providerType and baseUrl are discarded in favour of whoever owns the key (#373), and
+ * that binding is the exfiltration defense rather than something a provider type may opt out
+ * of. Callers that need "where did the request actually go?" must ask
+ * `resolveEffectiveConfigWithEndpointScope`, which is the only authority on it.
  *
  * Defaults to TRUE for an unrecognised type. That is the conservative direction here: a false
  * "needs no credential" would suppress inheritance a deployment depends on, whereas the
