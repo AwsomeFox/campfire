@@ -3,9 +3,10 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { DiceRoll } from '@campfire/schema';
 import { reliableDiceSubtotal } from '../../src/components/RollResultToastContext';
-import { buildAoeDamageApplications } from '../../src/features/encounters/directDamage';
-
-const ROOT = resolve(__dirname, '../..');
+import {
+  buildAoeDamageApplications,
+  normalizeDirectDamageType,
+} from '../../src/features/encounters/directDamage';
 
 function diceRoll(partial: Partial<DiceRoll>): DiceRoll {
   return {
@@ -39,8 +40,34 @@ test.describe('direct damage apply controls (issue #605)', () => {
     expect(reliableDiceSubtotal(diceRoll({ expr: '+3', rolls: [], total: 3, terms: [{ term: '+3', value: 3 }] }))).toBeUndefined();
   });
 
+  test('does not expose nonpositive signed dice subtotals for critical application', () => {
+    expect(reliableDiceSubtotal(diceRoll({
+      expr: '1d4-1d6+10',
+      total: 5,
+      terms: [
+        { term: '1d4', value: 1, rolls: [1] },
+        { term: '-1d6', value: -6, rolls: [6] },
+        { term: '+10', value: 10 },
+      ],
+    }))).toBeUndefined();
+    expect(reliableDiceSubtotal(diceRoll({
+      expr: '1d6-1d6+4',
+      total: 4,
+      terms: [
+        { term: '1d6', value: 3, rolls: [3] },
+        { term: '-1d6', value: -3, rolls: [3] },
+        { term: '+4', value: 4 },
+      ],
+    }))).toBeUndefined();
+  });
+
+  test('normalizes free-form damage types before building API metadata', () => {
+    expect(normalizeDirectDamageType('  fire  ')).toBe('fire');
+    expect(normalizeDirectDamageType('   ')).toBeUndefined();
+  });
+
   test('gates damage controls and metadata on the adapter capability', () => {
-    const source = readFileSync(resolve(ROOT, 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
+    const source = readFileSync(resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx'), 'utf8');
     expect(source).toContain('supportsDirectDamageRules === true');
     expect(source).toContain("mode === 'damage' && supportsDamageRules");
     expect(source).toContain('disabled={diceTotal === undefined}');

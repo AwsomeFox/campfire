@@ -30,12 +30,16 @@ type ApplyDamageHandler = (amount: number, label: string, diceTotal?: number) =>
  */
 export function reliableDiceSubtotal(roll: DiceRoll): number | undefined {
   if (roll.source === 'manual' || roll.rolls.length === 0) return undefined;
+  let subtotal: number;
   if (roll.terms) {
     const diceTerms = roll.terms.filter((term) => term.rolls !== undefined);
-    return diceTerms.length > 0 ? diceTerms.reduce((sum, term) => sum + term.value, 0) : undefined;
+    if (diceTerms.length === 0) return undefined;
+    subtotal = diceTerms.reduce((sum, term) => sum + term.value, 0);
+  } else {
+    // A no-terms rolled result is a single dice expression with no flat modifier.
+    subtotal = roll.total;
   }
-  // A no-terms rolled result is a single dice expression with no flat modifier.
-  return roll.total;
+  return subtotal > 0 ? subtotal : undefined;
 }
 
 export interface ShowRollOptions {

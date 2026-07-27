@@ -2,6 +2,11 @@ import type { DamageSaveOutcome as SharedDamageSaveOutcome } from '@campfire/sch
 
 export type DamageSaveOutcome = SharedDamageSaveOutcome;
 
+export function normalizeDirectDamageType(value: string): string | undefined {
+  const normalized = value.trim();
+  return normalized || undefined;
+}
+
 export type DirectDamageMetadata = {
   damageType?: string;
   saveOutcome?: DamageSaveOutcome;

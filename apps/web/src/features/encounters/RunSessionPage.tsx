@@ -134,6 +134,7 @@ import { gridCellRevealRect } from './fogGridReveal';
 import { combatantsInAoe, type AoeHitLayout, type AoeHitTestContext } from './aoeHitTest';
 import {
   buildAoeDamageApplications,
+  normalizeDirectDamageType,
   type DamageSaveOutcome,
   type DirectDamageMetadata,
   type TargetDamageApplication,
@@ -5202,7 +5203,7 @@ function ApplyDamageBar({
   const supportsDamageRules = ruleSystemAdapter(ruleSystem).supportsDirectDamageRules === true;
   const damage = mode === 'damage' && supportsDamageRules
     ? {
-        damageType: damageType || undefined,
+        damageType: normalizeDirectDamageType(damageType),
         saveOutcome: saveOutcome === 'half' ? ('half' as const) : undefined,
         isCrit: isCrit && diceTotal !== undefined ? true : undefined,
         damageDice: isCrit && diceTotal !== undefined ? diceTotal : undefined,
