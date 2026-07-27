@@ -64,6 +64,14 @@ export const campaigns = sqliteTable('campaigns', {
   // instead of picking an arbitrary first result. Nullable in older DBs pre-migration;
   // see db/db.module.ts migrateCampaignsTableForActiveEncounter().
   activeEncounterId: integer('active_encounter_id'),
+  // Issue #587: this campaign's opt-out from disclosing its NAME and DESCRIPTION in
+  // the server-admin metadata catalog. 'inherit' (default) follows the server-wide
+  // policy; 'redacted' overrides it toward privacy. Tighten-only, and writable ONLY
+  // by the campaign's own DM (PUT /campaigns/:id/catalog-privacy) — deliberately not
+  // reachable from any admin bulk operation, because an opt-out a server admin can
+  // clear is not an opt-out. Nullable in older DBs pre-migration; see
+  // db/db.module.ts migrateAdminCampaignCatalog587().
+  catalogPrivacy: text('catalog_privacy').notNull().default('inherit'),
   // Soft-delete / trash timestamp (issue #116). NULL => live; an ISO timestamp => the
   // campaign is trashed: excluded from normal listings while its rows + on-disk uploads
   // survive for a grace period, restorable until an explicit purge. Migrated via
@@ -1997,6 +2005,47 @@ export const campaignModuleSnapshots = sqliteTable('campaign_module_snapshots', 
   createdBy: text('created_by').notNull().default(''),
   rolledBackAt: text('rolled_back_at'),
 });
+
+/**
+ * Issue #587: a server operator's REQUEST that a campaign be exported.
+ *
+ * The catalog's whole premise is that an operator can locate and administer a
+ * campaign without being able to read it. Handing the requester an export would
+ * undo that in one call — a campaign export carries every quest, note,
+ * session-zero line and dmSecret there is. So a request is stored as an ASK
+ * addressed to the campaign's own DMs, who approve or deny it and who alone can
+ * then run the existing DM-gated export route. No column here ever holds
+ * exported content, and there is no admin route that returns one.
+ *
+ * `requestedBy` is the audit-actor string (`token:<name>` or a user id), matching
+ * audit_log.actor so the two trails join without a second identity notion.
+ */
+export const campaignExportRequests = sqliteTable(
+  'campaign_export_requests',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    campaignId: integer('campaign_id').notNull(),
+    /** Audit-actor string of the requesting operator. */
+    requestedBy: text('requested_by').notNull(),
+    /** Numeric user id as text when the requester was a real account; '' otherwise. */
+    requestedByUserId: text('requested_by_user_id').notNull().default(''),
+    /** Export profile asked for (see modules/export/export-profiles.ts). */
+    profile: text('profile').notNull().default(''),
+    /** Why the operator is asking. Required at the API layer and shown to the deciding DM. */
+    justification: text('justification').notNull().default(''),
+    /** 'pending' | 'approved' | 'denied' | 'cancelled'. */
+    status: text('status').notNull().default('pending'),
+    decidedBy: text('decided_by'),
+    decidedAt: text('decided_at'),
+    decisionNote: text('decision_note').notNull().default(''),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (t) => ({
+    campaignIdx: index('idx_campaign_export_requests_campaign').on(t.campaignId, t.id),
+    statusIdx: index('idx_campaign_export_requests_status').on(t.status, t.id),
+  }),
+);
 
 // Table safety hold / X-Card (issue #599). One row per campaign carrying the CURRENT stop
 // state, upserted rather than appended: activation must be idempotent and must never fail
