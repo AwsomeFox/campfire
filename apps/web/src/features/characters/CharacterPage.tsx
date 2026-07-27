@@ -81,6 +81,7 @@ import {
 } from '../../components/formFieldLabels';
 import { NotFoundState } from '../../components/NotFoundState';
 import { Markdown } from '../../components/Markdown';
+import { PrintControl } from '../../components/PrintControl';
 import { NotesRail } from '../../components/NotesRail';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
 import { ImageUpload, attachmentFileUrl } from '../../components/ImageUpload';
@@ -338,14 +339,7 @@ export default function CharacterPage() {
         {isOwner && <Chip variant="dm">You can edit</Chip>}
         <div className="flex items-center gap-1 ml-auto">
           {!editingSheet && (
-            <Btn
-              ghost
-              type="button"
-              className="cf-print-hide !min-h-0 !py-1.5 text-xs"
-              onClick={() => window.print()}
-            >
-              Print
-            </Btn>
+            <PrintControl />
           )}
           {canEdit && !editingSheet && (
             <Btn ghost className="cf-print-hide !min-h-0 !py-1.5 text-xs" onClick={() => setEditingSheet(true)}>

@@ -37,6 +37,16 @@
     display: block !important;
   }
 
+  /* Secrets remain absent from paper unless this page's PrintControl explicitly
+     enabled them for the current print invocation. */
+  .cf-print-secret {
+    display: none !important;
+  }
+
+  html.cf-print-include-secrets .cf-print-secret {
+    display: block !important;
+  }
+
   /* Both character panels remain mounted for accessible tab semantics; print
      needs the complete sheet, irrespective of which tab was active on screen. */
   #character-sheet-panel-play,
@@ -84,6 +94,36 @@
   .cf-prose table {
     break-inside: avoid;
   }
+
+  .cf-print-root,
+  .cf-print-root * {
+    overflow: visible !important;
+  }
+
+  .cf-print-root [class*="sticky"],
+  .cf-print-root [class*="grid-cols"] {
+    position: static !important;
+  }
+
+  .cf-print-roster {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 10pt;
+  }
+
+  .cf-print-roster th,
+  .cf-print-roster td {
+    border: 1px solid #777;
+    padding: .35rem;
+    text-align: left;
+    vertical-align: top;
+  }
+
+  .cf-print-roster td:last-child { min-width: 10rem; height: 2.5rem; }
+
+  /* The live encounter cockpit has maps, controls and activity feeds; its paper
+     counterpart is the intentionally small reference sheet below. */
+  .cf-print-encounter > :not(.cf-print-only) { display: none !important; }
 }
 
 /* Screen-only tab state. Avoid the native `hidden` attribute here because its

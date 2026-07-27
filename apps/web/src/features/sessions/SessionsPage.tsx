@@ -25,6 +25,7 @@ import { formatDate as formatLocaleDate, formatDateTime, useFormattingLocale } f
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Card, Btn, TextInput, TextArea, EmptyState, Skeleton, SkeletonConditionalRegion, ErrorNote } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
+import { PrintControl } from '../../components/PrintControl';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { useAnnounce } from '../../components/Announcer';
@@ -935,14 +936,7 @@ function SessionDetail({
         </h2>
         <span className="text-muted text-xs">{formatDate(session.playedAt)}</span>
         {!editing && (
-          <Btn
-            ghost
-            type="button"
-            className="cf-print-hide !min-h-0 !py-1.5 text-xs ml-auto"
-            onClick={() => window.print()}
-          >
-            Print
-          </Btn>
+          <PrintControl className="ml-auto" />
         )}
       </div>
 

@@ -16,6 +16,7 @@ import { Card, Chip, Btn, Skeleton, ErrorNote, DmPanel, EmptyState } from '../..
 import { NpcDispositionBadge, QuestStatusBadge } from '../../components/EntitySemanticBadges';
 import { NotFoundState } from '../../components/NotFoundState';
 import { Markdown } from '../../components/Markdown';
+import { PrintControl } from '../../components/PrintControl';
 import { NotesRail } from '../../components/NotesRail';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
@@ -325,12 +326,12 @@ export default function NpcPage() {
   });
 
   return (
-    <div className="max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" {...entityTargetProps('npc', npc.id)}>
-      <DetailPageWayfinding
+    <div className="cf-print-root max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" {...entityTargetProps('npc', npc.id)}>
+      <div className="cf-print-chrome"><DetailPageWayfinding
         campaignId={cid}
         defaultPath={`/c/${cid}/npcs`}
         defaultLabel="← Back to NPCs"
-      />
+      /></div>
 
       {error && <ErrorNote message={error} onRetry={load} />}
       {actionError && <ErrorNote message={actionError} onRetry={() => setActionError(null)} />}
@@ -394,6 +395,7 @@ export default function NpcPage() {
               {npc.role && <p className="text-sm text-slate-400 break-words">{npc.role}</p>}
             </div>
             <NpcDispositionBadge disposition={npc.disposition} />
+            <PrintControl allowSecrets={isDm && Boolean(npc.dmSecret)} className="ml-auto" />
             {isDm && npc.hidden && <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players</span></Chip>}
             {canDmWrite && (
               <div className="flex gap-2 ml-auto">
@@ -436,11 +438,11 @@ export default function NpcPage() {
                 {npc.body ? <Markdown>{npc.body}</Markdown> : <p className="text-sm text-secondary italic">No description yet.</p>}
               </Card>
 
-              {isDm && npc.dmSecret && <DmPanel>{npc.dmSecret}</DmPanel>}
+              {isDm && npc.dmSecret && <div className="cf-print-secret"><DmPanel>{npc.dmSecret}</DmPanel></div>}
 
               {/* Body revision history + restore (#157/#233) — DM-only, so a clobbered or
                   regretted edit is recoverable. Refetches after each save. */}
-              {isDm && (
+              {isDm && (<div className="cf-print-hide">
                 <RevisionHistoryPanel
                   entityType="npc"
                   entityId={id}
@@ -452,7 +454,7 @@ export default function NpcPage() {
                     void reloadLatest();
                   }}
                 />
-              )}
+              </div>)}
 
               <Card className="space-y-3">
                 <h2 className="font-bold text-white text-sm">Connected</h2>
@@ -484,7 +486,7 @@ export default function NpcPage() {
                 )}
               </Card>
 
-              <EntityDiscussion campaignId={cid} entityType="npc" entityId={id} />
+              <div className="cf-print-hide"><EntityDiscussion campaignId={cid} entityType="npc" entityId={id} /></div>
             </div>
 
             <div className="space-y-4 min-w-0">
@@ -532,7 +534,7 @@ export default function NpcPage() {
                 </div>
               </Card>
 
-              <NotesRail campaignId={cid} entityType="npc" entityId={id} />
+              <div className="cf-print-hide"><NotesRail campaignId={cid} entityType="npc" entityId={id} /></div>
             </div>
           </div>
         </>

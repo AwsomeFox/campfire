@@ -30,6 +30,7 @@ import {
 import { LocationStatusLabel, LOCATION_STATUS_LABEL } from '../../components/LocationStatusLabel';
 import { NotFoundState } from '../../components/NotFoundState';
 import { Markdown } from '../../components/Markdown';
+import { PrintControl } from '../../components/PrintControl';
 import { NotesRail } from '../../components/NotesRail';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
 import { ImageUpload, attachmentFileUrl } from '../../components/ImageUpload';
@@ -498,8 +499,8 @@ export default function LocationPage() {
   });
 
   return (
-    <div className="max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" {...entityTargetProps('location', location.id)}>
-      <DetailPageWayfinding
+    <div className="cf-print-root max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" {...entityTargetProps('location', location.id)}>
+      <div className="cf-print-chrome"><DetailPageWayfinding
         campaignId={cid}
         defaultPath={`/c/${cid}/locations`}
         defaultLabel="← Back to locations"
@@ -512,7 +513,7 @@ export default function LocationPage() {
             : undefined
         }
         currentLabel={!editing ? location.name : undefined}
-      />
+      /></div>
 
       {error && <ErrorNote message={error} onRetry={load} />}
       {actionError && <ErrorNote message={actionError} onRetry={() => setActionError(null)} />}
@@ -554,6 +555,7 @@ export default function LocationPage() {
             )}
             <h1 className="text-2xl font-extrabold text-white min-w-0 break-words">{location.name}</h1>
             <Chip variant={statusVariant(location.status)}><LocationStatusLabel status={location.status} /></Chip>
+            <PrintControl allowSecrets={isDm && Boolean(location.dmSecret)} className="ml-auto" />
             {isDm && location.status === 'unexplored' && (
               <Chip variant="failed" className="!ml-0"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players</span></Chip>
             )}
@@ -622,7 +624,7 @@ export default function LocationPage() {
             <div className="space-y-4 min-w-0">
               <Card className="space-y-4">
                 {/* Mini pin map */}
-                <div className="relative cf-inset overflow-hidden h-36">
+                <div className="cf-print-hide relative cf-inset overflow-hidden h-36">
                   {campaign?.mapAttachmentId ? (
                     <img
                       src={attachmentFileUrl(campaign.mapAttachmentId)}
@@ -704,11 +706,11 @@ export default function LocationPage() {
                 {location.body ? <Markdown>{location.body}</Markdown> : <p className="text-sm text-secondary italic">No description yet.</p>}
               </Card>
 
-              {isDm && location.dmSecret && <DmPanel>{location.dmSecret}</DmPanel>}
+              {isDm && location.dmSecret && <div className="cf-print-secret"><DmPanel>{location.dmSecret}</DmPanel></div>}
 
               {/* Body revision history + restore (#157/#233) — DM-only, so a clobbered or
                   regretted edit is recoverable. Refetches after each save. */}
-              {isDm && (
+              {isDm && (<div className="cf-print-hide">
                 <RevisionHistoryPanel
                   entityType="location"
                   entityId={id}
@@ -720,7 +722,7 @@ export default function LocationPage() {
                     void reloadLatest();
                   }}
                 />
-              )}
+              </div>)}
 
               <Card className="space-y-3">
                 <h2 className="font-bold text-white text-sm">Here &amp; connected</h2>
@@ -801,7 +803,7 @@ export default function LocationPage() {
 
               <EncounterBacklinksCard campaignId={cid} encounters={location.linkedEncounters ?? []} />
 
-              <EntityDiscussion campaignId={cid} entityType="location" entityId={id} />
+              <div className="cf-print-hide"><EntityDiscussion campaignId={cid} entityType="location" entityId={id} /></div>
             </div>
 
             <div className="space-y-4 min-w-0">
@@ -821,7 +823,7 @@ export default function LocationPage() {
                 </div>
               </Card>
 
-              <NotesRail campaignId={cid} entityType="location" entityId={id} />
+              <div className="cf-print-hide"><NotesRail campaignId={cid} entityType="location" entityId={id} /></div>
             </div>
           </div>
         </>

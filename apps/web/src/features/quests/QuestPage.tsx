@@ -27,6 +27,7 @@ import {
 } from '../../components/ui';
 import { QuestStatusBadge } from '../../components/EntitySemanticBadges';
 import { Markdown } from '../../components/Markdown';
+import { PrintControl } from '../../components/PrintControl';
 import { NotFoundState } from '../../components/NotFoundState';
 import { NotesRail } from '../../components/NotesRail';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
@@ -462,7 +463,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
   });
 
   return (
-    <div className="max-w-6xl mx-auto px-4 mt-5 pb-20 lg:pb-10" style={{ display: 'flex', flexDirection: 'column', gap: 14 }} {...entityTargetProps('quest', quest.id)}>
+    <div className="cf-print-root max-w-6xl mx-auto px-4 mt-5 pb-20 lg:pb-10" style={{ display: 'flex', flexDirection: 'column', gap: 14 }} {...entityTargetProps('quest', quest.id)}>
       {error && <ErrorNote message={error} onRetry={load} />}
 
       {canDmWrite && (
@@ -479,15 +480,16 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
         />
       )}
 
-      <DetailPageWayfinding
+      <div className="cf-print-chrome"><DetailPageWayfinding
         campaignId={campaignId}
         defaultPath={`/c/${campaignId}/quests`}
         defaultLabel={t('quests.backToQuests')}
-      />
+      /></div>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         <h3 className="min-w-0 break-words" style={{ margin: 0 }}>{quest.title}</h3>
         <QuestStatusBadge status={quest.status} />
+        <PrintControl allowSecrets={isDm && Boolean(quest.dmSecret)} className="ml-auto" />
         {isDm && quest.hidden && <Chip variant="failed">{t('quests.hiddenChip')}</Chip>}
         {canDmWrite && (
           <>
@@ -745,7 +747,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
 
           {showSecret && (
             <div
-              className="card"
+              className="cf-print-secret card"
               style={{
                 border: '1px solid var(--color-accent-700)',
                 background: 'color-mix(in srgb, var(--color-accent) 5%, var(--color-surface))',
@@ -796,7 +798,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
 
           <EncounterBacklinksCard campaignId={campaignId} encounters={quest.linkedEncounters ?? []} />
 
-          <EntityDiscussion campaignId={campaignId} entityType="quest" entityId={quest.id} />
+          <div className="cf-print-hide"><EntityDiscussion campaignId={campaignId} entityType="quest" entityId={quest.id} /></div>
         </div>
 
         <div className="lg:col-span-5" style={{ display: 'flex', flexDirection: 'column', gap: 16, minWidth: 0 }}>
@@ -826,7 +828,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
             </div>
           </div>
 
-          <NotesRail campaignId={campaignId} entityType="quest" entityId={questId} />
+          <div className="cf-print-hide"><NotesRail campaignId={campaignId} entityType="quest" entityId={questId} /></div>
         </div>
       </div>
 
