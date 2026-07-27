@@ -89,13 +89,21 @@ export function reclaimStaleUploadStageRoots(tmpDir = os.tmpdir(), currentRoot?:
  */
 export function createPrivateUploadStageRoot(tmpDir = os.tmpdir()): string {
   const root = fs.mkdtempSync(path.join(tmpDir, BACKUP_UPLOAD_STAGE_PREFIX));
-  fs.chmodSync(root, 0o700);
-  fs.writeFileSync(uploadStageOwnerPath(root), JSON.stringify({ pid: process.pid }), {
-    encoding: 'utf8',
-    flag: 'wx',
-    mode: 0o600,
-  });
-  return root;
+  try {
+    fs.chmodSync(root, 0o700);
+    fs.writeFileSync(uploadStageOwnerPath(root), JSON.stringify({ pid: process.pid }), {
+      encoding: 'utf8',
+      flag: 'wx',
+      mode: 0o600,
+    });
+    return root;
+  } catch (err) {
+    // `root` came directly from mkdtempSync above, so this exact removal cannot
+    // affect another process's staging root. Preserve the setup error even if
+    // best-effort rollback itself encounters a filesystem problem.
+    try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* best-effort */ }
+    throw err;
+  }
 }
 
 function getUploadStageRoot(): string {

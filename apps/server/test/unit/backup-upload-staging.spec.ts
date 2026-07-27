@@ -49,6 +49,16 @@ describe('backup upload staging root', () => {
     expect(fs.readFileSync(path.join(live, 'active.zip'), 'utf8')).toBe('live upload');
   });
 
+  it('preserves a live sibling root even when it is not the current-root exemption', () => {
+    const current = createPrivateUploadStageRoot(tmpDir);
+    const sibling = createPrivateUploadStageRoot(tmpDir);
+    fs.writeFileSync(path.join(sibling, 'active.zip'), 'sibling upload');
+
+    reclaimStaleUploadStageRoots(tmpDir, current);
+
+    expect(fs.readFileSync(path.join(sibling, 'active.zip'), 'utf8')).toBe('sibling upload');
+  });
+
   it('does not touch unsafe or unowned temp entries', () => {
     const target = path.join(tmpDir, 'do-not-delete');
     fs.mkdirSync(target);
@@ -79,6 +89,21 @@ describe('backup upload staging root', () => {
       expect(fs.existsSync(stale)).toBe(true);
     } finally {
       remove.mockRestore();
+    }
+  });
+
+  it('removes the exact new root when writing its owner marker fails', () => {
+    const error = new Error('marker write failed');
+    const realWriteFileSync = fs.writeFileSync.bind(fs);
+    const write = jest.spyOn(fs, 'writeFileSync').mockImplementation(((file: fs.PathOrFileDescriptor, data: string | NodeJS.ArrayBufferView, ...args: unknown[]) => {
+      if (String(file).endsWith(BACKUP_UPLOAD_STAGE_OWNER_FILE)) throw error;
+      return realWriteFileSync(file, data, ...(args as []));
+    }) as typeof fs.writeFileSync);
+    try {
+      expect(() => createPrivateUploadStageRoot(tmpDir)).toThrow(error);
+      expect(fs.readdirSync(tmpDir).filter((name) => name.startsWith(BACKUP_UPLOAD_STAGE_PREFIX))).toEqual([]);
+    } finally {
+      write.mockRestore();
     }
   });
 });
