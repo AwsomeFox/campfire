@@ -6,8 +6,8 @@
       "url": "https://github.com/AwsomeFox/campfire/pull/1616",
       "headBranch": "fix/issue-606-clean",
       "baseBranch": "main",
-      "updatedAt": "2026-07-27T20:37:00Z",
-      "notes": "Head 71794885. Addressed 4 review threads (floor DC, monster check redaction, .get(), column select). Threads resolved. Waiting on CI run 30303222865."
+      "updatedAt": "2026-07-27T20:53:00Z",
+      "notes": "Head 6ebe9b59. All review threads addressed/resolved including follow-up flaky ceil assertion. Waiting on CI after latest push."
     }
   ]
 }
