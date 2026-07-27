@@ -1,9 +1,17 @@
 import { EventEmitter } from 'node:events';
 import { BackupController } from '../../src/modules/backup/backup.controller';
 
-function response(): EventEmitter & { writableEnded: boolean; status: jest.Mock; set: jest.Mock } {
+function response(): EventEmitter & {
+  writableEnded: boolean;
+  headersSent: boolean;
+  destroyed: boolean;
+  status: jest.Mock;
+  set: jest.Mock;
+} {
   const res = Object.assign(new EventEmitter(), {
     writableEnded: false,
+    headersSent: false,
+    destroyed: false,
     status: jest.fn(),
     set: jest.fn(),
   });
@@ -25,6 +33,19 @@ describe('BackupController download cancellation', () => {
     };
     await expect(new BackupController(backup as never).download(req as never, res as never)).resolves.toBeUndefined();
     expect(backup.buildBackup).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not rethrow a pipeline failure after the ZIP response is committed', async () => {
+    const req = new EventEmitter();
+    const res = response();
+    const backup = {
+      backupFilename: jest.fn(() => 'backup.zip'),
+      buildBackup: jest.fn(async () => {
+        res.headersSent = true;
+        throw new Error('Backup archive exceeds compressed restore limit');
+      }),
+    };
+    await expect(new BackupController(backup as never).download(req as never, res as never)).resolves.toBeUndefined();
   });
 
   it('does not hide a genuine failure merely because a cancellation signal exists', async () => {
