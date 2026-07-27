@@ -177,6 +177,48 @@ export class CommentsService {
   }
 
   /**
+   * How many comments in this campaign the caller may SEE — without loading a single
+   * comment body (issue #602).
+   *
+   * The campaign summary wanted only `.length` of {@link listForCampaign}, which meant
+   * selecting every comment row in the campaign (bodies included) and walking them in
+   * JS, on a projection the dashboard re-reads on a timer. Counting is grouped per
+   * anchor in SQL instead, so the work scales with the number of distinct commented
+   * entities rather than with the number of comments.
+   *
+   * Redaction is preserved exactly, not approximated: a comment inherits its anchor
+   * entity's visibility (issue #230), so each distinct anchor is resolved through the
+   * SAME {@link isAnchorVisible} check the list uses, and only visible anchors
+   * contribute their count. That is also the same number of visibility queries the list
+   * performed — it already memoised per distinct anchor — so this removes the row scan
+   * without adding round-trips.
+   *
+   * The predicate is `campaignId` alone, matching {@link listForCampaign} exactly. Note
+   * that comments DO carry a `deletedAt` tombstone (issue #503) and neither method filters
+   * on it, so a tombstoned comment still counts. That is preserved rather than endorsed:
+   * it keeps `commentCount` at the number the summary already reported. If tombstones
+   * should be excluded, both methods need to change together.
+   */
+  async countForCampaign(campaignId: number, role: Role): Promise<number> {
+    const groups = await this.db
+      .select({
+        entityType: comments.entityType,
+        entityId: comments.entityId,
+        value: count(),
+      })
+      .from(comments)
+      .where(eq(comments.campaignId, campaignId))
+      .groupBy(comments.entityType, comments.entityId);
+
+    let total = 0;
+    for (const group of groups) {
+      const visible = await this.isAnchorVisible(campaignId, group.entityType as EntityTypeValue, group.entityId, role);
+      if (visible) total += group.value;
+    }
+    return total;
+  }
+
+  /**
    * Thin delegate onto the shared rule in `common/anchor-visibility.ts`. The body
    * moved there verbatim for issue #601 so the moderation module can apply the
    * IDENTICAL check when authorizing "may this reporter report this comment" —
