@@ -779,7 +779,10 @@ export class ExportService {
       archiveError = err;
       if (!destination.destroyed) destination.destroy(err);
     };
-    const onDestinationError = (err: Error) => archive.destroy(err);
+    const onDestinationError = (err: Error) => {
+      archiveError = err;
+      archive.destroy(err);
+    };
     signal.addEventListener('abort', abort, { once: true });
     archive.once('error', onArchiveError);
     destination.once('error', onDestinationError);
@@ -1054,6 +1057,9 @@ export class ExportService {
     for (const a of data.attachments) {
       const decision = attachmentBytes.get(a.id);
       if (decision?.bytes || decision?.sourcePath) {
+        if (decision.sourcePath && !writer.attachmentPath) {
+          throw new Error('Markdown ZIP writer cannot stream attachment paths');
+        }
         if (decision.sourcePath && writer.attachmentPath) {
           const staged = await writer.attachmentPath(a.file, decision.sourcePath);
           fileChecksums[a.file] = staged.checksum;
