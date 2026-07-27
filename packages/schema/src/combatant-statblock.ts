@@ -186,12 +186,11 @@ function damagePartsFrom(raw: unknown): Array<{ formula: string; flat: number; t
       const base = m[1];
       const sign = m[2] === '-' ? -1 : 1;
       const flat = m[3] ? sign * Number(m[3]) : 0;
-      // ActionSpec.flat is non-negative; keep penalties in the dice formula (e.g. 1d8-1).
-      if (flat < 0) {
-        out.push({ formula: `${base}${flat}`, flat: 0, type });
-      } else {
-        out.push({ formula: base, flat, type });
-      }
+      // #1053: `flat` accepts negatives now, so a penalty stays OUT of the dice formula. It
+      // used to be folded back in as "1d8-1" because the schema was `.min(0)` — and a 5e
+      // critical then re-rolled that formula and doubled the penalty. Keeping the split is
+      // what lets the resolver apply the campaign system's critical rule to the right half.
+      out.push({ formula: base, flat, type });
     } else {
       out.push({ formula: expr.trim(), flat: 0, type });
     }
