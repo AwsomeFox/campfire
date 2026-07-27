@@ -95,7 +95,12 @@ export class BackupArchiveReader {
     const limits = { ...DEFAULT_LIMITS, ...overrides };
     let stat: fs.Stats;
     try { stat = await fs.promises.stat(filePath); } catch { invalid('uploaded archive is unavailable'); }
-    if (!stat.isFile() || stat.size > limits.maxCompressedBytes) invalid('archive exceeds the 1 GiB compressed size limit');
+    if (!stat.isFile() || stat.size > limits.maxCompressedBytes) {
+      const limit = limits.maxCompressedBytes === DEFAULT_LIMITS.maxCompressedBytes
+        ? '1 GiB'
+        : `${limits.maxCompressedBytes} byte${limits.maxCompressedBytes === 1 ? '' : 's'}`;
+      invalid(`archive exceeds the ${limit} compressed size limit`);
+    }
     if (signal?.aborted) invalid('archive read was cancelled');
     let zip: ZipFile;
     try { zip = await openZip(filePath); } catch { invalid('not a readable zip file'); }

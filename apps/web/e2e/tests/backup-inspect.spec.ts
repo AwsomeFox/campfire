@@ -265,6 +265,29 @@ test.describe('server backup workflow UI (issues #514 / #444)', () => {
     await expect.poll(() => page.evaluate(() => (window as Window & { __backupWrites?: number }).__backupWrites)).toBeGreaterThan(0);
   });
 
+  test('treats a cancelled destination picker as a cancelled download without starting a request', async ({ page }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(window, 'showSaveFilePicker', {
+        configurable: true,
+        value: async () => {
+          throw new DOMException('The user aborted a request.', 'AbortError');
+        },
+      });
+    });
+    await page.route('**/api/v1/backup/status', (route) => route.fulfill({ status: 200, json: MOCK_STATUS }));
+    let downloadRequests = 0;
+    await page.route('**/api/v1/backup', (route) => {
+      downloadRequests += 1;
+      return route.fulfill({ status: 200, body: 'should-not-be-requested' });
+    });
+
+    await page.goto('/admin/storage');
+    const card = page.locator('.server-backup-workflow-card');
+    await card.getByRole('button', { name: 'Create & download backup' }).click();
+    await expect(card.getByText('Download cancelled.')).toBeVisible();
+    await expect.poll(() => downloadRequests).toBe(0);
+  });
+
   test('cancels the response stream when the selected destination fails', async ({ page }) => {
     await page.addInitScript(() => {
       (window as Window & { __backupResponseCancelled?: boolean }).__backupResponseCancelled = false;

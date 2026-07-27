@@ -251,7 +251,7 @@ export function ServerBackupWorkflowCard() {
           : `Downloaded ${result.filename} (${formatBytes(result.bytes)}). This browser buffered the archive in memory because direct file streaming is unavailable.`,
       );
     } catch (err) {
-      if (controller.signal.aborted) {
+      if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
         setDownloadNote('Download cancelled.');
       } else {
         setDownloadError(
