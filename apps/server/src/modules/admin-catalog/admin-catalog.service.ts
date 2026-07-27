@@ -152,16 +152,44 @@ export class AdminCatalogService {
     };
     await this.settings.setJson(CATALOG_PRIVACY_SETTINGS_KEY, next);
     const policy = await this.getPrivacyPolicy();
+
+    // THE POLICY HAS COMMITTED, AND THIS IS THE WORST PLACE IN THE MODULE TO LIE ABOUT
+    // THAT.
+    //
+    // Every other post-commit audit failure here made an operator retry work that had
+    // already landed: annoying, recoverable, visible on the second attempt. This one is
+    // different because of the direction the failure points. Letting the audit write
+    // throw returned a 500 while the server-wide disclosure policy had ALREADY changed,
+    // so on a `redacted` -> `visible` update:
+    //
+    //   - campaign names and descriptions are now exposed to every operator,
+    //   - the console still shows the old policy and reports that saving FAILED, and
+    //   - no audit row records that any of it happened.
+    //
+    // Nobody retries a privacy change that "failed" and then goes checking whether it
+    // silently applied anyway. So the truthful persisted policy is returned and the
+    // audit failure is made loud rather than fatal: the defect was the gap between what
+    // is stored and what the operator is shown, and closing that gap IS the fix.
+    //
     // Server-scoped row (campaignId null): this changes what EVERY operator can see
     // about EVERY campaign, which is exactly the kind of act the server-admin trail
-    // exists for.
-    await this.audit.log({
-      actor: actor.actor,
-      actorRole: actor.actorRole,
-      action: 'campaign.catalog.privacy.update',
-      entityType: 'settings',
-      detail: `names=${policy.names}, descriptions=${policy.descriptions}`,
-    });
+    // exists for — and therefore exactly the kind whose absence is an incident.
+    try {
+      await this.audit.log({
+        actor: actor.actor,
+        actorRole: actor.actorRole,
+        action: 'campaign.catalog.privacy.update',
+        entityType: 'settings',
+        detail: `names=${policy.names}, descriptions=${policy.descriptions}`,
+      });
+    } catch (err) {
+      this.logger.error(
+        `server catalog privacy policy changed to names=${policy.names}, ` +
+          `descriptions=${policy.descriptions}, but its audit row failed to write — the ` +
+          `change IS in effect and is unrecorded`,
+        err instanceof Error ? err.stack : String(err),
+      );
+    }
     return policy;
   }
 
@@ -1064,15 +1092,32 @@ export class AdminCatalogService {
       .returning({ id: campaigns.id, catalogPrivacy: campaigns.catalogPrivacy });
     if (!row) throw new NotFoundException('Campaign not found');
 
-    await this.audit.log({
-      actor: auditActor(user),
-      actorRole: 'dm',
-      action: 'campaign.catalog.privacy.set',
-      entityType: 'campaign',
-      entityId: campaignId,
-      campaignId,
-      detail: `catalogPrivacy=${next}`,
-    });
+    // Same shape and same reasoning as `updatePrivacyPolicy`, one scope down. The write
+    // above has committed, so throwing here would tell a DM their opt-out did not save
+    // while it had — and on a `redacted` -> `inherit` change that means the campaign's
+    // name and description are disclosed to operators again, with the settings card
+    // still showing "withheld" and no audit row saying otherwise.
+    //
+    // The direction is what makes it urgent: a DM who believes their withholding failed
+    // will not go back and verify that it silently succeeded in the opposite direction.
+    try {
+      await this.audit.log({
+        actor: auditActor(user),
+        actorRole: 'dm',
+        action: 'campaign.catalog.privacy.set',
+        entityType: 'campaign',
+        entityId: campaignId,
+        campaignId,
+        detail: `catalogPrivacy=${next}`,
+      });
+    } catch (err) {
+      this.logger.error(
+        `campaign ${campaignId} catalog privacy changed to ${next} but its audit row ` +
+          `failed to write — the change IS in effect and is unrecorded`,
+        err instanceof Error ? err.stack : String(err),
+      );
+    }
+    // Re-read rather than echo: what the DM is shown must be what is stored.
     return this.getCampaignPrivacy(campaignId);
   }
 

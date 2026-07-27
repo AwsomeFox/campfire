@@ -1,5 +1,6 @@
 import request from 'supertest';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
+import { AuditService } from '../src/modules/audit/audit.service';
 
 /**
  * Issue #587 — the load-bearing negative test.
@@ -465,6 +466,64 @@ describe('Issue #587: catalog metadata cannot reach campaign content (e2e)', () 
       // Reset for any later test.
       const reset = await admin.put('/api/v1/admin/campaigns/privacy').send({ names: 'visible' });
       expect(reset.status).toBe(200);
+    });
+
+    it('reports the REAL policy when the audit write fails after it committed', async () => {
+      // The highest-consequence instance of the post-commit-audit shape in this module,
+      // and the only one whose failure points toward DISCLOSURE.
+      //
+      // The setting commits before the audit row is written. Letting that write throw
+      // returned a 500 while the server-wide policy had already changed — so on a
+      // redacted -> visible update every campaign name was newly exposed, the console
+      // still showed the old policy and said saving FAILED, and nothing recorded it.
+      // Nobody retries a privacy change that "failed" and then checks whether it applied
+      // anyway, so the operator is left believing data is hidden when it is not.
+      const audit = ctx.app.get(AuditService);
+      const before = await admin.put('/api/v1/admin/campaigns/privacy').send({ names: 'redacted' });
+      expect(before.status).toBe(200);
+      expect((await entry()).nameRedacted).toBe(true);
+
+      const spy = jest.spyOn(audit, 'log').mockRejectedValue(new Error('audit table is unavailable'));
+      let loosened: Awaited<ReturnType<typeof admin.put>>;
+      try {
+        loosened = await admin.put('/api/v1/admin/campaigns/privacy').send({ names: 'visible' });
+      } finally {
+        spy.mockRestore();
+      }
+
+      // Not a 500, and — the entire point of the fix — the body reports what is actually
+      // stored rather than the value the operator would otherwise still believe.
+      expect(loosened!.status).toBe(200);
+      expect(loosened!.body.names).toBe('visible');
+
+      // The disclosure really did take effect, so `visible` was the truthful answer and
+      // the operator has not been misled about it.
+      expect((await entry()).nameRedacted).toBe(false);
+      const readBack = await admin.get('/api/v1/admin/campaigns/privacy');
+      expect(readBack.body.names).toBe('visible');
+    });
+
+    it('reports the REAL campaign opt-out when its audit write fails after it committed', async () => {
+      // Same shape one scope down: a DM told their opt-out failed when it had committed.
+      const audit = ctx.app.get(AuditService);
+      const spy = jest.spyOn(audit, 'log').mockRejectedValue(new Error('audit table is unavailable'));
+      let res: Awaited<ReturnType<typeof dm.put>>;
+      try {
+        res = await dm.put(`/api/v1/campaigns/${campaignId}/catalog/privacy`).send({ catalogPrivacy: 'redacted' });
+      } finally {
+        spy.mockRestore();
+      }
+
+      expect(res!.status).toBe(200);
+      expect(res!.body.catalogPrivacy).toBe('redacted');
+      // And the stored state agrees with what the DM was shown.
+      expect((await entry()).nameRedacted).toBe(true);
+
+      // Reset for any later test.
+      const restore = await dm
+        .put(`/api/v1/campaigns/${campaignId}/catalog/privacy`)
+        .send({ catalogPrivacy: 'inherit' });
+      expect(restore.status).toBe(200);
     });
   });
 
