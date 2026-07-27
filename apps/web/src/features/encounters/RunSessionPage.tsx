@@ -961,7 +961,7 @@ export default function RunSessionPage() {
   const [pendingApply, setPendingApply] = useState<{
     amount: number;
     label: string;
-    diceTotal: number;
+    diceTotal?: number;
     /** Combatant whose card rolled the damage — attributed as the combat-log actor when set. */
     actorCombatantId?: number;
   } | null>(null);
@@ -1262,7 +1262,7 @@ export default function RunSessionPage() {
   // A character card rolled damage — surface the one-tap "apply to target" bar. A
   // non-positive total (a 0/negative damage expr) has nothing to apply, so clear any
   // prior pending amount rather than leaving a stale bar from an earlier roll.
-  const onApplyDamageRolled = useCallback((amount: number, label: string, diceTotal = 0, actorCombatantId?: number) => {
+  const onApplyDamageRolled = useCallback((amount: number, label: string, diceTotal: number | undefined, actorCombatantId?: number) => {
     setPendingApply(amount > 0 ? { amount, label, diceTotal, actorCombatantId } : null);
   }, []);
 
@@ -5157,7 +5157,7 @@ function ApplyDamageBar({
 }: {
   amount: number;
   label: string;
-  diceTotal: number;
+  diceTotal?: number;
   ruleSystem?: string | null;
   targets: Combatant[];
   aoeTemplates?: AoeTemplate[];
@@ -5174,10 +5174,11 @@ function ApplyDamageBar({
   const [saveOutcome, setSaveOutcome] = useState<'full' | 'half'>('full');
   const [isCrit, setIsCrit] = useState(false);
   const delta = mode === 'heal' ? amount : -amount;
-  const damage = mode === 'damage'
+  const damageTypes = ruleSystemAdapter(ruleSystem).damageTypes ?? [];
+  const supportsDamageRules = ruleSystemAdapter(ruleSystem).supportsDirectDamageRules === true;
+  const damage = mode === 'damage' && supportsDamageRules
     ? { damageType: damageType || undefined, saveOutcome, isCrit: isCrit || undefined, damageDice: isCrit ? diceTotal : undefined }
     : {};
-  const damageTypes = ruleSystemAdapter(ruleSystem).damageTypes ?? [];
   return (
     <div
       className="cf-inset"
@@ -5213,7 +5214,7 @@ function ApplyDamageBar({
           </button>
         ))}
       </div>
-      {mode === 'damage' && (
+      {mode === 'damage' && supportsDamageRules && (
         <div className="flex items-center gap-2 flex-wrap" aria-label="Damage modifiers">
           <label className="text-muted" style={{ fontSize: 11.5 }}>
             Type{' '}
@@ -5233,7 +5234,7 @@ function ApplyDamageBar({
               <option value="half">saved — half</option>
             </select>
           </label>
-          <button type="button" className="btn btn-ghost cf-target-44" aria-pressed={isCrit} onClick={() => setIsCrit((value) => !value)} title="Double rolled dice, not flat modifiers">
+          <button type="button" className="btn btn-ghost cf-target-44" aria-pressed={isCrit} disabled={diceTotal === undefined} onClick={() => setIsCrit((value) => !value)} title={diceTotal === undefined ? 'Critical damage requires a dice roll breakdown' : 'Double rolled dice, not flat modifiers'}>
             Critical{isCrit ? ' × dice' : ''}
           </button>
           {(damageType || saveOutcome === 'half' || isCrit) && <span className="text-muted" style={{ fontSize: 11.5 }}>Rules modifiers apply per target.</span>}
@@ -5402,7 +5403,7 @@ function CombatantRow({
   campaignId: number | undefined;
   onRollError: (msg: string | null) => void;
   /** A damage total rolled from the card, to be applied to a target combatant. */
-  onApplyDamage: (amount: number, label: string) => void;
+  onApplyDamage: (amount: number, label: string, diceTotal?: number) => void;
   /** Issue #414 / #425: open the structured action Use flow for a resolvable action index. */
   onUseAction?: (actionIndex: number) => void;
   onUseMonsterAction?: (actionIndex: number, actionName: string, spec: ActionSpec) => void;

@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, ForbiddenException, Inject, Inj
 import { and, eq, gt, inArray, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
-import { ActiveEffect, AoeTemplate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, defaultCombatantStatblock, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
+import { ActiveEffect, AoeTemplate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_DAMAGE_TYPES, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, defaultCombatantStatblock, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
 import { z as zod } from 'zod';
 import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -686,10 +686,20 @@ export class EncountersService {
     const entry = this.db.select({ dataJson: ruleEntries.dataJson }).from(ruleEntries).where(eq(ruleEntries.id, row.ruleEntryId)).get();
     const data = entry ? fromJsonText<Record<string, unknown>>(entry.dataJson, {}) : {};
     const readList = (...keys: string[]): string[] => {
+      const normalized: string[] = [];
       for (const key of keys) {
         const value = data[key];
-        if (Array.isArray(value)) return value.map(String).map((v) => v.trim()).filter(Boolean);
-        if (typeof value === 'string' && value.trim()) return value.split(/[,;]/).map((v) => v.trim()).filter(Boolean);
+        const values = Array.isArray(value) ? value.map(String) : typeof value === 'string' ? [value] : [];
+        for (const raw of values) {
+          const text = raw.toLowerCase();
+          // Open5e and hand-entered statblocks commonly store prose such as
+          // "bludgeoning, piercing, and slashing from nonmagical attacks".
+          // Extract the canonical type words instead of requiring synthetic one-token arrays.
+          for (const type of DND5E_DAMAGE_TYPES) {
+            if (new RegExp(`\\b${type}\\b`, 'i').test(text)) normalized.push(type);
+          }
+        }
+        if (normalized.length > 0) return [...new Set(normalized)];
       }
       return [];
     };
@@ -3093,6 +3103,9 @@ export class EncountersService {
     const adapter = await this.adapterForCampaign(encounterRow.campaignId);
     const damageMetadataTouched =
       patch.damageType !== undefined || patch.saveOutcome !== undefined || patch.isCrit !== undefined || patch.damageDice !== undefined;
+    if (damageMetadataTouched && !adapter.supportsDirectDamageRules) {
+      throw new BadRequestException('The active rule system does not support typed direct-damage rules');
+    }
     if (damageMetadataTouched && (patch.hpDelta === undefined || patch.hpDelta >= 0)) {
       throw new BadRequestException('Damage type, save outcome, and critical metadata require a negative hpDelta');
     }

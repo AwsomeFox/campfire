@@ -2977,6 +2977,8 @@ export interface RuleSystemAdapter {
   readonly conditions: readonly string[];
   /** Optional typed-damage vocabulary offered by this system's encounter controls (issue #605). */
   readonly damageTypes?: readonly string[];
+  /** Whether this adapter owns 5e-style direct-damage semantics (save-half and dice-only crits). */
+  readonly supportsDirectDamageRules?: boolean;
   /**
    * OPTIONAL — the action-economy model for this system's turn workspace (issue #413):
    * the ordered slots (action / bonus / reaction / movement, or PF2e's three actions,
@@ -3233,6 +3235,7 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
   // surface — character sheet, encounter tracker, compendium — offers as suggestions.
   conditions: CONDITIONS,
   damageTypes: DND5E_DAMAGE_TYPES,
+  supportsDirectDamageRules: true,
   // 5e turn workspace (issue #413): action / bonus action / reaction / movement.
   actionEconomy: DND5E_ACTION_ECONOMY,
   // 5e square-grid ruler: Euclidean by default; DMs may prefer alternating-diagonal counting.
@@ -8169,7 +8172,7 @@ export const CombatantUpdate = z.object({
   isCrit: z.boolean().optional(),
   // The dice-only portion of hpDelta.  On a critical hit the engine adds this once,
   // leaving the flat modifier untouched (5e's "double dice, not modifier" rule).
-  damageDice: z.number().int().min(0).optional(),
+  damageDice: z.number().int().optional(),
   hpSet: z.number().int().nonnegative().optional(),
   spDelta: z.number().int().optional(),
   spSet: z.number().int().nonnegative().optional(),

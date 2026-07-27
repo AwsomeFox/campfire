@@ -412,6 +412,23 @@ describe('encounters (e2e)', () => {
       expect(invalid.status).toBe(400);
     });
 
+    it('rejects direct-damage metadata for adapters that do not own 5e damage rules (issue #605)', async () => {
+      const server = ctx.app.getHttpServer();
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const ts = new Date().toISOString();
+      await db.insert(rulePacks).values({ slug: 'pf2e-srd', name: 'PF2e SRD', version: '1', license: '', sourceUrl: '', installedAt: ts, entryCount: 0 }).onConflictDoNothing();
+      const campaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'No 5e damage math', ruleSystem: 'pf2e-srd' });
+      const encounter = await request(server).post(`/api/v1/campaigns/${campaign.body.id}/encounters`).set(dm).send({ name: 'Adapter gate' });
+      const target = await request(server).post(`/api/v1/encounters/${encounter.body.id}/combatants`).set(dm).send({ kind: 'monster', name: 'Target', hpMax: 20 });
+
+      const rejected = await request(server).patch(`/api/v1/encounters/${encounter.body.id}/combatants/${target.body.id}`).set(dm)
+        .send({ hpDelta: -5, damageType: 'fire' });
+      expect(rejected.status).toBe(400);
+      const raw = await request(server).patch(`/api/v1/encounters/${encounter.body.id}/combatants/${target.body.id}`).set(dm).send({ hpDelta: -5 });
+      expect(raw.status).toBe(200);
+      expect(raw.body.hpCurrent).toBe(15);
+    });
+
     // Issue #495: players may only add conditions from the active rule vocabulary;
     // arbitrary free-text ("god_mode") must 400. MCP update_combatant shares this path.
     it('owning player cannot inject an arbitrary free-text condition (issue #495)', async () => {

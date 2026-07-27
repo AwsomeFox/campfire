@@ -22,6 +22,22 @@ function RollResultToastChrome() {
 
 type ApplyDamageHandler = (amount: number, label: string, diceTotal?: number) => void;
 
+/**
+ * Dice-only contribution for a critical-hit apply. Compound roll terms retain their
+ * signed `value`, so `2d6-1d4+3` doubles `2d6-1d4`, never the +3. Physical/manual
+ * totals and modifier-only rolls deliberately return undefined: they cannot support an
+ * honest dice-only critical.
+ */
+export function reliableDiceSubtotal(roll: DiceRoll): number | undefined {
+  if (roll.source === 'manual' || roll.rolls.length === 0) return undefined;
+  if (roll.terms) {
+    const diceTerms = roll.terms.filter((term) => term.rolls !== undefined);
+    return diceTerms.length > 0 ? diceTerms.reduce((sum, term) => sum + term.value, 0) : undefined;
+  }
+  // A no-terms rolled result is a single dice expression with no flat modifier.
+  return roll.total;
+}
+
 export interface ShowRollOptions {
   /** Encounter apply-damage handler captured at roll time (character-card rolls). */
   onApply?: ApplyDamageHandler;
@@ -146,12 +162,7 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
     if (!handler) return;
     if (rollApplyHandler == null && !looksLikeDamageRoll(roll)) return;
     const label = roll.label || roll.expr;
-    // `terms` separates dice from flat modifiers for compound expressions.  Preserve
-    // that subtotal so the encounter can apply 5e crits by doubling dice only.
-    const diceTotal = roll.terms
-      ? roll.terms.reduce((sum, term) => sum + (term.rolls ? (term.kept ?? term.rolls).reduce((a, b) => a + b, 0) : 0), 0)
-      : (roll.kept ?? roll.rolls).reduce((sum, value) => sum + value, 0);
-    handler(Math.max(0, roll.total), label, Math.max(0, diceTotal));
+    handler(Math.max(0, roll.total), label, reliableDiceSubtotal(roll));
     dismiss();
   }, [roll, rollApplyHandler, dismiss]);
 
