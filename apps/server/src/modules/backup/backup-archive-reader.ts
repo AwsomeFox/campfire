@@ -26,7 +26,13 @@ function safeEntryName(name: string): void {
     invalid('unsafe entry path');
   }
   const parts = name.split('/');
-  if (parts.some((part) => part === '..')) invalid('unsafe entry path');
+  // A ZIP directory entry may have one trailing slash. Every other segment
+  // must be a real name so aliases such as `uploads//a` and `uploads/./a`
+  // cannot bypass raw-name duplicate checks.
+  const last = parts.length - 1;
+  if (parts.some((part, index) => part === '..' || part === '.' || (part === '' && index !== last))) {
+    invalid('unsafe entry path');
+  }
 }
 
 function openZip(filePath: string): Promise<ZipFile> {

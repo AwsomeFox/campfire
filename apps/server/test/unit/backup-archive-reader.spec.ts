@@ -56,6 +56,18 @@ describe('BackupArchiveReader', () => {
     await rejects(zip([{ name: 'bad\0name' }]));
   });
 
+  it('rejects empty and dot path aliases while allowing a directory trailing slash', async () => {
+    await rejects(zip([{ name: 'uploads/a' }, { name: 'uploads//a' }]));
+    await rejects(zip([{ name: 'uploads/a' }, { name: 'uploads/./a' }]));
+    await rejects(zip([{ name: './uploads/a' }]));
+    await rejects(zip([{ name: 'uploads//directory/' }]));
+
+    const reader = await BackupArchiveReader.open(zip([{ name: 'uploads/' }, { name: 'uploads/a' }]), undefined, low);
+    expect(reader.get('uploads/')).toBeDefined();
+    expect(reader.get('uploads/a')).toBeDefined();
+    reader.close();
+  });
+
   it('rejects encrypted and unsupported methods', async () => {
     await rejects(zip([{ name: 'a', flags: 1 }]));
     await rejects(zip([{ name: 'a', method: 12 }]));
