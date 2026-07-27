@@ -180,7 +180,7 @@ export class ScheduleController {
     const row = await this.scheduling.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
     try {
-      return await this.scheduling.restore(id, user, role, body?.force ?? false);
+      return await this.scheduling.restore(id, user, role, body?.force ?? false, (body?.reason ?? '').trim());
     } catch (err) {
       return await this.organizedPlay.toConflictResponse(err, user);
     }

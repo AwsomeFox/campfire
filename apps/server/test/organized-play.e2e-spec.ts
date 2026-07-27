@@ -1277,6 +1277,184 @@ describe('organized play (e2e)', () => {
     expect(byId.get(live.id)).toMatchObject({ title: 'Seq Policy (renamed)', icsSequence: live.icsSequence + 1 });
   });
 
+  it('detects a batch overlap that is NOT between sorted-adjacent occurrences', async () => {
+    const sweepRoom = (await api().post(`/api/v1/organized-play/venues/${venueId}/rooms`).set(dm).send({ name: 'Sweep Room' })).body;
+    // Three slots in one template, sorted by start: a LONG one that swallows the
+    // gap between two short ones.
+    //   A = 10:00-14:00, B = 11:00-12:00, C = 12:30-13:00
+    // A-B overlaps; B-C does not (B ends 12:00, C starts 12:30). An
+    // adjacent-pairs scan stops there and reports clean, but A-C genuinely
+    // double-books the room. Only a sweep carrying the maximum end seen so far
+    // catches it.
+    const template = await api()
+      .post('/api/v1/organized-play/templates')
+      .set(dm)
+      .send({
+        name: 'Non Adjacent Overlap',
+        timezone: 'UTC',
+        count: 1,
+        slots: [
+          { weekday: 1, startTime: '10:00', durationMinutes: 240, roomId: sweepRoom.id, title: 'A long' },
+          { weekday: 1, startTime: '11:00', durationMinutes: 60, roomId: sweepRoom.id, title: 'B short' },
+          { weekday: 1, startTime: '12:30', durationMinutes: 30, roomId: sweepRoom.id, title: 'C short' },
+        ],
+      });
+    expect(template.status).toBe(201);
+
+    const rejected = await api()
+      .post(`/api/v1/organized-play/templates/${template.body.id}/apply`)
+      .set(dm)
+      .send({ campaignId, startDate: '2100-08-02' });
+    expect(rejected.status).toBe(409);
+    expect(rejected.body.code).toBe('SCHEDULE_CONFLICT');
+    expect(rejected.body.conflicts.some((c: { kind: string }) => c.kind === 'room')).toBe(true);
+    // Nothing was created by the rejected batch.
+    const seriesAfter = await api().get(`/api/v1/campaigns/${campaignId}/series`).set(dm);
+    expect(seriesAfter.body.some((s: { title: string }) => s.title === 'A long')).toBe(false);
+
+    // Control: the same three windows in DIFFERENT rooms collide with nothing,
+    // so the sweep is not simply flagging everything.
+    const roomB = (await api().post(`/api/v1/organized-play/venues/${venueId}/rooms`).set(dm).send({ name: 'Sweep B' })).body;
+    const roomC = (await api().post(`/api/v1/organized-play/venues/${venueId}/rooms`).set(dm).send({ name: 'Sweep C' })).body;
+    const spread = await api()
+      .post('/api/v1/organized-play/templates')
+      .set(dm)
+      .send({
+        name: 'Same Windows Different Rooms',
+        timezone: 'UTC',
+        count: 1,
+        slots: [
+          { weekday: 1, startTime: '10:00', durationMinutes: 240, roomId: sweepRoom.id, title: 'A2' },
+          { weekday: 1, startTime: '11:00', durationMinutes: 60, roomId: roomB.id, title: 'B2' },
+          { weekday: 1, startTime: '12:30', durationMinutes: 30, roomId: roomC.id, title: 'C2' },
+        ],
+      });
+    const ok = await api()
+      .post(`/api/v1/organized-play/templates/${spread.body.id}/apply`)
+      .set(dm)
+      .send({ campaignId, startDate: '2100-09-06' });
+    expect(ok.status).toBe(201);
+    expect(ok.body.series).toHaveLength(3);
+  });
+
+  it('records the reason a night was restored, so the ledger explains itself', async () => {
+    const series = await api()
+      .post(`/api/v1/campaigns/${campaignId}/series`)
+      .set(dm)
+      .send({ title: 'Flooded', timezone: 'UTC', startDate: '2100-10-04', startTime: '18:00', freq: 'weekly', count: 1 });
+    const occ = series.body.occurrences[0];
+
+    expect((await api().delete(`/api/v1/schedule/${occ.id}`).set(dm).send({ reason: 'venue flooded' })).status).toBe(200);
+    expect(
+      (await api().post(`/api/v1/schedule/${occ.id}/restore`).set(dm).send({ reason: 'water cleared, venue reopened' })).status,
+    ).toBe(201);
+
+    const ledger = (await api().get(`/api/v1/organized-play/occurrences/${occ.id}/exceptions`).set(dm)).body;
+    // Both halves of the story, not just the cancellation: a restore explaining
+    // nothing leaves a reader unable to tell recovery from a misclick.
+    expect(ledger.map((e: { kind: string; reason: string }) => [e.kind, e.reason])).toEqual([
+      ['cancel', 'venue flooded'],
+      ['restore', 'water cleared, venue reopened'],
+    ]);
+
+    // Omitting it still works — the field is optional, like its cancel twin.
+    expect((await api().delete(`/api/v1/schedule/${occ.id}`).set(dm).send({})).status).toBe(200);
+    expect((await api().post(`/api/v1/schedule/${occ.id}/restore`).set(dm).send({})).status).toBe(201);
+    const after = (await api().get(`/api/v1/organized-play/occurrences/${occ.id}/exceptions`).set(dm)).body;
+    expect(after[3]).toMatchObject({ kind: 'restore', reason: '' });
+  });
+
+  it('a cancelled occurrence is a metadata target but not a booking participant', async () => {
+    const freed = (await api().post(`/api/v1/organized-play/venues/${venueId}/rooms`).set(dm).send({ name: 'Freed Room' })).body;
+    const series = await api()
+      .post(`/api/v1/campaigns/${campaignId}/series`)
+      .set(dm)
+      .send({ title: 'Half Cancelled', timezone: 'UTC', startDate: '2100-03-01', startTime: '18:00', durationMinutes: 180, freq: 'weekly', count: 2 });
+    expect(series.status).toBe(201);
+    const [first, second] = series.body.occurrences;
+
+    // Cancelling releases that window, so the rival booking below is legitimate.
+    expect((await api().delete(`/api/v1/schedule/${first.id}`).set(dm).send({ reason: 'skip' })).status).toBe(200);
+    const rival = await api()
+      .post(`/api/v1/campaigns/${otherCampaignId}/series`)
+      .set(dm)
+      .send({ title: 'Took The Freed Slot', timezone: 'UTC', startDate: '2100-03-01', startTime: '18:00', durationMinutes: 180, freq: 'weekly', count: 1, roomId: freed.id });
+    expect(rival.status).toBe(201);
+
+    // Assigning the room to the series must NOT count the cancelled night: the
+    // only live occurrence needing the room is the second week, which is free.
+    // Counting it would demand `force` for a collision that does not exist, on
+    // behalf of a night that is not happening.
+    const patched = await api().patch(`/api/v1/campaigns/${campaignId}/series/${series.body.id}`).set(dm).send({ roomId: freed.id });
+    expect(patched.status).toBe(200);
+    expect(patched.body.conflicts).toEqual([]);
+
+    const byId = new Map(patched.body.occurrences.map((o: { id: number }) => [o.id, o]));
+    // The cancelled night still RECEIVES the metadata, so restoring it later
+    // brings back a current row — it just took no part in the booking check.
+    expect(byId.get(first.id)).toMatchObject({ roomId: freed.id, status: 'cancelled' });
+    expect(byId.get(second.id)).toMatchObject({ roomId: freed.id, status: 'scheduled' });
+
+    // And restoring it now correctly refuses, because the room really is taken.
+    const blocked = await api().post(`/api/v1/schedule/${first.id}/restore`).set(dm).send({});
+    expect(blocked.status).toBe(409);
+  });
+
+  it('duplicating a one-off carries its timezone, which nothing else can repair', async () => {
+    const night = await api()
+      .post(`/api/v1/campaigns/${campaignId}/schedule`)
+      .set(dm)
+      .send({ scheduledAt: '2100-05-04T23:00:00Z', title: 'Zoned Night', timezone: 'America/New_York' });
+    expect(night.status).toBe(201);
+    expect(night.body.localStart).toBe('2100-05-04T19:00');
+
+    // `duplicate()` predates #588 but `timezone` does not, so a method that
+    // copies "everything" silently stopped doing so when the column arrived.
+    // ScheduledSessionUpdate carries no `timezone`, so a dropped zone here is
+    // unrepairable without recreating the row.
+    const copy = await api().post(`/api/v1/schedule/${night.body.id}/duplicate`).set(dm).send({ scheduledAt: '2100-05-11T23:00:00Z' });
+    expect(copy.status).toBe(201);
+    expect(copy.body.timezone).toBe('America/New_York');
+    expect(copy.body.localStart).toBe('2100-05-11T19:00');
+
+    // A zone-less original still duplicates to a zone-less copy.
+    const plain = await api().post(`/api/v1/campaigns/${campaignId}/schedule`).set(dm).send({ scheduledAt: '2100-05-18T18:00:00Z' });
+    const plainCopy = await api().post(`/api/v1/schedule/${plain.body.id}/duplicate`).set(dm).send({});
+    expect(plainCopy.body).toMatchObject({ timezone: '', localStart: '' });
+  });
+
+  it('one malformed template slot does not discard the valid slots beside it', async () => {
+    const holder = ctx.app.get<DbHolder>(DB_HOLDER);
+    const raw: Database = holder.raw;
+    const template = await api()
+      .post('/api/v1/organized-play/templates')
+      .set(dm)
+      .send({ name: 'Partly Broken', timezone: 'UTC', count: 1, slots: [{ weekday: 4, startTime: '18:00', title: 'Good Slot' }] });
+    expect(template.status).toBe(201);
+
+    // Simulate a hand-edited or partially-migrated row: one unreadable slot
+    // sitting beside a valid one. Previously a single bad entry reset the whole
+    // list to [], so the template silently became one that creates nothing — and
+    // there is no template-update endpoint with which to repair it.
+    raw
+      .prepare('UPDATE schedule_templates SET slots_json = ? WHERE id = ?')
+      .run(JSON.stringify([{ weekday: 4, startTime: '18:00', durationMinutes: 240, roomId: null, assignedDmUserId: '', capacity: 0, title: 'Good Slot' }, { weekday: 99, startTime: 'not-a-time' }]), template.body.id);
+
+    const listed = (await api().get('/api/v1/organized-play/templates').set(dm)).body.find(
+      (t: { id: number }) => t.id === template.body.id,
+    );
+    expect(listed.slots).toHaveLength(1);
+    expect(listed.slots[0].title).toBe('Good Slot');
+
+    // …and the surviving slot still applies.
+    const applied = await api()
+      .post(`/api/v1/organized-play/templates/${template.body.id}/apply`)
+      .set(dm)
+      .send({ campaignId, startDate: '2100-06-01' });
+    expect(applied.status).toBe(201);
+    expect(applied.body.series).toHaveLength(1);
+  });
+
   it('restoring a cancelled occurrence re-books its room and refuses a taken one', async () => {
     const room = (await api().post(`/api/v1/organized-play/venues/${venueId}/rooms`).set(dm).send({ name: 'Restore Room' })).body;
     const mine = await api()

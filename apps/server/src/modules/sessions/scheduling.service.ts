@@ -832,7 +832,7 @@ export class SchedulingService {
     return this.getWithRsvps(id);
   }
 
-  async restore(id: number, user: RequestUser, role: Role, force = false): Promise<ScheduledSessionWithRsvps> {
+  async restore(id: number, user: RequestUser, role: Role, force = false, reason = ''): Promise<ScheduledSessionWithRsvps> {
     // Effective status here too, so every write guard in this file reads the same
     // projection the API returns. ('cancelled' is never link-derived, so this one is
     // equivalent to the raw column today — it is written this way so the next guard
@@ -911,7 +911,7 @@ export class SchedulingService {
             fromScheduledAt: existing.scheduledAt,
             toScheduledAt: existing.scheduledAt,
             toLocalStart: existing.localStart,
-            reason: '',
+            reason,
             actorUserId: user.id,
             createdAt: ts,
           })
@@ -961,6 +961,13 @@ export class SchedulingService {
         title: input.title ?? existing.title,
         location: input.location ?? existing.location,
         notes: input.notes ?? existing.notes,
+        // #588: carry the zone across. `duplicate()` predates this branch, but
+        // `timezone` does not — so a method that copies "everything" silently
+        // stopped doing so the moment the column was added, and the copy stored
+        // '' with an empty `localStart`. Nothing could repair it afterwards:
+        // ScheduledSessionUpdate deliberately carries no `timezone`. Adding a
+        // column means auditing whoever claims to copy the row.
+        timezone: existing.timezone,
       },
       user,
       role,

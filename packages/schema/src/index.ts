@@ -1364,6 +1364,18 @@ export type ScheduledSessionCancel = z.infer<typeof ScheduledSessionCancel>;
  */
 export const ScheduledSessionRestore = z.object({
   force: z.boolean().default(false),
+  /**
+   * Why the night is coming back. Written to the `restore` ledger entry.
+   *
+   * Bounds copied from `ScheduledSessionCancel.reason` deliberately, not chosen
+   * afresh: both are audit prose on the SAME append-only ledger, and two fields
+   * on one ledger disagreeing about their own limits is how the next
+   * inconsistency starts. Without this the ledger could hold "cancelled: venue
+   * flooded" followed by a restore explaining nothing, and a coordinator reading
+   * it could not tell whether the flood receded or someone misclicked — which is
+   * the question the ledger exists to answer.
+   */
+  reason: z.string().max(1000).optional(),
 });
 export type ScheduledSessionRestore = z.infer<typeof ScheduledSessionRestore>;
 export const ScheduledSessionDuplicate = z.object({

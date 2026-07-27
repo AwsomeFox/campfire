@@ -400,6 +400,22 @@ export const castSessions = sqliteTable('cast_sessions', {
 // campaign child — several campaigns share one room calendar by design, so a
 // venue cannot hang off a single campaign (and a campaign purge must not take
 // the room with it).
+//
+// WHERE THE CONSTRAINTS LIVE, before anyone files "these tables declare no
+// foreign keys and no unique indexes": this file is the drizzle QUERY-side view,
+// not the DDL. Schema is hand-written in bootstrap.sql.ts — only 6 of ~80 tables
+// here bother with `references()`, and those are for relation typing rather than
+// for creating the constraint. The organized-play tables are fully constrained
+// there: `play_rooms.venue_id` → `play_venues` ON DELETE CASCADE plus
+// `UNIQUE(venue_id, name)`; `session_series.campaign_id` → `campaigns` CASCADE,
+// with `venue_id`/`room_id` ON DELETE SET NULL; `series_exceptions.series_id` →
+// `session_series` CASCADE and `occurrence_id` SET NULL;
+// `schedule_templates.venue_id` and `scheduled_sessions.series_id` SET NULL; and
+// `idx_session_series_uid` is a UNIQUE index on `series_uid`, which is what stops
+// two series minting colliding ICS UIDs. Adding `references()` here would change
+// no database — and the application-level cascade in CampaignsService.purge()
+// exists because installs predating FK enforcement still have to purge cleanly,
+// which is what db-cascades.e2e-spec.ts pins on both paths.
 export const playVenues = sqliteTable('play_venues', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   name: text('name').notNull(),

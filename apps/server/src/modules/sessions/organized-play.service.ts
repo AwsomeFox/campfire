@@ -496,10 +496,11 @@ export class OrganizedPlayService {
    * Already caller-visible: every occurrence here belongs to the request's own
    * target campaign, so there is nothing to redact.
    *
-   * Sorted-adjacent scan rather than all-pairs: within a group sharing a room or
-   * a DM, if A overlaps C then A also overlaps every entry between them, so one
-   * adjacent overlap is enough to report the collision without going quadratic
-   * on a 20-slot x 104-occurrence template.
+   * A sorted sweep rather than all-pairs, so a 20-slot x 104-occurrence template
+   * does not cost ~2M comparisons. NOTE: the sweep must carry the maximum end
+   * seen so far. An earlier version compared only ADJACENT pairs on the claim
+   * that "if A overlaps C it also overlaps everything between them" — that claim
+   * is false, and the counter-example is in the loop below.
    */
   private intraBatchConflicts(
     entries: Array<{ startsAt: string; endsAt: string; roomId: number | null; dm: string; campaignId: number; title: string }>,
@@ -517,14 +518,30 @@ export class OrganizedPlayService {
       }
       for (const group of groups.values()) {
         const sorted = [...group].sort((a, b) => a.startsAt.localeCompare(b.startsAt));
-        for (let i = 1; i < sorted.length; i += 1) {
-          const prev = sorted[i - 1];
-          const cur = sorted[i];
-          if (
-            !windowsOverlap(Date.parse(prev.startsAt), Date.parse(prev.endsAt), Date.parse(cur.startsAt), Date.parse(cur.endsAt))
-          ) {
-            continue;
+        // Sweep carrying the MAXIMUM end seen so far, not the previous element's
+        // end. Comparing only consecutive pairs is wrong: one long interval can
+        // swallow a gap between two short ones, and the pair that actually
+        // collides is then never compared. A=[10:00,14:00], B=[11:00,12:00],
+        // C=[12:30,13:00] sorts to A,B,C — A-B overlaps, B-C does not, and the
+        // adjacent scan stops there while A-C genuinely double-books the room.
+        // Tracking the max end (and which entry set it) is still one pass and
+        // O(n log n) overall, and it is correct for existence detection: an entry
+        // overlaps SOMETHING earlier exactly when it starts before the furthest
+        // end reached so far.
+        let maxEnd = Number.NEGATIVE_INFINITY;
+        let maxEntry: Entry | null = null;
+        for (const cur of sorted) {
+          const curStart = Date.parse(cur.startsAt);
+          const curEnd = Date.parse(cur.endsAt);
+          // Reuses the shared predicate rather than open-coding `start < maxEnd`,
+          // so half-open semantics stay defined in exactly one place.
+          const overlapsEarlier =
+            maxEntry !== null && windowsOverlap(Date.parse(maxEntry.startsAt), maxEnd, curStart, curEnd);
+          if (curEnd > maxEnd) {
+            maxEnd = curEnd;
+            maxEntry = cur;
           }
+          if (!overlapsEarlier) continue;
           out.push({
             kind,
             visible: true,
@@ -1002,6 +1019,15 @@ export class OrganizedPlayService {
         .where(and(eq(scheduledSessions.seriesId, id), sql`${scheduledSessions.scheduledAt} > ${nowStr}`))
         .all();
       const affected = future.filter((occ) => !overriddenIds.has(occ.id));
+      // A CANCELLED occurrence is a metadata target but NOT a booking
+      // participant. Cancelling releases the room and DM — `scheduleLiveSql()`
+      // drops the row from conflict detection, so another campaign may
+      // legitimately have taken that window — and `restore()` is what re-acquires
+      // them, with its own probe. Counting a cancelled row here would therefore
+      // demand `force` for a collision that does not exist, on behalf of a night
+      // that is not happening. Same rule as the SEQUENCE decision below: cancelled
+      // rows keep receiving metadata, and take no part in booking.
+      const booking = affected.filter((occ) => occ.status !== 'cancelled');
 
       // #588: a metadata PATCH that carries `roomId` or `assignedDmUserId` is a
       // BULK reassignment wearing a metadata edit's clothes — one request moves
@@ -1027,7 +1053,7 @@ export class OrganizedPlayService {
         // step), moving them all onto one room double-books it with no row
         // anywhere that could report it.
         const batchConflicts = this.intraBatchConflicts(
-          affected.map((occ) => ({
+          booking.map((occ) => ({
             startsAt: occ.scheduledAt,
             endsAt: endInstant(occ.scheduledAt, occ.durationMinutes),
             roomId: probeRoomId,
@@ -1037,7 +1063,7 @@ export class OrganizedPlayService {
           })),
         );
         const conflicts: RawConflict[] = [];
-        for (const occ of affected) {
+        for (const occ of booking) {
           conflicts.push(
             ...this.findConflictRows(tx, {
               startsAt: occ.scheduledAt,
@@ -1319,6 +1345,15 @@ export class OrganizedPlayService {
         endsAt: endInstant(scheduledAt, durationMinutes),
         roomId,
         assignedDmUserId: existing.assignedDmUserId,
+        // No member check, deliberately, on this and every other WRITE path.
+        // A room and a running DM are resources this server ALLOCATES, so
+        // double-allocating them is a bug it must refuse. A player is not
+        // allocated: they RSVP, and being wanted at two tables is a fact about
+        // their evening, not a broken booking — the coordinator resolves it by
+        // talking to them. `POST /conflicts` still reports it, because a probe
+        // that answers "what would this cost?" should surface everything;
+        // rejecting a legal room booking over it would let one player's RSVP veto
+        // another campaign's table.
         memberUserIds: [],
         excludeScheduleId: id,
       });
@@ -1616,8 +1651,22 @@ export class OrganizedPlayService {
       // Re-parse through the Zod schema rather than trusting the stored JSON:
       // the column is text, and a hand-edited or partially-migrated row must not
       // become an ill-typed object flowing through the whole bulk-create path.
-      slots = Array.isArray(parsed) ? parsed.map((s) => ScheduleTemplateSlot.parse(s)) : [];
+      //
+      // Per-slot, not one try/catch around the whole array: a single malformed
+      // slot used to reset `slots` to [] and discard every VALID slot beside it,
+      // so one bad entry silently turned the template into one that creates
+      // nothing. Dropping only the unreadable slot keeps the rest of the block
+      // usable, which is the recoverable failure — and there is no
+      // template-update endpoint with which to repair the other outcome.
+      slots = Array.isArray(parsed)
+        ? parsed.flatMap((raw) => {
+            const one = ScheduleTemplateSlot.safeParse(raw);
+            return one.success ? [one.data] : [];
+          })
+        : [];
     } catch {
+      // Unparseable JSON: nothing is recoverable, so the template reads as empty
+      // rather than throwing on a list endpoint.
       slots = [];
     }
     return {
