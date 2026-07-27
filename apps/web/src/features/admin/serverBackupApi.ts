@@ -225,6 +225,15 @@ function isAbortError(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'name' in error && error.name === 'AbortError';
 }
 
+function throwIfAborted(signal?: AbortSignal): void {
+  // AbortSignal.throwIfAborted() is not available in every browser that can run
+  // the app. Keep cancellation on the DOMException contract the workflow already
+  // recognizes instead of turning a dismissed picker into a TypeError.
+  if (signal?.aborted) {
+    throw new DOMException('The backup download was cancelled before it started.', 'AbortError');
+  }
+}
+
 export async function downloadServerBackup(options?: {
   keyPassphrase?: string;
   signal?: AbortSignal;
@@ -251,7 +260,7 @@ export async function downloadServerBackup(options?: {
       // failure would tell the operator the backup broke when they simply changed their
       // mind — and no request has even been issued yet.
       if (isAbortError(error)) {
-        options?.signal?.throwIfAborted();
+        throwIfAborted(options?.signal);
         throw new DOMException('The backup download was cancelled before it started.', 'AbortError');
       }
       throw error;
