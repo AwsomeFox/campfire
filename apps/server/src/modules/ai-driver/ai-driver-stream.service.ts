@@ -120,7 +120,25 @@ export type AiDmStreamEvent =
   // #572 — the DM erased the transcript. Purging resets the per-campaign `seq`, so every
   // open table must drop its local copy and refetch rather than resume from a watermark
   // that no longer refers to anything.
-  | { type: 'transcript.reset'; campaignId: number; at: string };
+  | { type: 'transcript.reset'; campaignId: number; at: string }
+  // #577 — the server's verdict on the factual claims in the turn that just ended. Thin, like
+  // every other signal here: clients refetch GET /ai-dm/grounding for the claim text, the
+  // per-citation reasons, and the evidence links. `provider`/`model` are the ruling's
+  // provenance badge and are deliberately the ONLY provider details ever put on this wire —
+  // no key, no base URL, no headers. `status: 'unverified'` means the narration the table just
+  // watched contains at least one assertion the server could not trace to an authorized read.
+  | {
+      type: 'grounding';
+      campaignId: number;
+      status: 'clean' | 'unverified';
+      supportedCount: number;
+      unsupportedCount: number;
+      provider: string;
+      model: string;
+      /** Ids of the persisted claim rows, for a direct refetch. Empty if persistence failed. */
+      claimIds: number[];
+      at: string;
+    };
 
 /**
  * In-process pub/sub for the AI DM driver's narration stream (#312), modelled on the

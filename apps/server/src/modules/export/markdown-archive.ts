@@ -126,6 +126,23 @@ export type ArchiveRecordEntry = {
   checksum: string;
 };
 
+/**
+ * Redaction disclosure written into every archive manifest (issue #586). An archive
+ * that went through a redaction profile must SAY SO in machine-readable form, so a
+ * consumer can tell a publishable module from a DM backup without inferring it from
+ * which keys happen to be empty.
+ */
+export type ArchiveRedactionDisclosure = {
+  profile: string;
+  options: Record<string, boolean>;
+  policy: Record<string, boolean>;
+  rows: unknown[];
+  attachments: unknown;
+  identifiers: unknown;
+  pseudonyms: { contributors: number };
+  limitations: string[];
+};
+
 export type MarkdownArchiveManifest = {
   app: string;
   kind: string;
@@ -133,6 +150,8 @@ export type MarkdownArchiveManifest = {
   appVersion: string;
   schemaVersion: number;
   secrecyProfile: string;
+  /** Always written; `profile: 'backup'` states plainly that nothing was redacted. */
+  redaction?: ArchiveRedactionDisclosure;
   createdAt: string;
   campaignId: number;
   counts: Record<string, number>;
@@ -207,6 +226,9 @@ export function buildMarkdownArchiveManifest(input: {
   records: ArchiveRecordEntry[];
   appVersion?: string;
   schemaVersion?: number;
+  /** Issue #586: overridden per export profile ('dm-full' | 'dm-handoff' | 'publishable-module'). */
+  secrecyProfile?: string;
+  redaction?: ArchiveRedactionDisclosure;
 }): MarkdownArchiveManifest {
   const modules = input.modules;
   for (const key of MACHINE_EXPORT_MODULES) {
@@ -221,7 +243,8 @@ export function buildMarkdownArchiveManifest(input: {
     formatVersion: MARKDOWN_ARCHIVE_FORMAT_VERSION,
     appVersion: input.appVersion ?? APP_VERSION,
     schemaVersion: input.schemaVersion ?? CURRENT_SCHEMA_REVISION,
-    secrecyProfile: MARKDOWN_ARCHIVE_SECRECY_PROFILE,
+    secrecyProfile: input.secrecyProfile ?? MARKDOWN_ARCHIVE_SECRECY_PROFILE,
+    ...(input.redaction ? { redaction: input.redaction } : {}),
     createdAt: input.createdAt ?? new Date().toISOString(),
     campaignId: input.campaignId,
     counts: input.counts,

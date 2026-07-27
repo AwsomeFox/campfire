@@ -277,6 +277,66 @@ export const CampaignClonePreview = z.object({
 });
 export type CampaignClonePreview = z.infer<typeof CampaignClonePreview>;
 
+// ── Export profiles + pre-export inventory (issue #586) ──────────────────────
+// The campaign export is no longer one artifact. `backup` is the unredacted DM
+// backup; `handoff` hands the world (and its secrets) to a new DM without the old
+// group's identities or paper trail; `publish` produces a redistributable adventure
+// module whose default is to exclude everything identity- or operations-shaped.
+export const ExportProfile = z.enum(['backup', 'handoff', 'publish']);
+export type ExportProfile = z.infer<typeof ExportProfile>;
+
+/** Opt-ins that WIDEN the publish profile. All default false — redaction-safe. */
+export const ExportProfileOptions = z.object({
+  includeDmSecrets: z.boolean().default(false),
+  includePlayedState: z.boolean().default(false),
+  includePlayerContent: z.boolean().default(false),
+});
+export type ExportProfileOptions = z.infer<typeof ExportProfileOptions>;
+
+export const ExportInventoryRow = z.object({
+  module: z.string(),
+  included: z.number().int().nonnegative(),
+  redacted: z.number().int().nonnegative(),
+  reason: z.string().optional(),
+  /** Columns the per-entity ALLOWLIST withheld from the rows that did travel. */
+  fieldsWithheld: z.array(z.string()).optional(),
+});
+export type ExportInventoryRow = z.infer<typeof ExportInventoryRow>;
+
+export const ExportAttachmentInventory = z.object({
+  included: z.number().int().nonnegative(),
+  bytesWithheld: z.number().int().nonnegative(),
+  filenamesNeutralized: z.number().int().nonnegative(),
+  metadataStripped: z.number().int().nonnegative(),
+  notes: z.array(z.string()),
+});
+export type ExportAttachmentInventory = z.infer<typeof ExportAttachmentInventory>;
+
+/** Pre-export inventory returned by GET /campaigns/:id/export/preview (issue #586). */
+export const ExportInventory = z.object({
+  app: z.literal('campfire'),
+  kind: z.literal('campaign-export-inventory'),
+  formatVersion: z.number().int(),
+  campaignId: Id,
+  profile: ExportProfile,
+  options: ExportProfileOptions,
+  secrecyProfile: z.string(),
+  summary: z.string(),
+  createdAt: IsoDate,
+  policy: z.record(z.string(), z.boolean()),
+  rows: z.array(ExportInventoryRow),
+  attachments: ExportAttachmentInventory,
+  identifiers: z.object({
+    scanned: z.number().int().nonnegative(),
+    unscannable: z.array(z.string()),
+    occurrencesRedacted: z.number().int().nonnegative(),
+  }),
+  pseudonyms: z.object({ contributors: z.number().int().nonnegative() }),
+  /** What this redaction does NOT protect against — always shown to the DM. */
+  limitations: z.array(z.string()),
+});
+export type ExportInventory = z.infer<typeof ExportInventory>;
+
 // Import input — POST /campaigns/import (issue #120). The body is a Campfire JSON
 // export (the shape ExportService.buildExport produces): make the one-way export
 // round-trippable by re-creating the campaign from it. Validated permissively —

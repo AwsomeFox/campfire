@@ -17,6 +17,7 @@ import { AiDriverController } from './ai-driver.controller';
 import { AiDmStreamService } from './ai-driver-stream.service';
 import { AiDmTranscriptService } from './ai-driver-transcript.service';
 import { ProactiveService } from './proactive.service';
+import { DriverGroundingService } from './driver-grounding.service';
 import { AI_PROVIDER_RESOLVER, ConfigAiProviderResolver } from './ai-provider-resolver';
 
 /**
@@ -62,8 +63,16 @@ import { AI_PROVIDER_RESOLVER, ConfigAiProviderResolver } from './ai-provider-re
     AiDmStreamService,
     AiDmTranscriptService,
     ProactiveService,
+    // #577 — grounding verdict persistence + the human-correction loop.
+    DriverGroundingService,
     { provide: AI_PROVIDER_RESOLVER, useClass: ConfigAiProviderResolver },
   ],
-  exports: [AiDriverService, AiDmStreamService, AiDmTranscriptService, ProactiveService],
+  exports: [
+    AiDriverService,
+    AiDmStreamService,
+    AiDmTranscriptService,
+    ProactiveService,
+    DriverGroundingService,
+  ],
 })
 export class AiDriverModule {}

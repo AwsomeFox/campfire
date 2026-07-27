@@ -56,6 +56,20 @@ import {
   formatListForPrompt,
   formatLocationEnvironmentFromSummary,
 } from './world-state-prompt';
+// Grounding (#577): the claim/citation boundary. The pure half (parse / ledger / verdict) lives
+// in driver-grounding.ts so it is unit-testable without a provider or a database; the persistence
+// + human-correction half lives in driver-grounding.service.ts.
+import {
+  evaluateGrounding,
+  GROUNDING_CITATION_CONTRACT,
+  GroundingDeltaFilter,
+  harvestRetrievals,
+  parseGroundingBlock,
+  RetrievalLedger,
+  type GroundingVerdict,
+  type ParsedGrounding,
+} from './driver-grounding';
+import { DriverGroundingService } from './driver-grounding.service';
 
 /** Default per-provider-call output cap for a driver step; clamped to remaining budget. */
 const DEFAULT_STEP_MAX_TOKENS = 1024;
@@ -154,6 +168,12 @@ export interface AiDmTurnRunResult {
   tokenBudget: number;
   budgetRemaining: number;
   seat: AiDmSeat;
+  /**
+   * Server-side verdict on the turn's factual claims (#577). Present on every completed turn.
+   * `status: 'unverified'` means at least one rules/canon assertion could not be traced to an
+   * authorized retrieval — the narration is still delivered, but labelled.
+   */
+  grounding?: GroundingVerdict;
 }
 
 export type AiDmSessionStatus = 'idle' | 'running' | 'paused';
@@ -191,7 +211,8 @@ export type AiDmStuckReason =
   | 'no_narration' // the turn produced no narration at all
   | 'loop' // the model repeated its previous narration verbatim
   | 'dispute' // a player flagged the AI's last ruling as wrong/unfair
-  | 'provider_error'; // provider failed or stalled mid-stream (#1046 / #1063)
+  | 'provider_error' // provider failed or stalled mid-stream (#1046 / #1063)
+  | 'unsupported_claim'; // the turn asserted rules/canon the server could not verify (#577)
 
 /** Snapshot of the current stuck condition; null when the seat is healthy. */
 export interface AiDmStuckInfo {
@@ -413,6 +434,10 @@ const STUCK_REASONS = allowlist<AiDmStuckReason>({
   loop: true,
   dispute: true,
   provider_error: true,
+  // #577 — a turn parked because the server could not trace a factual claim to an authorized
+  // read. Must be listed here or a restart would hydrate that seat back to healthy and drop
+  // the very signal the grounding ladder exists to raise.
+  unsupported_claim: true,
 });
 
 function recordOf(value: unknown): Record<string, unknown> | null {
@@ -516,6 +541,11 @@ const RECOVERY_SUMMARY: Record<ControlStateRecovery, string> = {
  * The runtime must not invent canon: rules come from the compendium (lookup_rule),
  * NPC/quest/location facts from campaign reads, and any NEW canon is created via a
  * tool (which the runtime forces down the proposal path), never asserted only in prose.
+ *
+ * Note (#577): this preamble is prompt text, and prompt text is a request, not a control. The
+ * enforcement for "never invent rules/canon" is the grounding contract appended immediately
+ * after it (GROUNDING_CITATION_CONTRACT) plus the SERVER-side citation validation in
+ * driver-grounding.ts, which never takes the model's word for anything.
  */
 const GROUNDING_PREAMBLE = [
   'You are the AI Dungeon Master running a live tabletop scene. Narrate vividly but stay grounded:',
@@ -1105,6 +1135,9 @@ export class AiDriverService {
     private readonly members: MembersService,
     private readonly characters: CharactersService,
     private readonly transcript: AiDmTranscriptService,
+    // #577 — grounding verdict persistence + the human-correction loop. Sits after #572's
+    // transcript and before #559's optional `db`, which must stay last in the list.
+    private readonly groundingStore: DriverGroundingService,
     // Optional, so it must stay last in the parameter list (#559).
     @Inject(DB) private readonly db?: DrizzleDb,
   ) {
@@ -1804,8 +1837,11 @@ export class AiDriverService {
         parameters: t.inputSchema,
       }));
 
-    const system = await this.assembleSystemPrompt(campaignId, seat, opts.narrationLanguage);
-    
+    // #577 — one ledger per turn. Seeded by the system-prompt context reads below, extended by
+    // every executed tool call, and consulted (never written) by the grounding verdict.
+    const ledger = new RetrievalLedger();
+    const system = await this.assembleSystemPrompt(campaignId, seat, opts.narrationLanguage, ledger);
+
     let speakerPrefix = '';
     if (opts.characterId) {
       try {
@@ -1855,6 +1891,14 @@ export class AiDriverService {
     let totalTokens = 0;
     let budgetRemaining = seat.budgetRemaining;
     let finalNarration = '';
+    // #577 — the last step's parsed reply. `finalNarration` always holds the STRIPPED prose
+    // (what the table saw) and `turnGrounding` the machine-readable claims that came with it,
+    // so the two can never drift apart no matter which exit path the turn takes.
+    let turnGrounding: ParsedGrounding = { narration: '', claims: [], present: false, malformed: false };
+    const setNarration = (raw: string): void => {
+      turnGrounding = parseGroundingBlock(raw);
+      finalNarration = turnGrounding.narration;
+    };
     let latestSeat = seat;
     let stopReason: AiDmStopReason = 'complete';
     const executed: AiDmExecutedTool[] = [];
@@ -2059,7 +2103,7 @@ export class AiDriverService {
           budgetRemaining = spend.budgetRemaining;
           totalTokens += spend.metered?.tokensUsed ?? 0;
           stopReason = generationAuthorityStopReason(spend.reason);
-          if (spend.text) finalNarration = spend.text;
+          if (spend.text) setNarration(spend.text);
           break;
         }
         if (spend.kind === 'aborted') {
@@ -2067,7 +2111,7 @@ export class AiDriverService {
           budgetRemaining = spend.budgetRemaining;
           totalTokens += spend.metered?.tokensUsed ?? 0;
           stopReason = 'aborted';
-          if (spend.text) finalNarration = spend.text;
+          if (spend.text) setNarration(spend.text);
           break;
         }
         if (spend.kind === 'provider_error') {
@@ -2077,7 +2121,7 @@ export class AiDriverService {
           stopReason = 'provider_error';
           providerError = spend.error;
           tokensUsageUnknown = spend.usageUnknown;
-          if (spend.text) finalNarration = spend.text;
+          if (spend.text) setNarration(spend.text);
           const detail = spend.error?.message ?? 'provider error';
           await this.audit.log({
             actor,
@@ -2098,16 +2142,23 @@ export class AiDriverService {
         const postStepAuth = await this.checkGenerationAuthority(campaignId, session, generationSignal);
         if (postStepAuth !== 'ok') {
           stopReason = generationAuthorityStopReason(postStepAuth);
-          if (text) finalNarration = text;
+          if (text) setNarration(text);
           break;
         }
 
         if (text) {
-          finalNarration = text;
-          this.stream.emit({ type: 'narration.message', campaignId, text });
-          // #572: the aggregated step is the authoritative narration line — persist it so a
-          // late joiner / reconnect rebuilds the same bubble. Raw deltas stay ephemeral.
-          this.recordNarration(campaignId, text);
+          // #577: split the reply into the prose the table sees and the structured claim block.
+          // Only the framing is removed — no narration is dropped or rewritten, which is why an
+          // unsupported claim gets labelled rather than deleted further down.
+          setNarration(text);
+          if (finalNarration) {
+            this.stream.emit({ type: 'narration.message', campaignId, text: finalNarration });
+            // #572: the aggregated step is the authoritative narration line — persist it so a
+            // late joiner / reconnect rebuilds the same bubble. Raw deltas stay ephemeral.
+            // It persists the STRIPPED prose, so scrollback matches what the table watched
+            // rather than replaying the raw citation block the live stream filtered out.
+            this.recordNarration(campaignId, finalNarration);
+          }
         }
 
         const toolCalls = result?.toolCalls ?? [];
@@ -2130,6 +2181,7 @@ export class AiDriverService {
           toolCalls,
           messages,
           executed,
+          ledger,
         );
         if (authorityStop) {
           stopReason = generationAuthorityStopReason(authorityStop);
@@ -2193,6 +2245,20 @@ export class AiDriverService {
       };
     }
 
+    // #577 — grounding: decide, server-side, which of this turn's factual claims are actually
+    // traceable to an authorized retrieval. Runs AFTER the narration has been broadcast on
+    // purpose: the table sees what the AI said either way, and unsupported claims are then
+    // labelled unverified rather than deleted out from under a DM who never saw them.
+    const grounding = await this.evaluateTurnGrounding(campaignId, session, {
+      narration: finalNarration,
+      parsed: turnGrounding,
+      ledger,
+      executed,
+      provider: provider.name,
+      model: execModel,
+      triggeredBy,
+    });
+
     // #314 — stuck detection: classify the turn's outcome and move the ladder. A stuck turn
     // parks the seat in `awaiting_players` with the recovery levers; a clean turn clears it.
     await this.detectAndTransition(campaignId, session, {
@@ -2200,6 +2266,9 @@ export class AiDriverService {
       narration: finalNarration,
       prevNarration,
       triggeredBy,
+      // #577: an unverified claim is a stuck condition, not a clean turn — the table gets the
+      // recovery levers (flag / nudge / vote / rules_lookup / human takeover) to resolve it.
+      unsupportedClaims: grounding.unsupportedCount,
     });
 
     this.emitTurnEnd(campaignId, stopReason, finalNarration, steps, totalTokens, budgetRemaining, providerError, tokensUsageUnknown);
@@ -2215,7 +2284,96 @@ export class AiDriverService {
       tokenBudget: seat.tokenBudget,
       budgetRemaining,
       seat: latestSeat,
+      grounding,
     };
+  }
+
+  /**
+   * Evaluate, broadcast, audit, and persist one turn's grounding verdict (#577).
+   *
+   * Kept as its own method rather than inlined into the turn loop so the loop's diff stays
+   * additive (#1442 / #1524 are both in flight in this file). The decision itself is the pure
+   * `evaluateGrounding`; everything here is the side effects around it — and every one of those
+   * is best-effort, because the narration has already gone out and a bookkeeping failure must
+   * not retroactively fail a turn the table already watched.
+   */
+  private async evaluateTurnGrounding(
+    campaignId: number,
+    session: AiDmSessionState,
+    ctx: {
+      narration: string;
+      parsed: ParsedGrounding;
+      ledger: RetrievalLedger;
+      executed: AiDmExecutedTool[];
+      provider: string;
+      model: string;
+      triggeredBy: RequestUser;
+    },
+  ): Promise<GroundingVerdict> {
+    const verdict = evaluateGrounding({
+      campaignId,
+      narration: ctx.narration,
+      parsed: ctx.parsed,
+      ledger: ctx.ledger,
+      executed: ctx.executed,
+      provider: ctx.provider,
+      model: ctx.model,
+    });
+
+    // Nothing asserted and nothing suspicious: a purely creative turn needs no card, no SSE
+    // noise, and no row. This is the common case and must stay free.
+    if (verdict.claims.length === 0) return verdict;
+
+    let claimIds: number[] = [];
+    try {
+      const stored = await this.groundingStore.recordVerdict(campaignId, session.turnCount, verdict);
+      claimIds = stored.map((c) => c.id);
+    } catch (err) {
+      this.logger.warn(
+        `Failed to record grounding verdict for campaign ${campaignId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+
+    this.stream.emit({
+      type: 'grounding',
+      campaignId,
+      status: verdict.status,
+      supportedCount: verdict.supportedCount,
+      unsupportedCount: verdict.unsupportedCount,
+      // Provenance for the ruling badge. Provider NAME and served model id only — never the
+      // key, base URL, or headers, which never leave the provider config.
+      provider: verdict.provider,
+      model: verdict.model,
+      claimIds,
+    });
+
+    if (verdict.unsupportedCount > 0) {
+      const reasons = verdict.claims
+        .filter((c) => c.status === 'unsupported')
+        .map((c) => c.reason)
+        .join(',');
+      await this.audit
+        .log({
+          actor: `ai-dm-seat:${campaignId}`,
+          actorRole: 'dm',
+          action: 'ai-dm.driver.grounding.unverified',
+          entityType: 'ai-dm',
+          campaignId,
+          detail:
+            `${verdict.unsupportedCount} unsupported claim(s) [${reasons}] provider=${verdict.provider} ` +
+            `model=${verdict.model} retrievals=${verdict.retrievals.length} (triggered by ${ctx.triggeredBy.id})`,
+        })
+        .catch((err: unknown) => {
+          this.logger.warn(
+            `Failed to audit grounding verdict for campaign ${campaignId}: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        });
+    }
+    return verdict;
   }
 
   private async getActionQueueDepth(campaignId: number): Promise<number> {
@@ -2275,6 +2433,10 @@ export class AiDriverService {
     let text = '';
     let result: AiGenerateResult | undefined;
     let streamUsage: AiUsage | undefined;
+    // #577: the grounding citation block is protocol framing appended after the prose. Without
+    // this filter the table would watch the DM "type" raw JSON at the end of every turn. `text`
+    // still accumulates the FULL raw output — the block is parsed off it once the step lands.
+    const deltaFilter = new GroundingDeltaFilter();
     const toolAcc = new Map<number, { id?: string; name?: string; args: string }>();
     let aborted = false;
     let cancelled = false;
@@ -2366,7 +2528,8 @@ export class AiDriverService {
         armIdle(); // reset idle watchdog on every chunk (#1063)
         if (ev.type === 'text') {
           text += ev.delta;
-          this.stream.emit({ type: 'narration.delta', campaignId, text: ev.delta });
+          const visible = deltaFilter.push(ev.delta);
+          if (visible) this.stream.emit({ type: 'narration.delta', campaignId, text: visible });
         } else if (ev.type === 'usage') {
           streamUsage = ev.usage;
         } else if (ev.type === 'tool_call') {
@@ -2394,6 +2557,10 @@ export class AiDriverService {
       linked.cleanup();
       // Idle timer must not outlive the step — clear only when the stream completes or aborts.
       clearIdle();
+      // #577: release any tail the fence detector was holding back but that never became a
+      // grounding block, so a reply ending in "[" is not silently truncated for the table.
+      const tail = deltaFilter.flush();
+      if (tail && !session.detached) this.stream.emit({ type: 'narration.delta', campaignId, text: tail });
     }
     // A provider that only streamed deltas (no `done`) still yields its text.
     if (result && !result.text && text) result = { ...result, text };
@@ -2421,6 +2588,8 @@ export class AiDriverService {
     toolCalls: AiToolCall[],
     messages: AiMessage[],
     executed: AiDmExecutedTool[],
+    /** #577 — records the ids each authorized call actually returned, for citation validation. */
+    ledger: RetrievalLedger,
   ): Promise<{ toolErrored: boolean; authorityStop: Exclude<GenerationAuthority, 'ok'> | null }> {
     let toolErrored = false;
     for (const call of toolCalls) {
@@ -2698,6 +2867,17 @@ export class AiDriverService {
       const content =
         approvedSecret && !res.isError ? `${cleanedText}\n\n${DM_APPROVED_SECRET_REMINDER}` : cleanedText;
       messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content });
+      // #577 — the ONLY place a tool-sourced id enters the retrieval ledger. It runs after every
+      // guard above (scope, policy, secrecy, confirmation), so an id can only become citeable by
+      // having survived the permission-checked tool layer for THIS campaign. `ok` is false for an
+      // errored call, which makes a citation of it resolve to `retrieval_failed` rather than
+      // silently passing. Harvested from `cleanedText` — what the model was actually shown.
+      //
+      // `useSeatPrincipal` marks the id DM-only: this call ran under the DM-scoped seat rather
+      // than the player-scoped context principal, so it can return a hidden encounter or an
+      // entity behind a narrow secret-read approval (#557). Such an id stays citeable — the
+      // model genuinely read it — but is projected out of every non-DM view (#825).
+      harvestRetrievals(ledger, call.name, args, cleanedText, !res.isError, useSeatPrincipal);
       const identity = await this.resolveToolResourceIdentity(
         campaignId,
         call.name,
@@ -2885,7 +3065,14 @@ export class AiDriverService {
   private async detectAndTransition(
     campaignId: number,
     session: AiDmSessionState,
-    ctx: { stopReason: AiDmStopReason; narration: string; prevNarration: string | null; triggeredBy: RequestUser },
+    ctx: {
+      stopReason: AiDmStopReason;
+      narration: string;
+      prevNarration: string | null;
+      triggeredBy: RequestUser;
+      /** #577 — how many of this turn's factual claims failed server-side verification. */
+      unsupportedClaims?: number;
+    },
   ): Promise<void> {
     // Compare-and-set guard (#381): if a human-control transition landed DURING this turn — a DM
     // pause, a granted takeover, or a passed table pause-vote — the session is now `paused` or
@@ -3659,8 +3846,16 @@ export class AiDriverService {
     campaignId: number,
     seat: AiDmSeat,
     narrationLanguageOverride?: NarrationLanguage,
+    /**
+     * #577 — the turn's retrieval ledger. The context reads below are AUTHORIZED RETRIEVAL that
+     * happened during this turn (player-scoped, campaign-scoped, permission-checked), so the ids
+     * they hand the model are legitimately citeable. Without seeding here, a model that correctly
+     * cites an NPC it read straight out of the campaign summary would be flagged as unsupported
+     * and the whole mechanism would cry wolf on every turn.
+     */
+    ledger?: RetrievalLedger,
   ): Promise<string> {
-    const parts: string[] = [GROUNDING_PREAMBLE, UNTRUSTED_INPUT_PREAMBLE];
+    const parts: string[] = [GROUNDING_PREAMBLE, GROUNDING_CITATION_CONTRACT, UNTRUSTED_INPUT_PREAMBLE];
     if (seat.instructions) parts.push(`## DM steering\n${seat.instructions}`);
 
     const campaign = await this.campaigns.getOrThrow(campaignId);
@@ -3676,6 +3871,7 @@ export class AiDriverService {
 
     const summary = await safeRead(contextToolset, 'get_campaign_summary', { campaignId });
     if (summary) parts.push(`## Campaign context\n${summary}`);
+    if (ledger && summary) harvestRetrievals(ledger, 'get_campaign_summary', { campaignId }, summary);
 
     const sessionZero = await safeRead(contextToolset, 'get_session_zero', { campaignId });
     if (sessionZero) parts.push(`## Session-zero charter (safety boundaries — MUST respect)\n${sessionZero}`);
@@ -3695,6 +3891,13 @@ export class AiDriverService {
       safeRead(contextToolset, 'list_encounters', { campaignId, status: 'running' }),
       safeRead(contextToolset, 'get_party', { campaignId }),
     ]);
+
+    if (ledger) {
+      // Same rationale as the summary above: these ids were handed to the model by an
+      // authorized read this turn, so citing them is legitimate.
+      harvestRetrievals(ledger, 'list_encounters', { campaignId }, activeEncountersRaw ?? undefined);
+      harvestRetrievals(ledger, 'get_party', { campaignId }, partyRaw ?? undefined);
+    }
 
     const calendar = formatCalendarForPrompt(calendarRaw);
     if (calendar) parts.push(`## In-world calendar / time\n${calendar}`);
@@ -3736,6 +3939,23 @@ export class AiDriverService {
     const supports = await this.supportPreferences.listForPublicAiNarration(campaignId);
     if (supports.length > 0) {
       parts.push(`## Participant-authorized practical supports\n${JSON.stringify(supports)}`);
+    }
+
+    // #577 — close the human-correction loop. Flagging a claim as unverified is only useful if
+    // the model stops repeating it, so a DM's correction is replayed here as table-authoritative
+    // and outranks the model's own memory of what it said. Read fresh every turn (like the world
+    // state above), so a correction takes effect on the very next player action.
+    const corrections = await this.groundingStore.correctionsForPrompt(campaignId);
+    if (corrections.length > 0) {
+      parts.push(
+        [
+          '## Table corrections (AUTHORITATIVE — these override your earlier claims)',
+          'A human at this table reviewed a factual claim you made and corrected it. The correction',
+          'is the truth of this campaign. Do not restate the original claim, and do not argue with',
+          'the correction; narrate consistently with it from now on.',
+          ...corrections,
+        ].join('\n'),
+      );
     }
 
     return parts.join('\n\n');
@@ -3946,6 +4166,8 @@ export function classifyStuck(ctx: {
   stopReason: AiDmStopReason;
   narration: string;
   prevNarration: string | null;
+  /** #577 — count of factual claims the server could not trace to an authorized retrieval. */
+  unsupportedClaims?: number;
 }): AiDmStuckReason | null {
   // Mode-switch teardown is not a stuck condition — the seat was intentionally reset.
   if (ctx.stopReason === 'aborted') return null;
@@ -3956,6 +4178,10 @@ export function classifyStuck(ctx: {
   if (ctx.stopReason === 'budget_exhausted') return 'budget_exhausted';
   if (ctx.stopReason === 'max_steps') return 'max_steps';
   if (ctx.stopReason === 'provider_error') return 'provider_error';
+  // #577 — a turn that COMPLETED but asserted rules/canon the server could not verify is not a
+  // healthy turn. Ranked below the hard stops (those are the more actionable diagnosis) and above
+  // the soft signals, because an unverified ruling is what the table most needs to act on.
+  if ((ctx.unsupportedClaims ?? 0) > 0) return 'unsupported_claim';
   const narration = ctx.narration.trim();
   if (narration === '') return 'no_narration';
   if (ctx.prevNarration && narration === ctx.prevNarration.trim()) return 'loop';
@@ -3979,6 +4205,8 @@ function describeStuck(reason: AiDmStuckReason): string {
       return 'A player disputed the AI’s last ruling.';
     case 'provider_error':
       return 'The AI provider failed or stalled mid-response.';
+    case 'unsupported_claim':
+      return 'The AI stated a rule or a fact about the world that it could not back with a source — it is marked unverified until a human checks it.';
     default:
       return 'The AI needs help.';
   }

@@ -30,6 +30,8 @@ import { CampaignEventsService } from '../events/campaign-events.service';
 import { AiDriverService, toPublicAiDmSessionState } from './ai-driver.service';
 import { AiDmStreamService } from './ai-driver-stream.service';
 import { ProactiveService } from './proactive.service';
+import { DriverGroundingService } from './driver-grounding.service';
+import { projectGroundingVerdictForRole } from './driver-grounding';
 import { projectAiDmToolEventForRole } from './ai-dm-tool-resource';
 import { AiDmTranscriptService, projectTranscriptEventForRole } from './ai-driver-transcript.service';
 
@@ -173,6 +175,19 @@ const AiDmToolConfirmationRequest = z
   .strict();
 class AiDmToolConfirmationDto extends createZodDto(AiDmToolConfirmationRequest) {}
 
+/** Correct one of the AI's factual claims (POST /ai-dm/grounding/correct, #577). */
+const AiDmGroundingCorrectionRequest = z
+  .object({
+    claimId: z.number().int().positive().describe('The grounding claim id from GET /ai-dm/grounding.'),
+    correction: z
+      .string()
+      .min(1)
+      .max(2_000)
+      .describe('What is actually true — replayed into later turns as table-authoritative.'),
+  })
+  .strict();
+class AiDmGroundingCorrectionDto extends createZodDto(AiDmGroundingCorrectionRequest) {}
+
 const HEARTBEAT_MS = 25_000;
 
 /**
@@ -202,6 +217,7 @@ export class AiDriverController {
     private readonly events: CampaignEventsService,
     private readonly proactive: ProactiveService,
     private readonly transcript: AiDmTranscriptService,
+    private readonly groundingStore: DriverGroundingService,
   ) {}
 
   @Post('message')
@@ -221,8 +237,8 @@ export class AiDriverController {
     @Body() body: AiDmMessageDto,
     @CurrentUser() user: RequestUser,
   ) {
-    await this.access.requireRole(user, id, 'player');
-    return this.driver.runTurn(id, user, body.input, {
+    const role = await this.access.requireRole(user, id, 'player');
+    const turn = await this.driver.runTurn(id, user, body.input, {
       scene: body.scene,
       maxSteps: body.maxSteps,
       maxTokens: body.maxTokens,
@@ -234,6 +250,10 @@ export class AiDriverController {
       characterName: body.characterName,
       displayText: body.displayText,
     });
+    // #577 — the turn result carries the grounding verdict, including the raw retrieval ledger.
+    // This endpoint is player-callable, so it is a second delivery path for DM-only ids and gets
+    // the same role projection as GET /ai-dm/grounding (#825).
+    return turn.grounding ? { ...turn, grounding: projectGroundingVerdictForRole(turn.grounding, role) } : turn;
   }
 
   @Get('session')
@@ -514,6 +534,46 @@ export class AiDriverController {
   async deleteTranscript(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     await this.access.requireRole(user, id, 'dm');
     return { deleted: await this.transcript.purge(id) };
+  }
+
+  // ---- Grounding claims + the human-correction loop (#577) -------------------------
+
+  @Get('grounding')
+  @ApiOperation({
+    summary: 'List the AI DM’s recent factual claims and the server’s verdict on each',
+    description:
+      'Requires campaign membership (#577). One entry per rules ruling / existing-canon assertion the driver made, ' +
+      'with the SERVER’s verdict (supported / unsupported / corrected), the reason code, the structured citations ' +
+      'with evidence links, and the ruling’s provenance — the provider NAME and served model id only, never a key, ' +
+      'base URL, or header. Deliberately member-readable: the table is the audience for an unverified ruling. ' +
+      'Role redaction is applied HERE: a citation backed by a DM-only id (a hidden encounter, or an entity behind ' +
+      'a #557 secret-read approval) keeps its verdict for every reader but has its id and evidence link withheld ' +
+      'from players and viewers (#825).',
+  })
+  @ApiResponse({ status: 200, description: 'Recent grounding claims, newest first.' })
+  async grounding(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const role = await this.access.requireMember(user, id);
+    return this.groundingStore.listForCampaign(id, role);
+  }
+
+  @Post('grounding/correct')
+  @ApiOperation({
+    summary: 'Correct one of the AI DM’s claims',
+    description:
+      'DM only (#577). Records the human’s ruling against a claim: the original claim text, verdict, and provenance ' +
+      'are preserved (the table may need to argue about what the AI actually said) and the correction is layered on ' +
+      'top. The correction is replayed into every subsequent turn’s system prompt as table-authoritative, so the ' +
+      'model stops repeating the claim.',
+  })
+  @ApiResponse({ status: 201, description: 'The corrected claim record.' })
+  @ApiResponse({ status: 404, description: 'No such claim in this campaign.' })
+  async correctGrounding(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: AiDmGroundingCorrectionDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const role = await this.access.requireRole(user, id, 'dm');
+    return this.groundingStore.correct(id, body.claimId, user, role, body.correction);
   }
 
   @Sse('stream')
