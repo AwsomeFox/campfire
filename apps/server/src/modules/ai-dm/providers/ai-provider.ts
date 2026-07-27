@@ -97,8 +97,25 @@ export interface AiUsage {
   totalTokens: number;
 }
 
-/** Why generation stopped — normalized across providers. */
-export type AiFinishReason = 'stop' | 'length' | 'tool_calls' | 'content_filter' | 'unknown';
+/**
+ * Why generation stopped — normalized across providers.
+ *
+ * Two of these members are SAFETY TERMINAL STATES rather than descriptions of a finished
+ * reply (#598):
+ *   - `content_filter` — a provider-side classifier stopped the generation (OpenAI
+ *     `finish_reason: content_filter` / a Responses `incomplete_details.reason` of the same,
+ *     Gemini `SAFETY` / `RECITATION` / `PROHIBITED_CONTENT`).
+ *   - `refusal`        — the MODEL declined (Anthropic `stop_reason: refusal`, an OpenAI
+ *     Responses `refusal` output part).
+ *
+ * They are kept DISTINCT because they mean different things to a human reviewing an
+ * incident — a filter is the vendor's policy layer firing, a refusal is the model's own —
+ * and collapsing them loses that. Consumers that only care whether a turn may be delivered
+ * must not switch on the strings by hand: use the exhaustive disposition map in
+ * `ai-driver/driver-safety.ts`, which is a `Record<AiFinishReason, …>` so that adding a
+ * member here is a COMPILE error at every decision point rather than a silent fail-open.
+ */
+export type AiFinishReason = 'stop' | 'length' | 'tool_calls' | 'content_filter' | 'refusal' | 'unknown';
 
 /** The complete result of a (possibly streamed) generation. */
 export interface AiGenerateResult {
@@ -111,6 +128,22 @@ export interface AiGenerateResult {
   finishReason: AiFinishReason;
   /** Model that actually served the request (echoed by the provider when available). */
   model: string;
+  /**
+   * How many characters of REFUSAL prose the provider produced (#598). A LENGTH ONLY — the
+   * refusal text itself is discarded by the adapter and never reaches `text`, the wire, or any
+   * log, because a refusal is not narration.
+   *
+   * This field exists because discarding the prose also discarded the only measurement the
+   * budget estimator had. On a provider that omits streaming usage, {@link AiUsage} arrives as
+   * zeros and the driver falls back to estimating cost from output LENGTH (#1076) — so a
+   * refusal-only turn, having no output left to measure, metered as ZERO tokens. Repeated
+   * refusals then never advanced the campaign budget gate, against a provider billing for
+   * every one of them.
+   *
+   * Keeping the content quarantined while letting its length out is the whole point: a
+   * character count leaks nothing a token count does not already. Never widen this to a string.
+   */
+  refusalChars?: number;
 }
 
 /**

@@ -1,5 +1,6 @@
 import request from 'supertest';
 import { createAiEvalHarness, dm, player, type AiEvalHarness } from './ai-eval-harness';
+import { AiProviderConfigService } from '../src/modules/ai-provider-config/ai-provider-config.service';
 
 /**
  * Co-DM authoring (issue #313) — the AI drafts content that lands in the approval queue as
@@ -324,5 +325,100 @@ describe('co-DM authoring — server-scope endpoint URL never lands in provenanc
 
     const proposals = await request(h.server).get(`/api/v1/campaigns/${campaignId}/proposals`).set(dm);
     expect(JSON.stringify(proposals.body)).not.toContain('campfire-internal-gateway');
+  });
+});
+
+/**
+ * #598 review — a Co-DM draft the provider REFUSED must still be paid for, and reported as a
+ * refusal.
+ *
+ * `CoDmService` read `result.usage.totalTokens` straight through and ignored `finishReason`.
+ * A safety refusal arrives with its prose already discarded by the adapter, so `text` is empty
+ * — and a Gemini PROMPT block carries no candidate and no `usageMetadata` at all, so usage is
+ * absent too. That metered ZERO, which REFUNDS the whole reservation, so the seat's budget gate
+ * never advanced while the provider billed every attempt: a DM could retry a blocked draft
+ * indefinitely for free. The empty text then reached `toPayloads`, which found no JSON in it
+ * and blamed the operator's setup ("Configure a real provider…") — the wrong diagnosis, and the
+ * one guaranteed to send a DM off editing settings that were fine.
+ *
+ * Driven by stubbing the RESOLVED PROVIDER CONFIG rather than the harness's injected provider,
+ * because the defect lives in the external-provider branch — the one a real Gemini/OpenAI seat
+ * takes. The `mock` provider type lets the wire shape be scripted exactly.
+ */
+describe('co-DM authoring — a refused draft is still metered (#598)', () => {
+  let h: AiEvalHarness;
+  let campaignId: number;
+
+  beforeAll(async () => {
+    h = await createAiEvalHarness({ model: 'eval-model' });
+    await h.enableExperimental();
+    campaignId = await h.createCampaign('Co-DM Refusal');
+    await h.configureSeat(campaignId, { model: 'eval-model', tokenBudget: 50_000 });
+  });
+
+  afterAll(async () => {
+    jest.restoreAllMocks();
+    await h.close();
+  });
+
+  /** Point the co-DM path at a scripted external provider for the duration of one draft. */
+  function scriptExternal(response: Record<string, unknown>): void {
+    const svc = h.ctx.app.get(AiProviderConfigService);
+    jest.spyOn(svc, 'resolveEffectiveConfigWithEndpointScope').mockResolvedValue({
+      config: {
+        providerType: 'mock',
+        model: 'mock-1',
+        mockResponses: [response],
+      } as never,
+      endpointScope: 'campaign',
+    });
+  }
+
+  /**
+   * The invariant is about MEASUREMENT, not about refusals, so both shapes are asserted: a
+   * refusal that reports no usage, and a prompt block that reports no usage and no finish
+   * reason worth naming. Both must consume the reservation.
+   */
+  it.each([
+    ['a content filter with no usage reported', { text: '', usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 }, finishReason: 'content_filter' }],
+    ['a refusal with no usage reported', { text: '', usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 }, finishReason: 'refusal' }],
+  ])('%s consumes the reservation instead of refunding it', async (_label, response) => {
+    await request(h.server).post(`/api/v1/campaigns/${campaignId}/ai-dm/reset`).set(dm).send({});
+    scriptExternal(response);
+
+    const res = await request(h.server).post(api(campaignId)).set(dm).send({ target: 'npc', prompt: 'anyone' });
+
+    // THE POINT, asserted FIRST so a regression reports the BILLING defect rather than the
+    // wording: the budget gate moved. Before the fix `budgetRemaining` came back at the full
+    // 50000 — the reservation fully refunded — so a loop of blocked drafts cost the operator
+    // real money and never tripped the gate.
+    const seat = await h.getSeat(campaignId);
+    expect(seat.status).toBe(200);
+    expect(seat.body.tokensUsed + seat.body.tokensUnknown).toBeGreaterThan(0);
+    expect(seat.body.budgetRemaining).toBeLessThan(seat.body.tokenBudget);
+    // Nothing is left reserved: the reservation was settled exactly once, not stranded.
+    expect(seat.body.tokensReserved).toBe(0);
+
+    // And reported AS a refusal — not as a provider-misconfiguration error.
+    expect(res.status).toBe(422);
+    expect(res.body.message).toMatch(/withheld/i);
+    expect(res.body.message).not.toMatch(/Configure a real provider/i);
+  });
+
+  it('a refusal that DID report usage meters that figure, not an estimate', async () => {
+    await request(h.server).post(`/api/v1/campaigns/${campaignId}/ai-dm/reset`).set(dm).send({});
+    scriptExternal({
+      text: '',
+      usage: { promptTokens: 700, completionTokens: 20, totalTokens: 720 },
+      finishReason: 'content_filter',
+    });
+
+    const res = await request(h.server).post(api(campaignId)).set(dm).send({ target: 'npc', prompt: 'anyone' });
+    expect(res.status).toBe(422);
+
+    // A reported figure is exact and must survive as such — `unknown` is for absence only.
+    const seat = await h.getSeat(campaignId);
+    expect(seat.body.tokensUsed).toBe(720);
+    expect(seat.body.tokensUnknown).toBe(0);
   });
 });

@@ -23,7 +23,7 @@ import type {
   AiFinishReason,
   AiUsage,
 } from './ai-provider';
-import { AiProviderError } from './errors';
+import { streamAbortError } from './http';
 
 /** A single canned reply. Any field omitted gets a deterministic default. */
 export interface MockResponse {
@@ -34,6 +34,12 @@ export interface MockResponse {
   /** Override usage; otherwise derived from prompt + reply length. */
   usage?: AiUsage;
   finishReason?: AiFinishReason;
+  /**
+   * #598 — refusal characters the provider produced, as the real adapters report them: a
+   * LENGTH, with the prose itself never surfacing as narration. Lets a test model the shape
+   * that broke budget metering — a refusal-only turn whose only output is refusal text.
+   */
+  refusalChars?: number;
   /** How many text chunks `stream()` splits `text` into (default 3). */
   streamChunks?: number;
   /** When false, omit text deltas and only emit the final `done` (simulates done-only narration). */
@@ -50,6 +56,15 @@ export interface MockResponse {
   stallAfterChunks?: number;
   /** Throw after emitting the usage frame but before `done` (#560). */
   throwAfterUsage?: boolean;
+  /**
+   * #598 — hang AFTER `done` until the generation signal aborts, then end the stream cleanly.
+   *
+   * Exists to make the teardown RACE deterministic: it holds the stream open at the one instant
+   * where `result` is already populated (so the terminal safety frame has landed) but
+   * streamStep's `finally` has not yet run. A test can then tear the session down inside that
+   * window, which is otherwise a few microseconds wide and untestable.
+   */
+  stallAfterDone?: boolean;
   /** Throw when the first tool_call delta is yielded (#560). */
   throwDuringToolCall?: boolean;
   /** Throw this error from `generate`/`stream` instead of returning a reply (#1046). */
@@ -77,6 +92,11 @@ export class MockAiProvider implements AiProvider {
   readonly received: AiGenerateRequest[] = [];
   private readonly queue: MockResponse[];
   private cursor = 0;
+  /**
+   * #598 — invoked the instant a {@link MockResponse.stallAfterDone} stall begins. Lets a test
+   * act inside the window between the terminal frame landing and the driver's `finally`.
+   */
+  onStall?: () => void;
 
   constructor(opts: MockProviderOptions = {}) {
     this.name = opts.name ?? 'mock';
@@ -117,7 +137,14 @@ export class MockAiProvider implements AiProvider {
       totalTokens: mockTokenCount(promptText) + mockTokenCount(text),
     };
     const finishReason: AiFinishReason = canned.finishReason ?? (toolCalls.length > 0 ? 'tool_calls' : 'stop');
-    return { text, toolCalls, usage, finishReason, model: this.model };
+    return {
+      text,
+      toolCalls,
+      usage,
+      finishReason,
+      model: this.model,
+      ...(canned.refusalChars !== undefined ? { refusalChars: canned.refusalChars } : {}),
+    };
   }
 
   async generate(req: AiGenerateRequest, _opts?: AiGenerateOptions): Promise<AiGenerateResult> {
@@ -172,19 +199,42 @@ export class MockAiProvider implements AiProvider {
     yield { type: 'usage', usage: result.usage };
     if (canned.throwError && canned.throwAfterUsage) throw canned.throwError;
     yield { type: 'done', result };
+    if (canned.stallAfterDone) {
+      this.onStall?.();
+      // Resolve rather than reject: the stream ENDS normally, so the driver reaches its
+      // `finally` with `result` set and the session already detached — the race under test.
+      await resolveOnAbort(opts?.signal);
+    }
   }
 }
 
-/** Hang until `signal` aborts; reject with a timeout-shaped provider error. */
+/**
+ * Hang until `signal` aborts, then resolve. Used by {@link MockResponse.stallAfterDone}.
+ */
+function resolveOnAbort(signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (!signal || signal.aborted) return resolve();
+    signal.addEventListener('abort', () => resolve(), { once: true });
+  });
+}
+
+/**
+ * Hang until `signal` aborts, then reject with EXACTLY what the real transport would.
+ *
+ * #1052 — THIS FAKE USED TO LIE, and it lied in the most expensive direction. It built its own
+ * `AiProviderError('timeout', …)` with no `retryable`, which defaults to TRUE, while the real
+ * `raceRead` hardcoded `retryable: false` for every signal abort. Same trigger, opposite
+ * classification: the retry suite exercised a path production never took, so every green test
+ * about step-level retry was consistent with the feature never firing for the silent-stall case
+ * it exists to recover from.
+ *
+ * The fix is not to hardcode the other answer here — that would just move the lie. It is to call
+ * the SAME function production calls, so the fake cannot drift from the transport again without
+ * the transport changing too. `streamAbortError` is exported for exactly this.
+ */
 function hangUntilAbort(signal?: AbortSignal): Promise<never> {
   return new Promise((_resolve, reject) => {
-    const fail = () =>
-      reject(
-        new AiProviderError('timeout', 'mock: stream idle timeout', {
-          provider: 'mock',
-          cause: signal?.reason,
-        }),
-      );
+    const fail = () => reject(streamAbortError(signal, 'mock'));
     if (!signal) {
       // No signal → hang forever (test misconfiguration); still reject sync if already aborted.
       return;

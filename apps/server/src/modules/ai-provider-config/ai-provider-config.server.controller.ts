@@ -48,6 +48,46 @@ export class AiProviderServerConfigController {
     return this.configs.putServer(body, user);
   }
 
+  @Get('fallback')
+  @ApiOperation({
+    summary: 'Get the server-default FALLBACK AI provider config',
+    description:
+      'Server-admin only (#1052). Redacted exactly like the primary — the API key is never returned. ' +
+      'Returns null when no fallback is configured, which is the default: failover is opt-in. ' +
+      'A fallback provider is used ONLY after the primary exhausts its bounded retries on a TRANSIENT failure (429 / 5xx / transport / timeout). It is never used for a deterministic one — a bad key, a malformed request, a context overflow, or a CONTENT REFUSAL is not retried and is never failed over, because asking a second vendor the same question a first one declined is a safety bypass, not resilience. It is also never used once narration has already reached the table, so failover cannot rewrite what players just read.',
+  })
+  @ApiResponse({ status: 200, description: 'The redacted server fallback config, or null when unset.' })
+  getFallback() {
+    return this.configs.getServerFallbackView();
+  }
+
+  @Put('fallback')
+  @ApiOperation({
+    summary: 'Set the server-default FALLBACK AI provider config',
+    description:
+      'Server-admin only (#1052). Same body as the primary; `apiKey` is write-only (omit to keep, value to ' +
+      'set/rotate, "" to clear). The fallback is a fully independent config — its own key, base URL, and provider ' +
+      'type — so the credential it stores is only ever sent to the endpoint stored alongside it (#373). ' +
+      '`allowedModels` is ignored here: the allowlist is one server-wide policy owned by the primary row, and the ' +
+      'fallback model is VALIDATED against it rather than able to extend it.',
+  })
+  @ApiResponse({ status: 200, description: 'The updated (redacted) fallback config.' })
+  @ApiResponse({ status: 400, description: 'The model is not in the server admin allowlist.' })
+  putFallback(@Body() body: AiProviderConfigUpdateDto, @CurrentUser() user: RequestUser) {
+    return this.configs.putServerFallback(body, user);
+  }
+
+  @Delete('fallback')
+  @HttpCode(204)
+  @ApiOperation({
+    summary: 'Delete the server-default FALLBACK AI provider config',
+    description: 'Server-admin only (#1052). Leaves the primary untouched. Turns simply stop failing over.',
+  })
+  @ApiResponse({ status: 204, description: 'Deleted (or already absent).' })
+  async removeFallback(@CurrentUser() user: RequestUser) {
+    await this.configs.deleteServerFallback(user);
+  }
+
   @Delete('key')
   @ApiOperation({
     summary: 'Clear the stored server-default API key',

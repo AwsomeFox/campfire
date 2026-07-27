@@ -1668,12 +1668,23 @@ export const aiDmTranscriptEvents = sqliteTable('ai_dm_transcript_events', {
 });
 
 // AI provider config storage (issue #310): provider selection + ENCRYPTED API key
-// at two scopes — 'server' (one row, admin default) and 'campaign' (per-campaign
-// override, DM-managed, cascades on campaign delete). `encrypted_api_key` holds an
-// aes-256-gcm ciphertext (see common/crypto.ts encryptSecret); the plaintext key is
-// NEVER stored/returned/logged/exported — reads expose only `key_last4`. Unique
-// partial indexes enforce exactly one server row and one row per campaign (see
-// db.module.ts bootstrap + migrateAiProviderConfigTable).
+// at two scopes — 'server' (admin default) and 'campaign' (per-campaign override,
+// DM-managed, cascades on campaign delete). `encrypted_api_key` holds an aes-256-gcm
+// ciphertext (see common/crypto.ts encryptSecret); the plaintext key is NEVER
+// stored/returned/logged/exported — reads expose only `key_last4`.
+//
+// #1052 — each scope holds one row PER ROLE, not one row outright. The partial unique
+// indexes are keyed on `(scope, role)` and `(campaign_id, role)`, so a scope may hold a
+// 'primary' AND a 'fallback' — which is the entire point of the optional fallback provider.
+// At most one of EACH role per scope still holds: widening the uniqueness did not remove it.
+// See db.module.ts bootstrap + migrateAiProviderConfigFallbackRole1052.
+//
+// The widening is safe on existing data, and not by luck: the OLD indexes were STRICTER
+// (one row per scope, full stop), so every row satisfying them also satisfies the new ones.
+// Migration 0135 backfills `role = 'primary'` on every pre-existing row, and because there
+// was at most one row per scope to begin with, that backfill cannot produce two rows sharing
+// a `(scope, role)` pair. Relaxing a unique index can never collide on data that already
+// satisfied the tighter one.
 export const aiProviderConfigs = sqliteTable('ai_provider_configs', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   scope: text('scope').notNull(), // 'server' | 'campaign'
@@ -1685,6 +1696,15 @@ export const aiProviderConfigs = sqliteTable('ai_provider_configs', {
   encryptedApiKey: text('encrypted_api_key'), // aes-256-gcm ciphertext; null = no key stored
   keyLast4: text('key_last4'), // masked display indicator only — never the key
   allowedModels: text('allowed_models').notNull().default('[]'), // JSON string[] admin allowlist (server scope)
+  /**
+   * #1052: 'primary' | 'fallback'. A fallback row is a SECOND, fully independent provider
+   * config at the same scope, used only after the primary exhausts its retries on a TRANSIENT
+   * failure. Modelled as its own row rather than extra columns on the primary so it carries
+   * its own key, base URL, and provider type as one unit — the #373 invariant is that whoever
+   * owns the key owns the endpoint, and a half-config sharing the primary's key would break it.
+   * The partial unique indexes are keyed on (scope, role) / (campaign_id, role).
+   */
+  role: text('role').notNull().default('primary'),
   createdBy: text('created_by').notNull().default(''),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
@@ -2007,6 +2027,64 @@ export const campaignModuleSnapshots = sqliteTable('campaign_module_snapshots', 
   createdBy: text('created_by').notNull().default(''),
   rolledBackAt: text('rolled_back_at'),
 });
+
+// Issue #598: the incident trail for AI driver turns WITHHELD by a provider content filter or
+// a model refusal.
+//
+// Every column here is a count or a piece of provenance, and that is the entire design. There
+// is deliberately NO column for the withheld text, and no digest of it either: copying prose a
+// provider just refused to stand behind into an audit table gives it a longer-lived, exportable
+// home than the live stream it was kept off, which recreates the exposure this feature exists
+// to prevent — and a hash of a short passage is a guessable commitment, i.e. the same thing
+// with extra steps.
+//
+// What the counts DO answer: did any of it reach the table before the terminal frame arrived
+// (`released_chars` — the residual the quarantine window did not cover), how much the delay
+// line still had in hand (`withheld_chars`), did the same response also try to run tools
+// (`suppressed_tool_calls`), which provider/model/turn, and whose action provoked it. That is
+// enough for a DM to notice a pattern and act on it without anyone re-reading the content.
+//
+// READ `released_chars` FIRST. It is the exposure. `withheld_chars` is bounded by the
+// quarantine window (~240 chars), so on a long refused reply it is small BECAUSE most of the
+// reply had already aged out of the window and been broadcast — not because little was
+// refused. The two together are roughly what the model generated; neither alone is.
+export const aiDriverWithheldTurns = sqliteTable(
+  'ai_driver_withheld_turns',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    campaignId: integer('campaign_id').notNull(),
+    /** The driver session's turn counter when the withhold fired. */
+    turn: integer('turn').notNull(),
+    /** Which tool-loop step of that turn was withheld (1-based). */
+    step: integer('step').notNull(),
+    /** Normalized terminal state: 'content_filter' (vendor policy) or 'refusal' (the model). */
+    finishReason: text('finish_reason').notNull(),
+    /** Provider NAME only — never the key, base URL, or headers. */
+    provider: text('provider').notNull().default(''),
+    /** The model id actually served for the step. */
+    model: text('model').notNull().default(''),
+    /**
+     * Characters still inside the quarantine delay line when the refusal landed, and so never
+     * broadcast. LENGTH ONLY — the text itself is discarded. BOUNDED BY THE WINDOW: this is
+     * how much was held back AT THE CUT-OFF, not the total the model produced. See the note
+     * above the table.
+     *
+     * NOT A REASSURANCE NUMBER. A small value on a long refusal means the reply OUTRAN the
+     * window and most of it had already gone out — the opposite of "the model barely said
+     * anything". `released_chars` is what says how much reached the table, and is the field to
+     * read first.
+     */
+    withheldChars: integer('withheld_chars').notNull().default(0),
+    /** Characters already broadcast when the refusal arrived — the residual exposure. */
+    releasedChars: integer('released_chars').notNull().default(0),
+    /** Tool calls carried by the same response. None were dispatched; this is how many. */
+    suppressedToolCalls: integer('suppressed_tool_calls').notNull().default(0),
+    /** Member whose action provoked the turn; NULL for a proactive/system turn. */
+    triggeredByUserId: text('triggered_by_user_id'),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => ({ campaignIdx: index('idx_ai_driver_withheld_campaign').on(t.campaignId, t.id) }),
+);
 
 /**
  * Issue #587: a server operator's REQUEST that a campaign be exported.

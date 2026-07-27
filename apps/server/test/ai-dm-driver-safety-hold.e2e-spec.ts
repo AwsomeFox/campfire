@@ -2,6 +2,10 @@ import request from 'supertest';
 import { createAiEvalHarness, dm, player, type AiEvalHarness } from './ai-eval-harness';
 import { AiDmStreamService, type AiDmStreamEvent } from '../src/modules/ai-driver/ai-driver-stream.service';
 import { TableSafetyService } from '../src/modules/safety/table-safety.service';
+import {
+  NARRATION_QUARANTINE_CHARS,
+  setNarrationQuarantineCharsForTests,
+} from '../src/modules/ai-driver/driver-safety';
 
 /**
  * Issue #599 — a participant safety hold freezes the AI seat's input, its IN-FLIGHT output,
@@ -17,6 +21,15 @@ describe('ai-dm driver — participant safety hold freezes the seat (#599)', () 
   beforeAll(async () => {
     h = await createAiEvalHarness({ model: 'safety-hold-model' });
     await h.enableExperimental();
+    // #598: the cases below raise the hold MID-STREAM by reacting to the first
+    // `narration.delta`. The withheld-turn quarantine is a trailing delay line, so a scripted
+    // reply shorter than the window emits no delta at all until the stream ends — the
+    // subscriber would never fire, the hold would never be raised, and the stalled stream
+    // would hang to the test timeout instead of asserting anything. Switching the window off
+    // keeps this suite testing what it is about (#599 freezing an in-flight turn); the
+    // window's own behaviour is covered by driver-safety.spec.ts and the #598 e2e suite. Same
+    // convention, and the same reason, as ai-dm-driver-stop-controls.e2e-spec.ts.
+    setNarrationQuarantineCharsForTests(0);
   });
 
   beforeEach(() => {
@@ -24,6 +37,7 @@ describe('ai-dm driver — participant safety hold freezes the seat (#599)', () 
   });
 
   afterAll(async () => {
+    setNarrationQuarantineCharsForTests(NARRATION_QUARANTINE_CHARS);
     await h.close();
   });
 

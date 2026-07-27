@@ -1,12 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, Logger, Optional, ServiceUnavailableException } from '@nestjs/common';
-import { eq } from 'drizzle-orm';
+import { and, desc, eq, lt } from 'drizzle-orm';
 import { buildMcpEnvelope } from '../../common/api-error.envelope';
 import { auditActor, roleAtLeast, type RequestUser } from '../../common/user.types';
 import { nowIso } from '../../common/time';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { aiDriverControlState } from '../../db/schema';
+import { aiDriverControlState, aiDriverWithheldTurns } from '../../db/schema';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService, excerpt } from '../notifications/notifications.service';
 import { AiDmService, type AiDmTokenReservation } from '../ai-dm/ai-dm.service';
@@ -36,8 +36,26 @@ import type {
   AiUsage,
 } from '../ai-dm/providers/ai-provider';
 import { AiProviderError } from '../ai-dm/providers/errors';
+// Defined here originally; moved to a pure module so the Co-DM draft path can settle its
+// reservation off the same helper without closing an import cycle back through
+// `ai-dm.service`. Re-exported at the bottom of this file — the unit suite imports it here.
+import { resolveProviderStepUsage } from '../ai-dm/providers/step-usage';
 import { DEFAULT_IDLE_TIMEOUT_MS } from '../ai-dm/providers/http';
-import { AI_PROVIDER_RESOLVER, resolveProviderForExecution, type AiProviderResolver } from './ai-provider-resolver';
+import {
+  AI_PROVIDER_RESOLVER,
+  resolveFallbackForExecution,
+  resolveProviderForExecution,
+  type AiProviderResolver,
+} from './ai-provider-resolver';
+// #1052 — transient-failure retry + provider failover. The POLICY is pure and lives here so
+// the guard ordering (safety → already-broadcast → affordability → attempts) is testable
+// without a provider, a lock, or a database.
+import {
+  decideStepRetry,
+  maxStepAttempts,
+  providerForAttempt,
+  type RetryRefusalReason,
+} from './driver-retry';
 import { AiDmStreamService } from './ai-driver-stream.service';
 import {
   buildPromptHistory,
@@ -85,6 +103,16 @@ import {
   type ParsedGrounding,
 } from './driver-grounding';
 import { DriverGroundingService } from './driver-grounding.service';
+// Safety (#598): the provider refusal / content-filter boundary. Pure and dependency-free so
+// the delivery decision and the quarantine delay line are unit-testable without a provider,
+// a database, or a session — the same split #577 uses for grounding.
+import {
+  describeWithheldTurn,
+  isWithheldFinishReason,
+  NarrationQuarantine,
+  type WithheldFinishReason,
+  type WithheldTurnIncident,
+} from './driver-safety';
 
 /** Default per-provider-call output cap for a driver step; clamped to remaining budget. */
 const DEFAULT_STEP_MAX_TOKENS = 1024;
@@ -106,6 +134,20 @@ export function setDriverStreamIdleTimeoutMsForTests(ms: number): void {
   DRIVER_STREAM_IDLE_TIMEOUT_MS = ms;
 }
 
+/**
+ * Backoff sleep for the #1052 retry loop. A module-level indirection so specs can make the
+ * wait instantaneous without faking timers globally — the driver's own idle watchdog also
+ * uses setTimeout, and swapping the whole timer implementation out from under it in a test
+ * changes the behaviour under test.
+ */
+export let sleepMs: (ms: number) => Promise<void> = (ms) =>
+  ms > 0 ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve();
+
+/** Test-only: replace the retry backoff sleep (#1052). */
+export function setRetrySleepForTests(fn: (ms: number) => Promise<void>): void {
+  sleepMs = fn;
+}
+
 /** Why a driver turn stopped — surfaced on the result + the turn.end SSE event. */
 export type AiDmStopReason =
   | 'complete' // the model produced narration with no further tool calls
@@ -115,7 +157,13 @@ export type AiDmStopReason =
   | 'aborted' // seat left Driver mid-turn; session was torn down (#1071)
   | 'frozen' // a DM pause or human takeover landed mid-turn; abort early (#1057)
   | 'cancelled' // kill switch or stop control aborted the in-flight provider request (#558)
-  | 'provider_error'; // provider threw / idle-timed-out mid-stream (#1046 / #1063)
+  | 'provider_error' // provider threw / idle-timed-out mid-stream (#1046 / #1063)
+  // #598 — SAFETY TERMINAL STATE. The provider reported a content filter or a refusal, so the
+  // step's prose was never committed, never persisted, and its tool calls were never
+  // dispatched. Deliberately NOT a flavour of `provider_error`: that reason is retryable
+  // plumbing failure and is surfaced to the table as "the AI provider failed", which is both
+  // untrue here and the wrong lever set. It is equally not `complete` — that is the bug.
+  | 'content_withheld';
 
 /** Abort reason wired into provider AbortSignals when a stop control fires (#558). */
 export const GENERATION_STOP_ABORT = 'generation_stop';
@@ -141,20 +189,54 @@ export function shouldEmitTurnCancelled(stopReason: AiDmStopReason): boolean {
  */
 export function linkAbortSignals(...sources: AbortSignal[]): { signal: AbortSignal; cleanup: () => void } {
   const controller = new AbortController();
-  const onAbort = () => controller.abort();
+  // #1052 — FORWARD THE REASON. This used to call `controller.abort()` with no argument, which
+  // silently replaced whatever the aborter said with a bare AbortError. Everything downstream
+  // then had to guess, and the transport guessed "caller stop, not retryable" — so the driver's
+  // idle watchdog, which aborts WITH a classified retryable timeout, was reclassified into the
+  // one thing that cannot be retried. The composite signal is a relay; a relay that drops the
+  // message is worse than no relay, because callers reasonably assume `.reason` survived.
+  //
+  // Per-source listeners because the reason lives on the SOURCE, and cleanup has to remove the
+  // exact function it registered.
+  const links: Array<[AbortSignal, () => void]> = [];
   for (const s of sources) {
     if (s.aborted) {
-      controller.abort();
+      controller.abort(s.reason);
       break;
     }
+    const onAbort = () => controller.abort(s.reason);
+    links.push([s, onAbort]);
     s.addEventListener('abort', onAbort);
   }
   return {
     signal: controller.signal,
     cleanup: () => {
-      for (const s of sources) s.removeEventListener('abort', onAbort);
+      for (const [s, fn] of links) s.removeEventListener('abort', fn);
     },
   };
+}
+
+/**
+ * Resolve as soon as EITHER `work` settles or `signal` aborts (#1052).
+ *
+ * Deliberately resolves rather than rejects on abort: the caller's job after waiting is to
+ * re-check authority, and that check is what decides the outcome. This helper only ensures the
+ * decision is not delayed behind a backoff nobody is waiting for any more. Listener removed on
+ * both paths so a long turn cannot accumulate one per retry.
+ */
+export function raceAbort(work: Promise<unknown>, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', finish);
+      resolve();
+    };
+    signal.addEventListener('abort', finish, { once: true });
+    void work.then(finish, finish);
+  });
 }
 
 /** One tool the AI executed this turn (id-only; details are audited, not returned raw). */
@@ -172,6 +254,72 @@ export interface AiDmExecutedTool {
 /** Narrow resource identity to the fields persisted on a turn's executed-tool summary. */
 function pickExecutedIdentity(identity: ToolResourceIdentity): Pick<AiDmExecutedTool, 'encounterId'> {
   return identity.encounterId !== undefined ? { encounterId: identity.encounterId } : {};
+}
+
+/**
+ * Rows kept per campaign in the withheld-turn incident trail (#598). Mirrors #577's grounding
+ * retention: this is an operational review trail, not canon, so an unbounded log on a long
+ * campaign would be pure cost.
+ */
+const MAX_WITHHELD_INCIDENTS_PER_CAMPAIGN = 200;
+
+/** One persisted withheld-turn incident as returned to API clients (#598). Counts only. */
+export interface AiDriverWithheldTurnRecord {
+  id: number;
+  campaignId: number;
+  turn: number;
+  step: number;
+  finishReason: string;
+  provider: string;
+  model: string;
+  withheldChars: number;
+  releasedChars: number;
+  suppressedToolCalls: number;
+  triggeredByUserId: string | null;
+  createdAt: string;
+}
+
+/**
+ * What {@link AiDriverService.streamStep} reports when a provider safety terminal state ended
+ * the step (#598). Carries only counts — the withheld prose is dropped on the floor inside
+ * streamStep and is never returned, logged, or persisted anywhere.
+ */
+export interface WithheldStreamOutcome {
+  finishReason: WithheldFinishReason;
+  /**
+   * Characters still inside the quarantine delay line when the terminal frame landed, and so
+   * never broadcast. BOUNDED BY THE WINDOW ({@link NARRATION_QUARANTINE_CHARS}) — on a long
+   * refused reply this is "how much the delay line caught at the cut-off", NOT the length of
+   * the refusal. {@link releasedChars} is the rest of it.
+   */
+  quarantinedChars: number;
+  /** Characters already broadcast when the terminal frame arrived — the residual exposure. */
+  releasedChars: number;
+  /**
+   * Total raw characters the model generated this step, INCLUDING the #577 grounding block the
+   * delta filter strips. Never the text — a length, kept only so the #1076 usage estimate still
+   * has something to work from on a provider that omits streaming usage, now that streamStep
+   * blanks the refused prose before returning.
+   */
+  generatedChars: number;
+}
+
+/**
+ * The withheld step's bookkeeping context (#598), carried out of the turn loop so
+ * {@link AiDriverService.handleWithheldTurn} can settle it after the turn's `finally` — where
+ * `session.turnCount` has already been incremented and therefore matches the stuck record.
+ * Counts and provenance only, like everything else on this path.
+ */
+interface WithheldTurnContext {
+  withheld: WithheldStreamOutcome;
+  /** Which tool-loop step of the turn was withheld (1-based). */
+  step: number;
+  suppressedToolCalls: number;
+  provider: string;
+  model: string;
+  actor: string;
+  triggeredBy: RequestUser;
+  proactive: boolean;
 }
 
 export interface AiDmTurnRunResult {
@@ -309,7 +457,8 @@ export type AiDmStuckReason =
   | 'loop' // the model repeated its previous narration verbatim
   | 'dispute' // a player flagged the AI's last ruling as wrong/unfair
   | 'provider_error' // provider failed or stalled mid-stream (#1046 / #1063)
-  | 'unsupported_claim'; // the turn asserted rules/canon the server could not verify (#577)
+  | 'unsupported_claim' // the turn asserted rules/canon the server could not verify (#577)
+  | 'content_withheld'; // a provider content filter / refusal withheld the turn (#598)
 
 /** Snapshot of the current stuck condition; null when the seat is healthy. */
 export interface AiDmStuckInfo {
@@ -612,6 +761,11 @@ const STUCK_REASONS = allowlist<AiDmStuckReason>({
   // read. Must be listed here or a restart would hydrate that seat back to healthy and drop
   // the very signal the grounding ladder exists to raise.
   unsupported_claim: true,
+  // #598 — a turn a provider content filter / refusal withheld. It MUST hydrate: a seat that
+  // came back "healthy" after a restart would drop the very signal that says a human still
+  // owes this table a decision, and would happily accept the next action as if the refused
+  // turn had never happened.
+  content_withheld: true,
 });
 
 function recordOf(value: unknown): Record<string, unknown> | null {
@@ -921,6 +1075,15 @@ export function buildGroundingPreamble(ruleSystem?: string | null): string {
         '- Server-side resolution (resolve_action) and the saving_throw tool implement D&D 5e maths — one d20 plus a flat modifier, compared against ascending armour class, with a level-based proficiency bonus. This campaign uses a DIFFERENT rule system, so do NOT use them to decide whether an attack hits or whether a save succeeds: the totals would be computed the wrong way and could apply damage that never landed. Narrate the action, state the numbers from the statblock or sheet, and let the human DM make the call. Never assert a hit, a miss, or a save result yourself.',
       ]),
   '- Respect the session-zero charter (lines/veils/safety tools) below at all times.',
+  // #598 — the OUTPUT POLICY half of the charter. Campfire's own rule is that the charter
+  // governs what may be narrated, and that steering AROUND a line beats generating it and
+  // relying on a downstream filter: a filtered turn costs the table its whole turn.
+  //
+  // Prompt text is a request, not a control (see the note above) — the enforcement is the
+  // server-side withhold in driver-safety.ts, which runs on the provider's terminal state no
+  // matter what this paragraph asked for. This line exists so the model's instructions and the
+  // server's behaviour say the same thing, not because it is load-bearing on its own.
+  '- The charter is your OUTPUT POLICY, not just scene guidance: if answering would require content a line or veil forbids, do not write it. Cut away, summarize at a distance, or say plainly that the scene moves on — then keep the story going.',
   ].join('\n');
 }
 
@@ -977,6 +1140,7 @@ export const GREETING_PROMPT = [
   'The table has just sat down for a new session. Greet the players and recap where the party',
   'left off, following the OPENING phase direction in your system prompt exactly.',
 ].join('\n');
+
 
 /** The server-authored prompt behind POST /ai-dm/wrap-up (#1043). */
 export const WRAP_UP_PROMPT = [
@@ -2411,6 +2575,29 @@ export class AiDriverService {
     });
   }
 
+  /**
+   * #1052 review — BOTH TRAILING PARAMETERS ARE REQUIRED, and `tokensUsageUnknown` deliberately
+   * has no default.
+   *
+   * The write side of the usage-unknown accumulator is already sealed: `markUsageUnknown` only
+   * ORs and `usageUnknown()` only reads, so `tokensUsageUnknown = spend.usageUnknown` is now a
+   * compile error rather than a silent clobber. That secured every WRITE — and it did nothing
+   * for the exit that never performed the READ. The `session.detached` early return stopped at
+   * `budgetRemaining`, took the old `= false` default, and published a turn as exactly measured
+   * while `markReservationUsageUnknown` had charged the seat an amount nobody could measure.
+   *
+   * The general shape, which is why this is a signature change and not a one-line fix: A DEFAULT
+   * THAT MEANS THE REASSURING THING TURNS AN OMISSION INTO A POSITIVE CLAIM. `false` here does
+   * not mean "no information about measurement"; it means "this total is exact" — asserted by a
+   * call site that never considered the question. An exit that forgets is still silent, which is
+   * the same failure mode one level over. So the accumulated flag is not something a terminal
+   * exit can decline to mention: the invariant is "EVERY terminal event carries the accumulated
+   * flag", and it is now the compiler that enforces it rather than whoever reads this comment.
+   *
+   * `providerError` is required for the same reason and only incidentally: a required parameter
+   * cannot follow an optional one, and callers with no provider error pass `undefined` — which
+   * is at least an explicit statement that there was none.
+   */
   private emitTurnEnd(
     campaignId: number,
     stopReason: AiDmStopReason,
@@ -2418,8 +2605,8 @@ export class AiDriverService {
     steps: number,
     tokensUsed: number,
     budgetRemaining: number,
-    providerError?: AiProviderError,
-    tokensUsageUnknown = false,
+    providerError: AiProviderError | undefined,
+    tokensUsageUnknown: boolean,
   ): void {
     if (stopReason === 'provider_error') {
       this.stream.emit({
@@ -3124,6 +3311,11 @@ export class AiDriverService {
       );
     }
     const { provider, model: execModel } = execution;
+    // #1052: the OPTIONAL second provider. Resolved once per turn rather than lazily on
+    // failure, so a misconfigured fallback surfaces in the logs at a calm moment instead of
+    // during the incident it was meant to cover. `null` whenever none is configured or it
+    // fails execution-time policy — failover is opt-in and never invents a provider.
+    const fallbackExecution = await resolveFallbackForExecution(this.resolver, campaignId);
 
     const seatPrincipal = this.seatPrincipal(campaignId);
     const contextPrincipal = this.contextPrincipal(campaignId);
@@ -3284,7 +3476,51 @@ export class AiDriverService {
     let steps = 0;
     const { signal: generationSignal, handle: generationHandle } = this.beginGeneration(campaignId);
     let providerError: AiProviderError | undefined;
-    let tokensUsageUnknown = false;
+    /**
+     * #1052 — "any part of this turn's spend was unmeasured", accumulated across every attempt
+     * and every step.
+     *
+     * WRITE-ONLY-THROUGH-A-HELPER, ON PURPOSE. This started as a plain `let` with a comment
+     * saying it is never cleared, and then a terminal exit fifty lines below cleared it by
+     * writing the obvious thing — `tokensUsageUnknown = spend.usageUnknown` — which reassigns a
+     * per-TURN accumulator from a per-STEP fact. Three of the four terminal branches combined
+     * correctly and one did not, so the invariant held everywhere except the exit nobody
+     * re-read. A comment stating a rule that a later edit can silently break is the same shape
+     * as the false compile-guarantee this PR already removed from driver-retry.ts.
+     *
+     * So there is no longer a variable to assign to: `markUsageUnknown` only ever ORs, and
+     * `usageUnknown()` only reads. A future exit that wants to record unmeasured usage has one
+     * way to do it, and it is the correct one.
+     */
+    let usageUnknownAccum = false;
+    const markUsageUnknown = (unknown: boolean | undefined): void => {
+      usageUnknownAccum = usageUnknownAccum || unknown === true;
+    };
+    const usageUnknown = (): boolean => usageUnknownAccum;
+    /**
+     * #1052 — how the last step's attempt loop ended. `attempts` counts provider calls made
+     * for that step (1 when nothing was retried); `gaveUp` names why no further attempt was
+     * made, or null when an attempt succeeded. Audited so "why did this not retry?" — most
+     * importantly "because it was a refusal" — is answerable after the fact.
+     */
+    let retryOutcome: { attempts: number; gaveUp: RetryRefusalReason | null } = { attempts: 1, gaveUp: null };
+    // #1052 / #577: the provider + model that actually SERVED the most recent step. Starts as
+    // the primary and only moves on a successful failover, so the grounding verdict's
+    // provenance badge names the model that produced the narration being judged rather than
+    // the one the DM configured.
+    let servedProviderName = provider.name;
+    let servedProviderModel = execModel;
+    /**
+     * #598 — the withheld step's bookkeeping context, settled after the loop rather than inside
+     * it. `WithheldTurnIncident.turn` is documented to correlate with the stuck record, and the
+     * stuck record is written by detectAndTransition() AFTER the `finally` below bumps
+     * `session.turnCount`. Recording the incident from inside the loop read the counter one
+     * increment early, so the first withheld incident said turn 0 while the stuck record for
+     * the same turn said turn 1, and every later pair was off by one. Deferring means both
+     * numbers come from evaluating `session.turnCount` at the same point in the turn's
+     * lifecycle — one source of truth, not two expressions that have to stay in sync.
+     */
+    let withheldTurn: WithheldTurnContext | undefined;
 
     try {
       for (let step = 0; step < maxSteps; step++) {
@@ -3303,139 +3539,267 @@ export class AiDriverService {
         // seat after ownership, then keep provider streaming and metering in one
         // critical section. A scribe that spent while this turn waited can
         // exhaust the budget without this driver making another provider call.
-        const spend = await this.aiDm.withSpendLock(campaignId, async () => {
-          const currentSeat = await this.aiDm.getSeat(campaignId);
-          const currentRemaining = currentSeat.budgetRemaining;
-          if (currentRemaining <= 0) {
-            return { kind: 'budget_exhausted' as const, seat: currentSeat, budgetRemaining: 0 };
-          }
-          // Detach (#1071) vs freeze (#1057) vs kill (#558) — authority is re-checked under the
-          // spend lock immediately before the provider call.
-          const lockAuth = await this.checkGenerationAuthority(campaignId, session, generationSignal);
-          if (lockAuth !== 'ok') {
-            return {
-              kind: 'stopped' as const,
-              reason: lockAuth,
-              seat: currentSeat,
-              budgetRemaining: currentRemaining,
-              text: '',
-              metered: null,
-            };
-          }
-          let reservation: AiDmTokenReservation;
-          try {
-            reservation = await this.aiDm.reserveTokenBudget(campaignId, Math.min(perStepCap, currentRemaining));
-          } catch {
-            return { kind: 'server_cap' as const, seat: currentSeat, budgetRemaining: currentRemaining };
-          }
-
-          const maxTokens = reservation.tokensReserved;
-          steps = stepNumber;
-          let step:
-            | { ok: true; text: string; result: AiGenerateResult | undefined; aborted: boolean; cancelled: boolean }
-            | { ok: false; text: string; result: AiGenerateResult | undefined; error: AiProviderError };
-          try {
-            step = await this.streamStep(campaignId, provider, session, generationSignal, {
-              system,
-              messages,
-              // Issue #564: the executable model derives ONLY from the effective provider
-              // config (allowlist-validated at resolution above), NEVER from legacy seat.model.
-              model: execModel,
-              maxTokens,
-              tools: toolSchemas,
-            });
-          } catch (err) {
-            // Settling the hold is bookkeeping; the provider error is what the caller
-            // needs to see. Never let a failed settle replace it (#563).
-            let unknownMetered: { seat: AiDmSeat; budgetRemaining: number };
-            try {
-              unknownMetered = await this.aiDm.markReservationUsageUnknown(reservation, {
-                actor,
-                action: 'ai-dm.driver.usage_unknown',
-                detail: `step ${stepNumber} provider exception model=${execModel} usage unknown by ${triggeredBy.id}`,
-                model: execModel,
-              });
-            } catch (releaseErr) {
-              this.logger.error(
-                `Failed to release AI token reservation (campaign=${campaignId}, tokens=${reservation.tokensReserved}) after a provider exception: ${
-                  releaseErr instanceof Error ? releaseErr.message : String(releaseErr)
-                }`,
-              );
-              unknownMetered = { seat: currentSeat, budgetRemaining: currentRemaining };
+        //
+        // #1052: ONE attempt. The retry/failover loop below calls this repeatedly, taking
+        // and releasing the lock each time.
+        const runAttempt = async (attemptProvider: AiProvider, attemptModel: string) =>
+          this.aiDm.withSpendLock(campaignId, async () => {
+            const currentSeat = await this.aiDm.getSeat(campaignId);
+            const currentRemaining = currentSeat.budgetRemaining;
+            if (currentRemaining <= 0) {
+              return { kind: 'budget_exhausted' as const, seat: currentSeat, budgetRemaining: 0 };
             }
-            const error =
-              err instanceof AiProviderError
-                ? err
-                : new AiProviderError('unknown', err instanceof Error ? err.message : String(err), {
-                    provider: provider.name,
-                    cause: err,
-                  });
-            return {
-              kind: 'provider_error' as const,
-              seat: unknownMetered.seat,
-              budgetRemaining: unknownMetered.budgetRemaining,
-              text: '',
-              error,
-              usageUnknown: true,
-              metered: undefined,
-            };
-          }
+            // Detach (#1071) vs freeze (#1057) vs kill (#558) — authority is re-checked under the
+            // spend lock immediately before the provider call.
+            const lockAuth = await this.checkGenerationAuthority(campaignId, session, generationSignal);
+            if (lockAuth !== 'ok') {
+              return {
+                kind: 'stopped' as const,
+                reason: lockAuth,
+                seat: currentSeat,
+                budgetRemaining: currentRemaining,
+                text: '',
+                metered: null,
+              };
+            }
+            let reservation: AiDmTokenReservation;
+            try {
+              reservation = await this.aiDm.reserveTokenBudget(campaignId, Math.min(perStepCap, currentRemaining));
+            } catch {
+              return { kind: 'server_cap' as const, seat: currentSeat, budgetRemaining: currentRemaining };
+            }
 
-          if (!step.ok) {
-            const resolved = resolveProviderStepUsage(step.text, step.result);
-            let metered: { seat: AiDmSeat; tokensUsed: number; budgetRemaining: number } | undefined;
-            let unknownMetered: { seat: AiDmSeat; budgetRemaining: number } | undefined;
-            if (resolved.unknown) {
-              unknownMetered = await this.aiDm.markReservationUsageUnknown(reservation, {
-                actor,
-                action: 'ai-dm.driver.usage_unknown',
-                detail: `step ${stepNumber} provider_error model=${execModel} usage unknown by ${triggeredBy.id}`,
-                model: step.result?.model || execModel,
+            const maxTokens = reservation.tokensReserved;
+            steps = stepNumber;
+            let step: Awaited<ReturnType<AiDriverService['streamStep']>>;
+            try {
+              step = await this.streamStep(campaignId, attemptProvider, session, generationSignal, {
+                system,
+                messages,
+                // Issue #564: the executable model derives ONLY from the effective provider
+                // config (allowlist-validated at resolution above), NEVER from legacy seat.model.
+                // #1052: on a failover attempt this is the FALLBACK's own allowlist-validated
+                // model, resolved through the same execution-time choke point.
+                model: attemptModel,
+                maxTokens,
+                tools: toolSchemas,
               });
-            } else {
-              metered = await this.aiDm.meterTurn(campaignId, resolved.tokens, {
+            } catch (err) {
+              // Settling the hold is bookkeeping; the provider error is what the caller
+              // needs to see. Never let a failed settle replace it (#563).
+              let unknownMetered: { seat: AiDmSeat; budgetRemaining: number };
+              try {
+                unknownMetered = await this.aiDm.markReservationUsageUnknown(reservation, {
+                  actor,
+                  action: 'ai-dm.driver.usage_unknown',
+                  detail: `step ${stepNumber} provider exception model=${attemptModel} usage unknown by ${triggeredBy.id}`,
+                  model: attemptModel,
+                });
+              } catch (releaseErr) {
+                this.logger.error(
+                  `Failed to release AI token reservation (campaign=${campaignId}, tokens=${reservation.tokensReserved}) after a provider exception: ${
+                    releaseErr instanceof Error ? releaseErr.message : String(releaseErr)
+                  }`,
+                );
+                unknownMetered = { seat: currentSeat, budgetRemaining: currentRemaining };
+              }
+              // #1052 — LOAD-BEARING INVARIANT, written down here because the code that depends
+              // on it is three files away.
+              //
+              // `streamStep` re-throws ONLY for values that are not an AiProviderError (it
+              // returns `{ok:false}` for those), so everything reaching this catch wraps as
+              // kind `'unknown'`. `unknown` is `give_up` in ERROR_KIND_RETRY, so
+              // `decideStepRetry` returns early and NEVER consults the `already_broadcast`
+              // guard — which is why `broadcastChars: 0` below is honest rather than merely
+              // convenient, even though this path genuinely cannot know what reached the wire.
+              //
+              // THE FRAGILITY: if a future change ever makes a thrown value classify as
+              // something retryable, that guard starts being consulted with a hardcoded 0, and
+              // a silent retry could re-narrate over prose the table has already read. Anyone
+              // changing either this wrap or `unknown`'s disposition owns that.
+              const error =
+                err instanceof AiProviderError
+                  ? err
+                  : new AiProviderError('unknown', err instanceof Error ? err.message : String(err), {
+                      provider: attemptProvider.name,
+                      cause: err,
+                    });
+              return {
+                kind: 'provider_error' as const,
+                seat: unknownMetered.seat,
+                budgetRemaining: unknownMetered.budgetRemaining,
+                text: '',
+                error,
+                usageUnknown: true,
+                metered: undefined,
+                // streamStep threw before returning, so nothing it emitted is knowable here.
+                // 0 is the honest value: this path is a throw from the provider call itself
+                // (a non-AiProviderError escaping), which happens before any delta.
+                broadcastChars: 0,
+              };
+            }
+
+            if (!step.ok) {
+              const resolved = resolveProviderStepUsage(step.text, step.result);
+              let metered: { seat: AiDmSeat; tokensUsed: number; budgetRemaining: number } | undefined;
+              let unknownMetered: { seat: AiDmSeat; budgetRemaining: number } | undefined;
+              if (resolved.unknown) {
+                unknownMetered = await this.aiDm.markReservationUsageUnknown(reservation, {
+                  actor,
+                  action: 'ai-dm.driver.usage_unknown',
+                  detail: `step ${stepNumber} provider_error model=${attemptModel} usage unknown by ${triggeredBy.id}`,
+                  model: step.result?.model || attemptModel,
+                });
+              } else {
+                metered = await this.aiDm.meterTurn(campaignId, resolved.tokens, {
+                  actor,
+                  action: 'ai-dm.driver.turn',
+                  detail: `step ${stepNumber} provider_error model=${attemptModel} +${resolved.tokens} tokens (partial) by ${triggeredBy.id}`,
+                  model: step.result?.model || attemptModel,
+                }, reservation);
+              }
+              return {
+                kind: 'provider_error' as const,
+                seat: metered?.seat ?? unknownMetered?.seat ?? currentSeat,
+                budgetRemaining: metered?.budgetRemaining ?? unknownMetered?.budgetRemaining ?? currentRemaining,
+                text: step.text,
+                error: step.error,
+                usageUnknown: resolved.unknown,
+                metered,
+                // #1052: what this attempt actually put on the wire, which is what decides
+                // whether a silent retry would contradict something the table already read.
+                broadcastChars: step.broadcastChars,
+              };
+            }
+
+            const { text, result, aborted, cancelled } = step;
+
+            // Meter this step's REAL usage before releasing the mutex, including
+            // a completed/partial stream that was frozen before narration/tool
+            // delivery. The SQL clamp remains defense in depth; another local
+            // spender cannot pass a stale budget gate while this call is billed.
+            // ABSENCE OF A MEASUREMENT IS NOT A MEASUREMENT OF ZERO (#598 review).
+            //
+            // This used to compute usage inline and fall through to `meterTurn(…, 0)` whenever it
+            // had nothing to estimate from — which REFUNDS the whole reservation. Any turn that
+            // reported no usage and produced nothing visible was therefore free, and the budget
+            // gate never advanced no matter how many billable provider calls it took. Three
+            // different shapes reached that state: a refusal whose prose the adapters discard, a
+            // Gemini PROMPT block (no candidate, no text, and no `usageMetadata` at all), and any
+            // future provider quirk that returns "we did work and produced nothing you can see".
+            //
+            // Rather than enumerate them, this now routes through the same
+            // `resolveProviderStepUsage` the provider-error path has always used, which already
+            // distinguishes the three cases properly: a reported figure, an estimate from output
+            // length, or UNKNOWN. An unknown settlement consumes the reservation instead of
+            // refunding it and marks the seat total as an estimate — so the gate advances, the
+            // number is honest about its own confidence, and an unseen provider shape fails safe
+            // instead of silently free. Zero is now reachable only when something actually said
+            // zero.
+            //
+            // `generatedChars` folds in the provider's REFUSAL length, which on a refusal-only
+            // turn is the only output there is: the adapters discard refusal prose so it can
+            // never be broadcast, and discarding it took this estimator's only measurement with
+            // it. The provider bills for that work whether or not the table ever sees it, so the
+            // length (never the text) has to survive the discard.
+            const resolvedUsage = resolveProviderStepUsage(text, result, step.withheld?.generatedChars ?? 0);
+            const usage = resolvedUsage.tokens;
+            if (resolvedUsage.unknown) {
+              this.logger.warn(
+                `Provider reported no usage and no measurable output for step ${stepNumber} ` +
+                  `(model=${result?.model || attemptModel}); settling the reservation as UNKNOWN spend rather than ` +
+                  `metering zero, which would refund a billable call.`,
+              );
+            } else if ((result?.usage.totalTokens ?? 0) === 0) {
+              this.logger.warn(
+                `Provider did not report streaming usage for step ${stepNumber} (model=${result?.model || attemptModel}); estimating ${usage} tokens from output length`,
+              );
+            }
+            const servedModel = result?.model || attemptModel;
+            /**
+             * Settle the reservation exactly once, by whichever route the measurement justifies.
+             * Returns a uniform shape so callers never have to care which one ran.
+             */
+            const settle = async (): Promise<{
+              seat: AiDmSeat;
+              tokensUsed: number;
+              budgetRemaining: number;
+              usageUnknown: boolean;
+            }> => {
+              if (resolvedUsage.unknown) {
+                const u = await this.aiDm.markReservationUsageUnknown(reservation, {
+                  actor,
+                  action: 'ai-dm.driver.usage_unknown',
+                  detail: `step ${stepNumber} model=${servedModel || 'default'} produced no measurable output by ${triggeredBy.id}`,
+                  model: servedModel,
+                });
+                return { seat: u.seat, tokensUsed: 0, budgetRemaining: u.budgetRemaining, usageUnknown: true };
+              }
+              const m = await this.aiDm.meterTurn(campaignId, usage, {
                 actor,
                 action: 'ai-dm.driver.turn',
-                detail: `step ${stepNumber} provider_error model=${execModel} +${resolved.tokens} tokens (partial) by ${triggeredBy.id}`,
-                model: step.result?.model || execModel,
+                detail: `step ${stepNumber} model=${servedModel || 'default'} +${usage} tokens by ${triggeredBy.id}`,
               }, reservation);
+              return { ...m, usageUnknown: false };
+            };
+
+          // #598 — SAFETY FIRST, and deliberately ahead of every other post-stream branch,
+          // INCLUDING metering.
+          //
+          // The abort / freeze / stopped branches below all propagate `text` outward, where the
+          // caller calls setNarration() on it and `turn.cancelled` carries it onto the wire AND
+          // into a durable transcript row. A response the provider refused must not reach any
+          // of those paths, so the withhold is resolved before them.
+          //
+          // Metering still happens — the provider billed for the tokens whether or not the
+          // table ever sees them, and quietly not charging for a refused turn would let a loop
+          // of refusals run the budget gate open — but it happens INSIDE this branch and its
+          // failure cannot escape it. `meterTurn` writes an audit row and a usage-history row;
+          // either can reject, and when it did, the rejection unwound past the whole withheld
+          // path into runTurn's catch-all and reclassified a refused turn as `provider_error`.
+          // That took the incident record, the `content_withheld` stop reason and (before the
+          // retraction moved into streamStep) the retraction itself with it. A ledger write
+          // does not get a vote on whether a provider refused: meterTurn already settles its
+          // own reservation on failure (#563), so the worst case here is unbilled tokens,
+          // which is strictly better than published text.
+          if (step.withheld) {
+            let metered: { seat: AiDmSeat; tokensUsed: number; budgetRemaining: number; usageUnknown: boolean } | undefined;
+            let settledSeat: AiDmSeat = currentSeat;
+            let settledRemaining = currentRemaining;
+            try {
+              metered = await settle();
+              settledSeat = metered.seat;
+              settledRemaining = metered.budgetRemaining;
+            } catch (err) {
+              this.logger.error(
+                `Failed to meter a WITHHELD AI DM turn on campaign ${campaignId} (step ${stepNumber}, ` +
+                  `${usage} tokens): ${err instanceof Error ? err.message : String(err)}. The withhold stands; ` +
+                  `re-reading the seat to report what was actually settled.`,
+              );
+              try {
+                const after = await this.aiDm.getSeat(campaignId);
+                settledSeat = after;
+                settledRemaining = after.budgetRemaining;
+              } catch (readErr) {
+                this.logger.warn(
+                  `Could not re-read the AI DM seat for campaign ${campaignId} after a metering failure; ` +
+                    `reporting the pre-call budget snapshot: ${readErr instanceof Error ? readErr.message : String(readErr)}`,
+                );
+              }
             }
             return {
-              kind: 'provider_error' as const,
-              seat: metered?.seat ?? unknownMetered?.seat ?? currentSeat,
-              budgetRemaining: metered?.budgetRemaining ?? unknownMetered?.budgetRemaining ?? currentRemaining,
-              text: step.text,
-              error: step.error,
-              usageUnknown: resolved.unknown,
+              kind: 'withheld' as const,
+              seat: settledSeat,
+              budgetRemaining: settledRemaining,
               metered,
+              withheld: step.withheld,
+              suppressedToolCalls: result?.toolCalls?.length ?? 0,
+              servedModel,
+              step: stepNumber,
+              usageUnknown: metered?.usageUnknown ?? resolvedUsage.unknown,
             };
           }
-
-          const { text, result, aborted, cancelled } = step;
-
-          // Meter this step's REAL usage before releasing the mutex, including
-          // a completed/partial stream that was frozen before narration/tool
-          // delivery. The SQL clamp remains defense in depth; another local
-          // spender cannot pass a stale budget gate while this call is billed.
-          let usage = result?.usage.totalTokens ?? 0;
-          // Issue #1076: some providers (Ollama, llama.cpp, LM Studio, some OpenRouter models)
-          // omit streaming usage. When that happens usage is 0 despite real content. Estimate
-          // rather than silently fail-open on budget enforcement.
-          const outputText = text || result?.text || '';
-          if (usage === 0 && (outputText.length > 0 || (result?.toolCalls?.length ?? 0) > 0)) {
-            const outputChars = outputText.length + JSON.stringify(result?.toolCalls ?? []).length;
-            // ~4 chars per token is a conservative English-language estimate.
-            usage = Math.max(1, Math.ceil(outputChars / 4));
-            this.logger.warn(
-              `Provider did not report streaming usage for step ${stepNumber} (model=${result?.model || execModel}); estimating ${usage} tokens from ${outputChars} output chars`,
-            );
-          }
-          const servedModel = result?.model || execModel;
-          const metered = await this.aiDm.meterTurn(campaignId, usage, {
-            actor,
-            action: 'ai-dm.driver.turn',
-            detail: `step ${stepNumber} model=${servedModel || 'default'} +${usage} tokens by ${triggeredBy.id}`,
-          }, reservation);
+          const metered = await settle();
           // streamStep sets `aborted` on mode-switch detach and `cancelled` on stop-control abort (#558).
           if (aborted || cancelled || session.detached) {
             const postAuth = await this.checkGenerationAuthority(campaignId, session, generationSignal);
@@ -3469,7 +3833,194 @@ export class AiDriverService {
             };
           }
           return { kind: 'metered' as const, text, result, metered };
-        });
+          });
+
+        // ── #1052: per-step attempt loop (transient-failure retry + provider failover) ──
+        //
+        // Wrapped AROUND withSpendLock, never inside it. The backoff sleep is the reason:
+        // the spend lock is the campaign-wide mutex the scribe shares (#1058), so sleeping
+        // while holding it would block every other spender for the whole backoff — turning a
+        // provider blip on the driver into a stall on an unrelated scribe job. Each attempt
+        // takes the lock, spends, and releases; the waiting happens in between, unlocked.
+        //
+        // Re-taking the lock per attempt also means the budget gate is re-evaluated with
+        // fresh numbers every time (`currentRemaining <= 0` below), so a retry storm cannot
+        // outrun a budget another spender has since drained. That is the load-bearing reason
+        // this is not "reserve once, retry inside".
+        let spend!: Awaited<ReturnType<typeof runAttempt>>;
+        let attempt = 1;
+        const attemptCap = maxStepAttempts(!!fallbackExecution);
+        /**
+         * #1052 — tokens already METERED by attempts this loop then discards.
+         *
+         * `spend` is reassigned per attempt and only the last one is summed into `totalTokens`,
+         * but an intermediate attempt that fails retryably WITH partial usage has already called
+         * `meterTurn` — a real DB write that decremented the seat's budget. Dropping those made
+         * `tokenBudget - budgetRemaining` exceed the reported `tokensUsed`, so the seat row and
+         * the turn result disagreed about what the table had spent. Accumulated here at the
+         * moment an attempt is abandoned, and added once after the loop.
+         */
+        let carriedTokens = 0;
+        /**
+         * #1052 review — whether any abandoned attempt spent tokens it could NOT measure.
+         *
+         * Carrying `metered.tokensUsed` alone fixed half the problem and made the other half
+         * worse. An attempt that dies BEFORE reporting usage goes through
+         * `markReservationUsageUnknown`, which consumes its reservation with the amount unknown;
+         * that carries no token count to accumulate, so the flag was simply dropped. If a later
+         * attempt then succeeded, `turn.end` and the durable `turn.ended` transcript presented
+         * the final attempt's count as EXACT while the seat had also been charged an unmeasured
+         * amount.
+         *
+         * Under-reporting a number is a wrong number. Reporting it as exact when part of the
+         * spend is unmeasured is a claim of precision that is not true, and the DM has no way to
+         * see it — so this is carried with the same care as the tokens.
+         */
+        let carriedUsageUnknown = false;
+        // #1052 — identity of the attempt whose OUTPUT is the one we keep. Tracked per attempt
+        // because a failover means the last attempt is not the configured primary.
+        let servedName = provider.name;
+        let servedModel = execModel;
+        /** Replace a discarded attempt with a stop, preserving what it already accounted for. */
+        const stoppedDuringBackoff = (
+          prev: Extract<Awaited<ReturnType<typeof runAttempt>>, { kind: 'provider_error' }>,
+          reason: Exclude<GenerationAuthority, 'ok'>,
+        ) => {
+          const seat = prev.metered?.seat ?? prev.seat;
+          const remaining = prev.metered?.budgetRemaining ?? prev.budgetRemaining;
+          return {
+            kind: 'stopped' as const,
+            reason,
+            seat,
+            budgetRemaining: remaining,
+            text: prev.text,
+            // ZERO usage, not the abandoned attempt's: whatever it metered has already moved to
+            // `carriedTokens` above, and the terminal handler adds `metered.tokensUsed` on top.
+            // Repeating it here would double-bill the table for one failed attempt.
+            metered: { seat, tokensUsed: 0, budgetRemaining: remaining, usageUnknown: prev.usageUnknown === true },
+          };
+        };
+        /**
+         * Record that a retry was abandoned because a human stopped the table (#1052).
+         *
+         * The `provider_error` branch below owns the `attempts=/gave_up=` audit line, and a turn
+         * that terminates as `stopped` never reaches it — correctly, since this was not a
+         * provider failure. But the retry attempt HAPPENED and its abandonment is the kind of
+         * thing an operator reading back a stalled session needs to see, so it gets its own row
+         * rather than inheriting a misleading one or vanishing.
+         */
+        const auditRetryStopped = (reason: Exclude<GenerationAuthority, 'ok'>, attempts: number, kind: string) => {
+          void this.audit
+            .log({
+              actor,
+              actorRole: 'dm',
+              action: 'ai-dm.driver.retry_abandoned',
+              entityType: 'ai-dm',
+              campaignId,
+              detail:
+                `step ${stepNumber} retry abandoned after a ${reason} stop control ` +
+                `[attempts=${attempts} gave_up=stopped last_error=${kind}] (triggered by ${triggeredBy.id})`,
+            })
+            .catch(() => undefined);
+        };
+        // Reset per STEP: a multi-step turn must not audit step 3's failure with step 1's
+        // attempt count.
+        retryOutcome = { attempts: 1, gaveUp: null };
+        // eslint-disable-next-line no-constant-condition
+        for (;;) {
+          const useFallback = providerForAttempt(attempt, !!fallbackExecution) === 'fallback';
+          const attemptProvider = useFallback ? fallbackExecution!.provider : provider;
+          const attemptModel = useFallback ? fallbackExecution!.model : execModel;
+          spend = await runAttempt(attemptProvider, attemptModel);
+          servedName = attemptProvider.name;
+          servedModel = attemptModel;
+          retryOutcome = { attempts: attempt, gaveUp: null };
+          if (spend.kind !== 'provider_error' || !spend.error) break;
+
+          const decision = decideStepRetry({
+            error: spend.error,
+            attempt,
+            maxAttempts: attemptCap,
+            // What the TABLE saw, not what the model generated — a retry that would
+            // contradict prose already on the wire is refused outright.
+            broadcastChars: spend.broadcastChars ?? 0,
+            budgetRemaining: spend.metered?.budgetRemaining ?? spend.budgetRemaining,
+          });
+          if (!decision.retry) {
+            retryOutcome = { attempts: attempt, gaveUp: decision.reason };
+            break;
+          }
+          // This attempt is now being ABANDONED. Whatever it metered is spent whether or not we
+          // keep its result, so it moves to the carry before `spend` can be overwritten.
+          carriedTokens += spend.metered?.tokensUsed ?? 0;
+          carriedUsageUnknown = carriedUsageUnknown || spend.usageUnknown === true;
+
+          // A freeze / kill / detach that landed during the backoff must win over the retry;
+          // re-check BEFORE sleeping and again after, so a stop control is not made to wait
+          // out a provider's Retry-After.
+          //
+          // #1052 — AND IT MUST WIN THE ARGUMENT ABOUT WHAT HAPPENED, not just stop the loop.
+          // These two checks used to `break` with `spend` still holding the previous attempt's
+          // `provider_error`, so an operator kill was reported as a provider failure: the turn
+          // ended `provider_error`, `detectAndTransition` parked the ladder in `awaiting_players`
+          // with a provider-error stuck state instead of emitting the real frozen/cancelled
+          // outcome, and the audit said `gave_up=attempts_exhausted` when nothing was exhausted.
+          // Terminating through the existing `stopped` path fixes all three at once.
+          const preSleepAuth = await this.checkGenerationAuthority(campaignId, session, generationSignal);
+          if (preSleepAuth !== 'ok') {
+            retryOutcome = { attempts: attempt, gaveUp: 'stopped' };
+            auditRetryStopped(preSleepAuth, attempt, spend.error.kind);
+            spend = stoppedDuringBackoff(spend, preSleepAuth);
+            break;
+          }
+          this.logger.warn(
+            `AI provider step ${stepNumber} attempt ${attempt}/${attemptCap} failed on campaign ${campaignId} ` +
+              `(${spend.error.kind}); retrying in ${decision.delayMs}ms` +
+              `${providerForAttempt(decision.attempt, !!fallbackExecution) === 'fallback' ? ' on the FALLBACK provider' : ''}`,
+          );
+          // #1052 review — RACE THE BACKOFF. `cancelGeneration` promises to stop active
+          // generation immediately; a plain `await sleepMs(...)` made that promise false for up
+          // to the 2s cap, because the post-sleep authority check could not run until the whole
+          // delay had elapsed. The DM hitting kill during a retry storm is exactly the person
+          // who most needs it honoured. Resolving early does not decide anything — the existing
+          // authority check immediately below still does — it only stops the wait.
+          await raceAbort(sleepMs(decision.delayMs), generationSignal);
+          const postSleepAuth = await this.checkGenerationAuthority(campaignId, session, generationSignal);
+          if (postSleepAuth !== 'ok') {
+            retryOutcome = { attempts: attempt, gaveUp: 'stopped' };
+            auditRetryStopped(postSleepAuth, attempt, spend.error.kind);
+            spend = stoppedDuringBackoff(spend, postSleepAuth);
+            break;
+          }
+          attempt = decision.attempt;
+          retryOutcome = { attempts: attempt, gaveUp: null };
+        }
+
+        // #1052 — usage from every attempt this step abandoned. Added once, before the terminal
+        // handlers add the surviving attempt's own metered usage.
+        totalTokens += carriedTokens;
+        // Sticky, and never cleared by a later success: once any part of this turn's spend is
+        // unmeasured, the turn's total is an estimate and must be labelled as one.
+        markUsageUnknown(carriedUsageUnknown);
+
+        // #1052 — #577 provenance follows the RETAINED OUTPUT, not merely a successful metered
+        // attempt. When both primary attempts fail and the fallback emits visible partial
+        // narration before throwing, the policy terminates with `already_broadcast` and that
+        // fallback prose becomes `finalNarration` — so recording the primary here would file the
+        // fallback's words under a provider that never wrote them, and grounding would carry that
+        // attribution forward.
+        // The test is "did THIS step supply the narration we are keeping", not "did it succeed".
+        // `kind === 'metered'` was too loose: in a multi-step turn a later primary step that
+        // completes with only a tool call — or an empty response — returns no text, so
+        // `setNarration` never replaces the fallback's prose, yet the identity flipped back to
+        // the primary anyway and grounding durably filed the fallback's words under a provider
+        // that never wrote them. Non-empty text is exactly the condition under which
+        // `setNarration` runs, on both the terminal branches and the continue path below.
+        if ('text' in spend && spend.text) {
+          servedProviderName = servedName;
+          servedProviderModel = servedModel;
+        }
+
 
         if (spend.kind === 'budget_exhausted' || spend.kind === 'server_cap') {
           latestSeat = spend.seat;
@@ -3477,11 +4028,45 @@ export class AiDriverService {
           stopReason = 'budget_exhausted';
           break;
         }
+        // #598 — the provider content filter / refusal path. Placed FIRST among the outcome
+        // branches for the same reason the withhold is resolved first inside the lock: every
+        // other branch here either commits prose or feeds it onward.
+        //
+        // What deliberately does NOT happen below: no setNarration (so `finalNarration` keeps
+        // whatever EARLIER steps legitimately committed and never gains the refused text), no
+        // `narration.message`, no transcript narration row, no assistant message pushed back
+        // into `messages`, and no executeToolCalls — the loop breaks before reaching any of it.
+        //
+        // The retraction has ALREADY gone out, from inside streamStep, atomically with dropping
+        // the prose. Nothing below is load-bearing for the table's safety; it is the record of
+        // what happened, and it is deliberately deferred to after the loop (see `withheldTurn`).
+        if (spend.kind === 'withheld') {
+          latestSeat = spend.seat;
+          budgetRemaining = spend.budgetRemaining;
+          totalTokens += spend.metered?.tokensUsed ?? 0;
+          // An unmeasured turn was settled as unknown spend, not metered as zero. Surface that
+          // so `turn.ended` marks the seat total as an estimate rather than presenting it as
+          // exact (#1076's flag, reused).
+          if (spend.usageUnknown) markUsageUnknown(true);
+          stopReason = 'content_withheld';
+          withheldTurn = {
+            withheld: spend.withheld,
+            step: spend.step,
+            suppressedToolCalls: spend.suppressedToolCalls,
+            provider: provider.name,
+            model: spend.servedModel || execModel,
+            actor,
+            triggeredBy,
+            proactive: opts.proactive === true,
+          };
+          break;
+        }
         if (spend.kind === 'stopped') {
           latestSeat = spend.seat;
           budgetRemaining = spend.budgetRemaining;
           totalTokens += spend.metered?.tokensUsed ?? 0;
           stopReason = generationAuthorityStopReason(spend.reason);
+          if (spend.metered?.usageUnknown) markUsageUnknown(true);
           if (spend.text) setNarration(spend.text);
           break;
         }
@@ -3490,6 +4075,7 @@ export class AiDriverService {
           budgetRemaining = spend.budgetRemaining;
           totalTokens += spend.metered?.tokensUsed ?? 0;
           stopReason = 'aborted';
+          if (spend.metered?.usageUnknown) markUsageUnknown(true);
           if (spend.text) setNarration(spend.text);
           break;
         }
@@ -3499,7 +4085,7 @@ export class AiDriverService {
           totalTokens += spend.metered?.tokensUsed ?? 0;
           stopReason = 'provider_error';
           providerError = spend.error;
-          tokensUsageUnknown = spend.usageUnknown;
+          markUsageUnknown(spend.usageUnknown);
           if (spend.text) setNarration(spend.text);
           const detail = spend.error?.message ?? 'provider error';
           await this.audit.log({
@@ -3508,12 +4094,19 @@ export class AiDriverService {
             action: 'ai-dm.driver.provider_error',
             entityType: 'ai-dm',
             campaignId,
-            detail: `${detail} (triggered by ${triggeredBy.id})`,
+            // #1052: record the attempt count and WHY the loop stopped. Without the reason a
+            // reader cannot tell a genuine 3-attempt exhaustion from a first-attempt refusal
+            // that was deliberately never retried — and those call for opposite responses.
+            detail:
+              `${detail} [attempts=${retryOutcome.attempts}` +
+              `${retryOutcome.gaveUp ? ` gave_up=${retryOutcome.gaveUp}` : ''}` +
+              `${fallbackExecution ? ' fallback=configured' : ''}] (triggered by ${triggeredBy.id})`,
           });
           break;
         }
 
         const { text, result, metered } = spend;
+        if (metered.usageUnknown) markUsageUnknown(true);
         totalTokens += metered.tokensUsed;
         budgetRemaining = metered.budgetRemaining;
         latestSeat = metered.seat;
@@ -3580,7 +4173,7 @@ export class AiDriverService {
       // locked forever, even though the seat slot is released. Catch here so we still emit
       // turn.error/turn.end with provider_error and park the ladder in awaiting_players for recovery.
       stopReason = 'provider_error';
-      tokensUsageUnknown = true;
+      markUsageUnknown(true);
       providerError = err instanceof AiProviderError ? err : undefined;
       const detail = err instanceof Error ? err.message : String(err);
       this.logger.error(`AI DM provider failure on campaign ${campaignId}: ${detail}`, err instanceof Error ? err.stack : undefined);
@@ -3609,13 +4202,42 @@ export class AiDriverService {
       }
     }
 
+    // #598 — the withheld turn's RECORD (audit + incident row). Runs here, past the `finally`,
+    // so `session.turnCount` has already been incremented and the incident's `turn` matches the
+    // stuck record detectAndTransition() writes below for the same turn. Runs BEFORE the
+    // detached early-return so a turn torn down mid-flight still leaves an incident behind —
+    // that path writes no stuck record either, so there is no correlation to break.
+    if (withheldTurn) await this.handleWithheldTurn(campaignId, session, withheldTurn);
+
     // Detached mid-turn: skip stuck detection (would mutate/emit against a dead object) and
     // just signal turn.end so open stream clients close the orphaned bubble cleanly.
     if (session.detached) {
-      this.emitTurnEnd(campaignId, 'aborted', finalNarration, steps, totalTokens, budgetRemaining);
+      // #598 — A WITHHELD TURN KEEPS ITS STOP REASON EVEN HERE.
+      //
+      // The race this closes: Driver mode is switched off (or to Co-DM) after the terminal
+      // safety frame has populated `result` but before streamStep's `finally` runs.
+      // `teardownSession` marks the session detached, which suppresses `narration.withheld` —
+      // correctly, because emitting onto a replaced session's channel would splice a frame into
+      // a table that has moved on. This branch then reported `aborted`, and the web reducer is
+      // ALLOWED to promote live text for `aborted`. So provider-filtered prose was committed
+      // permanently to the transcript, defeating the whole feature via a mode switch that
+      // happened to land in a few-millisecond window.
+      //
+      // `commitsLiveText()` was not wrong — it was handed a stop reason that lied. The turn
+      // genuinely ended because content was withheld; the teardown is incidental timing. Saying
+      // so makes the reason TRUE rather than adding a second mechanism to compensate for it
+      // being false, and routes this case into the guarantee already built and tested instead
+      // of teaching another code path about safety.
+      const detachedStopReason: AiDmStopReason = withheldTurn ? 'content_withheld' : 'aborted';
+      // #1052 review — `usageUnknown()`, not silence. A turn can be detached by a mode switch
+      // AFTER an attempt was abandoned with unmeasured usage (that attempt's reservation was
+      // consumed via `markReservationUsageUnknown`, so the seat really was charged an amount
+      // nobody counted). Being detached says nothing about whether the spend was measured, and
+      // omitting the argument used to claim it was.
+      this.emitTurnEnd(campaignId, detachedStopReason, finalNarration, steps, totalTokens, budgetRemaining, undefined, usageUnknown());
       return {
         narration: finalNarration,
-        stopReason: 'aborted',
+        stopReason: detachedStopReason,
         steps,
         toolCalls: executed,
         tokensUsed: totalTokens,
@@ -3634,8 +4256,8 @@ export class AiDriverService {
       parsed: turnGrounding,
       ledger,
       executed,
-      provider: provider.name,
-      model: execModel,
+      provider: servedProviderName,
+      model: servedProviderModel,
       triggeredBy,
     });
 
@@ -3651,7 +4273,7 @@ export class AiDriverService {
       unsupportedClaims: grounding.unsupportedCount,
     });
 
-    this.emitTurnEnd(campaignId, stopReason, finalNarration, steps, totalTokens, budgetRemaining, providerError, tokensUsageUnknown);
+    this.emitTurnEnd(campaignId, stopReason, finalNarration, steps, totalTokens, budgetRemaining, providerError, usageUnknown());
 
     this.drainQueue(campaignId).catch(err => this.logger.error('Queue drain failed', err));
 
@@ -3666,6 +4288,162 @@ export class AiDriverService {
       seat: latestSeat,
       grounding,
     };
+  }
+
+  /**
+   * The RECORD of a withheld turn (#598) — everything that is merely *about* the withhold.
+   *
+   * The withhold itself is already complete before this runs: streamStep dropped the prose and
+   * emitted `narration.withheld` in the same breath, and the turn loop committed nothing. That
+   * separation is the point. Every side effect here is fallible bookkeeping, and none of it may
+   * be able to undo, delay, or skip the protection — which is exactly what happened when the
+   * retraction lived at the top of this method behind an awaited `meterTurn`.
+   *
+   * What is left, all best-effort:
+   *   1. an audit entry, so the withhold is visible to the same operator tooling as every
+   *      other driver decision;
+   *   2. a privacy-minimized incident row (counts + provenance, never the text);
+   *   3. nothing else — the seat transition is the stuck ladder's job, driven from the
+   *      `content_withheld` stop reason by the normal `detectAndTransition` at the end of the
+   *      turn. #598 deliberately reuses that ladder rather than standing up a parallel
+   *      recovery mechanism: the levers a table needs here (retry, nudge with different
+   *      framing, continue without the AI, hand to a human) are exactly the ones it already
+   *      offers, and a second mechanism would be a second thing to get wrong.
+   *
+   * Called from runTurn AFTER the turn's `finally` — see {@link WithheldTurnContext}.
+   */
+  private async handleWithheldTurn(
+    campaignId: number,
+    session: AiDmSessionState,
+    ctx: WithheldTurnContext,
+  ): Promise<void> {
+    const { finishReason, quarantinedChars, releasedChars } = ctx.withheld;
+
+    await this.audit
+      .log({
+        actor: ctx.actor,
+        actorRole: 'dm',
+        action: 'ai-dm.driver.content_withheld',
+        entityType: 'ai-dm',
+        campaignId,
+        // Counts and provenance only — never a fragment of what was withheld.
+        detail:
+          `${finishReason}: withheld ${quarantinedChars} chars (${releasedChars} already broadcast), ` +
+          `suppressed ${ctx.suppressedToolCalls} tool call(s) on step ${ctx.step} ` +
+          `provider=${ctx.provider} model=${ctx.model} (triggered by ${ctx.triggeredBy.id})`,
+      })
+      .catch((err) => this.logger.warn(`Failed to audit withheld AI DM turn on campaign ${campaignId}: ${String(err)}`));
+
+    await this.recordWithheldIncident({
+      campaignId,
+      // Post-increment (this runs after the turn's `finally`), so it is the SAME number
+      // `session.stuck.turn` carries for this turn. See {@link WithheldTurnContext}.
+      turn: session.turnCount,
+      step: ctx.step,
+      finishReason,
+      provider: ctx.provider,
+      model: ctx.model,
+      withheldChars: quarantinedChars,
+      releasedChars,
+      suppressedToolCalls: ctx.suppressedToolCalls,
+      // A proactive turn had no human behind it; attributing the incident to whoever happened
+      // to trigger the scheduler would be a false accusation in the one record a DM reads to
+      // decide whether a player needs a conversation.
+      triggeredByUserId: ctx.proactive ? null : ctx.triggeredBy.id,
+    });
+
+    this.logger.warn(
+      `AI DM turn withheld on campaign ${campaignId} (${finishReason}, step ${ctx.step}): ` +
+        `${quarantinedChars} chars quarantined, ${releasedChars} already broadcast, ` +
+        `${ctx.suppressedToolCalls} tool call(s) suppressed`,
+    );
+  }
+
+  /**
+   * Persist one withheld-turn incident (#598). Best-effort, like every other bookkeeping write
+   * on this path: a storage failure must not turn a correctly-withheld turn into a 500 (the
+   * table is already protected by the time this runs), so it is logged and dropped.
+   *
+   * Written straight through `this.db` rather than via a new injected store on purpose: the
+   * driver's constructor is positional and hand-constructed by several specs, and adding a
+   * parameter to it has broken CI more than once. The row shape here is a flat counter record
+   * with no read-modify-write, so a dedicated service would buy nothing.
+   */
+  private async recordWithheldIncident(incident: WithheldTurnIncident): Promise<void> {
+    if (!this.db) return;
+    try {
+      await this.db.insert(aiDriverWithheldTurns).values({
+        campaignId: incident.campaignId,
+        turn: incident.turn,
+        step: incident.step,
+        finishReason: incident.finishReason,
+        provider: incident.provider,
+        model: incident.model,
+        withheldChars: incident.withheldChars,
+        releasedChars: incident.releasedChars,
+        suppressedToolCalls: incident.suppressedToolCalls,
+        triggeredByUserId: incident.triggeredByUserId,
+        createdAt: nowIso(),
+      });
+      await this.pruneWithheldIncidents(incident.campaignId);
+    } catch (err) {
+      this.logger.warn(
+        `Failed to record withheld-turn incident for campaign ${incident.campaignId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
+  /** Keep a campaign's incident trail bounded, mirroring #577's grounding-claim retention. */
+  private async pruneWithheldIncidents(campaignId: number): Promise<void> {
+    if (!this.db) return;
+    try {
+      const [cutoff] = await this.db
+        .select({ id: aiDriverWithheldTurns.id })
+        .from(aiDriverWithheldTurns)
+        .where(eq(aiDriverWithheldTurns.campaignId, campaignId))
+        .orderBy(desc(aiDriverWithheldTurns.id))
+        .limit(1)
+        .offset(MAX_WITHHELD_INCIDENTS_PER_CAMPAIGN - 1);
+      if (!cutoff) return;
+      await this.db
+        .delete(aiDriverWithheldTurns)
+        .where(and(eq(aiDriverWithheldTurns.campaignId, campaignId), lt(aiDriverWithheldTurns.id, cutoff.id)));
+    } catch (err) {
+      this.logger.warn(`Failed to prune withheld-turn incidents for campaign ${campaignId}: ${String(err)}`);
+    }
+  }
+
+  /**
+   * The campaign's recent withheld-turn incidents, newest first (#598).
+   *
+   * DM-only at the controller. Every field here is already non-content — this is counts and
+   * provenance — but "how often does the AI get filtered on this table, and on whose turns"
+   * is table-management information, not play information.
+   */
+  async listWithheldIncidents(campaignId: number, limit = 50): Promise<AiDriverWithheldTurnRecord[]> {
+    if (!this.db) return [];
+    const rows = await this.db
+      .select()
+      .from(aiDriverWithheldTurns)
+      .where(eq(aiDriverWithheldTurns.campaignId, campaignId))
+      .orderBy(desc(aiDriverWithheldTurns.id))
+      .limit(Math.max(1, Math.min(limit, 200)));
+    return rows.map((row) => ({
+      id: row.id,
+      campaignId: row.campaignId,
+      turn: row.turn,
+      step: row.step,
+      finishReason: row.finishReason,
+      provider: row.provider,
+      model: row.model,
+      withheldChars: row.withheldChars,
+      releasedChars: row.releasedChars,
+      suppressedToolCalls: row.suppressedToolCalls,
+      triggeredByUserId: row.triggeredByUserId ?? null,
+      createdAt: row.createdAt,
+    }));
   }
 
   /**
@@ -3799,6 +4577,14 @@ export class AiDriverService {
    * Stream one provider call, forwarding text deltas to the SSE channel; returns the aggregated
    * text + result. Passes an AbortSignal so a stalled mid-body stream (no chunk within
    * {@link DRIVER_STREAM_IDLE_TIMEOUT_MS}) aborts instead of wedging the campaign (#1063).
+   *
+   * DELTA PIPELINE (order matters):
+   *   raw provider delta → GroundingDeltaFilter (#577, strips the citation block)
+   *                      → NarrationQuarantine (#598, trailing delay line)
+   *                      → `narration.delta` on the wire
+   * One chain, one place where a byte becomes visible to the table. #598 composes with #577's
+   * interceptor rather than adding a second one, so there is no path that reaches the SSE
+   * channel past either filter.
    */
   private async streamStep(
     campaignId: number,
@@ -3807,19 +4593,56 @@ export class AiDriverService {
     generationSignal: AbortSignal,
     req: { system: string; messages: AiMessage[]; model: string; maxTokens: number; tools: AiToolSchema[] },
   ): Promise<
-    | { ok: true; text: string; result: AiGenerateResult | undefined; aborted: boolean; cancelled: boolean }
-    | { ok: false; text: string; result: AiGenerateResult | undefined; error: AiProviderError }
+    | {
+        ok: true;
+        text: string;
+        result: AiGenerateResult | undefined;
+        aborted: boolean;
+        cancelled: boolean;
+        broadcastChars: number;
+        /** #598 — set when the provider reported a safety terminal state; null otherwise. */
+        withheld: WithheldStreamOutcome | null;
+      }
+    | {
+        ok: false;
+        text: string;
+        result: AiGenerateResult | undefined;
+        error: AiProviderError;
+        /** #1052 — narration this attempt actually put on the wire; gates a silent retry. */
+        broadcastChars: number;
+      }
   > {
     let text = '';
     let result: AiGenerateResult | undefined;
     let streamUsage: AiUsage | undefined;
+    /**
+     * #1052: characters actually EMITTED as `narration.delta`, which is deliberately not the
+     * same as `text.length`. `text` is what the model generated; this is what the table saw.
+     * The #577 citation filter already withholds protocol framing from the wire, so the two
+     * diverge today, and a retry decision must be made on what a player could have read.
+     */
+    let broadcastChars = 0;
     // #577: the grounding citation block is protocol framing appended after the prose. Without
     // this filter the table would watch the DM "type" raw JSON at the end of every turn. `text`
     // still accumulates the FULL raw output — the block is parsed off it once the step lands.
     const deltaFilter = new GroundingDeltaFilter();
+    // #598: the trailing delay line. Narration is broadcast only once enough further text has
+    // arrived behind it, so the most recently generated prose is still server-side when the
+    // terminal frame (which carries the finish reason) lands.
+    const quarantine = new NarrationQuarantine();
+    /** Characters that actually reached the table — the residual exposure if this is withheld. */
+    let releasedChars = 0;
+    /** Characters the quarantine window swallowed when a withhold fired. */
+    let quarantinedChars = 0;
+    let withheld: WithheldStreamOutcome | null = null;
+    /** A transport-level provider failure, held until the withhold decision has been made. */
+    let streamError: AiProviderError | undefined;
+    /** Anything else the stream threw — re-raised past the `finally`, never swallowed. */
+    let fatalError: unknown;
     const toolAcc = new Map<number, { id?: string; name?: string; args: string }>();
     let aborted = false;
     let cancelled = false;
+    /** Set when the stream threw a typed provider error; returned after `finally` flushes. */
     const idleAc = new AbortController();
     const linked = linkAbortSignals(generationSignal, idleAc.signal);
     const idleMs = DRIVER_STREAM_IDLE_TIMEOUT_MS;
@@ -3909,7 +4732,12 @@ export class AiDriverService {
         if (ev.type === 'text') {
           text += ev.delta;
           const visible = deltaFilter.push(ev.delta);
-          if (visible) this.stream.emit({ type: 'narration.delta', campaignId, text: visible });
+          const released = visible ? quarantine.push(visible) : '';
+          if (released) {
+            broadcastChars += released.length;
+            releasedChars += released.length;
+            this.stream.emit({ type: 'narration.delta', campaignId, text: released });
+          }
         } else if (ev.type === 'usage') {
           streamUsage = ev.usage;
         } else if (ev.type === 'tool_call') {
@@ -3923,15 +4751,20 @@ export class AiDriverService {
         }
       }
     } catch (err) {
+      // #598 — do NOT return/rethrow from here. Both of those exits leave the try BEFORE the
+      // `finally` below has decided whether this turn was withheld, so the decision (and the
+      // retraction it publishes) would be made after the function had already committed to an
+      // outcome. The error is parked and re-raised past the finally instead, so there is
+      // exactly one point in this function where "withheld?" is answered and it dominates
+      // every exit. See the disposition block after the try.
+      //
       // Stop-control abort (#558) is intentional — surface as cancelled, not provider_error.
       if (generationSignal.aborted) {
         cancelled = true;
+      } else if (err instanceof AiProviderError) {
+        streamError = err;
       } else {
-        const partial = partialResult();
-        if (err instanceof AiProviderError) {
-          return { ok: false, text, result: partial, error: err };
-        }
-        throw err;
+        fatalError = err;
       }
     } finally {
       linked.cleanup();
@@ -3939,22 +4772,58 @@ export class AiDriverService {
       clearIdle();
       // #577: release any tail the fence detector was holding back but that never became a
       // grounding block, so a reply ending in "[" is not silently truncated for the table.
-      //
-      // #599: NOT when a stop control fired. `generationSignal.aborted` means a safety hold, a
-      // DM pause, a takeover, or the kill switch tore this stream down — and the grounding
-      // filter can be sitting on several buffered characters at that moment. Flushing them here
-      // would push one last fragment of the AI's prose onto the table's screen *after* the stop,
-      // which is exactly the output someone raised the X-Card to not see. Truncating the tail is
-      // the correct loss: a cancelled turn is already incomplete, and the client renders it as
-      // cancelled either way.
+      // It goes through the quarantine like every other byte — a bypass here would be a hole
+      // in the delay line for exactly the LAST characters of the reply, which are the ones
+      // most likely to have triggered a filter.
       const tail = deltaFilter.flush();
-      if (tail && !session.detached && !generationSignal.aborted) {
-        this.stream.emit({ type: 'narration.delta', campaignId, text: tail });
+      const pending = quarantine.push(tail) + quarantine.flush();
+      // #598: the terminal frame has landed by now, so the finish reason is known BEFORE the
+      // held tail goes out. This is the whole reason the delay line exists.
+      const filtered = isWithheldFinishReason(result?.finishReason);
+      if (filtered) {
+        quarantinedChars = pending.length;
+        const finishReason = result!.finishReason as WithheldFinishReason;
+        withheld = {
+          finishReason,
+          quarantinedChars,
+          releasedChars,
+          generatedChars: text.length + (result?.refusalChars ?? 0),
+        };
+        if (!session.detached) {
+          this.stream.emit({
+            type: 'narration.withheld',
+            campaignId,
+            reason: finishReason,
+            message: describeWithheldTurn(finishReason),
+          });
+        }
+      } else if (pending && !session.detached && !generationSignal.aborted) {
+        broadcastChars += pending.length;
+        releasedChars += pending.length;
+        this.stream.emit({ type: 'narration.delta', campaignId, text: pending });
       }
     }
+    // ── Disposition. One place, reached by every exit, with the withhold decided. ──────────
+    if (withheld) {
+      if (streamError || fatalError) {
+        this.logger.warn(
+          `Provider stream for campaign ${campaignId} failed AFTER a safety terminal frame; ` +
+            `keeping the withhold and discarding the transport error: ${String(streamError ?? fatalError)}`,
+        );
+      }
+      // The refused prose does not leave this function. The caller's withheld branch already
+      // avoids touching it — but "avoids" is a convention every future edit to the turn loop
+      // has to remember, and the other branches it sits next to all propagate `text` into
+      // setNarration(), `turn.cancelled`, and a durable transcript row. Blanking it here makes
+      // the guarantee structural instead. `withheld.generatedChars` carries the only thing
+      // downstream still legitimately needs from it: a length, for the #1076 usage estimate.
+      return { ok: true, text: '', result: result ? { ...result, text: '' } : undefined, aborted, cancelled, withheld, broadcastChars };
+    }
+    if (fatalError !== undefined) throw fatalError;
+    if (streamError) return { ok: false, text, result: partialResult(), error: streamError, broadcastChars };
     // A provider that only streamed deltas (no `done`) still yields its text.
     if (result && !result.text && text) result = { ...result, text };
-    return { ok: true, text, result, aborted, cancelled };
+    return { ok: true, text, result, aborted, cancelled, withheld, broadcastChars };
   }
 
   /**
@@ -4599,6 +5468,13 @@ export class AiDriverService {
         // set remains so the table is never without a way forward.
         if (session.stuck?.reason === 'provider_error') {
           return ['retry', 'continue_without_ai', 'nudge', 'flag', 'vote', 'rules_lookup', 'request_takeover', 'pause'];
+        }
+        // #598 — a withheld turn offers the same three human moves the acceptance criteria
+        // name: retry as-is, `nudge` (replay with a hint — the "edit the framing" lever this
+        // seat already has), or carry on with no AI at all. `flag` is dropped from the front
+        // of the list because there is no ruling to dispute: the table never saw one.
+        if (session.stuck?.reason === 'content_withheld') {
+          return ['retry', 'nudge', 'continue_without_ai', 'vote', 'rules_lookup', 'request_takeover', 'pause'];
         }
         return ['retry', 'nudge', 'flag', 'vote', 'rules_lookup', 'request_takeover', 'pause'];
       case 'collaborative':
@@ -5785,25 +6661,6 @@ export function summarizeToolArgs(args: Record<string, unknown> | undefined | nu
   return parts.join(', ');
 }
 
-/**
- * Resolve billable tokens for a provider step that failed mid-stream (#560). Uses reported
- * provider usage when available; otherwise estimates from partial output. When neither is
- * available, returns `unknown: true` so callers never assume zero usage.
- */
-export function resolveProviderStepUsage(
-  text: string,
-  result: AiGenerateResult | undefined,
-): { tokens: number; unknown: boolean } {
-  const reported = result?.usage?.totalTokens ?? 0;
-  if (reported > 0) return { tokens: reported, unknown: false };
-  const outputText = text || result?.text || '';
-  const toolCalls = result?.toolCalls ?? [];
-  if (outputText.length > 0 || toolCalls.length > 0) {
-    const outputChars = outputText.length + JSON.stringify(toolCalls).length;
-    return { tokens: Math.max(1, Math.ceil(outputChars / 4)), unknown: false };
-  }
-  return { tokens: 0, unknown: true };
-}
 
 /**
  * Map a finished turn onto a stuck reason, or null if the turn was healthy (#314). Order
@@ -5822,6 +6679,11 @@ export function classifyStuck(ctx: {
   // #1057 / #558: a deliberate freeze or kill-switch cancel is not a stuck condition.
   if (ctx.stopReason === 'frozen') return null;
   if (ctx.stopReason === 'cancelled') return null;
+  // #598 — a safety terminal state outranks every diagnostic below it. A withheld turn also
+  // produces no narration, so without this it would classify as `no_narration` and tell the
+  // table "the AI produced no narration this turn" — technically true, and exactly the wrong
+  // thing to say when the truth is that a reply was generated and deliberately not shown.
+  if (ctx.stopReason === 'content_withheld') return 'content_withheld';
   if (ctx.stopReason === 'tool_error') return 'tool_error';
   if (ctx.stopReason === 'budget_exhausted') return 'budget_exhausted';
   if (ctx.stopReason === 'max_steps') return 'max_steps';
@@ -5855,6 +6717,9 @@ function describeStuck(reason: AiDmStuckReason): string {
       return 'The AI provider failed or stalled mid-response.';
     case 'unsupported_claim':
       return 'The AI stated a rule or a fact about the world that it could not back with a source — it is marked unverified until a human checks it.';
+    case 'content_withheld':
+      // Neutral and non-specific on purpose (#598) — see describeWithheldTurn in driver-safety.ts.
+      return 'The AI’s reply was withheld before it reached the table — nothing was posted or saved. A human can retry, nudge with different framing, or continue without the AI.';
     default:
       return 'The AI needs help.';
   }
@@ -5917,3 +6782,7 @@ function renderNoRuleSystem(query: string): string {
     'A DM can pick a rule system in **Campaign Settings → Rule system** to scope rules lookups to an installed pack (e.g. the D&D 5e SRD).',
   ].join('\n');
 }
+
+// Re-exported for the existing unit suite and any caller that has always imported it here
+// (#598 review). The implementation now lives in `ai-dm/providers/step-usage`.
+export { resolveProviderStepUsage };

@@ -3645,6 +3645,63 @@ function migrateCampaignModules585(sqlite: Database.Database): void {
 }
 
 /**
+ * Issue #598 — the incident trail for AI driver turns withheld by a provider content filter or
+ * a model refusal.
+ *
+ * Purely additive: one new table plus its index, so the body is `CREATE ... IF NOT EXISTS` and
+ * re-running it is a no-op. The `sqlite_master` / `PRAGMA table_info` probe is the belt for the
+ * one case IF NOT EXISTS cannot cover — an install carrying an EARLIER shape of the table from
+ * a pre-release build of this branch. Dropping in that case is deliberate and cheap: the rows
+ * are an operational review trail of counts, never campaign canon, and the alternative
+ * (guessing which columns to ALTER in) is how a half-migrated table ships.
+ *
+ * Note what is NOT here: any column that could hold the withheld text. See the schema comment.
+ */
+function migrateAiDriverWithheldTurns598(sqlite: Database.Database): void {
+  const existing = sqlite
+    .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='ai_driver_withheld_turns'`)
+    .all();
+  if (existing.length > 0) {
+    const cols = sqlite.prepare(`PRAGMA table_info(ai_driver_withheld_turns)`).all() as Array<{ name: string }>;
+    const names = new Set(cols.map((c) => c.name));
+    const expected = [
+      'id',
+      'campaign_id',
+      'turn',
+      'step',
+      'finish_reason',
+      'provider',
+      'model',
+      'withheld_chars',
+      'released_chars',
+      'suppressed_tool_calls',
+      'triggered_by_user_id',
+      'created_at',
+    ];
+    if (expected.every((c) => names.has(c))) return;
+    sqlite.exec(`DROP TABLE ai_driver_withheld_turns`);
+  }
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS ai_driver_withheld_turns (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+      turn INTEGER NOT NULL,
+      step INTEGER NOT NULL,
+      finish_reason TEXT NOT NULL,
+      provider TEXT NOT NULL DEFAULT '',
+      model TEXT NOT NULL DEFAULT '',
+      withheld_chars INTEGER NOT NULL DEFAULT 0,
+      released_chars INTEGER NOT NULL DEFAULT 0,
+      suppressed_tool_calls INTEGER NOT NULL DEFAULT 0,
+      triggered_by_user_id TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_ai_driver_withheld_campaign
+      ON ai_driver_withheld_turns(campaign_id, id);
+  `);
+}
+
+/**
  * Issue #587: server-admin campaign metadata catalog.
  *
  * Two independent pieces, both idempotent and both probe-before-act:
@@ -3734,6 +3791,50 @@ function migrateAdminCampaignCatalog587(sqlite: Database.Database): void {
       ON campaign_export_requests(campaign_id, id);
     CREATE INDEX IF NOT EXISTS idx_campaign_export_requests_status
       ON campaign_export_requests(status, id);
+  `);
+}
+
+/**
+ * Issue #1052 — an OPTIONAL FALLBACK provider config per scope.
+ *
+ * Two edits, and the second is the one that matters. Adding `role` is a plain ADD COLUMN with
+ * a default, so every existing row becomes the 'primary' it always was. But the pre-existing
+ * partial uniques —
+ *     UNIQUE(scope)       WHERE scope = 'server'
+ *     UNIQUE(campaign_id) WHERE campaign_id IS NOT NULL
+ * — permit exactly ONE row per scope, which makes a fallback row impossible to insert. They
+ * are dropped and recreated keyed on (…, role).
+ *
+ * DROP + CREATE rather than editing the original DDL in place: `CREATE UNIQUE INDEX IF NOT
+ * EXISTS` is a no-op against a database that already has an index of that name, so editing
+ * migration 0040's body would silently leave every existing install on the old
+ * one-row-per-scope constraint while fresh installs got the new one. The index NAMES change
+ * too (`…_server` → `…_server_role`), so a half-applied state cannot masquerade as complete.
+ *
+ * Idempotent and safe to re-run: the column is probed for, and DROP INDEX IF EXISTS is a
+ * no-op. Widening a unique index can never fail on existing data — every row satisfying the
+ * old, stricter constraint satisfies the new one.
+ */
+function migrateAiProviderConfigFallbackRole1052(sqlite: Database.Database): void {
+  const tableExists =
+    sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ai_provider_configs'").get() != null;
+  // A fresh DB gets the whole shape from BOOTSTRAP_SQL; there is nothing to migrate.
+  if (!tableExists) return;
+
+  const cols = (sqlite.prepare('PRAGMA table_info(ai_provider_configs)').all() as Array<{ name: string }>).map(
+    (c) => c.name,
+  );
+  if (!cols.includes('role')) {
+    sqlite.exec("ALTER TABLE ai_provider_configs ADD COLUMN role TEXT NOT NULL DEFAULT 'primary'");
+  }
+
+  sqlite.exec(`
+    DROP INDEX IF EXISTS idx_ai_provider_configs_server;
+    DROP INDEX IF EXISTS idx_ai_provider_configs_campaign;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_provider_configs_server_role
+      ON ai_provider_configs(scope, role) WHERE scope = 'server';
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_provider_configs_campaign_role
+      ON ai_provider_configs(campaign_id, role) WHERE campaign_id IS NOT NULL;
   `);
 }
 
@@ -4027,6 +4128,14 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // colliding ordinal — and renaming this entry after a database has recorded it is the one
   // edit that silently re-runs it.
   { name: '0126_admin_campaign_catalog_587', run: migrateAdminCampaignCatalog587 },
+  // 0129 was CENTRALLY ALLOCATED to issue #598 by the merge coordinator. 0122-0128 are held by
+  // other in-flight branches, so the gap above is deliberate and must NOT be "tidied" into the
+  // next free ordinal — several branches each computing "next free" in parallel is precisely
+  // how they collide. runMigrations applies entries in ARRAY order and dedupes on the FULL name
+  // string, so the `_598` suffix is what actually guarantees this runs exactly once, and
+  // renaming it later (a database that already recorded this name would silently skip it) is
+  // the one edit that breaks run-once.
+  { name: '0129_ai_driver_withheld_turns_598', run: migrateAiDriverWithheldTurns598 },
   // 0130 was CENTRALLY ALLOCATED to issue #599 by the merge coordinator. 0122-0129 are held by
   // other in-flight branches, so the gap above is deliberate and must not be "tidied" down to
   // the next free ordinal — every branch computing "next free" for itself is exactly how these
@@ -4060,6 +4169,21 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // on the FULL name string, so the `_1047` suffix is what guarantees this runs exactly once
   // even if a sibling branch lands a colliding ordinal.
   { name: '0132_character_condition_instances_1047', run: migrateCharacterConditionInstances1047 },
+  // 0135 was CENTRALLY ALLOCATED to this issue. 0126-0134 are held by other in-flight
+  // branches (0126 #587, 0127 #597, 0129 #598, 0130 #599, 0131 #1042, 0132 #1022, 0133 #1043,
+  // 0134 #1049), so the gap above is deliberate and must not be "tidied" into the next free
+  // ordinal — several branches each computing "next free" in parallel is exactly how they
+  // collide, and this entry was itself renumbered off 0130 for that reason before it merged.
+  //
+  // `runMigrations` dedupes on the FULL name string, so two entries sharing an ordinal would
+  // both still run correctly; the ordinal is there so a HUMAN can read this array in order,
+  // which is precisely the property a duplicate destroys. Renaming after a database has
+  // recorded the name is the one edit that breaks run-once, which is why this could only be
+  // fixed pre-merge.
+  //
+  // This one is NOT purely additive, unlike its neighbours: it REPLACES two partial unique
+  // indexes. It must therefore never be reordered above 0040, which creates the originals.
+  { name: '0135_ai_provider_config_fallback_role_1052', run: migrateAiProviderConfigFallbackRole1052 },
 ];
 
 /**

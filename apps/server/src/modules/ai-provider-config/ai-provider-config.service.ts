@@ -26,6 +26,7 @@ import { auditActor, auditActorRole, type RequestUser } from '../../common/user.
 import { AuditService } from '../audit/audit.service';
 import {
   createAiProvider,
+  providerRequiresApiKey,
   type AiProviderConfig,
   type AiProviderType,
 } from '../ai-dm/providers';
@@ -35,6 +36,16 @@ type ConfigView = z.infer<typeof AiProviderConfigView>;
 type TestInput = z.infer<typeof AiProviderTestRequest>;
 type TestResult = z.infer<typeof AiProviderTestResult>;
 type Scope = 'server' | 'campaign';
+/**
+ * #1052: which of a scope's two provider slots a row is. 'primary' is what every pre-#1052
+ * row is and what every existing read path means; 'fallback' is an OPTIONAL second, fully
+ * independent config used only after the primary exhausts its retries on a transient failure.
+ *
+ * Every row lookup below filters on this. Without the filter `serverRow()`/`campaignRow()`
+ * — which are `.limit(1)` with no ORDER BY — would return an ARBITRARY one of the two rows,
+ * so adding a fallback would non-deterministically swap the table's primary provider.
+ */
+export type AiProviderRole = 'primary' | 'fallback';
 type Row = typeof aiProviderConfigs.$inferSelect;
 type TestedTarget = TestResult['testedTarget'];
 
@@ -129,20 +140,29 @@ export class AiProviderConfigService {
 
   // ── row access ─────────────────────────────────────────────────────────────
 
-  private async serverRow(): Promise<Row | undefined> {
+  private async serverRow(role: AiProviderRole = 'primary'): Promise<Row | undefined> {
     const [row] = await this.db
       .select()
       .from(aiProviderConfigs)
-      .where(eq(aiProviderConfigs.scope, 'server'))
+      // The role filter is load-bearing, not cosmetic (#1052): this is `.limit(1)` with no
+      // ORDER BY, so without it a configured fallback would be returned in place of the
+      // primary on an arbitrary subset of queries.
+      .where(and(eq(aiProviderConfigs.scope, 'server'), eq(aiProviderConfigs.role, role)))
       .limit(1);
     return row;
   }
 
-  private async campaignRow(campaignId: number): Promise<Row | undefined> {
+  private async campaignRow(campaignId: number, role: AiProviderRole = 'primary'): Promise<Row | undefined> {
     const [row] = await this.db
       .select()
       .from(aiProviderConfigs)
-      .where(and(eq(aiProviderConfigs.scope, 'campaign'), eq(aiProviderConfigs.campaignId, campaignId)))
+      .where(
+        and(
+          eq(aiProviderConfigs.scope, 'campaign'),
+          eq(aiProviderConfigs.campaignId, campaignId),
+          eq(aiProviderConfigs.role, role),
+        ),
+      )
       .limit(1);
     return row;
   }
@@ -291,6 +311,7 @@ export class AiProviderConfigService {
     input: ConfigUpdateInput,
     user: RequestUser,
     auditCampaignId?: number,
+    role: AiProviderRole = 'primary',
   ): Promise<void> {
     const ts = nowIso();
     await this.assertBaseUrlPermitted(input.baseUrl);
@@ -311,15 +332,19 @@ export class AiProviderConfigService {
       }
     }
 
-    // allowedModels is only meaningful at the server scope (the admin allowlist).
+    // allowedModels is only meaningful at the server scope (the admin allowlist), and only on
+    // the PRIMARY row (#1052): the allowlist is one server-wide policy, not a per-slot one, and
+    // letting a fallback row carry its own copy would create a second, silently-diverging
+    // source of truth for which models are permitted.
     const allowedModels =
-      scope === 'server' && input.allowedModels !== undefined
+      scope === 'server' && role === 'primary' && input.allowedModels !== undefined
         ? JSON.stringify(input.allowedModels)
         : (existing?.allowedModels ?? '[]');
 
     const values = {
       scope,
       campaignId,
+      role,
       providerType: input.providerType,
       baseUrl: input.baseUrl?.trim() ? input.baseUrl.trim() : null,
       model: input.model,
@@ -347,7 +372,7 @@ export class AiProviderConfigService {
       action: 'ai-provider.configure',
       entityType: 'ai-provider',
       campaignId: auditCampaignId ?? null,
-      detail: `${scope} provider=${input.providerType} model=${input.model} key=${keyAction}`,
+      detail: `${scope}/${role} provider=${input.providerType} model=${input.model} key=${keyAction}`,
     });
   }
 
@@ -423,6 +448,29 @@ export class AiProviderConfigService {
     });
   }
 
+  /**
+   * Delete the server provider — BOTH ROLES (#1052 review).
+   *
+   * This was role-scoped to `'primary'` first, reasoning that a "remove the provider" click
+   * should not silently wipe a configured backup. That was the wrong way round, for two reasons
+   * that only became visible once the whole shape was on the table.
+   *
+   * A FALLBACK WITHOUT A PRIMARY IS NOT A BACKUP. Resolution reads the primary first and gives
+   * up when there is none, so the surviving row serves no turn, answers no health probe, and is
+   * reachable by no execution path. Keeping it preserves no capability whatsoever.
+   *
+   * WHAT IT DOES PRESERVE IS A SECRET. The row carries a stored, encrypted API key, and it
+   * survived the one operation an admin performs in order to destroy exactly that. There is no
+   * fallback UI in this release, so an operator working from the web app is never shown the
+   * leftover — and re-creating a primary later silently re-arms it, on a credential the admin
+   * then in post never knowingly configured and cannot see. A secret outliving the intent to
+   * destroy it is the worse failure, and "inert at runtime" is not the axis that matters when
+   * the question is whether the key is gone.
+   *
+   * THE OTHER DIRECTION STAYS INDEPENDENT: deleting the fallback leaves the primary alone. The
+   * asymmetry is the point rather than an inconsistency — a fallback depends on a primary for
+   * its meaning, and not the reverse.
+   */
   async deleteServer(user: RequestUser): Promise<void> {
     await this.db.delete(aiProviderConfigs).where(eq(aiProviderConfigs.scope, 'server'));
     await this.audit.log({
@@ -430,10 +478,13 @@ export class AiProviderConfigService {
       actorRole: auditActorRole(user),
       action: 'ai-provider.delete',
       entityType: 'ai-provider',
-      detail: 'server',
+      // Names both roles, so the trail shows the fallback's credential went with it rather than
+      // leaving a reader to infer that from which endpoint was called.
+      detail: 'server (primary + fallback)',
     });
   }
 
+  /** Delete a campaign's provider override — BOTH ROLES, for the reasons on {@link deleteServer}. */
   async deleteCampaign(campaignId: number, user: RequestUser): Promise<void> {
     await this.db
       .delete(aiProviderConfigs)
@@ -444,7 +495,7 @@ export class AiProviderConfigService {
       action: 'ai-provider.delete',
       entityType: 'ai-provider',
       campaignId,
-      detail: 'campaign',
+      detail: 'campaign (primary + fallback)',
     });
   }
 
@@ -468,8 +519,8 @@ export class AiProviderConfigService {
    * `baseUrl: 'https://attacker.example'` with no key and have the server's admin key
    * shipped there.
    */
-  async resolveEffectiveConfig(campaignId: number): Promise<AiProviderConfig | null> {
-    return (await this.resolveEffectiveConfigWithEndpointScope(campaignId)).config;
+  async resolveEffectiveConfig(campaignId: number, role: AiProviderRole = 'primary'): Promise<AiProviderConfig | null> {
+    return (await this.resolveEffectiveConfigWithEndpointScope(campaignId, role)).config;
   }
 
   /**
@@ -490,9 +541,18 @@ export class AiProviderConfigService {
    */
   async resolveEffectiveConfigWithEndpointScope(
     campaignId: number,
+    /**
+     * #1052: which slot to resolve. `'fallback'` runs the IDENTICAL precedence and identical
+     * #373 key/endpoint binding one slot over — campaign fallback ?? server fallback, and a
+     * keyless campaign fallback inherits the SERVER FALLBACK's key + endpoint + provider type,
+     * never the server PRIMARY's. Crossing the slots there would silently ship the primary's
+     * credential to an endpoint the fallback row names, which is exactly the exfiltration
+     * #373 closed, re-opened one level down.
+     */
+    role: AiProviderRole = 'primary',
   ): Promise<{ config: AiProviderConfig | null; endpointScope: 'campaign' | 'server' | null }> {
-    const server = await this.serverRow();
-    const camp = await this.campaignRow(campaignId);
+    const server = await this.serverRow(role);
+    const camp = await this.campaignRow(campaignId, role);
     const primary = camp ?? server;
     if (!primary) return { config: null, endpointScope: null };
 
@@ -615,9 +675,9 @@ export class AiProviderConfigService {
    */
   async resolveExecutionModel(
     campaignId: number,
-    opts: { resolveDns?: boolean } = {},
+    opts: { resolveDns?: boolean; role?: AiProviderRole } = {},
   ): Promise<{ model: string; config: AiProviderConfig } | null> {
-    const config = await this.resolveEffectiveConfig(campaignId);
+    const config = await this.resolveEffectiveConfig(campaignId, opts.role ?? 'primary');
     if (!config) return null;
     // Fail closed on a previously-stored blocked host (issues #1064, #570).
     await this.assertBaseUrlPermitted(config.baseUrl, opts.resolveDns ?? true);
@@ -629,6 +689,113 @@ export class AiProviderConfigService {
       );
     }
     return { model: config.model, config };
+  }
+
+  /**
+   * Resolve the OPTIONAL fallback provider for a campaign (#1052), or null when none is
+   * configured at either scope.
+   *
+   * Deliberately runs the SAME `resolveExecutionModel` — the same SSRF/base-URL re-check and
+   * the same admin model allowlist. A fallback is a provider the table's turns will actually
+   * be served by, so exempting it from execution-time policy would make "configure a fallback"
+   * a way to route around the allowlist and the host policy in one step.
+   *
+   * A rejected fallback (blocked host, disallowed model) resolves to null rather than throwing:
+   * the fallback exists to make a bad moment better, and letting its misconfiguration take down
+   * a turn the PRIMARY could have served would invert the whole point. The rejection is logged
+   * so it is not silent.
+   */
+  async resolveFallbackExecutionModel(
+    campaignId: number,
+    opts: { resolveDns?: boolean } = {},
+  ): Promise<{ model: string; config: AiProviderConfig } | null> {
+    try {
+      return await this.resolveExecutionModel(campaignId, { ...opts, role: 'fallback' });
+    } catch (err) {
+      this.logger.warn(
+        `Fallback AI provider for campaign ${campaignId} is configured but not usable, ignoring it: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return null;
+    }
+  }
+
+  // ── fallback slot CRUD (#1052) ───────────────────────────────────────────────
+  //
+  // Thin wrappers over the primary-slot methods with `role: 'fallback'`. Deliberately NOT a
+  // `role` request-body field on the existing routes: the slot is part of the resource's
+  // identity, and a body field would make it possible to overwrite the primary by typo, on
+  // endpoints whose whole job is storing a credential.
+
+  async getServerFallbackView(): Promise<ConfigView | null> {
+    const row = await this.serverRow('fallback');
+    return row ? this.toView(row, localCredentialSource(row)) : null;
+  }
+
+  async getCampaignFallbackView(campaignId: number): Promise<ConfigView | null> {
+    const [row, serverFallback] = await Promise.all([
+      this.campaignRow(campaignId, 'fallback'),
+      this.serverRow('fallback'),
+    ]);
+    return row ? this.toView(row, campaignCredentialSource(row, serverFallback)) : null;
+  }
+
+  /** Upsert the server-default FALLBACK provider (admin-gated at the controller). */
+  async putServerFallback(input: ConfigUpdateInput, user: RequestUser): Promise<ConfigView> {
+    // The fallback serves real turns, so it is bound by the same admin allowlist as a campaign
+    // override. The server PRIMARY is exempt because it is the row that DEFINES the allowlist;
+    // the fallback does not define it, so it must obey it.
+    this.assertCampaignModelAllowed(input.model, await this.serverRow('primary'));
+    const existing = await this.serverRow('fallback');
+    await this.upsert('server', null, existing, input, user, undefined, 'fallback');
+    const row = await this.serverRow('fallback');
+    return this.toView(row!, localCredentialSource(row!));
+  }
+
+  /** Upsert a per-campaign FALLBACK override (DM-gated at the controller). */
+  async putCampaignFallback(campaignId: number, input: ConfigUpdateInput, user: RequestUser): Promise<ConfigView> {
+    this.assertCampaignModelAllowed(input.model, await this.serverRow('primary'));
+    const existing = await this.campaignRow(campaignId, 'fallback');
+    await this.upsert('campaign', campaignId, existing, input, user, campaignId, 'fallback');
+    const row = await this.campaignRow(campaignId, 'fallback');
+    return this.toView(row!, campaignCredentialSource(row!, await this.serverRow('fallback')));
+  }
+
+  /** Remove the server fallback slot entirely (no-op when unset). */
+  async deleteServerFallback(user: RequestUser): Promise<void> {
+    await this.db
+      .delete(aiProviderConfigs)
+      .where(and(eq(aiProviderConfigs.scope, 'server'), eq(aiProviderConfigs.role, 'fallback')));
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: auditActorRole(user),
+      action: 'ai-provider.delete',
+      entityType: 'ai-provider',
+      campaignId: null,
+      detail: 'server/fallback removed',
+    });
+  }
+
+  /** Remove a campaign's fallback slot entirely (no-op when unset). */
+  async deleteCampaignFallback(campaignId: number, user: RequestUser): Promise<void> {
+    await this.db
+      .delete(aiProviderConfigs)
+      .where(
+        and(
+          eq(aiProviderConfigs.scope, 'campaign'),
+          eq(aiProviderConfigs.campaignId, campaignId),
+          eq(aiProviderConfigs.role, 'fallback'),
+        ),
+      );
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: auditActorRole(user),
+      action: 'ai-provider.delete',
+      entityType: 'ai-provider',
+      campaignId,
+      detail: 'campaign/fallback removed',
+    });
   }
 
   // ── test-connection (builds the real provider via #309's factory) ────────────
@@ -766,8 +933,12 @@ export class AiProviderConfigService {
     };
     const candidateApiKey = input.apiKey?.trim();
 
-    // Mock never consumes a credential, even if a stale/typed key exists.
-    if (input.providerType === 'mock') {
+    // A keyless provider never consumes a credential, even if a stale/typed key exists.
+    // #1052 review — the shared predicate rather than a third open-coded `=== 'mock'`.
+    // Semantics are unchanged: this probes the DRAFT AS TYPED (`testedTarget` and the
+    // 'candidate' source say so), not what resolution would run, so the candidate's own
+    // provider type is the right thing to ask about here.
+    if (!providerRequiresApiKey(input.providerType)) {
       return {
         config: candidate,
         testedTarget: campaignId === null ? 'server-default' : 'campaign-override',
@@ -906,7 +1077,8 @@ function environmentApiKey(providerType: string): string | undefined {
 
 function localCredentialSource(row: Row): AiProviderCredentialSource {
   if (row.encryptedApiKey) return 'stored';
-  if (row.providerType === 'mock') return 'not-required';
+  // #1052 review — one shared predicate rather than an open-coded `=== 'mock'`.
+  if (!providerRequiresApiKey(row.providerType as AiProviderType)) return 'not-required';
   return environmentApiKey(row.providerType) ? 'environment' : 'none';
 }
 
@@ -916,17 +1088,50 @@ function inheritedServerCredentialSource(row: Row): AiProviderTestCredentialSour
   return source === 'stored' ? 'server' : source;
 }
 
+/**
+ * What credential a campaign override will ACTUALLY run on.
+ *
+ * Environment keys are operator credentials. A campaign row may use its own stored key, but it
+ * may not pair an environment key with its DM-controlled baseUrl, so environment fallback is
+ * only inherited through an admin-controlled server-default row.
+ *
+ * #1052 review — THIS MIRRORS `resolveEffectiveConfigWithEndpointScope`'S PRECEDENCE, AND THE
+ * ORDER IS THE WHOLE POINT.
+ *
+ * `not-required` used to be answered SECOND, before the server row was consulted at all, so a
+ * campaign override set to the offline `mock` reported "needs no credential" while resolution
+ * went on to inherit the server's key, endpoint and provider type and ran the turn against an
+ * external vendor. The stated configuration and the executed one disagreed, and the DM was
+ * shown the reassuring half.
+ *
+ * The fix belongs HERE and not in resolution, and that was tried the other way round first.
+ * A keyless campaign override is a MODEL-ONLY override by design (#373): its providerType and
+ * baseUrl are discarded in favour of whoever owns the key. Short-circuiting that for keyless
+ * provider types looks like the tidier fix and is the wrong one, for two reasons.
+ *
+ * It makes "which row's endpoint serves this turn" depend on the campaign row's providerType —
+ * a DM-controlled field, and precisely the input #373 removed from the endpoint decision. The
+ * exemption is safe only for as long as a hard-coded set of "contacts nothing" types stays
+ * correct; a type wrongly listed there hands a DM the endpoint choice back.
+ *
+ * And it breaks the #501 provenance contract, which `scribe` and `co-dm` each assert
+ * independently: `endpointScope` must name where the request REALLY went, so a keyless
+ * override reports `server`. Short-circuiting made it report `campaign` — the configuration's
+ * scope rather than the execution's — which misleads exactly the operator asking which
+ * endpoint saw their table's content.
+ *
+ * So resolution keeps its behaviour and the VIEW stops misreporting it: the server's credential
+ * is checked first, and `not-required` is reached only when nothing is inherited and the
+ * campaign's own keyless provider really is what runs. A DM who wants no external calls at all
+ * still needs the ADMIN to clear the server row; what changes here is that the DM is no longer
+ * told otherwise.
+ */
 function campaignCredentialSource(campaign: Row, server: Row | undefined): AiProviderCredentialSource {
-  // Environment keys are operator credentials. A campaign row may use its own
-  // stored key (and a keyless mock needs none), but it may not pair an environment
-  // key with its DM-controlled baseUrl. Environment fallback is therefore only
-  // inherited through an admin-controlled server-default row.
   if (campaign.encryptedApiKey) return 'stored';
-  if (campaign.providerType === 'mock') return 'not-required';
-  if (!server) return 'none';
-  const fallback = localCredentialSource(server);
-  if (fallback === 'stored') return 'server';
-  if (fallback === 'environment') return 'environment';
+  const inherited = server ? localCredentialSource(server) : 'none';
+  if (inherited === 'stored') return 'server';
+  if (inherited === 'environment') return 'environment';
+  if (!providerRequiresApiKey(campaign.providerType as AiProviderType)) return 'not-required';
   return 'none';
 }
 

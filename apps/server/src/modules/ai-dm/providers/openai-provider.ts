@@ -171,7 +171,13 @@ export class OpenAiProvider implements AiProvider {
           continue;
         }
         for (const ev of acc.push(event)) yield ev;
-        if (event.type === 'response.completed') break;
+        // #598: break on EVERY terminal frame, not just the happy one. A content-filtered or
+        // failed response ends on `response.incomplete` / `response.failed`; leaving the loop
+        // spinning after one of those made the adapter depend on a trailing `[DONE]` to stop.
+        // Real OpenAI sends it, but an OpenAI-compatible proxy that does not would hang here
+        // until the idle timeout — and the frame it would be hanging after is precisely the one
+        // that says the turn was refused, so the retraction would be delayed by that timeout.
+        if (event.type === 'response.completed' || event.type === 'response.incomplete' || event.type === 'response.failed') break;
       }
       yield { type: 'done', result: acc.finish() };
     } else {
@@ -203,6 +209,11 @@ export class OpenAiProvider implements AiProvider {
       name: tc.function?.name ?? '',
       arguments: parseJsonArgs(tc.function?.arguments),
     }));
+    // #598 — a Chat Completions refusal, which reports `finish_reason: 'stop'`. Its text is
+    // deliberately NOT folded into `text`: a refusal is not narration, and this adapter's job
+    // is to report the terminal state rather than hand the driver something to broadcast.
+    const refusalChars = typeof msg?.refusal === 'string' ? msg.refusal.length : 0;
+    const refused = refusalChars > 0;
     return {
       text: msg?.content ?? '',
       toolCalls,
@@ -211,20 +222,45 @@ export class OpenAiProvider implements AiProvider {
         completionTokens: json.usage?.completion_tokens ?? 0,
         totalTokens: json.usage?.total_tokens ?? (json.usage ? (json.usage.prompt_tokens ?? 0) + (json.usage.completion_tokens ?? 0) : 0),
       },
-      finishReason: mapFinishReason(choice?.finish_reason),
+      // Safety-first precedence, matching the Responses path: a refusal outranks the wire's
+      // `stop` (which it is always paired with) AND outranks `tool_calls`, so a response that
+      // both declined and asked for tools can never dispatch them.
+      finishReason: resolveChatFinish(choice?.finish_reason, refused, toolCalls.length),
       model: json.model ?? requestedModel,
+      // Length only — the refusal text is dropped above. See AiGenerateResult.refusalChars:
+      // without this a refusal-only turn measures as zero output and meters as zero tokens.
+      refusalChars,
     };
   }
 
   private parseResponsesResult(json: ResponsesApiResponse, requestedModel: string): AiGenerateResult {
     let text = '';
+    let refused = false;
+    /** #598 — refusal LENGTH only; the prose is dropped. See AiGenerateResult.refusalChars. */
+    let refusalChars = 0;
     const toolCalls: AiToolCall[] = [];
 
     for (const item of json.output ?? []) {
       if (item.type === 'message') {
         for (const part of item.content ?? []) {
           if (part.type === 'output_text') text += part.text ?? '';
+          // #598: a `refusal` part is the model declining. Its text is deliberately NOT
+          // concatenated into `text` — a refusal is not narration, and this adapter's job is
+          // to report the terminal state, not to hand the driver something to broadcast.
+          else if (part.type === 'refusal') {
+            refused = true;
+            refusalChars += (part.refusal ?? part.text ?? '').length;
+          }
         }
+      } else if (item.type === 'refusal') {
+        // A refusal can also arrive as a TOP-LEVEL output item rather than a content part.
+        // This branch set the flag but not the count, so the SAME refusal measured as zero
+        // characters or as its real length depending purely on which shape the wire used — a
+        // counter running in one branch and absent from its sibling. The driver no longer
+        // depends on this number to avoid a free turn (unmeasurable turns settle as unknown
+        // spend), but an estimate that silently varies by wire shape is its own defect.
+        refused = true;
+        refusalChars += (item.refusal ?? '').length;
       } else if (item.type === 'function_call') {
         toolCalls.push({
           id: item.call_id ?? item.id ?? `call_${toolCalls.length}`,
@@ -242,8 +278,13 @@ export class OpenAiProvider implements AiProvider {
         completionTokens: json.usage?.output_tokens ?? 0,
         totalTokens: (json.usage?.input_tokens ?? 0) + (json.usage?.output_tokens ?? 0),
       },
-      finishReason: toolCalls.length > 0 ? 'tool_calls' : mapResponsesStatus(json.status),
+      // #598: the SAFETY terminal state outranks `tool_calls`. A response that both refused
+      // (or tripped the filter) and asked for tools previously reported `tool_calls`, which
+      // erased the refusal entirely and let the driver dispatch the very calls that came
+      // packaged with it. Resolve safety first, and only fall back to tool_calls.
+      finishReason: resolveResponsesFinish(json, refused, toolCalls.length),
       model: json.model ?? requestedModel,
+      refusalChars,
     };
   }
 
@@ -327,13 +368,72 @@ function toResponsesTool(t: AiToolSchema): ResponsesTool {
   };
 }
 
-function mapResponsesStatus(status: string | undefined): AiFinishReason {
+/**
+ * Map a Responses-API terminal status onto a normalized finish reason.
+ *
+ * `incompleteReason` is load-bearing (#598). The Responses protocol reports BOTH "ran out of
+ * output tokens" and "the content filter stopped this" as `status: 'incomplete'`, and tells
+ * them apart only in `incomplete_details.reason`. Ignoring that field — which is what this
+ * adapter did — reported a filtered turn as `length`, i.e. as an ordinary truncation, so the
+ * safety terminal state simply did not exist on this protocol. The Chat Completions path had
+ * `finish_reason: 'content_filter'` all along; this closes the gap between the two.
+ */
+function mapResponsesStatus(status: string | undefined, incompleteReason?: string | null): AiFinishReason {
   switch (status) {
     case 'completed': return 'stop';
-    case 'incomplete': return 'length';
-    case 'failed': return 'unknown';
+    case 'incomplete': return incompleteReason === 'content_filter' ? 'content_filter' : 'length';
+    case 'failed': return incompleteReason === 'content_filter' ? 'content_filter' : 'unknown';
     default: return 'stop';
   }
+}
+
+/**
+ * Resolve a Responses-API finish reason with SAFETY FIRST (#598).
+ *
+ * Order matters and is the point of this helper: an explicit refusal, then a filter status,
+ * then tool calls, then whatever the status said. The old inline expression put `tool_calls`
+ * first, so a filtered/refused response that happened to carry tool calls reported
+ * `tool_calls` — the driver would then have dispatched tools from a response the provider had
+ * just declined to stand behind.
+ */
+function resolveResponsesFinish(
+  json: ResponsesApiResponse,
+  refused: boolean,
+  toolCallCount: number,
+): AiFinishReason {
+  if (refused) return 'refusal';
+  const mapped = mapResponsesStatus(json.status, json.incomplete_details?.reason);
+  if (mapped === 'content_filter') return 'content_filter';
+  return toolCallCount > 0 ? 'tool_calls' : mapped;
+}
+
+/**
+ * Resolve a CHAT COMPLETIONS finish reason with the same safety-first precedence (#598).
+ *
+ * The Chat Completions twin of the Responses gap above, and a nastier one. On this protocol a
+ * model refusal is reported in `message.refusal` (or streamed `delta.refusal`) while
+ * `finish_reason` stays **`stop`** — the identical terminal state as a perfectly good answer.
+ * So unlike a content filter, there is no value of `finish_reason` that betrays it: an adapter
+ * that reads only that field cannot distinguish a refusal from success, and the driver files
+ * the turn as ordinary narration or `no_narration` rather than as a withheld incident.
+ *
+ * `refused` therefore outranks the wire's own finish reason rather than merely competing with
+ * it, and — as on the Responses path — outranks `tool_calls`, so a response that both declined
+ * and asked for tools can never dispatch them.
+ *
+ * @param wireReason the raw `finish_reason`, when the caller has one to map.
+ * @param alreadyMapped a pre-mapped reason (the streaming accumulator maps as chunks arrive).
+ */
+function resolveChatFinish(
+  wireReason: string | null | undefined,
+  refused: boolean,
+  toolCallCount: number,
+  alreadyMapped?: AiFinishReason,
+): AiFinishReason {
+  if (refused) return 'refusal';
+  const mapped = alreadyMapped ?? mapFinishReason(wireReason);
+  if (mapped === 'content_filter') return 'content_filter';
+  return toolCallCount > 0 && mapped === 'stop' ? 'tool_calls' : mapped;
 }
 
 function mapFinishReason(reason: string | null | undefined): AiFinishReason {
@@ -369,6 +469,10 @@ export function parseJsonArgs(raw: string | undefined | null): Record<string, un
  */
 class OpenAiStreamAccumulator {
   private text = '';
+  /** #598 — a `delta.refusal` arrived. Sticky: nothing later re-opens that decision. */
+  private refused = false;
+  /** #598 — total refusal characters seen. A COUNT; the text itself is never retained. */
+  private refusalChars = 0;
   private readonly toolAcc = new Map<number, { id?: string; name?: string; args: string }>();
   private usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
   private finishReason: AiFinishReason = 'stop';
@@ -393,9 +497,27 @@ class OpenAiStreamAccumulator {
     if (choice.finish_reason) this.finishReason = mapFinishReason(choice.finish_reason);
     const delta = choice.delta;
     if (!delta) return;
+    // #598 — a streamed refusal. Sticky, and NOT emitted as a text delta: the whole point of
+    // the withhold is that refusal prose never reaches the table, so forwarding it here would
+    // put it on the wire ahead of the terminal frame that says it was refused.
+    if (typeof delta.refusal === 'string' && delta.refusal.length > 0) {
+      this.refused = true;
+      this.refusalChars += delta.refusal.length;
+    }
     if (typeof delta.content === 'string' && delta.content.length > 0) {
+      // #598 — ONCE REFUSED, STOP FORWARDING. The quarantine window exists because a turn
+      // cannot be known to be refused until the terminal signal arrives; it is a bounded,
+      // documented residual. But here the signal has ALREADY arrived — `refused` is sticky and
+      // set — so every remaining delta is known to belong to a refused turn, and forwarding it
+      // would release content AFTER the thing the window was waiting for. That is not the
+      // unavoidable residual, it is a leak past it, and on an interleaved
+      // refusal-then-content stream it is unbounded rather than capped at the window.
+      //
+      // `text` still accumulates so the step's usage estimate stays honest; only the live
+      // broadcast stops. Costs nothing in the ordinary case, where a refusal has no content
+      // after it.
       this.text += delta.content;
-      yield { type: 'text', delta: delta.content };
+      if (!this.refused) yield { type: 'text', delta: delta.content };
     }
     for (const tc of delta.tool_calls ?? []) {
       const idx = tc.index ?? 0;
@@ -422,8 +544,10 @@ class OpenAiStreamAccumulator {
       text: this.text,
       toolCalls,
       usage: this.usage,
-      finishReason: this.finishReason,
+      // Safety-first precedence, as on the non-streaming path.
+      finishReason: resolveChatFinish(undefined, this.refused, toolCalls.length, this.finishReason),
       model: this.model,
+      refusalChars: this.refusalChars,
     };
   }
 }
@@ -432,9 +556,16 @@ class ResponsesStreamAccumulator {
   private text = '';
   private readonly toolAcc = new Map<string, { id: string; name: string; args: string }>();
   private usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
-  private finishReason: AiFinishReason = 'stop';
   private model: string;
   private currentToolCallId = '';
+  /** Terminal status from the last response.{completed,incomplete,failed} frame (#598). */
+  private status: string | undefined;
+  /** `incomplete_details.reason` — the only place this protocol says "content filter" (#598). */
+  private incompleteReason: string | null = null;
+  /** The model emitted a refusal part/delta this response (#598). */
+  private refused = false;
+  /** #598 — total refusal characters seen. A COUNT; the text itself is never retained. */
+  private refusalChars = 0;
 
   constructor(requestedModel: string) {
     this.model = requestedModel;
@@ -450,13 +581,19 @@ class ResponsesStreamAccumulator {
             name: event.item.name ?? '',
             args: '',
           });
+        } else if (event.item?.type === 'refusal') {
+          this.refused = true;
+          this.refusalChars += (event.item.refusal ?? '').length;
         }
         break;
       }
       case 'response.output_text.delta': {
         const delta = event.delta ?? '';
         this.text += delta;
-        yield { type: 'text', delta };
+        // #598 — mirror the Chat Completions stream guard: once a refusal signal has
+        // arrived, later output_text deltas belong to a withheld turn and must not reach
+        // the live table.
+        if (!this.refused) yield { type: 'text', delta };
         break;
       }
       case 'response.function_call_arguments.delta': {
@@ -473,7 +610,31 @@ class ResponsesStreamAccumulator {
         };
         break;
       }
-      case 'response.completed': {
+      // #598: the model declining. A refusal delta is NOT forwarded as a text delta — it is
+      // not narration, and forwarding it would put the decline into the table's DM bubble.
+      // Recording the terminal state is the whole job here.
+      case 'response.refusal.delta': {
+        this.refused = true;
+        this.refusalChars += (event.delta ?? '').length;
+        break;
+      }
+      case 'response.refusal.done': {
+        // `.done` carries the COMPLETE refusal, while `.delta` carries increments. A provider
+        // may send either or both, so take the larger rather than adding — adding would double
+        // count a stream that sends both, and ignoring `.done` would count ZERO for a stream
+        // that sends only that. The second case is the one that matters: it is the same
+        // unmeasured-turn shape as the other three, reached through a fourth door.
+        this.refused = true;
+        this.refusalChars = Math.max(this.refusalChars, (event.refusal ?? '').length);
+        break;
+      }
+      // #598: `response.completed` is not the only terminal frame. A filtered or failed
+      // response ends on `response.incomplete` / `response.failed`, neither of which this
+      // accumulator looked at — so the stream simply ended with the default `stop` and the
+      // safety signal never reached the driver.
+      case 'response.completed':
+      case 'response.incomplete':
+      case 'response.failed': {
         const resp = event.response;
         if (resp?.usage) {
           this.usage = {
@@ -484,7 +645,8 @@ class ResponsesStreamAccumulator {
           yield { type: 'usage', usage: this.usage };
         }
         if (resp?.model) this.model = resp.model;
-        this.finishReason = mapResponsesStatus(resp?.status);
+        this.status = resp?.status;
+        this.incompleteReason = resp?.incomplete_details?.reason ?? null;
         break;
       }
     }
@@ -500,8 +662,15 @@ class ResponsesStreamAccumulator {
       text: this.text,
       toolCalls,
       usage: this.usage,
-      finishReason: this.finishReason,
+      // Same safety-first resolution as the non-streaming path (#598), so the two protocols
+      // and the two transports cannot disagree about whether a turn was withheld.
+      finishReason: resolveResponsesFinish(
+        { status: this.status, incomplete_details: { reason: this.incompleteReason } },
+        this.refused,
+        toolCalls.length,
+      ),
       model: this.model,
+      refusalChars: this.refusalChars,
     };
   }
 }
@@ -530,6 +699,15 @@ interface OpenAiCompletion {
     finish_reason?: string | null;
     message?: {
       content?: string | null;
+      /**
+       * #598 — the model declining, on the Chat Completions protocol.
+       *
+       * The trap is that this arrives alongside `finish_reason: 'stop'` — the SAME terminal
+       * state as an ordinary successful answer. Reading only `finish_reason` therefore
+       * classifies a refusal as deliverable, and the driver files it as a normal or empty
+       * turn instead of a withheld one. The refusal is knowable ONLY from this field.
+       */
+      refusal?: string | null;
       tool_calls?: { id: string; function?: { name?: string; arguments?: string } }[];
     };
   }[];
@@ -541,6 +719,8 @@ interface OpenAiChunk {
     finish_reason?: string | null;
     delta?: {
       content?: string | null;
+      /** #598 — streamed counterpart of `message.refusal`, with the same `stop` trap. */
+      refusal?: string | null;
       tool_calls?: { index?: number; id?: string; function?: { name?: string; arguments?: string } }[];
     };
   }[];
@@ -570,9 +750,19 @@ interface ResponsesApiResponse {
   id?: string;
   model?: string;
   status?: string;
+  /**
+   * Why an `incomplete` response stopped (#598). Without this the adapter could only see
+   * `status: 'incomplete'` and reported every one as `length`, so a content-filtered turn on
+   * this protocol was indistinguishable from one that merely ran out of output tokens.
+   */
+  incomplete_details?: { reason?: string | null };
   output?: {
-    type: 'message' | 'function_call';
-    content?: { type: string; text?: string }[];
+    // `refusal` is a first-class output/content part on this protocol: the model declines and
+    // the decline text comes back in its own part rather than as `output_text` (#598).
+    type: 'message' | 'function_call' | 'refusal';
+    content?: { type: string; text?: string; refusal?: string }[];
+    /** The decline text when the refusal is a TOP-LEVEL item rather than a content part. */
+    refusal?: string;
     id?: string;
     call_id?: string;
     name?: string;
@@ -592,8 +782,12 @@ interface ResponsesStreamEvent {
     id?: string;
     call_id?: string;
     name?: string;
+    /** The decline text when the refusal is a TOP-LEVEL output item. */
+    refusal?: string;
   };
   delta?: string;
+  /** #598 — the COMPLETE refusal text on `response.refusal.done`. Only its length is used. */
+  refusal?: string;
   call_id?: string;
   item_id?: string;
   response?: ResponsesApiResponse;

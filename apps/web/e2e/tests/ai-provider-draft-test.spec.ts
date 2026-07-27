@@ -51,7 +51,7 @@ test.describe('AI provider visible-draft connection test', () => {
 
       await page.goto('/admin/ai');
       await expect(page.getByRole('heading', { level: 1, name: 'AI console' })).toBeVisible();
-      await page.getByLabel('Provider').selectOption('openai');
+      await page.getByTestId('ai-provider-form-server').getByLabel('Provider').selectOption('openai');
       await page.getByLabel('Model', { exact: true }).fill('visible-unsaved-model');
       await page.getByLabel('Base URL (optional)').fill('https://visible-unsaved.example/v1');
       await page.getByLabel(/API key/).fill(DRAFT_KEY);

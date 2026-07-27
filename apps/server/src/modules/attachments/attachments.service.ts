@@ -404,6 +404,59 @@ export class AttachmentsService implements OnApplicationBootstrap {
     return fs.existsSync(this.filePath(row));
   }
 
+  private openExportFile(
+    row: { campaignId: number; id: number; mime: string },
+  ): { path: string; fd: number } | null {
+    const source = this.filePath(row);
+    let fd: number;
+    try {
+      fd = fs.openSync(source, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    } catch (error: unknown) {
+      // A missing row-backed file is an expected export race. Permission and
+      // other I/O errors must remain visible to the archive caller instead of
+      // silently omitting bytes as though the attachment had vanished.
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ELOOP') return null;
+      throw error;
+    }
+    try {
+      if (!fs.fstatSync(fd).isFile()) {
+        fs.closeSync(fd);
+        return null;
+      }
+      return { path: source, fd };
+    } catch (error) {
+      fs.closeSync(fd);
+      throw error;
+    }
+  }
+
+  /** Probe export availability without retaining an open descriptor. */
+  hasExportFile(row: { campaignId: number; id: number; mime: string }): boolean {
+    const source = this.openExportFile(row);
+    if (!source) return false;
+    fs.closeSync(source.fd);
+    return true;
+  }
+
+  /**
+   * Open a row-backed regular file without following a final-component symlink.
+   * The returned stream owns the validated descriptor, eliminating a check/open
+   * race between attachment planning and archive staging.
+   */
+  openExportStreamIfPresent(
+    row: { campaignId: number; id: number; mime: string },
+  ): fs.ReadStream | null {
+    const source = this.openExportFile(row);
+    if (!source) return null;
+    try {
+      return fs.createReadStream(source.path, { fd: source.fd, autoClose: true });
+    } catch (error) {
+      fs.closeSync(source.fd);
+      throw error;
+    }
+  }
+
   /**
    * Read the stored bytes for an attachment row, or `null` when the file is missing
    * on disk (row-without-file — the same shape #84 guards the GET route against).

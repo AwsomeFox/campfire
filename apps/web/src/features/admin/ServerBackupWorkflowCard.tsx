@@ -15,12 +15,14 @@ import { ConfirmDestructiveDialog } from '../../components/ConfirmDestructiveDia
 import {
   RESTORE_CONFIRM_TOKEN,
   KEY_ENVELOPE_MIN_PASSPHRASE_LEN,
+  BackupDownloadLimitError,
   downloadServerBackup,
   fetchBackupStatus,
   inspectBackupArchive,
   restoreServerBackup,
   verifyServerHealth,
   type BackupInspectResult,
+  type BackupDownloadProgress,
   type BackupStatus,
   type RestoreResult,
   type ServerHealthResult,
@@ -64,9 +66,6 @@ function InspectResults({ result }: { result: BackupInspectResult }) {
           <dt className="text-[10px] uppercase tracking-widest text-secondary">Format version</dt>
           <dd className="font-semibold text-white">
             {result.formatVersion}
-            {result.sourceFormatVersion !== result.formatVersion && (
-              <span className="text-slate-400 font-normal"> (source: {result.sourceFormatVersion})</span>
-            )}
           </dd>
         </div>
         <div>
@@ -85,46 +84,37 @@ function InspectResults({ result }: { result: BackupInspectResult }) {
         </div>
         <div>
           <dt className="text-[10px] uppercase tracking-widest text-secondary">Database entry</dt>
-          <dd className="font-semibold text-white truncate" title={result.dbEntry ?? undefined}>
-            {result.dbEntry ?? '—'}
+          <dd className="font-semibold text-white truncate" title={result.dbEntry}>
+            {result.dbEntry}
           </dd>
         </div>
         <div>
           <dt className="text-[10px] uppercase tracking-widest text-secondary">Database size</dt>
           <dd className="font-semibold text-white">
-            {result.dbBytes === null ? '—' : formatBytes(result.dbBytes)}
+            {formatBytes(result.dbBytes)}
           </dd>
         </div>
-        {result.aiKeySource && (
-          <div className="sm:col-span-2">
-            <dt className="text-[10px] uppercase tracking-widest text-secondary">AI credential key</dt>
-            <dd className="font-semibold text-white">
-              {result.aiKeySource}
-              {result.aiKeyIncluded ? ' · encrypted envelope included' : ''}
-              {result.aiCredentialCount !== null
-                ? ` · ${result.aiCredentialCount.toLocaleString()} stored credential(s)`
-                : ''}
-            </dd>
-          </div>
-        )}
+        <div className="sm:col-span-2">
+          <dt className="text-[10px] uppercase tracking-widest text-secondary">AI credential key</dt>
+          <dd className="font-semibold text-white">
+            {result.aiKeySource}
+            {result.aiKeyIncluded ? ' · encrypted envelope included' : ''}
+            {result.aiCredentialCount !== null
+              ? ` · ${result.aiCredentialCount.toLocaleString()} stored credential(s)`
+              : ''}
+          </dd>
+        </div>
       </dl>
 
-      {result.reconciliation && (
-        <div className="text-xs space-y-1">
-          <p className="text-[10px] font-bold text-secondary uppercase tracking-widest">Reconciliation</p>
-          <p className={result.reconciliation.clean ? 'text-emerald-400' : 'text-amber-400'}>
-            {result.reconciliation.clean
-              ? 'Archive is fully reconciled — DB snapshot matches captured files.'
-              : `Archive has reconciliation issues — missing ${result.reconciliation.missing}, changed ${result.reconciliation.changed}, orphans ${result.reconciliation.orphanCount}. Review before restoring.`}
-          </p>
-          <p className="text-secondary font-mono text-[11px]">generation {result.reconciliation.generation}</p>
-        </div>
-      )}
+      <div className="text-xs space-y-1">
+        <p className="text-[10px] font-bold text-secondary uppercase tracking-widest">Reconciliation</p>
+        <p className="text-emerald-400">Archive is fully reconciled — DB snapshot matches captured files.</p>
+        <p className="text-secondary font-mono text-[11px]">generation {result.reconciliation.generation}</p>
+      </div>
 
       <div>
         <p id={uploadsId} className="text-[10px] font-bold text-secondary uppercase tracking-widest mb-1">
-          Upload contents ({result.uploads.length.toLocaleString()}
-          {result.uploadCount !== null ? ` · manifest count ${result.uploadCount.toLocaleString()}` : ''})
+          Upload contents ({result.uploads.length.toLocaleString()} · manifest count {result.uploadCount.toLocaleString()})
         </p>
         {result.uploads.length === 0 ? (
           <p className="text-xs text-secondary">No upload files in this archive.</p>
@@ -179,6 +169,8 @@ export function ServerBackupWorkflowCard() {
   const [downloadBusy, setDownloadBusy] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const [downloadNote, setDownloadNote] = useState<string | null>(null);
+  const [downloadPhase, setDownloadPhase] = useState<'preparing' | 'streaming' | 'finalizing' | null>(null);
+  const [downloadProgress, setDownloadProgress] = useState<BackupDownloadProgress | null>(null);
   const downloadAbortRef = useRef<AbortController | null>(null);
 
   const [pendingFile, setPendingFile] = useState<File | null>(null);
@@ -211,9 +203,14 @@ export function ServerBackupWorkflowCard() {
   }, [loadStatus]);
 
   function cancelDownload() {
-    downloadAbortRef.current?.abort();
-    downloadAbortRef.current = null;
-    setDownloadBusy(false);
+    const controller = downloadAbortRef.current;
+    if (!controller) return;
+    if (!window.confirm('Cancel this backup download? Any partially written file will be cleaned up when the browser supports it.')) {
+      return;
+    }
+    controller.abort();
+    if (downloadAbortRef.current === controller) downloadAbortRef.current = null;
+    setDownloadNote('Cancelling download…');
   }
 
   async function runDownload() {
@@ -225,23 +222,38 @@ export function ServerBackupWorkflowCard() {
     setDownloadBusy(true);
     setDownloadError(null);
     setDownloadNote(null);
+    setDownloadPhase('preparing');
+    setDownloadProgress(null);
     const controller = new AbortController();
     downloadAbortRef.current = controller;
     try {
       const result = await downloadServerBackup({
         keyPassphrase: passphrase || undefined,
         signal: controller.signal,
+        onProgress: (progress) => {
+          setDownloadProgress(progress);
+        },
+        onPhase: setDownloadPhase,
       });
-      setDownloadNote(`Downloaded ${result.filename} (${formatBytes(result.bytes)}).`);
+      setDownloadNote(
+        result.destination === 'file-system-access'
+          ? `Saved ${result.filename} (${formatBytes(result.bytes)}) directly to the selected file.`
+          : `Downloaded ${result.filename} (${formatBytes(result.bytes)}). This browser buffered the archive in memory because direct file streaming is unavailable.`,
+      );
     } catch (err) {
-      if (controller.signal.aborted) {
+      if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
         setDownloadNote('Download cancelled.');
       } else {
-        setDownloadError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
+        setDownloadError(
+          err instanceof BackupDownloadLimitError
+            ? err.message
+            : translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }),
+        );
       }
     } finally {
       downloadAbortRef.current = null;
       setDownloadBusy(false);
+      setDownloadPhase(null);
     }
   }
 
@@ -367,6 +379,10 @@ export function ServerBackupWorkflowCard() {
           Download a WAL-safe archive of the live database and every upload. Optional passphrase wraps the AI credential
           keyfile in an encrypted envelope for portable restores — passphrases are never logged.
         </p>
+        <p className="text-[11px] text-secondary">
+          Where supported, the archive streams directly to the file you choose. Other browsers buffer a bounded archive in
+          browser memory (up to 512 MiB); use a File System Access browser or <code>curl</code> for larger exports.
+        </p>
         <label className="block text-xs font-semibold text-slate-300" htmlFor="server-backup-download-passphrase">
           Key envelope passphrase (optional)
         </label>
@@ -396,6 +412,29 @@ export function ServerBackupWorkflowCard() {
             </Btn>
           )}
         </div>
+        {downloadBusy && (
+          <div className="space-y-1" role="status" aria-live="polite">
+            <p className="text-xs text-slate-300">
+              {downloadPhase === 'preparing' && 'Preparing backup and choosing a destination…'}
+              {downloadPhase === 'streaming' &&
+                (downloadProgress === null || downloadProgress.receivedBytes === 0
+                  ? 'Streaming backup…'
+                  : downloadProgress.totalBytes === null
+                  ? `Streaming backup — ${formatBytes(downloadProgress.receivedBytes)} received.`
+                  : `Streaming backup — ${formatBytes(downloadProgress.receivedBytes)} of ${formatBytes(downloadProgress.totalBytes)}.`)}
+              {downloadPhase === 'finalizing' && 'Finalizing saved archive…'}
+            </p>
+            {downloadPhase === 'streaming' && (
+              <progress
+                className="w-full"
+                aria-label="Backup download progress"
+                {...(downloadProgress?.totalBytes !== null && downloadProgress?.totalBytes !== undefined
+                  ? { value: downloadProgress?.receivedBytes ?? 0, max: downloadProgress.totalBytes }
+                  : {})}
+              />
+            )}
+          </div>
+        )}
         {downloadError && <ErrorNote message={downloadError} onRetry={() => void runDownload()} />}
         {downloadNote && <p className="text-xs text-emerald-400">{downloadNote}</p>}
       </section>

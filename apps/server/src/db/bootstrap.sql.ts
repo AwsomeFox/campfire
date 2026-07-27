@@ -1461,12 +1461,23 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_dm_transcript_events_event_id
   ON ai_dm_transcript_events (campaign_id, event_id);
 
 -- AI provider config: encrypted API-key + provider storage (issue #310). Two
--- scopes -- 'server' (one row, the admin-managed default) and 'campaign' (a
--- per-campaign override, DM-managed, cascading on campaign delete). The API key
--- is stored ONLY as encrypted_api_key (an aes-256-gcm ciphertext -- see
--- common/crypto.ts encryptSecret); the plaintext key is NEVER stored, returned,
--- logged, or exported. Reads expose only key_last4. The partial unique indexes
--- pin exactly one server row and at most one row per campaign.
+-- scopes -- 'server' (the admin-managed default) and 'campaign' (a per-campaign
+-- override, DM-managed, cascading on campaign delete). The API key is stored ONLY
+-- as encrypted_api_key (an aes-256-gcm ciphertext -- see common/crypto.ts
+-- encryptSecret); the plaintext key is NEVER stored, returned, logged, or
+-- exported. Reads expose only key_last4.
+--
+-- #1052 -- each scope holds one row PER ROLE, not one row outright. The partial
+-- unique indexes below are keyed on (scope, role) and (campaign_id, role), so a
+-- scope may hold a 'primary' AND a 'fallback' -- the point of the optional
+-- fallback provider. At most one of EACH role per scope still holds; widening the
+-- uniqueness did not remove it.
+--
+-- Widening is safe on existing data because the OLD indexes were STRICTER (one row
+-- per scope, full stop), so every row satisfying them also satisfies these. The
+-- 0135 migration backfills role = 'primary' on every pre-existing row, and since
+-- there was at most one row per scope to begin with, that backfill cannot produce
+-- two rows sharing a (scope, role) pair.
 CREATE TABLE IF NOT EXISTS ai_provider_configs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   scope TEXT NOT NULL,
@@ -1478,12 +1489,19 @@ CREATE TABLE IF NOT EXISTS ai_provider_configs (
   encrypted_api_key TEXT,
   key_last4 TEXT,
   allowed_models TEXT NOT NULL DEFAULT '[]',
+  -- #1052: 'primary' | 'fallback'. A fallback row is a SECOND, fully independent provider
+  -- config at the same scope, tried only after the primary has exhausted its retries on a
+  -- transient failure. It is a separate row (not extra columns) so it carries its own key,
+  -- endpoint, and provider type — which is what the #373 key/endpoint binding requires.
+  role TEXT NOT NULL DEFAULT 'primary',
   created_by TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_provider_configs_server ON ai_provider_configs(scope) WHERE scope = 'server';
-CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_provider_configs_campaign ON ai_provider_configs(campaign_id) WHERE campaign_id IS NOT NULL;
+-- The partial uniques are keyed on (…, role) so a scope can hold one primary AND one
+-- fallback, while still permitting no more than one of each.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_provider_configs_server_role ON ai_provider_configs(scope, role) WHERE scope = 'server';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_provider_configs_campaign_role ON ai_provider_configs(campaign_id, role) WHERE campaign_id IS NOT NULL;
 
 -- AI scribe (issue #316): per-campaign trigger config + a log of runs. The scribe
 -- drafts a session recap from the campaign's own material using the configured
@@ -1653,6 +1671,25 @@ CREATE TABLE IF NOT EXISTS ai_driver_grounding_claims (
   correction TEXT,
   corrected_by TEXT,
   corrected_at TEXT
+);
+
+-- Issue #598: incident trail for AI driver turns withheld by a provider content filter or a
+-- model refusal. Counts and provenance ONLY — there is deliberately no column for the withheld
+-- text, nor a digest of it: persisting prose a provider just refused to stand behind would give
+-- it a longer-lived, exportable home than the live stream it was kept off.
+CREATE TABLE IF NOT EXISTS ai_driver_withheld_turns (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  turn INTEGER NOT NULL,
+  step INTEGER NOT NULL,
+  finish_reason TEXT NOT NULL,
+  provider TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '',
+  withheld_chars INTEGER NOT NULL DEFAULT 0,
+  released_chars INTEGER NOT NULL DEFAULT 0,
+  suppressed_tool_calls INTEGER NOT NULL DEFAULT 0,
+  triggered_by_user_id TEXT,
+  created_at TEXT NOT NULL
 );
 
 -- Issue #587: a server operator's REQUEST that a campaign be exported.
@@ -1837,6 +1874,9 @@ CREATE INDEX IF NOT EXISTS idx_encounter_op_idempotency_encounter ON encounter_o
 -- #577: the grounding review card reads a campaign's most recent claims, newest first.
 CREATE INDEX IF NOT EXISTS idx_ai_driver_grounding_campaign
   ON ai_driver_grounding_claims(campaign_id, id);
+-- #598: the withheld-turn incident list reads a campaign's most recent incidents, newest first.
+CREATE INDEX IF NOT EXISTS idx_ai_driver_withheld_campaign
+  ON ai_driver_withheld_turns(campaign_id, id);
 -- #587: the admin catalog's per-campaign aggregates are served by indexes that already
 -- exist above and are NOT re-declared here: attachment bytes/counts use
 -- idx_attachments_campaign_state (see the attachments block), and "next scheduled

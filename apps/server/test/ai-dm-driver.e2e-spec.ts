@@ -1,6 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import request from 'supertest';
+import { eq } from 'drizzle-orm';
+import { DB } from '../src/db/db.module';
+import { aiProviderConfigs } from '../src/db/schema';
 import { createAiEvalHarness, dm, player, viewer, type AiEvalHarness } from './ai-eval-harness';
 import { mcpToolsToAiSchemas } from '../src/modules/ai-dm/providers/tool-registry';
 import { AiProviderError } from '../src/modules/ai-dm/providers/errors';
@@ -10,6 +13,10 @@ import {
   DRIVER_STREAM_IDLE_TIMEOUT_MS,
 } from '../src/modules/ai-driver/ai-driver.service';
 import { AiDmStreamService, type AiDmStreamEvent } from '../src/modules/ai-driver/ai-driver-stream.service';
+import {
+  NARRATION_QUARANTINE_CHARS,
+  setNarrationQuarantineCharsForTests,
+} from '../src/modules/ai-driver/driver-safety';
 import { DEFAULT_IDLE_TIMEOUT_MS } from '../src/modules/ai-dm/providers/http';
 
 /**
@@ -92,10 +99,53 @@ describe('ai-dm driver runtime — session loop + streamed narration + tool exec
     );
     expect(ready.body.estimatedCost).toEqual(
       expect.objectContaining({
+        // No metered turns yet, so the split IS our stated assumption and is reported.
+        estimatedPromptTokens: 750,
         estimatedCompletionTokens: 1024,
-        estimatedTotalTokens: expect.any(Number),
+        estimatedTotalTokens: 1774,
+        // No pricing table on this server, so there is no money to report (#1065).
+        estimatedUsdRange: null,
       }),
     );
+  });
+
+  it('#1065 readiness survives a credential it cannot decrypt, and prices nothing', async () => {
+    // The failure this pins: readiness is the screen an operator opens to find out WHY their
+    // AI seat stopped working after AI_CONFIG_KEY was lost or rotated. Resolving the provider
+    // decrypts the stored key, which throws on a key that no longer matches. A second,
+    // unguarded resolve added for the cost basis turned that into a 500 — so the one
+    // diagnostic surface that exists for this exact situation became unavailable in it,
+    // which is strictly worse than the graceful "provider blocked" it replaced.
+    //
+    // The cost basis now reuses the config the model check already resolved INSIDE its
+    // try/catch, so there is one resolution per request and its failure is already handled.
+    const campaignId = await h.createCampaign('AI Readiness 1065 undecryptable key');
+    await h.configureProvider(campaignId);
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 20_000 });
+
+    // Corrupt the stored ciphertext in place — the observable equivalent of the server's
+    // AI config key having changed under a row that was written with the old one.
+    const db = h.ctx.app.get(DB);
+    await db
+      .update(aiProviderConfigs)
+      .set({ encryptedApiKey: 'not-a-decryptable-ciphertext' })
+      .where(eq(aiProviderConfigs.campaignId, campaignId));
+
+    const res = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/readiness`).set(dm);
+
+    // The whole point: a 200 with a usable checklist, not a 500.
+    expect(res.status).toBe(200);
+    const modelCheck = res.body.checks.find((c: { key: string }) => c.key === 'model');
+    expect(modelCheck).toEqual(expect.objectContaining({ ok: false, status: 'blocked' }));
+    expect(res.body.driverOk).toBe(false);
+
+    // And money degrades to the disclosure rather than to a number or to a crash. The reason
+    // is the specific one, not the generic `no_provider` — a provider IS configured here, and
+    // telling the operator otherwise would send them to re-enter settings already correct.
+    expect(res.body.estimatedCost.basis).toEqual({ kind: 'unknown', reason: 'provider_unresolved' });
+    expect(res.body.estimatedCost.estimatedUsdRange).toBeNull();
+    // The token estimate is independent of pricing and still renders.
+    expect(res.body.estimatedCost.estimatedTotalTokens).toBeGreaterThan(0);
   });
 
   it('#519 readiness never reports driver-ready while the seat mode is off', async () => {
@@ -441,9 +491,20 @@ describe('ai-dm driver runtime — session loop + streamed narration + tool exec
     const events: AiDmStreamEvent[] = [];
     const sub = streamSvc.streamFor(campaignId).subscribe((e) => events.push(e));
 
-    h.script({ text: 'The torches gutter as the door swings wide.', streamChunks: 4 });
-    await h.sendMessage(campaignId, { input: 'We enter the crypt.' });
-    sub.unsubscribe();
+    // #598: token-by-token delivery is what this case asserts, and the safety quarantine is a
+    // TRAILING delay line — a 42-character reply is shorter than the window, so it would be
+    // released as one blob at end of stream. Switch the window off for this case: what is under
+    // test here is the delta pipeline's chunking, not the delay. The window's own effect on
+    // delivery (and its interaction with a refusal) is covered by the #598 e2e suite, and the
+    // no-blob property below still proves the pipeline forwards each provider chunk.
+    setNarrationQuarantineCharsForTests(0);
+    try {
+      h.script({ text: 'The torches gutter as the door swings wide.', streamChunks: 4 });
+      await h.sendMessage(campaignId, { input: 'We enter the crypt.' });
+    } finally {
+      setNarrationQuarantineCharsForTests(NARRATION_QUARANTINE_CHARS);
+      sub.unsubscribe();
+    }
 
     const deltas = events.filter((e) => e.type === 'narration.delta');
     expect(deltas.length).toBeGreaterThan(1); // multiple token chunks, not one blob
@@ -881,11 +942,18 @@ describe('ai-dm driver — provider failure termination + partial usage (#560)',
     const events: AiDmStreamEvent[] = [];
     const sub = streamSvc.streamFor(campaignId).subscribe((e) => events.push(e));
 
-    h.script({
+    // #1052: a `transport` failure with nothing on the wire is now RETRIED, so a single
+    // scripted failure would be recovered from and this case would no longer reach the
+    // terminal path it exists to test. Script enough failures to exhaust the attempt budget
+    // (2 against the primary, with no fallback configured on this harness) — what #560 is
+    // about is what happens once the provider is genuinely unavailable, not how many tries
+    // it took to establish that.
+    const offline = () => ({
       text: 'Never delivered.',
       throwAfterChunks: 0,
       throwError: new AiProviderError('transport', 'mock: connection reset', { provider: 'mock' }),
     });
+    h.script(offline(), offline());
 
     const res = await h.sendMessage(campaignId, { input: 'Hello?' });
     sub.unsubscribe();
@@ -974,10 +1042,13 @@ describe('ai-dm driver — provider failure termination + partial usage (#560)',
     const campaignId = await h.createCampaign('Driver Continue Without AI');
     await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
 
-    h.script({
+    // #1052: two failures, so the retry budget is exhausted and the seat genuinely lands on
+    // the stuck ladder — which is the precondition this lever test needs.
+    const offline = () => ({
       throwAfterChunks: 0,
       throwError: new AiProviderError('transport', 'mock: offline', { provider: 'mock' }),
     });
+    h.script(offline(), offline());
     await h.sendMessage(campaignId, { input: 'Any action.' });
 
     const cont = await h.lever(campaignId, 'continue-without-ai');

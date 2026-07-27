@@ -54,6 +54,8 @@ export const AI_DM_BROADCAST_SAFE_FRAMES: Record<BroadcastSafeFrameType, string>
   'narration.delta':
     'The prose the whole table is watching. The system prompt is assembled through a PLAYER-scoped toolset (#387) precisely so narration cannot contain DM-only material.',
   'narration.message': 'The aggregated form of the same table-visible prose as narration.delta.',
+  'narration.withheld':
+    'A RETRACTION, not content (#598). Carries a normalized finish reason (content_filter / refusal) and a fixed neutral sentence the SERVER chooses — never a fragment of the withheld prose, never an entity id. It must reach every reader the deltas reached, i.e. the whole table: its job is to make clients drop the in-progress bubble before turn.end can promote those deltas into the permanent transcript. Withholding it from anyone would leave exactly the text it exists to retract sitting on their screen, so role-gating this frame would invert its purpose.',
   'turn.cancelled':
     'Narration already shown to the table, plus a stop reason. No entity identity.',
   'turn.error':

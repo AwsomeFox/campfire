@@ -22,7 +22,7 @@ export function CharacterSheetNav({
 }) {
   return (
     <div
-      className="sticky top-0 z-20 -mx-4 px-4 py-2 bg-[var(--color-surface)]/95 backdrop-blur border-b border-slate-800/80"
+      className="cf-print-hide sticky top-0 z-20 -mx-4 px-4 py-2 bg-[var(--color-surface)]/95 backdrop-blur border-b border-slate-800/80"
       data-testid="character-sheet-tabs"
     >
       <div className="seg self-start inline-flex max-w-full" role="tablist" aria-label="Character sheet sections">

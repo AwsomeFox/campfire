@@ -282,6 +282,44 @@ describe('scheduled backup catch-up (issue #732, real SQLite + settings row)', (
     expect(status.alerts).not.toContainEqual(expect.stringMatching(/^Last scheduled backup failed: .*low disk space/i));
   });
 
+  it('retries on the next poll when an interactive archive operation owns the lane', async () => {
+    holder = new DbHolder();
+    const service = makeService();
+    const dueAt = new Date(Date.now() - 1).toISOString();
+    writeCadenceRow(holder.proxy, {
+      lastAttemptAt: new Date(Date.now() - HOUR_MS).toISOString(),
+      lastSuccessAt: null,
+      nextRunAt: dueAt,
+      lastSize: null,
+      lastChecksum: null,
+      lastError: 'previous failure',
+      consecutiveFailures: 2,
+      metrics: {
+        successCount: 0,
+        failureCount: 2,
+        pruneCount: 0,
+        prunedBytes: 0,
+        lastFreeBytes: null,
+        lastEstimatedBytes: null,
+        lastPruneAt: null,
+        lastPruneError: '',
+      },
+    });
+    const harness = service as unknown as {
+      archiveOperation: 'backup' | 'restore' | null;
+      runScheduledBackup: (intervalMs: number) => Promise<void>;
+    };
+    harness.archiveOperation = 'restore';
+
+    await expect(harness.runScheduledBackup(HOUR_MS)).resolves.toBeUndefined();
+
+    const cadence = readCadenceRow(holder.proxy)!;
+    expect(cadence.nextRunAt).toBe(dueAt);
+    expect(cadence.lastError).toBe('previous failure');
+    expect(cadence.consecutiveFailures).toBe(2);
+    expect(cadence.metrics?.failureCount).toBe(2);
+  });
+
   it('clears the scheduled-running guard when fallback size estimation throws', async () => {
     holder = new DbHolder();
     const service = makeService();

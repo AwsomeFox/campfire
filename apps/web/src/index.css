@@ -6,6 +6,97 @@
    after Tailwind/generated rules triggers Vite's CSS optimizer warning and can drop the font. */
 @import "./nocturne.css";
 
+/* Print only the readable page content. The app is intentionally optimized for
+   an interactive dark UI, so print uses an explicit paper palette and removes
+   fixed navigation, transient overlays, and marked action controls. */
+@page {
+  margin: 1.5cm;
+}
+
+@media print {
+  :root {
+    color-scheme: light;
+  }
+
+  html,
+  body {
+    background: #fff !important;
+    color: #000 !important;
+  }
+
+  .cf-ember-layer,
+  .cf-tabbar,
+  .cf-print-chrome,
+  .cf-undo-snackbar,
+  .cf-print-hide,
+  .cf-print-editor {
+    display: none !important;
+  }
+
+  .cf-print-only {
+    display: block !important;
+  }
+
+  /* Both character panels remain mounted for accessible tab semantics; print
+     needs the complete sheet, irrespective of which tab was active on screen. */
+  #character-sheet-panel-play,
+  .cf-character-sheet-panel-hidden {
+    display: block !important;
+  }
+
+  #character-sheet-panel-build {
+    display: grid !important;
+    grid-template-columns: 1fr 280px !important;
+  }
+
+  .cf-authed-shell,
+  .reading-surface,
+  .cf-card,
+  .cf-print-paper,
+  .reading-surface .cf-inset,
+  .reading-surface button,
+  .reading-surface .tag {
+    background: #fff !important;
+    box-shadow: none !important;
+    color: #000 !important;
+  }
+
+  .reading-surface .cf-inset,
+  .reading-surface button,
+  .reading-surface .tag {
+    border-color: #777 !important;
+  }
+
+  .cf-prose,
+  .cf-prose *,
+  .reading-surface,
+  .reading-surface * {
+    color: #000 !important;
+  }
+
+  .cf-prose a {
+    text-decoration: underline;
+  }
+
+  .cf-card,
+  .cf-prose pre,
+  .cf-prose blockquote,
+  .cf-prose table {
+    break-inside: avoid;
+  }
+}
+
+/* Screen-only tab state. Avoid the native `hidden` attribute here because its
+   user-agent/Tailwind rule would also suppress the panel in print. */
+.cf-character-sheet-panel-hidden {
+  display: none;
+}
+
+/* Content reserved for print (e.g. a read-only draft preview while editing). */
+.cf-print-only {
+  display: none;
+}
+
 /*
   Campfire design tokens — ported from the Nocturne design system
   (design/claude-design/_ds/nocturne-.../styles.css). Keep the --cf-* variable
