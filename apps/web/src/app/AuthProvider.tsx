@@ -59,6 +59,7 @@ import {
   isMembershipSyncMessage,
   openMembershipSyncChannel,
 } from '../lib/membershipLiveSync';
+import { purgeLocalAiTranscripts } from '../features/ai-dm/transcriptPrivacy';
 
 /** Translates a thrown /me error into a MeFetchOutcome. */
 function outcomeFromError(err: unknown): MeFetchOutcome {
@@ -102,6 +103,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     applyReadingPreference(document.documentElement, 'default');
     clearAuthStorage();
     clearMeSnapshot();
+    // Issue #573: the AI-DM transcript paint cache is identity-scoped local data that
+    // records who said what at the table. Cache Storage is origin-wide so one tab's
+    // clearApiCache covers every tab, but localStorage writes are per-key and nobody was
+    // removing these — a peer-tab sign-out has to drop them here too.
+    purgeLocalAiTranscripts();
     setStaleIdentity(false);
     setLastSyncedAt(null);
     setConnectionError(false);
@@ -139,6 +145,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // /auth/logout — the server already rejected the cookie as expired.
       clearAuthStorage();
       clearMeSnapshot();
+      // #573: a provenance-safe 401 is how an ADMIN-DISABLED or deleted account reaches
+      // this tab — the server rejects the cookie and every client surfaces it here. There
+      // is no push channel for "your account was turned off", and this is the existing
+      // failure path that means it, so the local transcripts go with the session.
+      purgeLocalAiTranscripts();
       setStaleIdentity(false);
       setLastSyncedAt(null);
       setConnectionError(false);
@@ -177,6 +188,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     });
 
     if (decision.shouldWipeCaches) {
+      // Proven identity change (first sign-in, account switch, a dev-auth identity flip)
+      // or a proven 401. #573: purge synchronously and BEFORE the awaited cache clear, so
+      // a surface that renders during the await cannot read the prior account's
+      // transcripts. `decideAuthOutcome` is the single place that decides an identity
+      // really changed, which is why the purge hangs off its verdict rather than off a
+      // hand-rolled id comparison here.
+      purgeLocalAiTranscripts();
       await clearApiCache();
       queryClient.clear();
     }
@@ -302,6 +320,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     lastUserIdRef.current = null;
     lastInstanceRef.current = null;
     clearMeSnapshot();
+    // Issue #573: the AI-DM transcript paint cache survived sign-out, so the next account
+    // on a shared browser inherited the previous player's table history — including the
+    // raw text they typed and the rules they looked up. Purged SYNCHRONOUSLY here, next to
+    // the other identity-scoped local state, for the same reason queryClient.clear() is:
+    // a fast re-login must not be able to read it back.
+    purgeLocalAiTranscripts();
     setStaleIdentity(false);
     setLastSyncedAt(null);
     setConnectionError(false);

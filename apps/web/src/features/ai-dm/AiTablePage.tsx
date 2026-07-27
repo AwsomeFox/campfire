@@ -36,7 +36,7 @@ import {
   type Encounter,
   type EncounterWithCombatants,
 } from '@campfire/schema';
-import { api, API, translateApiError } from '../../lib/api';
+import { api, API, ApiError, translateApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { GameIcon } from '../../components/GameIcon';
 import {
@@ -57,6 +57,7 @@ import {
   emptyTranscript,
 } from './transcript';
 import { invalidateForToolEvent } from './toolActivity';
+import { isTranscriptRememberEnabled, setTranscriptRemember } from './transcriptPrivacy';
 import { usePendingHydrate } from './usePendingHydrate';
 import {
   advanceNarrationLog,
@@ -85,6 +86,7 @@ import { StuckLadder } from './StuckLadder';
 import { GroundingPanel } from './GroundingPanel';
 import { TranscriptRow, systemText } from './AiDmTranscriptUi';
 import { Field } from '../../components/Field';
+import { Toggle } from '../../components/Toggle';
 import { AI_TABLE_FIELD, AI_TABLE_PREFIX } from '../../components/formFieldLabels';
 import { Btn, Card, Chip, EmptyState, Skeleton, type ChipVariant } from '../../components/ui';
 
@@ -100,7 +102,7 @@ export default function AiTablePage() {
   const { t } = useTranslation();
   const params = useParams<{ campaignId: string }>();
   const campaignId = params.campaignId ? Number(params.campaignId) : undefined;
-  const { me, roleIn, isAdmin } = useAuth();
+  const { me, ready: authReady, roleIn, isAdmin } = useAuth();
   const queryClient = useQueryClient();
 
   const role = campaignId !== undefined ? roleIn(campaignId) : null;
@@ -123,12 +125,28 @@ export default function AiTablePage() {
   // The transcript VIEW MODEL (see transcript.ts). The authoritative log lives on the
   // server since #572; localStorage is only a paint cache so a reload has something on
   // screen before the first page lands, and is reconciled away by `eventId` as soon as it
-  // does. Hydration is lazy so the cached scrollback is on screen from the first frame.
-  const [transcript, dispatch] = useReducer(
-    transcriptReducer,
-    campaignId,
-    (id) => (id !== undefined ? loadTranscript(id) : emptyTranscript),
-  );
+  // does.
+  //
+  // #573: the reducer starts EMPTY. It used to hydrate in its lazy initializer, which runs
+  // on the FIRST render — before `/me` has resolved — so it could not know whose cache it
+  // was reading, and a slow auth check painted the previous account's table. Hydration now
+  // happens in the identity-gated effect below, one commit later. That is the deliberate
+  // trade: a frame of empty transcript instead of a frame of somebody else's.
+  const [transcript, dispatch] = useReducer(transcriptReducer, emptyTranscript);
+
+  /**
+   * The shared hydrate/identity latch (#572, #573). `viewerId` is null until `/me` has
+   * resolved, and every transcript storage entry point is a no-op for a null viewer — so
+   * "never hydrate before identity is established" needs no separate flag here.
+   */
+  const pendingHydrate = usePendingHydrate({ ready: authReady, userId: me?.user.id ?? null });
+  const viewerId = pendingHydrate.viewerId;
+  const [rememberTranscript, setRememberTranscript] = useState(false);
+  // Read the device grant once identity settles, and re-read on an identity change: it is
+  // per-user, so the previous account's answer must never carry over. Default false.
+  useEffect(() => {
+    setRememberTranscript(isTranscriptRememberEnabled(viewerId));
+  }, [viewerId]);
 
   /**
    * Reconnect watermark (#572): the highest authoritative `seq` this client has folded in.
@@ -190,23 +208,28 @@ export default function AiTablePage() {
   const characterName = myCharacter?.name;
 
   /**
-   * Which campaign the reducer state currently holds. Seeded from the first render, since
-   * that is what the lazy initializer loaded, and re-pointed by the campaign-switch reset
-   * below. Needed because a table -> table param change reuses this component instance, so
-   * for one render `campaignId` is already the NEW table while `transcript` still holds the
-   * OLD one's entries.
+   * Which (viewer, campaign) the reducer state currently holds. Starts as "nobody" —
+   * unlike before #573 the reducer no longer hydrates in its initializer — and is
+   * re-pointed by the load effect below. Needed because a table -> table param change (or
+   * an account switch) reuses this component instance, so for one render `campaignId` /
+   * `viewerId` are already the NEW owner while `transcript` still holds the OLD one's
+   * entries.
    */
-  const transcriptCampaignRef = useRef<number | undefined>(campaignId);
+  const transcriptOwnerRef = useRef<string>('');
+  const transcriptOwnerKey = `${viewerId ?? ''}:${campaignId ?? ''}`;
 
-  // Persist the transcript cache on every change (bounded inside saveTranscript).
+  // Persist the transcript cache on every change (bounded inside saveTranscript, and a
+  // no-op unless this viewer opted into remembering transcripts on this device).
   useEffect(() => {
-    // Never write one campaign's entries under another's key. This effect is declared
-    // BEFORE the campaign-switch reset, so on the switch render it would otherwise persist
-    // the previous table's transcript to the new campaign's cache — which the reset would
-    // then read straight back, laundering the leak through localStorage.
-    if (campaignId === undefined || transcriptCampaignRef.current !== campaignId) return;
-    saveTranscript(campaignId, transcript);
-  }, [campaignId, transcript]);
+    // Never write one owner's entries under another's key. This effect is declared BEFORE
+    // the load/reset effect, so on the switch render it would otherwise persist the
+    // previous table's transcript to the new key — which the reset would then read
+    // straight back, laundering the leak through localStorage. With `viewerId` in the key
+    // that leak would cross ACCOUNTS, not just campaigns.
+    if (campaignId === undefined || viewerId === null) return;
+    if (transcriptOwnerRef.current !== transcriptOwnerKey) return;
+    saveTranscript(viewerId, campaignId, transcript);
+  }, [campaignId, viewerId, transcriptOwnerKey, transcript]);
 
   /**
    * Load the AUTHORITATIVE transcript (#572) — the fix for late join, reload and reconnect.
@@ -238,23 +261,36 @@ export default function AiTablePage() {
           // newest page and older scrollback is paged by `nextCursor` on demand.
           if (watermark === undefined || !res.hasMore || !last) return;
           watermark = last.seq;
-        } catch {
-          /* transcript read is best-effort: the live stream still carries the table */
+        } catch (err) {
+          // #573: membership removal and campaign deletion are SERVER-side events with no
+          // push channel of their own — they surface as the next read being refused. A 403
+          // ("not a member of this campaign") or a 404 (campaign gone) means this viewer
+          // may no longer see this table's history, so drop the local copy rather than
+          // leaving it repainting from cache. BOTH scopes go: the activity provider caches
+          // the same campaign under its own key and never fetches the transcript, so it has
+          // no failure of its own to learn this from. Any other failure is soft — the live
+          // stream still carries the table and the client keeps whatever scrollback it had.
+          if (err instanceof ApiError && (err.status === 403 || err.status === 404)) {
+            clearTranscript(viewerId, campaignId);
+            clearTranscript(viewerId, campaignId, 'activity');
+            dispatch({ type: 'reset' });
+            dispatch({ type: 'authoritative' });
+          }
           return;
         }
       }
     },
-    [campaignId],
+    [campaignId, viewerId],
   );
 
-  const transcriptLoadedFor = useRef<number | undefined>(undefined);
+  const transcriptLoadedFor = useRef<string | null>(null);
   const [transcriptFetched, setTranscriptFetched] = useState(false);
-  const pendingHydrate = usePendingHydrate();
   useEffect(() => {
     if (campaignId === undefined || !isDriver) return;
-    if (transcriptLoadedFor.current === campaignId) return;
-    const previous = transcriptLoadedFor.current;
-    transcriptLoadedFor.current = campaignId;
+    // #573: no hydrate, no fetch, no seed until `/me` has established who is looking.
+    if (pendingHydrate.identityPending || viewerId === null) return;
+    if (transcriptLoadedFor.current === transcriptOwnerKey) return;
+    transcriptLoadedFor.current = transcriptOwnerKey;
     setTranscriptFetched(false);
     // TABLE -> TABLE campaign switch. `/c/:campaignId/table` is one unkeyed route element,
     // so React reuses this component instance when only the param changes — the reducer's
@@ -268,23 +304,31 @@ export default function AiTablePage() {
     // A reset dispatch rather than `key={campaignId}` on the route: remounting would also
     // discard scroll/follow position and re-run the whole seed + screen-reader settle
     // sequence, and this is the narrower, local fix.
-    if (previous !== undefined) {
-      lastSeqRef.current = 0;
-      dispatch({ type: 'hydrate', state: loadTranscript(campaignId) });
-      seededRef.current = false;
-      // The seed effect runs LATER IN THIS SAME COMMIT and would still see the previous
-      // campaign's entries — its `entries.length > 0` branch would latch `seededRef` back
-      // to true, and the new table (whose own transcript is empty) would then never seed
-      // its scene / lastNarration join context at all. Skip that one stale pass.
-      pendingHydrate.mark();
-    }
-    transcriptCampaignRef.current = campaignId;
+    // Runs on the FIRST established owner as well as on every switch, because since #573
+    // the reducer no longer hydrates in its lazy initializer — this effect is the only
+    // thing that ever loads the cache, and it cannot run before `/me` has answered.
+    lastSeqRef.current = 0;
+    dispatch({ type: 'hydrate', state: loadTranscript(viewerId, campaignId) });
+    seededRef.current = false;
+    // The seed effect runs LATER IN THIS SAME COMMIT and would still see the previous
+    // owner's entries — its `entries.length > 0` branch would latch `seededRef` back
+    // to true, and the new table (whose own transcript is empty) would then never seed
+    // its scene / lastNarration join context at all. Skip that one stale pass.
+    pendingHydrate.mark();
+    transcriptOwnerRef.current = transcriptOwnerKey;
     // Opt this surface into authoritative mode BEFORE the first fetch: from here on the
     // durable `transcript` frames are the transcript, and the thin signal frames that now
     // have durable counterparts are ignored so nothing renders twice.
     dispatch({ type: 'authoritative' });
     void fetchTranscript().finally(() => setTranscriptFetched(true));
-  }, [campaignId, isDriver, fetchTranscript]);
+  }, [
+    campaignId,
+    isDriver,
+    fetchTranscript,
+    viewerId,
+    transcriptOwnerKey,
+    pendingHydrate.identityPending,
+  ]);
 
   // Seed a fresh transcript (empty localStorage) from thin session state so a brand-new
   // browser drops in behind a "joined mid-session" divider showing scene + last narration.
@@ -377,7 +421,7 @@ export default function AiTablePage() {
           // re-seed from an empty server transcript rather than a stale watermark (#572).
           // The paint cache must go too, or a reload would repaint erased scrollback that
           // the (now empty) server transcript has nothing to correct.
-          clearTranscript(campaignId);
+          clearTranscript(viewerId, campaignId);
           lastSeqRef.current = 0;
           void fetchTranscript();
         } else if (event.type === 'grounding') {
@@ -723,6 +767,24 @@ export default function AiTablePage() {
     }
   }
 
+  /**
+   * Flip the device grant (#573).
+   *
+   * Turning it ON writes what is already on screen, so the control takes effect at once
+   * rather than only from the next narration delta. Turning it OFF purges inside
+   * {@link setTranscriptRemember} — "don't keep this on my device" has to mean the copy
+   * that is already there, not just future ones.
+   */
+  function onToggleRememberTranscript() {
+    if (viewerId === null) return;
+    const next = !rememberTranscript;
+    setTranscriptRemember(viewerId, next);
+    setRememberTranscript(next);
+    if (next && campaignId !== undefined && transcriptOwnerRef.current === transcriptOwnerKey) {
+      saveTranscript(viewerId, campaignId, transcript);
+    }
+  }
+
   // ---- Gated / off / loading states --------------------------------------
   // The onboarding issue (#343) owns the rich explainer/checklist; here we render only
   // the minimal fallback the issue calls for (message + a settings link).
@@ -892,6 +954,30 @@ export default function AiTablePage() {
           </div>
         )}
       </Card>
+
+      {/*
+        #573 — the explicit device grant. OFF by default: the server owns the authoritative
+        transcript and refetches it on every load, so keeping a copy in this browser buys a
+        frame of earlier paint and costs a readable record of who said what at the table.
+        On a shared device that trade is not ours to make silently, so the private option is
+        the default and remembering is something the player asks for. Turning it back off
+        purges what is already stored rather than only stopping future writes.
+      */}
+      <div className="flex items-start gap-2 px-1">
+        <Toggle
+          checked={rememberTranscript}
+          disabled={viewerId === null}
+          onChange={onToggleRememberTranscript}
+          label={t('table.rememberTranscript')}
+          title={t('table.rememberTranscriptHelp')}
+          size={15}
+          className="mt-0.5"
+        />
+        <div className="min-w-0">
+          <span className="text-xs text-[var(--color-neutral-200)]">{t('table.rememberTranscript')}</span>
+          <p className="text-[11px] text-secondary">{t('table.rememberTranscriptHelp')}</p>
+        </div>
+      </div>
 
       {/* #1077: polite log mirror — appends only finished entries (turn.end). */}
       <div
