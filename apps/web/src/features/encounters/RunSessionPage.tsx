@@ -2448,32 +2448,32 @@ export default function RunSessionPage() {
       >
         <div className="space-y-4 min-w-0">
           <div className="card elev-sm" style={{ padding: '6px 0', gap: 0 }}>
-        {sheetsStatusLabel && (
-          <p
-            className="text-muted"
-            data-testid="inline-character-sheets-status"
-            style={{ fontSize: 11, margin: 0, padding: '8px 14px 0' }}
-            role="status"
-            aria-live="polite"
-          >
-            {sheetsStatusLabel}
-          </p>
-        )}
-        {orderedCombatants.length === 0 ? (
-          <div style={{ padding: 16 }}>
-            <EmptyState
-              icon="crossed-swords"
-              title={t('encounters.empty.noCombatants')}
-              hint={
-                isDm
-                  ? characters.some((c) => c.status === 'active')
-                    ? t('encounters.empty.noCombatantsHintDmActive')
-                    : t('encounters.empty.noCombatantsHintDmNoParty')
-                  : t('encounters.empty.noCombatantsHintPlayer')
-              }
-            />
-          </div>
-        ) : (
+            {sheetsStatusLabel && (
+              <p
+                className="text-muted"
+                data-testid="inline-character-sheets-status"
+                style={{ fontSize: 11, margin: 0, padding: '8px 14px 0' }}
+                role="status"
+                aria-live="polite"
+              >
+                {sheetsStatusLabel}
+              </p>
+            )}
+            {orderedCombatants.length === 0 ? (
+              <div style={{ padding: 16 }}>
+                <EmptyState
+                  icon="crossed-swords"
+                  title={t('encounters.empty.noCombatants')}
+                  hint={
+                    isDm
+                      ? characters.some((c) => c.status === 'active')
+                        ? t('encounters.empty.noCombatantsHintDmActive')
+                        : t('encounters.empty.noCombatantsHintDmNoParty')
+                      : t('encounters.empty.noCombatantsHintPlayer')
+                  }
+                />
+              </div>
+            ) : (
           orderedCombatants.map((c) => (
             <CombatantRow
               key={c.id}
@@ -2565,7 +2565,7 @@ export default function RunSessionPage() {
               onRemove={() => setConfirmRemoveCombatantId(c.id)}
             />
           ))
-        )}
+            )}
           </div>
 
           {canDmWrite && encounter.status !== 'ended' && (
@@ -2580,7 +2580,10 @@ export default function RunSessionPage() {
           )}
         </div>
 
-        <aside className="space-y-4 lg:sticky lg:top-4" aria-label="Encounter activity">
+        <aside
+          className="space-y-4 lg:sticky lg:top-4 lg:max-h-[calc(100vh-1rem)] lg:overflow-y-auto lg:overscroll-contain"
+          aria-label="Encounter activity"
+        >
           <CombatLog events={events} />
 
           <SharedDiceLog campaignId={cid} />
