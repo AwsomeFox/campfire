@@ -65,7 +65,12 @@ function makeService(orm: DrizzleDb): Harness {
     undefined as unknown as Ctor[10],
     undefined as unknown as Ctor[11],
     new AiDmTranscriptService(orm, stream as unknown as ConstructorParameters<typeof AiDmTranscriptService>[1]) as Ctor[12],
-    orm as Ctor[13],
+    // groundingStore (#577) sits between #572's transcript and #559's optional `db`. It must be
+    // passed explicitly: `db` is the LAST parameter, so leaving this out would silently slide the
+    // orm into the grounding slot and leave control-state persistence disabled — the exact
+    // failure this spec exists to catch.
+    { correctionsForPrompt: async () => [] } as unknown as Ctor[13],
+    orm as Ctor[14],
   );
   return { service, audit, stream, notifications } as Harness;
 }

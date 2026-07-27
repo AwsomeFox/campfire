@@ -55,6 +55,8 @@ export const queryKeys = {
   aiDmSeat: (campaignId: number) => ['campaign', campaignId, 'ai-dm', 'seat'] as const,
   /** The #519 readiness checklist: derived from the seat, provider, settings and consent. */
   aiDmReadiness: (campaignId: number) => ['campaign', campaignId, 'ai-dm', 'readiness'] as const,
+  /** #577 — the AI's factual claims plus the server's verdict on each (the grounding card). */
+  aiDmGrounding: (campaignId: number) => ['campaign', campaignId, 'ai-dm', 'grounding'] as const,
 } satisfies Record<string, (...args: never[]) => QueryKey>;
 
 /**

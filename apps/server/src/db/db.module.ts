@@ -3163,6 +3163,68 @@ function migrateEncounterOpIdempotency580(sqlite: Database.Database): void {
 }
 
 /**
+ * Issue #577 — grounding verdicts on the AI driver's factual claims (rules rulings and
+ * assertions about existing canon), with the provider/model provenance and the human
+ * correction that supersedes an unsupported one.
+ *
+ * Purely additive: one new table plus its index, so the whole body is `CREATE ... IF NOT
+ * EXISTS` and re-running it is a no-op. The `sqlite_master` / `PRAGMA table_info` probe is the
+ * belt for the case IF NOT EXISTS cannot cover — an install carrying an EARLIER shape of the
+ * table. Dropping in that case is acceptable and deliberate: the rows are an audit-style review
+ * trail for past turns, not durable campaign canon, and the alternative (guessing which columns
+ * to ALTER in) is how a half-migrated table gets shipped.
+ */
+function migrateAiDriverGroundingClaims577(sqlite: Database.Database): void {
+  const existing = sqlite
+    .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='ai_driver_grounding_claims'`)
+    .all();
+  if (existing.length > 0) {
+    const cols = sqlite.prepare(`PRAGMA table_info(ai_driver_grounding_claims)`).all() as Array<{ name: string }>;
+    const names = new Set(cols.map((c) => c.name));
+    const expected = [
+      'id',
+      'campaign_id',
+      'turn',
+      'claim_index',
+      'kind',
+      'claim_text',
+      'status',
+      'reason',
+      'citations_json',
+      'provider',
+      'model',
+      'created_at',
+      'correction',
+      'corrected_by',
+      'corrected_at',
+    ];
+    if (expected.every((c) => names.has(c))) return;
+    sqlite.exec(`DROP TABLE ai_driver_grounding_claims`);
+  }
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS ai_driver_grounding_claims (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+      turn INTEGER NOT NULL,
+      claim_index INTEGER NOT NULL,
+      kind TEXT NOT NULL,
+      claim_text TEXT NOT NULL,
+      status TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      citations_json TEXT NOT NULL DEFAULT '[]',
+      provider TEXT NOT NULL DEFAULT '',
+      model TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      correction TEXT,
+      corrected_by TEXT,
+      corrected_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_ai_driver_grounding_campaign
+      ON ai_driver_grounding_claims(campaign_id, id);
+  `);
+}
+
+/**
  * Issue #588 — organized-play scheduling: venue/room resources, recurring series,
  * a per-occurrence exception ledger, reusable schedule templates, and the
  * organized-play decoration on `scheduled_sessions` (series link, explicit IANA
@@ -3476,8 +3538,11 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // to 0120 to look tidy, since renaming a migration a database has already recorded is
   // the one edit that would break run-once behaviour.
   { name: '0117_moderation_incidents_601', run: migrateModerationIncidents601 },
-  // 0123/0124 are CENTRALLY ALLOCATED to this branch by the merge coordinator.
-  // 0112-0122 are held by other in-flight branches, so the gap above is deliberate
+  // 0121 was CENTRALLY ALLOCATED to issue #577 by the merge coordinator; 0112-0120 are held
+  // by other in-flight branches, so the gap above is deliberate and must not be "tidied" into
+  // the next free ordinal. runMigrations dedupes on the FULL name string, so the `_577` suffix
+  // is what guarantees this runs exactly once even if a sibling branch lands a colliding ordinal.
+  { name: '0121_ai_driver_grounding_claims_577', run: migrateAiDriverGroundingClaims577 },
   // and these are NOT "the next free ordinal" — do not renumber them to close it.
   // runMigrations dedupes on the FULL name, so the `_588` suffix is what actually
   // guarantees run-once even if a sibling branch lands a colliding ordinal first.

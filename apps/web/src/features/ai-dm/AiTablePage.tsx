@@ -82,6 +82,7 @@ import {
 } from './feedScrollFollow';
 import { AiSetupChecklist, AiGateExplainer, AiTransparencyNote } from './AiSetupChecklist';
 import { StuckLadder } from './StuckLadder';
+import { GroundingPanel } from './GroundingPanel';
 import { TranscriptRow, systemText } from './AiDmTranscriptUi';
 import { Field } from '../../components/Field';
 import { AI_TABLE_FIELD, AI_TABLE_PREFIX } from '../../components/formFieldLabels';
@@ -379,6 +380,10 @@ export default function AiTablePage() {
           clearTranscript(campaignId);
           lastSeqRef.current = 0;
           void fetchTranscript();
+        } else if (event.type === 'grounding') {
+          // #577: thin signal — refetch the claim list so the review card reconciles with the
+          // server's verdict on the turn that just ended.
+          void queryClient.invalidateQueries({ queryKey: queryKeys.aiDmGrounding(campaignId) });
         } else if (
           event.type === 'state' ||
           event.type === 'stuck' ||
@@ -841,6 +846,14 @@ export default function AiTablePage() {
           }
         />
       )}
+
+      {/*
+        #577: rulings the server could NOT trace to an authorized retrieval this turn. The
+        transcript keeps every word the AI said; this card labels the factual claims inside it
+        as unverified, shows the provider/model that produced them plus evidence links for the
+        citations that DID check out, and lets a DM correct one into every later turn.
+      */}
+      {campaignId !== undefined && <GroundingPanel campaignId={campaignId} isDm={isDm} />}
 
       {/* Transcript — named log landmark with aria-live=off so token deltas
           never spam SRs. The sr-only mirror below owns polite additions. */}

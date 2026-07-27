@@ -528,6 +528,13 @@ function applyStream(state: TranscriptState, event: AiDmStreamEvent): Transcript
     case 'transcript.reset':
       // The DM erased the transcript and `seq` restarted; a stale watermark would strand us.
       return state.authoritative ? { ...emptyTranscript, authoritative: true } : state;
+    // #577: the grounding verdict is deliberately NOT folded into the transcript. The
+    // transcript is the record of what was SAID; the GroundingPanel directly above it is the
+    // record of what the server could VERIFY, and it reconciles off its own refetch on this
+    // same signal. Splicing a verdict line between narration bubbles would also replay badly
+    // against the persisted transcript, which does not carry the claim rows.
+    case 'grounding':
+      return state;
 
     default: {
       // Exhaustiveness guard — a new event kind must be handled explicitly.
