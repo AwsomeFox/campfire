@@ -54,3 +54,30 @@ export function providerCapabilities(type: AiProviderType): AiProviderCapabiliti
 export function supportsImageGeneration(type: AiProviderType): boolean {
   return providerCapabilities(type).imageGeneration === true;
 }
+
+/**
+ * Provider types that contact NO external endpoint and therefore need no credential (#1052
+ * review). Today that is the deterministic offline `mock` alone — precisely the one type
+ * {@link createAiProvider} builds without calling `requireKey` and without throwing.
+ *
+ * `noop`/`custom` are deliberately absent: they are DI scaffolds that `createAiProvider`
+ * refuses to build at all, so they are never a stored config whose credential needs deciding.
+ */
+const KEYLESS_PROVIDER_TYPES: ReadonlySet<AiProviderType> = new Set<AiProviderType>(['mock']);
+
+/**
+ * Does a provider of this type need an API key to serve a turn? (#1052 review)
+ *
+ * The single definition of "needs a credential", because the answer had been open-coded as
+ * `providerType === 'mock'` in three places and consulted in a fourth by omission — and the
+ * copies had already drifted into disagreeing about the same config. The credential-source
+ * VIEW said a keyless provider needs nothing; credential RESOLUTION never asked, and handed a
+ * campaign that chose `mock` the server's provider, endpoint and key instead.
+ *
+ * Defaults to TRUE for an unrecognised type. That is the conservative direction here: a false
+ * "needs no credential" would suppress inheritance a deployment depends on, whereas the
+ * default merely preserves the existing path.
+ */
+export function providerRequiresApiKey(type: AiProviderType): boolean {
+  return !KEYLESS_PROVIDER_TYPES.has(type);
+}

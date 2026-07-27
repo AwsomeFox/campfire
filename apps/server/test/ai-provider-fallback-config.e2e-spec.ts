@@ -3,6 +3,7 @@ import Database from 'better-sqlite3';
 import { Logger } from '@nestjs/common';
 import { createTestApp, closeTestApp, createTestAppNoDevAuth, type TestAppContext } from './test-app';
 import { dbFilePath } from '../src/db/db.module';
+import { AiProviderConfigService } from '../src/modules/ai-provider-config/ai-provider-config.service';
 import {
   AI_PROVIDER_RESOLVER,
   resolveFallbackForExecution,
@@ -223,6 +224,126 @@ describe('AI provider fallback slot (#1052)', () => {
     // disallowed model, and NOT true for a missing key, whose throw comes from the factory,
     // outside that service's try/catch.
     expect(logs.some((l) => /fallback/i.test(l))).toBe(true);
+  });
+});
+
+/**
+ * #1052 review — A CAMPAIGN THAT NEEDS NO CREDENTIAL MUST NOT INHERIT ONE.
+ *
+ * Choosing `mock` is how someone says "no external calls": local development, a
+ * privacy-sensitive table, or testing without spending tokens. The credential-inheritance
+ * branches existed to answer "the DM configured an override but stored no key" — a question
+ * that only arises when the DM's chosen provider NEEDS a key. `mock` needs none, so there was
+ * nothing to inherit, and inheriting anyway swapped the provider, the endpoint and the key.
+ *
+ * The two layers already disagreed, and the VIEW was the one that was right:
+ * `campaignCredentialSource` returns 'not-required' for a keyless provider BEFORE it ever
+ * consults the server row, so the GET reported "mock, not-required" while resolution handed
+ * back a credentialed external provider. That contradiction is what these tests assert —
+ * the observable disagreement, not the branch that caused it.
+ *
+ * Asserted for BOTH ROLES on purpose. The inheritance lives in one role-agnostic function
+ * (`resolveEffectiveConfigWithEndpointScope`), so a fix aimed only at the fallback slot would
+ * leave the identical hole on the primary — and the primary half is not even new to #1052.
+ */
+describe('a keyless campaign provider never inherits a server credential (#1052 review)', () => {
+  let ctx: TestAppContext;
+  let server: ReturnType<TestAppContext['app']['getHttpServer']>;
+  let configs: AiProviderConfigService;
+  let campaignId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    server = ctx.app.getHttpServer();
+    configs = ctx.app.get(AiProviderConfigService);
+    const camp = await request(server).post('/api/v1/campaigns').set(admin).send({ name: 'Keyless Inherit Guard' });
+    campaignId = camp.body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  const SERVER_KEY = 'sk-server-should-never-be-inherited-9001';
+  const SERVER_URL = 'https://server-owned.example/v1';
+
+  it('FALLBACK: a mock campaign fallback is not replaced by the credentialed server fallback', async () => {
+    await request(server)
+      .put('/api/v1/settings/ai-provider')
+      .set(admin)
+      .send({ providerType: 'openai', model: 'primary-model', apiKey: 'sk-primary-0001' });
+    // A credentialed SERVER fallback pointing at a real external endpoint...
+    await request(server)
+      .put('/api/v1/settings/ai-provider/fallback')
+      .set(admin)
+      .send({ providerType: 'openai', model: 'primary-model', baseUrl: SERVER_URL, apiKey: SERVER_KEY });
+    // ...and a campaign that deliberately chose the offline mock for its fallback.
+    await request(server)
+      .put(`/api/v1/campaigns/${campaignId}/ai-provider/fallback`)
+      .set(admin)
+      .send({ providerType: 'mock', model: 'primary-model' });
+
+    const effective = await configs.resolveEffectiveConfig(campaignId, 'fallback');
+
+    // The table's stated configuration is where its content actually goes. Before the fix this
+    // came back as openai + the server URL + the server key, so a failed turn contacted an
+    // external provider the DM had explicitly configured away from — on the failover path,
+    // which is the path nobody watches.
+    expect(effective?.providerType).toBe('mock');
+    expect(effective?.apiKey).toBeUndefined();
+    expect(effective?.baseUrl).not.toBe(SERVER_URL);
+    expect(JSON.stringify(effective)).not.toContain(SERVER_KEY);
+
+    // ...and the GET must agree with what resolution just did. This is the half that makes it a
+    // TRUST defect rather than a config nicety: the view already said 'not-required'.
+    const view = await request(server).get(`/api/v1/campaigns/${campaignId}/ai-provider/fallback`).set(admin);
+    expect(view.status).toBe(200);
+    expect(view.body.providerType).toBe('mock');
+    expect(view.body.credentialSource).toBe('not-required');
+  });
+
+  it('PRIMARY: the same inheritance path has the same hole one slot over', async () => {
+    // Not introduced by #1052 — the branch is role-agnostic and predates the fallback slot.
+    // Pinned here because a fix aimed only at the reported (fallback) symptom would leave it.
+    await request(server)
+      .put('/api/v1/settings/ai-provider')
+      .set(admin)
+      .send({ providerType: 'openai', model: 'primary-model', baseUrl: SERVER_URL, apiKey: SERVER_KEY });
+    await request(server)
+      .put(`/api/v1/campaigns/${campaignId}/ai-provider`)
+      .set(admin)
+      .send({ providerType: 'mock', model: 'primary-model' });
+
+    const effective = await configs.resolveEffectiveConfig(campaignId);
+    expect(effective?.providerType).toBe('mock');
+    expect(effective?.apiKey).toBeUndefined();
+    expect(effective?.baseUrl).not.toBe(SERVER_URL);
+    expect(JSON.stringify(effective)).not.toContain(SERVER_KEY);
+
+    const view = await request(server).get(`/api/v1/campaigns/${campaignId}/ai-provider`).set(admin);
+    expect(view.status).toBe(200);
+    expect(view.body.providerType).toBe('mock');
+    expect(view.body.credentialSource).toBe('not-required');
+  });
+
+  it('a KEY-REQUIRING campaign override still inherits the server credential', async () => {
+    // The guard must be narrow. Inheritance is the whole point of a keyless override for a
+    // provider that DOES need a key — removing that would break the #373 design rather than
+    // fix it. Only "needs no credential" short-circuits.
+    await request(server)
+      .put('/api/v1/settings/ai-provider')
+      .set(admin)
+      .send({ providerType: 'openai', model: 'primary-model', baseUrl: SERVER_URL, apiKey: SERVER_KEY });
+    await request(server)
+      .put(`/api/v1/campaigns/${campaignId}/ai-provider`)
+      .set(admin)
+      .send({ providerType: 'openai', model: 'primary-model' });
+
+    const effective = await configs.resolveEffectiveConfig(campaignId);
+    expect(effective?.providerType).toBe('openai');
+    expect(effective?.apiKey).toBe(SERVER_KEY);
+    // ...and with the key comes the SERVER's endpoint, never the campaign's (#373).
+    expect(effective?.baseUrl).toBe(SERVER_URL);
   });
 });
 

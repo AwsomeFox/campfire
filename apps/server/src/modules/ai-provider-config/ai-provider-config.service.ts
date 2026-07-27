@@ -26,6 +26,7 @@ import { auditActor, auditActorRole, type RequestUser } from '../../common/user.
 import { AuditService } from '../audit/audit.service';
 import {
   createAiProvider,
+  providerRequiresApiKey,
   type AiProviderConfig,
   type AiProviderType,
 } from '../ai-dm/providers';
@@ -544,6 +545,41 @@ export class AiProviderConfigService {
     /** The endpoint belongs to whichever row supplied the baseUrl below. */
     const primaryScope: 'campaign' | 'server' = camp ? 'campaign' : 'server';
 
+    // #1052 review — A PROVIDER THAT NEEDS NO CREDENTIAL NEVER INHERITS ONE.
+    //
+    // This must come BEFORE every inheritance branch below, and it is a statement about the
+    // general rule rather than about one provider name. Those branches answer "the row that
+    // was selected has no key of its own — where does its key come from?", and that question
+    // only has meaning when the selected provider actually NEEDS a key. When it does not,
+    // there is nothing to inherit, and the branches did not merely add a credential: they
+    // replaced `providerType` and `baseUrl` too, because #373 correctly binds a key to its
+    // own endpoint. So a campaign that chose the offline `mock` was resolved to the SERVER's
+    // external provider, at the server's URL, on the server's key.
+    //
+    // That is a trust defect, not a config nicety. Choosing `mock` is how someone says "no
+    // external calls" — local development, a privacy-sensitive table, testing without
+    // spending tokens — and the substitution made the stated configuration disagree with
+    // where the table's content actually went. On the failover path it was also invisible.
+    //
+    // The two layers already disagreed and the VIEW was right: `campaignCredentialSource`
+    // returns 'not-required' for a keyless provider before it ever consults the server row.
+    // This makes resolution agree with what the GET has been reporting all along.
+    //
+    // Applies to BOTH roles because this function is role-agnostic — the primary slot had the
+    // identical hole and it predates the fallback slot entirely.
+    if (!providerRequiresApiKey(primary.providerType as AiProviderType)) {
+      return {
+        config: {
+          providerType: primary.providerType as AiProviderType,
+          model: primary.model,
+          apiKey: undefined,
+          baseUrl: primary.baseUrl ?? undefined,
+          params: safeJson(primary.params, {}),
+        },
+        endpointScope: primaryScope,
+      };
+    }
+
     // The scope that supplies the key also supplies the endpoint + providerType.
     // When the primary scope has its own key, key+endpoint+type are self-consistent.
     if (primary.encryptedApiKey) {
@@ -1058,7 +1094,9 @@ function environmentApiKey(providerType: string): string | undefined {
 
 function localCredentialSource(row: Row): AiProviderCredentialSource {
   if (row.encryptedApiKey) return 'stored';
-  if (row.providerType === 'mock') return 'not-required';
+  // #1052 review — one shared predicate rather than a third open-coded `=== 'mock'`. The
+  // copies of this question had already drifted: resolution never asked it at all.
+  if (!providerRequiresApiKey(row.providerType as AiProviderType)) return 'not-required';
   return environmentApiKey(row.providerType) ? 'environment' : 'none';
 }
 
@@ -1074,7 +1112,7 @@ function campaignCredentialSource(campaign: Row, server: Row | undefined): AiPro
   // key with its DM-controlled baseUrl. Environment fallback is therefore only
   // inherited through an admin-controlled server-default row.
   if (campaign.encryptedApiKey) return 'stored';
-  if (campaign.providerType === 'mock') return 'not-required';
+  if (!providerRequiresApiKey(campaign.providerType as AiProviderType)) return 'not-required';
   if (!server) return 'none';
   const fallback = localCredentialSource(server);
   if (fallback === 'stored') return 'server';

@@ -41,7 +41,7 @@ export type { MockProviderOptions, MockResponse } from './mock-provider';
 export { createAiProvider, createAiImageProvider } from './factory';
 export type { AiProviderConfig, AiProviderParams } from './factory';
 
-export { providerCapabilities, supportsImageGeneration } from './capabilities';
+export { providerCapabilities, supportsImageGeneration, providerRequiresApiKey } from './capabilities';
 
 export { OpenAiImageProvider } from './openai-image-provider';
 export type { OpenAiImageProviderOptions } from './openai-image-provider';
