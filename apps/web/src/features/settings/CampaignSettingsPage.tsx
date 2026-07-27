@@ -17,6 +17,7 @@ import type {
   CampaignCatalogPrivacySetting,
   CampaignCloneMode,
   CampaignClonePreview,
+  CampaignExportRequest,
   CampaignInvite,
   CastSession,
   CastSessionCreated,
@@ -297,6 +298,7 @@ export default function CampaignSettingsPage() {
                 }}
               />
               <CatalogPrivacyCard key={`catalog-privacy-${campaign.id}`} campaign={campaign} />
+              <ExportRequestsCard key={`export-requests-${campaign.id}`} campaign={campaign} />
               <CastSessionsCard key={`cast-${campaign.id}`} campaign={campaign} />
             </SettingsCategory>
 
@@ -771,6 +773,157 @@ function CatalogPrivacyCard({ campaign }: { campaign: Campaign }) {
         default will not reveal yours.
       </p>
       {error && <p className="text-sm text-red-400 m-0" role="alert">{error}</p>}
+    </div>
+  );
+}
+
+/**
+ * Export requests (issue #587) — the DM half of the catalog's `request_export`.
+ *
+ * A server operator can ASK for an export; they cannot take one. The ask lands here,
+ * and until this card existed it landed nowhere a DM could see: the admin console
+ * offered the operation, the server recorded a pending row, and this page rendered only
+ * the privacy card — so requests sat pending forever unless somebody hand-rolled an API
+ * call. An approval workflow in which nobody can approve is not a workflow.
+ *
+ * Approving records CONSENT and nothing else. No admin route returns an artifact; the
+ * bundle is still produced by a DM through the existing DM-gated campaign export. That
+ * separation is the whole reason the request is a durable row rather than a button that
+ * hands over a file, and the card says so plainly so a DM knows what they are agreeing
+ * to before they agree to it.
+ */
+function ExportRequestsCard({ campaign }: { campaign: Campaign }) {
+  const [requests, setRequests] = useState<CampaignExportRequest[] | null>(null);
+  const [notes, setNotes] = useState<Record<number, string>>({});
+  const [busyId, setBusyId] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      setRequests(
+        await api.get<CampaignExportRequest[]>(`${API}/campaigns/${campaign.id}/catalog/export-requests`),
+      );
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't load export requests.");
+    }
+  }, [campaign.id]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  async function decide(requestId: number, decision: 'approved' | 'denied') {
+    setBusyId(requestId);
+    setError(null);
+    try {
+      await api.post<CampaignExportRequest>(
+        `${API}/campaigns/${campaign.id}/catalog/export-requests/${requestId}/decision`,
+        { decision, note: (notes[requestId] ?? '').trim() },
+      );
+      await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't record that decision.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  const pending = (requests ?? []).filter((r) => r.status === 'pending');
+  const decided = (requests ?? []).filter((r) => r.status !== 'pending');
+
+  return (
+    <div
+      id="export-requests"
+      className="card elev-sm settings-anchor"
+      tabIndex={-1}
+      data-testid="export-requests-settings"
+      aria-labelledby="export-requests-heading"
+    >
+      <div className="flex items-center gap-2 flex-wrap">
+        <span id="export-requests-heading" className="card-kicker" style={{ margin: 0 }}>
+          Export requests
+        </span>
+        {pending.length > 0 && <span className="tag tag-accent">{pending.length} awaiting you</span>}
+      </div>
+      <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
+        A server admin can ask you to produce an export of this campaign. They cannot take one — approving
+        records your consent, and the bundle is still something you produce yourself from this campaign&apos;s
+        export tools. Leaving a request alone keeps it pending; nothing is shared either way.
+      </p>
+
+      {requests !== null && requests.length === 0 && (
+        <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
+          No server admin has requested an export of this campaign.
+        </p>
+      )}
+
+      {pending.map((r) => (
+        <div
+          key={r.id}
+          className="flex flex-col gap-2"
+          style={{ borderTop: '1px solid var(--line)', paddingTop: 8 }}
+        >
+          <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
+            <strong>{r.requestedBy}</strong> asked for a <strong>{r.profile || 'backup'}</strong> export on{' '}
+            {r.createdAt.slice(0, 10)}.
+          </p>
+          {r.justification && (
+            <p style={{ margin: 0, fontSize: 12 }}>
+              <span className="text-muted">Their reason: </span>
+              {r.justification}
+            </p>
+          )}
+          <label className="flex flex-col gap-1 text-muted" style={{ fontSize: 11.5 }}>
+            Note back (optional, recorded with your decision)
+            <input
+              className="input"
+              value={notes[r.id] ?? ''}
+              onChange={(e) => setNotes((prev) => ({ ...prev, [r.id]: e.target.value }))}
+            />
+          </label>
+          <div className="flex flex-col sm:flex-row gap-2">
+            <button
+              className="btn btn-primary"
+              disabled={busyId === r.id}
+              aria-busy={busyId === r.id || undefined}
+              onClick={() => void decide(r.id, 'approved')}
+            >
+              Approve
+            </button>
+            <button
+              className="btn"
+              disabled={busyId === r.id}
+              aria-busy={busyId === r.id || undefined}
+              onClick={() => void decide(r.id, 'denied')}
+            >
+              Deny
+            </button>
+          </div>
+        </div>
+      ))}
+
+      {decided.length > 0 && (
+        <div style={{ borderTop: '1px solid var(--line)', paddingTop: 8 }}>
+          <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
+            Earlier requests
+          </p>
+          <ul style={{ margin: '4px 0 0', paddingInlineStart: 16 }}>
+            {decided.map((r) => (
+              <li key={r.id} className="text-muted" style={{ fontSize: 11.5 }}>
+                {r.createdAt.slice(0, 10)} — {r.requestedBy} asked for {r.profile || 'backup'}:{' '}
+                <strong>{r.status}</strong>
+                {r.decisionNote ? ` (${r.decisionNote})` : ''}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {error && (
+        <p className="text-sm text-red-400 m-0" role="alert">
+          {error}
+        </p>
+      )}
     </div>
   );
 }

@@ -17,6 +17,7 @@ import type {
   CampaignCatalogBulkOperation,
   CampaignCatalogBulkResult,
   CampaignCatalogEntry,
+  CampaignCatalogFieldVisibility,
   CampaignCatalogPage,
   CampaignCatalogPrivacyPolicy,
   CampaignCatalogSort,
@@ -28,14 +29,19 @@ import { PageTitle } from '../../components/PageTitle';
 import { RequireServerAdmin } from './RequireServerAdmin';
 import {
   CATALOG_PAGE_SIZE,
+  EMPTY_BULK_ARGS,
   EMPTY_FILTERS,
   availableOperations,
+  buildBulkPayload,
   buildCatalogQuery,
+  bulkArgsError,
   currentPage,
   isNoOpResult,
   outcomeVariant,
   pageCount,
+  reconcileOperation,
   storageLabel,
+  type BulkArgs,
   type CatalogFilters,
 } from './adminCatalogState';
 
@@ -43,6 +49,106 @@ function shortDate(iso: string | null): string {
   if (!iso) return '—';
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? '—' : d.toISOString().slice(0, 10);
+}
+
+/**
+ * The server-wide disclosure default, as an operator SETS it rather than merely reads it.
+ *
+ * `PUT /admin/campaigns/privacy` shipped with no caller: the page fetched the policy and
+ * printed it, so the name/description defaults the catalog advertises could not be
+ * configured through the product at all. Both fields are always submitted together
+ * because the server materialises the whole policy on any update — see
+ * `updatePrivacyPolicy` — so showing two selects and sending both is what the stored
+ * value actually reflects.
+ */
+function PrivacyPolicyCard({
+  policy,
+  onSaved,
+}: {
+  policy: CampaignCatalogPrivacyPolicy;
+  onSaved: (next: CampaignCatalogPrivacyPolicy) => void;
+}) {
+  const { t } = useTranslation();
+  const [names, setNames] = useState<CampaignCatalogFieldVisibility>(policy.names);
+  const [descriptions, setDescriptions] = useState<CampaignCatalogFieldVisibility>(policy.descriptions);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+
+  // Follow the server if it changes underneath us (a reload, or another operator).
+  useEffect(() => {
+    setNames(policy.names);
+    setDescriptions(policy.descriptions);
+  }, [policy.names, policy.descriptions]);
+
+  const dirty = names !== policy.names || descriptions !== policy.descriptions;
+
+  const save = async () => {
+    setBusy(true);
+    setError(null);
+    setSaved(false);
+    try {
+      const next = await api.put<CampaignCatalogPrivacyPolicy>(`${API}/admin/campaigns/privacy`, {
+        names,
+        descriptions,
+      });
+      onSaved(next);
+      setSaved(true);
+    } catch (err) {
+      setError(translateApiError(err, t, { fallbackKey: 'admin.errors.savePrivacyPolicy' }));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const options = (
+    <>
+      <option value="visible">{t('admin.catalog.privacy.visible')}</option>
+      <option value="redacted">{t('admin.catalog.privacy.redacted')}</option>
+    </>
+  );
+
+  return (
+    <Card className="space-y-3">
+      <h2 className="text-sm font-bold text-white">{t('admin.catalog.privacy.heading')}</h2>
+      <p className="text-xs text-secondary">{t('admin.catalog.privacy.hint')}</p>
+      <div className="flex flex-wrap gap-2 items-end">
+        <label className="flex flex-col gap-1 text-xs text-secondary">
+          {t('admin.catalog.privacy.names')}
+          <select
+            className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-sm text-white"
+            value={names}
+            onChange={(e) => setNames(e.target.value as CampaignCatalogFieldVisibility)}
+          >
+            {options}
+          </select>
+        </label>
+        <label className="flex flex-col gap-1 text-xs text-secondary">
+          {t('admin.catalog.privacy.descriptions')}
+          <select
+            className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-sm text-white"
+            value={descriptions}
+            onChange={(e) => setDescriptions(e.target.value as CampaignCatalogFieldVisibility)}
+          >
+            {options}
+          </select>
+        </label>
+        <Btn disabled={busy || !dirty} onClick={() => void save()}>
+          {t('admin.catalog.privacy.save')}
+        </Btn>
+      </div>
+      <p className="text-xs text-secondary">
+        {policy.source === 'default'
+          ? t('admin.catalog.privacy.sourceDefault')
+          : t('admin.catalog.privacy.sourceSettings')}
+      </p>
+      {/* A campaign can always tighten past this; it can never loosen. Saying so here
+          stops an operator reading `visible` as "every name is disclosed". */}
+      <p className="text-xs text-secondary">{t('admin.catalog.privacy.tightenOnly')}</p>
+      {saved && !dirty && <p className="text-xs text-emerald-300">{t('admin.catalog.privacy.saved')}</p>}
+      {error && <ErrorNote message={error} />}
+    </Card>
+  );
 }
 
 function AdminCatalog() {
@@ -56,6 +162,7 @@ function AdminCatalog() {
   const [order, setOrder] = useState<'asc' | 'desc'>('desc');
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [operation, setOperation] = useState<CampaignCatalogBulkOperation>('archive');
+  const [bulkArgs, setBulkArgs] = useState<BulkArgs>(EMPTY_BULK_ARGS);
   const [reason, setReason] = useState('');
   const [preview, setPreview] = useState<CampaignCatalogBulkResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -88,6 +195,30 @@ function AdminCatalog() {
   const selectedEntries = useMemo(() => items.filter((c) => selected.has(c.id)), [items, selected]);
   const operations = useMemo(() => availableOperations(selectedEntries), [selectedEntries]);
 
+  // Keep the chooser honest. When the selection narrows `operations`, a `<select>` whose
+  // value is no longer among its options renders the first one while state keeps the old
+  // value — the operator would read one verb and dispatch another.
+  useEffect(() => {
+    setOperation((prev) => {
+      const next = reconcileOperation(prev, operations);
+      return next === prev ? prev : next;
+    });
+  }, [operations]);
+
+  // What (if anything) stops this run, as a translation key. The server re-validates
+  // everything; this only keeps the page from dispatching a request it can already see
+  // will 400, and lets the operator read the reason instead of guessing at a dead button.
+  const blocked = useMemo(() => {
+    const argsError = bulkArgsError(operation, bulkArgs);
+    if (argsError) return argsError;
+    // `request_export` asks a DM to hand over every secret in their campaign, so the
+    // server demands a justification of at least 10 characters. Mirror that here.
+    if (operation === 'request_export' && reason.trim().length < 10) {
+      return 'admin.catalog.args.justificationRequired';
+    }
+    return null;
+  }, [operation, bulkArgs, reason]);
+
   const toggle = (id: number) => {
     setSelected((prev) => {
       const next = new Set(prev);
@@ -111,12 +242,16 @@ function AdminCatalog() {
       setBusy(true);
       setError(null);
       try {
-        const result = await api.post<CampaignCatalogBulkResult>(`${API}/admin/campaigns/bulk`, {
-          operation,
-          campaignIds: selectedEntries.map((c) => c.id),
-          dryRun,
-          reason,
-        });
+        const result = await api.post<CampaignCatalogBulkResult>(
+          `${API}/admin/campaigns/bulk`,
+          buildBulkPayload(
+            operation,
+            selectedEntries.map((c) => c.id),
+            dryRun,
+            reason,
+            bulkArgs,
+          ),
+        );
         setPreview(result);
         if (!dryRun) {
           setSelected(new Set());
@@ -128,7 +263,7 @@ function AdminCatalog() {
         setBusy(false);
       }
     },
-    [operation, reason, selectedEntries, load, t],
+    [operation, reason, bulkArgs, selectedEntries, load, t],
   );
 
   if (loading && !page) {
@@ -225,6 +360,8 @@ function AdminCatalog() {
           </p>
         )}
       </Card>
+
+      {policy && <PrivacyPolicyCard policy={policy} onSaved={setPolicy} />}
 
       <Card className="space-y-3">
         <div className="flex items-center justify-between flex-wrap gap-2">
@@ -360,20 +497,111 @@ function AdminCatalog() {
               ))}
             </select>
           </label>
+          {operation === 'reassign_owner' && (
+            <label className="flex flex-col gap-1 text-xs text-secondary">
+              {t('admin.catalog.args.toUserId')}
+              <TextInput
+                inputMode="numeric"
+                value={bulkArgs.toUserId}
+                onChange={(e) => setBulkArgs((p) => ({ ...p, toUserId: e.target.value }))}
+              />
+            </label>
+          )}
+
+          {operation === 'set_quota' && (
+            <label className="flex flex-col gap-1 text-xs text-secondary">
+              {t('admin.catalog.args.storageQuotaBytes')}
+              <TextInput
+                inputMode="numeric"
+                placeholder={t('admin.catalog.args.quotaClearHint')}
+                value={bulkArgs.storageQuotaBytes}
+                onChange={(e) => setBulkArgs((p) => ({ ...p, storageQuotaBytes: e.target.value }))}
+              />
+            </label>
+          )}
+
+          {operation === 'set_policy' && (
+            <>
+              <label className="flex items-center gap-2 text-xs text-secondary">
+                <input
+                  type="checkbox"
+                  checked={bulkArgs.closePublicInvites}
+                  onChange={(e) => setBulkArgs((p) => ({ ...p, closePublicInvites: e.target.checked }))}
+                />
+                {t('admin.catalog.args.closePublicInvites')}
+              </label>
+              <label className="flex flex-col gap-1 text-xs text-secondary">
+                {t('admin.catalog.args.aiExternalContentPolicy')}
+                <select
+                  className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-sm text-white"
+                  value={bulkArgs.aiExternalContentPolicy}
+                  onChange={(e) =>
+                    setBulkArgs((p) => ({
+                      ...p,
+                      aiExternalContentPolicy: e.target.value as BulkArgs['aiExternalContentPolicy'],
+                    }))
+                  }
+                >
+                  <option value="">{t('admin.catalog.args.aiPolicyUnchanged')}</option>
+                  <option value="disabled">{t('admin.catalog.args.aiPolicyDisabled')}</option>
+                  <option value="member_consent">{t('admin.catalog.args.aiPolicyMemberConsent')}</option>
+                </select>
+              </label>
+            </>
+          )}
+
+          {operation === 'update_module' && (
+            <label className="flex flex-col gap-1 text-xs text-secondary">
+              {t('admin.catalog.args.ruleSystem')}
+              <TextInput
+                value={bulkArgs.ruleSystem}
+                onChange={(e) => setBulkArgs((p) => ({ ...p, ruleSystem: e.target.value }))}
+              />
+            </label>
+          )}
+
+          {operation === 'request_export' && (
+            <label className="flex flex-col gap-1 text-xs text-secondary">
+              {t('admin.catalog.args.exportProfile')}
+              <select
+                className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-sm text-white"
+                value={bulkArgs.exportProfile}
+                onChange={(e) =>
+                  setBulkArgs((p) => ({ ...p, exportProfile: e.target.value as BulkArgs['exportProfile'] }))
+                }
+              >
+                <option value="backup">{t('admin.catalog.args.profileBackup')}</option>
+                <option value="handoff">{t('admin.catalog.args.profileHandoff')}</option>
+                <option value="publish">{t('admin.catalog.args.profilePublish')}</option>
+              </select>
+            </label>
+          )}
+
           <label className="flex flex-col gap-1 text-xs text-secondary flex-1 min-w-[200px]">
-            {t('admin.catalog.bulkReason')}
+            {operation === 'request_export'
+              ? t('admin.catalog.args.justification')
+              : t('admin.catalog.bulkReason')}
             <TextInput value={reason} onChange={(e) => setReason(e.target.value)} />
           </label>
-          <Btn disabled={busy || selectedEntries.length === 0} onClick={() => void runBulk(true)}>
+          <Btn disabled={busy || selectedEntries.length === 0 || blocked !== null} onClick={() => void runBulk(true)}>
             {t('admin.catalog.dryRun')}
           </Btn>
           <Btn
-            disabled={busy || preview === null || preview.dryRun === false}
+            disabled={busy || preview === null || preview.dryRun === false || blocked !== null}
             onClick={() => void runBulk(false)}
           >
             {t('admin.catalog.apply')}
           </Btn>
         </div>
+
+        {/* Say WHY the buttons are disabled. A dead button with no explanation is the
+            thing this whole card is trying to stop the operator running into. */}
+        {blocked !== null && selectedEntries.length > 0 && (
+          <p className="text-xs text-amber-300">{t(blocked)}</p>
+        )}
+        {operation === 'set_policy' && (
+          <p className="text-xs text-secondary">{t('admin.catalog.args.invitesCloseOnlyHint')}</p>
+        )}
 
         {preview && (
           <div className="space-y-2">

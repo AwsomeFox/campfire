@@ -8,10 +8,12 @@
  * between an operator working a queue confidently and one clicking buttons that 400.
  */
 import type {
+  AiExternalContentPolicy,
   CampaignCatalogBulkOperation,
   CampaignCatalogBulkResult,
   CampaignCatalogEntry,
   CampaignCatalogSort,
+  ExportProfile,
 } from '@campfire/schema';
 import type { ChipVariant } from '../../components/chipVariants';
 
@@ -37,10 +39,16 @@ export const EMPTY_FILTERS: CatalogFilters = {
 /**
  * Build the catalog query string.
  *
- * Empty values are OMITTED rather than sent blank, and that distinction is load-bearing
- * on one parameter: the server treats a PRESENT-but-empty `ruleSystem` as "campaigns
- * with no rule system", so sending every filter unconditionally would silently apply a
- * filter the operator never chose.
+ * Empty values are OMITTED rather than sent blank. For the filters this module actually
+ * sends that is merely tidy — `parseCatalogQuery` already maps an empty `status`,
+ * `moduleInstalled`, `overQuota`, `trashed` or `q` to "not filtering".
+ *
+ * It becomes load-bearing the moment anyone adds `ruleSystem` or `packageVersion` to
+ * `CatalogFilters`: those are the two parameters where the server deliberately
+ * distinguishes ABSENT from PRESENT-BUT-EMPTY, because "campaigns with no rule system
+ * set" is a real condition an operator wants to find. Serialising either of those
+ * unconditionally would silently apply a filter nobody chose, so keep the omit-empty
+ * habit here and that addition stays safe.
  */
 export function buildCatalogQuery(
   filters: CatalogFilters,
@@ -89,6 +97,130 @@ export function availableOperations(selected: CampaignCatalogEntry[]): CampaignC
   if (selected.some((c) => c.status !== 'active')) ops.push('activate');
   ops.push('reassign_owner', 'set_quota', 'set_policy', 'update_module', 'request_export');
   return ops;
+}
+
+/**
+ * Keep the chosen operation valid as the selection changes.
+ *
+ * `availableOperations` narrows with the selection, but the chooser's state does not
+ * follow it on its own. When the current operation drops out of the list, a `<select>`
+ * with no matching `<option>` renders the FIRST option while still holding the stale
+ * value — so the operator reads "archive" and dispatches "pause". Reconciling on every
+ * change is what stops the control from lying about what the button will do.
+ */
+export function reconcileOperation(
+  current: CampaignCatalogBulkOperation,
+  available: CampaignCatalogBulkOperation[],
+): CampaignCatalogBulkOperation {
+  if (available.length === 0) return current;
+  return available.includes(current) ? current : available[0];
+}
+
+/**
+ * The operation-specific arguments, as the form holds them.
+ *
+ * Everything is a string because these come straight from inputs; `buildBulkPayload`
+ * is the single place that converts and drops the fields the operation does not use.
+ */
+export type BulkArgs = {
+  /** reassign_owner: the user id that becomes dm + primary owner. */
+  toUserId: string;
+  /** set_quota: bytes, or '' to CLEAR the quota (sent as null). */
+  storageQuotaBytes: string;
+  /** set_policy: close public invite links. Only ever closes — see below. */
+  closePublicInvites: boolean;
+  /** set_policy: '' leaves the AI content policy untouched. */
+  aiExternalContentPolicy: '' | AiExternalContentPolicy;
+  /** update_module: rule-pack slug. */
+  ruleSystem: string;
+  /** request_export: which profile the DM is asked to produce. */
+  exportProfile: ExportProfile;
+};
+
+export const EMPTY_BULK_ARGS: BulkArgs = {
+  toUserId: '',
+  storageQuotaBytes: '',
+  closePublicInvites: false,
+  aiExternalContentPolicy: '',
+  ruleSystem: '',
+  exportProfile: 'backup',
+};
+
+/**
+ * Why the current arguments cannot be submitted yet, as a translation key, or null.
+ *
+ * Mirrors `validateBulkArgs` on the server. The server remains the decider — this only
+ * stops the page dispatching a request it can already see will 400, which is the
+ * difference between a disabled button with a reason and a red error after the click.
+ */
+export function bulkArgsError(operation: CampaignCatalogBulkOperation, args: BulkArgs): string | null {
+  switch (operation) {
+    case 'reassign_owner':
+      return /^\d+$/.test(args.toUserId.trim()) && Number(args.toUserId.trim()) > 0
+        ? null
+        : 'admin.catalog.args.toUserIdRequired';
+    case 'set_quota': {
+      const raw = args.storageQuotaBytes.trim();
+      if (raw === '') return null; // '' is a deliberate "clear the quota", sent as null
+      return /^\d+$/.test(raw) ? null : 'admin.catalog.args.quotaInvalid';
+    }
+    case 'set_policy':
+      // The server requires at least one of the two policy fields.
+      return args.closePublicInvites || args.aiExternalContentPolicy !== ''
+        ? null
+        : 'admin.catalog.args.policyRequired';
+    case 'update_module':
+      return args.ruleSystem.trim() === '' ? 'admin.catalog.args.ruleSystemRequired' : null;
+    case 'request_export':
+      return null; // exportProfile always holds a valid enum value; `reason` is checked below
+    default:
+      return null;
+  }
+}
+
+/**
+ * The exact request body for a bulk run.
+ *
+ * Built here rather than inline in the page so the "which operation carries which
+ * argument" mapping is unit-testable against the server's DTO — four of the five
+ * argument-taking operations used to send nothing but `operation`/`campaignIds`/
+ * `dryRun`/`reason`, so every one of them 400'd even as a dry run.
+ */
+export function buildBulkPayload(
+  operation: CampaignCatalogBulkOperation,
+  campaignIds: number[],
+  dryRun: boolean,
+  reason: string,
+  args: BulkArgs,
+): Record<string, unknown> {
+  const body: Record<string, unknown> = { operation, campaignIds, dryRun, reason };
+  switch (operation) {
+    case 'reassign_owner':
+      body.toUserId = Number(args.toUserId.trim());
+      break;
+    case 'set_quota': {
+      const raw = args.storageQuotaBytes.trim();
+      // '' means CLEAR, which the server spells `null` — not "argument omitted".
+      body.storageQuotaBytes = raw === '' ? null : Number(raw);
+      break;
+    }
+    case 'set_policy':
+      // Only ever `false`. The catalog can close public invites but not open them:
+      // enabling is gated on the campaign being active and untrashed, and arming the
+      // flag from here would revive every retained link on the next `activate`.
+      if (args.closePublicInvites) body.publicInvitesEnabled = false;
+      if (args.aiExternalContentPolicy !== '') body.aiExternalContentPolicy = args.aiExternalContentPolicy;
+      break;
+    case 'update_module':
+      body.ruleSystem = args.ruleSystem.trim();
+      break;
+    case 'request_export':
+      body.exportProfile = args.exportProfile;
+      break;
+    default:
+      break;
+  }
+  return body;
 }
 
 /**
