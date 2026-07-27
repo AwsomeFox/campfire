@@ -203,8 +203,34 @@ export class AdminCatalogService {
    * Browsing is a privileged read, so the listing itself is audited (issue bullet 5
    * says "audit catalog access and operations", not just operations) — with the exact
    * slice recorded, so a reviewer can reconstruct what the operator actually saw
-   * rather than merely that they looked. Post-commit and best-effort in the house
-   * sense: the audit write happens after the reads, outside any transaction.
+   * rather than merely that they looked.
+   *
+   * READS FAIL CLOSED. THAT IS THE OPPOSITE OF THE WRITE PATHS, AND DELIBERATELY SO.
+   *
+   * The audit write here is NOT guarded: if it throws, the request 500s and no catalog
+   * data is returned. This endpoint refuses to serve metadata it cannot record having
+   * served. (The docblock previously called this "best-effort", which the code has never
+   * done — the comment was describing an intention the implementation contradicted.)
+   *
+   * The asymmetry with `bulk`/`applyOne`, which DO guard their audit writes, is the
+   * point rather than an inconsistency:
+   *
+   *   - On a WRITE, the change has already committed by the time the audit row is
+   *     attempted. Refusing at that point cannot un-happen it; it can only mislead an
+   *     operator into retrying work that already landed. So the truthful outcome is
+   *     returned and the audit failure is made loud.
+   *   - On a READ, nothing has happened yet. Declining is still available, costs only a
+   *     retry, and preserves the property the whole feature rests on: every disclosure
+   *     of campaign metadata to a non-member is recorded. A silently unaudited read is
+   *     precisely the "administrative label laundering content access" failure this
+   *     module exists to prevent.
+   *
+   * Same rule applies to `getCatalogEntry` and `listExportRequests` below, including
+   * BOTH rows of their double-writes. A partial double-write (server row committed,
+   * campaign row failed) still 500s and returns nothing, so the trail can over-record a
+   * disclosure that did not reach the operator but can never under-record one that did.
+   * Over-recording is the safe residue; it cannot be eliminated without a
+   * transaction-aware audit write, which is #1581.
    */
   async listCatalog(user: RequestUser, query: CatalogQuery): Promise<CampaignCatalogPage> {
     const policy = await this.getPrivacyPolicy();
@@ -257,7 +283,13 @@ export class AdminCatalogService {
     return { items, total: Number(total), hasMore: offset + items.length < Number(total), limit, offset, sort, order };
   }
 
-  /** One catalog row by id. Audited both server-scoped and campaign-scoped. */
+  /**
+   * One catalog row by id. Audited both server-scoped and campaign-scoped.
+   *
+   * Both audit writes are UNGUARDED, like `listCatalog` — a read this module cannot
+   * record is a read it does not serve. See the fail-closed rationale there; the same
+   * applies to each row of this double-write independently.
+   */
   async getCatalogEntry(user: RequestUser, campaignId: number): Promise<CampaignCatalogEntry> {
     const policy = await this.getPrivacyPolicy();
     const rows = await this.db
@@ -911,6 +943,12 @@ export class AdminCatalogService {
    * discloses requester justifications and DM decision notes — other people's stated
    * reasons, which is exactly the content that guarantee exists to cover. Every other
    * catalog read records one; this one did not.
+   *
+   * Both rows below are UNGUARDED, like the other two read paths: a read this module
+   * cannot record is a read it does not serve. See `listCatalog` for why reads fail
+   * closed while writes are guarded. Note that the double-write doubles the number of
+   * ways this read can 500 — that is accepted, because the alternative is a disclosure
+   * of other people's justifications with no record that it happened.
    */
   async listExportRequests(
     user: RequestUser,

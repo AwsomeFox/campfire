@@ -957,6 +957,56 @@ describe('Issue #587: campaign catalog paging, filtering and bulk lifecycle (e2e
       expect(read[0].detail).toMatch(/total=\d+/);
     });
 
+    it('REFUSES to serve a read it cannot record, on every read path', async () => {
+      // A DELIBERATE ASYMMETRY, PINNED SO IT CANNOT DRIFT.
+      //
+      // The write paths guard their audit writes: by then the change has committed, and
+      // relabelling it failed would send an operator to retry work that already landed.
+      // Reads are the opposite — nothing has happened yet, declining costs only a retry,
+      // and it preserves the property the whole feature rests on: every disclosure of
+      // campaign metadata to a non-member is recorded. A silently unaudited read is the
+      // failure this module exists to prevent.
+      //
+      // Covers all three read paths, and BOTH rows of the two double-writes, because a
+      // partial double-write must not serve data either.
+      const audit = ctx.app.get(AuditService);
+
+      const failsClosed = async (call: () => Promise<{ status: number; body: unknown }>) => {
+        const spy = jest.spyOn(audit, 'log').mockRejectedValue(new Error('audit table is unavailable'));
+        try {
+          return await call();
+        } finally {
+          spy.mockRestore();
+        }
+      };
+
+      // 1. The paged listing.
+      const list = await failsClosed(() => admin.get('/api/v1/admin/campaigns').query({ limit: 5 }));
+      expect(list.status).toBeGreaterThanOrEqual(500);
+      expect((list.body as { items?: unknown }).items).toBeUndefined();
+
+      // 2. The single-entry read (double-write: campaign row + server mirror).
+      const entry = await failsClosed(() => admin.get(`/api/v1/admin/campaigns/${aIds[0]}`));
+      expect(entry.status).toBeGreaterThanOrEqual(500);
+      expect((entry.body as { id?: number }).id).toBeUndefined();
+
+      // 3. The export-request listing, unscoped (one row) and scoped (double-write).
+      const unscoped = await failsClosed(() => admin.get('/api/v1/admin/campaigns/export-requests'));
+      expect(unscoped.status).toBeGreaterThanOrEqual(500);
+      expect((unscoped.body as { items?: unknown }).items).toBeUndefined();
+
+      const scoped = await failsClosed(() =>
+        admin.get('/api/v1/admin/campaigns/export-requests').query({ campaignId: aIds[3] }),
+      );
+      expect(scoped.status).toBeGreaterThanOrEqual(500);
+      expect((scoped.body as { items?: unknown }).items).toBeUndefined();
+
+      // And the refusal is transient, not sticky: the same reads work once audit does.
+      const recovered = await admin.get('/api/v1/admin/campaigns').query({ limit: 5 });
+      expect(recovered.status).toBe(200);
+      expect(Array.isArray(recovered.body.items)).toBe(true);
+    });
+
     it('records a CAMPAIGN-SCOPED read in the server-admin trail too, not instead', async () => {
       // The audit row used to take its scope from the query string
       // (`campaignId: opts.campaignId ?? null`). `listServerAdmin` returns only rows
