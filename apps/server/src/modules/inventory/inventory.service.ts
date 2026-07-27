@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, desc, eq, isNotNull, isNull, lt, sql } from 'drizzle-orm';
+import { and, count, desc, eq, isNotNull, isNull, lt, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import { InventoryItemCreate, InventoryItemUpdate, TreasuryPatch } from '@campfire/schema';
 import type { InventoryItem, Treasury, Role } from '@campfire/schema';
@@ -91,6 +91,23 @@ export class InventoryService {
       .from(inventoryItems)
       .where(and(eq(inventoryItems.campaignId, campaignId), notDeleted(inventoryItems.deletedAt)));
     return rows.map(toDomain);
+  }
+
+  /**
+   * How many live inventory items this campaign has (issue #602).
+   *
+   * The campaign summary needs only the integer, and the dashboard re-reads that
+   * summary on a timer — so loading every item row (name, notes, quantities, the
+   * lot) just to take `.length` made the poll's cost scale with the party's loot
+   * pile. The predicate is identical to {@link listForCampaign}, so the number is
+   * the same one that list would have produced; it just never leaves SQLite.
+   */
+  async countForCampaign(campaignId: number): Promise<number> {
+    const [row] = await this.db
+      .select({ value: count() })
+      .from(inventoryItems)
+      .where(and(eq(inventoryItems.campaignId, campaignId), notDeleted(inventoryItems.deletedAt)));
+    return row?.value ?? 0;
   }
 
   async listTrashForCampaign(campaignId: number): Promise<InventoryItem[]> {
