@@ -142,6 +142,11 @@ export class BackupController {
       // Once streaming begins, pipeline teardown owns the response. Do not let
       // Nest attempt a second JSON error response over a partial ZIP.
       if (res.headersSent || res.destroyed) return;
+      // A pre-stream validation/reconciliation failure still belongs to Nest's
+      // JSON exception path. Remove attachment headers so clients do not save
+      // that error payload as a corrupt ZIP.
+      res.removeHeader('Content-Type');
+      res.removeHeader('Content-Disposition');
       throw error;
     } finally {
       operation.dispose();
