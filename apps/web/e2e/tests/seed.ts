@@ -16,9 +16,23 @@ export function stateFor(role: 'admin' | 'dm' | 'player' | 'viewer'): string {
   return resolve(AUTH_DIR, `${role}.json`);
 }
 
-/** 16:9 aspect ratio PNG buffer matching the battle map surface aspect ratio. */
+/**
+ * A real, decodable 16x9 PNG (8-bit RGB, one IDAT, correct chunk CRCs) — 16:9 so it matches the
+ * battle-map surface's aspect ratio and fills it without letterboxing, which keeps the grid and
+ * calibration overlays' contained-rect maths trivial.
+ *
+ * The previous buffer here was NOT a decodable PNG (issue #1609): its IHDR CRC did not match and
+ * its IDAT header was malformed. That stayed invisible for as long as every consumer handed the
+ * bytes to `route.fulfill`, because Chromium renders leniently and nothing in the suite decoded
+ * it strictly. The moment a spec POSTs it to the real attachment endpoint — which decodes the
+ * upload to derive dimensions — the server answers
+ * `400 Input buffer has corrupt header: pngload_buffer: invalid chunk checksum`, an error that
+ * names libvips and not the fixture, so it reads as an upload-endpoint bug. Keep this buffer
+ * strictly valid: run the chunk-CRC check in #1609 over any replacement rather than trusting
+ * that it renders.
+ */
 export const PNG_16_9 = Buffer.from(
-  'iVBORw0KGgoAAAANSUhEUgAAABAAAAAJCAYAAAACvn2aAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAARElEQVQoU2NgGAWjYBSMAgAAAQQAAAGn1v8AAAAASUVORUSCYII=',
+  'iVBORw0KGgoAAAANSUhEUgAAABAAAAAJCAIAAAC0SDtlAAAAIUlEQVR42mOwsveGIzlFTTjCJc4wCDUQowhZfDBqINXTALwBVGFnWt94AAAAAElFTkSuQmCC',
   'base64',
 );
 
