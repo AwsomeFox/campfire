@@ -217,7 +217,7 @@ export function createPrivateUploadStageRoot(tmpDir = os.tmpdir()): string {
   }
 }
 
-function getUploadStageRoot(): string {
+export function getUploadStageRoot(): string {
   if (!uploadStageRoot || !fs.existsSync(uploadStageRoot) || !fs.existsSync(uploadStageOwnerPath(uploadStageRoot))) {
     uploadStageRoot = createPrivateUploadStageRoot();
   }

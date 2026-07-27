@@ -6,6 +6,7 @@ import {
   BACKUP_UPLOAD_STAGE_PREFIX,
   createPrivateUploadStageRoot,
   defaultUploadStageProcessState,
+  getUploadStageRoot,
   linuxProcessState,
   reclaimStaleUploadStageRoots,
 } from '../../src/modules/backup/backup.controller';
@@ -42,6 +43,20 @@ describe('backup upload staging root', () => {
     expect(fs.lstatSync(root).isDirectory()).toBe(true);
     expect(fs.lstatSync(root).isSymbolicLink()).toBe(false);
     expect(fs.statSync(root).mode & 0o777).toBe(0o700);
+  });
+
+  it('recreates a cached root when its directory or owner marker disappears', () => {
+    const first = getUploadStageRoot();
+    expect(fs.existsSync(path.join(first, BACKUP_UPLOAD_STAGE_OWNER_FILE))).toBe(true);
+    fs.rmSync(first, { recursive: true, force: true });
+    const second = getUploadStageRoot();
+    expect(second).not.toBe(first);
+    expect(fs.existsSync(path.join(second, BACKUP_UPLOAD_STAGE_OWNER_FILE))).toBe(true);
+    fs.rmSync(path.join(second, BACKUP_UPLOAD_STAGE_OWNER_FILE));
+    const third = getUploadStageRoot();
+    expect(third).not.toBe(second);
+    expect(fs.existsSync(path.join(third, BACKUP_UPLOAD_STAGE_OWNER_FILE))).toBe(true);
+    fs.rmSync(third, { recursive: true, force: true });
   });
 
   it('reclaims a dead-owner staging root while preserving the current live root', () => {
