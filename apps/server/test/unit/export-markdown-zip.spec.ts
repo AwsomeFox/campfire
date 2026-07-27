@@ -1,6 +1,7 @@
 import JSZip from 'jszip';
 import { PassThrough } from 'node:stream';
 import { ExportService } from '../../src/modules/export/export.service';
+import { resolveExportPolicy } from '../../src/modules/export/export-profiles';
 import type { RequestUser } from '../../src/common/user.types';
 
 /**
@@ -134,6 +135,30 @@ function serviceWithCollisions(): ExportService {
 }
 
 describe('buildMarkdownZip — filename collisions (issues #530 / #863)', () => {
+  it('stages sanitized streaming attachments instead of retaining their buffers', () => {
+    const service = serviceWithCollisions();
+    const bytes = Buffer.from('%PDF-without-private-identifiers');
+    (service as any).attachments.exportPathIfPresent = jest.fn(() => '/live/source.pdf');
+    (service as any).attachments.readBytesIfPresent = jest.fn(() => bytes);
+    const stage = jest.fn(() => ({ path: '/staged/sanitized.pdf', checksum: 'abc123' }));
+
+    const decisions = (service as any).planAttachmentBytes(
+      1,
+      { attachments: [{ id: 7, mime: 'application/pdf', filename: 'source.pdf' }] },
+      resolveExportPolicy('handoff'),
+      [],
+      true,
+      stage,
+    );
+
+    expect(stage).toHaveBeenCalledWith(bytes);
+    expect(decisions.get(7)).toMatchObject({
+      bytes: null,
+      sourcePath: '/staged/sanitized.pdf',
+      sourceChecksum: 'abc123',
+    });
+  });
+
   it('streams a readable ZIP without invoking the compatibility buffer builder', async () => {
     const service = serviceWithCollisions();
     const legacy = jest.spyOn(service, 'buildMarkdownZip');

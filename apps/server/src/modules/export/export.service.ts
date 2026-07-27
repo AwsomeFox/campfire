@@ -126,6 +126,8 @@ type AttachmentByteDecision = {
   bytes: Buffer | null;
   /** Original immutable attachment source, used only by the streaming backup path. */
   sourcePath?: string;
+  /** Present when sourcePath was already staged from sanitized bytes. */
+  sourceChecksum?: string;
   /** Set when bytes were withheld — surfaced in warnings.txt and the inventory. */
   withheldReason?: string;
   metadataStripped: boolean;
@@ -135,7 +137,12 @@ type MarkdownZipWriter = {
   file(path: string, content: string | Buffer): void;
   /** Deliberately distinct from `file`: streaming exports hand archiver a pathname. */
   attachment?(path: string, content: Buffer): void;
-  attachmentPath?(path: string, source: string): Promise<{ path: string; checksum: string }>;
+  stageAttachment?(content: Buffer): { path: string; checksum: string };
+  attachmentPath?(
+    path: string,
+    source: string,
+    stagedChecksum?: string,
+  ): Promise<{ path: string; checksum: string }>;
 };
 
 export type ProfileExportResult = {
@@ -447,7 +454,12 @@ export class ExportService {
     user: RequestUser,
     profile: ExportProfile = DEFAULT_EXPORT_PROFILE,
     options: ExportProfileOptions = {},
-    opts: { inspectAttachmentBytes?: boolean; format?: 'json' | 'mdzip'; attachmentPaths?: boolean } = {},
+    opts: {
+      inspectAttachmentBytes?: boolean;
+      format?: 'json' | 'mdzip';
+      attachmentPaths?: boolean;
+      stageAttachmentBytes?: (content: Buffer) => { path: string; checksum: string };
+    } = {},
   ): Promise<ProfileExportResult & { projection: ExportProjection; attachmentBytes: Map<number, AttachmentByteDecision> }> {
     const policy = resolveExportPolicy(profile, options);
     const raw = (await this.buildExport(campaignId, user)) as unknown as Record<string, unknown>;
@@ -456,7 +468,14 @@ export class ExportService {
     const { scannable } = partitionIdentifiers(collectPrivateIdentifiers(raw));
     const format = opts.format ?? 'json';
     const attachmentBytes = opts.inspectAttachmentBytes
-      ? this.planAttachmentBytes(campaignId, raw, policy, scannable, opts.attachmentPaths === true)
+      ? this.planAttachmentBytes(
+          campaignId,
+          raw,
+          policy,
+          scannable,
+          opts.attachmentPaths === true,
+          opts.stageAttachmentBytes,
+        )
       : new Map<number, AttachmentByteDecision>();
 
     // Keep `present` honest: a row whose bytes the policy withholds must not claim the
@@ -585,6 +604,7 @@ export class ExportService {
     policy: ResolvedExportPolicy,
     identifiers: string[],
     preferPaths = false,
+    stageAttachmentBytes?: (content: Buffer) => { path: string; checksum: string },
   ): Map<number, AttachmentByteDecision> {
     const decisions = new Map<number, AttachmentByteDecision>();
     const rows = Array.isArray(raw.attachments) ? (raw.attachments as Array<{ id: number; mime: string; filename: string }>) : [];
@@ -622,7 +642,18 @@ export class ExportService {
         });
         continue;
       }
-      decisions.set(row.id, { id: row.id, bytes: result.bytes, metadataStripped: result.stripped });
+      if (stageAttachmentBytes) {
+        const staged = stageAttachmentBytes(result.bytes);
+        decisions.set(row.id, {
+          id: row.id,
+          bytes: null,
+          sourcePath: staged.path,
+          sourceChecksum: staged.checksum,
+          metadataStripped: result.stripped,
+        });
+      } else {
+        decisions.set(row.id, { id: row.id, bytes: result.bytes, metadataStripped: result.stripped });
+      }
     }
     return decisions;
   }
@@ -829,7 +860,16 @@ export class ExportService {
             fs.writeFileSync(staged, content, { flag: 'wx' });
             archive.file(staged, { name: entryPath });
           },
-          attachmentPath: async (entryPath, source) => {
+          stageAttachment: (content) => {
+            const staged = path.join(stagingDir, `${stageNumber++}.attachment`);
+            fs.writeFileSync(staged, content, { flag: 'wx' });
+            return { path: staged, checksum: sha256Hex(content) };
+          },
+          attachmentPath: async (entryPath, source, stagedChecksum) => {
+            if (stagedChecksum) {
+              archive.file(source, { name: entryPath });
+              return { path: source, checksum: stagedChecksum };
+            }
             const staged = path.join(stagingDir, `${stageNumber++}.attachment`);
             const hash = crypto.createHash('sha256');
             const hashing = new Transform({
@@ -899,6 +939,7 @@ export class ExportService {
     const profileResult = await this.buildProfileExport(campaignId, user, opts.profile ?? DEFAULT_EXPORT_PROFILE, opts.options ?? {}, {
       inspectAttachmentBytes: true,
       attachmentPaths: streamAttachments,
+      stageAttachmentBytes: streamAttachments ? writer.stageAttachment : undefined,
       format: 'mdzip',
     });
     const policy = profileResult.policy;
@@ -1108,7 +1149,11 @@ export class ExportService {
           throw new Error('Markdown ZIP writer cannot stream attachment paths');
         }
         if (decision.sourcePath && writer.attachmentPath) {
-          const staged = await writer.attachmentPath(a.file, decision.sourcePath);
+          const staged = await writer.attachmentPath(
+            a.file,
+            decision.sourcePath,
+            decision.sourceChecksum,
+          );
           fileChecksums[a.file] = staged.checksum;
         } else if (decision.bytes) {
           if (writer.attachment) writer.attachment(a.file, decision.bytes);
