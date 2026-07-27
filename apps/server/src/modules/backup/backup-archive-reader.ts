@@ -88,16 +88,27 @@ export class BackupArchiveReader {
     try {
       await new Promise<void>((resolve, reject) => {
         let settled = false;
+        const cleanup = () => {
+          signal?.removeEventListener('abort', abort);
+          zip.removeListener('error', fail);
+          zip.removeListener('entry', onEntry);
+          zip.removeListener('end', onEnd);
+        };
         const fail = (err: unknown) => {
           if (settled) return;
           settled = true;
+          cleanup();
           zip.close();
           reject(err);
         };
         const abort = () => fail(new Error('aborted'));
-        signal?.addEventListener('abort', abort, { once: true });
-        zip.on('error', fail);
-        zip.on('entry', (entry: Entry) => {
+        const onEnd = () => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          resolve();
+        };
+        const onEntry = (entry: Entry) => {
           try {
             const entryCount = entries.length + 1;
             if (entryCount > limits.maxEntries) invalid('too many entries');
@@ -116,8 +127,11 @@ export class BackupArchiveReader {
             entries.push(entry);
             zip.readEntry();
           } catch (err) { fail(err); }
-        });
-        zip.on('end', () => { if (!settled) { settled = true; resolve(); } });
+        };
+        signal?.addEventListener('abort', abort, { once: true });
+        zip.once('error', fail);
+        zip.on('entry', onEntry);
+        zip.once('end', onEnd);
         zip.readEntry();
       });
       return new BackupArchiveReader(zip, entries, limits);

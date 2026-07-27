@@ -63,6 +63,40 @@ describe('backup streaming writer (#603)', () => {
     await expect(service().buildBackup({ signal: controller.signal }, new PassThrough())).rejects.toThrow('cancelled');
   });
 
+  it('refuses to publish a database entry larger than restore accepts', async () => {
+    const realStatSync = fs.statSync.bind(fs);
+    const stat = jest.spyOn(fs, 'statSync').mockImplementation(((target: fs.PathLike, ...args: unknown[]) => {
+      const actual = realStatSync(target, ...(args as []));
+      return String(target).endsWith(`${path.sep}campfire.db`)
+        ? Object.assign(Object.create(Object.getPrototypeOf(actual)), actual, { size: 512 * 1024 * 1024 + 1 })
+        : actual;
+    }) as typeof fs.statSync);
+    try {
+      await expect(service().buildBackup(undefined, new PassThrough())).rejects.toThrow('restore entry limit');
+    } finally {
+      stat.mockRestore();
+    }
+  });
+
+  it('destroys a scheduled output when backup setup fails before piping', async () => {
+    const backupDir = path.join(dataDir, 'backups');
+    const previous = process.env.BACKUP_DIR;
+    process.env.BACKUP_DIR = backupDir;
+    const svc = service();
+    (svc as any).archiveOperation = 'backup';
+    const createStream = jest.spyOn(fs, 'createWriteStream');
+    try {
+      await expect((svc as any).runScheduledBackup(60 * 60 * 1000)).rejects.toThrow('already in progress');
+      const partial = createStream.mock.results.at(-1)?.value as fs.WriteStream;
+      expect(partial.destroyed).toBe(true);
+    } finally {
+      createStream.mockRestore();
+      (svc as any).archiveOperation = null;
+      if (previous === undefined) delete process.env.BACKUP_DIR;
+      else process.env.BACKUP_DIR = previous;
+    }
+  });
+
   it('publishes scheduled archives atomically and leaves no partial file', async () => {
     const backupDir = path.join(dataDir, 'backups');
     const previous = process.env.BACKUP_DIR;

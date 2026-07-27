@@ -2,7 +2,7 @@ import crypto, { createHash, scryptSync } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { PassThrough, type Writable } from 'node:stream';
+import { PassThrough, Transform, type Writable } from 'node:stream';
 import { finished, pipeline } from 'node:stream/promises';
 import archiver from 'archiver';
 import {
@@ -14,7 +14,15 @@ import {
   type OnApplicationBootstrap,
 } from '@nestjs/common';
 import Database from 'better-sqlite3';
-import { BackupArchiveReader, MAX_KEY_ENVELOPE_BYTES, MAX_MANIFEST_BYTES } from './backup-archive-reader';
+import {
+  BackupArchiveReader,
+  MAX_ARCHIVE_COMPRESSED_BYTES,
+  MAX_ARCHIVE_ENTRIES,
+  MAX_ARCHIVE_UNCOMPRESSED_BYTES,
+  MAX_ENTRY_UNCOMPRESSED_BYTES,
+  MAX_KEY_ENVELOPE_BYTES,
+  MAX_MANIFEST_BYTES,
+} from './backup-archive-reader';
 import { DB_HOLDER, DbHolder, dbFilePath, resolveDataDir } from '../../db/db.module';
 import { decryptSecret } from '../../common/crypto';
 import { AiProviderConfigService } from '../ai-provider-config/ai-provider-config.service';
@@ -523,10 +531,14 @@ export class BackupService implements OnApplicationBootstrap {
       // Same-filesystem temporary file means a completed archive becomes visible
       // atomically. Interrupted runs leave only a removable .partial artifact.
       const partialPath = path.join(dir, `.${archiveName}.${crypto.randomUUID()}.partial`);
+      const partialOutput = fs.createWriteStream(partialPath, { flags: 'wx', mode: 0o600 });
+      // Handle failures that occur before buildBackup reaches pipeline(), where
+      // it would otherwise attach the stream's error handling.
+      partialOutput.on('error', () => undefined);
       try {
         await this.buildBackup(
           scheduledPassphrase ? { keyPassphrase: scheduledPassphrase } : undefined,
-          fs.createWriteStream(partialPath, { flags: 'wx', mode: 0o600 }),
+          partialOutput,
         );
         const descriptor = fs.openSync(partialPath, 'r');
         try { fs.fsyncSync(descriptor); } finally { fs.closeSync(descriptor); }
@@ -558,6 +570,7 @@ export class BackupService implements OnApplicationBootstrap {
           `pruned ${prune.count} archive(s), ${prune.bytes} bytes; next run ${nextRunAt}`,
       );
       } finally {
+        if (!partialOutput.destroyed && !partialOutput.writableFinished) partialOutput.destroy();
         fs.rmSync(partialPath, { force: true });
       }
     } catch (err) {
@@ -942,6 +955,12 @@ export class BackupService implements OnApplicationBootstrap {
       // Keep the snapshot on disk and let the ZIP writer pull from it under
       // output backpressure instead of materializing the database in the V8 heap.
       const dbSize = safeFileBytes(snapshotPath);
+      if (dbSize > MAX_ENTRY_UNCOMPRESSED_BYTES) {
+        throw new ServiceUnavailableException(
+          `Backup database exceeds the ${MAX_ENTRY_UNCOMPRESSED_BYTES} byte restore entry limit`,
+        );
+      }
+      let declaredArchiveBytes = dbSize;
       zip.file(snapshotPath, { name: DB_ENTRY });
 
       // Read committed attachment rows from the SNAPSHOT. Rows in state 'reserved' are
@@ -992,6 +1011,17 @@ export class BackupService implements OnApplicationBootstrap {
         // → restored DB would be internally inconsistent with the archived file.
         const staged = path.join(tmpDir, 'uploads', rel);
         const captured = await stageAndHashFile(abs, staged, options?.signal);
+        if (captured.bytes > MAX_ENTRY_UNCOMPRESSED_BYTES) {
+          throw new ServiceUnavailableException(
+            `Backup attachment ${rel} exceeds the ${MAX_ENTRY_UNCOMPRESSED_BYTES} byte restore entry limit`,
+          );
+        }
+        declaredArchiveBytes += captured.bytes;
+        if (declaredArchiveBytes > MAX_ARCHIVE_UNCOMPRESSED_BYTES) {
+          throw new ServiceUnavailableException(
+            `Backup contents exceed the ${MAX_ARCHIVE_UNCOMPRESSED_BYTES} byte restore archive limit`,
+          );
+        }
         const after = safeFileBytes(abs);
         if (before !== after || captured.bytes !== before || captured.bytes !== row.size) changed++;
         // Do not retain attachment bytes: the ZIP producer reads this file as
@@ -1071,8 +1101,14 @@ export class BackupService implements OnApplicationBootstrap {
             probe.close();
           }
         }
-        const envelope = encryptKeyfile(keyBytes, requestedPassphrase);
-        zip.append(JSON.stringify(envelope, null, 2), { name: KEY_ENVELOPE_ENTRY });
+        const envelope = JSON.stringify(encryptKeyfile(keyBytes, requestedPassphrase), null, 2);
+        declaredArchiveBytes += Buffer.byteLength(envelope);
+        if (declaredArchiveBytes > MAX_ARCHIVE_UNCOMPRESSED_BYTES) {
+          throw new ServiceUnavailableException(
+            `Backup contents exceed the ${MAX_ARCHIVE_UNCOMPRESSED_BYTES} byte restore archive limit`,
+          );
+        }
+        zip.append(envelope, { name: KEY_ENVELOPE_ENTRY });
         aiKeyIncluded = true;
       } else if (requestedPassphrase && aiKeySource === 'env') {
         this.logger.warn(
@@ -1097,7 +1133,26 @@ export class BackupService implements OnApplicationBootstrap {
         attachments: attachmentRecords,
         reconciliation,
       };
-      zip.append(JSON.stringify(manifest, null, 2), { name: MANIFEST_ENTRY });
+      const manifestJson = JSON.stringify(manifest, null, 2);
+      const manifestBytes = Buffer.byteLength(manifestJson);
+      if (manifestBytes > MAX_MANIFEST_BYTES) {
+        throw new ServiceUnavailableException(
+          `Backup manifest exceeds the ${MAX_MANIFEST_BYTES} byte restore manifest limit`,
+        );
+      }
+      const entryCount = 2 + attachmentRecords.length + (aiKeyIncluded ? 1 : 0);
+      if (entryCount > MAX_ARCHIVE_ENTRIES) {
+        throw new ServiceUnavailableException(
+          `Backup contents exceed the ${MAX_ARCHIVE_ENTRIES} entry restore archive limit`,
+        );
+      }
+      declaredArchiveBytes += manifestBytes;
+      if (declaredArchiveBytes > MAX_ARCHIVE_UNCOMPRESSED_BYTES) {
+        throw new ServiceUnavailableException(
+          `Backup contents exceed the ${MAX_ARCHIVE_UNCOMPRESSED_BYTES} byte restore archive limit`,
+        );
+      }
+      zip.append(manifestJson, { name: MANIFEST_ENTRY });
 
       // Fail loudly if any file was missing or changed under capture — partial /
       // inconsistent archives should never silently claim success (#828 AC). Orphans
@@ -1113,14 +1168,24 @@ export class BackupService implements OnApplicationBootstrap {
       const archive = zip;
       const chunks: Buffer[] = [];
       const sink = output ?? new PassThrough();
-      archive.once('error', (err) => sink.destroy(err));
-      archive.pipe(sink);
       if (!output) {
         sink.on('data', (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
       }
+      let compressedBytes = 0;
+      const compressedLimit = new Transform({
+        transform(chunk: Buffer, _encoding, callback) {
+          compressedBytes += chunk.length;
+          if (compressedBytes > MAX_ARCHIVE_COMPRESSED_BYTES) {
+            callback(new Error(`Backup archive exceeds the ${MAX_ARCHIVE_COMPRESSED_BYTES} byte compressed restore limit`));
+            return;
+          }
+          callback(null, chunk);
+        },
+      });
       const abort = () => archive.destroy(new Error('Backup generation cancelled'));
       options?.signal?.addEventListener('abort', abort, { once: true });
-      const done = finished(sink);
+      const done = pipeline(archive, compressedLimit, sink);
+      void done.catch(() => undefined);
       try {
         assertBackupNotCancelled(options?.signal);
         await archive.finalize();

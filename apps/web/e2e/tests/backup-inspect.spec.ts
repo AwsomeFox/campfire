@@ -192,6 +192,19 @@ test.describe('server backup workflow UI (issues #514 / #444)', () => {
     await expect(card.getByRole('alert').getByRole('button', { name: 'Retry' })).toBeVisible();
   });
 
+  test('localizes generic network failures while preserving download-specific errors', async ({ page }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(window, 'showSaveFilePicker', { value: undefined, configurable: true });
+    });
+    await page.route('**/api/v1/backup/status', (route) => route.fulfill({ status: 200, json: MOCK_STATUS }));
+    await page.route('**/api/v1/backup', (route) => route.abort('failed'));
+
+    await page.goto('/admin/storage');
+    const card = page.locator('.server-backup-workflow-card');
+    await card.getByRole('button', { name: 'Create & download backup' }).click();
+    await expect(card.getByRole('alert')).toContainText("Couldn't load data.");
+  });
+
   test('uses indeterminate progress when a chunked response omits Content-Length', async ({ page }) => {
     await page.addInitScript(() => {
       Object.defineProperty(window, 'showSaveFilePicker', { value: undefined, configurable: true });

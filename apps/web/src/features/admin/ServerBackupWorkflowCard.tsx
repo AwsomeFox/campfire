@@ -15,6 +15,7 @@ import { ConfirmDestructiveDialog } from '../../components/ConfirmDestructiveDia
 import {
   RESTORE_CONFIRM_TOKEN,
   KEY_ENVELOPE_MIN_PASSPHRASE_LEN,
+  BackupDownloadLimitError,
   downloadServerBackup,
   fetchBackupStatus,
   inspectBackupArchive,
@@ -253,7 +254,11 @@ export function ServerBackupWorkflowCard() {
       if (controller.signal.aborted) {
         setDownloadNote('Download cancelled.');
       } else {
-        setDownloadError(err instanceof Error && err.message ? err.message : translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
+        setDownloadError(
+          err instanceof BackupDownloadLimitError
+            ? err.message
+            : translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }),
+        );
       }
     } finally {
       downloadAbortRef.current = null;

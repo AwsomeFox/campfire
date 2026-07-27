@@ -178,6 +178,9 @@ function triggerBrowserDownload(blob: Blob, filename: string): void {
 /** The non-streaming browser fallback is deliberately bounded. */
 export const MAX_BROWSER_BACKUP_BUFFER_BYTES = 512 * 1024 * 1024;
 
+/** Deliberately user-actionable download constraints that should remain verbatim. */
+export class BackupDownloadLimitError extends Error {}
+
 export interface BackupDownloadProgress {
   receivedBytes: number;
   totalBytes: number | null;
@@ -276,7 +279,7 @@ export async function downloadServerBackup(options?: {
 
   if (totalBytes !== null && totalBytes > MAX_BROWSER_BACKUP_BUFFER_BYTES) {
     await reader.cancel();
-    throw new Error(
+    throw new BackupDownloadLimitError(
       `This browser must buffer the archive in memory and only supports backups up to ${MAX_BROWSER_BACKUP_BUFFER_BYTES / 1024 / 1024} MiB. Use a browser with File System Access support or download with curl.`,
     );
   }
@@ -287,7 +290,7 @@ export async function downloadServerBackup(options?: {
     receivedBytes += value.byteLength;
     if (receivedBytes > MAX_BROWSER_BACKUP_BUFFER_BYTES) {
       await reader.cancel();
-      throw new Error(
+      throw new BackupDownloadLimitError(
         `This browser must buffer the archive in memory and only supports backups up to ${MAX_BROWSER_BACKUP_BUFFER_BYTES / 1024 / 1024} MiB. The partial download was discarded.`,
       );
     }

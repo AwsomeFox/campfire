@@ -43,7 +43,12 @@ const uploadStorage = diskStorage({
 
 async function removeUpload(file: MulterFile | undefined): Promise<void> {
   if (!file?.path) return;
-  await fs.promises.rm(file.path, { force: true });
+  try {
+    await fs.promises.rm(file.path, { force: true });
+  } catch {
+    // Staging cleanup is best-effort and must never replace the inspect/restore
+    // result (especially a useful validation 400) with an unrelated cleanup 500.
+  }
 }
 
 function requestAbort(req: Request, res: Response): { signal: AbortSignal; dispose: () => void } {
