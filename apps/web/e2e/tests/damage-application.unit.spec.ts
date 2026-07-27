@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { DiceRoll } from '@campfire/schema';
 import { reliableDiceSubtotal } from '../../src/components/RollResultToastContext';
+import { buildAoeDamageApplications } from '../../src/features/encounters/directDamage';
 
 const ROOT = resolve(__dirname, '../..');
 
@@ -44,5 +45,17 @@ test.describe('direct damage apply controls (issue #605)', () => {
     expect(source).toContain("mode === 'damage' && supportsDamageRules");
     expect(source).toContain('disabled={diceTotal === undefined}');
     expect(source).toContain('key={pendingApply.id}');
+  });
+
+  test('builds independent save outcomes for targets in one AoE apply', () => {
+    expect(buildAoeDamageApplications(
+      [11, 22],
+      { damageType: 'fire', isCrit: true, damageDice: 6 },
+      'full',
+      { 22: 'half' },
+    )).toEqual([
+      { combatantId: 11, damage: { damageType: 'fire', isCrit: true, damageDice: 6 } },
+      { combatantId: 22, damage: { damageType: 'fire', isCrit: true, damageDice: 6, saveOutcome: 'half' } },
+    ]);
   });
 });

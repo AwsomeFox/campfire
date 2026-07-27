@@ -133,6 +133,12 @@ import { FOG_HIDDEN_TOKEN_LABEL, partitionMapTokens } from './mapTokenPlacement'
 import { gridCellRevealRect } from './fogGridReveal';
 import { combatantsInAoe, type AoeHitLayout, type AoeHitTestContext } from './aoeHitTest';
 import {
+  buildAoeDamageApplications,
+  type DamageSaveOutcome,
+  type DirectDamageMetadata,
+  type TargetDamageApplication,
+} from './directDamage';
+import {
   calibrationToPx,
   clampPercent,
   computeContainedRect,
@@ -1519,22 +1525,24 @@ export default function RunSessionPage() {
 
   const applyHpDeltaBulk = useCallback(
     async (
-      combatantIds: readonly number[],
+      applications: readonly TargetDamageApplication[],
       delta: number,
       actorId?: number,
-      damage: { damageType?: string; saveOutcome?: 'full' | 'half'; isCrit?: boolean; damageDice?: number } = {},
     ) => {
-      if (combatantIds.length === 0) return;
+      if (applications.length === 0) return;
       setActionError(null);
       await queryClient.cancelQueries({ queryKey: queryKeys.encounter(eid) });
       const previous = queryClient.getQueryData<EncounterWithCombatants>(queryKeys.encounter(eid));
-      const targets = new Set(combatantIds);
+      const targets = new Set(applications.map(({ combatantId }) => combatantId));
+      const hasDamageMetadata = applications.some(({ damage }) =>
+        damage.damageType !== undefined ||
+        damage.saveOutcome !== undefined ||
+        damage.isCrit !== undefined ||
+        damage.damageDice !== undefined
+      );
       if (
         previous &&
-        damage.damageType === undefined &&
-        damage.saveOutcome === undefined &&
-        damage.isCrit === undefined &&
-        damage.damageDice === undefined
+        !hasDamageMetadata
       ) {
         queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), {
           ...previous,
@@ -1554,7 +1562,7 @@ export default function RunSessionPage() {
       // itself and is deliberately left out of this change.
       const bulkOperationId = newOperationId();
       try {
-        for (const combatantId of combatantIds) {
+        for (const { combatantId, damage } of applications) {
           await api.patch(
             `${API}/encounters/${eid}/combatants/${combatantId}`,
             hpPatchWithActor(
@@ -2426,9 +2434,9 @@ export default function RunSessionPage() {
             hpDelta.mutate({ combatantId, delta, actorId, ...damage });
             setPendingApply(null);
           }}
-          onApplyToAll={(combatantIds, delta, damage) => {
+          onApplyToAll={(applications, delta) => {
             const actorId = pendingApply.actorCombatantId ?? currentCombatantId ?? undefined;
-            void applyHpDeltaBulk(combatantIds, delta, actorId, damage)
+            void applyHpDeltaBulk(applications, delta, actorId)
               .then(() => setPendingApply(null))
               .catch(() => undefined);
           }}
@@ -5179,14 +5187,15 @@ function ApplyDamageBar({
   aoeHitContext?: AoeHitTestContext | null;
   isStarfinder?: boolean;
   applyDisabled?: boolean;
-  onApply: (combatantId: number, delta: number, damage: { damageType?: string; saveOutcome?: 'full' | 'half'; isCrit?: boolean; damageDice?: number }) => void;
-  onApplyToAll: (combatantIds: number[], delta: number, damage: { damageType?: string; saveOutcome?: 'full' | 'half'; isCrit?: boolean; damageDice?: number }) => void;
+  onApply: (combatantId: number, delta: number, damage: DirectDamageMetadata) => void;
+  onApplyToAll: (applications: TargetDamageApplication[], delta: number) => void;
   onDismiss: () => void;
 }) {
   const [mode, setMode] = useState<'damage' | 'heal'>('damage');
   const [targetAc, setTargetAc] = useState<'KAC' | 'EAC'>('KAC');
   const [damageType, setDamageType] = useState('');
-  const [saveOutcome, setSaveOutcome] = useState<'full' | 'half'>('full');
+  const [saveOutcome, setSaveOutcome] = useState<DamageSaveOutcome>('full');
+  const [aoeSaveOutcomes, setAoeSaveOutcomes] = useState<Partial<Record<number, DamageSaveOutcome>>>({});
   const [isCrit, setIsCrit] = useState(false);
   const delta = mode === 'heal' ? amount : -amount;
   const damageTypes = ruleSystemAdapter(ruleSystem).damageTypes ?? [];
@@ -5249,7 +5258,7 @@ function ApplyDamageBar({
           </label>
           <label className="text-muted" style={{ fontSize: 11.5 }}>
             Save{' '}
-            <select value={saveOutcome} onChange={(event) => setSaveOutcome(event.target.value as 'full' | 'half')} aria-label="Save outcome">
+            <select value={saveOutcome} onChange={(event) => setSaveOutcome(event.target.value as DamageSaveOutcome)} aria-label="Save outcome">
               <option value="full">full damage</option>
               <option value="half">saved — half</option>
             </select>
@@ -5320,24 +5329,50 @@ function ApplyDamageBar({
             {aoeTemplates.map((t) => {
               const affectedCombatants = combatantsInAoe(targets, t, aoeHitContext);
               const buttonLabel = `Apply to all in ${t.shape} (${t.sizeFt} ft)`;
+              const applications = mode === 'damage' && supportsDamageRules
+                ? buildAoeDamageApplications(
+                    affectedCombatants.map((c) => c.id),
+                    damage,
+                    saveOutcome,
+                    aoeSaveOutcomes,
+                  )
+                : affectedCombatants.map((c) => ({ combatantId: c.id, damage: {} }));
               return (
-                <button
-                  key={t.id}
-                  type="button"
-                  className="btn btn-secondary cf-target-44"
-                  style={{ fontSize: 12, padding: '0 12px' }}
-                  disabled={applyDisabled || affectedCombatants.length === 0}
-                  title={
-                    affectedCombatants.length === 0
-                      ? `No editable targets inside this ${t.shape} template`
-                      : `${mode === 'heal' ? 'Heal' : 'Deal'} ${amount} to ${affectedCombatants.map((c) => c.name).join(', ')}`
-                  }
-                  data-testid={`apply-damage-aoe-${t.id}`}
-                  onClick={() => onApplyToAll(affectedCombatants.map((c) => c.id), delta, damage)}
-                >
-                  {buttonLabel}
-                  {affectedCombatants.length > 0 ? ` (${affectedCombatants.length})` : ''}
-                </button>
+                <div key={t.id} className="flex items-center gap-2 flex-wrap">
+                  <button
+                    type="button"
+                    className="btn btn-secondary cf-target-44"
+                    style={{ fontSize: 12, padding: '0 12px' }}
+                    disabled={applyDisabled || affectedCombatants.length === 0}
+                    title={
+                      affectedCombatants.length === 0
+                        ? `No editable targets inside this ${t.shape} template`
+                        : `${mode === 'heal' ? 'Heal' : 'Deal'} ${amount} to ${affectedCombatants.map((c) => c.name).join(', ')}`
+                    }
+                    data-testid={`apply-damage-aoe-${t.id}`}
+                    onClick={() => onApplyToAll(applications, delta)}
+                  >
+                    {buttonLabel}
+                    {affectedCombatants.length > 0 ? ` (${affectedCombatants.length})` : ''}
+                  </button>
+                  {mode === 'damage' && supportsDamageRules && affectedCombatants.map((c) => (
+                    <label key={c.id} className="text-muted" style={{ fontSize: 11.5 }}>
+                      {c.name}{' '}
+                      <select
+                        value={aoeSaveOutcomes[c.id] ?? saveOutcome}
+                        onChange={(event) => {
+                          const outcome = event.target.value as DamageSaveOutcome;
+                          setAoeSaveOutcomes((current) => ({ ...current, [c.id]: outcome }));
+                        }}
+                        aria-label={`Save outcome for ${c.name} in ${t.shape} template`}
+                        data-testid={`aoe-save-outcome-${t.id}-${c.id}`}
+                      >
+                        <option value="full">full damage</option>
+                        <option value="half">saved — half</option>
+                      </select>
+                    </label>
+                  ))}
+                </div>
               );
             })}
           </div>
