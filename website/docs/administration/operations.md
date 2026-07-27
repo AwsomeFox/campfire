@@ -45,6 +45,28 @@ server-admin session or API token):
   you can verify app version, schema revision, format version, creation time, and
   contents before restoring.
 
+### Streaming, space, and cancellation
+
+Campfire serializes archive creation and restore work: if another archive operation is busy,
+wait and retry rather than starting a competing in-memory export. Downloads are streamed from
+the server, and restores are staged on disk before the live database and uploads are replaced.
+The current fixed safety limits are **1 GiB compressed archive**, **512 MiB per entry**,
+**4 GiB total uncompressed data**, and **100,000 entries**. They are not configuration
+environment variables.
+
+Leave temporary disk capacity for the received ZIP and its extracted staging directory in
+addition to the live data. Validation failures and cancellation clean up staging/partial server
+artifacts and leave the live install unchanged. Cancelling from the admin UI aborts the browser
+request; it does not guarantee that work the server has already begun can be interrupted.
+
+For downloads, the admin UI streams directly to the chosen file with the browser File System
+Access API when available, showing bytes received and total size when supplied. Browsers that
+lack it have to buffer the finished archive in browser memory; that fallback is explicitly
+limited to **512 MiB** and reported in the UI. Use `curl` or a File System Access-capable browser
+for larger archives. When cancelling a direct-to-file export, the UI asks the browser writable
+stream to discard its partial file; confirm the destination is clean if the browser reports an
+interrupted write.
+
 ### Backup manifest compatibility
 
 Each archive includes a `manifest.json` with:

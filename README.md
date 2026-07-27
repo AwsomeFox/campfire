@@ -186,6 +186,20 @@ so copying that volume is still the simplest backup. On top of that, Campfire ex
   `confirm` token; a malformed/foreign archive is rejected (400) with the server left
   untouched (the running DB is never closed until the archive passes validation).
 
+Archive creation and restore use streaming and disk staging: the server serializes archive work so only one archive
+operation runs at a time, streams downloads rather than holding the finished ZIP in process memory, and stages a
+restore on disk before replacing live data. The default safety limits are a 1 GiB compressed archive, 512 MiB per
+entry, 4 GiB total uncompressed content, and 100,000 entries. These are fixed limits (not environment settings).
+Plan temporary space for both the incoming archive and its extracted staging contents; a failed or cancelled request
+leaves live data intact and the server cleans its staging area. Cancelling a browser request sends an `AbortSignal`,
+but cannot promise that a server-side operation already underway has stopped.
+
+The admin UI uses the File System Access API to stream the archive directly to a selected file when the browser
+supports it. Browsers without that API must buffer the completed archive in browser memory; Campfire bounds that
+fallback at 512 MiB and tells the operator when it is used. Use `curl` or a File System Access-capable browser for
+larger downloads. Cancelling a direct-to-file download asks the browser to discard its partial file; verify the
+destination if the browser reports a cancellation or write error.
+
 **Scheduled backups** are opt-in and off by default. Set `BACKUP_SCHEDULE_ENABLED=1` to
 have the server write a fresh archive to `BACKUP_DIR` (default `$DATA_DIR/backups`) every
 `BACKUP_INTERVAL_HOURS` (default 24). These are the same archives the download endpoint

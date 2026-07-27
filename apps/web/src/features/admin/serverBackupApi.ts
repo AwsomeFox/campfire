@@ -175,13 +175,63 @@ function triggerBrowserDownload(blob: Blob, filename: string): void {
   setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }
 
+/** The non-streaming browser fallback is deliberately bounded. */
+export const MAX_BROWSER_BACKUP_BUFFER_BYTES = 512 * 1024 * 1024;
+
+export interface BackupDownloadProgress {
+  receivedBytes: number;
+  totalBytes: number | null;
+}
+
+export type BackupDownloadResult = {
+  filename: string;
+  bytes: number;
+  /** `file-system-access` writes directly to the chosen file; `browser-memory` buffers a bounded Blob. */
+  destination: 'file-system-access' | 'browser-memory';
+};
+
+type WritableFileHandle = {
+  createWritable(): Promise<{ write(chunk: Uint8Array): Promise<void>; close(): Promise<void>; abort(): Promise<void> }>;
+};
+
+type SaveFilePicker = (options: {
+  suggestedName: string;
+  types: Array<{ description: string; accept: Record<string, string[]> }>;
+}) => Promise<WritableFileHandle>;
+
+function saveFilePicker(): SaveFilePicker | null {
+  const picker = (window as Window & { showSaveFilePicker?: SaveFilePicker }).showSaveFilePicker;
+  return picker ?? null;
+}
+
+function contentLength(res: Response): number | null {
+  const raw = res.headers.get('Content-Length')?.trim();
+  if (!raw) return null;
+  const value = Number(raw);
+  // A backup archive cannot be empty. Treat zero, malformed, and missing headers
+  // as unknown length so chunked responses retain indeterminate progress.
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
 export async function downloadServerBackup(options?: {
   keyPassphrase?: string;
   signal?: AbortSignal;
-}): Promise<{ filename: string; bytes: number }> {
+  onProgress?: (progress: BackupDownloadProgress) => void;
+  onPhase?: (phase: 'streaming' | 'finalizing') => void;
+}): Promise<BackupDownloadResult> {
   const passphrase = options?.keyPassphrase?.trim();
   const usePost = Boolean(passphrase);
   const headers = devHeaders();
+  // This runs before the first await so browsers that require a user gesture can show
+  // the destination chooser. POST downloads cannot be handed to the browser download
+  // manager portably, so use File System Access when it is available.
+  const picker = saveFilePicker();
+  const fileHandle = picker
+    ? await picker({
+        suggestedName: 'campfire-backup.zip',
+        types: [{ description: 'Campfire backup archive', accept: { 'application/zip': ['.zip'] } }],
+      })
+    : null;
   const res = await fetch(usePost ? `${API}/backup/download` : `${API}/backup`, {
     method: usePost ? 'POST' : 'GET',
     credentials: 'include',
@@ -193,10 +243,63 @@ export async function downloadServerBackup(options?: {
     signal: options?.signal,
   });
   if (!res.ok) throw await parseApiError(res);
-  const blob = await res.blob();
   const filename = parseDownloadFilename(res.headers.get('Content-Disposition'));
+  const totalBytes = contentLength(res);
+  const reader = res.body?.getReader();
+  if (!reader) throw new Error('The browser did not provide a readable backup response stream.');
+
+  let receivedBytes = 0;
+  const report = () => options?.onProgress?.({ receivedBytes, totalBytes });
+  options?.onPhase?.('streaming');
+  report();
+
+  if (fileHandle) {
+    let writable: Awaited<ReturnType<WritableFileHandle['createWritable']>> | null = null;
+    try {
+      writable = await fileHandle.createWritable();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        await writable.write(value);
+        receivedBytes += value.byteLength;
+        report();
+      }
+      options?.onPhase?.('finalizing');
+      await writable.close();
+      return { filename, bytes: receivedBytes, destination: 'file-system-access' };
+    } catch (error) {
+      // Abort removes the partial file where supported by the browser's writable stream.
+      await writable?.abort().catch(() => undefined);
+      throw error;
+    }
+  }
+
+  if (totalBytes !== null && totalBytes > MAX_BROWSER_BACKUP_BUFFER_BYTES) {
+    await reader.cancel();
+    throw new Error(
+      `This browser must buffer the archive in memory and only supports backups up to ${MAX_BROWSER_BACKUP_BUFFER_BYTES / 1024 / 1024} MiB. Use a browser with File System Access support or download with curl.`,
+    );
+  }
+  const chunks: BlobPart[] = [];
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    receivedBytes += value.byteLength;
+    if (receivedBytes > MAX_BROWSER_BACKUP_BUFFER_BYTES) {
+      await reader.cancel();
+      throw new Error(
+        `This browser must buffer the archive in memory and only supports backups up to ${MAX_BROWSER_BACKUP_BUFFER_BYTES / 1024 / 1024} MiB. The partial download was discarded.`,
+      );
+    }
+    // Copy each chunk into an ArrayBuffer so TypeScript's SharedArrayBuffer-aware
+    // stream types remain valid Blob parts. This path is already the bounded-memory fallback.
+    chunks.push(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength) as ArrayBuffer);
+    report();
+  }
+  const blob = new Blob(chunks, { type: res.headers.get('Content-Type') ?? 'application/zip' });
+  options?.onPhase?.('finalizing');
   triggerBrowserDownload(blob, filename);
-  return { filename, bytes: blob.size };
+  return { filename, bytes: receivedBytes, destination: 'browser-memory' };
 }
 
 export async function restoreServerBackup(options: {

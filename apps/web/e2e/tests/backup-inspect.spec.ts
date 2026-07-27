@@ -138,4 +138,131 @@ test.describe('server backup workflow UI (issues #514 / #444)', () => {
     await expect(card.getByRole('alert')).toContainText(/format version 42/);
     await expect(card.getByRole('alert')).toContainText(/v99\.0\.0/);
   });
+
+  test('discloses bounded memory fallback and reports successful streamed download state', async ({ page }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(window, 'showSaveFilePicker', { value: undefined, configurable: true });
+    });
+    await page.route('**/api/v1/backup/status', (route) => route.fulfill({ status: 200, json: MOCK_STATUS }));
+    let releaseDownload!: () => void;
+    const downloadReady = new Promise<void>((resolve) => {
+      releaseDownload = resolve;
+    });
+    await page.route('**/api/v1/backup', async (route) => {
+      await downloadReady;
+      await route.fulfill({
+        status: 200,
+        headers: {
+          'Content-Type': 'application/zip',
+          'Content-Disposition': 'attachment; filename="server.zip"',
+          'Content-Length': '4',
+        },
+        body: 'zip!',
+      });
+    });
+
+    await page.goto('/admin/storage');
+    const card = page.locator('.server-backup-workflow-card');
+    await expect(card.getByText(/buffer.*archive in browser memory/i)).toBeVisible();
+    await card.getByRole('button', { name: 'Create & download backup' }).click();
+    await expect(card.getByRole('status')).toContainText(/Preparing backup/i);
+    releaseDownload();
+    await expect(card.getByText(/Downloaded server\.zip/)).toBeVisible();
+    await expect(card.getByText(/buffered the archive in memory/i)).toBeVisible();
+  });
+
+  test('rejects oversized fallback downloads with recovery copy', async ({ page }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(window, 'showSaveFilePicker', { value: undefined, configurable: true });
+    });
+    await page.route('**/api/v1/backup/status', (route) => route.fulfill({ status: 200, json: MOCK_STATUS }));
+    await page.route('**/api/v1/backup', (route) =>
+      route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'application/zip', 'Content-Length': String(513 * 1024 * 1024) },
+        body: '',
+      }),
+    );
+
+    await page.goto('/admin/storage');
+    const card = page.locator('.server-backup-workflow-card');
+    await card.getByRole('button', { name: 'Create & download backup' }).click();
+    await expect(card.getByRole('alert')).toContainText(/only supports backups up to 512 MiB/i);
+    await expect(card.getByRole('alert')).toContainText(/File System Access support or download with curl/i);
+    await expect(card.getByRole('alert').getByRole('button', { name: 'Retry' })).toBeVisible();
+  });
+
+  test('uses indeterminate progress when a chunked response omits Content-Length', async ({ page }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(window, 'showSaveFilePicker', { value: undefined, configurable: true });
+      const nativeFetch = window.fetch.bind(window);
+      window.fetch = (input, init) => {
+        const url = typeof input === 'string' ? input : input.url;
+        if (!url.endsWith('/api/v1/backup')) return nativeFetch(input, init);
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('zip'));
+            window.setTimeout(() => controller.close(), 600);
+          },
+        });
+        return Promise.resolve(new Response(stream, { headers: { 'Content-Type': 'application/zip' } }));
+      };
+    });
+    await page.route('**/api/v1/backup/status', (route) => route.fulfill({ status: 200, json: MOCK_STATUS }));
+
+    await page.goto('/admin/storage');
+    const card = page.locator('.server-backup-workflow-card');
+    await card.getByRole('button', { name: 'Create & download backup' }).click();
+    const progress = card.getByRole('progressbar', { name: 'Backup download progress' });
+    await expect(progress).toBeVisible();
+    await expect(progress).not.toHaveAttribute('value');
+    await expect(card.getByRole('status')).toContainText(/Streaming backup — 3 B received/i);
+  });
+
+  test('writes to a File System Access destination without browser buffering', async ({ page }) => {
+    await page.addInitScript(() => {
+      (window as Window & { __backupWrites?: number }).__backupWrites = 0;
+      Object.defineProperty(window, 'showSaveFilePicker', {
+        configurable: true,
+        value: async () => ({
+          createWritable: async () => ({
+            write: async () => {
+              (window as Window & { __backupWrites?: number }).__backupWrites! += 1;
+            },
+            close: async () => undefined,
+            abort: async () => undefined,
+          }),
+        }),
+      });
+    });
+    await page.route('**/api/v1/backup/status', (route) => route.fulfill({ status: 200, json: MOCK_STATUS }));
+    await page.route('**/api/v1/backup', (route) =>
+      route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'application/zip', 'Content-Disposition': 'attachment; filename="streamed.zip"' },
+        body: 'zip!',
+      }),
+    );
+
+    await page.goto('/admin/storage');
+    const card = page.locator('.server-backup-workflow-card');
+    await card.getByRole('button', { name: 'Create & download backup' }).click();
+    await expect(card.getByText(/Saved streamed\.zip .*directly to the selected file/i)).toBeVisible();
+    await expect.poll(() => page.evaluate(() => (window as Window & { __backupWrites?: number }).__backupWrites)).toBeGreaterThan(0);
+  });
+
+  test('confirms cancellation and announces the aborted request', async ({ page }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(window, 'showSaveFilePicker', { value: undefined, configurable: true });
+    });
+    await page.route('**/api/v1/backup/status', (route) => route.fulfill({ status: 200, json: MOCK_STATUS }));
+    await page.route('**/api/v1/backup', () => new Promise(() => undefined));
+    await page.goto('/admin/storage');
+    const card = page.locator('.server-backup-workflow-card');
+    await card.getByRole('button', { name: 'Create & download backup' }).click();
+    await expect(card.getByRole('button', { name: 'Cancel' })).toBeVisible();
+    page.once('dialog', (dialog) => dialog.accept());
+    await card.getByRole('button', { name: 'Cancel' }).click();
+    await expect(card.getByText('Download cancelled.')).toBeVisible();
+  });
 });
