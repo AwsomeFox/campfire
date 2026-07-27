@@ -802,7 +802,11 @@ export class AiDmService implements OnApplicationBootstrap {
     // The note is split English-for-logs / key-for-clients, the same way `detail`/`detailKey`
     // is on every readiness check — server prose rendered raw in a localized UI was the
     // existing wart here, and growing it would have made money the one untranslated string.
-    const noteKey = recentUsage ? 'metered' : 'noData';
+    // Same `=== null` test as `splitIsAssumed` above, deliberately. These two must agree —
+    // one decides whether a split is reported, the other tells the reader why — and a
+    // truthiness check here would silently disagree the day `recentTurnTokenAverage`
+    // returns 0 rather than null for a campaign whose turns all metered as free.
+    const noteKey = splitIsAssumed ? 'noData' : 'metered';
     return {
       campaignId,
       // A check that is not `ok` never counts as ready — including one whose status is
@@ -820,7 +824,7 @@ export class AiDmService implements OnApplicationBootstrap {
         estimatedTotalTokens,
         estimatedUsdRange,
         basis,
-        note: recentUsage
+        note: !splitIsAssumed
           ? 'Per-turn token estimate from this campaign’s recent metered turns. Metering records a turn’s total only, so the dollar range spans an all-input to an all-output split. Actual usage depends on context, tools, and model pricing.'
           : 'Best-effort per-turn estimate before sending to the provider — this campaign has no metered turns yet. The dollar range spans an all-input to an all-output split. Actual usage depends on context, tools, and model pricing.',
         noteKey,
