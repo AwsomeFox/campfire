@@ -74,6 +74,13 @@ function requestAbort(req: Request, res: Response): { signal: AbortSignal; dispo
   };
   req.once('aborted', abort);
   res.once('close', abortOnClose);
+  // The request/response may have disconnected between Express noticing it and
+  // this handler registering its listeners. EventEmitter cannot replay that
+  // transition, so inspect the terminal state after registration as well.
+  // `writableEnded` is safe to treat as terminal here because this operation
+  // has not started yet; the close listener still deliberately ignores the
+  // normal close that follows a successfully completed response.
+  if (req.aborted || res.destroyed || res.writableEnded) abort();
   return {
     signal: controller.signal,
     dispose: () => {
@@ -154,6 +161,9 @@ export class BackupController {
         });
     };
     try {
+      // Do not start an expensive snapshot after an already-fired disconnect
+      // (or after a response was already terminal before this handler ran).
+      if (operation.signal.aborted) return;
       await this.backup.buildBackup(
         {
           ...(keyPassphrase && keyPassphrase.length > 0 ? { keyPassphrase } : {}),

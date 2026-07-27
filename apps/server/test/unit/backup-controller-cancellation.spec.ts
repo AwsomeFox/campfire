@@ -27,6 +27,58 @@ function response(): EventEmitter & {
 }
 
 describe('BackupController download cancellation', () => {
+  it('does not start a backup when the request was already aborted before listeners registered', async () => {
+    const req = Object.assign(new EventEmitter(), { aborted: true });
+    const res = response();
+    const backup = {
+      backupFilename: jest.fn(() => 'backup.zip'),
+      buildBackup: jest.fn(),
+    };
+
+    await expect(new BackupController(backup as never).download(req as never, res as never)).resolves.toBeUndefined();
+    expect(backup.buildBackup).not.toHaveBeenCalled();
+  });
+
+  it('does not start a backup when the response was already destroyed before listeners registered', async () => {
+    const req = new EventEmitter();
+    const res = response();
+    res.destroyed = true;
+    const backup = {
+      backupFilename: jest.fn(() => 'backup.zip'),
+      buildBackup: jest.fn(),
+    };
+
+    await expect(new BackupController(backup as never).download(req as never, res as never)).resolves.toBeUndefined();
+    expect(backup.buildBackup).not.toHaveBeenCalled();
+  });
+
+  it('does not start a backup when the response was already ended before listeners registered', async () => {
+    const req = new EventEmitter();
+    const res = response();
+    res.writableEnded = true;
+    const backup = {
+      backupFilename: jest.fn(() => 'backup.zip'),
+      buildBackup: jest.fn(),
+    };
+
+    await expect(new BackupController(backup as never).download(req as never, res as never)).resolves.toBeUndefined();
+    expect(backup.buildBackup).not.toHaveBeenCalled();
+  });
+
+  it('starts a backup for a live request', async () => {
+    const req = new EventEmitter();
+    const res = response();
+    const backup = {
+      backupFilename: jest.fn(() => 'backup.zip'),
+      buildBackup: jest.fn(async (_options: { signal: AbortSignal }, _output: unknown) => undefined),
+    };
+
+    await expect(new BackupController(backup as never).download(req as never, res as never)).resolves.toBeUndefined();
+    expect(backup.buildBackup).toHaveBeenCalledTimes(1);
+    const [options] = backup.buildBackup.mock.calls[0]!;
+    expect(options.signal.aborted).toBe(false);
+  });
+
   it('suppresses the expected build cancellation after the client disconnects', async () => {
     const req = new EventEmitter();
     const res = response();
