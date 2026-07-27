@@ -23,6 +23,7 @@ import type { RequestUser } from '../../common/user.types';
 import { nextUpdatedAt, staleWrite } from '../../common/stale-write';
 import { RevisionsService } from '../revisions/revisions.service';
 import { assertAnchorVisible as assertAnchorVisibleShared } from '../../common/anchor-visibility';
+import { assertMayInteract } from '../../common/interactive-capability';
 import { ModerationService, QUARANTINE_BODY } from '../moderation/moderation.service';
 
 type CommentCreateInput = z.infer<typeof CommentCreate>;
@@ -518,6 +519,14 @@ export class CommentsService {
     // or the DM queue's `mute` verb is theatre. Checked before any other work so a
     // muted member's request does no writes at all.
     await this.moderation.assertNotMuted(campaignId, user);
+    // Issue #597: a comment is read by everyone who can see the thread, so it needs an
+    // INTERACTIVE seat — a viewer is read-only unless a DM granted the interactive-guest
+    // capability. Enforced in the service rather than the controller because MCP's
+    // `post_comment` tool reaches this method directly; a controller-only gate would
+    // leave the agent surface wide open, which is exactly the kind of second door this
+    // issue is about. Checked before the anchor-visibility probe so a read-only seat
+    // cannot use the 403-vs-404 difference to test whether a secret entity exists.
+    await assertMayInteract(this.db, user, campaignId, role, 'post comments');
     // Can't post on a thread you can't see — hidden/secret entities 404 (issue #230).
     await this.assertAnchorVisible(campaignId, entityType, entityId, role);
     let parentId: number | null = null;
@@ -578,6 +587,10 @@ export class CommentsService {
     if (existing.authorUserId !== user.id && role !== 'dm') {
       throw new ForbiddenException('Only the author or a DM may edit this comment');
     }
+    // Issue #597: an edit publishes new words to the same readers a new comment would,
+    // so it needs the same interactive seat. Without this a member demoted to viewer
+    // keeps a live broadcast channel through the comments they wrote earlier.
+    await assertMayInteract(this.db, user, existing.campaignId, role, 'edit comments');
     this.assertNotQuarantined(existing);
     const moderatorEdit = existing.authorUserId !== user.id;
     if (input.inCharacter !== undefined && input.inCharacter !== existing.inCharacter) {

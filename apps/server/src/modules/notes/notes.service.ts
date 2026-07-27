@@ -7,7 +7,7 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { and, count, desc, eq, inArray, lt, or, sql, type SQL } from 'drizzle-orm';
+import { and, count, desc, eq, inArray, lt, notInArray, or, sql, type SQL } from 'drizzle-orm';
 import type { z } from 'zod';
 import {
   NoteCreate,
@@ -37,6 +37,8 @@ import {
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { canSee } from '../../common/note-visibility';
+import { assertMayInteract, noteVisibilityIsOutbound } from '../../common/interactive-capability';
+import { blockedTargetsOf } from '../../common/safety-controls';
 import { foldForSearch, foldedIncludes } from '../../common/text-search';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService, excerpt } from '../notifications/notifications.service';
@@ -396,6 +398,18 @@ export class NotesService {
     if (filters.mine) conds.push(eq(notes.authorUserId, user.id));
     if (filters.visibility) conds.push(eq(notes.visibility, filters.visibility));
 
+    // Issue #597: a personal BLOCK hides the blocked member's notes — including any
+    // whisper they aimed at the blocker — from the blocker's reads. Applied on the
+    // READER's side only: the blocked author's own write still succeeds and their own
+    // reads are unchanged, so nothing about the block is observable from their side.
+    // The row is not deleted and stays fully visible to the DM and to the moderation
+    // evidence path, because a blocked whisper is exactly the material a safeguarding
+    // review needs. Empty for almost every caller, so this costs one indexed lookup.
+    const blockedAuthors = await blockedTargetsOf(this.db, user.id, campaignId);
+    if (blockedAuthors.size > 0) {
+      conds.push(notInArray(notes.authorUserId, [...blockedAuthors]));
+    }
+
     // Free-text search (issue #65 / #624). The needle is folded with the shared helper
     // (NFKC + fixed-locale case fold). SQLite `lower()` is ASCII-only and cannot see
     // ß→ss / İ / accent case folds, so `q` is fold-matched in JS.
@@ -604,6 +618,15 @@ export class NotesService {
   async getOrThrow(id: number, user: RequestUser, role: Role): Promise<Note> {
     const row = await this.getRowOrThrow(id);
     if (!canSee(row, user, role)) throw new NotFoundException(`Note ${id} not found`);
+    // Issue #597: a note by someone this reader blocks reads as nonexistent to them,
+    // matching the list filter, so a direct id fetch is not a way around the block. Same
+    // 404 the visibility rule uses — the reader already knows they blocked this person,
+    // and the AUTHOR never sees this path at all, so nothing is disclosed either way.
+    // Deliberately not applied in `canSee`: the moderation module authorizes reports
+    // through that predicate, and a blocked whisper must stay reportable.
+    if (row.authorUserId !== user.id && (await blockedTargetsOf(this.db, user.id, row.campaignId)).has(row.authorUserId)) {
+      throw new NotFoundException(`Note ${id} not found`);
+    }
     return this.toDomainWithEntityName(row);
   }
 
@@ -614,6 +637,15 @@ export class NotesService {
     await this.moderation.assertNotMuted(campaignId, user);
     const ts = nowIso();
     const visibility = input.visibility ?? 'private';
+    // Issue #597: the read-only boundary is drawn at "does this reach anyone else".
+    // A viewer keeping private notes is the Viewer seat working as intended; a viewer
+    // whispering a member, or broadcasting to the party, is the bug this issue closes.
+    // Checked here rather than in the controller because the answer depends on the
+    // resolved visibility, and checked BEFORE resolveWhisperTarget so a read-only seat
+    // cannot use the whisper-target validation as a roster oracle.
+    if (noteVisibilityIsOutbound(visibility)) {
+      await assertMayInteract(this.db, user, campaignId, role, 'share, whisper, or send notes to other members');
+    }
     const recipientUserId = await this.resolveWhisperTarget(campaignId, visibility, input.recipientUserId);
     const [row] = await this.db
       .insert(notes)
@@ -680,6 +712,21 @@ export class NotesService {
     // away from whisper clears the recipient, switching into whisper (or re-targeting)
     // re-validates it against campaign membership. issue #127.
     const finalVisibility = input.visibility ?? existing.visibility;
+    // Issue #597: gate on the RESULTING visibility, which is why this check lives here
+    // and not in the controller. A read-only viewer may keep editing their own private
+    // notes; the moment the patch would make one reach someone else — a new outbound
+    // visibility, or a body edit to an already-outbound note — the interactive seat is
+    // required. The `existing` case matters for a member demoted from player to viewer,
+    // who otherwise keeps a live broadcast channel through notes they wrote earlier.
+    if (noteVisibilityIsOutbound(finalVisibility, existing.kind)) {
+      await assertMayInteract(
+        this.db,
+        user,
+        existing.campaignId,
+        role,
+        'share, whisper, or send notes to other members',
+      );
+    }
     const finalRecipientRaw = 'recipientUserId' in input ? input.recipientUserId : existing.recipientUserId;
     const recipientUserId = await this.resolveWhisperTarget(existing.campaignId, finalVisibility, finalRecipientRaw);
 
@@ -845,6 +892,13 @@ export class NotesService {
    * that would need a caller-supplied display name in the first place).
    */
   async createInbox(campaignId: number, input: InboxCreateInput, user: RequestUser, role: Role): Promise<Note> {
+    // Issue #597: an inbox submission is dm_shared and notifies every DM, so it is
+    // outbound content and needs an interactive seat. Enforced here rather than only in
+    // the controller because MCP's `submit_inbox_item` tool calls this method directly.
+    await assertMayInteract(this.db, user, campaignId, role, 'post to the DM inbox');
+    // Issue #601 parity with create(): a moderation silence must stop inbox posts too,
+    // or the DM's own inbox becomes the one channel a silenced member can still use.
+    await this.moderation.assertNotMuted(campaignId, user);
     const ts = nowIso();
     const [row] = await this.db
       .insert(notes)

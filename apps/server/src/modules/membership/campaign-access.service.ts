@@ -4,6 +4,7 @@ import type { GuestDmGrantScope, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { campaigns } from '../../db/schema';
 import { roleAtLeast, type RequestUser } from '../../common/user.types';
+import { assertMayInteract, memberMayInteract } from '../../common/interactive-capability';
 import { RoleResolver } from './role-resolver.service';
 
 export type CampaignAccessOpts = {
@@ -168,6 +169,36 @@ export class CampaignAccessService {
     }
     if (!opts?.allowArchived) await this.assertWritable(campaignId);
     return role;
+  }
+
+  /**
+   * Issue #597: member-level write endpoints whose output REACHES ANOTHER MEMBER —
+   * comments, shared/whispered notes, DM-inbox submissions — gate on this instead of
+   * bare `requireMember(..., { write: true })`.
+   *
+   * The distinction the old call sites got wrong: `{ write: true }` asserts the
+   * CAMPAIGN is writable (not archived/trashed); it returns `viewer` unchanged and
+   * asserts nothing about the caller's authority. This method adds the missing half —
+   * the caller must actually be allowed to speak at this table.
+   *
+   * `what` is a short verb phrase ("post comments", "whisper another member") that ends
+   * up in the 403 so a newly read-only viewer learns what changed and who can grant it
+   * back, rather than seeing a bare refusal.
+   */
+  async requireInteractive(
+    user: RequestUser,
+    campaignId: number,
+    what: string,
+    opts?: CampaignAccessOpts,
+  ): Promise<Role> {
+    const role = await this.requireMember(user, campaignId, { ...opts, write: opts?.write ?? true });
+    await assertMayInteract(this.db, user, campaignId, role, what);
+    return role;
+  }
+
+  /** Whether this seat currently holds the interactive capability (roster / preview rendering). */
+  async mayInteract(user: RequestUser, campaignId: number, role: Role): Promise<boolean> {
+    return memberMayInteract(this.db, user, campaignId, role);
   }
 
   /**
