@@ -2486,7 +2486,7 @@ export default function RunSessionPage() {
       */}
       <div
         data-testid="encounter-cockpit"
-        className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_20rem] lg:items-start"
+        className="grid gap-4 min-w-0 lg:grid-cols-[minmax(0,1fr)_20rem] lg:items-start"
       >
         <div className="space-y-4 min-w-0">
           <div className="card elev-sm" style={{ padding: '6px 0', gap: 0 }}>
@@ -2623,7 +2623,7 @@ export default function RunSessionPage() {
         </div>
 
         <aside
-          className="space-y-4 lg:sticky lg:top-4 lg:max-h-[calc(100vh-1rem)] lg:overflow-y-auto lg:overscroll-contain"
+          className="min-w-0 space-y-4 lg:sticky lg:top-4 lg:max-h-[calc(100vh-1rem)] lg:overflow-y-auto lg:overscroll-contain"
           aria-label="Encounter activity"
         >
           <CombatLog events={events} />
