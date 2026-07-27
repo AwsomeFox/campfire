@@ -132,6 +132,8 @@ describe('AiDriverService.assembleSystemPrompt (#1048)', () => {
       // inert stub keeps this spec about prompt assembly. The Ctor[] cast still makes a
       // future signature change a compile error rather than a silent `never`.
       undefined as unknown as Ctor[12],
+      // #577 — grounding store: assembleSystemPrompt asks it for human corrections to replay.
+      { correctionsForPrompt: async () => [] } as unknown as Ctor[13],
     );
     return { svc, call, mcpTools, supportPreferences, campaigns };
   }

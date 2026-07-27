@@ -472,6 +472,74 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     }
   });
 
+  it('0121 creates ai_driver_grounding_claims identically on a fresh DB and an upgraded one (#577)', () => {
+    // The classic failure for this convention is bootstrap.sql and the migration drifting apart,
+    // leaving an upgraded install with a subtly different table than a fresh one. Assert the two
+    // paths produce the SAME column set, and that the migration is registered + safely re-run.
+    expect(MIGRATION_NAMES).toContain('0121_ai_driver_grounding_claims_577');
+
+    const expected = [
+      'id',
+      'campaign_id',
+      'turn',
+      'claim_index',
+      'kind',
+      'claim_text',
+      'status',
+      'reason',
+      'citations_json',
+      'provider',
+      'model',
+      'created_at',
+      'correction',
+      'corrected_by',
+      'corrected_at',
+    ].sort();
+
+    const upgradedDir = makeTempDataDir();
+    dataDir = makeTempDataDir();
+    try {
+      const fresh = openDatabase(dataDir);
+      let freshCols: string[];
+      try {
+        freshCols = columnNames(fresh.sqlite, 'ai_driver_grounding_claims');
+        expect(
+          (fresh.sqlite.pragma('index_list(ai_driver_grounding_claims)') as Array<{ name: string }>).map((i) => i.name),
+        ).toContain('idx_ai_driver_grounding_campaign');
+      } finally {
+        fresh.sqlite.close();
+      }
+
+      writeOldSchemaDb(upgradedDir);
+      const upgraded = openDatabase(upgradedDir);
+      try {
+        const upgradedCols = [...columnNames(upgraded.sqlite, 'ai_driver_grounding_claims')].sort();
+        expect(upgradedCols).toEqual(expected);
+        expect(upgradedCols).toEqual([...freshCols].sort());
+        upgraded.sqlite
+          .prepare(
+            `INSERT INTO ai_driver_grounding_claims
+               (campaign_id, turn, claim_index, kind, claim_text, status, reason, citations_json, provider, model, created_at)
+             VALUES (1, 1, 0, 'rule', 'x', 'unsupported', 'not_retrieved', '[]', 'mock', 'm', '2026-01-01T00:00:00.000Z')`,
+          )
+          .run();
+        expect(countRows(upgraded.sqlite, 'ai_driver_grounding_claims')).toBe(1);
+      } finally {
+        upgraded.sqlite.close();
+      }
+
+      // Re-opening must not drop or re-create the table (probe-before-act + run-once dedupe).
+      const again = openDatabase(upgradedDir);
+      try {
+        expect(countRows(again.sqlite, 'ai_driver_grounding_claims')).toBe(1);
+      } finally {
+        again.sqlite.close();
+      }
+    } finally {
+      fs.rmSync(upgradedDir, { recursive: true, force: true });
+    }
+  });
+
   it('0070 adds notifications.data on a legacy table and preserves JSON payloads', () => {
     dataDir = makeTempDataDir();
     const seeded = openDatabase(dataDir);

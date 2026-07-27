@@ -67,7 +67,22 @@ export type AiDmStreamEvent =
    */
   | { type: 'transcript'; campaignId: number; event: AiDmTranscriptEvent; at: string }
   /** The DM erased the transcript (#572): drop the local copy and refetch — `seq` restarted. */
-  | { type: 'transcript.reset'; campaignId: number; at: string };
+  | { type: 'transcript.reset'; campaignId: number; at: string }
+  // #577 — the server's verdict on the factual claims in the turn that just ended. Thin, like
+  // every other signal here: the client refetches GET /ai-dm/grounding for the claim text, the
+  // per-citation reasons, and the evidence links.
+  | {
+      type: 'grounding';
+      campaignId: number;
+      status: 'clean' | 'unverified';
+      supportedCount: number;
+      unsupportedCount: number;
+      /** Provider NAME and served model id only — the provenance badge, never a secret. */
+      provider: string;
+      model: string;
+      claimIds: number[];
+      at: string;
+    };
 
 /** Narrow union of the `type` discriminants for cheap membership checks. */
 export type AiDmStreamEventType = AiDmStreamEvent['type'];

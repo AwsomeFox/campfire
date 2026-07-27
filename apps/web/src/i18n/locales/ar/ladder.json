@@ -10,7 +10,8 @@
       "no_narration": "The DM produced no narration",
       "loop": "The DM repeated itself",
       "dispute": "A ruling was disputed",
-      "provider_error": "The AI provider failed"
+      "provider_error": "The AI provider failed",
+      "unsupported_claim": "The DM stated something it could not back with a source"
     },
     "tableTools": "Table tools",
     "working": "Working…",
