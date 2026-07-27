@@ -1,6 +1,31 @@
 import AxeBuilder from '@axe-core/playwright';
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import { seed, stateFor } from './seed';
+
+/**
+ * The Access-support section's own live region.
+ *
+ * Scoped deliberately. A bare `page.getByRole('status')` is page-wide, and this page has
+ * other `role="status"` elements — the charter save-status label, and `<Skeleton>`, which
+ * renders `role="status" aria-busy="true"` of its own (SkeletonStatus, components/ui.tsx).
+ * Two matches would be a Playwright strict-mode violation, which fails outright instead of
+ * retrying (see campaign-audit.spec.ts, where exactly that happened).
+ *
+ * This is NOT currently redundant-but-harmless — it is load-bearing against two accidents:
+ *
+ *  1. The skeleton is gated on `loading && !charter`, while the whole Access-support
+ *     section is gated on `!loading`. They cannot coexist TODAY, but that mutual exclusion
+ *     is an incidental consequence of two separate conditionals, not a guarantee anyone
+ *     wrote down or tests.
+ *  2. The charter save-status label renders only when `protectedCharter.saveStatusLabel` is
+ *     set, which needs a CHARTER save; these tests only save the support preference.
+ *
+ * Either could change without anyone touching this file, at which point an unscoped query
+ * starts matching two elements and this spec fails on a mechanism that has nothing to do
+ * with what it tests. Please do not "simplify" this back to a page-wide query.
+ */
+const supportStatus = (page: Page) =>
+  page.locator('[aria-labelledby="access-support-heading"]').getByRole('status');
 
 test.describe.serial('Session Zero participant-owned access support', () => {
   test('desktop keyboard flow keeps facilitator visibility separate from AI consent', async ({ browser }) => {
@@ -20,7 +45,7 @@ test.describe.serial('Session Zero participant-owned access support', () => {
     const save = player.getByRole('button', { name: 'Save preference' });
     await save.focus();
     await player.keyboard.press('Enter');
-    await expect(player.getByRole('status')).toContainText('saved');
+    await expect(supportStatus(player)).toContainText('saved');
     const playerAxe = await new AxeBuilder({ page: player }).include('[aria-labelledby="access-support-heading"]').analyze();
     expect(playerAxe.violations).toEqual([]);
 
@@ -39,7 +64,7 @@ test.describe.serial('Session Zero participant-owned access support', () => {
     await player.keyboard.press('Enter');
     await player.getByRole('button', { name: 'Confirm delete' }).focus();
     await player.keyboard.press('Enter');
-    await expect(player.getByRole('status')).toContainText('deleted');
+    await expect(supportStatus(player)).toContainText('deleted');
 
     await playerContext.close();
     await dmContext.close();
@@ -63,7 +88,7 @@ test.describe.serial('Session Zero participant-owned access support', () => {
     await expect(tableRadio).toBeChecked();
     await expect(page.getByRole('checkbox', { name: /Allow Campfire AI features/ })).not.toBeChecked();
     await page.getByRole('button', { name: 'Save preference' }).click();
-    await expect(page.getByRole('status')).toContainText('saved');
+    await expect(supportStatus(page)).toContainText('saved');
 
     const viewport = await page.evaluate(() => ({ width: document.documentElement.clientWidth, scrollWidth: document.documentElement.scrollWidth }));
     expect(viewport.scrollWidth).toBeLessThanOrEqual(viewport.width);

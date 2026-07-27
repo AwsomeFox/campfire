@@ -37,6 +37,7 @@ import { SessionsModule } from './modules/sessions/sessions.module';
 import { NotesModule } from './modules/notes/notes.module';
 import { CommentsModule } from './modules/comments/comments.module';
 import { ModerationModule } from './modules/moderation/moderation.module';
+import { SafetyModule } from './modules/safety/safety.module';
 import { SearchModule } from './modules/search/search.module';
 import { AuditModule } from './modules/audit/audit.module';
 import { TokensModule } from './modules/tokens/tokens.module';
@@ -166,6 +167,7 @@ function serveStaticImports(): DynamicModule[] {
     NotesModule,
     CommentsModule,
     ModerationModule,
+    SafetyModule,
     SearchModule,
     ProposalsModule,
     ExportModule,

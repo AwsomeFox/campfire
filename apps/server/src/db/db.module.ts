@@ -1627,6 +1627,43 @@ function migrateAiDriverControlStateAnnouncedRecovery(sqlite: Database.Database)
 }
 
 /**
+ * Issue #1042 — two additive columns on `ai_driver_control_state` holding the AI seat's
+ * outstanding GRANTS OF AUTHORITY: unconsumed secret-read approvals (#557) and queued
+ * confirm-policy tool calls awaiting DM approval (#474).
+ *
+ * They are persisted so a restart can REVOKE THEM LOUDLY — audited, signalled, and visible in
+ * the table log — not so they can be resurrected. That distinction is the whole point of the
+ * issue: "silently revoked" is the bug, and you cannot audit the revocation of something you
+ * kept no record of. Hydration reads these, writes one audit row per discarded grant, tells the
+ * table, and clears the columns; nothing is ever restored onto the live session.
+ *
+ * A SEPARATE, never-before-recorded migration name rather than a widening of #559's
+ * `migrateAiDriverControlStateTable`, for exactly the reason that migration's own comment
+ * spells out: a database that already recorded the CREATE would never re-run it, so a column
+ * folded into it would stay missing forever — and every drizzle read of the table would then
+ * throw inside a best-effort try/catch that swallows it, silently disabling restart-safety with
+ * no visible symptom. Additive column changes get their own name so they run independently of
+ * whether the CREATE was recorded.
+ *
+ * Guarded per-column (not per-table): a database may legitimately have one column and not the
+ * other if a future branch adds a third the same way.
+ */
+function migrateAiDriverSessionPersistence1042(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ai_driver_control_state'")
+    .get();
+  if (!hasTable) return;
+  const cols = sqlite.prepare('PRAGMA table_info(ai_driver_control_state)').all() as Array<{ name: string }>;
+  const names = new Set(cols.map((c) => c.name));
+  if (!names.has('secret_read_approvals')) {
+    sqlite.exec('ALTER TABLE ai_driver_control_state ADD COLUMN secret_read_approvals TEXT');
+  }
+  if (!names.has('pending_tool_confirmations')) {
+    sqlite.exec('ALTER TABLE ai_driver_control_state ADD COLUMN pending_tool_confirmations TEXT');
+  }
+}
+
+/**
  * Migration for DBs created before DM-initiated check requests (issue #415): the
  * `check_requests` table didn't exist. Same "new table" pattern as migrateAiScribeTables —
  * CREATE TABLE / CREATE INDEX IF NOT EXISTS, recorded so upgraded hosts get the table (and its
@@ -2466,6 +2503,115 @@ function migrateArchmageEscalation542(sqlite: Database.Database): void {
       sqlite.exec('ALTER TABLE combatants ADD COLUMN initiative_breakdown TEXT');
     }
   }
+}
+
+/**
+ * Issue #597: viewer capability + personal safety controls.
+ *
+ * `member_safety_controls` itself is created by BOOTSTRAP_SQL (which runs on every
+ * boot and so reaches fresh AND upgraded DBs); this migration exists for the three
+ * ALTER TABLE paths bootstrap cannot express, plus the one backfill that carries a
+ * real product decision:
+ *
+ *   1. campaign_members.interactive_guest
+ *   2. notifications.actor_user_id
+ *   3. notification_digest_queue.actor_user_id
+ *
+ * THE MIGRATION POSTURE (grandfathering), stated once, here
+ * --------------------------------------------------------
+ * The default for the new column is 0 — every viewer seat becomes genuinely
+ * read-only, which is what the role has always been documented to be. Applying that
+ * to EXISTING seats unmodified would silently gag, mid-campaign, every viewer who
+ * has been commenting at a live table. From the member's side that is
+ * indistinguishable from a shadow-ban; from the DM's side it is an unexplained
+ * outage in a table they never changed. So this migration GRANDFATHERS: a viewer
+ * who has already demonstrably taken part — authored a comment, or a note that is
+ * shared/whispered/inbox rather than private — is granted the interactive-guest
+ * capability, because the DM has already, in practice, accepted them as a
+ * participant.
+ *
+ * The grandfather is evidence-based and bounded, not a blanket exemption:
+ *   - it only ever touches `role = 'viewer'` rows that have authored OUTBOUND content
+ *     in that same campaign (a viewer with only private notes stays read-only —
+ *     private notes were never gated in the first place);
+ *   - every seat it touches gets a campaign-scoped audit row, so a DM auditing their
+ *     table can see exactly which viewers retained the capability and why;
+ *   - it is a one-time snapshot of the past. From this migration forward, every new
+ *     viewer defaults to read-only and the capability is granted only by an explicit,
+ *     audited DM action (PATCH /campaigns/:id/members/:memberId).
+ *
+ * The alternative — tightening immediately for everyone — is defensible on paper and
+ * was rejected on one ground: it converts a safety improvement into an unannounced
+ * removal of a capability people are actively using, which is how safety features
+ * earn a reputation for breaking things and get turned off. A DM who WANTS the strict
+ * outcome gets it with one toggle per seat, and can see which seats those are.
+ */
+function migrateSafetyControls597(sqlite: Database.Database): void {
+  const tableExists = (table: string): boolean =>
+    sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(table) != null;
+  const hasColumn = (table: string, column: string): boolean =>
+    (sqlite.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).some((c) => c.name === column);
+
+  for (const table of ['notifications', 'notification_digest_queue'] as const) {
+    if (!tableExists(table)) continue; // fresh DB — BOOTSTRAP_SQL already declares the column.
+    if (!hasColumn(table, 'actor_user_id')) {
+      sqlite.exec(`ALTER TABLE ${table} ADD COLUMN actor_user_id TEXT`);
+    }
+  }
+
+  if (!tableExists('campaign_members')) return;
+  const freshColumn = hasColumn('campaign_members', 'interactive_guest');
+  if (!freshColumn) {
+    sqlite.exec('ALTER TABLE campaign_members ADD COLUMN interactive_guest INTEGER NOT NULL DEFAULT 0');
+  }
+
+  // The grandfather runs whether or not this boot added the column: a DB created by an
+  // earlier build of this branch already has the column (from BOOTSTRAP_SQL) but has
+  // never had the backfill applied. Running it twice is harmless — the UPDATE is
+  // idempotent and the audit insert is guarded on the same predicate.
+  if (!tableExists('comments') || !tableExists('notes')) return;
+
+  const grandfatherPredicate = `
+    cm.role = 'viewer'
+    AND cm.interactive_guest = 0
+    AND (
+      EXISTS (
+        SELECT 1 FROM comments c
+        WHERE c.campaign_id = cm.campaign_id AND c.author_user_id = CAST(cm.user_id AS TEXT)
+      )
+      OR EXISTS (
+        SELECT 1 FROM notes n
+        WHERE n.campaign_id = cm.campaign_id
+          AND n.author_user_id = CAST(cm.user_id AS TEXT)
+          AND (n.visibility <> 'private' OR n.kind = 'inbox')
+      )
+    )`;
+
+  const seats = sqlite
+    .prepare(`SELECT cm.id AS id, cm.campaign_id AS campaignId, cm.user_id AS userId FROM campaign_members cm WHERE ${grandfatherPredicate}`)
+    .all() as Array<{ id: number; campaignId: number; userId: number }>;
+  if (seats.length === 0) return;
+
+  const nowTs = new Date().toISOString();
+  const markGranted = sqlite.prepare('UPDATE campaign_members SET interactive_guest = 1 WHERE id = ?');
+  const recordGrant = tableExists('audit_log')
+    ? sqlite.prepare(
+        `INSERT INTO audit_log (campaign_id, actor, actor_role, action, entity_type, entity_id, detail, created_at)
+         VALUES (?, 'system:migration', 'admin', 'member.interactive_guest.grandfathered', 'campaign_member', ?, ?, ?)`,
+      )
+    : null;
+  const apply = sqlite.transaction(() => {
+    for (const seat of seats) {
+      markGranted.run(seat.id);
+      recordGrant?.run(
+        seat.campaignId,
+        seat.id,
+        `issue #597: viewer ${seat.userId} kept interactive-guest because they had already posted in this campaign before the read-only tightening`,
+        nowTs,
+      );
+    }
+  });
+  apply();
 }
 
 /**
@@ -3474,6 +3620,16 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // the next free ordinal. runMigrations dedupes on the FULL name string, so the `_577` suffix
   // is what guarantees this runs exactly once even if a sibling branch lands a colliding ordinal.
   { name: '0121_ai_driver_grounding_claims_577', run: migrateAiDriverGroundingClaims577 },
+  // 0131 was CENTRALLY ALLOCATED to issue #1042 by the merge coordinator. 0122-0130 are held by
+  // other in-flight branches (0130 → #599), so the gap is deliberate and must not be tidied down
+  // to the next free ordinal — every branch computing "next free" for itself is how they collide.
+  //
+  // This must stay AFTER 0118 (`ai_driver_control_state` CREATE) in the array: it ALTERs that
+  // table, and runMigrations executes in array order. The name is never-before-recorded, which
+  // is what actually guarantees run-once — runMigrations dedupes on the FULL string, so the
+  // `_1042` suffix survives a sibling branch landing a colliding ordinal, and renaming it later
+  // is the one edit that would silently skip it on every database that already recorded it.
+  { name: '0131_ai_driver_session_persistence_1042', run: migrateAiDriverSessionPersistence1042 },
   // Campaign modules take 0120, assigned centrally. The 0114/0115 this branch originally
   // carried were reassigned to #1443 and #1524 as those landed first; 0112/0113 are a
   // permanent gap, since the branch holding them ended up taking 0118/0119.
@@ -3484,6 +3640,12 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // contiguous or sorted. That is also why nothing is renumbered to look tidy: renaming a
   // migration a database has already recorded is the one edit that breaks run-once.
   { name: '0120_campaign_modules_585', run: migrateCampaignModules585 },
+  // 0127 was CENTRALLY ALLOCATED to issue #597; 0122-0126 are held by other in-flight
+  // branches, so the gap above is deliberate and must not be "tidied" into the next
+  // free ordinal. runMigrations dedupes on the FULL name string — renaming this entry
+  // on a database that has already recorded it would silently re-run the grandfather
+  // backfill against seats a DM may since have deliberately revoked.
+  { name: '0127_safety_controls_597', run: migrateSafetyControls597 },
   // 0130 was CENTRALLY ALLOCATED to issue #599 by the merge coordinator. 0122-0129 are held by
   // other in-flight branches, so the gap above is deliberate and must not be "tidied" down to
   // the next free ordinal — every branch computing "next free" for itself is exactly how these

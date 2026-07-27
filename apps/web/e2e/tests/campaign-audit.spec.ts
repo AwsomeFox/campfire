@@ -10,7 +10,18 @@ test.describe('campaign audit log — issue #443', () => {
     await page.goto(`/c/${campaignId}/audit?action=note.create`);
 
     await expect(page.getByRole('heading', { name: 'Audit log' })).toBeVisible();
-    await expect(page.getByRole('status')).toContainText(/of \d+/);
+
+    // Scope to the Activity card's header. A bare page.getByRole('status') is AMBIGUOUS
+    // while the list loads: the count readout is role="status", and <Skeleton> is *also*
+    // role="status" aria-busy="true" (SkeletonStatus in components/ui.tsx). Two matches
+    // is a Playwright strict-mode violation, which fails outright instead of retrying —
+    // so the assertion only ever passed when the audit fetch beat the 10s expect timeout.
+    // Scoping makes it deterministic; raising the timeout would just slow the race down.
+    const countReadout = page
+      .getByRole('heading', { name: 'Activity' })
+      .locator('xpath=..')
+      .getByRole('status');
+    await expect(countReadout).toContainText(/of \d+/);
 
     const downloadPromise = page.waitForEvent('download');
     await page.getByRole('button', { name: 'Export CSV' }).click();

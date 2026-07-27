@@ -11,6 +11,7 @@ import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { filterHidden, isVisibleTo, resolveCreateHidden } from '../../common/redact';
 import { fromJsonText, toJsonText } from '../../common/json';
+import { conditionWriteSetFromInstances, legacyConditionInstance as sharedLegacyConditionInstance, parseConditionInstancesText } from '../../common/conditions';
 import { fogConcealsPixels, parseFogState } from '../../common/fog';
 import { rollDice, rollInitiative, rollOpenLegendActionDice } from '../../common/dice';
 import { foldForSearch, foldedIncludes } from '../../common/text-search';
@@ -309,36 +310,17 @@ function combatantToDomain(row: typeof combatants.$inferSelect): Combatant {
 
 /** Stable structured wrapper for one legacy string condition (issue #423 migration bridge). */
 function legacyConditionInstance(rawName: string): ConditionInstance | null {
-  const name = rawName.trim();
-  if (!name) return null;
-  // Bound the generated id to the schema max(40) and keep it stable.
-  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 33);
-  return {
-    id: `legacy_${slug || 'condition'}`.slice(0, 40),
-    name,
-    ruleEntryId: null,
-    source: null,
-    sourceCombatantId: null,
-    durationRounds: null,
-    roundsRemaining: null,
-    timing: 'none',
-    saveTiming: 'none',
-    saveDc: null,
-    saveAbility: null,
-    isConcentration: false,
-    stacks: 1,
-    notes: '',
-    custom: false,
-  };
+  // Single definition lives in common/conditions.ts alongside the write helpers, so the
+  // shape a legacy string materialises into cannot drift between reader and writer.
+  return sharedLegacyConditionInstance(rawName);
 }
 
 /** Parse stored condition instances JSON or synthesize default instances from legacy conditions array (issue #423). */
 function parseConditionInstances(text: string | null, stringConditions: string[] = []): ConditionInstance[] {
-  let instances: ConditionInstance[] = [];
-  if (text != null) {
-    const parsed = zod.array(ConditionInstance).safeParse(fromJsonText<unknown>(text, null));
-    if (parsed.success) instances = parsed.data;
-  }
+  // Union, not reconcile: this is the READ path, where a pre-#423 row legitimately has
+  // legacy names and no instances. The WRITE path must reconcile instead — see
+  // conditionWriteSetFromNames in common/conditions.ts.
+  const instances: ConditionInstance[] = parseConditionInstancesText(text);
   if (stringConditions.length > 0) {
     const existingNames = new Set(instances.map((i) => i.name.trim().toLowerCase()));
     for (const rawName of stringConditions) {
@@ -3283,8 +3265,7 @@ export class EncountersService {
           instances = instances.slice(0, 50);
           const derived = deriveConditionNames(instances);
           afterConditions = new Set(derived);
-          writeSet.conditionInstances = toJsonText(instances);
-          writeSet.conditions = toJsonText(derived);
+          Object.assign(writeSet, conditionWriteSetFromInstances(instances));
         }
         if (patch.eac !== undefined && isDm) writeSet.eac = patch.eac;
         if (patch.kac !== undefined && isDm) writeSet.kac = patch.kac;
@@ -4196,10 +4177,7 @@ export class EncountersService {
               expiredConditions.push({ combatantId: ending.id, combatantName: ending.name, conditionName: c.name });
             }
             tx.update(combatants)
-              .set({
-                conditionInstances: toJsonText(condTick.kept),
-                conditions: toJsonText(deriveConditionNames(condTick.kept)),
-              })
+              .set(conditionWriteSetFromInstances(condTick.kept))
               .where(eq(combatants.id, ending.id))
               .run();
           }
@@ -4235,8 +4213,7 @@ export class EncountersService {
             for (const c of condTick.expired) {
               expiredConditions.push({ combatantId: starting.id, combatantName: starting.name, conditionName: c.name });
             }
-            startSet.conditionInstances = toJsonText(condTick.kept);
-            startSet.conditions = toJsonText(deriveConditionNames(condTick.kept));
+            Object.assign(startSet, conditionWriteSetFromInstances(condTick.kept));
           }
           tx.update(combatants).set(startSet).where(eq(combatants.id, starting.id)).run();
         } else if (phase === 'lair') {
@@ -4833,10 +4810,7 @@ export class EncountersService {
           const { updatedCombatants, removed } = cascadeConcentrationLoss(withInstances, combatantId);
           for (const [id, instances] of updatedCombatants) {
             tx.update(combatants)
-              .set({
-                conditionInstances: toJsonText(instances),
-                conditions: toJsonText(deriveConditionNames(instances)),
-              })
+              .set(conditionWriteSetFromInstances(instances))
               .where(eq(combatants.id, id))
               .run();
           }

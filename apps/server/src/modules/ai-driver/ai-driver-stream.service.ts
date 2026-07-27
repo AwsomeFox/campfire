@@ -117,6 +117,25 @@ export type AiDmStreamEvent =
       visibility: AiDmTranscriptVisibility;
       at: string;
     }
+  // #1042 — a restart discarded outstanding session state that could not be carried across the
+  // process boundary: an open table vote whose ballot window lapsed while the server was down,
+  // secret-read approvals, and queued confirm-policy tool calls. Emitted ONCE, on the first
+  // touch of the seat after the restart, and never re-emitted (the reconciled row is written
+  // back with the discarded state cleared).
+  //
+  // Thin like every other signal here: the counts are enough for a client to render "the
+  // restart cleared N approvals" and refetch GET /ai-dm/session + /ai-dm/tool-confirmations for
+  // the authoritative lists. The DISCARDED ITEMS THEMSELVES ARE NOT ON THIS WIRE — a secret-read
+  // approval names a hidden entity, and this frame reaches every member of the table. The
+  // per-item detail lives in the audit log and in a DM-only transcript row.
+  | {
+      type: 'session.reset';
+      campaignId: number;
+      voteExpired: boolean;
+      approvalsRevoked: number;
+      confirmationsDiscarded: number;
+      at: string;
+    }
   // #572 — the DM erased the transcript. Purging resets the per-campaign `seq`, so every
   // open table must drop its local copy and refetch rather than resume from a watermark
   // that no longer refers to anything.

@@ -117,6 +117,12 @@ describe('encounter condition sync (issue #486, service layer)', () => {
     return fromJsonText<string[]>(row.conditions, []);
   }
 
+  /** Structured instance names on a combatant, which must never disagree with `conditions`. */
+  function readInstanceNames(orm: ReturnType<typeof build>['orm'], combatantId: number): string[] {
+    const [row] = orm.select().from(combatants).where(eq(combatants.id, combatantId)).limit(1).all();
+    return fromJsonText<Array<{ name: string }>>(row.conditionInstances, []).map((i) => i.name).sort();
+  }
+
   it('create() seeds combatant conditions from the sheet', async () => {
     dataDir = makeTempDataDir();
     const { orm, encountersService } = build();
@@ -202,5 +208,58 @@ describe('encounter condition sync (issue #486, service layer)', () => {
     expect(sheet).toEqual(expect.arrayContaining(['poisoned']));
     expect(sheet).not.toContain('frightened');
     expect(tracker).toEqual(sheet);
+  });
+
+  /**
+   * The combatant carries the SAME conditions twice: the legacy `conditions` string array
+   * and the structured `conditionInstances` blob added by #423. Writers that set only the
+   * former leave the latter stale, and `parseConditionInstances` UNIONS rather than
+   * reconciles — it adds legacy names missing from instances, but never drops instances
+   * missing from the legacy array. A removal therefore survives in the structured copy and
+   * is re-derived back into visibility by the next write that touches conditions.
+   */
+  describe('conditions and conditionInstances must not diverge', () => {
+    /** Sheet has 'poisoned'; a tracker edit materialises it as a structured instance. */
+    async function materialisedThenClearedOnSheet() {
+      const ctx = seedRunningFight({ sheetConditions: ['poisoned'] });
+      await ctx.encountersService.updateCombatant(
+        ctx.encounterId,
+        ctx.combatantId,
+        { addConditions: ['prone'] },
+        dmUser,
+        'dm',
+      );
+      expect(readInstanceNames(ctx.orm, ctx.combatantId)).toEqual(['poisoned', 'prone']);
+
+      // The sheet clears 'poisoned'. syncActiveCombatantConditions writes `conditions` only.
+      await ctx.charactersService.patchConditions(ctx.characterId, { remove: ['poisoned'] }, dmUser, 'dm');
+      // The removal LOOKS applied at this point — both surfaces agree.
+      expect(readConditions(ctx.orm, 'combatant', ctx.combatantId)).not.toContain('poisoned');
+      expect(readConditions(ctx.orm, 'character', ctx.characterId)).not.toContain('poisoned');
+      return ctx;
+    }
+
+    // The symptom a DM actually sees: a condition they removed comes back by itself.
+    it('does not resurrect a sheet-removed condition on the next tracker write', async () => {
+      const ctx = await materialisedThenClearedOnSheet();
+
+      // An unrelated condition edit re-derives `conditions` from the stale instances.
+      await ctx.encountersService.updateCombatant(
+        ctx.encounterId,
+        ctx.combatantId,
+        { addConditions: ['blinded'] },
+        dmUser,
+        'dm',
+      );
+
+      expect(readConditions(ctx.orm, 'combatant', ctx.combatantId)).not.toContain('poisoned');
+      expect(readConditions(ctx.orm, 'character', ctx.characterId)).not.toContain('poisoned');
+    });
+
+    // The cause: the structured copy still holds what the legacy array dropped.
+    it('reconciles conditionInstances when a sheet-side removal lands', async () => {
+      const ctx = await materialisedThenClearedOnSheet();
+      expect(readInstanceNames(ctx.orm, ctx.combatantId)).toEqual(['prone']);
+    });
   });
 });

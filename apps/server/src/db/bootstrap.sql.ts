@@ -631,6 +631,30 @@ CREATE TABLE IF NOT EXISTS moderation_mutes (
 );
 CREATE INDEX IF NOT EXISTS idx_moderation_mutes_active ON moderation_mutes(campaign_id, user_id, lifted_at);
 
+-- Issue #597: personal, member-owned safety controls (block / mute_sender /
+-- mute_thread). Separate from moderation_mutes above: that table is a DM SANCTION
+-- and is DM-visible, this one belongs to the protected member and is never disclosed
+-- to its subject. campaign_id NULL = account-wide (every block is account-wide).
+CREATE TABLE IF NOT EXISTS member_safety_controls (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER,
+  kind TEXT NOT NULL,
+  owner_user_id TEXT NOT NULL,
+  target_user_id TEXT,
+  thread_entity_type TEXT,
+  thread_entity_id INTEGER,
+  reason TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  lifted_at TEXT
+);
+-- Every enforcement read is "what are OWNER's live controls" (notification fan-out,
+-- note read filters); the second index answers the reverse question the block-evasion
+-- check asks: "does anyone already block this identity".
+CREATE INDEX IF NOT EXISTS idx_member_safety_controls_owner
+  ON member_safety_controls(owner_user_id, lifted_at);
+CREATE INDEX IF NOT EXISTS idx_member_safety_controls_target
+  ON member_safety_controls(target_user_id, lifted_at);
+
 CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   username TEXT NOT NULL UNIQUE COLLATE NOCASE,
@@ -694,6 +718,9 @@ CREATE TABLE IF NOT EXISTS campaign_members (
   character_id INTEGER REFERENCES characters(id) ON DELETE SET NULL,
   ai_external_use_consent INTEGER NOT NULL DEFAULT 0,
   is_primary_owner INTEGER NOT NULL DEFAULT 0,
+  -- Issue #597: explicit interactive-guest capability. 0 = a viewer seat is genuinely
+  -- read-only (no comments / shared notes / whispers / DM-inbox posts).
+  interactive_guest INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE(campaign_id, user_id)
@@ -1040,6 +1067,9 @@ CREATE TABLE IF NOT EXISTS notifications (
   comment_id INTEGER,
   data TEXT,
   actor_name TEXT NOT NULL DEFAULT '',
+  -- Issue #597: the actor's note-identity id, so a recipient's block can filter bell
+  -- items that already exist. actor_name alone is not an identity.
+  actor_user_id TEXT,
   read_at TEXT,
   created_at TEXT NOT NULL
 );
@@ -1086,6 +1116,8 @@ CREATE TABLE IF NOT EXISTS notification_digest_queue (
   comment_id INTEGER,
   data TEXT,
   actor_name TEXT NOT NULL DEFAULT '',
+  -- Issue #597: carried through the deferral so a flushed row keeps its actor identity.
+  actor_user_id TEXT,
   reason TEXT NOT NULL DEFAULT 'digest',
   created_at TEXT NOT NULL
 );
@@ -1198,6 +1230,17 @@ CREATE TABLE IF NOT EXISTS ai_driver_control_state (
   -- state (paused / human_control / stuck / open vote) is announced once, not re-announced
   -- on every subsequent restart.
   announced_recovery TEXT,
+  -- Issue #1042. These two are persisted so they can be REVOKED LOUDLY, not so they can be
+  -- resurrected. Both are grants of authority scoped to a room the server can no longer verify
+  -- after a restart: secret_read_approvals lets the AI seat read ONE named hidden entity under
+  -- the DM principal (#557), and pending_tool_confirmations holds irreversible live-play tool
+  -- calls awaiting a DM's explicit approval (#474). Hydration reads them, audits each one as
+  -- revoked/discarded, tells the table, and then CLEARS them -- it never puts them back on the
+  -- session. Before this they lived only in process memory, so a restart dropped them with no
+  -- audit row and no signal, which is the silence issue #1042 is actually about: you cannot
+  -- audit a revocation you have no record of.
+  secret_read_approvals TEXT,
+  pending_tool_confirmations TEXT,
   updated_at TEXT NOT NULL
 );
 
