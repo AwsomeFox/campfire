@@ -5,6 +5,7 @@ import {
   availableOperations,
   buildBulkPayload,
   bulkArgsError,
+  bulkPayloadFingerprint,
   reconcileOperation,
   type BulkArgs,
 } from '../../src/features/admin/adminCatalogState';
@@ -118,6 +119,64 @@ test.describe('argument validation mirrors the server before the request is sent
     for (const op of ['archive', 'pause', 'activate'] as const) {
       expect(bulkArgsError(op, args())).toBeNull();
     }
+  });
+});
+
+test.describe('Apply cannot run a batch that was never previewed', () => {
+  // The dry run is only a safety property if Apply runs the thing that was previewed.
+  // Gating Apply on "a preview exists" is a weaker claim than "the preview describes
+  // what Apply will do", and the gap is where an operator previews a reassignment to
+  // Alice, edits the owner to Bob, and Apply proceeds against Bob.
+  type Op = Parameters<typeof bulkPayloadFingerprint>[0];
+  const key = (op: Op, ids: number[], reason: string, a: BulkArgs) => bulkPayloadFingerprint(op, ids, reason, a);
+
+  test('the exact scenario: previewing Alice then editing to Bob retires the preview', () => {
+    const previewed = key('reassign_owner', [1, 2], 'handover', args({ toUserId: '10' }));
+    const nowSending = key('reassign_owner', [1, 2], 'handover', args({ toUserId: '20' }));
+    expect(nowSending).not.toBe(previewed);
+  });
+
+  test('every operation-specific field changes the fingerprint', () => {
+    const cases: Array<[Op, BulkArgs, BulkArgs]> = [
+      ['reassign_owner', args({ toUserId: '1' }), args({ toUserId: '2' })],
+      ['set_quota', args({ storageQuotaBytes: '10' }), args({ storageQuotaBytes: '20' })],
+      ['set_quota', args({ storageQuotaBytes: '10' }), args({ storageQuotaBytes: '' })],
+      [
+        'set_policy',
+        args({ aiExternalContentPolicy: 'disabled' }),
+        args({ aiExternalContentPolicy: 'member_consent' }),
+      ],
+      ['set_policy', args({ closePublicInvites: true }), args({ closePublicInvites: false })],
+      ['update_module', args({ ruleSystem: 'srd-5e' }), args({ ruleSystem: 'pf2e' })],
+      ['request_export', args({ exportProfile: 'backup' }), args({ exportProfile: 'publish' })],
+    ];
+    for (const [op, before, after] of cases) {
+      expect(key(op, [1], 'r', before), `${op} must invalidate`).not.toBe(key(op, [1], 'r', after));
+    }
+  });
+
+  test('reason is covered too, which the original per-field invalidation missed', () => {
+    expect(key('archive', [1], 'first reason', args())).not.toBe(key('archive', [1], 'second reason', args()));
+  });
+
+  test('selection and operation changes still invalidate', () => {
+    expect(key('archive', [1, 2], 'r', args())).not.toBe(key('archive', [1], 'r', args()));
+    expect(key('archive', [1], 'r', args())).not.toBe(key('pause', [1], 'r', args()));
+  });
+
+  test('an unchanged payload keeps the preview valid, including a reordered selection', () => {
+    expect(key('archive', [1, 2, 3], 'r', args())).toBe(key('archive', [3, 1, 2], 'r', args()));
+    expect(key('set_quota', [1], 'r', args({ storageQuotaBytes: '5' }))).toBe(
+      key('set_quota', [1], 'r', args({ storageQuotaBytes: '5' })),
+    );
+  });
+
+  test('irrelevant fields do not invalidate, so the gate is not noise', () => {
+    // Editing the quota box while the operation is `archive` changes nothing that would
+    // be sent, so a valid preview must survive it.
+    expect(key('archive', [1], 'r', args({ storageQuotaBytes: '99', toUserId: '5' }))).toBe(
+      key('archive', [1], 'r', args()),
+    );
   });
 });
 

@@ -1,4 +1,11 @@
-import { BadRequestException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  Inject,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lte, sql, type SQL } from 'drizzle-orm';
 import type {
   CampaignCatalogBulkItemResult,
@@ -756,6 +763,19 @@ export class AdminCatalogService {
 
     const ts = nowIso();
     const actor = auditActor(user);
+    // THE PREDICATE CARRIES THE PRECONDITION, NOT JUST THE ID.
+    //
+    // The status check above is a read, and there is an `await` between it and this
+    // write. Two DMs deciding the same request concurrently both pass that check; if the
+    // update matched on id alone, both would succeed, both would write audit rows, and
+    // the LAST WRITE would silently decide whether consent was granted — behind an audit
+    // trail that contradicts itself. Consent is exactly the wrong thing to settle by
+    // write ordering.
+    //
+    // Re-stating `campaign_id` and `status = 'pending'` here makes the update unable to
+    // match a row that has already been decided, so the loser changes nothing and is
+    // told so. Same shape as the fix in #1039: a predicate that cannot match a stale
+    // state, rather than a check that can go stale across an await.
     const [updated] = await this.db
       .update(campaignExportRequests)
       .set({
@@ -765,8 +785,23 @@ export class AdminCatalogService {
         decisionNote: decision.note.slice(0, 2000),
         updatedAt: ts,
       })
-      .where(eq(campaignExportRequests.id, requestId))
+      .where(
+        and(
+          eq(campaignExportRequests.id, requestId),
+          eq(campaignExportRequests.campaignId, campaignId),
+          eq(campaignExportRequests.status, 'pending'),
+        ),
+      )
       .returning();
+
+    // Zero rows means another DM decided it in the gap. Returning success here would
+    // hand this DM the OTHER DM's decision as though it were their own, so it is
+    // surfaced. 409 rather than the 400 the pre-check raises: a sequential double-decide
+    // is a malformed request, this is a genuine concurrent conflict, and someone reading
+    // a contradictory trail later benefits from being able to tell them apart.
+    if (!updated) {
+      throw new ConflictException('Another DM decided this export request first');
+    }
 
     await this.audit.log({
       actor,

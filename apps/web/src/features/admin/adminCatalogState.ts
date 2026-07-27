@@ -224,6 +224,38 @@ export function buildBulkPayload(
 }
 
 /**
+ * A stable fingerprint of everything a bulk run would send, minus `dryRun`.
+ *
+ * THE DRY RUN IS ONLY A SAFETY PROPERTY IF APPLY RUNS THE THING THAT WAS PREVIEWED.
+ * "A preview exists" is not the same claim as "the preview describes what Apply will
+ * do", and the gap between them is where an operator previews a reassignment to Alice,
+ * edits the owner to Bob, and Apply proceeds against Bob having shown them Alice.
+ *
+ * Comparing fingerprints rather than clearing the preview on each individual edit is
+ * deliberate: a clear-call has to be remembered for every field that can vary, and this
+ * page has already demonstrated twice that it will not be. A fingerprint covers the
+ * fields that exist today, the ones someone adds tomorrow, and `reason` — which the
+ * original invalidation also missed — because it is derived from the payload builder
+ * itself rather than from a list maintained by hand.
+ *
+ * `dryRun` is excluded because it is the one field that legitimately differs between the
+ * preview and the apply.
+ */
+export function bulkPayloadFingerprint(
+  operation: CampaignCatalogBulkOperation,
+  campaignIds: number[],
+  reason: string,
+  args: BulkArgs,
+): string {
+  // Ids sorted so a different selection ORDER is not mistaken for a different batch.
+  const sortedIds = [...campaignIds].sort((a, b) => a - b);
+  const body = buildBulkPayload(operation, sortedIds, true, reason, args);
+  delete body.dryRun;
+  // Key order fixed, so two equal payloads always produce the same string.
+  return JSON.stringify(Object.entries(body).sort(([a], [b]) => a.localeCompare(b)));
+}
+
+/**
  * True when a bulk result changed nothing and the operator should be told why rather
  * than shown an empty success. A run where everything skipped is a real outcome, not a
  * failure, but presenting it as "done" is how an operator concludes an archive worked

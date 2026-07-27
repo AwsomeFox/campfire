@@ -3,6 +3,8 @@ import Database from 'better-sqlite3';
 import request from 'supertest';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
 import { AuditService } from '../src/modules/audit/audit.service';
+import { AdminCatalogService } from '../src/modules/admin-catalog/admin-catalog.service';
+import type { RequestUser } from '../src/common/user.types';
 
 /**
  * Issue #587 — catalog paging/filtering (criterion 2) and bulk lifecycle (criterion 3).
@@ -623,6 +625,62 @@ describe('Issue #587: campaign catalog paging, filtering and bulk lifecycle (e2e
         .post(`/api/v1/campaigns/${target}/catalog/export-requests/${requestId}/decision`)
         .send({ decision: 'approved', note: 'changed my mind' });
       expect(again.status).toBe(400); // already decided
+    });
+
+    it('lets exactly one of two concurrent decisions win', async () => {
+      // The status pre-check is a read with an await before the write. Without the
+      // precondition in the UPDATE predicate both callers pass that check, both update,
+      // both write audit rows, and the last write silently decides whether consent was
+      // granted — behind a trail that contradicts itself. Consent must not be settled by
+      // write ordering.
+      const target = aIds[4];
+      const raise = await bulk({
+        operation: 'request_export',
+        campaignIds: [target],
+        exportProfile: 'handoff',
+        dryRun: false,
+        reason: 'concurrency drill for the export request',
+      });
+      expect(raise.status).toBe(201);
+
+      const inbox = await dmA.get(`/api/v1/campaigns/${target}/catalog/export-requests`);
+      const pending = (inbox.body as Array<{ id: number; status: string }>).find((r) => r.status === 'pending');
+      expect(pending).toBeDefined();
+      const requestId = pending!.id;
+
+      // DRIVEN AT THE SERVICE LAYER ON PURPOSE. Two overlapping HTTP requests do NOT
+      // reproduce this: supertest serialises them on one agent and better-sqlite3 is
+      // synchronous, so the second handler's pre-check runs after the first has already
+      // committed and catches it. That makes an HTTP-level version of this test pass
+      // whether or not the bug is fixed — a green test proving nothing.
+      //
+      // Calling the service twice WITHOUT awaiting the first starts both before either
+      // reaches its write: call A runs to its `await select` and yields, call B then
+      // performs its own select and sees the same `pending` row. Both pre-checks pass,
+      // and both proceed to update — which is precisely the interleaving the predicate
+      // has to survive.
+      const svc = ctx.app.get(AdminCatalogService);
+      const actingDm = { id: String(dmAId), name: 'cat2-dm-a', serverRole: 'user' } as RequestUser;
+      const settled = await Promise.allSettled([
+        svc.decideExportRequest(requestId, { decision: 'approved', note: 'first writer' }, actingDm, target),
+        svc.decideExportRequest(requestId, { decision: 'denied', note: 'second writer' }, actingDm, target),
+      ]);
+
+      // Exactly one wins; the loser is told, never silently handed the other's verdict.
+      const winners = settled.filter((r) => r.status === 'fulfilled');
+      const losers = settled.filter((r) => r.status === 'rejected');
+      expect(winners).toHaveLength(1);
+      expect(losers).toHaveLength(1);
+
+      // And the stored row agrees with whichever call reported success, so the audit
+      // trail and the persisted consent cannot disagree.
+      const winner = (winners[0] as PromiseFulfilledResult<{ status: string; decisionNote: string }>).value;
+      const after = await dmA.get(`/api/v1/campaigns/${target}/catalog/export-requests`);
+      const stored = (after.body as Array<{ id: number; status: string; decisionNote: string }>).find(
+        (r) => r.id === requestId,
+      );
+      expect(stored!.status).toBe(winner.status);
+      expect(stored!.decisionNote).toBe(winner.decisionNote);
     });
 
     it('does not let a non-DM member or an outsider decide', async () => {

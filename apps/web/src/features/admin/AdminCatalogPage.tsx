@@ -35,6 +35,7 @@ import {
   buildBulkPayload,
   buildCatalogQuery,
   bulkArgsError,
+  bulkPayloadFingerprint,
   currentPage,
   isNoOpResult,
   outcomeVariant,
@@ -165,6 +166,9 @@ function AdminCatalog() {
   const [bulkArgs, setBulkArgs] = useState<BulkArgs>(EMPTY_BULK_ARGS);
   const [reason, setReason] = useState('');
   const [preview, setPreview] = useState<CampaignCatalogBulkResult | null>(null);
+  // The payload fingerprint `preview` was produced from. Apply is gated on this still
+  // matching what would be sent now — see `bulkPayloadFingerprint`.
+  const [previewKey, setPreviewKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -204,6 +208,16 @@ function AdminCatalog() {
       return next === prev ? prev : next;
     });
   }, [operations]);
+
+  // Everything the next request would carry, as one comparable string. Apply is only
+  // offered while this still equals the fingerprint the preview was produced from, so
+  // editing ANY field after a dry run — owner, quota, policy, module, profile, reason,
+  // selection — retires the preview instead of silently re-aiming it.
+  const currentBulkKey = useMemo(
+    () => bulkPayloadFingerprint(operation, selectedEntries.map((c) => c.id), reason, bulkArgs),
+    [operation, selectedEntries, reason, bulkArgs],
+  );
+  const previewStale = preview !== null && previewKey !== currentBulkKey;
 
   // What (if anything) stops this run, as a translation key. The server re-validates
   // everything; this only keeps the page from dispatching a request it can already see
@@ -253,8 +267,12 @@ function AdminCatalog() {
           ),
         );
         setPreview(result);
+        // Stamp the preview with exactly what produced it, so a later edit to any field
+        // makes the mismatch visible rather than leaving Apply pointed somewhere new.
+        setPreviewKey(currentBulkKey);
         if (!dryRun) {
           setSelected(new Set());
+          setPreviewKey(null);
           await load();
         }
       } catch (err) {
@@ -263,7 +281,7 @@ function AdminCatalog() {
         setBusy(false);
       }
     },
-    [operation, reason, bulkArgs, selectedEntries, load, t],
+    [operation, reason, bulkArgs, selectedEntries, currentBulkKey, load, t],
   );
 
   if (loading && !page) {
@@ -361,7 +379,21 @@ function AdminCatalog() {
         )}
       </Card>
 
-      {policy && <PrivacyPolicyCard policy={policy} onSaved={setPolicy} />}
+      {/* Refetch the rows, not just the policy. Tightening `names` to `redacted` is a
+          deliberate act to STOP showing those names; leaving the already-loaded page
+          rendering them until some unrelated reload makes the product's response to that
+          act "keep showing them". Refetching rather than redacting client-side keeps the
+          redaction rule in exactly one place — the server — instead of adding a second
+          implementation here that has to agree with it. */}
+      {policy && (
+        <PrivacyPolicyCard
+          policy={policy}
+          onSaved={(next) => {
+            setPolicy(next);
+            void load();
+          }}
+        />
+      )}
 
       <Card className="space-y-3">
         <div className="flex items-center justify-between flex-wrap gap-2">
@@ -587,7 +619,7 @@ function AdminCatalog() {
             {t('admin.catalog.dryRun')}
           </Btn>
           <Btn
-            disabled={busy || preview === null || preview.dryRun === false || blocked !== null}
+            disabled={busy || preview === null || preview.dryRun === false || blocked !== null || previewStale}
             onClick={() => void runBulk(false)}
           >
             {t('admin.catalog.apply')}
@@ -598,6 +630,11 @@ function AdminCatalog() {
             thing this whole card is trying to stop the operator running into. */}
         {blocked !== null && selectedEntries.length > 0 && (
           <p className="text-xs text-amber-300">{t(blocked)}</p>
+        )}
+        {/* The preview no longer describes what Apply would do. Say so instead of
+            leaving a disabled button and a result panel that look like agreement. */}
+        {previewStale && blocked === null && (
+          <p className="text-xs text-amber-300">{t('admin.catalog.previewStale')}</p>
         )}
         {operation === 'set_policy' && (
           <p className="text-xs text-secondary">{t('admin.catalog.args.invitesCloseOnlyHint')}</p>

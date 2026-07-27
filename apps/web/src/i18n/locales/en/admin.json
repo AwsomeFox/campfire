@@ -187,7 +187,8 @@
         "sourceDefault": "Currently the built-in default — no operator has configured this yet.",
         "sourceSettings": "Configured by an operator on this server.",
         "tightenOnly": "Saving stores both fields together, so the value you see here is the value that is stored. Campaigns that have opted out stay redacted either way."
-      }
+      },
+      "previewStale": "These values changed since the preview. Run the dry run again so Apply acts on what you were shown."
     }
   }
 }
