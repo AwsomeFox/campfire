@@ -15,9 +15,9 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import { useLocation } from 'react-router-dom';
-import { useQueryClient } from '@tanstack/react-query';
-import type { AiDmMode, AiDmSeat, AiProviderEffectiveView, Campaign, NarrationLanguage } from '@campfire/schema';
-import { NARRATION_LANGUAGE_OPTIONS } from '@campfire/schema';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import type { AiCostBasis, AiDmMode, AiDmReadiness, AiDmSeat, AiProviderEffectiveView, Campaign, NarrationLanguage } from '@campfire/schema';
+import { AI_COST_BASIS_UNKNOWN, NARRATION_LANGUAGE_OPTIONS } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
 import { SkeletonCard } from '../../components/ui';
 import { AI_DM_BUDGET_INPUT_ID, AI_DM_BUDGET_SECTION_ID } from './aiDmBudgetIds';
@@ -25,6 +25,8 @@ import { ProviderForm } from './ProviderForm';
 import { queryKeys } from '../../lib/query';
 import { useAuth } from '../../app/auth';
 import { AiSetupChecklist } from '../ai-dm/AiSetupChecklist';
+import { CostDisclosure } from '../ai-dm/CostDisclosure';
+import { formatUsdRange } from '../ai-dm/costEstimate';
 import { TermHelp } from '../../components/TermHelp';
 
 const AI_DM_INSTRUCTIONS_SECTION_ID = 'ai-dm-instructions';
@@ -428,6 +430,19 @@ function BudgetSection({
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // #1065 — the cost basis rides along on readiness, which the checklist in this same card
+  // has already fetched, so this shares that cache rather than adding a request. When it has
+  // not loaded yet the basis is `unknown`, which renders the disclosure: the honest state to
+  // be in while we do not know, and the state we must never silently skip past.
+  const readinessQuery = useQuery({
+    queryKey: queryKeys.aiDmReadiness(campaignId),
+    queryFn: () => api.get<AiDmReadiness>(`${API}/campaigns/${campaignId}/ai-dm/readiness`),
+  });
+  const costBasis: AiCostBasis = readinessQuery.data?.estimatedCost.basis ?? AI_COST_BASIS_UNKNOWN;
+  // Price the number being TYPED when it is valid, otherwise the saved one.
+  const typedBudget = Number(tokenBudget);
+  const budgetForEstimate = Number.isFinite(typedBudget) && typedBudget >= 0 ? typedBudget : seat.tokenBudget;
+
   async function save() {
     const n = Number(tokenBudget);
     if (!Number.isFinite(n) || n < 0) {
@@ -465,6 +480,17 @@ function BudgetSection({
           onChange={(e) => setTokenBudget(e.target.value)}
         />
       </div>
+      {/* #1065 — what that budget is worth in real money, or an explicit statement that we
+          cannot say. Tracks the TYPED value rather than the saved one: this is the moment a
+          DM is choosing a number, so showing the consequence of the number under the cursor
+          is the entire point. A token cap nobody can price is not a spending limit, and
+          until now nothing on this screen said so. */}
+      <CostDisclosure
+        className="text-xs text-[var(--color-neutral-300)]"
+        basis={costBasis}
+        amount={formatUsdRange(budgetForEstimate, costBasis)}
+        scopeKey="aiOnboarding.cost.scopeBudget"
+      />
       {/* Usage meter */}
       <div className="flex flex-col gap-1">
         <div style={{ height: 8, borderRadius: 4, background: 'var(--color-neutral-800, #2a2a2a)', overflow: 'hidden' }}>

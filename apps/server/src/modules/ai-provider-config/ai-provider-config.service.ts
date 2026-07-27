@@ -231,6 +231,48 @@ export class AiProviderConfigService {
     };
   }
 
+  /**
+   * The identity a PRICE is keyed on (issue #1065): provider type, model, and endpoint.
+   *
+   * Deliberately separate from {@link getEffectiveView}, which omits `baseUrl` on purpose —
+   * surfacing an inherited server endpoint to a campaign DM discloses a URL they cannot
+   * otherwise obtain (#373). This method is SERVER-SIDE ONLY and its `baseUrl` must never be
+   * serialized to a client; the cost basis built from it echoes back only the provider type
+   * and model, never the endpoint.
+   *
+   * Equally deliberately NOT `resolveEffectiveConfigWithEndpointScope`, which decrypts the API
+   * key. Rendering a budget estimate must not decrypt a credential — that would put a secret
+   * through a code path whose only job is to multiply two numbers, on every page render.
+   *
+   * Follows the same endpoint-scope rule as the credential resolver: the scope that OWNS the
+   * credential owns the endpoint and provider type, while the primary row still supplies the
+   * model. That matters for pricing because a keyless campaign override runs against the
+   * SERVER's endpoint, so its price must be looked up against that endpoint rather than
+   * against none.
+   */
+  async getPricingIdentity(
+    campaignId: number,
+  ): Promise<{ providerType: AiProviderType | null; model: string | null; baseUrl: string }> {
+    const server = await this.serverRow();
+    const camp = await this.campaignRow(campaignId);
+    const primary = camp ?? server;
+    if (!primary) return { providerType: null, model: null, baseUrl: '' };
+
+    const credentialSource = camp
+      ? campaignCredentialSource(camp, server)
+      : localCredentialSource(primary);
+    const endpointOwner =
+      camp && (credentialSource === 'server' || credentialSource === 'environment') && server
+        ? server
+        : primary;
+
+    return {
+      providerType: endpointOwner.providerType as AiProviderType,
+      model: primary.model,
+      baseUrl: (endpointOwner.baseUrl ?? '').trim(),
+    };
+  }
+
   // ── writes ───────────────────────────────────────────────────────────────────
 
   /** Upsert the server-default config (admin-gated at the controller). */

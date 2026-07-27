@@ -101,8 +101,51 @@ Together these screens configure:
   instructions** (redacted from non-DM readers).
 
 A server admin also gets an **AI console** at **`/admin/ai`**: a **kill switch** (the
-server-wide `experimentalAiDm` flag), a **server-wide token cap**, and a **provider
-health** check that probes the configured providers.
+server-wide `experimentalAiDm` flag), a **server-wide token cap**, **model pricing**
+(below), and a **provider health** check that probes the configured providers.
+
+### What a token budget does and does not tell you
+
+!!! warning "A token budget is not a spending limit"
+
+    It is a **token** cap. Turns stop when it is reached, so it bounds usage — but on
+    its own it says nothing about **money**, and what a given number of tokens costs
+    depends entirely on which model serves them.
+
+Campfire shows a dollar estimate **only when a server admin has entered pricing for the
+model in question**, under **AI console → model pricing**. Prices are per million input
+and output tokens, and are keyed by provider, model, **and endpoint**.
+
+When no price is on file, every cost surface says so plainly — *"Campfire cannot
+estimate cost — monitor your provider's billing"* — rather than showing a figure. That
+is deliberate. Vendors change prices without notice, self-hosted and proxied endpoints
+have no public price at all, and **a confident wrong number is worse than no number**: a
+DM shown "$3.10" who is then billed $31 was actively misled, whereas a DM told we cannot
+estimate goes and reads their provider's billing page, which is the right thing to do
+regardless.
+
+Three things worth knowing about the estimates:
+
+- **They are ranges, and approximate.** A budget's real cost depends on how it splits
+  between input and output tokens, which nobody knows in advance and which differ
+  several-fold on most providers. The **top** of the range is the number to budget
+  against. Figures are rounded and prefixed `≈`; none of them is a quote.
+- **They cover one campaign's AI seat** — not your server's total AI spend, and not any
+  other campaign. That caveat is printed next to every figure, not hidden in a tooltip.
+- **A custom Base URL never inherits a vendor price.** A model *name* behind a proxy,
+  gateway, or self-hosted server says nothing about what that endpoint charges, and
+  anyone pointing at one is more likely to be on a negotiated or self-hosted rate. Enter
+  a price for that endpoint explicitly, or the disclosure is shown.
+
+Campfire ships a small **reference list** of published prices for common models. It is a
+**data-entry aid only** — nothing estimates against it. An admin can prefill from it,
+review the figures, and save them; only then do they become live pricing, and the saved
+entry records that it came from the reference list along with the date that list was
+verified, so staleness stays visible.
+
+The estimate or the disclosure appears **before you switch a campaign to Driver mode**,
+in the setup checklist directly above the mode selector, and again beside the token
+budget field as you type a number.
 
 ### The shipped provider still makes no vendor call
 

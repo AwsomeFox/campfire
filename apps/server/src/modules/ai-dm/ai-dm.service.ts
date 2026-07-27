@@ -9,7 +9,7 @@ import {
 } from '@nestjs/common';
 import { and, desc, eq, gt, gte, sql } from 'drizzle-orm';
 import type { z } from 'zod';
-import { AiDmProactiveSettings } from '@campfire/schema';
+import { AiDmProactiveSettings, estimateUsdForSplit } from '@campfire/schema';
 import type {
   AiDmMode,
   AiDmReadiness,
@@ -32,6 +32,7 @@ import { AiProviderConfigService } from '../ai-provider-config/ai-provider-confi
 import { AI_DM_PROVIDER, type AiDmProvider } from './ai-dm.provider';
 import { SessionZeroService } from '../session-zero/session-zero.service';
 import { SupportPreferencesService } from '../session-zero/support-preferences.service';
+import { AiPricingService } from '../ai-pricing/ai-pricing.service';
 import { providerCapabilities } from './providers';
 import type { AiProviderConfig } from './providers/factory';
 
@@ -178,6 +179,10 @@ export class AiDmService implements OnApplicationBootstrap {
     private readonly providerConfig: AiProviderConfigService,
     private readonly sessionZero: SessionZeroService,
     private readonly supportPreferences: SupportPreferencesService,
+    // #1065 — read ONLY when rendering readiness. Never from meterTurn, reserveTokenBudget,
+    // or the turn loop: SettingsService.getJson is an uncached SELECT per call, and an
+    // estimate is `tokens × price` with both sides already known at render time.
+    private readonly pricing: AiPricingService,
     @Inject(AI_DM_PROVIDER) private readonly provider: AiDmProvider,
   ) {}
 
@@ -670,6 +675,29 @@ export class AiDmService implements OnApplicationBootstrap {
       recentUsage ?? (DEFAULT_ESTIMATED_PROMPT_TOKENS + DEFAULT_ESTIMATED_COMPLETION_TOKENS);
     const estimatedCompletionTokens = Math.round(estimatedTotalTokens * DEFAULT_COMPLETION_SHARE);
     const estimatedPromptTokens = estimatedTotalTokens - estimatedCompletionTokens;
+
+    // #1065 — the MONEY dimension. A token budget is not a spending limit, and every surface
+    // here was token-only, so a DM sized a budget with no idea what it would cost.
+    //
+    // `basis` is a discriminated union whose `unknown` variant is the only state reachable
+    // without an actual matched price, and `estimateUsdForSplit` returns null on it. So the
+    // dollar figure below cannot be non-null unless a price was genuinely resolved — a new
+    // provider, a renamed model, or a proxied endpoint falls into the DISCLOSURE rather than
+    // into a confident wrong number. That is the failure this issue is really about: a DM
+    // shown "$3.10" and billed $31 was misled by us, whereas one told we cannot estimate goes
+    // and reads their provider's billing page, which is the right thing to do regardless.
+    //
+    // Uses the pricing IDENTITY (which includes the endpoint) rather than the client-facing
+    // provider view, because a model name behind a custom endpoint does not imply the
+    // vendor's price. Resolving here also keeps `baseUrl` server-side: the basis echoes back
+    // only the provider type and model, never the URL (#373).
+    const pricingIdentity = await this.providerConfig.getPricingIdentity(campaignId);
+    const basis = await this.pricing.resolveBasis(pricingIdentity);
+    const estimatedUsd = estimateUsdForSplit(estimatedPromptTokens, estimatedCompletionTokens, basis);
+    // The note is split English-for-logs / key-for-clients, the same way `detail`/`detailKey`
+    // is on every readiness check — server prose rendered raw in a localized UI was the
+    // existing wart here, and growing it would have made money the one untranslated string.
+    const noteKey = recentUsage ? 'metered' : 'noData';
     return {
       campaignId,
       // A check that is not `ok` never counts as ready — including one whose status is
@@ -685,10 +713,13 @@ export class AiDmService implements OnApplicationBootstrap {
         estimatedPromptTokens,
         estimatedCompletionTokens,
         estimatedTotalTokens: estimatedPromptTokens + estimatedCompletionTokens,
-        estimatedUsd: null,
+        estimatedUsd,
+        basis,
         note: recentUsage
           ? 'Per-turn estimate from this campaign’s recent metered turns. Actual usage depends on context, tools, and model pricing.'
           : 'Best-effort per-turn estimate before sending to the provider — this campaign has no metered turns yet. Actual usage depends on context, tools, and model pricing.',
+        noteKey,
+        noteParams: {},
       },
       driverUnavailableReason: firstBlocked?.detail ?? driverModeReason,
     };

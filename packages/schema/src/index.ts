@@ -5919,12 +5919,178 @@ export const AiDmReadinessCheck = z.object({
 });
 export type AiDmReadinessCheck = z.infer<typeof AiDmReadinessCheck>;
 
+// ── Monetary cost model (issue #1065) ────────────────────────────────────────
+//
+// A token budget is NOT a spending limit, and until now nothing on screen said so. The
+// pieces below add the money dimension — and the design constraint that shapes all of them
+// is that BEING UNABLE TO ANSWER IS THE COMMON CASE, not the edge case. Pricing changes
+// without notice, self-hosted and proxied endpoints have no public price at all, and a
+// confident wrong dollar figure is strictly worse than no figure: a DM shown "$3.10" and
+// billed $31 was actively misled by us, whereas a DM told we cannot estimate goes and reads
+// their provider's billing page, which is the correct behaviour anyway.
+//
+// So the unknown branch is the DEFAULT and the only state reachable without evidence. See
+// {@link AiCostBasis}.
+
+/** Whether a stored price was typed by an admin or prefilled from the shipped reference table. */
+export const AiModelPriceSource = z.enum(['manual', 'reference']);
+export type AiModelPriceSource = z.infer<typeof AiModelPriceSource>;
+
+/**
+ * One admin-configured price, keyed by the identity that actually determines cost.
+ *
+ * Keyed on `(providerType, model, baseUrl)` — NOT on the campaign. A model's price is a
+ * property of the model, not of whoever calls it: `gpt-5` costs the same for campaign 3 and
+ * campaign 47. Keying by campaign would make every DM look the same numbers up independently,
+ * let them drift apart on one server, and turn a vendor price change into an N-row edit.
+ *
+ * `baseUrl` is part of the key and that is load-bearing. A model NAME behind a proxy or
+ * gateway does not imply the vendor's pricing — someone pointing at a custom endpoint is
+ * MORE likely to have a negotiated rate, not less — so a price entered for the vendor's own
+ * endpoint must never be applied to a custom one. '' means the provider's own endpoint.
+ */
+export const AiModelPrice = z.object({
+  providerType: z.string().trim().min(1).max(40),
+  model: z.string().trim().min(1).max(200),
+  /** Custom endpoint this price is scoped to; '' = the provider's own default endpoint. */
+  baseUrl: z.string().trim().max(2048).default(''),
+  /** USD per MILLION input (prompt) tokens. Per-million, because per-token is unreadable. */
+  inputUsdPerMTok: z.number().nonnegative().max(1_000_000),
+  /** USD per MILLION output (completion) tokens. */
+  outputUsdPerMTok: z.number().nonnegative().max(1_000_000),
+  source: AiModelPriceSource.default('manual'),
+  /** As-of date (YYYY-MM-DD) of the figures, so staleness is visible rather than implied. */
+  asOf: z.string().trim().max(10).nullable().default(null),
+  updatedAt: z.string(),
+});
+export type AiModelPrice = z.infer<typeof AiModelPrice>;
+
+/**
+ * The server-wide pricing table, stored as ONE JSON blob under a settings key.
+ *
+ * Server-wide rather than per-campaign for the reason above, and in the generic settings k/v
+ * rather than on `ai_provider_configs` for a second reason: that table's server row holds a
+ * single `providerType`, and a campaign may override the provider entirely. Pricing hung off
+ * it would have no home for a campaign on Anthropic under an OpenAI server default. Only an
+ * admin writes this, so a single blob has no concurrent read-modify-write problem.
+ */
+export const AiPricingTable = z.object({
+  version: z.literal(1).default(1),
+  entries: z.array(AiModelPrice).max(500).default([]),
+  updatedAt: z.string().nullable().default(null),
+  updatedBy: z.string().default(''),
+});
+export type AiPricingTable = z.infer<typeof AiPricingTable>;
+
+/** Why no dollar figure is available. Each maps to its own honest sentence, never a number. */
+export const AiCostUnknownReason = z.enum([
+  /** No admin has entered pricing for this server at all. */
+  'no_pricing_configured',
+  /** Pricing exists, but not for this provider/model pair. */
+  'model_not_priced',
+  /** The campaign points at a custom endpoint with no price entered FOR that endpoint. */
+  'custom_endpoint_not_priced',
+  /** No provider/model is resolved yet, so there is nothing to price. */
+  'no_provider',
+]);
+export type AiCostUnknownReason = z.infer<typeof AiCostUnknownReason>;
+
+/**
+ * THE choke point for "may we show money?" — a discriminated union, deliberately.
+ *
+ * `unknown` is the variant you get unless a price was actually resolved, so a new provider,
+ * a renamed model, or a forgotten config path falls into the DISCLOSURE rather than into a
+ * confident wrong number. This is the same reasoning as the exhaustive finish-reason Record
+ * in driver-safety.ts: a shape that makes the unsafe state unreachable beats a convention
+ * that the unsafe state is handled.
+ *
+ * Every dollar figure in the product is derived from this via {@link estimateUsdRange} or
+ * {@link estimateUsdForSplit}, both of which return null on `unknown`. There is no other
+ * supported way to turn tokens into money, which is what makes the guarantee structural
+ * rather than a rule someone has to remember.
+ */
+export const AiCostBasis = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('unknown'),
+    reason: AiCostUnknownReason,
+  }),
+  z.object({
+    kind: z.literal('priced'),
+    inputUsdPerMTok: z.number().nonnegative(),
+    outputUsdPerMTok: z.number().nonnegative(),
+    source: AiModelPriceSource,
+    asOf: z.string().nullable(),
+    /** Echoed back so the UI can say WHICH model the figure is for, never just "$X". */
+    providerType: z.string(),
+    model: z.string(),
+  }),
+]);
+export type AiCostBasis = z.infer<typeof AiCostBasis>;
+
+/** The basis every caller starts from. Exported so "unknown" is the easy thing to reach for. */
+export const AI_COST_BASIS_UNKNOWN: AiCostBasis = { kind: 'unknown', reason: 'no_pricing_configured' };
+
+/**
+ * Dollar RANGE for a bare token count, or null when we cannot say.
+ *
+ * A range and not a point, because a token budget's real cost genuinely depends on how it
+ * splits between input and output — which nobody knows in advance, and which differ by
+ * several times on most providers. Reporting the midpoint to the cent would invent precision
+ * we do not have; reporting the honest span is both true and more useful, because the top of
+ * it is the number a DM should actually budget against.
+ *
+ * Returns null for `unknown`. That is the whole point: there is no argument you can pass to
+ * get a number out of an unpriced basis.
+ */
+export function estimateUsdRange(tokens: number, basis: AiCostBasis): { low: number; high: number } | null {
+  if (basis.kind !== 'priced') return null;
+  const millions = Math.max(0, tokens) / 1_000_000;
+  const a = millions * basis.inputUsdPerMTok;
+  const b = millions * basis.outputUsdPerMTok;
+  return a <= b ? { low: a, high: b } : { low: b, high: a };
+}
+
+/**
+ * Dollar figure for a KNOWN prompt/completion split, or null when we cannot say.
+ *
+ * Used for the per-turn estimate, where the split is estimated from this campaign's own
+ * metered turns rather than unknown — so a point value is derivable here in a way it is not
+ * for a raw budget. Still a best-effort figure over an estimated split; the UI renders it
+ * with limited significant figures and says what it assumed.
+ */
+export function estimateUsdForSplit(
+  promptTokens: number,
+  completionTokens: number,
+  basis: AiCostBasis,
+): number | null {
+  if (basis.kind !== 'priced') return null;
+  return (
+    (Math.max(0, promptTokens) / 1_000_000) * basis.inputUsdPerMTok +
+    (Math.max(0, completionTokens) / 1_000_000) * basis.outputUsdPerMTok
+  );
+}
+
 export const AiDmEstimatedCost = z.object({
   estimatedPromptTokens: z.number().int().nonnegative(),
   estimatedCompletionTokens: z.number().int().nonnegative(),
   estimatedTotalTokens: z.number().int().nonnegative(),
   estimatedUsd: z.number().nonnegative().nullable().default(null),
+  /**
+   * #1065 — what the dollar figure above is (or is not) based on. `estimatedUsd` is DERIVED
+   * from this and is null whenever `basis.kind === 'unknown'`; the basis is what the UI reads
+   * to decide between showing a number and showing the cannot-estimate disclosure.
+   */
+  basis: AiCostBasis.default(AI_COST_BASIS_UNKNOWN),
+  /**
+   * English prose for API consumers and logs. Localized clients prefer {@link noteKey} —
+   * same split as {@link AiDmReadinessCheck.detail}/`detailKey`, so a server that grows a new
+   * variant never blanks a row on an older client (#629).
+   */
   note: z.string(),
+  /** Machine-readable id for {@link note}: `aiOnboarding.runCost.notes.<noteKey>`. */
+  noteKey: z.string().default(''),
+  /** Interpolation values for {@link noteKey}. */
+  noteParams: z.record(z.string(), z.union([z.string(), z.number()])).default({}),
 });
 export type AiDmEstimatedCost = z.infer<typeof AiDmEstimatedCost>;
 
@@ -6317,6 +6483,55 @@ export const AiAllowlistUpdate = z
   .object({ allowedModels: z.array(z.string().min(1).max(120)).max(200) })
   .strict();
 export type AiAllowlistUpdate = z.infer<typeof AiAllowlistUpdate>;
+
+// PUT /settings/ai/pricing (issue #1065) — replace the server-wide model price list.
+// Wholesale replace rather than per-entry patch: the list is short, an admin edits it as a
+// table, and a partial update API would need an identity for rows whose natural key
+// (providerType+model+baseUrl) is exactly what an edit changes.
+export const AiPricingUpdate = z
+  .object({
+    entries: z
+      .array(
+        z
+          .object({
+            providerType: z.string().trim().min(1).max(40),
+            model: z.string().trim().min(1).max(200),
+            baseUrl: z.string().trim().max(2048).default(''),
+            inputUsdPerMTok: z.number().nonnegative().max(1_000_000),
+            outputUsdPerMTok: z.number().nonnegative().max(1_000_000),
+            source: AiModelPriceSource.default('manual'),
+            asOf: z.string().trim().max(10).nullable().default(null),
+          })
+          .strict(),
+      )
+      .max(500),
+  })
+  .strict();
+export type AiPricingUpdate = z.infer<typeof AiPricingUpdate>;
+
+/** GET /settings/ai/pricing — the stored list plus the reference figures offered for prefill. */
+export const AiPricingView = z.object({
+  entries: z.array(AiModelPrice),
+  updatedAt: z.string().nullable(),
+  updatedBy: z.string(),
+  /**
+   * Campfire's shipped reference figures. Offered for PREFILL only — nothing resolves an
+   * estimate against them. They become live pricing solely once an admin has reviewed and
+   * saved them, at which point they are indistinguishable from typed pricing except for the
+   * `source`/`asOf` provenance recorded on the entry.
+   */
+  reference: z.array(
+    z.object({
+      providerType: z.string(),
+      model: z.string(),
+      inputUsdPerMTok: z.number().nonnegative(),
+      outputUsdPerMTok: z.number().nonnegative(),
+    }),
+  ),
+  /** The date the reference figures were last verified. Shown at the moment of prefill. */
+  referenceAsOf: z.string(),
+});
+export type AiPricingView = z.infer<typeof AiPricingView>;
 // ── AI scribe: scheduled / automatic server-side recap jobs (issue #316) ──────
 // The scribe runs the configured provider (#309/#310) on a trigger to draft a
 // session recap from the campaign's own material (resolved inbox + encounters),

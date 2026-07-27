@@ -4,6 +4,7 @@ import { SettingsModule } from '../settings/settings.module';
 import { RoleAccessModule } from '../membership/role-access.module';
 import { AiProviderConfigModule } from '../ai-provider-config/ai-provider-config.module';
 import { ProposalRecordsModule } from '../proposals/proposal-records.module';
+import { AiPricingModule } from '../ai-pricing/ai-pricing.module';
 import { SessionZeroModule } from '../session-zero/session-zero.module';
 import { AiDmService } from './ai-dm.service';
 import { AiDmController } from './ai-dm.controller';
@@ -27,6 +28,7 @@ import { AI_DM_PROVIDER, NoopAiDmProvider } from './ai-dm.provider';
     AiProviderConfigModule,
     ProposalRecordsModule,
     SessionZeroModule,
+    AiPricingModule,
   ],
   controllers: [AiDmController, CoDmController],
   providers: [AiDmService, CoDmService, { provide: AI_DM_PROVIDER, useClass: NoopAiDmProvider }],

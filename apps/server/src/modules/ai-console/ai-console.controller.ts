@@ -5,7 +5,7 @@ import { ServerRoles } from '../../common/decorators/server-roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { AiConsoleService } from './ai-console.service';
-import { AiCapsUpdateDto, AiKillSwitchUpdateDto, AiAllowlistUpdateDto } from './ai-console.dto';
+import { AiCapsUpdateDto, AiKillSwitchUpdateDto, AiAllowlistUpdateDto, AiPricingUpdateDto } from './ai-console.dto';
 
 /**
  * Admin AI console (issue #315) — the server-admin cockpit for the AI program
@@ -20,6 +20,8 @@ import { AiCapsUpdateDto, AiKillSwitchUpdateDto, AiAllowlistUpdateDto } from './
  *   GET  /settings/ai/allowlist  → the model allowlist
  *   PUT  /settings/ai/allowlist  → replace the model allowlist (drives #310)
  *   POST /settings/ai/health     → "test all" provider health probe
+ *   GET  /settings/ai/pricing    → server-wide model pricing + reference figures (#1065)
+ *   PUT  /settings/ai/pricing    → replace the model price list
  *
  * No API key or raw prompt is ever surfaced by any route here.
  */
@@ -85,5 +87,31 @@ export class AiConsoleController {
   @ApiResponse({ status: 200, description: 'Per-provider health results.' })
   health() {
     return this.console.testAll();
+  }
+
+  @Get('pricing')
+  @ApiOperation({
+    summary: 'Get the AI model price list',
+    description:
+      'Server-admin only. The server-wide per-model pricing that turns token budgets into dollar estimates (#1065), ' +
+      'plus Campfire’s shipped reference figures offered for prefill. The reference figures are a DATA-ENTRY AID: ' +
+      'nothing estimates against them until an admin has reviewed and saved them.',
+  })
+  @ApiResponse({ status: 200, description: 'The stored price list and the reference figures.' })
+  pricing() {
+    return this.console.getPricing();
+  }
+
+  @Put('pricing')
+  @ApiOperation({
+    summary: 'Set the AI model price list',
+    description:
+      'Server-admin only. Replaces the server-wide price list. Prices are keyed by (providerType, model, baseUrl) — ' +
+      'a price entered for a provider’s own endpoint is never applied to a custom endpoint, because a model name ' +
+      'behind a proxy does not imply the vendor’s rate. A model with no entry shows the cannot-estimate disclosure.',
+  })
+  @ApiResponse({ status: 200, description: 'The updated price list.' })
+  setPricing(@Body() body: AiPricingUpdateDto, @CurrentUser() user: RequestUser) {
+    return this.console.setPricing(body.entries, user);
   }
 }

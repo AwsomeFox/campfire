@@ -16,6 +16,7 @@ import type { AiConsoleOverview, AiProviderHealthEntry } from '@campfire/schema'
 import { api, API, translateApiError } from '../../lib/api';
 import { Card, Btn, TextInput, Skeleton, ErrorNote } from '../../components/ui';
 import { ProviderForm } from '../settings/ProviderForm';
+import { AiPricingEditor } from './AiPricingEditor';
 
 function fmt(n: number): string {
   return n.toLocaleString();
@@ -150,6 +151,9 @@ export function AiConsoleCard() {
 
           {/* Model allowlist — kept next to the provider it constrains. */}
           <AllowlistEditor ov={ov} onSaved={setOv} onError={setError} />
+          {/* #1065 — model pricing sits next to the allowlist: both are admin-owned facts
+              about models that every campaign resolves against. */}
+          <AiPricingEditor onError={setError} />
 
           {/* Per-campaign usage table */}
           <CampaignUsageTable ov={ov} />

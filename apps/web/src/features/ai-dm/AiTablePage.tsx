@@ -89,6 +89,7 @@ import { Field } from '../../components/Field';
 import { Toggle } from '../../components/Toggle';
 import { AI_TABLE_FIELD, AI_TABLE_PREFIX } from '../../components/formFieldLabels';
 import { Btn, Card, Chip, EmptyState, Skeleton, type ChipVariant } from '../../components/ui';
+import { formatApproxUsd } from './costEstimate';
 
 /** Seat status → chip variant for the header status pill. */
 const STATUS_VARIANT: Record<'idle' | 'narrating' | 'paused' | 'human', ChipVariant> = {
@@ -1029,9 +1030,14 @@ export default function AiTablePage() {
                 prompt: readiness.estimatedCost.estimatedPromptTokens.toLocaleString(),
                 completion: readiness.estimatedCost.estimatedCompletionTokens.toLocaleString(),
               })}{' '}
+              {/* #1065 — the same money line as the settings card, from the same basis. It
+                  used to render `toFixed(4)` against a hardcoded-null figure: five decimal
+                  places of implied accuracy on an estimate that did not exist. */}
               {readiness.estimatedCost.estimatedUsd === null
                 ? t('aiOnboarding.runCost.usdUnknown')
-                : t('aiOnboarding.runCost.usdKnown', { usd: `$${readiness.estimatedCost.estimatedUsd.toFixed(4)}` })}
+                : t('aiOnboarding.runCost.usdKnown', {
+                    usd: formatApproxUsd(readiness.estimatedCost.estimatedUsd),
+                  })}
             </div>
           )}
           {isDm && (

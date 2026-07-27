@@ -132,13 +132,18 @@
           "driver": "In Driver mode, players join the shared session at the Table tab in the sidebar. Share that with your table.",
           "notYet": "Once Driver mode is on, a Table tab appears for every member — that's where the session is played."
         }
-      }
+      },
+      "costTokens": "Plan for up to {{tokens}} tokens (about {{prompt}} prompt + {{completion}} completion)."
     },
     "runCost": {
       "label": "Estimated next AI turn:",
       "summary": "up to {{tokens}} tokens ({{prompt}} prompt + {{completion}} completion).",
       "usdUnknown": "USD varies by provider/model.",
-      "usdKnown": "About {{usd}}."
+      "usdKnown": "About {{usd}}.",
+      "notes": {
+        "metered": "Per-turn estimate from this campaign’s recent metered turns. Actual usage depends on context, tools, and model pricing.",
+        "noData": "Best-effort per-turn estimate before sending to the provider — this campaign has no metered turns yet. Actual usage depends on context, tools, and model pricing."
+      }
     },
     "dashboard": {
       "hintTitle": "Try the AI Dungeon Master",
@@ -200,6 +205,21 @@
         "title": "A human holds the seat",
         "body": "A human has taken over the DM seat. The AI won't act until control is handed back."
       }
+    },
+    "cost": {
+      "cannotEstimate": "Campfire cannot estimate cost — monitor your provider’s billing.",
+      "unknown": {
+        "noPricingConfigured": "No model pricing has been set up on this server. A server admin can add it in the AI console.",
+        "modelNotPriced": "No price is on file for this provider and model. A server admin can add one in the AI console.",
+        "customEndpointNotPriced": "This campaign uses a custom endpoint, and a model name behind a proxy or self-hosted server does not imply the vendor’s price. A server admin can add a price for this endpoint in the AI console.",
+        "noProvider": "No provider and model are configured yet, so there is nothing to price.",
+        "generic": "No price is on file for this configuration."
+      },
+      "scopePerTurn": "per AI turn, estimated",
+      "scopeBudget": "to spend this whole budget, estimated",
+      "basis": "Based on the price on file for {{provider}} {{model}}: ${{input}} per million input tokens, ${{output}} per million output tokens.",
+      "referenceAsOf": "These figures were prefilled from Campfire’s reference list as of {{date}}. Prices change without notice — re-check them against your provider.",
+      "scopeCaveat": "This campaign’s AI seat only — not your server’s total AI spend, and not any other campaign."
     }
   }
 }
