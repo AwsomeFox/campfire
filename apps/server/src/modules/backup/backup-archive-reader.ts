@@ -104,6 +104,10 @@ export class BackupArchiveReader {
     if (signal?.aborted) invalid('archive read was cancelled');
     let zip: ZipFile;
     try { zip = await openZip(filePath); } catch { invalid('not a readable zip file'); }
+    if (signal?.aborted) {
+      zip.close();
+      invalid('archive read was cancelled');
+    }
     const entries: Entry[] = [];
     const names = new Set<string>();
     let declaredTotal = 0;
