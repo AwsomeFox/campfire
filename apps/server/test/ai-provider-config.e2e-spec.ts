@@ -1193,8 +1193,15 @@ describe('provider resolvers agree on configured-vs-null (#501)', () => {
     await assertAgreement('keyless override');
 
     // …and the endpoint is attributed to the SERVER row that actually supplied it.
-    const { endpointScope } = await configs.resolveEffectiveConfigWithEndpointScope(campaignId);
+    const { config, endpointScope } = await configs.resolveEffectiveConfigWithEndpointScope(campaignId);
     expect(endpointScope).toBe('server');
+    // #1052 review — the one assertion this case was missing. `scope === 'server'` alone
+    // cannot distinguish "inherited the server credential" from "resolved to something else
+    // that merely reports server scope", so a change that stopped inheriting could leave the
+    // scope assertion looking honest while altering what actually executes. Pinning the
+    // BORROWED KEY proves the inheritance really happened — the property #373 defines and
+    // #501 depends on.
+    expect(config?.apiKey).toBe('sk-agree-0001');
   });
 
   it('agrees for a keyless campaign override with only an ENVIRONMENT server credential', async () => {

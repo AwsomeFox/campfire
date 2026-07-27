@@ -47,6 +47,12 @@ export interface AiEvalHarnessOptions {
   temperature?: number;
   /** Responses to pre-load onto the mock's queue (more can be added via `script`). */
   responses?: MockResponse[];
+  /**
+   * #1052: when set, the harness also binds a SECOND deterministic provider as the campaign's
+   * fallback, so failover can be driven offline. Its name is `mock-fallback`, which is how a
+   * spec tells which provider actually served a turn.
+   */
+  fallback?: { model?: string; responses?: MockResponse[] };
 }
 
 export interface AiEvalHarness {
@@ -54,6 +60,10 @@ export interface AiEvalHarness {
   server: Server;
   /** The underlying deterministic provider — inspect `.received` to assert prompt/tools/system. */
   mock: MockAiProvider;
+  /** #1052: the deterministic FALLBACK provider, when `options.fallback` was supplied. */
+  fallbackMock?: MockAiProvider;
+  /** #1052: enqueue turns onto the FALLBACK provider's queue. */
+  scriptFallback(...responses: MockResponse[]): void;
   /**
    * Enqueue one or more scripted turns, consumed in order by subsequent `/turn` calls.
    * When the queue is exhausted the mock falls back to a deterministic echo of the prompt.
@@ -131,12 +141,28 @@ export async function createAiEvalHarness(options: AiEvalHarnessOptions = {}): P
     temperature: options.temperature,
   });
 
+  // #1052: an optional second provider so failover is exercisable with no network. Bound
+  // through `resolveFallbackForExecution`, the same optional method the production resolver
+  // implements — a harness without it simply has no fallback, which is the real default.
+  const fallbackScript: MockResponse[] = [...(options.fallback?.responses ?? [])];
+  const fallbackMock = options.fallback
+    ? new MockAiProvider({ name: 'mock-fallback', model: options.fallback.model ?? 'mock-fallback-model', responses: fallbackScript })
+    : undefined;
+
   const ctx = await createTestApp({
     overrides: [
       { token: AI_DM_PROVIDER, useValue: bridged },
       // Driver runtime (#312): resolve the SAME deterministic mock as the streaming
       // AiProvider, so the whole session loop runs offline with scripted turns.
-      { token: AI_PROVIDER_RESOLVER, useValue: { resolve: async () => mock } },
+      {
+        token: AI_PROVIDER_RESOLVER,
+        useValue: {
+          resolve: async () => mock,
+          ...(fallbackMock
+            ? { resolveFallbackForExecution: async () => ({ provider: fallbackMock, model: fallbackMock.model }) }
+            : {}),
+        },
+      },
     ],
   });
   const server = ctx.app.getHttpServer();
@@ -145,12 +171,18 @@ export async function createAiEvalHarness(options: AiEvalHarnessOptions = {}): P
     ctx,
     server,
     mock,
+    fallbackMock,
     script(...responses: MockResponse[]): void {
       script.push(...responses);
+    },
+    scriptFallback(...responses: MockResponse[]): void {
+      fallbackScript.push(...responses);
     },
     resetMock(): void {
       mock.clearResponses();
       mock.clearReceived();
+      fallbackMock?.clearResponses();
+      fallbackMock?.clearReceived();
     },
     async enableExperimental(): Promise<void> {
       const res = await request(server).patch('/api/v1/settings').set(dm).send({ experimentalAiDm: true });

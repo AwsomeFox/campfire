@@ -21,7 +21,7 @@ import { useId, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useQuery } from '@tanstack/react-query';
-import { aiDmReadinessProgress, aiDmSetupComplete, type AiDmReadiness } from '@campfire/schema';
+import { AI_COST_BASIS_UNKNOWN, aiDmReadinessProgress, aiDmSetupComplete, type AiDmReadiness } from '@campfire/schema';
 import { api, API } from '../../lib/api';
 import { queryKeys, useAiDmSeat } from '../../lib/query';
 import { classifyAiGate } from './aiGate';
@@ -29,6 +29,8 @@ import { localizeDetailParams } from './aiReadiness';
 import { CopyControl } from '../../components/CopyControl';
 import { GameIcon } from '../../components/GameIcon';
 import { Btn, Card } from '../../components/ui';
+import { CostDisclosure } from './CostDisclosure';
+import { formatUsdRangeValue } from './costEstimate';
 
 /** One computed checklist step. `done: null` = state is unknown (e.g. flag, for a non-admin). */
 interface Step {
@@ -137,17 +139,47 @@ export function AiSetupChecklist({
         </div>
       )}
 
+      {/* #1065 — the money block, rendered ABOVE the mode selector in AiDmCard, so the
+          estimate-or-disclosure is on screen before a DM commits the seat to Driver. The
+          token line stays: tokens are what the budget is actually denominated in, and the
+          dollar figure is an interpretation of them, not a replacement. */}
       <div className="cf-inset p-3 text-xs text-[var(--color-neutral-300)]">
         <p className="font-semibold text-[var(--color-neutral-200)] m-0">{t('aiOnboarding.checklist.costTitle')}</p>
+        {/* The prompt/completion breakdown appears only when the server actually has one to
+            give. Metered turns record a total, so claiming a split there would be inventing
+            the more specific half of the sentence. */}
         <p className="m-0 mt-1">
-          {t('aiOnboarding.checklist.costBody', {
-            tokens: readiness.estimatedCost.estimatedTotalTokens.toLocaleString(),
-            prompt: readiness.estimatedCost.estimatedPromptTokens.toLocaleString(),
-            completion: readiness.estimatedCost.estimatedCompletionTokens.toLocaleString(),
-            usd: readiness.estimatedCost.estimatedUsd === null ? t('aiOnboarding.checklist.costUnknownUsd') : `$${readiness.estimatedCost.estimatedUsd.toFixed(4)}`,
-          })}
+          {readiness.estimatedCost.estimatedPromptTokens === null ||
+          readiness.estimatedCost.estimatedCompletionTokens === null
+            ? t('aiOnboarding.checklist.costTokensTotal', {
+                tokens: readiness.estimatedCost.estimatedTotalTokens.toLocaleString(),
+              })
+            : t('aiOnboarding.checklist.costTokens', {
+                tokens: readiness.estimatedCost.estimatedTotalTokens.toLocaleString(),
+                prompt: readiness.estimatedCost.estimatedPromptTokens.toLocaleString(),
+                completion: readiness.estimatedCost.estimatedCompletionTokens.toLocaleString(),
+              })}
         </p>
-        <p className="m-0 mt-1 text-[11px] text-secondary">{readiness.estimatedCost.note}</p>
+        <CostDisclosure
+          className="mt-1.5"
+          // `?? AI_COST_BASIS_UNKNOWN` matches BudgetSection. The schema default already
+          // supplies it on a same-version response, so this is not defending against a gap —
+          // it keeps the two sibling call sites reading the same, so the convention the next
+          // reader copies is the one that also holds against an older or partial payload.
+          basis={readiness.estimatedCost.basis ?? AI_COST_BASIS_UNKNOWN}
+          amount={formatUsdRangeValue(readiness.estimatedCost.estimatedUsdRange)}
+          scopeKey="aiOnboarding.cost.scopePerTurn"
+        />
+        {/* Server prose is the API/log rendering; localized clients prefer `noteKey` and fall
+            back to it, so a server that grows a new variant never blanks this line (#629). */}
+        <p className="m-0 mt-1 text-[11px] text-secondary">
+          {readiness.estimatedCost.noteKey
+            ? t(`aiOnboarding.runCost.notes.${readiness.estimatedCost.noteKey}`, {
+                defaultValue: readiness.estimatedCost.note,
+                ...readiness.estimatedCost.noteParams,
+              })
+            : readiness.estimatedCost.note}
+        </p>
       </div>
 
       <p className="text-[11px] text-secondary">

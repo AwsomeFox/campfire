@@ -23,7 +23,7 @@ import type {
   AiFinishReason,
   AiUsage,
 } from './ai-provider';
-import { AiProviderError } from './errors';
+import { streamAbortError } from './http';
 
 /** A single canned reply. Any field omitted gets a deterministic default. */
 export interface MockResponse {
@@ -208,7 +208,9 @@ export class MockAiProvider implements AiProvider {
   }
 }
 
-/** Hang until `signal` aborts, then resolve. Used by {@link MockResponse.stallAfterDone}. */
+/**
+ * Hang until `signal` aborts, then resolve. Used by {@link MockResponse.stallAfterDone}.
+ */
 function resolveOnAbort(signal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
     if (!signal || signal.aborted) return resolve();
@@ -216,16 +218,23 @@ function resolveOnAbort(signal?: AbortSignal): Promise<void> {
   });
 }
 
-/** Hang until `signal` aborts; reject with a timeout-shaped provider error. */
+/**
+ * Hang until `signal` aborts, then reject with EXACTLY what the real transport would.
+ *
+ * #1052 — THIS FAKE USED TO LIE, and it lied in the most expensive direction. It built its own
+ * `AiProviderError('timeout', …)` with no `retryable`, which defaults to TRUE, while the real
+ * `raceRead` hardcoded `retryable: false` for every signal abort. Same trigger, opposite
+ * classification: the retry suite exercised a path production never took, so every green test
+ * about step-level retry was consistent with the feature never firing for the silent-stall case
+ * it exists to recover from.
+ *
+ * The fix is not to hardcode the other answer here — that would just move the lie. It is to call
+ * the SAME function production calls, so the fake cannot drift from the transport again without
+ * the transport changing too. `streamAbortError` is exported for exactly this.
+ */
 function hangUntilAbort(signal?: AbortSignal): Promise<never> {
   return new Promise((_resolve, reject) => {
-    const fail = () =>
-      reject(
-        new AiProviderError('timeout', 'mock: stream idle timeout', {
-          provider: 'mock',
-          cause: signal?.reason,
-        }),
-      );
+    const fail = () => reject(streamAbortError(signal, 'mock'));
     if (!signal) {
       // No signal → hang forever (test misconfiguration); still reject sync if already aborted.
       return;

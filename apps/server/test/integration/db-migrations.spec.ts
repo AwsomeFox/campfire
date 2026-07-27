@@ -1228,6 +1228,68 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     }
   });
 
+  it('0135 adds ai_provider_configs.role and WIDENS the partial uniques so a fallback can exist (#1052)', () => {
+    expect(MIGRATION_NAMES).toContain('0135_ai_provider_config_fallback_role_1052');
+
+    const upgradedDir = makeTempDataDir();
+    dataDir = makeTempDataDir();
+    try {
+      const fresh = openDatabase(dataDir);
+      let freshIndexes: string[];
+      try {
+        expect(columnNames(fresh.sqlite, 'ai_provider_configs')).toContain('role');
+        freshIndexes = (
+          fresh.sqlite.pragma('index_list(ai_provider_configs)') as Array<{ name: string }>
+        ).map((i) => i.name);
+      } finally {
+        fresh.sqlite.close();
+      }
+
+      writeOldSchemaDb(upgradedDir);
+      const upgraded = openDatabase(upgradedDir);
+      try {
+        expect(columnNames(upgraded.sqlite, 'ai_provider_configs')).toContain('role');
+
+        // The OLD one-row-per-scope indexes must be GONE, not merely shadowed. Leaving them
+        // would make the fallback insert below fail on an upgraded install while succeeding on
+        // a fresh one — the exact fresh/upgraded divergence this whole convention guards.
+        const upgradedIndexes = (
+          upgraded.sqlite.pragma('index_list(ai_provider_configs)') as Array<{ name: string }>
+        ).map((i) => i.name);
+        expect(upgradedIndexes).toContain('idx_ai_provider_configs_server_role');
+        expect(upgradedIndexes).toContain('idx_ai_provider_configs_campaign_role');
+        expect(upgradedIndexes).not.toContain('idx_ai_provider_configs_server');
+        expect(upgradedIndexes).not.toContain('idx_ai_provider_configs_campaign');
+        expect([...upgradedIndexes].sort()).toEqual([...freshIndexes].sort());
+
+        const insert = upgraded.sqlite.prepare(
+          `INSERT INTO ai_provider_configs (scope, campaign_id, provider_type, model, role, created_at, updated_at)
+           VALUES (?, ?, 'openai', ?, ?, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+        );
+        // One primary AND one fallback at the server scope — impossible before this migration.
+        insert.run('server', null, 'primary-model', 'primary');
+        insert.run('server', null, 'fallback-model', 'fallback');
+        expect(countRows(upgraded.sqlite, 'ai_provider_configs')).toBe(2);
+
+        // ...but still at most ONE of each. Widening the uniqueness must not remove it.
+        expect(() => insert.run('server', null, 'another', 'primary')).toThrow(/UNIQUE/i);
+      } finally {
+        upgraded.sqlite.close();
+      }
+
+      // Re-opening must be a no-op: the column probe and DROP INDEX IF EXISTS are idempotent,
+      // and the rows written above must survive.
+      const again = openDatabase(upgradedDir);
+      try {
+        expect(countRows(again.sqlite, 'ai_provider_configs')).toBe(2);
+      } finally {
+        again.sqlite.close();
+      }
+    } finally {
+      fs.rmSync(upgradedDir, { recursive: true, force: true });
+    }
+  });
+
   it('0070 adds notifications.data on a legacy table and preserves JSON payloads', () => {
     dataDir = makeTempDataDir();
     const seeded = openDatabase(dataDir);

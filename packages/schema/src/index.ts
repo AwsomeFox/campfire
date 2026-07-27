@@ -7266,12 +7266,279 @@ export const AiDmReadinessCheck = z.object({
 });
 export type AiDmReadinessCheck = z.infer<typeof AiDmReadinessCheck>;
 
+// ── Monetary cost model (issue #1065) ────────────────────────────────────────
+//
+// A token budget is NOT a spending limit, and until now nothing on screen said so. The
+// pieces below add the money dimension — and the design constraint that shapes all of them
+// is that BEING UNABLE TO ANSWER IS THE COMMON CASE, not the edge case. Pricing changes
+// without notice, self-hosted and proxied endpoints have no public price at all, and a
+// confident wrong dollar figure is strictly worse than no figure: a DM shown "$3.10" and
+// billed $31 was actively misled by us, whereas a DM told we cannot estimate goes and reads
+// their provider's billing page, which is the correct behaviour anyway.
+//
+// So the unknown branch is the DEFAULT and the only state reachable without evidence. See
+// {@link AiCostBasis}.
+
+/** Whether a stored price was typed by an admin or prefilled from the shipped reference table. */
+export const AiModelPriceSource = z.enum(['manual', 'reference']);
+export type AiModelPriceSource = z.infer<typeof AiModelPriceSource>;
+
+/**
+ * One admin-configured price, keyed by the identity that actually determines cost.
+ *
+ * Keyed on `(providerType, model, baseUrl)` — NOT on the campaign. A model's price is a
+ * property of the model, not of whoever calls it: `gpt-5` costs the same for campaign 3 and
+ * campaign 47. Keying by campaign would make every DM look the same numbers up independently,
+ * let them drift apart on one server, and turn a vendor price change into an N-row edit.
+ *
+ * `baseUrl` is part of the key and that is load-bearing. A model NAME behind a proxy or
+ * gateway does not imply the vendor's pricing — someone pointing at a custom endpoint is
+ * MORE likely to have a negotiated rate, not less — so a price entered for the vendor's own
+ * endpoint must never be applied to a custom one. '' means the provider's own endpoint.
+ */
+export const AiModelPrice = z.object({
+  providerType: z.string().trim().min(1).max(40),
+  model: z.string().trim().min(1).max(200),
+  /** Custom endpoint this price is scoped to; '' = the provider's own default endpoint. */
+  baseUrl: z.string().trim().max(2048).default(''),
+  /** USD per MILLION input (prompt) tokens. Per-million, because per-token is unreadable. */
+  inputUsdPerMTok: z.number().nonnegative().max(1_000_000),
+  /** USD per MILLION output (completion) tokens. */
+  outputUsdPerMTok: z.number().nonnegative().max(1_000_000),
+  source: AiModelPriceSource.default('manual'),
+  /** As-of date (YYYY-MM-DD) of the figures, so staleness is visible rather than implied. */
+  asOf: z.string().trim().max(10).nullable().default(null),
+  updatedAt: z.string(),
+});
+export type AiModelPrice = z.infer<typeof AiModelPrice>;
+
+/**
+ * THE pricing identity, in one function.
+ *
+ * `(providerType, model, baseUrl)` is the table's documented key, and three places have to
+ * agree on what it means: the write-side validator that rejects a duplicate, the resolver
+ * that matches a campaign against a row, and the editor that flags a duplicate before the
+ * admin can save one. When each implemented its own comparison they drifted — the resolver
+ * matched case-insensitively while nothing stopped two rows differing only in case from
+ * being stored, which made the resolved price depend on array order.
+ *
+ * Provider type and model are trimmed and lowercased — an admin typing `OpenAI` and `openai`
+ * means the same row both times, and case-insensitive model matching is the rule the resolver
+ * has always documented. The three parts are joined on a NUL escape, which cannot occur in any
+ * of them, so no combination of values can collide by containing the separator.
+ *
+ * The base URL is deliberately NOT lowercased wholesale; see {@link normalizePricingBaseUrl}.
+ */
+export function aiPricingIdentityKey(entry: {
+  providerType: string;
+  model: string;
+  baseUrl?: string | null;
+}): string {
+  const norm = (s: string | null | undefined) => (s ?? '').trim().toLowerCase();
+  // '\u0000' as an ESCAPE, never a literal NUL byte in this file — a raw control character
+  // here makes the whole module read as binary to grep, diff and review tooling.
+  return [norm(entry.providerType), norm(entry.model), normalizePricingBaseUrl(entry.baseUrl)].join('\u0000');
+}
+
+/**
+ * Case-fold a base URL only where a URL is genuinely case-insensitive.
+ *
+ * Scheme and host are case-insensitive (RFC 3986 3.1 and 6.2.2.1); PATH and QUERY are not, and
+ * gateways routinely carry a case-sensitive tenant, deployment or workspace id in the path.
+ * Lowercasing the whole string collapsed `https://host/TenantA` and `https://host/tenanta` into
+ * ONE pricing identity, which did two things at once: the duplicate check refused to let an
+ * admin enter separate prices for two genuinely different endpoints, and the resolver could
+ * hand one tenant's negotiated rate to the other — while requests still went to the URL
+ * exactly as typed. That is this feature's central failure, a confident wrong number, arriving
+ * through the KEY rather than through the arithmetic.
+ *
+ * A value that does not parse as an absolute URL is compared verbatim after trimming rather
+ * than guessed at: with no parse there is no way to know which span is the host.
+ */
+export function normalizePricingBaseUrl(raw: string | null | undefined): string {
+  const trimmed = (raw ?? '').trim();
+  if (!trimmed) return '';
+  try {
+    const url = new URL(trimmed);
+    // `protocol` and `host` come back already lowercased from the URL parser, which also drops
+    // a redundant default port. Everything from the path on keeps its case.
+    return `${url.protocol}//${url.host}${url.pathname}${url.search}${url.hash}`;
+  } catch {
+    return trimmed;
+  }
+}
+
+/**
+ * Indices of entries whose identity repeats an earlier one. Empty means the list is a valid
+ * table. Shared by the schema refinement and the admin editor so "duplicate" cannot mean two
+ * different things at the two ends of the same round trip.
+ *
+ * Rows whose provider or model is still blank are SKIPPED rather than compared: a half-typed
+ * row is already reported as missing required fields, and treating two blank rows as
+ * duplicates of each other stacks a second, misleading error on top of that.
+ */
+export function aiPricingDuplicateIndices(
+  entries: readonly { providerType: string; model: string; baseUrl?: string | null }[],
+): number[] {
+  const seen = new Set<string>();
+  const duplicates: number[] = [];
+  entries.forEach((entry, index) => {
+    if (!entry.providerType.trim() || !entry.model.trim()) return;
+    const key = aiPricingIdentityKey(entry);
+    if (seen.has(key)) duplicates.push(index);
+    else seen.add(key);
+  });
+  return duplicates;
+}
+
+/**
+ * Ceiling on the price list. Exported so the admin editor stops an admin AT the limit rather
+ * than letting them type past it and discover the cap when the save 400s.
+ */
+export const AI_PRICING_MAX_ENTRIES = 500;
+
+/**
+ * The server-wide pricing table, stored as ONE JSON blob under a settings key.
+ *
+ * Server-wide rather than per-campaign for the reason above, and in the generic settings k/v
+ * rather than on `ai_provider_configs` for a second reason: that table's server row holds a
+ * single `providerType`, and a campaign may override the provider entirely. Pricing hung off
+ * it would have no home for a campaign on Anthropic under an OpenAI server default. Only an
+ * admin writes this, so a single blob has no concurrent read-modify-write problem.
+ */
+export const AiPricingTable = z.object({
+  version: z.literal(1).default(1),
+  entries: z.array(AiModelPrice).max(AI_PRICING_MAX_ENTRIES).default([]),
+  updatedAt: z.string().nullable().default(null),
+  updatedBy: z.string().default(''),
+});
+export type AiPricingTable = z.infer<typeof AiPricingTable>;
+
+/** Why no dollar figure is available. Each maps to its own honest sentence, never a number. */
+export const AiCostUnknownReason = z.enum([
+  /** No admin has entered pricing for this server at all. */
+  'no_pricing_configured',
+  /** Pricing exists, but not for this provider/model pair. */
+  'model_not_priced',
+  /** The campaign points at a custom endpoint with no price entered FOR that endpoint. */
+  'custom_endpoint_not_priced',
+  /** No provider/model is resolved yet, so there is nothing to price. */
+  'no_provider',
+  /**
+   * A provider IS configured, but resolving it failed — most often a stored credential that
+   * can no longer be decrypted after `AI_CONFIG_KEY` was lost or rotated, and also a model
+   * pushed off a tightened allowlist or a stored endpoint that now fails host policy.
+   *
+   * Distinct from `no_provider` because the fix is different and much less obvious: nothing
+   * in the configuration LOOKS wrong, so "no provider is configured yet" would send an
+   * operator to re-enter settings that are already correct. The readiness `model` check
+   * carries the specific server sentence; this reason points there.
+   */
+  'provider_unresolved',
+]);
+export type AiCostUnknownReason = z.infer<typeof AiCostUnknownReason>;
+
+/**
+ * THE choke point for "may we show money?" — a discriminated union, deliberately.
+ *
+ * `unknown` is the variant you get unless a price was actually resolved, so a new provider,
+ * a renamed model, or a forgotten config path falls into the DISCLOSURE rather than into a
+ * confident wrong number. This is the same reasoning as the exhaustive finish-reason Record
+ * in driver-safety.ts: a shape that makes the unsafe state unreachable beats a convention
+ * that the unsafe state is handled.
+ *
+ * Every dollar figure in the product is derived from this via {@link estimateUsdRange}, which
+ * returns null on `unknown`. That is the ONLY supported way to turn tokens into money — there
+ * is deliberately no point-estimate counterpart, because no caller has a genuinely measured
+ * prompt/completion split to give one, and an entry point that accepts an assumed split is an
+ * entry point for publishing a guess as a measurement. What makes the guarantee structural
+ * rather than a rule someone has to remember is that there is nothing else to call.
+ */
+export const AiCostBasis = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('unknown'),
+    reason: AiCostUnknownReason,
+  }),
+  z.object({
+    kind: z.literal('priced'),
+    inputUsdPerMTok: z.number().nonnegative(),
+    outputUsdPerMTok: z.number().nonnegative(),
+    source: AiModelPriceSource,
+    asOf: z.string().nullable(),
+    /** Echoed back so the UI can say WHICH model the figure is for, never just "$X". */
+    providerType: z.string(),
+    model: z.string(),
+  }),
+]);
+export type AiCostBasis = z.infer<typeof AiCostBasis>;
+
+/** The basis every caller starts from. Exported so "unknown" is the easy thing to reach for. */
+export const AI_COST_BASIS_UNKNOWN: AiCostBasis = { kind: 'unknown', reason: 'no_pricing_configured' };
+
+/**
+ * Dollar RANGE for a bare token count, or null when we cannot say.
+ *
+ * A range and not a point, because a token budget's real cost genuinely depends on how it
+ * splits between input and output — which nobody knows in advance, and which differ by
+ * several times on most providers. Reporting the midpoint to the cent would invent precision
+ * we do not have; reporting the honest span is both true and more useful, because the top of
+ * it is the number a DM should actually budget against.
+ *
+ * Returns null for `unknown`. That is the whole point: there is no argument you can pass to
+ * get a number out of an unpriced basis.
+ */
+export function estimateUsdRange(tokens: number, basis: AiCostBasis): { low: number; high: number } | null {
+  if (basis.kind !== 'priced') return null;
+  const millions = Math.max(0, tokens) / 1_000_000;
+  const a = millions * basis.inputUsdPerMTok;
+  const b = millions * basis.outputUsdPerMTok;
+  return a <= b ? { low: a, high: b } : { low: b, high: a };
+}
+
 export const AiDmEstimatedCost = z.object({
-  estimatedPromptTokens: z.number().int().nonnegative(),
-  estimatedCompletionTokens: z.number().int().nonnegative(),
+  /**
+   * The assumed prompt/completion split, or null when it is NOT known.
+   *
+   * Null is the metered case, and that is not a gap in the data — it is the data. Metering
+   * records one `tokensUsed` total per turn, so a campaign with history knows what a turn
+   * costs in tokens and knows nothing about how that total divided. Reporting a split here
+   * anyway (an earlier draft multiplied the total by a fixed 57.7%) dressed a constant up as
+   * a measurement, which is precisely what {@link AiCostBasis}'s `unknown` variant exists to
+   * stop one layer down. Non-null only when the numbers ARE our own stated assumption,
+   * i.e. the campaign has no metered turns yet.
+   */
+  estimatedPromptTokens: z.number().int().nonnegative().nullable().default(null),
+  estimatedCompletionTokens: z.number().int().nonnegative().nullable().default(null),
   estimatedTotalTokens: z.number().int().nonnegative(),
-  estimatedUsd: z.number().nonnegative().nullable().default(null),
+  /**
+   * #1065 — the money, as a RANGE, or null when we cannot say.
+   *
+   * A range because the split above is generally unknown and output tokens are priced several
+   * times higher than input on most providers: a point value would be an invented ratio
+   * carried to two significant figures. The span between all-input and all-output pricing is
+   * the honest statement of what we actually know, and its top is the number a DM should
+   * budget against.
+   */
+  estimatedUsdRange: z
+    .object({ low: z.number().nonnegative(), high: z.number().nonnegative() })
+    .nullable()
+    .default(null),
+  /**
+   * #1065 — what the dollar range above is (or is not) based on. `estimatedUsdRange` is
+   * DERIVED from this and is null whenever `basis.kind === 'unknown'`; the basis is what the
+   * UI reads to decide between showing a figure and showing the cannot-estimate disclosure.
+   */
+  basis: AiCostBasis.default(AI_COST_BASIS_UNKNOWN),
+  /**
+   * English prose for API consumers and logs. Localized clients prefer {@link noteKey} —
+   * same split as {@link AiDmReadinessCheck.detail}/`detailKey`, so a server that grows a new
+   * variant never blanks a row on an older client (#629).
+   */
   note: z.string(),
+  /** Machine-readable id for {@link note}: `aiOnboarding.runCost.notes.<noteKey>`. */
+  noteKey: z.string().default(''),
+  /** Interpolation values for {@link noteKey}. */
+  noteParams: z.record(z.string(), z.union([z.string(), z.number()])).default({}),
 });
 export type AiDmEstimatedCost = z.infer<typeof AiDmEstimatedCost>;
 
@@ -7664,6 +7931,70 @@ export const AiAllowlistUpdate = z
   .object({ allowedModels: z.array(z.string().min(1).max(120)).max(200) })
   .strict();
 export type AiAllowlistUpdate = z.infer<typeof AiAllowlistUpdate>;
+
+// PUT /settings/ai/pricing (issue #1065) — replace the server-wide model price list.
+// Wholesale replace rather than per-entry patch: the list is short, an admin edits it as a
+// table, and a partial update API would need an identity for rows whose natural key
+// (providerType+model+baseUrl) is exactly what an edit changes.
+export const AiPricingUpdate = z
+  .object({
+    entries: z
+      .array(
+        z
+          .object({
+            providerType: z.string().trim().min(1).max(40),
+            model: z.string().trim().min(1).max(200),
+            baseUrl: z.string().trim().max(2048).default(''),
+            inputUsdPerMTok: z.number().nonnegative().max(1_000_000),
+            outputUsdPerMTok: z.number().nonnegative().max(1_000_000),
+            source: AiModelPriceSource.default('manual'),
+            asOf: z.string().trim().max(10).nullable().default(null),
+          })
+          .strict(),
+      )
+      .max(AI_PRICING_MAX_ENTRIES)
+      // The identity is the table's key, so the write boundary is where it has to hold.
+      // Without this the store accepted two rows for the same target and `resolveBasisFrom`
+      // silently priced against whichever happened to come first — an estimate that depended
+      // on array order. Rejecting here also means the editor's duplicate check and the
+      // server's agree by construction: both call `aiPricingDuplicateIndices`.
+      .superRefine((entries, ctx) => {
+        for (const index of aiPricingDuplicateIndices(entries)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: [index],
+            message:
+              'Duplicate pricing entry: another entry already covers this provider, model and base URL.',
+          });
+        }
+      }),
+  })
+  .strict();
+export type AiPricingUpdate = z.infer<typeof AiPricingUpdate>;
+
+/** GET /settings/ai/pricing — the stored list plus the reference figures offered for prefill. */
+export const AiPricingView = z.object({
+  entries: z.array(AiModelPrice),
+  updatedAt: z.string().nullable(),
+  updatedBy: z.string(),
+  /**
+   * Campfire's shipped reference figures. Offered for PREFILL only — nothing resolves an
+   * estimate against them. They become live pricing solely once an admin has reviewed and
+   * saved them, at which point they are indistinguishable from typed pricing except for the
+   * `source`/`asOf` provenance recorded on the entry.
+   */
+  reference: z.array(
+    z.object({
+      providerType: z.string(),
+      model: z.string(),
+      inputUsdPerMTok: z.number().nonnegative(),
+      outputUsdPerMTok: z.number().nonnegative(),
+    }),
+  ),
+  /** The date the reference figures were last verified. Shown at the moment of prefill. */
+  referenceAsOf: z.string(),
+});
+export type AiPricingView = z.infer<typeof AiPricingView>;
 // ── AI scribe: scheduled / automatic server-side recap jobs (issue #316) ──────
 // The scribe runs the configured provider (#309/#310) on a trigger to draft a
 // session recap from the campaign's own material (resolved inbox + encounters),

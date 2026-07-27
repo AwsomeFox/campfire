@@ -68,6 +68,55 @@ export class AiProviderCampaignConfigController {
     return this.configs.putCampaign(id, body, user);
   }
 
+  @Get('fallback')
+  @ApiOperation({
+    summary: 'Get the per-campaign FALLBACK AI provider override',
+    description:
+      'DM only (#1052). Redacted exactly like the primary — the API key is never returned. Null when unset, which ' +
+      'is the default: failover is opt-in. A campaign fallback takes precedence over a server fallback, and a ' +
+      'KEYLESS campaign fallback inherits the SERVER FALLBACK\'s key, base URL, and provider type — never the ' +
+      'server PRIMARY\'s, which would ship one slot\'s credential to the other slot\'s endpoint (#373).',
+  })
+  @ApiResponse({ status: 200, description: 'The redacted fallback override, or null when unset.' })
+  async getFallback(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    await this.access.requireRole(user, id, 'dm', { allowArchived: true });
+    return this.configs.getCampaignFallbackView(id);
+  }
+
+  @Put('fallback')
+  @ApiOperation({
+    summary: 'Set the per-campaign FALLBACK AI provider override',
+    description:
+      'DM only (#1052). Used ONLY after the primary exhausts its bounded retries on a TRANSIENT failure (429 / 5xx / ' +
+      'transport / timeout). It is never used for a deterministic one — a bad key, a malformed request, a context ' +
+      'overflow, or a CONTENT REFUSAL is not retried and is never failed over, because asking a second vendor the ' +
+      'same question a first one declined is a safety bypass, not resilience. It is also never used once narration ' +
+      'has reached the table, so failover cannot rewrite what players just read. The chosen `model` is validated ' +
+      'against the server admin allowlist exactly like the primary.',
+  })
+  @ApiResponse({ status: 200, description: 'The updated (redacted) fallback override.' })
+  @ApiResponse({ status: 400, description: 'Model not in the server admin allowlist.' })
+  async putFallback(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: AiProviderConfigUpdateDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    await this.access.requireRole(user, id, 'dm');
+    return this.configs.putCampaignFallback(id, body, user);
+  }
+
+  @Delete('fallback')
+  @HttpCode(204)
+  @ApiOperation({
+    summary: 'Delete the per-campaign FALLBACK AI provider override',
+    description: 'DM only (#1052). Leaves the primary override untouched; turns stop failing over to it.',
+  })
+  @ApiResponse({ status: 204, description: 'Deleted (or already absent).' })
+  async removeFallback(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    await this.access.requireRole(user, id, 'dm');
+    await this.configs.deleteCampaignFallback(id, user);
+  }
+
   @Delete('key')
   @ApiOperation({
     summary: 'Clear the stored campaign API key',

@@ -15,8 +15,10 @@ import {
   AiDmProactiveSettings,
   AiDmSeatDefaults,
   AiDmStylePresets,
+  estimateUsdRange,
 } from '@campfire/schema';
 import type {
+  AiCostBasis,
   AiDmMode,
   AiDmReadiness,
   AiDmReadinessCheck,
@@ -38,6 +40,7 @@ import { AiProviderConfigService } from '../ai-provider-config/ai-provider-confi
 import { AI_DM_PROVIDER, type AiDmProvider } from './ai-dm.provider';
 import { SessionZeroService } from '../session-zero/session-zero.service';
 import { SupportPreferencesService } from '../session-zero/support-preferences.service';
+import { AiPricingService } from '../ai-pricing/ai-pricing.service';
 import { providerCapabilities } from './providers';
 import type { AiProviderConfig } from './providers/factory';
 import { renderTableStyleSection } from '../ai-driver/driver-style';
@@ -55,9 +58,6 @@ const DEFAULT_MAX_TOKENS = 512;
  */
 const DEFAULT_ESTIMATED_PROMPT_TOKENS = 750;
 const DEFAULT_ESTIMATED_COMPLETION_TOKENS = 1024;
-/** Share of a turn's tokens attributed to completion when only a total is known. */
-const DEFAULT_COMPLETION_SHARE =
-  DEFAULT_ESTIMATED_COMPLETION_TOKENS / (DEFAULT_ESTIMATED_PROMPT_TOKENS + DEFAULT_ESTIMATED_COMPLETION_TOKENS);
 /** How many recent metered turns the readiness estimate averages over. */
 const READINESS_USAGE_SAMPLE = 20;
 
@@ -230,6 +230,10 @@ export class AiDmService implements OnApplicationBootstrap {
     private readonly providerConfig: AiProviderConfigService,
     private readonly sessionZero: SessionZeroService,
     private readonly supportPreferences: SupportPreferencesService,
+    // #1065 — read ONLY when rendering readiness. Never from meterTurn, reserveTokenBudget,
+    // or the turn loop: SettingsService.getJson is an uncached SELECT per call, and an
+    // estimate is `tokens × price` with both sides already known at render time.
+    private readonly pricing: AiPricingService,
     @Inject(AI_DM_PROVIDER) private readonly provider: AiDmProvider,
   ) {}
 
@@ -583,6 +587,18 @@ export class AiDmService implements OnApplicationBootstrap {
       : 'Choose the model that will execute AI requests.';
     let modelDetailKey = provider.model ? 'model.selected' : 'model.choose';
     let modelDetailParams: Record<string, string | number> = { model: provider.model ?? '' };
+    // #1065 — the resolved config is captured here and REUSED for the cost basis below.
+    // Resolving a second time down there was three bugs at once: it decrypted the stored
+    // credential again on every render of a page a DM may poll, it sat outside this
+    // try/catch so an undecryptable key turned the whole readiness GET into a 500 — losing
+    // the operator the exact diagnostic screen they opened to find out why their key stopped
+    // working — and it made this feature's own "pricing never decrypts" claim false. One
+    // resolution, already error-handled, threaded through.
+    let executionConfig: AiProviderConfig | null = null;
+    // Distinguishes "nothing is configured" from "configuration exists but could not be
+    // resolved". Both leave us unable to price, for different reasons the operator fixes
+    // differently, and the disclosure says which.
+    let executionFailed = false;
     try {
       // Readiness is a plain GET that a settings UI may poll, and it sends NOTHING outbound,
       // so it must not drag the DNS-resolving half of the baseUrl gate onto the read path —
@@ -593,12 +609,14 @@ export class AiDmService implements OnApplicationBootstrap {
       const execution = await this.providerConfig.resolveExecutionModel(campaignId, { resolveDns: false });
       modelOk = !!execution;
       if (execution) {
+        executionConfig = execution.config;
         modelDetail = `Execution model ${execution.model} passes the server allowlist.`;
         modelDetailKey = 'model.allowed';
         modelDetailParams = { model: execution.model };
       }
     } catch (err) {
       modelOk = false;
+      executionFailed = true;
       modelDetail = err instanceof Error ? err.message : 'The selected model is not executable.';
       // The rejection reason is composed by the allowlist policy at throw time and has no
       // enumerable id, so this variant carries the server sentence through as a parameter.
@@ -764,8 +782,63 @@ export class AiDmService implements OnApplicationBootstrap {
     // next edit, and this value is a spend estimate a DM makes decisions on.
     const estimatedTotalTokens =
       recentUsage ?? (DEFAULT_ESTIMATED_PROMPT_TOKENS + DEFAULT_ESTIMATED_COMPLETION_TOKENS);
-    const estimatedCompletionTokens = Math.round(estimatedTotalTokens * DEFAULT_COMPLETION_SHARE);
-    const estimatedPromptTokens = estimatedTotalTokens - estimatedCompletionTokens;
+    // The prompt/completion split is reported ONLY when it is our own stated assumption.
+    // `meterTurn` records ONE total per turn, so a campaign with history tells us what a turn
+    // costs and nothing about how that total divided. An earlier draft multiplied the metered
+    // total by a fixed ratio and priced the two halves — output tokens cost several times
+    // input on most providers, so that figure could be far off while the UI described it as
+    // coming from the operator's own metering. Null is the honest value here, and the money
+    // below is a range rather than a point for exactly the same reason.
+    const splitIsAssumed = recentUsage === null;
+    const estimatedPromptTokens = splitIsAssumed ? DEFAULT_ESTIMATED_PROMPT_TOKENS : null;
+    const estimatedCompletionTokens = splitIsAssumed ? DEFAULT_ESTIMATED_COMPLETION_TOKENS : null;
+
+    // #1065 — the MONEY dimension. A token budget is not a spending limit, and every surface
+    // here was token-only, so a DM sized a budget with no idea what it would cost.
+    //
+    // `basis` is a discriminated union whose `unknown` variant is the only state reachable
+    // without an actual matched price, and `estimateUsdRange` returns null on it. So the
+    // dollar figure below cannot be non-null unless a price was genuinely resolved — a new
+    // provider, a renamed model, or a proxied endpoint falls into the DISCLOSURE rather than
+    // into a confident wrong number. That is the failure this issue is really about: a DM
+    // shown "$3.10" and billed $31 was misled by us, whereas one told we cannot estimate goes
+    // and reads their provider's billing page, which is the right thing to do regardless.
+    //
+    // Keyed on the EXECUTED config captured by the model check above — which includes the
+    // endpoint, because a model name behind a custom endpoint does not imply the vendor's
+    // price — rather than the client-facing provider view. `baseUrl` stays server-side: the
+    // basis echoes back only the provider type and model, never the URL (#373).
+    //
+    // No provider resolution happens here. That is the point: the one resolution this
+    // request performs already ran inside the model check's try/catch, so a credential that
+    // cannot be decrypted degrades to the disclosure exactly like every other unpriceable
+    // state instead of taking the readiness endpoint down with a 500.
+    const basis: AiCostBasis = executionConfig
+      ? await this.pricing.resolveBasis({
+          providerType: executionConfig.providerType,
+          model: executionConfig.model,
+          baseUrl: executionConfig.baseUrl ?? '',
+        })
+      : {
+          kind: 'unknown',
+          // A resolution that THREW is a different problem from one that found nothing, and
+          // the operator fixes them differently — a lost `AI_CONFIG_KEY` versus an unset
+          // provider. The `model` check above carries the specific sentence; this points at
+          // it rather than repeating a reason it does not own.
+          reason: executionFailed ? 'provider_unresolved' : 'no_provider',
+        };
+    // Priced off the TOTAL, spanning all-input to all-output. That span is what we can
+    // actually defend: the split is either unknown (metered) or a stated assumption (no
+    // metering), and neither justifies a single number to two significant figures.
+    const estimatedUsdRange = estimateUsdRange(estimatedTotalTokens, basis);
+    // The note is split English-for-logs / key-for-clients, the same way `detail`/`detailKey`
+    // is on every readiness check — server prose rendered raw in a localized UI was the
+    // existing wart here, and growing it would have made money the one untranslated string.
+    // Same `=== null` test as `splitIsAssumed` above, deliberately. These two must agree —
+    // one decides whether a split is reported, the other tells the reader why — and a
+    // truthiness check here would silently disagree the day `recentTurnTokenAverage`
+    // returns 0 rather than null for a campaign whose turns all metered as free.
+    const noteKey = splitIsAssumed ? 'noData' : 'metered';
     return {
       campaignId,
       // A check that is not `ok` never counts as ready — including one whose status is
@@ -780,11 +853,14 @@ export class AiDmService implements OnApplicationBootstrap {
       estimatedCost: {
         estimatedPromptTokens,
         estimatedCompletionTokens,
-        estimatedTotalTokens: estimatedPromptTokens + estimatedCompletionTokens,
-        estimatedUsd: null,
-        note: recentUsage
-          ? 'Per-turn estimate from this campaign’s recent metered turns. Actual usage depends on context, tools, and model pricing.'
-          : 'Best-effort per-turn estimate before sending to the provider — this campaign has no metered turns yet. Actual usage depends on context, tools, and model pricing.',
+        estimatedTotalTokens,
+        estimatedUsdRange,
+        basis,
+        note: !splitIsAssumed
+          ? 'Per-turn token estimate from this campaign’s recent metered turns. Metering records a turn’s total only, so the dollar range spans an all-input to an all-output split. Actual usage depends on context, tools, and model pricing.'
+          : 'Best-effort per-turn estimate before sending to the provider — this campaign has no metered turns yet. The dollar range spans an all-input to an all-output split. Actual usage depends on context, tools, and model pricing.',
+        noteKey,
+        noteParams: {},
       },
       driverUnavailableReason: firstBlocked?.detail ?? driverModeReason,
     };
