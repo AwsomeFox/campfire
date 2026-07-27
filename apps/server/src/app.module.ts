@@ -25,6 +25,7 @@ import { SettingsModule } from './modules/settings/settings.module';
 import { ServerMetaModule } from './modules/server-meta/server-meta.module';
 import { MembershipModule } from './modules/membership/membership.module';
 import { CampaignsModule } from './modules/campaigns/campaigns.module';
+import { CampaignModulesModule } from './modules/campaign-modules/campaign-modules.module';
 import { CharactersModule } from './modules/characters/characters.module';
 import { QuestsModule } from './modules/quests/quests.module';
 import { StorylinesModule } from './modules/storylines/storylines.module';
@@ -152,6 +153,7 @@ function serveStaticImports(): DynamicModule[] {
     MembershipModule,
     AuditModule,
     CampaignsModule,
+    CampaignModulesModule,
     CharactersModule,
     QuestsModule,
     StorylinesModule,

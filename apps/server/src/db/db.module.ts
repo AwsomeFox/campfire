@@ -4,7 +4,7 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import { drizzle, type BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { APP_VERSION } from '../common/build-metadata';
-import { BOOTSTRAP_SQL, CAMPAIGN_SEARCH_FTS_SQL, RULE_ENTRIES_FTS_SQL } from './bootstrap.sql';
+import { BOOTSTRAP_SQL, CAMPAIGN_MODULES_DDL, CAMPAIGN_SEARCH_FTS_SQL, RULE_ENTRIES_FTS_SQL } from './bootstrap.sql';
 import { assertDataMount } from './boot-guard';
 import * as schema from './schema';
 
@@ -3224,6 +3224,40 @@ function migrateAiDriverGroundingClaims577(sqlite: Database.Database): void {
   `);
 }
 
+/**
+ * Issue #585 — campaign module package identity, install/fork lineage, per-artifact
+ * baselines and pre-apply snapshots.
+ *
+ * Executes the SAME `CAMPAIGN_MODULES_DDL` text that BOOTSTRAP_SQL interpolates, so a
+ * fresh DB and an upgraded DB get an identical shape by construction rather than by two
+ * hand-kept copies. Every statement is `IF NOT EXISTS`, which makes this idempotent on
+ * its own and safe in either order relative to bootstrap (migrations run first).
+ *
+ * No sqlite_master probe is needed to decide whether to run — but we DO probe before the
+ * back-compat guard below, because an early build of this branch could have created the
+ * installs table without the fork-lineage columns.
+ */
+function migrateCampaignModules585(sqlite: Database.Database): void {
+  sqlite.exec(CAMPAIGN_MODULES_DDL);
+  const hasInstalls = !!sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaign_module_installs'")
+    .get();
+  if (!hasInstalls) return;
+  const columns = new Set(
+    (sqlite.pragma('table_info(campaign_module_installs)') as Array<{ name: string }>).map((c) => c.name),
+  );
+  const addColumn = (name: string, ddl: string) => {
+    if (!columns.has(name)) sqlite.exec(`ALTER TABLE campaign_module_installs ADD COLUMN ${ddl}`);
+  };
+  addColumn('origin_kind', "origin_kind TEXT NOT NULL DEFAULT 'install'");
+  addColumn('origin_source_url', "origin_source_url TEXT NOT NULL DEFAULT ''");
+  addColumn('upstream_module_id', 'upstream_module_id TEXT');
+  addColumn('upstream_version', 'upstream_version TEXT');
+  addColumn('forked_at', 'forked_at TEXT');
+  addColumn('detached', 'detached INTEGER NOT NULL DEFAULT 0');
+  addColumn('detached_at', 'detached_at TEXT');
+}
+
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
   { name: '0001_users_oidc', run: migrateUsersTableForOidc },
   { name: '0002_campaigns_rule_system', run: migrateCampaignsTableForRuleSystem },
@@ -3384,6 +3418,16 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // the next free ordinal. runMigrations dedupes on the FULL name string, so the `_577` suffix
   // is what guarantees this runs exactly once even if a sibling branch lands a colliding ordinal.
   { name: '0121_ai_driver_grounding_claims_577', run: migrateAiDriverGroundingClaims577 },
+  // Campaign modules take 0120, assigned centrally. The 0114/0115 this branch originally
+  // carried were reassigned to #1443 and #1524 as those landed first; 0112/0113 are a
+  // permanent gap, since the branch holding them ended up taking 0118/0119.
+  //
+  // Note 0117 (#601) sits ABOVE 0118/0119 (#559) in the array despite the lower number —
+  // merge order, not a mistake. `runMigrations` applies entries in ARRAY order and dedupes
+  // on the FULL name, so ordinals are presentational and need only be unique, never
+  // contiguous or sorted. That is also why nothing is renumbered to look tidy: renaming a
+  // migration a database has already recorded is the one edit that breaks run-once.
+  { name: '0120_campaign_modules_585', run: migrateCampaignModules585 },
 ];
 
 /**
