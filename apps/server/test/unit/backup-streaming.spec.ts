@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { DbHolder, type DrizzleDb } from '../../src/db/db.module';
-import { BackupService } from '../../src/modules/backup/backup.service';
+import { ArchiveOperationBusyError, BackupService } from '../../src/modules/backup/backup.service';
 import { AuditService } from '../../src/modules/audit/audit.service';
 import { SettingsService } from '../../src/modules/settings/settings.service';
 import { AttachmentsService } from '../../src/modules/attachments/attachments.service';
@@ -78,7 +78,26 @@ describe('backup streaming writer (#603)', () => {
     }
   });
 
-  it('destroys a scheduled output and defers when the archive lane is held', async () => {
+  it('releases the archive operation lane after a pre-pipeline failure', async () => {
+    const svc = service();
+    const realStatSync = fs.statSync.bind(fs);
+    const stat = jest.spyOn(fs, 'statSync').mockImplementation(((target: fs.PathLike, ...args: unknown[]) => {
+      const actual = realStatSync(target, ...(args as []));
+      return String(target).endsWith(`${path.sep}campfire.db`)
+        ? Object.assign(Object.create(Object.getPrototypeOf(actual)), actual, { size: 512 * 1024 * 1024 + 1 })
+        : actual;
+    }) as typeof fs.statSync);
+    try {
+      await expect(svc.buildBackup(undefined, new PassThrough())).rejects.toThrow('restore entry limit');
+    } finally {
+      stat.mockRestore();
+    }
+    const output = new PassThrough();
+    output.resume();
+    await expect(svc.buildBackup(undefined, output)).resolves.toBeUndefined();
+  });
+
+  it('defers a scheduled backup without creating output when the archive lane is occupied', async () => {
     const backupDir = path.join(dataDir, 'backups');
     const previous = process.env.BACKUP_DIR;
     process.env.BACKUP_DIR = backupDir;
@@ -96,21 +115,45 @@ describe('backup streaming writer (#603)', () => {
     // Stand in for an admin download streaming while the scheduler fires.
     (svc as any).archiveOperation = 'backup';
     const createStream = jest.spyOn(fs, 'createWriteStream');
+    const writeFailure = jest.spyOn(svc as any, 'writeFailureCadence');
     try {
       await expect((svc as any).runScheduledBackup(60 * 60 * 1000)).resolves.toBeUndefined();
-      const partial = createStream.mock.results.at(-1)?.value as fs.WriteStream;
-      expect(partial.destroyed).toBe(true);
+      expect(createStream).not.toHaveBeenCalled();
+      expect(writeFailure).not.toHaveBeenCalled();
       // Contention is a deferral. Recording it as a failure would raise a backup alert
-      // out of a routine download and push the real run out by the failure backoff —
-      // corrupting the one signal an operator must be able to trust.
+      // out of a routine admin download and push the real run out by the failure
+      // backoff — corrupting the one signal an operator must be able to trust.
       const after = await (svc as any).readCadence();
       expect(after.consecutiveFailures ?? 0).toBe(0);
       expect(after.lastError).toBe('');
       expect(after.nextRunAt).toBe(seeded.nextRunAt);
       expect(after.lastSuccessAt).toBe(seeded.lastSuccessAt);
     } finally {
+      writeFailure.mockRestore();
       createStream.mockRestore();
       (svc as any).archiveOperation = null;
+      if (previous === undefined) delete process.env.BACKUP_DIR;
+      else process.env.BACKUP_DIR = previous;
+    }
+  });
+
+  it('defers when the lane is taken after the pre-check, not just before it', async () => {
+    const backupDir = path.join(dataDir, 'backups');
+    const previous = process.env.BACKUP_DIR;
+    process.env.BACKUP_DIR = backupDir;
+    const svc = service();
+    // The pre-check above cannot close the window between its own read and
+    // beginArchiveOperation(); a download starting inside it must still defer rather
+    // than be stamped as a failed backup.
+    jest
+      .spyOn(svc, 'buildBackup')
+      .mockRejectedValue(new ArchiveOperationBusyError('A whole-server backup operation is already in progress') as never);
+    const writeFailure = jest.spyOn(svc as any, 'writeFailureCadence');
+    try {
+      await expect((svc as any).runScheduledBackup(60 * 60 * 1000)).resolves.toBeUndefined();
+      expect(writeFailure).not.toHaveBeenCalled();
+    } finally {
+      jest.restoreAllMocks();
       if (previous === undefined) delete process.env.BACKUP_DIR;
       else process.env.BACKUP_DIR = previous;
     }

@@ -96,10 +96,13 @@ export class BackupArchiveReader {
     let stat: fs.Stats;
     try { stat = await fs.promises.stat(filePath); } catch { invalid('uploaded archive is unavailable'); }
     if (!stat.isFile()) invalid('uploaded archive is not a regular file');
-    // Report the limit actually in force; it is overridable per call, so a hard-coded
-    // "1 GiB" would misdescribe the rejection the caller just hit.
     if (stat.size > limits.maxCompressedBytes) {
-      invalid(`archive exceeds the ${limits.maxCompressedBytes} byte compressed size limit`);
+      // Report the limit actually in force. It is overridable per call, so a hard-coded
+      // "1 GiB" would misdescribe the rejection a caller with tighter limits just hit.
+      const limit = limits.maxCompressedBytes === DEFAULT_LIMITS.maxCompressedBytes
+        ? '1 GiB'
+        : `${limits.maxCompressedBytes} byte${limits.maxCompressedBytes === 1 ? '' : 's'}`;
+      invalid(`archive exceeds the ${limit} compressed size limit`);
     }
     if (signal?.aborted) invalid('archive read was cancelled');
     let zip: ZipFile;
@@ -213,6 +216,11 @@ export class BackupArchiveReader {
     const source = await new Promise<Readable>((resolve, reject) => this.zip.openReadStream(entry, (err, stream) => err || !stream ? reject(err ?? new Error('Cannot open entry')) : resolve(stream)));
     const abort = () => source.destroy(new Error('aborted'));
     signal?.addEventListener('abort', abort, { once: true });
+    // addEventListener never fires for an already-aborted signal, and openReadStream above
+    // is async — a cancellation landing during it would otherwise let this entry be read in
+    // full. On the restore path that means work continuing toward a destructive apply after
+    // the operator cancelled, so recheck rather than trusting the pre-open guard.
+    if (signal?.aborted) abort();
     try { await consume(source); }
     catch (err) {
       if (err instanceof BadRequestException) throw err;

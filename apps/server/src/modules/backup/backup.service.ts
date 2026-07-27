@@ -531,6 +531,15 @@ export class BackupService implements OnApplicationBootstrap {
         this.logger.warn(message);
         return;
       }
+      // An interactive backup or restore owns the same archive lane. This is
+      // expected coordination, not a failed scheduled attempt. Leave cadence
+      // due so the next scheduler poll retries as soon as the lane is free.
+      if (this.archiveOperation) {
+        this.logger.warn(
+          `Scheduled backup deferred: whole-server ${this.archiveOperation} operation is already in progress`,
+        );
+        return;
+      }
       // #496: Scheduled backups pick up a passphrase from BACKUP_KEY_PASSPHRASE
       // so an unattended cron produces credential-portable archives when the
       // server is running with the auto-generated keyfile. Empty / unset means
@@ -554,13 +563,19 @@ export class BackupService implements OnApplicationBootstrap {
         const descriptor = fs.openSync(partialPath, 'r');
         try { fs.fsyncSync(descriptor); } finally { fs.closeSync(descriptor); }
         const archived = await hashFile(partialPath);
+        // Verify BEFORE publishing the final name. Renaming first would leave an archive
+        // that failed verification sitting under a name indistinguishable from a good
+        // scheduled backup — the inner finally only removes `partialPath` — and an
+        // unrestorable archive that looks healthy is the worst outcome a backup can have.
+        // Verifying here also makes the atomicity note above true: a failed run leaves
+        // only the removable `.partial`.
+        const verification = await this.verifyScheduledArchive(partialPath);
+        if (!verification.verified) {
+          throw new Error(`Scheduled backup failed verification after write: ${verification.error}`);
+        }
         fs.renameSync(partialPath, filePath);
         const size = archived.bytes;
         const checksum = archived.sha256;
-      const verification = await this.verifyScheduledArchive(filePath);
-      if (!verification.verified) {
-        throw new Error(`Scheduled backup failed verification after write: ${verification.error}`);
-      }
       const prune = await this.pruneVerifiedScheduledBackups(dir, retentionPolicy, archiveName, checksum);
       const nextRunAt = new Date(Date.now() + intervalMs).toISOString();
       const metrics = this.metricsAfterSuccess(previous?.metrics, disk, estimatedBytes, prune);
@@ -957,7 +972,7 @@ export class BackupService implements OnApplicationBootstrap {
     // attachment) from the moment it is created, but teardown only becomes pipeline()'s
     // job once streaming starts. Between those two points nothing else owns it, so hold
     // a reference the outer finally can destroy.
-    let pendingArchive: archiver.Archiver | null = null;
+    let zip: ReturnType<typeof archiver> | null = null;
     try {
       assertBackupNotCancelled(options?.signal);
       const dataDir = resolveDataDir();
@@ -976,8 +991,7 @@ export class BackupService implements OnApplicationBootstrap {
       // below is against this snapshot, not the live DB.
       this.holder.raw.exec(`VACUUM INTO '${snapshotPath.replace(/'/g, "''")}'`);
       assertBackupNotCancelled(options?.signal);
-      const zip = archiver('zip', { zlib: { level: 6 } });
-      pendingArchive = zip;
+      zip = archiver('zip', { zlib: { level: 6 } });
       // Keep the snapshot on disk and let the ZIP writer pull from it under
       // output backpressure instead of materializing the database in the V8 heap.
       const dbSize = safeFileBytes(snapshotPath);
@@ -1036,7 +1050,21 @@ export class BackupService implements OnApplicationBootstrap {
         // Concurrent overwrite OR captured bytes disagree with the snapshot row size
         // → restored DB would be internally inconsistent with the archived file.
         const staged = path.join(tmpDir, 'uploads', rel);
-        const captured = await stageAndHashFile(abs, staged, options?.signal);
+        let captured: { bytes: number; sha256: string };
+        try {
+          captured = await stageAndHashFile(abs, staged, options?.signal);
+        } catch (err) {
+          // The file can be deleted between the existsSync above and the read stream
+          // opening. Letting a raw ENOENT escape here would abort mid-loop with no
+          // reconciliation report — the operator would see an opaque path error instead
+          // of "which attachments went missing". Route it to the same `missing` outcome
+          // the pre-check produces so the failure stays legible and complete.
+          if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
+            missing++;
+            continue;
+          }
+          throw err;
+        }
         if (captured.bytes > MAX_ENTRY_UNCOMPRESSED_BYTES) {
           throw new ServiceUnavailableException(
             `Backup attachment ${rel} exceeds the ${MAX_ENTRY_UNCOMPRESSED_BYTES} byte restore entry limit`,
@@ -1214,9 +1242,9 @@ export class BackupService implements OnApplicationBootstrap {
       // landing between archive creation and this line would otherwise leave the
       // archive alive while the throw below unwinds.
       if (options?.signal?.aborted) abort();
+      // pipeline() owns teardown from here; the outer finally's !destroyed guard keeps
+      // it from double-destroying an archive this call already tore down.
       const done = pipeline(archive, compressedLimit, sink);
-      // pipeline() owns teardown from here; the outer finally must not double-destroy.
-      pendingArchive = null;
       void done.catch(() => undefined);
       try {
         assertBackupNotCancelled(options?.signal);
@@ -1227,17 +1255,21 @@ export class BackupService implements OnApplicationBootstrap {
         options?.signal?.removeEventListener('abort', abort);
       }
     } finally {
-      // Failed before streaming started: release the queued attachment read streams
-      // ourselves, otherwise they stay open for the process lifetime and can make the
-      // staging removal below fail on platforms that refuse to unlink open files.
-      pendingArchive?.destroy();
       try {
-        if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+        // Failed before streaming started: release the queued attachment read streams
+        // ourselves, otherwise they stay open for the process lifetime and can make the
+        // staging removal below fail on platforms that refuse to unlink open files.
+        // After a completed pipeline the archive is already destroyed, so this is a no-op.
+        if (zip && !zip.destroyed) zip.destroy();
       } finally {
-        // Releasing the lane must not depend on cleanup succeeding. A single throwing
-        // rmSync would otherwise wedge the guard permanently and every subsequent
-        // backup and restore would 503 for the lifetime of the process.
-        this.endArchiveOperation('backup');
+        try {
+          if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+        } finally {
+          // Releasing the lane must not depend on cleanup succeeding. A single throwing
+          // rmSync would otherwise wedge the guard permanently and every subsequent
+          // backup and restore would 503 for the lifetime of the process.
+          this.endArchiveOperation('backup');
+        }
       }
     }
   }

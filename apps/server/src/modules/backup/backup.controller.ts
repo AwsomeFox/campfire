@@ -68,6 +68,11 @@ function requestAbort(req: Request, res: Response): { signal: AbortSignal; dispo
   };
 }
 
+function isBackupDownloadCancellation(error: unknown, signal: AbortSignal): boolean {
+  if (!signal.aborted || !(error instanceof Error)) return false;
+  return error.name === 'AbortError' || error.message === 'Backup generation cancelled';
+}
+
 @ApiTags('backup')
 @Controller('backup')
 @ServerRoles('admin')
@@ -130,11 +135,19 @@ export class BackupController {
         { ...(keyPassphrase && keyPassphrase.length > 0 ? { keyPassphrase } : {}), signal: operation.signal },
         res,
       );
-    } catch (err) {
-      // A cancelled download is a normal outcome, not a server error. Rethrowing would
-      // log noise and ask Nest to write an error body onto a response whose zip headers
-      // have already gone out. Mirrors the mdzip export path.
-      if (!operation.signal.aborted) throw err;
+    } catch (error) {
+      // A client disconnect is expected during a streamed download.
+      if (isBackupDownloadCancellation(error, operation.signal)) return;
+      // Once bytes are committed the response belongs to the archive. Rethrowing would
+      // have Nest write a JSON error over the in-flight ZIP — the compressed-size ceiling
+      // is enforced mid-stream, so this is the *expected* path for an oversized archive,
+      // not a rare one. Destroy the response instead: a truncated transfer the client can
+      // detect beats a body that is half archive and half error. Mirrors the export path.
+      if (res.headersSent || res.destroyed) {
+        if (!res.destroyed) res.destroy(error instanceof Error ? error : new Error(String(error)));
+        return;
+      }
+      throw error;
     } finally {
       operation.dispose();
     }

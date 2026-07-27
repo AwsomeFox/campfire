@@ -181,9 +181,6 @@ export const MAX_BROWSER_BACKUP_BUFFER_BYTES = 512 * 1024 * 1024;
 /** Deliberately user-actionable download constraints that should remain verbatim. */
 export class BackupDownloadLimitError extends Error {}
 
-/** The operator dismissed the save dialog. A choice, not a failure. */
-export class BackupDownloadCancelledError extends Error {}
-
 export interface BackupDownloadProgress {
   receivedBytes: number;
   totalBytes: number | null;
@@ -208,7 +205,11 @@ type SaveFilePicker = (options: {
 
 function saveFilePicker(): SaveFilePicker | null {
   const picker = (window as Window & { showSaveFilePicker?: SaveFilePicker }).showSaveFilePicker;
-  return picker ?? null;
+  // Bind to `window`: Chromium's WebIDL window methods reject a detached receiver with
+  // "Illegal invocation". Calling it unbound would fail on exactly the browsers that
+  // support streaming to disk, and — because the picker was detected — would skip the
+  // bounded-memory fallback too, so the download would not degrade, it would just break.
+  return picker ? picker.bind(window) : null;
 }
 
 function contentLength(res: Response): number | null {
@@ -220,6 +221,10 @@ function contentLength(res: Response): number | null {
   return Number.isFinite(value) && value > 0 ? value : null;
 }
 
+function isAbortError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'name' in error && error.name === 'AbortError';
+}
+
 export async function downloadServerBackup(options?: {
   keyPassphrase?: string;
   signal?: AbortSignal;
@@ -229,7 +234,7 @@ export async function downloadServerBackup(options?: {
   const passphrase = options?.keyPassphrase?.trim();
   const usePost = Boolean(passphrase);
   const headers = devHeaders();
-  // Run the picker before the network request: browsers only allow the destination
+  // Pick a destination before starting the network request: browsers only allow the
   // chooser while the user gesture that started the download is still live. POST
   // downloads cannot be handed to the browser download manager portably, so use
   // File System Access when it is available.
@@ -241,14 +246,15 @@ export async function downloadServerBackup(options?: {
         suggestedName: 'campfire-backup.zip',
         types: [{ description: 'Campfire backup archive', accept: { 'application/zip': ['.zip'] } }],
       });
-    } catch (err) {
+    } catch (error) {
       // Dismissing the save dialog rejects with AbortError. Reporting that as an API
-      // failure would tell the operator the backup broke when they simply changed
-      // their mind — and no request has even been issued yet.
-      if (err instanceof Error && err.name === 'AbortError') {
-        throw new BackupDownloadCancelledError('Backup download cancelled before a destination was chosen.');
+      // failure would tell the operator the backup broke when they simply changed their
+      // mind — and no request has even been issued yet.
+      if (isAbortError(error)) {
+        options?.signal?.throwIfAborted();
+        throw new DOMException('The backup download was cancelled before it started.', 'AbortError');
       }
-      throw err;
+      throw error;
     }
   }
   const res = await fetch(usePost ? `${API}/backup/download` : `${API}/backup`, {

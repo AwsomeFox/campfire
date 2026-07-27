@@ -158,6 +158,28 @@ describe('buildMarkdownZip — filename collisions (issues #530 / #863)', () => 
     expect(chunks).toHaveLength(0);
   });
 
+  it('leaves the response intact when the export fails before any byte is written', async () => {
+    const service = serviceWithCollisions();
+    // buildProfileExport runs many DB reads after the controller has staged headers but
+    // before archiver emits anything. Destroying the response here would reset the
+    // connection, and the controller's already-destroyed guard would then swallow the
+    // error — handing the DM an opaque failed download instead of a JSON 500.
+    jest
+      .spyOn(service as unknown as { buildProfileExport: () => Promise<unknown> }, 'buildProfileExport')
+      .mockRejectedValue(new Error('transient database failure'));
+    const output = new PassThrough();
+    const chunks: Buffer[] = [];
+    output.on('data', (chunk: Buffer) => chunks.push(chunk));
+
+    await expect(service.streamMarkdownZip(output, new AbortController().signal, 1, USER)).rejects.toThrow(
+      'transient database failure',
+    );
+    expect(chunks).toHaveLength(0);
+    // Still writable, so Nest can answer with a normal error response.
+    expect(output.destroyed).toBe(false);
+    jest.restoreAllMocks();
+  });
+
   it('produces one zip entry per source entity in every folder', async () => {
     const service = serviceWithCollisions();
     const { buffer } = await service.buildMarkdownZip(1, USER);

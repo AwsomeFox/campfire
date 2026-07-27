@@ -241,16 +241,22 @@ test.describe('server backup workflow UI (issues #514 / #444)', () => {
       (window as Window & { __backupWrites?: number }).__backupWrites = 0;
       Object.defineProperty(window, 'showSaveFilePicker', {
         configurable: true,
-        value: async () => ({
-          name: 'chosen-backup.zip',
-          createWritable: async () => ({
-            write: async () => {
-              (window as Window & { __backupWrites?: number }).__backupWrites! += 1;
-            },
-            close: async () => undefined,
-            abort: async () => undefined,
-          }),
-        }),
+        // Deliberately NOT an arrow function. Chromium's real showSaveFilePicker rejects a
+        // detached receiver with "Illegal invocation", so a mock that ignores `this` would
+        // pass against code that production cannot run. Enforce the receiver here.
+        value: async function (this: unknown) {
+          if (this !== window) throw new TypeError('Illegal invocation');
+          return {
+            name: 'chosen-backup.zip',
+            createWritable: async () => ({
+              write: async () => {
+                (window as Window & { __backupWrites?: number }).__backupWrites! += 1;
+              },
+              close: async () => undefined,
+              abort: async () => undefined,
+            }),
+          };
+        },
       });
     });
     await page.route('**/api/v1/backup/status', (route) => route.fulfill({ status: 200, json: MOCK_STATUS }));
@@ -267,6 +273,29 @@ test.describe('server backup workflow UI (issues #514 / #444)', () => {
     await card.getByRole('button', { name: 'Create & download backup' }).click();
     await expect(card.getByText(/Saved chosen-backup\.zip .*directly to the selected file/i)).toBeVisible();
     await expect.poll(() => page.evaluate(() => (window as Window & { __backupWrites?: number }).__backupWrites)).toBeGreaterThan(0);
+  });
+
+  test('treats a cancelled destination picker as a cancelled download without starting a request', async ({ page }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(window, 'showSaveFilePicker', {
+        configurable: true,
+        value: async () => {
+          throw new DOMException('The user aborted a request.', 'AbortError');
+        },
+      });
+    });
+    await page.route('**/api/v1/backup/status', (route) => route.fulfill({ status: 200, json: MOCK_STATUS }));
+    let downloadRequests = 0;
+    await page.route('**/api/v1/backup', (route) => {
+      downloadRequests += 1;
+      return route.fulfill({ status: 200, body: 'should-not-be-requested' });
+    });
+
+    await page.goto('/admin/storage');
+    const card = page.locator('.server-backup-workflow-card');
+    await card.getByRole('button', { name: 'Create & download backup' }).click();
+    await expect(card.getByText('Download cancelled.')).toBeVisible();
+    await expect.poll(() => downloadRequests).toBe(0);
   });
 
   test('cancels the response stream when the selected destination fails', async ({ page }) => {

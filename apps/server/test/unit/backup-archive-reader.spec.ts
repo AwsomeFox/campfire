@@ -92,4 +92,11 @@ describe('BackupArchiveReader', () => {
     const controller = new AbortController(); controller.abort();
     await expect(BackupArchiveReader.open(zip([{ name: 'a' }]), controller.signal, low)).rejects.toBeInstanceOf(BadRequestException);
   });
+
+  it('reports the effective compressed-size override', async () => {
+    const file = zip([{ name: 'a', data: Buffer.alloc(32) }]);
+    await expect(BackupArchiveReader.open(file, undefined, { ...low, maxCompressedBytes: 1 })).rejects.toThrow(
+      '1 byte compressed size limit',
+    );
+  });
 });
