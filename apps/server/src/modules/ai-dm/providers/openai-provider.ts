@@ -782,6 +782,8 @@ interface ResponsesStreamEvent {
     id?: string;
     call_id?: string;
     name?: string;
+    /** The decline text when the refusal is a TOP-LEVEL output item. */
+    refusal?: string;
   };
   delta?: string;
   /** #598 — the COMPLETE refusal text on `response.refusal.done`. Only its length is used. */
