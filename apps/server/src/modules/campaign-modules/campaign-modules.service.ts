@@ -179,8 +179,18 @@ function isUniqueConstraintError(err: unknown): boolean {
 function danglingReferences(contentById: ReadonlyMap<string, PortableContent>): string[] {
   const out: string[] = [];
   for (const [id, content] of contentById) {
-    const kind = id.slice(0, id.indexOf(':')) as ModuleArtifactKind;
-    for (const [field, , refKind] of REFERENCE_FIELDS[kind]) {
+    // Defensive only: every id here is built by artifactId(), so it always has a ':' and a
+    // known kind. Without the guard a malformed id would make indexOf return -1, slice(0,-1)
+    // would yield a corrupted kind, and REFERENCE_FIELDS[kind] would be undefined — turning
+    // a bad package into an unhandled TypeError (a 500) inside what is meant to be
+    // validation. Skipping is right rather than reporting: an unknown kind has no reference
+    // fields to check, and a spurious rejection of a VALID package would be the worse bug.
+    const separator = id.indexOf(':');
+    if (separator <= 0) continue;
+    const kind = id.slice(0, separator) as ModuleArtifactKind;
+    const referenceFields = REFERENCE_FIELDS[kind];
+    if (referenceFields == null) continue;
+    for (const [field, , refKind] of referenceFields) {
       const key = content[field];
       if (typeof key !== 'string' || key === '') continue;
       const target = artifactId(refKind, key);

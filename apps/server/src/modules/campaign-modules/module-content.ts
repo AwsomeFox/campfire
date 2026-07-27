@@ -195,12 +195,24 @@ function normalizeKey(value: unknown): string | null {
  *
  * Both sides sorting with this same comparator is what makes an installed quest re-project
  * to the baseline it was hashed from. Exported so the two call sites cannot drift apart.
+ *
+ * A non-finite `sortOrder` cannot arrive from {@link normalizeObjectives} — normalizeNumber's
+ * `Number.isFinite` guard maps NaN, ±Infinity and every unparseable value to 0. But this
+ * comparator is ALSO fed raw `quest_objectives` rows, where SQLite's dynamic typing makes
+ * the `number` in the signature a claim rather than a guarantee. A comparator that can
+ * return NaN leaves `Array.prototype.sort` implementation-defined, which would reintroduce
+ * the exact baseline disagreement this ordering exists to prevent — and do it
+ * intermittently, so it would not reproduce. Hence the explicit finite coercion, and
+ * ordering by comparison rather than by subtraction (which can also lose precision or
+ * overflow on extreme values).
  */
 export function compareObjectives(
   a: { text: string; sortOrder: number },
   b: { text: string; sortOrder: number },
 ): number {
-  if (a.sortOrder !== b.sortOrder) return a.sortOrder - b.sortOrder;
+  const ao = Number.isFinite(a.sortOrder) ? a.sortOrder : 0;
+  const bo = Number.isFinite(b.sortOrder) ? b.sortOrder : 0;
+  if (ao !== bo) return ao < bo ? -1 : 1;
   return a.text < b.text ? -1 : a.text > b.text ? 1 : 0;
 }
 

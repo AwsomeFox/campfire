@@ -888,6 +888,44 @@ describe('campaign modules (e2e, real cookie sessions)', () => {
     expect(npcList.find((n) => n.name === 'Vex')!.locationId).toBe(keep.id);
   });
 
+  it('persists index-derived sortOrder when the package omits it, so the quest still matches its baseline', async () => {
+    // Objectives shipped without an explicit sortOrder take their array position. That is
+    // NOT a further instance of the baseline-disagreement class: the derived value is what
+    // gets WRITTEN to quest_objectives.sort_order, so the live row reads back with those
+    // same values and re-projects identically. When no sortOrder is given, array order IS
+    // the content, so two packages listing the same texts in different orders should — and
+    // do — hash differently. This test pins the persistence half of that argument.
+    const cid = (await dm.post(api('/campaigns')).send({ name: 'Implicit Order Table' })).body.id as number;
+    const arts = v1Artifacts();
+    (arts[4].data as Record<string, unknown>).objectives = [
+      { text: 'Alpha step' },
+      { text: 'Beta step' },
+      { text: 'Gamma step' },
+    ];
+    const install = (await dm.post(api(`/campaigns/${cid}/modules`)).send({ package: buildPackage('1.0.0', arts) })).body;
+
+    // The invariant holds even though no sortOrder was shipped.
+    expect(install.locallyEditedCount).toBe(0);
+
+    const quests = (await dm.get(api(`/campaigns/${cid}/quests`))).body as Array<Record<string, unknown>>;
+    const qid = quests.find((q) => q.title === 'Rescue the Cartographer')!.id as number;
+    const detail = (await dm.get(api(`/quests/${qid}`))).body as {
+      objectives: Array<{ text: string; sortOrder: number }>;
+    };
+    // The derived positions are genuinely persisted — not discarded, not re-derived later.
+    expect(detail.objectives.map((o) => [o.text, o.sortOrder])).toEqual([
+      ['Alpha step', 0],
+      ['Beta step', 1],
+      ['Gamma step', 2],
+    ]);
+
+    // And re-previewing the identical package still classifies every artifact unchanged.
+    const preview = await dm
+      .post(api(`/campaigns/${cid}/modules/${install.id}/update/preview`))
+      .send({ package: buildPackage('1.0.0', arts) });
+    expect(preview.body.counts).toEqual({ unchanged: arts.length });
+  });
+
   it('rejects a package whose cross-reference names an artifact it does not ship', async () => {
     const arts = v1Artifacts();
     (arts[3].data as Record<string, unknown>).factionKey = 'not-shipped';

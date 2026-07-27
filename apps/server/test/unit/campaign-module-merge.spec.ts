@@ -17,6 +17,7 @@ import {
 } from '@campfire/schema';
 import {
   applyOverlay,
+  compareObjectives,
   computeOverlay,
   hashPortable,
   projectPortable,
@@ -219,6 +220,63 @@ describe('portable content projection (issue #585)', () => {
       { text: 'Second', sortOrder: 1 },
       { text: 'Third', sortOrder: 2 },
     ]);
+  });
+
+  it('never emits a non-finite sortOrder, however hostile the package', () => {
+    // The comparator's ordering signal must never be NaN. The first line of defence is
+    // normalization: nothing unparseable survives it, so NaN cannot reach the comparator
+    // from a package at all. A numeric string is the one non-number that carries a value.
+    const hostile: Array<[unknown, number]> = [
+      [NaN, 0],
+      [Infinity, 0],
+      [-Infinity, 0],
+      ['abc', 0],
+      ['', 0],
+      ['   ', 0],
+      ['1e999', 0], // overflows to Infinity, so it is not finite and normalizes to 0
+      [{}, 0],
+      [[], 0],
+      [true, 0],
+      ['5', 5], // a numeric string does carry through
+      [7.9, 7], // and fractions truncate, as for every other numeric column
+    ];
+    for (const [input, expected] of hostile) {
+      const projected = projectPortable('quest', { title: 'Q', objectives: [{ text: 'T', sortOrder: input }] });
+      const sortOrder = (projected.objectives as Array<{ sortOrder: number }>)[0].sortOrder;
+      expect(Number.isFinite(sortOrder)).toBe(true);
+      expect(sortOrder).toBe(expected);
+    }
+  });
+
+  it('is a total order even if a non-finite sortOrder reaches the comparator directly', () => {
+    // Second line of defence. compareObjectives is exported and is also fed raw
+    // quest_objectives rows, where SQLite's dynamic typing means the `number` in the
+    // signature is a claim, not a guarantee. A comparator returning NaN makes
+    // Array.prototype.sort implementation-defined — non-deterministic ordering would
+    // reintroduce the baseline disagreement this ordering exists to prevent.
+    for (const bad of [NaN, Infinity, -Infinity]) {
+      expect(Number.isNaN(compareObjectives({ text: 'a', sortOrder: bad }, { text: 'b', sortOrder: 5 }))).toBe(false);
+      expect(Number.isNaN(compareObjectives({ text: 'a', sortOrder: 5 }, { text: 'b', sortOrder: bad }))).toBe(false);
+      expect(Number.isNaN(compareObjectives({ text: 'a', sortOrder: bad }, { text: 'b', sortOrder: bad }))).toBe(false);
+    }
+    // Non-finite entries coerce to 0 and are then ordered by text, so sorting is total and
+    // stable rather than implementation-defined.
+    const sorted = [
+      { text: 'delta', sortOrder: NaN },
+      { text: 'alpha', sortOrder: Infinity },
+      { text: 'charlie', sortOrder: -1 },
+      { text: 'bravo', sortOrder: 0 },
+    ].sort(compareObjectives);
+    expect(sorted.map((o) => o.text)).toEqual(['charlie', 'alpha', 'bravo', 'delta']);
+    // The comparator must also be antisymmetric, or sort() is free to misbehave.
+    for (const [x, y] of [
+      [{ text: 'a', sortOrder: NaN }, { text: 'b', sortOrder: 1 }],
+      [{ text: 'a', sortOrder: 2 }, { text: 'a', sortOrder: 2 }],
+      [{ text: 'z', sortOrder: 0 }, { text: 'a', sortOrder: 0 }],
+    ] as const) {
+      // Summed rather than negated so the equal case compares 0 to 0, not 0 to -0.
+      expect(Math.sign(compareObjectives(x, y)) + Math.sign(compareObjectives(y, x))).toBe(0);
+    }
   });
 });
 
