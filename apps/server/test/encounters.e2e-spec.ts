@@ -445,6 +445,13 @@ describe('encounters (e2e)', () => {
         .send({ hpDelta: -4, damageType: '   ' });
       expect(emptyDamageType.status).toBe(400);
 
+      const conflictingHpSet = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${targetId}`)
+        .set(dm)
+        .send({ hpDelta: -4, hpSet: 100, damageType: 'fire' });
+      expect(conflictingHpSet.status).toBe(400);
+      expect(conflictingHpSet.body.message).toContain('cannot be combined with hpSet');
+
       const [qualifiedEntry] = await db
         .insert(ruleEntries)
         .values({

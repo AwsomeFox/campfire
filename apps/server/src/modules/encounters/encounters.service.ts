@@ -3090,6 +3090,9 @@ export class EncountersService {
     if (patch.damageType !== undefined && damageType === undefined) {
       throw new BadRequestException(`Unknown damage type for this rule system: ${JSON.stringify(patch.damageType)}`);
     }
+    if (damageMetadataTouched && patch.hpSet !== undefined) {
+      throw new BadRequestException('Direct-damage metadata cannot be combined with hpSet');
+    }
     if (damageMetadataTouched && (patch.hpDelta === undefined || patch.hpDelta >= 0)) {
       throw new BadRequestException('Damage type, save outcome, and critical metadata require a negative hpDelta');
     }
