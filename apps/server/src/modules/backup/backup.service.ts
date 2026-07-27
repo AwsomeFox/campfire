@@ -250,10 +250,6 @@ export function captureFileBytesOrNullIfMissing(filePath: string): number | null
   }
 }
 
-function directoryBytes(root: string): number {
-  return listFilesRecursive(root).reduce((sum, rel) => sum + safeFileBytes(path.join(root, rel)), 0);
-}
-
 function lastScheduledAttemptAlert(lastError: string): string {
   const lowDiskSkipPrefix = 'Scheduled backup skipped: low disk space';
   if (lastError.toLowerCase().startsWith(lowDiskSkipPrefix.toLowerCase())) {
@@ -723,7 +719,14 @@ export class BackupService implements OnApplicationBootstrap {
 
   private estimateFallbackBackupBytes(): number {
     const dataDir = resolveDataDir();
-    return safeFileBytes(dbFilePath(dataDir)) + directoryBytes(uploadsRoot(dataDir));
+    // The archive stages only committed attachment rows. Do not walk uploads/:
+    // that includes orphan/staging files which are intentionally excluded and
+    // would make the preflight both pessimistic and O(all filesystem entries).
+    const row = this.holder.raw
+      .prepare(`SELECT COALESCE(SUM(size), 0) AS bytes FROM attachments WHERE state = 'committed'`)
+      .get() as { bytes?: number | string };
+    const attachmentBytes = Number(row.bytes ?? 0);
+    return safeFileBytes(dbFilePath(dataDir)) + (Number.isFinite(attachmentBytes) ? attachmentBytes : 0);
   }
 
   /**
