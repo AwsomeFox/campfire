@@ -3,11 +3,11 @@
     {
       "pr": 1580,
       "url": "https://github.com/AwsomeFox/campfire/pull/1580",
-      "status": "babysitting",
+      "status": "merged",
       "headBranch": "fix/issue-1065",
       "baseBranch": "main",
-      "updatedAt": "2026-07-27T17:00:00Z",
-      "notes": "Initial tracking; assessing conflicts, reviews, and CI"
+      "updatedAt": "2026-07-27T17:37:42Z",
+      "notes": "Merged after CI green. Resolved outdated Codex thread PRRT_kwDOTdNRkM6UDklM (getPricingIdentity 500) already fixed by 90c99635. No conflicts with main."
     }
   ]
 }
