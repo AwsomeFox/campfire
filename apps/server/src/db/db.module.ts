@@ -3414,6 +3414,177 @@ function migrateAiDriverGroundingClaims577(sqlite: Database.Database): void {
 }
 
 /**
+ * Issue #588 — organized-play scheduling: venue/room resources, recurring series,
+ * a per-occurrence exception ledger, reusable schedule templates, and the
+ * organized-play decoration on `scheduled_sessions` (series link, explicit IANA
+ * timezone + local wall clock, room/DM assignment, capacity, event/season keys,
+ * stable ICS UID/SEQUENCE, and reschedule lineage).
+ *
+ * Purely additive: new tables are `CREATE TABLE IF NOT EXISTS`, and every column
+ * added to `scheduled_sessions` is guarded by a `PRAGMA table_info` probe, so the
+ * whole migration is safe to re-run (boot is not once-only — DbHolder re-runs it
+ * after a restore).
+ *
+ * The FK on `scheduled_sessions.series_id` cannot be added by ALTER (SQLite has no
+ * ADD CONSTRAINT), so on an upgraded DB the column is a plain INTEGER while a
+ * freshly bootstrapped DB carries the declared REFERENCES. That asymmetry already
+ * exists throughout this file (see migrateSchedulingLifecycle504's `session_id`)
+ * and is why series teardown is written as an explicit delete in
+ * CampaignsService.purge() rather than left to the constraint.
+ */
+function migrateOrganizedPlay588(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS play_venues (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      timezone TEXT NOT NULL DEFAULT 'UTC',
+      address TEXT NOT NULL DEFAULT '',
+      notes TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS play_rooms (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      venue_id INTEGER NOT NULL REFERENCES play_venues(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      capacity INTEGER NOT NULL DEFAULT 0,
+      notes TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(venue_id, name)
+    );
+    CREATE TABLE IF NOT EXISTS session_series (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+      title TEXT NOT NULL DEFAULT '',
+      location TEXT NOT NULL DEFAULT '',
+      notes TEXT NOT NULL DEFAULT '',
+      timezone TEXT NOT NULL DEFAULT 'UTC',
+      start_date TEXT NOT NULL,
+      start_time TEXT NOT NULL,
+      duration_minutes INTEGER NOT NULL DEFAULT 240,
+      freq TEXT NOT NULL DEFAULT 'weekly',
+      interval INTEGER NOT NULL DEFAULT 1,
+      count INTEGER NOT NULL DEFAULT 1,
+      until_date TEXT,
+      venue_id INTEGER REFERENCES play_venues(id) ON DELETE SET NULL,
+      room_id INTEGER REFERENCES play_rooms(id) ON DELETE SET NULL,
+      assigned_dm_user_id TEXT NOT NULL DEFAULT '',
+      capacity INTEGER NOT NULL DEFAULT 0,
+      event_id TEXT NOT NULL DEFAULT '',
+      season_id TEXT NOT NULL DEFAULT '',
+      series_uid TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS series_exceptions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      series_id INTEGER NOT NULL REFERENCES session_series(id) ON DELETE CASCADE,
+      occurrence_id INTEGER REFERENCES scheduled_sessions(id) ON DELETE SET NULL,
+      recurrence_local_date TEXT NOT NULL DEFAULT '',
+      kind TEXT NOT NULL,
+      from_scheduled_at TEXT,
+      to_scheduled_at TEXT,
+      to_local_start TEXT NOT NULL DEFAULT '',
+      -- #588: what the entry actually CHANGED. Without these the ledger records
+      -- only the instants, so an A->B->C sequence of room moves leaves B
+      -- unrecoverable — the surviving occurrence holds only C — and the
+      -- "append-only exception lineage" could not answer the one question a
+      -- coordinator asks it. from_* == to_* on a cancel/restore, which records the
+      -- seating in force at that moment rather than pretending nothing was held.
+      from_room_id INTEGER,
+      to_room_id INTEGER,
+      from_assigned_dm_user_id TEXT NOT NULL DEFAULT '',
+      to_assigned_dm_user_id TEXT NOT NULL DEFAULT '',
+      from_capacity INTEGER NOT NULL DEFAULT 0,
+      to_capacity INTEGER NOT NULL DEFAULT 0,
+      reason TEXT NOT NULL DEFAULT '',
+      actor_user_id TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS schedule_templates (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      venue_id INTEGER REFERENCES play_venues(id) ON DELETE SET NULL,
+      timezone TEXT NOT NULL DEFAULT 'UTC',
+      freq TEXT NOT NULL DEFAULT 'weekly',
+      interval INTEGER NOT NULL DEFAULT 1,
+      count INTEGER NOT NULL DEFAULT 8,
+      event_id TEXT NOT NULL DEFAULT '',
+      season_id TEXT NOT NULL DEFAULT '',
+      slots_json TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_play_rooms_venue ON play_rooms(venue_id);
+    CREATE INDEX IF NOT EXISTS idx_session_series_campaign ON session_series(campaign_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_session_series_uid ON session_series(series_uid);
+    CREATE INDEX IF NOT EXISTS idx_series_exceptions_series ON series_exceptions(series_id, id);
+    CREATE INDEX IF NOT EXISTS idx_series_exceptions_occurrence ON series_exceptions(occurrence_id);
+  `);
+
+  const hasScheduledSessions = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='scheduled_sessions'")
+    .get();
+  if (!hasScheduledSessions) return;
+
+  const cols = sqlite.prepare('PRAGMA table_info(scheduled_sessions)').all() as Array<{ name: string }>;
+  const has = (name: string): boolean => cols.some((c) => c.name === name);
+  const addColumns: Array<[string, string]> = [
+    ['series_id', 'INTEGER'],
+    ['occurrence_index', 'INTEGER NOT NULL DEFAULT 0'],
+    ['timezone', "TEXT NOT NULL DEFAULT ''"],
+    ['local_start', "TEXT NOT NULL DEFAULT ''"],
+    ['venue_id', 'INTEGER'],
+    ['room_id', 'INTEGER'],
+    ['assigned_dm_user_id', "TEXT NOT NULL DEFAULT ''"],
+    ['capacity', 'INTEGER NOT NULL DEFAULT 0'],
+    ['event_id', "TEXT NOT NULL DEFAULT ''"],
+    ['season_id', "TEXT NOT NULL DEFAULT ''"],
+    ['ics_uid', "TEXT NOT NULL DEFAULT ''"],
+    ['ics_sequence', 'INTEGER NOT NULL DEFAULT 0'],
+    ['original_scheduled_at', 'TEXT'],
+  ];
+  for (const [name, ddl] of addColumns) {
+    if (!has(name)) sqlite.exec(`ALTER TABLE scheduled_sessions ADD COLUMN ${name} ${ddl}`);
+  }
+
+  sqlite.exec(`
+    CREATE INDEX IF NOT EXISTS idx_scheduled_sessions_at ON scheduled_sessions(scheduled_at);
+    CREATE INDEX IF NOT EXISTS idx_scheduled_sessions_room_at ON scheduled_sessions(room_id, scheduled_at);
+    CREATE INDEX IF NOT EXISTS idx_scheduled_sessions_dm_at ON scheduled_sessions(assigned_dm_user_id, scheduled_at);
+    CREATE INDEX IF NOT EXISTS idx_scheduled_sessions_series ON scheduled_sessions(series_id, occurrence_index);
+  `);
+}
+
+/**
+ * Issue #588 — backfill the stable ICS UID for every pre-existing scheduled
+ * session. Deliberately a SEPARATE, ADJACENT ordinal after the create/ALTER step
+ * above (0123): the create must be recorded as applied even if a backfill on a
+ * huge table is interrupted, and splitting them keeps that recovery honest.
+ *
+ * The backfilled string is EXACTLY the UID `buildCampaignIcs` has always emitted
+ * (`campfire-c<campaign>-s<id>@campfire`). Minting a fresh UID here would tell
+ * every already-subscribed calendar that each existing event was deleted and a
+ * different one created — the ghost-accumulation this feature is meant to stop.
+ * Only rows with an empty ics_uid are touched, so re-running is a no-op.
+ */
+function migrateOrganizedPlayIcsUidBackfill588(sqlite: Database.Database): void {
+  const hasScheduledSessions = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='scheduled_sessions'")
+    .get();
+  if (!hasScheduledSessions) return;
+  const cols = sqlite.prepare('PRAGMA table_info(scheduled_sessions)').all() as Array<{ name: string }>;
+  if (!cols.some((c) => c.name === 'ics_uid')) return;
+  sqlite.exec(`
+    UPDATE scheduled_sessions
+       SET ics_uid = 'campfire-c' || campaign_id || '-s' || id || '@campfire'
+     WHERE ics_uid = ''
+  `);
+}
+
+/**
  * Issue #585 — campaign module package identity, install/fork lineage, per-artifact
  * baselines and pre-apply snapshots.
  *
@@ -3738,6 +3909,17 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // guarantees this runs exactly once even if a sibling branch lands a colliding number.
   // Renaming it after a database has recorded it is the one edit that would break run-once.
   { name: '0134_ai_seat_style_presets_1049', run: migrateAiDmSeatsTableForStylePresets1049 },
+  // 0123/0124 are CENTRALLY ALLOCATED to this branch by the merge coordinator.
+  // 0112-0122 are held by other in-flight branches, so the gap above is deliberate
+  // and these are NOT "the next free ordinal" — do not renumber them to close it.
+  // runMigrations dedupes on the FULL name, so the `_588` suffix is what actually
+  // guarantees run-once even if a sibling branch lands a colliding ordinal first.
+  // The pair must stay adjacent and in this order: 0124 backfills a column 0123 adds.
+  // They sit below main's entries because main reached the merge base first; execution
+  // order between them is immaterial — 0130 touches `table_safety_holds` and 0123/0124
+  // touch the organized-play tables and `scheduled_sessions`, which are disjoint.
+  { name: '0123_organized_play_588', run: migrateOrganizedPlay588 },
+  { name: '0124_organized_play_ics_uid_backfill_588', run: migrateOrganizedPlayIcsUidBackfill588 },
   // 0132 was CENTRALLY ALLOCATED to issue #1047 by the merge coordinator; the gap above is
   // deliberate and must not be "tidied" down to the next free ordinal. runMigrations dedupes
   // on the FULL name string, so the `_1047` suffix is what guarantees this runs exactly once

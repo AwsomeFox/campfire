@@ -8,6 +8,7 @@ import {
   getRecordedAppVersion,
 } from '../../src/db/db.module';
 import { makeTempDataDir, writeOldSchemaDb, columnNames, countRows } from './fixtures';
+import { legacyIcsUid } from '../../src/modules/sessions/ics.util';
 
 /**
  * Integration coverage for the hand-rolled ADD-COLUMN / table-rebuild migrations
@@ -134,6 +135,76 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
           'handed_back_at',
         ]),
       );
+      // 0123 (#588): organized-play decoration on the legacy scheduled_sessions
+      // table, plus the new venue/room/series/exception/template tables.
+      expect(columnNames(sqlite, 'scheduled_sessions')).toEqual(
+        expect.arrayContaining([
+          'status', // 0111 (#504) still applies to this old-shaped table
+          'session_id',
+          'series_id',
+          'occurrence_index',
+          'timezone',
+          'local_start',
+          'venue_id',
+          'room_id',
+          'assigned_dm_user_id',
+          'capacity',
+          'event_id',
+          'season_id',
+          'ics_uid',
+          'ics_sequence',
+          'original_scheduled_at',
+        ]),
+      );
+      expect(columnNames(sqlite, 'play_venues')).toEqual(expect.arrayContaining(['name', 'timezone', 'address']));
+      expect(columnNames(sqlite, 'play_rooms')).toEqual(expect.arrayContaining(['venue_id', 'name', 'capacity']));
+      expect(columnNames(sqlite, 'session_series')).toEqual(
+        expect.arrayContaining(['campaign_id', 'timezone', 'start_date', 'start_time', 'freq', 'interval', 'count', 'series_uid', 'status']),
+      );
+      expect(columnNames(sqlite, 'series_exceptions')).toEqual(
+        expect.arrayContaining(['series_id', 'occurrence_id', 'recurrence_local_date', 'kind', 'from_scheduled_at', 'to_scheduled_at']),
+      );
+      expect(columnNames(sqlite, 'schedule_templates')).toEqual(expect.arrayContaining(['name', 'timezone', 'slots_json']));
+    } finally {
+      sqlite.close();
+    }
+  });
+
+  /**
+   * 0124 (#588). The backfilled UID must be EXACTLY the string the ICS feed has
+   * always emitted for that row: minting a fresh one would tell every subscribed
+   * calendar that the event was deleted and an unrelated one created in its place.
+   */
+  it('0124 backfills the pre-existing ICS UID rather than minting a new one', () => {
+    dataDir = makeTempDataDir();
+    writeOldSchemaDb(dataDir);
+
+    const { sqlite } = openDatabase(dataDir);
+    try {
+      const row = sqlite
+        .prepare(
+          "SELECT id, campaign_id, ics_uid, ics_sequence, timezone, local_start, series_id FROM scheduled_sessions WHERE title = 'Legacy game night'",
+        )
+        .get() as {
+        id: number;
+        campaign_id: number;
+        ics_uid: string;
+        ics_sequence: number;
+        timezone: string;
+        local_start: string;
+        series_id: number | null;
+      };
+      // Compared against legacyIcsUid() itself, not a hand-copied format string:
+      // the invariant is "the migration and the feed agree", and two independent
+      // copies of the same literal cannot detect the two drifting apart.
+      expect(row.ics_uid).toBe(legacyIcsUid(row.campaign_id, row.id));
+      expect(row.ics_uid).toBe(`campfire-c${row.campaign_id}-s${row.id}@campfire`);
+      // The legacy row stays organized-play-neutral: no zone, no wall clock, no
+      // series, no sequence bump. Nothing about an existing campaign changed.
+      expect(row.ics_sequence).toBe(0);
+      expect(row.timezone).toBe('');
+      expect(row.local_start).toBe('');
+      expect(row.series_id).toBeNull();
     } finally {
       sqlite.close();
     }

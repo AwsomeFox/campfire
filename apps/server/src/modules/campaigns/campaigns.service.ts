@@ -51,6 +51,8 @@ import {
   castSessions,
   scheduledSessions,
   sessionRsvps,
+  sessionSeries,
+  seriesExceptions,
   comments,
   entityRevisions,
   campaignInvites,
@@ -3220,6 +3222,10 @@ export class CampaignsService {
       await this.db.select({ id: scheduledSessions.id }).from(scheduledSessions).where(eq(scheduledSessions.campaignId, id))
     ).map((r) => r.id);
     const storyBeatIds = (await this.db.select({ id: storyBeats.id }).from(storyBeats).where(eq(storyBeats.campaignId, id))).map((r) => r.id);
+    // #588: series_exceptions hangs off session_series, not off campaign_id.
+    const seriesIds = (
+      await this.db.select({ id: sessionSeries.id }).from(sessionSeries).where(eq(sessionSeries.campaignId, id))
+    ).map((r) => r.id);
 
     try {
       this.db.transaction((tx) => {
@@ -3252,6 +3258,9 @@ export class CampaignsService {
         if (scheduledSessionIds.length > 0) {
           tx.delete(sessionRsvps).where(inArray(sessionRsvps.scheduledSessionId, scheduledSessionIds)).run();
         }
+        if (seriesIds.length > 0) {
+          tx.delete(seriesExceptions).where(inArray(seriesExceptions.seriesId, seriesIds)).run();
+        }
         if (storyBeatIds.length > 0) {
           tx.delete(storyBranches).where(inArray(storyBranches.beatId, storyBeatIds)).run();
         }
@@ -3282,6 +3291,11 @@ export class CampaignsService {
         tx.delete(castSessions).where(eq(castSessions.campaignId, id)).run();
         tx.delete(sessions).where(eq(sessions.campaignId, id)).run();
         tx.delete(scheduledSessions).where(eq(scheduledSessions.campaignId, id)).run();
+        // #588: after the occurrences, so the series has no live children left.
+        // Venues/rooms are install-level shared resources and are deliberately
+        // NOT touched — purging a campaign must not remove a room other campaigns
+        // are booked into.
+        tx.delete(sessionSeries).where(eq(sessionSeries.campaignId, id)).run();
         tx.delete(proposals).where(eq(proposals.campaignId, id)).run();
         tx.delete(campaignGuestDmGrants).where(eq(campaignGuestDmGrants.campaignId, id)).run();
         tx.delete(campaignMembers).where(eq(campaignMembers.campaignId, id)).run();

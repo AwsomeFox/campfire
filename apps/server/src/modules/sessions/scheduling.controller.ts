@@ -2,7 +2,7 @@ import { Body, Controller, Delete, Get, Param, ParseIntPipe, Patch, Post, Put, Q
 import { ApiTags, ApiOperation, ApiParam, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import type { Response } from 'express';
-import type { CalendarFeed, ScheduledSessionListPage, ScheduledSessionWithRsvps } from '@campfire/schema';
+import type { CalendarFeed, ScheduledSessionListPage, ScheduledSessionRestored, ScheduledSessionWithRsvps } from '@campfire/schema';
 import { Public } from '../../common/decorators/public.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
@@ -11,10 +11,14 @@ import { parsePageParams } from '../../common/pagination';
 import { SCHEDULE_PAST_MAX_LIMIT } from '@campfire/schema';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { SchedulingService } from './scheduling.service';
+// #588: restore re-acquires a released room/DM, so it can 409 like the
+// organized-play booking endpoints and shares their redaction of the conflict list.
+import { OrganizedPlayService } from './organized-play.service';
 import {
   ScheduledSessionCancelDto,
   ScheduledSessionCreateDto,
   ScheduledSessionDuplicateDto,
+  ScheduledSessionRestoreDto,
   ScheduledSessionUpdateDto,
   RsvpSetDto,
 } from './sessions.dto';
@@ -109,6 +113,7 @@ export class ScheduleController {
   constructor(
     private readonly scheduling: SchedulingService,
     private readonly access: CampaignAccessService,
+    private readonly organizedPlay: OrganizedPlayService,
   ) {}
 
   @Get(':id')
@@ -158,12 +163,27 @@ export class ScheduleController {
   }
 
   @Post(':id/restore')
-  @ApiOperation({ summary: 'Restore a cancelled scheduled session', description: 'dm role required. Clears cancellation metadata and returns the schedule to live/upcoming projections.' })
+  @ApiOperation({
+    summary: 'Restore a cancelled scheduled session',
+    description:
+      'dm role required. Clears cancellation metadata and returns the schedule to live/upcoming projections. A cancelled '
+      + 'night has RELEASED any room and assigned DM it held, so restoring re-books them: if either was taken while the '
+      + 'night was cancelled this rejects with 409 SCHEDULE_CONFLICT unless `force`.',
+  })
   @ApiResponse({ status: 201, description: 'Restored scheduled session.' })
-  async restore(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser): Promise<ScheduledSessionWithRsvps> {
+  @ApiResponse({ status: 409, description: 'SCHEDULE_CONFLICT with the (redacted) conflict list.' })
+  async restore(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: ScheduledSessionRestoreDto,
+    @CurrentUser() user: RequestUser,
+  ): Promise<ScheduledSessionRestored> {
     const row = await this.scheduling.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
-    return this.scheduling.restore(id, user, role);
+    try {
+      return await this.scheduling.restore(id, user, role, body?.force ?? false, (body?.reason ?? '').trim());
+    } catch (err) {
+      return await this.organizedPlay.toConflictResponse(err, user);
+    }
   }
 
   @Post(':id/duplicate')

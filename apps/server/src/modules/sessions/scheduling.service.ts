@@ -13,13 +13,15 @@ import {
   scheduleNotificationFallbackTitle,
   scheduleNotificationFallbackBody,
   scheduleNotificationLabel,
+  isValidIanaTimeZone,
+  utcToLocalDateTime,
   type ScheduleNotificationData,
 } from '@campfire/schema';
-import type { ScheduledSession, ScheduledSessionWithRsvps, ScheduledSessionListPage, SessionRsvp, CalendarFeed, Role, PageParams } from '@campfire/schema';
+import type { ScheduledSession, ScheduledSessionRestored, ScheduledSessionWithRsvps, ScheduledSessionListPage, SessionRsvp, CalendarFeed, Role, PageParams } from '@campfire/schema';
 import { SCHEDULE_PAST_DEFAULT_LIMIT, SCHEDULE_PAST_MAX_LIMIT } from '@campfire/schema';
 import { applyPage } from '../../common/pagination';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { scheduledSessions, sessionRsvps, campaigns, sessions, notificationReminders } from '../../db/schema';
+import { scheduledSessions, sessionRsvps, campaigns, sessions, notificationReminders, seriesExceptions, sessionSeries } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { generateIcsFeedToken, looksLikeIcsFeedToken } from '../../common/crypto';
@@ -29,10 +31,11 @@ import { nextUpdatedAt, staleWrite } from '../../common/stale-write';
 import { AuditService } from '../audit/audit.service';
 import { RevisionsService } from '../revisions/revisions.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { RoleResolver } from '../membership/role-resolver.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
-import { buildCampaignIcs } from './ics.util';
+import { buildCampaignIcs, legacyIcsUid } from './ics.util';
 import {
   scheduleInProgressSql,
   scheduleLiveSql,
@@ -40,6 +43,17 @@ import {
   schedulePastSql,
   scheduleUpcomingOnlySql,
 } from './scheduling-queries';
+// #588: restoring a cancelled night re-acquires the room/DM the cancellation
+// released, so it runs the same booking probe as the organized-play endpoints.
+import {
+  SeriesConflictSignal,
+  endInstant,
+  findConflictRows,
+  holdsBookableResource,
+  lookupConflictNames,
+  redactConflicts,
+  type RawConflict,
+} from './schedule-conflicts';
 
 const PAST_LIST_MAX = SCHEDULE_PAST_MAX_LIMIT;
 
@@ -54,6 +68,60 @@ function icsFeedTokenExpiryFromNow(): string {
 function icsTokenIsExpired(expiresAt: string | null): boolean {
   if (!expiresAt) return false;
   return new Date(expiresAt).getTime() < Date.now();
+}
+
+/**
+ * The RFC 5545 RECURRENCE-ID analogue for one occurrence: the local date it was
+ * ORIGINALLY materialized on — never the date it currently sits on (#588).
+ *
+ * `local_start` is the MOVED wall clock once an occurrence has been rescheduled,
+ * so deriving the recurrence id from it gave one logical occurrence a different
+ * id in every ledger entry written after its first move. Lining those entries up
+ * is the entire job of the ledger, so the id has to come from an anchor that does
+ * not move: `original_scheduled_at` is stamped once at materialization and
+ * preserved across every later reschedule. For an occurrence that has never
+ * moved the two agree exactly, so entries written before this change still line
+ * up with entries written after it.
+ *
+ * The ZONE has to be pinned for exactly the same reason the instant does, and
+ * `seriesTimezone` is what pins it. `rescheduleOccurrence` accepts and persists
+ * `input.timezone`, so the occurrence's own `timezone` column is as mutable as
+ * its wall clock: move a late-night Los Angeles occurrence and re-label it
+ * Pacific/Kiritimati (+21h) and the very next ledger entry re-reads the SAME
+ * anchor instant in the new zone and lands on the following local date — one
+ * logical occurrence, two recurrence ids again, just reached by a different
+ * route than the one `original_scheduled_at` closed. A series' zone, by
+ * contrast, is immutable: `updateSeries` never writes `timezone`, because the
+ * recurrence rule is immutable after creation. So the series is the anchor for
+ * both halves of the id. Falls back to the row's own zone for a one-off or a
+ * legacy row that belongs to no series, where nothing can drift anyway.
+ */
+export function recurrenceLocalDateFor(
+  row: {
+    originalScheduledAt: string | null;
+    scheduledAt: string;
+    timezone: string;
+    localStart: string;
+  },
+  seriesTimezone?: string,
+): string {
+  const anchor = row.originalScheduledAt ?? row.scheduledAt;
+  const zone = seriesTimezone || row.timezone;
+  if (zone) return utcToLocalDateTime(anchor, zone).slice(0, 10);
+  // No explicit zone (a legacy row adopted into a series): fall back to the
+  // stored wall clock, then to the UTC date, so the column is never blank when
+  // a date is derivable at all.
+  return row.localStart.slice(0, 10) || anchor.slice(0, 10);
+}
+
+/**
+ * The immutable zone of the series an occurrence belongs to, read inside the
+ * caller's transaction. `''` when the series has vanished — {@link
+ * recurrenceLocalDateFor} then falls back to the row's own zone.
+ */
+export function seriesTimezoneInTx(tx: SyncDb, seriesId: number): string {
+  const [row] = tx.select({ timezone: sessionSeries.timezone }).from(sessionSeries).where(eq(sessionSeries.id, seriesId)).limit(1).all();
+  return row?.timezone ?? '';
 }
 
 /** ScheduledSessionCreate's duration bounds — a NEW live night is at least 15 minutes. */
@@ -79,7 +147,12 @@ export type LinkSessionOutcome = { campaignId: number; linked: boolean; wasPrevi
 /** Result of the row-level half of a schedule↔session unlink (#504). */
 export type UnlinkSessionOutcome = { campaignId: number; scheduleIds: number[] };
 
-function toDomain(row: typeof scheduledSessions.$inferSelect): ScheduledSession {
+/**
+ * Row -> API shape. Exported (issue #588) so the organized-play layer projects
+ * occurrences through exactly the same mapper the Schedule tab uses — a second
+ * hand-written mapper is how two views of one row start disagreeing.
+ */
+export function scheduledSessionToDomain(row: typeof scheduledSessions.$inferSelect): ScheduledSession {
   return {
     id: row.id,
     campaignId: row.campaignId,
@@ -93,10 +166,27 @@ function toDomain(row: typeof scheduledSessions.$inferSelect): ScheduledSession 
     cancelledBy: row.cancelledBy,
     cancellationReason: row.cancellationReason,
     sessionId: row.sessionId,
+    // Organized-play decoration (#588) — empty/absent on every row that never
+    // opted in, which is what keeps this feature invisible to existing tables.
+    seriesId: row.seriesId,
+    occurrenceIndex: row.occurrenceIndex,
+    timezone: row.timezone,
+    localStart: row.localStart,
+    venueId: row.venueId,
+    roomId: row.roomId,
+    assignedDmUserId: row.assignedDmUserId,
+    capacity: row.capacity,
+    eventId: row.eventId,
+    seasonId: row.seasonId,
+    icsUid: row.icsUid,
+    icsSequence: row.icsSequence,
+    originalScheduledAt: row.originalScheduledAt,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
 }
+
+const toDomain = scheduledSessionToDomain;
 
 function rsvpToDomain(row: typeof sessionRsvps.$inferSelect): SessionRsvp {
   return {
@@ -128,6 +218,9 @@ export class SchedulingService {
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
     private readonly notifications: NotificationsService,
+    // #588: restore() reports what forcing it overrode, and the list is redacted
+    // per caller — which needs the caller's campaign scope.
+    private readonly roles: RoleResolver,
     private readonly events: CampaignEventsService,
     private readonly revisions: RevisionsService,
   ) {}
@@ -491,19 +584,50 @@ export class SchedulingService {
 
   async create(campaignId: number, input: ScheduledSessionCreateInput, user: RequestUser, role: Role): Promise<ScheduledSessionWithRsvps> {
     const ts = nowIso();
-    const [row] = await this.db
-      .insert(scheduledSessions)
-      .values({
-        campaignId,
-        scheduledAt: this.normalizeScheduledAt(input.scheduledAt),
-        durationMinutes: input.durationMinutes ?? 240,
-        title: input.title ?? '',
-        location: input.location ?? '',
-        notes: input.notes ?? '',
-        createdAt: ts,
-        updatedAt: ts,
-      })
-      .returning();
+    const scheduledAt = this.normalizeScheduledAt(input.scheduledAt);
+    // Issue #588: an explicit IANA zone is optional metadata on a ONE-OFF night —
+    // the instant stays authoritative and `localStart` is derived from it, so the
+    // two can never contradict each other. Recurring series are the opposite way
+    // round (wall clock authoritative, instant derived) because only a wall clock
+    // survives a DST transition; see OrganizedPlayService.
+    //
+    // An explicit zone that is not a real IANA zone is REJECTED, not dropped.
+    // `organizedPlayScheduleFields.timezone` is a plain bounded string — the
+    // validating `IanaTimeZone` schema guards the series endpoints, not this one,
+    // and `timezone` is absent from ORGANIZED_PLAY_OMIT — so silently storing ''
+    // accepted a body that OrganizedPlayService.assertTimezone and the series
+    // schemas both reject, and gave the client no way to detect that its zone had
+    // been ignored. '' still means "no explicit zone"; legacy rows depend on it.
+    if (input.timezone && !isValidIanaTimeZone(input.timezone)) {
+      throw new BadRequestException(`Unknown IANA time zone: ${input.timezone}`);
+    }
+    const timezone = input.timezone ?? '';
+    const localStart = timezone ? utcToLocalDateTime(scheduledAt, timezone) : '';
+    // The UID must exist before the row is readable, and it needs the row id, so
+    // insert + stamp commit together. The string is byte-identical to the UID the
+    // ICS feed emitted before #588, so subscribers see an update, never a new event.
+    const row = this.db.transaction((tx) => {
+      const [inserted] = tx
+        .insert(scheduledSessions)
+        .values({
+          campaignId,
+          scheduledAt,
+          durationMinutes: input.durationMinutes ?? 240,
+          title: input.title ?? '',
+          location: input.location ?? '',
+          notes: input.notes ?? '',
+          timezone,
+          localStart,
+          originalScheduledAt: scheduledAt,
+          createdAt: ts,
+          updatedAt: ts,
+        })
+        .returning()
+        .all();
+      const icsUid = legacyIcsUid(campaignId, inserted.id);
+      tx.update(scheduledSessions).set({ icsUid }).where(eq(scheduledSessions.id, inserted.id)).run();
+      return { ...inserted, icsUid };
+    });
 
     await this.audit.log({
       actor: auditActor(user),
@@ -552,6 +676,54 @@ export class SchedulingService {
     }
     const patch = { ...input };
     if (patch.scheduledAt !== undefined) patch.scheduledAt = this.normalizeScheduledAt(patch.scheduledAt);
+    // Issue #588: this is the LEGACY one-off editor and it knows nothing about
+    // rooms, DMs or the exception ledger. Sliding a row's window through it while
+    // that row still holds its room and its assigned DM — with no
+    // findConflictRows probe and no ledger entry — is precisely the double-booking
+    // the organized-play endpoints exist to prevent. Room and DM cannot be
+    // reached from this body at all (ORGANIZED_PLAY_OMIT), so the WINDOW is the
+    // whole hazard. Reject the moves and name the endpoint that does them safely,
+    // rather than re-implementing the conflict check here — which would then need
+    // its own `force` override and 409 shape, i.e. the reschedule endpoint again.
+    //
+    // TWO INDEPENDENT REASONS to refuse, and the guard tests for both, because
+    // testing `seriesId != null` alone was a PROXY for the first one and missed
+    // rows that satisfy it without belonging to a series:
+    //
+    //   - the row HOLDS A BOOKABLE RESOURCE, so moving it can collide with
+    //     another campaign. `reassignOccurrence` seats ANY occurrence — it
+    //     rejects only cancelled rows — so a plain one-off can be given a room,
+    //     which puts it in the conflict pool (`scheduleOrganizedPlaySql` matches
+    //     `room_id IS NOT NULL`), and `seriesId` is null the whole time. That row
+    //     was movable here with no probe at all. `holdsBookableResource` is
+    //     defined next to `findConflictRows` so it cannot drift from what the
+    //     probe actually collides on.
+    //   - the row BELONGS TO A SERIES, so moving it must be recorded in the
+    //     append-only exception ledger as lineage. True even for a series
+    //     occurrence holding no room and no DM, where there is nothing to
+    //     double-book but still something to record.
+    //
+    // Exactly two changes can introduce an overlap: moving the start instant, and
+    // GROWING the duration. Shrinking it cannot — the window strictly contracts,
+    // so every collision that would exist afterwards already existed before — and
+    // shrinking is how mid-session "End session" works (#818), which is reachable
+    // on an occurrence because occurrences are ordinary rows in the Schedule tab.
+    // Rejecting a shrink would break a running game to prevent nothing.
+    //
+    // Comparison is against the STORED value, not mere presence of the key, so a
+    // full-object PATCH from the edit form that re-sends the unchanged instant is
+    // a no-op and passes. Title/location/notes hold no shared resource and stay
+    // editable here.
+    const widensWindow =
+      (patch.scheduledAt !== undefined && patch.scheduledAt !== existing.scheduledAt)
+      || (patch.durationMinutes !== undefined && patch.durationMinutes > existing.durationMinutes);
+    if (widensWindow && (existing.seriesId != null || holdsBookableResource(existing))) {
+      throw new BadRequestException(
+        'A scheduled session that belongs to a series, or that holds a room or an assigned DM, cannot be moved or '
+          + 'lengthened here — use POST /organized-play/occurrences/:id/reschedule, which runs the booking conflict '
+          + 'check and records the move in the exception ledger',
+      );
+    }
     const next = {
       scheduledAt: patch.scheduledAt ?? existing.scheduledAt,
       durationMinutes: patch.durationMinutes ?? existing.durationMinutes,
@@ -559,15 +731,99 @@ export class SchedulingService {
       location: patch.location ?? existing.location,
       notes: patch.notes ?? existing.notes,
     };
-    const updated = await this.db
-      .update(scheduledSessions)
-      .set({ ...patch, updatedAt: nextUpdatedAt(existing.updatedAt) })
-      .where(
-        opts?.expectedUpdatedAt
-          ? and(eq(scheduledSessions.id, id), eq(scheduledSessions.updatedAt, opts.expectedUpdatedAt))
-          : eq(scheduledSessions.id, id),
-      )
-      .returning();
+    // Issue #588: bump the RFC 5545 SEQUENCE whenever a field a calendar client
+    // renders actually changed, and keep the local wall clock in step with the
+    // instant when the row carries an explicit zone. Only on a real change — a
+    // no-op PATCH must not push a fresh SEQUENCE at every subscriber.
+    //
+    // `notes` is in this list because it is emitted as DESCRIPTION (ics.util.ts),
+    // and the rule here is "anything that renders into the feed bumps SEQUENCE" —
+    // title→SUMMARY and location→LOCATION are already here for exactly that
+    // reason. LAST-MODIFIED does still advance on a notes-only edit, so a lenient
+    // client picked the new description up regardless; a client that gates
+    // revisions on SEQUENCE, as RFC 5545 §3.8.7.4 allows, kept the stale one.
+    const calendarFieldChanged =
+      next.scheduledAt !== existing.scheduledAt
+      || next.durationMinutes !== existing.durationMinutes
+      || next.title !== existing.title
+      || next.location !== existing.location
+      || next.notes !== existing.notes;
+    const localStartPatch =
+      next.scheduledAt !== existing.scheduledAt && existing.timezone
+        ? { localStart: utcToLocalDateTime(next.scheduledAt, existing.timezone) }
+        : {};
+    // Issue #588: which of this row's prose fields this PATCH actually changes.
+    // The window fields are absent by construction — a series occurrence cannot
+    // reach the write below with a moved instant or a grown duration, the guard
+    // above rejects that and names the endpoint that records it properly. So the
+    // ledger entry this produces is a PROSE entry and says so.
+    //
+    // Field NAMES only, never the prose itself: the exception ledger is readable
+    // by organized-play coordinators who need not be members of the campaign,
+    // and the note bodies are versioned in the revisions table where campaign
+    // membership is enforced. Naming the field is what makes the lineage useful;
+    // quoting it would leak.
+    const editedProseFields = (['title', 'location', 'notes'] as const).filter((f) => next[f] !== existing[f]);
+    let updated: Array<typeof scheduledSessions.$inferSelect> = [];
+    // One transaction so the row write and its ledger entry cannot separate. A
+    // committed prose edit with no `edit` entry is exactly the invisible
+    // per-occurrence divergence this ledger exists to surface, and the reverse —
+    // an entry for a write that lost a stale-write race — would claim an edit
+    // that never happened.
+    this.db.transaction((tx) => {
+      updated = tx
+        .update(scheduledSessions)
+        .set({
+          ...patch,
+          ...localStartPatch,
+          ...(calendarFieldChanged ? { icsSequence: existing.icsSequence + 1 } : {}),
+          updatedAt: nextUpdatedAt(existing.updatedAt),
+        })
+        .where(
+          opts?.expectedUpdatedAt
+            ? and(eq(scheduledSessions.id, id), eq(scheduledSessions.updatedAt, opts.expectedUpdatedAt))
+            : eq(scheduledSessions.id, id),
+        )
+        .returning()
+        .all();
+      // Nothing was written — leave the rollback to the stale-write throw below,
+      // which needs an async read this synchronous callback cannot make.
+      if (!updated[0]) return;
+      // #588: the legacy editor is still the ordinary way a DM retitles or
+      // re-notes ONE night of a series from the Schedule tab, and until now it
+      // left no trace at all: the lineage could not show that this occurrence had
+      // diverged from its series, even though `updateSeries` would later flatten
+      // the divergence away. `edit` is NOT in METADATA_OVERRIDE_KINDS, so
+      // appending it does not detach the night from future series edits — that is
+      // the whole distinction between recording a prose edit and honouring a
+      // booking decision (reschedule / reassign).
+      if (existing.seriesId != null && editedProseFields.length > 0) {
+        tx.insert(seriesExceptions)
+          .values({
+            seriesId: existing.seriesId,
+            occurrenceId: id,
+            recurrenceLocalDate: recurrenceLocalDateFor(existing, seriesTimezoneInTx(tx, existing.seriesId)),
+            kind: 'edit',
+            // A prose edit moves no instant and no assignment, so from == to
+            // throughout, recorded rather than defaulted for the same reason
+            // `cancel` records them: the entry states the seating in force when
+            // the edit happened.
+            fromScheduledAt: existing.scheduledAt,
+            toScheduledAt: existing.scheduledAt,
+            toLocalStart: existing.localStart,
+            fromRoomId: existing.roomId,
+            toRoomId: existing.roomId,
+            fromAssignedDmUserId: existing.assignedDmUserId,
+            toAssignedDmUserId: existing.assignedDmUserId,
+            fromCapacity: existing.capacity,
+            toCapacity: existing.capacity,
+            reason: `edited ${editedProseFields.join(', ')}`,
+            actorUserId: user.id,
+            createdAt: nowIso(),
+          })
+          .run();
+      }
+    });
     if (!updated[0]) {
       const current = await this.getRowOrThrow(id);
       throw staleWrite(opts?.expectedUpdatedAt, current.updatedAt);
@@ -623,16 +879,55 @@ export class SchedulingService {
     }
     const ts = nowIso();
     const reason = (input.reason ?? '').trim();
-    await this.db
-      .update(scheduledSessions)
-      .set({
-        status: 'cancelled',
-        cancelledAt: ts,
-        cancelledBy: user.id,
-        cancellationReason: reason,
-        updatedAt: ts,
-      })
-      .where(eq(scheduledSessions.id, id));
+    // Cancelling the row and appending its ledger entry are one change, so they
+    // commit or roll back together — restore() already pairs its un-cancel with a
+    // `restore` entry the same way.
+    this.db.transaction((tx) => {
+      tx.update(scheduledSessions)
+        .set({
+          status: 'cancelled',
+          cancelledAt: ts,
+          cancelledBy: user.id,
+          cancellationReason: reason,
+          // #588: a cancellation is published as STATUS:CANCELLED under the SAME
+          // UID, so it needs a higher SEQUENCE or subscribers keep the live copy.
+          icsSequence: existing.icsSequence + 1,
+          updatedAt: ts,
+        })
+        .where(eq(scheduledSessions.id, id))
+        .run();
+      // #588: `DELETE /schedule/:id` is the ONLY exposed way to cancel a single
+      // occurrence of a series — cancelSeries cancels the whole tail — so this is
+      // where an occurrence's `cancel` has to be appended. Without it the
+      // append-only ledger could hold a `restore` with no preceding `cancel`
+      // (restore() writes one unconditionally), and a night the coordinator
+      // skipped carried no recorded reason at all.
+      if (existing.seriesId != null) {
+        tx.insert(seriesExceptions)
+          .values({
+            seriesId: existing.seriesId,
+            occurrenceId: id,
+            recurrenceLocalDate: recurrenceLocalDateFor(existing, seriesTimezoneInTx(tx, existing.seriesId)),
+            kind: 'cancel',
+            fromScheduledAt: existing.scheduledAt,
+            toScheduledAt: null,
+            toLocalStart: '',
+            // A lifecycle entry changes no assignment, so from == to. Recorded
+            // rather than left at defaults so the ledger states the seating that
+            // was in force when the night was cancelled.
+            fromRoomId: existing.roomId,
+            toRoomId: existing.roomId,
+            fromAssignedDmUserId: existing.assignedDmUserId,
+            toAssignedDmUserId: existing.assignedDmUserId,
+            fromCapacity: existing.capacity,
+            toCapacity: existing.capacity,
+            reason,
+            actorUserId: user.id,
+            createdAt: ts,
+          })
+          .run();
+      }
+    });
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -659,7 +954,7 @@ export class SchedulingService {
     return this.getWithRsvps(id);
   }
 
-  async restore(id: number, user: RequestUser, role: Role): Promise<ScheduledSessionWithRsvps> {
+  async restore(id: number, user: RequestUser, role: Role, force = false, reason = ''): Promise<ScheduledSessionRestored> {
     // Effective status here too, so every write guard in this file reads the same
     // projection the API returns. ('cancelled' is never link-derived, so this one is
     // equivalent to the raw column today — it is written this way so the next guard
@@ -682,13 +977,69 @@ export class SchedulingService {
     // cancelled the ledger is a useful record of what the party was already told, and
     // restore is the exact moment the night becomes eligible to remind again. Restore
     // starts a new incarnation of the night, so it starts with a clean ledger.
+    let forced: RawConflict[] = [];
+    // The row this restore actually re-books, re-read inside the transaction.
+    // Everything after it — audit, notification, the returned payload — describes
+    // what was written, so it must describe THIS row, not the snapshot above.
+    let booked: typeof scheduledSessions.$inferSelect = existing;
     this.db.transaction((tx) => {
+      // Re-read INSIDE the transaction, because every value below is derived from
+      // this row and the read above is separated from this write by an await.
+      //
+      // The probe already ran in here; its INPUTS did not, and that was the gap.
+      // A series PATCH may legitimately move a cancelled occurrence's room —
+      // cancelled rows sit outside `scheduleLiveSql()`, so the fan-out skips the
+      // booking check for them by design — and it can commit in that gap. This
+      // restore would then probe the room the row USED to hold, find it free, and
+      // flip a row now pointing at a different, possibly occupied, room to
+      // `scheduled`: a live double-booking created by the one path whose probe
+      // exists to prevent exactly that. The SEQUENCE and the ledger entry came
+      // off the same stale snapshot, so both would have described the wrong room.
+      booked = this.getRowOrThrowTx(tx, id);
+      // Re-validated in here too: if a concurrent restore already won, this one
+      // must not re-probe and re-announce a night that is no longer cancelled.
+      if (booked.status !== 'cancelled') {
+        throw new NotFoundException(`Scheduled session ${id} is not cancelled`);
+      }
+      // #588: a restore is a BOOKING, not merely a status flip.
+      //
+      // Cancelling RELEASES the resource — a cancelled row keeps its `room_id`
+      // and `assigned_dm_user_id`, but `scheduleLiveSql()` excludes it from
+      // conflict detection, so while it is cancelled another campaign can
+      // legitimately take that room or that DM and the server correctly tells
+      // them it is free. Flipping the row back to `scheduled` with no probe
+      // silently recreates exactly the double-booking this feature exists to
+      // prevent, and tells neither party. It is the mirror image of the cancel
+      // side: whatever cancelling gives up, restoring has to ask for again.
+      //
+      // Probed inside the write transaction like every other booking path, so the
+      // answer still holds at the moment the row reclaims the resource.
+      const conflicts = findConflictRows(tx, {
+        startsAt: booked.scheduledAt,
+        endsAt: endInstant(booked.scheduledAt, booked.durationMinutes),
+        roomId: booked.roomId,
+        assignedDmUserId: booked.assignedDmUserId,
+        memberUserIds: [],
+        // Cancelled rows are already outside the live filter so this row cannot
+        // match its own probe; excluded explicitly anyway so the guarantee does
+        // not depend on that filter never changing.
+        excludeScheduleId: id,
+      });
+      if (conflicts.length > 0 && !force) throw new SeriesConflictSignal(conflicts);
+      // What forcing this restore overrode. Reported rather than discarded: the
+      // rule this feature states is that an override the caller cannot tell they
+      // took is not an override, and restore was the one force-taking path still
+      // returning a payload with nowhere to say so.
+      forced = conflicts;
       tx.update(scheduledSessions)
         .set({
           status: 'scheduled',
           cancelledAt: null,
           cancelledBy: null,
           cancellationReason: '',
+          // #588: un-cancelling is another update a subscriber must apply on top
+          // of the STATUS:CANCELLED copy it already holds, so SEQUENCE advances.
+          icsSequence: booked.icsSequence + 1,
           updatedAt: ts,
         })
         .where(eq(scheduledSessions.id, id))
@@ -696,6 +1047,33 @@ export class SchedulingService {
       tx.delete(notificationReminders)
         .where(eq(notificationReminders.scheduledSessionId, id))
         .run();
+      // #588: an occurrence's exception ledger is append-only, so an un-cancel is
+      // recorded rather than expressed by deleting the earlier `cancel` entry.
+      // Without this a restored night would read, forever, as still cancelled in
+      // the lineage the coordinator audits from.
+      if (booked.seriesId != null) {
+        tx.insert(seriesExceptions)
+          .values({
+            seriesId: booked.seriesId,
+            occurrenceId: id,
+            recurrenceLocalDate: recurrenceLocalDateFor(booked, seriesTimezoneInTx(tx, booked.seriesId)),
+            kind: 'restore',
+            fromScheduledAt: booked.scheduledAt,
+            toScheduledAt: booked.scheduledAt,
+            toLocalStart: booked.localStart,
+            // from == to: a restore re-acquires what the row already names.
+            fromRoomId: booked.roomId,
+            toRoomId: booked.roomId,
+            fromAssignedDmUserId: booked.assignedDmUserId,
+            toAssignedDmUserId: booked.assignedDmUserId,
+            fromCapacity: booked.capacity,
+            toCapacity: booked.capacity,
+            reason,
+            actorUserId: user.id,
+            createdAt: ts,
+          })
+          .run();
+      }
     });
     await this.audit.log({
       actor: auditActor(user),
@@ -703,21 +1081,30 @@ export class SchedulingService {
       action: 'schedule.restore',
       entityType: 'session',
       entityId: id,
-      campaignId: existing.campaignId,
+      campaignId: booked.campaignId,
     });
-    this.emitScheduleUpdated(existing.campaignId, id);
+    this.emitScheduleUpdated(booked.campaignId, id);
     await this.notifyScheduleLifecycle(
-      existing.campaignId,
+      booked.campaignId,
       user,
       this.scheduleNotificationData({
-        scheduleId: existing.id,
-        scheduledAt: existing.scheduledAt,
-        durationMinutes: existing.durationMinutes,
-        title: existing.title,
+        scheduleId: booked.id,
+        scheduledAt: booked.scheduledAt,
+        durationMinutes: booked.durationMinutes,
+        title: booked.title,
         changeType: 'updated',
       }),
     );
-    return this.getWithRsvps(id);
+    // Redacted per caller through the same leaf-module helpers OrganizedPlayService
+    // uses, so a forced restore cannot reveal more about another campaign's
+    // booking than the conflict probe would.
+    const scope = await this.roles.accessibleCampaignIds(user);
+    const names = await lookupConflictNames(
+      this.db,
+      forced.map((r) => r.campaignId),
+      forced.flatMap((r) => (r.roomId != null ? [r.roomId] : [])),
+    );
+    return { ...(await this.getWithRsvps(id)), conflicts: redactConflicts(forced, scope, names) };
   }
 
   async duplicate(
@@ -740,6 +1127,13 @@ export class SchedulingService {
         title: input.title ?? existing.title,
         location: input.location ?? existing.location,
         notes: input.notes ?? existing.notes,
+        // #588: carry the zone across. `duplicate()` predates this branch, but
+        // `timezone` does not — so a method that copies "everything" silently
+        // stopped doing so the moment the column was added, and the copy stored
+        // '' with an empty `localStart`. Nothing could repair it afterwards:
+        // ScheduledSessionUpdate deliberately carries no `timezone`. Adding a
+        // column means auditing whoever claims to copy the row.
+        timezone: existing.timezone,
       },
       user,
       role,
