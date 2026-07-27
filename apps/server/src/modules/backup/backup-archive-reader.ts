@@ -57,6 +57,23 @@ const DEFAULT_LIMITS: BackupArchiveReaderLimits = Object.freeze({
   maxTotalUncompressedBytes: MAX_ARCHIVE_UNCOMPRESSED_BYTES,
 });
 
+const SYSTEM_IO_ERROR_CODES = new Set([
+  'EACCES',
+  'EBADF',
+  'EIO',
+  'EMFILE',
+  'ENFILE',
+  'ENOENT',
+  'ENOSPC',
+  'EPERM',
+  'EROFS',
+]);
+
+function isSystemIoError(err: unknown): err is NodeJS.ErrnoException {
+  return err instanceof Error && typeof (err as NodeJS.ErrnoException).code === 'string' &&
+    SYSTEM_IO_ERROR_CODES.has((err as NodeJS.ErrnoException).code!);
+}
+
 export class BackupArchiveReader {
   private actualTotal = 0;
   private constructor(
@@ -194,6 +211,7 @@ export class BackupArchiveReader {
     try { await consume(source); }
     catch (err) {
       if (err instanceof BadRequestException) throw err;
+      if (isSystemIoError(err)) throw err;
       invalid(signal?.aborted ? 'archive read was cancelled' : 'entry is malformed, truncated, or exceeds its size limit');
     } finally { signal?.removeEventListener('abort', abort); }
   }

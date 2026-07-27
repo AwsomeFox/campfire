@@ -146,7 +146,12 @@ export class ExportController {
       try {
         await this.exportService.streamMarkdownZip(res, abortController.signal, campaignId, user, { profile, options });
       } catch (err) {
-        if (!abortController.signal.aborted) throw err;
+        if (abortController.signal.aborted) return;
+        // Once streaming has started, the service has already destroyed the
+        // failed response. Do not ask Nest to write a second JSON error response
+        // over committed ZIP headers.
+        if (res.headersSent || res.destroyed) return;
+        throw err;
       } finally {
         res.off('close', onClose);
       }
