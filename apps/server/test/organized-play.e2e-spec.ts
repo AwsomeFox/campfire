@@ -1663,4 +1663,140 @@ describe('organized play (e2e)', () => {
     expect(forced.status).toBe(201);
     expect(forced.body.occurrences).toHaveLength(6);
   });
+
+  /**
+   * A double-submitted extend used to mint duplicate occurrence indexes — and
+   * therefore duplicate ICS UIDs, which subscribers cannot recover from.
+   *
+   * Driven through the service rather than HTTP so the interleaving is
+   * DETERMINISTIC: better-sqlite3 is synchronous, so nothing can interleave once
+   * a transaction callback is running, but every `await` before it is a yield.
+   * When the count and the occurrence-index set were read outside the
+   * transaction, both calls awaited the same answer, both computed the same
+   * "fresh" indexes, and both inserted them — and because the series holds no
+   * room and no DM, the booking probe had nothing to collide on and reported
+   * neither.
+   */
+  it('serializes two concurrent extends: no duplicate occurrence index and no duplicate ICS UID', async () => {
+    const service = ctx.app.get(OrganizedPlayService);
+    const series = await api()
+      .post(`/api/v1/campaigns/${campaignId}/series`)
+      .set(dm)
+      .send({ title: 'Double Submit', timezone: 'UTC', startDate: '2099-07-07', startTime: '18:00', freq: 'weekly', count: 2 });
+    expect(series.status).toBe(201);
+    const seriesId = series.body.id as number;
+    const actor = { id: 'dev:op-dm', name: 'OP DM', roles: [] as string[] };
+
+    await Promise.all([
+      service.extendSeries(seriesId, 2, actor as never, 'dm'),
+      service.extendSeries(seriesId, 2, actor as never, 'dm'),
+    ]);
+
+    const after = await api().get(`/api/v1/campaigns/${campaignId}/series/${seriesId}`).set(dm);
+    const indexes = after.body.occurrences.map((o: { occurrenceIndex: number }) => o.occurrenceIndex);
+    const uids = after.body.occurrences.map((o: { icsUid: string }) => o.icsUid);
+    expect(new Set(indexes).size).toBe(indexes.length);
+    expect(new Set(uids).size).toBe(uids.length);
+    // Both extensions land, one after the other: 2 + 2 + 2.
+    expect(indexes.slice().sort((a: number, b: number) => a - b)).toEqual([0, 1, 2, 3, 4, 5]);
+    expect(after.body.count).toBe(6);
+  });
+
+  it('keeps one recurrence id when a reschedule also changes the occurrence timezone', async () => {
+    // 23:00 in Los Angeles is the NEXT day in Kiritimati (+21h), so the anchor
+    // instant lands on a different local date depending on which zone reads it.
+    const series = await api()
+      .post(`/api/v1/campaigns/${campaignId}/series`)
+      .set(dm)
+      .send({ title: 'Zone Drift', timezone: 'America/Los_Angeles', startDate: '2099-08-18', startTime: '23:00', freq: 'weekly', count: 2 });
+    expect(series.status).toBe(201);
+    const occ = series.body.occurrences[0];
+
+    // First move re-labels the row's zone. `rescheduleOccurrence` accepts and
+    // PERSISTS `timezone`, so the occurrence's own zone is as mutable as its wall
+    // clock — and deriving the recurrence id from it meant the very next entry
+    // read the same anchor instant in a different zone and filed under a
+    // different date. `original_scheduled_at` pinned the instant; only the series
+    // zone can pin the zone.
+    expect(
+      (
+        await api()
+          .post(`/api/v1/organized-play/occurrences/${occ.id}/reschedule`)
+          .set(dm)
+          .send({ scheduledAt: '2099-08-20T06:00:00.000Z', timezone: 'Pacific/Kiritimati' })
+      ).status,
+    ).toBe(201);
+    expect(
+      (await api().post(`/api/v1/organized-play/occurrences/${occ.id}/reschedule`).set(dm).send({ scheduledAt: '2099-08-21T06:00:00.000Z' })).status,
+    ).toBe(201);
+
+    const ledger = (await api().get(`/api/v1/organized-play/occurrences/${occ.id}/exceptions`).set(dm)).body;
+    const ids = ledger.map((e: { recurrenceLocalDate: string }) => e.recurrenceLocalDate);
+    expect(new Set(ids).size).toBe(1);
+    // The series' own zone, which is immutable — updateSeries never writes it.
+    expect(ids).toEqual(['2099-08-18', '2099-08-18']);
+  });
+
+  it('a reassign that changes nothing files no override, so the series can still reach the occurrence', async () => {
+    const series = await api()
+      .post(`/api/v1/campaigns/${campaignId}/series`)
+      .set(dm)
+      .send({ title: 'No-op Reassign', timezone: 'UTC', startDate: '2099-09-01', startTime: '18:00', freq: 'weekly', count: 2, capacity: 6 });
+    expect(series.status).toBe(201);
+    const occ = series.body.occurrences[0];
+
+    // Reason-only: nothing about the seating changed. The ledger is append-only,
+    // so an override written here could never be withdrawn — one stray call (or a
+    // double-click) would freeze this night out of every later series edit
+    // FOREVER, leaving it with a stale title, room, DM and event keys.
+    const noop = await api().post(`/api/v1/organized-play/occurrences/${occ.id}/reassign`).set(dm).send({ reason: 'just checking' });
+    expect(noop.status).toBe(201);
+    // Repeating the values already stored is equally a no-op.
+    expect((await api().post(`/api/v1/organized-play/occurrences/${occ.id}/reassign`).set(dm).send({ capacity: 6 })).status).toBe(201);
+    expect((await api().get(`/api/v1/organized-play/occurrences/${occ.id}/exceptions`).set(dm)).body).toEqual([]);
+
+    const edited = await api().patch(`/api/v1/campaigns/${campaignId}/series/${series.body.id}`).set(dm).send({ title: 'No-op Reassign (v2)' });
+    expect(edited.status).toBe(200);
+    const byId = new Map(edited.body.occurrences.map((o: { id: number }) => [o.id, o]));
+    expect(byId.get(occ.id)).toMatchObject({ title: 'No-op Reassign (v2)' });
+
+    // A REAL re-seat still files its override and is still respected.
+    expect((await api().post(`/api/v1/organized-play/occurrences/${occ.id}/reassign`).set(dm).send({ capacity: 2 })).status).toBe(201);
+    expect((await api().get(`/api/v1/organized-play/occurrences/${occ.id}/exceptions`).set(dm)).body.map((e: { kind: string }) => e.kind)).toEqual([
+      'reassign',
+    ]);
+  });
+
+  it('does not push a fresh SEQUENCE for a room change, which the feed never renders', async () => {
+    const seqRoom = (await api().post(`/api/v1/organized-play/venues/${venueId}/rooms`).set(dm).send({ name: 'Sequence Room' })).body;
+    const series = await api()
+      .post(`/api/v1/campaigns/${campaignId}/series`)
+      .set(dm)
+      .send({ title: 'Room Seq', timezone: 'UTC', startDate: '2099-09-15', startTime: '18:00', freq: 'weekly', count: 2 });
+    expect(series.status).toBe(201);
+    const [first, second] = series.body.occurrences;
+
+    // The emitter renders SUMMARY from `title`, LOCATION from the free-text
+    // `location` column and DESCRIPTION from `notes` — never the room. A re-seat
+    // therefore produces a byte-identical VEVENT, and a fresh SEQUENCE would
+    // announce a revision to every subscriber that changed nothing they can see.
+    const reseated = await api().post(`/api/v1/organized-play/occurrences/${first.id}/reassign`).set(dm).send({ roomId: seqRoom.id });
+    expect(reseated.status).toBe(201);
+    expect(reseated.body.occurrence.roomId).toBe(seqRoom.id);
+    expect(reseated.body.occurrence.icsSequence).toBe(first.icsSequence);
+
+    // The bulk form of the same change, through the series fan-out. The two must
+    // not disagree about what "renders".
+    const fanned = await api().patch(`/api/v1/campaigns/${campaignId}/series/${series.body.id}`).set(dm).send({ roomId: seqRoom.id, force: true });
+    expect(fanned.status).toBe(200);
+    const after = new Map(fanned.body.occurrences.map((o: { id: number }) => [o.id, o]));
+    expect(after.get(second.id)).toMatchObject({ roomId: seqRoom.id, icsSequence: second.icsSequence });
+
+    // …and a title change in the same breath still does bump it, so this is a
+    // rule about what renders and not a blanket "fan-outs never bump".
+    const renamed = await api().patch(`/api/v1/campaigns/${campaignId}/series/${series.body.id}`).set(dm).send({ title: 'Room Seq (v2)' });
+    expect(renamed.status).toBe(200);
+    const renamedById = new Map(renamed.body.occurrences.map((o: { id: number }) => [o.id, o]));
+    expect(renamedById.get(second.id)).toMatchObject({ title: 'Room Seq (v2)', icsSequence: second.icsSequence + 1 });
+  });
 });

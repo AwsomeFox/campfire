@@ -299,8 +299,22 @@ export function expandRecurrence(spec: RecurrenceSpec): ExpandedOccurrence[] {
         : addDaysLocal(spec.startDate, step * interval * (spec.freq === 'weekly' ? 7 : 1));
     if (localDate == null) continue;
     if (until != null && localDate > until) break;
-    const localStart: LocalDateTime = `${localDate}T${spec.startTime}`;
-    const resolved = wallClockToUtc(localStart, spec.timezone);
+    const requested: LocalDateTime = `${localDate}T${spec.startTime}`;
+    const resolved = wallClockToUtc(requested, spec.timezone);
+    // A GAP occurrence does not happen at the requested wall clock — 02:30 does
+    // not exist on the spring-forward day, and `wallClockToUtc` shifts the
+    // instant past the transition. `localStart` is the PERSISTED wall clock of
+    // the materialized row, so it has to describe the instant that was actually
+    // chosen (03:30) rather than the one that was asked for: everywhere else in
+    // this feature the two agree by construction (`SchedulingService.update`
+    // re-derives localStart whenever the instant moves, `rescheduleOccurrence`
+    // derives it from `scheduledAt`), and a row that alone breaks the invariant
+    // renders an hour off in any UI that trusts the stored wall clock.
+    //
+    // `localDate` is deliberately NOT re-derived: it is the recurrence identity
+    // — which day of the rule this is — and the rule still says this day.
+    const localStart: LocalDateTime =
+      resolved.resolution === 'gap' ? utcToLocalDateTime(resolved.utcIso, spec.timezone) : requested;
     out.push({
       index: out.length,
       localDate,

@@ -6,9 +6,17 @@ import {
   ScheduleTemplateSlot,
   expandRecurrence,
   isValidIanaTimeZone,
+  scheduleNotificationChangeType,
+  scheduleNotificationFallbackBody,
+  scheduleNotificationFallbackTitle,
+  shouldNotifyScheduleUpdate,
   utcToLocalDateTime,
   wallClockToUtc,
   windowsOverlap,
+  diffScheduleNotificationFields,
+  type ScheduleNotificationChangeType,
+  type ScheduleNotificationChangedField,
+  type ScheduleNotificationData,
   type CoordinatorCalendar,
   type CoordinatorCalendarEntry,
   type OccurrenceAttendance,
@@ -56,9 +64,10 @@ import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { AuditService } from '../audit/audit.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { RoleResolver } from '../membership/role-resolver.service';
 import { seriesIcsUid } from './ics.util';
-import { recurrenceLocalDateFor, scheduledSessionToDomain, type SyncDb } from './scheduling.service';
+import { recurrenceLocalDateFor, scheduledSessionToDomain, seriesTimezoneInTx, type SyncDb } from './scheduling.service';
 import {
   scheduleEffectiveStatusSql,
   scheduleLiveSql,
@@ -196,8 +205,66 @@ export class OrganizedPlayService {
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
     private readonly events: CampaignEventsService,
+    private readonly notifications: NotificationsService,
     private readonly roles: RoleResolver,
   ) {}
+
+  /**
+   * Tell the party about a schedule change made through an organized-play route.
+   *
+   * `this.events.emit` is an EPHEMERAL SSE ping: it reaches whoever has the app
+   * open at that instant and nobody else. Every equivalent write on the one-off
+   * path also calls `SchedulingService.notifyScheduleLifecycle`, which persists a
+   * notification row and feeds immediate delivery, digests and offline catch-up.
+   * Without this, cancelling a series or moving an occurrence told nobody who was
+   * not already looking at the page — and `PATCH /schedule/:id` now REJECTS a
+   * series occurrence's move and points callers here, so the one path that used
+   * to notify was replaced by one that did not. Members would keep turning up to
+   * a game that had been cancelled or moved.
+   *
+   * ONE notification per request, anchored on the SOONEST affected occurrence,
+   * rather than one per row. A series-level action is a single decision by the
+   * coordinator; fanning it out per occurrence would put up to
+   * MAX_SERIES_OCCURRENCES bells in every member's tray for one click, and the
+   * soonest night is the one they would otherwise have travelled to. The
+   * per-occurrence routes pass their single row and so behave exactly like the
+   * one-off path.
+   *
+   * Deliberately silent for `reassignOccurrence`: room, DM and capacity are not
+   * `ScheduleNotificationChangedField`s and do not reach the party's copy of the
+   * event, so a re-seat is the organized-play analogue of the title-only edit
+   * `shouldNotifyScheduleUpdate` already declines to announce.
+   */
+  private async notifyOccurrenceChange(
+    campaignId: number,
+    user: RequestUser,
+    rows: Array<{ id: number; scheduledAt: string; durationMinutes: number; title: string }>,
+    changeType: ScheduleNotificationChangeType,
+    changedFields: ScheduleNotificationChangedField[] = [],
+  ): Promise<void> {
+    if (rows.length === 0) return;
+    const anchor = rows.reduce((soonest, row) => (row.scheduledAt < soonest.scheduledAt ? row : soonest));
+    const data: ScheduleNotificationData = {
+      kind: 'schedule',
+      scheduleId: anchor.id,
+      scheduledAt: anchor.scheduledAt,
+      durationMinutes: anchor.durationMinutes,
+      changeType,
+      changedFields,
+      label: anchor.title.trim(),
+    };
+    await this.notifications.notifyCampaign(campaignId, user, {
+      type: 'session_scheduled',
+      title: scheduleNotificationFallbackTitle(data),
+      body: scheduleNotificationFallbackBody(data),
+      // entityId alone (no EntityType for scheduled_session), matching
+      // SchedulingService: the bell routes session_scheduled to the Schedule tab
+      // and focuses this card (#446).
+      entityId: data.scheduleId,
+      actorName: user.name,
+      data,
+    });
+  }
 
   // ----- venues + rooms -----
 
@@ -823,6 +890,7 @@ export class OrganizedPlayService {
     );
 
     let forced: RawConflict[] = [];
+    let createdRows: ScheduleRow[] = [];
     const created = this.db.transaction((tx) => {
       const conflicts: RawConflict[] = [];
       for (const occ of occurrences) {
@@ -871,9 +939,7 @@ export class OrganizedPlayService {
         .returning()
         .all();
 
-      for (const occ of occurrences) {
-        this.insertOccurrence(tx, series, occ, ts);
-      }
+      createdRows = occurrences.map((occ) => this.insertOccurrence(tx, series, occ, ts));
       return series;
     });
 
@@ -887,6 +953,7 @@ export class OrganizedPlayService {
       detail: `occurrences=${occurrences.length} tz=${input.timezone}`,
     });
     this.events.emit({ type: 'schedule.updated', campaignId, scheduleId: created.id });
+    await this.notifyOccurrenceChange(campaignId, user, createdRows, 'created');
     return this.withForcedConflicts(await this.getSeries(created.id), forced, batchConflicts, user);
   }
 
@@ -1012,6 +1079,7 @@ export class OrganizedPlayService {
 
     let forced: RawConflict[] = [];
     let forcedBatch: ScheduleConflict[] = [];
+    let notifyRows: ScheduleRow[] = [];
     this.db.transaction((tx) => {
       const future = tx
         .select()
@@ -1028,6 +1096,9 @@ export class OrganizedPlayService {
       // that is not happening. Same rule as the SEQUENCE decision below: cancelled
       // rows keep receiving metadata, and take no part in booking.
       const booking = affected.filter((occ) => occ.status !== 'cancelled');
+      // A cancelled night is not one the party can be told to turn up to, so it
+      // is not a notification subject either — the same line `booking` draws.
+      notifyRows = booking;
 
       // #588: a metadata PATCH that carries `roomId` or `assignedDmUserId` is a
       // BULK reassignment wearing a metadata edit's clothes — one request moves
@@ -1115,12 +1186,19 @@ export class OrganizedPlayService {
         // visible content did not change. Restore bumps SEQUENCE itself, which is
         // when the accumulated metadata legitimately reaches subscribers. Raw
         // status, not effective: it is the raw column the ICS emitter branches on.
+        //
+        // `roomId` is NOT here, and its absence is the same rule stated from the
+        // other side: the emitter renders LOCATION from the free-text `location`
+        // column, never from the room, so a room-only fan-out produces a
+        // byte-identical VEVENT and a fresh SEQUENCE would announce a revision
+        // that changed nothing a subscriber can see. reassignOccurrence declines
+        // the bump for exactly this reason; the two must not disagree about what
+        // "renders" means.
         const renders =
           occ.status !== 'cancelled'
           && ((input.title !== undefined && input.title !== occ.title)
             || (input.location !== undefined && input.location !== occ.location)
-            || (input.notes !== undefined && input.notes !== occ.notes)
-            || (input.roomId !== undefined && input.roomId !== occ.roomId));
+            || (input.notes !== undefined && input.notes !== occ.notes));
         tx.update(scheduledSessions)
           .set({
             ...(input.title !== undefined ? { title: input.title } : {}),
@@ -1148,6 +1226,17 @@ export class OrganizedPlayService {
       campaignId: existing.campaignId,
     });
     this.events.emit({ type: 'schedule.updated', campaignId: existing.campaignId, scheduleId: id });
+    // Only the facets a member's copy of the night actually carries. Title-only
+    // stays silent here for the same reason `shouldNotifyScheduleUpdate` keeps it
+    // silent on the one-off path, and room/DM/capacity are not party-visible
+    // fields at all — see notifyOccurrenceChange.
+    const changedFields = diffScheduleNotificationFields(
+      { scheduledAt: '', durationMinutes: 0, location: existing.location, notes: existing.notes },
+      { scheduledAt: '', durationMinutes: 0, location: input.location ?? existing.location, notes: input.notes ?? existing.notes },
+    );
+    if (shouldNotifyScheduleUpdate(changedFields)) {
+      await this.notifyOccurrenceChange(existing.campaignId, user, notifyRows, 'updated', changedFields);
+    }
     return this.withForcedConflicts(await this.getSeries(id), forced, forcedBatch, user);
   }
 
@@ -1159,57 +1248,79 @@ export class OrganizedPlayService {
   async extendSeries(id: number, addCount: number, user: RequestUser, role: Role, force = false): Promise<SessionSeriesWithOccurrences> {
     const existing = await this.getSeriesRowOrThrow(id);
     if (existing.status !== 'active') throw new BadRequestException('Cancelled series cannot be extended');
-    const nextCount = existing.count + addCount;
-    if (nextCount > MAX_SERIES_OCCURRENCES) {
-      throw new BadRequestException(`A series may hold at most ${MAX_SERIES_OCCURRENCES} occurrences`);
-    }
-    const all = this.expandOrThrow({
-      timezone: existing.timezone,
-      startDate: existing.startDate,
-      startTime: existing.startTime,
-      durationMinutes: existing.durationMinutes,
-      freq: existing.freq as RecurrenceFreq,
-      interval: existing.interval,
-      count: nextCount,
-      untilDate: existing.untilDate,
-    });
-    const existingIndexes = new Set(
-      (await this.db.select({ occurrenceIndex: scheduledSessions.occurrenceIndex }).from(scheduledSessions).where(eq(scheduledSessions.seriesId, id))).map(
-        (r) => r.occurrenceIndex,
-      ),
-    );
-    const fresh = all.filter((o) => !existingIndexes.has(o.index));
-    if (fresh.length === 0) throw new BadRequestException('Recurrence produced no new occurrences (untilDate reached?)');
-
-    // The same self-collision hazard createSeries and applyTemplate guard against,
-    // and for the identical reason: NOTHING in `fresh` is stored yet, so the
-    // per-row probe inside the transaction below cannot see the batch against
-    // itself. An extension whose duration exceeds its recurrence step (a daily
-    // 25-hour marathon), or one that straddles a spring-forward transition,
-    // would otherwise double-book its own room and its own DM and pass every
-    // database probe on the way through.
-    const batchConflicts = this.intraBatchConflicts(
-      fresh.map((occ) => ({
-        startsAt: occ.scheduledAt,
-        endsAt: endInstant(occ.scheduledAt, occ.durationMinutes),
-        roomId: existing.roomId,
-        dm: existing.assignedDmUserId,
-        campaignId: existing.campaignId,
-        title: existing.title,
-      })),
-    );
 
     const ts = nowIso();
     let forced: RawConflict[] = [];
+    let batchConflicts: ScheduleConflict[] = [];
+    let addedRows: ScheduleRow[] = [];
     this.db.transaction((tx) => {
+      // Count, occurrence indexes and expansion are ALL re-derived here, inside
+      // the transaction, and not from the row read above.
+      //
+      // better-sqlite3 is synchronous, so nothing can interleave once this
+      // callback is running — but every `await` before it is a yield. Two
+      // extensions of the same series (a double-submitted button) both awaited
+      // the same `count` and the same index set, both computed the same "fresh"
+      // indexes, and both inserted them: `idx_scheduled_sessions_series` is a
+      // plain index, not unique, and a resource-less series gives the booking
+      // probe nothing to collide on, so the duplicates were reported to neither
+      // caller. Two rows then shared an occurrence_index AND an ICS UID, which
+      // is a subscriber-visible corruption the feed cannot recover from.
+      // Re-reading inside the sync transaction is the same structural guarantee
+      // the conflict probe already rests on: read and claim in one atomic step.
+      const current = tx.select().from(sessionSeries).where(eq(sessionSeries.id, id)).limit(1).all()[0];
+      if (!current) throw new NotFoundException(`Series ${id} not found`);
+      const nextCount = current.count + addCount;
+      if (nextCount > MAX_SERIES_OCCURRENCES) {
+        throw new BadRequestException(`A series may hold at most ${MAX_SERIES_OCCURRENCES} occurrences`);
+      }
+      const all = this.expandOrThrow({
+        timezone: current.timezone,
+        startDate: current.startDate,
+        startTime: current.startTime,
+        durationMinutes: current.durationMinutes,
+        freq: current.freq as RecurrenceFreq,
+        interval: current.interval,
+        count: nextCount,
+        untilDate: current.untilDate,
+      });
+      const existingIndexes = new Set(
+        tx
+          .select({ occurrenceIndex: scheduledSessions.occurrenceIndex })
+          .from(scheduledSessions)
+          .where(eq(scheduledSessions.seriesId, id))
+          .all()
+          .map((r) => r.occurrenceIndex),
+      );
+      const fresh = all.filter((o) => !existingIndexes.has(o.index));
+      if (fresh.length === 0) throw new BadRequestException('Recurrence produced no new occurrences (untilDate reached?)');
+
+      // The same self-collision hazard createSeries and applyTemplate guard
+      // against, and for the identical reason: NOTHING in `fresh` is stored yet,
+      // so the per-row probe below cannot see the batch against itself. An
+      // extension whose duration exceeds its recurrence step (a daily 25-hour
+      // marathon), or one that straddles a spring-forward transition, would
+      // otherwise double-book its own room and its own DM and pass every
+      // database probe on the way through.
+      batchConflicts = this.intraBatchConflicts(
+        fresh.map((occ) => ({
+          startsAt: occ.scheduledAt,
+          endsAt: endInstant(occ.scheduledAt, occ.durationMinutes),
+          roomId: current.roomId,
+          dm: current.assignedDmUserId,
+          campaignId: current.campaignId,
+          title: current.title,
+        })),
+      );
+
       const conflicts: RawConflict[] = [];
       for (const occ of fresh) {
         conflicts.push(
           ...this.findConflictRows(tx, {
             startsAt: occ.scheduledAt,
             endsAt: endInstant(occ.scheduledAt, occ.durationMinutes),
-            roomId: existing.roomId,
-            assignedDmUserId: existing.assignedDmUserId,
+            roomId: current.roomId,
+            assignedDmUserId: current.assignedDmUserId,
             memberUserIds: [],
           }),
         );
@@ -1219,7 +1330,7 @@ export class OrganizedPlayService {
       }
       forced = conflicts;
       tx.update(sessionSeries).set({ count: nextCount, updatedAt: ts }).where(eq(sessionSeries.id, id)).run();
-      for (const occ of fresh) this.insertOccurrence(tx, { ...existing, count: nextCount }, occ, ts);
+      addedRows = fresh.map((occ) => this.insertOccurrence(tx, { ...current, count: nextCount }, occ, ts));
     });
 
     await this.audit.log({
@@ -1229,9 +1340,10 @@ export class OrganizedPlayService {
       entityType: 'session',
       entityId: id,
       campaignId: existing.campaignId,
-      detail: `added=${fresh.length}`,
+      detail: `added=${addedRows.length}`,
     });
     this.events.emit({ type: 'schedule.updated', campaignId: existing.campaignId, scheduleId: id });
+    await this.notifyOccurrenceChange(existing.campaignId, user, addedRows, 'created');
     return this.withForcedConflicts(await this.getSeries(id), forced, batchConflicts, user);
   }
 
@@ -1270,7 +1382,7 @@ export class OrganizedPlayService {
           .values({
             seriesId: id,
             occurrenceId: occ.id,
-            recurrenceLocalDate: recurrenceLocalDateFor(occ),
+            recurrenceLocalDate: recurrenceLocalDateFor(occ, existing.timezone),
             kind: 'cancel',
             fromScheduledAt: occ.scheduledAt,
             toScheduledAt: null,
@@ -1281,7 +1393,7 @@ export class OrganizedPlayService {
           })
           .run();
       }
-      return future.length;
+      return future;
     });
 
     await this.audit.log({
@@ -1291,9 +1403,10 @@ export class OrganizedPlayService {
       entityType: 'session',
       entityId: id,
       campaignId: existing.campaignId,
-      detail: `cancelled=${cancelled}`,
+      detail: `cancelled=${cancelled.length}`,
     });
     this.events.emit({ type: 'schedule.updated', campaignId: existing.campaignId, scheduleId: id });
+    await this.notifyOccurrenceChange(existing.campaignId, user, cancelled, 'cancelled');
     return this.getSeries(id);
   }
 
@@ -1382,9 +1495,12 @@ export class OrganizedPlayService {
             occurrenceId: id,
             // The ORIGINAL local date, not the one this row currently sits on:
             // otherwise a twice-moved occurrence files its two entries under two
-            // different recurrence ids and the ledger cannot line them up. See
-            // recurrenceLocalDateFor.
-            recurrenceLocalDate: recurrenceLocalDateFor(existing),
+            // different recurrence ids and the ledger cannot line them up. And
+            // the SERIES' zone, not this row's: `timezone` below is being
+            // rewritten from `input.timezone` on this very statement, so reading
+            // the row's own zone would let the id drift across the date line on
+            // the next entry. See recurrenceLocalDateFor.
+            recurrenceLocalDate: recurrenceLocalDateFor(existing, seriesTimezoneInTx(tx, existing.seriesId)),
             kind: 'reschedule',
             fromScheduledAt: existing.scheduledAt,
             toScheduledAt: scheduledAt,
@@ -1407,6 +1523,23 @@ export class OrganizedPlayService {
       detail: `${existing.scheduledAt} -> ${scheduledAt}`,
     });
     this.events.emit({ type: 'schedule.updated', campaignId: existing.campaignId, scheduleId: id });
+    // The same diff `SchedulingService.update` runs, so a move made here and the
+    // identical move made through PATCH /schedule/:id announce themselves the
+    // same way. Location and notes cannot change on this route, so in practice
+    // this yields 'rescheduled'.
+    const changedFields = diffScheduleNotificationFields(
+      { scheduledAt: existing.scheduledAt, durationMinutes: existing.durationMinutes, location: existing.location, notes: existing.notes },
+      { scheduledAt, durationMinutes, location: existing.location, notes: existing.notes },
+    );
+    if (shouldNotifyScheduleUpdate(changedFields)) {
+      await this.notifyOccurrenceChange(
+        existing.campaignId,
+        user,
+        [{ id, scheduledAt, durationMinutes, title: existing.title }],
+        scheduleNotificationChangeType(changedFields),
+        changedFields,
+      );
+    }
 
     const names = await this.lookupNames(
       rawConflicts.map((r) => r.campaignId),
@@ -1451,24 +1584,40 @@ export class OrganizedPlayService {
       });
       if (conflicts.length > 0 && !input.force) throw new SeriesConflictSignal(conflicts);
       rawConflicts = conflicts;
-      const renders = roomId !== existing.roomId;
+      // NOT a SEQUENCE bump, deliberately. Nothing this endpoint writes reaches
+      // the ICS feed: the emitter renders SUMMARY from `title`, LOCATION from the
+      // free-text `location` column and DESCRIPTION from `notes` (ics.util.ts),
+      // and never the room, the DM or the capacity. A re-seat therefore produces
+      // a byte-identical VEVENT, so advancing SEQUENCE would push every
+      // subscriber a "revision" of an event whose visible content did not change
+      // — the exact no-op-must-not-bump rule `calendarFieldChanged` states on the
+      // one-off path, and the rule the series fan-out follows too. If a room ever
+      // starts rendering into LOCATION, all three predicates change together.
+      const reseated = roomId !== existing.roomId || assignedDmUserId !== existing.assignedDmUserId || capacity !== existing.capacity;
       tx.update(scheduledSessions)
         .set({
           roomId,
           venueId,
           assignedDmUserId,
           capacity,
-          ...(renders ? { icsSequence: existing.icsSequence + 1 } : {}),
           updatedAt: ts,
         })
         .where(eq(scheduledSessions.id, id))
         .run();
-      if (existing.seriesId != null) {
+      // Only a REAL re-seat files an override. `updateSeries` reads every
+      // `reassign` entry as "the coordinator made a per-occurrence decision here,
+      // do not overwrite it", so an entry written for a request that changed
+      // nothing — an empty body, a reason-only call, a retry repeating the values
+      // already stored — froze that occurrence out of every later series edit
+      // PERMANENTLY (the ledger is append-only; there is no way to withdraw one).
+      // A night could be excluded from its own series' title, notes, room, DM and
+      // event keys forever because of a double-click.
+      if (existing.seriesId != null && reseated) {
         tx.insert(seriesExceptions)
           .values({
             seriesId: existing.seriesId,
             occurrenceId: id,
-            recurrenceLocalDate: recurrenceLocalDateFor(existing),
+            recurrenceLocalDate: recurrenceLocalDateFor(existing, seriesTimezoneInTx(tx, existing.seriesId)),
             kind: 'reassign',
             fromScheduledAt: existing.scheduledAt,
             toScheduledAt: existing.scheduledAt,

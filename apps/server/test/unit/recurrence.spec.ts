@@ -248,6 +248,32 @@ describe('recurrence expansion (#588)', () => {
     expect(out[1].scheduledAt).toBe('2026-03-08T07:30:00.000Z');
   });
 
+  it('stores a gap occurrence’s ACTUAL wall clock, so localStart round-trips against the instant', () => {
+    const out = expandRecurrence({
+      timezone: 'America/New_York',
+      startDate: '2026-03-01',
+      startTime: '02:30',
+      durationMinutes: 60,
+      freq: 'weekly',
+      interval: 1,
+      count: 3,
+    });
+    // `localStart` is the wall clock PERSISTED on the materialized row, and the
+    // 02:30 that was asked for does not exist on 2026-03-08 — the instant was
+    // shifted past the transition to 03:30. Storing the requested 02:30 anyway
+    // left the one row in this feature whose stored wall clock disagreed with its
+    // own instant (every other write path derives one from the other), and any UI
+    // reading `localStart` showed the table meeting an hour before it does.
+    for (const occ of out) {
+      expect(utcToLocalDateTime(occ.scheduledAt, 'America/New_York')).toBe(occ.localStart);
+    }
+    // …but the recurrence identity is the day the RULE names, and the rule still
+    // names this day. Only the clock moved.
+    expect(out[1].localDate).toBe('2026-03-08');
+    // The unaffected siblings keep the requested wall clock exactly.
+    expect(out.map((o) => o.localStart)).toEqual(['2026-03-01T02:30', '2026-03-08T03:30', '2026-03-15T02:30']);
+  });
+
   it('supports biweekly (interval 2) and daily frequencies', () => {
     expect(
       expandRecurrence({ ...weekly, interval: 2, count: 3 }).map((o) => o.localDate),

@@ -21,7 +21,7 @@ import type { ScheduledSession, ScheduledSessionWithRsvps, ScheduledSessionListP
 import { SCHEDULE_PAST_DEFAULT_LIMIT, SCHEDULE_PAST_MAX_LIMIT } from '@campfire/schema';
 import { applyPage } from '../../common/pagination';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { scheduledSessions, sessionRsvps, campaigns, sessions, notificationReminders, seriesExceptions } from '../../db/schema';
+import { scheduledSessions, sessionRsvps, campaigns, sessions, notificationReminders, seriesExceptions, sessionSeries } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { generateIcsFeedToken, looksLikeIcsFeedToken } from '../../common/crypto';
@@ -73,19 +73,46 @@ function icsTokenIsExpired(expiresAt: string | null): boolean {
  * preserved across every later reschedule. For an occurrence that has never
  * moved the two agree exactly, so entries written before this change still line
  * up with entries written after it.
+ *
+ * The ZONE has to be pinned for exactly the same reason the instant does, and
+ * `seriesTimezone` is what pins it. `rescheduleOccurrence` accepts and persists
+ * `input.timezone`, so the occurrence's own `timezone` column is as mutable as
+ * its wall clock: move a late-night Los Angeles occurrence and re-label it
+ * Pacific/Kiritimati (+21h) and the very next ledger entry re-reads the SAME
+ * anchor instant in the new zone and lands on the following local date — one
+ * logical occurrence, two recurrence ids again, just reached by a different
+ * route than the one `original_scheduled_at` closed. A series' zone, by
+ * contrast, is immutable: `updateSeries` never writes `timezone`, because the
+ * recurrence rule is immutable after creation. So the series is the anchor for
+ * both halves of the id. Falls back to the row's own zone for a one-off or a
+ * legacy row that belongs to no series, where nothing can drift anyway.
  */
-export function recurrenceLocalDateFor(row: {
-  originalScheduledAt: string | null;
-  scheduledAt: string;
-  timezone: string;
-  localStart: string;
-}): string {
+export function recurrenceLocalDateFor(
+  row: {
+    originalScheduledAt: string | null;
+    scheduledAt: string;
+    timezone: string;
+    localStart: string;
+  },
+  seriesTimezone?: string,
+): string {
   const anchor = row.originalScheduledAt ?? row.scheduledAt;
-  if (row.timezone) return utcToLocalDateTime(anchor, row.timezone).slice(0, 10);
+  const zone = seriesTimezone || row.timezone;
+  if (zone) return utcToLocalDateTime(anchor, zone).slice(0, 10);
   // No explicit zone (a legacy row adopted into a series): fall back to the
   // stored wall clock, then to the UTC date, so the column is never blank when
   // a date is derivable at all.
   return row.localStart.slice(0, 10) || anchor.slice(0, 10);
+}
+
+/**
+ * The immutable zone of the series an occurrence belongs to, read inside the
+ * caller's transaction. `''` when the series has vanished — {@link
+ * recurrenceLocalDateFor} then falls back to the row's own zone.
+ */
+export function seriesTimezoneInTx(tx: SyncDb, seriesId: number): string {
+  const [row] = tx.select({ timezone: sessionSeries.timezone }).from(sessionSeries).where(eq(sessionSeries.id, seriesId)).limit(1).all();
+  return row?.timezone ?? '';
 }
 
 /** ScheduledSessionCreate's duration bounds — a NEW live night is at least 15 minutes. */
@@ -794,7 +821,7 @@ export class SchedulingService {
           .values({
             seriesId: existing.seriesId,
             occurrenceId: id,
-            recurrenceLocalDate: recurrenceLocalDateFor(existing),
+            recurrenceLocalDate: recurrenceLocalDateFor(existing, seriesTimezoneInTx(tx, existing.seriesId)),
             kind: 'cancel',
             fromScheduledAt: existing.scheduledAt,
             toScheduledAt: null,
@@ -906,7 +933,7 @@ export class SchedulingService {
           .values({
             seriesId: existing.seriesId,
             occurrenceId: id,
-            recurrenceLocalDate: recurrenceLocalDateFor(existing),
+            recurrenceLocalDate: recurrenceLocalDateFor(existing, seriesTimezoneInTx(tx, existing.seriesId)),
             kind: 'restore',
             fromScheduledAt: existing.scheduledAt,
             toScheduledAt: existing.scheduledAt,
