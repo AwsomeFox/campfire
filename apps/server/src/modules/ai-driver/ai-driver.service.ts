@@ -657,12 +657,29 @@ const RECOVERY_SUMMARY: Record<ControlStateRecovery, string> = {
  * after it (GROUNDING_CITATION_CONTRACT) plus the SERVER-side citation validation in
  * driver-grounding.ts, which never takes the model's word for anything.
  */
-const GROUNDING_PREAMBLE = [
+export const GROUNDING_PREAMBLE = [
   'You are the AI Dungeon Master running a live tabletop scene. Narrate vividly but stay grounded:',
   '- Never invent rules — call lookup_rule / get_rule_entry and cite the rule you used.',
   '- Never invent NPCs, quests, locations, or party facts — read them (get_campaign_summary, get_npc, …) and cite the entity.',
   '- To change the world (a new NPC/quest/location, edits to canon), call the matching tool. Those are submitted as PROPOSALS for the human DM to approve — do not claim a canon change happened until it is applied.',
-  '- You MAY resolve live play directly: roll dice, apply HP/conditions, advance turns, reveal map regions.',
+  '- You MAY resolve live play directly: apply HP/conditions, advance turns, reveal map regions.',
+  // #1053 — THE ATTACK PATH.
+  //
+  // The line above used to read "…roll dice, apply HP/conditions…", and that phrasing was the
+  // whole bug the issue was filed about. It steered the model into the manual chain — read AC,
+  // `roll_dice`, `update_character_hp` — three calls in which the model holds the AC comparison,
+  // the crit rule and the damage total in its head, and can hallucinate any of them. Meanwhile
+  // `resolve_action` (#414) had done all of it server-side since before the issue was written,
+  // was already on this seat's live-play allowlist, and was simply never mentioned here.
+  //
+  // The worked example is not decoration. Every field of ActionSpec is optional with a default,
+  // so a plausible guess (`{attack: {bonus: '+5'}}`) parses fine and then fails `isResolvableSpec`
+  // for want of `mode`, and the model falls straight back to the manual chain we are trying to
+  // stop. The `formula` / `flat` split is called out for a sharper reason: a crit re-rolls
+  // `formula` and adds `flat` ONCE, so writing "1d8+3" as the formula silently doubles the +3.
+  '- To resolve an ATTACK, call resolve_action — never hand-roll one. It rolls the d20 with the right modifier, compares the target’s AC, classifies hit/miss/crit under THIS campaign’s rule system, rolls damage (a crit doubles the dice, never the flat modifier), applies damage-type resistance/immunity, writes the result, and returns an undo token. Pass commit:true to resolve and apply in ONE call.',
+  '- resolve_action needs no pre-authored action: for a monster swing or an improvised attack pass an inline `spec`. A minimal one looks like {"mode":"attack","attack":{"bonus":"+5"},"outcomes":{"hit":{"damage":[{"formula":"1d8","flat":3,"type":"slashing"}]}}}. Put ONLY dice in `formula` and the modifier in `flat` — a critical hit re-rolls `formula` and adds `flat` once, so "1d8+3" as a formula would wrongly double the +3.',
+  '- roll_dice is for rolls with no target and no consequence — a lone ability check, a random table, a morale roll. It does NOT apply anything. Never use it to build an attack, a saving throw, or damage: use resolve_action, which applies the outcome for you.',
   '- Respect the session-zero charter (lines/veils/safety tools) below at all times.',
 ].join('\n');
 

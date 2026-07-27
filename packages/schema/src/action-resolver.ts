@@ -165,9 +165,19 @@ export type TargetRule = z.infer<typeof TargetRule>;
 
 /** One typed damage component. */
 export const DamagePart = z.object({
-  // Dice expression ("2d6+3") the roller understands; empty = no dice (flat via `flat`).
+  /**
+   * DICE ONLY — "2d6", "1d8". Do NOT fold the modifier in as "2d6+3".
+   *
+   * #1053: this comment previously read `Dice expression ("2d6+3")`, which directly
+   * contradicted {@link rollBranchDamage}'s contract two hundred lines below: a critical hit
+   * re-rolls `formula` and adds `flat` ONCE. So an author (or an AI writing an inline spec,
+   * following this very example) who put the modifier in the formula got the modifier DOUBLED
+   * on every crit, silently and with no error — wrong crit damage produced by following the
+   * documentation. The split is load-bearing, not stylistic; it is what makes "a crit doubles
+   * the dice, not the total" expressible at all.
+   */
   formula: z.string().max(60).default(''),
-  // Flat damage when there's no formula (e.g. a fixed 1 point); added to a rolled formula.
+  /** The flat modifier, added ONCE even on a critical hit. Also usable alone for fixed damage. */
   flat: z.number().int().min(0).max(999).default(0),
   // Damage type ('fire', 'slashing', …); '' = untyped (never resisted).
   type: z.string().max(24).default(''),
