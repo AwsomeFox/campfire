@@ -9623,7 +9623,15 @@ export const CampaignCatalogBulkRequest = z
     toUserId: Id.optional(),
     /** set_quota: bytes, or null to clear the quota. */
     storageQuotaBytes: z.number().int().nonnegative().nullable().optional(),
-    /** set_policy: public invite links on/off. */
+    /**
+     * set_policy: close public invite links. `false` only.
+     *
+     * The catalog can shut invites off — the containment action an operator needs —
+     * but cannot turn them on. Enabling is gated on the campaign being active and
+     * untrashed (see `InvitesService.setPolicy`), and arming the flag from here would
+     * bypass that: the next `activate` preserves it and every retained link revives at
+     * once. `true` is rejected with a 400 rather than silently ignored.
+     */
     publicInvitesEnabled: z.boolean().optional(),
     /** set_policy: external-AI content policy. */
     aiExternalContentPolicy: AiExternalContentPolicy.optional(),

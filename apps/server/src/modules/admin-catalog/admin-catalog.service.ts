@@ -1,4 +1,4 @@
-import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lte, sql, type SQL } from 'drizzle-orm';
 import type {
   CampaignCatalogBulkItemResult,
@@ -92,6 +92,8 @@ const COMMITTED = 'committed';
  */
 @Injectable()
 export class AdminCatalogService {
+  private readonly logger = new Logger(AdminCatalogService.name);
+
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
@@ -259,9 +261,11 @@ export class AdminCatalogService {
    * would mean one bad campaign rolls back 199 good ones; no transaction at all would
    * mean a half-applied batch plus a 500 and no record of where it stopped. So each
    * campaign is applied in its own transaction and reported individually, and the batch
-   * as a whole always returns 200 with a per-item verdict. The operator learns exactly
-   * which items applied — that is what makes a partial outcome recoverable instead of
-   * mysterious.
+   * as a whole always succeeds with a per-item verdict. (The route is a POST with no
+   * `@HttpCode`, so that success status is Nest's default 201, which is what the e2e
+   * specs assert — the point is that it is never a 500 that hides what applied.) The
+   * operator learns exactly which items applied — that is what makes a partial outcome
+   * recoverable instead of mysterious.
    *
    * A dry run performs the same reads and the same eligibility checks as the real run
    * and reports `would_apply` / `skipped` per item, so "nothing surprising here" is
@@ -309,16 +313,32 @@ export class AdminCatalogService {
     // One server-scoped summary row for the batch itself. Dry runs are audited too:
     // enumerating which campaigns an operator is contemplating acting on is itself
     // worth a record, and it is cheap.
-    await this.audit.log({
-      actor,
-      actorRole,
-      action: req.dryRun ? 'campaign.catalog.bulk.dryrun' : 'campaign.catalog.bulk',
-      entityType: 'campaign',
-      detail:
-        `op=${req.operation}, requested=${result.requested}, applied=${result.applied}, ` +
-        `wouldApply=${result.wouldApply}, skipped=${result.skipped}, failed=${result.failed}` +
-        (req.reason ? `, reason=${req.reason.slice(0, 300)}` : ''),
-    });
+    //
+    // Guarded for the same reason as the per-item write above. By the time this runs,
+    // every campaign in the batch has already committed in its own transaction, and
+    // `results` is the operator's ONLY record of which ones did. Letting a failure here
+    // propagate would turn a fully-applied batch into a 500 with no body — the operator
+    // then cannot tell what landed, and re-running is unsafe precisely because some of
+    // it did. The summary is a convenience for the audit trail; the per-item verdicts
+    // are the thing that must survive.
+    try {
+      await this.audit.log({
+        actor,
+        actorRole,
+        action: req.dryRun ? 'campaign.catalog.bulk.dryrun' : 'campaign.catalog.bulk',
+        entityType: 'campaign',
+        detail:
+          `op=${req.operation}, requested=${result.requested}, applied=${result.applied}, ` +
+          `wouldApply=${result.wouldApply}, skipped=${result.skipped}, failed=${result.failed}` +
+          (req.reason ? `, reason=${req.reason.slice(0, 300)}` : ''),
+      });
+    } catch (err) {
+      this.logger.error(
+        `bulk ${req.operation} completed (applied=${result.applied}, skipped=${result.skipped}, ` +
+          `failed=${result.failed}) but its summary audit row failed to write`,
+        err instanceof Error ? err.stack : String(err),
+      );
+    }
 
     return result;
   }
@@ -337,6 +357,33 @@ export class AdminCatalogService {
         if (req.publicInvitesEnabled === undefined && req.aiExternalContentPolicy === undefined) {
           throw new BadRequestException(
             '`publicInvitesEnabled` and/or `aiExternalContentPolicy` is required for set_policy',
+          );
+        }
+        // THE CATALOG MAY CLOSE PUBLIC INVITES, NEVER OPEN THEM.
+        //
+        // `InvitesService.setPolicy` refuses to enable public invites unless the
+        // campaign is active and untrashed, precisely so that a restore or unarchive
+        // can never leave invite links live without a deliberate post-restore
+        // reactivation. Writing `publicInvitesEnabled` straight to the column here
+        // sidesteps that: arming the flag on a paused campaign is silent until someone
+        // runs `activate`, whose status change deliberately preserves the flag — and
+        // every retained link goes live in the same instant.
+        //
+        // Rather than copy that precondition into a second file (where it would drift
+        // from the original), the catalog simply cannot express the state the invites
+        // service would refuse. That is also the right product answer: opening a
+        // campaign to public joiners is a capability GRANT, and this feature's premise
+        // is that an operator gets lifecycle control over campaigns they cannot read,
+        // not the power to hand out access to them. Closing invites is the containment
+        // action an operator legitimately needs, and it stays available.
+        //
+        // Rejected here rather than skipped per item because the constraint does not
+        // depend on any campaign: the request is malformed for every id in the batch,
+        // so an API client should learn that from a 400, not by reading 200 skips.
+        if (req.publicInvitesEnabled === true) {
+          throw new BadRequestException(
+            'set_policy can disable public invites but cannot enable them; a DM re-enables invites ' +
+              'on an active campaign via PUT /campaigns/:id/invites/policy',
           );
         }
         break;
@@ -399,19 +446,35 @@ export class AdminCatalogService {
 
     plan.apply();
 
-    await this.audit.log({
-      actor: actor.actor,
-      actorRole: actor.actorRole,
-      action: `campaign.catalog.${req.operation}`,
-      entityType: 'campaign',
-      entityId: campaignId,
-      campaignId,
-      detail:
-        `${plan.summary.field}: ${plan.summary.before} -> ${plan.summary.after}` +
-        (req.reason ? ` (${req.reason.slice(0, 300)})` : ''),
-    });
+    // THE WRITE HAS COMMITTED. Everything below is record-keeping, and record-keeping
+    // must not be able to relabel a committed change as a failure. If this audit write
+    // throws, the campaign really has been archived/paused/requoted — reporting the
+    // item as `failed` would send the operator to retry an operation that already
+    // happened, which for a non-idempotent op is how a batch gets applied twice.
+    // So the outcome stays `applied` and the audit failure is carried in `reason`.
+    let auditNote = '';
+    try {
+      await this.audit.log({
+        actor: actor.actor,
+        actorRole: actor.actorRole,
+        action: `campaign.catalog.${req.operation}`,
+        entityType: 'campaign',
+        entityId: campaignId,
+        campaignId,
+        detail:
+          `${plan.summary.field}: ${plan.summary.before} -> ${plan.summary.after}` +
+          (req.reason ? ` (${req.reason.slice(0, 300)})` : ''),
+      });
+    } catch (err) {
+      // Surfaced, never swallowed: an unaudited admin action is itself an incident.
+      this.logger.error(
+        `campaign.catalog.${req.operation} applied to campaign ${campaignId} but its audit row failed to write`,
+        err instanceof Error ? err.stack : String(err),
+      );
+      auditNote = 'applied, but the audit row could not be written';
+    }
 
-    return { campaignId, outcome: 'applied', reason: '', ...plan.summary };
+    return { campaignId, outcome: 'applied', reason: auditNote, ...plan.summary };
   }
 
   /**

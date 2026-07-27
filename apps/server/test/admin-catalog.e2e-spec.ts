@@ -2,6 +2,7 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import request from 'supertest';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
+import { AuditService } from '../src/modules/audit/audit.service';
 
 /**
  * Issue #587 — catalog paging/filtering (criterion 2) and bulk lifecycle (criterion 3).
@@ -436,6 +437,84 @@ describe('Issue #587: campaign catalog paging, filtering and bulk lifecycle (e2e
       const entry = await admin.get(`/api/v1/admin/campaigns/${target}`);
       expect(entry.body.publicInvitesEnabled).toBe(false);
       expect(entry.body.aiExternalContentPolicy).toBe('disabled');
+    });
+
+    it('still reports what applied when the audit write fails after the change committed', async () => {
+      // Every campaign in a batch commits in its OWN transaction, and the per-item
+      // results are the operator's only record of which ones did. The audit writes all
+      // happen AFTER those commits, so letting one propagate would turn a batch that
+      // really did apply into a 500 with no body: the operator cannot tell what landed,
+      // and retrying is unsafe precisely because some of it already has.
+      const audit = ctx.app.get(AuditService);
+      const spy = jest.spyOn(audit, 'log').mockRejectedValue(new Error('audit table is unavailable'));
+      const target = aIds[2]; // left `paused` by the partial-batch test above
+      try {
+        const res = await bulk({
+          operation: 'activate',
+          campaignIds: [target],
+          dryRun: false,
+          reason: 'audit failure drill',
+        });
+        // Not a 500, and the per-item verdict survived.
+        expect(res.status).toBe(201);
+        expect(res.body.applied).toBe(1);
+        expect(res.body.failed).toBe(0);
+        expect(res.body.results[0]).toMatchObject({ campaignId: target, outcome: 'applied' });
+        // The operator is told the trail is incomplete rather than left to assume it.
+        expect(res.body.results[0].reason).toContain('audit');
+      } finally {
+        spy.mockRestore();
+      }
+
+      // And the change genuinely committed — `applied` was the truthful verdict.
+      const entry = await admin.get(`/api/v1/admin/campaigns/${target}`);
+      expect(entry.body.status).toBe('active');
+      await bulk({ operation: 'pause', campaignIds: [target], dryRun: false, reason: 'audit drill undo' });
+    });
+
+    it('refuses to ENABLE public invites, which would bypass the invite reactivation gate', async () => {
+      // `InvitesService.setPolicy` refuses to enable public invites unless the campaign
+      // is active and untrashed, so that restoring or unarchiving cannot silently
+      // revive retained links. Writing the column from the bulk path would sidestep
+      // that entirely: arm the flag on a paused campaign, then `activate` — whose
+      // status change deliberately preserves the flag — and every link goes live.
+      const target = aIds[1];
+      const paused = await bulk({ operation: 'pause', campaignIds: [target], dryRun: false, reason: 'arm test' });
+      expect(paused.status).toBe(201);
+
+      const armed = await bulk({
+        operation: 'set_policy',
+        campaignIds: [target],
+        publicInvitesEnabled: true,
+        dryRun: false,
+        reason: 'attempt to pre-arm invites',
+      });
+      expect(armed.status).toBe(400);
+
+      // A dry run must not be a way to sneak the same request past the check either.
+      const dry = await bulk({
+        operation: 'set_policy',
+        campaignIds: [target],
+        publicInvitesEnabled: true,
+        dryRun: true,
+        reason: 'attempt to pre-arm invites',
+      });
+      expect(dry.status).toBe(400);
+
+      // The flag really is still off, so a later activate cannot revive anything.
+      await bulk({ operation: 'activate', campaignIds: [target], dryRun: false, reason: 'arm test undo' });
+      const entry = await admin.get(`/api/v1/admin/campaigns/${target}`);
+      expect(entry.body.publicInvitesEnabled).toBe(false);
+
+      // Disabling — the containment action an operator actually needs — still works.
+      const closed = await bulk({
+        operation: 'set_policy',
+        campaignIds: [target],
+        publicInvitesEnabled: false,
+        dryRun: false,
+        reason: 'close invites',
+      });
+      expect(closed.status).toBe(201);
     });
 
     it('refuses to pin a campaign to a rule pack this server does not have', async () => {
