@@ -180,5 +180,13 @@ export function searchPredicate(
     clauses.push(sql`${campaigns.id} = ${asId}`);
   }
 
-  return sql.join(clauses, sql` OR `);
+  // PARENTHESISE THE WHOLE CHAIN. This predicate is handed to drizzle's `and(...)`
+  // alongside the trash and status filters. `and()` wraps the group it builds but does
+  // NOT parenthesise each operand, and `AND` binds tighter than `OR` — so returning a
+  // bare `a OR b OR c` here degrades the caller's WHERE into
+  //   (deleted_at IS NULL AND status = ? AND a) OR b OR c
+  // and every trailing branch escapes the filters entirely. A campaign in the trash
+  // would then surface in an operator's search, and in the `total` COUNT beside it.
+  // Covered by the "smuggle a trashed campaign past the trash filter" e2e regression.
+  return sql`(${sql.join(clauses, sql` OR `)})`;
 }

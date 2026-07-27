@@ -235,6 +235,41 @@ describe('Issue #587: campaign catalog paging, filtering and bulk lifecycle (e2e
       expect(trashed.items.map((i) => i.id)).toEqual([trashTarget]);
       expect(trashed.items[0].trashed).toBe(true);
     });
+
+    it('does not let a search term smuggle a trashed campaign past the trash filter', async () => {
+      // REGRESSION (operator precedence). The search predicate is an OR-chain and the
+      // trash/status filters are ANDed alongside it. `AND` binds tighter than `OR`, so
+      // an unparenthesised chain degrades the whole WHERE to
+      //   (deleted_at IS NULL AND status = ? AND <name match>) OR <rule_system match> OR <id match>
+      // and any row matching a trailing branch comes back regardless of the filters the
+      // operator actually set. A soft-deleted campaign surfacing in an admin search is a
+      // disclosure bug, not a cosmetic one, so it is pinned here.
+      const trashTarget = aIds[5]; // trashed by the preceding test
+      const db = new Database(path.join(ctx.dataDir, 'campfire.db'));
+      try {
+        db.prepare('UPDATE campaigns SET rule_system = ? WHERE id = ?').run('trash-probe-system', trashTarget);
+      } finally {
+        db.close();
+      }
+
+      // The rule-system branch of the OR-chain matches this row, and only this row.
+      const search = await catalog({ q: 'trash-probe-system', limit: 100 });
+      expect(search.items.map((i) => i.id)).not.toContain(trashTarget);
+      // `total` is a COUNT over the same predicate, so it leaks the row even when the
+      // page happens not to show it. Both have to hold.
+      expect(search.total).toBe(0);
+
+      // Same again with a status filter present: the shape that makes the precedence
+      // bug reachable with more than one ANDed clause.
+      const filtered = await catalog({ q: 'trash-probe-system', status: 'active', limit: 100 });
+      expect(filtered.items.map((i) => i.id)).not.toContain(trashTarget);
+      expect(filtered.total).toBe(0);
+
+      // …and the numeric-id branch must not become a trash bypass either.
+      const byId = await catalog({ q: String(trashTarget), limit: 100 });
+      expect(byId.items.map((i) => i.id)).not.toContain(trashTarget);
+      expect(byId.total).toBe(0);
+    });
   });
 
   // -------------------------------------------------------------------------

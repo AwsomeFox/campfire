@@ -170,5 +170,33 @@ describe('#587 catalog projection', () => {
       const { params } = compile(visible, '412');
       expect(params).toContain(412);
     });
+
+    it('is a self-contained group, so ANDed filters cannot be escaped by an OR branch', () => {
+      // The predicate is combined with the trash/status filters via drizzle's `and()`,
+      // which parenthesises the group it builds but not the individual operands. Since
+      // AND binds tighter than OR, an unwrapped chain lets every branch after the first
+      // escape those filters — a trashed campaign then shows up in an operator's search
+      // and in the `total` beside it. Asserting the emitted shape here means the e2e
+      // regression is not the only thing standing between this and a repeat.
+      const { sql: emitted } = compile(visible, 'dnd5e');
+      expect(emitted).toContain(' OR ');
+      expect(emitted.startsWith('(')).toBe(true);
+      expect(emitted.endsWith(')')).toBe(true);
+
+      // …and that must be one real enclosing group, not merely a leading `(` from the
+      // first branch plus a trailing `)` from the last. Walk the nesting depth: it may
+      // only return to zero at the very end of the string.
+      let depth = 0;
+      let closedEarly = false;
+      for (let i = 0; i < emitted.length; i += 1) {
+        if (emitted[i] === '(') depth += 1;
+        else if (emitted[i] === ')') {
+          depth -= 1;
+          if (depth === 0 && i < emitted.length - 1) closedEarly = true;
+        }
+      }
+      expect(closedEarly).toBe(false);
+      expect(depth).toBe(0);
+    });
   });
 });
