@@ -253,9 +253,6 @@ describe('backup streaming writer (#603)', () => {
     const estimate = jest
       .spyOn(svc as any, 'estimateFallbackBackupBytes')
       .mockReturnValue(stagingBytes);
-    const sameFilesystem = jest
-      .spyOn(svc as any, 'pathsShareFilesystem')
-      .mockReturnValue(true);
     const probeDisk = jest.spyOn(svc as any, 'probeDisk');
     const shareFs = jest.spyOn(svc as any, 'pathsShareFilesystem').mockReturnValue(sameDevice);
     const statfs = jest.spyOn(fs, 'statfsSync').mockReturnValue({
@@ -273,7 +270,6 @@ describe('backup streaming writer (#603)', () => {
       statfs.mockRestore();
       shareFs.mockRestore();
       probeDisk.mockRestore();
-      sameFilesystem.mockRestore();
       estimate.mockRestore();
     };
     return { svc, backupDir, stagingBytes, archiveBytes, probeDisk, createStream, restore };
@@ -308,6 +304,22 @@ describe('backup streaming writer (#603)', () => {
     });
   });
 
+  it('reports the combined staging and archive estimate when status shares the filesystem', async () => {
+    await withScheduledEnv(async () => {
+      const t = runScheduledWithDisk(true);
+      try {
+        const status = await t.svc.getStatus();
+        expect(status.disk).toMatchObject({
+          estimatedNextBytes: t.archiveBytes + t.stagingBytes,
+          lowSpace: true,
+        });
+        expect(t.probeDisk).toHaveBeenCalledWith(t.backupDir, 1024, t.archiveBytes + t.stagingBytes);
+      } finally {
+        t.restore();
+      }
+    });
+  });
+
   it('reserves only the archive estimate when staging is on a different filesystem', async () => {
     await withScheduledEnv(async () => {
       const t = runScheduledWithDisk(false);
@@ -317,6 +329,40 @@ describe('backup streaming writer (#603)', () => {
         expect(t.probeDisk).toHaveBeenCalledWith(t.backupDir, 1024, t.archiveBytes);
         expect(t.probeDisk).not.toHaveBeenCalledWith(t.backupDir, 1024, t.archiveBytes + t.stagingBytes);
       } finally {
+        t.restore();
+      }
+    });
+  });
+
+  it('reports only the archive estimate when status uses a different filesystem for staging', async () => {
+    await withScheduledEnv(async () => {
+      const t = runScheduledWithDisk(false);
+      try {
+        const status = await t.svc.getStatus();
+        expect(status.disk).toMatchObject({
+          estimatedNextBytes: t.archiveBytes,
+          lowSpace: false,
+        });
+        expect(t.probeDisk).toHaveBeenCalledWith(t.backupDir, 1024, t.archiveBytes);
+      } finally {
+        t.restore();
+      }
+    });
+  });
+
+  it('uses the same disk-requirement calculation for status and scheduled execution', async () => {
+    await withScheduledEnv(async () => {
+      const t = runScheduledWithDisk(true);
+      const estimate = jest.spyOn(t.svc as any, 'scheduledBackupDiskEstimate');
+      try {
+        await t.svc.getStatus();
+        await (t.svc as any).runScheduledBackup(60 * 60 * 1000);
+        expect(estimate).toHaveBeenCalledTimes(2);
+        expect(estimate).toHaveBeenNthCalledWith(1, t.backupDir, null);
+        expect(estimate).toHaveBeenNthCalledWith(2, t.backupDir, null);
+        expect(t.probeDisk).toHaveBeenCalledWith(t.backupDir, 1024, t.archiveBytes + t.stagingBytes);
+      } finally {
+        estimate.mockRestore();
         t.restore();
       }
     });

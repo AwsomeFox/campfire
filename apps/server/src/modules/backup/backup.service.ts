@@ -131,6 +131,7 @@ export interface BackupDiskStatus {
   freeBytes: number;
   totalBytes: number;
   reserveBytes: number;
+  /** Archive estimate, or the staging-plus-archive peak when both paths share a filesystem. */
   estimatedNextBytes: number;
   lowSpace: boolean;
 }
@@ -565,22 +566,11 @@ export class BackupService implements OnApplicationBootstrap {
       const retentionPolicy = parseBackupRetentionPolicy();
       const minFreeBytes = parseBackupMinFreeBytes();
       const dir = this.backupDir();
-      const stagingBytes = this.estimateFallbackBackupBytes();
-      estimatedBytes = estimateNextBackupBytes(
-        previous?.lastSize ?? null,
-        stagingBytes,
-      );
-      // buildBackup stages a full copy of the DB snapshot and the uploads tree under
-      // os.tmpdir() while the growing .partial ZIP is written into BACKUP_DIR. When the
-      // two share a filesystem both allocations are live at once, so checking each path
-      // separately would pass twice on space that can only satisfy one of them — the run
-      // then fails with ENOSPC partway through, having eaten the free-space reserve the
-      // live database depends on. Reserve their combined peak in that case.
-      const scheduledPeakBytes =
-        this.pathsShareFilesystem(dir, os.tmpdir()) ? estimatedBytes + stagingBytes : estimatedBytes;
-      disk = this.probeDisk(dir, minFreeBytes, scheduledPeakBytes);
+      const diskEstimate = this.scheduledBackupDiskEstimate(dir, previous?.lastSize ?? null);
+      estimatedBytes = diskEstimate.archiveBytes;
+      disk = this.probeDisk(dir, minFreeBytes, diskEstimate.requiredBytes);
       fs.mkdirSync(dir, { recursive: true });
-      disk = this.probeDisk(dir, minFreeBytes, scheduledPeakBytes);
+      disk = this.probeDisk(dir, minFreeBytes, diskEstimate.requiredBytes);
       if (disk && disk.lowSpace) {
         const message =
           `Scheduled backup skipped: low disk space in BACKUP_DIR ` +
@@ -687,6 +677,27 @@ export class BackupService implements OnApplicationBootstrap {
   private estimateFallbackBackupBytes(): number {
     const dataDir = resolveDataDir();
     return safeFileBytes(dbFilePath(dataDir)) + directoryBytes(uploadsRoot(dataDir));
+  }
+
+  /**
+   * Space required on BACKUP_DIR's filesystem for a scheduled backup. buildBackup
+   * stages a full DB/uploads copy under os.tmpdir() while the .partial ZIP grows in
+   * BACKUP_DIR. If those paths share a filesystem, both allocations are live at
+   * once; otherwise BACKUP_DIR needs only the archive estimate. Keep status and
+   * execution on this one calculation so operator warnings match the actual guard.
+   */
+  private scheduledBackupDiskEstimate(
+    backupDir: string,
+    previousArchiveBytes: number | null,
+  ): { archiveBytes: number; requiredBytes: number } {
+    const stagingBytes = this.estimateFallbackBackupBytes();
+    const archiveBytes = estimateNextBackupBytes(previousArchiveBytes, stagingBytes);
+    return {
+      archiveBytes,
+      requiredBytes: this.pathsShareFilesystem(backupDir, os.tmpdir())
+        ? archiveBytes + stagingBytes
+        : archiveBytes,
+    };
   }
 
   private probeDisk(
@@ -946,7 +957,7 @@ export class BackupService implements OnApplicationBootstrap {
     if (input.disk?.lowSpace) {
       alerts.push(
         `Backup volume is below reserve: free ${input.disk.freeBytes}B, ` +
-          `estimated next archive ${input.disk.estimatedNextBytes}B, reserve ${input.disk.reserveBytes}B`,
+          `estimated required space ${input.disk.estimatedNextBytes}B, reserve ${input.disk.reserveBytes}B`,
       );
     }
     if (input.retention.lastPruneError) {
@@ -977,11 +988,8 @@ export class BackupService implements OnApplicationBootstrap {
     const onDisk: BackupOnDiskEntry[] = onDiskWithPaths.map(({ name, bytes, mtime }) => ({ name, bytes, mtime }));
     const policy = parseBackupRetentionPolicy();
     const reserveBytes = parseBackupMinFreeBytes();
-    const estimatedNextBytes = estimateNextBackupBytes(
-      cadence?.lastSize ?? null,
-      () => this.estimateFallbackBackupBytes(),
-    );
-    const disk = this.probeDisk(dir, reserveBytes, estimatedNextBytes);
+    const diskEstimate = this.scheduledBackupDiskEstimate(dir, cadence?.lastSize ?? null);
+    const disk = this.probeDisk(dir, reserveBytes, diskEstimate.requiredBytes);
     const metrics = this.normalizeMetrics(cadence?.metrics);
     const totalBytes = onDisk.reduce((sum, entry) => sum + entry.bytes, 0);
     const retention: BackupRetentionStatus = {
