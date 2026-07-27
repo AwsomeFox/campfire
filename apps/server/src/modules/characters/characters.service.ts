@@ -33,6 +33,7 @@ import { auditLog, campaigns, characters, checkRequests, combatants, encounters 
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { fromJsonText, toJsonText } from '../../common/json';
+import { conditionWriteSetFromNames } from '../../common/conditions';
 import { redactSecret, redactSecrets } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
@@ -562,7 +563,13 @@ export class CharactersService {
       await this.db
         .update(combatants)
         .set({
-          conditions: conditionsJson,
+          // Reconcile the structured copy too, or a sheet-side REMOVAL leaves its instance
+          // behind and the next tracker write derives the condition straight back (#423 ×
+          // #486). See common/conditions.ts.
+          ...conditionWriteSetFromNames(
+            fromJsonText<string[]>(conditionsJson, []),
+            combatant.conditionInstances,
+          ),
           ...(sheetSyncedUpdatedAt != null ? { sheetSyncedUpdatedAt } : {}),
         })
         .where(eq(combatants.id, combatant.id));
