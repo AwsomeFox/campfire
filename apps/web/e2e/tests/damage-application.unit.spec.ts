@@ -43,5 +43,6 @@ test.describe('direct damage apply controls (issue #605)', () => {
     expect(source).toContain('supportsDirectDamageRules === true');
     expect(source).toContain("mode === 'damage' && supportsDamageRules");
     expect(source).toContain('disabled={diceTotal === undefined}');
+    expect(source).toContain('key={pendingApply.id}');
   });
 });

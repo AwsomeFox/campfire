@@ -417,6 +417,13 @@ describe('encounters (e2e)', () => {
       const normalizedEvents = await request(server).get(`/api/v1/encounters/${encounterId}/events`).set(dm);
       expect(normalizedEvents.body.some((event: { detail: string }) => /4 fire.*resistant/.test(event.detail))).toBe(true);
 
+      // A negative flat modifier can make the dice subtotal larger than the net roll.
+      // That is still valid critical math: 2 × 4 dice - 1 flat = 7.
+      res = await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${targetId}`).set(dm)
+        .send({ hpDelta: -3, damageType: 'slashing', isCrit: true, damageDice: 4 });
+      expect(res.status).toBe(200);
+      expect(res.body.hpCurrent).toBe(62);
+
       const unknownType = await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${targetId}`).set(dm)
         .send({ hpDelta: -4, damageType: 'laser' });
       expect(unknownType.status).toBe(400);

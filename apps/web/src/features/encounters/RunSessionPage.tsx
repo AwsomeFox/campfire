@@ -959,12 +959,14 @@ export default function RunSessionPage() {
   // A damage/heal amount just rolled from a character card, awaiting a one-tap target
   // pick (issue: wire actions → dice → damage). Cleared on apply or dismiss.
   const [pendingApply, setPendingApply] = useState<{
+    id: number;
     amount: number;
     label: string;
     diceTotal?: number;
     /** Combatant whose card rolled the damage — attributed as the combat-log actor when set. */
     actorCombatantId?: number;
   } | null>(null);
+  const pendingApplySequence = useRef(0);
   /** Live map layout from BattleMap for AoE hit-testing (issue #626). */
   const [aoeHitLayout, setAoeHitLayout] = useState<AoeHitLayout | null>(null);
   // Issue #414: structured action Use flow — pick targets, preview, apply, undo.
@@ -1263,7 +1265,7 @@ export default function RunSessionPage() {
   // non-positive total (a 0/negative damage expr) has nothing to apply, so clear any
   // prior pending amount rather than leaving a stale bar from an earlier roll.
   const onApplyDamageRolled = useCallback((amount: number, label: string, diceTotal: number | undefined, actorCombatantId?: number) => {
-    setPendingApply(amount > 0 ? { amount, label, diceTotal, actorCombatantId } : null);
+    setPendingApply(amount > 0 ? { id: ++pendingApplySequence.current, amount, label, diceTotal, actorCombatantId } : null);
   }, []);
 
   useRollApplyDamageBridge(encounter?.status === 'running' ? onApplyDamageRolled : undefined);
@@ -2381,6 +2383,7 @@ export default function RunSessionPage() {
 
       {pendingApply && (
         <ApplyDamageBar
+          key={pendingApply.id}
           amount={pendingApply.amount}
           label={pendingApply.label}
           diceTotal={pendingApply.diceTotal}

@@ -378,7 +378,7 @@ function normalizedCreatureActions(v: unknown): Array<Record<string, unknown>> {
     .sort((a, b) => (numberOrNull(a.order_in_statblock) ?? Number.MAX_SAFE_INTEGER) - (numberOrNull(b.order_in_statblock) ?? Number.MAX_SAFE_INTEGER));
 }
 
-function mapCreature(row: Record<string, unknown>): ImportedEntry {
+export function mapCreature(row: Record<string, unknown>): ImportedEntry {
   const type = nestedName(row.type);
   const size = nestedName(row.size);
   const cr = row.challenge_rating;
@@ -414,6 +414,11 @@ function mapCreature(row: Record<string, unknown>): ImportedEntry {
       armorClass: row.armor_class ?? null,
       hitPoints: row.hit_points ?? null,
       speed: row.speed ?? null,
+      // Keep the upstream values intact. Encounter damage applies only simple,
+      // unconditional canonical entries until attack-source qualifiers are modeled.
+      damage_resistances: row.damage_resistances ?? null,
+      damage_vulnerabilities: row.damage_vulnerabilities ?? null,
+      damage_immunities: row.damage_immunities ?? null,
       abilityScores: row.ability_scores ?? null,
       specialAbilities,
       actions: regularActions,

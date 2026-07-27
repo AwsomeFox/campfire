@@ -3119,9 +3119,6 @@ export class EncountersService {
     if (patch.isCrit && patch.damageDice === undefined) {
       throw new BadRequestException('Critical damage requires the dice-only damage subtotal');
     }
-    if (patch.damageDice !== undefined && patch.hpDelta !== undefined && patch.damageDice > -patch.hpDelta) {
-      throw new BadRequestException('damageDice cannot exceed the rolled damage total');
-    }
     if (!isDm && patch.addConditions !== undefined && patch.addConditions.length > 0) {
       const unknown = patch.addConditions.filter((c) => !isKnownCondition(adapter.conditions, c));
       if (unknown.length > 0) {
@@ -3363,7 +3360,9 @@ export class EncountersService {
             const { final, applied } = applyDamageModifiers(
               criticalTotal,
               damageType ?? '',
-              this.targetDamageDefenses(fresh),
+              // Untyped damage cannot use a defence, so avoid an unnecessary statblock
+              // lookup for the tracker’s frequent raw HP adjustments.
+              damageType ? this.targetDamageDefenses(fresh) : { resistances: [], vulnerabilities: [], immunities: [] },
               { half: patch.saveOutcome === 'half' },
             );
             if (damageMetadataTouched) {
