@@ -191,6 +191,22 @@ describe('campaign purge cascade (real SQLite, no orphan rows)', () => {
     run('INSERT INTO ai_dm_seats (campaign_id, created_at, updated_at) VALUES (?, ?, ?)', campaignId, now, now);
     // #559: durable driver control state is campaign-scoped and must be swept by the manual cascade too.
     run('INSERT INTO ai_driver_control_state (campaign_id, updated_at) VALUES (?, ?)', campaignId, now);
+    // #585: a campaign module install, its per-artifact install baseline, and a pre-apply
+    // snapshot. All three are keyed directly off campaign_id and are swept by the hand
+    // cascade in purge(); on a fresh (FK-enforcing) DB the declared ON DELETE CASCADE would
+    // mask an incomplete list, so this legacy no-FK path is the only thing pinning them.
+    const moduleInstallId = run(
+      'INSERT INTO campaign_module_installs (campaign_id, module_id, name, version, installed_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+      campaignId, '3f7c1e10-585a-4c2b-9d81-0a2b6c4d5e6f', 'The Sunken Keep', '1.2.0', now, now,
+    );
+    run(
+      'INSERT INTO campaign_module_artifacts (install_id, campaign_id, kind, artifact_key, baseline_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      moduleInstallId, campaignId, 'quest', 'the-drowned-bell', 'baseline-hash-585', now, now,
+    );
+    run(
+      'INSERT INTO campaign_module_snapshots (install_id, campaign_id, created_at) VALUES (?, ?, ?)',
+      moduleInstallId, campaignId, now,
+    );
     run('INSERT INTO encounter_events (encounter_id, type, created_at) VALUES (?, ?, ?)', encounterId, 'damage', now);
     run('INSERT INTO api_tokens (user_id, name, scope, campaign_id, token_hash, token_prefix, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', 1, 'tok', 'dm', campaignId, 'tok-hash-235', 'tokpfx', now, now);
 
@@ -217,6 +233,7 @@ describe('campaign purge cascade (real SQLite, no orphan rows)', () => {
         'notes', 'comments', 'entity_revisions', 'campaign_guest_dm_grants', 'campaign_members', 'campaign_invites', 'api_tokens',
         'proposals', 'attachments', 'encounters', 'dice_rolls', 'notifications', 'inventory_items',
         'party_treasury', 'ai_dm_seats', 'ai_driver_control_state', 'session_series',
+        'campaign_module_installs', 'campaign_module_artifacts', 'campaign_module_snapshots',
       ];
       for (const table of campaignScoped) {
         expect({ table, rows: countRows(after, table, `campaign_id = ${campaignId}`) }).toEqual({ table, rows: 0 });

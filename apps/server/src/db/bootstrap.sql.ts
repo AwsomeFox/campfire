@@ -1,4 +1,91 @@
 /**
+ * Campaign module tables (issue #585) — package identity, install/fork lineage, the
+ * per-artifact BASELINE that makes update previews a real three-way compare, and the
+ * pre-apply snapshots rollback restores from.
+ *
+ * Exported and interpolated into BOOTSTRAP_SQL below AND re-executed verbatim by
+ * `migrateCampaignModules585` in db.module.ts, so the fresh-DB and upgraded-DB shapes
+ * are the same text and cannot drift. All three statements are IF NOT EXISTS, so
+ * running them in either order (migrations execute before BOOTSTRAP_SQL) is a no-op
+ * the second time.
+ *
+ * Why the columns exist:
+ *  - `module_id` is the stable package UUID; UNIQUE(campaign_id, module_id) is what an
+ *    update is matched on. Nothing here is derived from the campaign or module NAME, so
+ *    renaming either cannot sever lineage.
+ *  - `manifest_json` stores the manifest exactly as installed — the identity baseline.
+ *  - `baseline_json` / `baseline_hash` store the artifact content exactly as installed.
+ *    Without them, "the table edited this" and "the publisher edited this" are
+ *    indistinguishable and three-way merge is impossible.
+ *  - `overlay_json` is the local divergence retained across an update, so BASE can
+ *    advance to upstream without losing (or silently re-conflicting on) the table's edits.
+ */
+export const CAMPAIGN_MODULES_DDL = `
+CREATE TABLE IF NOT EXISTS campaign_module_installs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  module_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  version TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  license TEXT NOT NULL DEFAULT '',
+  source_url TEXT NOT NULL DEFAULT '',
+  authors_json TEXT NOT NULL DEFAULT '[]',
+  compatibility_json TEXT NOT NULL DEFAULT '{}',
+  dependencies_json TEXT NOT NULL DEFAULT '[]',
+  manifest_json TEXT NOT NULL DEFAULT '{}',
+  origin_kind TEXT NOT NULL DEFAULT 'install',
+  origin_source_url TEXT NOT NULL DEFAULT '',
+  upstream_module_id TEXT,
+  upstream_version TEXT,
+  forked_at TEXT,
+  detached INTEGER NOT NULL DEFAULT 0,
+  detached_at TEXT,
+  installed_at TEXT NOT NULL,
+  installed_by TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL,
+  UNIQUE(campaign_id, module_id)
+);
+CREATE INDEX IF NOT EXISTS idx_campaign_module_installs_campaign ON campaign_module_installs(campaign_id);
+CREATE INDEX IF NOT EXISTS idx_campaign_module_installs_module ON campaign_module_installs(module_id);
+CREATE INDEX IF NOT EXISTS idx_campaign_module_installs_upstream ON campaign_module_installs(upstream_module_id);
+
+CREATE TABLE IF NOT EXISTS campaign_module_artifacts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  install_id INTEGER NOT NULL REFERENCES campaign_module_installs(id) ON DELETE CASCADE,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  artifact_key TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  entity_id INTEGER,
+  baseline_hash TEXT NOT NULL,
+  baseline_json TEXT NOT NULL DEFAULT '{}',
+  overlay_json TEXT,
+  installed_version TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(install_id, kind, artifact_key)
+);
+CREATE INDEX IF NOT EXISTS idx_campaign_module_artifacts_install ON campaign_module_artifacts(install_id);
+CREATE INDEX IF NOT EXISTS idx_campaign_module_artifacts_entity ON campaign_module_artifacts(campaign_id, kind, entity_id);
+
+CREATE TABLE IF NOT EXISTS campaign_module_snapshots (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  install_id INTEGER NOT NULL REFERENCES campaign_module_installs(id) ON DELETE CASCADE,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  reason TEXT NOT NULL DEFAULT 'update',
+  from_version TEXT NOT NULL DEFAULT '',
+  to_version TEXT NOT NULL DEFAULT '',
+  artifact_count INTEGER NOT NULL DEFAULT 0,
+  state_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  created_by TEXT NOT NULL DEFAULT '',
+  rolled_back_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_campaign_module_snapshots_install ON campaign_module_snapshots(install_id, id);
+`;
+
+/**
  * Bootstrap DDL, executed on boot via better-sqlite3 `.exec()`.
  * Simple CREATE TABLE IF NOT EXISTS statements.
  *
@@ -1619,7 +1706,7 @@ CREATE INDEX IF NOT EXISTS idx_encounter_op_idempotency_encounter ON encounter_o
 -- #577: the grounding review card reads a campaign's most recent claims, newest first.
 CREATE INDEX IF NOT EXISTS idx_ai_driver_grounding_campaign
   ON ai_driver_grounding_claims(campaign_id, id);
-`;
+${CAMPAIGN_MODULES_DDL}`;
 
 /**
  * FTS5 virtual table + sync triggers for rule_entries, created separately
