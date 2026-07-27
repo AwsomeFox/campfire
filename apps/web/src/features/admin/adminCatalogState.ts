@@ -100,6 +100,45 @@ export function availableOperations(selected: CampaignCatalogEntry[]): CampaignC
 }
 
 /**
+ * A last-request-wins gate for overlapping async loads.
+ *
+ * WHY THIS IS NOT COSMETIC ON THIS SCREEN. `load()` fires on every filter, sort and page
+ * change, and nothing sequenced the responses — whichever resolved LAST called `setPage`.
+ * A slow response for a superseded query therefore repainted the table with campaigns
+ * that do not match the controls the operator is looking at.
+ *
+ * On most screens that is a flicker. Here the rows are selectable, and the selection
+ * feeds bulk operations that reassign ownership and change privacy policy across many
+ * campaigns at once. Acting on rows that do not match the visible filters is precisely
+ * the failure this console exists to prevent. It also compounds the retained-selection
+ * model: `selected` deliberately survives pagination, so a stale row that reached the
+ * table could be ticked and then carried through further navigation inside the payload.
+ *
+ * A DEBOUNCE WOULD BE THE WRONG FIX. It narrows the window; it does not close it — any
+ * request still in flight when a newer one starts can still land last. This gate closes
+ * it: each `start()` invalidates every earlier attempt, and a superseded attempt is
+ * refused permission to commit no matter when it resolves.
+ *
+ * Kept here rather than inline in the page so tests drive the real gate. A copy of this
+ * logic living in a spec would pass regardless of what the page does — a trap this PR
+ * has already fallen into once.
+ */
+export type LatestOnlyGate = {
+  /** Begin an attempt. The returned predicate is true only while it is still the newest. */
+  start: () => () => boolean;
+};
+
+export function createLatestOnlyGate(): LatestOnlyGate {
+  let newest = 0;
+  return {
+    start() {
+      const mine = ++newest;
+      return () => mine === newest;
+    },
+  };
+}
+
+/**
  * The selected campaigns, in a stable order, from the page's selection map.
  *
  * SELECTION IS HELD BY VALUE AND SURVIVES PAGINATION. It used to be a `Set<number>` with

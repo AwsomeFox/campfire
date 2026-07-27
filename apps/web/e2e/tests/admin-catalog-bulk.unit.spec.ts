@@ -6,6 +6,7 @@ import {
   buildBulkPayload,
   bulkArgsError,
   bulkPayloadFingerprint,
+  createLatestOnlyGate,
   reconcileOperation,
   selectedEntriesFrom,
   type BulkArgs,
@@ -335,5 +336,87 @@ test.describe('the operation chooser cannot display one verb and dispatch anothe
     const available = availableOperations([entry(1, 'completed')]);
     expect(available).not.toContain('archive');
     expect(reconcileOperation('archive', available)).toBe(available[0]);
+  });
+});
+
+test.describe('a superseded catalog load cannot repaint the table', () => {
+  // `load()` fires on every filter, sort and page change and nothing sequenced the
+  // responses, so whichever resolved LAST called setPage. A slow response for a
+  // superseded query therefore painted rows that do not match the visible controls —
+  // and on this screen those rows are selectable into a bulk operation that reassigns
+  // ownership and rewrites privacy policy.
+  //
+  // `gate` IS the function the page calls, imported rather than re-implemented.
+
+  test('a slow earlier load loses to a fast later one', async () => {
+    const gate = createLatestOnlyGate();
+    const committed: string[] = [];
+
+    // Request A starts first but resolves last (the slow, superseded query).
+    const slowEarlier = gate.start();
+    // Request B starts second and resolves first (what the operator is looking at).
+    const fastLater = gate.start();
+
+    await new Promise((r) => setTimeout(r, 1));
+    if (fastLater()) committed.push('later');
+    await new Promise((r) => setTimeout(r, 5));
+    if (slowEarlier()) committed.push('earlier');
+
+    // Only the newest query may paint, no matter which response arrives last.
+    expect(committed).toEqual(['later']);
+  });
+
+  test('the newest attempt always wins regardless of resolution order', () => {
+    const gate = createLatestOnlyGate();
+    const a = gate.start();
+    const b = gate.start();
+    const c = gate.start();
+    expect(a()).toBe(false);
+    expect(b()).toBe(false);
+    expect(c()).toBe(true);
+  });
+
+  test('a lone load is allowed to commit', () => {
+    const gate = createLatestOnlyGate();
+    const only = gate.start();
+    expect(only()).toBe(true);
+  });
+
+  test('gates are independent, so one page does not invalidate another', () => {
+    const a = createLatestOnlyGate();
+    const b = createLatestOnlyGate();
+    const first = a.start();
+    b.start();
+    expect(first()).toBe(true);
+  });
+
+  test('a stale row never reaches the retained selection', () => {
+    // The interaction with the cross-page selection model: `selected` deliberately
+    // survives pagination, so a stale row that got painted could be ticked and then
+    // carried through further navigation INSIDE the bulk payload. The gate is what stops
+    // the stale rows existing to be ticked in the first place.
+    const gate = createLatestOnlyGate();
+    const selected = new Map<number, CampaignCatalogEntry>();
+    const commit = (isNewest: () => boolean, rows: CampaignCatalogEntry[]) => {
+      if (!isNewest()) return [] as CampaignCatalogEntry[];
+      return rows;
+    };
+
+    const staleAttempt = gate.start();          // filter "active"
+    const currentAttempt = gate.start();        // operator switched to "completed"
+
+    const currentRows = commit(currentAttempt, [entry(1, 'completed')]);
+    const staleRows = commit(staleAttempt, [entry(99, 'active')]);
+
+    for (const e of [...currentRows, ...staleRows]) selected.set(e.id, e);
+
+    // The stale campaign is not paintable, therefore not tickable, therefore absent from
+    // the payload — including after further paging, since the Map only holds what was
+    // actually selected.
+    expect(staleRows).toEqual([]);
+    expect(selectedEntriesFrom(selected).map((c) => c.id)).toEqual([1]);
+    expect(
+      buildBulkPayload('archive', selectedEntriesFrom(selected).map((c) => c.id), true, 'r', args()).campaignIds,
+    ).toEqual([1]);
   });
 });

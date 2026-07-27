@@ -12,7 +12,7 @@ import { useTranslation } from 'react-i18next';
  * unpaginated tile grid on HomePage is one of the findings this issue was raised
  * about, and reproducing it here at fleet scale would miss the point.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   CampaignCatalogBulkOperation,
   CampaignCatalogBulkResult,
@@ -36,6 +36,7 @@ import {
   buildCatalogQuery,
   bulkArgsError,
   bulkPayloadFingerprint,
+  createLatestOnlyGate,
   currentPage,
   isNoOpResult,
   outcomeVariant,
@@ -191,7 +192,14 @@ function AdminCatalog() {
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
 
+  // Only the newest in-flight load may commit — see `createLatestOnlyGate`. Without this,
+  // a slow response for a superseded filter/sort/page repaints the table with rows that
+  // do not match the visible controls, and those rows are selectable into a bulk
+  // operation that reassigns ownership and rewrites privacy policy.
+  const loadGate = useRef(createLatestOnlyGate());
+
   const load = useCallback(async () => {
+    const isNewest = loadGate.current.start();
     setLoading(true);
     setError(null);
     try {
@@ -200,12 +208,19 @@ function AdminCatalog() {
         api.get<CampaignCatalogPage>(`${API}/admin/campaigns?${query}`),
         api.get<CampaignCatalogPrivacyPolicy>(`${API}/admin/campaigns/privacy`),
       ]);
+      // A newer load started while this was in flight: ITS result is the one the
+      // operator's controls describe, so this one is discarded rather than painted.
+      if (!isNewest()) return;
       setPage(rows);
       setPolicy(pol);
     } catch (err) {
+      // A superseded load's failure is equally irrelevant — surfacing it would replace a
+      // good newer page with an error about a query nobody is looking at any more.
+      if (!isNewest()) return;
       setError(translateApiError(err, t, { fallbackKey: 'admin.errors.loadCampaigns' }));
     } finally {
-      setLoading(false);
+      // Leave the spinner up if a newer load is still running; that one owns the flag.
+      if (isNewest()) setLoading(false);
     }
   }, [filters, offset, sort, order, t]);
 
