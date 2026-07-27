@@ -21,10 +21,79 @@
       "full": "Role"
     }
   },
+  "basic-fantasy": {
+    "rating": {
+      "full": "Hit Dice",
+      "short": "HD"
+    },
+    "defense": {
+      "full": "Armor Class",
+      "short": "AC"
+    },
+    "hitPoints": {
+      "full": "Hit Points",
+      "short": "HP"
+    },
+    "abilities": {
+      "full": "Abilities"
+    },
+    "actions": {
+      "full": "Actions"
+    },
+    "creatureType": {
+      "full": "Type"
+    }
+  },
   "dnd5e": {
     "rating": {
       "full": "Challenge",
       "short": "CR"
+    },
+    "defense": {
+      "full": "Armor Class",
+      "short": "AC"
+    },
+    "hitPoints": {
+      "full": "Hit Points",
+      "short": "HP"
+    },
+    "abilities": {
+      "full": "Abilities"
+    },
+    "actions": {
+      "full": "Actions"
+    },
+    "creatureType": {
+      "full": "Type"
+    }
+  },
+  "labyrinth-lord": {
+    "rating": {
+      "full": "Hit Dice",
+      "short": "HD"
+    },
+    "defense": {
+      "full": "Armor Class",
+      "short": "AC"
+    },
+    "hitPoints": {
+      "full": "Hit Points",
+      "short": "HP"
+    },
+    "abilities": {
+      "full": "Abilities"
+    },
+    "actions": {
+      "full": "Actions"
+    },
+    "creatureType": {
+      "full": "Type"
+    }
+  },
+  "old-school-essentials": {
+    "rating": {
+      "full": "Hit Dice",
+      "short": "HD"
     },
     "defense": {
       "full": "Armor Class",
@@ -65,7 +134,53 @@
       "full": "Descriptor"
     }
   },
+  "ose": {
+    "rating": {
+      "full": "Hit Dice",
+      "short": "HD"
+    },
+    "defense": {
+      "full": "Armor Class",
+      "short": "AC"
+    },
+    "hitPoints": {
+      "full": "Hit Points",
+      "short": "HP"
+    },
+    "abilities": {
+      "full": "Abilities"
+    },
+    "actions": {
+      "full": "Actions"
+    },
+    "creatureType": {
+      "full": "Type"
+    }
+  },
   "osr": {
+    "rating": {
+      "full": "Hit Dice",
+      "short": "HD"
+    },
+    "defense": {
+      "full": "Armor Class",
+      "short": "AC"
+    },
+    "hitPoints": {
+      "full": "Hit Points",
+      "short": "HP"
+    },
+    "abilities": {
+      "full": "Abilities"
+    },
+    "actions": {
+      "full": "Actions"
+    },
+    "creatureType": {
+      "full": "Type"
+    }
+  },
+  "osric": {
     "rating": {
       "full": "Hit Dice",
       "short": "HD"
@@ -184,6 +299,29 @@
     },
     "defense": {
       "full": "Defense"
+    },
+    "hitPoints": {
+      "full": "Hit Points",
+      "short": "HP"
+    },
+    "abilities": {
+      "full": "Abilities"
+    },
+    "actions": {
+      "full": "Actions"
+    },
+    "creatureType": {
+      "full": "Type"
+    }
+  },
+  "swords-wizardry": {
+    "rating": {
+      "full": "Hit Dice",
+      "short": "HD"
+    },
+    "defense": {
+      "full": "Armor Class",
+      "short": "AC"
     },
     "hitPoints": {
       "full": "Hit Points",

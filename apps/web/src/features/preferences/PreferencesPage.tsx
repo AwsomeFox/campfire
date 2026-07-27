@@ -455,8 +455,8 @@ export default function PreferencesPage() {
                 type="button"
                 className="flex flex-col gap-2 p-3 rounded-lg text-left transition-all"
                 style={{
-                  background: 'var(--color-bg-elevated)',
-                  border: isSelected ? '2px solid var(--color-accent)' : '1px solid var(--color-border)',
+                  background: 'var(--color-surface)',
+                  border: isSelected ? '2px solid var(--color-accent)' : '1px solid var(--color-divider)',
                   boxShadow: isSelected ? '0 0 12px rgba(99, 102, 241, 0.25)' : 'none',
                   cursor: 'pointer',
                 }}

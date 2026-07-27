@@ -14,6 +14,7 @@ import { FsDeletionService } from '../../src/modules/attachments/fs-deletion.ser
 import { CampaignLibraryService } from '../../src/modules/campaign-library/campaign-library.service';
 import { EncountersService } from '../../src/modules/encounters/encounters.service';
 import { CharactersService } from '../../src/modules/characters/characters.service';
+import type { ConditionInstance } from '@campfire/schema';
 import { fromJsonText } from '../../src/common/json';
 import type { RequestUser } from '../../src/common/user.types';
 import { makeTempDataDir } from './fixtures';
@@ -117,6 +118,12 @@ describe('encounter condition sync (issue #486, service layer)', () => {
     return fromJsonText<string[]>(row.conditions, []);
   }
 
+  /** Structured instance names on a combatant, which must never disagree with `conditions`. */
+  function readInstanceNames(orm: ReturnType<typeof build>['orm'], combatantId: number): string[] {
+    const [row] = orm.select().from(combatants).where(eq(combatants.id, combatantId)).limit(1).all();
+    return fromJsonText<Array<{ name: string }>>(row.conditionInstances, []).map((i) => i.name).sort();
+  }
+
   it('create() seeds combatant conditions from the sheet', async () => {
     dataDir = makeTempDataDir();
     const { orm, encountersService } = build();
@@ -202,5 +209,142 @@ describe('encounter condition sync (issue #486, service layer)', () => {
     expect(sheet).toEqual(expect.arrayContaining(['poisoned']));
     expect(sheet).not.toContain('frightened');
     expect(tracker).toEqual(sheet);
+  });
+
+  /**
+   * The combatant carries the SAME conditions twice: the legacy `conditions` string array
+   * and the structured `conditionInstances` blob added by #423. Writers that set only the
+   * former leave the latter stale, and `parseConditionInstances` UNIONS rather than
+   * reconciles — it adds legacy names missing from instances, but never drops instances
+   * missing from the legacy array. A removal therefore survives in the structured copy and
+   * is re-derived back into visibility by the next write that touches conditions.
+   */
+  describe('conditions and conditionInstances must not diverge', () => {
+    /** Sheet has 'poisoned'; a tracker edit materialises it as a structured instance. */
+    async function materialisedThenClearedOnSheet() {
+      const ctx = seedRunningFight({ sheetConditions: ['poisoned'] });
+      await ctx.encountersService.updateCombatant(
+        ctx.encounterId,
+        ctx.combatantId,
+        { addConditions: ['prone'] },
+        dmUser,
+        'dm',
+      );
+      expect(readInstanceNames(ctx.orm, ctx.combatantId)).toEqual(['poisoned', 'prone']);
+
+      // The sheet clears 'poisoned'. syncActiveCombatantConditions writes `conditions` only.
+      await ctx.charactersService.patchConditions(ctx.characterId, { remove: ['poisoned'] }, dmUser, 'dm');
+      // The removal LOOKS applied at this point — both surfaces agree.
+      expect(readConditions(ctx.orm, 'combatant', ctx.combatantId)).not.toContain('poisoned');
+      expect(readConditions(ctx.orm, 'character', ctx.characterId)).not.toContain('poisoned');
+      return ctx;
+    }
+
+    // The symptom a DM actually sees: a condition they removed comes back by itself.
+    it('does not resurrect a sheet-removed condition on the next tracker write', async () => {
+      const ctx = await materialisedThenClearedOnSheet();
+
+      // An unrelated condition edit re-derives `conditions` from the stale instances.
+      await ctx.encountersService.updateCombatant(
+        ctx.encounterId,
+        ctx.combatantId,
+        { addConditions: ['blinded'] },
+        dmUser,
+        'dm',
+      );
+
+      expect(readConditions(ctx.orm, 'combatant', ctx.combatantId)).not.toContain('poisoned');
+      expect(readConditions(ctx.orm, 'character', ctx.characterId)).not.toContain('poisoned');
+    });
+
+    // The cause: the structured copy still holds what the legacy array dropped.
+    it('reconciles conditionInstances when a sheet-side removal lands', async () => {
+      const ctx = await materialisedThenClearedOnSheet();
+      expect(readInstanceNames(ctx.orm, ctx.combatantId)).toEqual(['prone']);
+    });
+  });
+
+  /**
+   * Issue #1047 — the sheet<->combat boundary.
+   *
+   * The sheet stores the same ConditionInstance shape as a combatant, but rounds do not
+   * elapse outside an encounter, so the round/turn-scoped fields are nulled on the way to
+   * the sheet and adopted as "indefinite" on the way back in. This is where the next
+   * desync would live, so it is asserted in both directions.
+   */
+  describe('sheet <-> combat condition boundary (#1047)', () => {
+    function readSheetInstances(orm: ReturnType<typeof build>['orm'], characterId: number) {
+      const [row] = orm.select().from(characters).where(eq(characters.id, characterId)).limit(1).all();
+      return fromJsonText<ConditionInstance[]>(row.conditionInstances, []);
+    }
+
+    it('strips round-scoped fields when a condition travels to the sheet on /end', async () => {
+      const ctx = seedRunningFight();
+      // A condition with a live round counter and a repeat save, as combat produces.
+      await ctx.encountersService.updateCombatant(
+        ctx.encounterId,
+        ctx.combatantId,
+        {
+          addConditionInstance: {
+            id: 'inst_poison', name: 'poisoned', ruleEntryId: null, source: 'Giant Spider',
+            sourceCombatantId: 4242, durationRounds: 3, roundsRemaining: 2, timing: 'end-of-turn',
+            saveTiming: 'end-of-turn', saveDc: 13, saveAbility: 'con', isConcentration: false,
+            stacks: 1, notes: 'bite', custom: false,
+          },
+        },
+        dmUser,
+        'dm',
+      );
+
+      await ctx.encountersService.end(ctx.encounterId, dmUser, 'dm');
+
+      const [sheet] = readSheetInstances(ctx.orm, ctx.characterId).filter((i) => i.name === 'poisoned');
+      expect(sheet).toBeDefined();
+      // Kept: the duration-independent facts.
+      expect(sheet.source).toBe('Giant Spider');
+      expect(sheet.notes).toBe('bite');
+      expect(sheet.stacks).toBe(1);
+      // Stripped: everything that only means something inside a round loop.
+      expect(sheet.durationRounds).toBeNull();
+      expect(sheet.roundsRemaining).toBeNull();
+      expect(sheet.timing).toBe('none');
+      expect(sheet.saveTiming).toBe('none');
+      expect(sheet.saveDc).toBeNull();
+      expect(sheet.saveAbility).toBeNull();
+      expect(sheet.sourceCombatantId).toBeNull();
+      // The condition itself survives — a mid-countdown effect is not silently dropped.
+      expect(readConditions(ctx.orm, 'character', ctx.characterId)).toContain('poisoned');
+    });
+
+    it('carries sheet metadata into a new encounter as an indefinite condition', async () => {
+      const ctx = seedRunningFight();
+      await ctx.charactersService.patchConditions(ctx.characterId, { add: ['cursed'] }, dmUser, 'dm');
+      // Give the sheet instance metadata a bare string cannot express.
+      const sheetInstances = readSheetInstances(ctx.orm, ctx.characterId).map((i) =>
+        i.name === 'cursed' ? { ...i, source: 'Hag bargain', stacks: 3, notes: 'family debt' } : i,
+      );
+      ctx.orm
+        .update(characters)
+        .set({ conditionInstances: JSON.stringify(sheetInstances) })
+        .where(eq(characters.id, ctx.characterId))
+        .run();
+
+      const next = await ctx.encountersService.create(ctx.campaignId, { name: 'Round two' }, dmUser, 'dm');
+      const pc = next.combatants.find((c) => c.characterId === ctx.characterId);
+      expect(pc).toBeDefined();
+      const [carried] = fromJsonText<ConditionInstance[]>(
+        ctx.orm.select().from(combatants).where(eq(combatants.id, pc!.id)).limit(1).all()[0].conditionInstances,
+        [],
+      ).filter((i) => i.name === 'cursed');
+
+      expect(carried).toBeDefined();
+      expect(carried.source).toBe('Hag bargain');
+      expect(carried.notes).toBe('family debt');
+      // stacks survives the boundary — this is what lets exhaustion be an instance, not a column (#1073).
+      expect(carried.stacks).toBe(3);
+      // Adopted as indefinite: you did not walk in with a round timer already running.
+      expect(carried.roundsRemaining).toBeNull();
+      expect(carried.timing).toBe('none');
+    });
   });
 });

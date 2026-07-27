@@ -128,6 +128,9 @@ export const MCP_TOOL_NAMES = [
   'award_xp',
   'level_up_character',
   'set_character_conditions',
+  // #1041 — atomic party rest (plan the whole party, then one transaction).
+  'long_rest',
+  'short_rest',
   'add_note',
   'whisper_to_player',
   'update_note',
