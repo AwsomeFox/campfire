@@ -3,9 +3,11 @@
     {
       "pr": 1606,
       "url": "https://github.com/AwsomeFox/campfire/pull/1606",
-      "status": "babysitting",
+      "status": "merged",
       "headBranch": "fix/issue-667",
-      "updatedAt": "2026-07-27T17:17:00Z"
+      "mergeCommit": "4b77ab1009e820383126365f6dce0581b17ba7e7",
+      "mergedAt": "2026-07-27T17:56:19Z",
+      "updatedAt": "2026-07-27T17:56:30Z"
     }
   ]
 }
