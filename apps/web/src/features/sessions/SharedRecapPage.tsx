@@ -11,7 +11,7 @@ import { Link, useParams } from 'react-router-dom';
 import type { SharedRecap } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { formatDate as formatLocaleDate, useFormattingLocale } from '../../lib/format';
-import { Card, Skeleton, ErrorNote } from '../../components/ui';
+import { Btn, Card, Skeleton, ErrorNote } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
 import { GameIcon } from '../../components/GameIcon';
 import { PageTitle } from '../../components/PageTitle';
@@ -73,6 +73,16 @@ export default function SharedRecapPage() {
         </span>
         {recap && <span className="text-muted text-sm">{recap.campaignName}</span>}
         <span className="tag ml-auto">Read-only recap</span>
+        {recap && (
+          <Btn
+            ghost
+            type="button"
+            className="cf-print-hide !min-h-0 !py-1.5 text-xs"
+            onClick={() => window.print()}
+          >
+            Print
+          </Btn>
+        )}
       </header>
 
       {loading && (

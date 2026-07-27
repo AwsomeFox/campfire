@@ -919,7 +919,7 @@ function SessionDetail({
   return (
     <div className="reading-surface space-y-3" style={{ maxWidth: 720 }} {...entityTargetProps('session', session.id)}>
       <div>
-        <button onClick={onBack} className="text-xs text-secondary hover:text-[var(--color-neutral-300)] lg:hidden mb-1 block">
+        <button onClick={onBack} className="cf-print-hide text-xs text-secondary hover:text-[var(--color-neutral-300)] lg:hidden mb-1 block">
           ← Back to sessions
         </button>
       </div>
@@ -934,6 +934,14 @@ function SessionDetail({
           {session.title || 'Untitled session'}
         </h2>
         <span className="text-muted text-xs">{formatDate(session.playedAt)}</span>
+        <Btn
+          ghost
+          type="button"
+          className="cf-print-hide !min-h-0 !py-1.5 text-xs ml-auto"
+          onClick={() => window.print()}
+        >
+          Print
+        </Btn>
       </div>
 
       {editing ? (
@@ -1103,7 +1111,7 @@ function SessionDetail({
       {!editing && <AttendancePanel sessionId={session.id} campaignId={session.campaignId} />}
 
       {canDmWrite && !editing && (
-        <div className="flex gap-2">
+        <div className="cf-print-hide flex gap-2">
           <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setEditing(true)}>
             Edit recap
           </Btn>
@@ -1113,24 +1121,30 @@ function SessionDetail({
         </div>
       )}
 
-      {!editing && <SharePanel sessionId={session.id} campaignId={campaignId} />}
+      {!editing && (
+        <div className="cf-print-hide">
+          <SharePanel sessionId={session.id} campaignId={campaignId} />
+        </div>
+      )}
 
       {/* Recap revision history + restore (issue #157) — DM-only, so a clobbered or
           regretted edit can be recovered. Refetches whenever a save/restore happens. */}
       {canDmWrite && !editing && (
-        <RevisionHistoryPanel
-          entityType="session"
-          entityId={session.id}
-          currentSnapshot={{ recap }}
-          expectedUpdatedAt={loadedUpdatedAt}
-          label="Recap history"
-          reloadNonce={historyNonce}
-          onRestored={() => {
-            setHistoryNonce((n) => n + 1);
-            void reloadLatest();
-            onChange();
-          }}
-        />
+        <div className="cf-print-hide">
+          <RevisionHistoryPanel
+            entityType="session"
+            entityId={session.id}
+            currentSnapshot={{ recap }}
+            expectedUpdatedAt={loadedUpdatedAt}
+            label="Recap history"
+            reloadNonce={historyNonce}
+            onRestored={() => {
+              setHistoryNonce((n) => n + 1);
+              void reloadLatest();
+              onChange();
+            }}
+          />
+        </div>
       )}
 
       {confirmingDelete && (
