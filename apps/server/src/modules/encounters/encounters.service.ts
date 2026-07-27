@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, ForbiddenException, Inject, Inj
 import { and, eq, gt, inArray, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
-import { ActiveEffect, AoeTemplate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, STARFINDER_ADAPTER_ID, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, defaultCombatantStatblock, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
+import { ActiveEffect, AoeTemplate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, STARFINDER_ADAPTER_ID, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, defaultCombatantStatblock, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
 import { z as zod } from 'zod';
 import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, CombatantUpdateResult, ConcentrationCheck, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -3294,39 +3294,37 @@ export class EncountersService {
 
         if (recomputeHp) {
           const effectiveHpMax = hpMaxChanged ? Math.max(1, patch.hpMax!) : fresh.hpMax;
-        const state: CombatantHpState = {
+          const state: CombatantHpState = {
             kind: fresh.kind as CombatantHpState['kind'],
             hpCurrent: fresh.hpCurrent,
             hpMax: effectiveHpMax,
             hpTemp: fresh.hpTemp,
             deathState: fresh.deathState as CombatantHpState['deathState'],
             deathSaveSuccesses: fresh.deathSaveSuccesses,
-          deathSaveFailures: fresh.deathSaveFailures,
-          // A caster can be concentrating solely through an effect on another
-          // combatant. Inspect the encounter-wide canonical source relationship,
-          // not just this row's display state.
-          isConcentrating:
-            fromJsonText<{ concentration?: string | null }>(fresh.turnState, {}).concentration != null ||
-            tx
-              .select()
-              .from(combatants)
-              .where(eq(combatants.encounterId, encounterId))
-              .all()
-              .some((candidate) =>
-                parseConditionInstances(candidate.conditionInstances, fromJsonText<string[]>(candidate.conditions, [])).some(
-                  (condition) => condition.isConcentration && condition.sourceCombatantId === combatantId,
-                ),
-              ),
-        };
-        const result = applyCombatantHp(state, {
+            deathSaveFailures: fresh.deathSaveFailures,
+            isConcentrating:
+              adapter.id === DND5E_ADAPTER_ID &&
+              (fromJsonText<{ concentration?: string | null }>(fresh.turnState, {}).concentration != null ||
+                tx
+                  .select()
+                  .from(combatants)
+                  .where(eq(combatants.encounterId, encounterId))
+                  .all()
+                  .some((candidate) =>
+                    parseConditionInstances(candidate.conditionInstances, fromJsonText<string[]>(candidate.conditions, [])).some(
+                      (condition) => condition.isConcentration && condition.sourceCombatantId === combatantId,
+                    ),
+                  )),
+          };
+          const result = applyCombatantHp(state, {
             hpDelta: patch.hpDelta,
             hpSet: patch.hpSet,
             hpTemp: patch.hpTemp,
             deathSaveSuccesses: patch.deathSaveSuccesses,
             deathSaveFailures: patch.deathSaveFailures,
-          deathSaveRoll: patch.deathSaveRoll,
-        });
-        concentrationCheck = adapter.id === 'dnd5e' && patch.hpDelta !== undefined && patch.hpDelta < 0 ? result.concentrationCheck : null;
+            deathSaveRoll: patch.deathSaveRoll,
+          });
+          concentrationCheck = adapter.id === DND5E_ADAPTER_ID && patch.hpDelta !== undefined && patch.hpDelta < 0 ? result.concentrationCheck : null;
 
           // If Starfinder adapter or SP present, damage flows through temp HP -> SP -> HP
           if (adapter.id === STARFINDER_ADAPTER_ID && patch.hpDelta !== undefined && patch.hpDelta < 0) {

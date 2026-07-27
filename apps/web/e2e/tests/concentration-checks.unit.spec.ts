@@ -10,13 +10,14 @@ test.describe('concentration checks (issue #606)', () => {
     expect(source).toContain('pendingConcentrationChecks');
     expect(source).toContain('api.patch<CombatantUpdateResult>');
     expect(source).toContain('response.data.concentrationCheck');
-    expect(source).toContain('setPendingConcentrationChecks((pending) => [...pending');
+    expect(source).toContain('appendConcentrationCheck');
   });
 
   test('retains a failed-check prompt until its concentration-clear mutation succeeds', () => {
     const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
     expect(source).toMatch(/combatantTurnState\s*\.mutateAsync/);
-    expect(source).toContain('.then(() => setPendingConcentrationChecks((pending) => pending.slice(1)))');
+    expect(source).toContain('dequeueConcentrationCheck');
+    expect(source).toContain('.catch(() => undefined)');
     expect(source).toContain('disabled={combatantTurnState.isPending}');
   });
 });
