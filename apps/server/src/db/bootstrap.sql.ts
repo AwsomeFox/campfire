@@ -134,6 +134,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
   public_recap_sharing_enabled INTEGER NOT NULL DEFAULT 1,
   public_invites_enabled INTEGER NOT NULL DEFAULT 1,
   narration_language TEXT NOT NULL DEFAULT 'en',
+  ai_external_content_policy TEXT NOT NULL DEFAULT 'member_consent',
   session_count INTEGER NOT NULL DEFAULT 0,
   rule_system TEXT NOT NULL DEFAULT '',
   map_attachment_id INTEGER REFERENCES attachments(id) ON DELETE SET NULL,
@@ -691,6 +692,7 @@ CREATE TABLE IF NOT EXISTS campaign_members (
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   role TEXT NOT NULL,
   character_id INTEGER REFERENCES characters(id) ON DELETE SET NULL,
+  ai_external_use_consent INTEGER NOT NULL DEFAULT 0,
   is_primary_owner INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
@@ -898,6 +900,7 @@ CREATE TABLE IF NOT EXISTS proposals (
   proposer TEXT NOT NULL,
   proposer_user_id TEXT NOT NULL DEFAULT '',
   proposer_token TEXT,
+  generation_provenance TEXT,
   status TEXT NOT NULL DEFAULT 'pending',
   resolved_by TEXT NOT NULL DEFAULT '',
   note TEXT NOT NULL DEFAULT '',
@@ -1328,6 +1331,7 @@ CREATE TABLE IF NOT EXISTS ai_scribe_jobs (
   detail TEXT NOT NULL DEFAULT '',
   scheduled_session_id INTEGER,
   source_stats TEXT,
+  generation_provenance TEXT,
   created_by TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL
 );

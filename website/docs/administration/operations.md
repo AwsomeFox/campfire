@@ -149,6 +149,51 @@ There's no separate migration command to run.
     successful migration is not supported — the pre-upgrade snapshot is your rollback
     path.
 
+### Behaviour change: AI scribe member consent
+
+Installs running the **AI scribe against an external AI provider** will see a change after
+upgrading to the release that adds member consent controls.
+
+Every campaign gains an AI content policy defaulting to `member_consent`, and every
+existing membership gains a per-member consent flag defaulting to **off** — the
+fail-closed default, since nobody can retroactively consent on a player's behalf.
+
+**What you will observe**
+
+- With an **external AI provider configured**, scribe recaps stop including
+  member-authored inbox notes until each author opts in. A run whose material was
+  entirely withheld records `no_material` and reports *"N notes withheld pending author
+  consent"* rather than failing silently — visible in the scribe panel and in the run's
+  job history.
+- With **no provider configured** — the default self-hosted install, using the shipped
+  no-op provider — **nothing changes** for scribe recaps. Consent gates external use only,
+  and that path sends nothing off the server.
+- **Connected MCP agents are always treated as external.** The `draft_session_recap` tool
+  hands raw note bodies to whatever agent called it, and Campfire cannot see what that
+  agent is, so it applies the consent gate unconditionally. A DM using a local MCP client
+  will get an empty inbox in that tool's source material until members opt in; the tool's
+  `consent` block reports what was withheld and why.
+- Members no longer see each other's consent state on the roster. The DM still sees
+  everyone's (needed to explain a withheld recap), and each member still sees their own.
+- **The first scribe run after upgrading re-drafts rather than skipping.** The assembled
+  source material changed shape, so its idempotency hash differs from the one recorded
+  before the upgrade and a run over otherwise-unchanged material will not report
+  *"identical source already drafted"*. This is one-time; subsequent runs skip as usual.
+
+**What members and DMs need to do**
+
+1. Each member opens **Members** in their campaign and ticks *"Allow external AI use of my
+   authored source notes"*. This is self-service by design: a DM cannot set it for
+   someone else.
+2. A DM who wants no member notes sent at all can set the campaign policy to `disabled`
+   in campaign settings.
+3. If your configured provider is a model running on your own box and you want generations
+   through it treated as local rather than external, set `AI_PROVIDER_ENDPOINT_IS_LOCAL=1`
+   (defaults to off).
+
+See [Member consent for external AI use](../ai/capabilities.md#member-consent-for-external-ai-use)
+for the full model.
+
 ## Health
 
 Campfire exposes two unauthenticated health endpoints:

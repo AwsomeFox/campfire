@@ -1281,6 +1281,16 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     await client.callTool({ name: 'begin_encounter', arguments: { encounterId: enc.id } });
     await client.callTool({ name: 'end_encounter', arguments: { encounterId: enc.id } });
 
+    // Issue #501: draft_session_recap hands member-authored note bodies straight to the
+    // connected MCP client, which is definitionally an external model — so it applies the
+    // same server-side consent filter as the scribe run engine. The note's author must have
+    // opted in before their material is eligible. (The fail-closed default is asserted in
+    // scribe.e2e-spec.ts, and the exclusion is asserted in the next test.)
+    const consent = await dmAgent
+      .patch(`/api/v1/campaigns/${campaignId}/members/me/ai-consent`)
+      .send({ aiExternalUseConsent: true });
+    expect(consent.status).toBe(200);
+
     const result = await client.callTool({ name: 'draft_session_recap', arguments: { campaignId } });
     expect(result.isError).toBeFalsy();
     const draft = parseResult(result) as {
@@ -1306,6 +1316,75 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(draft.draft).toContain('Threads resolved this session');
     expect(draft.sourceMaterial.resolvedInbox.some((n) => n.resolvedNote.includes('fled out the back'))).toBe(true);
     expect(draft.sourceMaterial.encounters.some((e) => e.name === 'Bandit Ambush' && e.status === 'ended')).toBe(true);
+  });
+
+  it('draft_session_recap withholds a member\'s note once they revoke AI consent (#501)', async () => {
+    const client = await mcpClient(dmToken);
+
+    const revoke = await dmAgent
+      .patch(`/api/v1/campaigns/${campaignId}/members/me/ai-consent`)
+      .send({ aiExternalUseConsent: false });
+    expect(revoke.status).toBe(200);
+
+    const result = await client.callTool({ name: 'draft_session_recap', arguments: { campaignId } });
+    expect(result.isError).toBeFalsy();
+    const draft = parseResult(result) as {
+      draft: string;
+      sourceMaterial: { resolvedInbox: Array<{ body: string }>; encounters: Array<{ name: string }> };
+      consent: { campaignPolicy: string; excludedInboxByConsent: number };
+    };
+
+    // The note is gone from BOTH the rendered draft and the raw structured material —
+    // this tool used to read notes directly and ship every one of them regardless.
+    expect(draft.draft).not.toContain('Did the tavern keeper survive the fire?');
+    expect(draft.sourceMaterial.resolvedInbox).toHaveLength(0);
+    expect(draft.consent.campaignPolicy).toBe('member_consent');
+    expect(draft.consent.excludedInboxByConsent).toBeGreaterThan(0);
+    // Non-member-authored material is unaffected — only authored notes are gated.
+    expect(draft.sourceMaterial.encounters.some((e) => e.name === 'Bandit Ambush')).toBe(true);
+
+    const regrant = await dmAgent
+      .patch(`/api/v1/campaigns/${campaignId}/members/me/ai-consent`)
+      .send({ aiExternalUseConsent: true });
+    expect(regrant.status).toBe(200);
+  });
+
+  /**
+   * Issue #501 review — routing this tool through the scribe's assembler must not inherit
+   * the RUN ENGINE's "is this worth spending provider tokens on?" gate.
+   *
+   * That gate collapses the assembly to nothing unless there is a fought encounter, a
+   * resolved note, or a dice roll. Applied here it dropped `preparing` encounters from a
+   * scaffold tool that calls no model at all — collateral from sharing one assembler, and
+   * serving no consent purpose, since encounters are DM-authored and never consent-gated.
+   */
+  it('draft_session_recap still returns encounters that are only PREPARING (#501 review)', async () => {
+    // A campaign whose sole material is an unfought encounter — nothing "recap-worthy".
+    const created = await dmAgent.post('/api/v1/campaigns').send({ name: 'Prep Only Campaign' });
+    expect(created.status).toBe(201);
+    const prepCampaignId = created.body.id as number;
+
+    const encounter = await dmAgent
+      .post(`/api/v1/campaigns/${prepCampaignId}/encounters`)
+      .send({ name: 'Planned Ambush' });
+    expect(encounter.status).toBe(201);
+    expect(encounter.body.status).toBe('preparing');
+
+    const client = await mcpClient(dmToken);
+    const result = await client.callTool({
+      name: 'draft_session_recap',
+      arguments: { campaignId: prepCampaignId },
+    });
+    expect(result.isError).toBeFalsy();
+    const draft = parseResult(result) as {
+      sourceMaterial: { encounters: Array<{ name: string; status: string }> };
+      consent: { campaignPolicy: string };
+    };
+
+    expect(draft.sourceMaterial.encounters.map((e) => e.name)).toContain('Planned Ambush');
+    // The consent block is present even on an otherwise-empty assembly, so an empty result
+    // always carries its own explanation rather than reading as a broken tool.
+    expect(draft.consent.campaignPolicy).toBeTruthy();
   });
 
   it('draft_session_recap is dm-only (viewer PAT is denied)', async () => {

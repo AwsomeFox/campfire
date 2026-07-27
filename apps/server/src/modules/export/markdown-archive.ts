@@ -169,6 +169,7 @@ export const MACHINE_EXPORT_MODULES = [
   'auditNote',
   'aiSeat',
   'aiScribeConfig',
+  'aiScribeJobs',
   'proposals',
   'encounters',
   'factions',

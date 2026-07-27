@@ -57,6 +57,7 @@ function campaign(
     currentLocationId: null,
     dangerLevel: 'low',
     narrationLanguage: 'en',
+    aiExternalContentPolicy: 'member_consent',
     dmControlsProgression: false,
     dmControlsTurns: false,
     requireDmTurnConfirmation: false,

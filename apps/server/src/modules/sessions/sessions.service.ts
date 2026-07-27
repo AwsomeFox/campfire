@@ -63,15 +63,22 @@ function attendeeToDomain(row: typeof sessionAttendees.$inferSelect): SessionAtt
  * (or the human) writes the prose.
  */
 export interface RecapDraftSource {
-  resolvedInbox: Pick<Note, 'body' | 'resolvedNote' | 'entityName'>[];
+  resolvedInbox: (Pick<Note, 'body' | 'resolvedNote' | 'entityName'> &
+    Partial<Pick<Note, 'id' | 'authorUserId' | 'visibility'>>)[];
   // `events` (issue #1068) is the persisted per-encounter combat log — the round-by-round
   // damage/heal/condition/death/turn trail — so a recap can narrate WHAT HAPPENED in the
   // fight, not just who was in it. Optional so pure buildRecapDraft callers/tests that only
   // seed the roster line stay valid; assembled sources (scribe + draft_session_recap) carry it.
-  encounters: (Pick<EncounterWithCombatants, 'name' | 'status' | 'combatants'> & { events?: EncounterEvent[] })[];
+  encounters: (Pick<EncounterWithCombatants, 'name' | 'status' | 'combatants'> &
+    Partial<Pick<EncounterWithCombatants, 'id'>> & { events?: EncounterEvent[] })[];
   // Issue #673: paper-table / physical rolls logged during play — honest totals without
   // fabricated dice — so recap drafts can mention notable off-screen checks.
-  diceRolls?: Pick<DiceRoll, 'label' | 'actor' | 'rollerName' | 'total' | 'dc' | 'success' | 'natural20' | 'source' | 'createdAt'>[];
+  // `rollerUserId` is carried ONLY between assembly and the #501 consent gate, which uses it
+  // as the join key for redacting `rollerName` (the member's own display name) on rolls whose
+  // roller has not consented to external use. Both gate exits strip it again, so it never
+  // reaches a prompt, a source hash, or an MCP client.
+  diceRolls?: (Pick<DiceRoll, 'label' | 'actor' | 'rollerName' | 'total' | 'dc' | 'success' | 'natural20' | 'source' | 'createdAt'> &
+    Partial<Pick<DiceRoll, 'id' | 'rollerUserId'>>)[];
 }
 
 /** One line summarising an encounter for the Recap section seed. */

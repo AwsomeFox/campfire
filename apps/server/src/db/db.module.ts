@@ -382,6 +382,34 @@ function migrateProposalsTableForBaseSnapshot(sqlite: Database.Database): void {
 }
 
 /**
+ * Issue #501: AI consent + generation provenance.
+ *
+ * Adds the campaign-level external-source policy, per-member consent, and JSON
+ * provenance blobs for AI-authored proposals / scribe jobs. Defaults are fail-closed:
+ * upgraded members have not consented until they opt in, and manual/legacy artifacts
+ * keep NULL provenance.
+ */
+function migrateAiConsentAndProvenance501(sqlite: Database.Database): void {
+  const hasTable = (name: string) =>
+    !!sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(name);
+  const hasColumn = (table: string, column: string) =>
+    (sqlite.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).some((c) => c.name === column);
+
+  if (hasTable('campaigns') && !hasColumn('campaigns', 'ai_external_content_policy')) {
+    sqlite.exec("ALTER TABLE campaigns ADD COLUMN ai_external_content_policy TEXT NOT NULL DEFAULT 'member_consent'");
+  }
+  if (hasTable('campaign_members') && !hasColumn('campaign_members', 'ai_external_use_consent')) {
+    sqlite.exec('ALTER TABLE campaign_members ADD COLUMN ai_external_use_consent INTEGER NOT NULL DEFAULT 0');
+  }
+  if (hasTable('proposals') && !hasColumn('proposals', 'generation_provenance')) {
+    sqlite.exec('ALTER TABLE proposals ADD COLUMN generation_provenance TEXT');
+  }
+  if (hasTable('ai_scribe_jobs') && !hasColumn('ai_scribe_jobs', 'generation_provenance')) {
+    sqlite.exec('ALTER TABLE ai_scribe_jobs ADD COLUMN generation_provenance TEXT');
+  }
+}
+
+/**
  * Migration for DBs created before character-sheet depth (issue #1):
  * `characters.save_proficiencies` / `skills` / `actions` / `spell_slots`
  * didn't exist. Plain defaulted ADD COLUMNs — no table rebuild needed, same
@@ -3284,11 +3312,18 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // after all of them, so the scheduling lifecycle migration takes the next genuinely
   // free ordinal rather than collide.
   { name: '0111_scheduling_lifecycle_504', run: migrateSchedulingLifecycle504 },
-  // 0112-0113 are held by the merge coordinator for other in-flight work, and 0114 went
-  // to #501; 0115 is this branch's central allocation. The gap above 0111 is deliberate,
-  // not a miscount. Dedup is by the FULL name rather than the ordinal, so the issue-number
-  // suffix is what actually guarantees each runs exactly once even if a sibling branch
-  // lands a colliding ordinal first.
+  // The 0112-0113 gap is permanent, not a miscount. Those ordinals were held for branches
+  // that ultimately landed elsewhere (#559 took 0118/0119), so nothing will ever claim
+  // them. Ordinals were allocated centrally across concurrent branches — 0114 → #501,
+  // 0115 → #572, 0116 → #580, 0117 → #601 — precisely so several branches would not each
+  // compute "next free" in parallel and collide.
+  //
+  // The numbers are presentational: `runMigrations` applies entries in ARRAY order and
+  // dedupes on the FULL name string, so the issue-number suffix is what actually
+  // guarantees each runs exactly once. That is also why nothing here is ever renumbered
+  // to look tidy — renaming a migration a database has already recorded is the one edit
+  // that silently breaks run-once.
+  { name: '0114_ai_consent_provenance_501', run: migrateAiConsentAndProvenance501 },
   { name: '0115_ai_dm_transcript_events_572', run: migrateAiDmTranscriptEventsTable572 },
   { name: '0116_encounter_op_idempotency_580', run: migrateEncounterOpIdempotency580 },
   // #559 deliberately skips past the contested 0112-0117 band rather than taking the next free

@@ -12,6 +12,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import type {
+  AiExternalContentPolicy,
   Campaign,
   CampaignCloneMode,
   CampaignClonePreview,
@@ -866,12 +867,18 @@ function GeneralCard({
   const [description, setDescription] = useState(campaign.description);
   const [dangerLevel, setDangerLevel] = useState<DangerLevel>(campaign.dangerLevel);
   const [dmControlsProgression, setDmControlsProgression] = useState(campaign.dmControlsProgression);
+  const [aiExternalContentPolicy, setAiExternalContentPolicy] = useState<AiExternalContentPolicy>(
+    campaign.aiExternalContentPolicy,
+  );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
 
   const metadataDirty = isCampaignMetadataDirty(campaign, { name, description, dangerLevel });
-  const dirty = metadataDirty || dmControlsProgression !== campaign.dmControlsProgression;
+  const dirty =
+    metadataDirty ||
+    dmControlsProgression !== campaign.dmControlsProgression ||
+    aiExternalContentPolicy !== campaign.aiExternalContentPolicy;
   // Issue #760: campaign switcher confirms before discarding mid-edit settings.
   useUnsavedWork(`campaign-settings:${campaignId}`, dirty);
 
@@ -891,6 +898,7 @@ function GeneralCard({
         description,
         dangerLevel,
         dmControlsProgression,
+        aiExternalContentPolicy,
       });
       onSaved(updated);
       setSaved(true);
@@ -933,6 +941,23 @@ function GeneralCard({
         <p className="text-muted" style={{ fontSize: 12 }}>
           When on, only the DM can award XP or level up characters. When off, players may
           award XP and level up their own characters.
+        </p>
+      </div>
+      <div className="field">
+        <label htmlFor="settings-ai-external-policy">External AI source policy</label>
+        <select
+          id="settings-ai-external-policy"
+          className="cf-select"
+          value={aiExternalContentPolicy}
+          onChange={(e) => setAiExternalContentPolicy(e.target.value as AiExternalContentPolicy)}
+          disabled={saving}
+        >
+          <option value="member_consent">Allow member-consented source notes</option>
+          <option value="disabled">Do not send member-authored source notes</option>
+        </select>
+        <p className="text-muted" style={{ fontSize: 12 }}>
+          Applies to external AI scribe generation. Even when allowed, each member must opt in before their resolved
+          inbox notes can be included; private and opted-out notes are excluded.
         </p>
       </div>
       <div className="flex gap-2 items-center">

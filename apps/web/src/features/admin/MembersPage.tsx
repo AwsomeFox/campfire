@@ -177,6 +177,7 @@ export default function MembersPage() {
           <h2 className="font-bold text-white text-sm border-b border-slate-700 pb-2">Members</h2>
           <ReadOnlyMemberTable members={members ?? []} />
         </Card>
+        <AiConsentCard campaignId={id} members={members ?? []} myUserId={myUserId} onChange={() => load()} />
         <YourMembershipCard campaignId={id} members={members ?? []} myUserId={myUserId} />
       </div>
     );
@@ -201,6 +202,8 @@ export default function MembersPage() {
           charactersPanel.retry();
         }}
       />
+
+      <AiConsentCard campaignId={id} members={members ?? []} myUserId={myUserId} onChange={() => load()} />
 
       <GuestDmGrantsCard
         campaignId={id}
@@ -903,6 +906,98 @@ function ReadOnlyMemberTable({ members }: { members: CampaignMember[] }) {
  * and leave the campaign themselves. Distinct from the DM's campaign-wide export
  * (settings page, dm-only) and the DM's remove-member control above.
  */
+/**
+ * Issue #501: a member's OWN consent for external AI use of the source notes they wrote.
+ *
+ * Rendered for every member, DM included — a DM authors inbox notes too, and consent is
+ * a member-level decision, not a role privilege. Nobody can widen anyone else's consent;
+ * this is the only writer, and it PATCHes `members/me/ai-consent`.
+ */
+function AiConsentCard({
+  campaignId,
+  members,
+  myUserId,
+  onChange,
+}: {
+  campaignId: number;
+  members: CampaignMember[];
+  myUserId: number | null;
+  /**
+   * Refetch the shared member list. MUST be awaitable: the optimistic `pending` value is
+   * held until the refreshed `members` prop has actually arrived, otherwise the checkbox
+   * flickers next → old → next (see `save`).
+   */
+  onChange: () => void | Promise<void>;
+}) {
+  const { t } = useTranslation();
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const myMember = myUserId != null ? members.find((m) => m.userId === myUserId) : undefined;
+  // Server value is the single source of truth while idle; during an in-flight save the
+  // pending value wins so a concurrent list refresh cannot flicker the checkbox back.
+  const [pending, setPending] = useState<boolean | null>(null);
+  const checked = pending ?? myMember?.aiExternalUseConsent ?? false;
+
+  if (!myMember) return null;
+
+  async function save(next: boolean) {
+    setSaving(true);
+    setError(null);
+    setPending(next);
+    try {
+      await api.patch<CampaignMember>(`${API}/campaigns/${campaignId}/members/me/ai-consent`, {
+        aiExternalUseConsent: next,
+      });
+    } catch (err) {
+      setError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
+      // The write failed, so the server value is still authoritative — drop the optimistic
+      // value immediately and let the checkbox snap back to what is actually stored.
+      setPending(null);
+      setSaving(false);
+      return;
+    }
+
+    // Saved. Refetch the shared list so the DM-facing consent chip is not stale, and AWAIT
+    // it: clearing `pending` before the refreshed `members` prop arrives would let `checked`
+    // fall back to the stale prop for a frame — the exact next → old → next flicker the
+    // pending value exists to prevent.
+    try {
+      await onChange();
+    } catch {
+      // The refresh is best-effort; the consent write itself already succeeded, so this
+      // must not revert the checkbox or surface as a save error.
+    }
+    setPending(null);
+    setSaving(false);
+  }
+
+  return (
+    <Card className="space-y-2.5" data-testid="ai-consent-card">
+      <p className="card-kicker mb-0">External AI use of your notes</p>
+      <label className="flex items-start gap-2 cursor-pointer cf-inset p-3">
+        <input
+          type="checkbox"
+          className="mt-0.5"
+          checked={checked}
+          disabled={saving}
+          onChange={(event) => void save(event.target.checked)}
+        />
+        <span>
+          <span className="block text-[12.5px] font-semibold text-white">
+            Allow external AI use of my authored source notes
+          </span>
+          <span className="block text-[11px] text-secondary">
+            When the campaign policy permits external AI, the scribe may include resolved inbox notes you authored and
+            shared with the DM or the party. Private and whisper notes are never sent, and opting out again stops your
+            notes being included in future runs.
+          </span>
+        </span>
+      </label>
+      {error && <p className="text-xs text-rose-400 m-0">{error}</p>}
+    </Card>
+  );
+}
+
 function YourMembershipCard({
   campaignId,
   members,
@@ -1230,6 +1325,12 @@ function MemberRow({
           {member.displayName || member.username}
           {member.primaryOwner && <span className="text-[10px] text-amber-300">protected owner</span>}
           {member.disabled && <span className="text-[10px] text-rose-400">disabled</span>}
+          <span
+            className={`text-[10px] ${member.aiExternalUseConsent ? 'text-emerald-300' : 'text-secondary'}`}
+            title="Member-controlled consent for external AI use of their authored source notes"
+          >
+            AI source {member.aiExternalUseConsent ? 'allowed' : 'opted out'}
+          </span>
         </p>
         <p className="text-muted text-[11px] m-0">{character?.name || 'no character linked'}</p>
       </div>
