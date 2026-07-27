@@ -23,6 +23,7 @@ import type {
   ModerationReportStatus,
   ModerationRetentionPolicy,
   ModerationRetentionPolicyUpdate,
+  ModerationSilenceCreate,
   ModerationTargetType,
   Role,
 } from '@campfire/schema';
@@ -508,6 +509,120 @@ export class ModerationService implements OnApplicationBootstrap {
         ? `You are muted in this campaign until ${row.expiresAt}.`
         : 'You are muted in this campaign. Contact your DM.',
     );
+  }
+
+  /**
+   * Issue #597: TEMPORARY SILENCE, applied directly by a DM without a report.
+   *
+   * #601 delivered the enforcement (assertNotMuted, above) but only reachable through
+   * the queue's `mute` verb, which needs an incident to hang it on. That leaves a DM
+   * facing an escalating table with two bad options: manufacture a permanent accusation
+   * record against someone who mainly needs to cool off, or remove them from the
+   * campaign. This is the middle rung the issue asks for — time-bounded, reversible,
+   * audited, and explicitly NOT removal: the member keeps their seat, their character,
+   * and every read; they simply cannot post for a while.
+   *
+   * `hours` omitted means indefinite-until-lifted, which is the honest representation of
+   * "we'll talk about it later" — but the endpoint documents that a bounded silence is
+   * the expected shape, because an unbounded one that everybody forgets about is a
+   * removal with extra steps.
+   *
+   * Refuses to silence a DM: silencing a co-DM is a jurisdiction question (they can lift
+   * it themselves a second later), and the conflicted-DM path in the report queue is how
+   * that case is meant to travel.
+   */
+  async silenceMember(
+    campaignId: number,
+    input: ModerationSilenceCreate,
+    user: RequestUser,
+    role: Role,
+  ): Promise<ModerationMute> {
+    const target = input.userId.trim();
+    if (target === user.id) throw new BadRequestException('You cannot silence yourself.');
+    const targetName = await this.lookupMemberName(campaignId, target);
+    if (!targetName) throw new BadRequestException('`userId` must name a member of this campaign');
+    if (await this.holdsDmRole(campaignId, target)) {
+      throw new BadRequestException(
+        'A DM cannot be silenced from the queue — they could lift it themselves. Escalate a report instead, which ' +
+          'leaves DM jurisdiction for server-admin review.',
+      );
+    }
+
+    const nowTs = nowIso();
+    const expiresAt = input.hours ? new Date(Date.now() + input.hours * 3600_000).toISOString() : null;
+    // Clear any live silence first so the list never shows two overlapping rows for one
+    // member and `assertNotMuted` cannot be confused about which horizon applies.
+    await this.db
+      .update(moderationMutes)
+      .set({ liftedAt: nowTs, liftedBy: auditActor(user) })
+      .where(
+        and(
+          eq(moderationMutes.campaignId, campaignId),
+          eq(moderationMutes.userId, target),
+          isNull(moderationMutes.liftedAt),
+        ),
+      );
+    const [row] = await this.db
+      .insert(moderationMutes)
+      .values({
+        campaignId,
+        userId: target,
+        userName: targetName,
+        reason: input.reason?.slice(0, 500) ?? '',
+        expiresAt,
+        createdBy: auditActor(user),
+        createdAt: nowTs,
+      })
+      .returning();
+
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'moderation.silence',
+      entityType: 'moderation_mute',
+      entityId: row.id,
+      campaignId,
+      detail: `user=${target}, until=${expiresAt ?? 'lifted'}`,
+    });
+    return {
+      id: row.id,
+      campaignId: row.campaignId,
+      userId: row.userId,
+      userName: row.userName,
+      reason: row.reason,
+      expiresAt: row.expiresAt,
+      createdBy: row.createdBy,
+      createdAt: row.createdAt,
+    };
+  }
+
+  /** Lift one silence by id (issue #597) — the reverse of {@link silenceMember}. */
+  async liftSilence(campaignId: number, muteId: number, user: RequestUser, role: Role): Promise<void> {
+    const [row] = await this.db
+      .select()
+      .from(moderationMutes)
+      .where(
+        and(
+          eq(moderationMutes.id, muteId),
+          eq(moderationMutes.campaignId, campaignId),
+          isNull(moderationMutes.liftedAt),
+        ),
+      )
+      .limit(1);
+    if (!row) throw new NotFoundException(`Mute ${muteId} not found`);
+    await this.db
+      .update(moderationMutes)
+      .set({ liftedAt: nowIso(), liftedBy: auditActor(user) })
+      .where(eq(moderationMutes.id, muteId));
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'moderation.unsilence',
+      entityType: 'moderation_mute',
+      entityId: muteId,
+      campaignId,
+      detail: `user=${row.userId}`,
+    });
   }
 
   async listMutes(campaignId: number): Promise<ModerationMute[]> {

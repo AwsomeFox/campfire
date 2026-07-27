@@ -133,6 +133,8 @@ describe('AI driver control state persistence across restart (#559, real SQLite)
         'campaign_id', 'status', 'state', 'scene', 'last_narration', 'last_turn_at',
         'turn_count', 'stuck', 'acting_dm', 'vote', 'takeover_requested_by', 'last_input',
         'announced_recovery',
+        // #1042 — the two grant maps, added by 0131 as a separate additive migration.
+        'secret_read_approvals', 'pending_tool_confirmations',
         'collaborative', // #1051 — added by 0138 as a separate additive migration.
         'updated_at',
       ]),
@@ -452,6 +454,207 @@ describe('AI driver control state persistence across restart (#559, real SQLite)
     const live = first.service.getSession(campaignId).vote!;
     expect(live.resolved).toBe(false);
     expect(rawRow()).toMatchObject({ vote: expect.stringContaining(`"id":"${live.id}"`) });
+  });
+
+  // -------------------------------------------------------------------------
+  // #1042 — what the restart DESTROYED, told loudly.
+  //
+  // #559 (above) made the seat's SHAPE survive. These cover the remainder: grants of authority
+  // that deliberately do NOT survive, and must therefore be audited and signalled rather than
+  // vanishing. "Silently revoked" is the bug; a loud revocation is a correct outcome.
+  // -------------------------------------------------------------------------
+
+  it('revokes secret-read approvals across a restart, with an audit row naming each one', async () => {
+    const first = firstBoot();
+    await first.service.grantSecretReadApproval(campaignId, dm, 'get_npc', 42, 'the hidden broker');
+    await first.service.grantSecretReadApproval(campaignId, dm, 'get_quest', 7);
+
+    // Persisted the moment they were granted — not at some later turn boundary.
+    const raw = rawRow();
+    expect(String(raw?.secret_read_approvals)).toContain('get_npc');
+    expect(String(raw?.secret_read_approvals)).toContain('get_quest');
+
+    const restarted = boot();
+    const session = restarted.service.getSession(campaignId);
+    // NOT restored. A grant to read one hidden entity was made to a room the DM could see; the
+    // server cannot re-verify that room after a restart, so the safe direction is to drop it.
+    expect(Object.keys(session.secretReadApprovals ?? {})).toHaveLength(0);
+
+    // ...but LOUDLY. One audit row per grant, naming the exact tool and entity — "two approvals
+    // were revoked" is not an answer to "which secret was the AI allowed to read".
+    const revoked = restarted.audit.log.mock.calls
+      .map((c) => c[0] as { action: string; detail: string })
+      .filter((a) => a.action === 'ai-dm.driver.secret.revoked_on_restart');
+    expect(revoked).toHaveLength(2);
+    expect(revoked.map((a) => a.detail).join(' ')).toContain('get_npc#42');
+    expect(revoked.map((a) => a.detail).join(' ')).toContain('get_quest#7');
+
+    const reset = restarted.stream.emit.mock.calls
+      .map((c) => c[0] as { type: string; approvalsRevoked?: number })
+      .find((e) => e.type === 'session.reset');
+    expect(reset?.approvalsRevoked).toBe(2);
+
+    // The reset frame carries COUNTS ONLY. The #557 `secret-approval` frame names the entity and
+    // the driver SSE controller forwards it to every member unprojected, so broadcasting one per
+    // revoked approval would hand the whole table the ids of the hidden entities the DM had
+    // approved — a burst amplification of an existing leak.
+    expect(
+      restarted.stream.emit.mock.calls
+        .map((c) => (c[0] as { type: string }).type)
+        .filter((t) => t === 'secret-approval'),
+    ).toHaveLength(0);
+    expect(JSON.stringify(reset)).not.toContain('42');
+
+    // The row is cleared, so a second restart says nothing. Clearing the source data IS the
+    // suppression here — `announced_recovery` tracks a steady shape and cannot express "an
+    // event already happened".
+    expect(rawRow()?.secret_read_approvals).toBeNull();
+    const third = boot();
+    third.service.getSession(campaignId);
+    expect(
+      third.audit.log.mock.calls
+        .map((c) => (c[0] as { action: string }).action)
+        .filter((a) => a === 'ai-dm.driver.secret.revoked_on_restart'),
+    ).toHaveLength(0);
+  });
+
+  it('does not report a CONSUMED approval as revoked by the restart', async () => {
+    const first = firstBoot();
+    await first.service.grantSecretReadApproval(campaignId, dm, 'get_npc', 42);
+    await first.service.revokeSecretReadApproval(campaignId, dm, 'get_npc', 42);
+    // Spent or withdrawn authority is not authority the restart took away; announcing it would
+    // be a false alarm about access that no longer existed.
+    expect(rawRow()?.secret_read_approvals).toBeNull();
+
+    const restarted = boot();
+    restarted.service.getSession(campaignId);
+    expect(
+      restarted.audit.log.mock.calls
+        .map((c) => (c[0] as { action: string }).action)
+        .filter((a) => a === 'ai-dm.driver.secret.revoked_on_restart'),
+    ).toHaveLength(0);
+  });
+
+  it('discards queued tool confirmations across a restart with an audit row each', () => {
+    const first = firstBoot();
+    const session = first.service.getSession(campaignId);
+    // A confirm-policy tool call is an IRREVERSIBLE live-play write parked on a human's answer.
+    session.pendingToolConfirmations = {
+      'apply_damage:call_1': {
+        id: 'confirm-1',
+        tool: 'apply_damage',
+        args: { combatantId: 3, amount: 12 },
+        toolCallId: 'call_1',
+        profile: 'live',
+        policy: 'confirm',
+        requestedAt: '2026-07-26T00:00:00.000Z',
+        actor: `ai-dm-seat:${campaignId}`,
+        triggeredBy: 'player-1',
+        turnNumber: 4,
+      },
+    };
+    first.service.setPaused(campaignId, true); // any lever persists the session
+
+    const restarted = boot();
+    // Not restored: the DM never approved it, and a write nobody approved must not survive into
+    // a session where the turn that asked for it no longer exists.
+    expect(restarted.service.getSession(campaignId).pendingToolConfirmations).toEqual({});
+
+    const discarded = restarted.audit.log.mock.calls
+      .map((c) => c[0] as { action: string; detail: string })
+      .filter((a) => a.action === 'ai-dm.driver.confirmation.discarded_on_restart');
+    expect(discarded).toHaveLength(1);
+    expect(discarded[0].detail).toContain('apply_damage');
+    expect(discarded[0].detail).toContain('never executed');
+
+    const reset = restarted.stream.emit.mock.calls
+      .map((c) => c[0] as { type: string; confirmationsDiscarded?: number })
+      .find((e) => e.type === 'session.reset');
+    expect(reset?.confirmationsDiscarded).toBe(1);
+    expect(rawRow()?.pending_tool_confirmations).toBeNull();
+  });
+
+  it('gives a lapsed vote the stream signal it never had', async () => {
+    const first = firstBoot();
+    await first.service.openVote(campaignId, player, 'override', 'player');
+    const live = first.service.getSession(campaignId).vote!;
+    open!.sqlite
+      .prepare('UPDATE ai_driver_control_state SET vote = ? WHERE campaign_id = ?')
+      .run(JSON.stringify({ ...live, expiresAt: '2020-01-01T00:00:00.000Z' }), campaignId);
+
+    const restarted = boot();
+    restarted.service.getSession(campaignId);
+
+    // #559 already failed the vote correctly; nobody was told. Hydration skips `open_vote` for
+    // an already-resolved vote, so `settled` was null and the recovery notice never fired — the
+    // state was right and the table watched a decision quietly stop existing.
+    const voteFrames = restarted.stream.emit.mock.calls
+      .map((c) => c[0] as { type: string; action?: string; outcome?: string })
+      .filter((e) => e.type === 'vote' && e.action === 'expired');
+    expect(voteFrames).toHaveLength(1);
+    expect(voteFrames[0].outcome).toBe('failed');
+    expect(
+      restarted.audit.log.mock.calls
+        .map((c) => (c[0] as { action: string }).action)
+        .filter((a) => a === 'ai-dm.driver.vote.expired_on_restart'),
+    ).toHaveLength(1);
+  });
+
+  it('announces a lapsed vote even on a seat whose shape was already announced', async () => {
+    const first = firstBoot();
+    first.service.setPaused(campaignId, true);
+    await first.service.openVote(campaignId, player, 'override', 'player');
+    const live = first.service.getSession(campaignId).vote!;
+    open!.sqlite
+      .prepare('UPDATE ai_driver_control_state SET vote = ?, announced_recovery = ? WHERE campaign_id = ?')
+      .run(JSON.stringify({ ...live, expiresAt: '2020-01-01T00:00:00.000Z' }), 'paused', campaignId);
+
+    const restarted = boot();
+    restarted.service.getSession(campaignId);
+
+    // THE CASE THAT MOTIVATES SPLITTING RestartReconciliation FROM ControlStateRecovery. The
+    // seat came back `paused`, a steady shape already announced, so the #559 notice is correctly
+    // suppressed. Folding the expiry into that same mechanism would suppress it too.
+    expect(
+      restarted.audit.log.mock.calls
+        .map((c) => (c[0] as { action: string }).action)
+        .filter((a) => a === 'ai-dm.driver.control_state.recovered'),
+    ).toHaveLength(0);
+    expect(
+      restarted.stream.emit.mock.calls
+        .map((c) => c[0] as { type: string; action?: string })
+        .filter((e) => e.type === 'vote' && e.action === 'expired'),
+    ).toHaveLength(1);
+  });
+
+  it('says nothing at all when a restart destroyed nothing', () => {
+    const first = firstBoot();
+    first.service.setPaused(campaignId, true);
+    const restarted = boot();
+    restarted.service.getSession(campaignId);
+    // The reset notice has to stay rare enough to mean something. A seat with no outstanding
+    // grants and no lapsed vote produces no session.reset frame at all.
+    expect(
+      restarted.stream.emit.mock.calls
+        .map((c) => (c[0] as { type: string }).type)
+        .filter((t) => t === 'session.reset'),
+    ).toHaveLength(0);
+  });
+
+  it('a malformed persisted grant map is dropped rather than announced', () => {
+    firstBoot();
+    open!.sqlite
+      .prepare('UPDATE ai_driver_control_state SET secret_read_approvals = ? WHERE campaign_id = ?')
+      .run('{"broken": {"tool": 12, "entityId": "nope"}}', campaignId);
+    const restarted = boot();
+    expect(() => restarted.service.getSession(campaignId)).not.toThrow();
+    // An audit line describing a grant we cannot actually read is worse than no line: it would
+    // tell a DM the AI had access to something the row does not really say.
+    expect(
+      restarted.audit.log.mock.calls
+        .map((c) => (c[0] as { action: string }).action)
+        .filter((a) => a === 'ai-dm.driver.secret.revoked_on_restart'),
+    ).toHaveLength(0);
   });
 
   // -------------------------------------------------------------------------

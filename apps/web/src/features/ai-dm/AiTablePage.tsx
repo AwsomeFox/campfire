@@ -44,8 +44,10 @@ import {
   useAiDmSeat,
   useAiDmSession,
   invalidateAiDm,
+  invalidateAiDmToolConfirmations,
 } from '../../lib/query';
 import { useAiDmStream } from '../../lib/useAiDmStream';
+import { ToolConfirmationsPanel } from './ToolConfirmationsPanel';
 import {
   transcriptReducer,
   clearTranscript,
@@ -196,6 +198,19 @@ export default function AiTablePage() {
     queryFn: () => api.get<EncounterWithCombatants>(`${API}/encounters/${activeEncounterId}`),
     enabled: activeEncounterId !== undefined,
   });
+  /**
+   * #1558 — the id → name map the confirmation summaries resolve against.
+   *
+   * Deliberately assembled from reads THIS PAGE ALREADY MADE under the viewer's own permissions
+   * (characters + the running encounter's combatants). No extra fetch is added to make the
+   * summaries prettier, which is what guarantees a DM-hidden entity can never be named here: an
+   * id the client was never given renders as `#12`.
+   */
+  const confirmationEntities = useMemo(
+    () => [...(charactersQuery.data ?? []), ...(activeEncounterQuery.data?.combatants ?? [])],
+    [charactersQuery.data, activeEncounterQuery.data],
+  );
+
   const currentCombatantName = useMemo(() => {
     const d = activeEncounterQuery.data;
     if (!d?.currentCombatantId) return undefined;
@@ -431,6 +446,11 @@ export default function AiTablePage() {
           // #577: thin signal — refetch the claim list so the review card reconciles with the
           // server's verdict on the turn that just ended.
           void queryClient.invalidateQueries({ queryKey: queryKeys.aiDmGrounding(campaignId) });
+        } else if (event.type === 'tool-confirmation') {
+          // #1558: thin signal — refetch the authoritative queue. Without this the panel would
+          // only update on its poll, and "the AI is waiting on you" would arrive up to 30s late
+          // in the one situation where the delay is the whole problem.
+          invalidateAiDmToolConfirmations(queryClient, campaignId);
         } else if (
           event.type === 'state' ||
           event.type === 'stuck' ||
@@ -634,9 +654,9 @@ export default function AiTablePage() {
   // Composer lock: streaming OR a state the stuck-ladder issue (#340) owns.
   const paused = session?.state === 'paused';
   const humanControl = session?.state === 'human_control';
-  // #1051. Note the APPROVAL surface for the deferred calls is issue #1558's — there is no tool-
-  // confirmation UI anywhere in this app yet, which is why this page only reports the mode and
-  // does not pretend to offer a way to resolve what it defers.
+  // #1051. This flag only reports the MODE. The approval surface for the calls it defers is
+  // #1558's `ToolConfirmationsPanel`, mounted above the transcript on this same page — so a DM
+  // who sees this status also sees, and resolves, the queue the mode fills.
   const collaborative = session?.state === 'collaborative';
   const awaiting = session?.state === 'awaiting_players';
   const locked = streaming || paused || humanControl || awaiting;
@@ -882,6 +902,12 @@ export default function AiTablePage() {
         </div>
         {pauseError && <p className="text-xs text-rose-400 mt-2">{pauseError}</p>}
       </Card>
+
+      {/* #1558 — pending AI tool confirmations. Mounted HIGH, directly under the header and above
+          the transcript, because it is an action a DM must take during play within seconds. It
+          renders nothing when the queue is empty, so it costs the page no space until it matters
+          and its appearance is itself the signal. */}
+      <ToolConfirmationsPanel campaignId={campaignId} isDm={isDm} knownEntities={confirmationEntities} />
 
       {/* Live-encounter strip (design point 4) */}
       {activeEncounter && (

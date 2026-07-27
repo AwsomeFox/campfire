@@ -279,7 +279,7 @@ describe('characters (e2e)', () => {
     expect(res.status).toBe(400);
   });
 
-  it('spell-slots spend/restore adjusts used and clamps to [0, max]', async () => {
+  it('spell-slots spend/restore adjusts used; an OVERSPEND now errors (#1039)', async () => {
     const server = ctx.app.getHttpServer();
     const spend = await request(server)
       .post(`/api/v1/characters/${characterId}/spell-slots`)
@@ -288,6 +288,8 @@ describe('characters (e2e)', () => {
     expect(spend.status).toBe(201);
     expect(spend.body.spellSlots['1']).toEqual({ max: 4, used: 1 });
 
+    // Over-RESTORE still clamps: it cannot invent a slot, and used=0 is the state a long rest
+    // produces anyway, so refusing it would be noise rather than protection.
     const overRestore = await request(server)
       .post(`/api/v1/characters/${characterId}/spell-slots`)
       .set(owner)
@@ -295,12 +297,48 @@ describe('characters (e2e)', () => {
     expect(overRestore.status).toBe(201);
     expect(overRestore.body.spellSlots['1']).toEqual({ max: 4, used: 0 });
 
+    // #1039 BEHAVIOUR CHANGE — this used to return 201 with `used` clamped to max. A silent
+    // success is indistinguishable, to the caller, from actually having cast the spell, which
+    // is the unlimited-casting hole when the caller is the AI DM.
     const overSpend = await request(server)
       .post(`/api/v1/characters/${characterId}/spell-slots`)
       .set(owner)
       .send({ level: 1, delta: 100 });
-    expect(overSpend.status).toBe(201);
-    expect(overSpend.body.spellSlots['1']).toEqual({ max: 4, used: 4 });
+    expect(overSpend.status).toBe(400);
+    expect(overSpend.body.code).toBe('insufficient_slots');
+    // The error must be legible enough for a model to self-correct rather than retry blindly.
+    expect(overSpend.body).toMatchObject({ level: 1, remaining: 4, max: 4 });
+
+    // The refused spend wrote nothing.
+    const after = await request(server).get(`/api/v1/characters/${characterId}`).set(owner);
+    expect(after.body.spellSlots['1']).toEqual({ max: 4, used: 0 });
+  });
+
+  it('spell-slots: spending the LAST slot succeeds, the next one errors (#1039)', async () => {
+    const server = ctx.app.getHttpServer();
+    // Drain level 1 exactly.
+    for (let i = 0; i < 4; i++) {
+      const res = await request(server)
+        .post(`/api/v1/characters/${characterId}/spell-slots`)
+        .set(owner)
+        .send({ level: 1, delta: 1 });
+      expect(res.status).toBe(201);
+    }
+    const exhausted = await request(server).get(`/api/v1/characters/${characterId}`).set(owner);
+    expect(exhausted.body.spellSlots['1']).toEqual({ max: 4, used: 4 });
+
+    const oneTooMany = await request(server)
+      .post(`/api/v1/characters/${characterId}/spell-slots`)
+      .set(owner)
+      .send({ level: 1, delta: 1 });
+    expect(oneTooMany.status).toBe(400);
+    expect(oneTooMany.body).toMatchObject({ code: 'insufficient_slots', remaining: 0, max: 4 });
+
+    // Restore for the suite's later cases.
+    await request(server)
+      .post(`/api/v1/characters/${characterId}/spell-slots`)
+      .set(owner)
+      .send({ level: 1, delta: -4 });
   });
 
   it('spell-slots at an unconfigured level -> 400', async () => {

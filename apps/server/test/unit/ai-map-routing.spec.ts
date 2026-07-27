@@ -264,4 +264,53 @@ describe('pure helpers (#410)', () => {
     expect(moderateMapPrompt('a normal dungeon map').flagged).toBe(false);
     expect(moderateMapPrompt('sexual content with a child').flagged).toBe(true);
   });
+
+  /**
+   * The per-campaign generation rate limit (issue #410) had no coverage at all, which is
+   * how it came to be the hidden cause of a "flaky" e2e spec. These pin both halves of
+   * the contract: it must still throttle real generation, and it must NOT charge a
+   * campaign for a prompt that never generated anything.
+   */
+  describe('per-campaign generation rate limit', () => {
+    afterEach(() => setAiMapRateLimitMsForTests(0));
+
+    it('throttles a second generation inside the window', async () => {
+      setAiMapRateLimitMsForTests(60_000);
+      const { service } = makeService(null);
+      const campaignId = nextCampaign();
+      const first = await service.createJob(campaignId, { prompt: 'a dungeon', mode: 'battle-map', count: 1 } as never, USER, 'dm');
+      expect(first.status).toBe('succeeded');
+      await expect(
+        service.createJob(campaignId, { prompt: 'another dungeon', mode: 'battle-map', count: 1 } as never, USER, 'dm'),
+      ).rejects.toThrow(/rate-limited/i);
+    });
+
+    it('limits per campaign, so a different campaign is unaffected', async () => {
+      setAiMapRateLimitMsForTests(60_000);
+      const { service } = makeService(null);
+      await service.createJob(nextCampaign(), { prompt: 'a dungeon', mode: 'battle-map', count: 1 } as never, USER, 'dm');
+      const other = await service.createJob(nextCampaign(), { prompt: 'a crypt', mode: 'battle-map', count: 1 } as never, USER, 'dm');
+      expect(other.status).toBe('succeeded');
+    });
+
+    it('does not spend the rate-limit slot on a prompt the moderation gate blocked', async () => {
+      // A blocked prompt runs no renderer and costs nothing, so it must not lock the
+      // campaign out of its next legitimate generation. Charging for it also made the
+      // moderation e2e depend on how fast the preceding test happened to run.
+      setAiMapRateLimitMsForTests(60_000);
+      const { service } = makeService(null);
+      const campaignId = nextCampaign();
+      const blocked = await service.createJob(
+        campaignId,
+        { prompt: 'sexual content with a child', mode: 'battle-map', count: 1 } as never,
+        USER,
+        'dm',
+      );
+      expect(blocked.moderation.flagged).toBe(true);
+      expect(blocked.status).toBe('failed');
+
+      const legit = await service.createJob(campaignId, { prompt: 'a quiet glade', mode: 'battle-map', count: 1 } as never, USER, 'dm');
+      expect(legit.status).toBe('succeeded');
+    });
+  });
 });
