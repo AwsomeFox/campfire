@@ -186,15 +186,43 @@ function normalizeKey(value: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
-/** Quest objectives normalize to an ordered `[{text, sortOrder}]` — `done` is play state. */
+/**
+ * The canonical order for quest objectives, used by BOTH the projection below and the live
+ * read in campaign-modules.service.ts. It must be a TOTAL order and must depend only on
+ * content, never on the order the rows or the array elements happened to arrive in — a
+ * publisher's array order and SQLite's scan order are both arbitrary. `sortOrder` alone is
+ * not total (a package may ship ties), so `text` breaks them.
+ *
+ * Both sides sorting with this same comparator is what makes an installed quest re-project
+ * to the baseline it was hashed from. Exported so the two call sites cannot drift apart.
+ */
+export function compareObjectives(
+  a: { text: string; sortOrder: number },
+  b: { text: string; sortOrder: number },
+): number {
+  if (a.sortOrder !== b.sortOrder) return a.sortOrder - b.sortOrder;
+  return a.text < b.text ? -1 : a.text > b.text ? 1 : 0;
+}
+
+/**
+ * Quest objectives normalize to an ordered `[{text, sortOrder}]` — `done` is play state.
+ *
+ * The result is SORTED, not left in the publisher's array order. The live row is read back
+ * sorted by `sortOrder`, so a projection that preserved array order would hash a baseline
+ * the freshly-written row could never reproduce, and the quest would report itself
+ * `locally_edited` from the moment it installed.
+ */
 function normalizeObjectives(value: unknown): Array<{ text: string; sortOrder: number }> {
   if (!Array.isArray(value)) return [];
-  return value.slice(0, MAX_OBJECTIVES).map((raw, index) => {
-    const rec = raw != null && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
-    const text = typeof raw === 'string' ? raw : normalizeString(rec.text);
-    const sortOrder = rec.sortOrder == null ? index : normalizeNumber(rec.sortOrder);
-    return { text: text.slice(0, 2000), sortOrder };
-  });
+  return value
+    .slice(0, MAX_OBJECTIVES)
+    .map((raw, index) => {
+      const rec = raw != null && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+      const text = typeof raw === 'string' ? raw : normalizeString(rec.text);
+      const sortOrder = rec.sortOrder == null ? index : normalizeNumber(rec.sortOrder);
+      return { text: text.slice(0, 2000), sortOrder };
+    })
+    .sort(compareObjectives);
 }
 
 function normalizeField(spec: FieldSpec, value: unknown): unknown {

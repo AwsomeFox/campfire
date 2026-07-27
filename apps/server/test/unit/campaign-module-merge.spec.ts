@@ -165,6 +165,61 @@ describe('portable content projection (issue #585)', () => {
     const without = projectPortable('quest', { objectives: [{ text: 'Find it', sortOrder: 0 }] });
     expect(withDone).toEqual(without);
   });
+
+  it('canonicalizes objective order, so array order cannot change the hash', () => {
+    // The live row is read back sorted, never in the publisher's array order, so the
+    // projection has to sort too or the baseline is one the row can never reproduce.
+    const shuffled = projectPortable('quest', {
+      title: 'Q',
+      objectives: [
+        { text: 'Escape', sortOrder: 2 },
+        { text: 'Reach', sortOrder: 0 },
+        { text: 'Find', sortOrder: 1 },
+      ],
+    });
+    expect((shuffled.objectives as Array<{ text: string }>).map((o) => o.text)).toEqual(['Reach', 'Find', 'Escape']);
+    // Any permutation of the same objectives hashes identically.
+    expect(hashPortable('quest', {
+      title: 'Q',
+      objectives: [{ text: 'Escape', sortOrder: 2 }, { text: 'Reach', sortOrder: 0 }, { text: 'Find', sortOrder: 1 }],
+    })).toBe(hashPortable('quest', {
+      title: 'Q',
+      objectives: [{ text: 'Reach', sortOrder: 0 }, { text: 'Find', sortOrder: 1 }, { text: 'Escape', sortOrder: 2 }],
+    }));
+  });
+
+  it('breaks tied sortOrder deterministically, since sortOrder alone is not a total order', () => {
+    // A package may ship ties. If the comparator stopped at sortOrder, tied entries would
+    // keep whatever order they arrived in — the publisher's array on one side, SQLite's
+    // scan order on the other — and the quest would read edited with nobody having edited.
+    const one = hashPortable('quest', {
+      title: 'Q',
+      objectives: [{ text: 'Beta', sortOrder: 0 }, { text: 'Alpha', sortOrder: 0 }],
+    });
+    const other = hashPortable('quest', {
+      title: 'Q',
+      objectives: [{ text: 'Alpha', sortOrder: 0 }, { text: 'Beta', sortOrder: 0 }],
+    });
+    expect(one).toBe(other);
+    const projected = projectPortable('quest', {
+      title: 'Q',
+      objectives: [{ text: 'Beta', sortOrder: 0 }, { text: 'Alpha', sortOrder: 0 }],
+    });
+    expect((projected.objectives as Array<{ text: string }>).map((o) => o.text)).toEqual(['Alpha', 'Beta']);
+  });
+
+  it('still derives sortOrder from array position when the package omits it', () => {
+    // The index fallback must survive the sort: omitted sortOrder means "this order".
+    const projected = projectPortable('quest', {
+      title: 'Q',
+      objectives: [{ text: 'First' }, { text: 'Second' }, { text: 'Third' }],
+    });
+    expect(projected.objectives).toEqual([
+      { text: 'First', sortOrder: 0 },
+      { text: 'Second', sortOrder: 1 },
+      { text: 'Third', sortOrder: 2 },
+    ]);
+  });
 });
 
 describe('three-way merge (issue #585)', () => {

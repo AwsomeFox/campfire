@@ -549,6 +549,51 @@ describe('campaign modules (e2e, real cookie sessions)', () => {
     expect(unblocked.body.canApply).toBe(true);
   });
 
+  it('blocks the INSTALL of an incompatible package, or one missing a required dependency', async () => {
+    // The same gates the update path enforces, on the path that actually brings the module
+    // into the campaign. Install materializes content into live rows immediately, so a
+    // package this server cannot run must not get in and then only complain on a later
+    // update — that would leave the incompatible content already in the campaign.
+    const cid = (await dm.post(api('/campaigns')).send({ name: 'Install Gate Table' })).body.id as number;
+
+    const incompatible = await dm.post(api(`/campaigns/${cid}/modules`)).send({
+      package: buildPackage('1.0.0', v1Artifacts(), { compatibility: { campfire: '>=99.0.0', ruleSystems: [] } }),
+    });
+    expect(incompatible.status).toBe(409);
+    expect(incompatible.body.code).toBe('MODULE_INSTALL_BLOCKED');
+    expect(String(incompatible.body.blockers.join(' '))).toContain('>=99.0.0');
+
+    // Nothing was written — a blocked install must not leave content behind.
+    expect((await dm.get(api(`/campaigns/${cid}/modules`))).body).toHaveLength(0);
+    expect((await dm.get(api(`/campaigns/${cid}/locations`))).body).toHaveLength(0);
+
+    const needsDep = buildPackage('1.0.0', v1Artifacts(), {
+      dependencies: [
+        { kind: 'module', id: OTHER_MODULE_ID, name: 'Tide Tables', versionRange: '^2.0.0', optional: false },
+        { kind: 'compendium-pack', id: 'nonexistent-pack', name: 'Nonexistent', versionRange: '*', optional: true },
+      ],
+    });
+    const missingDep = await dm.post(api(`/campaigns/${cid}/modules`)).send({ package: needsDep });
+    expect(missingDep.status).toBe(409);
+    expect(missingDep.body.code).toBe('MODULE_INSTALL_BLOCKED');
+    // Only the REQUIRED dependency blocks; the optional one is reported but not fatal.
+    expect(missingDep.body.blockers).toHaveLength(1);
+    expect(String(missingDep.body.blockers[0])).toContain('Tide Tables');
+    expect((await dm.get(api(`/campaigns/${cid}/modules`))).body).toHaveLength(0);
+
+    // Installing the required dependency unblocks the very same package.
+    const depInstall = await dm.post(api(`/campaigns/${cid}/modules`)).send({
+      package: {
+        manifest: { moduleId: OTHER_MODULE_ID, name: 'Tide Tables', version: '2.1.0', artifacts: [] },
+        artifacts: [],
+      },
+    });
+    expect(depInstall.status).toBe(201);
+    const nowOk = await dm.post(api(`/campaigns/${cid}/modules`)).send({ package: needsDep });
+    expect(nowOk.status).toBe(201);
+    expect(nowOk.body.locallyEditedCount).toBe(0);
+  });
+
   // ------------------------------------------------------------------ fork + detach
 
   it('forks in place: new identity, retained ancestry, and upstream corrections still mergeable', async () => {
@@ -757,6 +802,90 @@ describe('campaign modules (e2e, real cookie sessions)', () => {
     const locations = (await dm.get(api(`/campaigns/${cid}/locations`))).body as Array<Record<string, unknown>>;
     expect(locations.find((l) => l.name === 'Unstated Room')!.status).toBe('unexplored');
     expect(install.locallyEditedCount).toBe(0);
+  });
+
+  /**
+   * THE INSTALL INVARIANT: immediately after install, every artifact's live row must
+   * re-project to exactly the baseline that was hashed from the package. Nothing has been
+   * edited, so nothing may read as edited.
+   *
+   * This is the general form of three defects found separately on this branch — a dangling
+   * cross-reference, an untruncated fractional mapX, and objectives ordered differently from
+   * their sortOrder. Each was an install that immediately disagreed with its own baseline,
+   * inflating locallyEditedCount and silently taking the keep-local branch on every later
+   * update, with nobody having touched anything. The package below is built to be awkward on
+   * every axis at once so the invariant is tested rather than any single symptom.
+   */
+  it('re-projects every artifact to its own baseline immediately after install (nothing reads edited)', async () => {
+    const cid = (await dm.post(api('/campaigns')).send({ name: 'Invariant Table' })).body.id as number;
+    const awkward: Artifact[] = [
+      { kind: 'faction', key: 'crimson', data: { name: 'The Crimson Hand', kind: 'cult', body: 'Sunken zealots.' } },
+      // Fractional coordinates (INTEGER columns), and an omitted status (enum-backed).
+      { kind: 'location', key: 'keep', data: { name: 'The Sunken Keep', kind: 'fort', body: 'A drowned fortress.', mapX: 12.7, mapY: -3.2 } },
+      { kind: 'location', key: 'cellar', data: { name: 'Flooded Cellar', kind: 'room', body: 'Waist-deep water.', parentKey: 'keep' } },
+      // Cross-references in both directions, and an omitted disposition.
+      { kind: 'npc', key: 'vex', data: { name: 'Vex', role: 'fence', body: 'Sells maps.', locationKey: 'keep', factionKey: 'crimson' } },
+      {
+        kind: 'quest',
+        key: 'rescue',
+        data: {
+          title: 'Rescue the Cartographer',
+          body: 'Find her before the tide.',
+          reward: '200gp',
+          giverNpcKey: 'vex',
+          // Deliberately NOT in sortOrder order: the live read comes back sorted by
+          // sortOrder, so a projection that preserved array order would hash differently
+          // from the row it just wrote.
+          objectives: [
+            { text: 'Escape with her', sortOrder: 2 },
+            { text: 'Reach the cellar', sortOrder: 0 },
+            { text: 'Find the cartographer', sortOrder: 1 },
+          ],
+        },
+      },
+    ];
+
+    const install = (await dm.post(api(`/campaigns/${cid}/modules`)).send({ package: buildPackage('1.0.0', awkward) })).body;
+    const installId2 = install.id as number;
+
+    // The invariant, stated directly.
+    expect(install.locallyEditedCount).toBe(0);
+    expect(install.overlayCount).toBe(0);
+
+    // And stated again through the three-way engine: re-previewing the IDENTICAL package
+    // must classify every artifact `unchanged`. This is the assertion that would have caught
+    // all three defects — any baseline/live disagreement shows up here as locally_edited.
+    const preview = await dm
+      .post(api(`/campaigns/${cid}/modules/${installId2}/update/preview`))
+      .send({ package: buildPackage('1.0.0', awkward) });
+    expect(preview.status).toBe(201);
+    expect(preview.body.counts).toEqual({ unchanged: awkward.length });
+    expect(preview.body.conflictCount).toBe(0);
+
+    // The overlay view is the same claim from the other side: no artifact has diverged.
+    const overlays = (await dm.get(api(`/campaigns/${cid}/modules/${installId2}/overlays`))).body as unknown[];
+    expect(overlays).toHaveLength(0);
+
+    // Sanity: the awkward values really did land the way the projection claims, so the
+    // invariant above is not being satisfied by both sides being wrong in the same way.
+    const locations = (await dm.get(api(`/campaigns/${cid}/locations`))).body as Array<Record<string, unknown>>;
+    const keep = locations.find((l) => l.name === 'The Sunken Keep')!;
+    expect(keep.mapX).toBe(12);
+    expect(keep.mapY).toBe(-3);
+    expect(keep.status).toBe('unexplored');
+    const quests = (await dm.get(api(`/campaigns/${cid}/quests`))).body as Array<Record<string, unknown>>;
+    const rescue = quests.find((q) => q.title === 'Rescue the Cartographer')!;
+    const rescueDetail = (await dm.get(api(`/quests/${rescue.id}`))).body as {
+      objectives: Array<{ text: string; sortOrder: number }>;
+    };
+    // Stored in sortOrder order, NOT the order the package listed them in.
+    expect(rescueDetail.objectives.map((o) => o.text)).toEqual([
+      'Reach the cellar',
+      'Find the cartographer',
+      'Escape with her',
+    ]);
+    const npcList = (await dm.get(api(`/campaigns/${cid}/npcs`))).body as Array<Record<string, unknown>>;
+    expect(npcList.find((n) => n.name === 'Vex')!.locationId).toBe(keep.id);
   });
 
   it('rejects a package whose cross-reference names an artifact it does not ship', async () => {

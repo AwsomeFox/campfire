@@ -87,11 +87,15 @@ export class CampaignModulesController {
   @ApiOperation({
     summary: 'Install a campaign module',
     description:
-      "dm role required. The body is a module package: a versioned manifest (UUID, semver, authors, license, source URL, compatibility range, dependency contract, per-artifact content hashes) plus the artifact payloads it declares. Every declared hash is verified against the payload before anything is written — a mismatched or undeclared artifact is a 400. Artifacts are materialized as campaign locations/npcs/quests/factions with cross-references resolved by stable artifact key, and the content installed is recorded as the BASELINE that future update previews diff against. 409 if this module UUID is already installed here.",
+      "dm role required. The body is a module package: a versioned manifest (UUID, semver, authors, license, source URL, compatibility range, dependency contract, per-artifact content hashes) plus the artifact payloads it declares. Every declared hash is verified against the payload before anything is written — a mismatched or undeclared artifact is a 400. Compatibility (app semver range, rule system) and every required dependency are checked before anything is written, with the same blocking semantics the update path uses: an incompatible package, or one whose required dependencies are absent, is a 409 and installs nothing. Artifacts are then materialized as campaign locations/npcs/quests/factions with cross-references resolved by stable artifact key, and the content installed is recorded as the BASELINE that future update previews diff against. 409 if this module UUID is already installed here.",
   })
   @ApiResponse({ status: 201, description: 'The install, with identity and lineage.' })
   @ApiResponse({ status: 400, description: 'Invalid manifest, bad semver, or an artifact hash mismatch.' })
-  @ApiResponse({ status: 409, description: 'That module UUID is already installed in this campaign.' })
+  @ApiResponse({
+    status: 409,
+    description:
+      'Blocked — that module UUID is already installed here, the package is incompatible with this server or campaign, or a required dependency is missing.',
+  })
   async install(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @Body() body: ModuleInstallDto,

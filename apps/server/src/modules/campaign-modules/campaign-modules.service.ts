@@ -89,6 +89,7 @@ import {
   REFERENCE_FIELDS,
   applyOverlay,
   artifactId,
+  compareObjectives,
   computeOverlay,
   hashProjected,
   projectPortable,
@@ -254,7 +255,11 @@ export class CampaignModulesService {
       list.push({ text: row.text, sortOrder: row.sortOrder });
       map.set(row.questId, list);
     }
-    for (const list of map.values()) list.sort((a, b) => a.sortOrder - b.sortOrder);
+    // The SAME comparator the projection uses. Sorting on sortOrder alone is not enough: it
+    // is not a total order (a package may ship ties), so tied entries would fall back to
+    // SQLite's scan order here and to the publisher's array order there, and the quest would
+    // read `locally_edited` with nobody having edited it.
+    for (const list of map.values()) list.sort(compareObjectives);
     return map;
   }
 
@@ -690,6 +695,34 @@ export class CampaignModulesService {
       );
     }
 
+    // Compatibility and dependencies gate GETTING the module into a campaign, so they have
+    // to run here and not only on the update path. Installing materializes the module's
+    // content into live campaign rows immediately — there is no staging state in which an
+    // incompatible module sits inert — so letting a package whose declared Campfire range
+    // excludes this server, or whose required dependencies are absent, install cleanly
+    // would invert the purpose of declaring them. Same findings and the same 409 semantics
+    // the apply path uses; as there, only NON-optional dependencies block.
+    const compatibility = this.compatibilityCheck(this.db, campaignId, pkg);
+    const dependencies = this.dependencyChecks(this.db, campaignId, pkg, null);
+    const blockers = [
+      ...compatibility.issues,
+      ...dependencies
+        .filter((dep) => dep.status !== 'satisfied' && !dep.optional)
+        .map(
+          (dep) =>
+            `Dependency ${dep.name} (${dep.versionRange}) is ${dep.status.replace('_', ' ')}${
+              dep.installedVersion ? ` — installed ${dep.installedVersion}` : ''
+            }.`,
+        ),
+    ];
+    if (blockers.length > 0) {
+      throw new ConflictException({
+        code: 'MODULE_INSTALL_BLOCKED',
+        message: `This module cannot be installed: ${blockers.join(' ')}`,
+        blockers,
+      });
+    }
+
     const ts = nowIso();
     const contentById = this.packageContent(pkg);
     // Insert in dependency order so most references resolve on the first pass; the explicit
@@ -916,14 +949,14 @@ export class CampaignModulesService {
 
   // ------------------------------------------------------------------ preview
 
-  private compatibilityCheck(db: Db, install: InstallRow, pkg: ModulePackage): ModuleCompatibilityCheck {
+  private compatibilityCheck(db: Db, campaignId: number, pkg: ModulePackage): ModuleCompatibilityCheck {
     const compat = pkg.manifest.compatibility;
     const campaign = db
       .select({ ruleSystem: campaigns.ruleSystem })
       .from(campaigns)
-      .where(eq(campaigns.id, install.campaignId))
+      .where(eq(campaigns.id, campaignId))
       .limit(1)
-      .all()[0];
+      .get();
     const ruleSystem = campaign?.ruleSystem ?? '';
     const issues: string[] = [];
     const range = compat.campfire || '*';
@@ -947,9 +980,21 @@ export class CampaignModulesService {
     };
   }
 
-  private dependencyChecks(db: Db, install: InstallRow, pkg: ModulePackage): ModuleDependencyCheck[] {
+  /**
+   * Resolve every declared dependency against what this campaign actually has.
+   *
+   * `previousDependenciesJson` is the dependency set already recorded on the install, used
+   * only to report whether a dependency's declaration `changed`. It is null on a fresh
+   * install, where every dependency is new by definition.
+   */
+  private dependencyChecks(
+    db: Db,
+    campaignId: number,
+    pkg: ModulePackage,
+    previousDependenciesJson: string | null,
+  ): ModuleDependencyCheck[] {
     const installedDeps = new Map(
-      parseJson<ModuleDependency[]>(install.dependenciesJson, []).map((d) => [`${d.kind}:${d.id}`, d] as const),
+      parseJson<ModuleDependency[]>(previousDependenciesJson, []).map((d) => [`${d.kind}:${d.id}`, d] as const),
     );
     return pkg.manifest.dependencies.map((dep) => {
       const previous = installedDeps.get(`${dep.kind}:${dep.id}`);
@@ -968,13 +1013,10 @@ export class CampaignModulesService {
           .select({ version: campaignModuleInstalls.version })
           .from(campaignModuleInstalls)
           .where(
-            and(
-              eq(campaignModuleInstalls.campaignId, install.campaignId),
-              eq(campaignModuleInstalls.moduleId, dep.id),
-            ),
+            and(eq(campaignModuleInstalls.campaignId, campaignId), eq(campaignModuleInstalls.moduleId, dep.id)),
           )
           .limit(1)
-          .all()[0];
+          .get();
         installedVersion = other?.version ?? null;
       }
       let status: ModuleDependencyCheck['status'];
@@ -1041,13 +1083,13 @@ export class CampaignModulesService {
       warnings.push({ code: 'invalid_version', message: `"${manifest.version}" is not valid semver.`, blocking: true });
     }
 
-    const compatibility = this.compatibilityCheck(db, install, pkg);
+    const compatibility = this.compatibilityCheck(db, install.campaignId, pkg);
     if (!compatibility.compatible) {
       for (const issue of compatibility.issues) {
         warnings.push({ code: 'incompatible', message: issue, blocking: true });
       }
     }
-    const dependencies = this.dependencyChecks(db, install, pkg);
+    const dependencies = this.dependencyChecks(db, install.campaignId, pkg, install.dependenciesJson);
     for (const dep of dependencies) {
       if (dep.status === 'satisfied') continue;
       warnings.push({
