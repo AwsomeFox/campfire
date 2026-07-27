@@ -31,6 +31,32 @@ import { fromJsonText, toJsonText } from './json';
  *     a character sheet). Instances are reconciled against those names: metadata is preserved
  *     for names that survive, instances for names that are gone are DROPPED, and names with
  *     no instance get a bare legacy one.
+ *
+ * ── IF YOU ARE ADDING A STRUCTURED COLUMN NEXT TO AN EXISTING ONE, READ THIS ──────────────
+ *
+ * Run the writer audit AFTER the schema change, not before. This inverts the natural
+ * instinct — you want to survey the call sites, then change the column — and the instinct is
+ * wrong, because ADDING THE SECOND COLUMN IS ITSELF THE EVENT THAT BREAKS A PREVIOUSLY
+ * CORRECT CALL SITE.
+ *
+ * It happened twice here, in both directions:
+ *
+ *   - #423 added `combatants.condition_instances`. Every existing writer of
+ *     `combatants.conditions` was correct the day before and silently became a half-write the
+ *     day after. That is the bug #1575 fixed, two years later, after a DM watched a condition
+ *     they had removed come back.
+ *   - #1047 added `characters.condition_instances`. The action-resolver's two sheet mirrors
+ *     were correct — `characters` had no structured copy — and became the identical bug one
+ *     table over the moment the column existed. An audit taken before the change would have
+ *     cleared them, correctly, and been useless.
+ *
+ * The audit that catches this is mechanical, so run it as the LAST step:
+ *
+ *     grep -rn "conditions: toJsonText\|conditionInstances: toJsonText" apps/server/src \
+ *       | grep -v common/conditions.ts        # must print nothing
+ *
+ * A guarantee you can grep for is worth more than one you assert in a comment — including
+ * this comment.
  */
 
 /** A metadata-free instance for a condition that only ever existed as a string. */
