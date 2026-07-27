@@ -107,6 +107,103 @@ describe('inline spell slots & character resources (issue #422)', () => {
     ).rejects.toThrow(BadRequestException);
   });
 
+  /**
+   * Issue #1073 — inspiration / hero points as first-class COUNTED resources.
+   *
+   * The issue asked for new fields on the character model. They were not needed: #422 already
+   * gave characters a bounded `resources` map and gave each adapter a resource vocabulary, so
+   * the gap was that NO adapter declared these two. A first-class column would have been a
+   * second source of truth for a fact this model already holds.
+   */
+  it('#1073 declares inspiration for 5e and hero points for PF2e, with their own economies', () => {
+    const dnd = resourceVocabularyForAdapter(Dnd5eAdapter);
+    const inspiration = dnd.find((r) => r.key === 'inspiration');
+    expect(inspiration).toBeDefined();
+    // You either have inspiration or you do not — a second award is not a second point.
+    expect(inspiration!.defaultMax).toBe(1);
+    // NOT a rest cadence: 5e inspiration is DM-awarded and survives rests, so a long-rest
+    // recharge would hand it out free every night — the opposite of how it works.
+    expect(inspiration!.recharge).toBe('special');
+
+    const pf2e = resourceVocabularyForAdapter(Pf2eAdapter);
+    const heroPoints = pf2e.find((r) => r.key === 'heroPoints');
+    expect(heroPoints).toBeDefined();
+    // A different economy, which is why each system declares its own rather than one being
+    // modelled as the other: hero points accrue during a session and spending ALL three is the
+    // avoid-death move.
+    expect(heroPoints!.defaultMax).toBe(3);
+    expect(heroPoints!.recharge).toBe('special');
+
+    // Neither system inherits the other's resource.
+    expect(dnd.map((r) => r.key)).not.toContain('heroPoints');
+    expect(pf2e.map((r) => r.key)).not.toContain('inspiration');
+  });
+
+  it('#1073 a system that declares no resources offers none — silence means "no such resource"', async () => {
+    // Six adapters declare no `resources` at all. That must keep meaning "this system has no
+    // such pool", never "fall back to 5e's" — an OSR or Open Legend sheet must not sprout
+    // inspiration because D&D has it.
+    const { OpenLegendAdapter } = await import('@campfire/schema');
+    expect(resourceVocabularyForAdapter(OpenLegendAdapter as never)).toEqual([]);
+  });
+
+  it('#1073 spending a resource you do not have ERRORS instead of clamping', async () => {
+    const user = { id: '1', name: 'Tester' } as any;
+    const ts = new Date().toISOString();
+    const [camp] = db.insert(campaigns).values({ name: 'Inspiration', ruleSystem: 'dnd5e', createdAt: ts, updatedAt: ts }).returning().all();
+    const [c] = db.insert(characters).values({ campaignId: camp.id, name: 'Aria', ownerUserId: '1', createdAt: ts, updatedAt: ts }).returning().all();
+
+    // Award, then spend: the normal round trip.
+    await charactersService.adjustResource(c.id, { key: 'inspiration', max: 1, used: 0, name: 'Inspiration', recharge: 'special' }, user, 'player');
+    const spent = await charactersService.adjustResource(c.id, { key: 'inspiration', delta: 1 }, user, 'player');
+    expect(spent.resources['inspiration'].used).toBe(1);
+
+    // Spending again must FAIL, not silently clamp at the bound. A clamp would report success
+    // for a spend that never happened, and an AI narrating the result would describe a reroll
+    // it never paid for (#1039).
+    await expect(
+      charactersService.adjustResource(c.id, { key: 'inspiration', delta: 1 }, user, 'player'),
+    ).rejects.toThrow(BadRequestException);
+
+    // The failed spend left the stored value untouched — no partial write.
+    const after = await charactersService.getOrThrow(c.id, 'player');
+    expect(after.resources['inspiration'].used).toBe(1);
+  });
+
+  it('#1073 concurrent spends cannot lose an update', async () => {
+    /**
+     * The #1039 race, at the service layer ON PURPOSE. Driving this through HTTP would prove
+     * nothing: supertest plus synchronous better-sqlite3 serialises requests end to end, so the
+     * window between read and write never opens and the test passes whether or not the bug is
+     * fixed. Calling the service concurrently is the only way to open it.
+     *
+     * Before the fix both calls read `used: 0`, both decided `1`, and the second write landed on
+     * the first — three hero points spent, one still on the sheet.
+     */
+    const user = { id: '1', name: 'Tester' } as any;
+    const ts = new Date().toISOString();
+    const [camp] = db.insert(campaigns).values({ name: 'Hero Points', ruleSystem: 'pf2e', createdAt: ts, updatedAt: ts }).returning().all();
+    const [c] = db.insert(characters).values({ campaignId: camp.id, name: 'Kyra', ownerUserId: '1', createdAt: ts, updatedAt: ts }).returning().all();
+
+    await charactersService.adjustResource(c.id, { key: 'heroPoints', max: 3, used: 0, name: 'Hero Points', recharge: 'special' }, user, 'player');
+
+    const results = await Promise.allSettled([
+      charactersService.adjustResource(c.id, { key: 'heroPoints', delta: 1 }, user, 'player'),
+      charactersService.adjustResource(c.id, { key: 'heroPoints', delta: 1 }, user, 'player'),
+      charactersService.adjustResource(c.id, { key: 'heroPoints', delta: 1 }, user, 'player'),
+    ]);
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(3);
+
+    // Every spend was paid for: three succeeded, so three are gone. A lost update would show 1 or 2.
+    const after = await charactersService.getOrThrow(c.id, 'player');
+    expect(after.resources['heroPoints'].used).toBe(3);
+
+    // And the pool is now genuinely empty, so a fourth spend errors rather than going negative.
+    await expect(
+      charactersService.adjustResource(c.id, { key: 'heroPoints', delta: 1 }, user, 'player'),
+    ).rejects.toThrow(BadRequestException);
+  });
+
   it('executes short rest, long rest, and refocus cadences', async () => {
     const user = { id: 1, username: 'test_user', displayName: 'Test', serverRole: 'user' as const };
     const ts = new Date().toISOString();
