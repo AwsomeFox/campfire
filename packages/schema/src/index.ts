@@ -9637,8 +9637,15 @@ export const CampaignCatalogBulkRequest = z
     aiExternalContentPolicy: AiExternalContentPolicy.optional(),
     /** update_module: the rule-pack slug to move campaigns onto. */
     ruleSystem: z.string().max(120).optional(),
-    /** request_export: which export profile the DM is being asked to produce. */
-    exportProfile: z.string().max(40).optional(),
+    /**
+     * request_export: which export profile the DM is being asked to produce.
+     *
+     * Constrained to the profiles the export module can actually build. A free string
+     * here reaches the DM as a request for something that cannot be produced — they
+     * approve it and then have no way to satisfy it — so the operator is corrected at
+     * request time instead. Defaults to `backup` when omitted.
+     */
+    exportProfile: ExportProfile.optional(),
   })
   .strict();
 export type CampaignCatalogBulkRequest = z.infer<typeof CampaignCatalogBulkRequest>;
@@ -9673,7 +9680,12 @@ export const CampaignExportRequest = z.object({
   /** Audit-actor string of the requesting operator (`token:<name>` or a user id). */
   requestedBy: z.string().max(200),
   requestedByUserId: z.string().max(120).default(''),
-  /** Which export profile was asked for (see the export module's profiles). */
+  /**
+   * Which export profile was asked for. Always one of `ExportProfile` for rows this
+   * module writes — the request body is validated against that enum — but typed as a
+   * plain string because the column carries a `''` default and this is what the DB
+   * hands back, not a re-validated value.
+   */
   profile: z.string().max(40).default(''),
   /** Why the operator is asking. Required, and shown to the DM who decides. */
   justification: z.string().max(2000).default(''),

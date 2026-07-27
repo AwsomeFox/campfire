@@ -121,6 +121,21 @@ export class AdminCatalogService {
     actor: Actor,
   ): Promise<CampaignCatalogPrivacyPolicy> {
     const current = await this.getPrivacyPolicy();
+    // A PARTIAL UPDATE MATERIALISES THE WHOLE POLICY, DELIBERATELY.
+    //
+    // Sending only `names` also persists the current `descriptions`, which pins it to
+    // whatever it resolves to today — including a value that came from
+    // CATALOG_PRIVACY_DEFAULTS rather than from an operator. A later change to those
+    // defaults will then not reach this server. That is the intended trade and it is
+    // the safe direction for a disclosure setting: an operator who has deliberately
+    // configured what admins may read about every campaign on the server should not
+    // have half of that decision silently re-decided by a future release. Freezing
+    // what they saw when they chose is the conservative behaviour; drifting is not.
+    //
+    // The consequence a reader needs to know is that `source: 'settings'` after any
+    // update means "an operator has configured this", not "an operator chose each
+    // field individually". The audit detail below records both resolved values, so
+    // the trail says what was actually stored rather than what was sent.
     const next = {
       names: update.names ?? current.names,
       descriptions: update.descriptions ?? current.descriptions,
@@ -666,7 +681,16 @@ export class AdminCatalogService {
                 .values({
                   campaignId: id,
                   requestedBy: actor.actor,
-                  requestedByUserId: actor.actor.startsWith('token:') ? '' : actor.actor,
+                  // The column is documented as "numeric user id as text when the
+                  // requester was a real account; '' otherwise", so test for that
+                  // directly rather than excluding the one decorated prefix we happen
+                  // to remember. `auditActor` returns a bare `String(users.id)` for a
+                  // real account, but `token:<name>` on the PAT path and `dev:<name>`
+                  // on the header-auth path — and only the first of those was being
+                  // filtered, so a dev-auth principal wrote `dev:alice` into a column
+                  // every reader is entitled to treat as an id. Any future actor shape
+                  // is now excluded by construction instead of by enumeration.
+                  requestedByUserId: /^\d+$/.test(actor.actor) ? actor.actor : '',
                   profile,
                   justification: (req.reason ?? '').slice(0, 2000),
                   status: 'pending',

@@ -591,6 +591,20 @@ describe('Issue #587: campaign catalog paging, filtering and bulk lifecycle (e2e
       expect(inbox.body[0].justification).toContain('archiving the season');
     });
 
+    it('refuses a profile the export module cannot build', async () => {
+      // A free-string profile reaches the DM as a request for something that cannot be
+      // produced: they approve it and then have no way to satisfy it. The operator is
+      // corrected at request time instead.
+      const res = await bulk({
+        operation: 'request_export',
+        campaignIds: [aIds[3]],
+        exportProfile: 'foo',
+        dryRun: false,
+        reason: 'asking for a profile that does not exist',
+      });
+      expect(res.status).toBe(400);
+    });
+
     it('lets the DM decide, and records the decision without producing an artifact', async () => {
       const target = aIds[3];
       const inbox = await dmA.get(`/api/v1/campaigns/${target}/catalog/export-requests`);
