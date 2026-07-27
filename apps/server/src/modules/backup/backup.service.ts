@@ -634,7 +634,7 @@ export class BackupService implements OnApplicationBootstrap {
         fs.renameSync(partialPath, filePath);
         const size = archived.bytes;
         const checksum = archived.sha256;
-      const prune = await this.pruneVerifiedScheduledBackups(dir, retentionPolicy, archiveName, checksum);
+      const prune = await this.pruneVerifiedScheduledBackups(dir, retentionPolicy, archiveName, checksum, filePath);
       const nextRunAt = new Date(Date.now() + intervalMs).toISOString();
       const metrics = this.metricsAfterSuccess(previous?.metrics, disk, estimatedBytes, prune);
       await this.writeCadence({
@@ -867,11 +867,17 @@ export class BackupService implements OnApplicationBootstrap {
     policy: BackupRetentionPolicy,
     lastArchiveName: string,
     lastChecksum: string,
+    knownVerifiedPath?: string,
   ): Promise<{ count: number; bytes: number; error: string }> {
     const files = this.listScheduledBackupFiles(dir);
     const candidates: BackupRetentionCandidate[] = [];
     for (const file of files) {
-      const verification = await this.verifyScheduledArchive(file.abs);
+      // The just-published archive was comprehensively verified while it still
+      // had its partial name. Reusing that result avoids another full archive
+      // read/decompression pass, but only for this explicit path in this run.
+      const verification = knownVerifiedPath && path.resolve(file.abs) === path.resolve(knownVerifiedPath)
+        ? { verified: true, checksum: lastChecksum, error: '' }
+        : await this.verifyScheduledArchive(file.abs);
       const markers = this.retentionMarkers(file.abs);
       candidates.push({
         name: file.name,

@@ -336,4 +336,49 @@ describe('backup streaming writer (#603)', () => {
       else process.env.BACKUP_DIR = previous;
     }
   });
+
+  it('does not re-verify the just-published archive while retaining verification of older candidates', async () => {
+    const backupDir = path.join(dataDir, 'backups');
+    const previous = process.env.BACKUP_DIR;
+    process.env.BACKUP_DIR = backupDir;
+    const svc = service();
+    try {
+      // Create an older, known-good retention candidate before observing calls.
+      await (svc as any).runScheduledBackup(60 * 60 * 1000);
+      const verify = jest.spyOn(svc as any, 'verifyScheduledArchive');
+
+      await (svc as any).runScheduledBackup(60 * 60 * 1000);
+
+      // One call verifies the new archive under its partial name; one verifies
+      // the older candidate during retention. The renamed new path is trusted
+      // only through the explicit handoff, never re-read by prune.
+      expect(verify).toHaveBeenCalledTimes(2);
+      expect(verify.mock.calls.filter(([filePath]) => String(filePath).endsWith('.partial'))).toHaveLength(1);
+      expect(verify.mock.calls.filter(([filePath]) => String(filePath).endsWith('.zip'))).toHaveLength(1);
+    } finally {
+      if (previous === undefined) delete process.env.BACKUP_DIR;
+      else process.env.BACKUP_DIR = previous;
+    }
+  });
+
+  it('does not hand an initially unverified archive to retention', async () => {
+    const backupDir = path.join(dataDir, 'backups');
+    const previous = process.env.BACKUP_DIR;
+    process.env.BACKUP_DIR = backupDir;
+    const svc = service();
+    const verify = jest.spyOn(svc as any, 'verifyScheduledArchive').mockResolvedValue({
+      verified: false,
+      checksum: null,
+      error: 'invalid archive',
+    });
+    try {
+      await expect((svc as any).runScheduledBackup(60 * 60 * 1000)).rejects.toThrow('failed verification');
+      expect(verify).toHaveBeenCalledTimes(1);
+      expect(fs.existsSync(backupDir) ? fs.readdirSync(backupDir).filter((name) => name.endsWith('.zip')) : []).toEqual([]);
+    } finally {
+      verify.mockRestore();
+      if (previous === undefined) delete process.env.BACKUP_DIR;
+      else process.env.BACKUP_DIR = previous;
+    }
+  });
 });
