@@ -184,7 +184,17 @@ export type AiDmSessionStatus = 'idle' | 'running' | 'paused';
  * drive. `running` is healthy; `awaiting_players` means detection tripped and the table must
  * pull a lever; `paused` is a deliberate freeze; `human_control` means a human holds the seat.
  */
-export type AiDmLadderState = 'running' | 'awaiting_players' | 'paused' | 'human_control';
+export type AiDmLadderState =
+  | 'running'
+  | 'awaiting_players'
+  | 'paused'
+  | 'human_control'
+  // #1051 — collaborative handoff: the AI still narrates, but mechanical commits defer to a DM.
+  // Deliberately NOT a frozen state (see isMidTurnFrozenState): the whole point is that the AI
+  // keeps running. It is a MODE wearing a ladder state's clothes, which is why the durable
+  // truth is `AiDmSessionState.collaborative` and this value is derived from it — see
+  // `deriveLadderState`.
+  | 'collaborative';
 
 /**
  * Mid-turn freeze guard (#1057). `session.state` is mutable across awaits; TypeScript narrows
@@ -193,6 +203,19 @@ export type AiDmLadderState = 'running' | 'awaiting_players' | 'paused' | 'human
  */
 export function isMidTurnFrozenState(state: AiDmLadderState | string): boolean {
   return state === 'paused' || state === 'human_control';
+}
+
+/**
+ * Resolve the ladder state a healthy seat should display (#1051).
+ *
+ * Only ever converts `running` ⇄ `collaborative`. Every other value is an urgent condition —
+ * paused, stuck, under human control — and those outrank the mode in the display slot while the
+ * `collaborative` flag keeps the mode itself alive underneath.
+ */
+function deriveLadderState(state: AiDmLadderState, collaborative: boolean): AiDmLadderState {
+  if (collaborative && state === 'running') return 'collaborative';
+  if (!collaborative && state === 'collaborative') return 'running';
+  return state;
 }
 
 /**
@@ -253,6 +276,20 @@ export interface AiDmSessionState {
   status: AiDmSessionStatus;
   /** Stuck-ladder lifecycle state (#314) — what the player levers act on. */
   state: AiDmLadderState;
+  /**
+   * Collaborative handoff is ON (#1051) — the durable truth behind `state === 'collaborative'`.
+   *
+   * A SEPARATE FLAG RATHER THAN JUST THE LADDER VALUE, because `state` is a single slot that
+   * urgent conditions legitimately take over: a pause, a takeover, or a stuck seat all overwrite
+   * it. If the mode lived only there, a DM who paused for five minutes would resume to a seat
+   * that had silently gone back to applying damage on its own — a safety-relevant downgrade,
+   * arrived at by a control that says nothing about autonomy. The flag is the memory; `state`
+   * is the display, restored from the flag whenever the urgent condition clears.
+   *
+   * It is also what the TOOL POLICY reads, so a collaborative table defers mechanics even while
+   * it is stuck or paused — the modes compose instead of one silently cancelling the other.
+   */
+  collaborative: boolean;
   scene: string | null;
   lastNarration: string | null;
   lastTurnAt: string | null;
@@ -425,6 +462,7 @@ const LADDER_STATES = allowlist<AiDmLadderState>({
   awaiting_players: true,
   paused: true,
   human_control: true,
+  collaborative: true, // #1051
 });
 const STUCK_REASONS = allowlist<AiDmStuckReason>({
   tool_error: true,
@@ -1204,11 +1242,23 @@ export class AiDriverService {
     fresh.takeoverRequestedBy = row.takeoverRequestedBy ?? null;
 
     if (row.lastInput) this.lastInputs.set(campaignId, row.lastInput);
+    // #1051: the MODE is restored before the ladder value is reconciled, because the
+    // reconciliation below needs to know whether `running` should read as `collaborative`.
+    fresh.collaborative = row.collaborative === true;
+    // These two drop an impossible ladder value back to the baseline; `deriveLadderState` at the
+    // end of this block is what turns that baseline back into `collaborative` when the mode is on.
     if (fresh.state === 'awaiting_players' && !fresh.stuck) fresh.state = 'running';
     if (fresh.state === 'human_control' && !fresh.actingDm) fresh.state = 'running';
-    if (fresh.status === 'paused' && fresh.state === 'running') fresh.state = 'paused';
+    // A stored pause must survive hydration whatever the ladder slot happens to hold. This was
+    // `fresh.state === 'running'` before #1051; a collaborative seat that was paused would have
+    // fallen through both branches and come back `status: 'idle'` — silently un-paused, which is
+    // the one thing restart handling must never do.
+    if (fresh.status === 'paused' && (fresh.state === 'running' || fresh.state === 'collaborative')) {
+      fresh.state = 'paused';
+    }
     if (fresh.state === 'paused' || fresh.state === 'human_control') fresh.status = 'paused';
     else fresh.status = 'idle';
+    fresh.state = deriveLadderState(fresh.state, fresh.collaborative);
     // An interrupted turn outranks whatever ladder state the row carried: freeze the seat. The
     // stuck info (if any) is kept, so an explicit resume drops back to `awaiting_players` with
     // the recovery levers intact rather than losing the ladder.
@@ -1315,6 +1365,7 @@ export class AiDriverService {
       vote: session.vote ? toJsonText(session.vote) : null,
       takeoverRequestedBy: stringOrNull(session.takeoverRequestedBy),
       lastInput: this.lastInputs.get(session.campaignId) ?? null,
+      collaborative: session.collaborative, // #1051
       updatedAt: ts,
     };
 
@@ -1341,6 +1392,7 @@ export class AiDriverService {
             takeoverRequestedBy: values.takeoverRequestedBy,
             lastInput: values.lastInput,
             announcedRecovery: values.announcedRecovery,
+            collaborative: values.collaborative,
             updatedAt: values.updatedAt,
           },
         })
@@ -1589,7 +1641,12 @@ export class AiDriverService {
       session.state = 'paused';
       this.cancelGeneration(campaignId);
     } else if (session.state === 'paused') {
-      session.state = session.stuck ? 'awaiting_players' : 'running';
+      // #1051: resuming restores the MODE, not a bare `running`. Without this, a DM who paused
+      // for five minutes would come back to a seat quietly applying damage on its own again —
+      // an autonomy change made by a control that says nothing about autonomy.
+      session.state = session.stuck
+        ? 'awaiting_players'
+        : deriveLadderState('running', session.collaborative);
     }
     session.levers = this.leversFor(session);
     this.persistControlState(session);
@@ -1600,11 +1657,44 @@ export class AiDriverService {
     return session;
   }
 
+  /**
+   * Turn collaborative handoff on or off (#1051) — DM only, enforced at the controller.
+   *
+   * Idempotent, and deliberately does NOT touch `status`, the stuck ladder, or a human takeover.
+   * This is a statement about who decides mechanics, not about whether the seat may run: a
+   * paused table stays paused, a stuck table stays stuck, and both come back into the mode when
+   * their urgent condition clears, because the flag is what persists.
+   *
+   * WHAT PERSISTS AND WHAT DOES NOT. The MODE is durable (its own column, restored on boot). The
+   * DEFERRALS it produces are queued confirm-policy grants, which on this branch live only in
+   * process memory and are dropped by a restart with no audit row and no signal — the gap issue
+   * #1042 is about, and which #1042 fixes for every confirm-policy grant at once by persisting
+   * them in order to revoke them loudly. Deliberately NOT re-solved here: a second mechanism
+   * beside that one would be the "third store" that issue exists to prevent. Until it lands, a
+   * restart mid-session silently discards whatever the DM had not yet approved, and the mode's
+   * own durability makes that MORE likely to bite, because the table comes back still deferring.
+   */
+  setCollaborative(campaignId: number, enabled: boolean): AiDmSessionState {
+    const session = this.ensureSession(campaignId);
+    if (session.collaborative === enabled) return session;
+    session.collaborative = enabled;
+    session.state = deriveLadderState(session.state, enabled);
+    session.levers = this.leversFor(session);
+    this.persistControlState(session);
+    this.stream.emit({ type: 'state', campaignId, state: session.state });
+    // #572: an autonomy change belongs in the durable table log. A player who joins late must be
+    // able to see that the AI stopped deciding mechanics on its own, not infer it from the fact
+    // that damage stopped landing.
+    this.recordControl(campaignId, { control: enabled ? 'collaborative' : 'collaborative_ended', state: session.state });
+    return session;
+  }
+
   private freshSession(campaignId: number): AiDmSessionState {
     return {
       campaignId,
       status: 'idle',
       state: 'running',
+      collaborative: false,
       scene: null,
       lastNarration: null,
       lastTurnAt: null,
@@ -1636,11 +1726,13 @@ export class AiDriverService {
   private policyForTool(
     profile: DriverSessionProfile,
     tool: Pick<DriverTool, 'name' | 'mutating' | 'proposalCapable'>,
+    collaborative = false,
   ) {
     return resolveDriverToolPolicy({
       profile,
       tool,
       onLivePlayAllowList: DRIVER_LIVE_PLAY_TOOLS.has(tool.name),
+      collaborative,
     });
   }
 
@@ -2598,7 +2690,7 @@ export class AiDriverService {
         return { toolErrored: false, authorityStop: authority };
       }
 
-      const rateLimit = checkDriverPolicyRateLimits(session);
+      const rateLimit = checkDriverPolicyRateLimits(session, { collaborative: session.collaborative });
       if (!rateLimit.ok) {
         if (rateLimit.emergencyPause) {
           await this.triggerEmergencyPause(campaignId, session, actor, rateLimit.message);
@@ -2615,7 +2707,9 @@ export class AiDriverService {
       }
 
       const tool = seatToolset.get(call.name) ?? contextToolset.get(call.name);
-      const policyDecision = tool ? this.policyForTool(sessionProfile, tool) : null;
+      // #1051: read the FLAG, not `session.state` — a collaborative table that is also stuck
+      // shows `awaiting_players` in the ladder slot but must still defer its mechanics.
+      const policyDecision = tool ? this.policyForTool(sessionProfile, tool, session.collaborative) : null;
 
       // (0) Tool-scoping (#317/#378/#474): default-deny at EXECUTION so a hallucinated or
       // injection-induced forbidden call never reaches a service.
@@ -3106,7 +3200,9 @@ export class AiDriverService {
     // Clean turn: if we were stuck, announce the recovery.
     const wasStuck = session.stuck !== null || session.state === 'awaiting_players';
     session.stuck = null;
-    session.state = 'running';
+    // #1051: recovering from stuck returns to the MODE, not a bare `running`. Getting unstuck is
+    // not a decision about autonomy.
+    session.state = deriveLadderState('running', session.collaborative);
     session.levers = this.leversFor(session);
     this.persistControlState(session);
     if (wasStuck) {
@@ -3129,10 +3225,14 @@ export class AiDriverService {
           return ['retry', 'continue_without_ai', 'nudge', 'flag', 'vote', 'rules_lookup', 'request_takeover', 'pause'];
         }
         return ['retry', 'nudge', 'flag', 'vote', 'rules_lookup', 'request_takeover', 'pause'];
+      case 'collaborative':
+        // #1051 — a healthy, running seat with mechanics deferred, so it keeps the full
+        // healthy-play set and adds the lever that takes the table back to full autonomy.
+        return ['nudge', 'flag', 'vote', 'rules_lookup', 'request_takeover', 'pause', 'end_collaborative'];
       case 'running':
       default:
         // Levers are available in healthy play too (flag a ruling, call a vote, etc.).
-        return ['nudge', 'flag', 'vote', 'rules_lookup', 'request_takeover', 'pause'];
+        return ['nudge', 'flag', 'vote', 'rules_lookup', 'request_takeover', 'pause', 'collaborative'];
     }
   }
 
@@ -3641,7 +3741,9 @@ export class AiDriverService {
       } else {
         // override: discard the disputed ruling and let play resume.
         session.stuck = null;
-        session.state = session.status === 'paused' ? 'paused' : 'running';
+        session.state = session.status === 'paused'
+          ? 'paused'
+          : deriveLadderState('running', session.collaborative); // #1051
         session.lastNarration = null;
       }
     }
@@ -3790,7 +3892,12 @@ export class AiDriverService {
     session.actingDm = null;
     session.stuck = null;
     session.status = 'idle';
-    session.state = 'running';
+    // #1051: hand back into the MODE the table was in, not a bare `running`. A human taking the
+    // seat and giving it back says nothing about whether the AI may decide mechanics on its own,
+    // so it must not be the thing that grants that authority back. Same reasoning as the resume
+    // path in setPaused — every control that releases an urgent condition has to restore the
+    // mode underneath it, or autonomy widens as a side effect of an unrelated lever.
+    session.state = deriveLadderState('running', session.collaborative);
     session.levers = this.leversFor(session);
     this.persistControlState(session);
     await this.audit.log({
@@ -3875,6 +3982,29 @@ export class AiDriverService {
 
     const sessionZero = await safeRead(contextToolset, 'get_session_zero', { campaignId });
     if (sessionZero) parts.push(`## Session-zero charter (safety boundaries — MUST respect)\n${sessionZero}`);
+
+    // #1051 — collaborative handoff. THE HONESTY CLAUSE is the important half. The runtime
+    // already defers the mechanics (the tool returns `pending_dm_confirmation` and the turn
+    // carries on), so without this the model would narrate "the blade bites deep for nine
+    // damage" while the board never changed — a silent divergence between what the table heard
+    // and what is true, which is a worse failure than the autonomy it was meant to remove.
+    if (this.ensureSession(campaignId).collaborative) {
+      parts.push(
+        [
+          '## Collaborative handoff (ACTIVE)',
+          'A human at this table decides the mechanics. You narrate; they rule.',
+          '- Call the mechanical tools exactly as you normally would. They will come back',
+          '  `pending_dm_confirmation` instead of executing — that is expected, not an error, and',
+          '  you must not retry, work around it, or reach for a different tool to get the same',
+          '  effect.',
+          '- When a call is pending, narrate the action as ATTEMPTED or IMMINENT, never as',
+          '  resolved. "She swings for the gap in its armour" — not "she hits for nine damage".',
+          '  Do not state a number, a condition, or an outcome the DM has not confirmed.',
+          '- Never claim a turn advanced, a creature fell, or a fight began until you have seen it',
+          '  succeed. If you are unsure whether something landed, say so and hand back to the DM.',
+        ].join('\n'),
+      );
+    }
 
     // #1048: dynamic world-state context — inject the LIVE game state into the prompt so the
     // AI can narrate coherently without needing to chain read tools every turn. All reads go

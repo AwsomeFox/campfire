@@ -91,11 +91,14 @@ import { AI_TABLE_FIELD, AI_TABLE_PREFIX } from '../../components/formFieldLabel
 import { Btn, Card, Chip, EmptyState, Skeleton, type ChipVariant } from '../../components/ui';
 
 /** Seat status → chip variant for the header status pill. */
-const STATUS_VARIANT: Record<'idle' | 'narrating' | 'paused' | 'human', ChipVariant> = {
+const STATUS_VARIANT: Record<'idle' | 'narrating' | 'paused' | 'human' | 'collaborative', ChipVariant> = {
   idle: 'available',
   narrating: 'active',
   paused: 'private',
   human: 'dm',
+  // #1051 — a healthy, running seat with its mechanics deferred, so it reads as active rather
+  // than as a stopped state.
+  collaborative: 'dm',
 };
 
 export default function AiTablePage() {
@@ -631,6 +634,10 @@ export default function AiTablePage() {
   // Composer lock: streaming OR a state the stuck-ladder issue (#340) owns.
   const paused = session?.state === 'paused';
   const humanControl = session?.state === 'human_control';
+  // #1051. Note the APPROVAL surface for the deferred calls is issue #1558's — there is no tool-
+  // confirmation UI anywhere in this app yet, which is why this page only reports the mode and
+  // does not pretend to offer a way to resolve what it defers.
+  const collaborative = session?.state === 'collaborative';
   const awaiting = session?.state === 'awaiting_players';
   const locked = streaming || paused || humanControl || awaiting;
   const lockReason = streaming
@@ -823,18 +830,21 @@ export default function AiTablePage() {
     );
   }
 
-  const statusKey: 'idle' | 'narrating' | 'paused' | 'human' = streaming
+  const statusKey: 'idle' | 'narrating' | 'paused' | 'human' | 'collaborative' = streaming
     ? 'narrating'
     : paused
       ? 'paused'
       : humanControl
         ? 'human'
-        : 'idle';
+        : collaborative
+          ? 'collaborative'
+          : 'idle';
   const statusLabel = {
     idle: t('table.seatIdle'),
     narrating: t('table.seatNarrating'),
     paused: t('table.seatPaused'),
     human: t('table.seatHumanControl'),
+    collaborative: t('table.seatCollaborative'),
   }[statusKey];
 
   return (

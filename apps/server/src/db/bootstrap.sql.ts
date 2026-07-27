@@ -1198,6 +1198,11 @@ CREATE TABLE IF NOT EXISTS ai_driver_control_state (
   -- state (paused / human_control / stuck / open vote) is announced once, not re-announced
   -- on every subsequent restart.
   announced_recovery TEXT,
+  -- Issue #1051: collaborative handoff is on (the AI narrates, a DM decides mechanics). Its own
+  -- column rather than a ladder-state value, because the state column is one slot that a pause,
+  -- a takeover, or a stuck seat legitimately takes over -- and a mode that vanished when a DM
+  -- paused for five minutes would silently restore full autonomy on resume.
+  collaborative INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT NOT NULL
 );
 

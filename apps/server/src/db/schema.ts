@@ -1400,6 +1400,8 @@ export const aiDriverControlState = sqliteTable('ai_driver_control_state', {
   lastInput: text('last_input'),
   /** The recovery shape last announced to the table — suppresses re-announcing a steady state. */
   announcedRecovery: text('announced_recovery'),
+  /** #1051 — collaborative handoff: the AI narrates, a DM confirms mechanical commits. */
+  collaborative: integer('collaborative', { mode: 'boolean' }).notNull().default(false),
   updatedAt: text('updated_at').notNull(),
 });
 
