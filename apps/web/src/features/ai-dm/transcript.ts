@@ -175,7 +175,7 @@ export interface SystemEntry {
     | 'withheld'
     // #1043 — the durable session-lifecycle control rows.
     | 'phase'
-    | 'phaseInterrupted
+    | 'phaseInterrupted'
     | 'info';
   /** Optional raw text (e.g. a seeded scene label or a stuck detail) for the page to render. */
   text?: string;
