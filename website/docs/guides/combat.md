@@ -35,12 +35,14 @@ deleting and re-adding it.
 2. **Start** — sorts by initiative and begins round 1, highlighting the current turn.
 3. **Next turn** — advances the highlight; wrapping around bumps the round counter.
 4. **Deal damage / heal** — the ± buttons on each combatant adjust HP (clamped at 0
-   and max). When applying a rolled hit, choose its 5e damage type, whether the
-   target saved for half, and whether it was a critical hit. Campfire applies
-   resistance, vulnerability, and immunity from the target's statblock; criticals
-   double dice only, never the flat modifier. The combat log shows the final adjusted
-   damage (including zero damage from immunity). As DM you can edit anyone; a **player
-   can adjust only their own character's** HP and conditions.
+   and max). Rule-aware controls appear only for adapters that support direct-damage
+   rules (currently D&D 5e); other rule systems use plain HP adjustments. In a
+   supported encounter, choose the rolled hit's damage type, whether the target saved
+   for half, and whether it was a critical hit. Campfire applies resistance,
+   vulnerability, and immunity from the target's statblock; criticals double dice
+   only, never the flat modifier. The combat log shows the final adjusted damage
+   (including zero damage from immunity). As DM you can edit anyone; a **player can
+   adjust only their own character's** HP and conditions.
 5. **Temporary HP** — a separate pool that soaks damage *before* real HP; it doesn't
    stack (you take the higher of the two) and isn't capped by max HP.
 6. **Death saves** — when a player character drops to 0 HP they start **dying**;
