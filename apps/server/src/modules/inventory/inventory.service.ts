@@ -1,11 +1,11 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, count, desc, eq, isNotNull, isNull, lt, sql } from 'drizzle-orm';
 import type { z } from 'zod';
-import { CompendiumSnapshot, InventoryFromCompendium, InventoryItemCreate, InventoryItemUpdate, TreasuryPatch } from '@campfire/schema';
-import type { InventoryItem, Treasury, Role, CompendiumRef } from '@campfire/schema';
+import { CompendiumRef, CompendiumSnapshot, InventoryFromCompendium, InventoryItem, InventoryItemCreate, InventoryItemUpdate, TreasuryPatch } from '@campfire/schema';
+import type { Treasury, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { inventoryItems, inventoryQtyIdempotency, partyTreasury, characters, ruleEntries, rulePacks } from '../../db/schema';
-import { buildCompendiumRef, buildCompendiumSnapshot, compendiumRefKey, computeRuleEntryContentHash, parseCompendiumRef } from '../campaigns/compendium-import';
+import { buildCompendiumRef, buildCompendiumSnapshot, compendiumRefKey, computeRuleEntryContentHash } from '../campaigns/compendium-import';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { AuditService } from '../audit/audit.service';
@@ -49,7 +49,8 @@ function qtyFingerprint(input: InventoryItemUpdateInput): string {
 }
 
 function toDomain(row: typeof inventoryItems.$inferSelect): InventoryItem {
-  const ref = parseCompendiumRef(row.compendiumRef ? safeJson(row.compendiumRef) : null);
+  const parsedRef = CompendiumRef.safeParse(row.compendiumRef ? safeJson(row.compendiumRef) : null);
+  const ref = parsedRef.success ? parsedRef.data : null;
   const parsedSnapshot = row.compendiumSnapshot ? CompendiumSnapshot.safeParse(safeJson(row.compendiumSnapshot)) : null;
   const snapshot = parsedSnapshot?.success ? parsedSnapshot.data : null;
   return {
@@ -64,7 +65,7 @@ function toDomain(row: typeof inventoryItems.$inferSelect): InventoryItem {
     ruleEntryId: row.ruleEntryId ?? null,
     compendiumRef: ref,
     compendiumSnapshot: snapshot,
-    compendiumState: ['linked', 'linked_updated', 'overridden', 'detached'].includes(row.compendiumState ?? '') ? row.compendiumState as InventoryItem['compendiumState'] : null,
+    compendiumState: InventoryItem.shape.compendiumState.safeParse(row.compendiumState).success ? InventoryItem.shape.compendiumState.parse(row.compendiumState) : null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     deletedAt: row.deletedAt ?? null,
@@ -252,8 +253,8 @@ export class InventoryService {
       }
       const candidates = tx.select().from(inventoryItems).where(and(eq(inventoryItems.campaignId, campaignId), eq(inventoryItems.ownerType, ownerType), characterId == null ? isNull(inventoryItems.characterId) : eq(inventoryItems.characterId, characterId), isNull(inventoryItems.deletedAt))).all();
       const existing = candidates.find((candidate) => {
-        const candidateRef = parseCompendiumRef(candidate.compendiumRef ? safeJson(candidate.compendiumRef) : null);
-        return candidateRef != null && compendiumRefKey(candidateRef) === compendiumRefKey(ref);
+        const candidateRef = CompendiumRef.safeParse(candidate.compendiumRef ? safeJson(candidate.compendiumRef) : null);
+        return candidateRef.success && compendiumRefKey(candidateRef.data) === compendiumRefKey(ref);
       });
       if (existing && input.duplicateMode === 'confirm') throw new ConflictException({ code: 'INVENTORY_COMPENDIUM_DUPLICATE', existing: toDomain(existing) });
       const ts = nowIso();

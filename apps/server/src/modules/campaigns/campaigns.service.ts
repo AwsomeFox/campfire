@@ -71,6 +71,17 @@ import {
   participantSupportPreferences,
   campaignPurgeTombstones,
 } from '../../db/schema';
+
+function safeImportedCompendiumSnapshot(value: unknown): string | null {
+  const parsed = CompendiumSnapshot.safeParse(value);
+  if (!parsed.success) return null;
+  if (parsed.data.sourceUrl && !/^https?:\/\//i.test(parsed.data.sourceUrl)) return null;
+  return JSON.stringify(parsed.data);
+}
+function safeImportedCompendiumRef(value: unknown): string | null {
+  const parsed = CompendiumRef.safeParse(value);
+  return parsed.success ? JSON.stringify(parsed.data) : null;
+}
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { persistedFogConcealsPixels } from '../../common/fog';
@@ -2341,11 +2352,11 @@ export class CampaignsService {
             iconSlug: str(item.iconSlug), // issue #307 — preserve icon override on import
             // Numeric ids are local only; retained ref/snapshot keep imports play-safe.
             ruleEntryId: null,
-            compendiumRef: CompendiumRef.safeParse(item.compendiumRef).success ? JSON.stringify(CompendiumRef.parse(item.compendiumRef)) : null,
-            compendiumSnapshot: CompendiumSnapshot.safeParse(item.compendiumSnapshot).success ? JSON.stringify(CompendiumSnapshot.parse(item.compendiumSnapshot)) : null,
+            compendiumRef: safeImportedCompendiumRef(item.compendiumRef),
+            compendiumSnapshot: safeImportedCompendiumSnapshot(item.compendiumSnapshot),
             // A cross-install numeric id cannot be trusted. Keep the snapshot play-safe
             // and surface a detached link rather than pretending it can be refreshed.
-            compendiumState: CompendiumRef.safeParse(item.compendiumRef).success && CompendiumSnapshot.safeParse(item.compendiumSnapshot).success ? 'detached' : null,
+            compendiumState: safeImportedCompendiumRef(item.compendiumRef) && safeImportedCompendiumSnapshot(item.compendiumSnapshot) ? 'detached' : null,
             createdAt: ts,
             updatedAt: ts,
           })
