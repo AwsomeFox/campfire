@@ -303,6 +303,11 @@ export function notificationHref(notification: Notification): string {
       return notification.entityType === 'character' && validId(notification.entityId)
         ? entityHref(campaignId, { type: 'character', id: notification.entityId })
         : `/c/${campaignId}/characters`;
+    // Issue #1640: unlike every other case here, the campaign this notification names is
+    // one the recipient no longer belongs to — routing there would just bounce them straight
+    // back off it (the Layout "lost access" screen). Send them home directly instead.
+    case 'removed_from_campaign':
+      return '/';
     case 'added_to_campaign':
     default:
       return `/c/${campaignId}`;

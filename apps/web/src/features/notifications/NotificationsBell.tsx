@@ -21,6 +21,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import type { Notification, NotificationUnreadCount, TimeFormat } from '@campfire/schema';
 import { parseScheduleNotificationData } from '@campfire/schema';
 import { useAuth } from '../../app/auth';
+import { useCampaigns } from '../../app/CampaignContext';
 import { api, API } from '../../lib/api';
 import { Btn, ErrorNote, Skeleton } from '../../components/ui';
 import { useAnnounce } from '../../components/Announcer';
@@ -192,6 +193,8 @@ function typeIcon(type: Notification['type']): string {
       return 'top-hat';
     case 'added_to_campaign':
       return 'campfire';
+    case 'removed_from_campaign':
+      return 'padlock';
     case 'character_reassigned':
       return 'meeple';
     case 'session_scheduled':
@@ -248,6 +251,7 @@ function BellIcon({ size = 17 }: { size?: number }) {
 
 export function NotificationsProvider({ children }: { children: ReactNode }) {
   const { me, refresh } = useAuth();
+  const { refresh: refreshCampaigns } = useCampaigns();
   const userId = me?.user.id;
   const location = useLocation();
   const navigate = useNavigate();
@@ -277,6 +281,11 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
   // re-subscribe every render).
   const refreshRef = useRef(refresh);
   refreshRef.current = refresh;
+  // Issue #1640 — the campaign list refresh rides the same trigger. `refresh` above fixes
+  // /me (nav/role chrome); this fixes the SEPARATE `GET /campaigns` list the dashboard and
+  // Layout's stale-access check read, which `refresh` does not touch.
+  const refreshCampaignsRef = useRef(refreshCampaigns);
+  refreshCampaignsRef.current = refreshCampaigns;
   // See `nextMembershipSignalState` for what this tracks and why a plain boolean is not
   // enough (a fresh account's own "you were added" notification already makes
   // `membershipChanged` true before any role change ever happens).
@@ -306,16 +315,24 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
    * path — `useMembershipLiveSync` — is unchanged and still fires first).
    *
    * Scenarios this does NOT close: `/c/:id/screen` (the cast display) is mounted outside
-   * Layout and never gets a NotificationsProvider at all; and this only fires for a
-   * signal the server actually sends — `members.service.ts#remove` (removal from a
-   * campaign) does not send an account-wide notification today, only the campaign-scoped
-   * `membership.revoked` SSE frame. See the PR for #1590 for why that is deliberately
-   * out of scope here rather than folded in.
+   * Layout and never gets a NotificationsProvider at all.
+   *
+   * Issue #1640: `members.service.ts#remove` now sends this same account-wide signal
+   * (`removed_from_campaign`, folded into `MEMBERSHIP_NOTIFICATION_TYPES`) — so this path
+   * also closes that gap for a tab with no SSE open on the affected campaign, refreshing
+   * BOTH /me and the campaign list together (a revocation removes a campaign from the list
+   * entirely, unlike a role change). A tab that DOES have the affected campaign open reacts
+   * faster and more precisely via `useMembershipLiveSync`'s `onRevoked` (immediate redirect,
+   * not just a background refresh) — this poll-driven path is the backstop for every OTHER
+   * tab, same division of labor #1590 established for role changes.
    */
   const applyMembershipSignal = useCallback((membershipChanged: boolean, count: number) => {
     const next = nextMembershipSignalState(membershipSignalRef.current, { membershipChanged, count });
     membershipSignalRef.current = next.next;
-    if (next.shouldRefresh) void refreshRef.current();
+    if (next.shouldRefresh) {
+      void refreshRef.current();
+      void refreshCampaignsRef.current();
+    }
   }, []);
 
   const readStoredSnapshot = useCallback((): CountSnapshot | null => {

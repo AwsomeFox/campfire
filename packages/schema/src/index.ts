@@ -2888,6 +2888,11 @@ export const NotificationType = z.enum([
   'note_shared',
   'comment_reply',
   'added_to_campaign',
+  // Issue #1640: membership REVOKED (removed, or left) — as opposed to `added_to_campaign`,
+  // which also covers a role change on a membership you still hold. A different type because
+  // the client reaction differs: a role change re-renders chrome in place, a revocation must
+  // move the user off any page scoped to that campaign (see MEMBERSHIP_NOTIFICATION_TYPES).
+  'removed_from_campaign',
   // Issue #819: exclusive character seat transferred away from (or onto) this member.
   'character_reassigned',
   'session_scheduled',
@@ -2925,13 +2930,23 @@ export type NotificationType = z.infer<typeof NotificationType>;
  * what counts — a type added here without updating a hand-maintained duplicate elsewhere is
  * the failure mode this constant exists to rule out.
  *
- * Deliberately narrow: `added_to_campaign` already covers being added, promoted (including the
- * admin `reassign_owner` path, #1546), and — after #1590 — a DM's own promote/demote of an
- * existing member (issue #437's `members.service.ts#update`). It is reused rather than split
- * into a separate "role changed" type because both describe the same fact a client needs to
- * react to: re-fetch `/me`, the memberships list may be stale.
+ * `added_to_campaign` already covers being added, promoted (including the admin
+ * `reassign_owner` path, #1546), and — after #1590 — a DM's own promote/demote of an existing
+ * member (issue #437's `members.service.ts#update`). It is reused rather than split into a
+ * separate "role changed" type because both describe the same fact a client needs to react to:
+ * re-fetch `/me`, the memberships list may be stale.
+ *
+ * `removed_from_campaign` (issue #1640) is deliberately its OWN type rather than folded into
+ * `added_to_campaign` too: a role change leaves the membership in place (re-render chrome from
+ * fresh `/me` data, stay put), but a revocation removes it entirely — a client sitting on a
+ * route scoped to that campaign must navigate away, not just re-render. Both still belong in
+ * this same list because the account-wide `membershipChanged` discriminator below only needs
+ * to answer "is `/me` possibly stale", not which of the two happened.
  */
-export const MEMBERSHIP_NOTIFICATION_TYPES = ['added_to_campaign'] as const satisfies readonly NotificationType[];
+export const MEMBERSHIP_NOTIFICATION_TYPES = [
+  'added_to_campaign',
+  'removed_from_campaign',
+] as const satisfies readonly NotificationType[];
 
 export const Notification = z.object({
   id: Id,
@@ -2993,7 +3008,7 @@ export const NotificationCategory = z.enum([
   'quests', // quest_updated
   'proposals', // proposal_submitted, proposal_resolved
   'inbox', // inbox_submitted
-  'access', // added_to_campaign, character_reassigned, charter_published — ALWAYS ON (access control)
+  'access', // added_to_campaign, removed_from_campaign, character_reassigned, charter_published — ALWAYS ON (access control)
   'security', // ai_dm_alert, safety_hold — ALWAYS ON (security/recovery)
 ]);
 export type NotificationCategory = z.infer<typeof NotificationCategory>;
@@ -3029,6 +3044,7 @@ export const NOTIFICATION_TYPE_CATEGORY: Record<NotificationType, NotificationCa
   note_shared: 'notes',
   comment_reply: 'comments',
   added_to_campaign: 'access',
+  removed_from_campaign: 'access',
   character_reassigned: 'access',
   session_scheduled: 'schedule',
   session_rsvp: 'schedule',

@@ -1001,6 +1001,48 @@ export class MembersService {
       memberId,
     });
 
+    // Issue #1640: the SSE event above only reaches a browser that already has THIS
+    // campaign's stream open — and closes that stream outright (#527), which is enough for
+    // a tab actively looking at the campaign to react immediately client-side. It reaches
+    // nothing else: a tab on the dashboard, a different campaign, or /admin has no signal at
+    // all that its cached /me memberships (and the campaign list built from them) just went
+    // stale. This mirrors the exact gap #1590/#1634 closed for role changes on
+    // `members.service.ts#update`, reusing the same account-wide notification channel — see
+    // that method's own comment for why an SSE-only signal was never enough on its own.
+    //
+    // `removed_from_campaign` rather than reusing `added_to_campaign`: a role change leaves
+    // the membership in place (re-render chrome from fresh /me, stay put); a revocation
+    // removes it (a route scoped to this campaign must navigate the user away). Both still
+    // discriminate the SAME account-wide `membershipChanged` flag on GET
+    // /notifications/unread-count (see MEMBERSHIP_NOTIFICATION_TYPES) — that flag is computed
+    // from the recipient's OWN unread rows and discloses nothing new; it does not change
+    // shape or scope for this type.
+    //
+    // `allowSelf: true` only for self-leave: the actor and the removed member are the same
+    // person, and the whole point of this signal is reaching OTHER open tabs of theirs — the
+    // default self-suppression (correct for a DM acting on someone ELSE) would silence it
+    // exactly when it is needed. A DM removing SOMEONE ELSE never hits this branch (actor !==
+    // recipient there), so the default suppression still applies for that case as normal.
+    const [campaignRow] = await this.db
+      .select({ name: campaigns.name })
+      .from(campaigns)
+      .where(eq(campaigns.id, campaignId))
+      .limit(1);
+    const campaignName = campaignRow?.name || 'a campaign';
+    await this.notifications.notifyUser(
+      existing.userId,
+      campaignId,
+      actor,
+      {
+        type: 'removed_from_campaign',
+        title: opts?.selfLeave ? `You left ${campaignName}` : `You were removed from ${campaignName}`,
+        entityType: 'campaign',
+        entityId: campaignId,
+        actorName: actor.name,
+      },
+      { allowSelf: opts?.selfLeave === true },
+    );
+
     try {
       await this.audit.log({
         actor: auditActor(actor),

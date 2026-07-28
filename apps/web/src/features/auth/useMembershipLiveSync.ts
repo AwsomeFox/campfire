@@ -7,6 +7,15 @@
  *
  * Optional encounter hooks let Layout reuse this single stream for live-encounter
  * chrome (issue #637) instead of opening a second /campaigns/:id/events socket.
+ *
+ * `onRevoked` (issue #1640) is the other half of membership change: unlike a role change,
+ * a revocation removes the membership entirely, so re-rendering chrome in place is not
+ * enough — the caller (Layout) must move the user off this campaign. Wired to the SSE
+ * stream's `onForbidden`, not to a `membership.revoked` frame: the server never puts that
+ * frame on the data path (it is a control signal that closes the stream instead, #527), so
+ * the reliable client-side observation is "this stream 403'd" rather than "I received a
+ * revocation event". That fires within one reconnect attempt of the stream closing —
+ * effectively immediate for a tab that has this campaign open, no polling wait.
  */
 import { useCallback, useEffect, useRef } from 'react';
 import type { CampaignEvent } from '@campfire/schema';
@@ -21,6 +30,7 @@ export type MembershipLiveSyncOptions = {
   onEncounterChange?: () => void;
   onReconnect?: () => void;
   onStreamRecovery?: () => void;
+  onRevoked?: () => void;
 };
 
 export function useMembershipLiveSync(
@@ -79,5 +89,9 @@ export function useMembershipLiveSync(
     optionsRef.current?.onStreamRecovery?.();
   }, []);
 
-  useCampaignEvents(campaignId, { onEvent, onReconnect, onStreamRecovery });
+  const onForbidden = useCallback(() => {
+    optionsRef.current?.onRevoked?.();
+  }, []);
+
+  useCampaignEvents(campaignId, { onEvent, onReconnect, onStreamRecovery, onForbidden });
 }
