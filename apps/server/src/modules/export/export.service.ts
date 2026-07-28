@@ -8,6 +8,7 @@ import path from 'node:path';
 import { Transform, type Writable } from 'node:stream';
 import { finished, pipeline } from 'node:stream/promises';
 import { eq } from 'drizzle-orm';
+import { ScheduledSessionExport } from '@campfire/schema';
 import type { EncounterEvent, EncounterWithCombatants } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { aiDmSeats, aiScribeConfigs, aiScribeJobs } from '../../db/schema';
@@ -400,7 +401,15 @@ export class ExportService {
       // Issue #813: version authorship + replacer metadata round-trips with remapped ids.
       revisions: revisionList,
       // Issue #436: schedules + RSVPs and session attendance round-trip on import.
-      scheduledSessions: scheduledSessionList,
+      // Issue #1548: `importCampaign` never restores organized-play decoration
+      // (series/venue/room/assignedDm/capacity/event+season keys/ics identity/
+      // occurrence lineage) — only the legacy fields below. Per the maintainer's
+      // ruling on #1548, campaign export/import stays scoped to the campaign, not
+      // install-level scheduling/venue/room resources, so that decoration is
+      // dropped HERE rather than carried and silently discarded on import.
+      // `ScheduledSessionExport` strips it via `.omit(ORGANIZED_PLAY_OMIT)` — the
+      // exact field set import's create literal already never reads.
+      scheduledSessions: ScheduledSessionExport.array().parse(scheduledSessionList),
       sessionAttendance: sessionAttendanceList,
       diceRolls: diceRollList,
       // Issue #1078: AI seat + scribe config (DM-authored steering, NOT runtime counters or provider keys).

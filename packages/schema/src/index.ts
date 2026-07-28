@@ -1432,6 +1432,29 @@ export const ScheduledSessionWithRsvps = ScheduledSession.extend({ rsvps: z.arra
 export type ScheduledSessionWithRsvps = z.infer<typeof ScheduledSessionWithRsvps>;
 
 /**
+ * Campaign-export shape for a scheduled session (issue #1548).
+ *
+ * `CampaignsService.importCampaign` has never restored organized-play decoration —
+ * it inserts scheduled sessions from a closed literal that writes only the legacy
+ * fields (`scheduledAt`, `durationMinutes`, `title`, `location`, `notes`, `status`,
+ * `cancelledAt`, `cancellationReason`), the same "drop install-local/cross-collection
+ * ids" discipline it already applies to `cancelledBy` and `sessionId`. A campaign
+ * export carrying `seriesId`/`venueId`/`roomId`/etc. anyway made an organized-play
+ * campaign's export LOOK like a full backup of its scheduling, when restoring it
+ * silently flattened every occurrence into a one-off — the export promised more than
+ * import could ever deliver. Per the maintainer's ruling on #1548: campaign
+ * export/import cares about the campaign, not install-level scheduling/venue/room
+ * resources, so the fix is to stop exporting decoration import was never going to
+ * restore, rather than teach import to restore it.
+ *
+ * Reuses {@link ORGANIZED_PLAY_OMIT} — the exact field set import already never
+ * reads on the CREATE path — rather than a second hand-maintained list that could
+ * drift from it.
+ */
+export const ScheduledSessionExport = ScheduledSessionWithRsvps.omit(ORGANIZED_PLAY_OMIT);
+export type ScheduledSessionExport = z.infer<typeof ScheduledSessionExport>;
+
+/**
  * Paginated past-schedule list (issue #612). Most-recent ended nights first.
  */
 export const ScheduledSessionListPage = z.object({

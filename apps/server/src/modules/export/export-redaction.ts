@@ -120,13 +120,13 @@ export function collectPrivateIdentifiers(raw: Row): string[] {
   }
   for (const s of asRows(raw.scheduledSessions)) {
     add(s.cancelledBy);
-    // #588: the organized-play running DM. Same id space as `Note.authorUserId`
-    // and as `cancelledBy` directly above — an account identity, not in-fiction
-    // content — so it belongs in the scan for exactly the reason they do. It
-    // arrived with the organized-play columns, after this collector was written;
-    // a field that leaves the install carrying a real user id while sitting
-    // outside the sweep is precisely the gap this function exists to close.
-    add(s.assignedDmUserId);
+    // #588 added `assignedDmUserId` (the organized-play running DM) here as an
+    // account identity to scan, same reasoning as `cancelledBy` above. #1548
+    // removed `assignedDmUserId` from the export entirely (organized-play
+    // decoration import never restores) — `raw.scheduledSessions` rows no
+    // longer carry it, so scanning for it here would be a no-op. Not a coverage
+    // loss: the running DM is a campaign member, so the same id is already
+    // collected via `raw.members[].userId` above.
     for (const rsvp of asRows(s.rsvps)) {
       add(rsvp.userId);
       add(rsvp.userName);
