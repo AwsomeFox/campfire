@@ -299,6 +299,7 @@
         "overageSuffix": "{{n}} overage",
         "byModel": "By model:",
         "unsetModel": "(unset)",
+        "tokensSuffix": "{{n}} tok",
         "footnote": "Set a campaign's budget from its own AI-DM settings, or raise the server cap above. Usage aggregates the per-turn metering, active reservations, and conservative unknown-usage holds."
       },
       "health": {

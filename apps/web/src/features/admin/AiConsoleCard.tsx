@@ -465,7 +465,7 @@ function CampaignUsageTable({ ov }: { ov: AiConsoleOverview }) {
           {ov.usage.byModel.map((m, i) => (
             <span key={m.model || `_${i}`}>
               {i > 0 && ' · '}
-              <span className="text-slate-300">{m.model || t('admin.aiConsole.usageTable.unsetModel')}</span> {fmt(m.tokensUsed)} tok
+              <span className="text-slate-300">{m.model || t('admin.aiConsole.usageTable.unsetModel')}</span> {t('admin.aiConsole.usageTable.tokensSuffix', { n: fmt(m.tokensUsed) })}
             </span>
           ))}
         </p>
