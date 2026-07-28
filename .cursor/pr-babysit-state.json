@@ -6,8 +6,8 @@
       "url": "https://github.com/AwsomeFox/campfire/pull/1659",
       "headBranch": "fix/issue-756",
       "baseBranch": "main",
-      "updatedAt": "2026-07-28T13:07:11Z",
-      "notes": "Head b9f5973e (disable Save while removing; prior review fixes + main sync). All 5 review threads resolved. Awaiting required CI 30361353185."
+      "updatedAt": "2026-07-28T13:27:55Z",
+      "notes": "Head 4f2c3aa1 (merged main ae3e2886 after review follow-ups 32ea4b27/9a68c7b0/b9f5973e). All 8 review threads resolved. Awaiting required CI."
     }
   ]
 }
