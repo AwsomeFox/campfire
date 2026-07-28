@@ -60,47 +60,55 @@ export class CampaignLibraryTaxonomyController {
   constructor(private readonly library: CampaignLibraryService, private readonly access: CampaignAccessService) {}
 
   @Get('tags')
+  @ApiOperation({ summary: 'List campaign library tags (issue #742)' })
   async listTags(@Param('campaignId', ParseIntPipe) campaignId: number, @CurrentUser() user: RequestUser) {
     await this.access.requireMember(user, campaignId);
     return this.library.listTags(campaignId);
   }
 
   @Post('tags')
+  @ApiOperation({ summary: 'Create a campaign library tag (issue #742)' })
   async createTag(@Param('campaignId', ParseIntPipe) campaignId: number, @Body() body: CampaignLibraryTagCreateDto, @CurrentUser() user: RequestUser, @Res({ passthrough: true }) res: Response) {
     const role = await this.access.requireRole(user, campaignId, 'dm'); res.status(201);
     return this.library.createTag(campaignId, CampaignLibraryTagCreate.parse(body), user, role);
   }
 
   @Patch('tags/:id')
+  @ApiOperation({ summary: 'Update a campaign library tag (issue #742)' })
   async updateTag(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('id', ParseIntPipe) id: number, @Body() body: CampaignLibraryTagUpdateDto, @CurrentUser() user: RequestUser) {
     const role = await this.access.requireRole(user, campaignId, 'dm');
     return this.library.updateTag(campaignId, id, body, user, role);
   }
 
   @Delete('tags/:id')
+  @ApiOperation({ summary: 'Delete a campaign library tag (issue #742)' })
   async removeTag(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const role = await this.access.requireRole(user, campaignId, 'dm'); await this.library.removeTag(campaignId, id, user, role); return { ok: true };
   }
 
   @Get('collections')
+  @ApiOperation({ summary: 'List campaign library collections (issue #742)' })
   async listCollections(@Param('campaignId', ParseIntPipe) campaignId: number, @CurrentUser() user: RequestUser) {
     await this.access.requireMember(user, campaignId);
     return this.library.listCollections(campaignId);
   }
 
   @Post('collections')
+  @ApiOperation({ summary: 'Create a campaign library collection (issue #742)' })
   async createCollection(@Param('campaignId', ParseIntPipe) campaignId: number, @Body() body: CampaignLibraryCollectionCreateDto, @CurrentUser() user: RequestUser, @Res({ passthrough: true }) res: Response) {
     const role = await this.access.requireRole(user, campaignId, 'dm'); res.status(201);
     return this.library.createCollection(campaignId, CampaignLibraryCollectionCreate.parse(body), user, role);
   }
 
   @Patch('collections/:id')
+  @ApiOperation({ summary: 'Update a campaign library collection (issue #742)' })
   async updateCollection(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('id', ParseIntPipe) id: number, @Body() body: CampaignLibraryCollectionUpdateDto, @CurrentUser() user: RequestUser) {
     const role = await this.access.requireRole(user, campaignId, 'dm');
     return this.library.updateCollection(campaignId, id, body, user, role);
   }
 
   @Delete('collections/:id')
+  @ApiOperation({ summary: 'Delete a campaign library collection (issue #742)' })
   async removeCollection(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const role = await this.access.requireRole(user, campaignId, 'dm'); await this.library.removeCollection(campaignId, id, user, role); return { ok: true };
   }
@@ -119,42 +127,49 @@ export class CampaignLibrarySearchController {
   }
 
   @Post('bulk')
+  @ApiOperation({ summary: 'Apply an atomic campaign library bulk edit (issue #742)' })
   async bulk(@Param('campaignId', ParseIntPipe) campaignId: number, @Body() body: unknown, @CurrentUser() user: RequestUser) {
     const role = await this.access.requireRole(user, campaignId, 'dm');
     return this.library.bulk(campaignId, body, user, role);
   }
 
   @Post('bulk/:operationId/undo')
+  @ApiOperation({ summary: 'Undo a campaign library bulk edit (issue #742)' })
   async undo(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('operationId', ParseIntPipe) operationId: number, @CurrentUser() user: RequestUser) {
     const role = await this.access.requireRole(user, campaignId, 'dm');
     return this.library.undoBulk(campaignId, operationId, user, role);
   }
 
   @Get('templates')
+  @ApiOperation({ summary: 'List campaign library entity templates (issue #742)' })
   async listTemplates(@Param('campaignId', ParseIntPipe) campaignId: number, @Query('archived') archived: string | undefined, @CurrentUser() user: RequestUser) {
     await this.access.requireRole(user, campaignId, 'dm');
     return this.library.listTemplates(campaignId, archived === 'true');
   }
 
   @Post('templates')
+  @ApiOperation({ summary: 'Save a campaign library entity template (issue #742)' })
   async saveTemplate(@Param('campaignId', ParseIntPipe) campaignId: number, @Body() body: unknown, @CurrentUser() user: RequestUser, @Res({ passthrough: true }) res: Response) {
     const role = await this.access.requireRole(user, campaignId, 'dm'); res.status(201);
     return this.library.saveTemplate(campaignId, body, user, role);
   }
 
   @Post('templates/:templateId/instantiate')
+  @ApiOperation({ summary: 'Instantiate a campaign library entity template (issue #742)' })
   async instantiateTemplate(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('templateId', ParseIntPipe) templateId: number, @Body() body: unknown, @CurrentUser() user: RequestUser, @Res({ passthrough: true }) res: Response) {
     const role = await this.access.requireRole(user, campaignId, 'dm'); res.status(201);
     return this.library.instantiateTemplate(campaignId, templateId, body, user, role);
   }
 
   @Post('templates/:templateId/archive')
+  @ApiOperation({ summary: 'Archive a campaign library entity template (issue #742)' })
   async archiveTemplate(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('templateId', ParseIntPipe) templateId: number, @CurrentUser() user: RequestUser) {
     const role = await this.access.requireRole(user, campaignId, 'dm');
     return this.library.archiveTemplate(campaignId, templateId, user, role);
   }
 
   @Post('entities/:entityType/:entityId/duplicate')
+  @ApiOperation({ summary: 'Duplicate a campaign library entity (issue #742)' })
   async duplicate(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('entityType') entityType: string, @Param('entityId', ParseIntPipe) entityId: number, @Body() body: unknown, @CurrentUser() user: RequestUser, @Res({ passthrough: true }) res: Response) {
     const role = await this.access.requireRole(user, campaignId, 'dm'); res.status(201);
     return this.library.duplicateEntity(campaignId, LibraryEntityType.parse(entityType), entityId, body, user, role);
