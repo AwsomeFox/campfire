@@ -39,6 +39,17 @@ import {
   // routed through here rather than re-implemented, so the standalone spend path and the
   // apply_action path cannot drift apart on what "overspend" means.
   applySpellSlotDelta,
+  // #1637 — the adapter-owned action-economy model (#413/#618): `actionEconomyForAdapter`
+  // resolves the per-slot max the same way the turn workspace and `updateCombatantTurnState`
+  // already do, so this resolver doesn't invent a second notion of "how many actions". The
+  // legendary-action slot is the one exception the adapter model doesn't cover (it's a
+  // per-MONSTER capability, not a per-system one) — `LEGENDARY_ACTION_SLOT` /
+  // `LEGENDARY_ACTIONS_PER_ROUND` / `statblockSectionHasEntries` are the exact same trio
+  // `updateCombatantTurnState` already uses to bound it.
+  actionEconomyForAdapter,
+  LEGENDARY_ACTION_SLOT,
+  LEGENDARY_ACTIONS_PER_ROUND,
+  statblockSectionHasEntries,
   type ActionRollFn,
   type CharacterAction,
   type OutcomeBranch,
@@ -186,6 +197,37 @@ export class ActionResolverService {
     const encounter = this.db.select({ campaignId: encounters.campaignId }).from(encounters).where(eq(encounters.id, row.encounterId)).get();
     const entry = this.db.select({ dataJson: ruleEntries.dataJson }).from(ruleEntries).where(and(eq(ruleEntries.id, row.ruleEntryId), encounter ? or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, encounter.campaignId)) : isNull(ruleEntries.campaignId))).get();
     return entry ? fromJsonText<Record<string, unknown>>(entry.dataJson, {}) : null;
+  }
+
+  /**
+   * The maximum uses of one action-economy slot this actor has available (issue #1637).
+   *
+   * `null` means "not a slot this resolver can bound" — a `cost.slot` key the adapter's own
+   * {@link actionEconomyForAdapter} model doesn't declare, and that isn't the legendary-action
+   * slot either. Refusing to invent a cap for an unrecognised key follows the same "refuse
+   * rather than guess" rule this resolver already applies elsewhere (an unknown AC, an unknown
+   * hit-die size): a wrong invented limit could reject a legitimate homebrew slot key that
+   * predates this check, which is worse than leaving it unbounded until the adapter (or a
+   * future issue) actually declares one.
+   *
+   * The legendary-action slot is the one key the adapter model deliberately does NOT cover —
+   * it is a per-MONSTER capability (does THIS statblock have a Legendary Actions section?),
+   * not a per-system one — so it is resolved the exact same way `updateCombatantTurnState`
+   * (`encounters.service.ts`, issue #618) already does: `LEGENDARY_ACTIONS_PER_ROUND` when the
+   * mapped statblock has entries, 0 (not null — a monster WITHOUT legendary actions has none,
+   * it does not get to spend them unbounded) otherwise. Kept in exact parity with that
+   * precedent rather than reinvented, so the two enforcement points cannot drift apart on what
+   * "how many legendary actions" means.
+   */
+  private actionEconomySlotMax(actor: typeof combatants.$inferSelect, adapter: RuleSystemAdapter, slot: string): number | null {
+    if (slot === LEGENDARY_ACTION_SLOT) {
+      const data = this.statblockData(actor);
+      if (!data) return 0;
+      const mapped = adapter.mapStatblock(data);
+      return statblockSectionHasEntries(mapped.legendaryActions) ? LEGENDARY_ACTIONS_PER_ROUND : 0;
+    }
+    const declared = actionEconomyForAdapter(adapter).slots.find((s) => s.key === slot);
+    return declared ? declared.max : null;
   }
 
   /** A target's AC / primary-defence number, or null when unknown (caller must not invent one). */
@@ -850,7 +892,8 @@ export class ActionResolverService {
     const round = encounter.round;
     const chainId = `chain-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     const performedBy = this.performedByFrom(user, role);
-    const ruleSystem = this.adapterForCampaign(encounter.campaignId).id;
+    const adapter = this.adapterForCampaign(encounter.campaignId);
+    const ruleSystem = adapter.id;
     const undoTargets: ActionUndoToken['targets'] = [];
     let concentrationBefore: string | null = null;
     let pendingConcentrationChecksBefore: PendingConcentrationCheck[] = [];
@@ -906,6 +949,33 @@ export class ActionResolverService {
         const actorTurnStateBefore = CombatantTurnState.parse(
           fromJsonText<unknown>(actorBeforeTargets.turnState, null) ?? {},
         );
+        // #1637 — VALIDATE THE ACTION-ECONOMY SPEND FIRST too, same convention as the spell-slot
+        // check above and for the same reason: before any target consequence is written, not
+        // late-and-unwind. Worse than #1571's bug (a silent CLAMP that at least kept the stored
+        // value legal): this had NO check at all — `turnState.used[costSlot]` just grew past the
+        // slot's max forever, so an actor could "spend" an action/bonus/reaction it did not have,
+        // repeatedly, and the sheet recorded a value out of range rather than a rejected spend.
+        if (resolution.costSlot && resolution.costCount > 0) {
+          const usedBefore = actorTurnStateBefore.used[resolution.costSlot] ?? 0;
+          const max = this.actionEconomySlotMax(actor, adapter, resolution.costSlot);
+          // `max === null`: an unrecognised slot key — see actionEconomySlotMax's doc comment
+          // for why that is deliberately NOT bounded rather than guessed at.
+          if (max !== null && usedBefore + resolution.costCount > max) {
+            const remaining = Math.max(0, max - usedBefore);
+            // Same shape #1570/#1571 introduced for spell slots (`code`/`message` plus
+            // `remaining`/`max`) so the caller — an AI Driver as often as a human — can
+            // self-correct (a different action, or a new turn) instead of retrying blind.
+            throw new BadRequestException({
+              code: 'action_economy_exhausted',
+              message:
+                `"${resolution.actionName}" costs ${resolution.costCount} ${resolution.costSlot}` +
+                `${resolution.costCount === 1 ? '' : 's'}, but only ${remaining} of ${max} remain this turn.`,
+              slot: resolution.costSlot,
+              remaining,
+              max,
+            });
+          }
+        }
         concentrationBefore = actorTurnStateBefore.concentration;
         pendingConcentrationChecksBefore = actorTurnStateBefore.pendingConcentrationChecks.map(
           (check) => ({ ...check }),
@@ -1054,6 +1124,8 @@ export class ActionResolverService {
       }
 
       // Spend the actor's resources: action-economy slot, spell slot, concentration.
+      // #1637 — the action-economy spend, like spellSlotSpend, was already validated at the top
+      // of this transaction, before any consequence above was written — this is just the write.
       const actorFresh = tx.select().from(combatants).where(eq(combatants.id, actor.id)).get();
       if (actorFresh) {
         const turnState = CombatantTurnState.parse(fromJsonText<unknown>(actorFresh.turnState, null) ?? {});
@@ -1186,6 +1258,13 @@ export class ActionResolverService {
         }
       }
       // Refund the actor's resources.
+      // #1637 review: this is the mirror image of the apply-side spend, and was ALREADY correct
+      // — a refund can only ever SUBTRACT from `used`, and `Math.max(0, ...)` already floors it
+      // at zero, so there is no "goes out of range" direction here the way the unguarded spend
+      // had. This matches `applySpellSlotDelta`'s own asymmetry (spend errors, restore clamps —
+      // see packages/schema/src/spell-slots.ts): a restore cannot invent a slot, so refusing an
+      // overshoot would be noise, not protection. No change needed; documented so a future
+      // reader does not have to re-derive that this was checked.
       const actorFresh = tx.select().from(combatants).where(eq(combatants.id, actor.id)).get();
       if (actorFresh) {
         const turnState = CombatantTurnState.parse(fromJsonText<unknown>(actorFresh.turnState, null) ?? {});

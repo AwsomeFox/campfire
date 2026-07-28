@@ -200,6 +200,63 @@ describe('action resolver (real SQLite, service layer)', () => {
     }
   });
 
+  it('#1637: an actor with no action remaining cannot spend one through apply_action — legible rejection, not a silent overwrite', () => {
+    const { orm, service, encounterId, actor, drake } = seed();
+    // The actor already spent their one 5e action this turn.
+    orm.update(combatants).set({ turnState: JSON.stringify({ used: { action: 1 } }) }).where(eq(combatants.id, actor)).run();
+
+    let threw: unknown;
+    try {
+      service.resolve(encounterId, ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: true }), alice, 'player');
+    } catch (e) {
+      threw = e;
+    }
+    expect(threw).toBeDefined();
+    const body = (threw as { getResponse?: () => unknown }).getResponse?.();
+    expect(body).toMatchObject({ code: 'action_economy_exhausted', slot: 'action', remaining: 0, max: 1 });
+
+    // Nothing was written: no damage landed, and `used.action` did not grow past its max.
+    expect(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.hpCurrent).toBe(60);
+    const actorAfter = JSON.parse(orm.select().from(combatants).where(eq(combatants.id, actor)).get()!.turnState ?? '{}');
+    expect(actorAfter.used.action).toBe(1);
+  });
+
+  it('#1637: legendary-action spend is bounded by the MONSTER statblock, not a fixed constant — a drake with none cannot spend any', () => {
+    const { orm, service, encounterId, drake } = seed();
+    // The drake's statblock (dataJson: { armor_class, hit_points, damage_resistances }) has no
+    // legendaryActions section at all, so its legendary-action max is 0 — spending even the
+    // first one must be rejected, mirroring encounters.service.ts's updateCombatantTurnState
+    // precedent for the same slot (issue #618): a monster WITHOUT legendary actions does not
+    // get to spend them unbounded.
+    let threw: unknown;
+    try {
+      service.resolve(
+        encounterId,
+        ActionResolveRequest.parse({
+          actorCombatantId: drake,
+          actionName: 'Tail Slam',
+          spec: {
+            mode: 'attack',
+            attack: { bonus: '+5' },
+            cost: { slot: 'legendary', count: 1 },
+            targets: { count: 0, allow: 'enemy' },
+            outcomes: {},
+          },
+          targetIds: [],
+          commit: true,
+        }),
+        dmUser,
+        'dm',
+      );
+    } catch (e) {
+      threw = e;
+    }
+    expect(threw).toBeDefined();
+    const body = (threw as { getResponse?: () => unknown }).getResponse?.();
+    expect(body).toMatchObject({ code: 'action_economy_exhausted', slot: 'legendary', remaining: 0, max: 0 });
+    expect(JSON.parse(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.turnState ?? '{}').used?.legendary ?? 0).toBe(0);
+  });
+
   it('OSR descending-AC attack evidence shows the effective ascending threshold, not native descending AC as the threshold', () => {
     const { orm, service, encounterId, actor, drake } = seed({ ruleSystem: 'basic-fantasy' });
     const target = orm.select().from(combatants).where(eq(combatants.id, drake)).get()!;
