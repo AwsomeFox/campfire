@@ -6,8 +6,8 @@
       "url": "https://github.com/AwsomeFox/campfire/pull/1655",
       "headBranch": "fix/issue-742",
       "baseBranch": "main",
-      "updatedAt": "2026-07-28T11:55:00Z",
-      "notes": "Head 950bb962: lint, Codex, Devin 409, Devin type-facet fixes. All known review threads resolved. Awaiting full CI green to merge."
+      "updatedAt": "2026-07-28T12:20:00Z",
+      "notes": "Head 3709832e: audit taxonomy CRUD + scoped bulk undo restore. All known review threads resolved. Local library e2e 18/18. Awaiting CI green to merge."
     }
   ]
 }
