@@ -1,0 +1,14 @@
+{
+  "tracked": [
+    {
+      "pr": 1689,
+      "repo": "AwsomeFox/campfire",
+      "url": "https://github.com/AwsomeFox/campfire/pull/1689",
+      "branch": "fix/issue-1685",
+      "title": "fix(a11y): scope PlayerDisplayPage's injected CSS and stop the HP-colour drift",
+      "status": "babysitting",
+      "updatedAt": "2026-07-28T16:32:00Z",
+      "notes": "Primary tracker cursor/pull-request-babysitting-74e0. Review follow-up 3c4b96c addresses portal exit-pin + chip base classes; CI failing after that commit."
+    }
+  ]
+}
