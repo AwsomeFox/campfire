@@ -1889,7 +1889,23 @@ export class OrganizedPlayService {
         if (conflicts.length > 0 && !input.force) throw new SeriesConflictSignal(conflicts);
         rawConflicts = conflicts;
       }
-      if (kind === null) return;
+      if (kind === null) {
+        // Idempotent retry: skip conflict probe results, ledger, SEQUENCE bump,
+        // and notifications. Still back-fill a missing lineage anchor on legacy
+        // rows adopted into a series without one — that write does not change
+        // the schedule the client sent and cannot create a new overlap.
+        if (existing.originalScheduledAt == null) {
+          tx.update(scheduledSessions)
+            .set({
+              originalScheduledAt: existing.scheduledAt,
+              updatedAt: ts,
+            })
+            .where(eq(scheduledSessions.id, id))
+            .run();
+          existing = { ...existing, originalScheduledAt: existing.scheduledAt, updatedAt: ts };
+        }
+        return;
+      }
       tx.update(scheduledSessions)
         .set({
           scheduledAt,
@@ -1900,8 +1916,8 @@ export class OrganizedPlayService {
           venueId,
           // Set once, then preserved: the FIRST materialized instant is the
           // lineage anchor, so a twice-moved night still points at where it began.
-          // Stamped even on a no-op, which REPAIRS a legacy row adopted into a
-          // series with no anchor rather than leaving it without one.
+          // Missing anchors on no-op retries are repaired on the early-return
+          // path above without probing or filing a ledger entry.
           originalScheduledAt: existing.originalScheduledAt ?? existing.scheduledAt,
           ...(movedTime ? { icsSequence: existing.icsSequence + 1 } : {}),
           updatedAt: ts,
