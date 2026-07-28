@@ -495,24 +495,6 @@ export default function CompendiumPage() {
           <Card>
             <Skeleton lines={4} />
           </Card>
-        ) : noRuleSystemChosen ? (
-          <div className="card items-center text-center" style={{ padding: 24 }}>
-            <p style={{ margin: 0, fontSize: 13, color: 'var(--color-neutral-200)' }}>
-              No rule system chosen for this campaign.
-            </p>
-            <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 12 }}>
-              Pick one in Settings, or ask an admin to install a pack.
-            </p>
-          </div>
-        ) : noPacksInstalled ? (
-          <div className="card items-center text-center" style={{ padding: 24 }}>
-            <p style={{ margin: 0, fontSize: 13, color: 'var(--color-neutral-200)' }}>
-              No rule system installed for this campaign yet.
-            </p>
-            <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 12 }}>
-              A server admin can install one from Server admin → Rule systems, then pick it in Campaign settings.
-            </p>
-          </div>
         ) : (
           <>
             {error && (

@@ -69,7 +69,7 @@ export default function ReaderPage() {
     setSavingIcon(true);
     setIconError(null);
     try {
-      const updated = await api.patch<RuleEntry>(`${API}/rules/entries/${entry.id}`, { iconSlug: slug });
+      const updated = await api.patch<RuleEntry>(entry.campaignId ? `${API}/campaigns/${id}/homebrew/${entry.id}` : `${API}/rules/entries/${entry.id}`, entry.campaignId ? { iconSlug: slug, expectedUpdatedAt: entry.updatedAt } : { iconSlug: slug });
       setEntry(updated);
     } catch (err) {
       setIconError(translateApiError(err, t, { fallbackKey: 'compendium.errors.updateIcon' }));
