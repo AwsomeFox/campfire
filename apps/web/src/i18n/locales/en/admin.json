@@ -231,6 +231,87 @@
       },
       "previewStale": "These values changed since the preview. Run the dry run again so Apply acts on what you were shown."
     },
+    "aiConsole": {
+      "title": "AI console",
+      "statusEnabled": "AI enabled",
+      "statusPaused": "AI paused",
+      "intro": "Opt in, cap spend, watch usage, and stop everything with one switch. The kill switch pauses <0>all</0> AI server-wide instantly — no new turn can start while it's off.",
+      "killSwitch": {
+        "heading": "Server-wide AI",
+        "enabledBody": "AI is enabled. Turn this off to pause every campaign immediately.",
+        "pausedBody": "AI is paused server-wide. Turn on to opt the server in.",
+        "onButton": "On — click to pause",
+        "offButton": "Paused — click to enable"
+      },
+      "usage": {
+        "tokensUsed": "Tokens used",
+        "turns": "Turns",
+        "activeSeats": "Active seats",
+        "serverCap": "Server cap",
+        "unlimited": "Unlimited",
+        "leftSuffix": "{{n}} left",
+        "ofTotal": "of {{n}}"
+      },
+      "caps": {
+        "heading": "Budgets & cost caps",
+        "feedbackSubject": "Server token cap",
+        "body": "A server-wide <0>hard</0> token cap across every campaign. 0 = unlimited. Once the total metered tokens reach it, new turns are refused with a clear reason (per-campaign budgets are set per row below).",
+        "label": "Server token cap",
+        "saved": "Saved.",
+        "save": "Save cap"
+      },
+      "providerDefault": {
+        "heading": "Default AI provider",
+        "ready": "Ready",
+        "credentialMissing": "Credential missing",
+        "notSet": "Not set",
+        "body": "One set of credentials, one bill. This is the server default every campaign falls back to unless a DM sets a per-campaign override. The API key is <0>write-only</0> — it is never shown back, only its last 4 digits. Setting it here is all a DM needs to run AI (no per-campaign key required)."
+      },
+      "allowlist": {
+        "heading": "Model allowlist",
+        "feedbackSubject": "Model allowlist",
+        "effectiveLabel": "Effective state:",
+        "effectiveAriaLabel": "Effective allowlist state",
+        "unrestricted": "Unrestricted — any model ID is allowed.",
+        "restrictedOne": "Restricted to 1 model ID.",
+        "restrictedSome": "Restricted to {{n}} model IDs.",
+        "body": "When restricted, campaign provider overrides may only select a model on this list. Requires a configured server-default provider.",
+        "inputLabel": "Allowed model IDs",
+        "help": "Separate model IDs with commas or line breaks. Leave blank to allow any model ID.",
+        "fixErrors": "Fix the following before saving:",
+        "errEntryLength": "Entry {{n}} is {{length}} characters; model IDs can be at most {{max}} characters.",
+        "errWhitespace": "Entry {{n}} contains whitespace. Separate model IDs with a comma or line break.",
+        "errDuplicate": "Entry {{n}} duplicates entry {{first}}: “{{model}}”.",
+        "errTooMany": "The allowlist has {{n}} entries; it can contain at most {{max}}.",
+        "saved": "Saved.",
+        "save": "Save allowlist"
+      },
+      "usageTable": {
+        "heading": "Usage by campaign",
+        "empty": "No campaign has configured an AI-DM seat yet. Once a DM enables one, its usage and budget show up here.",
+        "colCampaign": "Campaign",
+        "colModel": "Model",
+        "colSeat": "Seat",
+        "colUsedBudget": "Used / budget",
+        "colTurns": "Turns",
+        "seatOn": "On",
+        "seatOff": "Off",
+        "reservedSuffix": "{{n}} reserved",
+        "unknownSuffix": "{{n}} unknown",
+        "overageSuffix": "{{n}} overage",
+        "byModel": "By model:",
+        "unsetModel": "(unset)",
+        "tokensSuffix": "{{n}} tok",
+        "footnote": "Set a campaign's budget from its own AI-DM settings, or raise the server cap above. Usage aggregates the per-turn metering, active reservations, and conservative unknown-usage holds."
+      },
+      "health": {
+        "heading": "Provider health",
+        "testAll": "Test all",
+        "testing": "Testing…",
+        "none": "No AI provider is configured yet.",
+        "serverDefault": "Server default"
+      }
+    },
     "exportRequests": {
       "heading": "Export requests",
       "hint": "Requests you or another operator raised through the campaign catalog, and how each campaign's DM answered. Approving records consent only — the export itself is still produced by the DM through the campaign's own export tools.",

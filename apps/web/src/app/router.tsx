@@ -206,6 +206,10 @@ export const router = createBrowserRouter(
             element: lazyPage(() => import('../features/compendium/ReaderPage')),
           },
           {
+            path: '/c/:campaignId/library',
+            element: lazyPage(() => import('../features/library/CampaignLibraryPage')),
+          },
+          {
             path: '/c/:campaignId/settings',
             element: lazyPage(() => import('../features/settings/CampaignSettingsPage')),
           },
