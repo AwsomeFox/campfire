@@ -11,7 +11,7 @@ import { useTranslation } from 'react-i18next';
 import { useEffect, useId, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useNavigate, useParams } from 'react-router-dom';
-import { api, API, translateApiError } from '../../lib/api';
+import { api, API, ApiError, translateApiError } from '../../lib/api';
 import type { Character, RuleEntry, RulePack } from '@campfire/schema';
 import { Card, ErrorNote, Skeleton, Btn } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
@@ -57,6 +57,7 @@ export default function ReaderPage() {
   const [qty, setQty] = useState('1');
   const [notes, setNotes] = useState('');
   const acquireTitleId = useId();
+  const [revisions, setRevisions] = useState<Array<{ id: number; createdAt: string; actor: string }> | null>(null);
 
   async function saveIcon(slug: string) {
     if (!entry) return;
@@ -72,6 +73,9 @@ export default function ReaderPage() {
       setSavingIcon(false);
     }
   }
+  async function duplicateHomebrew() { if (!entry) return; const copy = await api.post<RuleEntry>(`${API}/campaigns/${id}/homebrew/${entry.id}/duplicate`, {}); navigate(`/c/${id}/compendium/${copy.id}`); }
+  async function archiveHomebrew() { if (!entry) return; await api.post(`${API}/campaigns/${id}/homebrew/${entry.id}/archive`, {}); navigate(`/c/${id}/compendium`); }
+  async function showRevisions() { if (!entry) return; setRevisions(await api.get(`${API}/campaigns/${id}/homebrew/${entry.id}/revisions`)); }
 
   useEffect(() => {
     if (!entryId) return;
@@ -84,7 +88,10 @@ export default function ReaderPage() {
           // Campaign route is the privacy boundary for homebrew. It returns no
           // cross-campaign/private entry by id; global entries retain the legacy
           // reader fallback below for installed packs.
-          api.get<RuleEntry>(`${API}/campaigns/${id}/homebrew/${entryId}`).catch(() => api.get<RuleEntry>(`${API}/rules/entries/${entryId}`)),
+          api.get<RuleEntry>(`${API}/campaigns/${id}/homebrew/${entryId}`).catch((err: unknown) => {
+            if (err instanceof ApiError && err.status === 404) return api.get<RuleEntry>(`${API}/rules/entries/${entryId}`);
+            throw err;
+          }),
           api.get<RulePack[]>(`${API}/rules/packs`).catch(() => []),
         ]);
         if (!cancelled) {
@@ -172,8 +179,10 @@ export default function ReaderPage() {
                 )}
               </span>
             )}
+            {entry.campaignId && isDm && canDmWrite && <span className="flex gap-1.5" style={{ marginLeft: 'auto' }}><Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={duplicateHomebrew}>Duplicate</Btn><Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={archiveHomebrew}>Archive</Btn><Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={showRevisions}>Revisions</Btn></span>}
           </div>
           {iconError && <ErrorNote message={iconError} />}
+          {revisions && <div className="text-muted" style={{ fontSize: 12 }}>{revisions.map((revision) => <p key={revision.id} style={{ margin: 0 }}>{revision.createdAt} · {revision.actor}</p>)}</div>}
           {/* Monster entries carry an empty `body` — their stats live in `dataJson`
               (issue #142). Render the structured statblock when there's no prose body
               and the JSON has renderable fields; otherwise fall back to the markdown

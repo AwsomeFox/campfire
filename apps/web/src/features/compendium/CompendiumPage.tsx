@@ -134,6 +134,7 @@ export default function CompendiumPage() {
   const [rawMode, setRawMode] = useState(false);
   const [draft, setDraft] = useState({ name: '', slug: '', type: 'spell', summary: '', body: '', rightsStatus: 'private_original', license: '', attribution: '', sourceUrl: '', dataJson: '{}' });
   const [authorError, setAuthorError] = useState<string | null>(null);
+  const [structuredData, setStructuredData] = useState<Record<string, string>>({ level: '', school: '', castingTime: '', range: '', duration: '', ac: '', hp: '', cr: '', abilities: '', actions: '', category: '', rarity: '', weight: '', value: '' });
   const [importPreview, setImportPreview] = useState<any[] | null>(null);
   const [importEntries, setImportEntries] = useState<any[] | null>(null);
   const [importStrategy, setImportStrategy] = useState<'skip' | 'replace' | 'duplicate'>('skip');
@@ -333,7 +334,9 @@ export default function CompendiumPage() {
     let data: Record<string, unknown> | undefined;
     try { data = JSON.parse(draft.dataJson); if (!data || Array.isArray(data) || typeof data !== 'object') throw new Error(); }
     catch { setAuthorError('Raw data must be a JSON object.'); return; }
-    const payload = { ...draft, data: rawMode ? undefined : data, dataJson: rawMode ? draft.dataJson : undefined };
+    const structured = Object.fromEntries(Object.entries(structuredData).filter(([, value]) => value.trim() !== ''));
+    if (draft.type === 'monster' && structured.actions) { try { JSON.parse(structured.actions); } catch { setAuthorError('Monster actions must be a JSON array.'); return; } }
+    const payload = { ...draft, data: rawMode ? undefined : structured, dataJson: rawMode ? draft.dataJson : undefined };
     try {
       const proposed = !isDm;
       await api.post(`${API}/campaigns/${id}/homebrew${proposed ? '?proposed=true' : ''}`, payload);
@@ -398,8 +401,10 @@ export default function CompendiumPage() {
             <input className="input" placeholder="Summary" value={draft.summary} onChange={(e) => setDraft({ ...draft, summary: e.target.value })} />
             <textarea className="input" placeholder="Markdown details" value={draft.body} onChange={(e) => setDraft({ ...draft, body: e.target.value })} />
             <label><input type="checkbox" checked={rawMode} onChange={(e) => setRawMode(e.target.checked)} /> Raw JSON data</label>
-            {!rawMode && <p className="text-muted" style={{ margin: 0, fontSize: 12 }}>{draft.type === 'spell' ? 'Structured spell fields: level, school, casting time, range, duration.' : draft.type === 'monster' ? 'Structured monster fields: AC, HP, CR, abilities, actions.' : draft.type === 'item' ? 'Structured item fields: category, rarity, weight, value.' : 'Structured fields.'}</p>}
-            <textarea className="input" aria-label="Homebrew JSON object" value={draft.dataJson} onChange={(e) => setDraft({ ...draft, dataJson: e.target.value })} />
+            {!rawMode && <div className="flex gap-2 flex-wrap" aria-label="Structured homebrew fields">
+              {(draft.type === 'spell' ? [['level', 'Level'], ['school', 'School'], ['castingTime', 'Casting time'], ['range', 'Range'], ['duration', 'Duration']] : draft.type === 'monster' ? [['ac', 'AC'], ['hp', 'HP'], ['cr', 'CR'], ['abilities', 'Abilities'], ['actions', 'Actions (JSON array)']] : draft.type === 'item' ? [['category', 'Category'], ['rarity', 'Rarity'], ['weight', 'Weight'], ['value', 'Value']] : []).map(([key, label]) => <input key={key} className="input" aria-label={label} placeholder={label} value={structuredData[key] ?? ''} onChange={(e) => setStructuredData({ ...structuredData, [key]: e.target.value })} />)}
+            </div>}
+            {rawMode && <textarea className="input" aria-label="Homebrew JSON object" value={draft.dataJson} onChange={(e) => setDraft({ ...draft, dataJson: e.target.value })} />}
             <select className="input" value={draft.rightsStatus} onChange={(e) => setDraft({ ...draft, rightsStatus: e.target.value })}><option value="private_original">Private original — no license required</option><option value="permission_granted">Permission granted</option><option value="open_licensed">Open licensed</option></select>
             {draft.rightsStatus !== 'private_original' && <><input className="input" placeholder="License" value={draft.license} onChange={(e) => setDraft({ ...draft, license: e.target.value })} /><input className="input" placeholder="Attribution" value={draft.attribution} onChange={(e) => setDraft({ ...draft, attribution: e.target.value })} /><input className="input" placeholder="https:// source URL" value={draft.sourceUrl} onChange={(e) => setDraft({ ...draft, sourceUrl: e.target.value })} /></>}
             {authorError && <ErrorNote message={authorError} />}
