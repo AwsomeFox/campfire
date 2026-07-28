@@ -62,6 +62,7 @@ import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { fromJsonText, toJsonText } from '../../common/json';
 import {
+  conditionWriteSetFromInstances,
   conditionWriteSetFromNames,
   sheetConditionWriteSetFromNames,
   legacyConditionInstance,
@@ -615,7 +616,7 @@ export class CharactersService {
   private async syncActiveCombatantConditions(
     characterId: number,
     conditionsJson: string,
-    opts?: { campaignId?: number },
+    opts?: { campaignId?: number; conditionInstancesJson?: string | null },
   ): Promise<void> {
     const rows = await this.db
       .select({ combatant: combatants, campaignId: encounters.campaignId, encounterId: encounters.id })
@@ -631,6 +632,10 @@ export class CharactersService {
       .where(eq(characters.id, characterId))
       .limit(1);
     const sheetSyncedUpdatedAt = sheetMeta?.updatedAt;
+    const authoritativeInstances =
+      opts?.conditionInstancesJson !== undefined
+        ? readConditionInstances(opts.conditionInstancesJson, conditionsJson)
+        : null;
     for (const { combatant, campaignId: encCampaignId, encounterId } of rows) {
       await this.db
         .update(combatants)
@@ -638,10 +643,12 @@ export class CharactersService {
           // Reconcile the structured copy too, or a sheet-side REMOVAL leaves its instance
           // behind and the next tracker write derives the condition straight back (#423 ×
           // #486). See common/conditions.ts.
-          ...conditionWriteSetFromNames(
-            fromJsonText<string[]>(conditionsJson, []),
-            combatant.conditionInstances,
-          ),
+          ...(authoritativeInstances
+            ? conditionWriteSetFromInstances(authoritativeInstances)
+            : conditionWriteSetFromNames(
+                fromJsonText<string[]>(conditionsJson, []),
+                combatant.conditionInstances,
+              )),
           ...(sheetSyncedUpdatedAt != null ? { sheetSyncedUpdatedAt } : {}),
         })
         .where(eq(combatants.id, combatant.id));
@@ -1325,38 +1332,50 @@ export class CharactersService {
       );
     }
 
-    const priorInstances = readConditionInstances(existing.conditionInstances, existing.conditions);
-    const trackKey = track.name.toLowerCase();
-    const currentInstance = priorInstances.find((i) => i.name.trim().toLowerCase() === trackKey);
-    const currentLevel = currentInstance?.stacks ?? 0;
-    let nextLevel = patch.level !== undefined ? patch.level : currentLevel;
-    if (patch.delta !== undefined) nextLevel += patch.delta;
+    let currentLevel = 0;
+    let nextLevel = 0;
+    const row = this.db.transaction((tx) => {
+      const fresh = tx.select().from(characters).where(eq(characters.id, id)).get();
+      if (!fresh || fresh.deletedAt !== null) throw new NotFoundException(`Character ${id} not found`);
 
-    // Deliberately an ERROR, never a clamp (#1039): the same "never silently under- or
-    // over-report a resource change" rule as adjustResource/patchSpellSlots. A clamp here
-    // would let an AI narrate a 7th exhaustion level (or a -1'th) that never actually
-    // landed on the sheet.
-    if (nextLevel < 0 || nextLevel > track.max) {
-      throw new BadRequestException(`${track.name} level (${nextLevel}) must be in [0, ${track.max}]`);
-    }
+      const priorInstances = readConditionInstances(fresh.conditionInstances, fresh.conditions);
+      const trackKey = track.name.toLowerCase();
+      const currentInstance = priorInstances.find((i) => i.name.trim().toLowerCase() === trackKey);
+      currentLevel = currentInstance?.stacks ?? 0;
+      nextLevel = patch.level !== undefined ? patch.level : currentLevel;
+      if (patch.delta !== undefined) nextLevel += patch.delta;
 
-    const nextInstances =
-      nextLevel === 0
-        ? priorInstances.filter((i) => i.name.trim().toLowerCase() !== trackKey)
-        : currentInstance
-          ? priorInstances.map((i) => (i === currentInstance ? { ...i, stacks: nextLevel } : i))
-          : // `legacyConditionInstance` only returns null for an empty name; `track.name`
-            // is always a non-empty constant ('Exhaustion'), so this cannot actually be null.
-            [...priorInstances, { ...legacyConditionInstance(track.name)!, stacks: nextLevel }];
+      // Deliberately an ERROR, never a clamp (#1039): the same "never silently under- or
+      // over-report a resource change" rule as adjustResource/patchSpellSlots. A clamp here
+      // would let an AI narrate a 7th exhaustion level (or a -1'th) that never actually
+      // landed on the sheet.
+      if (nextLevel < 0 || nextLevel > track.max) {
+        throw new BadRequestException(`${track.name} level (${nextLevel}) must be in [0, ${track.max}]`);
+      }
 
-    const [row] = await this.db
-      .update(characters)
-      .set({ ...sheetConditionWriteSetFromInstances(nextInstances), updatedAt: nowIso() })
-      .where(eq(characters.id, id))
-      .returning();
+      const nextInstances =
+        nextLevel === 0
+          ? priorInstances.filter((i) => i.name.trim().toLowerCase() !== trackKey)
+          : currentInstance
+            ? priorInstances.map((i) => (i === currentInstance ? { ...i, stacks: nextLevel } : i))
+            : // `legacyConditionInstance` only returns null for an empty name; `track.name`
+              // is always a non-empty constant ('Exhaustion'), so this cannot actually be null.
+              [...priorInstances, { ...legacyConditionInstance(track.name)!, stacks: nextLevel }];
+
+      const [updated] = tx
+        .update(characters)
+        .set({ ...sheetConditionWriteSetFromInstances(nextInstances), updatedAt: nowIso() })
+        .where(eq(characters.id, id))
+        .returning()
+        .all();
+      return updated;
+    });
 
     // Issue #486: sheet → live combatant, same as patchConditions above.
-    await this.syncActiveCombatantConditions(id, row.conditions, { campaignId: existing.campaignId });
+    await this.syncActiveCombatantConditions(id, row.conditions, {
+      campaignId: existing.campaignId,
+      conditionInstancesJson: row.conditionInstances,
+    });
 
     await this.audit.log({
       actor: auditActor(user),

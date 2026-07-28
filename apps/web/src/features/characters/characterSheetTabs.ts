@@ -17,6 +17,7 @@ export type CharacterSheetFocus =
   | 'saves'
   | 'skills'
   | 'slots'
+  | 'resources'
   | 'xp'
   | 'background'
   | 'inventory'
@@ -39,6 +40,7 @@ const PLAY_FOCUS = new Set<CharacterSheetFocus>([
   'saves',
   'skills',
   'slots',
+  'resources',
 ]);
 
 const BUILD_FOCUS = new Set<CharacterSheetFocus>([
@@ -68,6 +70,13 @@ const FOCUS_ALIASES: Record<string, CharacterSheetFocus> = {
   'spell-slots': 'slots',
   // "spells" maps to spell *slots* (pips), not a spell list — there is no list section yet.
   spells: 'slots',
+  resources: 'resources',
+  resource: 'resources',
+  // Issue #1642 — deliberately generic aliases, not "inspiration"/"heroPoints": which
+  // resource (if any) is declared, and its display name, comes from the campaign's rule
+  // system adapter, not from a hardcoded 5e/PF2e vocabulary here.
+  inspiration: 'resources',
+  'hero-points': 'resources',
   xp: 'xp',
   experience: 'xp',
   level: 'xp',
@@ -133,6 +142,12 @@ export const CHARACTER_SHEET_SECTION_LABEL: Record<CharacterSheetFocus, string> 
   saves: 'Saving throws',
   skills: 'Skills',
   slots: 'Spell slots',
+  // Issue #1642: this static map can't know per-campaign whether the adapter declares
+  // inspiration (5e), hero points (PF2e), or neither — the section itself renders
+  // nothing for the "neither" case, and uses the adapter's own resource name for its
+  // visible content. This label is only the section's `aria-label` landmark, so a
+  // rule-system-neutral name is honest here, unlike inside the card.
+  resources: 'Character resource',
   xp: 'Experience',
   background: 'Background',
   inventory: 'Inventory',
@@ -176,6 +191,7 @@ export const CHARACTER_SHEET_PLAY_SECTIONS = [
   'saves',
   'skills',
   'slots',
+  'resources',
 ] as const satisfies ReadonlyArray<CharacterSheetFocus>;
 
 /** Build-panel sections in profile/advancement order. */

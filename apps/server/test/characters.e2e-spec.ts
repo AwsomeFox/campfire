@@ -2,7 +2,7 @@ import request from 'supertest';
 import { eq } from 'drizzle-orm';
 import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
 import { DB, type DrizzleDb } from '../src/db/db.module';
-import { campaigns, characters } from '../src/db/schema';
+import { campaigns, characters, combatants } from '../src/db/schema';
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' };
 const owner = { 'x-dev-role': 'player', 'x-dev-user': 'owner-1' };
@@ -582,6 +582,15 @@ describe('characters (e2e)', () => {
   // no explicit ruleSystem, which resolves to the 5e adapter (ruleSystemAdapter('') falls
   // back to Dnd5eAdapter), so it's a real 5e sheet.
   describe('exhaustion level (issue #1643)', () => {
+    it('requires an actual delta or level adjustment', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/characters/${characterId}/conditions/level`)
+        .set(owner)
+        .send({ name: 'Exhaustion' });
+      expect(res.status).toBe(400);
+    });
+
     it('delta increments from nothing, level sets absolutely, and level shows up in conditionInstances', async () => {
       const server = ctx.app.getHttpServer();
       // Starts at 0 (no Exhaustion instance yet) — delta +1 creates it at level 1.
@@ -656,6 +665,56 @@ describe('characters (e2e)', () => {
 
       // Clean up for later tests in this file.
       await request(server).post(`/api/v1/characters/${characterId}/conditions/level`).set(dm).send({ name: 'Exhaustion', level: 0 });
+    });
+
+    it('relative level adjustments are not lost when two callers update at once', async () => {
+      const server = ctx.app.getHttpServer();
+      const charRes = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(dm)
+        .send({ name: 'Concurrent Exhaustion Target' });
+      expect(charRes.status).toBe(201);
+      const targetId = charRes.body.id as number;
+
+      const [a, b] = await Promise.all([
+        request(server).post(`/api/v1/characters/${targetId}/conditions/level`).set(dm).send({ name: 'Exhaustion', delta: 1 }),
+        request(server).post(`/api/v1/characters/${targetId}/conditions/level`).set(dm).send({ name: 'Exhaustion', delta: 1 }),
+      ]);
+      expect([a.status, b.status].sort()).toEqual([201, 201]);
+
+      const after = await request(server).get(`/api/v1/characters/${targetId}`).set(dm);
+      expect(after.body.conditionInstances.find((i: { name: string }) => i.name === 'Exhaustion')).toMatchObject({ stacks: 2 });
+    });
+
+    it('syncs the adjusted level into a linked live combatant', async () => {
+      const server = ctx.app.getHttpServer();
+      const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Live Exhaustion Sync Campaign' });
+      expect(campRes.status).toBe(201);
+      const liveCampaignId = campRes.body.id as number;
+      const charRes = await request(server)
+        .post(`/api/v1/campaigns/${liveCampaignId}/characters`)
+        .set(dm)
+        .send({ name: 'Live Exhaustion Target' });
+      expect(charRes.status).toBe(201);
+      const liveCharacterId = charRes.body.id as number;
+      const encRes = await request(server).post(`/api/v1/campaigns/${liveCampaignId}/encounters`).set(dm).send({ name: 'Live Sync Fight' });
+      expect(encRes.status).toBe(201);
+      const combatantRes = await request(server)
+        .post(`/api/v1/encounters/${encRes.body.id}/combatants`)
+        .set(dm)
+        .send({ kind: 'character', characterId: liveCharacterId });
+      expect(combatantRes.status).toBe(201);
+
+      const adjusted = await request(server)
+        .post(`/api/v1/characters/${liveCharacterId}/conditions/level`)
+        .set(dm)
+        .send({ name: 'Exhaustion', level: 3 });
+      expect(adjusted.status).toBe(201);
+
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const [combatant] = await db.select().from(combatants).where(eq(combatants.characterId, liveCharacterId)).limit(1);
+      const instances = JSON.parse(combatant.conditionInstances ?? '[]') as Array<{ name: string; stacks: number }>;
+      expect(instances.find((i) => i.name === 'Exhaustion')).toMatchObject({ stacks: 3 });
     });
 
     it("a name that isn't this system's leveled track is a 400 (does not silently create a custom leveled condition)", async () => {

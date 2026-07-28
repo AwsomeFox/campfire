@@ -11,7 +11,7 @@ import { useTranslation } from 'react-i18next';
 import { useEffect, useId, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useNavigate, useParams } from 'react-router-dom';
-import { api, API, translateApiError } from '../../lib/api';
+import { api, API, ApiError, translateApiError } from '../../lib/api';
 import type { Character, RuleEntry, RulePack } from '@campfire/schema';
 import { Card, ErrorNote, Skeleton, Btn } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
@@ -29,6 +29,7 @@ import {
   COMPENDIUM_SOURCE_COPY_LABEL,
   resolveCompendiumSource,
 } from './compendiumProvenance';
+import { ruleEntryIconEndpoint, serializeHomebrewEditor } from './homebrewEditor';
 
 export default function ReaderPage() {
   const { t } = useTranslation();
@@ -57,6 +58,25 @@ export default function ReaderPage() {
   const [qty, setQty] = useState('1');
   const [notes, setNotes] = useState('');
   const acquireTitleId = useId();
+  const [revisions, setRevisions] = useState<Array<{ id: number; createdAt: string; actor: string }> | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [editBody, setEditBody] = useState('');
+  const [editSummary, setEditSummary] = useState('');
+  const [editName, setEditName] = useState('');
+  const [editDataJson, setEditDataJson] = useState('{}');
+  const [editRaw, setEditRaw] = useState(true);
+  const [editStructured, setEditStructured] = useState<Record<string, string>>({});
+  const [editSlug, setEditSlug] = useState('');
+  const [editType, setEditType] = useState('other');
+  const [editRights, setEditRights] = useState('private_original');
+  const [editLicense, setEditLicense] = useState('');
+  const [editAttribution, setEditAttribution] = useState('');
+  const [editAuthor, setEditAuthor] = useState('');
+  const [editSourceUrl, setEditSourceUrl] = useState('');
+  const [editError, setEditError] = useState<string | null>(null);
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [acting, setActing] = useState(false);
 
   async function saveIcon(slug: string) {
     if (!entry) return;
@@ -64,7 +84,7 @@ export default function ReaderPage() {
     setSavingIcon(true);
     setIconError(null);
     try {
-      const updated = await api.patch<RuleEntry>(`${API}/rules/entries/${entry.id}`, { iconSlug: slug });
+      const updated = await api.patch<RuleEntry>(ruleEntryIconEndpoint(API, id, entry), entry.campaignId ? { iconSlug: slug, expectedUpdatedAt: entry.updatedAt } : { iconSlug: slug });
       setEntry(updated);
     } catch (err) {
       setIconError(translateApiError(err, t, { fallbackKey: 'compendium.errors.updateIcon' }));
@@ -72,6 +92,10 @@ export default function ReaderPage() {
       setSavingIcon(false);
     }
   }
+  async function duplicateHomebrew() { if (!entry) return; setActing(true); setActionError(null); try { const copy = await api.post<RuleEntry>(`${API}/campaigns/${id}/homebrew/${entry.id}/duplicate`, {}); navigate(`/c/${id}/compendium/${copy.id}`); } catch (err) { setActionError(translateApiError(err, t, { fallbackKey: 'compendium.errors.loadEntry' })); } finally { setActing(false); } }
+  async function archiveHomebrew() { if (!entry) return; setActing(true); setActionError(null); try { await api.post(`${API}/campaigns/${id}/homebrew/${entry.id}/archive`, {}); navigate(`/c/${id}/compendium`); } catch (err) { setActionError(translateApiError(err, t, { fallbackKey: 'compendium.errors.loadEntry' })); } finally { setActing(false); } }
+  async function showRevisions() { if (!entry) return; setActing(true); setActionError(null); try { setRevisions(await api.get(`${API}/campaigns/${id}/homebrew/${entry.id}/revisions`)); } catch (err) { setActionError(translateApiError(err, t, { fallbackKey: 'compendium.errors.loadEntry' })); } finally { setActing(false); } }
+  async function saveEdit() { if (!entry) return; setSavingEdit(true); setEditError(null); try { const serialized = serializeHomebrewEditor({ name: editName, slug: editSlug, type: editType, summary: editSummary, body: editBody, rightsStatus: editRights, license: editLicense, attribution: editAttribution, author: editAuthor, sourceUrl: editSourceUrl, dataJson: editDataJson }, editStructured, editRaw); if (!serialized.ok) { setEditError(serialized.error); return; } const payload = { ...serialized.value, expectedUpdatedAt: entry.updatedAt }; const updated = await api.patch<RuleEntry>(`${API}/campaigns/${id}/homebrew/${entry.id}${isDm ? '' : '?proposed=true'}`, payload); if (isDm) setEntry(updated); setEditing(false); } catch (err) { setEditError(translateApiError(err, t, { fallbackKey: 'compendium.errors.loadEntry' })); } finally { setSavingEdit(false); } }
 
   useEffect(() => {
     if (!entryId) return;
@@ -81,7 +105,13 @@ export default function ReaderPage() {
       setError(null);
       try {
         const [data, packs] = await Promise.all([
-          api.get<RuleEntry>(`${API}/rules/entries/${entryId}`),
+          // Campaign route is the privacy boundary for homebrew. It returns no
+          // cross-campaign/private entry by id; global entries retain the legacy
+          // reader fallback below for installed packs.
+          api.get<RuleEntry>(`${API}/campaigns/${id}/homebrew/${entryId}`).catch((err: unknown) => {
+            if (err instanceof ApiError && err.status === 404) return api.get<RuleEntry>(`${API}/rules/entries/${entryId}`);
+            throw err;
+          }),
           api.get<RulePack[]>(`${API}/rules/packs`).catch(() => []),
         ]);
         if (!cancelled) {
@@ -169,8 +199,12 @@ export default function ReaderPage() {
                 )}
               </span>
             )}
+            {entry.campaignId && <span className="flex gap-1.5" style={{ marginLeft: 'auto' }}><Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={acting} onClick={() => { const parsed = (() => { try { return JSON.parse(entry.dataJson ?? '{}') as Record<string, unknown>; } catch { return {}; } })(); setEditBody(entry.body); setEditName(entry.name); setEditSummary(entry.summary); setEditSlug(entry.slug); setEditType(entry.type); setEditRights(entry.rightsStatus); setEditLicense(entry.license); setEditAttribution(entry.attribution); setEditAuthor(entry.author); setEditSourceUrl(entry.sourceUrl); setEditDataJson(entry.dataJson ?? '{}'); setEditStructured(Object.fromEntries(Object.entries(parsed).map(([key, value]) => [key, typeof value === 'string' ? value : JSON.stringify(value)]))); setEditing(true); }}>{isDm && canDmWrite ? 'Edit' : 'Propose edit'}</Btn>{isDm && canDmWrite && <><Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={acting} onClick={duplicateHomebrew}>Duplicate</Btn><Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={acting} onClick={archiveHomebrew}>Archive</Btn><Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={acting} onClick={showRevisions}>Revisions</Btn></>}</span>}
           </div>
           {iconError && <ErrorNote message={iconError} />}
+          {actionError && <ErrorNote message={actionError} />}
+          {editing && <div className="flex flex-col gap-2"><input className="input" aria-label="Edit homebrew name" value={editName} onChange={(e) => setEditName(e.target.value)} /><input className="input" aria-label="Edit homebrew slug" value={editSlug} onChange={(e) => setEditSlug(e.target.value)} /><select className="input" aria-label="Edit homebrew type" value={editType} onChange={(e) => setEditType(e.target.value)}><option value="spell">Spell</option><option value="monster">Monster</option><option value="item">Item</option><option value="other">Other</option></select><input className="input" aria-label="Edit homebrew summary" value={editSummary} onChange={(e) => setEditSummary(e.target.value)} /><textarea className="input" aria-label="Edit homebrew body" value={editBody} onChange={(e) => setEditBody(e.target.value)} /><label><input type="checkbox" checked={editRaw} onChange={(e) => setEditRaw(e.target.checked)} /> Raw JSON data</label>{editRaw ? <textarea className="input" aria-label="Edit homebrew JSON object" value={editDataJson} onChange={(e) => setEditDataJson(e.target.value)} /> : <div className="flex gap-2 flex-wrap">{(editType === 'spell' ? ['level','school','castingTime','range','duration'] : editType === 'monster' ? ['ac','hp','cr','abilities','actions'] : editType === 'item' ? ['category','rarity','weight','value'] : []).map((key) => <input key={key} className="input" aria-label={`Edit ${key}`} placeholder={key} value={editStructured[key] ?? ''} onChange={(e) => setEditStructured({ ...editStructured, [key]: e.target.value })} />)}</div>}<select className="input" aria-label="Edit rights status" value={editRights} onChange={(e) => setEditRights(e.target.value)}><option value="private_original">Private original</option><option value="permission_granted">Permission granted</option><option value="open_licensed">Open licensed</option></select><input className="input" aria-label="Edit license" value={editLicense} onChange={(e) => setEditLicense(e.target.value)} /><input className="input" aria-label="Edit attribution" value={editAttribution} onChange={(e) => setEditAttribution(e.target.value)} /><input className="input" aria-label="Edit author" value={editAuthor} onChange={(e) => setEditAuthor(e.target.value)} /><input className="input" aria-label="Edit source URL" value={editSourceUrl} onChange={(e) => setEditSourceUrl(e.target.value)} />{editError && <ErrorNote message={editError} />}<Btn onClick={saveEdit} disabled={savingEdit}>{savingEdit ? 'Saving…' : isDm ? 'Save' : 'Submit proposal'}</Btn></div>}
+          {revisions && <div className="text-muted" style={{ fontSize: 12 }}>{revisions.map((revision) => <p key={revision.id} style={{ margin: 0 }}>{revision.createdAt} · {revision.actor}</p>)}</div>}
           {/* Monster entries carry an empty `body` — their stats live in `dataJson`
               (issue #142). Render the structured statblock when there's no prose body
               and the JSON has renderable fields; otherwise fall back to the markdown

@@ -639,11 +639,17 @@ export const ConditionsPatch = z.object({
  * itself requires `stacks >= 1`). Going below 0 or above the track's `max` is a 400, not a
  * clamp, matching every other bounded-resource write in this schema (#1039).
  */
-export const ConditionLevelPatch = z.object({
+export const ConditionLevelPatchShape = {
   name: z.string().min(1).max(40),
-  delta: z.number().int().optional(),
-  level: z.number().int().min(0).max(99).optional(),
-});
+  delta: z.number().int().optional().describe('Relative level change. Required unless `level` is provided.'),
+  level: z.number().int().min(0).max(99).optional().describe('Absolute level to set. Required unless `delta` is provided.'),
+} as const;
+export const ConditionLevelPatch = z
+  .object(ConditionLevelPatchShape)
+  .strict()
+  .refine((patch) => patch.delta !== undefined || patch.level !== undefined, {
+    message: 'Either delta or level is required',
+  });
 export type ConditionLevelPatch = z.infer<typeof ConditionLevelPatch>;
 /**
  * Canonical 5e condition vocabulary — the single source of truth shared across
@@ -3155,7 +3161,7 @@ export const RulePack = z.object({
   name: z.string().min(1).max(120),
   version: z.string().max(40).default(''),
   license: z.string().max(120).default(''), // e.g. "OGL 1.0a", "CC-BY-4.0"
-  sourceUrl: z.string().max(500).default(''),
+  sourceUrl: z.string().max(500).refine((url) => !url || /^https?:\/\//i.test(url), 'Source URL must be http(s)').default(''),
   installedAt: IsoDate,
   entryCount: z.number().int().nonnegative().default(0),
   // Authoritative, server-wide count of campaigns whose `ruleSystem` == this pack's slug
@@ -3172,6 +3178,7 @@ export type RuleEntryType = z.infer<typeof RuleEntryType>;
 export const RuleEntry = z.object({
   id: Id,
   packId: Id,
+  campaignId: Id.nullable().optional(),
   slug: z.string().min(1).max(160),
   name: z.string().min(1).max(200),
   type: RuleEntryType,
@@ -3201,7 +3208,7 @@ export const RuleEntry = z.object({
   license: z.string().max(160).default(''),
   attribution: z.string().max(500).default(''),
   author: z.string().max(200).default(''),
-  sourceUrl: z.string().max(500).default(''),
+  sourceUrl: z.string().max(500).refine((url) => !url || /^https?:\/\//i.test(url), 'Source URL must be http(s)').default(''),
   // Optional manual icon override (issue #305): the slug of a bundled game-icons.net
   // entity icon (see apps/web/src/lib/icons) shown in the compendium list + reader in
   // place of the type/school-derived default. '' means "no override — the web app
@@ -3210,6 +3217,8 @@ export const RuleEntry = z.object({
   // the default), mirroring Npc.iconSlug from #302 so the field stays forward-compatible
   // as the curated set grows.
   iconSlug: z.string().max(80).default(''),
+  rightsStatus: z.enum(['private_original', 'permission_granted', 'open_licensed']).default('open_licensed'),
+  archivedAt: IsoDate.nullable().optional(),
   ...timestamps,
 });
 export type RuleEntry = z.infer<typeof RuleEntry>;
@@ -3225,6 +3234,60 @@ export const RuleEntryUpdate = z.object({
   iconSlug: z.string().max(80),
 }).partial();
 export type RuleEntryUpdate = z.infer<typeof RuleEntryUpdate>;
+
+// ---------- campaign homebrew (issue #741) ----------
+// Homebrew is deliberately an entry-level, campaign-private concern.  It is not a
+// pack upload and therefore never inherits the global/open-pack licensing contract.
+export const HomebrewRightsStatus = z.enum(['private_original', 'permission_granted', 'open_licensed']);
+export type HomebrewRightsStatus = z.infer<typeof HomebrewRightsStatus>;
+const HomebrewDataObject = z.record(z.string(), z.unknown());
+export const HomebrewRuleEntryInput = z.object({
+  slug: z.string().min(1).max(160).regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, 'Use a stable lowercase slug'),
+  name: z.string().min(1).max(200),
+  type: RuleEntryType,
+  summary: z.string().max(1000).default(''),
+  body: z.string().max(50_000).default(''),
+  /** Structured editors serialize here; raw mode accepts only a JSON object. */
+  data: HomebrewDataObject.optional(),
+  dataJson: z.string().max(100_000).optional(),
+  rightsStatus: HomebrewRightsStatus.default('private_original'),
+  license: z.string().max(160).default(''),
+  attribution: z.string().max(500).default(''),
+  author: z.string().max(200).default(''),
+  sourceUrl: z.string().max(500).refine((url) => !url || /^https?:\/\//i.test(url), 'Source URL must be http(s)').default(''),
+  iconSlug: z.string().max(80).default(''),
+}).superRefine((value, ctx) => {
+  if (value.data !== undefined && value.dataJson !== undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Provide data or dataJson, not both' });
+  if (value.dataJson !== undefined) {
+    try { const parsed: unknown = JSON.parse(value.dataJson); if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') throw new Error(); }
+    catch { ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['dataJson'], message: 'Raw data must be a JSON object' }); }
+  }
+  if (value.rightsStatus === 'open_licensed') {
+    if (!value.license.trim()) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['license'], message: 'Open-licensed work requires a license' });
+    if (!value.attribution.trim() && !value.author.trim()) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['attribution'], message: 'Open-licensed work requires attribution or author' });
+    if (!value.sourceUrl.trim()) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['sourceUrl'], message: 'Open-licensed work requires a source URL' });
+  }
+  if (value.rightsStatus === 'permission_granted' && !value.attribution.trim() && !value.author.trim()) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['attribution'], message: 'Permission-granted work requires attribution or author' });
+});
+export type HomebrewRuleEntryInput = z.infer<typeof HomebrewRuleEntryInput>;
+// Re-parse an update after merging it with the stored entry; keeping this permissive
+// patch shape avoids accidentally requiring every field on a normal edit.
+export const HomebrewRuleEntryUpdate = z.object({
+  slug: z.string().min(1).max(160).regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).optional(),
+  name: z.string().min(1).max(200).optional(), type: RuleEntryType.optional(),
+  summary: z.string().max(1000).optional(), body: z.string().max(50_000).optional(),
+  data: HomebrewDataObject.optional(), dataJson: z.string().max(100_000).optional(),
+  rightsStatus: HomebrewRightsStatus.optional(), license: z.string().max(160).optional(),
+  attribution: z.string().max(500).optional(), author: z.string().max(200).optional(),
+  sourceUrl: z.string().max(500).refine((url) => !url || /^https?:\/\//i.test(url), 'Source URL must be http(s)').optional(), iconSlug: z.string().max(80).optional(),
+  expectedUpdatedAt: ExpectedUpdatedAt,
+});
+export type HomebrewRuleEntryUpdate = z.infer<typeof HomebrewRuleEntryUpdate>;
+export const HomebrewImportEntry = HomebrewRuleEntryInput;
+export const HomebrewImportPreview = z.object({ entries: z.array(HomebrewImportEntry).min(1).max(1000) });
+export const HomebrewConflictStrategy = z.enum(['skip', 'replace', 'duplicate']);
+export const HomebrewImportApply = HomebrewImportPreview.extend({ strategy: HomebrewConflictStrategy, expectedUpdatedAt: z.record(z.string(), z.string()).optional() });
+export type HomebrewImportApply = z.infer<typeof HomebrewImportApply>;
 
 /**
  * Portable compendium identity for campaign export/import (issue #584). Replaces
