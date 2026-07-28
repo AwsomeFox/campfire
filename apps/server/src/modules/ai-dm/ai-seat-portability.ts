@@ -284,10 +284,9 @@ export function readPortableAiSeat(
     mode: enumOrDefault(AiDmMode, src.mode, 'off', 'mode', warn),
     // `enabled` needs no equivalent to `mode`'s enum check and gets none — deliberately, not
     // by oversight. `boolOf` is TOTAL (anything not `true` becomes `false`), so a boolean has
-    // no unrepresentable value left to admit; `mode` was the only scalar here with a CLOSED
-    // domain that nothing enforced. `tokenBudget` is NOT in that position — see below, it has
-    // its own closed domain (`AiDmSeat.shape.tokenBudget`'s `.nonnegative().max(...)`) and,
-    // until this fix, nothing here enforced its upper bound either.
+    // no unrepresentable value left to admit. The two closed-domain scalars are handled by
+    // their own guards: `mode` is parsed against `AiDmMode`, and `tokenBudget` is clamped to
+    // `AiDmSeat.shape.tokenBudget` immediately below.
     enabled: boolOf(src.enabled),
     model: str(src.model),
     instructions: str(src.instructions),

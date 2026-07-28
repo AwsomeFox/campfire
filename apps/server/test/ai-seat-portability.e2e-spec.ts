@@ -8,6 +8,7 @@ import {
   readPortableAiSeat,
   type PortableAiSeat,
 } from '../src/modules/ai-dm/ai-seat-portability';
+import { AiDmSeat } from '@campfire/schema';
 
 /**
  * #1049 — the AI seat's DM-authored configuration must survive clone, export and import.
@@ -42,6 +43,12 @@ const PROACTIVE = {
   cooldownSeconds: 600,
   maxProactiveTokensPerHour: 1_500,
 } as const;
+
+const TOKEN_BUDGET_MAX = (() => {
+  const max = AiDmSeat.shape.tokenBudget.removeDefault().maxValue;
+  if (max === null) throw new Error('AiDmSeat.shape.tokenBudget must define a max for portability clamping');
+  return max;
+})();
 
 /**
  * The round-trip fixture: EVERY portable field, each at a distinctly non-default value.
@@ -331,15 +338,15 @@ describe('AI seat portability across clone / export / import (#1049)', () => {
 
   it('clamps tokenBudget to the range AiDmSeat.shape.tokenBudget allows (issue #1593)', async () => {
     // Before the fix this was `Math.max(0, …)` — a floor with no ceiling. An archive carrying
-    // a tokenBudget past the schema's own `.max(1_000_000_000)` imported without complaint and
+    // a tokenBudget past the schema's own `.max(...)` imported without complaint and
     // read back verbatim, holding a value the schema calls illegal. This is a schema-integrity
     // fix, not a spend-safety one: assertWithinServerTokenCap governs actual consumption
     // regardless of what the seat stores.
-    const tooHigh = await importWithSeat('Huge Budget', { tokenBudget: 5_000_000_000 });
+    const tooHigh = await importWithSeat('Huge Budget', { tokenBudget: TOKEN_BUDGET_MAX + 1 });
     expect(tooHigh.status).toBe(201);
     const seat = await readSeat(tooHigh.body.id);
     expect(seat.status).toBe(200);
-    expect(seat.body.tokenBudget).toBe(1_000_000_000);
+    expect(seat.body.tokenBudget).toBe(TOKEN_BUDGET_MAX);
 
     // The floor still holds too — this half already worked, and stays covered so a future
     // change to the clamp helper cannot silently drop it.
@@ -358,7 +365,7 @@ describe('AI seat portability across clone / export / import (#1049)', () => {
    * `str(src.mode, 'off')` accepted any string at all — and is fixed here.
    *
    * `tokenBudget` ALSO has a closed domain (`AiDmSeat.shape.tokenBudget`'s
-   * `.nonnegative().max(1_000_000_000)`), which this PR did NOT close — `Math.max(0, …)`
+   * `.nonnegative().max(...)`), which this PR did NOT close — `Math.max(0, …)`
    * enforced the floor but not the ceiling. That gap shipped in this PR and was closed
    * separately in #1593, with its own test above; it is called out here rather than silently
    * left implying "already handled," which is what an earlier version of this comment claimed.
