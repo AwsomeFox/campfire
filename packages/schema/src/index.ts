@@ -2732,6 +2732,54 @@ export const InboxResolve = z
     message: 'entityType and entityId must be provided together',
   });
 
+/**
+ * Inbox sweep (issue #1644) — server-side orchestration that reads a campaign's OPEN
+ * scribe-inbox captures, infers create/update/dismiss, and files PENDING PROPOSALS ONLY
+ * (never a direct canon write). Entity types are deliberately the four bootstrapped by
+ * `get_campaign_summary`/`CampaignsService.summary` — objective ticks, HP, and combat
+ * writes are explicitly unsupported and always skip with a stated reason.
+ */
+export const InboxSweepEntityType = z.enum(['quest', 'npc', 'location', 'character']);
+export type InboxSweepEntityType = z.infer<typeof InboxSweepEntityType>;
+
+/** Per-item outcome (issue #1644) — must survive to the caller, never just logged. */
+export const InboxSweepOutcome = z.enum(['proposed', 'skipped', 'errored']);
+export type InboxSweepOutcome = z.infer<typeof InboxSweepOutcome>;
+
+export const InboxSweepItemResult = z.object({
+  noteId: Id,
+  outcome: InboxSweepOutcome,
+  entityType: InboxSweepEntityType.nullable(),
+  entityId: Id.nullable(),
+  proposalId: Id.nullable(),
+  reason: z.string().min(1),
+});
+export type InboxSweepItemResult = z.infer<typeof InboxSweepItemResult>;
+
+/** `disabled` = no AI provider configured for the campaign (campaign or server default). */
+export const InboxSweepJobStatus = z.enum(['succeeded', 'disabled']);
+export type InboxSweepJobStatus = z.infer<typeof InboxSweepJobStatus>;
+
+export const InboxSweepJob = z.object({
+  id: Id,
+  campaignId: Id,
+  status: InboxSweepJobStatus,
+  itemsTotal: z.number().int().nonnegative(),
+  itemsProposed: z.number().int().nonnegative(),
+  itemsSkipped: z.number().int().nonnegative(),
+  itemsErrored: z.number().int().nonnegative(),
+  detail: z.string(),
+  createdBy: z.string(),
+  createdAt: z.string(),
+});
+export type InboxSweepJob = z.infer<typeof InboxSweepJob>;
+
+export const InboxSweepResult = z.object({
+  job: InboxSweepJob,
+  items: z.array(InboxSweepItemResult),
+});
+export type InboxSweepResult = z.infer<typeof InboxSweepResult>;
+
 /** Default page size for notes + inbox list endpoints (issue #608). */
 export const NOTES_LIST_DEFAULT_LIMIT = 50;
 /** Hard cap for `?limit=` on notes/inbox lists — clients page with `cursor`, not a huge page. */
