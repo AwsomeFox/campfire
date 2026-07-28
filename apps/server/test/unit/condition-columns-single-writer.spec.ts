@@ -177,14 +177,6 @@ function listTsFiles(dir: string): string[] {
  */
 const KNOWN_EXCEPTIONS: { file: string; snippetContains: string; reason: string }[] = [
   {
-    file: 'modules/characters/characters.service.ts',
-    snippetContains: 'conditions: toJsonText(p.conditionsAfter)',
-    reason:
-      "Issue #1664's restParty violation — fixed in PR #1665 (unmerged at #1666's branch time). " +
-      'Remove this entry once #1665 merges; at that point the site spreads ' +
-      'sheetConditionWriteSetFromInstances(...) and this scanner will stop matching it anyway.',
-  },
-  {
     file: 'modules/campaigns/campaigns.service.ts',
     snippetContains: "conditions: '[]',",
     reason:
