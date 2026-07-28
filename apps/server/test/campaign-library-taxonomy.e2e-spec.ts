@@ -80,6 +80,10 @@ describe('campaign library taxonomy (issue #742)', () => {
     expect(playerAll.body.items.some((item: { name: string }) => item.name === 'Uncharted vault')).toBe(false);
     const dmAll = await request(server).get(`/api/v1/campaigns/${campaignId}/library/search?visibility=hidden`).set(dm);
     expect(dmAll.body.items).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'Secret cult', visibility: 'hidden' }), expect.objectContaining({ name: 'Uncharted vault', visibility: 'hidden' })]));
+    const typed = await request(server).get(`/api/v1/campaigns/${campaignId}/library/search?type=quest`).set(dm);
+    expect(typed.status).toBe(200);
+    expect(typed.body.items.every((item: { entityType: string }) => item.entityType === 'quest')).toBe(true);
+    expect(typed.body.facets.types.map((facet: { id: string }) => facet.id)).toEqual(expect.arrayContaining(['quest', 'npc', 'location']));
   });
 
   it('bulk move is atomic, auditable, and undo preserves a later unrelated collection', async () => {
