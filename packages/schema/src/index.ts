@@ -1381,7 +1381,12 @@ export type ScheduledSession = z.infer<typeof ScheduledSession>;
  * adopt a night into someone else's series, or a `roomId` that skipped its
  * double-booking check.
  */
-const ORGANIZED_PLAY_OMIT = {
+/**
+ * Organized-play decoration keys that campaign export/import deliberately does
+ * not carry (issue #1548). Shared by {@link ScheduledSessionCreate}'s omit list
+ * and {@link toScheduledSessionExport}'s strip list so the two cannot drift.
+ */
+export const ORGANIZED_PLAY_OMIT = {
   seriesId: true,
   occurrenceIndex: true,
   venueId: true,
@@ -1503,6 +1508,49 @@ export type RsvpSet = z.infer<typeof RsvpSet>;
 
 export const ScheduledSessionWithRsvps = ScheduledSession.extend({ rsvps: z.array(SessionRsvp) });
 export type ScheduledSessionWithRsvps = z.infer<typeof ScheduledSessionWithRsvps>;
+
+/**
+ * Campaign-export shape for a scheduled session (issue #1548).
+ *
+ * `CampaignsService.importCampaign` has never restored organized-play decoration —
+ * it inserts scheduled sessions from a closed literal that writes only the legacy
+ * fields (`scheduledAt`, `durationMinutes`, `title`, `location`, `notes`, `status`,
+ * `cancelledAt`, `cancellationReason`), the same "drop install-local/cross-collection
+ * ids" discipline it already applies to `cancelledBy` and `sessionId`. A campaign
+ * export carrying `seriesId`/`venueId`/`roomId`/etc. anyway made an organized-play
+ * campaign's export LOOK like a full backup of its scheduling, when restoring it
+ * silently flattened every occurrence into a one-off — the export promised more than
+ * import could ever deliver. Per the maintainer's ruling on #1548: campaign
+ * export/import cares about the campaign, not install-level scheduling/venue/room
+ * resources, so the fix is to stop exporting decoration import was never going to
+ * restore, rather than teach import to restore it.
+ *
+ * Reuses {@link ORGANIZED_PLAY_OMIT} — the exact field set import already never
+ * reads on the CREATE path — rather than a second hand-maintained list that could
+ * drift from it.
+ */
+export const ScheduledSessionExport = ScheduledSessionWithRsvps.omit(ORGANIZED_PLAY_OMIT);
+export type ScheduledSessionExport = z.infer<typeof ScheduledSessionExport>;
+
+/**
+ * Drop organized-play decoration from a scheduled-session row for campaign export.
+ *
+ * Deliberately does **not** re-validate through {@link ScheduledSessionExport}.parse:
+ * `importCampaign` writes schedule fields through a closed insert literal into SQLite
+ * without enforcing Zod bounds (e.g. title length, RSVP status enum), so a previously
+ * exportable imported campaign can hold out-of-schema values. Re-parsing here would
+ * turn every JSON / mdzip / export-preview path into a 500 for those campaigns.
+ * Export's job is to project trusted stored rows; validation belongs at write boundaries.
+ */
+export function toScheduledSessionExport(
+  row: ScheduledSessionWithRsvps,
+): ScheduledSessionExport {
+  const out: Record<string, unknown> = { ...row };
+  for (const key of Object.keys(ORGANIZED_PLAY_OMIT) as Array<keyof typeof ORGANIZED_PLAY_OMIT>) {
+    delete out[key];
+  }
+  return out as ScheduledSessionExport;
+}
 
 /**
  * Paginated past-schedule list (issue #612). Most-recent ended nights first.
@@ -2683,6 +2731,54 @@ export const InboxResolve = z
   .refine((v) => (v.entityType == null) === (v.entityId == null), {
     message: 'entityType and entityId must be provided together',
   });
+
+/**
+ * Inbox sweep (issue #1644) — server-side orchestration that reads a campaign's OPEN
+ * scribe-inbox captures, infers create/update/dismiss, and files PENDING PROPOSALS ONLY
+ * (never a direct canon write). Entity types are deliberately the four bootstrapped by
+ * `get_campaign_summary`/`CampaignsService.summary` — objective ticks, HP, and combat
+ * writes are explicitly unsupported and always skip with a stated reason.
+ */
+export const InboxSweepEntityType = z.enum(['quest', 'npc', 'location', 'character']);
+export type InboxSweepEntityType = z.infer<typeof InboxSweepEntityType>;
+
+/** Per-item outcome (issue #1644) — must survive to the caller, never just logged. */
+export const InboxSweepOutcome = z.enum(['proposed', 'skipped', 'errored']);
+export type InboxSweepOutcome = z.infer<typeof InboxSweepOutcome>;
+
+export const InboxSweepItemResult = z.object({
+  noteId: Id,
+  outcome: InboxSweepOutcome,
+  entityType: InboxSweepEntityType.nullable(),
+  entityId: Id.nullable(),
+  proposalId: Id.nullable(),
+  reason: z.string().min(1),
+});
+export type InboxSweepItemResult = z.infer<typeof InboxSweepItemResult>;
+
+/** `disabled` = no AI provider configured for the campaign (campaign or server default). */
+export const InboxSweepJobStatus = z.enum(['succeeded', 'disabled']);
+export type InboxSweepJobStatus = z.infer<typeof InboxSweepJobStatus>;
+
+export const InboxSweepJob = z.object({
+  id: Id,
+  campaignId: Id,
+  status: InboxSweepJobStatus,
+  itemsTotal: z.number().int().nonnegative(),
+  itemsProposed: z.number().int().nonnegative(),
+  itemsSkipped: z.number().int().nonnegative(),
+  itemsErrored: z.number().int().nonnegative(),
+  detail: z.string(),
+  createdBy: z.string(),
+  createdAt: z.string(),
+});
+export type InboxSweepJob = z.infer<typeof InboxSweepJob>;
+
+export const InboxSweepResult = z.object({
+  job: InboxSweepJob,
+  items: z.array(InboxSweepItemResult),
+});
+export type InboxSweepResult = z.infer<typeof InboxSweepResult>;
 
 /** Default page size for notes + inbox list endpoints (issue #608). */
 export const NOTES_LIST_DEFAULT_LIMIT = 50;
@@ -11838,3 +11934,75 @@ export const CampaignCatalogPrivacyUpdate = z
   .object({ catalogPrivacy: CampaignCatalogPrivacy })
   .strict();
 export type CampaignCatalogPrivacyUpdate = z.infer<typeof CampaignCatalogPrivacyUpdate>;
+
+// ---------- campaign library management (issue #742) ----------
+// These contracts deliberately describe a clean, campaign-owned taxonomy.  They do
+// not contain a migration/version field: early-alpha clients all speak this shape.
+export const LibraryEntityType = z.enum([
+  'quest', 'npc', 'location', 'faction', 'encounter', 'timeline_event', 'inventory_item', 'attachment', 'campaign_library_monster',
+]);
+export type LibraryEntityType = z.infer<typeof LibraryEntityType>;
+
+const LibraryName = z.string().trim().min(1).max(120);
+const LibraryAliases = z.array(LibraryName).max(30).default([]);
+const LibraryColor = z.string().regex(/^#[0-9a-fA-F]{6}$/, 'color must be a #RRGGBB value').default('#64748b');
+export const CampaignLibraryTag = z.object({
+  id: Id, campaignId: Id, name: LibraryName, aliases: LibraryAliases, color: LibraryColor,
+  description: z.string().max(2000).default(''), parentTagId: Id.nullable().default(null), createdAt: IsoDate, updatedAt: IsoDate,
+});
+export type CampaignLibraryTag = z.infer<typeof CampaignLibraryTag>;
+export const CampaignLibraryTagCreate = CampaignLibraryTag.pick({ name: true, aliases: true, color: true, description: true, parentTagId: true }).partial({ aliases: true, color: true, description: true, parentTagId: true });
+export const CampaignLibraryTagUpdate = CampaignLibraryTagCreate.partial();
+export type CampaignLibraryTagCreate = z.infer<typeof CampaignLibraryTagCreate>;
+export type CampaignLibraryTagUpdate = z.infer<typeof CampaignLibraryTagUpdate>;
+
+export const CampaignLibraryCollection = z.object({
+  id: Id, campaignId: Id, name: LibraryName, aliases: LibraryAliases, color: LibraryColor,
+  description: z.string().max(2000).default(''), parentCollectionId: Id.nullable().default(null), createdAt: IsoDate, updatedAt: IsoDate,
+});
+export type CampaignLibraryCollection = z.infer<typeof CampaignLibraryCollection>;
+export const CampaignLibraryCollectionCreate = CampaignLibraryCollection.pick({ name: true, aliases: true, color: true, description: true, parentCollectionId: true }).partial({ aliases: true, color: true, description: true, parentCollectionId: true });
+export const CampaignLibraryCollectionUpdate = CampaignLibraryCollectionCreate.partial();
+export type CampaignLibraryCollectionCreate = z.infer<typeof CampaignLibraryCollectionCreate>;
+export type CampaignLibraryCollectionUpdate = z.infer<typeof CampaignLibraryCollectionUpdate>;
+
+export const LibraryEntityRef = z.object({ entityType: LibraryEntityType, entityId: Id });
+export type LibraryEntityRef = z.infer<typeof LibraryEntityRef>;
+const LibraryBulkTargets = z.array(LibraryEntityRef).min(1).max(500).superRefine((items, ctx) => {
+  const seen = new Set<string>();
+  items.forEach((item, index) => { const key = `${item.entityType}:${item.entityId}`; if (seen.has(key)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [index], message: 'targets must be unique' }); seen.add(key); });
+});
+export const LibraryBulkOperation = z.enum(['add_tag', 'remove_tag', 'add_collection', 'remove_collection', 'move_collection', 'set_visibility', 'set_status', 'move_inventory_owner', 'archive', 'restore']);
+/** Discriminated so an action can never receive ambiguous or ignored fields. */
+const LibraryBulkRequestBase = z.discriminatedUnion('operation', [
+  z.object({ operation: z.literal('add_tag'), targets: LibraryBulkTargets, taxonomyId: Id }).strict(),
+  z.object({ operation: z.literal('remove_tag'), targets: LibraryBulkTargets, taxonomyId: Id }).strict(),
+  z.object({ operation: z.literal('add_collection'), targets: LibraryBulkTargets, taxonomyId: Id }).strict(),
+  z.object({ operation: z.literal('remove_collection'), targets: LibraryBulkTargets, taxonomyId: Id }).strict(),
+  z.object({ operation: z.literal('move_collection'), targets: LibraryBulkTargets, taxonomyId: Id }).strict(),
+  z.object({ operation: z.literal('set_visibility'), targets: LibraryBulkTargets, visibility: z.enum(['public', 'hidden']) }).strict(),
+  z.object({ operation: z.literal('set_status'), targets: LibraryBulkTargets, status: z.string().trim().min(1).max(80) }).strict(),
+  z.object({ operation: z.literal('move_inventory_owner'), targets: LibraryBulkTargets, ownerType: z.enum(['party', 'character']), characterId: Id.nullable().optional() }).strict(),
+  z.object({ operation: z.literal('archive'), targets: LibraryBulkTargets }).strict(),
+  z.object({ operation: z.literal('restore'), targets: LibraryBulkTargets }).strict(),
+]);
+export const LibraryBulkRequest = LibraryBulkRequestBase.superRefine((value, ctx) => {
+  if (value.operation !== 'move_inventory_owner') return;
+  if (value.ownerType === 'character' && value.characterId == null) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['characterId'], message: 'characterId is required for character ownership' });
+  if (value.ownerType === 'party' && value.characterId != null) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['characterId'], message: 'party ownership cannot include characterId' });
+});
+export type LibraryBulkRequest = z.infer<typeof LibraryBulkRequest>;
+export const LibraryBulkResult = z.object({ operationId: Id, applied: z.number().int().nonnegative(), undoAvailable: z.boolean() });
+export type LibraryBulkResult = z.infer<typeof LibraryBulkResult>;
+export const LibraryEntitySummary = z.object({ entityType: LibraryEntityType, entityId: Id, name: z.string(), description: z.string().default(''), visibility: z.string().nullable().default(null), status: z.string().nullable().default(null), owner: z.string().nullable().default(null), tags: z.array(CampaignLibraryTag), collections: z.array(CampaignLibraryCollection) });
+export type LibraryEntitySummary = z.infer<typeof LibraryEntitySummary>;
+export const LibraryFacet = z.object({ id: z.union([Id, z.string()]), label: z.string(), count: z.number().int().nonnegative() });
+export const LibrarySearchPage = z.object({ items: z.array(LibraryEntitySummary), total: z.number().int().nonnegative(), limit: z.number().int().positive(), offset: z.number().int().nonnegative(), facets: z.object({ types: z.array(LibraryFacet), tags: z.array(LibraryFacet), collections: z.array(LibraryFacet), visibility: z.array(LibraryFacet), status: z.array(LibraryFacet) }) });
+export type LibrarySearchPage = z.infer<typeof LibrarySearchPage>;
+export const LibrarySearchQuery = z.object({ q: z.string().trim().max(200).optional(), type: LibraryEntityType.optional(), tagId: z.coerce.number().int().positive().optional(), collectionId: z.coerce.number().int().positive().optional(), visibility: z.enum(['public', 'hidden']).optional(), status: z.string().trim().max(80).optional(), owner: z.string().trim().max(120).optional(), limit: z.coerce.number().int().min(1).max(100).default(50), offset: z.coerce.number().int().min(0).default(0) }).strict();
+export const CampaignLibraryTemplate = z.object({ id: Id, campaignId: Id, entityType: LibraryEntityType, name: LibraryName, description: z.string().max(2000).default(''), snapshot: z.unknown(), sourceEntityId: Id.nullable().default(null), archivedAt: IsoDate.nullable().default(null), createdAt: IsoDate, updatedAt: IsoDate });
+export type CampaignLibraryTemplate = z.infer<typeof CampaignLibraryTemplate>;
+export const CampaignLibraryTemplateSave = z.object({ entityType: LibraryEntityType, entityId: Id, name: LibraryName, description: z.string().max(2000).default('') }).strict();
+export type CampaignLibraryTemplateSave = z.infer<typeof CampaignLibraryTemplateSave>;
+export const CampaignLibraryTemplateInstantiate = z.object({ name: LibraryName.optional(), refs: z.record(z.string().max(80), Id).default({}) }).strict();
+export type CampaignLibraryTemplateInstantiate = z.infer<typeof CampaignLibraryTemplateInstantiate>;

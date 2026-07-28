@@ -68,7 +68,10 @@ function buildService(entities: {
     // scheduling — the archive reads listForExport, deliberately the RAW rows (#504);
     // exposing only that method keeps the stub honest if the call site ever changes back.
     { listForExport: async () => entities.scheduledSessions ?? [] } as any,
-    { listForCampaign: async () => entities.characters ?? [] } as any,
+    // characters — #1667: the archive reads listForExport, which also resolves
+    // conditionInstances (not on the public Character schema); exposing only that
+    // method keeps the stub honest if the call site ever changes back.
+    { listForExport: async () => entities.characters ?? [] } as any,
     // Pagination (#608): export walks the full set via listAllForCampaign.
     { listAllForCampaign: async () => entities.notes ?? [] } as any,
     { listForCampaign: async () => entities.comments ?? [] } as any,
@@ -399,14 +402,14 @@ describe('buildMarkdownZip — collisions + Unicode + determinism (issue #863)',
     expect(row.split(' | ').length).toBe(8);
   });
 
-  it('embeds the RAW scheduled-session rows in campaign.json, completed status and all (#504)', async () => {
+  it('embeds campaign-portable scheduled-session rows in campaign.json, completed status and all (#504/#1548)', async () => {
     // The archive reads SchedulingService.listForExport, NOT the link-reconciled read
     // every API projection uses: a recap that merely happens to be in the Trash at
     // export time must not permanently downgrade a completed night to 'scheduled' in
     // the portable copy. (The read-vs-export divergence itself is pinned end-to-end by
     // "exports the RAW schedule row even while its linked recap is trashed" in
     // schedule.e2e-spec.ts, against the real service; this pins that the archive writer
-    // passes those rows through verbatim rather than re-deriving anything.)
+    // preserves the campaign-local fields rather than re-deriving anything.)
     const service = buildService({
       npcs: [{ id: 1, name: 'Bob' }],
       scheduledSessions: [
@@ -423,6 +426,9 @@ describe('buildMarkdownZip — collisions + Unicode + determinism (issue #863)',
           cancelledBy: null,
           cancellationReason: '',
           sessionId: 42,
+          assignedDmUserId: 'dev:op-dm',
+          roomId: 99,
+          capacity: 6,
           createdAt: '2098-01-01T00:00:00.000Z',
           updatedAt: '2098-01-01T00:00:00.000Z',
           rsvps: [],
@@ -435,9 +441,81 @@ describe('buildMarkdownZip — collisions + Unicode + determinism (issue #863)',
     expect(campaignJson.scheduledSessions).toEqual([
       expect.objectContaining({ id: 7, status: 'completed', sessionId: 42 }),
     ]);
+    expect(campaignJson.scheduledSessions[0]).not.toHaveProperty('assignedDmUserId');
+    expect(campaignJson.scheduledSessions[0]).not.toHaveProperty('roomId');
+    expect(campaignJson.scheduledSessions[0]).not.toHaveProperty('capacity');
 
     const manifest = JSON.parse(await zip.file('archive-manifest.json')!.async('string'));
     expect(manifest.counts.scheduledSessions).toBe(1);
+  });
+
+  it('projects scheduled-session rows without reparsing stored values (#1548)', async () => {
+    const legacyRsvp = {
+      id: 'legacy-rsvp-id',
+      scheduledSessionId: 7,
+      userId: 123,
+      userName: null,
+      status: 'legacy-imported-status',
+      note: 99,
+    };
+    const service = buildService({
+      scheduledSessions: [
+        {
+          id: 7,
+          campaignId: 1,
+          scheduledAt: 'legacy-imported-instant',
+          durationMinutes: 'all-day',
+          title: 'Legacy imported night',
+          location: '',
+          notes: '',
+          status: 'scheduled',
+          cancelledAt: null,
+          cancelledBy: null,
+          cancellationReason: '',
+          sessionId: null,
+          createdAt: 'legacy-created-at',
+          updatedAt: 'legacy-updated-at',
+          seriesId: 'series-1',
+          occurrenceIndex: 'first',
+          venueId: 'venue-1',
+          roomId: 'room-1',
+          assignedDmUserId: 'dev:op-dm',
+          capacity: 'six',
+          eventId: 'event-1',
+          seasonId: 'season-1',
+          icsUid: 123,
+          icsSequence: 'bad-sequence',
+          originalScheduledAt: 'not-nullable-iso',
+          rsvps: [legacyRsvp],
+        },
+      ],
+    });
+
+    const data = await service.buildExport(1, USER);
+    const [scheduled] = data.scheduledSessions as Array<Record<string, unknown>>;
+    expect(scheduled).toEqual(
+      expect.objectContaining({
+        id: 7,
+        scheduledAt: 'legacy-imported-instant',
+        durationMinutes: 'all-day',
+        rsvps: [legacyRsvp],
+      }),
+    );
+    for (const key of [
+      'seriesId',
+      'occurrenceIndex',
+      'venueId',
+      'roomId',
+      'assignedDmUserId',
+      'capacity',
+      'eventId',
+      'seasonId',
+      'icsUid',
+      'icsSequence',
+      'originalScheduledAt',
+    ]) {
+      expect(scheduled).not.toHaveProperty(key);
+    }
   });
 
   it('includes typed ids, relationships, actions, and map/grid/fog/token snapshots', async () => {

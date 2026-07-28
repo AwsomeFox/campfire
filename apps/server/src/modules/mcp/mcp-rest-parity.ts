@@ -55,6 +55,23 @@ export const MCP_REST_PARITY_ISSUE_683: readonly McpRestParityEntry[] = [
   { rest: 'PATCH /library/monsters/:id', mcpTool: 'update_campaign_library_monster' },
   { rest: 'DELETE /library/monsters/:id', mcpTool: 'delete_campaign_library_monster' },
   { rest: 'POST /campaigns/:campaignId/library/monsters/:id/clone', mcpTool: 'clone_campaign_library_monster' },
+  // campaign library management (issue #742)
+  { rest: 'GET /campaigns/:campaignId/library/search', mcpTool: 'search_campaign_library' },
+  { rest: 'GET /campaigns/:campaignId/library/tags', mcpTool: 'list_campaign_library_tags' },
+  { rest: 'POST /campaigns/:campaignId/library/tags', mcpTool: 'create_campaign_library_tag' },
+  { rest: 'PATCH /campaigns/:campaignId/library/tags/:id', mcpTool: 'update_campaign_library_tag' },
+  { rest: 'DELETE /campaigns/:campaignId/library/tags/:id', mcpTool: 'delete_campaign_library_tag' },
+  { rest: 'GET /campaigns/:campaignId/library/collections', mcpTool: 'list_campaign_library_collections' },
+  { rest: 'POST /campaigns/:campaignId/library/collections', mcpTool: 'create_campaign_library_collection' },
+  { rest: 'PATCH /campaigns/:campaignId/library/collections/:id', mcpTool: 'update_campaign_library_collection' },
+  { rest: 'DELETE /campaigns/:campaignId/library/collections/:id', mcpTool: 'delete_campaign_library_collection' },
+  { rest: 'POST /campaigns/:campaignId/library/bulk', mcpTool: 'bulk_campaign_library' },
+  { rest: 'POST /campaigns/:campaignId/library/bulk/:operationId/undo', mcpTool: 'undo_campaign_library_bulk' },
+  { rest: 'GET /campaigns/:campaignId/library/templates', mcpTool: 'list_campaign_library_templates' },
+  { rest: 'POST /campaigns/:campaignId/library/templates', mcpTool: 'save_campaign_library_template' },
+  { rest: 'POST /campaigns/:campaignId/library/templates/:templateId/instantiate', mcpTool: 'instantiate_campaign_library_template' },
+  { rest: 'POST /campaigns/:campaignId/library/templates/:templateId/archive', mcpTool: 'archive_campaign_library_template' },
+  { rest: 'POST /campaigns/:campaignId/library/entities/:entityType/:entityId/duplicate', mcpTool: 'duplicate_campaign_library_entity' },
   // spell slots
   { rest: 'POST /characters/:id/spell-slots', mcpTool: 'adjust_spell_slots' },
   // attachments — metadata reads already exist; manage + binary gap

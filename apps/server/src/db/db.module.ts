@@ -3179,6 +3179,44 @@ function migrateCampaignCatchUpCursorsTable(sqlite: Database.Database): void {
   `);
 }
 
+/**
+ * Issue #1644 — inbox sweep auditable job record + per-item idempotency ledger.
+ * Fresh DBs get both tables from BOOTSTRAP_SQL; upgraded installs create them here.
+ */
+function migrateInboxSweepTables1644(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS inbox_sweep_jobs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+      status TEXT NOT NULL,
+      items_total INTEGER NOT NULL DEFAULT 0,
+      items_proposed INTEGER NOT NULL DEFAULT 0,
+      items_skipped INTEGER NOT NULL DEFAULT 0,
+      items_errored INTEGER NOT NULL DEFAULT 0,
+      detail TEXT NOT NULL DEFAULT '',
+      created_by TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_inbox_sweep_jobs_campaign ON inbox_sweep_jobs(campaign_id, created_at);
+
+    CREATE TABLE IF NOT EXISTS inbox_sweep_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+      note_id INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+      job_id INTEGER NOT NULL REFERENCES inbox_sweep_jobs(id) ON DELETE CASCADE,
+      outcome TEXT NOT NULL,
+      entity_type TEXT,
+      entity_id INTEGER,
+      proposal_id INTEGER,
+      reason TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(campaign_id, note_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_inbox_sweep_items_job ON inbox_sweep_items(job_id);
+  `);
+}
+
 function migrateAiScribeSessionScope499(sqlite: Database.Database): void {
   const hasConfigs = sqlite
     .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ai_scribe_configs'")
@@ -4118,6 +4156,36 @@ function migrateTableSafetyHolds599(sqlite: Database.Database): void {
   `);
 }
 
+/** Fresh installs receive this via bootstrap; upgrades need the same clean taxonomy tables. */
+function migrateCampaignLibraryManagement742(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS campaign_library_tags (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+      name TEXT NOT NULL, aliases_json TEXT NOT NULL DEFAULT '[]', color TEXT NOT NULL DEFAULT '#64748b', description TEXT NOT NULL DEFAULT '',
+      parent_tag_id INTEGER REFERENCES campaign_library_tags(id) ON DELETE SET NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(campaign_id, name));
+    CREATE INDEX IF NOT EXISTS idx_campaign_library_tags_campaign ON campaign_library_tags(campaign_id);
+    CREATE TABLE IF NOT EXISTS campaign_library_collections (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+      name TEXT NOT NULL, aliases_json TEXT NOT NULL DEFAULT '[]', color TEXT NOT NULL DEFAULT '#64748b', description TEXT NOT NULL DEFAULT '',
+      parent_collection_id INTEGER REFERENCES campaign_library_collections(id) ON DELETE SET NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(campaign_id, name));
+    CREATE INDEX IF NOT EXISTS idx_campaign_library_collections_campaign ON campaign_library_collections(campaign_id);
+    CREATE TABLE IF NOT EXISTS campaign_library_entity_taxonomy (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE, entity_type TEXT NOT NULL, entity_id INTEGER NOT NULL,
+      tag_id INTEGER REFERENCES campaign_library_tags(id) ON DELETE CASCADE, collection_id INTEGER REFERENCES campaign_library_collections(id) ON DELETE CASCADE, created_at TEXT NOT NULL,
+      CHECK ((tag_id IS NOT NULL) != (collection_id IS NOT NULL)));
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_campaign_library_entity_tag ON campaign_library_entity_taxonomy(campaign_id, entity_type, entity_id, tag_id) WHERE tag_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_campaign_library_entity_collection ON campaign_library_entity_taxonomy(campaign_id, entity_type, entity_id, collection_id) WHERE collection_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_campaign_library_entity_taxonomy_entity ON campaign_library_entity_taxonomy(campaign_id, entity_type, entity_id);
+    CREATE TABLE IF NOT EXISTS campaign_library_bulk_operations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE, actor TEXT NOT NULL, operation TEXT NOT NULL,
+      before_json TEXT NOT NULL, after_json TEXT NOT NULL, inverse_json TEXT NOT NULL, undone_at TEXT, undone_by TEXT, created_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS campaign_library_templates (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE, entity_type TEXT NOT NULL, name TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '', snapshot_json TEXT NOT NULL, source_entity_id INTEGER, archived_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+    CREATE INDEX IF NOT EXISTS idx_campaign_library_templates_campaign ON campaign_library_templates(campaign_id, entity_type, archived_at);
+  `);
+}
+
 /**
  * Issue #1047: sheet-scoped condition metadata.
  *
@@ -4439,6 +4507,13 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // #738: additive inventory provenance columns; 0139 avoids colliding with
   // 0137 (#735) and 0138 (#1051) already used earlier in this array.
   { name: '0139_inventory_compendium_738', run: migrateInventoryItemsCompendium738 },
+  // #1644 reached this branch as 0139, but main now owns that ordinal for #738.
+  // This migration has not shipped on main, so keep the feature and give it the
+  // next unique recorded name rather than creating a duplicate human-facing ordinal.
+  { name: '0140_inbox_sweep_1644', run: migrateInboxSweepTables1644 },
+  // #742 campaign-owned taxonomy, bulk journals, and current-format templates.
+  // 0141: main claimed 0140 for inbox sweep (#1644) after this branch's earlier 0140.
+  { name: '0141_campaign_library_management_742', run: migrateCampaignLibraryManagement742 },
 ];
 
 /**

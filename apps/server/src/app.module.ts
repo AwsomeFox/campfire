@@ -64,6 +64,7 @@ import { AiDriverModule } from './modules/ai-driver/ai-driver.module';
 import { AiProviderConfigModule } from './modules/ai-provider-config/ai-provider-config.module';
 import { AiConsoleModule } from './modules/ai-console/ai-console.module';
 import { ScribeModule } from './modules/scribe/scribe.module';
+import { InboxSweepModule } from './modules/inbox-sweep/inbox-sweep.module';
 import { TimelineModule } from './modules/timeline/timeline.module';
 import { CatchUpModule } from './modules/catch-up/catch-up.module';
 import { SessionZeroModule } from './modules/session-zero/session-zero.module';
@@ -197,6 +198,7 @@ function serveStaticImports(): DynamicModule[] {
     AiProviderConfigModule,
     AiConsoleModule,
     ScribeModule,
+    InboxSweepModule,
     TimelineModule,
     CatchUpModule,
     SessionZeroModule,

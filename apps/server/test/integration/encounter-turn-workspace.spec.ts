@@ -722,4 +722,175 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
       expect.objectContaining({ damage: 8, dc: 10 }),
     ]);
   });
+
+  /**
+   * Issue #1674 — `updateCombatantTurnState` bounded ONLY the legendary slot; every other slot
+   * (action, bonus, reaction, movement, PF2e's `actions`) incremented/absolute-set with no
+   * check against the adapter's action-economy model, reachable directly via the turn-workspace
+   * endpoint. Convention (#1570/#1571, extended by #1637): spends error, restores clamp.
+   */
+  describe('action-economy slot bounds (issue #1674)', () => {
+    async function expectRejected(promise: Promise<unknown>): Promise<{ code?: string; slot?: string; remaining?: number; max?: number }> {
+      let threw: unknown;
+      try {
+        await promise;
+      } catch (e) {
+        threw = e;
+      }
+      expect(threw).toBeDefined();
+      const body = (threw as { getResponse?: () => unknown }).getResponse?.();
+      return body as { code?: string; slot?: string; remaining?: number; max?: number };
+    }
+
+    it('useSlot rejects a 5e action once the action slot is already spent — 400 with code/slot/remaining/max', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { encounterId, c1 } = seed(orm);
+
+      await service.updateCombatantTurnState(encounterId, c1, { useSlot: 'action' }, dmUser, 'dm');
+      const body = await expectRejected(service.updateCombatantTurnState(encounterId, c1, { useSlot: 'action' }, dmUser, 'dm'));
+      expect(body).toMatchObject({ code: 'action_economy_exhausted', slot: 'action', remaining: 0, max: 1 });
+
+      // Nothing was overwritten past the legal value.
+      const [row] = orm.select().from(combatants).where(eq(combatants.id, c1)).limit(1).all();
+      expect(JSON.parse(row.turnState ?? '{}').used.action).toBe(1);
+    });
+
+    it('useSlot rejects a 5e bonus action and reaction past their max of 1 each', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { encounterId, c1 } = seed(orm);
+
+      await service.updateCombatantTurnState(encounterId, c1, { useSlot: 'bonus' }, dmUser, 'dm');
+      const bonusBody = await expectRejected(service.updateCombatantTurnState(encounterId, c1, { useSlot: 'bonus' }, dmUser, 'dm'));
+      expect(bonusBody).toMatchObject({ code: 'action_economy_exhausted', slot: 'bonus', remaining: 0, max: 1 });
+
+      await service.updateCombatantTurnState(encounterId, c1, { useSlot: 'reaction' }, dmUser, 'dm');
+      const reactionBody = await expectRejected(service.updateCombatantTurnState(encounterId, c1, { useSlot: 'reaction' }, dmUser, 'dm'));
+      expect(reactionBody).toMatchObject({ code: 'action_economy_exhausted', slot: 'reaction', remaining: 0, max: 1 });
+    });
+
+    it("setSlotUsed rejects an absolute overshoot just as easily as useSlot's increment", async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { encounterId, c1 } = seed(orm);
+
+      const body = await expectRejected(
+        service.updateCombatantTurnState(encounterId, c1, { setSlotUsed: { key: 'action', used: 2 } }, dmUser, 'dm'),
+      );
+      expect(body).toMatchObject({ code: 'action_economy_exhausted', slot: 'action', remaining: 1, max: 1 });
+
+      const [row] = orm.select().from(combatants).where(eq(combatants.id, c1)).limit(1).all();
+      expect(JSON.parse(row.turnState ?? '{}').used?.action ?? 0).toBe(0);
+    });
+
+    it('moveFt tracks movement past the adapter default, while a negative correction still floors at 0', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { encounterId, c1 } = seed(orm);
+
+      const moved = await service.updateCombatantTurnState(encounterId, c1, { moveFt: 45 }, dmUser, 'dm');
+      expect(moved.turnState.movementUsedFt).toBe(45);
+
+      // A decrement (correcting overcounted movement) is never rejected — floors at 0.
+      const corrected = await service.updateCombatantTurnState(encounterId, c1, { moveFt: -100 }, dmUser, 'dm');
+      expect(corrected.turnState.movementUsedFt).toBe(0);
+    });
+
+    it('releaseSlot keeps flooring at 0 rather than erroring on over-release', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { encounterId, c1 } = seed(orm);
+
+      const released = await service.updateCombatantTurnState(encounterId, c1, { releaseSlot: 'action' }, dmUser, 'dm');
+      expect(released.turnState.used.action ?? 0).toBe(0);
+      const releasedAgain = await service.updateCombatantTurnState(encounterId, c1, { releaseSlot: 'action' }, dmUser, 'dm');
+      expect(releasedAgain.turnState.used.action ?? 0).toBe(0);
+    });
+
+    it('legendary-action spend is still bounded by the monster statblock: none declared means none spendable', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { encounterId } = seed(orm);
+      const ts = new Date().toISOString();
+      const [pack] = orm.insert(rulePacks).values({ slug: 'plain-monster', name: 'Plain Monster', installedAt: ts }).returning().all();
+      const [entry] = orm
+        .insert(ruleEntries)
+        .values({
+          packId: pack.id,
+          slug: 'no-legendary-drake',
+          name: 'No-Legendary Drake',
+          type: 'monster',
+          dataJson: JSON.stringify({ armor_class: 15, hit_points: 60 }),
+          createdAt: ts,
+          updatedAt: ts,
+        })
+        .returning()
+        .all();
+      const [monster] = orm
+        .insert(combatants)
+        .values({ encounterId, kind: 'monster', name: 'Drake', initiative: 1, hpCurrent: 60, hpMax: 60, sortOrder: 3, ruleEntryId: entry.id })
+        .returning()
+        .all();
+
+      const body = await expectRejected(service.updateCombatantTurnState(encounterId, monster.id, { useSlot: 'legendary' }, dmUser, 'dm'));
+      expect(body).toMatchObject({ code: 'action_economy_exhausted', slot: 'legendary', remaining: 0, max: 0 });
+    });
+
+    it('legendary-action spend is bounded at 3 for a monster whose statblock declares legendary actions, and rejected on the 4th', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { encounterId } = seed(orm);
+      const ts = new Date().toISOString();
+      const [pack] = orm.insert(rulePacks).values({ slug: 'legendary-monster', name: 'Legendary Monster', installedAt: ts }).returning().all();
+      const [entry] = orm
+        .insert(ruleEntries)
+        .values({
+          packId: pack.id,
+          slug: 'legendary-drake',
+          name: 'Legendary Drake',
+          type: 'monster',
+          dataJson: JSON.stringify({
+            armor_class: 18,
+            hit_points: 120,
+            legendary_actions: [{ name: 'Tail Attack', desc: 'The drake makes a tail attack.' }],
+          }),
+          createdAt: ts,
+          updatedAt: ts,
+        })
+        .returning()
+        .all();
+      const [monster] = orm
+        .insert(combatants)
+        .values({ encounterId, kind: 'monster', name: 'Ancient Drake', initiative: 1, hpCurrent: 120, hpMax: 120, sortOrder: 3, ruleEntryId: entry.id })
+        .returning()
+        .all();
+
+      await service.updateCombatantTurnState(encounterId, monster.id, { useSlot: 'legendary' }, dmUser, 'dm');
+      await service.updateCombatantTurnState(encounterId, monster.id, { useSlot: 'legendary' }, dmUser, 'dm');
+      await service.updateCombatantTurnState(encounterId, monster.id, { useSlot: 'legendary' }, dmUser, 'dm');
+      const body = await expectRejected(service.updateCombatantTurnState(encounterId, monster.id, { useSlot: 'legendary' }, dmUser, 'dm'));
+      expect(body).toMatchObject({ code: 'action_economy_exhausted', slot: 'legendary', remaining: 0, max: 3 });
+
+      const [row] = orm.select().from(combatants).where(eq(combatants.id, monster.id)).limit(1).all();
+      expect(JSON.parse(row.turnState ?? '{}').used.legendary).toBe(3);
+    });
+
+    it("PF2e is bounded by ITS action economy (3 actions, no bonus/movement slot) — not 5e's numbers", async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { encounterId, c1 } = seed(orm);
+      const encounter = orm.select().from(encounters).where(eq(encounters.id, encounterId)).get()!;
+      orm.update(campaigns).set({ ruleSystem: 'pf2e' }).where(eq(campaigns.id, encounter.campaignId)).run();
+
+      // Three PF2e actions are all spendable — 5e would have capped a single "action" at 1.
+      await service.updateCombatantTurnState(encounterId, c1, { useSlot: 'actions' }, dmUser, 'dm');
+      await service.updateCombatantTurnState(encounterId, c1, { useSlot: 'actions' }, dmUser, 'dm');
+      const third = await service.updateCombatantTurnState(encounterId, c1, { useSlot: 'actions' }, dmUser, 'dm');
+      expect(third.turnState.used.actions).toBe(3);
+
+      const body = await expectRejected(service.updateCombatantTurnState(encounterId, c1, { useSlot: 'actions' }, dmUser, 'dm'));
+      expect(body).toMatchObject({ code: 'action_economy_exhausted', slot: 'actions', remaining: 0, max: 3 });
+    });
+  });
 });

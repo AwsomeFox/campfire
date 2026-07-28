@@ -1898,6 +1898,43 @@ export const aiScribeJobs = sqliteTable('ai_scribe_jobs', {
   createdAt: text('created_at').notNull(),
 });
 
+// Inbox sweep (issue #1644) — one row per `POST /campaigns/:id/inbox/sweep` call, the
+// auditable job record the issue requires. Per-item outcomes live in `inboxSweepItems`.
+export const inboxSweepJobs = sqliteTable('inbox_sweep_jobs', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  campaignId: integer('campaign_id').notNull(), // FK->campaigns ON DELETE CASCADE
+  status: text('status').notNull(), // InboxSweepJobStatus: 'succeeded' | 'disabled'
+  itemsTotal: integer('items_total').notNull().default(0),
+  itemsProposed: integer('items_proposed').notNull().default(0),
+  itemsSkipped: integer('items_skipped').notNull().default(0),
+  itemsErrored: integer('items_errored').notNull().default(0),
+  detail: text('detail').notNull().default(''),
+  createdBy: text('created_by').notNull().default(''),
+  createdAt: text('created_at').notNull(),
+});
+
+// Per-inbox-item sweep ledger (issue #1644). Serves two purposes: (1) the durable
+// per-item outcome the response is built from, and (2) the IDEMPOTENCY mechanism — a
+// UNIQUE(campaign_id, note_id) row is written the moment a proposal is filed (or an
+// item is dismissed/skipped-as-unsupported) so a re-sweep never re-infers or refiles a
+// SECOND proposal for the same inbox item. Deterministic classifier errors are persisted
+// and resolved too, so invalid model output does not hot-loop on every sweep; consent- or
+// provider-configuration gates intentionally remain open/unledgered so they can be retried
+// after the underlying condition changes.
+export const inboxSweepItems = sqliteTable('inbox_sweep_items', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  campaignId: integer('campaign_id').notNull(), // FK->campaigns ON DELETE CASCADE
+  noteId: integer('note_id').notNull(), // FK->notes.id (the inbox item)
+  jobId: integer('job_id').notNull(), // the sweep run that first produced this outcome
+  outcome: text('outcome').notNull(), // InboxSweepOutcome: 'proposed' | 'skipped' | 'errored'
+  entityType: text('entity_type'), // InboxSweepEntityType, when outcome='proposed' + action='update'
+  entityId: integer('entity_id'),
+  proposalId: integer('proposal_id'), // set when outcome='proposed'
+  reason: text('reason').notNull().default(''),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
 export const combatants = sqliteTable('combatants', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   encounterId: integer('encounter_id').notNull(),
@@ -1963,6 +2000,30 @@ export const campaignLibraryMonsters = sqliteTable('campaign_library_monsters', 
   sourceRuleEntryId: integer('source_rule_entry_id'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
+});
+
+/** Campaign-owned taxonomy for the central library manager (issue #742). */
+export const campaignLibraryTags = sqliteTable('campaign_library_tags', {
+  id: integer('id').primaryKey({ autoIncrement: true }), campaignId: integer('campaign_id').notNull(),
+  name: text('name').notNull(), aliasesJson: text('aliases_json').notNull().default('[]'), color: text('color').notNull().default('#64748b'),
+  description: text('description').notNull().default(''), parentTagId: integer('parent_tag_id'), createdAt: text('created_at').notNull(), updatedAt: text('updated_at').notNull(),
+});
+export const campaignLibraryCollections = sqliteTable('campaign_library_collections', {
+  id: integer('id').primaryKey({ autoIncrement: true }), campaignId: integer('campaign_id').notNull(),
+  name: text('name').notNull(), aliasesJson: text('aliases_json').notNull().default('[]'), color: text('color').notNull().default('#64748b'),
+  description: text('description').notNull().default(''), parentCollectionId: integer('parent_collection_id'), createdAt: text('created_at').notNull(), updatedAt: text('updated_at').notNull(),
+});
+export const campaignLibraryEntityTaxonomy = sqliteTable('campaign_library_entity_taxonomy', {
+  id: integer('id').primaryKey({ autoIncrement: true }), campaignId: integer('campaign_id').notNull(), entityType: text('entity_type').notNull(), entityId: integer('entity_id').notNull(),
+  tagId: integer('tag_id'), collectionId: integer('collection_id'), createdAt: text('created_at').notNull(),
+});
+export const campaignLibraryBulkOperations = sqliteTable('campaign_library_bulk_operations', {
+  id: integer('id').primaryKey({ autoIncrement: true }), campaignId: integer('campaign_id').notNull(), actor: text('actor').notNull(), operation: text('operation').notNull(),
+  beforeJson: text('before_json').notNull(), afterJson: text('after_json').notNull(), inverseJson: text('inverse_json').notNull(), undoneAt: text('undone_at'), undoneBy: text('undone_by'), createdAt: text('created_at').notNull(),
+});
+export const campaignLibraryTemplates = sqliteTable('campaign_library_templates', {
+  id: integer('id').primaryKey({ autoIncrement: true }), campaignId: integer('campaign_id').notNull(), entityType: text('entity_type').notNull(), name: text('name').notNull(), description: text('description').notNull().default(''),
+  snapshotJson: text('snapshot_json').notNull(), sourceEntityId: integer('source_entity_id'), archivedAt: text('archived_at'), createdAt: text('created_at').notNull(), updatedAt: text('updated_at').notNull(),
 });
 
 /**
