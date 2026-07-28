@@ -3,11 +3,16 @@ import {
   CharacterAction,
   Dnd5eAdapter,
   Pf2eAdapter,
+  BasicFantasyAdapter,
+  OldSchoolEssentialsAdapter,
+  OpenLegendAdapter,
   applyDamageModifiers,
   classifyAttackOutcome,
   classifySaveOutcome,
   computeAttackModifier,
   computeSaveDc,
+  defaultAttackRoll,
+  resolveAttackForAdapter,
   halveDamage,
   isResolvableSpec,
   parseSignedBonus,
@@ -132,6 +137,104 @@ describe('classifyAttackOutcome / classifySaveOutcome — PF2e degrees', () => {
   it('save (5e): only success/failure, no crit', () => {
     expect(classifySaveOutcome(Dnd5eAdapter, 15, 12, 15).outcome).toBe('success');
     expect(classifySaveOutcome(Dnd5eAdapter, 14, 12, 15).outcome).toBe('failure');
+  });
+});
+
+/**
+ * resolveAttackForAdapter / defaultAttackRoll — issue #1598.
+ *
+ * The resolver used to roll exactly 1d20 and compare the total against `targetAc` assuming
+ * ASCENDING armour class, unconditionally. `resolveAttackForAdapter` asks the adapter for its
+ * OWN `resolveAttack` when it declares one (OSR's descending-AC thac0 comparison via
+ * `osrAttackHits`, Open Legend's exploding dice pool) and falls back to `defaultAttackRoll`
+ * (exactly the old behaviour) otherwise — so 5e/PF2e/SF2e keep working unchanged while OSR and
+ * Open Legend get their own, correct maths instead of a second `if (system === ...)` branch
+ * inside the resolver itself.
+ */
+describe('resolveAttackForAdapter / defaultAttackRoll — issue #1598', () => {
+  it('5e: defaultAttackRoll reproduces classifyAttackOutcome exactly (no behaviour change)', () => {
+    const roll = fixedRoller({ '1d20': 12 });
+    const result = defaultAttackRoll(Dnd5eAdapter, { modifier: 6, targetAc: 15, roll });
+    expect(result).toEqual({ total: 18, naturalRoll: 12, outcome: classifyAttackOutcome(Dnd5eAdapter, 18, 12, 15) });
+    expect(result.outcome).toBe('hit');
+    // No resolveAttack declared, so resolveAttackForAdapter takes the SAME path.
+    expect(resolveAttackForAdapter(Dnd5eAdapter, { modifier: 6, targetAc: 15, roll })).toEqual(result);
+  });
+
+  it('OSR descending AC: the OLD ascending-AC bug misclassified nearly every roll as a hit against strong armour', () => {
+    // A very heavily armoured target (descending AC -5 — better than plate) against an
+    // unskilled attacker (modifier 0). Neither roll is 1 or 20, so neither of osrAttackHits'
+    // auto-miss/auto-hit overrides fires — this exercises the actual comparison.
+    const roll = fixedRoller({ '1d20': 10 });
+    const input = { modifier: 0, targetAc: -5, roll };
+
+    // THE BUG, reproduced directly: the old code compared the SAME numbers as ascending AC —
+    // total (10) >= targetAc (-5) — which is true for virtually any roll against a very
+    // negative descending AC. This is exactly what #1598 reports: "against descending AC 2
+    // nearly any positive total reads as a hit".
+    expect(classifyAttackOutcome(BasicFantasyAdapter, 10, 10, -5)).toBe('hit');
+
+    // THE FIX: BasicFantasyAdapter now owns its own attack roll via osrAttackHits, which
+    // compares nat 10 against thac0(19) - descendingAc(-5) = 24 — unreachable by any d20 — so
+    // the SAME inputs correctly miss.
+    const result = resolveAttackForAdapter(BasicFantasyAdapter, input);
+    expect(result.outcome).toBe('miss');
+    expect(result.naturalRoll).toBe(10);
+    expect(result.targetLabel).toBe('ascending AC 24 (descending AC -5)');
+  });
+
+  it('OSR descending AC: a real hit against ordinary armour still lands (not just "always miss now")', () => {
+    // A competent attacker (modifier 5 -> thac0 14) against lightly-armoured descending AC 9:
+    // threshold = 14 - 9 = 5, and a natural 15 clears it.
+    const roll = fixedRoller({ '1d20': 15 });
+    const result = resolveAttackForAdapter(OldSchoolEssentialsAdapter, { modifier: 5, targetAc: 9, roll });
+    expect(result.outcome).toBe('hit');
+    expect(result.naturalRoll).toBe(15);
+    expect(result.targetLabel).toBeUndefined();
+  });
+
+  it('OSR: a natural 1 always misses and a natural 20 always hits, matching osrAttackHits', () => {
+    // Impossibly good armour, but a nat 20 still hits; impossibly easy target, but a nat 1
+    // still misses — the auto-fail/auto-succeed convention osrAttackHits already encodes.
+    expect(resolveAttackForAdapter(BasicFantasyAdapter, { modifier: 0, targetAc: -20, roll: fixedRoller({ '1d20': 20 }) }).outcome).toBe(
+      'hit',
+    );
+    expect(resolveAttackForAdapter(BasicFantasyAdapter, { modifier: 20, targetAc: 20, roll: fixedRoller({ '1d20': 1 }) }).outcome).toBe(
+      'miss',
+    );
+  });
+
+  it('OSR: never reports crit/critMiss — base rules have no automatic critical-hit multiplier', () => {
+    // A natural 20 always HITS under OSR rules, but is not itself a critical hit — that would
+    // be a house rule this adapter has no authority to assume.
+    const result = resolveAttackForAdapter(BasicFantasyAdapter, { modifier: 0, targetAc: -20, roll: fixedRoller({ '1d20': 20 }) });
+    expect(result.outcome).toBe('hit');
+    expect(result.outcome).not.toBe('crit');
+  });
+
+  it('Open Legend: rolls an exploding ATTRIBUTE DICE POOL, not a d20 — the old code rolled the wrong thing entirely', () => {
+    // Score 3 -> pool [20, 8] (see OPEN_LEGEND_ACTION_DICE). Neither die shows its max face,
+    // so nothing explodes: total = 1 (d20) + 6 (d8) = 7, plus the score itself is NOT re-added
+    // (the score selects the pool; it is not also a flat bonus).
+    const roll = fixedRoller({ '1d20': 1, '1d8': 6 });
+    const result = resolveAttackForAdapter(OpenLegendAdapter, { modifier: 3, targetAc: 5, roll });
+    expect(result.total).toBe(7);
+    expect(result.naturalRoll).toBeNull();
+    expect(result.outcome).toBe('hit');
+
+    // THE BUG, reproduced directly: the old code would have rolled ONLY a d20 (ignoring the
+    // pool's other die entirely) and added the score as a flat modifier — a 1d20+3 wholly
+    // unrelated to Open Legend's actual dice-pool rules.
+    const wrongPath = defaultAttackRoll(OpenLegendAdapter, { modifier: 3, targetAc: 5, roll: fixedRoller({ '1d20': 1 }) });
+    expect(wrongPath.total).toBe(4); // 1 + 3 — not the pool's 7
+    // classifyAttackOutcome's 5e "natural 1 always misses" rule fires on this SAME roll used as
+    // a d20 nat-1 — a rule this system's true dice-pool maths does not even have a concept of.
+    expect(wrongPath.outcome).toBe('critMiss'); // would have wrongly refused a hit that actually landed
+  });
+
+  it('Open Legend: a negative or non-finite modifier degrades to the score-0 disadvantage pool rather than throwing', () => {
+    const roll = fixedRoller({ '1d20': 10 });
+    expect(() => resolveAttackForAdapter(OpenLegendAdapter, { modifier: -3, targetAc: 5, roll })).not.toThrow();
   });
 });
 

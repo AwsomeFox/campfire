@@ -39,6 +39,8 @@ import {
   RESOLVER_MATH_D20_5E,
   type CriticalDamageRule,
   type ResolverMathProfile,
+  type AttackRollInput,
+  type AttackRollResult,
 } from './action-resolver';
 import { RestModel } from './rest';
 import { CharacterAction } from './character-action';
@@ -3935,6 +3937,16 @@ export interface RuleSystemAdapter {
    * a factual claim — check the three clauses against the system's rules first.
    */
   readonly resolverMath?: ResolverMathProfile;
+  /**
+   * OPTIONAL — this system's OWN attack roll and hit/miss/crit classification (issue #1598),
+   * the way {@link criticalDamage} owns the crit-damage rule. Omit it and the resolver falls
+   * back to a single d20 + flat modifier vs ascending AC (5e's maths, and the pre-existing
+   * behaviour for every system) — see `defaultAttackRoll` / `resolveAttackForAdapter` in
+   * action-resolver.ts. Declaring it does NOT by itself widen {@link resolverMath}: that flag
+   * also covers save proficiency (#1599), so an adapter can have correct attack maths here and
+   * still withhold `resolverMath` until its saves are correct too.
+   */
+  resolveAttack?(input: AttackRollInput): AttackRollResult;
   /** Map a monster rule-entry's `dataJson` to canonical statblock fields (AC/HP/CR/abilities/…). */
   mapStatblock(data: Record<string, unknown>): MonsterStatblockData;
   /** Resolve a monster's numeric max HP from its `dataJson`, or null when unavailable. */
@@ -4506,6 +4518,32 @@ export const OpenLegendAdapter: RuleSystemAdapter = {
   },
   attributeDicePool(score: number): AttributeDicePool {
     return openLegendAttributeDicePool(score);
+  },
+  /**
+   * Open Legend's OWN attack roll (issue #1598): an exploding attribute dice pool, not a d20.
+   * The structured resolver's `computeAttackModifier` already resolves the flat modifier via
+   * `abilityModifier`, and THIS adapter's `abilityModifier` (above) returns the raw attribute
+   * score truncated rather than a d20-style bonus — deliberately, so the number the resolver
+   * hands back here through `input.modifier` in the common case (an action spec naming
+   * `attack.ability`) already IS the attribute score `openLegendAttributeDicePool` expects, with
+   * no separate lookup needed. A spec that instead sets a flat printed `attack.bonus` hands this
+   * the same integer as a score, which `openLegendAttributeDicePool` clamps to a valid table
+   * index (negative → 0, the disadvantage pool) rather than throwing — an honest degrade for an
+   * input shape this system's actions are not expected to use.
+   *
+   * No separate crit tier: the pool's OWN exploding dice already are Open Legend's escalation
+   * mechanic (a max face re-rolls and adds), so layering a 5e-style "natural 20 crits" on top
+   * would double-count an already-escalating result. `naturalRoll` is null — there is no single
+   * die whose face is "the" roll to show as d20-style crit/fumble evidence.
+   */
+  resolveAttack(input: AttackRollInput): AttackRollResult {
+    const score = Number.isFinite(input.modifier) ? Math.trunc(input.modifier) : 0;
+    const rollDie = (sides: number): number => {
+      const r = input.roll(`1d${sides}`);
+      return r.rolls[0] ?? r.total;
+    };
+    const rolled = rollActionDice(score, rollDie);
+    return { total: rolled.total, naturalRoll: null, outcome: rolled.total >= input.targetAc ? 'hit' : 'miss' };
   },
 };
 
