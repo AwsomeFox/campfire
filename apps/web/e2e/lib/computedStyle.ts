@@ -4,6 +4,7 @@ import type { Locator, Page } from '@playwright/test';
 
 const FONT_EXT_MIME: Record<string, string> = { woff2: 'font/woff2', woff: 'font/woff' };
 
+
 /**
  * getComputedStyle helpers for pinning real rendered geometry (issue #1694).
  *
@@ -67,6 +68,7 @@ export async function measureBox(locator: Locator): Promise<ComputedBox> {
   }).then((box) => ({ ...box, height: round2(box.height), width: round2(box.width) }));
 }
 
+<<<<<<< HEAD
 /** Default location of the built web assets, shared by every helper below. */
 function defaultDistAssetsDir(): string {
   return resolve(__dirname, '..', '..', 'dist', 'assets');
@@ -74,6 +76,11 @@ function defaultDistAssetsDir(): string {
 
 /** `dist/assets/index-*.css`'s filename, newest by mtime — shared by the two functions below. */
 function newestIndexCssFilename(dir: string): string {
+=======
+/** Locates the most recently built `dist/assets/index-*.css`, newest by mtime. */
+export function latestCompiledCss(distAssetsDir?: string): string {
+  const dir = distAssetsDir ?? resolve(__dirname, '..', '..', 'dist', 'assets');
+>>>>>>> 2f30065a7 (test(web): add golden-screenshot coverage for interactive control surfaces (#1694))
   let entries: string[];
   try {
     entries = readdirSync(dir);
@@ -87,6 +94,7 @@ function newestIndexCssFilename(dir: string): string {
   if (cssFiles.length === 0) {
     throw new Error(`No index-*.css found in ${dir} — run \`npx vite build\` in apps/web first.`);
   }
+<<<<<<< HEAD
   return cssFiles.map((f) => ({ f, mtime: statSync(resolve(dir, f)).mtimeMs })).sort((a, b) => b.mtime - a.mtime)[0]!
     .f;
 }
@@ -127,6 +135,12 @@ function inlineFontUrls(css: string, assetsDir: string): string {
     }
     return `url(data:${mime};base64,${bytes.toString('base64')})`;
   });
+=======
+  const newest = cssFiles
+    .map((f) => ({ f, mtime: statSync(resolve(dir, f)).mtimeMs }))
+    .sort((a, b) => b.mtime - a.mtime)[0]!.f;
+  return readFileSync(resolve(dir, newest), 'utf8');
+>>>>>>> 2f30065a7 (test(web): add golden-screenshot coverage for interactive control surfaces (#1694))
 }
 
 /**
@@ -136,6 +150,7 @@ function inlineFontUrls(css: string, assetsDir: string): string {
  * matches the app shell; Campfire ships one theme only (see index.css's `@media print`
  * comment — "the app is intentionally optimized for an interactive dark UI") so there is
  * no light-theme variant to also render.
+<<<<<<< HEAD
  *
  * Font URLs are rewritten to inline `data:` URIs (see `inlineFontUrls`) and the returned
  * promise doesn't resolve until `document.fonts.ready` — `waitUntil: 'load'` alone does
@@ -157,4 +172,14 @@ export async function renderCssFixture(
     { waitUntil: 'load' },
   );
   await page.evaluate(() => document.fonts.ready);
+=======
+ */
+export async function renderCssFixture(page: Page, bodyHtml: string, css?: string): Promise<void> {
+  const compiled = css ?? latestCompiledCss();
+  await page.setContent(
+    `<!doctype html><html data-theme="dark"><head><meta charset="utf-8"><style>${compiled}</style></head>` +
+      `<body style="background:#111;color:#eee;">${bodyHtml}</body></html>`,
+    { waitUntil: 'load' },
+  );
+>>>>>>> 2f30065a7 (test(web): add golden-screenshot coverage for interactive control surfaces (#1694))
 }
