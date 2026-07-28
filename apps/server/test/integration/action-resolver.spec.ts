@@ -302,6 +302,41 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.hpCurrent).toBe(60);
   });
 
+  it('#1571: a caster at 0 remaining slots at a level cannot cast at that level through apply_action, and nothing else is written', () => {
+    const { orm, service, encounterId, actor, aliceChar, drake } = seed();
+    // Exhaust Alice's level-3 slots first, exactly like the prior test — then the NEXT
+    // cast at that level is the one #1571 is about.
+    orm.update(characters).set({ spellSlots: JSON.stringify({ '3': { max: 2, used: 2 } }) }).where(eq(characters.id, aliceChar.id)).run();
+
+    let caught: { status?: number; response?: { code?: string; level?: number; remaining?: number; max?: number; message?: string } } | undefined;
+    try {
+      service.resolve(
+        encounterId,
+        ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 2, targetIds: [drake], commit: true }),
+        alice,
+        'player',
+      );
+    } catch (err) {
+      caught = err as typeof caught;
+    }
+    expect(caught?.status).toBe(400);
+    // Same shape `patchSpellSlots` / `adjust_spell_slots` throw (#1570): enough for the AI
+    // Driver to self-correct (a different level, or a rest) instead of retrying blind.
+    expect(caught?.response?.code).toBe('insufficient_slots');
+    expect(caught?.response?.level).toBe(3);
+    expect(caught?.response?.remaining).toBe(0);
+    expect(caught?.response?.max).toBe(2);
+    expect(caught?.response?.message).toMatch(/0 of 2 remain/);
+
+    // FAIL BEFORE THE WORK — not a partial apply. Nothing about the rejected cast landed:
+    // the drake took no damage, the sheet's slots are untouched, no action-economy cost was
+    // spent, and no combat-log chain was written for it.
+    expect(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.hpCurrent).toBe(60);
+    expect(JSON.parse(orm.select().from(characters).where(eq(characters.id, aliceChar.id)).get()!.spellSlots)['3'].used).toBe(2);
+    expect(JSON.parse(orm.select().from(combatants).where(eq(combatants.id, actor)).get()!.turnState ?? '{}').used?.action ?? 0).toBe(0);
+    expect(orm.select().from(encounterEvents).where(eq(encounterEvents.encounterId, encounterId)).all()).toHaveLength(0);
+  });
+
   it('a player may not resolve a monster/NPC action (DM-authorized)', () => {
     const { service, encounterId, drake } = seed();
     expect(() =>

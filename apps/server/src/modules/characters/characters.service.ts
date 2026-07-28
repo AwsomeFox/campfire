@@ -31,8 +31,26 @@ import {
   type RestAdapter,
   type RestCharacterState,
   type RestKind,
+  // #422/#1578 — the adapter-owned resource vocabulary (standard pools + the character's own
+  // custom ones), so the surface never hardcodes one system's resource names.
+  resourceVocabularyForAdapter,
 } from '@campfire/schema';
-import type { Character, CharacterAction, CharacterResource, Role, SkillRank, SpellSlotLevel, RollCheckDefinition, CheckRollRequest, CheckRollResponse, CheckRequest, CheckRequestCreate, CheckRequestResolution } from '@campfire/schema';
+import type {
+  Character,
+  CharacterAction,
+  CharacterResource,
+  Role,
+  SkillRank,
+  SpellSlotLevel,
+  RollCheckDefinition,
+  CheckRollRequest,
+  CheckRollResponse,
+  CheckRequest,
+  CheckRequestCreate,
+  CheckRequestResolution,
+  AdapterResourceDef,
+  ResourcePatch,
+} from '@campfire/schema';
 import { rollDice } from '../../common/dice';
 import { RollsService } from '../rolls/rolls.service';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -1335,13 +1353,24 @@ export class CharactersService {
     return spellSlotsRemaining(fromJsonText<Record<string, SpellSlotLevel>>(existing.spellSlots, {}), level);
   }
 
+  /**
+   * The resource vocabulary for a character (issue #422/#1578): the campaign rule system's
+   * STANDARD pools (5e `hitDice`/`rage`/`kiPoints`/`inspiration`, PF2e `focusPoints`/`heroPoints`,
+   * …) plus whatever CUSTOM resources are already on this sheet, sourced from the campaign's
+   * RuleSystemAdapter exactly like {@link listChecks} sources the roll catalog. This is how a
+   * caller (REST client, MCP tool description, the sheet UI) discovers valid `key`s BEFORE
+   * calling {@link adjustResource} — `adjustResource` itself stays open to an arbitrary key so a
+   * homebrew resource is never blocked, but nothing should have to hardcode "hitDice, rage,
+   * actionSurge, kiPoints" to know what a 5e character can have.
+   */
+  async listResourceVocabulary(id: number): Promise<AdapterResourceDef[]> {
+    const row = await this.getRowOrThrow(id);
+    const adapter = await this.adapterForCampaign(row.campaignId);
+    return resourceVocabularyForAdapter(adapter, toDomain(row));
+  }
+
   /** Spend, restore, or configure a bounded character resource (issue #422). */
-  async adjustResource(
-    id: number,
-    patch: { key: string; delta?: number; used?: number; max?: number; name?: string; recharge?: 'short-rest' | 'long-rest' | 'refocus' | 'dawn' | 'turn-start' | 'special' },
-    user: RequestUser,
-    role: Role,
-  ): Promise<Character> {
+  async adjustResource(id: number, patch: ResourcePatch, user: RequestUser, role: Role): Promise<Character> {
     const existing = await this.getRowOrThrow(id);
     this.assertCanWrite(existing, user, role);
 

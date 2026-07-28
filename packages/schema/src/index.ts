@@ -647,6 +647,28 @@ export const SpellSlotPatch = z.object({
   level: z.number().int().min(1).max(9),
   delta: z.number().int(),
 });
+/**
+ * Spend, restore, or configure one bounded character resource (issue #422/#1578) —
+ * `hitDice`/`rage`/`kiPoints` under 5e, `focusPoints` under PF2e, or a custom pool the
+ * character defines by using a `key` the adapter does not declare. `key` is never
+ * validated against a closed enum: {@link resourceVocabularyForAdapter} is how a caller
+ * DISCOVERS the adapter's standard keys, but the write path stays open to a homebrew
+ * resource the same way `characters.resources` always has.
+ *
+ * `delta` and `used` are alternatives, not a pair — `delta` adjusts relative to the
+ * resource's current `used`, `used` sets it absolutely; the service applies `used` first
+ * when both are sent, then `delta`. Spending past 0 or restoring past `max` is a 400, not
+ * a clamp (see `CharactersService.adjustResource`'s own doc comment for why).
+ */
+export const ResourcePatch = z.object({
+  key: z.string().min(1).max(80),
+  delta: z.number().int().optional(),
+  used: z.number().int().min(0).max(100).optional(),
+  max: z.number().int().min(0).max(100).optional(),
+  name: z.string().min(1).max(80).optional(),
+  recharge: z.enum(['short-rest', 'long-rest', 'refocus', 'dawn', 'turn-start', 'special']).optional(),
+});
+export type ResourcePatch = z.infer<typeof ResourcePatch>;
 export const XpPatch = z.union([
   z.object({ delta: z.number().int() }),
   z.object({ set: z.number().int().nonnegative() }),

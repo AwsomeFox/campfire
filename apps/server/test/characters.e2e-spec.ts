@@ -359,6 +359,97 @@ describe('characters (e2e)', () => {
     expect(res.status).toBe(403);
   });
 
+  // Issue #422/#1578: the resource system (adjustResource, resourceVocabularyForAdapter) had
+  // ZERO callers — no REST route, no MCP tool. These pin the new surface with the SAME
+  // authority spell-slots already has (dm or the owning player), not a re-invented gate.
+  describe('character resources (#422/#1578)', () => {
+    it('lists the campaign rule system\'s standard resource vocabulary, sourced from the adapter', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server).get(`/api/v1/characters/${characterId}/resource-vocabulary`).set(owner);
+      expect(res.status).toBe(200);
+      expect(Array.isArray(res.body)).toBe(true);
+      // The default test campaign's rule system is 5e — this is a fact about THAT adapter's
+      // declared resources, not a hardcoded assumption the route itself makes.
+      const keys = (res.body as Array<{ key: string }>).map((r) => r.key);
+      expect(keys).toEqual(expect.arrayContaining(['hitDice', 'rage', 'actionSurge', 'kiPoints']));
+    });
+
+    it('a viewer CAN read the resource vocabulary — non-sensitive campaign metadata, same access as list_checks', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server).get(`/api/v1/characters/${characterId}/resource-vocabulary`).set(viewer);
+      expect(res.status).toBe(200);
+    });
+
+    it('the owning player spends and restores a resource; an overspend errors rather than clamping', async () => {
+      const server = ctx.app.getHttpServer();
+      const spend = await request(server)
+        .post(`/api/v1/characters/${characterId}/resources`)
+        .set(owner)
+        .send({ key: 'kiPoints', delta: 1, max: 3, name: 'Ki Points', recharge: 'short-rest' });
+      expect(spend.status).toBe(201);
+      expect(spend.body.resources.kiPoints).toMatchObject({ max: 3, used: 1, name: 'Ki Points', recharge: 'short-rest' });
+
+      const restore = await request(server)
+        .post(`/api/v1/characters/${characterId}/resources`)
+        .set(owner)
+        .send({ key: 'kiPoints', delta: -1 });
+      expect(restore.status).toBe(201);
+      expect(restore.body.resources.kiPoints.used).toBe(0);
+
+      // Deliberately an error, never a clamp (#1039's rule, restated for resources) — a silent
+      // success here is indistinguishable from an AI narrating a technique it never paid for.
+      const overspend = await request(server)
+        .post(`/api/v1/characters/${characterId}/resources`)
+        .set(owner)
+        .send({ key: 'kiPoints', delta: 100 });
+      expect(overspend.status).toBe(400);
+
+      // The refused spend wrote nothing.
+      const after = await request(server).get(`/api/v1/characters/${characterId}`).set(owner);
+      expect(after.body.resources.kiPoints.used).toBe(0);
+    });
+
+    it('a key outside the adapter vocabulary creates a custom resource rather than being rejected', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/characters/${characterId}/resources`)
+        .set(owner)
+        .send({ key: 'houseRuleLuckPoints', delta: 1, max: 2, name: 'Luck Points' });
+      expect(res.status).toBe(201);
+      expect(res.body.resources.houseRuleLuckPoints).toMatchObject({ max: 2, used: 1, name: 'Luck Points' });
+    });
+
+    it('non-owner, non-dm player gets 403 adjusting a resource', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/characters/${characterId}/resources`)
+        .set(nonOwner)
+        .send({ key: 'kiPoints', delta: 1 });
+      expect(res.status).toBe(403);
+    });
+
+    it('a viewer cannot adjust a resource', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/characters/${characterId}/resources`)
+        .set(viewer)
+        .send({ key: 'kiPoints', delta: 1 });
+      expect(res.status).toBe(403);
+    });
+
+    it('the DM may adjust any character\'s resources', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/characters/${characterId}/resources`)
+        .set(dm)
+        .send({ key: 'kiPoints', delta: 1 });
+      expect(res.status).toBe(201);
+      expect(res.body.resources.kiPoints.used).toBe(1);
+      // Restore for later tests.
+      await request(server).post(`/api/v1/characters/${characterId}/resources`).set(dm).send({ key: 'kiPoints', delta: -1 });
+    });
+  });
+
   // Issue #59: characters carry a DM-only dmSecret (a secret curse, hidden true
   // identity…) with the same strip-for-non-DM redaction as quests/NPCs/locations.
   it('dmSecret visible to dm but absent for the owning player and viewer', async () => {
