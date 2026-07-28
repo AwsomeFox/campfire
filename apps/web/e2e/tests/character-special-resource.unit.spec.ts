@@ -34,13 +34,16 @@ test.describe('findSpecialResource — adapter-driven, never hardcoded (#1642)',
   });
 });
 
-test.describe('resourceAvailability — pip math, adapter-default before first touch (#1642)', () => {
+test.describe('resourceAvailability — pip math, DM-awarded economy (#1642)', () => {
   const inspirationDef = { key: 'inspiration', defaultMax: 1 };
   const heroPointsDef = { key: 'heroPoints', defaultMax: 3 };
 
-  test('a character that has never had this resource touched shows the ADAPTER default max, fully available', () => {
-    expect(resourceAvailability(inspirationDef, { resources: {} })).toEqual({ max: 1, used: 0, available: 1 });
-    expect(resourceAvailability(heroPointsDef, { resources: {} })).toEqual({ max: 3, used: 0, available: 3 });
+  // Inspiration / hero points are DM-awarded (resources.spec.ts #1073). Absence of the
+  // sparse key must not look like a full pool — otherwise Spend consumes a reroll that
+  // was never awarded. Show adapter capacity with nothing available until first award.
+  test('a character that has never had this resource touched shows adapter capacity with nothing available', () => {
+    expect(resourceAvailability(inspirationDef, { resources: {} })).toEqual({ max: 1, used: 1, available: 0 });
+    expect(resourceAvailability(heroPointsDef, { resources: {} })).toEqual({ max: 3, used: 3, available: 0 });
   });
 
   test('a spent (used) resource reduces availability, capped at 0', () => {

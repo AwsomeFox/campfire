@@ -22,12 +22,22 @@ test.describe('character sheet surfaces inspiration (#1642)', () => {
     const region = page.getByRole('region', { name: 'Inspiration' });
     await expect(region).toBeVisible();
 
-    // Fresh (never-touched) resource: adapter default max 1, fully available.
-    await expect(region.getByLabel('1 of 1 — Inspiration available')).toBeVisible();
+    // Fresh (never-touched) resource: adapter capacity shown, but nothing available until
+    // awarded (DM-awarded economy — resources.spec.ts #1073). Restore awards on first touch.
+    await expect(region.getByLabel('0 of 1 — Inspiration available')).toBeVisible();
     const spend = region.getByRole('button', { name: 'Spend' });
     const restore = region.getByRole('button', { name: 'Restore' });
+    await expect(spend).toBeDisabled();
+    await expect(restore).toBeEnabled();
+
+    const awardReq = page.waitForResponse(
+      (res) => res.url().includes(`/api/v1/characters/${navigation.characterId}/resources`) && res.request().method() === 'POST',
+    );
+    await restore.click();
+    await awardReq;
+    await expect(region.getByLabel('1 of 1 — Inspiration available')).toBeVisible();
     await expect(spend).toBeEnabled();
-    await expect(restore).toBeDisabled(); // nothing spent yet — restore has nothing to give back
+    await expect(restore).toBeDisabled(); // nothing spent yet
 
     const spendReq = page.waitForResponse(
       (res) => res.url().includes(`/api/v1/characters/${navigation.characterId}/resources`) && res.request().method() === 'POST',

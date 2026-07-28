@@ -34,17 +34,25 @@ export function findSpecialResource(adapter: RuleSystemAdapter): AdapterResource
 export type ResourceAvailability = { max: number; used: number; available: number };
 
 /**
- * Current max/used/available for one resource on a character, falling back to the
- * adapter's declared default when the character has never had this resource touched
- * (issue #422's `characters.resources` is sparse — a key is only present once
- * `adjustResource` has written it at least once).
+ * Current max/used/available for one resource on a character.
+ *
+ * Issue #422's `characters.resources` is sparse — a key is only present once
+ * `adjustResource` has written it at least once. Inspiration / hero points are
+ * DM-awarded (see `resources.spec.ts` #1073): absence must NOT be treated as a
+ * full pool, or a fresh sheet would let the player Spend a reroll that was never
+ * awarded. Untouched characters therefore show the adapter's capacity with
+ * nothing available; Restore on the card awards the pool on first touch.
  */
 export function resourceAvailability(
   def: Pick<AdapterResourceDef, 'key' | 'defaultMax'>,
   character: Pick<Character, 'resources'>,
 ): ResourceAvailability {
   const stored = character.resources[def.key];
-  const max = stored?.max ?? def.defaultMax ?? 1;
-  const used = stored?.used ?? 0;
+  if (!stored) {
+    const max = def.defaultMax ?? 1;
+    return { max, used: max, available: 0 };
+  }
+  const max = stored.max;
+  const used = stored.used ?? 0;
   return { max, used, available: Math.max(0, max - used) };
 }

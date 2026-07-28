@@ -2048,20 +2048,27 @@ function AdapterResourceCard({
     setBusy(true);
     onError(null);
     try {
-      // `max`/`name`/`recharge` ride along on every call (not just the first touch):
-      // the adjustResource service only applies them when the resource doesn't already
-      // exist on this character, but sending them unconditionally means a sheet that
-      // opens before this resource was ever touched still creates it with the
-      // ADAPTER'S max, not the service's own hardcoded default (see ResourcePatch's
-      // doc comment — an omitted `max` on first touch defaults to 1, which is correct
-      // for inspiration but wrong for hero points).
-      await api.post(`${API}/characters/${character.id}/resources`, {
-        key: def.key,
-        delta,
-        max: def.defaultMax ?? 1,
-        name: def.name,
-        recharge: def.recharge,
-      });
+      const stored = character.resources[def.key];
+      // CharactersService.adjustResource applies `patch.max` whenever it is defined
+      // (not only on first touch). Only send max/name/recharge when creating the
+      // pool so a DM-configured override is preserved on later Spend/Restore.
+      // Untouched pools have nothing to Spend (see resourceAvailability); Restore
+      // awards by creating `{ max: adapterDefault, used: 0 }`.
+      if (!stored) {
+        if (delta >= 0) return;
+        await api.post(`${API}/characters/${character.id}/resources`, {
+          key: def.key,
+          max: def.defaultMax ?? 1,
+          used: 0,
+          name: def.name,
+          recharge: def.recharge,
+        });
+      } else {
+        await api.post(`${API}/characters/${character.id}/resources`, {
+          key: def.key,
+          delta,
+        });
+      }
       onChange();
     } catch (err) {
       onError(err instanceof ApiError ? err.message : t('characters.resources.updateError', { name: def.name }));
