@@ -10,8 +10,11 @@ test.describe('compendium inventory UI (#738)', () => {
     expect(reader).toContain('/inventory/from-compendium');
     expect(reader).toContain('ruleEntryId: entry.id');
     expect(reader).toContain("duplicateMode: 'confirm'");
-    expect(reader).toContain("acquire('increment')");
-    expect(reader).toContain("acquire('separate')");
+    expect(reader).toContain("onAcquire('increment')");
+    expect(reader).toContain("onAcquire('separate')");
+    expect(reader).toContain('useDialog');
+    expect(reader).toContain('role="dialog"');
+    expect(reader).toContain('aria-modal="true"');
   });
 
   test('inventory renders provenance, play-safe details, and link actions', () => {

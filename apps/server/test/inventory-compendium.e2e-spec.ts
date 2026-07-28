@@ -37,7 +37,12 @@ describe('compendium inventory (#738 e2e)', () => {
     });
     expect(imported.status).toBe(201);
     const importedItems = await request(server).get(`/api/v1/campaigns/${imported.body.id}/inventory`).set(player);
-    expect(importedItems.body[0]).toMatchObject({ compendiumRef: null, compendiumSnapshot: null, compendiumState: null });
+    // Invalid ref is dropped; valid snapshot fields are kept with the unsafe URL blanked.
+    expect(importedItems.body[0]).toMatchObject({
+      compendiumRef: null,
+      compendiumState: null,
+      compendiumSnapshot: { slug: 'x', name: 'x', type: 'item', sourceUrl: '' },
+    });
     expect((await request(server).post(url).set(player).send({ ruleEntryId: entryId, ownerType: 'character', characterId: ownCharacterId })).status).toBe(201);
     expect((await request(server).post(url).set(player).send({ ruleEntryId: entryId, ownerType: 'character', characterId: foreignCharacterId })).status).toBe(403);
     expect((await request(server).post(`/api/v1/campaigns/${campaignId}/inventory`).set(player).send({ name: 'forged', ruleEntryId: entryId })).status).toBe(400);

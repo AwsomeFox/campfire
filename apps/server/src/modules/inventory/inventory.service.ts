@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, count, desc, eq, isNotNull, isNull, lt, sql } from 'drizzle-orm';
+import { and, count, desc, eq, inArray, isNotNull, isNull, lt, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import { CompendiumRef, CompendiumSnapshot, InventoryFromCompendium, InventoryItem, InventoryItemCreate, InventoryItemUpdate, TreasuryPatch } from '@campfire/schema';
 import type { Treasury, Role } from '@campfire/schema';
@@ -48,11 +48,20 @@ function qtyFingerprint(input: InventoryItemUpdateInput): string {
   return `${qtyPart}|${restPart}`;
 }
 
+function sanitizeCompendiumSnapshot(value: unknown): CompendiumSnapshot | null {
+  const parsed = CompendiumSnapshot.safeParse(value);
+  if (!parsed.success) return null;
+  // Keep body/license/source; blank only a non-http(s) external URL.
+  if (parsed.data.sourceUrl && !/^https?:\/\//i.test(parsed.data.sourceUrl)) {
+    return { ...parsed.data, sourceUrl: '' };
+  }
+  return parsed.data;
+}
+
 function toDomain(row: typeof inventoryItems.$inferSelect): InventoryItem {
   const parsedRef = CompendiumRef.safeParse(row.compendiumRef ? safeJson(row.compendiumRef) : null);
   const ref = parsedRef.success ? parsedRef.data : null;
-  const parsedSnapshot = row.compendiumSnapshot ? CompendiumSnapshot.safeParse(safeJson(row.compendiumSnapshot)) : null;
-  const snapshot = parsedSnapshot?.success && (!parsedSnapshot.data.sourceUrl || /^https?:\/\//i.test(parsedSnapshot.data.sourceUrl)) ? parsedSnapshot.data : null;
+  const snapshot = row.compendiumSnapshot ? sanitizeCompendiumSnapshot(safeJson(row.compendiumSnapshot)) : null;
   return {
     id: row.id,
     campaignId: row.campaignId,
@@ -102,7 +111,7 @@ export class InventoryService {
       .select()
       .from(inventoryItems)
       .where(and(eq(inventoryItems.campaignId, campaignId), notDeleted(inventoryItems.deletedAt)));
-    return Promise.all(rows.map((row) => this.withCompendiumState(row)));
+    return this.withCompendiumStates(rows);
   }
 
   /**
@@ -145,11 +154,31 @@ export class InventoryService {
 
   /** Compute volatile linked_updated without mutating snapshots or player-owned fields. */
   private async withCompendiumState(row: typeof inventoryItems.$inferSelect): Promise<InventoryItem> {
-    const item = toDomain(row);
-    if (!item.compendiumRef || item.compendiumState !== 'linked' || item.ruleEntryId == null) return item;
-    const [entry] = await this.db.select().from(ruleEntries).where(eq(ruleEntries.id, item.ruleEntryId)).limit(1);
-    if (!entry || computeRuleEntryContentHash(entry) !== item.compendiumRef.contentHash) item.compendiumState = 'linked_updated';
+    const [item] = await this.withCompendiumStates([row]);
     return item;
+  }
+
+  /** Batch-resolve rule entries so list endpoints avoid N+1 SELECTs. */
+  private async withCompendiumStates(rows: Array<typeof inventoryItems.$inferSelect>): Promise<InventoryItem[]> {
+    const items = rows.map(toDomain);
+    const linkedIds = [
+      ...new Set(
+        items
+          .filter((item) => item.compendiumRef && item.compendiumState === 'linked' && item.ruleEntryId != null)
+          .map((item) => item.ruleEntryId as number),
+      ),
+    ];
+    if (linkedIds.length === 0) return items;
+    const entries = await this.db.select().from(ruleEntries).where(inArray(ruleEntries.id, linkedIds));
+    const byId = new Map(entries.map((entry) => [entry.id, entry]));
+    for (const item of items) {
+      if (!item.compendiumRef || item.compendiumState !== 'linked' || item.ruleEntryId == null) continue;
+      const entry = byId.get(item.ruleEntryId);
+      if (!entry || computeRuleEntryContentHash(entry) !== item.compendiumRef.contentHash) {
+        item.compendiumState = 'linked_updated';
+      }
+    }
+    return items;
   }
 
   /**

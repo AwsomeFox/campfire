@@ -43,6 +43,9 @@ describe('compendium inventory acquisition (#738)', () => {
     expect(campaigns).toContain('safeImportedCompendiumRef(item.compendiumRef)');
     expect(campaigns).toContain('safeImportedCompendiumSnapshot(item.compendiumSnapshot)');
     expect(campaigns).toContain("compendiumState: safeImportedCompendiumRef(item.compendiumRef) && safeImportedCompendiumSnapshot(item.compendiumSnapshot) ? 'detached' : null");
-    expect(campaigns).toContain('if (parsed.data.sourceUrl && !/^https?:\\/\\//i.test(parsed.data.sourceUrl)) return null');
+    expect(campaigns).toContain("sourceUrl: ''");
+    expect(service).toContain('sanitizeCompendiumSnapshot');
+    expect(service).toContain('withCompendiumStates');
+    expect(service).toContain('inArray(ruleEntries.id, linkedIds)');
   });
 });

@@ -112,8 +112,11 @@ import {
 function safeImportedCompendiumSnapshot(value: unknown): string | null {
   const parsed = CompendiumSnapshot.safeParse(value);
   if (!parsed.success) return null;
-  if (parsed.data.sourceUrl && !/^https?:\/\//i.test(parsed.data.sourceUrl)) return null;
-  return JSON.stringify(parsed.data);
+  // Keep play-safe provenance; blank only an unsafe external URL.
+  const snapshot = parsed.data.sourceUrl && !/^https?:\/\//i.test(parsed.data.sourceUrl)
+    ? { ...parsed.data, sourceUrl: '' }
+    : parsed.data;
+  return JSON.stringify(snapshot);
 }
 
 function safeImportedCompendiumRef(value: unknown): string | null {

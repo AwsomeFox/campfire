@@ -8,7 +8,8 @@ import { useTranslation } from 'react-i18next';
  * shape) with just the back link. RuleEntry only carries packId, so the
  * owning pack (for name + license) is resolved from GET /rules/packs.
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useNavigate, useParams } from 'react-router-dom';
 import { api, API, translateApiError } from '../../lib/api';
 import type { Character, RuleEntry, RulePack } from '@campfire/schema';
@@ -17,6 +18,7 @@ import { Markdown } from '../../components/Markdown';
 import { StatBlock, hasMonsterStatblock } from '../../components/StatBlock';
 import { GameIcon } from '../../components/GameIcon';
 import { IconPicker } from '../../components/IconPicker';
+import { useDialog } from '../../components/useDialog';
 import { ruleEntryIconSlug } from '../../lib/ruleEntryIcon';
 import { useCampaign } from '../../app/CampaignContext';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
@@ -54,6 +56,7 @@ export default function ReaderPage() {
   const [ownerId, setOwnerId] = useState('party');
   const [qty, setQty] = useState('1');
   const [notes, setNotes] = useState('');
+  const acquireTitleId = useId();
 
   async function saveIcon(slug: string) {
     if (!entry) return;
@@ -208,15 +211,87 @@ export default function ReaderPage() {
         <IconPicker value={entry.iconSlug} onSelect={saveIcon} onClose={() => setPickingIcon(false)} />
       )}
       {acquiring && entry && (
-        <div className="modal-backdrop"><Card className="max-w-md w-full space-y-3"><h2>Add {entry.name} to inventory</h2>
-          <label>Owner <select value={ownerId} onChange={(e) => setOwnerId(e.target.value)}><option value="party">Party stash</option>{owners.map((owner) => <option key={owner.id} value={owner.id}>{owner.name}</option>)}</select></label>
-          <label>Quantity <input value={qty} type="number" min="1" onChange={(e) => setQty(e.target.value)} /></label>
-          <label>Notes <textarea value={notes} onChange={(e) => setNotes(e.target.value)} /></label>
-          {acquireError && <ErrorNote message={acquireError} />}
-          <div className="flex gap-2"><Btn onClick={() => void acquire()}>Add</Btn>{acquireError?.startsWith('That item') && <><Btn ghost onClick={() => void acquire('increment')}>Increment existing</Btn><Btn ghost onClick={() => void acquire('separate')}>Create separate</Btn></>}<Btn ghost onClick={() => setAcquiring(false)}>Cancel</Btn></div>
-        </Card></div>
+        <AcquireInventoryDialog
+          titleId={acquireTitleId}
+          entryName={entry.name}
+          owners={owners}
+          ownerId={ownerId}
+          qty={qty}
+          notes={notes}
+          acquireError={acquireError}
+          onOwnerIdChange={setOwnerId}
+          onQtyChange={setQty}
+          onNotesChange={setNotes}
+          onAcquire={(mode) => void acquire(mode)}
+          onClose={() => setAcquiring(false)}
+        />
       )}
     </div>
+  );
+}
+
+function AcquireInventoryDialog({
+  titleId,
+  entryName,
+  owners,
+  ownerId,
+  qty,
+  notes,
+  acquireError,
+  onOwnerIdChange,
+  onQtyChange,
+  onNotesChange,
+  onAcquire,
+  onClose,
+}: {
+  titleId: string;
+  entryName: string;
+  owners: Character[];
+  ownerId: string;
+  qty: string;
+  notes: string;
+  acquireError: string | null;
+  onOwnerIdChange: (value: string) => void;
+  onQtyChange: (value: string) => void;
+  onNotesChange: (value: string) => void;
+  onAcquire: (mode?: 'confirm' | 'increment' | 'separate') => void;
+  onClose: () => void;
+}) {
+  const dialogRef = useDialog<HTMLDivElement>({ onClose, inertBackground: true });
+  return createPortal(
+    <div
+      className="dialog-backdrop"
+      data-overlay="dialog"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        className="dialog w-full max-w-md space-y-3"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <h2 id={titleId} className="dialog-title">Add {entryName} to inventory</h2>
+        <label>Owner <select value={ownerId} onChange={(e) => onOwnerIdChange(e.target.value)}><option value="party">Party stash</option>{owners.map((owner) => <option key={owner.id} value={owner.id}>{owner.name}</option>)}</select></label>
+        <label>Quantity <input value={qty} type="number" min="1" onChange={(e) => onQtyChange(e.target.value)} /></label>
+        <label>Notes <textarea value={notes} onChange={(e) => onNotesChange(e.target.value)} /></label>
+        {acquireError && <ErrorNote message={acquireError} />}
+        <div className="flex gap-2 flex-wrap">
+          <Btn onClick={() => onAcquire()}>Add</Btn>
+          {acquireError?.startsWith('That item') && (
+            <>
+              <Btn ghost onClick={() => onAcquire('increment')}>Increment existing</Btn>
+              <Btn ghost onClick={() => onAcquire('separate')}>Create separate</Btn>
+            </>
+          )}
+          <Btn ghost onClick={onClose}>Cancel</Btn>
+        </div>
+      </div>
+    </div>,
+    document.body,
   );
 }
 
