@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, ForbiddenException, Inject, Inj
 import { and, eq, gt, inArray, isNull, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
-import { ActiveEffect, AoeTemplate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
+import { ActiveEffect, AoeTemplate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
 import { z as zod } from 'zod';
 import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -3117,6 +3117,12 @@ export class EncountersService {
       }
     }
     const adapter = await this.adapterForCampaign(encounterRow.campaignId);
+    // Issue #1670: the SAME lookup the character sheet's adjustConditionLevel uses
+    // (characters.service.ts), not a second constant or a duplicated cap — that
+    // duplication is exactly what let this drift in the first place. `undefined` for
+    // a system with no leveled track (e.g. PF2e) is the negative case, matching the
+    // sheet's own handling: nothing here to cap, so nothing is rejected.
+    const leveledTrack = leveledConditionTrackFor(adapter.id);
     const damageMetadataTouched =
       patch.damageType !== undefined || patch.saveOutcome !== undefined || patch.isCrit !== undefined || patch.damageDice !== undefined;
     if (damageMetadataTouched && !adapter.supportsDirectDamageRules) {
@@ -3351,6 +3357,25 @@ export class EncountersService {
           }
 
           instances = instances.slice(0, 50);
+
+          // Issue #1670: enforce the adapter's leveled-condition cap here too, or a
+          // combatant edit can push exhaustion past what the character sheet's own
+          // adjustConditionLevel would ever allow — and, because the sheet's controls
+          // are bounded to [0, track.max], the party has no way back down from the
+          // combatant surface once that happens. An ERROR, never a clamp, mirroring
+          // adjustConditionLevel's own "never silently under/over-report" rule
+          // (issue #1039): a clamp here would let a DM (or an AI DM over MCP) believe
+          // a 9th exhaustion level landed when only a 6th actually did.
+          if (leveledTrack) {
+            const trackKey = leveledTrack.name.toLowerCase();
+            const overCap = instances.find((i) => i.name.trim().toLowerCase() === trackKey && i.stacks > leveledTrack.max);
+            if (overCap) {
+              throw new BadRequestException(
+                `${leveledTrack.name} level (${overCap.stacks}) must be in [0, ${leveledTrack.max}]`,
+              );
+            }
+          }
+
           const derived = deriveConditionNames(instances);
           afterConditions = new Set(derived);
           Object.assign(writeSet, conditionWriteSetFromInstances(instances));
