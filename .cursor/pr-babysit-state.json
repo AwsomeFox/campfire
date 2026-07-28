@@ -1,0 +1,13 @@
+{
+  "tracked": [
+    {
+      "pr": 1651,
+      "status": "babysitting",
+      "url": "https://github.com/AwsomeFox/campfire/pull/1651",
+      "headBranch": "fix/issue-1548",
+      "baseBranch": "main",
+      "updatedAt": "2026-07-28T11:56:00Z",
+      "notes": "Tracking started on cursor/pull-request-babysitting-2412. Head 28ce9926 already updates stale export-profiles assignedDm test. Remaining: Codex P1 on ScheduledSessionExport.array().parse() (may throw on permissive-import rows); Devin/Codex assignedDm threads should resolve after test fix; CI run 30356778396 in progress; MERGEABLE vs main but behind."
+    }
+  ]
+}
