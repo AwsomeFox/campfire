@@ -9,6 +9,8 @@ type Taxonomy = { id: number; name: string; aliases: string[]; color: string; de
 type Entry = { entityType: string; entityId: number; name: string; description: string; tags: Taxonomy[]; collections: Taxonomy[] };
 type Search = { items: Entry[]; total: number; facets: { types: { id: string; label: string; count: number }[] } };
 type Template = { id: number; entityType: string; name: string };
+const SEARCH_DEBOUNCE_MS = 300;
+const INITIAL_FILTERS = { q: '', type: '', tagId: '', collectionId: '', visibility: '', status: '', owner: '' };
 export function libraryQuery(filters: Record<string, string>) { const params = new URLSearchParams(); for (const [k, v] of Object.entries(filters)) if (v) params.set(k, v); return params.toString(); }
 export function libraryTargets(selected: Set<string>) { return [...selected].map((key) => { const [entityType, entityId] = key.split(':'); return { entityType, entityId: Number(entityId) }; }); }
 export function libraryBulkRequest(operation: string, selected: Set<string>, extra: Record<string, unknown> = {}) { return { operation, targets: libraryTargets(selected), ...extra }; }
@@ -17,26 +19,27 @@ export function operationIdAfterUndo(current: number | null, succeeded: boolean)
 export default function CampaignLibraryPage() {
   const campaignId = Number(useParams<{ campaignId: string }>().campaignId); const { isDm } = useCampaignAccess();
   const [search, setSearch] = useState<Search | null>(null); const [tags, setTags] = useState<Taxonomy[]>([]); const [collections, setCollections] = useState<Taxonomy[]>([]); const [templates, setTemplates] = useState<Template[]>([]);
-  const [filters, setFilters] = useState({ q: '', type: '', tagId: '', collectionId: '', visibility: '', status: '', owner: '' }); const [selected, setSelected] = useState(new Set<string>()); const [operationId, setOperationId] = useState<number | null>(null); const [error, setError] = useState<string | null>(null); const [notice, setNotice] = useState('');
+  const [filters, setFilters] = useState(INITIAL_FILTERS); const [selected, setSelected] = useState(new Set<string>()); const [operationId, setOperationId] = useState<number | null>(null); const [error, setError] = useState<string | null>(null); const [notice, setNotice] = useState('');
   const [taxKind, setTaxKind] = useState<'tags' | 'collections'>('tags'); const [tax, setTax] = useState({ name: '', aliases: '', color: '#64748b', description: '', parent: '' }); const [editingId, setEditingId] = useState<number | null>(null); const [statusValue, setStatusValue] = useState(''); const [characterId, setCharacterId] = useState(''); const [templateName, setTemplateName] = useState('');
   // A request-sequence guard so a slower, earlier response (e.g. from a fast
   // keystroke burst) can never overwrite the result of a request issued later.
   const requestSeq = useRef(0);
-  const load = useCallback(async () => {
+  const load = useCallback(async (signal?: AbortSignal) => {
     const seq = ++requestSeq.current;
     try {
       const query = libraryQuery(filters);
-      const [result, nextTags, nextCollections, nextTemplates] = await Promise.all([api.get<Search>(`${API}/campaigns/${campaignId}/library/search?${query}`), api.get<Taxonomy[]>(`${API}/campaigns/${campaignId}/library/tags`), api.get<Taxonomy[]>(`${API}/campaigns/${campaignId}/library/collections`), isDm ? api.get<Template[]>(`${API}/campaigns/${campaignId}/library/templates`) : Promise.resolve([])]);
-      if (seq !== requestSeq.current) return;
+      const request = signal ? { signal } : undefined;
+      const [result, nextTags, nextCollections, nextTemplates] = await Promise.all([api.get<Search>(`${API}/campaigns/${campaignId}/library/search?${query}`, request), api.get<Taxonomy[]>(`${API}/campaigns/${campaignId}/library/tags`, request), api.get<Taxonomy[]>(`${API}/campaigns/${campaignId}/library/collections`, request), isDm ? api.get<Template[]>(`${API}/campaigns/${campaignId}/library/templates`, request) : Promise.resolve([])]);
+      if (signal?.aborted || seq !== requestSeq.current) return;
       setSearch(result); setTags(nextTags); setCollections(nextCollections); setTemplates(nextTemplates);
     } catch (e) {
-      if (seq !== requestSeq.current) return;
+      if (signal?.aborted || seq !== requestSeq.current) return;
       setError(e instanceof ApiError ? e.message : 'Could not load library');
     }
   }, [campaignId, filters, isDm]);
   // Debounce filter-driven reloads (every keystroke otherwise re-triggers a
   // full-campaign search); the explicit Filter button still calls load() directly.
-  useEffect(() => { const timer = setTimeout(() => { void load(); }, 300); return () => clearTimeout(timer); }, [load]);
+  useEffect(() => { const controller = new AbortController(); const timeout = window.setTimeout(() => { void load(controller.signal); }, SEARCH_DEBOUNCE_MS); return () => { controller.abort(); window.clearTimeout(timeout); }; }, [load]);
   const targets = useMemo(() => libraryTargets(selected), [selected]);
   const setFilter = (key: keyof typeof filters, value: string) => setFilters((old) => ({ ...old, [key]: value }));
   const post = async (path: string, body?: unknown) => { try { const result = await api.post<{ operationId?: number }>(`${API}/campaigns/${campaignId}/library/${path}`, body); if (result.operationId) { setOperationId(result.operationId); setNotice(`Applied operation ${result.operationId}.`); } else setNotice('Saved.'); await load(); return result; } catch (e) { setError(e instanceof ApiError ? e.message : 'Update failed'); return null; } };
