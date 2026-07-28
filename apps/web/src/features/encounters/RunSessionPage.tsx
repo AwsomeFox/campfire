@@ -25,6 +25,7 @@ import type {
   AoeTemplate,
   Attachment,
   CampaignLibraryMonster,
+  CastSessionCreated,
   Character,
   Combatant,
   CombatantKind,
@@ -120,6 +121,15 @@ import { AiDmPresenceTag, AiDmToolActivityRow } from '../ai-dm/AiDmActivityChip'
 import { resolveToolActivity, toolResource } from '../ai-dm/toolActivity';
 import { GameIcon } from '../../components/GameIcon';
 import { TermHelp } from '../../components/TermHelp';
+import {
+  CAST_DISPLAY_CHANNEL,
+  type CastDisplayStatus,
+  displayStatusLabel,
+  focusCastWindow,
+  navigateCastWindow,
+  openCastWindow,
+  type CastWindowState,
+} from '../screen/castWindow';
 import { useDisclosure } from '../../components/useDisclosure';
 import {
   advanceCombatLogAnnouncements,
@@ -1028,6 +1038,100 @@ export default function RunSessionPage() {
   const [encounterReadStale, setEncounterReadStale] = useState(false);
   const [resyncPending, setResyncPending] = useState(false);
   const [syncRevision, setSyncRevision] = useState<EncounterSyncRevision | null>(null);
+  // The player display is deliberately a separate browsing context: navigating this
+  // cockpit to `/screen` used to strand the DM without initiative or turn controls.
+  // Keep only the window handle and non-secret status here; cast capabilities never
+  // cross BroadcastChannel/postMessage (issue #762 / #547).
+  const castWindowRef = useRef<Window | null>(null);
+  const [castWindowState, setCastWindowState] = useState<CastWindowState>('idle');
+  const [castFollowedEncounterId, setCastFollowedEncounterId] = useState<number | null>(null);
+  const [castDisplayNotice, setCastDisplayNotice] = useState<string | null>(null);
+
+  const receiveCastDisplayStatus = useCallback((status: CastDisplayStatus) => {
+    if (status.campaignId !== cid) return;
+    if (status.type === 'ready') {
+      setCastWindowState('ready');
+      setCastFollowedEncounterId(status.encounterId);
+      return;
+    }
+    setCastWindowState('window-closed');
+  }, [cid]);
+
+  useEffect(() => {
+    if (!Number.isFinite(cid)) return;
+    const onMessage = (event: MessageEvent<unknown>) => {
+      if (event.origin !== window.location.origin || !event.data || typeof event.data !== 'object') return;
+      const data = event.data as Partial<CastDisplayStatus>;
+      if ((data.type === 'ready' || data.type === 'closed') && data.campaignId === cid) {
+        receiveCastDisplayStatus(data as CastDisplayStatus);
+      }
+    };
+    window.addEventListener('message', onMessage);
+    // BroadcastChannel is an enhancement, not the only protocol: opener postMessage
+    // keeps named-window focus/status functional in older embedded/tablet browsers.
+    const channel = typeof BroadcastChannel === 'undefined' ? null : new BroadcastChannel(CAST_DISPLAY_CHANNEL);
+    if (channel) channel.onmessage = (event: MessageEvent<CastDisplayStatus>) => receiveCastDisplayStatus(event.data);
+    return () => {
+      window.removeEventListener('message', onMessage);
+      channel?.close();
+    };
+  }, [cid, receiveCastDisplayStatus]);
+
+  const mintCastLink = useCallback(async (): Promise<string> => {
+    const expiresAt = new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString();
+    const created = await api.post<CastSessionCreated>(`${API}/campaigns/${cid}/cast-sessions`, {
+      label: 'Player display',
+      expiresAt,
+    });
+    return new URL(created.url, window.location.origin).href;
+  }, [cid]);
+
+  const openPlayerDisplay = useCallback(() => {
+    // `openCastWindow` intentionally happens before any await: this is the user
+    // gesture that prevents popup blockers from stealing the display workflow.
+    const target = openCastWindow();
+    if (!target) {
+      setCastWindowState('popup-blocked');
+      setCastDisplayNotice('The browser blocked the player display. Allow popups for Campfire, then try Open display again.');
+      return;
+    }
+    castWindowRef.current = target;
+    setCastWindowState('opening');
+    setCastDisplayNotice(null);
+    void mintCastLink()
+      .then((url) => {
+        if (!navigateCastWindow(target, url)) {
+          setCastWindowState('window-closed');
+          setCastDisplayNotice('The display window closed before it could connect. Open display to try again.');
+        }
+      })
+      .catch((error: unknown) => {
+        setCastWindowState('idle');
+        setCastDisplayNotice(error instanceof Error ? `Couldn't create a safe display link: ${error.message}` : "Couldn't create a safe display link. Try again.");
+      });
+  }, [mintCastLink]);
+
+  const copyPlayerDisplayLink = useCallback(() => {
+    setCastDisplayNotice(null);
+    void mintCastLink()
+      .then(async (url) => {
+        if (!navigator.clipboard?.writeText) throw new Error('Clipboard access is unavailable; open the display and copy its address instead.');
+        await navigator.clipboard.writeText(url);
+        setCastDisplayNotice('A safe player-display link was copied. It expires in 8 hours.');
+      })
+      .catch((error: unknown) => {
+        setCastDisplayNotice(error instanceof Error ? error.message : "Couldn't copy a player-display link.");
+      });
+  }, [mintCastLink]);
+
+  const reconnectPlayerDisplay = useCallback(() => {
+    if (focusCastWindow(castWindowRef.current)) {
+      setCastDisplayNotice('Focused the existing player display.');
+      return;
+    }
+    setCastWindowState('window-closed');
+    openPlayerDisplay();
+  }, [openPlayerDisplay]);
 
   // Reads via TanStack Query (issue #73). Each is polled while the tab is visible
   // (refetchInterval pauses in the background by default) as a backstop to the SSE
@@ -2176,17 +2280,36 @@ export default function RunSessionPage() {
         <div className="flex-1" />
         {isDm && (
           <>
-            {/* No aria-label / title here: the visible word "Cast" is the
-                accessible name, and the adjacent TermHelp carries the
-                explanation without a hover-only tooltip (issue #518). */}
-            <Btn
-              ghost
-              className="!min-h-0 !py-1.5 text-xs"
-              onClick={() => navigate(`/c/${cid}/screen`)}
-            >
-              <GameIcon slug="tv" size={13} className="inline align-text-bottom mr-1" />Cast
-            </Btn>
+            <div className="flex items-center gap-1.5 flex-wrap" role="group" aria-label="Player display">
+              {/* Open synchronously from this button's click stack. The newly minted
+                  #547 capability navigates only that separate window, never the DM cockpit. */}
+              <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={openPlayerDisplay}>
+                <GameIcon slug="tv" size={13} className="inline align-text-bottom mr-1" />Open display
+              </Btn>
+              <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={copyPlayerDisplayLink}>
+                Copy link
+              </Btn>
+              <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={reconnectPlayerDisplay}>
+                Reconnect/focus
+              </Btn>
+              <span
+                className={`tag ${castWindowState === 'ready' ? 'tag-accent' : 'tag-neutral'}`}
+                role="status"
+                data-testid="player-display-status"
+                title={castDisplayNotice ?? undefined}
+              >
+                {displayStatusLabel(
+                  castWindowState,
+                  castFollowedEncounterId === encounter?.id ? encounter.name : null,
+                )}
+              </span>
+            </div>
             <TermHelp termId="cast" />
+            {castDisplayNotice && (
+              <p className="text-xs text-muted m-0 basis-full" role="status" data-testid="player-display-notice">
+                {castDisplayNotice}
+              </p>
+            )}
           </>
         )}
         {canDmWrite && (

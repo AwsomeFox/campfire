@@ -73,6 +73,7 @@ import {
 } from './playerDisplayLoad';
 import { useWakeLock } from './useWakeLock';
 import { loginHrefWithReturn } from '../../lib/safeInternalPath';
+import { CAST_DISPLAY_CHANNEL, CAST_WINDOW_NAME, type CastDisplayStatus } from './castWindow';
 import {
   DEFAULT_SCENE,
   initiativeWindow,
@@ -725,6 +726,44 @@ export default function PlayerDisplayPage() {
       setFullscreenPending(false);
     }
   }, [syncFullscreen]);
+
+  // The separate window reports only operational state back to the cockpit.
+  // In particular, neither the cast URL nor its bearer token is ever sent over
+  // postMessage/BroadcastChannel (the URL itself is the #547 credential).
+  useEffect(() => {
+    if (!Number.isFinite(cid)) return;
+    const status = (): CastDisplayStatus => ({ type: 'ready', campaignId: cid, encounterId: encounter?.id ?? null });
+    const publish = (message: CastDisplayStatus) => {
+      try {
+        window.opener?.postMessage(message, window.location.origin);
+      } catch {
+        // An opener can disappear while the display navigates; BroadcastChannel
+        // and the on-screen controls remain independent recovery paths.
+      }
+    };
+    publish(status());
+    const channel = typeof BroadcastChannel === 'undefined' ? null : new BroadcastChannel(CAST_DISPLAY_CHANNEL);
+    channel?.postMessage(status());
+    const onPageHide = () => {
+      const closed: CastDisplayStatus = { type: 'closed', campaignId: cid };
+      publish(closed);
+      channel?.postMessage(closed);
+    };
+    window.addEventListener('pagehide', onPageHide);
+    return () => {
+      window.removeEventListener('pagehide', onPageHide);
+      channel?.close();
+    };
+  }, [cid, encounter?.id]);
+
+  // A popup opened by the DM is allowed to *ask* for fullscreen in its own
+  // browsing context. Browsers that require an additional activation reject it;
+  // toggleFullscreen turns that into the existing explicit, recoverable notice.
+  // Direct `/cast` links and normal `/screen` previews keep their manual control.
+  useEffect(() => {
+    if (window.name !== CAST_WINDOW_NAME || !isCastMode || isFullscreen || fullscreenPending) return;
+    void toggleFullscreen();
+  }, [fullscreenPending, isCastMode, isFullscreen, toggleFullscreen]);
 
   const displayedFullscreenNotice = fullscreenSupported
     ? fullscreenNotice
