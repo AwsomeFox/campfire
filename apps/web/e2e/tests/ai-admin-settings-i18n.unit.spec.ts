@@ -89,6 +89,19 @@ test.describe('AiDmCard / AiConsoleCard / AiPricingEditor localization (#1579)',
     expect(settingsAr.settings.aiDm.title).not.toBe(settingsEn.settings.aiDm.title);
   });
 
+  test('the ar values for the narration-language and credential-source labels are genuine Arabic, not English placeholders', () => {
+    const narrationOptions = settingsAr.settings.aiDm.narrationLanguage.options as Record<string, string>;
+    const credentialLabels = settingsAr.settings.aiDm.provider.credentialSourceLabels as Record<string, string>;
+    const samples = [...Object.values(narrationOptions), ...Object.values(credentialLabels)];
+    expect(samples.length).toBeGreaterThan(0);
+    for (const value of samples) {
+      expect(value, `expected Arabic script in: ${value}`).toMatch(ARABIC);
+    }
+    // Distinct from the English source, not a copy-through.
+    const narrationOptionsEn = settingsEn.settings.aiDm.narrationLanguage.options as Record<string, string>;
+    expect(narrationOptions.fr).not.toBe(narrationOptionsEn.fr);
+  });
+
   test('the ar values for the new AiConsoleCard keys are genuine Arabic, not English placeholders', () => {
     const samples = [
       adminAr.admin.aiConsole.title,
