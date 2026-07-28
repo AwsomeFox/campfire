@@ -38,7 +38,7 @@ export function HandoutsCard({ campaignId }: { campaignId: number }) {
   const [uploadMetadata, setUploadMetadata] = useState<MetadataDraft>(blankMetadata);
   // Concurrent load()/Retry callers share one promise so `await load()` never
   // resolves before the in-flight attachments fetch settles (#691).
-  const loadInFlight = useRef<Promise<void> | null>(null);
+  const loadInFlight = useRef<Promise<Attachment[] | null> | null>(null);
   // Tracks which campaign the card is currently bound to so a late response
   // from a previous campaignId cannot overwrite items/error/loading.
   const activeCampaignIdRef = useRef(campaignId);
@@ -49,12 +49,14 @@ export function HandoutsCard({ campaignId }: { campaignId: number }) {
       setLoading(true);
       try {
         const list = await api.get<Attachment[]>(`${API}/campaigns/${forCampaignId}/attachments`);
-        if (activeCampaignIdRef.current !== forCampaignId) return;
+        if (activeCampaignIdRef.current !== forCampaignId) return null;
         setItems(list);
         setError(null);
+        return list;
       } catch (err) {
-        if (activeCampaignIdRef.current !== forCampaignId) return;
+        if (activeCampaignIdRef.current !== forCampaignId) return null;
         setError(err instanceof ApiError ? err.message : "Couldn't load handouts.");
+        return null;
       } finally {
         if (activeCampaignIdRef.current === forCampaignId) {
           setLoading(false);
@@ -102,7 +104,13 @@ export function HandoutsCard({ campaignId }: { campaignId: number }) {
       setEditing(null); await load();
     } catch (err) {
       setError(err instanceof ApiError && err.status === 409 ? 'This handout changed elsewhere. Reloaded the latest version; review and save again.' : err instanceof ApiError ? err.message : "Couldn't save handout metadata.");
-      if (err instanceof ApiError && err.status === 409) await load();
+      if (err instanceof ApiError && err.status === 409) {
+        // Refresh the open editor's updatedAt (and row) so Retry can succeed;
+        // keep the local draft so the DM can review their pending edits.
+        const list = await load();
+        const fresh = list?.find((a) => a.id === editing.id) ?? null;
+        setEditing(fresh);
+      }
     } finally { setSavingMetadata(false); }
   }
 
@@ -119,7 +127,7 @@ export function HandoutsCard({ campaignId }: { campaignId: number }) {
 
       {error && (
         <div style={{ padding: '0 14px 8px' }}>
-          <ErrorNote message={error} pending={loading} onRetry={load} />
+          <ErrorNote message={error} pending={loading} onRetry={() => { void load(); }} />
         </div>
       )}
       {isDm && (

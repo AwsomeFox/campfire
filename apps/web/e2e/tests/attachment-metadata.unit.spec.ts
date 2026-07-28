@@ -29,6 +29,8 @@ test.describe('attachment metadata handouts (#735)', () => {
     expect(handouts).toContain('updatedAt: editing.updatedAt');
     expect(handouts).toContain('/metadata`');
     expect(handouts).toContain('changed elsewhere');
+    expect(handouts).toContain('list?.find((a) => a.id === editing.id)');
+    expect(handouts).toContain('setEditing(fresh)');
     expect(handouts).toContain('Handout details (optional)');
   });
 });

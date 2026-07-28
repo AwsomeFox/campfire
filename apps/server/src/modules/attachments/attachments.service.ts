@@ -141,7 +141,7 @@ function toDomain(row: typeof attachments.$inferSelect): Attachment {
     hidden: row.hidden,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
-  } as Attachment;
+  };
 }
 
 /**
@@ -612,7 +612,7 @@ export class AttachmentsService implements OnApplicationBootstrap {
     const after = { ...before, ...patch };
     const ts = nowIso();
     const row = this.db.transaction((tx) => {
-      const [updated] = tx.update(attachments).set({ ...patch, updatedAt: ts }).where(and(eq(attachments.id, id), eq(attachments.updatedAt, input.updatedAt))).returning().all();
+      const updated = tx.update(attachments).set({ ...patch, updatedAt: ts }).where(and(eq(attachments.id, id), eq(attachments.updatedAt, input.updatedAt))).returning().get();
       if (!updated) throw new ConflictException('Attachment metadata changed; reload before saving');
       tx.run(sql`INSERT INTO attachment_metadata_revisions (attachment_id, actor_user_id, before_json, after_json, created_at)
         VALUES (${id}, ${user.id}, ${JSON.stringify(before)}, ${JSON.stringify(after)}, ${ts})`);
@@ -860,6 +860,15 @@ export class AttachmentsService implements OnApplicationBootstrap {
       filename: string;
       mime: string;
       size: number;
+      title: string;
+      caption: string;
+      altText: string;
+      creator: string;
+      sourceUrl: string;
+      license: string;
+      rights: string;
+      attribution: string;
+      checksumSha256: string | null;
       hidden: number;
       state: string;
       createdAt: string;

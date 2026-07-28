@@ -8154,12 +8154,21 @@ export const AttachmentKind = z.enum(['portrait', 'map', 'image']);
 
 // Attribution is deliberately optional: ordinary table uploads should remain a
 // one-click operation, while imports and generated assets can record provenance.
+/** http(s) URL or empty; preprocess trims so whitespace-only becomes ''. */
+export const AttachmentSourceUrl = z.preprocess(
+  (v) => (typeof v === 'string' ? v.trim() : v),
+  z.union([
+    z.literal(''),
+    z.string().url().refine((v) => /^https?:\/\//i.test(v), 'Must be an http(s) URL'),
+  ]),
+);
+
 export const AttachmentMetadata = z.object({
   title: z.string().trim().max(255).default(''),
   caption: z.string().trim().max(2_000).default(''),
   altText: z.string().trim().max(1_000).default(''),
   creator: z.string().trim().max(255).default(''),
-  sourceUrl: z.string().trim().url().refine((v) => /^https?:\/\//i.test(v), 'Must be an http(s) URL').or(z.literal('')).default(''),
+  sourceUrl: AttachmentSourceUrl.default(''),
   license: z.string().trim().max(255).default(''),
   rights: z.string().trim().max(1_000).default(''),
   attribution: z.string().trim().max(1_000).default(''),
