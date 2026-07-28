@@ -67,19 +67,19 @@ export class CampaignLibraryTaxonomyController {
 
   @Post('tags')
   async createTag(@Param('campaignId', ParseIntPipe) campaignId: number, @Body() body: CampaignLibraryTagCreateDto, @CurrentUser() user: RequestUser, @Res({ passthrough: true }) res: Response) {
-    await this.access.requireRole(user, campaignId, 'dm'); res.status(201);
-    return this.library.createTag(campaignId, CampaignLibraryTagCreate.parse(body));
+    const role = await this.access.requireRole(user, campaignId, 'dm'); res.status(201);
+    return this.library.createTag(campaignId, CampaignLibraryTagCreate.parse(body), user, role);
   }
 
   @Patch('tags/:id')
   async updateTag(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('id', ParseIntPipe) id: number, @Body() body: CampaignLibraryTagUpdateDto, @CurrentUser() user: RequestUser) {
-    await this.access.requireRole(user, campaignId, 'dm');
-    return this.library.updateTag(campaignId, id, body);
+    const role = await this.access.requireRole(user, campaignId, 'dm');
+    return this.library.updateTag(campaignId, id, body, user, role);
   }
 
   @Delete('tags/:id')
   async removeTag(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
-    await this.access.requireRole(user, campaignId, 'dm'); await this.library.removeTag(campaignId, id); return { ok: true };
+    const role = await this.access.requireRole(user, campaignId, 'dm'); await this.library.removeTag(campaignId, id, user, role); return { ok: true };
   }
 
   @Get('collections')
@@ -90,19 +90,19 @@ export class CampaignLibraryTaxonomyController {
 
   @Post('collections')
   async createCollection(@Param('campaignId', ParseIntPipe) campaignId: number, @Body() body: CampaignLibraryCollectionCreateDto, @CurrentUser() user: RequestUser, @Res({ passthrough: true }) res: Response) {
-    await this.access.requireRole(user, campaignId, 'dm'); res.status(201);
-    return this.library.createCollection(campaignId, CampaignLibraryCollectionCreate.parse(body));
+    const role = await this.access.requireRole(user, campaignId, 'dm'); res.status(201);
+    return this.library.createCollection(campaignId, CampaignLibraryCollectionCreate.parse(body), user, role);
   }
 
   @Patch('collections/:id')
   async updateCollection(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('id', ParseIntPipe) id: number, @Body() body: CampaignLibraryCollectionUpdateDto, @CurrentUser() user: RequestUser) {
-    await this.access.requireRole(user, campaignId, 'dm');
-    return this.library.updateCollection(campaignId, id, body);
+    const role = await this.access.requireRole(user, campaignId, 'dm');
+    return this.library.updateCollection(campaignId, id, body, user, role);
   }
 
   @Delete('collections/:id')
   async removeCollection(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
-    await this.access.requireRole(user, campaignId, 'dm'); await this.library.removeCollection(campaignId, id); return { ok: true };
+    const role = await this.access.requireRole(user, campaignId, 'dm'); await this.library.removeCollection(campaignId, id, user, role); return { ok: true };
   }
 }
 

@@ -220,6 +220,35 @@ describe('campaign library taxonomy (issue #742)', () => {
     expect((await db.select().from(campaigns).where(eq(campaigns.id, campaignId))).at(0)?.currentLocationId).toBe(previous.id);
   });
 
+  it('audits taxonomy create, update, and delete writes', async () => {
+    const server = ctx.app.getHttpServer(); const db = ctx.app.get<DrizzleDb>(DB);
+    const created = await request(server).post(`/api/v1/campaigns/${campaignId}/library/tags`).set(dm).send({ name: 'Audited tag' });
+    expect(created.status).toBe(201);
+    expect(await db.select().from(auditLog).where(and(eq(auditLog.campaignId, campaignId), eq(auditLog.action, 'campaign_library.tag.create'), eq(auditLog.entityId, created.body.id)))).toHaveLength(1);
+    expect((await request(server).patch(`/api/v1/campaigns/${campaignId}/library/tags/${created.body.id}`).set(dm).send({ description: 'tracked' })).status).toBe(200);
+    expect(await db.select().from(auditLog).where(and(eq(auditLog.campaignId, campaignId), eq(auditLog.action, 'campaign_library.tag.update'), eq(auditLog.entityId, created.body.id)))).toHaveLength(1);
+    expect((await request(server).delete(`/api/v1/campaigns/${campaignId}/library/tags/${created.body.id}`).set(dm)).status).toBe(200);
+    expect(await db.select().from(auditLog).where(and(eq(auditLog.campaignId, campaignId), eq(auditLog.action, 'campaign_library.tag.delete'), eq(auditLog.entityId, created.body.id)))).toHaveLength(1);
+  });
+
+  it('does not revive unrelated taxonomy links removed after a bulk add when undoing', async () => {
+    const server = ctx.app.getHttpServer(); const db = ctx.app.get<DrizzleDb>(DB); const ts = new Date().toISOString();
+    const [quest] = await db.insert(quests).values({ campaignId, title: 'Scoped undo', createdAt: ts, updatedAt: ts }).returning();
+    const keep = await request(server).post(`/api/v1/campaigns/${campaignId}/library/tags`).set(dm).send({ name: 'Keep on undo' });
+    const unrelated = await request(server).post(`/api/v1/campaigns/${campaignId}/library/tags`).set(dm).send({ name: 'Removed by collaborator' });
+    const added = await request(server).post(`/api/v1/campaigns/${campaignId}/library/tags`).set(dm).send({ name: 'Bulk added' });
+    await db.insert(campaignLibraryEntityTaxonomy).values([
+      { campaignId, entityType: 'quest', entityId: quest.id, tagId: keep.body.id, collectionId: null, createdAt: ts },
+      { campaignId, entityType: 'quest', entityId: quest.id, tagId: unrelated.body.id, collectionId: null, createdAt: ts },
+    ]);
+    const bulk = await request(server).post(`/api/v1/campaigns/${campaignId}/library/bulk`).set(dm).send({ operation: 'add_tag', taxonomyId: added.body.id, targets: [{ entityType: 'quest', entityId: quest.id }] });
+    expect(bulk.status).toBe(201);
+    await db.delete(campaignLibraryEntityTaxonomy).where(and(eq(campaignLibraryEntityTaxonomy.campaignId, campaignId), eq(campaignLibraryEntityTaxonomy.entityId, quest.id), eq(campaignLibraryEntityTaxonomy.tagId, unrelated.body.id)));
+    expect((await request(server).post(`/api/v1/campaigns/${campaignId}/library/bulk/${bulk.body.operationId}/undo`).set(dm)).status).toBe(201);
+    const rows = await db.select().from(campaignLibraryEntityTaxonomy).where(and(eq(campaignLibraryEntityTaxonomy.campaignId, campaignId), eq(campaignLibraryEntityTaxonomy.entityId, quest.id)));
+    expect(rows.map((row) => row.tagId).sort()).toEqual([keep.body.id]);
+  });
+
   it('rejects taxonomy undo when a later collaborator edit conflicts with a no-op add', async () => {
     const server = ctx.app.getHttpServer(); const db = ctx.app.get<DrizzleDb>(DB); const ts = new Date().toISOString();
     const [quest] = await db.insert(quests).values({ campaignId, title: 'No-op fence', createdAt: ts, updatedAt: ts }).returning();

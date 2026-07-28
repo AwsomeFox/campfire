@@ -80,20 +80,22 @@ export class CampaignLibraryService {
     while (cursor != null) { if (cursor === selfId) throw new BadRequestException('Parent would create a cycle'); const [row] = await this.db.select({ parentId: parentColumn }).from(table).where(eq(table.id, cursor)).limit(1); cursor = row?.parentId ?? null; }
   }
 
-  async createTag(campaignId: number, input: CampaignLibraryTagCreate): Promise<CampaignLibraryTag> {
+  async createTag(campaignId: number, input: CampaignLibraryTagCreate, user: RequestUser, role: Role): Promise<CampaignLibraryTag> {
     await this.assertParent(campaignLibraryTags, campaignId, input.parentTagId); const ts = nowIso();
     try {
       const [row] = await this.db.insert(campaignLibraryTags).values({ campaignId, name: input.name.trim(), aliasesJson: toJsonText(input.aliases ?? []), color: input.color ?? '#64748b', description: input.description ?? '', parentTagId: input.parentTagId ?? null, createdAt: ts, updatedAt: ts }).returning().all();
+      await this.audit.log({ actor: auditActor(user), actorRole: role, action: 'campaign_library.tag.create', entityType: 'campaign_library_tag', entityId: row.id, campaignId, detail: input.name.trim() });
       return this.tag(row);
     } catch (err) {
       if (isUniqueConstraintError(err)) throw new ConflictException('A tag with that name already exists in this campaign.');
       throw err;
     }
   }
-  async createCollection(campaignId: number, input: CampaignLibraryCollectionCreate): Promise<CampaignLibraryCollection> {
+  async createCollection(campaignId: number, input: CampaignLibraryCollectionCreate, user: RequestUser, role: Role): Promise<CampaignLibraryCollection> {
     await this.assertParent(campaignLibraryCollections, campaignId, input.parentCollectionId); const ts = nowIso();
     try {
       const [row] = await this.db.insert(campaignLibraryCollections).values({ campaignId, name: input.name.trim(), aliasesJson: toJsonText(input.aliases ?? []), color: input.color ?? '#64748b', description: input.description ?? '', parentCollectionId: input.parentCollectionId ?? null, createdAt: ts, updatedAt: ts }).returning().all();
+      await this.audit.log({ actor: auditActor(user), actorRole: role, action: 'campaign_library.collection.create', entityType: 'campaign_library_collection', entityId: row.id, campaignId, detail: input.name.trim() });
       return this.collection(row);
     } catch (err) {
       if (isUniqueConstraintError(err)) throw new ConflictException('A collection with that name already exists in this campaign.');
@@ -113,7 +115,7 @@ export class CampaignLibraryService {
     return row;
   }
 
-  async updateTag(campaignId: number, id: number, input: CampaignLibraryTagUpdate): Promise<CampaignLibraryTag> {
+  async updateTag(campaignId: number, id: number, input: CampaignLibraryTagUpdate, user: RequestUser, role: Role): Promise<CampaignLibraryTag> {
     await this.tagRowOrThrow(campaignId, id);
     if (input.parentTagId !== undefined) await this.assertParent(campaignLibraryTags, campaignId, input.parentTagId, id);
     const patch: Partial<typeof campaignLibraryTags.$inferInsert> = { updatedAt: nowIso() };
@@ -124,6 +126,7 @@ export class CampaignLibraryService {
     if (input.parentTagId !== undefined) patch.parentTagId = input.parentTagId;
     try {
       const [row] = await this.db.update(campaignLibraryTags).set(patch).where(and(eq(campaignLibraryTags.id, id), eq(campaignLibraryTags.campaignId, campaignId))).returning().all();
+      await this.audit.log({ actor: auditActor(user), actorRole: role, action: 'campaign_library.tag.update', entityType: 'campaign_library_tag', entityId: id, campaignId, detail: row.name });
       return this.tag(row);
     } catch (err) {
       if (isUniqueConstraintError(err)) throw new ConflictException('A tag with that name already exists in this campaign.');
@@ -131,7 +134,7 @@ export class CampaignLibraryService {
     }
   }
 
-  async updateCollection(campaignId: number, id: number, input: CampaignLibraryCollectionUpdate): Promise<CampaignLibraryCollection> {
+  async updateCollection(campaignId: number, id: number, input: CampaignLibraryCollectionUpdate, user: RequestUser, role: Role): Promise<CampaignLibraryCollection> {
     await this.collectionRowOrThrow(campaignId, id);
     if (input.parentCollectionId !== undefined) await this.assertParent(campaignLibraryCollections, campaignId, input.parentCollectionId, id);
     const patch: Partial<typeof campaignLibraryCollections.$inferInsert> = { updatedAt: nowIso() };
@@ -142,6 +145,7 @@ export class CampaignLibraryService {
     if (input.parentCollectionId !== undefined) patch.parentCollectionId = input.parentCollectionId;
     try {
       const [row] = await this.db.update(campaignLibraryCollections).set(patch).where(and(eq(campaignLibraryCollections.id, id), eq(campaignLibraryCollections.campaignId, campaignId))).returning().all();
+      await this.audit.log({ actor: auditActor(user), actorRole: role, action: 'campaign_library.collection.update', entityType: 'campaign_library_collection', entityId: id, campaignId, detail: row.name });
       return this.collection(row);
     } catch (err) {
       if (isUniqueConstraintError(err)) throw new ConflictException('A collection with that name already exists in this campaign.');
@@ -150,22 +154,24 @@ export class CampaignLibraryService {
   }
 
   /** Delete is intentionally destructive in alpha: taxonomy references are removed, children become roots. */
-  async removeTag(campaignId: number, id: number): Promise<void> {
-    await this.tagRowOrThrow(campaignId, id);
+  async removeTag(campaignId: number, id: number, user: RequestUser, role: Role): Promise<void> {
+    const existing = await this.tagRowOrThrow(campaignId, id);
     this.db.transaction((tx) => {
       tx.delete(campaignLibraryEntityTaxonomy).where(and(eq(campaignLibraryEntityTaxonomy.campaignId, campaignId), eq(campaignLibraryEntityTaxonomy.tagId, id))).run();
       tx.update(campaignLibraryTags).set({ parentTagId: null, updatedAt: nowIso() }).where(and(eq(campaignLibraryTags.campaignId, campaignId), eq(campaignLibraryTags.parentTagId, id))).run();
       tx.delete(campaignLibraryTags).where(and(eq(campaignLibraryTags.id, id), eq(campaignLibraryTags.campaignId, campaignId))).run();
     });
+    await this.audit.log({ actor: auditActor(user), actorRole: role, action: 'campaign_library.tag.delete', entityType: 'campaign_library_tag', entityId: id, campaignId, detail: existing.name });
   }
 
-  async removeCollection(campaignId: number, id: number): Promise<void> {
-    await this.collectionRowOrThrow(campaignId, id);
+  async removeCollection(campaignId: number, id: number, user: RequestUser, role: Role): Promise<void> {
+    const existing = await this.collectionRowOrThrow(campaignId, id);
     this.db.transaction((tx) => {
       tx.delete(campaignLibraryEntityTaxonomy).where(and(eq(campaignLibraryEntityTaxonomy.campaignId, campaignId), eq(campaignLibraryEntityTaxonomy.collectionId, id))).run();
       tx.update(campaignLibraryCollections).set({ parentCollectionId: null, updatedAt: nowIso() }).where(and(eq(campaignLibraryCollections.campaignId, campaignId), eq(campaignLibraryCollections.parentCollectionId, id))).run();
       tx.delete(campaignLibraryCollections).where(and(eq(campaignLibraryCollections.id, id), eq(campaignLibraryCollections.campaignId, campaignId))).run();
     });
+    await this.audit.log({ actor: auditActor(user), actorRole: role, action: 'campaign_library.collection.delete', entityType: 'campaign_library_collection', entityId: id, campaignId, detail: existing.name });
   }
 
   async bulk(campaignId: number, raw: unknown, user: RequestUser, role: Role): Promise<LibraryBulkResult> {
@@ -363,7 +369,14 @@ export class CampaignLibraryService {
         if (request.operation === 'move_collection') tx.delete(campaignLibraryEntityTaxonomy).where(and(eq(campaignLibraryEntityTaxonomy.campaignId, campaignId), eq(campaignLibraryEntityTaxonomy.entityType, target.entityType), eq(campaignLibraryEntityTaxonomy.entityId, target.entityId), eq(campaignLibraryEntityTaxonomy.collectionId, request.taxonomyId))).run();
         else tx.delete(campaignLibraryEntityTaxonomy).where(and(eq(campaignLibraryEntityTaxonomy.campaignId, campaignId), eq(campaignLibraryEntityTaxonomy.entityType, target.entityType), eq(campaignLibraryEntityTaxonomy.entityId, target.entityId), isTag ? eq(campaignLibraryEntityTaxonomy.tagId, request.taxonomyId) : eq(campaignLibraryEntityTaxonomy.collectionId, request.taxonomyId))).run();
       }
-      for (const row of rows) tx.insert(campaignLibraryEntityTaxonomy).values({ campaignId: row.campaignId, entityType: row.entityType, entityId: row.entityId, tagId: row.tagId, collectionId: row.collectionId, createdAt: row.createdAt }).onConflictDoNothing().run();
+      // Restore only the mutated dimension. Re-inserting every pre-op membership
+      // would resurrect unrelated links a collaborator removed after the bulk edit.
+      const restoreRows = rows.filter((row) => {
+        if (request.operation === 'move_collection') return row.collectionId != null;
+        if (isTag) return row.tagId === request.taxonomyId;
+        return row.collectionId === request.taxonomyId;
+      });
+      for (const row of restoreRows) tx.insert(campaignLibraryEntityTaxonomy).values({ campaignId: row.campaignId, entityType: row.entityType, entityId: row.entityId, tagId: row.tagId, collectionId: row.collectionId, createdAt: row.createdAt }).onConflictDoNothing().run();
       tx.insert(auditLog).values({ campaignId, actor: auditActor(user), actorRole: role, action: 'campaign_library.bulk.undo', entityType: 'campaign_library_bulk_operation', entityId: operationId, detail: operation.operation, requestId: getRequestId() ?? null, createdAt: nowIso() }).run();
       return { operationId, undone: true, alreadyUndone: false };
     });
