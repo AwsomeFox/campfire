@@ -85,6 +85,23 @@ test.describe('Design-system density (#674)', () => {
     );
   });
 
+  test('.cf-target-24/.cf-target-44 floors cannot be silently overridden (issue #1698)', () => {
+    // .btn's later "Nocturne .btn aliases default-density controls" rule (issue #674)
+    // wins at equal specificity over a plain (non-!important) .cf-target-* declaration,
+    // so a floor helper without !important does not actually floor anything on a .btn
+    // control — the one .cf-target-24 usage silently rendered at 44px, and every
+    // .cf-target-44 + .btn usage only "worked" by coincidence (44px matching the alias
+    // it was actually losing to). Pin the !important directly rather than trusting
+    // declaration order, which the next refactor could quietly reshuffle.
+    const css = READ(INDEX_CSS);
+    for (const target of ['cf-target-44', 'cf-target-24']) {
+      const rule = new RegExp(`\\.${target}\\s*\\{[^}]*\\}`).exec(css);
+      expect(rule, `.${target} rule must exist in index.css`).not.toBeNull();
+      expect(rule![0], `.${target} min-width must be !important`).toMatch(/min-width:\s*\d+px\s*!important/);
+      expect(rule![0], `.${target} min-height must be !important`).toMatch(/min-height:\s*\d+px\s*!important/);
+    }
+  });
+
   test('ui.tsx exports canonical primitives with density support', () => {
     const ui = READ(UI_TSX);
     const density = READ(DENSITY_TS);

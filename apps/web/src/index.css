@@ -1143,16 +1143,28 @@ h1, h2, h3, h4, h5, h6 {
  * Issue #428 — WCAG 2.2 target-size helpers for encounter combat / map controls.
  * Primary combat actions use the 44×44 enhanced size; secondary controls still meet
  * the 24×24 AA minimum. Visual glyphs can stay compact inside the larger hit area.
+ *
+ * min-width/min-height carry !important (issue #1698). Without it, `.btn`'s later
+ * "Nocturne .btn aliases default-density controls" rule (below, issue #674) wins at
+ * equal specificity and silently overrides these on any `.btn`-based control — the
+ * one existing `.cf-target-24` usage rendered at 44px despite carrying it, and every
+ * `.cf-target-44` + `.btn` usage "worked" purely by coincidence (44px matching the
+ * alias it was actually losing to, not enforcing). A floor helper that a later,
+ * unrelated rule can silently override is not a floor. These are the ONE place in
+ * the design system callers reach for an explicit sub-default WCAG floor on a plain
+ * `.btn` control, so they must always win regardless of what else is combined with
+ * them — see the tripwire in design-system-density.unit.spec.ts pinning the
+ * !important on both.
  */
 .cf-target-44 {
   box-sizing: border-box;
-  min-width: 44px;
-  min-height: 44px;
+  min-width: 44px !important;
+  min-height: 44px !important;
 }
 .cf-target-24 {
   box-sizing: border-box;
-  min-width: 24px;
-  min-height: 24px;
+  min-width: 24px !important;
+  min-height: 24px !important;
 }
 .cf-map-tool {
   box-sizing: border-box;
