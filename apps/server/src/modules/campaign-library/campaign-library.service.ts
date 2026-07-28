@@ -1,14 +1,16 @@
 import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import {
   CampaignLibraryMonster,
   CampaignLibraryMonsterCreate,
   CampaignLibraryMonsterUpdate,
+  CampaignLibraryTag, CampaignLibraryTagCreate, CampaignLibraryTagUpdate,
+  CampaignLibraryCollection, CampaignLibraryCollectionCreate, CampaignLibraryCollectionUpdate,
   CombatantStatblock,
   type Role,
 } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { campaignLibraryMonsters } from '../../db/schema';
+import { campaignLibraryCollections, campaignLibraryMonsters, campaignLibraryTags } from '../../db/schema';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
@@ -41,6 +43,31 @@ export class CampaignLibraryService {
       .where(eq(campaignLibraryMonsters.campaignId, campaignId))
       .orderBy(campaignLibraryMonsters.name);
     return rows.map(toDomain);
+  }
+
+  private tag(row: typeof campaignLibraryTags.$inferSelect): CampaignLibraryTag { return CampaignLibraryTag.parse({ ...row, aliases: fromJsonText(row.aliasesJson, []), parentTagId: row.parentTagId }); }
+  private collection(row: typeof campaignLibraryCollections.$inferSelect): CampaignLibraryCollection { return CampaignLibraryCollection.parse({ ...row, aliases: fromJsonText(row.aliasesJson, []), parentCollectionId: row.parentCollectionId }); }
+
+  async listTags(campaignId: number): Promise<CampaignLibraryTag[]> { return (await this.db.select().from(campaignLibraryTags).where(eq(campaignLibraryTags.campaignId, campaignId)).orderBy(campaignLibraryTags.name)).map((r) => this.tag(r)); }
+  async listCollections(campaignId: number): Promise<CampaignLibraryCollection[]> { return (await this.db.select().from(campaignLibraryCollections).where(eq(campaignLibraryCollections.campaignId, campaignId)).orderBy(campaignLibraryCollections.name)).map((r) => this.collection(r)); }
+
+  private async assertParent(table: typeof campaignLibraryTags | typeof campaignLibraryCollections, campaignId: number, parentId: number | null | undefined, selfId?: number) {
+    if (parentId == null) return;
+    if (parentId === selfId) throw new BadRequestException('A taxonomy entry cannot parent itself');
+    const parentColumn = table === campaignLibraryTags ? campaignLibraryTags.parentTagId : campaignLibraryCollections.parentCollectionId;
+    const [parent] = await this.db.select().from(table).where(and(eq(table.id, parentId), eq(table.campaignId, campaignId))).limit(1);
+    if (!parent) throw new BadRequestException('Parent must exist in this campaign');
+    let cursor: number | null = parentId;
+    while (cursor != null) { if (cursor === selfId) throw new BadRequestException('Parent would create a cycle'); const [row] = await this.db.select({ parentId: parentColumn }).from(table).where(eq(table.id, cursor)).limit(1); cursor = row?.parentId ?? null; }
+  }
+
+  async createTag(campaignId: number, input: CampaignLibraryTagCreate): Promise<CampaignLibraryTag> {
+    await this.assertParent(campaignLibraryTags, campaignId, input.parentTagId); const ts = nowIso();
+    const [row] = await this.db.insert(campaignLibraryTags).values({ campaignId, name: input.name.trim(), aliasesJson: toJsonText(input.aliases ?? []), color: input.color ?? '#64748b', description: input.description ?? '', parentTagId: input.parentTagId ?? null, createdAt: ts, updatedAt: ts }).returning().all(); return this.tag(row);
+  }
+  async createCollection(campaignId: number, input: CampaignLibraryCollectionCreate): Promise<CampaignLibraryCollection> {
+    await this.assertParent(campaignLibraryCollections, campaignId, input.parentCollectionId); const ts = nowIso();
+    const [row] = await this.db.insert(campaignLibraryCollections).values({ campaignId, name: input.name.trim(), aliasesJson: toJsonText(input.aliases ?? []), color: input.color ?? '#64748b', description: input.description ?? '', parentCollectionId: input.parentCollectionId ?? null, createdAt: ts, updatedAt: ts }).returning().all(); return this.collection(row);
   }
 
   async getRowOrThrow(id: number, campaignId?: number) {

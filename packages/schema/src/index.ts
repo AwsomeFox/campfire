@@ -11703,6 +11703,8 @@ export const CampaignLibraryTag = z.object({
 export type CampaignLibraryTag = z.infer<typeof CampaignLibraryTag>;
 export const CampaignLibraryTagCreate = CampaignLibraryTag.pick({ name: true, aliases: true, color: true, description: true, parentTagId: true }).partial({ aliases: true, color: true, description: true, parentTagId: true });
 export const CampaignLibraryTagUpdate = CampaignLibraryTagCreate.partial();
+export type CampaignLibraryTagCreate = z.infer<typeof CampaignLibraryTagCreate>;
+export type CampaignLibraryTagUpdate = z.infer<typeof CampaignLibraryTagUpdate>;
 
 export const CampaignLibraryCollection = z.object({
   id: Id, campaignId: Id, name: LibraryName, aliases: LibraryAliases, color: LibraryColor,
@@ -11711,6 +11713,8 @@ export const CampaignLibraryCollection = z.object({
 export type CampaignLibraryCollection = z.infer<typeof CampaignLibraryCollection>;
 export const CampaignLibraryCollectionCreate = CampaignLibraryCollection.pick({ name: true, aliases: true, color: true, description: true, parentCollectionId: true }).partial({ aliases: true, color: true, description: true, parentCollectionId: true });
 export const CampaignLibraryCollectionUpdate = CampaignLibraryCollectionCreate.partial();
+export type CampaignLibraryCollectionCreate = z.infer<typeof CampaignLibraryCollectionCreate>;
+export type CampaignLibraryCollectionUpdate = z.infer<typeof CampaignLibraryCollectionUpdate>;
 
 export const LibraryEntityRef = z.object({ entityType: LibraryEntityType, entityId: Id });
 export type LibraryEntityRef = z.infer<typeof LibraryEntityRef>;
