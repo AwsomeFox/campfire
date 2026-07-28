@@ -42,14 +42,30 @@ describe('StorageDiagnosticsService (issue #724)', () => {
     await expect(service.runIntegrity('quick')).resolves.toMatchObject({ status: 'failed', code: 'QUICK_CHECK_FAILED' });
   });
 
-  it('uses a rollback-only singleton write probe and restores busy timeout after ENOSPC/EROFS/lock failures', () => {
-    for (const code of ['SQLITE_FULL', 'SQLITE_READONLY', 'SQLITE_BUSY', 'SQLITE_LOCKED']) {
+  it('uses a rollback-only singleton write probe and restores busy timeout after ENOSPC/EROFS failures', () => {
+    for (const code of ['SQLITE_FULL', 'SQLITE_READONLY']) {
       const raw = (holder() as unknown as { raw: { exec: jest.Mock; pragma: jest.Mock } }).raw;
       raw.exec.mockImplementation((sql: string) => { if (sql.startsWith('BEGIN')) throw Object.assign(new Error(code), { code }); });
       const service = new StorageDiagnosticsService({ raw } as never);
       const result = (service as unknown as { writeCheck(): { code: string; status: string } }).writeCheck();
       expect(result.status).toBe('failed');
-      expect(result.code).toMatch(/WRITE_(ENOSPC|EROFS|LOCKED)/);
+      expect(result.code).toMatch(/WRITE_(ENOSPC|EROFS)/);
+      expect(raw.exec).toHaveBeenCalledWith('ROLLBACK');
+      expect(raw.pragma).toHaveBeenLastCalledWith('busy_timeout = 5000');
+    }
+  });
+
+  // Momentary BUSY/LOCKED write contention is ordinary concurrency, not a storage
+  // failure — unlike ENOSPC/EROFS it must NOT flip readiness/503, or a normal
+  // concurrent writer could fail the unauthenticated Docker HEALTHCHECK probe.
+  it('classifies a lock-contended write probe as degraded (not failed), restoring busy timeout', () => {
+    for (const code of ['SQLITE_BUSY', 'SQLITE_LOCKED']) {
+      const raw = (holder() as unknown as { raw: { exec: jest.Mock; pragma: jest.Mock } }).raw;
+      raw.exec.mockImplementation((sql: string) => { if (sql.startsWith('BEGIN')) throw Object.assign(new Error(code), { code }); });
+      const service = new StorageDiagnosticsService({ raw } as never);
+      const result = (service as unknown as { writeCheck(): { code: string; status: string } }).writeCheck();
+      expect(result.status).toBe('degraded');
+      expect(result.code).toBe('WRITE_LOCKED');
       expect(raw.exec).toHaveBeenCalledWith('ROLLBACK');
       expect(raw.pragma).toHaveBeenLastCalledWith('busy_timeout = 5000');
     }

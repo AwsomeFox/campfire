@@ -172,7 +172,15 @@ export class StorageDiagnosticsService implements OnModuleInit {
     } catch (error) {
       try { db.exec('ROLLBACK'); } catch { /* ignore nested rollback failures */ }
       const code = String((error as { code?: string }).code ?? '');
-      result = check('failed', code.includes('FULL') ? 'WRITE_ENOSPC' : code.includes('READONLY') ? 'WRITE_EROFS' : code.includes('BUSY') || code.includes('LOCKED') ? 'WRITE_LOCKED' : 'WRITE_FAILED', 'Rollback-only database write probe failed.');
+      // BUSY/LOCKED is ordinary short-lived write contention under a tight 100ms
+      // busy_timeout, not a storage failure — classify it 'degraded' (does not flip
+      // readiness/503) so a momentary concurrent writer can't fail the Docker
+      // HEALTHCHECK. ENOSPC/EROFS/other are genuine unwritable-storage conditions
+      // and stay 'failed'.
+      const locked = code.includes('BUSY') || code.includes('LOCKED');
+      result = locked
+        ? check('degraded', 'WRITE_LOCKED', 'Rollback-only database write probe was briefly lock-contended.')
+        : check('failed', code.includes('FULL') ? 'WRITE_ENOSPC' : code.includes('READONLY') ? 'WRITE_EROFS' : 'WRITE_FAILED', 'Rollback-only database write probe failed.');
     } finally {
       try { db.pragma(`busy_timeout = ${old}`); } catch { /* ignore restore failures */ }
     }
