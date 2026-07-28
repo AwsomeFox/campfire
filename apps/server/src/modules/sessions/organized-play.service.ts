@@ -1822,6 +1822,8 @@ export class OrganizedPlayService {
     let existing!: ScheduleRow;
     let scheduledAt!: string;
     let durationMinutes!: number;
+    let movedTime = false;
+    let kind: 'reschedule' | 'reassign' | null = null;
     this.db.transaction((tx) => {
       existing = this.getOccurrenceRowInTxOrThrow(tx, id);
       // Re-validated in here too: an occurrence cancelled in the gap must not be
@@ -1856,38 +1858,38 @@ export class OrganizedPlayService {
       durationMinutes = input.durationMinutes ?? existing.durationMinutes;
       const roomId = input.roomId === undefined ? existing.roomId : input.roomId;
       const venueId = roomId === existing.roomId || roomId == null ? existing.venueId : roomVenue;
-      const conflicts = this.findConflictRows(tx, {
-        startsAt: scheduledAt,
-        endsAt: endInstant(scheduledAt, durationMinutes),
-        roomId,
-        assignedDmUserId: existing.assignedDmUserId,
-        // No member check, deliberately, on this and every other WRITE path.
-        // A room and a running DM are resources this server ALLOCATES, so
-        // double-allocating them is a bug it must refuse. A player is not
-        // allocated: they RSVP, and being wanted at two tables is a fact about
-        // their evening, not a broken booking — the coordinator resolves it by
-        // talking to them. `POST /conflicts` still reports it, because a probe
-        // that answers "what would this cost?" should surface everything;
-        // rejecting a legal room booking over it would let one player's RSVP veto
-        // another campaign's table.
-        memberUserIds: [],
-        excludeScheduleId: id,
-      });
-      if (conflicts.length > 0 && !input.force) throw new SeriesConflictSignal(conflicts);
-      rawConflicts = conflicts;
-      // Did this request MOVE anything? Same predicate reassignOccurrence uses,
-      // over the columns this endpoint writes. A retry that resends the current
-      // instant must not file an override it can never withdraw, and must not
-      // push subscribers a fresh SEQUENCE for an unchanged VEVENT.
-      // TWO questions, deliberately separated. `movedTime` gates the SEQUENCE bump
-      // because only the instants render into the feed (DTSTART/DTEND) — a
-      // room-only edit through this endpoint must not push subscribers a revision
-      // of an unchanged VEVENT, exactly as reassignOccurrence declines to. `kind`
-      // gates the ledger and describes what actually changed, so a room-only edit
-      // made here is filed as `reassign` rather than mislabelled a time move.
+      // Did this request MOVE anything? Compute it BEFORE the probe so a retry
+      // that resends the current instant/duration/room/DM is not rejected over a
+      // forced overlap it did not cause. The same predicate gates the SEQUENCE bump
+      // and the ledger below, so all three decisions stay in lockstep.
       const next = { scheduledAt, durationMinutes, timezone, localStart, roomId, venueId };
-      const movedTime = changesOccurrence(existing, pickFields(next, OCCURRENCE_TIME_FIELDS));
-      const kind = occurrenceExceptionKind(existing, next);
+      movedTime = changesOccurrence(existing, pickFields(next, OCCURRENCE_TIME_FIELDS));
+      kind = occurrenceExceptionKind(existing, next);
+      // Only probe resources when the request actually changes them. Re-confirming
+      // an occurrence's existing time/room/DM would flag its own forced overlap
+      // as if a new edit had caused it.
+      if (kind !== null) {
+        const conflicts = this.findConflictRows(tx, {
+          startsAt: scheduledAt,
+          endsAt: endInstant(scheduledAt, durationMinutes),
+          roomId,
+          assignedDmUserId: existing.assignedDmUserId,
+          // No member check, deliberately, on this and every other WRITE path.
+          // A room and a running DM are resources this server ALLOCATES, so
+          // double-allocating them is a bug it must refuse. A player is not
+          // allocated: they RSVP, and being wanted at two tables is a fact about
+          // their evening, not a broken booking — the coordinator resolves it by
+          // talking to them. `POST /conflicts` still reports it, because a probe
+          // that answers "what would this cost?" should surface everything;
+          // rejecting a legal room booking over it would let one player's RSVP veto
+          // another campaign's table.
+          memberUserIds: [],
+          excludeScheduleId: id,
+        });
+        if (conflicts.length > 0 && !input.force) throw new SeriesConflictSignal(conflicts);
+        rawConflicts = conflicts;
+      }
+      if (kind === null) return;
       tx.update(scheduledSessions)
         .set({
           scheduledAt,
@@ -1906,7 +1908,7 @@ export class OrganizedPlayService {
         })
         .where(eq(scheduledSessions.id, id))
         .run();
-      if (existing.seriesId != null && kind != null) {
+      if (existing.seriesId != null) {
         tx.insert(seriesExceptions)
           .values({
             seriesId: existing.seriesId,
@@ -1937,34 +1939,36 @@ export class OrganizedPlayService {
       }
     });
 
-    await this.audit.log({
-      actor: auditActor(user),
-      actorRole: role,
-      action: 'organized_play.occurrence_reschedule',
-      entityType: 'session',
-      entityId: id,
-      campaignId: existing.campaignId,
-      detail: `${existing.scheduledAt} -> ${scheduledAt}`,
-    });
-    this.events.emit({ type: 'schedule.updated', campaignId: existing.campaignId, scheduleId: id });
-    // NOTIFIES. The same diff `SchedulingService.update` runs, so a move made here and the
-    // identical move made through PATCH /schedule/:id announce themselves the
-    // same way. Location and notes cannot change on this route, so in practice
-    // this yields 'rescheduled'. Diffed against the row as it was read INSIDE the
-    // transaction, so a concurrent write cannot make this announce a move that
-    // did not happen (or stay silent about one that did).
-    const changedFields = diffScheduleNotificationFields(
-      { scheduledAt: existing.scheduledAt, durationMinutes: existing.durationMinutes, location: existing.location, notes: existing.notes },
-      { scheduledAt, durationMinutes, location: existing.location, notes: existing.notes },
-    );
-    if (shouldNotifyScheduleUpdate(changedFields)) {
-      await this.notifyOccurrenceChange(
-        existing.campaignId,
-        user,
-        [{ id, scheduledAt, durationMinutes, title: existing.title }],
-        scheduleNotificationChangeType(changedFields),
-        changedFields,
+    if (kind !== null) {
+      await this.audit.log({
+        actor: auditActor(user),
+        actorRole: role,
+        action: 'organized_play.occurrence_reschedule',
+        entityType: 'session',
+        entityId: id,
+        campaignId: existing.campaignId,
+        detail: `${existing.scheduledAt} -> ${scheduledAt}`,
+      });
+      this.events.emit({ type: 'schedule.updated', campaignId: existing.campaignId, scheduleId: id });
+      // NOTIFIES. The same diff `SchedulingService.update` runs, so a move made here and the
+      // identical move made through PATCH /schedule/:id announce themselves the
+      // same way. Location and notes cannot change on this route, so in practice
+      // this yields 'rescheduled'. Diffed against the row as it was read INSIDE the
+      // transaction, so a concurrent write cannot make this announce a move that
+      // did not happen (or stay silent about one that did).
+      const changedFields = diffScheduleNotificationFields(
+        { scheduledAt: existing.scheduledAt, durationMinutes: existing.durationMinutes, location: existing.location, notes: existing.notes },
+        { scheduledAt, durationMinutes, location: existing.location, notes: existing.notes },
       );
+      if (shouldNotifyScheduleUpdate(changedFields)) {
+        await this.notifyOccurrenceChange(
+          existing.campaignId,
+          user,
+          [{ id, scheduledAt, durationMinutes, title: existing.title }],
+          scheduleNotificationChangeType(changedFields),
+          changedFields,
+        );
+      }
     }
 
     const names = await this.lookupNames(
@@ -1972,7 +1976,9 @@ export class OrganizedPlayService {
       rawConflicts.flatMap((r) => (r.roomId != null ? [r.roomId] : [])),
     );
     return {
-      occurrence: scheduledSessionToDomain(await this.getOccurrenceRowOrThrow(id)),
+      occurrence: scheduledSessionToDomain(
+        kind !== null ? await this.getOccurrenceRowOrThrow(id) : existing,
+      ),
       conflicts: this.redactConflicts(rawConflicts, scope, names),
     };
   }

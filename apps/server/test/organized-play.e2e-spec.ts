@@ -427,6 +427,60 @@ describe('organized play (e2e)', () => {
     expect(reschedule.reason).toBe('venue closed Tuesday');
   });
 
+  it('resending an occurrence’s current state is a no-op, even when it sits in a forced overlap (#1603)', async () => {
+    const first = await api()
+      .post(`/api/v1/campaigns/${campaignId}/series`)
+      .set(dm)
+      .send({
+        title: 'Overlap A',
+        timezone: 'America/New_York',
+        startDate: '2099-05-01',
+        startTime: '19:00',
+        durationMinutes: 240,
+        freq: 'weekly',
+        count: 1,
+        roomId: redRoomId,
+      });
+    expect(first.status).toBe(201);
+
+    const second = await api()
+      .post(`/api/v1/campaigns/${campaignId}/series`)
+      .set(dm)
+      .send({
+        title: 'Overlap B',
+        timezone: 'America/New_York',
+        startDate: '2099-05-01',
+        startTime: '19:00',
+        durationMinutes: 240,
+        freq: 'weekly',
+        count: 1,
+        roomId: redRoomId,
+        force: true,
+      });
+    expect(second.status).toBe(201);
+
+    const occ = second.body.occurrences[0];
+    const before = await api().get(`/api/v1/schedule/${occ.id}`).set(dm);
+    const sequenceBefore = before.body.icsSequence;
+    const ledgerBefore = (await api().get(`/api/v1/organized-play/occurrences/${occ.id}/exceptions`).set(dm)).body;
+
+    const retry = await api()
+      .post(`/api/v1/organized-play/occurrences/${occ.id}/reschedule`)
+      .set(dm)
+      .send({
+        localStart: occ.localStart,
+        durationMinutes: occ.durationMinutes,
+        roomId: occ.roomId,
+      });
+    expect(retry.status).toBe(201);
+    expect(retry.body.occurrence.icsSequence).toBe(sequenceBefore);
+    expect(retry.body.occurrence.scheduledAt).toBe(occ.scheduledAt);
+    expect(retry.body.occurrence.roomId).toBe(occ.roomId);
+
+    const ledgerAfter = (await api().get(`/api/v1/organized-play/occurrences/${occ.id}/exceptions`).set(dm)).body;
+    expect(ledgerAfter).toEqual(ledgerBefore);
+  });
+
   it('rejects malformed or impossible occurrence edits', async () => {
     const series = await api()
       .post(`/api/v1/campaigns/${campaignId}/series`)
