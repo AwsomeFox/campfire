@@ -93,6 +93,8 @@ export function ProviderForm({
   const [removing, setRemoving] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
   const [clearing, setClearing] = useState(false);
+  // Remove/clear are not saves — keep their copy off the shared save-feedback vocabulary.
+  const [actionNotice, setActionNotice] = useState<{ role: 'status' | 'alert'; text: string } | null>(null);
 
   function hydrate(p: AiProviderConfigView | null) {
     const nextDraft: ProviderDraft = {
@@ -120,6 +122,7 @@ export function ProviderForm({
     setTestResult(null);
     setTestError(null);
     setTesting(false);
+    setActionNotice(null);
     feedback.syncDirty(isProviderDraftDirty(provider, nextDraft));
     if (field === 'providerType') setProviderType(value as AiProviderConfigType);
     else if (field === 'model') setModel(value);
@@ -168,11 +171,13 @@ export function ProviderForm({
 
   async function save() {
     if (!model.trim()) {
+      setActionNotice(null);
       feedback.fail('A model is required.');
       return;
     }
     invalidateTestForAction();
     if (saving) return;
+    setActionNotice(null);
     feedback.begin();
     try {
       const body: Record<string, unknown> = { providerType, model: model.trim() };
@@ -243,14 +248,21 @@ export function ProviderForm({
   async function remove() {
     invalidateTestForAction();
     setRemoving(true);
-    feedback.begin();
+    setActionNotice(null);
+    feedback.reset();
     try {
       await api.delete(`${API}${basePath}`);
       hydrate(null);
       onChanged?.(null);
-      feedback.succeed();
+      setActionNotice({
+        role: 'status',
+        text: `${scope === 'server' ? 'Server' : 'Campaign'} AI provider removed.`,
+      });
     } catch (err) {
-      feedback.fail(err instanceof ApiError ? err.message : "Couldn't remove the provider.");
+      setActionNotice({
+        role: 'alert',
+        text: err instanceof ApiError ? err.message : "Couldn't remove the provider.",
+      });
     } finally {
       setRemoving(false);
     }
@@ -259,16 +271,20 @@ export function ProviderForm({
   async function clearStoredKey() {
     invalidateTestForAction();
     setClearing(true);
-    feedback.begin();
+    setActionNotice(null);
+    feedback.reset();
     try {
       const updated = await api.delete<AiProviderConfigView>(`${API}${basePath}/key`);
       setProvider(updated);
       editDraft('apiKey', '');
       setConfirmClear(false);
       onChanged?.(updated);
-      feedback.succeed();
+      setActionNotice({ role: 'status', text: 'Stored API key cleared.' });
     } catch (err) {
-      feedback.fail(err instanceof ApiError ? err.message : "Couldn't clear the stored key.");
+      setActionNotice({
+        role: 'alert',
+        text: err instanceof ApiError ? err.message : "Couldn't clear the stored key.",
+      });
     } finally {
       setClearing(false);
     }
@@ -488,6 +504,16 @@ export function ProviderForm({
             </button>
           )}
           {feedback.announcement}
+          {actionNotice && (
+            <p
+              role={actionNotice.role}
+              aria-live={actionNotice.role === 'alert' ? 'assertive' : 'polite'}
+              className={`text-xs ${actionNotice.role === 'alert' ? 'text-rose-400' : 'text-muted'}`}
+              style={{ margin: 0 }}
+            >
+              {actionNotice.text}
+            </p>
+          )}
         </div>
       </div>
       {confirmClear && provider?.configured && (
