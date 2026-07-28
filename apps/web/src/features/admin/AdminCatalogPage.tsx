@@ -157,7 +157,7 @@ function PrivacyPolicyCard({
 }
 
 /** Rows fetched per read of the admin's cross-campaign export-request queue. */
-const EXPORT_REQUEST_ADMIN_PAGE = 25;
+const EXPORT_REQUEST_ADMIN_PAGE = 100;
 
 const EXPORT_PROFILE_KEY: Record<string, string> = {
   backup: 'admin.catalog.args.profileBackup',
@@ -207,9 +207,12 @@ function ExportRequestsQueueCard() {
   const [error, setError] = useState<string | null>(null);
   const [campaignFilterDraft, setCampaignFilterDraft] = useState('');
   const [campaignFilter, setCampaignFilter] = useState<number | undefined>(undefined);
+  const loadGate = useRef(createLatestOnlyGate());
 
   const load = useCallback(
     async (pages = 1) => {
+      const isNewest = loadGate.current.start();
+      setLoading(true);
       setError(null);
       try {
         const collected: CampaignExportRequest[] = [];
@@ -224,18 +227,21 @@ function ExportRequestsQueueCard() {
           const page = await api.get<CampaignExportRequestPage>(
             `${API}/admin/campaigns/export-requests?${qs.toString()}`,
           );
+          if (!isNewest()) return;
           collected.push(...page.items);
           seenTotal = page.total;
           fetched += 1;
           if (!page.hasMore) break;
         }
+        if (!isNewest()) return;
         setRequests(collected);
         setTotal(seenTotal);
         setPagesLoaded(Math.max(1, fetched));
       } catch (err) {
+        if (!isNewest()) return;
         setError(translateApiError(err, t, { fallbackKey: 'admin.errors.loadExportRequests' }));
       } finally {
-        setLoading(false);
+        if (isNewest()) setLoading(false);
       }
     },
     [campaignFilter, t],
