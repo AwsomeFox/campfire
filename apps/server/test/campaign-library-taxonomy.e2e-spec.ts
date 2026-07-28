@@ -2,7 +2,7 @@ import request from 'supertest';
 import { and, eq } from 'drizzle-orm';
 import { closeTestApp, createTestApp, type TestAppContext } from './test-app';
 import { DB, type DrizzleDb } from '../src/db/db.module';
-import { auditLog, campaignLibraryEntityTaxonomy, campaignLibraryMonsters, characters, inventoryItems, locations, npcs, quests } from '../src/db/schema';
+import { auditLog, campaignLibraryEntityTaxonomy, campaignLibraryMonsters, campaigns, characters, inventoryItems, locations, npcs, quests } from '../src/db/schema';
 
 describe('campaign library taxonomy (issue #742)', () => {
   let ctx: TestAppContext;
@@ -183,6 +183,37 @@ describe('campaign library taxonomy (issue #742)', () => {
     expect(responses.filter((response) => response.body.alreadyUndone === true)).toHaveLength(1);
   });
 
+  it('promotes a bulk location to current with demotion, pointer update, and undo restore', async () => {
+    const server = ctx.app.getHttpServer(); const db = ctx.app.get<DrizzleDb>(DB); const ts = new Date().toISOString();
+    const [previous, next] = await db.insert(locations).values([
+      { campaignId, name: 'Was current', status: 'current', createdAt: ts, updatedAt: ts },
+      { campaignId, name: 'Becomes current', status: 'explored', createdAt: ts, updatedAt: ts },
+    ]).returning();
+    await db.update(campaigns).set({ currentLocationId: previous.id, updatedAt: ts }).where(eq(campaigns.id, campaignId));
+    const bulk = await request(server).post(`/api/v1/campaigns/${campaignId}/library/bulk`).set(dm).send({ operation: 'set_status', status: 'current', targets: [{ entityType: 'location', entityId: next.id }] });
+    expect(bulk.status).toBe(201);
+    expect((await db.select().from(locations).where(eq(locations.id, previous.id))).at(0)?.status).toBe('explored');
+    expect((await db.select().from(locations).where(eq(locations.id, next.id))).at(0)?.status).toBe('current');
+    expect((await db.select().from(campaigns).where(eq(campaigns.id, campaignId))).at(0)?.currentLocationId).toBe(next.id);
+    expect((await request(server).post(`/api/v1/campaigns/${campaignId}/library/bulk`).set(dm).send({ operation: 'set_status', status: 'current', targets: [{ entityType: 'location', entityId: previous.id }, { entityType: 'location', entityId: next.id }] })).status).toBe(400);
+    expect((await request(server).post(`/api/v1/campaigns/${campaignId}/library/bulk/${bulk.body.operationId}/undo`).set(dm)).status).toBe(201);
+    expect((await db.select().from(locations).where(eq(locations.id, previous.id))).at(0)?.status).toBe('current');
+    expect((await db.select().from(locations).where(eq(locations.id, next.id))).at(0)?.status).toBe('explored');
+    expect((await db.select().from(campaigns).where(eq(campaigns.id, campaignId))).at(0)?.currentLocationId).toBe(previous.id);
+  });
+
+  it('rejects taxonomy undo when a later collaborator edit conflicts with a no-op add', async () => {
+    const server = ctx.app.getHttpServer(); const db = ctx.app.get<DrizzleDb>(DB); const ts = new Date().toISOString();
+    const [quest] = await db.insert(quests).values({ campaignId, title: 'No-op fence', createdAt: ts, updatedAt: ts }).returning();
+    const tag = await request(server).post(`/api/v1/campaigns/${campaignId}/library/tags`).set(dm).send({ name: 'Already present' });
+    await db.insert(campaignLibraryEntityTaxonomy).values({ campaignId, entityType: 'quest', entityId: quest.id, tagId: tag.body.id, collectionId: null, createdAt: ts });
+    const bulk = await request(server).post(`/api/v1/campaigns/${campaignId}/library/bulk`).set(dm).send({ operation: 'add_tag', taxonomyId: tag.body.id, targets: [{ entityType: 'quest', entityId: quest.id }] });
+    expect(bulk.status).toBe(201);
+    await db.delete(campaignLibraryEntityTaxonomy).where(and(eq(campaignLibraryEntityTaxonomy.campaignId, campaignId), eq(campaignLibraryEntityTaxonomy.entityId, quest.id), eq(campaignLibraryEntityTaxonomy.tagId, tag.body.id)));
+    expect((await request(server).post(`/api/v1/campaigns/${campaignId}/library/bulk/${bulk.body.operationId}/undo`).set(dm)).status).toBe(409);
+    expect(await db.select().from(campaignLibraryEntityTaxonomy).where(and(eq(campaignLibraryEntityTaxonomy.campaignId, campaignId), eq(campaignLibraryEntityTaxonomy.entityId, quest.id), eq(campaignLibraryEntityTaxonomy.tagId, tag.body.id)))).toEqual([]);
+  });
+
   it('saves, instantiates, duplicates and archives current-format templates with campaign-safe references', async () => {
     const server = ctx.app.getHttpServer(); const db = ctx.app.get<DrizzleDb>(DB); const ts = new Date().toISOString();
     const [place] = await db.insert(locations).values({ campaignId, name: 'Template place', createdAt: ts, updatedAt: ts }).returning();
@@ -209,6 +240,16 @@ describe('campaign library taxonomy (issue #742)', () => {
     const locationCopy = await request(server).post(`/api/v1/campaigns/${campaignId}/library/entities/location/${place.id}/duplicate`).set(dm).send({ name: 'Location copy' });
     expect(locationCopy.status).toBe(201);
     expect((await db.select().from(locations).where(eq(locations.id, locationCopy.body.entityId))).at(0)?.name).toBe('Location copy');
+    const [currentPlace] = await db.insert(locations).values({ campaignId, name: 'Current template source', status: 'current', createdAt: ts, updatedAt: ts }).returning();
+    await db.update(campaigns).set({ currentLocationId: currentPlace.id, updatedAt: ts }).where(eq(campaigns.id, campaignId));
+    const currentTemplate = await request(server).post(`/api/v1/campaigns/${campaignId}/library/templates`).set(dm).send({ entityType: 'location', entityId: currentPlace.id, name: 'Current place template' });
+    expect(currentTemplate.status).toBe(201);
+    expect(currentTemplate.body.snapshot).toMatchObject({ status: 'explored' });
+    const currentCopy = await request(server).post(`/api/v1/campaigns/${campaignId}/library/entities/location/${currentPlace.id}/duplicate`).set(dm).send({ name: 'Current place copy' });
+    expect(currentCopy.status).toBe(201);
+    expect((await db.select().from(locations).where(eq(locations.id, currentCopy.body.entityId))).at(0)?.status).toBe('explored');
+    expect((await db.select().from(locations).where(eq(locations.id, currentPlace.id))).at(0)?.status).toBe('current');
+    expect((await db.select().from(campaigns).where(eq(campaigns.id, campaignId))).at(0)?.currentLocationId).toBe(currentPlace.id);
     const [monster] = await db.insert(campaignLibraryMonsters).values({ campaignId, name: 'Template monster', statblockJson: '{}', createdAt: ts, updatedAt: ts }).returning();
     const monsterTemplate = await request(server).post(`/api/v1/campaigns/${campaignId}/library/templates`).set(dm).send({ entityType: 'campaign_library_monster', entityId: monster.id, name: 'Monster template' });
     const monsterCopy = await request(server).post(`/api/v1/campaigns/${campaignId}/library/templates/${monsterTemplate.body.id}/instantiate`).set(dm).send({ name: 'Monster copy' });

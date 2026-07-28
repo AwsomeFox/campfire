@@ -18,7 +18,7 @@ import {
   type Role,
 } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { attachments, auditLog, campaignLibraryBulkOperations, campaignLibraryCollections, campaignLibraryEntityTaxonomy, campaignLibraryMonsters, campaignLibraryTags, campaignLibraryTemplates, encounters, factions, inventoryItems, locations, npcs, quests, timelineEvents } from '../../db/schema';
+import { attachments, auditLog, campaignLibraryBulkOperations, campaignLibraryCollections, campaignLibraryEntityTaxonomy, campaignLibraryMonsters, campaignLibraryTags, campaignLibraryTemplates, campaigns, encounters, factions, inventoryItems, locations, npcs, quests, timelineEvents } from '../../db/schema';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { nowIso } from '../../common/time';
 import { getRequestId } from '../../common/request-context';
@@ -193,6 +193,10 @@ export class CampaignLibraryService {
       const table = (type: string) => ({ quest: 'quests', npc: 'npcs', location: 'locations', faction: 'factions', encounter: 'encounters', timeline_event: 'timeline_events', inventory_item: 'inventory_items', attachment: 'attachments' } as Record<string, string>)[type];
       const snapshots: Array<{ entityType: string; entityId: number; value: unknown }> = [];
       if (request.operation === 'move_inventory_owner' && request.ownerType === 'character' && !tx.get(sql`select id from characters where id=${request.characterId!} and campaign_id=${campaignId}`)) throw new BadRequestException('Character owner must belong to this campaign');
+      const locationCurrentTargets = request.operation === 'set_status' && request.status === 'current'
+        ? request.targets.filter((target) => target.entityType === 'location')
+        : [];
+      if (locationCurrentTargets.length > 1) throw new BadRequestException('Only one location can be set to current at a time');
       for (const target of request.targets) {
         if (!config.allowed.has(target.entityType)) throw new BadRequestException(`${request.operation} is not supported for ${target.entityType}`);
         const name = table(target.entityType);
@@ -210,6 +214,17 @@ export class CampaignLibraryService {
           : tx.get(sql`select ${sql.raw(field)} as value from ${sql.raw(name)} where id=${target.entityId} and campaign_id=${campaignId}`);
         if (!row) throw new NotFoundException(`${target.entityType} ${target.entityId} not found in this campaign`);
         snapshots.push({ entityType: target.entityType, entityId: target.entityId, value: row });
+      }
+      // Mirror LocationsService.discover: at most one current location, plus the
+      // campaign pointer. Demotions are journaled so undo can restore both.
+      let locationPromotion: { previousCurrentLocationId: number | null; demoted: Array<{ entityId: number; previousStatus: string }> } | undefined;
+      if (locationCurrentTargets.length === 1) {
+        const promotedId = locationCurrentTargets[0].entityId;
+        const campaign = tx.select({ currentLocationId: campaigns.currentLocationId }).from(campaigns).where(eq(campaigns.id, campaignId)).get();
+        const demoted = tx.all(sql`select id as entityId, status as previousStatus from locations where campaign_id=${campaignId} and status='current' and id!=${promotedId} and deleted_at is null`)
+          .map((row) => z.object({ entityId: z.number().int(), previousStatus: z.string() }).parse(row));
+        for (const row of demoted) tx.run(sql`update locations set status='explored', updated_at=${ts} where id=${row.entityId} and campaign_id=${campaignId}`);
+        locationPromotion = { previousCurrentLocationId: campaign?.currentLocationId ?? null, demoted };
       }
       for (const target of request.targets) {
         const name = table(target.entityType);
@@ -229,7 +244,11 @@ export class CampaignLibraryService {
         } else if (request.operation === 'move_inventory_owner') tx.run(sql`update inventory_items set owner_type=${request.ownerType}, character_id=${request.characterId ?? null}, updated_at=${ts} where id=${target.entityId} and campaign_id=${campaignId}`);
         else tx.run(sql`update ${sql.raw(name)} set deleted_at=${request.operation === 'archive' ? ts : null}, updated_at=${ts} where id=${target.entityId} and campaign_id=${campaignId}`);
       }
-      const inserted = tx.insert(campaignLibraryBulkOperations).values({ campaignId, actor: auditActor(user), operation: request.operation, beforeJson: toJsonText({ kind: 'field', snapshots }), afterJson: toJsonText(request), inverseJson: toJsonText({ kind: 'field', snapshots }), createdAt: ts }).returning({ id: campaignLibraryBulkOperations.id }).get();
+      if (locationPromotion && locationCurrentTargets[0]) {
+        tx.update(campaigns).set({ currentLocationId: locationCurrentTargets[0].entityId, updatedAt: ts }).where(eq(campaigns.id, campaignId)).run();
+      }
+      const journal = { kind: 'field' as const, snapshots, ...(locationPromotion ? { locationPromotion } : {}) };
+      const inserted = tx.insert(campaignLibraryBulkOperations).values({ campaignId, actor: auditActor(user), operation: request.operation, beforeJson: toJsonText(journal), afterJson: toJsonText(request), inverseJson: toJsonText(journal), createdAt: ts }).returning({ id: campaignLibraryBulkOperations.id }).get();
       tx.insert(auditLog).values({ campaignId, actor: auditActor(user), actorRole: role, action: 'campaign_library.bulk', entityType: 'campaign_library_bulk_operation', entityId: inserted.id, detail: request.operation, requestId: getRequestId() ?? null, createdAt: ts }).run();
       return inserted.id;
     });
@@ -246,7 +265,14 @@ export class CampaignLibraryService {
       if (claimed.changes === 0) return { operationId, undone: true, alreadyUndone: true };
       const request = LibraryBulkRequest.parse(JSON.parse(operation.afterJson));
       if (!('taxonomyId' in request)) {
-        const FieldJournal = z.object({ kind: z.literal('field'), snapshots: z.array(z.object({ entityType: z.string(), entityId: z.number().int(), value: z.unknown() }).strict()) }).strict();
+        const FieldJournal = z.object({
+          kind: z.literal('field'),
+          snapshots: z.array(z.object({ entityType: z.string(), entityId: z.number().int(), value: z.unknown() }).strict()),
+          locationPromotion: z.object({
+            previousCurrentLocationId: z.number().int().nullable(),
+            demoted: z.array(z.object({ entityId: z.number().int(), previousStatus: z.string() }).strict()),
+          }).strict().optional(),
+        }).strict();
         const journal = FieldJournal.parse(JSON.parse(operation.beforeJson));
         const table = (type: string) => ({ quest: 'quests', npc: 'npcs', location: 'locations', faction: 'factions', encounter: 'encounters', timeline_event: 'timeline_events', inventory_item: 'inventory_items', attachment: 'attachments' } as Record<string, string>)[type];
         for (const row of journal.snapshots) {
@@ -275,11 +301,33 @@ export class CampaignLibraryService {
             tx.run(sql`update ${sql.raw(name)} set deleted_at=${scalar.value}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`);
           }
         }
+        if (journal.locationPromotion) {
+          const promoted = request.targets.find((target) => target.entityType === 'location');
+          if (!promoted) throw new ConflictException('A target changed after this bulk operation; undo would overwrite it');
+          if (!tx.select({ id: campaigns.id }).from(campaigns).where(and(eq(campaigns.id, campaignId), eq(campaigns.currentLocationId, promoted.entityId))).get()) {
+            throw new ConflictException('A target changed after this bulk operation; undo would overwrite it');
+          }
+          for (const row of journal.locationPromotion.demoted) {
+            if (!tx.get(sql`select id from locations where id=${row.entityId} and campaign_id=${campaignId} and status='explored'`)) {
+              throw new ConflictException('A target changed after this bulk operation; undo would overwrite it');
+            }
+            tx.run(sql`update locations set status=${row.previousStatus}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`);
+          }
+          tx.update(campaigns).set({ currentLocationId: journal.locationPromotion.previousCurrentLocationId, updatedAt: nowIso() }).where(eq(campaigns.id, campaignId)).run();
+        }
         tx.insert(auditLog).values({ campaignId, actor: auditActor(user), actorRole: role, action: 'campaign_library.bulk.undo', entityType: 'campaign_library_bulk_operation', entityId: operationId, detail: operation.operation, requestId: getRequestId() ?? null, createdAt: nowIso() }).run();
         return { operationId, undone: true, alreadyUndone: false };
       }
       const rows = JournalRows.parse(JSON.parse(operation.beforeJson));
       const isTag = request.operation === 'add_tag' || request.operation === 'remove_tag';
+      // Conflict fence: post-op membership must still match what this operation left
+      // behind, so a no-op (or later collaborator edit) cannot erase newer work.
+      for (const target of request.targets) {
+        const predicate = and(eq(campaignLibraryEntityTaxonomy.campaignId, campaignId), eq(campaignLibraryEntityTaxonomy.entityType, target.entityType), eq(campaignLibraryEntityTaxonomy.entityId, target.entityId), isTag ? eq(campaignLibraryEntityTaxonomy.tagId, request.taxonomyId) : eq(campaignLibraryEntityTaxonomy.collectionId, request.taxonomyId));
+        const linked = !!tx.select({ id: campaignLibraryEntityTaxonomy.id }).from(campaignLibraryEntityTaxonomy).where(predicate).get();
+        const expectLinked = request.operation === 'add_tag' || request.operation === 'add_collection' || request.operation === 'move_collection';
+        if (linked !== expectLinked) throw new ConflictException('A target changed after this bulk operation; undo would overwrite it');
+      }
       for (const target of request.targets) {
         // Undo only the dimension this operation touched.  A tag or collection a
         // collaborator added later is never deleted by an older undo.
@@ -504,6 +552,9 @@ export class CampaignLibraryService {
       values[entry[0]] = value;
     }
     if (name) values[type === 'quest' || type === 'timeline_event' ? 'title' : 'name'] = name;
+    // `current` is campaign play-state, not template content. Reset it so copies
+    // cannot violate LocationsService.discover's single-current invariant.
+    if (type === 'location' && values.status === 'current') values.status = 'explored';
     this.assertTemplateRefs(tx, campaignId, adapter, values);
     const ts = nowIso();
     const fields = ['campaign_id', ...adapter.fields, 'created_at', 'updated_at'];
@@ -526,6 +577,7 @@ export class CampaignLibraryService {
       const source = tx.get(sql`select * from ${sql.raw(adapter.table)} where id=${input.entityId} and campaign_id=${campaignId}`) as Record<string, unknown> | undefined;
       if (!source) throw new NotFoundException(`${input.entityType} ${input.entityId} not found in this campaign`);
       const snapshot = Object.fromEntries(adapter.fields.map((field) => [field, source[field]]));
+      if (input.entityType === 'location' && snapshot.status === 'current') snapshot.status = 'explored';
       this.assertTemplateRefs(tx, campaignId, adapter, snapshot);
       const row = tx.insert(campaignLibraryTemplates).values({ campaignId, entityType: input.entityType, name: input.name.trim(), description: input.description, snapshotJson: toJsonText(snapshot), sourceEntityId: input.entityId, createdAt: ts, updatedAt: ts }).returning().get();
       tx.insert(auditLog).values({ campaignId, actor: auditActor(user), actorRole: role, action: 'campaign_library.template.save', entityType: 'campaign_library_template', entityId: row.id, detail: input.entityType, requestId: getRequestId() ?? null, createdAt: ts }).run();
