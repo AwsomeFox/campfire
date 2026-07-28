@@ -6,7 +6,7 @@ import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './tes
 import { startFakeOpen5e, type FakeOpen5e } from './fake-open5e';
 import { startFakeDdb, PUBLIC_DDB_CHARACTER_ID, type FakeDdb } from './fake-ddb';
 import { MCP_CATALOG_COUNTS, MCP_TOOL_NAMES } from '../src/modules/mcp/mcp-catalog';
-import { OPEN_LEGEND_PACK_SLUG } from '@campfire/schema';
+import { OPEN_LEGEND_PACK_SLUG, PF2E_PACK_SLUG } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../src/db/db.module';
 import { campaigns } from '../src/db/schema';
 
@@ -3616,6 +3616,110 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
       });
       expect(denied.isError).toBe(true);
       expect((denied.content as TextContent[])[0].text).toContain('403');
+    });
+
+    // Issue #1642 — "verify the end-to-end path first": #1073's inspiration/heroPoints
+    // vocabulary, #422's adjustResource, and #1578's MCP surface (list_character_resources
+    // / adjust_character_resource, exercised generically with kiPoints just above) were
+    // built independently at different times, and nothing had proven an AI DM could
+    // actually award/spend inspiration or a hero point through the real MCP tool against a
+    // real campaign. These three tests are that proof, against real campaigns (the default
+    // campaign IS the 5e adapter — ruleSystemAdapter('') falls back to Dnd5eAdapter, see
+    // packages/schema/src/index.ts's ruleSystemAdapter — and a PF2e one made by updating
+    // ruleSystem the same way the Open Legend test above does), not a unit-level adapter
+    // check. Answer: it already works — same requireRole('player') gate, same
+    // adjustResource/ResourcePatch path as every other keyed resource; the key string is
+    // the only thing that differs. This narrows #1642 to display only, as the issue itself
+    // anticipated as a valid outcome.
+    it('#1642: an AI DM can award and spend 5e inspiration through adjust_character_resource on a real (default/5e) campaign', async () => {
+      const client = await mcpClient(dmToken);
+      const charRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/characters`).send({ name: '1642 inspiration target' });
+      const characterId = charRes.body.id as number;
+
+      const vocab = parseResult(
+        await client.callTool({ name: 'list_character_resources', arguments: { characterId } }),
+      ) as Array<{ key: string; name: string; recharge: string; defaultMax?: number }>;
+      const inspiration = vocab.find((r) => r.key === 'inspiration');
+      expect(inspiration).toMatchObject({ name: 'Inspiration', recharge: 'special', defaultMax: 1 });
+
+      // The DM awards inspiration: the character starts with none (used=1/max=1, i.e. spent),
+      // and restoring (delta: -1) grants it, mirroring the sheet's "Restore" action (#1642 UI).
+      const awarded = parseResult(
+        await client.callTool({
+          name: 'adjust_character_resource',
+          arguments: { characterId, key: 'inspiration', used: 1, max: 1, name: 'Inspiration', recharge: 'special' },
+        }),
+      ) as { resources: Record<string, { used: number; max: number }> };
+      expect(awarded.resources.inspiration).toMatchObject({ used: 1, max: 1 });
+      const granted = parseResult(
+        await client.callTool({ name: 'adjust_character_resource', arguments: { characterId, key: 'inspiration', delta: -1 } }),
+      ) as { resources: Record<string, { used: number; max: number }> };
+      expect(granted.resources.inspiration).toMatchObject({ used: 0, max: 1 });
+
+      // The player spends it: only ONE point exists (defaultMax: 1), so a second spend
+      // while already at 0 available is a real error, not a clamp — same #1039 rule as
+      // spell slots and every other bounded resource.
+      const spent = parseResult(
+        await client.callTool({ name: 'adjust_character_resource', arguments: { characterId, key: 'inspiration', delta: 1 } }),
+      ) as { resources: Record<string, { used: number }> };
+      expect(spent.resources.inspiration.used).toBe(1);
+      const overspend = await client.callTool({
+        name: 'adjust_character_resource',
+        arguments: { characterId, key: 'inspiration', delta: 1 },
+      });
+      expect(overspend.isError).toBe(true);
+    });
+
+    it('#1642: an AI DM can award and spend a PF2e hero point through adjust_character_resource on a real PF2e campaign', async () => {
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'MCP PF2e Hero Points' });
+      expect(campRes.status).toBe(201);
+      const pf2eId = campRes.body.id as number;
+      await db.update(campaigns).set({ ruleSystem: PF2E_PACK_SLUG }).where(eq(campaigns.id, pf2eId));
+
+      const client = await mcpClient(dmToken);
+      const charRes = await dmAgent.post(`/api/v1/campaigns/${pf2eId}/characters`).send({ name: '1642 hero point target' });
+      const characterId = charRes.body.id as number;
+
+      const vocab = parseResult(
+        await client.callTool({ name: 'list_character_resources', arguments: { characterId } }),
+      ) as Array<{ key: string; name: string; recharge: string; defaultMax?: number }>;
+      // Hero points are a DIFFERENT economy from 5e inspiration (defaultMax 3, not 1) —
+      // confirms this campaign's adapter really did resolve to PF2e, not the 5e fallback.
+      const heroPoints = vocab.find((r) => r.key === 'heroPoints');
+      expect(heroPoints).toMatchObject({ name: 'Hero Points', recharge: 'special', defaultMax: 3 });
+      expect(vocab.some((r) => r.key === 'inspiration')).toBe(false);
+
+      const spent = parseResult(
+        await client.callTool({
+          name: 'adjust_character_resource',
+          arguments: { characterId, key: 'heroPoints', delta: 1, max: 3, name: 'Hero Points', recharge: 'special' },
+        }),
+      ) as { resources: Record<string, { used: number; max: number }> };
+      expect(spent.resources.heroPoints).toMatchObject({ used: 1, max: 3 });
+
+      const restored = parseResult(
+        await client.callTool({ name: 'adjust_character_resource', arguments: { characterId, key: 'heroPoints', delta: -1 } }),
+      ) as { resources: Record<string, { used: number }> };
+      expect(restored.resources.heroPoints.used).toBe(0);
+    });
+
+    it('#1642: a system declaring neither resource (Open Legend) lists neither key', async () => {
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'MCP Open Legend Resources' });
+      expect(campRes.status).toBe(201);
+      const openLegendId = campRes.body.id as number;
+      await db.update(campaigns).set({ ruleSystem: OPEN_LEGEND_PACK_SLUG }).where(eq(campaigns.id, openLegendId));
+
+      const client = await mcpClient(dmToken);
+      const charRes = await dmAgent.post(`/api/v1/campaigns/${openLegendId}/characters`).send({ name: '1642 open legend target' });
+      const characterId = charRes.body.id as number;
+
+      const vocab = parseResult(
+        await client.callTool({ name: 'list_character_resources', arguments: { characterId } }),
+      ) as Array<{ key: string }>;
+      expect(vocab.some((r) => r.key === 'inspiration')).toBe(false);
+      expect(vocab.some((r) => r.key === 'heroPoints')).toBe(false);
     });
 
     it('reveal_attachment, hide_attachment, delete_attachment manage metadata only', async () => {

@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
-import { and, eq, gt, inArray, or, sql, type SQL } from 'drizzle-orm';
+import { and, eq, gt, inArray, isNull, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
 import { ActiveEffect, AoeTemplate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
@@ -698,7 +698,19 @@ export class EncountersService {
     db: SyncDb = this.db,
   ): TargetDefenses {
     if (row.ruleEntryId === null) return { resistances: [], vulnerabilities: [], immunities: [] };
-    const entry = db.select({ dataJson: ruleEntries.dataJson }).from(ruleEntries).where(eq(ruleEntries.id, row.ruleEntryId)).get();
+    const encounter = db
+      .select({ campaignId: encounters.campaignId })
+      .from(encounters)
+      .where(eq(encounters.id, row.encounterId))
+      .get();
+    const campaignScope = encounter
+      ? or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, encounter.campaignId))
+      : isNull(ruleEntries.campaignId);
+    const entry = db
+      .select({ dataJson: ruleEntries.dataJson })
+      .from(ruleEntries)
+      .where(and(eq(ruleEntries.id, row.ruleEntryId), campaignScope))
+      .get();
     const data = entry ? fromJsonText<Record<string, unknown>>(entry.dataJson, {}) : {};
     return damageDefensesFromStatblock(data, damageTypes);
   }
@@ -715,7 +727,7 @@ export class EncountersService {
     const rows = await this.db
       .select({ id: ruleEntries.id, dataJson: ruleEntries.dataJson })
       .from(ruleEntries)
-      .where(inArray(ruleEntries.id, ruleEntryIds));
+      .where(and(inArray(ruleEntries.id, ruleEntryIds), or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, campaignId))));
     for (const row of rows) {
       const data = fromJsonText<Record<string, unknown>>(row.dataJson ?? null, {});
       out.set(row.id, adapter.mapStatblock(data));
@@ -1909,7 +1921,7 @@ export class EncountersService {
       const entryRows = await this.db
         .select({ id: ruleEntries.id, dataJson: ruleEntries.dataJson })
         .from(ruleEntries)
-        .where(inArray(ruleEntries.id, ruleEntryIds));
+        .where(and(inArray(ruleEntries.id, ruleEntryIds), or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, encounterRow.campaignId))));
       for (const r of entryRows) {
         const data = fromJsonText<Record<string, unknown>>(r.dataJson, {});
         // Statblock CR field mapping comes from the adapter (issue #70), not inline field names.
@@ -2047,7 +2059,7 @@ export class EncountersService {
 
     const allowedTypes = filters?.includeHazards ? ['monster', 'hazard'] as const : ['monster'] as const;
     const typeWhere = inArray(ruleEntries.type, [...allowedTypes]);
-    const where = packId !== undefined ? and(typeWhere, eq(ruleEntries.packId, packId)) : typeWhere;
+    const where = packId !== undefined ? and(typeWhere, isNull(ruleEntries.campaignId), eq(ruleEntries.packId, packId)) : and(typeWhere, isNull(ruleEntries.campaignId));
     const rows = await this.db.select({ id: ruleEntries.id, name: ruleEntries.name, type: ruleEntries.type, dataJson: ruleEntries.dataJson }).from(ruleEntries).where(where);
 
     const typeNeedle = filters?.creatureType?.trim().toLowerCase();
@@ -2334,7 +2346,7 @@ export class EncountersService {
     const pickedIds = [...new Set(result.picks.map((p) => p.ruleEntryId))];
     const dataById = new Map<number, Record<string, unknown>>();
     if (pickedIds.length > 0) {
-      const rows = await this.db.select({ id: ruleEntries.id, dataJson: ruleEntries.dataJson }).from(ruleEntries).where(inArray(ruleEntries.id, pickedIds));
+      const rows = await this.db.select({ id: ruleEntries.id, dataJson: ruleEntries.dataJson }).from(ruleEntries).where(and(inArray(ruleEntries.id, pickedIds), isNull(ruleEntries.campaignId)));
       for (const r of rows) dataById.set(r.id, fromJsonText<Record<string, unknown>>(r.dataJson, {}));
     }
 
@@ -2456,7 +2468,7 @@ export class EncountersService {
 
     // Resolve each roster slot's statblock -> name/hp/initMod (outside the tx).
     const slotIds = [...new Set(input.roster.map((s) => s.ruleEntryId))];
-    const entryRows = await this.db.select().from(ruleEntries).where(inArray(ruleEntries.id, slotIds));
+    const entryRows = await this.db.select().from(ruleEntries).where(and(inArray(ruleEntries.id, slotIds), or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, campaignId))));
     const entryById = new Map(entryRows.map((r) => [r.id, r]));
     for (const s of input.roster) {
       if (!entryById.has(s.ruleEntryId)) {
@@ -2850,7 +2862,7 @@ export class EncountersService {
       // Any explicitly-supplied ruleEntryId (not just kind='monster') must resolve to a
       // real rule_entries row — 400 rather than silently dropping it and inserting a
       // combatant with a dangling reference.
-      const [entry] = await this.db.select().from(ruleEntries).where(eq(ruleEntries.id, input.ruleEntryId)).limit(1);
+      const [entry] = await this.db.select().from(ruleEntries).where(and(eq(ruleEntries.id, input.ruleEntryId), or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, encounterRow.campaignId)))).limit(1);
       if (!entry) {
         throw new BadRequestException(`Rule entry ${input.ruleEntryId} not found`);
       }
@@ -4268,7 +4280,7 @@ export class EncountersService {
           const entryRows = tx
             .select({ id: ruleEntries.id, dataJson: ruleEntries.dataJson })
             .from(ruleEntries)
-            .where(inArray(ruleEntries.id, ruleEntryIds))
+            .where(and(inArray(ruleEntries.id, ruleEntryIds), or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, fresh.campaignId))))
             .all();
           for (const entry of entryRows) {
             const data = fromJsonText<Record<string, unknown>>(entry.dataJson ?? null, {});
@@ -4509,7 +4521,7 @@ export class EncountersService {
         const entryRows = tx
           .select({ id: ruleEntries.id, dataJson: ruleEntries.dataJson })
           .from(ruleEntries)
-          .where(inArray(ruleEntries.id, ruleEntryIds))
+          .where(and(inArray(ruleEntries.id, ruleEntryIds), or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, fresh.campaignId))))
           .all();
         for (const entry of entryRows) {
           const data = fromJsonText<Record<string, unknown>>(entry.dataJson ?? null, {});
@@ -4836,7 +4848,7 @@ export class EncountersService {
       const encounterRow = await this.getRowOrThrow(c.encounterId);
       const adapter = await this.adapterForCampaign(encounterRow.campaignId);
       const ruleSystem = await this.ruleSystemForCampaign(encounterRow.campaignId);
-      const [entry] = await this.db.select({ dataJson: ruleEntries.dataJson }).from(ruleEntries).where(eq(ruleEntries.id, c.ruleEntryId)).limit(1);
+      const [entry] = await this.db.select({ dataJson: ruleEntries.dataJson }).from(ruleEntries).where(and(eq(ruleEntries.id, c.ruleEntryId), or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, encounterRow.campaignId)))).limit(1);
       const data = fromJsonText<Record<string, unknown>>(entry?.dataJson ?? null, {});
       const expanded = expandStatblockActions(data, adapter, ruleSystem ?? '');
       pushAction('action', expanded, 0);
@@ -4885,7 +4897,7 @@ export class EncountersService {
       const [entry] = await this.db
         .select({ dataJson: ruleEntries.dataJson })
         .from(ruleEntries)
-        .where(eq(ruleEntries.id, existing.ruleEntryId))
+        .where(and(eq(ruleEntries.id, existing.ruleEntryId), or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, encounterRow.campaignId))))
         .limit(1);
       const mapped = adapter.mapStatblock(fromJsonText<Record<string, unknown>>(entry?.dataJson ?? null, {}));
       if (statblockSectionHasEntries(mapped.legendaryActions)) legendaryMax = LEGENDARY_ACTIONS_PER_ROUND;

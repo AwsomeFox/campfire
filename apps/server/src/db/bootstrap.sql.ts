@@ -1130,6 +1130,7 @@ CREATE TABLE IF NOT EXISTS rule_packs (
 CREATE TABLE IF NOT EXISTS rule_entries (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   pack_id INTEGER NOT NULL REFERENCES rule_packs(id) ON DELETE CASCADE,
+  campaign_id INTEGER REFERENCES campaigns(id) ON DELETE CASCADE,
   slug TEXT NOT NULL,
   name TEXT NOT NULL,
   type TEXT NOT NULL,
@@ -1142,8 +1143,21 @@ CREATE TABLE IF NOT EXISTS rule_entries (
   author TEXT NOT NULL DEFAULT '',
   source_url TEXT NOT NULL DEFAULT '',
   icon_slug TEXT NOT NULL DEFAULT '',
+  rights_status TEXT NOT NULL DEFAULT 'open_licensed',
+  archived_at TEXT,
+  provenance TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS rule_entry_revisions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  rule_entry_id INTEGER NOT NULL REFERENCES rule_entries(id) ON DELETE CASCADE,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  actor TEXT NOT NULL,
+  before_json TEXT NOT NULL,
+  after_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS proposals (
@@ -2008,11 +2022,14 @@ CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status);
 CREATE INDEX IF NOT EXISTS idx_rule_entries_pack ON rule_entries(pack_id);
 CREATE INDEX IF NOT EXISTS idx_rule_entries_type ON rule_entries(type);
 CREATE INDEX IF NOT EXISTS idx_rule_entries_slug ON rule_entries(slug);
+CREATE INDEX IF NOT EXISTS idx_rule_entries_campaign ON rule_entries(campaign_id);
+CREATE INDEX IF NOT EXISTS idx_rule_entry_revisions_entry ON rule_entry_revisions(rule_entry_id, id);
 -- One canonical row per (pack, type, slug): the importer/upload paths dedupe on this key,
 -- and the unique index makes an accidental exact-duplicate insert a caught constraint error
 -- rather than a silently-duplicated compendium row (issue #143). Existing DBs are de-duped
 -- by migrateRuleEntriesTableForSource (runs before this) so the index can be created cleanly.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_rule_entries_pack_type_slug ON rule_entries(pack_id, type, slug);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_rule_entries_pack_type_slug ON rule_entries(pack_id, type, slug) WHERE campaign_id IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_rule_entries_campaign_slug ON rule_entries(campaign_id, slug) WHERE campaign_id IS NOT NULL;
 -- Keep both: the single-column index matches other entity tables and covers
 -- campaign-only lookups; (campaign_id, state) covers reserved/committed filters
 -- used by publication recovery and public reads without relying on prefix quirks.
