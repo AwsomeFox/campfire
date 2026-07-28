@@ -1324,6 +1324,9 @@ export const rulePacks = sqliteTable('rule_packs', {
 export const ruleEntries = sqliteTable('rule_entries', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   packId: integer('pack_id').notNull(),
+  // NULL for globally installed/open-pack entries. Non-null rows are private to
+  // this campaign and must only be read through campaign homebrew endpoints.
+  campaignId: integer('campaign_id'),
   slug: text('slug').notNull(),
   name: text('name').notNull(),
   type: text('type').notNull(),
@@ -1347,8 +1350,22 @@ export const ruleEntries = sqliteTable('rule_entries', {
   // icon, or '' to let the web app derive a default from type/dataJson. Nullable/absent
   // in older DBs pre-migration; see db/db.module.ts migrateRuleEntriesTableForIconSlug().
   iconSlug: text('icon_slug').notNull().default(''),
+  rightsStatus: text('rights_status').notNull().default('open_licensed'),
+  archivedAt: text('archived_at'),
+  provenance: text('provenance').notNull().default(''),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
+});
+
+/** Immutable before/after history for campaign homebrew only (issue #741). */
+export const ruleEntryRevisions = sqliteTable('rule_entry_revisions', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  ruleEntryId: integer('rule_entry_id').notNull(),
+  campaignId: integer('campaign_id').notNull(),
+  actor: text('actor').notNull(),
+  beforeJson: text('before_json').notNull(),
+  afterJson: text('after_json').notNull(),
+  createdAt: text('created_at').notNull(),
 });
 
 export const proposals = sqliteTable('proposals', {
