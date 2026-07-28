@@ -311,6 +311,56 @@ test.describe('startSseReconnectLoop — reconnect / abort / unmount (#800)', ()
     loop.dispose();
   });
 
+  test('403 stops the loop and fires onForbidden, distinct from a 401 (#1640)', async () => {
+    const fake = createFakeClock();
+    let bodyCancelled = false;
+    const statuses: SseStreamStatus[] = [];
+    let forbiddenCount = 0;
+    const loop = startSseReconnectLoop({
+      url: 'http://example.test/events',
+      clock: fake.clock,
+      fetchFn: async () => {
+        const body = new ReadableStream({
+          start() {
+            /* unconsumed body — must be cancelled on 403 */
+          },
+          cancel() {
+            bodyCancelled = true;
+          },
+        });
+        return new Response(body, { status: 403 });
+      },
+      onData: () => undefined,
+      onStatusChange: (s) => statuses.push(s),
+      onForbidden: () => {
+        forbiddenCount += 1;
+      },
+    });
+    await waitFor(() => statuses.includes('stopped'), fake);
+    expect(bodyCancelled).toBe(true);
+    expect(forbiddenCount).toBe(1);
+    loop.dispose();
+  });
+
+  test('401 does NOT fire onForbidden — session expiry and campaign-access loss are different signals (#1640)', async () => {
+    const fake = createFakeClock();
+    const statuses: SseStreamStatus[] = [];
+    let forbiddenCount = 0;
+    const loop = startSseReconnectLoop({
+      url: 'http://example.test/events',
+      clock: fake.clock,
+      fetchFn: async () => new Response(new ReadableStream(), { status: 401 }),
+      onData: () => undefined,
+      onStatusChange: (s) => statuses.push(s),
+      onForbidden: () => {
+        forbiddenCount += 1;
+      },
+    });
+    await waitFor(() => statuses.includes('stopped'), fake);
+    expect(forbiddenCount).toBe(0);
+    loop.dispose();
+  });
+
   test('failed connect cancels an unconsumed response body', async () => {
     const fake = createFakeClock();
     let bodyCancelled = false;

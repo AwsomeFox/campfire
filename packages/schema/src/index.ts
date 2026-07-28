@@ -2890,6 +2890,11 @@ export const NotificationType = z.enum([
   'note_shared',
   'comment_reply',
   'added_to_campaign',
+  // Issue #1640: membership REVOKED (removed, or left) — as opposed to `added_to_campaign`,
+  // which also covers a role change on a membership you still hold. A different type because
+  // the client reaction differs: a role change re-renders chrome in place, a revocation must
+  // move the user off any page scoped to that campaign (see MEMBERSHIP_NOTIFICATION_TYPES).
+  'removed_from_campaign',
   // Issue #819: exclusive character seat transferred away from (or onto) this member.
   'character_reassigned',
   'session_scheduled',
@@ -2927,13 +2932,23 @@ export type NotificationType = z.infer<typeof NotificationType>;
  * what counts — a type added here without updating a hand-maintained duplicate elsewhere is
  * the failure mode this constant exists to rule out.
  *
- * Deliberately narrow: `added_to_campaign` already covers being added, promoted (including the
- * admin `reassign_owner` path, #1546), and — after #1590 — a DM's own promote/demote of an
- * existing member (issue #437's `members.service.ts#update`). It is reused rather than split
- * into a separate "role changed" type because both describe the same fact a client needs to
- * react to: re-fetch `/me`, the memberships list may be stale.
+ * `added_to_campaign` already covers being added, promoted (including the admin
+ * `reassign_owner` path, #1546), and — after #1590 — a DM's own promote/demote of an existing
+ * member (issue #437's `members.service.ts#update`). It is reused rather than split into a
+ * separate "role changed" type because both describe the same fact a client needs to react to:
+ * re-fetch `/me`, the memberships list may be stale.
+ *
+ * `removed_from_campaign` (issue #1640) is deliberately its OWN type rather than folded into
+ * `added_to_campaign` too: a role change leaves the membership in place (re-render chrome from
+ * fresh `/me` data, stay put), but a revocation removes it entirely — a client sitting on a
+ * route scoped to that campaign must navigate away, not just re-render. Both still belong in
+ * this same list because the account-wide `membershipChanged` discriminator below only needs
+ * to answer "is `/me` possibly stale", not which of the two happened.
  */
-export const MEMBERSHIP_NOTIFICATION_TYPES = ['added_to_campaign'] as const satisfies readonly NotificationType[];
+export const MEMBERSHIP_NOTIFICATION_TYPES = [
+  'added_to_campaign',
+  'removed_from_campaign',
+] as const satisfies readonly NotificationType[];
 
 export const Notification = z.object({
   id: Id,
@@ -2995,7 +3010,7 @@ export const NotificationCategory = z.enum([
   'quests', // quest_updated
   'proposals', // proposal_submitted, proposal_resolved
   'inbox', // inbox_submitted
-  'access', // added_to_campaign, character_reassigned, charter_published — ALWAYS ON (access control)
+  'access', // added_to_campaign, removed_from_campaign, character_reassigned, charter_published — ALWAYS ON (access control)
   'security', // ai_dm_alert, safety_hold — ALWAYS ON (security/recovery)
 ]);
 export type NotificationCategory = z.infer<typeof NotificationCategory>;
@@ -3031,6 +3046,7 @@ export const NOTIFICATION_TYPE_CATEGORY: Record<NotificationType, NotificationCa
   note_shared: 'notes',
   comment_reply: 'comments',
   added_to_campaign: 'access',
+  removed_from_campaign: 'access',
   character_reassigned: 'access',
   session_scheduled: 'schedule',
   session_rsvp: 'schedule',
@@ -3112,7 +3128,7 @@ export const RulePack = z.object({
   name: z.string().min(1).max(120),
   version: z.string().max(40).default(''),
   license: z.string().max(120).default(''), // e.g. "OGL 1.0a", "CC-BY-4.0"
-  sourceUrl: z.string().max(500).default(''),
+  sourceUrl: z.string().max(500).refine((url) => !url || /^https?:\/\//i.test(url), 'Source URL must be http(s)').default(''),
   installedAt: IsoDate,
   entryCount: z.number().int().nonnegative().default(0),
   // Authoritative, server-wide count of campaigns whose `ruleSystem` == this pack's slug
@@ -3129,6 +3145,7 @@ export type RuleEntryType = z.infer<typeof RuleEntryType>;
 export const RuleEntry = z.object({
   id: Id,
   packId: Id,
+  campaignId: Id.nullable().optional(),
   slug: z.string().min(1).max(160),
   name: z.string().min(1).max(200),
   type: RuleEntryType,
@@ -3158,7 +3175,7 @@ export const RuleEntry = z.object({
   license: z.string().max(160).default(''),
   attribution: z.string().max(500).default(''),
   author: z.string().max(200).default(''),
-  sourceUrl: z.string().max(500).default(''),
+  sourceUrl: z.string().max(500).refine((url) => !url || /^https?:\/\//i.test(url), 'Source URL must be http(s)').default(''),
   // Optional manual icon override (issue #305): the slug of a bundled game-icons.net
   // entity icon (see apps/web/src/lib/icons) shown in the compendium list + reader in
   // place of the type/school-derived default. '' means "no override — the web app
@@ -3167,6 +3184,8 @@ export const RuleEntry = z.object({
   // the default), mirroring Npc.iconSlug from #302 so the field stays forward-compatible
   // as the curated set grows.
   iconSlug: z.string().max(80).default(''),
+  rightsStatus: z.enum(['private_original', 'permission_granted', 'open_licensed']).default('open_licensed'),
+  archivedAt: IsoDate.nullable().optional(),
   ...timestamps,
 });
 export type RuleEntry = z.infer<typeof RuleEntry>;
@@ -3182,6 +3201,60 @@ export const RuleEntryUpdate = z.object({
   iconSlug: z.string().max(80),
 }).partial();
 export type RuleEntryUpdate = z.infer<typeof RuleEntryUpdate>;
+
+// ---------- campaign homebrew (issue #741) ----------
+// Homebrew is deliberately an entry-level, campaign-private concern.  It is not a
+// pack upload and therefore never inherits the global/open-pack licensing contract.
+export const HomebrewRightsStatus = z.enum(['private_original', 'permission_granted', 'open_licensed']);
+export type HomebrewRightsStatus = z.infer<typeof HomebrewRightsStatus>;
+const HomebrewDataObject = z.record(z.string(), z.unknown());
+export const HomebrewRuleEntryInput = z.object({
+  slug: z.string().min(1).max(160).regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, 'Use a stable lowercase slug'),
+  name: z.string().min(1).max(200),
+  type: RuleEntryType,
+  summary: z.string().max(1000).default(''),
+  body: z.string().max(50_000).default(''),
+  /** Structured editors serialize here; raw mode accepts only a JSON object. */
+  data: HomebrewDataObject.optional(),
+  dataJson: z.string().max(100_000).optional(),
+  rightsStatus: HomebrewRightsStatus.default('private_original'),
+  license: z.string().max(160).default(''),
+  attribution: z.string().max(500).default(''),
+  author: z.string().max(200).default(''),
+  sourceUrl: z.string().max(500).refine((url) => !url || /^https?:\/\//i.test(url), 'Source URL must be http(s)').default(''),
+  iconSlug: z.string().max(80).default(''),
+}).superRefine((value, ctx) => {
+  if (value.data !== undefined && value.dataJson !== undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Provide data or dataJson, not both' });
+  if (value.dataJson !== undefined) {
+    try { const parsed: unknown = JSON.parse(value.dataJson); if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') throw new Error(); }
+    catch { ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['dataJson'], message: 'Raw data must be a JSON object' }); }
+  }
+  if (value.rightsStatus === 'open_licensed') {
+    if (!value.license.trim()) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['license'], message: 'Open-licensed work requires a license' });
+    if (!value.attribution.trim() && !value.author.trim()) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['attribution'], message: 'Open-licensed work requires attribution or author' });
+    if (!value.sourceUrl.trim()) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['sourceUrl'], message: 'Open-licensed work requires a source URL' });
+  }
+  if (value.rightsStatus === 'permission_granted' && !value.attribution.trim() && !value.author.trim()) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['attribution'], message: 'Permission-granted work requires attribution or author' });
+});
+export type HomebrewRuleEntryInput = z.infer<typeof HomebrewRuleEntryInput>;
+// Re-parse an update after merging it with the stored entry; keeping this permissive
+// patch shape avoids accidentally requiring every field on a normal edit.
+export const HomebrewRuleEntryUpdate = z.object({
+  slug: z.string().min(1).max(160).regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).optional(),
+  name: z.string().min(1).max(200).optional(), type: RuleEntryType.optional(),
+  summary: z.string().max(1000).optional(), body: z.string().max(50_000).optional(),
+  data: HomebrewDataObject.optional(), dataJson: z.string().max(100_000).optional(),
+  rightsStatus: HomebrewRightsStatus.optional(), license: z.string().max(160).optional(),
+  attribution: z.string().max(500).optional(), author: z.string().max(200).optional(),
+  sourceUrl: z.string().max(500).refine((url) => !url || /^https?:\/\//i.test(url), 'Source URL must be http(s)').optional(), iconSlug: z.string().max(80).optional(),
+  expectedUpdatedAt: ExpectedUpdatedAt,
+});
+export type HomebrewRuleEntryUpdate = z.infer<typeof HomebrewRuleEntryUpdate>;
+export const HomebrewImportEntry = HomebrewRuleEntryInput;
+export const HomebrewImportPreview = z.object({ entries: z.array(HomebrewImportEntry).min(1).max(1000) });
+export const HomebrewConflictStrategy = z.enum(['skip', 'replace', 'duplicate']);
+export const HomebrewImportApply = HomebrewImportPreview.extend({ strategy: HomebrewConflictStrategy, expectedUpdatedAt: z.record(z.string(), z.string()).optional() });
+export type HomebrewImportApply = z.infer<typeof HomebrewImportApply>;
 
 /**
  * Portable compendium identity for campaign export/import (issue #584). Replaces
@@ -3947,6 +4020,14 @@ export interface RuleSystemAdapter {
    * still withhold `resolverMath` until its saves are correct too.
    */
   resolveAttack?(input: AttackRollInput): AttackRollResult;
+  /**
+   * OPTIONAL — this system's own proficiency/training bonus (issue #1599), the way
+   * {@link resolveAttack} owns the attack roll. Omit it and the resolver falls back to 0 (see
+   * `defaultCheckProficiencyBonus` in action-resolver.ts for why the safe default is 0, not 5e's
+   * formula, unlike the attack default). `Dnd5eAdapter` declares it explicitly rather than
+   * relying on that default; `Pf2eAdapter` (inherited by SF2e) declares its own.
+   */
+  checkProficiencyBonus?(level: number): number;
   /** Map a monster rule-entry's `dataJson` to canonical statblock fields (AC/HP/CR/abilities/…). */
   mapStatblock(data: Record<string, unknown>): MonsterStatblockData;
   /** Resolve a monster's numeric max HP from its `dataJson`, or null when unavailable. */
@@ -4131,6 +4212,11 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
   // Unknown / empty / homebrew slugs resolve to this adapter via `ruleSystemAdapter`, so they
   // inherit the declaration, which is correct: 5e maths is exactly what those campaigns get.
   resolverMath: RESOLVER_MATH_D20_5E,
+  // #1599 — 5e is the one adapter that opts OUT of `checkProficiencyBonus`'s own default (0):
+  // that default is deliberately "add nothing" for every UNAUDITED system, but 5e's curve is
+  // exactly this formula, so 5e declares it explicitly rather than relying on a default that
+  // exists precisely so nobody ELSE has to make this claim by accident.
+  checkProficiencyBonus: dnd5eProficiencyBonus,
   presentation: DND5E_STATBLOCK_PRESENTATION,
   characterSheet: {
     abilityFields: STANDARD_D20_ABILITY_FIELDS,
@@ -4164,13 +4250,19 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
   // never a denylist of what is "permanent" — see the RestModel docs for why that direction is
   // the safe one when conditions are bare strings with no metadata (#1047).
   //
-  // These four are the 5e conditions a long rest ends on its own: exhaustion drops a level,
-  // and the three that PHB rest/unconsciousness rules resolve without an external cure. The
-  // conditions deliberately ABSENT are the ones that need a specific remedy — petrified,
+  // These three are the 5e conditions a long rest ends OUTRIGHT on its own — the PHB rest/
+  // unconsciousness rules resolve them without an external cure. Exhaustion is deliberately
+  // ABSENT from this list (issue #1641 — it used to be here, which was the bug: this allowlist
+  // can only express "removed entirely", and 5e's actual rule is "a long rest reduces
+  // exhaustion by ONE LEVEL", not to zero). Exhaustion's presence is instead read off
+  // `leveledConditionTrackFor('dnd5e')` (`leveled-conditions.ts`, issue #1643) by
+  // `restConditionOutcome`, which decrements it by one stack on a long rest and only fully
+  // removes it once that reaches 0 — see `rest.ts` for the mechanics. The conditions
+  // deliberately absent from BOTH lists are the ones that need a specific remedy — petrified,
   // paralyzed, charmed, poisoned, restrained, grappled, blinded, deafened, invisible — because
   // a rest that silently ended a Medusa's petrification would erase the DM's scene.
   restModel: {
-    clearedByLongRest: ['Exhaustion', 'Unconscious', 'Prone', 'Frightened'],
+    clearedByLongRest: ['Unconscious', 'Prone', 'Frightened'],
     clearedByShortRest: [],
     // 5e hit dice are per-class (d6 sorcerer … d12 barbarian) and the class die is NOT stored
     // on the sheet in this repo, so there is no honest default: `null` makes a short rest that
@@ -5365,6 +5457,19 @@ export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
     return typeof hp === 'number' && hp > 0 ? Math.round(hp) : null;
   },
   proficiencyBonus: pf2eProficiencyBonus,
+  // #1599 — the structured resolver's own save/attack proficiency hook. Distinct from
+  // `proficiencyBonus` just above: that one takes an explicit RANK (used by the roll catalog,
+  // which knows which skill/save it is building a check for); this one is the resolver's
+  // one-argument seam (`ResolverAdapter.checkProficiencyBonus`), which only ever knows a
+  // boolean "is this character proficient" — `character.saveProficiencies` records no rank.
+  // TRAINED is the correct floor for "marked proficient" with no finer data, the same degrade
+  // `initiativeModifier` above already makes for Perception: exact for an actual Trained
+  // character, an UNDERSTATEMENT for Expert/Master/Legendary (a real improvement over the
+  // previous blanket 0, not a full fix — see ResolverMathProfile's #1599 conclusion for why
+  // that residual gap keeps this adapter from declaring `resolverMath`).
+  checkProficiencyBonus(level: number): number {
+    return pf2eProficiencyBonus(Math.max(0, Math.trunc(level)), 'trained');
+  },
   levelBasedDC: pf2eLevelBasedDC,
   simpleDC: pf2eSimpleDC,
   degreeOfSuccess: pf2eDegreeOfSuccess,

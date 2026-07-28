@@ -51,6 +51,7 @@ import { AiSetupChecklist } from '../ai-dm/AiSetupChecklist';
 import { CostDisclosure } from '../ai-dm/CostDisclosure';
 import { formatUsdRange } from '../ai-dm/costEstimate';
 import { TermHelp } from '../../components/TermHelp';
+import { useSaveFeedback } from '../../components/SaveFeedback';
 
 const AI_DM_INSTRUCTIONS_SECTION_ID = 'ai-dm-instructions';
 const AI_DM_INSTRUCTIONS_INPUT_ID = 'ai-dm-instructions-input';
@@ -271,9 +272,8 @@ function NarrationLanguageSection({
 }) {
   const { t } = useTranslation();
   const [narrationLanguage, setNarrationLanguage] = useState<NarrationLanguage>(campaign.narrationLanguage);
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const feedback = useSaveFeedback('Narration language');
+  const saving = feedback.state === 'saving';
   const dirty = narrationLanguage !== campaign.narrationLanguage;
 
   useEffect(() => {
@@ -281,18 +281,14 @@ function NarrationLanguageSection({
   }, [campaign.id, campaign.narrationLanguage]);
 
   async function save() {
-    setSaving(true);
-    setError(null);
-    setSaved(false);
+    if (saving) return;
+    feedback.begin();
     try {
       const updated = await api.patch<Campaign>(`${API}/campaigns/${campaignId}`, { narrationLanguage });
       onSaved(updated);
-      setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
+      feedback.succeed();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : t('settings.aiDm.errors.saveNarrationLanguage'));
-    } finally {
-      setSaving(false);
+      feedback.fail(err instanceof ApiError ? err.message : t('settings.aiDm.errors.saveNarrationLanguage'));
     }
   }
 
@@ -308,7 +304,8 @@ function NarrationLanguageSection({
           className="input"
           value={narrationLanguage}
           disabled={saving}
-          onChange={(e) => setNarrationLanguage(e.target.value as NarrationLanguage)}
+          aria-describedby={feedback.statusId}
+          onChange={(e) => { const value = e.target.value as NarrationLanguage; setNarrationLanguage(value); feedback.syncDirty(value !== campaign.narrationLanguage); }}
         >
           {NARRATION_LANGUAGE_OPTIONS.map((opt) => (
             <option key={opt.value} value={opt.value}>
@@ -317,12 +314,11 @@ function NarrationLanguageSection({
           ))}
         </select>
       </div>
-      {error && <p className="text-sm" style={{ color: '#f87171' }}>{error}</p>}
       <div className="flex gap-2 items-center">
         <button className="btn btn-primary" style={{ fontSize: 12.5 }} disabled={saving || !dirty} onClick={() => void save()}>
           {saving ? t('common.saving') : t('settings.aiDm.narrationLanguage.save')}
         </button>
-        {saved && <span className="text-muted" style={{ fontSize: 12 }}>{t('settings.aiDm.saved')}</span>}
+        {feedback.announcement}
       </div>
     </Section>
   );
@@ -503,9 +499,8 @@ function BudgetSection({
 }) {
   const { t } = useTranslation();
   const [tokenBudget, setTokenBudget] = useState(String(seat.tokenBudget));
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const feedback = useSaveFeedback('AI budget');
+  const saving = feedback.state === 'saving';
 
   // #1065 — the cost basis rides along on readiness, which the checklist in this same card
   // has already fetched, so this shares that cache rather than adding a request. When it has
@@ -528,21 +523,17 @@ function BudgetSection({
   async function save() {
     const n = Number(tokenBudget);
     if (!Number.isFinite(n) || n < 0) {
-      setError(t('settings.aiDm.errors.invalidBudget'));
+      feedback.fail(t('settings.aiDm.errors.invalidBudget'));
       return;
     }
-    setSaving(true);
-    setError(null);
-    setSaved(false);
+    if (saving) return;
+    feedback.begin();
     try {
       const updated = await api.put<AiDmSeat>(`${API}/campaigns/${campaignId}/ai-dm`, { tokenBudget: Math.floor(n) });
       onChanged(updated);
-      setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
+      feedback.succeed();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : t('settings.aiDm.errors.saveBudget'));
-    } finally {
-      setSaving(false);
+      feedback.fail(err instanceof ApiError ? err.message : t('settings.aiDm.errors.saveBudget'));
     }
   }
 
@@ -559,7 +550,9 @@ function BudgetSection({
           type="number"
           min={0}
           value={tokenBudget}
-          onChange={(e) => setTokenBudget(e.target.value)}
+          disabled={saving}
+          aria-describedby={feedback.statusId}
+          onChange={(e) => { const value = e.target.value; setTokenBudget(value); feedback.syncDirty(value !== String(seat.tokenBudget)); }}
         />
       </div>
       {/* #1065 — what that budget is worth in real money, or an explicit statement that we
@@ -610,12 +603,11 @@ function BudgetSection({
           </span>
         )}
       </div>
-      {error && <p className="text-sm" style={{ color: '#f87171' }}>{error}</p>}
       <div className="flex gap-2 items-center">
         <button className="btn btn-primary" style={{ fontSize: 12.5 }} disabled={saving} onClick={() => void save()}>
           {saving ? t('common.saving') : t('settings.aiDm.budget.save')}
         </button>
-        {saved && <span className="text-muted" style={{ fontSize: 12 }}>{t('settings.aiDm.saved')}</span>}
+        {feedback.announcement}
       </div>
     </Section>
   );
@@ -632,23 +624,18 @@ function InstructionsSection({
 }) {
   const { t } = useTranslation();
   const [instructions, setInstructions] = useState(seat.instructions ?? '');
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const feedback = useSaveFeedback('AI instructions');
+  const saving = feedback.state === 'saving';
 
   async function save() {
-    setSaving(true);
-    setError(null);
-    setSaved(false);
+    if (saving) return;
+    feedback.begin();
     try {
       const updated = await api.put<AiDmSeat>(`${API}/campaigns/${campaignId}/ai-dm`, { instructions });
       onChanged(updated);
-      setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
+      feedback.succeed();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : t('settings.aiDm.errors.saveInstructions'));
-    } finally {
-      setSaving(false);
+      feedback.fail(err instanceof ApiError ? err.message : t('settings.aiDm.errors.saveInstructions'));
     }
   }
 
@@ -664,16 +651,17 @@ function InstructionsSection({
           className="input"
           style={{ minHeight: 96 }}
           value={instructions}
-          onChange={(e) => setInstructions(e.target.value)}
+          disabled={saving}
+          aria-describedby={feedback.statusId}
+          onChange={(e) => { const value = e.target.value; setInstructions(value); feedback.syncDirty(value !== (seat.instructions ?? '')); }}
           placeholder={t('settings.aiDm.instructions.placeholder')}
         />
       </div>
-      {error && <p className="text-sm" style={{ color: '#f87171' }}>{error}</p>}
       <div className="flex gap-2 items-center">
         <button className="btn btn-primary" style={{ fontSize: 12.5 }} disabled={saving} onClick={() => void save()}>
           {saving ? t('common.saving') : t('settings.aiDm.instructions.save')}
         </button>
-        {saved && <span className="text-muted" style={{ fontSize: 12 }}>{t('settings.aiDm.saved')}</span>}
+        {feedback.announcement}
       </div>
     </Section>
   );
@@ -703,9 +691,8 @@ function TableStyleSection({
 }) {
   const { t } = useTranslation();
   const [presets, setPresets] = useState<AiDmStylePresets>(seat.stylePresets);
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const feedback = useSaveFeedback('Table style');
+  const saving = feedback.state === 'saving';
 
   // Deliberately NOT re-synced from `seat`, matching InstructionsSection above.
   // Every section on this card shares one `seat` object in the parent, so saving the
@@ -716,21 +703,14 @@ function TableStyleSection({
   // section until the seat has loaded, so seeding once in useState is sufficient.
 
   async function save() {
-    setSaving(true);
-    setSaved(false);
-    setError(null);
+    if (saving) return;
+    feedback.begin();
     try {
       const updated = await api.put<AiDmSeat>(`${API}/campaigns/${campaignId}/ai-dm`, { stylePresets: presets });
       onChanged(updated);
-      setSaved(true);
-      // Matches every other section on this card: the confirmation is a flash, not a state.
-      // Without this the "Saved." line stays up indefinitely and reads as still-current
-      // after the DM has gone on to edit something else.
-      setTimeout(() => setSaved(false), 2000);
+      feedback.succeed();
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : t('settings.aiDm.errors.saveTableStyle'));
-    } finally {
-      setSaving(false);
+      feedback.fail(e instanceof ApiError ? e.message : t('settings.aiDm.errors.saveTableStyle'));
     }
   }
 
@@ -750,7 +730,8 @@ function TableStyleSection({
               className="input"
               value={presets[axis.key]}
               disabled={saving}
-              onChange={(e) => setPresets((prev) => ({ ...prev, [axis.key]: e.target.value }))}
+              aria-describedby={feedback.statusId}
+              onChange={(e) => { const value = e.target.value; const next = { ...presets, [axis.key]: value }; setPresets(next); feedback.syncDirty(JSON.stringify(next) !== JSON.stringify(seat.stylePresets)); }}
             >
               {AI_DM_STYLE_PRESET_OPTIONS[axis.key].map((opt) => (
                 <option key={opt.value} value={opt.value}>
@@ -761,12 +742,11 @@ function TableStyleSection({
           </div>
         ))}
       </div>
-      {error && <p className="text-sm" style={{ color: '#f87171' }}>{error}</p>}
       <div className="flex gap-2 items-center">
         <button className="btn btn-primary" style={{ fontSize: 12.5 }} disabled={saving} onClick={() => void save()}>
           {saving ? t('common.saving') : t('settings.aiDm.tableStyle.save')}
         </button>
-        {saved && <span className="text-muted" style={{ fontSize: 12 }}>{t('settings.aiDm.saved')}</span>}
+        {feedback.announcement}
       </div>
     </Section>
   );

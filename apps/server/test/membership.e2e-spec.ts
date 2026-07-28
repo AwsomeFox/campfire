@@ -1016,3 +1016,148 @@ describe('character soft-delete keeps member link (e2e, real cookie sessions, is
     expect(restoreRes.status).toBe(201);
   });
 });
+
+/**
+ * Issue #1640 — the revocation half of the account-wide membership signal #1590/#1634
+ * built for role changes. `MembersService.remove()` now also sends a `removed_from_campaign`
+ * notification, so a removed member's OTHER open tabs (dashboard, a different campaign,
+ * /admin — anywhere without this campaign's SSE stream open) learn their /me + campaign
+ * list are stale, same mechanism the promote/demote test above asserts for `update()`.
+ */
+describe('membership revocation notifies account-wide (e2e, real cookie sessions, issue #1640)', () => {
+  let ctx: TestAppContext;
+  let adminAgent: ReturnType<typeof request.agent>;
+  let dmAgent: ReturnType<typeof request.agent>;
+  let playerAgent: ReturnType<typeof request.agent>;
+  let dmId: number;
+  let playerId: number;
+  let campaignId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    const server = ctx.app.getHttpServer();
+
+    adminAgent = request.agent(server);
+    await adminAgent.post('/api/v1/auth/setup').send({ username: 'revoke-admin', password: 'admin-password-1' });
+
+    const createDm = await adminAgent.post('/api/v1/users').send({ username: 'revoke-dm', password: 'revoke-dm-password', serverRole: 'user' });
+    dmId = createDm.body.id;
+    dmAgent = request.agent(server);
+    await dmAgent.post('/api/v1/auth/login').send({ username: 'revoke-dm', password: 'revoke-dm-password' });
+
+    const createPlayer = await adminAgent
+      .post('/api/v1/users')
+      .send({ username: 'revoke-player', password: 'revoke-player-password', serverRole: 'user' });
+    playerId = createPlayer.body.id;
+    playerAgent = request.agent(server);
+    await playerAgent.post('/api/v1/auth/login').send({ username: 'revoke-player', password: 'revoke-player-password' });
+
+    const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'Revocation Campaign' });
+    campaignId = campRes.body.id;
+    const addRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: playerId, role: 'player' });
+    expect(addRes.status).toBe(201);
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('a dm removing a member notifies the removed member account-wide, and NOT the acting dm', async () => {
+    const membersBefore = await dmAgent.get(`/api/v1/campaigns/${campaignId}/members`);
+    const playerMember = membersBefore.body.find((m: { userId: number }) => m.userId === playerId);
+    expect(playerMember).toBeDefined();
+
+    const removeRes = await dmAgent.delete(`/api/v1/campaigns/${campaignId}/members/${playerMember.id}`);
+    expect(removeRes.status).toBe(204);
+
+    // The membership is really gone.
+    const meRes = await playerAgent.get('/api/v1/me');
+    expect(meRes.body.memberships.some((m: { campaignId: number }) => m.campaignId === campaignId)).toBe(false);
+
+    const notes = await playerAgent.get('/api/v1/notifications');
+    const items = Array.isArray(notes.body) ? notes.body : notes.body.items;
+    const removed = items.find(
+      (n: { type: string; campaignId: number }) => n.type === 'removed_from_campaign' && n.campaignId === campaignId,
+    );
+    expect(removed).toBeDefined();
+    expect(removed.title).toContain('removed');
+    expect(removed.title).not.toContain('left');
+    expect(removed.readAt).toBeNull();
+
+    const playerCount = await playerAgent.get('/api/v1/notifications/unread-count');
+    expect(playerCount.body.membershipChanged).toBe(true);
+
+    // The acting dm is not the target and gets no self-notification.
+    const dmCount = await dmAgent.get('/api/v1/notifications/unread-count');
+    expect(dmCount.body.membershipChanged).toBe(false);
+  });
+
+  it('a removed member who blocked the acting dm still receives the revocation signal (Codex/#597 review)', async () => {
+    // #597's block-based suppression exists to stop an ABUSER'S content reaching someone who
+    // blocked them; removed_from_campaign carries no actor content and exists purely so the
+    // removed member's other tabs learn their access changed. Gating it on the block would
+    // silently strand that member's cached membership stale in exactly the case that matters —
+    // see the comment on the notifyUser(..., null, ...) call in members.service.ts#remove.
+    const addRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: playerId, role: 'player' });
+    expect(addRes.status).toBe(201);
+    const memberId = addRes.body.id;
+
+    const blockRes = await playerAgent.post(`/api/v1/campaigns/${campaignId}/safety/blocks`).send({ targetUserId: String(dmId) });
+    expect(blockRes.status).toBe(201);
+    expect(blockRes.body.kind).toBe('block');
+
+    const removeRes = await dmAgent.delete(`/api/v1/campaigns/${campaignId}/members/${memberId}`);
+    expect(removeRes.status).toBe(204);
+
+    const notes = await playerAgent.get('/api/v1/notifications');
+    const items = Array.isArray(notes.body) ? notes.body : notes.body.items;
+    const removed = items.find(
+      (n: { type: string; campaignId: number; title: string }) =>
+        n.type === 'removed_from_campaign' && n.campaignId === campaignId && n.title.includes('removed'),
+    );
+    expect(removed).toBeDefined();
+
+    const playerCount = await playerAgent.get('/api/v1/notifications/unread-count');
+    expect(playerCount.body.membershipChanged).toBe(true);
+
+    // Leaving the block in place is fine for the rest of this describe block: the fix under
+    // test means removed_from_campaign no longer consults it at all, and no other notification
+    // types pass between this player and this dm in the remaining tests below.
+  });
+
+  it('self-leave notifies the leaving user too (their OTHER open tabs, not this request) with distinct copy', async () => {
+    const addRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: playerId, role: 'player' });
+    expect(addRes.status).toBe(201);
+    const memberId = addRes.body.id;
+
+    const leaveRes = await playerAgent.delete(`/api/v1/campaigns/${campaignId}/members/${memberId}`);
+    expect(leaveRes.status).toBe(204);
+
+    // Unlike a dm-initiated removal, self-leave DOES self-notify (opts.allowSelf) — it is
+    // the same person, but the point is reaching their OTHER tabs, which this request
+    // cannot do directly.
+    const notes = await playerAgent.get('/api/v1/notifications');
+    const items = Array.isArray(notes.body) ? notes.body : notes.body.items;
+    const left = items.find(
+      (n: { type: string; campaignId: number; title: string }) =>
+        n.type === 'removed_from_campaign' && n.campaignId === campaignId && n.title.includes('left'),
+    );
+    expect(left).toBeDefined();
+
+    const playerCount = await playerAgent.get('/api/v1/notifications/unread-count');
+    expect(playerCount.body.membershipChanged).toBe(true);
+  });
+
+  it('the last dm can neither be removed nor self-leave (409) — no revocation notification for a no-op removal', async () => {
+    // dm is the sole dm of this campaign at this point (player left in the prior test).
+    const membersRes = await dmAgent.get(`/api/v1/campaigns/${campaignId}/members`);
+    const dmMember = membersRes.body.find((m: { role: string }) => m.role === 'dm');
+    expect(dmMember).toBeDefined();
+
+    const selfLeave = await dmAgent.delete(`/api/v1/campaigns/${campaignId}/members/${dmMember.id}`);
+    expect(selfLeave.status).toBe(409);
+
+    const meRes = await dmAgent.get('/api/v1/me');
+    expect(meRes.body.memberships.some((m: { campaignId: number }) => m.campaignId === campaignId)).toBe(true);
+  });
+});
