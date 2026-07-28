@@ -1045,35 +1045,19 @@ export class MembersService {
     // someone who blocked them specifically to avoid seeing their content. The signal is
     // access-revocation, not sender-authored, so it stays actor-name-free too.
     //
-    // Campaign-name lookup is best-effort (Codex review, #1653): the delete above already
-    // committed and the SSE `membership.revoked` event above already fired, so the remove
-    // itself has unconditionally succeeded from here on. If this SELECT throws (e.g. a
-    // transient DB blip right after commit), letting it propagate would turn an already-
-    // successful removal into a 500 — and a client retry would then 404 (the membership
-    // is gone), reporting failure for an operation that actually worked. Falling back to
-    // the generic "a campaign" title keeps the notification (and the whole method)
-    // best-effort past this point, matching the audit-log try/catch below.
-    let campaignName = 'a campaign';
-    try {
-      const [campaignRow] = await this.db
-        .select({ name: campaigns.name })
-        .from(campaigns)
-        .where(eq(campaigns.id, campaignId))
-        .limit(1);
-      if (campaignRow?.name) campaignName = campaignRow.name;
-    } catch (err) {
-      const logger = new Logger(MembersService.name);
-      const message = `membership.revoked emitted for memberId=${memberId} but campaign-name lookup failed — falling back to generic notification title.`;
-      if (err instanceof Error) logger.error(message, err.stack);
-      else logger.error(`${message} Underlying error: ${String(err)}`);
-    }
+    // `campaigns.name` deliberately omitted (Codex review, #1653): campaign names are
+    // DM-editable metadata. Because this access-control signal bypasses actor blocking by
+    // design, including the campaign name would give a blocked DM one unblockable message
+    // carrying actor-controlled text. Keep the notice generic; the cache invalidation is the
+    // important behavior.
+    const title = opts?.selfLeave ? 'You left a campaign' : 'You were removed from a campaign';
     await this.notifications.notifyUser(
       existing.userId,
       campaignId,
       null,
       {
         type: 'removed_from_campaign',
-        title: opts?.selfLeave ? `You left ${campaignName}` : `You were removed from ${campaignName}`,
+        title,
         entityType: 'campaign',
         entityId: campaignId,
       },
