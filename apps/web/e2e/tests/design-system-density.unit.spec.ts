@@ -122,10 +122,20 @@ const DRIFT_PATTERNS: ReadonlyArray<{ name: string; pattern: RegExp; why: string
  *
  * None of these are fixed in this PR — #1692's job is the density API, not an a11y
  * sweep, and the two live violations especially need their own tracked fix, not a
- * drive-by inside an unrelated PR. Reported to the orchestrator to file separately.
- * Allowlisted here ONLY for this one new pattern, by name, not added to
- * `HEIGHT_SHRINK_ALLOWED_FILES` (which exempts a file from ALL of the
- * className-based patterns above; none of these files carry those).
+ * drive-by inside an unrelated PR. Filed as issue #1722, with these measurements,
+ * the near-misses, and an explicit warning not to "fix" any of them by just
+ * deleting the inline `minHeight: 0` — on a bare `.btn` that snaps to the ramp's
+ * 44px default and would visibly wreck a dense map toolbar.
+ *
+ * This allowlist exists to be removed against #1722, one entry at a time, as each
+ * site gets a real fix (a deliberate size via the density API or an explicit
+ * bespoke value, not just clearing the pattern) — it is not a permanent exemption.
+ * If you are here because #1722 closed and this comment still exists, that is
+ * itself a bug: either the fix didn't actually remove the corresponding entry
+ * below, or the issue closed without one. Allowlisted here ONLY for this one new
+ * pattern, by name, not added to `HEIGHT_SHRINK_ALLOWED_FILES` (which exempts a
+ * file from ALL of the className-based patterns above; none of these files carry
+ * those).
  */
 const INLINE_MIN_HEIGHT_ZERO_ALLOWED: ReadonlyMap<string, ReadonlySet<string>> = new Map([
   [
