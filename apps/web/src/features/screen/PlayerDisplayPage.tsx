@@ -947,14 +947,14 @@ export default function PlayerDisplayPage() {
           {summary.campaign.name}
         </h1>
         {location ? (
-          <span className="cf-chip cf-chip-accent cf-status-location">
+          <span className="cf-screen-chip cf-screen-chip-accent cf-status-location">
             {location.isCurrent ? (
               <GameIcon slug="position-marker" size={14} className="inline align-text-bottom mr-1" />
             ) : null}
             <span className="cf-clamp-1">{location.name}</span>
           </span>
         ) : (
-          <span className="cf-chip">Location unset</span>
+          <span className="cf-screen-chip">Location unset</span>
         )}
       </div>
       <div className="cf-status-combat" data-testid="cf-status-combat">
@@ -1310,17 +1310,17 @@ function PartyScene({
                       {c.name}
                     </span>
                     {!isActive && (
-                      <span className="cf-chip cf-chip-sm cf-party-status">{STATUS_LABEL[c.status]}</span>
+                      <span className="cf-screen-chip cf-screen-chip-sm cf-party-status">{STATUS_LABEL[c.status]}</span>
                     )}
                   </span>
-                  {c.ac != null && <span className="cf-chip cf-chip-sm">AC {c.ac}</span>}
+                  {c.ac != null && <span className="cf-screen-chip cf-screen-chip-sm">AC {c.ac}</span>}
                 </div>
                 <div className="cf-party-sub">
                   {[c.species, c.className && `${c.className} ${c.level}`].filter(Boolean).join(' · ') ||
                     `Level ${c.level}`}
                 </div>
                 <div className="cf-hp-row">
-                  <div className={`cf-hp ${tone}`}>
+                  <div className={`cf-screen-hp ${tone}`}>
                     <div style={{ width: `${pct}%` }} />
                   </div>
                   <span className="cf-hp-num">
@@ -1374,7 +1374,7 @@ function QuestsScene({
                   <span className="cf-quest-title cf-clamp-1" title={q.title}>
                     {q.title}
                   </span>
-                  <QuestStatusBadge status={q.status} className="cf-chip-sm" iconSize={14} />
+                  <QuestStatusBadge status={q.status} className="cf-screen-chip-sm" iconSize={14} />
                 </div>
                 {q.objectives.length > 0 && (
                   <ul className="cf-objs">
@@ -1411,7 +1411,7 @@ function QuestsScene({
                 {n.role && <span className="cf-npc-role cf-clamp-1">{n.role}</span>}
                 <NpcDispositionBadge
                   disposition={n.disposition}
-                  className="cf-chip-sm cf-npc-disposition"
+                  className="cf-screen-chip-sm cf-npc-disposition"
                   iconSize={14}
                 />
               </div>
@@ -1498,7 +1498,7 @@ function InitiativeRow({
           <span className="cf-clamp-1" title={combatant.name}>
             {combatant.name}
           </span>
-          <span className={`cf-chip cf-chip-sm ${isMonster ? '' : 'cf-chip-accent'}`}>{combatant.kind === 'npc' ? 'NPC' : combatant.kind}</span>
+          <span className={`cf-screen-chip cf-screen-chip-sm ${isMonster ? '' : 'cf-screen-chip-accent'}`}>{combatant.kind === 'npc' ? 'NPC' : combatant.kind}</span>
         </div>
         <ConditionChips conditions={combatant.conditions} tick={tick} />
       </div>
@@ -1506,7 +1506,7 @@ function InitiativeRow({
         {isMonster ? (
           <>
             <span className="cf-hp-num">{combatant.hpBand ? HP_BAND_LABEL[combatant.hpBand] : '—'}</span>
-            <div className={`cf-hp ${bandTone}`}>
+            <div className={`cf-screen-hp ${bandTone}`}>
               <div style={{ width: `${bandPct}%` }} />
             </div>
           </>
@@ -1515,7 +1515,7 @@ function InitiativeRow({
             <span className="cf-hp-num">
               {combatant.hpCurrent}/{combatant.hpMax}
             </span>
-            <div className={`cf-hp ${charTone}`}>
+            <div className={`cf-screen-hp ${charTone}`}>
               <div style={{ width: `${charPct}%` }} />
             </div>
           </>
@@ -1801,7 +1801,14 @@ const SCREEN_CSS = `
 .cf-status-next .cf-status-turn-name { color: var(--color-neutral-200); }
 .cf-status-idle { color: var(--color-neutral-400); font-size: 2.5cqh; }
 
-.cf-chip {
+/* Issue #1685: named cf-screen-chip*, NOT the app-wide .cf-chip (index.css) —
+   this <style> tag has no real DOM scoping (a <style> element applies
+   document-wide regardless of where it's nested in the tree), so reusing the
+   bare .cf-chip name here silently overrode every .cf-chip in the app for as
+   long as this route was mounted. The larger/higher-contrast cqh/cqw sizing
+   below IS a deliberate choice for this across-the-room TV surface — kept as
+   an override, just under a name that cannot collide with anything else. */
+.cf-screen-chip {
   display: inline-flex;
   align-items: center;
   border: 1px solid var(--color-divider);
@@ -1811,8 +1818,8 @@ const SCREEN_CSS = `
   white-space: nowrap;
   max-width: 100%;
 }
-.cf-chip-sm { padding: 0.3cqh 1cqw; font-size: 1.7cqh; text-transform: capitalize; }
-.cf-chip-accent {
+.cf-screen-chip-sm { padding: 0.3cqh 1cqw; font-size: 1.7cqh; text-transform: capitalize; }
+.cf-screen-chip-accent {
   border-color: color-mix(in srgb, var(--color-accent) 55%, transparent);
   background: color-mix(in srgb, var(--color-accent) 16%, transparent);
   color: var(--color-accent-2);
@@ -1916,20 +1923,28 @@ const SCREEN_CSS = `
 .cf-init-name .cf-clamp-1 { max-width: 34cqw; }
 .cf-init-hp { flex: none; width: 22cqw; text-align: right; }
 
-/* HP bars (shared look with the app's cf-hp) */
-.cf-hp {
+/* HP bars — same colours as the app's .cf-hp (index.css), issue #1685: this
+   used to hardcode its own hex (#5bd18b/#e5c15b/#e5735b) that had drifted
+   from the token values, so the SAME bar rendered a different colour on the
+   TV display than in the session runner, and neither followed accent
+   theming. Now reads the identical tokens as index.css's .cf-hp, so the two
+   surfaces can never disagree again and both re-theme together. Renamed
+   cf-hp -> cf-screen-hp (see the .cf-screen-chip comment above) — the taller
+   1.4cqh bar height is a deliberate TV-legibility override kept here, not
+   removed; only the colour source changed. */
+.cf-screen-hp {
   height: 1.4cqh;
   border-radius: 999px;
   background: color-mix(in srgb, var(--color-text) 12%, transparent);
   overflow: hidden;
   margin-top: 0.6cqh;
 }
-.cf-hp > div { height: 100%; background: #5bd18b; border-radius: 999px; transition: width 0.4s ease; }
-.cf-hp.low > div { background: #e5c15b; }
-.cf-hp.crit > div { background: #e5735b; }
+.cf-screen-hp > div { height: 100%; background: var(--cf-success); border-radius: 999px; transition: width 0.4s ease; }
+.cf-screen-hp.low > div { background: var(--color-accent); }
+.cf-screen-hp.crit > div { background: var(--cf-danger); }
 .cf-hp-num { font-size: 2.3cqh; font-variant-numeric: tabular-nums; color: var(--color-neutral-300); }
 .cf-hp-row { display: flex; align-items: center; gap: 1.5cqw; margin-top: 0.8cqh; }
-.cf-hp-row .cf-hp { flex: 1; margin-top: 0; }
+.cf-hp-row .cf-screen-hp { flex: 1; margin-top: 0; }
 
 /* Party */
 .cf-party { display: grid; grid-template-columns: repeat(auto-fill, minmax(24cqw, 1fr)); gap: 1.5cqw; align-content: start; overflow: hidden; }
@@ -2018,7 +2033,7 @@ const SCREEN_CSS = `
 
 @media (prefers-reduced-motion: reduce) {
   .cf-screen-control-stack,
-  .cf-hp > div {
+  .cf-screen-hp > div {
     transition: none;
   }
 }
