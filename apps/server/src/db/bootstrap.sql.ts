@@ -928,6 +928,20 @@ CREATE TABLE IF NOT EXISTS server_meta (
   updated_at TEXT NOT NULL
 );
 
+-- Health diagnostics bootstrap state (issue #724). These are intentionally
+-- tiny and are created with the canonical bootstrap schema, never by probes.
+CREATE TABLE IF NOT EXISTS health_write_probe (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  touched_at TEXT NOT NULL DEFAULT ''
+);
+INSERT OR IGNORE INTO health_write_probe (id) VALUES (1);
+CREATE TABLE IF NOT EXISTS health_integrity_results (
+  kind TEXT PRIMARY KEY CHECK (kind IN ('quick', 'full')),
+  status TEXT NOT NULL,
+  code TEXT NOT NULL,
+  checked_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS campaign_members (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
@@ -1161,11 +1175,30 @@ CREATE TABLE IF NOT EXISTS attachments (
   filename TEXT NOT NULL,
   mime TEXT NOT NULL,
   size INTEGER NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  caption TEXT NOT NULL DEFAULT '',
+  alt_text TEXT NOT NULL DEFAULT '',
+  creator TEXT NOT NULL DEFAULT '',
+  source_url TEXT NOT NULL DEFAULT '',
+  license TEXT NOT NULL DEFAULT '',
+  rights TEXT NOT NULL DEFAULT '',
+  attribution TEXT NOT NULL DEFAULT '',
+  checksum_sha256 TEXT,
   hidden INTEGER NOT NULL DEFAULT 0,
   state TEXT NOT NULL DEFAULT 'committed' CHECK (state IN ('reserved', 'committed')),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS attachment_metadata_revisions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  attachment_id INTEGER NOT NULL REFERENCES attachments(id) ON DELETE CASCADE,
+  actor_user_id TEXT NOT NULL,
+  before_json TEXT NOT NULL,
+  after_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_attachment_metadata_revisions_attachment ON attachment_metadata_revisions(attachment_id, id);
 
 -- Durable responsive derivatives for image attachments (issue #604). One row per
 -- (attachment, ladder rung); the bytes live next to the original at
@@ -1381,6 +1414,10 @@ CREATE TABLE IF NOT EXISTS inventory_items (
   qty INTEGER NOT NULL DEFAULT 1,
   notes TEXT NOT NULL DEFAULT '',
   icon_slug TEXT NOT NULL DEFAULT '',
+  rule_entry_id INTEGER,
+  compendium_ref TEXT,
+  compendium_snapshot TEXT,
+  compendium_state TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   deleted_at TEXT,

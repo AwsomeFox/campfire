@@ -1,10 +1,11 @@
 import { createZodDto } from 'nestjs-zod';
 import type { z } from 'zod';
-import { InventoryItemCreate, InventoryItemUpdate, TreasuryPatch } from '@campfire/schema';
+import { InventoryFromCompendium, InventoryItemCreate, InventoryItemUpdate, TreasuryPatch } from '@campfire/schema';
 
 // .strict() at the DTO layer only — see encounters.dto.ts header comment.
 export class InventoryItemCreateDto extends createZodDto(InventoryItemCreate.strict()) {}
 export class InventoryItemUpdateDto extends createZodDto(InventoryItemUpdate.strict()) {}
+export class InventoryFromCompendiumDto extends createZodDto(InventoryFromCompendium.strict()) {}
 
 // TreasuryPatch is a z.union(...) — same workaround as HpPatchDto in
 // characters.dto.ts: a union can't be a class's instance type via `extends`,
