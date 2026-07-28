@@ -72,14 +72,14 @@ describe('action resolver (real SQLite, service layer)', () => {
     },
   };
 
-  function seed(opts: { dmControlsTurns?: boolean; requireDmTurnConfirmation?: boolean } = {}) {
+  function seed(opts: { dmControlsTurns?: boolean; requireDmTurnConfirmation?: boolean; ruleSystem?: string } = {}) {
     const { orm, service } = build();
     const ts = new Date().toISOString();
     const [campaign] = orm
       .insert(campaigns)
       .values({
         name: 'Resolver Test',
-        ruleSystem: '',
+        ruleSystem: opts.ruleSystem ?? '',
         dmControlsTurns: opts.dmControlsTurns ?? false,
         requireDmTurnConfirmation: opts.requireDmTurnConfirmation ?? false,
         createdAt: ts,
@@ -198,6 +198,25 @@ describe('action resolver (real SQLite, service layer)', () => {
     if (correction?.metadataJson && res.undoToken?.chainId) {
       expect(JSON.parse(correction.metadataJson).undoOfChainId).toBe(res.undoToken.chainId);
     }
+  });
+
+  it('OSR descending-AC attack evidence shows the effective ascending threshold, not native descending AC as the threshold', () => {
+    const { orm, service, encounterId, actor, drake } = seed({ ruleSystem: 'basic-fantasy' });
+    const target = orm.select().from(combatants).where(eq(combatants.id, drake)).get()!;
+    orm.update(ruleEntries)
+      .set({ dataJson: JSON.stringify({ armor_class: -5, hit_points: 60 }) })
+      .where(eq(ruleEntries.id, target.ruleEntryId!))
+      .run();
+
+    const res = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: false }),
+      alice,
+      'player',
+    );
+    const dmText = res.resolution.targets[0].dmText;
+    expect(dmText).toContain('vs ascending AC 24 (descending AC -5)');
+    expect(dmText).not.toContain('vs AC -5');
   });
 
   it('save-for-half + fire resistance both apply on a successful save (DC 1 → always succeeds)', () => {
