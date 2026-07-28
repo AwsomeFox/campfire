@@ -196,7 +196,9 @@ export function ProviderForm({
   async function test() {
     if (!model.trim()) {
       invalidateTestForAction();
-      feedback.fail('A model is required.');
+      // Non-mutating validation — do not claim a save failed.
+      setActionNotice({ role: 'alert', text: 'A model is required to test the connection.' });
+      feedback.syncDirty(isProviderDraftDirty(provider, { providerType, model, baseUrl, apiKey }));
       return;
     }
     const body: AiProviderTestRequest = {
@@ -210,6 +212,7 @@ export function ProviderForm({
     setTesting(true);
     setTestResult(null);
     setTestError(null);
+    setActionNotice(null);
     // Test connection is non-mutating — keep/recompute dirty so unsaved drafts
     // do not look idle/discarded while the probe runs.
     feedback.syncDirty(isProviderDraftDirty(provider, { providerType, model, baseUrl, apiKey }));
