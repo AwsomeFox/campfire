@@ -288,7 +288,11 @@ function NarrationLanguageSection({
       onSaved(updated);
       feedback.succeed();
     } catch (err) {
-      feedback.fail(err instanceof ApiError ? err.message : t('settings.aiDm.errors.saveNarrationLanguage'));
+      if (err instanceof ApiError) {
+        feedback.fail(err.message);
+      } else {
+        feedback.fail(t('settings.aiDm.errors.saveNarrationLanguage'), { generic: true });
+      }
     }
   }
 
@@ -533,7 +537,11 @@ function BudgetSection({
       onChanged(updated);
       feedback.succeed();
     } catch (err) {
-      feedback.fail(err instanceof ApiError ? err.message : t('settings.aiDm.errors.saveBudget'));
+      if (err instanceof ApiError) {
+        feedback.fail(err.message);
+      } else {
+        feedback.fail(t('settings.aiDm.errors.saveBudget'), { generic: true });
+      }
     }
   }
 
@@ -635,7 +643,11 @@ function InstructionsSection({
       onChanged(updated);
       feedback.succeed();
     } catch (err) {
-      feedback.fail(err instanceof ApiError ? err.message : t('settings.aiDm.errors.saveInstructions'));
+      if (err instanceof ApiError) {
+        feedback.fail(err.message);
+      } else {
+        feedback.fail(t('settings.aiDm.errors.saveInstructions'), { generic: true });
+      }
     }
   }
 
@@ -710,7 +722,11 @@ function TableStyleSection({
       onChanged(updated);
       feedback.succeed();
     } catch (e) {
-      feedback.fail(e instanceof ApiError ? e.message : t('settings.aiDm.errors.saveTableStyle'));
+      if (e instanceof ApiError) {
+        feedback.fail(e.message);
+      } else {
+        feedback.fail(t('settings.aiDm.errors.saveTableStyle'), { generic: true });
+      }
     }
   }
 

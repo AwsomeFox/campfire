@@ -22,6 +22,7 @@ export function formatSaveFailure(
   subject: string,
   error: string,
   copy: SaveFailureCopy = DEFAULT_SAVE_FAILURE_COPY,
+  generic = false,
 ): string {
   // Collapse ONLY the app's own generic no-detail fallback strings (e.g. "Couldn't save
   // changes.", "Couldn't save the provider.") into the standard message below. The object
@@ -30,7 +31,7 @@ export function formatSaveFailure(
   // the provider. Check your API key." no longer matches, and its actionable detail past
   // the first period survives into the generic branch below instead of being discarded
   // (issue #756 review: Devin).
-  if (/^could(?:n['’]t| not) save\s+[^.]+[.]?$/i.test(error)) {
+  if (generic || /^could(?:n['’]t| not) save\s+[^.]+[.]?$/i.test(error)) {
     return copy.generic(subject);
   }
   return copy.withDetail(subject, error.replace(/[.]$/, ''));
@@ -38,7 +39,7 @@ export function formatSaveFailure(
 
 /** Shared explicit-save state. A result stays visible until the next edit or reset. */
 export function useSaveFeedback(subject: string) {
-  const [{ state, error, savedAt }, dispatch] = useReducer(reduceSaveFeedback, initialSaveFeedback);
+  const [{ state, error, savedAt, genericError }, dispatch] = useReducer(reduceSaveFeedback, initialSaveFeedback);
   const statusId = useId();
 
   return {
@@ -51,25 +52,48 @@ export function useSaveFeedback(subject: string) {
     },
     begin: () => dispatch({ type: 'begin' }),
     succeed: () => dispatch({ type: 'succeed', at: new Date() }),
-    fail: (message: string) => dispatch({ type: 'fail', error: message }),
+    fail: (message: string, options?: { generic?: boolean }) => dispatch({
+      type: 'fail',
+      error: message,
+      generic: options?.generic,
+    }),
     reset: () => dispatch({ type: 'reset' }),
-    announcement: <SaveFeedback subject={subject} state={state} error={error} savedAt={savedAt} id={statusId} />,
+    announcement: (
+      <SaveFeedback
+        subject={subject}
+        state={state}
+        error={error}
+        savedAt={savedAt}
+        genericError={genericError}
+        id={statusId}
+      />
+    ),
   };
 }
 
-export function SaveFeedback({ subject, state, error, savedAt, id }: {
-  subject: string; state: SaveFeedbackState; error: string | null; savedAt: Date | null; id?: string;
+export function SaveFeedback({ subject, state, error, savedAt, genericError = false, id }: {
+  subject: string;
+  state: SaveFeedbackState;
+  error: string | null;
+  savedAt: Date | null;
+  genericError?: boolean;
+  id?: string;
 }) {
   const { t } = useTranslation();
   if (state === 'error' && error) {
     return <p id={id} role="alert" aria-live="assertive" className="text-xs text-rose-400" style={{ margin: 0 }}>
-      {formatSaveFailure(subject, error, {
-        generic: (failureSubject) => t('common.saveFeedback.failure', { subject: failureSubject }),
-        withDetail: (failureSubject, failureError) => t('common.saveFeedback.failureWithDetail', {
-          subject: failureSubject,
-          error: failureError,
-        }),
-      })}
+      {formatSaveFailure(
+        subject,
+        error,
+        {
+          generic: (failureSubject) => t('common.saveFeedback.failure', { subject: failureSubject }),
+          withDetail: (failureSubject, failureError) => t('common.saveFeedback.failureWithDetail', {
+            subject: failureSubject,
+            error: failureError,
+          }),
+        },
+        genericError,
+      )}
     </p>;
   }
   const message = state === 'dirty' ? t('common.saveFeedback.dirty', { subject })

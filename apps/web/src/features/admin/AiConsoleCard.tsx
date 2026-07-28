@@ -24,7 +24,7 @@
 import { useTranslation, Trans } from 'react-i18next';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { AiConsoleOverview, AiProviderHealthEntry } from '@campfire/schema';
-import { api, API, translateApiError } from '../../lib/api';
+import { api, API, ApiError, translateApiError } from '../../lib/api';
 import { Card, Btn, TextInput, Skeleton, ErrorNote } from '../../components/ui';
 import { ProviderForm } from '../settings/ProviderForm';
 import { AiPricingEditor } from './AiPricingEditor';
@@ -239,7 +239,9 @@ function CapsEditor({
       onSaved(await api.put<AiConsoleOverview>(`${API}/settings/ai/caps`, { serverTokenCap: n }));
       feedback.succeed();
     } catch (err) {
-      feedback.fail(translateApiError(err, t, { fallbackKey: 'admin.errors.saveCap' }));
+      feedback.fail(translateApiError(err, t, { fallbackKey: 'admin.errors.saveCap' }), {
+        generic: !(err instanceof ApiError) || (!err.code && !err.message),
+      });
     }
   }
 
@@ -326,7 +328,9 @@ function AllowlistEditor({
       );
       feedback.succeed();
     } catch (err) {
-      feedback.fail(translateApiError(err, t, { fallbackKey: 'admin.errors.saveAllowlist' }));
+      feedback.fail(translateApiError(err, t, { fallbackKey: 'admin.errors.saveAllowlist' }), {
+        generic: !(err instanceof ApiError) || (!err.code && !err.message),
+      });
     }
   }
 

@@ -199,7 +199,11 @@ export function ProviderForm({
       onChanged?.(updated);
       feedback.succeed();
     } catch (err) {
-      feedback.fail(err instanceof ApiError ? err.message : "Couldn't save the provider.");
+      if (err instanceof ApiError) {
+        feedback.fail(err.message);
+      } else {
+        feedback.fail("Couldn't save the provider.", { generic: true });
+      }
     }
   }
 
