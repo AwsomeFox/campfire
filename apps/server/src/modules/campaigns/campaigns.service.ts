@@ -71,17 +71,6 @@ import {
   participantSupportPreferences,
   campaignPurgeTombstones,
 } from '../../db/schema';
-
-function safeImportedCompendiumSnapshot(value: unknown): string | null {
-  const parsed = CompendiumSnapshot.safeParse(value);
-  if (!parsed.success) return null;
-  if (parsed.data.sourceUrl && !/^https?:\/\//i.test(parsed.data.sourceUrl)) return null;
-  return JSON.stringify(parsed.data);
-}
-function safeImportedCompendiumRef(value: unknown): string | null {
-  const parsed = CompendiumRef.safeParse(value);
-  return parsed.success ? JSON.stringify(parsed.data) : null;
-}
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { persistedFogConcealsPixels } from '../../common/fog';
@@ -119,6 +108,18 @@ import {
   preflightCompendiumImport,
   resolveImportedCombatantRuleEntryId,
 } from './compendium-import';
+
+function safeImportedCompendiumSnapshot(value: unknown): string | null {
+  const parsed = CompendiumSnapshot.safeParse(value);
+  if (!parsed.success) return null;
+  if (parsed.data.sourceUrl && !/^https?:\/\//i.test(parsed.data.sourceUrl)) return null;
+  return JSON.stringify(parsed.data);
+}
+
+function safeImportedCompendiumRef(value: unknown): string | null {
+  const parsed = CompendiumRef.safeParse(value);
+  return parsed.success ? JSON.stringify(parsed.data) : null;
+}
 
 /** Generous cap on an uploaded import archive: several full-size (8MB) maps + text. */
 const MAX_IMPORT_ARCHIVE_BYTES = 128 * 1024 * 1024;

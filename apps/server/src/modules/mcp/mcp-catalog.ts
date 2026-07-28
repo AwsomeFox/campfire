@@ -206,6 +206,7 @@ export const MCP_TOOL_NAMES = [
   'draft_content',
   // write — inventory/timeline/comments/scheduling (issue #257)
   'add_inventory_item',
+  'acquire_compendium_item',
   'update_inventory_item',
   'delete_inventory_item',
   'adjust_treasury',

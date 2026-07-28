@@ -21,7 +21,7 @@ describe('compendium inventory acquisition (#738)', () => {
     const dto = readFileSync(resolve(ROOT, 'src/modules/inventory/inventory.dto.ts'), 'utf8');
     expect(dto).toContain('InventoryItemCreate.strict()');
     expect(dto).toContain('InventoryItemUpdate.strict()');
-    expect(service).toContain('compendiumRefKey(candidateRef) === compendiumRefKey(ref)');
+    expect(service).toContain('compendiumRefKey(candidateRef.data) === compendiumRefKey(ref)');
   });
 
   it('requires duplicate confirmation, composes increments, and records idempotent acquisition replays', () => {
@@ -40,7 +40,9 @@ describe('compendium inventory acquisition (#738)', () => {
   });
 
   it('imports exported object provenance as a detached, play-safe snapshot', () => {
-    expect(campaigns).toContain("typeof item.compendiumRef === 'object' ? JSON.stringify(item.compendiumRef)");
-    expect(campaigns).toContain("compendiumState: item.compendiumRef && item.compendiumSnapshot ? 'detached' : null");
+    expect(campaigns).toContain('safeImportedCompendiumRef(item.compendiumRef)');
+    expect(campaigns).toContain('safeImportedCompendiumSnapshot(item.compendiumSnapshot)');
+    expect(campaigns).toContain("compendiumState: safeImportedCompendiumRef(item.compendiumRef) && safeImportedCompendiumSnapshot(item.compendiumSnapshot) ? 'detached' : null");
+    expect(campaigns).toContain('if (parsed.data.sourceUrl && !/^https?:\\/\\//i.test(parsed.data.sourceUrl)) return null');
   });
 });
