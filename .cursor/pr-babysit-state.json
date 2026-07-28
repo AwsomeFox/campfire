@@ -1,0 +1,11 @@
+{
+  "tracked": [
+    {
+      "pr": 1673,
+      "url": "https://github.com/AwsomeFox/campfire/pull/1673",
+      "branch": "fix/issue-1637",
+      "status": "blocked",
+      "note": "Owner AwsomeFox: superseded by #1677 (fix/issue-1637-shared-slot-max) — do not merge. Left open as fallback until #1676→#1677 land. Review threads resolved/outdated; MERGEABLE vs main; head 159928c4."
+    }
+  ]
+}
