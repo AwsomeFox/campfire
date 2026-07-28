@@ -14,7 +14,8 @@ export type AuthFieldKey =
   | 'confirm'
   | 'displayName'
   | 'code'
-  | 'newPassword';
+  | 'newPassword'
+  | 'confirmNewPassword';
 
 export type AuthFieldErrors = Partial<Record<AuthFieldKey, string>>;
 
@@ -47,6 +48,7 @@ export const AUTH_FIELD_IDS: Record<AuthFieldKey, string> = {
   displayName: 'displayName',
   code: 'reset-code',
   newPassword: 'reset-new-password',
+  confirmNewPassword: 'reset-confirm-new-password',
 };
 
 export const AUTH_ERROR_IDS = {
@@ -56,6 +58,7 @@ export const AUTH_ERROR_IDS = {
   displayName: 'auth-displayName-error',
   code: 'auth-code-error',
   newPassword: 'auth-newPassword-error',
+  confirmNewPassword: 'auth-confirmNewPassword-error',
   form: 'auth-form-error',
   /** Login keeps a stable id used by existing responsive tests. */
   login: 'login-error',
