@@ -238,6 +238,21 @@ export class AiDmService implements OnApplicationBootstrap {
   ) {}
 
   /**
+   * Everything that must run once, on every boot, before this seat's state can be trusted
+   * (issue #563's stale-reservation reclaim, issue #1587's proactive-watcher rehydration).
+   *
+   * Split into two private steps rather than one long method so neither one's early exit can
+   * accidentally skip the other — see the #1587 note on {@link rehydrateProactiveWatchers} for
+   * why that shape bit this exact method once already (the reservation-reclaim step used to
+   * `return` early when there was nothing stale, which would have swallowed a rehydration step
+   * appended after it).
+   */
+  async onApplicationBootstrap(): Promise<void> {
+    await this.reclaimStaleReservations();
+    await this.rehydrateProactiveWatchers();
+  }
+
+  /**
    * Reservations live in the DB but the in-flight provider calls that own them live in
    * memory, so a crash/restart mid-call leaves `tokens_reserved` held by nobody (#563).
    * Nothing would ever release it and the seat's usable budget would shrink permanently.
@@ -248,7 +263,7 @@ export class AiDmService implements OnApplicationBootstrap {
    * clamp away actual/unknown spend"). Clean shutdowns settle their holds, so a normal
    * restart finds nothing to do here.
    */
-  async onApplicationBootstrap(): Promise<void> {
+  private async reclaimStaleReservations(): Promise<void> {
     const stale = await this.db
       .select({ campaignId: aiDmSeats.campaignId, tokensReserved: aiDmSeats.tokensReserved })
       .from(aiDmSeats)
@@ -279,6 +294,74 @@ export class AiDmService implements OnApplicationBootstrap {
         campaignId: row.campaignId,
         detail: `stale reservation=${row.tokensReserved} from a previous process recorded as unknown spend`,
       });
+    }
+  }
+
+  /**
+   * Re-announce every persisted seat's proactive settings on boot (issue #1587).
+   *
+   * `ProactiveService`'s watcher registry is a `Map` of live rxjs subscriptions, held entirely
+   * in memory. The only thing that ever populates it is the callback registered via
+   * {@link registerProactiveSettingsCallback}, and — before this fix — the only thing that ever
+   * fired that callback was {@link configure} (plus, for clone/import, {@link
+   * syncProactiveWatcher} directly — see #1560). A restart destroys the `Map` but not the
+   * durable `proactiveSettings.enabled` a seat's row still carries: every campaign that had
+   * proactive narration on before the restart reads "on" in the settings UI while nothing is
+   * actually subscribed, and only re-saving the seat — which nobody has a reason to do — was
+   * bringing it back.
+   *
+   * This is the same in-memory-state-destroyed-by-restart shape #1042 (persisted confirm-policy
+   * grants) and #1043 (transient lifecycle phases) hit, and both of those ANNOUNCED what the
+   * restart destroyed rather than leaving it silently reset — rehydrating live state from the
+   * durable row is the established convention here, not a new one. "Surface the state honestly
+   * instead" (show the UI as off until re-saved) was considered and rejected: it would leave a
+   * shipped, previously-working feature dead after every single deploy, converting a silent
+   * failure into a loud one without restoring anything a user already believed they had.
+   *
+   * REUSES {@link syncProactiveWatcher} rather than a second copy of its enabled/disabled
+   * decision — that function already re-reads the row (post-coercion, post-clamp) and calls the
+   * registered callback with the right (settings, seatEnabled) pair; this method's only job is
+   * to enumerate which campaigns to call it for.
+   *
+   * EVERY seat is announced here, not just ones with `proactiveSettings.enabled: true`.
+   * `syncProactiveWatcher` deliberately announces a DISABLED seat too — that is what stops a
+   * stale watcher surviving at a recycled campaign id (see its own doc comment) — and skipping
+   * disabled seats here as a boot-time optimization would quietly drop that guarantee for
+   * exactly the caller where the most watchers exist to potentially go stale. A cold boot starts
+   * with an empty watcher `Map`, so there is nothing for a disabled seat's announcement to stop
+   * TODAY, but this method has no way to know that invariant will hold forever, and matching
+   * `syncProactiveWatcher`'s existing contract everywhere it's called is simpler and safer than
+   * asserting the exception is not.
+   *
+   * BOOT COST: one query to enumerate every campaign with a seat row, then one further query per
+   * campaign inside `syncProactiveWatcher` (it re-reads rather than trusting a value carried
+   * across the enumeration, for the same "post-coercion" reason its own doc comment gives). So
+   * this is O(1 + N) queries for N configured seats — not a single batch query — run
+   * SEQUENTIALLY and awaited before `onApplicationBootstrap` resolves, which currently blocks
+   * server readiness the same way {@link reclaimStaleReservations} already does above. Each
+   * `startWatching` itself is cheap (one rxjs subscription, no I/O). Not batched or parallelised
+   * here: Campfire's SQLite server is single-process, N is "campaigns configured on one
+   * install" (not expected to be large), and the sibling reclaim step in the same hook already
+   * accepts the identical sequential-at-boot tradeoff. Worth revisiting only if boot time on a
+   * large install is actually measured to suffer.
+   */
+  private async rehydrateProactiveWatchers(): Promise<void> {
+    const seats = await this.db.select({ campaignId: aiDmSeats.campaignId }).from(aiDmSeats);
+    if (seats.length === 0) return;
+    for (const { campaignId } of seats) {
+      try {
+        await this.syncProactiveWatcher(campaignId);
+      } catch (err) {
+        // One malformed/corrupt seat must not stop every other campaign's proactive narration
+        // from rehydrating — log and move on, the same defensive shape as getActionQueueDepth's
+        // seat read elsewhere in this module.
+        const message = err instanceof Error ? err.message : String(err);
+        const trace = err instanceof Error ? err.stack : undefined;
+        this.logger.error(
+          `Failed to rehydrate the proactive watcher for campaign ${campaignId} after restart: ${message}`,
+          trace,
+        );
+      }
     }
   }
 
