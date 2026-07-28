@@ -74,7 +74,7 @@ describe('AI map generation (e2e, issue #410)', () => {
     expect(row).toMatchObject({
       title: expect.stringMatching(/^AI map/),
       altText: 'AI-generated battle map',
-      license: 'AI-generated output',
+      license: '',
       attribution: expect.stringMatching(/procedural renderer/i),
     });
   });

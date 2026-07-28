@@ -357,7 +357,9 @@ export class AiMapService {
         altText: 'AI-generated battle map',
         creator: preview.provenance.label,
         sourceUrl: '',
-        license: 'AI-generated output',
+        // Generation origin is not a licence. Leave this unknown unless a real
+        // provider/output licence is supplied, and retain the caveat in rights.
+        license: '',
         rights: 'Review provider terms before redistribution.',
         attribution: preview.provenance.label,
       } },
