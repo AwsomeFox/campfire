@@ -451,7 +451,17 @@ export const AppliedEffect = z.object({
 });
 export type AppliedEffect = z.infer<typeof AppliedEffect>;
 
-/** Everything an outcome branch does to a target. */
+/**
+ * Everything an outcome branch does to a target.
+ *
+ * CONVENTION (issues #1053/#1600): attack critical doubling belongs to the resolver, so a
+ * hand-authored `crit` branch still describes base damage and lets {@link rollBranchDamage}
+ * apply the campaign system's {@link CriticalDamageRule}. Save/check degree branches are
+ * different: an explicit `critFailure` branch is a degree-specific consequence as authored and
+ * is not automatically multiplied again. PF2e/SF2e basic saves get their double damage only when
+ * `critFailure` falls back to the ordinary `failure` branch and `success` is marked
+ * `halfDamage`; that shape means the branch is the basic-save full-damage baseline.
+ */
 export const OutcomeBranch = z.object({
   damage: z.array(DamagePart).max(12).default([]),
   // Save-for-half: this branch applies half of the branch's (or the failure branch's) damage.

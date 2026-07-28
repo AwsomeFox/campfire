@@ -41,6 +41,7 @@ import {
   applySpellSlotDelta,
   type ActionRollFn,
   type CharacterAction,
+  type OutcomeBranch,
   type OutcomeKey,
   type PendingConcentrationCheck,
   type ResolverAdapter,
@@ -522,12 +523,7 @@ export class ActionResolverService {
       const attackResult = resolveAttackForAdapter(adapter, { modifier, targetAc: ac, roll });
       const { total, naturalRoll: nat, outcome: resolvedOutcome } = attackResult;
       outcome = resolvedOutcome;
-      // #1053 review — `critical` is set in ATTACK mode only. A PF2e critical save FAILURE also
-      // doubles damage under that system, and this flag never becomes true in save/check mode,
-      // so `double-total` is wired to attacks and not to saves. Left deliberately rather than
-      // overlooked: a `critFailure` branch may already be authored with the doubled numbers, so
-      // wiring it needs a decision about double-counting, not a one-line change. Tracked in #1600 —
-      // called out here so the seam is not mistaken for complete.
+      // #1598: attack crit — see the save/check branch below for the #1600 counterpart.
       critical = outcome === 'crit';
       base.attackTotal = total;
       base.naturalRoll = nat;
@@ -584,10 +580,22 @@ export class ActionResolverService {
       // failure branch's damage at half (the common "save for half" authoring shape).
       const damageBranch = branch.damage.length === 0 && branch.halfDamage ? pickOutcomeBranch(spec, 'failure') ?? branch : branch;
       const half = branch.halfDamage;
+      const outcomes = spec.outcomes as Partial<Record<OutcomeKey, OutcomeBranch>>;
+      const successBranch = outcomes.success;
+      // #1600 — PF2e/SF2e critical failures double damage for basic saves: the selected
+      // damage is the fallback failure branch, and ordinary success is "half that damage".
+      // Checks and explicit critFailure branches carry their own degree-specific consequences.
+      const basicSaveCriticalFailure =
+        spec.mode === 'save' &&
+        base.degree === 'criticalFailure' &&
+        outcomes.critFailure === undefined &&
+        outcomes.failure === damageBranch &&
+        successBranch?.halfDamage === true &&
+        successBranch.damage.length === 0;
       // #1053: the crit rule is the SYSTEM's, not 5e's. `criticalDamageRuleForAdapter` returns
       // 'double-dice' for any adapter that has not declared one, so 5e and every unaudited
       // system keep the behaviour they had; PF2e/SF2e now double the total as their rules say.
-      const rolled = rollBranchDamage(damageBranch, roll, { critical, criticalRule: criticalDamageRuleForAdapter(adapter) });
+      const rolled = rollBranchDamage(damageBranch, roll, { critical: critical || basicSaveCriticalFailure, criticalRule: criticalDamageRuleForAdapter(adapter) });
       for (const part of rolled.parts) {
         const { final, applied } = applyDamageModifiers(part.amount, part.type, defenses, { half });
         base.damage.push({ type: part.type, amount: final, applied });
