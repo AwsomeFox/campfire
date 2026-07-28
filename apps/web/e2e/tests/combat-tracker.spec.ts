@@ -61,8 +61,9 @@ test.describe('combat tracker — DM view', () => {
     await expect(page.getByRole('button', { name: new RegExp(`(Reduce|Increase) ${boss.name}'s HP`) }).first()).toBeVisible();
   });
 
-  test('opens the safe display from keyboard without leaving the DM cockpit (#762)', async ({ page }) => {
+  test('keeps keyboard-opened display lifecycle and encounter updates in the DM cockpit (#762)', async ({ page }) => {
     await openEncounter(page);
+    const { campaignId } = seed();
     const openDisplay = page.getByRole('button', { name: 'Open display', exact: true });
     const popupPromise = page.waitForEvent('popup');
     await openDisplay.focus();
@@ -71,8 +72,39 @@ test.describe('combat tracker — DM view', () => {
 
     await expect(page).toHaveURL(encounterUrl());
     await expect(popup).toHaveURL(/\/cast\/\d+\/cf_cast_/);
-    await expect(page.getByTestId('player-display-status')).toContainText(/opening|connected/i);
+    const status = page.getByTestId('player-display-status');
+    await expect(status).toContainText(/Display connected/i);
     await popup.close();
+    await expect(status).toContainText(/Display window was closed/i);
+
+    // A display can follow a different encounter after its own authoritative
+    // refresh. Exercise the same-origin status protocol rather than leaking a
+    // capability URL through test messaging.
+    await page.evaluate((id) => {
+      window.dispatchEvent(new MessageEvent('message', {
+        origin: window.location.origin,
+        data: { type: 'ready', campaignId: id, encounterId: 999, encounterName: 'Second encounter' },
+      }));
+    }, campaignId);
+    await expect(status).toContainText(/following another encounter \(Second encounter\)/i);
+  });
+
+  test('keeps player-display controls usable at a tablet viewport (#762)', async ({ browser }) => {
+    const context = await browser.newContext({
+      storageState: stateFor('dm'),
+      hasTouch: true,
+      isMobile: true,
+      viewport: { width: 768, height: 1024 },
+    });
+    const page = await context.newPage();
+    await openEncounter(page);
+    for (const name of ['Open display', 'Copy link', 'Reconnect/focus']) {
+      await expect(page.getByRole('button', { name, exact: true })).toBeVisible();
+      await expect(page.getByRole('button', { name, exact: true })).toBeInViewport();
+    }
+    await expect(page.getByTestId('player-display-status')).toBeVisible();
+    await expect(page).toHaveURL(encounterUrl());
+    await context.close();
   });
 
   test('DM can clear initiative back to the unrolled state via the Clear control (issue #715)', async ({ page }) => {
