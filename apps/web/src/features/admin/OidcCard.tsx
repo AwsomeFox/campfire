@@ -481,18 +481,18 @@ export function OidcCard() {
 
           <div className="flex gap-2 justify-end items-center flex-wrap">
             {saved && <span className="text-xs text-emerald-400 mr-auto">Saved.</span>}
-            <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={testDiscovery} disabled={testing || testingLogin || !issuer.trim()}>
+            <Btn density="xs" ghost className="text-xs" onClick={testDiscovery} disabled={testing || testingLogin || !issuer.trim()}>
               {testing ? 'Testing…' : 'Test discovery'}
             </Btn>
-            <Btn
+            <Btn density="xs"
               ghost
-              className="!min-h-0 !py-1.5 text-xs"
+              className="text-xs"
               onClick={testLogin}
               disabled={testing || testingLogin || !issuer.trim()}
             >
               {testingLogin ? 'Starting…' : 'Test login (end-to-end)'}
             </Btn>
-            <Btn className="!min-h-0 !py-1.5 text-xs" onClick={save} disabled={saving}>
+            <Btn density="xs" className="text-xs" onClick={save} disabled={saving}>
               {saving ? 'Saving…' : 'Save'}
             </Btn>
           </div>
@@ -525,8 +525,8 @@ function OidcField({
         {label}
         {envPinned && <span className="cf-chip cf-chip-private !py-0 !text-[9px]">env</span>}
       </span>
-      <TextInput
-        className="!min-h-0 !py-2 text-sm mt-1"
+      <TextInput density="xs"
+        className="text-sm mt-1"
         value={value}
         type={type}
         placeholder={placeholder}

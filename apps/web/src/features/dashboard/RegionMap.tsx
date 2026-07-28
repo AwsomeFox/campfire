@@ -803,7 +803,7 @@ export function RegionMap({
               min={0}
               max={100}
               step={1}
-              className="cf-input !min-h-0 !py-0.5 !w-16 text-xs"
+              className="cf-input !w-16 text-xs cf-density-xs"
               value={kbPos.x}
               onChange={(e) => {
                 const v = clampPercentInt(Number(e.target.value) || 0);
@@ -821,7 +821,7 @@ export function RegionMap({
               min={0}
               max={100}
               step={1}
-              className="cf-input !min-h-0 !py-0.5 !w-16 text-xs"
+              className="cf-input !w-16 text-xs cf-density-xs"
               value={kbPos.y}
               onChange={(e) => {
                 const v = clampPercentInt(Number(e.target.value) || 0);

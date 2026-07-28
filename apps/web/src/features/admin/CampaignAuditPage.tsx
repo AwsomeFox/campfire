@@ -389,10 +389,10 @@ export default function CampaignAuditPage() {
             </VirtualList>
             </div>
             {hasMore && (
-              <Btn
+              <Btn density="xs"
                 ghost
                 type="button"
-                className="!min-h-0 !py-1.5 text-xs w-full"
+                className="text-xs w-full"
                 onClick={() => void loadPage(filters, nextCursor, true)}
                 disabled={loadingMore}
               >

@@ -221,7 +221,7 @@ export function GenerateEncounterWizard({
             as="select"
             label="Target difficulty"
             labelClassName="text-xs text-slate-400"
-            selectClassName="cf-select !min-h-0 !py-2 text-xs w-full"
+            selectClassName="cf-select text-xs w-full cf-density-xs"
             value={difficulty}
             onChange={(e) => setDifficulty(e.target.value as DifficultyBand)}
           >
@@ -237,7 +237,7 @@ export function GenerateEncounterWizard({
             as="select"
             label="Duration / shape"
             labelClassName="text-xs text-slate-400"
-            selectClassName="cf-select !min-h-0 !py-2 text-xs w-full"
+            selectClassName="cf-select text-xs w-full cf-density-xs"
             value={shape}
             onChange={(e) => setShape(e.target.value as '' | EncounterShape)}
           >
@@ -360,7 +360,7 @@ export function GenerateEncounterWizard({
               optional
             />
             <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>
-              <Field idPrefix="gen-enc" name="locationId" as="select" label="Location" labelClassName="text-xs text-slate-400" selectClassName="cf-select !min-h-0 !py-2 text-xs w-full" value={locationId} onChange={(e) => setLocationId(e.target.value)} optional>
+              <Field idPrefix="gen-enc" name="locationId" as="select" label="Location" labelClassName="text-xs text-slate-400" selectClassName="cf-select text-xs w-full cf-density-xs" value={locationId} onChange={(e) => setLocationId(e.target.value)} optional>
                 <option value="">— none —</option>
                 {locations.map((l) => (
                   <option key={l.id} value={l.id}>
@@ -368,7 +368,7 @@ export function GenerateEncounterWizard({
                   </option>
                 ))}
               </Field>
-              <Field idPrefix="gen-enc" name="questId" as="select" label="Quest" labelClassName="text-xs text-slate-400" selectClassName="cf-select !min-h-0 !py-2 text-xs w-full" value={questId} onChange={(e) => setQuestId(e.target.value)} optional>
+              <Field idPrefix="gen-enc" name="questId" as="select" label="Quest" labelClassName="text-xs text-slate-400" selectClassName="cf-select text-xs w-full cf-density-xs" value={questId} onChange={(e) => setQuestId(e.target.value)} optional>
                 <option value="">— none —</option>
                 {quests.map((q) => (
                   <option key={q.id} value={q.id}>
@@ -376,7 +376,7 @@ export function GenerateEncounterWizard({
                   </option>
                 ))}
               </Field>
-              <Field idPrefix="gen-enc" name="sessionId" as="select" label="Session" labelClassName="text-xs text-slate-400" selectClassName="cf-select !min-h-0 !py-2 text-xs w-full" value={sessionId} onChange={(e) => setSessionId(e.target.value)} optional>
+              <Field idPrefix="gen-enc" name="sessionId" as="select" label="Session" labelClassName="text-xs text-slate-400" selectClassName="cf-select text-xs w-full cf-density-xs" value={sessionId} onChange={(e) => setSessionId(e.target.value)} optional>
                 <option value="">— none —</option>
                 {sessions.map((s) => (
                   <option key={s.id} value={s.id}>
@@ -509,7 +509,7 @@ function RosterSlotRow({
                 const n = Number(ev.target.value);
                 if (Number.isFinite(n) && n >= 1) onCount(n);
               }}
-              className="cf-input !min-h-0 !py-1 !w-14 text-xs"
+              className="cf-input !w-14 text-xs cf-density-xs"
               aria-label={`Count of ${slot.name}`}
             />
           </label>

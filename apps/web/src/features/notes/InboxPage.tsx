@@ -486,10 +486,10 @@ export default function InboxPage() {
             )}
             {active.hasMore && (
               <div className="flex justify-center pt-1">
-                <Btn
+                <Btn density="xs"
                   type="button"
                   ghost
-                  className="!min-h-0 !py-1.5 text-xs"
+                  className="text-xs"
                   disabled={loadingMore || loading}
                   onClick={() => void loadMore()}
                 >
@@ -528,7 +528,7 @@ function SweepControl({
   return (
     <div className="cf-inset p-3 space-y-1.5">
       <div className="flex items-center gap-2 flex-wrap">
-        <Btn className="!min-h-0 !py-1.5 text-xs" onClick={onSweep} disabled={busy || disabledReason !== null || hardDisabled}>
+        <Btn density="compact" className="text-xs" onClick={onSweep} disabled={busy || disabledReason !== null || hardDisabled}>
           {busy ? t('notes.sweepButtonBusy') : t('notes.sweepButton')}
         </Btn>
         <p className="text-[11px] text-secondary m-0 flex-1 min-w-0">{t('notes.sweepHint')}</p>
@@ -785,7 +785,7 @@ function InboxItem({
           />
           <div className="flex gap-2 flex-wrap">
             <select
-              className="cf-select !min-h-0 !py-2 text-xs"
+              className="cf-select text-xs cf-density-xs"
               value={linkType}
               onChange={(e) => setLinkType(e.target.value as EntityTypeValue | '')}
               disabled={busy}
@@ -799,7 +799,7 @@ function InboxItem({
             </select>
             {linkType && (
               <select
-                className="cf-select !min-h-0 !py-2 text-xs flex-1 min-w-0"
+                className="cf-select text-xs flex-1 min-w-0 cf-density-xs"
                 value={linkId}
                 onChange={(e) => setLinkId(e.target.value === '' ? '' : Number(e.target.value))}
                 disabled={busy || optionsLoading}
@@ -818,10 +818,10 @@ function InboxItem({
               {t('notes.resolvePreamble')}{linkType && linkId !== '' ? t('notes.resolveLinked') : t('notes.resolveNote')}.
             </p>
             <div className="flex gap-2 shrink-0">
-              <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={handleDismiss} disabled={busy}>
+              <Btn density="xs" ghost className="text-xs" onClick={handleDismiss} disabled={busy}>
                 {t('notes.dismiss')}
               </Btn>
-              <Btn className="!min-h-0 !py-1.5 text-xs" onClick={handleResolve} disabled={busy}>
+              <Btn density="xs" className="text-xs" onClick={handleResolve} disabled={busy}>
                 {t('notes.resolve')}
               </Btn>
             </div>
@@ -831,7 +831,7 @@ function InboxItem({
 
       {canWrite && (
       <div className="flex justify-end">
-        <Btn className="!min-h-0 !py-1.5 text-xs" onClick={onToggle} disabled={busy}>
+        <Btn density="xs" className="text-xs" onClick={onToggle} disabled={busy}>
           {expanded ? t('notes.collapse') : t('notes.resolveArrow')}
         </Btn>
       </div>

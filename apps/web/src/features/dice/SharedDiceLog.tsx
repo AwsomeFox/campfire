@@ -346,7 +346,7 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
                   onChange={(e) => setExpr(e.target.value)}
                 />
               </div>
-              <Btn type="submit" className={compact ? '!min-h-0 !py-2 text-xs' : undefined} disabled={rolling || !expr.trim()}>
+              <Btn type="submit" density={compact ? 'xs' : undefined} className={compact ? 'text-xs' : undefined} disabled={rolling || !expr.trim()}>
                 {rolling ? t('dice.rolling') : t('dice.roll')}
               </Btn>
             </form>
@@ -414,7 +414,8 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
               </div>
               <Btn
                 type="submit"
-                className={compact ? '!min-h-0 !py-2 text-xs' : undefined}
+                density={compact ? 'xs' : undefined}
+                className={compact ? 'text-xs' : undefined}
                 disabled={loggingPhysical || !physical.total.trim()}
               >
                 {loggingPhysical ? t('dice.physicalSubmitting') : t('dice.physicalSubmit')}

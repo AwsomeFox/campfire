@@ -254,8 +254,8 @@ function CapsEditor({
       <div className="flex items-end gap-2 flex-wrap">
         <label className="block">
           <span className="text-[10px] uppercase tracking-widest text-secondary font-bold">{t('admin.aiConsole.caps.label')}</span>
-          <TextInput
-            className="!min-h-0 !py-2 text-sm mt-1 w-40"
+          <TextInput density="compact"
+            className="text-sm mt-1 w-40"
             type="number"
             min={0}
             value={cap}
@@ -265,7 +265,7 @@ function CapsEditor({
           />
         </label>
         {feedback.announcement}
-        <Btn className="!min-h-0 !py-1.5 text-xs mb-0.5" onClick={save} disabled={saving}>
+        <Btn density="compact" className="text-xs mb-0.5" onClick={save} disabled={saving}>
           {saving ? t('common.saving') : t('admin.aiConsole.caps.save')}
         </Btn>
       </div>
@@ -364,7 +364,7 @@ function AllowlistEditor({
       </p>
       <textarea
         id={inputId}
-        className="cf-input !min-h-0 py-2 text-sm w-full max-w-full font-mono"
+        className="cf-input py-2 text-sm w-full max-w-full font-mono cf-density-xs"
         rows={3}
         placeholder="gpt-4o-mini&#10;claude-3-5-haiku"
         value={text}
@@ -391,7 +391,7 @@ function AllowlistEditor({
       )}
       <div className="flex gap-2 justify-end items-center flex-wrap">
         {feedback.announcement}
-        <Btn className="!min-h-0 !py-1.5 text-xs" onClick={save} disabled={saving || hasErrors}>
+        <Btn density="compact" className="text-xs" onClick={save} disabled={saving || hasErrors}>
           {saving ? t('common.saving') : t('admin.aiConsole.allowlist.save')}
         </Btn>
       </div>
@@ -494,7 +494,7 @@ function HealthPanel({ onError }: { onError: (msg: string | null) => void }) {
     <div className="cf-inset p-3.5 space-y-2">
       <div className="flex items-center justify-between">
         <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">{t('admin.aiConsole.health.heading')}</p>
-        <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={testAll} disabled={testing}>
+        <Btn density="compact" ghost className="text-xs" onClick={testAll} disabled={testing}>
           {testing ? t('admin.aiConsole.health.testing') : t('admin.aiConsole.health.testAll')}
         </Btn>
       </div>

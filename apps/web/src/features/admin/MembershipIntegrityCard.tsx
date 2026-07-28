@@ -79,7 +79,7 @@ export function MembershipIntegrityCard({ users }: { users: User[] }) {
               {campaign.repairRequired && (
                 <div className="flex gap-2 items-center flex-wrap">
                   <select
-                    className="cf-select !min-h-0 !py-1 text-xs"
+                    className="cf-select text-xs cf-density-xs"
                     aria-label={`Recovery DM for ${campaign.campaignName}`}
                     value={targets[campaign.campaignId] ?? ''}
                     onChange={(event) =>
@@ -91,9 +91,9 @@ export function MembershipIntegrityCard({ users }: { users: User[] }) {
                       <option key={user.id} value={user.id}>{user.displayName || user.username}</option>
                     ))}
                   </select>
-                  <Btn
+                  <Btn density="xs"
                     type="button"
-                    className="!min-h-0 !py-1.5 text-xs"
+                    className="text-xs"
                     disabled={!targets[campaign.campaignId] || busyCampaignId === campaign.campaignId}
                     onClick={() => void repair(campaign.campaignId)}
                   >

@@ -100,14 +100,14 @@ export function ResetRequestsCard() {
                   </p>
                 </div>
                 <div className="flex gap-2">
-                  <Btn
-                    className="!min-h-0 !py-1.5 text-xs"
+                  <Btn density="xs"
+                    className="text-xs"
                     onClick={() => approve(r.id)}
                     disabled={busyId === r.id}
                   >
                     {r.status === 'approved' ? 'New code' : 'Approve'}
                   </Btn>
-                  <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => dismiss(r.id)} disabled={busyId === r.id}>
+                  <Btn density="xs" ghost className="text-xs" onClick={() => dismiss(r.id)} disabled={busyId === r.id}>
                     Dismiss
                   </Btn>
                 </div>
@@ -121,12 +121,12 @@ export function ResetRequestsCard() {
                     <code id={resetLinkId} className="text-xs text-emerald-400 break-all">
                       {resetUrl}
                     </code>
-                    <CopyControl
+                    <CopyControl density="xs"
                       text={resetUrl}
                       selectTargetId={resetLinkId}
                       label="Copy reset link"
                       ghost
-                      className="!min-h-0 !py-1 text-[11px]"
+                      className="text-[11px]"
                       successAnnouncement="Reset link copied to clipboard."
                       failureAnnouncement="Copy failed. Clipboard blocked — select the link and copy it manually."
                     />

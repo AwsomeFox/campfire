@@ -364,7 +364,7 @@ export default function CharacterPage() {
             />
           )}
           {canEdit && !editingSheet && (
-            <Btn ghost className="cf-print-hide !min-h-0 !py-1.5 text-xs" onClick={() => setEditingSheet(true)}>
+            <Btn density="xs" ghost className="cf-print-hide text-xs" onClick={() => setEditingSheet(true)}>
               ✎ Edit sheet
             </Btn>
           )}
@@ -1210,7 +1210,7 @@ function XpCard({
                 if (e.key === 'Enter') void addXp();
               }}
               placeholder="XP…"
-              className="cf-input !min-h-0 !w-24 text-sm"
+              className="cf-input !w-24 text-sm cf-density-xs"
               style={{ minHeight: 44, padding: '4px 10px' }}
             />
             <p id={xpHelpId} className="text-[11px] text-secondary m-0 max-w-[16rem]">
@@ -1222,13 +1222,13 @@ function XpCard({
               </p>
             )}
           </div>
-          <Btn className="!min-h-0" style={{ minHeight: 44 }} disabled={busy || !amount.trim()} onClick={addXp}>
+          <Btn density="xs" className="" style={{ minHeight: 44 }} disabled={busy || !amount.trim()} onClick={addXp}>
             + Award XP
           </Btn>
           {!atCap && !levellingUp && (
-            <Btn
+            <Btn density="xs"
               ghost={!ready}
-              className="!min-h-0 ml-auto"
+              className="ml-auto"
               style={{ minHeight: 44 }}
               disabled={busy}
               onClick={() => {
@@ -1266,11 +1266,11 @@ function XpCard({
             </div>
             {hpMaxError && <span className="text-xs text-rose-400">{hpMaxError}</span>}
             <div className="flex-1" />
-            <Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={busy} onClick={() => setLevellingUp(false)}>
+            <Btn density="xs" ghost className="text-xs" disabled={busy} onClick={() => setLevellingUp(false)}>
               Cancel
             </Btn>
-            <Btn
-              className="!min-h-0 !py-1.5 text-xs"
+            <Btn density="xs"
+              className="text-xs"
               disabled={busy || !newHpMax.trim()}
               onClick={confirmLevelUp}
             >
@@ -1303,7 +1303,7 @@ function RollChip({
   disabled: boolean;
 }) {
   return (
-    <Btn ghost type="button" className="!min-h-0 !py-1 text-xs" style={{ minHeight: 32 }} onClick={onClick} disabled={disabled} title={title}>
+    <Btn density="xs" ghost type="button" className="text-xs" style={{ minHeight: 32 }} onClick={onClick} disabled={disabled} title={title}>
       <GameIcon slug="rolling-dices" size={13} className="inline align-text-bottom mr-1" />{label}
     </Btn>
   );
@@ -1603,7 +1603,7 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
           </span>
         )}
         {canEdit && !adding && editingIndex == null && (
-          <Btn ghost className="!min-h-0 !py-1 text-xs ml-auto" onClick={() => { resetForm(); setAdding(true); }}>
+          <Btn density="xs" ghost className="text-xs ml-auto" onClick={() => { resetForm(); setAdding(true); }}>
             + Add
           </Btn>
         )}
@@ -1885,10 +1885,10 @@ function ActionForm({
         </p>
       )}
       <div className="flex gap-2 justify-end">
-        <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={onCancel} disabled={busy}>
+        <Btn density="xs" ghost className="text-xs" onClick={onCancel} disabled={busy}>
           Cancel
         </Btn>
-        <Btn className="!min-h-0 !py-1.5 text-xs" onClick={onSave} disabled={busy || !name.trim()}>
+        <Btn density="xs" className="text-xs" onClick={onSave} disabled={busy || !name.trim()}>
           {busy ? 'Saving…' : saveLabel}
         </Btn>
       </div>
@@ -1970,7 +1970,7 @@ function SpellSlotsCard({ character, canEdit, onChange, onError }: SheetCardProp
       <div className="flex items-center gap-2">
         <p className="card-kicker mb-0">Spell slots</p>
         {canEdit && !editing && (
-          <Btn ghost className="!min-h-0 !py-1 text-xs ml-auto" onClick={startEdit}>
+          <Btn density="xs" ghost className="text-xs ml-auto" onClick={startEdit}>
             ✎ Edit slots
           </Btn>
         )}
@@ -2000,10 +2000,10 @@ function SpellSlotsCard({ character, canEdit, onChange, onError }: SheetCardProp
             ))}
           </div>
           <div className="flex gap-2 justify-end">
-            <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setEditing(false)} disabled={busy}>
+            <Btn density="xs" ghost className="text-xs" onClick={() => setEditing(false)} disabled={busy}>
               Cancel
             </Btn>
-            <Btn className="!min-h-0 !py-1.5 text-xs" onClick={saveMaxima} disabled={busy}>
+            <Btn density="xs" className="text-xs" onClick={saveMaxima} disabled={busy}>
               {busy ? 'Saving…' : 'Save'}
             </Btn>
           </div>
@@ -2032,10 +2032,10 @@ function SpellSlotsCard({ character, canEdit, onChange, onError }: SheetCardProp
                 </span>
                 {canEdit && (
                   <span className="inline-flex gap-1 ml-auto">
-                    <Btn ghost className="!min-h-0 !py-1 text-xs" disabled={busy || available === 0} onClick={() => adjust(lvl, 1)}>
+                    <Btn density="xs" ghost className="text-xs" disabled={busy || available === 0} onClick={() => adjust(lvl, 1)}>
                       Use
                     </Btn>
-                    <Btn ghost className="!min-h-0 !py-1 text-xs" disabled={busy || slot.used === 0} onClick={() => adjust(lvl, -1)}>
+                    <Btn density="xs" ghost className="text-xs" disabled={busy || slot.used === 0} onClick={() => adjust(lvl, -1)}>
                       Restore
                     </Btn>
                   </span>
@@ -2123,10 +2123,10 @@ function AdapterResourceCard({
         <span className="text-[11px] text-secondary">{t('characters.resources.count', { available, max })}</span>
         {canEdit && (
           <span className="inline-flex gap-1 ml-auto">
-            <Btn ghost className="!min-h-0 !py-1 text-xs" disabled={busy || available === 0} onClick={() => void adjust(1)}>
+            <Btn density="xs" ghost className="text-xs" disabled={busy || available === 0} onClick={() => void adjust(1)}>
               {t('characters.resources.spend')}
             </Btn>
-            <Btn ghost className="!min-h-0 !py-1 text-xs" disabled={busy || used === 0} onClick={() => void adjust(-1)}>
+            <Btn density="xs" ghost className="text-xs" disabled={busy || used === 0} onClick={() => void adjust(-1)}>
               {t('characters.resources.restore')}
             </Btn>
           </span>
@@ -2189,9 +2189,9 @@ function HpEditor({
       data-testid="character-hp-editor"
     >
       {([-5, -1, 1, 5] as const).map((step) => (
-        <Btn
+        <Btn density="xs"
           key={step}
-          className="!min-h-0"
+          className=""
           style={{ minWidth: 52, minHeight: 44 }}
           disabled={busy}
           aria-label={hpDeltaLabel(name, step, hpCurrent, hpMax)}
@@ -2260,10 +2260,10 @@ function ConditionLevelRow({
       <span className="text-[11px] text-secondary">{t('characters.conditionLevel.count', { level, max: track.max })}</span>
       {canEdit && (
         <span className="inline-flex gap-1 ml-auto">
-          <Btn ghost className="!min-h-0 !py-1 text-xs" disabled={busy || level === 0} onClick={() => void adjust(-1)}>
+          <Btn density="xs" ghost className="text-xs" disabled={busy || level === 0} onClick={() => void adjust(-1)}>
             {t('characters.conditionLevel.lower')}
           </Btn>
-          <Btn ghost className="!min-h-0 !py-1 text-xs" disabled={busy || level >= track.max} onClick={() => void adjust(1)}>
+          <Btn density="xs" ghost className="text-xs" disabled={busy || level >= track.max} onClick={() => void adjust(1)}>
             {t('characters.conditionLevel.raise')}
           </Btn>
         </span>
@@ -2468,10 +2468,10 @@ function StoryBody({
           optional
         />
         <div className="flex gap-2 justify-end">
-          <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setEditing(false)} disabled={saving}>
+          <Btn density="xs" ghost className="text-xs" onClick={() => setEditing(false)} disabled={saving}>
             Cancel
           </Btn>
-          <Btn className="!min-h-0 !py-1.5 text-xs" onClick={save} disabled={saving}>
+          <Btn density="xs" className="text-xs" onClick={save} disabled={saving}>
             {saving ? 'Saving…' : 'Save'}
           </Btn>
         </div>
@@ -2487,9 +2487,9 @@ function StoryBody({
         <p className="text-sm text-secondary italic">No story written yet.</p>
       )}
       {canEdit && (
-        <Btn
+        <Btn density="xs"
           ghost
-          className="!min-h-0 !py-1 text-xs"
+          className="text-xs"
           onClick={() => {
             setNotes(character.notes);
             setEditing(true);
@@ -2562,10 +2562,10 @@ function DmSecretCard({
         <div className="space-y-2">
           <TextArea style={{ minHeight: 100 }} value={draft} onChange={(e) => setDraft(e.target.value)} />
           <div className="flex gap-2 justify-end">
-            <Btn ghost onClick={() => setEditing(false)} className="!min-h-0 !py-1.5 text-xs">
+            <Btn density="xs" ghost onClick={() => setEditing(false)} className="text-xs">
               Cancel
             </Btn>
-            <Btn onClick={save} disabled={saving} className="!min-h-0 !py-1.5 text-xs">
+            <Btn density="xs" onClick={save} disabled={saving} className="text-xs">
               {saving ? 'Saving…' : 'Save'}
             </Btn>
           </div>
@@ -2615,18 +2615,18 @@ function RestControls({
 
   return (
     <div className="flex gap-2 items-center flex-wrap pt-1">
-      <Btn
+      <Btn density="xs"
         ghost
-        className="!min-h-0 !py-1 text-xs"
+        className="text-xs"
         disabled={busy || character.rpCurrent < 1}
         onClick={() => void takeRest('stamina')}
         title="Spend 1 RP to restore full Stamina Points (10-min rest)"
       >
         ⚡ Stamina Rest (1 RP)
       </Btn>
-      <Btn
+      <Btn density="xs"
         ghost
-        className="!min-h-0 !py-1 text-xs"
+        className="text-xs"
         disabled={busy}
         onClick={() => void takeRest('night')}
         title="Full Night's Rest (8 hours) — restores full SP, RP, and HP equal to Level"

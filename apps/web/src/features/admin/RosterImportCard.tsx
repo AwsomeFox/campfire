@@ -90,12 +90,12 @@ export function RosterImportCard() {
       {error && <ErrorNote message={error} />}
 
       <div className="flex gap-2">
-        <Btn type="button" className="!min-h-0 !py-1.5 text-xs" disabled={!content.trim() || busy != null} onClick={() => void runDryRun()}>
+        <Btn density="xs" type="button" className="text-xs" disabled={!content.trim() || busy != null} onClick={() => void runDryRun()}>
           {busy === 'preview' ? 'Previewing…' : 'Dry-run preview'}
         </Btn>
-        <Btn
+        <Btn density="xs"
           type="button"
-          className="!min-h-0 !py-1.5 text-xs"
+          className="text-xs"
           disabled={!preview || preview.errorRows > 0 || preview.validRows === 0 || busy != null}
           onClick={() => void commit()}
         >

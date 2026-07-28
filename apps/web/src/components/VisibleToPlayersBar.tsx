@@ -68,7 +68,7 @@ export function VisibleToPlayersBar({
         They can see this in lists, search, and links. Hide to make it DM-only again.
       </span>
       {error && <span className="text-xs text-rose-300">{error}</span>}
-      <Btn ghost className="!min-h-0 !py-1 text-xs" disabled={busy} onClick={() => void hide()}>
+      <Btn density="xs" ghost className="text-xs" disabled={busy} onClick={() => void hide()}>
         {busy ? 'Hiding…' : 'Hide'}
       </Btn>
     </div>

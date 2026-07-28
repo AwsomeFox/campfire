@@ -83,7 +83,7 @@ export function DraftWithAiButton({
   campaignId,
   target,
   label = 'Draft with AI',
-  className = '!min-h-0 !py-1.5 text-xs',
+  className = 'text-xs',
   arcId,
   disabled = false,
   disabledTitle,
@@ -122,6 +122,7 @@ export function DraftWithAiButton({
       {showTrigger && (
         <Btn
           ghost
+          density="xs"
           className={`${className}${disabled ? ' opacity-50 cursor-not-allowed' : ''}`}
           onClick={() => {
             if (disabled) return;
@@ -278,9 +279,9 @@ function DraftWithAiModal({
               <div className="flex items-center gap-2.5" role="group" aria-labelledby={quantityLabelId}>
                 <span id={quantityLabelId} className="text-xs text-slate-400">Number of {plural}</span>
                 <div className="flex items-center gap-1.5">
-                  <Btn
+                  <Btn density="xs"
                     ghost
-                    className="!min-h-0 !py-1 !px-2.5 text-xs"
+                    className="!px-2.5 text-xs"
                     onClick={() => setCount((n) => Math.max(1, n - 1))}
                     disabled={busy || count <= 1}
                     aria-label={`Decrease number of ${plural}`}
@@ -297,9 +298,9 @@ function DraftWithAiModal({
                   >
                     {count}<span className="sr-only"> {count === 1 ? noun : plural}</span>
                   </output>
-                  <Btn
+                  <Btn density="xs"
                     ghost
-                    className="!min-h-0 !py-1 !px-2.5 text-xs"
+                    className="!px-2.5 text-xs"
                     onClick={() => setCount((n) => Math.min(10, n + 1))}
                     disabled={busy || count >= 10}
                     aria-label={`Increase number of ${plural}`}
@@ -328,10 +329,10 @@ function DraftWithAiModal({
             )}
 
             <div className="flex items-center justify-end gap-2">
-              <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={onClose} disabled={busy}>
+              <Btn density="xs" ghost className="text-xs" onClick={onClose} disabled={busy}>
                 Cancel
               </Btn>
-              <Btn className="!min-h-0 !py-1.5 text-xs" onClick={() => void submit()} disabled={busy || !prompt.trim()}>
+              <Btn density="xs" className="text-xs" onClick={() => void submit()} disabled={busy || !prompt.trim()}>
                 {busy ? 'Drafting…' : `Draft ${multi && count > 1 ? `${count} ${noun}s` : noun}`}
               </Btn>
             </div>
@@ -375,7 +376,7 @@ function DraftResultCard({
         </ul>
       )}
       <div className="flex items-center justify-end gap-2">
-        <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={onClose}>
+        <Btn density="xs" ghost className="text-xs" onClick={onClose}>
           Close
         </Btn>
         <Link to={`/c/${campaignId}/proposals`} className="cf-btn cf-density-compact text-xs no-underline">

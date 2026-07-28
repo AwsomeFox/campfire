@@ -88,13 +88,13 @@ function ConnectAiBlock({ token }: { token?: string }) {
       <div className="flex items-center gap-2 flex-wrap">
         <span className="text-[11px] text-secondary">MCP endpoint</span>
         <code id={mcpId} className="text-xs text-slate-300 font-mono break-all flex-1 min-w-0">{mcpUrl}</code>
-        <CopyControl text={mcpUrl} selectTargetId={mcpId} className="!min-h-0 !py-1.5 text-xs" />
+        <CopyControl density="xs" text={mcpUrl} selectTargetId={mcpId} className="text-xs" />
       </div>
       <div className="flex items-center gap-2 flex-wrap">
         <code id={commandId} className="cf-inset px-3 py-2 text-xs text-slate-300 font-mono break-all flex-1 min-w-0">
           {command}
         </code>
-        <CopyControl text={command} selectTargetId={commandId} className="!min-h-0 !py-1.5 text-xs" />
+        <CopyControl density="xs" text={command} selectTargetId={commandId} className="text-xs" />
       </div>
       <p className="text-[11px] text-secondary">
         {token
@@ -157,8 +157,8 @@ export function TokensCard() {
         <h2 className="font-bold text-white text-sm">
           API tokens <span className="text-secondary font-normal">(REST + MCP)</span>
         </h2>
-        <Btn
-          className="!min-h-0 !py-1.5 text-xs"
+        <Btn density="xs"
+          className="text-xs"
           onClick={() => {
             setCreated(null);
             setShowNew((v) => !v);
@@ -228,7 +228,7 @@ function TokenRow({ token, onRevoke }: { token: ApiToken; onRevoke: () => void }
           {token.tokenPrefix}•••• · last used {token.lastUsedAt ? timeAgo(token.lastUsedAt) : 'never'}
         </p>
       </div>
-      <Btn ghost danger className="!min-h-0 !py-1.5 text-xs" onClick={onRevoke}>
+      <Btn density="xs" ghost danger className="text-xs" onClick={onRevoke}>
         Revoke
       </Btn>
     </div>
@@ -297,8 +297,8 @@ function NewTokenForm({
         directly.
       </p>
       <div className="grid sm:grid-cols-2 gap-2">
-        <TextInput
-          className="!min-h-0 !py-2 text-sm"
+        <TextInput density="xs"
+          className="text-sm"
           placeholder="Name, e.g. claude-scribe"
           aria-label="Token name (required)"
           value={name}
@@ -307,7 +307,7 @@ function NewTokenForm({
           autoFocus
         />
         <select
-          className="cf-select !min-h-0 !py-2 text-sm"
+          className="cf-select text-sm cf-density-xs"
           value={scope}
           onChange={(e) => setScope(e.target.value as TokenScope)}
           aria-label="Read scope"
@@ -317,7 +317,7 @@ function NewTokenForm({
           <option value="viewer">Read: Viewer</option>
         </select>
         <select
-          className="cf-select !min-h-0 !py-2 text-sm"
+          className="cf-select text-sm cf-density-xs"
           value={writeScope}
           onChange={(e) => setWriteScope(e.target.value as WriteScope)}
           aria-label="Write mode"
@@ -327,7 +327,7 @@ function NewTokenForm({
           <option value="direct">Write: Direct (no review)</option>
         </select>
         <select
-          className="cf-select !min-h-0 !py-2 text-sm"
+          className="cf-select text-sm cf-density-xs"
           value={campaignId}
           onChange={(e) => setCampaignId(e.target.value)}
           aria-label="Campaign binding"
@@ -350,12 +350,12 @@ function NewTokenForm({
       )}
       <div className="flex items-center gap-2 justify-end">
         {!name.trim() && <p className="text-[11px] text-secondary mr-auto">Name your token to enable Create.</p>}
-        <Btn type="button" ghost className="!min-h-0 !py-1.5 text-xs" onClick={onCancel} disabled={saving}>
+        <Btn density="xs" type="button" ghost className="text-xs" onClick={onCancel} disabled={saving}>
           Cancel
         </Btn>
-        <Btn
+        <Btn density="xs"
           type="submit"
-          className="!min-h-0 !py-1.5 text-xs"
+          className="text-xs"
           disabled={saving || !name.trim()}
           title={!name.trim() ? 'Enter a token name first' : undefined}
         >
@@ -385,10 +385,10 @@ function NewTokenReveal({ created, onClose }: { created: ApiTokenCreated; onClos
         <code id={tokenId} className="cf-inset px-3 py-2 text-sm text-amber-300 font-mono break-all flex-1 min-w-0">
           {created.token}
         </code>
-        <CopyControl
+        <CopyControl density="xs"
           text={created.token}
           selectTargetId={tokenId}
-          className="!min-h-0 !py-1.5 text-xs"
+          className="text-xs"
           successAnnouncement="Token copied to clipboard."
           failureAnnouncement="Copy failed. Clipboard blocked — select the token and copy it manually."
         />

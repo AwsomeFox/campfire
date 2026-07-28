@@ -293,7 +293,7 @@ export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: 
                 {cancelledCopy.body}
               </p>
             </div>
-            <Btn ghost className="!min-h-0 !py-1 text-xs shrink-0" onClick={dismissCancelledDetail}>
+            <Btn density="xs" ghost className="text-xs shrink-0" onClick={dismissCancelledDetail}>
               Dismiss
             </Btn>
           </div>
@@ -306,7 +306,7 @@ export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: 
         </h2>
         <div className="flex-1" />
         {canDmWrite && !showAddForm && (
-          <Btn className="!min-h-0 !py-1.5 text-xs" onClick={() => setShowAddForm(true)}>
+          <Btn density="xs" className="text-xs" onClick={() => setShowAddForm(true)}>
             + Schedule session
           </Btn>
         )}
@@ -397,9 +397,9 @@ export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: 
                 </Link>
               )}
               {canDmWrite && s.status === 'cancelled' && (
-                <Btn
+                <Btn density="xs"
                   ghost
-                  className="!min-h-0 !py-1 text-xs"
+                  className="text-xs"
                   onClick={() => void restoreSchedule(s.id)}
                   busy={restoreBusyId === s.id}
                 >
@@ -407,17 +407,17 @@ export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: 
                 </Btn>
               )}
               {canDmWrite && (
-                <Btn ghost className="!min-h-0 !py-1 text-xs" onClick={() => setDuplicateTarget(s)}>
+                <Btn density="xs" ghost className="text-xs" onClick={() => setDuplicateTarget(s)}>
                   Duplicate
                 </Btn>
               )}
             </div>
           ))}
           {pastHasMore && (
-            <Btn
+            <Btn density="xs"
               ghost
               type="button"
-              className="!min-h-0 !py-1 text-xs"
+              className="text-xs"
               onClick={() => void loadMorePast()}
               disabled={loadingPast}
             >
@@ -700,9 +700,9 @@ function ScheduleItem({
                 disabled={noteSaving || rsvpSaving}
                 className="input flex-1 min-w-0 !text-sm"
               />
-              <Btn
+              <Btn density="xs"
                 ghost
-                className="!min-h-0 !py-1 text-xs"
+                className="text-xs"
                 disabled={!noteDirty || noteSaving || rsvpSaving || noteTooLong}
                 busy={noteSaving}
                 onClick={() => void saveNote()}
@@ -710,9 +710,9 @@ function ScheduleItem({
                 {RSVP_NOTE_SAVE_LABEL}
               </Btn>
               {persistedNote && (
-                <Btn
+                <Btn density="xs"
                   ghost
-                  className="!min-h-0 !py-1 text-xs"
+                  className="text-xs"
                   disabled={noteSaving || rsvpSaving}
                   onClick={() => void clearNote()}
                 >
@@ -753,14 +753,14 @@ function ScheduleItem({
         {happeningNow && (
           <div className="flex gap-2 flex-wrap">
             {isDm && (
-              <Link to={`/c/${campaignId}/encounters`} className="btn btn-ghost !min-h-0 !py-1 text-xs">
+              <Link to={`/c/${campaignId}/encounters`} className="btn btn-ghost text-xs cf-density-xs">
                 Encounters
               </Link>
             )}
-            <Link to={`/c/${campaignId}/screen`} className="btn btn-ghost !min-h-0 !py-1 text-xs">
+            <Link to={`/c/${campaignId}/screen`} className="btn btn-ghost text-xs cf-density-xs">
               Player display
             </Link>
-            <Link to={`/c/${campaignId}/notes`} className="btn btn-ghost !min-h-0 !py-1 text-xs">
+            <Link to={`/c/${campaignId}/notes`} className="btn btn-ghost text-xs cf-density-xs">
               Session notes
             </Link>
           </div>
@@ -770,17 +770,17 @@ function ScheduleItem({
           <div className="flex gap-2 flex-wrap">
             {happeningNow && (
               <>
-                <Btn
+                <Btn density="xs"
                   ghost
-                  className="!min-h-0 !py-1 text-xs"
+                  className="text-xs"
                   disabled={busy || schedule.durationMinutes >= 1440}
                   onClick={() => void patchDuration(extendSessionDurationMinutes(schedule.durationMinutes, 30))}
                 >
                   Extend +30 min
                 </Btn>
-                <Btn
+                <Btn density="xs"
                   ghost
-                  className="!min-h-0 !py-1 text-xs"
+                  className="text-xs"
                   disabled={busy}
                   onClick={() => void patchDuration(endSessionDurationMinutes(schedule.scheduledAt))}
                 >
@@ -788,10 +788,10 @@ function ScheduleItem({
                 </Btn>
               </>
             )}
-            <Btn ghost className="!min-h-0 !py-1 text-xs" onClick={() => setEditing(true)}>
+            <Btn density="xs" ghost className="text-xs" onClick={() => setEditing(true)}>
               Edit
             </Btn>
-            <Btn danger ghost className="!min-h-0 !py-1 text-xs" onClick={() => setConfirmingCancel(true)} busy={busy}>
+            <Btn density="xs" danger ghost className="text-xs" onClick={() => setConfirmingCancel(true)} busy={busy}>
               Cancel session
             </Btn>
           </div>
@@ -1197,10 +1197,10 @@ function ScheduleForm({
         describedBy={error ? formErrorId : undefined}
       />
       <div className="flex gap-2 justify-end">
-        <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={onCancel} disabled={saving}>
+        <Btn density="xs" ghost className="text-xs" onClick={onCancel} disabled={saving}>
           Cancel
         </Btn>
-        <Btn className="!min-h-0 !py-1.5 text-xs" onClick={() => void save()} disabled={saving} aria-busy={saving || undefined}>
+        <Btn density="xs" className="text-xs" onClick={() => void save()} disabled={saving} aria-busy={saving || undefined}>
           {saving ? 'Saving…' : initial ? 'Save' : 'Schedule'}
         </Btn>
       </div>
@@ -1285,16 +1285,16 @@ function FeedCard({
         <div className="flex-1" />
         {canDmWrite && absoluteUrl && (
           <>
-            <Btn ghost className="!min-h-0 !py-1 text-xs" onClick={rotate} disabled={busy} title="Generate a new URL; the old one stops working">
+            <Btn density="xs" ghost className="text-xs" onClick={rotate} disabled={busy} title="Generate a new URL; the old one stops working">
               Rotate
             </Btn>
-            <Btn danger ghost className="!min-h-0 !py-1 text-xs" onClick={disable} busy={busy}>
+            <Btn density="xs" danger ghost className="text-xs" onClick={disable} busy={busy}>
               Disable
             </Btn>
           </>
         )}
         {canDmWrite && !absoluteUrl && (
-          <Btn className="!min-h-0 !py-1 text-xs" onClick={rotate} disabled={busy}>
+          <Btn density="xs" className="text-xs" onClick={rotate} disabled={busy}>
             Enable feed
           </Btn>
         )}
@@ -1320,11 +1320,11 @@ function FeedCard({
               {absoluteUrl}
             </code>
             {absoluteUrl && (
-              <CopyControl
+              <CopyControl density="xs"
                 text={absoluteUrl}
                 selectTargetId={feedUrlId}
                 ghost
-                className="!min-h-0 !py-1 text-xs shrink-0"
+                className="text-xs shrink-0"
                 successAnnouncement="Calendar feed URL copied to clipboard."
                 failureAnnouncement="Copy failed. Clipboard blocked — select the URL and copy it manually."
               />

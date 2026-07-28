@@ -573,11 +573,11 @@ export function MapUploadButton({
           e.target.value = '';
         }}
       />
-      <Btn ghost className="!min-h-0 !py-1 text-[10px]" disabled={uploading} onClick={() => inputRef.current?.click()}>
+      <Btn density="xs" ghost className="text-[10px]" disabled={uploading} onClick={() => inputRef.current?.click()}>
         {uploading ? 'Uploading…' : hasMap ? 'Replace map' : 'Upload map'}
       </Btn>
       {hasMap && (
-        <Btn ghost className="!min-h-0 !py-1 text-[10px]" disabled={uploading} onClick={onRemove}>
+        <Btn density="xs" ghost className="text-[10px]" disabled={uploading} onClick={onRemove}>
           Remove map
         </Btn>
       )}

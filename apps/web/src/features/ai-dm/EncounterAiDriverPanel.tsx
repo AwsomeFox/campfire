@@ -311,7 +311,7 @@ export function EncounterAiDriverPanel({
               )}
             </p>
             {isDm && (
-              <Btn ghost className="!min-h-0 !py-1" onClick={onTogglePause} disabled={pauseBusy}>
+              <Btn density="xs" ghost className="" onClick={onTogglePause} disabled={pauseBusy}>
                 {paused ? t('table.resume') : t('table.pause')}
               </Btn>
             )}

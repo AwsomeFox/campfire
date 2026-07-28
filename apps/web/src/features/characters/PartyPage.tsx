@@ -396,7 +396,7 @@ function QuickHp({ character, onChange }: { character: Character; onChange: () =
           <button
             key={step}
             type="button"
-            className="btn btn-secondary !min-h-0"
+            className="btn btn-secondary cf-density-xs"
             style={{ flex: 1, minHeight: 38, fontSize: 13, fontFamily: 'var(--font-heading)' }}
             disabled={busy}
             aria-label={`${step < 0 ? 'Reduce' : 'Increase'} ${character.name}'s HP by ${Math.abs(step)} (hold Shift for ${Math.abs(step) * 5}; currently ${character.hpCurrent} of ${character.hpMax})`}

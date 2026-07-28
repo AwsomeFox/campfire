@@ -411,7 +411,7 @@ function NewEncounterForm({ campaignId, onCancel }: { campaignId: number; onCanc
               </span>
             }
             labelClassName="text-xs text-slate-400"
-            selectClassName="cf-select !min-h-0 !py-2 text-xs w-full"
+            selectClassName="cf-select text-xs w-full cf-density-xs"
             value={locationId}
             onChange={(e) => setLocationId(e.target.value)}
             help={ENCOUNTER_LOCATION_HELP}
@@ -434,7 +434,7 @@ function NewEncounterForm({ campaignId, onCancel }: { campaignId: number; onCanc
               </span>
             }
             labelClassName="text-xs text-slate-400"
-            selectClassName="cf-select !min-h-0 !py-2 text-xs w-full"
+            selectClassName="cf-select text-xs w-full cf-density-xs"
             value={questId}
             onChange={(e) => setQuestId(e.target.value)}
             help={ENCOUNTER_QUEST_HELP}
@@ -457,7 +457,7 @@ function NewEncounterForm({ campaignId, onCancel }: { campaignId: number; onCanc
               </span>
             }
             labelClassName="text-xs text-slate-400"
-            selectClassName="cf-select !min-h-0 !py-2 text-xs w-full"
+            selectClassName="cf-select text-xs w-full cf-density-xs"
             value={sessionId}
             onChange={(e) => setSessionId(e.target.value)}
             help={ENCOUNTER_SESSION_HELP}

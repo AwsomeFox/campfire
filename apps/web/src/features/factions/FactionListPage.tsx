@@ -129,9 +129,9 @@ export default function FactionListPage() {
             <TextInput aria-label="Faction kind" placeholder="Kind (e.g. guild, cult, government)" value={newKind} onChange={(e) => setNewKind(e.target.value)} maxLength={60} />
             <AudienceField value={audience} onChange={setAudience} entityLabel="faction" name="faction-audience" />
             <div className="flex items-center justify-end gap-2">
-              <Btn
+              <Btn density="xs"
                 ghost
-                className="!min-h-0 !py-1.5 text-xs"
+                className="text-xs"
                 onClick={() => {
                   setCreating(false);
                   setNewName('');
@@ -142,7 +142,7 @@ export default function FactionListPage() {
               >
                 Cancel
               </Btn>
-              <Btn className="!min-h-0 !py-1.5 text-xs" disabled={saving || !newName.trim()} onClick={createFaction}>
+              <Btn density="xs" className="text-xs" disabled={saving || !newName.trim()} onClick={createFaction}>
                 {saving ? 'Creating…' : 'Create'}
               </Btn>
             </div>

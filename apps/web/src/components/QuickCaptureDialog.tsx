@@ -75,14 +75,14 @@ export function QuickCaptureDialog({
           <div className="flex gap-2 mb-2 text-xs">
             <button
               type="button"
-              className={`btn btn-ghost !min-h-0 !py-1 ${dest === 'private' ? 'btn-primary' : ''}`}
+              className={`btn btn-ghost cf-density-xs ${dest === 'private' ? 'btn-primary' : ''}`}
               onClick={() => setDest('private')}
             >
               {t('keyboard.quickCapturePrivate')}
             </button>
             <button
               type="button"
-              className={`btn btn-ghost !min-h-0 !py-1 ${dest === 'inbox' ? 'btn-primary' : ''}`}
+              className={`btn btn-ghost cf-density-xs ${dest === 'inbox' ? 'btn-primary' : ''}`}
               onClick={() => setDest('inbox')}
             >
               {t('keyboard.quickCaptureInbox')}

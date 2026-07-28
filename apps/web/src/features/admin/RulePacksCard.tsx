@@ -404,7 +404,7 @@ function InstallPanel({
         <label className="flex flex-col gap-1 text-sm text-slate-300">
           <span className="text-[10px] uppercase tracking-widest text-secondary">Source</span>
           <select
-            className="cf-input !min-h-0 !py-1.5 text-sm"
+            className="cf-input text-sm cf-density-xs"
             value={source}
             disabled={installing}
             onChange={(e) => setSource(e.target.value as RulePackInstallSource)}
@@ -421,7 +421,7 @@ function InstallPanel({
           <label className="flex flex-col gap-1 text-sm text-slate-300">
             <span className="text-[10px] uppercase tracking-widest text-secondary">Variant</span>
             <select
-              className="cf-input !min-h-0 !py-1.5 text-sm"
+              className="cf-input text-sm cf-density-xs"
               value={osrVariant}
               disabled={installing}
               onChange={(e) => setOsrVariant(e.target.value as OsrInstallSystem)}
@@ -469,7 +469,7 @@ function InstallPanel({
           <span className="text-[10px] uppercase tracking-widest text-secondary">Mirror URL (required)</span>
           <input
             type="url"
-            className="cf-input !min-h-0 !py-1.5 text-sm"
+            className="cf-input text-sm cf-density-xs"
             placeholder="https://…"
             value={url}
             disabled={installing}
@@ -515,7 +515,7 @@ function InstallPanel({
       )}
       {done && !installing && <p className="text-[11px] text-emerald-400">{done}</p>}
       <div className="flex justify-end">
-        <Btn className="!min-h-0 !py-1.5 text-xs" onClick={install} disabled={!canSubmit}>
+        <Btn density="xs" className="text-xs" onClick={install} disabled={!canSubmit}>
           {installing ? 'Installing…' : hasExistingPack ? 'Add sections' : 'Install pack'}
         </Btn>
       </div>

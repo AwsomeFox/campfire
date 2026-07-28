@@ -500,9 +500,9 @@ export function RevisionHistoryPanel({
                           : `${restoreLabel} ${unchanged ? 'matches' : 'differs from'} current content`}
                       </p>
                     </div>
-                    <Btn
+                    <Btn density="xs"
                       ghost
-                      className="!min-h-0 w-full shrink-0 !py-1 text-xs sm:w-auto"
+                      className="w-full shrink-0 text-xs sm:w-auto"
                       onClick={() => inspect(revision)}
                       aria-label={`Preview version by ${attribution.authorForAria}`}
                     >
