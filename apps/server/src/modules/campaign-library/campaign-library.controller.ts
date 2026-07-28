@@ -1,7 +1,7 @@
 import { Body, Controller, Delete, Get, Param, ParseIntPipe, Patch, Post, Query, Res } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
-import { CampaignLibraryMonsterCreate, CampaignLibraryCollectionCreate, CampaignLibraryTagCreate } from '@campfire/schema';
+import { CampaignLibraryMonsterCreate, CampaignLibraryCollectionCreate, CampaignLibraryTagCreate, LibraryEntityType } from '@campfire/schema';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
@@ -128,6 +128,36 @@ export class CampaignLibrarySearchController {
   async undo(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('operationId', ParseIntPipe) operationId: number, @CurrentUser() user: RequestUser) {
     const role = await this.access.requireRole(user, campaignId, 'dm');
     return this.library.undoBulk(campaignId, operationId, user, role);
+  }
+
+  @Get('templates')
+  async listTemplates(@Param('campaignId', ParseIntPipe) campaignId: number, @Query('archived') archived: string | undefined, @CurrentUser() user: RequestUser) {
+    await this.access.requireRole(user, campaignId, 'dm');
+    return this.library.listTemplates(campaignId, archived === 'true');
+  }
+
+  @Post('templates')
+  async saveTemplate(@Param('campaignId', ParseIntPipe) campaignId: number, @Body() body: unknown, @CurrentUser() user: RequestUser, @Res({ passthrough: true }) res: Response) {
+    const role = await this.access.requireRole(user, campaignId, 'dm'); res.status(201);
+    return this.library.saveTemplate(campaignId, body, user, role);
+  }
+
+  @Post('templates/:templateId/instantiate')
+  async instantiateTemplate(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('templateId', ParseIntPipe) templateId: number, @Body() body: unknown, @CurrentUser() user: RequestUser, @Res({ passthrough: true }) res: Response) {
+    const role = await this.access.requireRole(user, campaignId, 'dm'); res.status(201);
+    return this.library.instantiateTemplate(campaignId, templateId, body, user, role);
+  }
+
+  @Post('templates/:templateId/archive')
+  async archiveTemplate(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('templateId', ParseIntPipe) templateId: number, @CurrentUser() user: RequestUser) {
+    const role = await this.access.requireRole(user, campaignId, 'dm');
+    return this.library.archiveTemplate(campaignId, templateId, user, role);
+  }
+
+  @Post('entities/:entityType/:entityId/duplicate')
+  async duplicate(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('entityType') entityType: string, @Param('entityId', ParseIntPipe) entityId: number, @Body() body: unknown, @CurrentUser() user: RequestUser, @Res({ passthrough: true }) res: Response) {
+    const role = await this.access.requireRole(user, campaignId, 'dm'); res.status(201);
+    return this.library.duplicateEntity(campaignId, LibraryEntityType.parse(entityType), entityId, body, user, role);
   }
 }
 

@@ -12,11 +12,14 @@ import {
   LibrarySearchPage,
   LibraryBulkRequest, LibraryBulkResult,
   QuestStatus, FactionStanding, LocationStatus,
+  CampaignLibraryTemplate, CampaignLibraryTemplateSave, CampaignLibraryTemplateInstantiate,
   type LibraryEntitySummary,
+  type LibraryEntityType,
+  type CampaignLibraryTemplate as CampaignLibraryTemplateType,
   type Role,
 } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { attachments, auditLog, campaignLibraryBulkOperations, campaignLibraryCollections, campaignLibraryEntityTaxonomy, campaignLibraryMonsters, campaignLibraryTags, characters, encounters, factions, inventoryItems, locations, npcs, quests, timelineEvents } from '../../db/schema';
+import { attachments, auditLog, campaignLibraryBulkOperations, campaignLibraryCollections, campaignLibraryEntityTaxonomy, campaignLibraryMonsters, campaignLibraryTags, campaignLibraryTemplates, characters, encounters, factions, inventoryItems, locations, npcs, quests, timelineEvents } from '../../db/schema';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { nowIso } from '../../common/time';
 import { getRequestId } from '../../common/request-context';
@@ -442,5 +445,119 @@ export class CampaignLibraryService {
       user,
       role,
     );
+  }
+
+  /**
+   * The library is deliberately a current-format feature: a template is a small,
+   * explicit create payload, not a serialized database row or a versioned backup.
+   * Keeping the field lists here makes adding an entity an intentional reviewable
+   * decision and prevents ids, tombstones and encounter play state leaking through.
+   */
+  private readonly templateAdapters: Record<Exclude<LibraryEntityType, 'attachment'>, { table: string; fields: readonly string[]; refs: Record<string, string> }> = {
+    quest: { table: 'quests', fields: ['parent_id', 'title', 'body', 'status', 'giver_npc_id', 'reward', 'dm_secret', 'hidden', 'sort_order'], refs: { parent_id: 'quests', giver_npc_id: 'npcs' } },
+    npc: { table: 'npcs', fields: ['name', 'role', 'disposition', 'location_id', 'faction_id', 'body', 'dm_secret', 'portrait_url', 'icon_slug', 'hidden'], refs: { location_id: 'locations', faction_id: 'factions' } },
+    location: { table: 'locations', fields: ['parent_id', 'name', 'kind', 'status', 'map_x', 'map_y', 'body', 'dm_secret', 'portrait_url'], refs: { parent_id: 'locations' } },
+    faction: { table: 'factions', fields: ['name', 'kind', 'body', 'goals', 'dm_secret', 'hidden', 'reputation', 'standing', 'portrait_url'], refs: {} },
+    timeline_event: { table: 'timeline_events', fields: ['title', 'in_world_date', 'body', 'era', 'sort_index', 'dm_secret', 'hidden'], refs: {} },
+    inventory_item: { table: 'inventory_items', fields: ['owner_type', 'character_id', 'name', 'qty', 'notes', 'icon_slug'], refs: { character_id: 'characters' } },
+    campaign_library_monster: { table: 'campaign_library_monsters', fields: ['name', 'statblock_json', 'source_rule_entry_id'], refs: { source_rule_entry_id: 'rule_entries' } },
+    // Encounters are prep templates only.  No combatants, turn pointer, rolls,
+    // completion state or idempotency state can be reintroduced by instantiation.
+    encounter: { table: 'encounters', fields: ['name', 'location_id', 'quest_id', 'session_id', 'map_attachment_id', 'grid_size', 'grid_scale', 'grid_unit', 'grid_snap', 'fog', 'grid_type', 'hex_orientation', 'aoe', 'grid_offset_x', 'grid_offset_y', 'grid_cell_height', 'grid_rotation', 'grid_opacity', 'hidden'], refs: { location_id: 'locations', quest_id: 'quests', session_id: 'sessions', map_attachment_id: 'attachments' } },
+  };
+
+  private templateRow(row: typeof campaignLibraryTemplates.$inferSelect): CampaignLibraryTemplateType {
+    return CampaignLibraryTemplate.parse({ id: row.id, campaignId: row.campaignId, entityType: row.entityType, name: row.name, description: row.description, snapshot: fromJsonText(row.snapshotJson, {}), sourceEntityId: row.sourceEntityId, archivedAt: row.archivedAt, createdAt: row.createdAt, updatedAt: row.updatedAt });
+  }
+
+  private adapter(type: LibraryEntityType) {
+    if (type === 'attachment') throw new BadRequestException('Attachment templates are unsupported because attachment bytes cannot be safely templated');
+    return this.templateAdapters[type];
+  }
+
+  private assertTemplateRefs(tx: any, campaignId: number, adapter: { refs: Record<string, string> }, snapshot: Record<string, unknown>) {
+    for (const [field, table] of Object.entries(adapter.refs)) {
+      const value = snapshot[field];
+      if (value == null) continue;
+      if (!Number.isInteger(value) || !tx.get(sql`select id from ${sql.raw(table)} where id=${value as number} and campaign_id=${campaignId}`)) {
+        throw new BadRequestException(`${field} must reference an entity in this campaign`);
+      }
+    }
+  }
+
+  private createFromSnapshot(tx: any, campaignId: number, type: Exclude<LibraryEntityType, 'attachment'>, snapshot: Record<string, unknown>, name?: string, refs: Record<string, number> = {}) {
+    const adapter = this.adapter(type);
+    const values: Record<string, unknown> = { ...snapshot };
+    for (const [key, value] of Object.entries(refs)) {
+      if (!(key in adapter.refs)) throw new BadRequestException(`Unknown template reference override: ${key}`);
+      values[key] = value;
+    }
+    if (name) values[type === 'quest' || type === 'timeline_event' ? 'title' : 'name'] = name;
+    this.assertTemplateRefs(tx, campaignId, adapter, values);
+    const ts = nowIso();
+    const fields = ['campaign_id', ...adapter.fields, 'created_at', 'updated_at'];
+    const args = [campaignId, ...adapter.fields.map((field) => values[field] ?? null), ts, ts];
+    const row = tx.get(sql`insert into ${sql.raw(adapter.table)} (${sql.join(fields.map((field) => sql.raw(field)), sql`, `)}) values (${sql.join(args.map((value) => sql`${value}`), sql`, `)}) returning id`);
+    if (!row) throw new BadRequestException('Template instantiation failed');
+    return (row as { id: number }).id;
+  }
+
+  async listTemplates(campaignId: number, includeArchived = false): Promise<CampaignLibraryTemplateType[]> {
+    const rows = await this.db.select().from(campaignLibraryTemplates).where(includeArchived ? eq(campaignLibraryTemplates.campaignId, campaignId) : and(eq(campaignLibraryTemplates.campaignId, campaignId), isNull(campaignLibraryTemplates.archivedAt))).orderBy(campaignLibraryTemplates.name);
+    return rows.map((row) => this.templateRow(row));
+  }
+
+  async saveTemplate(campaignId: number, raw: unknown, user: RequestUser, role: Role): Promise<CampaignLibraryTemplateType> {
+    const input = CampaignLibraryTemplateSave.parse(raw);
+    const adapter = this.adapter(input.entityType);
+    const ts = nowIso();
+    const result = this.db.transaction((tx) => {
+      const source = tx.get(sql`select * from ${sql.raw(adapter.table)} where id=${input.entityId} and campaign_id=${campaignId}`) as Record<string, unknown> | undefined;
+      if (!source) throw new NotFoundException(`${input.entityType} ${input.entityId} not found in this campaign`);
+      const snapshot = Object.fromEntries(adapter.fields.map((field) => [field, source[field]]));
+      this.assertTemplateRefs(tx, campaignId, adapter, snapshot);
+      const row = tx.insert(campaignLibraryTemplates).values({ campaignId, entityType: input.entityType, name: input.name.trim(), description: input.description, snapshotJson: toJsonText(snapshot), sourceEntityId: input.entityId, createdAt: ts, updatedAt: ts }).returning().get();
+      tx.insert(auditLog).values({ campaignId, actor: auditActor(user), actorRole: role, action: 'campaign_library.template.save', entityType: 'campaign_library_template', entityId: row.id, detail: input.entityType, requestId: getRequestId() ?? null, createdAt: ts }).run();
+      return row;
+    });
+    return this.templateRow(result);
+  }
+
+  async instantiateTemplate(campaignId: number, templateId: number, raw: unknown, user: RequestUser, role: Role) {
+    const input = CampaignLibraryTemplateInstantiate.parse(raw);
+    const ts = nowIso();
+    return this.db.transaction((tx) => {
+      const template = tx.select().from(campaignLibraryTemplates).where(and(eq(campaignLibraryTemplates.id, templateId), eq(campaignLibraryTemplates.campaignId, campaignId), isNull(campaignLibraryTemplates.archivedAt))).get();
+      if (!template) throw new NotFoundException(`Active template ${templateId} not found in this campaign`);
+      const type = template.entityType as LibraryEntityType;
+      const snapshot = z.record(z.string(), z.unknown()).parse(fromJsonText(template.snapshotJson, {}));
+      const id = this.createFromSnapshot(tx, campaignId, type as Exclude<LibraryEntityType, 'attachment'>, snapshot, input.name, input.refs);
+      tx.insert(auditLog).values({ campaignId, actor: auditActor(user), actorRole: role, action: 'campaign_library.template.instantiate', entityType: type, entityId: id, detail: template.name, requestId: getRequestId() ?? null, createdAt: ts }).run();
+      return { entityType: type, entityId: id };
+    });
+  }
+
+  async duplicateEntity(campaignId: number, type: LibraryEntityType, entityId: number, raw: unknown, user: RequestUser, role: Role) {
+    const input = CampaignLibraryTemplateInstantiate.parse(raw);
+    const adapter = this.adapter(type);
+    const ts = nowIso();
+    return this.db.transaction((tx) => {
+      const source = tx.get(sql`select * from ${sql.raw(adapter.table)} where id=${entityId} and campaign_id=${campaignId}`) as Record<string, unknown> | undefined;
+      if (!source) throw new NotFoundException(`${type} ${entityId} not found in this campaign`);
+      const snapshot = Object.fromEntries(adapter.fields.map((field) => [field, source[field]]));
+      const id = this.createFromSnapshot(tx, campaignId, type as Exclude<LibraryEntityType, 'attachment'>, snapshot, input.name, input.refs);
+      tx.insert(auditLog).values({ campaignId, actor: auditActor(user), actorRole: role, action: 'campaign_library.entity.duplicate', entityType: type, entityId: id, detail: String(entityId), requestId: getRequestId() ?? null, createdAt: ts }).run();
+      return { entityType: type, entityId: id };
+    });
+  }
+
+  async archiveTemplate(campaignId: number, templateId: number, user: RequestUser, role: Role) {
+    const ts = nowIso();
+    return this.db.transaction((tx) => {
+      const changed = tx.update(campaignLibraryTemplates).set({ archivedAt: ts, updatedAt: ts }).where(and(eq(campaignLibraryTemplates.id, templateId), eq(campaignLibraryTemplates.campaignId, campaignId), isNull(campaignLibraryTemplates.archivedAt))).run();
+      if (changed.changes === 0) throw new NotFoundException(`Active template ${templateId} not found in this campaign`);
+      tx.insert(auditLog).values({ campaignId, actor: auditActor(user), actorRole: role, action: 'campaign_library.template.archive', entityType: 'campaign_library_template', entityId: templateId, detail: '', requestId: getRequestId() ?? null, createdAt: ts }).run();
+      return { ok: true };
+    });
   }
 }
