@@ -25,6 +25,16 @@ describe('combatant statblock expansion (issue #425)', () => {
     expect(isResolvableSpec(action.spec)).toBe(true);
   });
 
+  it('maps PF2e statblock actions to the adapter actions slot, not the 5e action key (#1677)', () => {
+    const action = expandRawStatblockAction(
+      { name: 'Jaws', desc: 'Melee attack.', attack_bonus: 8, damage: [{ expression: '2d8+4', type: 'piercing' }] },
+      'action',
+      'pf2e',
+    );
+
+    expect(action.spec?.cost).toMatchObject({ slot: 'actions', count: 1 });
+  });
+
   it('keeps a NEGATIVE damage modifier in flat, not in the dice formula (#1053)', () => {
     // `DamagePart.flat` used to be `.min(0)`, so this expander folded a penalty back into the
     // formula as "1d8-1" — which a 5e crit then re-rolled, doubling the penalty. Now the split

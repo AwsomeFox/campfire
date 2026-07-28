@@ -74,6 +74,7 @@ import {
   applyCombatantHp,
   concentrationCheckForDamage,
   enqueueConcentrationCheck,
+  normalizeActionEconomyCostSlot,
   type CombatantHpState,
 } from './encounters.logic';
 
@@ -483,7 +484,7 @@ export class ActionResolverService {
       resolvedTargets.push(this.resolveOneTarget(spec, name, adapter as unknown as ResolverAdapter, encounter, actor, actorStats, prof, roll, target));
     }
 
-    const resolution = this.buildResolution(spec, name, actor, resolvedTargets);
+    const resolution = this.buildResolution(spec, name, actor, adapter, resolvedTargets);
     let applied = false;
     let undoToken: ActionUndoToken | null = null;
     if (req.commit && canApply) {
@@ -654,7 +655,13 @@ export class ActionResolverService {
     return r.rolls[0] ?? r.total;
   }
 
-  private buildResolution(spec: ActionSpec, name: string, actor: typeof combatants.$inferSelect, targets: ResolvedTarget[]): ActionResolution {
+  private buildResolution(
+    spec: ActionSpec,
+    name: string,
+    actor: typeof combatants.$inferSelect,
+    adapter: RuleSystemAdapter,
+    targets: ResolvedTarget[],
+  ): ActionResolution {
     const playerLines = targets.map((t) => `${t.name}: ${t.playerText}`);
     const dmLines = targets.map((t) => `${t.name}: ${t.dmText}`);
     return ActionResolution.parse({
@@ -665,7 +672,7 @@ export class ActionResolverService {
       playerSummary: `${actor.name} uses ${name}. ${playerLines.join(' | ')}`.trim(),
       dmSummary: `${actor.name} · ${name} — ${dmLines.join(' | ')}`.trim(),
       targets,
-      costSlot: spec.cost.slot,
+      costSlot: normalizeActionEconomyCostSlot(adapter, spec.cost.slot),
       costCount: spec.cost.count,
       usesSpent: spec.uses.max > 0 ? 1 : 0,
       spellLevelSpent: spec.uses.spellLevel,

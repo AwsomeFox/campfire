@@ -24,6 +24,7 @@ import {
   mulberry32,
   generateEncounterGroup,
   redactEncounterEventsForViewer,
+  normalizeActionEconomyCostSlot,
   UNKNOWN_COMBATANT_LABEL,
 } from '../../src/modules/encounters/encounters.logic';
 import type { GeneratorCandidate } from '../../src/modules/encounters/encounters.logic';
@@ -65,6 +66,14 @@ describe('encounters — abilityMod', () => {
     [18, 4],
   ])('score %i -> modifier %i', (score, mod) => {
     expect(abilityMod(score)).toBe(mod);
+  });
+});
+
+describe('encounters — action economy cost-slot normalization', () => {
+  it('keeps 5e action costs as action but maps PF2e legacy action costs to actions (#1677)', () => {
+    expect(normalizeActionEconomyCostSlot(Dnd5eAdapter, 'action')).toBe('action');
+    expect(normalizeActionEconomyCostSlot(Pf2eAdapter, 'action')).toBe('actions');
+    expect(normalizeActionEconomyCostSlot(Pf2eAdapter, 'reaction')).toBe('reaction');
   });
 });
 

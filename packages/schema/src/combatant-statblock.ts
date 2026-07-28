@@ -237,9 +237,14 @@ function attackBonusFrom(item: Record<string, unknown>): number | null {
   return numberOrNull(item.attackBonus) ?? numberOrNull(item.attack_bonus) ?? numberOrNull(item.to_hit_mod) ?? null;
 }
 
-function costSlotForSource(source: string): string {
+function usesThreeActionEconomy(ruleSystem: string): boolean {
+  return ruleSystem === 'pf2e' || ruleSystem === 'pf2e-srd' || ruleSystem === 'sf2e' || ruleSystem === 'sf2e-srd';
+}
+
+function costSlotForSource(source: string, ruleSystem: string): string {
   if (source === 'reaction') return 'reaction';
   if (source === 'legendary') return 'legendary';
+  if (usesThreeActionEconomy(ruleSystem)) return 'actions';
   return 'action';
 }
 
@@ -284,7 +289,7 @@ export function expandRawStatblockAction(raw: unknown, source: string, ruleSyste
     spec = ActionSpec.parse({
       mode: 'attack',
       attack: { bonus: toHit },
-      cost: { slot: costSlotForSource(source), count: 1 },
+      cost: { slot: costSlotForSource(source, ruleSystem), count: 1 },
       uses: recharge ? { recharge } : {},
       targets: { count: 1, allow: 'enemy' },
       outcomes,
@@ -301,7 +306,7 @@ export function expandRawStatblockAction(raw: unknown, source: string, ruleSyste
     spec = ActionSpec.parse({
       mode: 'save',
       save: { ability: save.ability, dc: { kind: 'fixed', dc: save.dc } },
-      cost: { slot: costSlotForSource(source), count: 1 },
+      cost: { slot: costSlotForSource(source, ruleSystem), count: 1 },
       uses: recharge ? { recharge } : {},
       targets: { count: 0, allow: 'enemy' },
       outcomes,

@@ -221,6 +221,47 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(actorAfter.used.action).toBe(1);
   });
 
+  it('#1677: PF2e generated statblock actions spend the shared actions slot and reject a fourth action', () => {
+    const { orm, service, encounterId, drake, bob } = seed({ ruleSystem: 'pf2e' });
+    const drakeRow = orm.select().from(combatants).where(eq(combatants.id, drake)).get()!;
+    orm
+      .update(ruleEntries)
+      .set({
+        dataJson: JSON.stringify({
+          ac: 16,
+          hp: 60,
+          actions: [
+            { name: 'Jaws', desc: 'Melee attack.', attack_bonus: 8, damage: [{ expression: '2d8+4', type: 'piercing' }] },
+          ],
+        }),
+      })
+      .where(eq(ruleEntries.id, drakeRow.ruleEntryId!))
+      .run();
+
+    const [jaws] = service.listUsableActions(encounterId, drake, dmUser, 'dm');
+    expect(jaws.spec?.cost).toMatchObject({ slot: 'actions', count: 1 });
+
+    orm.update(combatants).set({ turnState: JSON.stringify({ used: { actions: 3 } }) }).where(eq(combatants.id, drake)).run();
+    let threw: unknown;
+    try {
+      service.resolve(
+        encounterId,
+        ActionResolveRequest.parse({ actorCombatantId: drake, actionIndex: 0, targetIds: [bob], commit: true }),
+        dmUser,
+        'dm',
+      );
+    } catch (e) {
+      threw = e;
+    }
+
+    expect(threw).toBeDefined();
+    const body = (threw as { getResponse?: () => unknown }).getResponse?.();
+    expect(body).toMatchObject({ code: 'action_economy_exhausted', slot: 'actions', remaining: 0, max: 3 });
+    const turnStateAfter = JSON.parse(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.turnState ?? '{}');
+    expect(turnStateAfter.used.actions).toBe(3);
+    expect(turnStateAfter.used.action).toBeUndefined();
+  });
+
   it('#1637: legendary-action spend is bounded by the MONSTER statblock, not a fixed constant — a drake with none cannot spend any', () => {
     const { orm, service, encounterId, drake } = seed();
     // The drake's statblock (dataJson: { armor_class, hit_points, damage_resistances }) has no

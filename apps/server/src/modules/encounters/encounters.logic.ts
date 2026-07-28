@@ -71,6 +71,23 @@ export function actionEconomySlotMax(
   return declared ? declared.max : null;
 }
 
+/**
+ * Normalize the legacy/default "action" cost to the adapter's declared primary action slot
+ * when that adapter does not actually declare an "action" key. PF2e/SF2e expose one
+ * action-kind slot, "actions"; without this normalization a default structured cost can
+ * increment used.action and skip the shared cap.
+ */
+export function normalizeActionEconomyCostSlot(
+  adapter: Pick<RuleSystemAdapter, 'actionEconomy'>,
+  slot: string,
+): string {
+  if (slot !== 'action') return slot;
+  const economy = actionEconomyForAdapter(adapter);
+  if (economy.slots.some((s) => s.key === slot)) return slot;
+  const actionSlots = economy.slots.filter((s) => s.kind === 'action');
+  return actionSlots.length === 1 ? actionSlots[0].key : slot;
+}
+
 /** Display label for a combatant whose linked NPC is currently hidden from non-DMs (#374/#869). */
 export const UNKNOWN_COMBATANT_LABEL = 'Unknown combatant';
 
