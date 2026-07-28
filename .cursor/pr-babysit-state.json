@@ -1,0 +1,11 @@
+{
+  "tracked": [
+    {
+      "pr": 1677,
+      "url": "https://github.com/AwsomeFox/campfire/pull/1677",
+      "branch": "fix/issue-1637-shared-slot-max",
+      "status": "babysitting",
+      "note": "Stacked on #1676 (base fix/issue-1674). Codex P2 PF2e costSlot normalization addressed in 4eb552d6 (thread resolved). MERGEABLE; head behind base by 4 commits — will sync base. Awaiting CI on 4eb552d6."
+    }
+  ]
+}
