@@ -135,7 +135,9 @@ test.describe('scribe inbox sweep control', () => {
     const { campaignId } = seed();
     const dm = await browser.newContext({ storageState: stateFor('dm') });
     const before = await dm.request.get(`/api/v1/campaigns/${campaignId}`);
-    const beforeStatus = (await before.json()).status as string;
+    const beforeJson = (await before.json()) as { status: string; publicInvitesEnabled: boolean };
+    const beforeStatus = beforeJson.status;
+    const beforeInvites = beforeJson.publicInvitesEnabled;
 
     const archived = await dm.request.patch(`/api/v1/campaigns/${campaignId}`, { data: { status: 'completed' } });
     expect(archived.ok()).toBe(true);
@@ -146,8 +148,18 @@ test.describe('scribe inbox sweep control', () => {
       await expect(page.getByText(/archived, read-only/)).toBeVisible();
     } finally {
       // Restore the seed fixture for later tests/workers sharing this campaign.
-      const restore = await dm.request.patch(`/api/v1/campaigns/${campaignId}`, { data: { status: beforeStatus } });
+      // Archiving suspends public invites; restoring the campaign status does not
+      // revive them, so re-enable the previous policy if it was enabled.
+      const restore = await dm.request.patch(`/api/v1/campaigns/${campaignId}`, {
+        data: { status: beforeStatus },
+      });
       expect(restore.ok()).toBe(true);
+      if (beforeInvites) {
+        const restoreInvites = await dm.request.put(`/api/v1/campaigns/${campaignId}/invites/policy`, {
+          data: { enabled: true },
+        });
+        expect(restoreInvites.ok()).toBe(true);
+      }
       await dm.close();
     }
   });
