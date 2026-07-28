@@ -1312,6 +1312,14 @@ export class RulesService implements OnModuleInit {
     }); const entry = entryToDomain(row); await this.auditHomebrew(campaignId, entry, user, 'homebrew.update'); return entry;
   }
 
+  /** Proposal approval adapter: resolves campaign scope from the private row, then
+   * reuses the normal DM/CAS/revision/audit update path. */
+  async updateCampaignHomebrewFromProposal(id: number, patch: Record<string, unknown>, user: RequestUser): Promise<RuleEntry> {
+    const row = await this.db.select({ campaignId: ruleEntries.campaignId }).from(ruleEntries).where(eq(ruleEntries.id, id)).get();
+    if (!row?.campaignId) throw new NotFoundException('Homebrew rule entry not found');
+    return this.updateCampaignHomebrew(row.campaignId, id, patch, user);
+  }
+
   async duplicateCampaignHomebrew(campaignId: number, id: number, user: RequestUser): Promise<RuleEntry> {
     const source = await this.getCampaignHomebrew(campaignId, id, user);
     const base = `${source.slug}-copy`; let slug = base; let i = 2;

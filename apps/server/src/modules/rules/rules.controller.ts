@@ -5,6 +5,8 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { ServerRoles } from '../../common/decorators/server-roles.decorator';
 import { type RequestUser } from '../../common/user.types';
 import { RulesService } from './rules.service';
+import { CampaignAccessService } from '../membership/campaign-access.service';
+import { ProposalRecordsService } from '../proposals/proposal-records.service';
 import { RulePackInstallDto, RulePackUploadDto, RuleEntryUpdateDto, HomebrewRuleEntryDto, HomebrewRuleEntryUpdateDto, HomebrewImportPreviewDto, HomebrewImportApplyDto } from './rules.dto';
 
 /**
@@ -237,14 +239,18 @@ export class RulesController {
 @ApiTags('campaign homebrew')
 @Controller('campaigns/:campaignId/homebrew')
 export class CampaignHomebrewController {
-  constructor(private readonly rules: RulesService) {}
+  constructor(private readonly rules: RulesService, private readonly access: CampaignAccessService, private readonly proposals: ProposalRecordsService) {}
 
   @Get()
   list(@Param('campaignId', ParseIntPipe) campaignId: number, @Query('includeArchived') includeArchived: string | undefined, @CurrentUser() user: RequestUser) {
     return this.rules.listCampaignHomebrew(campaignId, user, includeArchived === 'true');
   }
   @Post()
-  create(@Param('campaignId', ParseIntPipe) campaignId: number, @Body() body: HomebrewRuleEntryDto, @CurrentUser() user: RequestUser) { return this.rules.createCampaignHomebrew(campaignId, body, user); }
+  async create(@Param('campaignId', ParseIntPipe) campaignId: number, @Body() body: HomebrewRuleEntryDto, @Query('proposed') proposed: string | undefined, @CurrentUser() user: RequestUser) {
+    const role = await this.access.requireMember(user, campaignId, { write: true });
+    if (role !== 'dm' || proposed === 'true') return this.proposals.create(campaignId, 'rule_entry', null, 'create', body as unknown as Record<string, unknown>, user, role);
+    return this.rules.createCampaignHomebrew(campaignId, body, user);
+  }
   @Post('import/preview')
   previewImport(@Param('campaignId', ParseIntPipe) campaignId: number, @Body() body: HomebrewImportPreviewDto, @CurrentUser() user: RequestUser) { return this.rules.previewHomebrewImport(campaignId, body, user); }
   @Post('import/apply')
@@ -256,7 +262,7 @@ export class CampaignHomebrewController {
   @Post(':id/archive')
   archive(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) { return this.rules.archiveCampaignHomebrew(campaignId, id, user); }
   @Patch(':id')
-  update(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('id', ParseIntPipe) id: number, @Body() body: HomebrewRuleEntryUpdateDto, @CurrentUser() user: RequestUser) { return this.rules.updateCampaignHomebrew(campaignId, id, body as Record<string, unknown>, user); }
+  async update(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('id', ParseIntPipe) id: number, @Body() body: HomebrewRuleEntryUpdateDto, @Query('proposed') proposed: string | undefined, @CurrentUser() user: RequestUser) { const role = await this.access.requireMember(user, campaignId, { write: true }); if (role !== 'dm' || proposed === 'true') return this.proposals.create(campaignId, 'rule_entry', id, 'update', body as Record<string, unknown>, user, role); return this.rules.updateCampaignHomebrew(campaignId, id, body as Record<string, unknown>, user); }
   @Get(':id')
   get(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) { return this.rules.getCampaignHomebrew(campaignId, id, user); }
 }

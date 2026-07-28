@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
-import { and, eq, gt, inArray, or, sql, type SQL } from 'drizzle-orm';
+import { and, eq, gt, inArray, isNull, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
 import { ActiveEffect, AoeTemplate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
@@ -698,7 +698,9 @@ export class EncountersService {
     db: SyncDb = this.db,
   ): TargetDefenses {
     if (row.ruleEntryId === null) return { resistances: [], vulnerabilities: [], immunities: [] };
-    const entry = db.select({ dataJson: ruleEntries.dataJson }).from(ruleEntries).where(eq(ruleEntries.id, row.ruleEntryId)).get();
+    // This helper has only a combatant, not the encounter/campaign scope. Fail
+    // closed to global rows rather than allowing another campaign's private entry.
+    const entry = db.select({ dataJson: ruleEntries.dataJson }).from(ruleEntries).where(and(eq(ruleEntries.id, row.ruleEntryId), isNull(ruleEntries.campaignId))).get();
     const data = entry ? fromJsonText<Record<string, unknown>>(entry.dataJson, {}) : {};
     return damageDefensesFromStatblock(data, damageTypes);
   }
@@ -715,7 +717,7 @@ export class EncountersService {
     const rows = await this.db
       .select({ id: ruleEntries.id, dataJson: ruleEntries.dataJson })
       .from(ruleEntries)
-      .where(inArray(ruleEntries.id, ruleEntryIds));
+      .where(and(inArray(ruleEntries.id, ruleEntryIds), or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, campaignId))));
     for (const row of rows) {
       const data = fromJsonText<Record<string, unknown>>(row.dataJson ?? null, {});
       out.set(row.id, adapter.mapStatblock(data));
