@@ -2,6 +2,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import request from 'supertest';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
 import { AppModule } from '../src/app.module';
@@ -36,6 +38,21 @@ async function buildThrottledApp(): Promise<{ app: INestApplication; dataDir: st
   await app.init();
 
   return { app, dataDir };
+}
+
+interface TextContent {
+  type: 'text';
+  text: string;
+}
+
+function parseMcpResult(result: unknown): unknown {
+  const content = (result as { content: TextContent[] }).content;
+  return JSON.parse(content[0].text);
+}
+
+function mcpErrorOf(result: unknown): { status: number; code: string; message: string } | null {
+  if (!(result as { isError?: boolean }).isError) return null;
+  return (parseMcpResult(result) as { error: { status: number; code: string; message: string } }).error;
 }
 
 describe('rate limiting on @Public auth endpoints (e2e, real ThrottlerGuard)', () => {
@@ -259,6 +276,60 @@ describe('rate limiting on AI invocation routes (e2e, AI throttler)', () => {
       statuses.push(res.status);
     }
     expect(statuses[statuses.length - 1]).toBe(429);
+  });
+});
+
+describe('rate limiting on MCP AI tools (e2e, AI throttler)', () => {
+  let app: INestApplication;
+  let dataDir: string;
+  let baseUrl: string;
+
+  beforeAll(async () => {
+    const built = await buildThrottledApp();
+    app = built.app;
+    dataDir = built.dataDir;
+    await app.listen(0);
+    const address = app.getHttpServer().address() as { port: number };
+    baseUrl = `http://127.0.0.1:${address.port}`;
+  });
+
+  afterAll(async () => {
+    await app.close();
+    fs.rmSync(dataDir, { recursive: true, force: true });
+    process.env.THROTTLE_DISABLED = '1';
+  });
+
+  it('sweep_inbox over MCP uses the strict per-user AI bucket', async () => {
+    const server = app.getHttpServer();
+    const AI_THROTTLE_LIMIT = 10;
+    const dmAgent = request.agent(server);
+
+    const setup = await dmAgent.post('/api/v1/auth/setup').send({ username: 'mcp-ai-throttle-dm', password: 'dm-password-1' });
+    expect(setup.status).toBe(201);
+    const campaign = await dmAgent.post('/api/v1/campaigns').send({ name: 'MCP AI Throttle' });
+    expect(campaign.status).toBe(201);
+    const tokenRes = await dmAgent
+      .post('/api/v1/tokens')
+      .send({ name: 'mcp-ai-throttle-direct', scope: 'dm', writeScope: 'direct' });
+    expect(tokenRes.status).toBe(201);
+
+    const client = new Client({ name: 'campfire-throttle-e2e', version: '0.0.1' });
+    const transport = new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), {
+      requestInit: { headers: { Authorization: `Bearer ${tokenRes.body.token}` } },
+    });
+    await client.connect(transport);
+
+    try {
+      for (let i = 0; i < AI_THROTTLE_LIMIT; i++) {
+        const result = await client.callTool({ name: 'sweep_inbox', arguments: { campaignId: campaign.body.id } });
+        expect(mcpErrorOf(result)?.status).not.toBe(429);
+      }
+
+      const overLimit = await client.callTool({ name: 'sweep_inbox', arguments: { campaignId: campaign.body.id } });
+      expect(mcpErrorOf(overLimit)?.status).toBe(429);
+    } finally {
+      await client.close().catch(() => undefined);
+    }
   });
 });
 

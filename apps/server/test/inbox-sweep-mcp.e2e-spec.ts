@@ -17,7 +17,7 @@ import {
  * `POST /campaigns/:id/inbox/sweep` route uses (see test/inbox-sweep.e2e-spec.ts for the REST
  * coverage of that shared path) — this suite only exercises the MCP-specific surface: tool
  * registration, DM-role gating, the archived-campaign read-only gate, and write-mode/token-scope
- * parity (propose-writeScope tokens must work; none-writeScope tokens must be refused).
+ * parity (propose/none writeScope tokens must be refused like the REST route).
  */
 interface TextContent {
   type: 'text';
@@ -206,24 +206,22 @@ describe('sweep_inbox MCP tool (e2e, issue #1645)', () => {
     expect(classifier.calls).toHaveLength(0);
   });
 
-  it('works with a propose-writeScope DM token — sweep still runs (it only ever files proposals)', async () => {
+  it('403s a propose-writeScope DM token on both REST and MCP (sweep has auxiliary direct writes)', async () => {
     const campaignId = await newCampaign('MCP Sweep Propose Scope');
-    const noteId = await submitInbox(campaignId, 'Please add an NPC for the miller, Rosalind.');
-    classifier.script.set('Please add an NPC for the miller, Rosalind.', {
-      action: 'create',
-      entityType: 'npc',
-      targetId: null,
-      fields: { name: 'Rosalind' },
-      reason: 'named NPC mentioned in play',
-    });
-
+    await submitInbox(campaignId, 'Please add an NPC for the miller, Rosalind.');
     const proposeToken = await mintToken('propose');
+
+    const rest = await request(ctx.app.getHttpServer())
+      .post(`/api/v1/campaigns/${campaignId}/inbox/sweep`)
+      .set('Authorization', `Bearer ${proposeToken}`);
+    expect(rest.status).toBe(403);
+
     const client = await mcpClient(proposeToken);
     const result = await client.callTool({ name: 'sweep_inbox', arguments: { campaignId } });
-    expect(result.isError).toBeFalsy();
-    const body = parseResult(result) as { items: Array<{ noteId: number; outcome: string; proposalId: number | null }> };
-    expect(body.items[0]).toMatchObject({ noteId, outcome: 'proposed' });
-    expect(typeof body.items[0].proposalId).toBe('number');
+    const err = errorOf(result);
+    expect(err).not.toBeNull();
+    expect(err!.status).toBe(403);
+    expect(classifier.calls).toHaveLength(0);
   });
 
   it('403s a none-writeScope (read-only) DM token before the classifier ever runs', async () => {
