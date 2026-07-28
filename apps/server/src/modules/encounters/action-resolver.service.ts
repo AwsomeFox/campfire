@@ -35,12 +35,17 @@ import {
   rollBranchDamage,
   ruleSystemAdapter,
   signedModifier,
+  // #1571 — the SAME overspend rule `CharactersService.patchSpellSlots` enforces (#1039),
+  // routed through here rather than re-implemented, so the standalone spend path and the
+  // apply_action path cannot drift apart on what "overspend" means.
+  applySpellSlotDelta,
   type ActionRollFn,
   type CharacterAction,
   type OutcomeKey,
   type PendingConcentrationCheck,
   type ResolverAdapter,
   type RuleSystemAdapter,
+  type SpellSlotMap,
   type TargetDefenses,
 } from '@campfire/schema';
 
@@ -817,6 +822,42 @@ export class ActionResolverService {
     const consequenceLogs: Array<{ type: 'damage' | 'heal' | 'condition' | 'death' | 'effect' | 'note' | 'resource_changed'; target?: string; targetId?: number; detail: string }> = [];
 
     this.db.transaction((tx) => {
+      // #1571 — VALIDATE THE SPELL SLOT SPEND FIRST, before any target consequence (damage,
+      // saves, conditions) is written. `patchSpellSlots` (the standalone spend path, #1039)
+      // fails loudly on overspend instead of silently clamping; this used to be a second,
+      // looser copy of that rule — `Math.min(slot.max, used + 1)` — which let a caster at
+      // `used === max` "cast" for free, with nothing reporting the slot was never paid for.
+      // Routing through the same `applySpellSlotDelta` this transaction now calls means a
+      // future change to the overspend policy cannot land on one path and miss the other.
+      //
+      // Deciding this validates HERE, ahead of the target loop below, rather than deducting
+      // at the bottom and unwinding on failure: unwinding already-written HP/condition/death
+      // state is the more fragile design, and it leaves a partial-application window between
+      // "damage landed" and "the cast turned out to be unpayable". Failing before any of that
+      // is written keeps the transaction simple and gives the caller (frequently the AI
+      // Driver) a clean retry — nothing here to undo.
+      let spellSlotSpend: { characterId: number; slots: SpellSlotMap } | null = null;
+      if (resolution.spellLevelSpent > 0 && actor.characterId !== null) {
+        const character = tx.select().from(characters).where(eq(characters.id, actor.characterId)).limit(1).all()[0];
+        if (character) {
+          const slots = fromJsonText<SpellSlotMap>(character.spellSlots, {});
+          const outcome = applySpellSlotDelta(slots, resolution.spellLevelSpent, 1);
+          if (!outcome.ok) {
+            // Same shape `patchSpellSlots` throws (#1570): `code`/`message` plus `remaining`
+            // and `max` so the caller — an AI Driver as often as a human — can self-correct
+            // (cast at a different level, or take a rest) instead of retrying blind.
+            throw new BadRequestException({
+              code: outcome.reason,
+              message: outcome.message,
+              level: outcome.level,
+              remaining: outcome.remaining,
+              max: outcome.max,
+            });
+          }
+          spellSlotSpend = { characterId: actor.characterId, slots: outcome.slots };
+        }
+      }
+
       // Snapshot concentration BEFORE any target consequences. The actor can target itself,
       // and target processing may enqueue a check for this very action; that generated check
       // is not part of the pre-apply state an undo must restore.
@@ -993,17 +1034,13 @@ export class ActionResolverService {
         }
         tx.update(combatants).set({ turnState: toJsonText(turnState) }).where(eq(combatants.id, actor.id)).run();
       }
-      if (resolution.spellLevelSpent > 0 && actor.characterId !== null) {
-        const character = tx.select().from(characters).where(eq(characters.id, actor.characterId)).limit(1).all()[0];
-        if (character) {
-          const slots = fromJsonText<Record<string, { max: number; used: number }>>(character.spellSlots, {});
-          const key = String(resolution.spellLevelSpent);
-          const slot = slots[key];
-          if (slot) {
-            slot.used = Math.min(slot.max, (slot.used ?? 0) + 1);
-            tx.update(characters).set({ spellSlots: toJsonText(slots), updatedAt: nowIso() }).where(eq(characters.id, actor.characterId)).run();
-          }
-        }
+      // The spend was already validated (and the replacement blob computed) at the top of
+      // this transaction, before any consequence above was written — this is just the write.
+      if (spellSlotSpend) {
+        tx.update(characters)
+          .set({ spellSlots: toJsonText(spellSlotSpend.slots), updatedAt: nowIso() })
+          .where(eq(characters.id, spellSlotSpend.characterId))
+          .run();
       }
     });
 
