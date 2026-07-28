@@ -15,7 +15,6 @@ import {
   CampaignLibraryTemplate, CampaignLibraryTemplateSave, CampaignLibraryTemplateInstantiate,
   LibraryEntityType,
   type LibraryEntitySummary,
-  type CampaignLibraryTemplate as CampaignLibraryTemplateType,
   type Role,
 } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -469,7 +468,7 @@ export class CampaignLibraryService {
     encounter: { table: 'encounters', fields: ['name', 'location_id', 'quest_id', 'session_id', 'map_attachment_id', 'grid_size', 'grid_scale', 'grid_unit', 'grid_snap', 'fog', 'grid_type', 'hex_orientation', 'aoe', 'grid_offset_x', 'grid_offset_y', 'grid_cell_height', 'grid_rotation', 'grid_opacity', 'hidden'], refs: { location_id: { key: 'locationId', table: 'locations' }, quest_id: { key: 'questId', table: 'quests' }, session_id: { key: 'sessionId', table: 'sessions' }, map_attachment_id: { key: 'mapAttachmentId', table: 'attachments', attachmentCommitted: true } } },
   };
 
-  private templateRow(row: typeof campaignLibraryTemplates.$inferSelect): CampaignLibraryTemplateType {
+  private templateRow(row: typeof campaignLibraryTemplates.$inferSelect): z.infer<typeof CampaignLibraryTemplate> {
     return CampaignLibraryTemplate.parse({ id: row.id, campaignId: row.campaignId, entityType: row.entityType, name: row.name, description: row.description, snapshot: fromJsonText(row.snapshotJson, {}), sourceEntityId: row.sourceEntityId, archivedAt: row.archivedAt, createdAt: row.createdAt, updatedAt: row.updatedAt });
   }
 
@@ -514,12 +513,12 @@ export class CampaignLibraryService {
     return (row as { id: number }).id;
   }
 
-  async listTemplates(campaignId: number, includeArchived = false): Promise<CampaignLibraryTemplateType[]> {
+  async listTemplates(campaignId: number, includeArchived = false): Promise<Array<z.infer<typeof CampaignLibraryTemplate>>> {
     const rows = await this.db.select().from(campaignLibraryTemplates).where(includeArchived ? eq(campaignLibraryTemplates.campaignId, campaignId) : and(eq(campaignLibraryTemplates.campaignId, campaignId), isNull(campaignLibraryTemplates.archivedAt))).orderBy(campaignLibraryTemplates.name);
     return rows.map((row) => this.templateRow(row));
   }
 
-  async saveTemplate(campaignId: number, raw: unknown, user: RequestUser, role: Role): Promise<CampaignLibraryTemplateType> {
+  async saveTemplate(campaignId: number, raw: unknown, user: RequestUser, role: Role): Promise<z.infer<typeof CampaignLibraryTemplate>> {
     const input = CampaignLibraryTemplateSave.parse(raw);
     const adapter = this.adapter(input.entityType);
     const ts = nowIso();

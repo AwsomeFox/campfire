@@ -2,7 +2,7 @@ import request from 'supertest';
 import { and, eq } from 'drizzle-orm';
 import { closeTestApp, createTestApp, type TestAppContext } from './test-app';
 import { DB, type DrizzleDb } from '../src/db/db.module';
-import { auditLog, campaignLibraryEntityTaxonomy, characters, inventoryItems, locations, npcs, quests } from '../src/db/schema';
+import { auditLog, campaignLibraryEntityTaxonomy, campaignLibraryMonsters, characters, inventoryItems, locations, npcs, quests } from '../src/db/schema';
 
 describe('campaign library taxonomy (issue #742)', () => {
   let ctx: TestAppContext;
@@ -181,5 +181,33 @@ describe('campaign library taxonomy (issue #742)', () => {
     expect(responses.map((response) => response.status)).toEqual([201, 201]);
     expect(responses.filter((response) => response.body.alreadyUndone === false)).toHaveLength(1);
     expect(responses.filter((response) => response.body.alreadyUndone === true)).toHaveLength(1);
+  });
+
+  it('saves, instantiates, duplicates and archives current-format templates with campaign-safe references', async () => {
+    const server = ctx.app.getHttpServer(); const db = ctx.app.get<DrizzleDb>(DB); const ts = new Date().toISOString();
+    const [place] = await db.insert(locations).values({ campaignId, name: 'Template place', createdAt: ts, updatedAt: ts }).returning();
+    const [npc] = await db.insert(npcs).values({ campaignId, name: 'Template giver', locationId: place.id, createdAt: ts, updatedAt: ts }).returning();
+    const [quest] = await db.insert(quests).values({ campaignId, title: 'Template quest', giverNpcId: npc.id, createdAt: ts, updatedAt: ts }).returning();
+    const saved = await request(server).post(`/api/v1/campaigns/${campaignId}/library/templates`).set(dm).send({ entityType: 'quest', entityId: quest.id, name: 'Quest template' });
+    expect(saved.status).toBe(201);
+    expect((await request(server).post(`/api/v1/campaigns/${campaignId}/library/templates`).set(player).send({ entityType: 'quest', entityId: quest.id, name: 'Nope' })).status).toBe(403);
+    const instantiated = await request(server).post(`/api/v1/campaigns/${campaignId}/library/templates/${saved.body.id}/instantiate`).set(dm).send({ name: 'Instantiated quest' });
+    expect(instantiated.status).toBe(201);
+    expect((await db.select().from(quests).where(eq(quests.id, instantiated.body.entityId))).at(0)).toMatchObject({ campaignId, title: 'Instantiated quest', giverNpcId: npc.id });
+    const npcTemplate = await request(server).post(`/api/v1/campaigns/${campaignId}/library/templates`).set(dm).send({ entityType: 'npc', entityId: npc.id, name: 'NPC template' });
+    const npcCopy = await request(server).post(`/api/v1/campaigns/${campaignId}/library/templates/${npcTemplate.body.id}/instantiate`).set(dm).send({ name: 'NPC copy', refs: { locationId: place.id } });
+    expect(npcCopy.status).toBe(201);
+    expect((await db.select().from(npcs).where(eq(npcs.id, npcCopy.body.entityId))).at(0)).toMatchObject({ name: 'NPC copy', locationId: place.id });
+    const locationCopy = await request(server).post(`/api/v1/campaigns/${campaignId}/library/entities/location/${place.id}/duplicate`).set(dm).send({ name: 'Location copy' });
+    expect(locationCopy.status).toBe(201);
+    expect((await db.select().from(locations).where(eq(locations.id, locationCopy.body.entityId))).at(0)?.name).toBe('Location copy');
+    const [monster] = await db.insert(campaignLibraryMonsters).values({ campaignId, name: 'Template monster', statblockJson: '{}', createdAt: ts, updatedAt: ts }).returning();
+    const monsterTemplate = await request(server).post(`/api/v1/campaigns/${campaignId}/library/templates`).set(dm).send({ entityType: 'campaign_library_monster', entityId: monster.id, name: 'Monster template' });
+    const monsterCopy = await request(server).post(`/api/v1/campaigns/${campaignId}/library/templates/${monsterTemplate.body.id}/instantiate`).set(dm).send({ name: 'Monster copy' });
+    expect(monsterCopy.status).toBe(201);
+    expect((await db.select().from(campaignLibraryMonsters).where(eq(campaignLibraryMonsters.id, monsterCopy.body.entityId))).at(0)?.name).toBe('Monster copy');
+    expect((await request(server).post(`/api/v1/campaigns/${campaignId}/library/templates/${saved.body.id}/archive`).set(dm)).status).toBe(201);
+    expect((await request(server).post(`/api/v1/campaigns/${campaignId}/library/templates/${saved.body.id}/instantiate`).set(dm).send({})).status).toBe(404);
+    expect((await request(server).post(`/api/v1/campaigns/${campaignId}/library/templates`).set(dm).send({ entityType: 'attachment', entityId: 1, name: 'Bytes missing' })).status).toBe(400);
   });
 });
