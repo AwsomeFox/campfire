@@ -20,6 +20,10 @@ import { GameIcon } from '../../components/GameIcon';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { MapConceptGlossary, MapPurposePreview } from '../../components/mapOnboarding';
 
+// Kept local until every consumer has rebuilt its generated schema declaration.
+type AttachmentDisplayMetadata = { title: string; caption: string; altText: string; creator: string; sourceUrl: string; license: string; attribution: string };
+const displayMetadata = (attachment: Attachment): AttachmentDisplayMetadata => attachment as Attachment & AttachmentDisplayMetadata;
+
 export function HandoutsCard({ campaignId }: { campaignId: number }) {
   const { isDm, canDmWrite } = useCampaignAccess();
   const [items, setItems] = useState<Attachment[] | null>(null);
@@ -119,7 +123,9 @@ export function HandoutsCard({ campaignId }: { campaignId: number }) {
               {isDm ? 'No handouts yet — upload a map or image below to stage it.' : 'No handouts have been shared yet.'}
             </p>
           ) : (
-            visible.map((a) => (
+            visible.map((a) => {
+              const meta = displayMetadata(a);
+              return (
               <div
                 key={a.id}
                 className="cf-inset"
@@ -146,14 +152,22 @@ export function HandoutsCard({ campaignId }: { campaignId: number }) {
                 ) : (
                   <img
                     src={attachmentFileUrl(a.id, { hidden: a.hidden, updatedAt: a.updatedAt }, { size: 'thumb' })}
-                    alt=""
+                    alt={meta.altText || meta.title || a.filename}
                     style={{ width: 44, height: 44, objectFit: 'cover', borderRadius: 6, flexShrink: 0 }}
                   />
                 )}
                 <div style={{ minWidth: 0, flex: 1 }}>
-                  <div className="text-[12px] truncate" title={a.filename}>
-                    {a.filename}
+                  <div className="text-[12px] truncate" title={meta.title || a.filename}>
+                    {meta.title || a.filename}
                   </div>
+                  {meta.caption && <div className="text-[11px] text-[var(--color-neutral-500)]">{meta.caption}</div>}
+                  {(meta.attribution || meta.license || meta.sourceUrl) && (
+                    <div className="text-[11px] text-[var(--color-neutral-500)]" style={{ marginTop: 2 }}>
+                      {meta.attribution || meta.creator}
+                      {meta.license ? `${meta.attribution || meta.creator ? ' · ' : ''}${meta.license}` : ''}
+                      {meta.sourceUrl && <><span>{meta.attribution || meta.creator || meta.license ? ' · ' : ''}</span><a href={meta.sourceUrl} target="_blank" rel="noopener noreferrer" className="hover:underline" style={{ color: 'var(--color-accent)' }}>Source</a></>}
+                    </div>
+                  )}
                   <div style={{ marginTop: 2 }}>
                     <Chip variant={a.hidden ? 'dm' : 'party'}>{a.hidden ? <><GameIcon slug="padlock" size={12} className="inline align-text-bottom" /> DM only</> : <><GameIcon slug="eyeball" size={12} className="inline align-text-bottom" /> Revealed</>}</Chip>
                   </div>
@@ -165,7 +179,7 @@ export function HandoutsCard({ campaignId }: { campaignId: number }) {
                       rel="noopener noreferrer"
                       style={{ color: 'var(--color-accent)' }}
                     >
-                      View
+                      View {meta.title || a.filename}
                     </a>
                     <a
                       className="text-[11px] hover:underline"
@@ -173,7 +187,7 @@ export function HandoutsCard({ campaignId }: { campaignId: number }) {
                       download={a.filename}
                       style={{ color: 'var(--color-accent)' }}
                     >
-                      Download
+                      Download {meta.title || a.filename}
                     </a>
                     {a.mime !== 'application/pdf' && (
                       <button
@@ -187,7 +201,7 @@ export function HandoutsCard({ campaignId }: { campaignId: number }) {
                         }}
                         style={{ color: 'var(--color-accent)' }}
                       >
-                        Print
+                        Print {meta.title || a.filename}
                       </button>
                     )}
                   </div>
@@ -204,7 +218,8 @@ export function HandoutsCard({ campaignId }: { campaignId: number }) {
                   </Btn>
                 )}
               </div>
-            ))
+              );
+            })
           )}
 
           {canDmWrite && (

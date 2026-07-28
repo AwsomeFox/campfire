@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Inject,
   Injectable,
@@ -16,6 +17,8 @@ import { and, desc, eq, isNotNull, like, sql } from 'drizzle-orm';
 import type {
   Attachment,
   AttachmentKind,
+  AttachmentMetadata,
+  AttachmentMetadataPatch,
   Role,
   StorageCleanupResult,
   StorageStats,
@@ -125,6 +128,15 @@ function toDomain(row: typeof attachments.$inferSelect): Attachment {
     filename: row.filename,
     mime: row.mime,
     size: row.size,
+    title: row.title,
+    caption: row.caption,
+    altText: row.altText,
+    creator: row.creator,
+    sourceUrl: row.sourceUrl,
+    license: row.license,
+    rights: row.rights,
+    attribution: row.attribution,
+    checksumSha256: row.checksumSha256,
     hidden: row.hidden,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -538,9 +550,14 @@ export class AttachmentsService implements OnApplicationBootstrap {
       return this.createGenerated(
         row.campaignId,
         row.kind as AttachmentKind,
-        { filename: `${prefix}${row.filename}`, mime: row.mime, bytes },
+        { filename: `${prefix}${row.filename}`, mime: row.mime, bytes, metadata: {
+          title: row.title, caption: row.caption, altText: row.altText, creator: row.creator, sourceUrl: row.sourceUrl,
+          license: row.license, rights: row.rights, attribution: row.attribution,
+        } },
         user,
         role,
+        undefined,
+        'attachment.generate',
       );
     }
     return this.create(
@@ -552,8 +569,10 @@ export class AttachmentsService implements OnApplicationBootstrap {
         size: bytes.length,
         buffer: bytes,
       },
-      user,
-      role,
+      user, role, {
+        title: row.title, caption: row.caption, altText: row.altText, creator: row.creator, sourceUrl: row.sourceUrl,
+        license: row.license, rights: row.rights, attribution: row.attribution,
+      },
     );
   }
 
@@ -570,6 +589,36 @@ export class AttachmentsService implements OnApplicationBootstrap {
       .where(and(eq(attachments.campaignId, campaignId), eq(attachments.state, COMMITTED)))
       .orderBy(desc(attachments.id));
     return rows.map(toDomain);
+  }
+
+  /** Correct descriptive/provenance metadata without ever changing bytes or visibility. */
+  async updateMetadata(
+    id: number,
+    input: AttachmentMetadataPatch & { updatedAt: string },
+    user: RequestUser,
+    role: Role,
+  ): Promise<Attachment> {
+    const existing = await this.getRowOrThrow(id);
+    if (role !== 'dm' && existing.uploaderUserId !== user.id) {
+      throw new ForbiddenException('Only the uploader or a DM can correct attachment metadata');
+    }
+    if (existing.updatedAt !== input.updatedAt) throw new ConflictException('Attachment metadata changed; reload before saving');
+    const { updatedAt: _updatedAt, ...patch } = input;
+    const before = {
+      title: existing.title, caption: existing.caption, altText: existing.altText, creator: existing.creator,
+      sourceUrl: existing.sourceUrl, license: existing.license, rights: existing.rights, attribution: existing.attribution,
+    };
+    const after = { ...before, ...patch };
+    const ts = nowIso();
+    const row = this.db.transaction((tx) => {
+      const [updated] = tx.update(attachments).set({ ...patch, updatedAt: ts }).where(and(eq(attachments.id, id), eq(attachments.updatedAt, input.updatedAt))).returning().all();
+      if (!updated) throw new ConflictException('Attachment metadata changed; reload before saving');
+      tx.run(sql`INSERT INTO attachment_metadata_revisions (attachment_id, actor_user_id, before_json, after_json, created_at)
+        VALUES (${id}, ${user.id}, ${JSON.stringify(before)}, ${JSON.stringify(after)}, ${ts})`);
+      return updated;
+    });
+    await this.audit.log({ actor: auditActor(user), actorRole: role, action: 'attachment.metadata.update', entityType: 'attachment', entityId: id, campaignId: existing.campaignId, detail: 'attribution/accessibility metadata corrected' });
+    return toDomain(row);
   }
 
   /**
@@ -608,6 +657,7 @@ export class AttachmentsService implements OnApplicationBootstrap {
     file: { originalname: string; mimetype: string; size: number; buffer: Buffer },
     user: RequestUser,
     role: Role,
+    metadata: Partial<AttachmentMetadata> = {},
   ): Promise<Attachment> {
     const sniffed = sniffUploadMime(file.buffer);
     if (sniffed !== file.mimetype) {
@@ -630,7 +680,7 @@ export class AttachmentsService implements OnApplicationBootstrap {
     return this.createAndPublish(
       campaignId,
       kind,
-      { filename: file.originalname, mime: file.mimetype, bytes: file.buffer },
+      { filename: file.originalname, mime: file.mimetype, bytes: file.buffer, metadata },
       user,
       role,
       'attachment.upload',
@@ -673,7 +723,7 @@ export class AttachmentsService implements OnApplicationBootstrap {
   async createGenerated(
     campaignId: number,
     kind: AttachmentKind,
-    file: { filename: string; mime: string; bytes: Buffer },
+    file: { filename: string; mime: string; bytes: Buffer; metadata?: Partial<AttachmentMetadata> },
     user: RequestUser,
     role: Role,
     /**
@@ -725,7 +775,7 @@ export class AttachmentsService implements OnApplicationBootstrap {
   private async createAndPublish(
     campaignId: number,
     kind: AttachmentKind,
-    file: { filename: string; mime: string; bytes: Buffer },
+    file: { filename: string; mime: string; bytes: Buffer; metadata?: Partial<AttachmentMetadata> },
     user: RequestUser,
     role: Role,
     auditAction: string = 'attachment.upload',
@@ -791,7 +841,7 @@ export class AttachmentsService implements OnApplicationBootstrap {
   private async reserveQuota(
     campaignId: number,
     kind: AttachmentKind,
-    file: { filename: string; mime: string; bytes: Buffer },
+    file: { filename: string; mime: string; bytes: Buffer; metadata?: Partial<AttachmentMetadata> },
     user: RequestUser,
   ): Promise<typeof attachments.$inferSelect> {
     const size = file.bytes.length;
@@ -799,6 +849,8 @@ export class AttachmentsService implements OnApplicationBootstrap {
     // Issue #630: grapheme-safe truncation + path/control scrubbing (not bare
     // String#slice, which can bisect a surrogate pair).
     const filename = sanitizeAttachmentFilename(file.filename);
+    const metadata = file.metadata ?? {};
+    const checksum = crypto.createHash('sha256').update(file.bytes).digest('hex');
     const inserted = this.db.all<{
       id: number;
       campaignId: number;
@@ -813,10 +865,11 @@ export class AttachmentsService implements OnApplicationBootstrap {
       updatedAt: string;
     }>(sql`
       INSERT INTO attachments (
-        campaign_id, uploader_user_id, kind, filename, mime, size, hidden, state, created_at, updated_at
+        campaign_id, uploader_user_id, kind, filename, mime, size, title, caption, alt_text, creator, source_url, license, rights, attribution, checksum_sha256, hidden, state, created_at, updated_at
       )
       SELECT
         ${campaignId}, ${user.id}, ${kind}, ${filename}, ${file.mime}, ${size},
+        ${metadata.title ?? ''}, ${metadata.caption ?? ''}, ${metadata.altText ?? ''}, ${metadata.creator ?? ''}, ${metadata.sourceUrl ?? ''}, ${metadata.license ?? ''}, ${metadata.rights ?? ''}, ${metadata.attribution ?? ''}, ${checksum},
         ${defaultHiddenForKind(kind) ? 1 : 0}, ${RESERVED}, ${ts}, ${ts}
       FROM campaigns AS campaign
       WHERE campaign.id = ${campaignId}
@@ -836,6 +889,15 @@ export class AttachmentsService implements OnApplicationBootstrap {
         filename,
         mime,
         size,
+        title,
+        caption,
+        alt_text AS altText,
+        creator,
+        source_url AS sourceUrl,
+        license,
+        rights,
+        attribution,
+        checksum_sha256 AS checksumSha256,
         hidden,
         state,
         created_at AS createdAt,

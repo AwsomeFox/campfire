@@ -99,7 +99,10 @@ export class MapsService {
     const attachment = await this.attachments.createGenerated(
       campaignId,
       'map',
-      { filename, mime: MAP_MIME, bytes: Buffer.from(map.svg, 'utf8') },
+      { filename, mime: MAP_MIME, bytes: Buffer.from(map.svg, 'utf8'), metadata: {
+        title: `${map.kind} map`, altText: `${map.kind} battle map`, creator: 'Campfire procedural generator',
+        sourceUrl: '', license: 'Campfire generated', rights: 'Generated locally by Campfire', attribution: 'Generated with Campfire',
+      } },
       user,
       role,
       // Audit records actor/source/seed (issue #409): the actor + role come from the
@@ -246,7 +249,10 @@ export class MapsService {
     const attachment = await this.attachments.createGenerated(
       campaignId,
       'map',
-      { filename, mime, bytes: file.buffer },
+      { filename, mime, bytes: file.buffer, metadata: {
+        title: attribution.title, altText: attribution.title, creator: attribution.author, sourceUrl: attribution.sourceUrl ?? '',
+        license, attribution: `${attribution.author}${license ? ` — ${license}` : ''}`, rights: '',
+      } },
       user,
       role,
       auditDetail,

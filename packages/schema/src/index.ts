@@ -8152,6 +8152,23 @@ export type ScribeRunResult = z.infer<typeof ScribeRunResult>;
 // ---------- attachments (uploaded images: character portraits, campaign maps) ----------
 export const AttachmentKind = z.enum(['portrait', 'map', 'image']);
 
+// Attribution is deliberately optional: ordinary table uploads should remain a
+// one-click operation, while imports and generated assets can record provenance.
+export const AttachmentMetadata = z.object({
+  title: z.string().trim().max(255).default(''),
+  caption: z.string().trim().max(2_000).default(''),
+  altText: z.string().trim().max(1_000).default(''),
+  creator: z.string().trim().max(255).default(''),
+  sourceUrl: z.string().trim().url().refine((v) => /^https?:\/\//i.test(v), 'Must be an http(s) URL').or(z.literal('')).default(''),
+  license: z.string().trim().max(255).default(''),
+  rights: z.string().trim().max(1_000).default(''),
+  attribution: z.string().trim().max(1_000).default(''),
+  checksumSha256: z.string().regex(/^[a-f0-9]{64}$/).nullable().default(null),
+});
+export type AttachmentMetadata = z.infer<typeof AttachmentMetadata>;
+export const AttachmentMetadataPatch = AttachmentMetadata.omit({ checksumSha256: true }).partial().strict();
+export type AttachmentMetadataPatch = z.infer<typeof AttachmentMetadataPatch>;
+
 export const Attachment = z.object({
   id: Id,
   campaignId: Id,
@@ -8160,6 +8177,7 @@ export const Attachment = z.object({
   filename: z.string().max(255), // original client filename, display only
   mime: z.string().max(80),
   size: z.number().int().nonnegative(), // bytes
+  ...AttachmentMetadata.shape,
   // Per-attachment visibility / staged reveal (issue #97). `hidden` gates the file
   // bytes AND the row itself: a hidden attachment is DM-only — non-DM members get a
   // 404 on GET /attachments/:id/file and never see it in the campaign list, so an

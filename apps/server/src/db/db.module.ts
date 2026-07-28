@@ -4107,7 +4107,25 @@ function migrateCharacterConditionInstances1047(sqlite: Database.Database): void
   sqlite.exec('ALTER TABLE characters ADD COLUMN condition_instances TEXT');
 }
 
+/** Issue #735: current attachment provenance fields. Additive only; no legacy format shim. */
+function migrateAttachmentMetadata735(sqlite: Database.Database): void {
+  const exists = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='attachments'").get();
+  if (!exists) return;
+  const columns = new Set((sqlite.prepare('PRAGMA table_info(attachments)').all() as Array<{ name: string }>).map((c) => c.name));
+  const additions: Array<[string, string]> = [
+    ['title', "TEXT NOT NULL DEFAULT ''"], ['caption', "TEXT NOT NULL DEFAULT ''"], ['alt_text', "TEXT NOT NULL DEFAULT ''"],
+    ['creator', "TEXT NOT NULL DEFAULT ''"], ['source_url', "TEXT NOT NULL DEFAULT ''"], ['license', "TEXT NOT NULL DEFAULT ''"],
+    ['rights', "TEXT NOT NULL DEFAULT ''"], ['attribution', "TEXT NOT NULL DEFAULT ''"], ['checksum_sha256', 'TEXT'],
+  ];
+  for (const [name, definition] of additions) if (!columns.has(name)) sqlite.exec(`ALTER TABLE attachments ADD COLUMN ${name} ${definition}`);
+  sqlite.exec(`CREATE TABLE IF NOT EXISTS attachment_metadata_revisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, attachment_id INTEGER NOT NULL REFERENCES attachments(id) ON DELETE CASCADE,
+    actor_user_id TEXT NOT NULL, before_json TEXT NOT NULL, after_json TEXT NOT NULL, created_at TEXT NOT NULL
+  ); CREATE INDEX IF NOT EXISTS idx_attachment_metadata_revisions_attachment ON attachment_metadata_revisions(attachment_id, id);`);
+}
+
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
+  { name: '0137_attachment_metadata_735', run: migrateAttachmentMetadata735 },
   { name: '0001_users_oidc', run: migrateUsersTableForOidc },
   { name: '0002_campaigns_rule_system', run: migrateCampaignsTableForRuleSystem },
   { name: '0003_users_accent_color', run: migrateUsersTableForAccentColor },
