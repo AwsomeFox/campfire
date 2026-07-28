@@ -26,10 +26,8 @@ import { makeTempDataDir } from './fixtures';
  */
 describe('AiDmService proactive-watcher rehydration on boot (#1587)', () => {
   let dataDir: string;
-  let orm: DrizzleDb | null = null;
 
   afterEach(() => {
-    orm = null;
     if (dataDir) fs.rmSync(dataDir, { recursive: true, force: true });
   });
 
@@ -67,7 +65,6 @@ describe('AiDmService proactive-watcher rehydration on boot (#1587)', () => {
   it('an enabled seat gets a live watcher again after a simulated restart', async () => {
     dataDir = makeTempDataDir();
     const { orm: db } = openDatabase(dataDir);
-    orm = db;
     const ts = '2026-07-27T00:00:00.000Z';
     db.insert(campaigns).values({ name: 'Proactive Table', createdAt: ts, updatedAt: ts }).run();
     const [campaign] = db.select().from(campaigns).all();
@@ -98,7 +95,6 @@ describe('AiDmService proactive-watcher rehydration on boot (#1587)', () => {
   it('a disabled seat is ANNOUNCED (stops a stale watcher), not silently skipped', async () => {
     dataDir = makeTempDataDir();
     const { orm: db } = openDatabase(dataDir);
-    orm = db;
     const ts = '2026-07-27T00:00:00.000Z';
     db.insert(campaigns).values({ name: 'Disabled Proactive Table', createdAt: ts, updatedAt: ts }).run();
     const [campaign] = db.select().from(campaigns).all();
@@ -145,7 +141,6 @@ describe('AiDmService proactive-watcher rehydration on boot (#1587)', () => {
   it('rehydration is a no-op when no campaign has ever configured a seat', async () => {
     dataDir = makeTempDataDir();
     const { orm: db } = openDatabase(dataDir);
-    orm = db;
     const { aiDm, proactive } = makeServices(db);
     await expect(aiDm.onApplicationBootstrap()).resolves.toBeUndefined();
     expect(proactive.isWatching(1)).toBe(false);
