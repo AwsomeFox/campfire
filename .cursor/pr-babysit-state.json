@@ -2,12 +2,14 @@
   "tracked": [
     {
       "pr": 1619,
-      "status": "babysitting",
+      "status": "merged",
       "url": "https://github.com/AwsomeFox/campfire/pull/1619",
       "headBranch": "fix/issue-729",
       "baseBranch": "main",
-      "updatedAt": "2026-07-28T02:36:28Z",
-      "notes": "Addressed Copilot+Devin review threads in 8c8006d0 (BOOTSTRAP_SQL placement, bounded publicHealth, chunked checksum, relink ID validation, cwd-independent unit path). All 5 threads resolved. Waiting on CI for head 8c8006d0."
+      "updatedAt": "2026-07-28T03:10:31Z",
+      "notes": "Merged via squash after review fixes (BOOTSTRAP_SQL placement, bounded publicHealth, chunked checksum, relink ID validation, cwd-independent unit path) and green CI run 30323587584. All review threads resolved.",
+      "mergedAt": "2026-07-28T03:10:21Z",
+      "mergeCommit": "627859d42e72ca1a39f24dd62dfff01236fb0d08"
     }
   ]
 }
