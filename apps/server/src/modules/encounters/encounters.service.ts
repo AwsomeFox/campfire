@@ -19,7 +19,7 @@ import { RollsService } from '../rolls/rolls.service';
 import { AuditService } from '../audit/audit.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
 import { RevisionsService } from '../revisions/revisions.service';
-import { auditActor } from '../../common/user.types';
+import { auditActor, roleAtLeast } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import {
   advanceEncounterTurn,
@@ -1688,12 +1688,13 @@ export class EncountersService {
   /**
    * Broadcast a transient battle-map ping (issue #238). Unlike fog/AoE this persists nothing —
    * it rides the campaign event stream as a one-shot `encounter.ping` signal every open client
-   * renders briefly and lets fade. Any writing member may drop one (a live table gesture, not
-   * DM-gated); the caller-side controller asserts membership. Hidden encounters are
-   * non-enumerating 404s for non-DMs (issue #869 — parity with roster/events/difficulty).
-   * The ping location is a coordinate the sender chose, so there is no secret to leak
-   * (contrast the id-only updated/deleted signals). Returns nothing meaningful — the effect
-   * is the emitted event.
+   * renders briefly and lets fade. Any DM or player (not viewer, issue #1636) may drop one (a
+   * live table gesture); the caller-side controller only asserts membership, not caller role
+   * (`requireMember`, not `requireRole`) — see the role-floor check below for why. Hidden
+   * encounters are non-enumerating 404s for non-DMs (issue #869 — parity with
+   * roster/events/difficulty). The ping location is a coordinate the sender chose, so there is
+   * no secret to leak (contrast the id-only updated/deleted signals). Returns nothing
+   * meaningful — the effect is the emitted event.
    */
   pingMap(
     encounterId: number,
@@ -1705,6 +1706,16 @@ export class EncountersService {
   ): void {
     if (viewerRole !== undefined && !isVisibleTo({ hidden }, viewerRole)) {
       throw new NotFoundException(`Encounter ${encounterId} not found`);
+    }
+    // Issue #1636: the role floor lives HERE, after the hidden-visibility check above,
+    // not in the controller. If the controller rejected a viewer with requireRole('player')
+    // up front, a viewer probing a HIDDEN encounter would get a 403 instead of the 404
+    // issue #869 requires — leaking that the encounter exists. Placing the floor after the
+    // visibility check keeps hidden encounters a uniform 404 for every non-DM, while a
+    // merely-visible encounter now correctly rejects a viewer instead of letting them
+    // broadcast a ping (the route's own docs already promised "any DM or player").
+    if (viewerRole !== undefined && !roleAtLeast(viewerRole, 'player')) {
+      throw new ForbiddenException('Viewers may not ping the map.');
     }
     // #754: never fan a hidden encounter's ping — which carries map coordinates —
     // onto the shared campaign stream, or both its existence and the ping payload
