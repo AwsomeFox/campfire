@@ -1,0 +1,13 @@
+{
+  "tracked": [
+    {
+      "pr": 1625,
+      "status": "babysitting",
+      "url": "https://github.com/AwsomeFox/campfire/pull/1625",
+      "headBranch": "fix/issue-738",
+      "baseBranch": "main",
+      "updatedAt": "2026-07-28T02:53:51Z",
+      "notes": "Opened PR; MERGEABLE; no review threads yet; CI in progress (run 30324368927)."
+    }
+  ]
+}
