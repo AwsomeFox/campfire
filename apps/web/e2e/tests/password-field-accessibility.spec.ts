@@ -209,11 +209,19 @@ test.describe('password field accessibility (issue #868)', () => {
     );
 
     await page.goto('/reset-password');
+    await page.getByRole('tab', { name: 'Use code' }).click();
     await expectRevealPreservesValueSelectionAndAutocomplete(
       page,
       page.getByLabel('New password', { exact: true }),
       'Show new password',
       'Hide new password',
+      'new-password',
+    );
+    await expectRevealPreservesValueSelectionAndAutocomplete(
+      page,
+      page.getByLabel('Confirm new password', { exact: true }),
+      'Show confirmed new password',
+      'Hide confirmed new password',
       'new-password',
     );
 
