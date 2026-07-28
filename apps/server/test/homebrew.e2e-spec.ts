@@ -30,6 +30,9 @@ describe('campaign homebrew (e2e)', () => {
     const proposal = await request(server).post(`/api/v1/campaigns/${campaignId}/homebrew?proposed=true`).set({ 'x-dev-role': 'player', 'x-dev-user': 'homebrew-player' }).send({ ...body, slug: 'proposed-spark' }); expect(proposal.status).toBe(201); expect(proposal.body.status).toBe('pending');
     const approved = await request(server).post(`/api/v1/proposals/${proposal.body.id}/approve`).set(dm).send({}); expect(approved.status).toBe(201);
     const proposedEntry = await request(server).get(`/api/v1/campaigns/${campaignId}/homebrew`).set(dm); expect(proposedEntry.body.some((entry: { slug: string }) => entry.slug === 'proposed-spark')).toBe(true);
+    const structuredEdit = await request(server).patch(`/api/v1/campaigns/${campaignId}/homebrew/${beta.body.id}`).set(dm).send({ data: { level: 2, school: 'evocation' }, expectedUpdatedAt: beta.body.updatedAt });
+    expect(structuredEdit.status).toBe(200);
+    expect(JSON.parse(structuredEdit.body.dataJson)).toEqual({ level: 2, school: 'evocation' });
     const archived = await request(server).post(`/api/v1/campaigns/${campaignId}/homebrew/${created.body.id}/archive`).set(dm).send({}); expect(archived.status).toBe(201);
     const listed = await request(server).get(`/api/v1/campaigns/${campaignId}/homebrew`).set(dm); expect(listed.body.some((entry: { id: number }) => entry.id === created.body.id)).toBe(false);
   });
@@ -76,5 +79,13 @@ describe('campaign homebrew membership and encounter isolation (e2e)', () => {
     const encounter = await a.post(`/api/v1/campaigns/${ca.body.id}/encounters`).send({ name: 'Fight' });
     expect((await a.post(`/api/v1/encounters/${encounter.body.id}/combatants`).send({ kind: 'monster', ruleEntryId: ea.body.id })).status).toBe(201);
     expect((await a.post(`/api/v1/encounters/${encounter.body.id}/combatants`).send({ kind: 'monster', ruleEntryId: eb.body.id })).status).toBe(400);
+    const itemA = await a.post(`/api/v1/campaigns/${ca.body.id}/homebrew`).send({ slug: 'private-item', name: 'Private Item', type: 'item', body: 'secret-a', data: { rarity: 'rare' }, rightsStatus: 'private_original' });
+    const itemB = await b.post(`/api/v1/campaigns/${cb.body.id}/homebrew`).send({ slug: 'private-item-b', name: 'Private Item B', type: 'item', body: 'secret-b', data: { rarity: 'legendary' }, rightsStatus: 'private_original' });
+    expect(itemA.status).toBe(201); expect(itemB.status).toBe(201);
+    const crossAcquire = await a.post(`/api/v1/campaigns/${ca.body.id}/inventory/from-compendium`).send({ ruleEntryId: itemB.body.id, qty: 1 });
+    expect(crossAcquire.status).toBe(400);
+    const sameAcquire = await a.post(`/api/v1/campaigns/${ca.body.id}/inventory/from-compendium`).send({ ruleEntryId: itemA.body.id, qty: 1 });
+    expect(sameAcquire.status).toBe(201);
+    expect(sameAcquire.body.compendiumSnapshot.body).toBe('secret-a');
   });
 });

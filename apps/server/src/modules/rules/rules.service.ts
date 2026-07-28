@@ -1281,7 +1281,8 @@ export class RulesService implements OnModuleInit {
 
   private normalizedHomebrew(input: unknown) {
     const parsed = HomebrewRuleEntryInput.parse(input);
-    return { ...parsed, dataJson: parsed.data !== undefined ? JSON.stringify(parsed.data) : (parsed.dataJson ?? null) };
+    const { data, ...rest } = parsed;
+    return { ...rest, dataJson: data !== undefined ? JSON.stringify(data) : (parsed.dataJson ?? null) };
   }
 
   async createCampaignHomebrew(campaignId: number, input: unknown, user: RequestUser, auditAction = 'homebrew.create'): Promise<RuleEntry> {
@@ -1304,7 +1305,14 @@ export class RulesService implements OnModuleInit {
     const expected = typeof patch.expectedUpdatedAt === 'string' ? patch.expectedUpdatedAt : undefined; delete patch.expectedUpdatedAt;
     const current = await this.getCampaignHomebrew(campaignId, id, user);
     if (expected && current.updatedAt !== expected) throw new ConflictException('Homebrew entry has changed; reload before saving');
-    const merged = this.normalizedHomebrew({ ...this.homebrewPayload((await this.db.select().from(ruleEntries).where(eq(ruleEntries.id, id)).get())!), ...patch }); const now = nowIso();
+    // homebrewPayload always projects dataJson. If the editor (or a proposal) supplies
+    // structured `data`, drop the stored representation first — HomebrewRuleEntryInput
+    // rejects objects that carry both.
+    const base = this.homebrewPayload((await this.db.select().from(ruleEntries).where(eq(ruleEntries.id, id)).get())!);
+    const mergedInput: Record<string, unknown> = { ...base, ...patch };
+    if (patch.data !== undefined) delete mergedInput.dataJson;
+    if (patch.dataJson !== undefined) delete mergedInput.data;
+    const merged = this.normalizedHomebrew(mergedInput); const now = nowIso();
     const [row] = await this.db.transaction((tx) => {
       const before = tx.select().from(ruleEntries).where(and(eq(ruleEntries.id, id), eq(ruleEntries.campaignId, campaignId))).get(); if (!before) throw new NotFoundException('Homebrew rule entry not found');
       const row = tx.update(ruleEntries).set({ ...merged, updatedAt: now }).where(and(eq(ruleEntries.id, id), eq(ruleEntries.campaignId, campaignId), expected ? eq(ruleEntries.updatedAt, expected) : undefined)).returning().get();
