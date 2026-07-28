@@ -6,8 +6,8 @@
       "url": "https://github.com/AwsomeFox/campfire/pull/1619",
       "headBranch": "fix/issue-729",
       "baseBranch": "main",
-      "updatedAt": "2026-07-28T02:24:00Z",
-      "notes": "Added to tracked on babysitting-820f. MERGEABLE; lint failed on CI run 30322969095; no review threads yet."
+      "updatedAt": "2026-07-28T02:24:45Z",
+      "notes": "MERGEABLE; 0 behind main. Fixed check:i18n (useTranslation in DataRepairCard) via 718e1f07 on fix/issue-729. Waiting on CI rerun; no review threads yet."
     }
   ]
 }
