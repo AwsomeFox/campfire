@@ -49,6 +49,54 @@ export type RestRechargeCadence = 'short-rest' | 'long-rest' | 'refocus' | 'dawn
 export type RestKind = 'short' | 'long';
 
 /**
+ * The current party-recovery wire format.  `custom` is intentionally narrow: it
+ * only restores resource pools the DM names.  It never guesses at HP, slots, or
+ * conditions, which are rule-specific state rather than generic "reset" data.
+ */
+export const PartyRecoveryRequest = z.object({
+  kind: z.enum(['short', 'long', 'custom']),
+  characterIds: z.array(z.number().int().positive()).min(1),
+  perCharacter: z.record(z.string(), z.object({ spendHitDice: z.number().int().min(0).optional(), hitDie: z.number().int().min(2).max(100).optional() })).default({}),
+  /** Resource keys to restore for custom recovery; cadence is never inferred. */
+  customResourceKeys: z.array(z.string().min(1).max(80)).default([]),
+});
+export type PartyRecoveryRequest = z.infer<typeof PartyRecoveryRequest>;
+
+/** Apply adds the preview token and a client-generated idempotency key. */
+export const PartyRecoveryApplyRequest = z.object({
+  previewToken: z.string().min(1).max(128),
+  idempotencyKey: z.string().min(8).max(200),
+  acknowledgeRunningCombatants: z.boolean().default(false),
+});
+export type PartyRecoveryApplyRequest = z.infer<typeof PartyRecoveryApplyRequest>;
+
+export const PartyRecoveryUndoRequest = z.object({ idempotencyKey: z.string().min(8).max(200) });
+export type PartyRecoveryUndoRequest = z.infer<typeof PartyRecoveryUndoRequest>;
+
+/** Exact, UI-friendly before/after deltas.  Stored plans use the same shape. */
+export interface PartyRecoveryCharacterDelta {
+  characterId: number;
+  name: string;
+  hp: { before: number; after: number; tempBefore: number; tempAfter: number };
+  deathState: { before: RestCharacterState['deathState']; after: RestCharacterState['deathState'] };
+  spellSlots: Record<string, { before: number; after: number }>;
+  resources: Record<string, { before: number; after: number }>;
+  conditionsCleared: string[];
+  conditionsKept: string[];
+  hitDiceSpent: number;
+  hitDiceRolls: number[];
+}
+
+export interface PartyRecoveryPreview {
+  previewToken: string;
+  request: PartyRecoveryRequest;
+  ruleSystem: string;
+  characters: PartyRecoveryCharacterDelta[];
+  failures: RestPlanFailure[];
+  runningCombatantCharacterIds: number[];
+}
+
+/**
  * Does a rest of this kind refill a resource with this cadence?
  *
  * EXHAUSTIVE `Record<RestKind, Record<RestRechargeCadence, boolean>>` on purpose, and not a
@@ -572,6 +620,49 @@ export function planPartyRest(
     else plans.push(result.plan);
   }
   return { kind, ruleSystem: adapter.id, plans, failures };
+}
+
+/**
+ * Plan a deliberately scoped custom recovery.  This is kept beside the short /
+ * long planner so both paths share the resource representation from #422.  A
+ * requested key must be present on the sheet and explicitly selected by the
+ * caller; unknown keys are ignored rather than becoming a mechanism to create
+ * or erase arbitrary sheet data.
+ */
+export function planPartyCustomRecovery(
+  adapter: RestAdapter,
+  characters: readonly RestCharacterState[],
+  resourceKeys: readonly string[],
+): RestPlan {
+  const selected = new Set(resourceKeys);
+  const plans: CharacterRestPlan[] = [];
+  const failures: RestPlanFailure[] = [];
+  for (const character of characters) {
+    if (character.deathState === 'dead') {
+      failures.push({ characterId: character.id, characterName: character.name, error: 'character_dead', detail: `${character.name} is dead and cannot recover.` });
+      continue;
+    }
+    const resourcesAfter: CharacterRestPlan['resourcesAfter'] = {};
+    const resourcesRecovered: string[] = [];
+    for (const [key, resource] of Object.entries(character.resources)) {
+      const next = { ...resource };
+      if (selected.has(key) && resource.used > 0) {
+        next.used = 0;
+        resourcesRecovered.push(key);
+      }
+      resourcesAfter[key] = next;
+    }
+    plans.push({
+      characterId: character.id, characterName: character.name,
+      hpBefore: character.hpCurrent, hpAfter: character.hpCurrent, hpTempAfter: character.hpTemp,
+      deathStateAfter: character.deathState, deathSaveSuccessesAfter: character.deathSaveSuccesses,
+      deathSaveFailuresAfter: character.deathSaveFailures, spellSlotsAfter: { ...character.spellSlots },
+      resourcesAfter, conditionsAfter: [...character.conditions], conditionsCleared: [],
+      conditionsKept: [...character.conditions], resourcesRecovered, spellSlotLevelsRecovered: [],
+      hitDiceSpent: 0, hitDiceRolls: [], hitDiceRecovered: 0,
+    });
+  }
+  return { kind: 'short', ruleSystem: adapter.id, plans, failures };
 }
 
 /**

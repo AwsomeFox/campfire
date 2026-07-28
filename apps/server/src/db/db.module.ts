@@ -3054,6 +3054,20 @@ function migrateCampaignPurgeTombstones(sqlite: Database.Database): void {
  * it is the canonical sequence in which an old-shaped DB is upgraded (mirrors the
  * historical call order in openDatabase). Append new migrations to the END only.
  */
+function migratePartyRestBatches759(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS party_rest_batches (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, campaign_id INTEGER NOT NULL,
+      actor_user_id TEXT NOT NULL, preview_token TEXT NOT NULL UNIQUE,
+      request_fingerprint TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'previewed',
+      idempotency_key TEXT, before_json TEXT NOT NULL DEFAULT '{}', plan_json TEXT NOT NULL DEFAULT '{}',
+      after_json TEXT NOT NULL DEFAULT '{}', result_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL,
+      applied_at TEXT, undone_at TEXT, UNIQUE(campaign_id, idempotency_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_party_rest_batches_campaign ON party_rest_batches(campaign_id, created_at DESC);
+  `);
+}
+
 function _migrateImportJobsTable(sqlite: Database.Database): void {
   sqlite.exec(`CREATE TABLE IF NOT EXISTS import_jobs (id TEXT PRIMARY KEY, source TEXT NOT NULL, source_hash TEXT NOT NULL DEFAULT '', input TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL DEFAULT 'queued', progress TEXT NOT NULL DEFAULT '{}', cursor TEXT, actor_id TEXT NOT NULL DEFAULT '', started_at TEXT, updated_at TEXT NOT NULL, completed_at TEXT, outcome TEXT, errors TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL); CREATE INDEX IF NOT EXISTS idx_import_jobs_status ON import_jobs(status); CREATE INDEX IF NOT EXISTS idx_import_jobs_created_at ON import_jobs(created_at);`);
 }
@@ -4541,6 +4555,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // 0141: main claimed 0140 for inbox sweep (#1644) after this branch's earlier 0140.
   { name: '0141_campaign_library_management_742', run: migrateCampaignLibraryManagement742 },
   { name: '0142_encounter_token_batches_761', run: migrateEncounterTokenBatches761 },
+  { name: '0143_party_rest_batches_759', run: migratePartyRestBatches759 },
 ];
 
 /**

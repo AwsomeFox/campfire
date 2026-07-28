@@ -1,4 +1,5 @@
 import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { randomUUID, createHash } from 'node:crypto';
 import { and, desc, eq, ne, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import {
@@ -28,6 +29,8 @@ import {
   // database — the service plans, validates the WHOLE party, then writes once.
   describeRestForLog,
   planPartyRest,
+  planPartyCustomRecovery,
+  type PartyRecoveryRequest,
   type RestAdapter,
   type RestCharacterState,
   type RestConditionState,
@@ -59,7 +62,7 @@ import type {
 import { rollDice } from '../../common/dice';
 import { RollsService } from '../rolls/rolls.service';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { auditLog, campaigns, characters, checkRequests, combatants, encounters } from '../../db/schema';
+import { auditLog, campaigns, characters, checkRequests, combatants, encounters, partyRestBatches } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { fromJsonText, toJsonText } from '../../common/json';
@@ -1800,6 +1803,37 @@ export class CharactersService {
         logLine: describeRestForLog(p, kind),
       })),
     };
+  }
+
+  /**
+   * DM-facing, persisted preview for the party-rest panel.  Dice are rolled at
+   * preview time and the exact plan is stored, preventing an apply retry from
+   * silently rolling a second, different short rest.
+   */
+  async previewPartyRecovery(campaignId: number, request: PartyRecoveryRequest, user: RequestUser, role: Role) {
+    if (!roleAtLeast(role, 'dm')) throw new ForbiddenException('Only a DM can rest the party.');
+    const adapter = (await this.adapterForCampaign(campaignId)) as unknown as RestAdapter;
+    const rows = await this.db.select().from(characters).where(and(eq(characters.campaignId, campaignId), notDeleted(characters.deletedAt)));
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    const missing = request.characterIds.filter((id) => !byId.has(id));
+    if (missing.length) throw new NotFoundException(`No character ${missing.join(', ')} in campaign ${campaignId}.`);
+    const targets = request.characterIds.map((id) => byId.get(id)!);
+    const states: RestCharacterState[] = targets.map((row) => ({
+      id: row.id, name: row.name, level: row.level, hpCurrent: row.hpCurrent, hpMax: row.hpMax, hpTemp: row.hpTemp,
+      deathState: row.deathState as RestCharacterState['deathState'], deathSaveSuccesses: row.deathSaveSuccesses,
+      deathSaveFailures: row.deathSaveFailures, conditions: fromJsonText<string[]>(row.conditions, []),
+      stats: fromJsonText<Record<string, number>>(row.stats, {}), spellSlots: fromJsonText<Record<string, SpellSlotLevel>>(row.spellSlots, {}),
+      resources: fromJsonText<Record<string, CharacterResource>>(row.resources, {}),
+    }));
+    const options = Object.fromEntries(Object.entries(request.perCharacter).map(([id, value]) => [Number(id), value]));
+    const plan = request.kind === 'custom'
+      ? planPartyCustomRecovery(adapter, states, request.customResourceKeys)
+      : planPartyRest(adapter, states, request.kind, options, (sides) => rollDice(`1d${sides}`).total);
+    const previewToken = randomUUID();
+    const before = targets.map((row) => ({ id: row.id, updatedAt: row.updatedAt, hpCurrent: row.hpCurrent, hpTemp: row.hpTemp, deathState: row.deathState, deathSaveSuccesses: row.deathSaveSuccesses, deathSaveFailures: row.deathSaveFailures, conditions: row.conditions, spellSlots: row.spellSlots, resources: row.resources }));
+    const fingerprint = createHash('sha256').update(JSON.stringify(request)).digest('hex');
+    await this.db.insert(partyRestBatches).values({ campaignId, actorUserId: user.id, previewToken, requestFingerprint: fingerprint, status: 'previewed', beforeJson: toJsonText(before), planJson: toJsonText(plan), createdAt: nowIso() });
+    return { previewToken, request, ruleSystem: plan.ruleSystem, failures: plan.failures, characters: plan.plans, runningCombatantCharacterIds: [] };
   }
 
   /**
