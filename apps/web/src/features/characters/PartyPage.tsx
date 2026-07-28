@@ -185,7 +185,7 @@ export default function PartyPage() {
           }}
         />
       )}
-      {canDmWrite && resting && <PartyRestPanel campaignId={id} characters={characters} onClose={() => setResting(false)} onApplied={() => { setResting(false); void load(); }} />}
+      {canDmWrite && resting && <PartyRestPanel campaignId={id} characters={characters} onClose={() => setResting(false)} onApplied={() => { void load(); }} />}
 
       {loading ? (
         <Card>
