@@ -28,7 +28,7 @@ import { DetailPageWayfinding } from '../../components/DetailPageWayfinding';
 import { CharacterSheetNav } from './CharacterSheetNav';
 import { CHARACTER_SHEET_SECTION_LABEL, characterSheetSectionId } from './characterSheetTabs';
 import { useCharacterSheetTab } from './useCharacterSheetTab';
-import type { Attachment, Character, CharacterAction, CampaignMember, CharacterStatus, SkillRank } from '@campfire/schema';
+import type { Attachment, Character, CharacterAction, CampaignMember, CharacterStatus, SkillRank, AdapterResourceDef } from '@campfire/schema';
 import { abilityLabelForAdapter, xpProgressForCharacter, ruleSystemAdapter, type RuleSystemAdapter } from '@campfire/schema';
 import { CHARACTER_STATUSES, STATUS_LABEL, StatusTag } from './status';
 import { api, API, ApiError } from '../../lib/api';
@@ -120,6 +120,8 @@ import {
   skillProficiencyLabel,
 } from './characterSheetA11y';
 import { useFormattingLocale } from '../../lib/format';
+import { useTranslation } from 'react-i18next';
+import { findSpecialResource, resourceAvailability } from './specialCharacterResource';
 
 export default function CharacterPage() {
   const { campaignId, characterId } = useParams<{ campaignId: string; characterId: string }>();
@@ -252,6 +254,10 @@ export default function CharacterPage() {
   const showSavingThrowEditor = adapter.characterSheet?.supportsSavingThrowEditor ?? true;
   const showSkillEditor = adapter.characterSheet?.supportsSkillEditor ?? true;
   const showSpellSlotEditor = adapter.characterSheet?.supportsSpellSlotEditor ?? true;
+  // Issue #1642: whichever of the two special counted resources THIS campaign's adapter
+  // actually declares (5e `inspiration`, PF2e `heroPoints`, or neither) — never assumed.
+  // A system declaring neither renders nothing here; see specialCharacterResource.ts.
+  const specialResource = findSpecialResource(adapter);
 
   async function savePortrait(attachment: Attachment) {
     setActionError(null);
@@ -542,6 +548,16 @@ export default function CharacterPage() {
             <p className="text-xs text-secondary">{adapter.characterSheet.genericModeDescription}</p>
           </Card>
         ) : null}
+
+        {specialResource && (
+          <section
+            id={characterSheetSectionId('resources')}
+            aria-label={specialResource.name}
+            className="scroll-mt-24"
+          >
+            <AdapterResourceCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} def={specialResource} />
+          </section>
+        )}
       </div>
 
       <div
@@ -2000,6 +2016,86 @@ function SpellSlotsCard({ character, canEdit, onChange, onError }: SheetCardProp
           })}
         </div>
       )}
+    </Card>
+  );
+}
+
+/**
+ * Issue #1642 — surfaces ONE adapter-declared special counted resource (5e inspiration or
+ * PF2e hero points; `def` is whichever one `CharacterPage` found, or the section isn't
+ * rendered at all). Deliberately mirrors `SpellSlotsCard`'s pip UI (issue #422's own
+ * "togglable or counted resource" language) rather than inventing a second widget style —
+ * for `defaultMax: 1` (inspiration) a single pip reads as a toggle; for `defaultMax: 3`
+ * (hero points) it reads as a counted pool. Both are the SAME component, driven entirely by
+ * `def.name` / `def.defaultMax` / `def.recharge` — no 5e- or PF2e-shaped branch anywhere in
+ * here, so a third adapter that declares a similarly-shaped `special`-recharge resource
+ * would render correctly with no code change.
+ */
+function AdapterResourceCard({
+  character,
+  canEdit,
+  onChange,
+  onError,
+  def,
+}: SheetCardProps & { def: AdapterResourceDef }) {
+  const { t } = useTranslation();
+  const [busy, setBusy] = useState(false);
+
+  const { max, used, available } = resourceAvailability(def, character);
+
+  async function adjust(delta: number) {
+    if (busy) return;
+    setBusy(true);
+    onError(null);
+    try {
+      // `max`/`name`/`recharge` ride along on every call (not just the first touch):
+      // the adjustResource service only applies them when the resource doesn't already
+      // exist on this character, but sending them unconditionally means a sheet that
+      // opens before this resource was ever touched still creates it with the
+      // ADAPTER'S max, not the service's own hardcoded default (see ResourcePatch's
+      // doc comment — an omitted `max` on first touch defaults to 1, which is correct
+      // for inspiration but wrong for hero points).
+      await api.post(`${API}/characters/${character.id}/resources`, {
+        key: def.key,
+        delta,
+        max: def.defaultMax ?? 1,
+        name: def.name,
+        recharge: def.recharge,
+      });
+      onChange();
+    } catch (err) {
+      onError(err instanceof ApiError ? err.message : t('characters.resources.updateError', { name: def.name }));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card className="space-y-2.5">
+      <p className="card-kicker mb-0">{def.name}</p>
+      <div className="flex items-center gap-2.5 flex-wrap">
+        <span
+          className="tracking-[3px] text-[15px] leading-none"
+          aria-label={t('characters.resources.available', { available, max, name: def.name })}
+        >
+          {Array.from({ length: max }, (_, i) => (
+            <span key={i} style={{ color: i < available ? 'var(--color-accent-300)' : 'var(--color-text-disabled)' }}>
+              {i < available ? '●' : '○'}
+            </span>
+          ))}
+        </span>
+        <span className="text-[11px] text-secondary">{t('characters.resources.count', { available, max })}</span>
+        {canEdit && (
+          <span className="inline-flex gap-1 ml-auto">
+            <Btn ghost className="!min-h-0 !py-1 text-xs" disabled={busy || available === 0} onClick={() => void adjust(1)}>
+              {t('characters.resources.spend')}
+            </Btn>
+            <Btn ghost className="!min-h-0 !py-1 text-xs" disabled={busy || used === 0} onClick={() => void adjust(-1)}>
+              {t('characters.resources.restore')}
+            </Btn>
+          </span>
+        )}
+      </div>
     </Card>
   );
 }
