@@ -703,7 +703,10 @@ export class EncountersController {
   @HttpCode(200)
   async resolveAction(@Param('id', ParseIntPipe) id: number, @Body() body: ActionResolveRequestDto, @CurrentUser() user: RequestUser) {
     const row = await this.encounters.getRowOrThrow(id);
-    const role = await this.access.requireMember(user, row.campaignId, { write: true });
+    // Issue #1450: `requireMember(..., { write: true })` only asserts the CAMPAIGN is
+    // writable, not that the CALLER has write authority — it returns a viewer's role
+    // unchanged. This route writes HP/conditions/effects, so it needs requireRole('player').
+    const role = await this.access.requireRole(user, row.campaignId, 'player');
     return this.actions.resolve(id, body, user, role);
   }
 
@@ -720,7 +723,8 @@ export class EncountersController {
   @HttpCode(200)
   async applyAction(@Param('id', ParseIntPipe) id: number, @Body() body: ActionResolutionDto, @CurrentUser() user: RequestUser) {
     const row = await this.encounters.getRowOrThrow(id);
-    const role = await this.access.requireMember(user, row.campaignId, { write: true });
+    // Issue #1450: see resolveAction — write:true does not assert caller authority.
+    const role = await this.access.requireRole(user, row.campaignId, 'player');
     return this.actions.apply(id, body, user, role);
   }
 
@@ -736,7 +740,8 @@ export class EncountersController {
   @HttpCode(200)
   async undoAction(@Param('id', ParseIntPipe) id: number, @Body() body: ActionUndoTokenDto, @CurrentUser() user: RequestUser) {
     const row = await this.encounters.getRowOrThrow(id);
-    const role = await this.access.requireMember(user, row.campaignId, { write: true });
+    // Issue #1450: see resolveAction — write:true does not assert caller authority.
+    const role = await this.access.requireRole(user, row.campaignId, 'player');
     return this.actions.undo(id, body, user, role);
   }
 }

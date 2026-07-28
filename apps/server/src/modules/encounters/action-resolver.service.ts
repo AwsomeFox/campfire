@@ -53,7 +53,7 @@ import { fromJsonText, toJsonText } from '../../common/json';
 import { conditionWriteSetFromNames, readConditionInstances, sheetConditionWriteSetFromNames } from '../../common/conditions';
 import { nowIso } from '../../common/time';
 import { rollDice } from '../../common/dice';
-import { auditActor } from '../../common/user.types';
+import { auditActor, roleAtLeast } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import {
   applyCombatantHp,
@@ -384,6 +384,15 @@ export class ActionResolverService {
   /** Determine the apply policy + whether THIS caller may commit, from campaign settings + role. */
   private policyFor(campaignId: number, actor: typeof combatants.$inferSelect, user: RequestUser, role: Role): { policy: ActionApplyPolicy; canApply: boolean } {
     if (role === 'dm') return { policy: 'automatic', canApply: true };
+    // Issue #1450 defense in depth: this service must be safe regardless of how it is
+    // called (REST route or MCP tool) or what upstream gate ran, since both call sites
+    // resolve the caller's role from the SAME `requireMember(..., { write: true })`-style
+    // helper that a viewer also passes. A viewer owns nothing to act with under normal
+    // play, but must never be treated as authorized to apply consequences even if some
+    // future caller forgets the role gate.
+    if (!roleAtLeast(role, 'player')) {
+      throw new ForbiddenException('Viewers may not resolve or apply combat actions.');
+    }
     // Non-DM: must own the actor character (enforced by the caller before this point).
     const c = this.db
       .select({ dmControlsTurns: campaigns.dmControlsTurns, requireDmTurnConfirmation: campaigns.requireDmTurnConfirmation })
@@ -1050,6 +1059,13 @@ export class ActionResolverService {
     if (token.encounterId !== encounterId) throw new BadRequestException('Undo token is for a different encounter.');
     const actor = this.combatantRowOrThrow(encounterId, token.actorCombatantId);
     if (role !== 'dm') {
+      // Issue #1450 defense in depth: undo() never routes through policyFor, so it needs
+      // its own role floor. Ownership alone is not enough — a member demoted from player
+      // to viewer keeps `characters.ownerUserId`, so the ownership check below would
+      // otherwise still pass for them.
+      if (!roleAtLeast(role, 'player')) {
+        throw new ForbiddenException('Viewers may not undo combat actions.');
+      }
       if (actor.kind !== 'character' || !this.isCharacterOwnedBy(actor, user)) {
         throw new ForbiddenException('Only the DM may undo a monster/NPC action.');
       }
