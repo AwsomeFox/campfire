@@ -5,6 +5,7 @@ import { DB, type DrizzleDb } from '../src/db/db.module';
 import { inboxSweepItems, inboxSweepJobs } from '../src/db/schema';
 import { nowIso } from '../src/common/time';
 import { AiProviderConfigService } from '../src/modules/ai-provider-config/ai-provider-config.service';
+import type { AiProviderConfig } from '../src/modules/ai-dm/providers';
 import {
   INBOX_SWEEP_CLASSIFIER,
   NoProviderConfiguredError,
@@ -30,12 +31,16 @@ const viewer = { 'x-dev-role': 'viewer', 'x-dev-user': 'sweep-viewer' };
 
 class ScriptedClassifier implements InboxSweepClassifier {
   script = new Map<string, InboxSweepClassification>();
-  calls: Array<{ capture: InboxSweepCapture; context: InboxSweepContext }> = [];
+  calls: Array<{ capture: InboxSweepCapture; context: InboxSweepContext; config?: AiProviderConfig | null }> = [];
   noProvider = false;
   beforeReturn: (() => Promise<void>) | null = null;
 
-  async classify(capture: InboxSweepCapture, context: InboxSweepContext): Promise<InboxSweepClassification> {
-    this.calls.push({ capture, context });
+  async classify(
+    capture: InboxSweepCapture,
+    context: InboxSweepContext,
+    config?: AiProviderConfig | null,
+  ): Promise<InboxSweepClassification> {
+    this.calls.push({ capture, context, config });
     if (this.noProvider) throw new NoProviderConfiguredError();
     if (this.beforeReturn) await this.beforeReturn();
     const scripted = this.script.get(capture.body);
@@ -228,6 +233,52 @@ describe('inbox sweep (e2e)', () => {
     expect(npcProposals).toHaveLength(1);
   });
 
+  it('does not commit a proposal when the inbox item changes while classification is in flight', async () => {
+    const campaignId = await newCampaign('Sweep Stale Capture');
+    const noteId = await submitInbox(campaignId, 'Add a quest from the original body.');
+    const current = await request(server).get(`/api/v1/notes/${noteId}`).set(player);
+    expect(current.status).toBe(200);
+
+    classifier.script.set('Add a quest from the original body.', {
+      action: 'create',
+      entityType: 'quest',
+      targetId: null,
+      fields: { title: 'Original Quest' },
+      reason: 'original capture looked actionable',
+    });
+    classifier.beforeReturn = async () => {
+      const update = await request(server)
+        .patch(`/api/v1/notes/${noteId}`)
+        .set(player)
+        .send({ body: 'Changed while the model was thinking.', expectedUpdatedAt: current.body.updatedAt });
+      expect(update.status).toBe(200);
+    };
+
+    const res = await request(server).post(`/api/v1/campaigns/${campaignId}/inbox/sweep`).set(dm);
+    expect(res.status).toBe(201);
+    expect(res.body.job.itemsProposed).toBe(0);
+    expect(res.body.job.itemsErrored).toBe(1);
+    expect(res.body.items[0]).toMatchObject({
+      noteId,
+      outcome: 'errored',
+      proposalId: null,
+    });
+    expect(res.body.items[0].reason).toContain('inbox item changed or was resolved');
+
+    const proposals = await request(server).get(`/api/v1/campaigns/${campaignId}/proposals?status=pending`).set(dm);
+    expect(proposals.status).toBe(200);
+    expect(proposals.body).toEqual([]);
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const ledger = await db.select().from(inboxSweepItems).where(eq(inboxSweepItems.noteId, noteId));
+    expect(ledger).toHaveLength(0);
+
+    const inbox = await request(server).get(`/api/v1/campaigns/${campaignId}/inbox`).set(dm);
+    const stillOpen = inbox.body.items.find((i: { id: number; body: string }) => i.id === noteId);
+    expect(stillOpen).toBeDefined();
+    expect(stillOpen.body).toBe('Changed while the model was thinking.');
+  });
+
   it('does not 500 when two sweeps race on the same dismiss/skip item', async () => {
     const campaignId = await newCampaign('Sweep Concurrent Dismiss');
     const noteId = await submitInbox(campaignId, 'Just a joke about the tavern cat — no canon change.');
@@ -275,14 +326,14 @@ describe('inbox sweep (e2e)', () => {
     const campaignId = await newCampaign('Sweep External Consent');
     const noteId = await submitInbox(campaignId, 'Please add a quest from a non-consenting author.');
     const configs = ctx.app.get(AiProviderConfigService);
-    const spy = jest.spyOn(configs, 'getEffectiveView').mockResolvedValue({
-      configured: true,
+    const providerConfig: AiProviderConfig = {
       providerType: 'mock',
       model: 'mock',
-      source: 'campaign',
-      credentialSource: 'stored',
-      ready: true,
-    });
+      params: {},
+    };
+    const spy = jest
+      .spyOn(configs, 'resolveEffectiveConfigWithEndpointScope')
+      .mockResolvedValue({ config: providerConfig, endpointScope: 'campaign' });
 
     try {
       const res = await request(server).post(`/api/v1/campaigns/${campaignId}/inbox/sweep`).set(dm);
@@ -307,6 +358,66 @@ describe('inbox sweep (e2e)', () => {
       const ledger = await db.select().from(inboxSweepItems).where(eq(inboxSweepItems.noteId, noteId));
       expect(ledger).toHaveLength(0);
     } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('rechecks external AI consent against the provider config before each capture is classified', async () => {
+    const campaignId = await newCampaign('Sweep Per-Item Consent Gate');
+    const externalNoteId = await submitInbox(campaignId, 'This later item should be withheld after egress changes.');
+    const localNoteId = await submitInbox(campaignId, 'This first item is allowed while the endpoint is declared local.');
+    classifier.script.set('This first item is allowed while the endpoint is declared local.', {
+      action: 'dismiss',
+      entityType: null,
+      targetId: null,
+      fields: {},
+      reason: 'no canon change needed',
+    });
+    classifier.script.set('This later item should be withheld after egress changes.', {
+      action: 'dismiss',
+      entityType: null,
+      targetId: null,
+      fields: {},
+      reason: 'would be classified only if the stale local gate were reused',
+    });
+
+    const configs = ctx.app.get(AiProviderConfigService);
+    const providerConfig: AiProviderConfig = {
+      providerType: 'mock',
+      model: 'mock',
+      params: {},
+    };
+    const spy = jest
+      .spyOn(configs, 'resolveEffectiveConfigWithEndpointScope')
+      .mockResolvedValue({ config: providerConfig, endpointScope: 'campaign' });
+    const priorLocalFlag = process.env.AI_PROVIDER_ENDPOINT_IS_LOCAL;
+    process.env.AI_PROVIDER_ENDPOINT_IS_LOCAL = 'true';
+    classifier.beforeReturn = async () => {
+      process.env.AI_PROVIDER_ENDPOINT_IS_LOCAL = 'false';
+    };
+
+    try {
+      const res = await request(server).post(`/api/v1/campaigns/${campaignId}/inbox/sweep`).set(dm);
+      expect(res.status).toBe(201);
+      expect(res.body.job.itemsSkipped).toBe(1);
+      expect(res.body.job.itemsErrored).toBe(1);
+      expect(classifier.calls.map((call) => call.capture.body)).toEqual([
+        'This first item is allowed while the endpoint is declared local.',
+      ]);
+      expect(classifier.calls[0].config).toBe(providerConfig);
+      expect(res.body.items).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ noteId: localNoteId, outcome: 'skipped' }),
+          expect.objectContaining({
+            noteId: externalNoteId,
+            outcome: 'errored',
+            reason: expect.stringContaining('withheld pending author consent'),
+          }),
+        ]),
+      );
+    } finally {
+      if (priorLocalFlag === undefined) delete process.env.AI_PROVIDER_ENDPOINT_IS_LOCAL;
+      else process.env.AI_PROVIDER_ENDPOINT_IS_LOCAL = priorLocalFlag;
       spy.mockRestore();
     }
   });

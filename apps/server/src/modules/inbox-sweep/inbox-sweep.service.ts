@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, isNull } from 'drizzle-orm';
 import type { AiExternalContentPolicy, InboxSweepEntityType, InboxSweepItemResult, InboxSweepJob, InboxSweepOutcome, InboxSweepResult, Role } from '@campfire/schema';
 import {
   CharacterCreate,
@@ -13,13 +13,14 @@ import {
 } from '@campfire/schema';
 import type { z } from 'zod';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { campaignMembers, campaigns, inboxSweepItems, inboxSweepJobs } from '../../db/schema';
+import { campaignMembers, campaigns, inboxSweepItems, inboxSweepJobs, notes as notesTable } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { auditActor, type RequestUser } from '../../common/user.types';
 import { NotesService } from '../notes/notes.service';
 import { ProposalRecordsService } from '../proposals/proposal-records.service';
 import { CampaignsService } from '../campaigns/campaigns.service';
 import { AiProviderConfigService } from '../ai-provider-config/ai-provider-config.service';
+import type { AiProviderConfig } from '../ai-dm/providers';
 import {
   INBOX_SWEEP_CLASSIFIER,
   NoProviderConfiguredError,
@@ -52,7 +53,15 @@ function isUniqueConstraintError(err: unknown): boolean {
   return /UNIQUE constraint failed/i.test(message);
 }
 
+class StaleInboxSweepItemError extends Error {
+  constructor() {
+    super('inbox item changed or was resolved before the proposal could be filed');
+    this.name = 'StaleInboxSweepItemError';
+  }
+}
+
 type InboxSweepEgress = 'external' | 'local';
+type InboxSweepTx = Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
 
 interface ExternalAiGate {
   egress: InboxSweepEgress;
@@ -173,8 +182,6 @@ export class InboxSweepService {
       locations: (summary?.locations ?? []).map((l) => ({ id: l.id, name: l.name })),
       characters: (summary?.characters ?? []).map((c) => ({ id: c.id, name: c.name })),
     };
-    const externalAiGate = await this.externalAiGate(campaignId);
-
     const results: InboxSweepItemResult[] = [];
     let proposed = 0;
     let skipped = 0;
@@ -208,6 +215,8 @@ export class InboxSweepService {
         continue;
       }
 
+      const { config } = await this.providerConfig.resolveEffectiveConfigWithEndpointScope(campaignId);
+      const externalAiGate = await this.externalAiGate(campaignId, config);
       const withheldReason = this.externalAiWithheldReason(item, externalAiGate);
       if (withheldReason) {
         errored++;
@@ -224,7 +233,7 @@ export class InboxSweepService {
 
       let classification: InboxSweepClassification;
       try {
-        classification = await this.classifier.classify({ noteId: item.id, body: item.body }, context);
+        classification = await this.classifier.classify({ noteId: item.id, body: item.body }, context, config);
       } catch (err) {
         if (err instanceof NoProviderConfiguredError) {
           // No point classifying the remaining items either — abort the whole run with a
@@ -254,7 +263,16 @@ export class InboxSweepService {
         continue;
       }
 
-      const outcome = await this.applyClassification(campaignId, job.id, item.id, classification, user, role);
+      const outcome = await this.applyClassification(
+        campaignId,
+        job.id,
+        item.id,
+        item.body,
+        item.updatedAt,
+        classification,
+        user,
+        role,
+      );
       results.push(outcome);
       if (outcome.outcome === 'proposed') proposed++;
       else if (outcome.outcome === 'errored') errored++;
@@ -276,6 +294,8 @@ export class InboxSweepService {
     campaignId: number,
     jobId: number,
     noteId: number,
+    originalBody: string,
+    originalUpdatedAt: string,
     classification: InboxSweepClassification,
     user: RequestUser,
     role: Role,
@@ -324,6 +344,7 @@ export class InboxSweepService {
         user,
         role,
         (tx, proposalRow) => {
+          this.assertInboxItemStillCurrent(tx, noteId, originalBody, originalUpdatedAt);
           const reason = classification.reason || `filed as ${classification.action} proposal #${proposalRow.id}`;
           const ts = nowIso();
           tx.insert(inboxSweepItems)
@@ -353,6 +374,16 @@ export class InboxSweepService {
       );
       return { noteId, outcome: 'proposed', entityType, entityId: targetId, proposalId: proposal.id, reason };
     } catch (err) {
+      if (err instanceof StaleInboxSweepItemError) {
+        return {
+          noteId,
+          outcome: 'errored',
+          entityType: null,
+          entityId: null,
+          proposalId: null,
+          reason: `${err.message}; re-run the sweep if it is still open`,
+        };
+      }
       const concurrent = await this.findLedger(campaignId, noteId);
       if (concurrent) {
         const link = this.resolveLinkForPrior(concurrent);
@@ -505,14 +536,38 @@ export class InboxSweepService {
     return row ?? null;
   }
 
+  private assertInboxItemStillCurrent(
+    tx: InboxSweepTx,
+    noteId: number,
+    originalBody: string,
+    originalUpdatedAt: string,
+  ): void {
+    const current = tx
+      .select({ id: notesTable.id })
+      .from(notesTable)
+      .where(
+        and(
+          eq(notesTable.id, noteId),
+          eq(notesTable.kind, 'inbox'),
+          eq(notesTable.resolved, false),
+          eq(notesTable.body, originalBody),
+          eq(notesTable.updatedAt, originalUpdatedAt),
+          isNull(notesTable.deletedAt),
+          isNull(notesTable.quarantinedAt),
+        ),
+      )
+      .limit(1)
+      .get();
+    if (!current) throw new StaleInboxSweepItemError();
+  }
+
   private operatorDeclaredLocalEndpoint(): boolean {
     const raw = process.env.AI_PROVIDER_ENDPOINT_IS_LOCAL?.trim().toLowerCase();
     return raw === '1' || raw === 'true';
   }
 
-  private async resolveEgress(campaignId: number): Promise<InboxSweepEgress> {
-    const view = await this.providerConfig.getEffectiveView(campaignId);
-    if (!view.configured) return 'local';
+  private resolveEgress(config: AiProviderConfig | null): InboxSweepEgress {
+    if (!config) return 'local';
     return this.operatorDeclaredLocalEndpoint() ? 'local' : 'external';
   }
 
@@ -533,8 +588,8 @@ export class InboxSweepService {
     return new Set(rows.map((row) => String(row.userId)));
   }
 
-  private async externalAiGate(campaignId: number): Promise<ExternalAiGate> {
-    const egress = await this.resolveEgress(campaignId);
+  private async externalAiGate(campaignId: number, config: AiProviderConfig | null): Promise<ExternalAiGate> {
+    const egress = this.resolveEgress(config);
     const policy = await this.aiContentPolicy(campaignId);
     const consentingMemberIds =
       egress === 'external' && policy === 'member_consent'

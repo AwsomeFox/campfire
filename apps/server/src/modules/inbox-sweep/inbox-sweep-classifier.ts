@@ -2,7 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { z } from 'zod';
 import { InboxSweepEntityType } from '@campfire/schema';
 import { AiProviderConfigService } from '../ai-provider-config/ai-provider-config.service';
-import { createAiProvider } from '../ai-dm/providers/factory';
+import { createAiProvider, type AiProviderConfig } from '../ai-dm/providers/factory';
 
 /**
  * Bootstrapped campaign context (issue #1644) — the cheap `get_campaign_summary`-shaped
@@ -47,7 +47,11 @@ export const INBOX_SWEEP_CLASSIFIER = Symbol('INBOX_SWEEP_CLASSIFIER');
 
 /** DI seam (mirrors AI_DM_PROVIDER) so orchestration is testable without a live model. */
 export interface InboxSweepClassifier {
-  classify(capture: InboxSweepCapture, context: InboxSweepContext): Promise<InboxSweepClassification>;
+  classify(
+    capture: InboxSweepCapture,
+    context: InboxSweepContext,
+    config?: AiProviderConfig | null,
+  ): Promise<InboxSweepClassification>;
 }
 
 function buildSystemPrompt(context: InboxSweepContext): string {
@@ -120,8 +124,15 @@ function extractJsonObject(text: string): unknown {
 export class AiInboxSweepClassifier implements InboxSweepClassifier {
   constructor(@Inject(AiProviderConfigService) private readonly providerConfig: AiProviderConfigService) {}
 
-  async classify(capture: InboxSweepCapture, context: InboxSweepContext): Promise<InboxSweepClassification> {
-    const { config } = await this.providerConfig.resolveEffectiveConfigWithEndpointScope(context.campaignId);
+  async classify(
+    capture: InboxSweepCapture,
+    context: InboxSweepContext,
+    resolvedConfig?: AiProviderConfig | null,
+  ): Promise<InboxSweepClassification> {
+    const config =
+      resolvedConfig === undefined
+        ? (await this.providerConfig.resolveEffectiveConfigWithEndpointScope(context.campaignId)).config
+        : resolvedConfig;
     if (!config) throw new NoProviderConfiguredError();
 
     const provider = createAiProvider(config);
