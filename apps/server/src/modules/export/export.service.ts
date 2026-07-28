@@ -282,6 +282,15 @@ export class ExportService {
       filename: row.filename,
       mime: row.mime,
       size: row.size,
+      title: row.title,
+      caption: row.caption,
+      altText: row.altText,
+      creator: row.creator,
+      sourceUrl: row.sourceUrl,
+      license: row.license,
+      rights: row.rights,
+      attribution: row.attribution,
+      checksumSha256: row.checksumSha256,
       createdAt: row.createdAt,
       /** Archive-relative path the bytes are stored at in the mdzip export. */
       file: this.attachmentArchivePath(row),
@@ -1566,8 +1575,8 @@ export class ExportService {
       'attachment to its file and to what references it (campaign map, character',
       'portraits, encounter battle maps).',
       '',
-      '| ID | Kind | Filename | File | Referenced by |',
-      '| --- | --- | --- | --- | --- |',
+      '| ID | Kind | Title | Filename | License / attribution | Source | File | Referenced by |',
+      '| --- | --- | --- | --- | --- | --- | --- | --- |',
     );
     for (const a of attachments) {
       const refs: string[] = [];
@@ -1579,7 +1588,7 @@ export class ExportService {
         if (e.mapAttachmentId === a.id) refs.push(`encounter map: ${this.mdCell(e.name)} (encounter:${e.id})`);
       }
       const fileCell = skippedIds.has(a.id) ? '_missing — skipped_' : `\`${this.mdCell(a.file)}\``;
-      lines.push(`| ${a.id} | ${this.mdCell(a.kind)} | ${this.mdCell(a.filename)} | ${fileCell} | ${refs.length ? refs.join(', ') : '_unreferenced_'} |`);
+      lines.push(`| ${a.id} | ${this.mdCell(a.kind)} | ${this.mdCell(a.title || '')} | ${this.mdCell(a.filename)} | ${this.mdCell([a.license, a.attribution].filter(Boolean).join(' · '))} | ${this.mdCell(a.sourceUrl || '')} | ${fileCell} | ${refs.length ? refs.join(', ') : '_unreferenced_'} |`);
     }
     if (skipped.length) {
       lines.push('', '## Skipped (file missing on disk)', '');

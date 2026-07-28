@@ -27,7 +27,9 @@ import {
   DEFAULT_TIMEOUT_MS,
   DEFAULT_IDLE_TIMEOUT_MS,
   postJson,
+  postAndReadJson,
   getJson,
+  readJsonBody,
   parseSse,
 } from './http';
 
@@ -132,13 +134,12 @@ export class OpenAiProvider implements AiProvider {
     const body = this.endpointMode === 'responses'
       ? this.buildResponsesBody(req, false)
       : this.buildBody(req, false);
-    const res = await postJson(this.fetchImpl, this.url(), this.authHeaders(), body, {
+    const json = await postAndReadJson<unknown>(this.fetchImpl, this.url(), this.authHeaders(), body, {
       provider: this.name,
       timeoutMs: opts?.timeoutMs ?? this.timeoutMs,
       retry: this.retry,
       signal: opts?.signal,
     });
-    const json = await res.json();
     return this.endpointMode === 'responses'
       ? this.parseResponsesResult(json as ResponsesApiResponse, req.model || this.opts.model)
       : this.parseCompletion(json as OpenAiCompletion, req.model || this.opts.model);
@@ -295,7 +296,9 @@ export class OpenAiProvider implements AiProvider {
       timeoutMs: this.timeoutMs,
     });
     if (!res.ok) throw new AiProviderError('invalid_request', `${this.name}: models request failed (${res.status})`, { provider: this.name });
-    const data = (await res.json()) as { data?: Array<{ id: string }> };
+    // `getJson` has no retry loop (model lists are not transient), so the parse guard is
+    // applied at the call site rather than through `postAndReadJson`.
+    const data = await readJsonBody<{ data?: Array<{ id: string }> }>(res, this.name);
     return (data.data ?? []).map((m) => m.id).sort();
   }
 }

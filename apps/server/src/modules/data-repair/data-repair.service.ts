@@ -1,0 +1,128 @@
+import { BadRequestException, ConflictException, Inject, Injectable, Logger, NotFoundException, type OnApplicationBootstrap } from '@nestjs/common';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { AuditService } from '../audit/audit.service';
+import { nowIso } from '../../common/time';
+import { DB_HOLDER, DbHolder, resolveDataDir } from '../../db/db.module';
+
+type Action = 'relink' | 'null' | 'quarantine';
+type Reference = { childTable:string; childColumn:string; parentTable:string; parentColumn:string; campaignColumn?:string; parentCampaignColumn?:string; nullable:boolean; quarantine:boolean };
+type Finding = { id:number; reference_type:'strict'|'soft'; child_table:string; child_row_id:number; child_column:string; parent_table:string; parent_column:string; reference_value:string; campaign_id:number|null; version:number; status:string };
+type Plan = { finding:Finding; ref:Reference; row:Record<string, unknown>; action:Action; replacement:number|null; dependentRowImpact:number };
+const quote = (identifier:string) => `"${identifier.replace(/"/g, '""')}"`;
+const literal = (value:string) => `'${value.replace(/'/g, "''")}'`;
+const PREVIEW_TTL_MS = 10 * 60_000;
+const BACKUP_LIMIT = 12;
+
+/** The repair API never accepts table or column names from clients. */
+export const SOFT_REFERENCE_CATALOG: readonly Reference[] = [
+  { childTable:'campaigns', childColumn:'current_location_id', parentTable:'locations', parentColumn:'id', nullable:true, quarantine:false },
+  { childTable:'campaigns', childColumn:'map_attachment_id', parentTable:'attachments', parentColumn:'id', nullable:true, quarantine:false },
+  { childTable:'campaigns', childColumn:'active_encounter_id', parentTable:'encounters', parentColumn:'id', nullable:true, quarantine:false },
+  { childTable:'encounters', childColumn:'location_id', parentTable:'locations', parentColumn:'id', campaignColumn:'campaign_id', parentCampaignColumn:'campaign_id', nullable:true, quarantine:true },
+  { childTable:'encounters', childColumn:'quest_id', parentTable:'quests', parentColumn:'id', campaignColumn:'campaign_id', parentCampaignColumn:'campaign_id', nullable:true, quarantine:true },
+  { childTable:'encounters', childColumn:'session_id', parentTable:'sessions', parentColumn:'id', campaignColumn:'campaign_id', parentCampaignColumn:'campaign_id', nullable:true, quarantine:true },
+  { childTable:'quests', childColumn:'parent_id', parentTable:'quests', parentColumn:'id', campaignColumn:'campaign_id', parentCampaignColumn:'campaign_id', nullable:true, quarantine:true },
+  { childTable:'quests', childColumn:'giver_npc_id', parentTable:'npcs', parentColumn:'id', campaignColumn:'campaign_id', parentCampaignColumn:'campaign_id', nullable:true, quarantine:true },
+  { childTable:'npcs', childColumn:'location_id', parentTable:'locations', parentColumn:'id', campaignColumn:'campaign_id', parentCampaignColumn:'campaign_id', nullable:true, quarantine:true },
+  { childTable:'npcs', childColumn:'faction_id', parentTable:'factions', parentColumn:'id', campaignColumn:'campaign_id', parentCampaignColumn:'campaign_id', nullable:true, quarantine:true },
+  { childTable:'locations', childColumn:'parent_id', parentTable:'locations', parentColumn:'id', campaignColumn:'campaign_id', parentCampaignColumn:'campaign_id', nullable:true, quarantine:true },
+];
+
+@Injectable()
+export class DataRepairService implements OnApplicationBootstrap {
+  private readonly logger = new Logger(DataRepairService.name);
+  constructor(@Inject(DB_HOLDER) private readonly holder: DbHolder, private readonly audit: AuditService) {}
+  async onApplicationBootstrap() { setImmediate(() => void this.scan('startup').catch(error => this.logger.warn(`integrity scan failed: ${String(error)}`))); }
+  private db() { return this.holder.raw; }
+  private columns(table:string) { return this.db().prepare(`PRAGMA table_info(${quote(table)})`).all() as Array<{name:string;notnull:number}>; }
+  private fingerprint(type:string, table:string, rowid:number, column:string, parent:string, value:unknown) { return crypto.createHash('sha256').update(`${type}|${table}|${rowid}|${column}|${parent}|${String(value)}`).digest('hex'); }
+  private finding(runId:number, type:'strict'|'soft', ref:Reference, rowid:number, row:Record<string,unknown>, value:unknown, detail:string) {
+    const campaign = ref.campaignColumn ? Number(row[ref.campaignColumn]) || null : (ref.childTable === 'campaigns' ? Number(row.id) || null : null);
+    const fp = this.fingerprint(type, ref.childTable, rowid, ref.childColumn, ref.parentTable, value);
+    this.db().prepare(`INSERT INTO data_repair_findings (fingerprint,reference_type,child_table,child_row_id,child_column,parent_table,parent_column,reference_value,campaign_id,first_seen_at,last_seen_at,last_run_id,status,detail) VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'open', ?) ON CONFLICT(fingerprint) DO UPDATE SET last_seen_at=excluded.last_seen_at,last_run_id=excluded.last_run_id,status='open',resolved_at=NULL,resolution_action=NULL,version=data_repair_findings.version+1,detail=excluded.detail`).run(fp,type,ref.childTable,rowid,ref.childColumn,ref.parentTable,ref.parentColumn,String(value).slice(0,256),campaign,nowIso(),nowIso(),runId,detail.slice(0,512));
+  }
+  async scan(source='manual', actor?:string, role?:any) {
+    const db=this.db(); const runId=Number(db.prepare('INSERT INTO data_repair_runs(source,started_at) VALUES (?,?)').run(source,nowIso()).lastInsertRowid); let strict=0; let soft=0;
+    try { db.transaction(() => {
+      for (const violation of db.pragma('foreign_key_check') as Array<{table:string;rowid:number;fkid:number}>) {
+        const fk=(db.prepare(`PRAGMA foreign_key_list(${quote(violation.table)})`).all() as Array<any>).find(entry=>Number(entry.id)===Number(violation.fkid));
+        const row=db.prepare(`SELECT rowid AS __repair_rowid__, * FROM ${quote(violation.table)} WHERE rowid=?`).get(violation.rowid) as Record<string,unknown>|undefined;
+        if (!fk || !row || !fk.from || !fk.table || !fk.to) continue;
+        const nullable=this.columns(violation.table).find(c=>c.name===fk.from)?.notnull===0;
+        this.finding(runId,'strict',{childTable:violation.table,childColumn:fk.from,parentTable:fk.table,parentColumn:fk.to,nullable,quarantine:false},violation.rowid,row,row[fk.from],'missing strict parent'); strict++;
+      }
+      for (const ref of SOFT_REFERENCE_CATALOG) {
+        if (!this.columns(ref.childTable).some(column=>column.name===ref.childColumn)) continue;
+        for (const row of db.prepare(`SELECT rowid AS __repair_rowid__, * FROM ${quote(ref.childTable)} WHERE ${quote(ref.childColumn)} IS NOT NULL`).all() as Array<Record<string,unknown>>) {
+          const parent=db.prepare(`SELECT * FROM ${quote(ref.parentTable)} WHERE ${quote(ref.parentColumn)}=?`).get(row[ref.childColumn]) as Record<string,unknown>|undefined;
+          const cross=!!(parent && ref.campaignColumn && ref.parentCampaignColumn && Number(row[ref.campaignColumn]) !== Number(parent[ref.parentCampaignColumn]));
+          if (!parent || cross) { this.finding(runId,'soft',ref,Number(row.__repair_rowid__),row,row[ref.childColumn],cross?'cross-campaign target':'missing soft parent'); soft++; }
+        }
+      }
+      db.prepare("UPDATE data_repair_findings SET status='resolved', resolution_action='scan', resolved_at=?, version=version+1 WHERE status='open' AND last_run_id<>?").run(nowIso(),runId);
+      db.prepare('UPDATE data_repair_runs SET completed_at=?,strict_count=?,soft_count=? WHERE id=?').run(nowIso(),strict,soft,runId);
+    })(); } catch (error) { db.prepare('UPDATE data_repair_runs SET completed_at=?,error_detail=? WHERE id=?').run(nowIso(),String(error).slice(0,512),runId); throw error; }
+    if(source==='admin' && actor) await this.audit.log({actor,actorRole:role,action:'data-repair.scan',entityType:'data_repair_run',entityId:runId,detail:'metadata-only scan'});
+    return this.run(runId);
+  }
+  run(id:number) { return this.db().prepare('SELECT * FROM data_repair_runs WHERE id=?').get(id); }
+  latest() { const db=this.db(); return {run:db.prepare('SELECT * FROM data_repair_runs ORDER BY id DESC LIMIT 1').get() ?? null,openCount:Number((db.prepare("SELECT count(*) n FROM data_repair_findings WHERE status='open'").get() as any).n),history:db.prepare('SELECT * FROM data_repair_runs ORDER BY id DESC LIMIT 20').all(),actions:db.prepare("SELECT id,action,status,created_at FROM data_repair_actions WHERE status='applied' ORDER BY id DESC LIMIT 20").all()}; }
+  /** Bounded readiness metadata only — never pull admin history lists on /readyz. */
+  publicHealth() {
+    const db = this.db();
+    const openCount = Number((db.prepare("SELECT count(*) n FROM data_repair_findings WHERE status='open'").get() as { n: number }).n);
+    const latestRunAt = (db.prepare('SELECT completed_at FROM data_repair_runs ORDER BY id DESC LIMIT 1').get() as { completed_at: string | null } | undefined)?.completed_at ?? null;
+    return { degraded: openCount > 0, openCount, latestRunAt };
+  }
+  findings(status?:string, limit=100, offset=0) { if(status && !['open','resolved','quarantined'].includes(status)) throw new BadRequestException('Unsupported finding status'); return this.db().prepare(`SELECT * FROM data_repair_findings ${status?'WHERE status=?':''} ORDER BY last_seen_at DESC LIMIT ? OFFSET ?`).all(...(status?[status,Math.min(Math.max(limit,1),200),Math.max(offset,0)]:[Math.min(Math.max(limit,1),200),Math.max(offset,0)])); }
+  private getFinding(id:number) { const finding=this.db().prepare('SELECT * FROM data_repair_findings WHERE id=?').get(id) as Finding|undefined; if(!finding) throw new NotFoundException('Finding not found'); return finding; }
+  private reference(f:Finding):Reference { const known=SOFT_REFERENCE_CATALOG.find(ref=>ref.childTable===f.child_table&&ref.childColumn===f.child_column&&ref.parentTable===f.parent_table&&ref.parentColumn===f.parent_column); if(known) return known; const column=this.columns(f.child_table).find(c=>c.name===f.child_column); const fk=(this.db().prepare(`PRAGMA foreign_key_list(${quote(f.child_table)})`).all() as Array<any>).find(entry=>entry.from===f.child_column&&entry.table===f.parent_table&&entry.to===f.parent_column); if(!column || !fk) throw new ConflictException('The current schema no longer matches this strict finding'); return {childTable:f.child_table,childColumn:f.child_column,parentTable:f.parent_table,parentColumn:f.parent_column,nullable:column.notnull===0,quarantine:false}; }
+  private assertRestorable(ref:Reference,row:Record<string,unknown>) { const db=this.db(); for(const fk of db.prepare(`PRAGMA foreign_key_list(${quote(ref.childTable)})`).all() as Array<any>) { const value=row[fk.from]; if(value!=null&&!db.prepare(`SELECT 1 FROM ${quote(fk.table)} WHERE ${quote(fk.to)}=?`).get(value)) throw new ConflictException('Undo would restore an invalid strict reference'); } for(const soft of SOFT_REFERENCE_CATALOG.filter(candidate=>candidate.childTable===ref.childTable)) { const value=row[soft.childColumn]; if(value==null) continue; const parent=db.prepare(`SELECT * FROM ${quote(soft.parentTable)} WHERE ${quote(soft.parentColumn)}=?`).get(value) as Record<string,unknown>|undefined; if(!parent || (soft.campaignColumn&&soft.parentCampaignColumn&&Number(row[soft.campaignColumn])!==Number(parent[soft.parentCampaignColumn]))) throw new ConflictException('Undo would restore an invalid soft reference'); } }
+  private dependencies(ref:Reference, row:Record<string,unknown>) { let count=0; const db=this.db(); for(const table of db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all() as Array<{name:string}>) for(const fk of db.prepare(`PRAGMA foreign_key_list(${quote(table.name)})`).all() as Array<any>) if(fk.table===ref.childTable && fk.to==='id') count+=Number((db.prepare(`SELECT count(*) n FROM ${quote(table.name)} WHERE ${quote(fk.from)}=?`).get(row.id) as any).n); for(const soft of SOFT_REFERENCE_CATALOG.filter(candidate=>candidate.parentTable===ref.childTable&&candidate.parentColumn==='id')) count+=Number((db.prepare(`SELECT count(*) n FROM ${quote(soft.childTable)} WHERE ${quote(soft.childColumn)}=?`).get(row.id) as any).n); return count; }
+  private plan(finding:Finding, action:Action, replacement?:number):Plan { if(finding.status!=='open') throw new ConflictException('Finding is no longer open'); const ref=this.reference(finding); const row=this.db().prepare(`SELECT rowid AS __repair_rowid__, * FROM ${quote(ref.childTable)} WHERE rowid=?`).get(finding.child_row_id) as Record<string,unknown>|undefined; if(!row || String(row[ref.childColumn])!==finding.reference_value) throw new ConflictException({code:'STALE_WRITE',message:'The row changed; scan and preview again.'}); if(action==='relink') { if(!replacement) throw new BadRequestException('replacementParentId is required'); const parent=this.db().prepare(`SELECT * FROM ${quote(ref.parentTable)} WHERE ${quote(ref.parentColumn)}=?`).get(replacement) as Record<string,unknown>|undefined; if(!parent) throw new BadRequestException('Replacement parent does not exist'); if(ref.campaignColumn && ref.parentCampaignColumn && Number(row[ref.campaignColumn])!==Number(parent[ref.parentCampaignColumn])) throw new BadRequestException('Replacement parent belongs to another campaign'); } else if(action==='null' && !ref.nullable) throw new BadRequestException('This reference is not nullable'); else if(action==='quarantine' && !ref.quarantine) throw new BadRequestException('Quarantine is not supported for this reference'); const dependentRowImpact=action==='quarantine'?this.dependencies(ref,row):0; if(action==='quarantine'&&dependentRowImpact>0) throw new ConflictException('Quarantine refused: live dependent rows exist'); return {finding,ref,row,action,replacement:replacement??null,dependentRowImpact}; }
+  preview(input:{findingId:number;action:Action;replacementParentId?:number;expectedVersion:number}) { const finding=this.getFinding(input.findingId); if(finding.version!==input.expectedVersion) throw new ConflictException({code:'STALE_WRITE',message:'Finding version changed; scan and preview again.'}); const plan=this.plan(finding,input.action,input.replacementParentId); const token=crypto.randomUUID(); const expiresAt=new Date(Date.now()+PREVIEW_TTL_MS).toISOString(); this.db().prepare('INSERT INTO data_repair_previews(token,finding_id,finding_version,action,replacement_parent_id,expires_at,created_at) VALUES (?,?,?,?,?,?,?)').run(token,finding.id,finding.version,plan.action,plan.replacement,expiresAt,nowIso()); return {dryRun:true,previewToken:token,expiresAt,findingId:finding.id,expectedVersion:finding.version,action:plan.action,dependentRowImpact:plan.dependentRowImpact,automaticBackup:true}; }
+  private snapshot() {
+    const dir = path.join(resolveDataDir(), 'repair-backups');
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    fs.chmodSync(dir, 0o700);
+    const file = path.join(dir, `repair-${Date.now()}-${crypto.randomUUID()}.db`);
+    this.db().exec(`VACUUM INTO ${literal(file)}`);
+    fs.chmodSync(file, 0o600);
+    // Chunked sync hash — avoid loading the whole SQLite snapshot into memory.
+    const hash = crypto.createHash('sha256');
+    const fd = fs.openSync(file, 'r');
+    try {
+      const buf = Buffer.alloc(64 * 1024);
+      let bytesRead = 0;
+      while ((bytesRead = fs.readSync(fd, buf, 0, buf.length, null)) > 0) {
+        hash.update(buf.subarray(0, bytesRead));
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+    const checksum = hash.digest('hex');
+    const current = path.basename(file);
+    // Never consider the newly-created snapshot for cleanup. Keep at most
+    // BACKUP_LIMIT - 1 older files, which makes the total hard bound exact.
+    const stale = fs.readdirSync(dir)
+      .filter(name => name.endsWith('.db') && name !== current)
+      .map(name => ({ name, mtime: fs.statSync(path.join(dir, name)).mtimeMs }))
+      .sort((left, right) => right.mtime - left.mtime || right.name.localeCompare(left.name))
+      .slice(Math.max(BACKUP_LIMIT - 1, 0));
+    for (const entry of stale) {
+      const oldPath = path.join(dir, entry.name);
+      // Clear durable references before attempting FS cleanup. If unlink fails,
+      // the leftover is unreferenced and is safely retried by a later snapshot.
+      this.db().prepare('UPDATE data_repair_actions SET backup_path=NULL WHERE backup_path=?').run(oldPath);
+      try { fs.unlinkSync(oldPath); }
+      catch (error) { this.logger.warn(`repair backup cleanup failed for ${entry.name}: ${String(error)}`); }
+    }
+    return { file, checksum };
+  }
+  private assertPreview(input:{findingId:number;action:Action;replacementParentId?:number;expectedVersion:number;previewToken:string}) { const preview=this.db().prepare('SELECT * FROM data_repair_previews WHERE token=?').get(input.previewToken) as any; if(!preview || preview.used_at || Date.parse(preview.expires_at)<Date.now() || Number(preview.finding_id)!==input.findingId || Number(preview.finding_version)!==input.expectedVersion || preview.action!==input.action || (preview.replacement_parent_id??null)!==(input.replacementParentId??null)) throw new ConflictException({code:'STALE_WRITE',message:'A current preview is required before applying a repair.'}); }
+  async apply(input:{findingId:number;action:Action;replacementParentId?:number;expectedVersion:number;previewToken:string}, actor:string, role:any) { this.assertPreview(input); const preflight=this.getFinding(input.findingId); if(preflight.version!==input.expectedVersion) throw new ConflictException({code:'STALE_WRITE',message:'Finding version changed; preview again.'}); this.plan(preflight,input.action,input.replacementParentId); const backup=this.snapshot(); let actionId=0; const db=this.db(); db.transaction(()=>{ this.assertPreview(input); const finding=this.getFinding(input.findingId); if(finding.version!==input.expectedVersion) throw new ConflictException({code:'STALE_WRITE',message:'Finding version changed; preview again.'}); const plan=this.plan(finding,input.action,input.replacementParentId); let payload:string|null=null; const mutation=plan.action==='quarantine' ? (payload=JSON.stringify(plan.row),db.prepare(`DELETE FROM ${quote(plan.ref.childTable)} WHERE rowid=?`).run(finding.child_row_id)) : db.prepare(`UPDATE ${quote(plan.ref.childTable)} SET ${quote(plan.ref.childColumn)}=? WHERE rowid=?`).run(plan.action==='null'?null:plan.replacement,finding.child_row_id); if(mutation.changes!==1) throw new ConflictException({code:'STALE_WRITE',message:'The row changed before repair could be applied.'}); actionId=Number(db.prepare('INSERT INTO data_repair_actions(finding_id,action,actor,before_value,after_value,backup_checksum,backup_path,undo_payload,created_at) VALUES (?,?,?,?,?,?,?,?,?)').run(finding.id,plan.action,actor,String(plan.row[plan.ref.childColumn]??''),plan.action==='null'?'':String(plan.replacement??''),backup.checksum,backup.file,payload,nowIso()).lastInsertRowid); if(payload) db.prepare('INSERT INTO data_repair_quarantine(action_id,child_table,child_row_id,payload,created_at) VALUES (?,?,?,?,?)').run(actionId,plan.ref.childTable,finding.child_row_id,payload,nowIso()); db.prepare('UPDATE data_repair_previews SET used_at=? WHERE token=?').run(nowIso(),input.previewToken); db.prepare("UPDATE data_repair_findings SET status=?,resolution_action=?,resolved_at=?,version=version+1 WHERE id=?").run(plan.action==='quarantine'?'quarantined':'resolved',plan.action,nowIso(),finding.id); })(); await this.audit.log({actor,actorRole:role,action:`data-repair.${input.action}`,entityType:'data_repair_finding',entityId:input.findingId,detail:`action=${actionId}`}); return {ok:true,actionId}; }
+  async undo(actionId:number, actor:string, role:any) { const db=this.db(); let findingId=0; db.transaction(()=>{ const action=db.prepare("SELECT * FROM data_repair_actions WHERE id=? AND status='applied'").get(actionId) as any; if(!action) throw new ConflictException('Repair action is not undoable'); const finding=this.getFinding(action.finding_id); const ref=this.reference(finding); findingId=finding.id; let mutation:any; if(action.action==='quarantine') { const row=JSON.parse(action.undo_payload ?? 'null') as Record<string,unknown>|null; if(!row || db.prepare(`SELECT 1 FROM ${quote(ref.childTable)} WHERE rowid=?`).get(finding.child_row_id)) throw new ConflictException('Undo conflict: row identity is occupied'); this.assertRestorable(ref,row); const keys=Object.keys(row).filter(key=>key!=='__repair_rowid__'); mutation=db.prepare(`INSERT INTO ${quote(ref.childTable)} (${keys.map(quote).join(',')}) VALUES (${keys.map(()=>'?').join(',')})`).run(...keys.map(key=>row[key])); } else { const row=db.prepare(`SELECT * FROM ${quote(ref.childTable)} WHERE rowid=?`).get(finding.child_row_id) as Record<string,unknown>|undefined; const current=action.after_value===''?null:action.after_value; if(!row || String(row[ref.childColumn]??'')!==String(current??'')) throw new ConflictException('Undo conflict: the repaired row has changed'); const before=action.before_value===''?null:action.before_value; const restored={...row,[ref.childColumn]:before}; this.assertRestorable(ref,restored); mutation=db.prepare(`UPDATE ${quote(ref.childTable)} SET ${quote(ref.childColumn)}=? WHERE rowid=?`).run(before,finding.child_row_id); } if(mutation.changes!==1) throw new ConflictException({code:'STALE_WRITE',message:'The row changed before undo could be applied.'}); db.prepare("UPDATE data_repair_actions SET status='undone',undone_at=? WHERE id=?").run(nowIso(),actionId); db.prepare("UPDATE data_repair_findings SET status='open',resolution_action='undo',resolved_at=NULL,version=version+1 WHERE id=?").run(finding.id); })(); await this.audit.log({actor,actorRole:role,action:'data-repair.undo',entityType:'data_repair_action',entityId:actionId,detail:`finding=${findingId}`}); return {ok:true}; }
+  bundle() { const db=this.db(); return {version:1,generatedAt:nowIso(),health:this.publicHealth(),runs:db.prepare('SELECT id,source,started_at,completed_at,strict_count,soft_count FROM data_repair_runs ORDER BY id DESC LIMIT 20').all(),findings:db.prepare('SELECT id,reference_type,child_table,child_row_id,child_column,parent_table,parent_column,campaign_id,status,resolution_action,first_seen_at,last_seen_at FROM data_repair_findings ORDER BY id DESC LIMIT 500').all(),schema:SOFT_REFERENCE_CATALOG.map(({childTable,childColumn,parentTable,parentColumn})=>({childTable,childColumn,parentTable,parentColumn})),repairs:db.prepare('SELECT id,finding_id,action,status,created_at,undone_at FROM data_repair_actions ORDER BY id DESC LIMIT 100').all()}; }
+}

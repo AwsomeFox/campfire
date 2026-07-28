@@ -30,8 +30,7 @@ function imageFetch(): FetchLike {
       ok: true,
       status: 200,
       headers: { get: () => null },
-      text: async () => '',
-      json: async () => ({ data, usage: { total_tokens: 5 } }),
+      text: async () => JSON.stringify({ data, usage: { total_tokens: 5 } }),
       body: null,
     };
   };
@@ -43,7 +42,6 @@ function failingFetch(): FetchLike {
     status: 500,
     headers: { get: () => null },
     text: async () => 'server error',
-    json: async () => ({}),
     body: null,
   });
 }
