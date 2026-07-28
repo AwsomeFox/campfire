@@ -534,6 +534,40 @@ describe('inbox sweep (e2e)', () => {
     expect(ledger.reason).toContain('bad JSON');
   });
 
+  it('records missing update targets as terminal classifier errors', async () => {
+    const campaignId = await newCampaign('Sweep Missing Update Target');
+    const noteId = await submitInbox(campaignId, 'Rename the quest that no longer exists.');
+    classifier.script.set('Rename the quest that no longer exists.', {
+      action: 'update',
+      entityType: 'quest',
+      targetId: 999999,
+      fields: { title: 'Renamed Missing Quest' },
+      reason: 'model chose a stale target id',
+    });
+
+    const res = await request(server).post(`/api/v1/campaigns/${campaignId}/inbox/sweep`).set(dm);
+    expect(res.status).toBe(201);
+    expect(res.body.job.itemsErrored).toBe(1);
+    expect(res.body.items[0]).toMatchObject({ noteId, outcome: 'errored', proposalId: null });
+    expect(res.body.items[0].reason).toContain('not found');
+
+    const inbox = await request(server).get(`/api/v1/campaigns/${campaignId}/inbox?resolved=true`).set(dm);
+    const resolved = inbox.body.items.find((i: { id: number }) => i.id === noteId);
+    expect(resolved).toBeDefined();
+    expect(resolved.resolved).toBe(true);
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const [ledger] = await db.select().from(inboxSweepItems).where(eq(inboxSweepItems.noteId, noteId)).limit(1);
+    expect(ledger.outcome).toBe('errored');
+    expect(ledger.reason).toContain('not found');
+
+    const callsAfterFirstSweep = classifier.calls.length;
+    const second = await request(server).post(`/api/v1/campaigns/${campaignId}/inbox/sweep`).set(dm);
+    expect(second.status).toBe(201);
+    expect(second.body.job.itemsTotal).toBe(0);
+    expect(classifier.calls).toHaveLength(callsAfterFirstSweep);
+  });
+
   it('records and resolves deterministic classifier errors so they do not retry forever', async () => {
     const campaignId = await newCampaign('Sweep Errored');
     const noteId = await submitInbox(campaignId, 'Add a quest but nobody named it.');

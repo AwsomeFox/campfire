@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { and, eq, inArray, isNull } from 'drizzle-orm';
 import type { AiExternalContentPolicy, InboxSweepEntityType, InboxSweepItemResult, InboxSweepJob, InboxSweepOutcome, InboxSweepResult, Role } from '@campfire/schema';
 import {
@@ -390,6 +390,10 @@ export class InboxSweepService {
           proposalId: null,
           reason: `${err.message}; re-run the sweep if it is still open`,
         };
+      }
+      if (err instanceof NotFoundException) {
+        const reason = `failed to file ${classification.action} proposal: ${err.message}`;
+        return this.recordError(campaignId, jobId, noteId, reason, user, role);
       }
       const concurrent = await this.findLedger(campaignId, noteId);
       if (concurrent) {
