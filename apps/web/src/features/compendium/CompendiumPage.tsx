@@ -334,8 +334,13 @@ export default function CompendiumPage() {
     let data: Record<string, unknown> | undefined;
     try { data = JSON.parse(draft.dataJson); if (!data || Array.isArray(data) || typeof data !== 'object') throw new Error(); }
     catch { setAuthorError('Raw data must be a JSON object.'); return; }
-    const structured = Object.fromEntries(Object.entries(structuredData).filter(([, value]) => value.trim() !== ''));
-    if (draft.type === 'monster' && structured.actions) { try { JSON.parse(structured.actions); } catch { setAuthorError('Monster actions must be a JSON array.'); return; } }
+    const structured: Record<string, unknown> = Object.fromEntries(Object.entries(structuredData).filter(([, value]) => value.trim() !== ''));
+    for (const field of ['level', 'ac', 'hp', 'cr', 'weight', 'value']) {
+      if (typeof structured[field] === 'string') { const value = Number(structured[field]); if (!Number.isFinite(value)) { setAuthorError(`${field} must be a number.`); return; } structured[field] = value; }
+    }
+    for (const field of ['abilities', 'actions']) {
+      if (typeof structured[field] === 'string' && structured[field]) { try { structured[field] = JSON.parse(structured[field] as string); } catch { setAuthorError(`${field} must be valid JSON.`); return; } }
+    }
     const payload = { ...draft, data: rawMode ? undefined : structured, dataJson: rawMode ? draft.dataJson : undefined };
     try {
       const proposed = !isDm;

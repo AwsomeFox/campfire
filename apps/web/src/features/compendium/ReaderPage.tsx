@@ -58,6 +58,10 @@ export default function ReaderPage() {
   const [notes, setNotes] = useState('');
   const acquireTitleId = useId();
   const [revisions, setRevisions] = useState<Array<{ id: number; createdAt: string; actor: string }> | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [editBody, setEditBody] = useState('');
+  const [editError, setEditError] = useState<string | null>(null);
+  const [savingEdit, setSavingEdit] = useState(false);
 
   async function saveIcon(slug: string) {
     if (!entry) return;
@@ -76,6 +80,7 @@ export default function ReaderPage() {
   async function duplicateHomebrew() { if (!entry) return; const copy = await api.post<RuleEntry>(`${API}/campaigns/${id}/homebrew/${entry.id}/duplicate`, {}); navigate(`/c/${id}/compendium/${copy.id}`); }
   async function archiveHomebrew() { if (!entry) return; await api.post(`${API}/campaigns/${id}/homebrew/${entry.id}/archive`, {}); navigate(`/c/${id}/compendium`); }
   async function showRevisions() { if (!entry) return; setRevisions(await api.get(`${API}/campaigns/${id}/homebrew/${entry.id}/revisions`)); }
+  async function saveEdit() { if (!entry) return; setSavingEdit(true); setEditError(null); try { const payload = { body: editBody, expectedUpdatedAt: entry.updatedAt }; const updated = await api.patch<RuleEntry>(`${API}/campaigns/${id}/homebrew/${entry.id}${isDm ? '' : '?proposed=true'}`, payload); if (isDm) setEntry(updated); setEditing(false); } catch (err) { setEditError(translateApiError(err, t, { fallbackKey: 'compendium.errors.loadEntry' })); } finally { setSavingEdit(false); } }
 
   useEffect(() => {
     if (!entryId) return;
@@ -179,9 +184,10 @@ export default function ReaderPage() {
                 )}
               </span>
             )}
-            {entry.campaignId && isDm && canDmWrite && <span className="flex gap-1.5" style={{ marginLeft: 'auto' }}><Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={duplicateHomebrew}>Duplicate</Btn><Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={archiveHomebrew}>Archive</Btn><Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={showRevisions}>Revisions</Btn></span>}
+            {entry.campaignId && <span className="flex gap-1.5" style={{ marginLeft: 'auto' }}><Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => { setEditBody(entry.body); setEditing(true); }}>{isDm && canDmWrite ? 'Edit' : 'Propose edit'}</Btn>{isDm && canDmWrite && <><Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={duplicateHomebrew}>Duplicate</Btn><Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={archiveHomebrew}>Archive</Btn><Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={showRevisions}>Revisions</Btn></>}</span>}
           </div>
           {iconError && <ErrorNote message={iconError} />}
+          {editing && <div className="flex flex-col gap-2"><textarea className="input" aria-label="Edit homebrew body" value={editBody} onChange={(e) => setEditBody(e.target.value)} />{editError && <ErrorNote message={editError} />}<Btn onClick={saveEdit} disabled={savingEdit}>{savingEdit ? 'Saving…' : isDm ? 'Save' : 'Submit proposal'}</Btn></div>}
           {revisions && <div className="text-muted" style={{ fontSize: 12 }}>{revisions.map((revision) => <p key={revision.id} style={{ margin: 0 }}>{revision.createdAt} · {revision.actor}</p>)}</div>}
           {/* Monster entries carry an empty `body` — their stats live in `dataJson`
               (issue #142). Render the structured statblock when there's no prose body
