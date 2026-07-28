@@ -1,6 +1,6 @@
 import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
-import { CharacterCreate, CharacterUpdate, HpPatch, ConditionsPatch, ConditionLevelPatch, SpellSlotPatch, ResourcePatch, XpPatch, XpAward, LevelUp, DdbCharacterImport, ExpectedUpdatedAt, CheckRollRequest, CheckRequestCreate, PartyRecoveryRequest } from '@campfire/schema';
+import { CharacterCreate, CharacterUpdate, HpPatch, ConditionsPatch, ConditionLevelPatch, SpellSlotPatch, ResourcePatch, XpPatch, XpAward, LevelUp, DdbCharacterImport, ExpectedUpdatedAt, CheckRollRequest, CheckRequestCreate, PartyRecoveryRequest, PartyRecoveryApplyRequest, PartyRecoveryUndoRequest } from '@campfire/schema';
 
 // .strict() applied here at the DTO layer only — see encounters.dto.ts header
 // comment for why the shared @campfire/schema exports themselves stay lenient
@@ -60,6 +60,8 @@ export class CheckRollRequestDto extends createZodDto(CheckRollRequest.strict())
 // Issue #415: DM-initiated check request from one or more target characters.
 export class CheckRequestCreateDto extends createZodDto(CheckRequestCreate.strict()) {}
 export class PartyRecoveryPreviewDto extends createZodDto(PartyRecoveryRequest.strict()) {}
+export class PartyRecoveryApplyDto extends createZodDto(PartyRecoveryApplyRequest.strict()) {}
+export class PartyRecoveryUndoDto extends createZodDto(PartyRecoveryUndoRequest.strict()) {}
 
 export const RestPatch = z.object({
   type: z.enum(['stamina', 'night', 'short', 'long']),

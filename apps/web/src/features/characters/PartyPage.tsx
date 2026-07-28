@@ -24,6 +24,7 @@ import { avatarTone, initials } from './avatar';
 import { CharacterTrashMenu } from './CharacterTrashMenu';
 import { NewCharacterForm } from './NewCharacterForm';
 import { STATUS_LABEL, StatusTag } from './status';
+import { PartyRestPanel } from './PartyRestPanel';
 
 export default function PartyPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
@@ -45,6 +46,7 @@ export default function PartyPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(() => searchParams.get('action') === 'new');
+  const [resting, setResting] = useState(false);
 
   const closeCreating = useCallback(() => {
     setCreating(false);
@@ -151,7 +153,7 @@ export default function PartyPage() {
 
   const secondaryActions: PageHeaderSecondaryAction[] =
     canDmWrite && !awarding && characters.length > 0
-      ? [{ key: 'award-xp', label: '✦ Award XP', onClick: () => setAwardingOpen(true) }]
+      ? [{ key: 'award-xp', label: '✦ Award XP', onClick: () => setAwardingOpen(true) }, { key: 'rest-party', label: 'Rest party', onClick: () => setResting(true) }]
       : [];
 
   return (
@@ -183,6 +185,7 @@ export default function PartyPage() {
           }}
         />
       )}
+      {canDmWrite && resting && <PartyRestPanel campaignId={id} characters={characters} onClose={() => setResting(false)} onApplied={() => { setResting(false); void load(); }} />}
 
       {loading ? (
         <Card>
