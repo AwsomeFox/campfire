@@ -19,6 +19,12 @@ export const API_WRITE_BUDGET = {
   overallMs: 120_000,
 } as const;
 
+/** Long-running sweep POST — classifies every open inbox item before responding. */
+export const API_SWEEP_BUDGET = {
+  connectMs: 15_000,
+  overallMs: 10 * 60_000,
+} as const;
+
 /** Large attachment uploads — separate from ordinary writes. */
 export const API_UPLOAD_BUDGET = {
   connectMs: 15_000,
@@ -30,11 +36,12 @@ export const API_STREAM_BUDGET = {
   connectMs: 15_000,
 } as const;
 
-export type ApiBudgetKind = 'read' | 'write' | 'upload' | 'stream';
+export type ApiBudgetKind = 'read' | 'write' | 'sweep' | 'upload' | 'stream';
 
 export type ApiFetchBudget =
   | typeof API_READ_BUDGET
   | typeof API_WRITE_BUDGET
+  | typeof API_SWEEP_BUDGET
   | typeof API_UPLOAD_BUDGET
   | typeof API_STREAM_BUDGET;
 
@@ -82,7 +89,7 @@ function linkAbortSignal(source: AbortSignal, target: AbortController): () => vo
   return () => source.removeEventListener('abort', onAbort);
 }
 
-type TimerPhase = ReadTimeoutPhase | 'write-overall' | 'upload-overall' | 'stream-connect';
+type TimerPhase = ReadTimeoutPhase | 'write-overall' | 'sweep-overall' | 'upload-overall' | 'stream-connect';
 
 function armTimer(
   ms: number,
@@ -103,6 +110,8 @@ function readTimeoutPhase(firedPhase: TimerPhase | null): ReadTimeoutPhase {
     ? firedPhase
     : 'overall';
 }
+
+const SWEEP_PATH_RE = /\/campaigns\/\d+\/inbox\/sweep(?:\?.*)?$/;
 
 /** Fetch null-body statuses — Response cannot be reconstructed with a stream body. */
 function isNullBodyStatus(status: number): boolean {
@@ -199,10 +208,10 @@ export async function fetchWithBudget(
     clearEarlyTimers.push(armTimer(readBudget.headersMs, 'headers', budgetController, onFire));
     // overallMs is a full round-trip budget — keep it armed until the body finishes.
     clearOverall = armTimer(readBudget.overallMs, 'overall', budgetController, onFire);
-  } else if (kind === 'write') {
-    const writeBudget = budget as typeof API_WRITE_BUDGET;
+  } else if (kind === 'write' || kind === 'sweep') {
+    const writeBudget = budget as typeof API_WRITE_BUDGET | typeof API_SWEEP_BUDGET;
     // overallMs bounds the full mutation including response body consumption.
-    clearOverall = armTimer(writeBudget.overallMs, 'write-overall', budgetController, onFire);
+    clearOverall = armTimer(writeBudget.overallMs, kind === 'sweep' ? 'sweep-overall' : 'write-overall', budgetController, onFire);
   } else if (kind === 'upload') {
     const uploadBudget = budget as typeof API_UPLOAD_BUDGET;
     clearOverall = armTimer(uploadBudget.overallMs, 'upload-overall', budgetController, onFire);
@@ -267,11 +276,16 @@ export async function fetchWithBudget(
 }
 
 /** Classify a request path/method into a budget kind. */
-export function apiBudgetKind(method: string, init?: RequestInit): ApiBudgetKind {
+export function apiBudgetKind(method: string, init?: RequestInit): ApiBudgetKind;
+export function apiBudgetKind(method: string, path: string, init?: RequestInit): ApiBudgetKind;
+export function apiBudgetKind(method: string, pathOrInit?: string | RequestInit, init?: RequestInit): ApiBudgetKind {
   const upper = method.toUpperCase();
   if (upper === 'GET' || upper === 'HEAD') return 'read';
-  const body = init?.body;
+  const path = typeof pathOrInit === 'string' ? pathOrInit : '';
+  const actualInit = typeof pathOrInit === 'object' ? pathOrInit : init;
+  const body = actualInit?.body;
   if (body instanceof FormData || body instanceof Blob) return 'upload';
+  if (upper === 'POST' && SWEEP_PATH_RE.test(path)) return 'sweep';
   return 'write';
 }
 
@@ -281,6 +295,8 @@ export function budgetForKind(kind: ApiBudgetKind): ApiFetchBudget {
       return API_READ_BUDGET;
     case 'write':
       return API_WRITE_BUDGET;
+    case 'sweep':
+      return API_SWEEP_BUDGET;
     case 'upload':
       return API_UPLOAD_BUDGET;
     case 'stream':

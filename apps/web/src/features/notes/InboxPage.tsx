@@ -297,7 +297,9 @@ export default function InboxPage() {
       setSweepResult(result);
       // Server-truth reconciliation still happens on the next route change (Layout's
       // effect); this just makes the badge catch up without waiting for that.
-      if (result.job.itemsProposed > 0) bumpPendingProposalsBadge(result.job.itemsProposed, sweepCid);
+      // Use newlyProposed so a re-swept/recovered prior row doesn't inflate the badge.
+      const newlyProposed = result.job.itemsNewlyProposed ?? 0;
+      if (newlyProposed > 0) bumpPendingProposalsBadge(newlyProposed, sweepCid);
       const freshOpenTotal = await load();
       if (sweepCid === cidRef.current && freshOpenTotal !== undefined) {
         setInboxCountBadge(freshOpenTotal, sweepCid);
@@ -587,7 +589,7 @@ function SweepResultCard({
         <ul className="m-0 p-0 space-y-2" style={{ listStyle: 'none' }}>
           {items.map((item) => {
             const tag = SWEEP_OUTCOME_TAG[item.outcome];
-            const body = itemBodies[item.noteId];
+            const body = item.body ?? itemBodies[item.noteId];
             return (
               <li key={item.noteId} className="cf-inset p-2.5 space-y-1">
                 <div className="flex items-center gap-2 flex-wrap">

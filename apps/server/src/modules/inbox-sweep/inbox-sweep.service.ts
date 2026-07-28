@@ -174,6 +174,7 @@ export class InboxSweepService {
         ),
       );
     const existingByNote = new Map(existing.map((r) => [r.noteId, r]));
+    const bodyByNoteId = new Map(openItems.map((n) => [n.id, n.body]));
 
     const summary = await this.campaigns.summary(campaignId, 'dm');
     const context: InboxSweepContext = {
@@ -185,6 +186,7 @@ export class InboxSweepService {
     };
     const results: InboxSweepItemResult[] = [];
     let proposed = 0;
+    let newlyProposed = 0;
     let skipped = 0;
     let errored = 0;
 
@@ -209,7 +211,7 @@ export class InboxSweepService {
           const link = this.resolveLinkForPrior(prior);
           await this.tryResolve(item.id, user, role, prior.reason, link.entityType, link.entityId);
         }
-        results.push(this.resultFromLedger(item.id, prior));
+        results.push(this.resultFromLedger(item.id, prior, bodyByNoteId.get(item.id) ?? ''));
         if (prior.outcome === 'proposed') proposed++;
         else if (prior.outcome === 'errored') errored++;
         else skipped++;
@@ -228,6 +230,7 @@ export class InboxSweepService {
           entityId: null,
           proposalId: null,
           reason: withheldReason,
+          body: item.body,
         });
         continue;
       }
@@ -247,11 +250,11 @@ export class InboxSweepService {
             itemsErrored: errored,
             detail: 'no AI provider configured for this campaign',
           });
-          return { job: jobToDomain(disabledJob), items: results };
+          return { job: { ...jobToDomain(disabledJob), itemsNewlyProposed: newlyProposed }, items: results };
         }
         const reason = `classification failed: ${err instanceof Error ? err.message : String(err)}`;
         if (err instanceof InvalidInboxSweepClassificationError) {
-          const outcome = await this.recordError(campaignId, job.id, item.id, reason, user, role);
+          const outcome = await this.recordError(campaignId, job.id, item.id, reason, user, role, item.body);
           results.push(outcome);
           if (outcome.outcome === 'proposed') proposed++;
           else if (outcome.outcome === 'errored') errored++;
@@ -265,6 +268,7 @@ export class InboxSweepService {
             entityId: null,
             proposalId: null,
             reason,
+            body: item.body,
           });
         }
         continue;
@@ -281,8 +285,10 @@ export class InboxSweepService {
         role,
       );
       results.push(outcome);
-      if (outcome.outcome === 'proposed') proposed++;
-      else if (outcome.outcome === 'errored') errored++;
+      if (outcome.outcome === 'proposed') {
+        proposed++;
+        newlyProposed++;
+      } else if (outcome.outcome === 'errored') errored++;
       else skipped++;
     }
 
@@ -294,7 +300,7 @@ export class InboxSweepService {
       itemsErrored: errored,
       detail: `swept ${openItems.length} item(s): ${proposed} proposed, ${skipped} skipped, ${errored} errored`,
     });
-    return { job: jobToDomain(finalJob), items: results };
+    return { job: { ...jobToDomain(finalJob), itemsNewlyProposed: newlyProposed }, items: results };
   }
 
   private async applyClassification(
@@ -315,12 +321,12 @@ export class InboxSweepService {
         classification.action === 'unsupported'
           ? classification.reason || UNSUPPORTED_WRITE_REASON
           : `entity type "${classification.entityType ?? 'unknown'}" is not supported by the inbox sweep`;
-      return this.recordSkip(campaignId, jobId, noteId, reason, user, role);
+      return this.recordSkip(campaignId, jobId, noteId, reason, user, role, originalBody);
     }
 
     if (classification.action === 'dismiss') {
       const reason = classification.reason || 'no canon change needed';
-      return this.recordSkip(campaignId, jobId, noteId, reason, user, role);
+      return this.recordSkip(campaignId, jobId, noteId, reason, user, role, originalBody);
     }
 
     // action is 'create' or 'update', entityType is one of the four supported types.
@@ -329,7 +335,7 @@ export class InboxSweepService {
     const targetId = classification.action === 'update' ? classification.targetId : null;
     if (classification.action === 'update' && targetId === null) {
       const reason = `model proposed an update to ${entityType} with no targetId`;
-      return this.recordError(campaignId, jobId, noteId, reason, user, role);
+      return this.recordError(campaignId, jobId, noteId, reason, user, role, originalBody);
     }
 
     let validated: Record<string, unknown>;
@@ -338,7 +344,7 @@ export class InboxSweepService {
       validated = schema.parse(classification.fields) as Record<string, unknown>;
     } catch (err) {
       const reason = `${entityType} ${classification.action} payload failed validation: ${err instanceof Error ? err.message : String(err)}`;
-      return this.recordError(campaignId, jobId, noteId, reason, user, role);
+      return this.recordError(campaignId, jobId, noteId, reason, user, role, originalBody);
     }
 
     try {
@@ -379,7 +385,7 @@ export class InboxSweepService {
         classification.action === 'update' ? entityType : null,
         classification.action === 'update' ? targetId : null,
       );
-      return { noteId, outcome: 'proposed', entityType, entityId: targetId, proposalId: proposal.id, reason };
+      return { noteId, outcome: 'proposed', entityType, entityId: targetId, proposalId: proposal.id, reason, body: originalBody };
     } catch (err) {
       if (err instanceof StaleInboxSweepItemError) {
         return {
@@ -389,20 +395,21 @@ export class InboxSweepService {
           entityId: null,
           proposalId: null,
           reason: `${err.message}; re-run the sweep if it is still open`,
+          body: originalBody,
         };
       }
       if (err instanceof NotFoundException) {
         const reason = `failed to file ${classification.action} proposal: ${err.message}`;
-        return this.recordError(campaignId, jobId, noteId, reason, user, role);
+        return this.recordError(campaignId, jobId, noteId, reason, user, role, originalBody);
       }
       const concurrent = await this.findLedger(campaignId, noteId);
       if (concurrent) {
         const link = this.resolveLinkForPrior(concurrent);
         await this.tryResolve(noteId, user, role, concurrent.reason, link.entityType, link.entityId);
-        return this.resultFromLedger(noteId, concurrent);
+        return this.resultFromLedger(noteId, concurrent, originalBody);
       }
       const reason = `failed to file ${classification.action} proposal: ${err instanceof Error ? err.message : String(err)}`;
-      return { noteId, outcome: 'errored', entityType: null, entityId: null, proposalId: null, reason };
+      return { noteId, outcome: 'errored', entityType: null, entityId: null, proposalId: null, reason, body: originalBody };
     }
   }
 
@@ -419,6 +426,7 @@ export class InboxSweepService {
     reason: string,
     user: RequestUser,
     role: Role,
+    body: string,
   ): Promise<InboxSweepItemResult> {
     try {
       await this.persistLedger(campaignId, jobId, noteId, 'skipped', null, null, null, reason);
@@ -427,7 +435,7 @@ export class InboxSweepService {
       if (concurrent) {
         const link = this.resolveLinkForPrior(concurrent);
         await this.tryResolve(noteId, user, role, concurrent.reason, link.entityType, link.entityId);
-        return this.resultFromLedger(noteId, concurrent);
+        return this.resultFromLedger(noteId, concurrent, body);
       }
       const message = err instanceof Error ? err.message : String(err);
       if (!isUniqueConstraintError(err)) {
@@ -444,10 +452,11 @@ export class InboxSweepService {
         entityId: null,
         proposalId: null,
         reason: `failed to record skip: ${message}`,
+        body,
       };
     }
     await this.tryResolve(noteId, user, role, reason, null, null);
-    return { noteId, outcome: 'skipped', entityType: null, entityId: null, proposalId: null, reason };
+    return { noteId, outcome: 'skipped', entityType: null, entityId: null, proposalId: null, reason, body };
   }
 
   /**
@@ -463,6 +472,7 @@ export class InboxSweepService {
     reason: string,
     user: RequestUser,
     role: Role,
+    body: string,
   ): Promise<InboxSweepItemResult> {
     try {
       await this.persistLedger(campaignId, jobId, noteId, 'errored', null, null, null, reason);
@@ -471,7 +481,7 @@ export class InboxSweepService {
       if (concurrent) {
         const link = this.resolveLinkForPrior(concurrent);
         await this.tryResolve(noteId, user, role, concurrent.reason, link.entityType, link.entityId);
-        return this.resultFromLedger(noteId, concurrent);
+        return this.resultFromLedger(noteId, concurrent, body);
       }
       const message = err instanceof Error ? err.message : String(err);
       this.logger.warn(`Failed to persist error ledger for inbox item ${noteId}: ${message}`);
@@ -482,11 +492,12 @@ export class InboxSweepService {
         entityId: null,
         proposalId: null,
         reason: `failed to record error: ${message}`,
+        body,
       };
     }
 
     await this.tryResolve(noteId, user, role, reason, null, null);
-    return { noteId, outcome: 'errored', entityType: null, entityId: null, proposalId: null, reason };
+    return { noteId, outcome: 'errored', entityType: null, entityId: null, proposalId: null, reason, body };
   }
 
   /** Best-effort: the ledger row above is what makes a re-sweep idempotent, not this. */
@@ -527,7 +538,7 @@ export class InboxSweepService {
     return { entityType: (row.entityType as InboxSweepEntityType | null) ?? null, entityId: row.entityId };
   }
 
-  private resultFromLedger(noteId: number, row: typeof inboxSweepItems.$inferSelect): InboxSweepItemResult {
+  private resultFromLedger(noteId: number, row: typeof inboxSweepItems.$inferSelect, body: string): InboxSweepItemResult {
     return {
       noteId,
       outcome: row.outcome as InboxSweepOutcome,
@@ -535,6 +546,7 @@ export class InboxSweepService {
       entityId: row.entityId,
       proposalId: row.proposalId,
       reason: row.reason || 'previously swept',
+      body,
     };
   }
 
