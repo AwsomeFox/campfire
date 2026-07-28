@@ -50,6 +50,7 @@ import {
   LEGENDARY_ACTION_SLOT,
   LEGENDARY_ACTIONS_PER_ROUND,
   statblockSectionHasEntries,
+  type ActionEconomySlotKind,
   type ActionRollFn,
   type CharacterAction,
   type OutcomeBranch,
@@ -78,6 +79,12 @@ import {
   enqueueConcentrationCheck,
   type CombatantHpState,
 } from './encounters.logic';
+
+type ResolvedActionEconomyCost = {
+  slot: string;
+  kind: ActionEconomySlotKind | 'legendary';
+  max: number | null;
+};
 
 /**
  * Structured action resolver (issue #414) — the server orchestration around the pure,
@@ -200,34 +207,60 @@ export class ActionResolverService {
   }
 
   /**
-   * The maximum uses of one action-economy slot this actor has available (issue #1637).
+   * Resolve one authored cost key to the slot that the turn workspace actually accounts for.
    *
-   * `null` means "not a slot this resolver can bound" — a `cost.slot` key the adapter's own
-   * {@link actionEconomyForAdapter} model doesn't declare, and that isn't the legendary-action
-   * slot either. Refusing to invent a cap for an unrecognised key follows the same "refuse
-   * rather than guess" rule this resolver already applies elsewhere (an unknown AC, an unknown
-   * hit-die size): a wrong invented limit could reject a legitimate homebrew slot key that
-   * predates this check, which is worse than leaving it unbounded until the adapter (or a
-   * future issue) actually declares one.
-   *
-   * The legendary-action slot is the one key the adapter model deliberately does NOT cover —
-   * it is a per-MONSTER capability (does THIS statblock have a Legendary Actions section?),
-   * not a per-system one — so it is resolved the exact same way `updateCombatantTurnState`
-   * (`encounters.service.ts`, issue #618) already does: `LEGENDARY_ACTIONS_PER_ROUND` when the
-   * mapped statblock has entries, 0 (not null — a monster WITHOUT legendary actions has none,
-   * it does not get to spend them unbounded) otherwise. Kept in exact parity with that
-   * precedent rather than reinvented, so the two enforcement points cannot drift apart on what
-   * "how many legendary actions" means.
+   * `max === null` means "not a slot this resolver can bound" — a `cost.slot` key the adapter's
+   * own {@link actionEconomyForAdapter} model doesn't declare, and that isn't the legendary slot
+   * either. Refusing to invent a cap for an unrecognised key follows the same "refuse rather than
+   * guess" rule this resolver already applies elsewhere.
    */
-  private actionEconomySlotMax(actor: typeof combatants.$inferSelect, adapter: RuleSystemAdapter, slot: string): number | null {
+  private resolveActionEconomyCost(actor: typeof combatants.$inferSelect, adapter: RuleSystemAdapter, slot: string): ResolvedActionEconomyCost {
     if (slot === LEGENDARY_ACTION_SLOT) {
+      if (this.inlineStatblockHasLegendaryAction(actor)) {
+        return { slot: LEGENDARY_ACTION_SLOT, kind: 'legendary', max: LEGENDARY_ACTIONS_PER_ROUND };
+      }
       const data = this.statblockData(actor);
-      if (!data) return 0;
+      if (!data) return { slot: LEGENDARY_ACTION_SLOT, kind: 'legendary', max: 0 };
       const mapped = adapter.mapStatblock(data);
-      return statblockSectionHasEntries(mapped.legendaryActions) ? LEGENDARY_ACTIONS_PER_ROUND : 0;
+      return {
+        slot: LEGENDARY_ACTION_SLOT,
+        kind: 'legendary',
+        max: statblockSectionHasEntries(mapped.legendaryActions) ? LEGENDARY_ACTIONS_PER_ROUND : 0,
+      };
     }
-    const declared = actionEconomyForAdapter(adapter).slots.find((s) => s.key === slot);
-    return declared ? declared.max : null;
+
+    const model = actionEconomyForAdapter(adapter);
+    const declared =
+      model.slots.find((s) => s.key === slot) ??
+      // Generated/default structured actions historically say "action"; PF2e's declared pool
+      // is keyed "actions", so map the generic default to the adapter's primary action slot.
+      (slot === 'action' ? model.slots.find((s) => s.kind === 'action') : undefined);
+    return declared ? { slot: declared.key, kind: declared.kind, max: declared.max } : { slot, kind: 'resource', max: null };
+  }
+
+  private inlineStatblockHasLegendaryAction(actor: typeof combatants.$inferSelect): boolean {
+    const inline = this.inlineStatblock(actor);
+    return inline?.actions.some((action) => action.kind?.toLowerCase() === LEGENDARY_ACTION_SLOT || action.spec?.cost.slot === LEGENDARY_ACTION_SLOT) ?? false;
+  }
+
+  private turnStateUsageForCost(turnState: CombatantTurnState, cost: ResolvedActionEconomyCost): number {
+    return cost.kind === 'movement' ? turnState.movementUsedFt : turnState.used[cost.slot] ?? 0;
+  }
+
+  private spendActionEconomyCost(turnState: CombatantTurnState, cost: ResolvedActionEconomyCost, count: number): void {
+    if (cost.kind === 'movement') {
+      turnState.movementUsedFt += count;
+      return;
+    }
+    turnState.used[cost.slot] = (turnState.used[cost.slot] ?? 0) + count;
+  }
+
+  private refundActionEconomyCost(turnState: CombatantTurnState, cost: ResolvedActionEconomyCost, count: number): void {
+    if (cost.kind === 'movement') {
+      turnState.movementUsedFt = Math.max(0, turnState.movementUsedFt - count);
+      return;
+    }
+    turnState.used[cost.slot] = Math.max(0, (turnState.used[cost.slot] ?? 0) - count);
   }
 
   /** A target's AC / primary-defence number, or null when unknown (caller must not invent one). */
@@ -956,9 +989,10 @@ export class ActionResolverService {
         // slot's max forever, so an actor could "spend" an action/bonus/reaction it did not have,
         // repeatedly, and the sheet recorded a value out of range rather than a rejected spend.
         if (resolution.costSlot && resolution.costCount > 0) {
-          const usedBefore = actorTurnStateBefore.used[resolution.costSlot] ?? 0;
-          const max = this.actionEconomySlotMax(actor, adapter, resolution.costSlot);
-          // `max === null`: an unrecognised slot key — see actionEconomySlotMax's doc comment
+          const actionEconomyCost = this.resolveActionEconomyCost(actor, adapter, resolution.costSlot);
+          const usedBefore = this.turnStateUsageForCost(actorTurnStateBefore, actionEconomyCost);
+          const max = actionEconomyCost.max;
+          // `max === null`: an unrecognised slot key — see resolveActionEconomyCost's doc comment
           // for why that is deliberately NOT bounded rather than guessed at.
           if (max !== null && usedBefore + resolution.costCount > max) {
             const remaining = Math.max(0, max - usedBefore);
@@ -969,8 +1003,8 @@ export class ActionResolverService {
               code: 'action_economy_exhausted',
               message:
                 `"${resolution.actionName}" costs ${resolution.costCount} ${resolution.costSlot}` +
-                `${resolution.costCount === 1 ? '' : 's'}, but only ${remaining} of ${max} remain this turn.`,
-              slot: resolution.costSlot,
+                `, but only ${remaining} of ${max} remain this turn.`,
+              slot: actionEconomyCost.slot,
               remaining,
               max,
             });
@@ -1130,7 +1164,11 @@ export class ActionResolverService {
       if (actorFresh) {
         const turnState = CombatantTurnState.parse(fromJsonText<unknown>(actorFresh.turnState, null) ?? {});
         if (resolution.costSlot && resolution.costCount > 0) {
-          turnState.used[resolution.costSlot] = (turnState.used[resolution.costSlot] ?? 0) + resolution.costCount;
+          this.spendActionEconomyCost(
+            turnState,
+            this.resolveActionEconomyCost(actorFresh, adapter, resolution.costSlot),
+            resolution.costCount,
+          );
         }
         if (resolution.startsConcentration) {
           // Starting this action's effect replaces the prior concentration; queued saves
@@ -1192,6 +1230,7 @@ export class ActionResolverService {
     const encounter = this.encounterRowOrThrow(encounterId);
     if (token.encounterId !== encounterId) throw new BadRequestException('Undo token is for a different encounter.');
     const actor = this.combatantRowOrThrow(encounterId, token.actorCombatantId);
+    const adapter = this.adapterForCampaign(encounter.campaignId);
     if (role !== 'dm') {
       // Issue #1450 defense in depth: undo() never routes through policyFor, so it needs
       // its own role floor. Ownership alone is not enough — a member demoted from player
@@ -1269,7 +1308,11 @@ export class ActionResolverService {
       if (actorFresh) {
         const turnState = CombatantTurnState.parse(fromJsonText<unknown>(actorFresh.turnState, null) ?? {});
         if (token.costSlot && token.costCount > 0) {
-          turnState.used[token.costSlot] = Math.max(0, (turnState.used[token.costSlot] ?? 0) - token.costCount);
+          this.refundActionEconomyCost(
+            turnState,
+            this.resolveActionEconomyCost(actorFresh, adapter, token.costSlot),
+            token.costCount,
+          );
         }
         if (token.startedConcentration) {
           turnState.concentration = token.concentrationBefore;

@@ -221,6 +221,187 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(actorAfter.used.action).toBe(1);
   });
 
+  it('#1637: multi-cost rejection messages do not append a naive plural suffix to slot keys', () => {
+    const { service, encounterId, actor } = seed();
+
+    let threw: unknown;
+    try {
+      service.resolve(
+        encounterId,
+        ActionResolveRequest.parse({
+          actorCombatantId: actor,
+          actionName: 'Quickened Flurry',
+          spec: {
+            mode: 'attack',
+            attack: { bonus: '+7' },
+            cost: { slot: 'bonus', count: 2 },
+            targets: { count: 0, allow: 'enemy' },
+            outcomes: {},
+          },
+          targetIds: [],
+          commit: true,
+        }),
+        alice,
+        'player',
+      );
+    } catch (e) {
+      threw = e;
+    }
+
+    const body = (threw as { getResponse?: () => unknown }).getResponse?.() as { message?: string } | undefined;
+    expect(body?.message).toContain('"Quickened Flurry" costs 2 bonus,');
+    expect(body?.message).not.toContain('bonuss');
+  });
+
+  it('#1637: PF2e default action costs spend the adapter actions slot and reject after it is exhausted', () => {
+    const { orm, service, encounterId, actor } = seed({ ruleSystem: 'pf2e' });
+    orm.update(combatants).set({ turnState: JSON.stringify({ used: { actions: 2 } }) }).where(eq(combatants.id, actor)).run();
+    const req = ActionResolveRequest.parse({
+      actorCombatantId: actor,
+      actionName: 'Interact',
+      spec: {
+        mode: 'attack',
+        attack: { bonus: '+7' },
+        targets: { count: 0, allow: 'enemy' },
+        outcomes: {},
+      },
+      targetIds: [],
+      commit: true,
+    });
+
+    const applied = service.resolve(encounterId, req, alice, 'player');
+    expect(applied.applied).toBe(true);
+    let state = CombatantTurnState.parse(
+      JSON.parse(orm.select().from(combatants).where(eq(combatants.id, actor)).get()!.turnState ?? '{}'),
+    );
+    expect(state.used.actions).toBe(3);
+    expect(state.used.action).toBeUndefined();
+
+    let threw: unknown;
+    try {
+      service.resolve(encounterId, req, alice, 'player');
+    } catch (e) {
+      threw = e;
+    }
+    const body = (threw as { getResponse?: () => unknown }).getResponse?.();
+    expect(body).toMatchObject({ code: 'action_economy_exhausted', slot: 'actions', remaining: 0, max: 3 });
+    state = CombatantTurnState.parse(
+      JSON.parse(orm.select().from(combatants).where(eq(combatants.id, actor)).get()!.turnState ?? '{}'),
+    );
+    expect(state.used.actions).toBe(3);
+    expect(state.used.action).toBeUndefined();
+
+    service.undo(encounterId, applied.undoToken!, alice, 'player');
+    state = CombatantTurnState.parse(
+      JSON.parse(orm.select().from(combatants).where(eq(combatants.id, actor)).get()!.turnState ?? '{}'),
+    );
+    expect(state.used.actions).toBe(2);
+    expect(state.used.action).toBeUndefined();
+  });
+
+  it('#1637: movement-cost actions validate and write movementUsedFt instead of used.movement', () => {
+    const { orm, service, encounterId, actor } = seed();
+    const req = ActionResolveRequest.parse({
+      actorCombatantId: actor,
+      actionName: 'Tactical Step',
+      spec: {
+        mode: 'attack',
+        attack: { bonus: '+7' },
+        cost: { slot: 'movement', count: 10 },
+        targets: { count: 0, allow: 'enemy' },
+        outcomes: {},
+      },
+      targetIds: [],
+      commit: true,
+    });
+
+    orm.update(combatants).set({ turnState: JSON.stringify({ used: {}, movementUsedFt: 25 }) }).where(eq(combatants.id, actor)).run();
+    let threw: unknown;
+    try {
+      service.resolve(encounterId, req, alice, 'player');
+    } catch (e) {
+      threw = e;
+    }
+    expect((threw as { getResponse?: () => unknown }).getResponse?.()).toMatchObject({
+      code: 'action_economy_exhausted',
+      slot: 'movement',
+      remaining: 5,
+      max: 30,
+    });
+    let state = CombatantTurnState.parse(
+      JSON.parse(orm.select().from(combatants).where(eq(combatants.id, actor)).get()!.turnState ?? '{}'),
+    );
+    expect(state.movementUsedFt).toBe(25);
+    expect(state.used.movement).toBeUndefined();
+
+    orm.update(combatants).set({ turnState: JSON.stringify({ used: {}, movementUsedFt: 20 }) }).where(eq(combatants.id, actor)).run();
+    const applied = service.resolve(encounterId, req, alice, 'player');
+    state = CombatantTurnState.parse(
+      JSON.parse(orm.select().from(combatants).where(eq(combatants.id, actor)).get()!.turnState ?? '{}'),
+    );
+    expect(state.movementUsedFt).toBe(30);
+    expect(state.used.movement).toBeUndefined();
+
+    service.undo(encounterId, applied.undoToken!, alice, 'player');
+    state = CombatantTurnState.parse(
+      JSON.parse(orm.select().from(combatants).where(eq(combatants.id, actor)).get()!.turnState ?? '{}'),
+    );
+    expect(state.movementUsedFt).toBe(20);
+    expect(state.used.movement).toBeUndefined();
+  });
+
+  it('#1637: inline statblock monsters with legendary actions can spend and refund that slot', () => {
+    const { orm, service, encounterId } = seed();
+    const [legendaryMonster] = orm
+      .insert(combatants)
+      .values({
+        encounterId,
+        kind: 'monster',
+        name: 'Inline Ancient',
+        initiative: 5,
+        hpCurrent: 80,
+        hpMax: 80,
+        sortOrder: 3,
+        statblockJson: JSON.stringify({
+          ac: 18,
+          abilityScores: { STR: 22, DEX: 10, CON: 18, INT: 10, WIS: 12, CHA: 14 },
+          actions: [
+            {
+              name: 'Tail Swipe',
+              kind: 'legendary',
+              spec: {
+                mode: 'attack',
+                attack: { bonus: '+9' },
+                cost: { slot: 'legendary', count: 1 },
+                targets: { count: 0, allow: 'enemy' },
+                outcomes: {},
+              },
+            },
+          ],
+        }),
+      })
+      .returning()
+      .all();
+
+    const applied = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: legendaryMonster.id, actionIndex: 0, targetIds: [], commit: true }),
+      dmUser,
+      'dm',
+    );
+    expect(applied.applied).toBe(true);
+    let state = CombatantTurnState.parse(
+      JSON.parse(orm.select().from(combatants).where(eq(combatants.id, legendaryMonster.id)).get()!.turnState ?? '{}'),
+    );
+    expect(state.used.legendary).toBe(1);
+
+    service.undo(encounterId, applied.undoToken!, dmUser, 'dm');
+    state = CombatantTurnState.parse(
+      JSON.parse(orm.select().from(combatants).where(eq(combatants.id, legendaryMonster.id)).get()!.turnState ?? '{}'),
+    );
+    expect(state.used.legendary).toBe(0);
+  });
+
   it('#1637: legendary-action spend is bounded by the MONSTER statblock, not a fixed constant — a drake with none cannot spend any', () => {
     const { orm, service, encounterId, drake } = seed();
     // The drake's statblock (dataJson: { armor_class, hit_points, damage_resistances }) has no
