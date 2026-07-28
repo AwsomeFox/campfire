@@ -10,6 +10,7 @@ import {
   Param,
   ParseIntPipe,
   Post,
+  Patch,
   Query,
   Req,
   Res,
@@ -25,7 +26,7 @@ import type { RequestUser } from '../../common/user.types';
 import { filterHidden } from '../../common/redact';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { AttachmentsService, ALLOWED_MIME_TO_EXT, MAX_UPLOAD_BYTES } from './attachments.service';
-import { AttachmentUploadDto } from './attachments.dto';
+import { AttachmentMetadataUpdateDto, AttachmentUploadDto } from './attachments.dto';
 import { contentDispositionHeader } from './filename';
 import {
   DERIVATIVE_VARIANT_NAMES,
@@ -100,7 +101,7 @@ export class CampaignAttachmentsController {
     const minRole = body.kind === 'portrait' ? 'player' : 'dm';
     const role = await this.access.requireRole(user, campaignId, minRole);
 
-    return this.attachmentsService.create(campaignId, body.kind, file, user, role);
+    return this.attachmentsService.create(campaignId, body.kind, file, user, role, body);
   }
 
   /**
@@ -258,6 +259,18 @@ export class AttachmentsController {
       }
     });
     stream.pipe(res);
+  }
+
+  @Patch(':id/metadata')
+  @ApiOperation({ summary: 'Correct attachment attribution and accessibility metadata', description: 'Requires the uploader or a DM. Bytes and visibility are immutable through this endpoint; updatedAt prevents overwriting a newer correction.' })
+  async updateMetadata(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: AttachmentMetadataUpdateDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const row = await this.attachmentsService.getRowOrThrow(id);
+    const role = await this.access.requireMember(user, row.campaignId, { write: true });
+    return this.attachmentsService.updateMetadata(id, body, user, role);
   }
 
   /**

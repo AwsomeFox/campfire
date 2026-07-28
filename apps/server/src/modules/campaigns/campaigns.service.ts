@@ -13,9 +13,12 @@ import {
   CampaignImport,
   CampaignPurge,
   CampaignUpdate,
+  AttachmentMetadata,
   CAMPAIGN_CLONE_PREVIEW_FORMAT_VERSION,
   AiExternalContentPolicy,
   NarrationLanguage,
+  CompendiumRef,
+  CompendiumSnapshot,
 } from '@campfire/schema';
 import type { Campaign, CampaignClonePreview, CampaignSummary, Role, TrashedEntity, CampaignImportPreflight, OnUnresolvedCompendium } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -106,6 +109,21 @@ import {
   preflightCompendiumImport,
   resolveImportedCombatantRuleEntryId,
 } from './compendium-import';
+
+function safeImportedCompendiumSnapshot(value: unknown): string | null {
+  const parsed = CompendiumSnapshot.safeParse(value);
+  if (!parsed.success) return null;
+  // Keep play-safe provenance; blank only an unsafe external URL.
+  const snapshot = parsed.data.sourceUrl && !/^https?:\/\//i.test(parsed.data.sourceUrl)
+    ? { ...parsed.data, sourceUrl: '' }
+    : parsed.data;
+  return JSON.stringify(snapshot);
+}
+
+function safeImportedCompendiumRef(value: unknown): string | null {
+  const parsed = CompendiumRef.safeParse(value);
+  return parsed.success ? JSON.stringify(parsed.data) : null;
+}
 
 /** Generous cap on an uploaded import archive: several full-size (8MB) maps + text. */
 const MAX_IMPORT_ARCHIVE_BYTES = 128 * 1024 * 1024;
@@ -233,6 +251,15 @@ export interface ImportAttachmentFile {
   filename: string;
   mime: string;
   bytes: Buffer;
+  title: string;
+  caption: string;
+  altText: string;
+  creator: string;
+  sourceUrl: string;
+  license: string;
+  rights: string;
+  attribution: string;
+  checksumSha256: string | null;
 }
 
 // ---- defensive readers for an imported export document (issue #120) ----
@@ -1205,6 +1232,15 @@ export class CampaignsService {
             filename: a.filename,
             mime: a.mime,
             size: a.size,
+            title: a.title,
+            caption: a.caption,
+            altText: a.altText,
+            creator: a.creator,
+            sourceUrl: a.sourceUrl,
+            license: a.license,
+            rights: a.rights,
+            attribution: a.attribution,
+            checksumSha256: a.checksumSha256,
             hidden: a.hidden,
             state: ATTACHMENT_STATE_COMMITTED,
             createdAt: ts,
@@ -1385,6 +1421,10 @@ export class CampaignsService {
               qty: item.qty,
               notes: item.notes,
               iconSlug: item.iconSlug,
+              ruleEntryId: item.ruleEntryId,
+              compendiumRef: item.compendiumRef,
+              compendiumSnapshot: item.compendiumSnapshot,
+              compendiumState: item.compendiumState,
               createdAt: ts,
               updatedAt: ts,
             })
@@ -2073,6 +2113,15 @@ export class CampaignsService {
             filename: a.filename,
             mime: a.mime,
             size: a.bytes.length,
+            title: a.title,
+            caption: a.caption,
+            altText: a.altText,
+            creator: a.creator,
+            sourceUrl: a.sourceUrl,
+            license: a.license,
+            rights: a.rights,
+            attribution: a.attribution,
+            checksumSha256: crypto.createHash('sha256').update(a.bytes).digest('hex'),
             // Secure default (#97): maps/images land DM-only, portraits stay player-visible.
             hidden: a.kind !== 'portrait',
             createdAt: ts,
@@ -2333,6 +2382,13 @@ export class CampaignsService {
             qty: intOr(item.qty, 1),
             notes: str(item.notes),
             iconSlug: str(item.iconSlug), // issue #307 — preserve icon override on import
+            // Numeric ids are local only; retained ref/snapshot keep imports play-safe.
+            ruleEntryId: null,
+            compendiumRef: safeImportedCompendiumRef(item.compendiumRef),
+            compendiumSnapshot: safeImportedCompendiumSnapshot(item.compendiumSnapshot),
+            // A cross-install numeric id cannot be trusted. Keep the snapshot play-safe
+            // and surface a detached link rather than pretending it can be refreshed.
+            compendiumState: safeImportedCompendiumRef(item.compendiumRef) && safeImportedCompendiumSnapshot(item.compendiumSnapshot) ? 'detached' : null,
             createdAt: ts,
             updatedAt: ts,
           })
@@ -3018,12 +3074,31 @@ export class CampaignsService {
         attachmentsSkipped += 1;
         continue;
       }
+      const checksumSha256 = crypto.createHash('sha256').update(bytes).digest('hex');
+      const declaredChecksum = str(a.checksumSha256);
+      if (declaredChecksum && declaredChecksum !== checksumSha256) {
+        attachmentsSkipped += 1;
+        continue;
+      }
+      // Archives are untrusted input too. Parse provenance through the same bounded
+      // current contract used by uploads/patches so an unsafe URL never becomes a
+      // clickable Handouts link after import.
+      const metadata = AttachmentMetadata.safeParse({
+        title: str(a.title), caption: str(a.caption), altText: str(a.altText), creator: str(a.creator),
+        sourceUrl: str(a.sourceUrl), license: str(a.license), rights: str(a.rights), attribution: str(a.attribution),
+        checksumSha256: declaredChecksum || null,
+      });
+      if (!metadata.success) {
+        attachmentsSkipped += 1;
+        continue;
+      }
       attachmentFiles.push({
         srcId,
         kind: str(a.kind, 'image'),
         filename: sanitizeAttachmentFilename(str(a.filename, `attachment-${srcId}`)),
         mime,
         bytes,
+        ...metadata.data,
       });
     }
 

@@ -4,6 +4,7 @@ import type { z } from 'zod';
 import type { AdminMetrics } from '@campfire/schema';
 import { APP_COMMIT, APP_VERSION } from '../../common/build-metadata';
 import { DB, type DrizzleDb } from '../../db/db.module';
+import { StorageDiagnosticsService } from '../health/storage-diagnostics.service';
 import {
   apiTokens,
   attachments,
@@ -41,7 +42,7 @@ const RECENT_ACTIVITY_LIMIT = 15;
  */
 @Injectable()
 export class ObservabilityService {
-  constructor(@Inject(DB) private readonly db: DrizzleDb) {}
+  constructor(@Inject(DB) private readonly db: DrizzleDb, private readonly diagnostics: StorageDiagnosticsService) {}
 
   async getMetrics(): Promise<z.infer<typeof AdminMetrics>> {
     const nowMs = Date.now();
@@ -79,7 +80,8 @@ export class ObservabilityService {
       this.countActiveSessions(new Date(nowMs).toISOString()),
     ]);
 
-    const database = this.databaseSize();
+    const diagnostic = this.diagnostics.cachedSnapshot();
+    const database = this.databaseSize(diagnostic.storage);
     const recentActivity = await this.recentActivity();
 
     return {
@@ -105,6 +107,16 @@ export class ObservabilityService {
         ruleEntries: ruleEntriesCount,
       },
       database,
+      storage: {
+        freeBytes: diagnostic.storage.freeBytes,
+        totalBytes: diagnostic.storage.totalBytes,
+        availableBytes: diagnostic.storage.availableBytes,
+        uploadsBytes: diagnostic.storage.uploadsBytes,
+        backupsBytes: diagnostic.storage.backupsBytes,
+        tempBytes: diagnostic.storage.tempBytes,
+        status: diagnostic.status,
+        quickCheck: { status: diagnostic.integrity.quickCheck.status, checkedAt: diagnostic.integrity.quickCheck.checkedAt },
+      },
       recentActivity,
     };
   }
@@ -123,14 +135,14 @@ export class ObservabilityService {
     return Number(row?.n ?? 0);
   }
 
-  private databaseSize(): z.infer<typeof AdminMetrics>['database'] {
+  private databaseSize(storage: { dbFileBytes: number | null; walBytes: number | null; shmBytes: number | null }): z.infer<typeof AdminMetrics>['database'] {
     // PRAGMA reads are metadata lookups — no table scan. Reported through
     // drizzle's raw get() so we don't need to reach for the underlying handle.
     const pageCountRow = this.db.get<{ page_count: number }>(sql`PRAGMA page_count`);
     const pageSizeRow = this.db.get<{ page_size: number }>(sql`PRAGMA page_size`);
     const pageCount = Number(pageCountRow?.page_count ?? 0);
     const pageSize = Number(pageSizeRow?.page_size ?? 0);
-    return { pageCount, pageSize, sizeBytes: pageCount * pageSize };
+    return { pageCount, pageSize, sizeBytes: pageCount * pageSize, dbFileBytes: storage.dbFileBytes, walBytes: storage.walBytes, shmBytes: storage.shmBytes };
   }
 
   private async recentActivity(): Promise<z.infer<typeof AdminMetrics>['recentActivity']> {

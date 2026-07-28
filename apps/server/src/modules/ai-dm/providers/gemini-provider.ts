@@ -30,6 +30,7 @@ import {
   type FetchLike,
   type RetryConfig,
   postJson,
+  postAndReadJson,
   parseSse,
 } from './http';
 
@@ -156,13 +157,12 @@ export class GeminiProvider implements AiProvider {
   async generate(req: AiGenerateRequest, opts?: AiGenerateOptions): Promise<AiGenerateResult> {
     const url = this.generateUrl(req.model, false);
     const body = this.buildBody(req);
-    const res = await postJson(this.fetchImpl, url, this.authHeaders(), body, {
+    const data = await postAndReadJson<GeminiResponse>(this.fetchImpl, url, this.authHeaders(), body, {
       provider: this.name,
       timeoutMs: opts?.timeoutMs ?? this.timeoutMs,
       retry: this.retry,
       signal: opts?.signal,
     });
-    const data = (await res.json()) as GeminiResponse;
     return this.parseResult(data, req.model);
   }
 
@@ -300,13 +300,15 @@ export class GeminiProvider implements AiProvider {
 
   /** Issue #987: list models from `GET ${baseUrl}/models`. */
   async listModels(): Promise<string[]> {
-    const { getJson } = await import('./http');
+    const { getJson, readJsonBody } = await import('./http');
     const res = await getJson(this.fetchImpl, `${this.baseUrl}/models`, this.authHeaders(), {
       provider: this.name,
       timeoutMs: this.timeoutMs,
     });
     if (!res.ok) throw new AiProviderError('invalid_request', `${this.name}: models request failed (${res.status})`, { provider: this.name });
-    const data = (await res.json()) as { models?: Array<{ name: string }> };
+    // `getJson` has no retry loop (model lists are not transient), so the parse guard is
+    // applied at the call site rather than through `postAndReadJson`.
+    const data = await readJsonBody<{ models?: Array<{ name: string }> }>(res, this.name);
     return (data.models ?? []).map((m) => m.name.replace(/^models\//, '')).sort();
   }
 }

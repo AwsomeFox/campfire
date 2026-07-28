@@ -393,9 +393,10 @@ describe('buildMarkdownZip — collisions + Unicode + determinism (issue #863)',
     const attachmentsMd = await zip.file('attachments.md')!.async('string');
     const row = attachmentsMd.split('\n').find((l) => l.startsWith('| 5 |'))!;
     expect(row).toBeDefined();
-    // The literal pipe is escaped and the newline collapsed, so the row keeps 5 columns.
+    // The literal pipe is escaped and the newline collapsed, so the row keeps
+    // its 8 columns (ID/Kind/Title/Filename/License/Source/File/Referenced by).
     expect(row).toContain('evil\\|name second');
-    expect(row.split(' | ').length).toBe(5);
+    expect(row.split(' | ').length).toBe(8);
   });
 
   it('embeds the RAW scheduled-session rows in campaign.json, completed status and all (#504)', async () => {
