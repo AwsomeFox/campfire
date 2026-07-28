@@ -2,12 +2,12 @@
   "tracked": [
     {
       "pr": 1631,
-      "status": "babysitting",
+      "status": "merged",
       "url": "https://github.com/AwsomeFox/campfire/pull/1631",
       "headBranch": "fix/issue-1585",
       "baseBranch": "main",
-      "updatedAt": "2026-07-28T10:00:00Z",
-      "notes": "Tracking started. MERGEABLE (no conflicts with main). Devin review threads already resolved after fix commit fe90e6fa (page size 100 + createLatestOnlyGate). CI in progress after synchronize; mergeStateStatus BLOCKED pending required checks."
+      "updatedAt": "2026-07-28T10:42:00Z",
+      "notes": "Merged 2026-07-28 via squash c1ece8eb by cursor[bot]. Head fe90e6fa addressed Devin page-size + latest-only-gate feedback; review threads resolved; required CI green (lint/coverage/build/build-test/e2e)."
     }
   ]
 }
