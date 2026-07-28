@@ -130,6 +130,8 @@ export const MCP_TOOL_NAMES = [
   'award_xp',
   'level_up_character',
   'set_character_conditions',
+  // #1643 — raise/lower a leveled condition track's level (5e Exhaustion).
+  'adjust_character_condition_level',
   // #1041 — atomic party rest (plan the whole party, then one transaction).
   'long_rest',
   'short_rest',

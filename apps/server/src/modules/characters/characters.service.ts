@@ -34,6 +34,9 @@ import {
   // #422/#1578 — the adapter-owned resource vocabulary (standard pools + the character's own
   // custom ones), so the surface never hardcodes one system's resource names.
   resourceVocabularyForAdapter,
+  // #1643 — the adapter-owned leveled condition track (5e Exhaustion; PF2e has none).
+  ConditionLevelPatch,
+  leveledConditionTrackFor,
 } from '@campfire/schema';
 import type {
   Character,
@@ -58,7 +61,13 @@ import { auditLog, campaigns, characters, checkRequests, combatants, encounters 
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { fromJsonText, toJsonText } from '../../common/json';
-import { conditionWriteSetFromNames, sheetConditionWriteSetFromNames } from '../../common/conditions';
+import {
+  conditionWriteSetFromNames,
+  sheetConditionWriteSetFromNames,
+  legacyConditionInstance,
+  readConditionInstances,
+  sheetConditionWriteSetFromInstances,
+} from '../../common/conditions';
 import { redactSecret, redactSecrets } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
@@ -130,6 +139,10 @@ export function toDomain(row: typeof characters.$inferSelect): Character {
     deathSaveSuccesses: row.deathSaveSuccesses,
     deathSaveFailures: row.deathSaveFailures,
     conditions: fromJsonText<string[]>(row.conditions, []),
+    // Issue #1643: structured instances (so a client can read a leveled condition's
+    // `stacks`, e.g. 5e Exhaustion), union-on-read same as the combatant side —
+    // materialises a bare legacy name with no instance yet into one (stacks: 1).
+    conditionInstances: readConditionInstances(row.conditionInstances, row.conditions),
     saveProficiencies: fromJsonText<Character['saveProficiencies']>(row.saveProficiencies, []),
     skills: fromJsonText<Record<string, SkillRank>>(row.skills, {}),
     actions: fromJsonText<CharacterAction[]>(row.actions, []),
@@ -1276,6 +1289,83 @@ export class CharactersService {
       entityId: id,
       campaignId: existing.campaignId,
       detail: JSON.stringify(patch),
+    });
+    this.emitCharacterUpdated(existing.campaignId, id, user.id);
+    return redactSecret(toDomain(row), role);
+  }
+
+  /**
+   * Raise or lower the LEVEL of a leveled condition track (issue #1643) — e.g. 5e
+   * Exhaustion — on a character sheet. `patchConditions` above only adds/removes a bare
+   * name and PRESERVES whatever `stacks` an existing instance already has; there was no
+   * path anywhere (REST, MCP, or the general character PATCH) that actually moved
+   * `stacks`, on a character rather than a combatant. This is that path.
+   *
+   * Rule-system aware by construction: `patch.name` must match the CURRENT campaign
+   * adapter's declared track (`leveledConditionTrackFor`), so a PF2e campaign (which
+   * declares none) 400s on every call rather than silently accepting an arbitrary name at
+   * an arbitrary cap — there is nothing here for it to level.
+   *
+   * Same delta/level-are-alternatives, never-a-silent-clamp shape as {@link adjustResource}
+   * (#1039): `level` sets the level absolutely (applied first when both are sent), `delta`
+   * adjusts relative to the CURRENT level, and a result outside [0, track.max] is a 400.
+   * Level 0 removes the condition entirely — `ConditionInstance.stacks` itself requires
+   * `stacks >= 1`, so "zero" has no on-disk representation as an instance.
+   */
+  async adjustConditionLevel(id: number, patch: ConditionLevelPatch, user: RequestUser, role: Role): Promise<Character> {
+    const existing = await this.getRowOrThrow(id);
+    this.assertCanWrite(existing, user, role);
+
+    const adapter = await this.adapterForCampaign(existing.campaignId);
+    const track = leveledConditionTrackFor(adapter.id);
+    const wantedName = patch.name.trim();
+    if (!track || track.name.toLowerCase() !== wantedName.toLowerCase()) {
+      throw new BadRequestException(
+        `'${wantedName}' is not a leveled condition track for this campaign's rule system (${adapter.label})`,
+      );
+    }
+
+    const priorInstances = readConditionInstances(existing.conditionInstances, existing.conditions);
+    const trackKey = track.name.toLowerCase();
+    const currentInstance = priorInstances.find((i) => i.name.trim().toLowerCase() === trackKey);
+    const currentLevel = currentInstance?.stacks ?? 0;
+    let nextLevel = patch.level !== undefined ? patch.level : currentLevel;
+    if (patch.delta !== undefined) nextLevel += patch.delta;
+
+    // Deliberately an ERROR, never a clamp (#1039): the same "never silently under- or
+    // over-report a resource change" rule as adjustResource/patchSpellSlots. A clamp here
+    // would let an AI narrate a 7th exhaustion level (or a -1'th) that never actually
+    // landed on the sheet.
+    if (nextLevel < 0 || nextLevel > track.max) {
+      throw new BadRequestException(`${track.name} level (${nextLevel}) must be in [0, ${track.max}]`);
+    }
+
+    const nextInstances =
+      nextLevel === 0
+        ? priorInstances.filter((i) => i.name.trim().toLowerCase() !== trackKey)
+        : currentInstance
+          ? priorInstances.map((i) => (i === currentInstance ? { ...i, stacks: nextLevel } : i))
+          : // `legacyConditionInstance` only returns null for an empty name; `track.name`
+            // is always a non-empty constant ('Exhaustion'), so this cannot actually be null.
+            [...priorInstances, { ...legacyConditionInstance(track.name)!, stacks: nextLevel }];
+
+    const [row] = await this.db
+      .update(characters)
+      .set({ ...sheetConditionWriteSetFromInstances(nextInstances), updatedAt: nowIso() })
+      .where(eq(characters.id, id))
+      .returning();
+
+    // Issue #486: sheet → live combatant, same as patchConditions above.
+    await this.syncActiveCombatantConditions(id, row.conditions, { campaignId: existing.campaignId });
+
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'character.conditionLevel',
+      entityType: 'character',
+      entityId: id,
+      campaignId: existing.campaignId,
+      detail: JSON.stringify({ name: track.name, from: currentLevel, to: nextLevel }),
     });
     this.emitCharacterUpdated(existing.campaignId, id, user.id);
     return redactSecret(toDomain(row), role);

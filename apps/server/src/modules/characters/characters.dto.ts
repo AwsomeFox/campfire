@@ -1,6 +1,6 @@
 import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
-import { CharacterCreate, CharacterUpdate, HpPatch, ConditionsPatch, SpellSlotPatch, ResourcePatch, XpPatch, XpAward, LevelUp, DdbCharacterImport, ExpectedUpdatedAt, CheckRollRequest, CheckRequestCreate } from '@campfire/schema';
+import { CharacterCreate, CharacterUpdate, HpPatch, ConditionsPatch, ConditionLevelPatch, SpellSlotPatch, ResourcePatch, XpPatch, XpAward, LevelUp, DdbCharacterImport, ExpectedUpdatedAt, CheckRollRequest, CheckRequestCreate } from '@campfire/schema';
 
 // .strict() applied here at the DTO layer only — see encounters.dto.ts header
 // comment for why the shared @campfire/schema exports themselves stay lenient
@@ -30,6 +30,8 @@ export type HpPatchDto = z.infer<typeof HpPatch>;
 export const HpPatchDto = HpPatchDtoClass;
 
 export class ConditionsPatchDto extends createZodDto(ConditionsPatch.strict()) {}
+// Issue #1643: raise/lower a leveled condition track's level (5e Exhaustion).
+export class ConditionLevelPatchDto extends createZodDto(ConditionLevelPatch.strict()) {}
 
 export class SpellSlotPatchDto extends createZodDto(SpellSlotPatch.strict()) {}
 // Issue #422/#1578: spend/restore/configure one bounded character resource.
