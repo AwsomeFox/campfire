@@ -103,6 +103,7 @@ import {
   InvitePolicyUpdate,
   SpellSlotPatch,
   ResourcePatch,
+  ConditionLevelPatch,
   spellSlotsRemaining,
   EncounterReopen,
   ProposalRevise,
@@ -3143,6 +3144,45 @@ export class McpToolsService {
           user,
           role,
         );
+      },
+    );
+
+    // Issue #1643: set_character_conditions above only adds/removes a bare name and
+    // PRESERVES an existing instance's `stacks` — there was no way for the AI (or a human
+    // via REST) to actually MOVE the level of a leveled condition track (5e Exhaustion) on
+    // a character sheet, only toggle its presence. This is that path: same
+    // delta/level-are-alternatives shape as adjust_character_resource, gated to whichever
+    // ONE condition (if any) the campaign's rule-system adapter declares as leveled — a
+    // PF2e campaign 400s on every call, since it declares none.
+    this.writeTool(
+      server,
+      user,
+      'adjust_character_condition_level',
+      "Raise or lower the LEVEL of the campaign's leveled condition track (issue #1643) — 5e Exhaustion (1-6), " +
+        'or nothing on a system with no such track (e.g. PF2e — every call 400s there). player owner or DM, same ' +
+        'authority as adjust_character_resource. `delta` adjusts relative to the current level; `level` sets it ' +
+        'absolutely (applied first when both are sent). Resulting level outside [0, the track\'s max] FAILS with a ' +
+        '400 — never a silent clamp — so a success can be trusted as "the level actually changed by that amount." ' +
+        'Level 0 removes the condition. `name` must match the track this campaign actually has.',
+      // ConditionLevelPatch is a ZodEffects (.refine requiring delta|level), so it has no
+      // `.shape` to spread — list the wire fields here and re-validate with .parse below.
+      {
+        characterId: Id.describe('Character id'),
+        name: z.string().min(1).max(40).describe("Leveled condition track name for this campaign (5e: 'Exhaustion')"),
+        delta: z.number().int().optional().describe('Relative level adjustment (at least one of delta or level required)'),
+        level: z
+          .number()
+          .int()
+          .min(0)
+          .max(99)
+          .optional()
+          .describe('Absolute level; 0 removes (at least one of delta or level required)'),
+      },
+      async ({ characterId, ...patch }) => {
+        const row = await this.characters.getRowOrThrow(characterId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'player');
+        const validated = ConditionLevelPatch.parse(patch);
+        return this.characters.adjustConditionLevel(characterId as number, validated, user, role);
       },
     );
 
