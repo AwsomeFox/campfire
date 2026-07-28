@@ -6,8 +6,8 @@
       "url": "https://github.com/AwsomeFox/campfire/pull/1618",
       "headBranch": "fix/issue-724",
       "baseBranch": "main",
-      "updatedAt": "2026-07-28T02:12:00Z",
-      "notes": "Added to tracked on babysitting-4387. MERGEABLE; CI in progress (run 30322429611); no review comments yet."
+      "updatedAt": "2026-07-28T02:25:00Z",
+      "notes": "Pushed review fixes on 62b7e4aa (bfree/bavail, scan-limit disk, uploads LIMIT 1, null checkedAt, write-probe cache, MetricsCard deps). Awaiting CI re-run and thread resolution."
     }
   ]
 }
