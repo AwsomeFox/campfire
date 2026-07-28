@@ -1,5 +1,6 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
+import ts from 'typescript';
 
 /**
  * Mechanical enforcement of the single-writer invariant (issue #1666, generalising #1664).
@@ -38,28 +39,10 @@ const EXCLUDED_FILES = new Set([join(SRC_ROOT, 'common', 'conditions.ts'), join(
 
 /** Spreading one of these into a `.set()`/`.values()` object writes both columns correctly. */
 const HELPER_MARKERS = [
-  'conditionWriteSetFromNames(',
-  'sheetConditionWriteSetFromNames(',
-  'conditionWriteSetFromInstances(',
-  'sheetConditionWriteSetFromInstances(',
-];
-
-/** RHS shapes that READ a column rather than WRITE it — excluded before pairing is checked. */
-const READ_RHS_PATTERNS = [
-  /^\s*(combatants|characters)\.conditions\b/,
-  /^\s*(combatants|characters)\.conditionInstances\b/,
-  /^\s*fromJsonText[<(]/,
-  /^\s*parseConditionInstances\(/,
-  /^\s*readConditionInstances\(/,
-  // A `.select({ conditionInstances: ... })` projection can alias through a row/candidate
-  // variable too (`r.conditionInstances`, `candidate.conditions`) — still a read, not a write,
-  // but only when paired with the SAME base identifier for both keys is it unambiguous; the
-  // narrower table-name check above is the safe default and this widens it for the common
-  // `row`/`candidate`/`r`/`w` aliases used in this codebase's `.select()` call sites.
-  /^\s*(row|candidate|r|w)\.conditions\b/,
-  /^\s*(row|candidate|r|w)\.conditionInstances\b/,
-  // A TS interface/type member ends in `;` immediately, never a runtime write.
-  /^\s*(string|number|boolean)\s*[;,]/,
+  'conditionWriteSetFromNames',
+  'sheetConditionWriteSetFromNames',
+  'conditionWriteSetFromInstances',
+  'sheetConditionWriteSetFromInstances',
 ];
 
 export interface Violation {
@@ -72,14 +55,16 @@ export interface Violation {
 }
 
 /**
- * The argument span of every `.set(...)` / `.values(...)` call in `source` — found by locating
- * the call, then counting parens from the `(` that opens its argument list to the matching `)`.
+ * The object-literal argument of every `.set({...})` / `.values({...})` call in `source`.
  * Deliberately scoped to THESE two Drizzle write methods, not "any `{...}` in the file": the
  * word "conditions" is common outside this invariant entirely (a SQL WHERE-clause accumulator
  * `const conditions: SQL[] = [...]`, a rule importer's route-name map `{ conditions: 'condition' }`)
  * and an enclosing-brace walk with no call-site anchor false-positives on all of them. Anchoring
  * to the two write methods that actually touch `characters`/`combatants` rows is what makes this
  * check about the DATABASE COLUMN rather than the English word.
+ *
+ * This is AST-based rather than a parenthesis-counting string walk: strings, comments, and
+ * templates can contain arbitrary `(`/`)` text without changing what the writer-call argument is.
  *
  * KNOWN LIMITATION, stated rather than hidden: `.values(someIdentifier)` where `someIdentifier`
  * is built elsewhere (e.g. via `.map()` returning row objects, as `encounters.service.ts`'s
@@ -90,38 +75,57 @@ export interface Violation {
  * `.values({...})` write in this codebase — which is every UPDATE and most INSERTs, including
  * the one #1664 actually found — IS covered.
  */
-function writerCallArgSpans(source: string): string[] {
-  const spans: string[] = [];
-  const callRe = /\.(?:set|values)\s*\(/g;
-  let m: RegExpExecArray | null;
-  while ((m = callRe.exec(source))) {
-    const argStart = m.index + m[0].length;
-    let depth = 1;
-    let i = argStart;
-    for (; i < source.length && depth > 0; i++) {
-      if (source[i] === '(') depth++;
-      else if (source[i] === ')') depth--;
+function writerCallArgObjects(source: string): { sourceFile: ts.SourceFile; object: ts.ObjectLiteralExpression; span: string }[] {
+  const sourceFile = ts.createSourceFile('condition-scan.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const objects: { sourceFile: ts.SourceFile; object: ts.ObjectLiteralExpression; span: string }[] = [];
+
+  const visit = (node: ts.Node) => {
+    if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      (node.expression.name.text === 'set' || node.expression.name.text === 'values') &&
+      node.arguments[0] &&
+      ts.isObjectLiteralExpression(node.arguments[0])
+    ) {
+      const object = node.arguments[0];
+      objects.push({ sourceFile, object, span: object.getText(sourceFile) });
     }
-    if (depth === 0) spans.push(source.slice(argStart, i - 1));
-  }
-  return spans;
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return objects;
 }
 
-/** Within one writer-call argument span, find WRITE-context `conditions:`/`conditionInstances:` keys. */
-function writeKeyHitsIn(span: string): { key: Violation['key']; index: number }[] {
+function conditionKeyFromName(name: ts.PropertyName): Violation['key'] | null {
+  if (ts.isIdentifier(name) || ts.isStringLiteral(name)) {
+    if (name.text === 'conditions' || name.text === 'conditionInstances') return name.text;
+  }
+  return null;
+}
+
+function helperNameFromSpread(prop: ts.SpreadAssignment): string | null {
+  let expr: ts.Expression = prop.expression;
+  while (ts.isParenthesizedExpression(expr)) expr = expr.expression;
+  if (!ts.isCallExpression(expr)) return null;
+  const callee = expr.expression;
+  return ts.isIdentifier(callee) ? callee.text : null;
+}
+
+/** Within one writer-call object literal, find WRITE-context conditions/conditionInstances keys. */
+function writeKeyHitsIn(sourceFile: ts.SourceFile, object: ts.ObjectLiteralExpression): { key: Violation['key']; index: number }[] {
   const hits: { key: Violation['key']; index: number }[] = [];
-  const re = /\b(conditionInstances|conditions)\s*:/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(span))) {
-    const key = m[1] as Violation['key'];
-    const matchStart = m.index;
-    const lineStart = span.lastIndexOf('\n', matchStart) + 1;
-    if (span.slice(lineStart, matchStart).trimStart().startsWith('//')) continue;
-    const rhs = span.slice(m.index + m[0].length, m.index + m[0].length + 80);
-    if (READ_RHS_PATTERNS.some((p) => p.test(rhs))) continue;
-    hits.push({ key, index: matchStart });
+  const objectStart = object.getStart(sourceFile);
+  for (const prop of object.properties) {
+    let key: Violation['key'] | null = null;
+    if (ts.isPropertyAssignment(prop)) key = conditionKeyFromName(prop.name);
+    else if (ts.isShorthandPropertyAssignment(prop)) key = prop.name.text === 'conditions' || prop.name.text === 'conditionInstances' ? prop.name.text : null;
+    if (key) hits.push({ key, index: prop.getStart(sourceFile) - objectStart });
   }
   return hits;
+}
+
+function hasHelperSpread(object: ts.ObjectLiteralExpression): boolean {
+  return object.properties.some((prop) => ts.isSpreadAssignment(prop) && HELPER_MARKERS.includes(helperNameFromSpread(prop) ?? ''));
 }
 
 /**
@@ -132,12 +136,12 @@ function writeKeyHitsIn(span: string): { key: Violation['key']; index: number }[
  */
 export function findUnpairedConditionWrites(source: string): Violation[] {
   const violations: Violation[] = [];
-  for (const span of writerCallArgSpans(source)) {
-    const hits = writeKeyHitsIn(span);
+  for (const { sourceFile, object, span } of writerCallArgObjects(source)) {
+    const hits = writeKeyHitsIn(sourceFile, object);
     if (hits.length === 0) continue;
     const hasConditions = hits.some((h) => h.key === 'conditions');
     const hasInstances = hits.some((h) => h.key === 'conditionInstances');
-    const hasHelper = HELPER_MARKERS.some((h) => span.includes(h));
+    const hasHelper = hasHelperSpread(object);
     if (hasHelper) continue; // paired via the shared helper
     if (hasConditions && hasInstances) continue; // both literal keys present — paired by hand
     for (const hit of hits) {
@@ -238,6 +242,46 @@ describe('single-writer invariant for conditions/conditionInstances (issue #1666
       tx.update(characters).set({ ...sheetConditionWriteSetFromNames(names, prior), updatedAt: at }).run();
     `;
     expect(findUnpairedConditionWrites(helperSpread)).toEqual([]);
+  });
+
+  it('SYNTHETIC PROOF: shorthand condition properties are write hits', () => {
+    const shorthand = `
+      tx.update(characters).set({ conditions, updatedAt: at }).run();
+    `;
+    const violations = findUnpairedConditionWrites(shorthand);
+    expect(violations).toHaveLength(1);
+    expect(violations[0].key).toBe('conditions');
+  });
+
+  it('SYNTHETIC PROOF: helper names in comments or strings do not suppress violations', () => {
+    const fakeHelperMentions = `
+      tx.update(characters).set({
+        conditions: encoded,
+        note: "TODO: use conditionWriteSetFromNames(...)",
+        // sheetConditionWriteSetFromInstances(instances) belongs in a spread, not a comment.
+        updatedAt: at,
+      }).run();
+    `;
+    expect(findUnpairedConditionWrites(fakeHelperMentions).map((v) => v.key)).toEqual(['conditions']);
+  });
+
+  it('SYNTHETIC PROOF: parentheses inside strings and comments do not truncate writer calls', () => {
+    const parensInText = `
+      tx.update(characters).set({
+        note: ")",
+        conditions: encoded,
+        // An unmatched ( in a comment must not absorb later calls.
+        updatedAt: at,
+      }).run();
+    `;
+    expect(findUnpairedConditionWrites(parensInText).map((v) => v.key)).toEqual(['conditions']);
+  });
+
+  it('SYNTHETIC PROOF: copying from a short-named variable is still a write', () => {
+    const shortAliasWrite = `
+      tx.update(combatants).set({ conditions: w.conditions, updatedAt: at }).run();
+    `;
+    expect(findUnpairedConditionWrites(shortAliasWrite).map((v) => v.key)).toEqual(['conditions']);
   });
 
   it("does NOT flag encounters.service.ts's end-of-encounter sheet sync (issue #1666 review note)", () => {
