@@ -36,5 +36,9 @@ describe('campaign homebrew (e2e)', () => {
     expect(created.isError).toBe(false);
     const listed = await tools.call('list_campaign_homebrew', { campaignId });
     expect(listed.isError).toBe(false); expect(listed.text).toContain('mcp-spark');
+    const playerTools = ctx.app.get(McpToolsService).buildToolset({ id: 'mcp-player', name: 'MCP player', devRole: 'player', serverRole: 'admin', tokenContext: undefined });
+    const proposed = await playerTools.call('create_campaign_homebrew', { campaignId, propose: true, entry: { slug: 'mcp-proposal', name: 'MCP proposal', type: 'spell', rightsStatus: 'private_original' } });
+    expect(proposed.isError).toBe(false); const proposalId = JSON.parse(proposed.text).id as number;
+    const approved = await request(server).post(`/api/v1/proposals/${proposalId}/approve`).set(dm).send({}); expect(approved.status).toBe(201);
   });
 });
