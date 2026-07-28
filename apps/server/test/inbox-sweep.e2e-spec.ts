@@ -302,6 +302,10 @@ describe('inbox sweep (e2e)', () => {
       const stillOpen = inbox.body.items.find((i: { id: number }) => i.id === noteId);
       expect(stillOpen).toBeDefined();
       expect(stillOpen.resolved).toBe(false);
+
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const ledger = await db.select().from(inboxSweepItems).where(eq(inboxSweepItems.noteId, noteId));
+      expect(ledger).toHaveLength(0);
     } finally {
       spy.mockRestore();
     }
@@ -372,7 +376,7 @@ describe('inbox sweep (e2e)', () => {
     expect(stillOpen.resolved).toBe(false);
   });
 
-  it('reports errored (not a silent skip) when the model payload fails entity validation, and leaves the item open for retry', async () => {
+  it('records and resolves deterministic classifier errors so they do not retry forever', async () => {
     const campaignId = await newCampaign('Sweep Errored');
     const noteId = await submitInbox(campaignId, 'Add a quest but nobody named it.');
     classifier.script.set('Add a quest but nobody named it.', {
@@ -389,9 +393,21 @@ describe('inbox sweep (e2e)', () => {
     expect(res.body.items[0]).toMatchObject({ noteId, outcome: 'errored' });
     expect(res.body.items[0].reason).toContain('validation');
 
-    const inbox = await request(server).get(`/api/v1/campaigns/${campaignId}/inbox`).set(dm);
-    const stillOpen = inbox.body.items.find((i: { id: number }) => i.id === noteId);
-    expect(stillOpen).toBeDefined();
-    expect(stillOpen.resolved).toBe(false);
+    const inbox = await request(server).get(`/api/v1/campaigns/${campaignId}/inbox?resolved=true`).set(dm);
+    const resolved = inbox.body.items.find((i: { id: number }) => i.id === noteId);
+    expect(resolved).toBeDefined();
+    expect(resolved.resolved).toBe(true);
+    expect(resolved.resolvedNote).toContain('validation');
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const [ledger] = await db.select().from(inboxSweepItems).where(eq(inboxSweepItems.noteId, noteId)).limit(1);
+    expect(ledger.outcome).toBe('errored');
+    expect(ledger.reason).toContain('validation');
+
+    const callsAfterFirstSweep = classifier.calls.length;
+    const second = await request(server).post(`/api/v1/campaigns/${campaignId}/inbox/sweep`).set(dm);
+    expect(second.status).toBe(201);
+    expect(second.body.job.itemsTotal).toBe(0);
+    expect(classifier.calls).toHaveLength(callsAfterFirstSweep);
   });
 });

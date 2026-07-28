@@ -115,13 +115,14 @@ function jobToDomain(row: JobRow): InboxSweepJob {
  * contain entity ids/types/reasons, never dmSecret text.
  *
  * IDEMPOTENCY: a UNIQUE(campaign_id, note_id) row in `inbox_sweep_items` is written the
- * moment an item's outcome is decided (proposed or skipped), BEFORE the corresponding
+ * moment an item's terminal outcome is decided (proposed, skipped, or an unusable
+ * classifier error), BEFORE the corresponding
  * inbox item is resolved. A re-sweep sees that ledger row first and skips straight to
  * "resolve if not already resolved" — it never re-classifies or re-files a proposal for
  * a note it has already swept, even if the process crashed between filing the proposal
- * and resolving the note. `errored` outcomes are deliberately NOT written to the ledger,
- * so a transient failure (bad model JSON, provider error) is retried on the next sweep
- * rather than stuck forever.
+ * and resolving the note. Consent-withheld and no-provider outcomes deliberately remain
+ * unledgered/open because a later consent or provider configuration change can make the
+ * item sweepable without manual intervention.
  */
 @Injectable()
 export class InboxSweepService {
@@ -202,6 +203,7 @@ export class InboxSweepService {
         }
         results.push(this.resultFromLedger(item.id, prior));
         if (prior.outcome === 'proposed') proposed++;
+        else if (prior.outcome === 'errored') errored++;
         else skipped++;
         continue;
       }
@@ -237,15 +239,18 @@ export class InboxSweepService {
           });
           return { job: jobToDomain(disabledJob), items: results };
         }
-        errored++;
-        results.push({
-          noteId: item.id,
-          outcome: 'errored',
-          entityType: null,
-          entityId: null,
-          proposalId: null,
-          reason: `classification failed: ${err instanceof Error ? err.message : String(err)}`,
-        });
+        const outcome = await this.recordError(
+          campaignId,
+          job.id,
+          item.id,
+          `classification failed: ${err instanceof Error ? err.message : String(err)}`,
+          user,
+          role,
+        );
+        results.push(outcome);
+        if (outcome.outcome === 'proposed') proposed++;
+        else if (outcome.outcome === 'errored') errored++;
+        else skipped++;
         continue;
       }
 
@@ -297,7 +302,7 @@ export class InboxSweepService {
     const targetId = classification.action === 'update' ? classification.targetId : null;
     if (classification.action === 'update' && targetId === null) {
       const reason = `model proposed an update to ${entityType} with no targetId`;
-      return { noteId, outcome: 'errored', entityType: null, entityId: null, proposalId: null, reason };
+      return this.recordError(campaignId, jobId, noteId, reason, user, role);
     }
 
     let validated: Record<string, unknown>;
@@ -306,7 +311,7 @@ export class InboxSweepService {
       validated = schema.parse(classification.fields) as Record<string, unknown>;
     } catch (err) {
       const reason = `${entityType} ${classification.action} payload failed validation: ${err instanceof Error ? err.message : String(err)}`;
-      return { noteId, outcome: 'errored', entityType: null, entityId: null, proposalId: null, reason };
+      return this.recordError(campaignId, jobId, noteId, reason, user, role);
     }
 
     try {
@@ -386,10 +391,10 @@ export class InboxSweepService {
       if (!isUniqueConstraintError(err)) {
         this.logger.warn(`Failed to persist skip ledger for inbox item ${noteId}: ${message}`);
       }
-      // Same graceful-degradation contract as the create/update path in applyClassification's
-      // catch: a single item's ledger-write failure must never abort the whole sweep loop and
-      // strand every remaining item without a result. errored outcomes are deliberately not
-      // persisted to the ledger, so this item is simply retried on the next sweep.
+      // Same graceful-degradation contract as the create/update path: a single item's
+      // ledger-write failure must never abort the whole sweep loop and strand every
+      // remaining item without a result. With no ledger row, this item can be retried on
+      // a later sweep if it was not resolved by hand.
       return {
         noteId,
         outcome: 'errored',
@@ -401,6 +406,45 @@ export class InboxSweepService {
     }
     await this.tryResolve(noteId, user, role, reason, null, null);
     return { noteId, outcome: 'skipped', entityType: null, entityId: null, proposalId: null, reason };
+  }
+
+  /**
+   * Persist a terminal classifier error and resolve the inbox item so deterministic bad
+   * model output (invalid payload, missing target, unparsable response) does not hot-loop
+   * on every sweep. Consent/provider-configuration gates do not use this helper because
+   * those conditions can become sweepable later without editing the inbox item.
+   */
+  private async recordError(
+    campaignId: number,
+    jobId: number,
+    noteId: number,
+    reason: string,
+    user: RequestUser,
+    role: Role,
+  ): Promise<InboxSweepItemResult> {
+    try {
+      await this.persistLedger(campaignId, jobId, noteId, 'errored', null, null, null, reason);
+    } catch (err) {
+      const concurrent = await this.findLedger(campaignId, noteId);
+      if (concurrent) {
+        const link = this.resolveLinkForPrior(concurrent);
+        await this.tryResolve(noteId, user, role, concurrent.reason, link.entityType, link.entityId);
+        return this.resultFromLedger(noteId, concurrent);
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`Failed to persist error ledger for inbox item ${noteId}: ${message}`);
+      return {
+        noteId,
+        outcome: 'errored',
+        entityType: null,
+        entityId: null,
+        proposalId: null,
+        reason: `failed to record error: ${message}`,
+      };
+    }
+
+    await this.tryResolve(noteId, user, role, reason, null, null);
+    return { noteId, outcome: 'errored', entityType: null, entityId: null, proposalId: null, reason };
   }
 
   /** Best-effort: the ledger row above is what makes a re-sweep idempotent, not this. */
@@ -516,7 +560,7 @@ export class InboxSweepService {
     campaignId: number,
     jobId: number,
     noteId: number,
-    outcome: 'proposed' | 'skipped',
+    outcome: InboxSweepOutcome,
     entityType: InboxSweepEntityType | null,
     entityId: number | null,
     proposalId: number | null,
