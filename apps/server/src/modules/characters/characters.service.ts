@@ -1847,6 +1847,7 @@ export class CharactersService {
     if (!roleAtLeast(role, 'dm')) throw new ForbiddenException('Only a DM can rest the party.');
     const [batch] = await this.db.select().from(partyRestBatches).where(and(eq(partyRestBatches.campaignId, campaignId), eq(partyRestBatches.previewToken, input.previewToken))).limit(1);
     if (!batch) throw new NotFoundException('Recovery preview not found.');
+    if (batch.actorUserId !== user.id) throw new ForbiddenException('Only the DM who created this recovery preview can apply it.');
     if (batch.status === 'applied' && batch.idempotencyKey === input.idempotencyKey) return fromJsonText(batch.resultJson, {});
     if (batch.status !== 'previewed' || (batch.idempotencyKey && batch.idempotencyKey !== input.idempotencyKey)) throw new ConflictException('Recovery preview was already used for another intent.');
     const before = fromJsonText<Array<{ id: number; updatedAt: string }>>(batch.beforeJson, []);
@@ -1859,8 +1860,13 @@ export class CharactersService {
     if (before.some((snapshot) => current.get(snapshot.id)?.updatedAt !== snapshot.updatedAt)) throw new ConflictException('A participant changed after this preview; preview recovery again.');
     const at = nowIso();
     this.db.transaction((tx) => {
-      for (const item of plan.plans) tx.update(characters).set({ hpCurrent: item.hpAfter, hpTemp: item.hpTempAfter, deathState: item.deathStateAfter, deathSaveSuccesses: item.deathSaveSuccessesAfter, deathSaveFailures: item.deathSaveFailuresAfter, conditions: toJsonText(item.conditionsAfter), spellSlots: toJsonText(item.spellSlotsAfter), resources: toJsonText(item.resourcesAfter), updatedAt: at }).where(eq(characters.id, item.characterId)).run();
-      tx.update(partyRestBatches).set({ status: 'applied', idempotencyKey: input.idempotencyKey, afterJson: toJsonText(plan.plans), resultJson: toJsonText({ batchId: batch.id, kind: plan.kind, ruleSystem: plan.ruleSystem, characterIds: ids }), appliedAt: at }).where(eq(partyRestBatches.id, batch.id)).run();
+      for (const item of plan.plans) {
+        const expected = before.find((snapshot) => snapshot.id === item.characterId)!.updatedAt;
+        const result = tx.update(characters).set({ hpCurrent: item.hpAfter, hpTemp: item.hpTempAfter, deathState: item.deathStateAfter, deathSaveSuccesses: item.deathSaveSuccessesAfter, deathSaveFailures: item.deathSaveFailuresAfter, conditions: toJsonText(item.conditionsAfter), spellSlots: toJsonText(item.spellSlotsAfter), resources: toJsonText(item.resourcesAfter), updatedAt: at }).where(and(eq(characters.id, item.characterId), eq(characters.campaignId, campaignId), eq(characters.updatedAt, expected))).run();
+        if (result.changes !== 1) throw new ConflictException('A participant changed while recovery was applying.');
+      }
+      const result = tx.update(partyRestBatches).set({ status: 'applied', idempotencyKey: input.idempotencyKey, afterJson: toJsonText(plan.plans), resultJson: toJsonText({ batchId: batch.id, kind: plan.kind, ruleSystem: plan.ruleSystem, characterIds: ids }), appliedAt: at }).where(and(eq(partyRestBatches.id, batch.id), eq(partyRestBatches.status, 'previewed'))).run();
+      if (result.changes !== 1) throw new ConflictException('Recovery preview was applied concurrently.');
     });
     for (const item of plan.plans) {
       await this.syncActiveCombatants(item.characterId, item.hpAfter, undefined, { campaignId, deathState: item.deathStateAfter as RestCharacterState['deathState'] }).catch(() => undefined);
@@ -1875,6 +1881,7 @@ export class CharactersService {
     if (!roleAtLeast(role, 'dm')) throw new ForbiddenException('Only a DM can undo a party rest.');
     const [batch] = await this.db.select().from(partyRestBatches).where(and(eq(partyRestBatches.campaignId, campaignId), eq(partyRestBatches.id, batchId))).limit(1);
     if (!batch) throw new NotFoundException('Party recovery batch not found.');
+    if (batch.actorUserId !== user.id) throw new ForbiddenException('Only the DM who applied this recovery can undo it.');
     if (batch.status === 'undone') return { batchId, undone: true, replayed: true };
     if (batch.status !== 'applied') throw new ConflictException('Only an applied recovery can be undone.');
     const before = fromJsonText<Array<{ id: number; hpCurrent: number; hpTemp: number; deathState: string; deathSaveSuccesses: number; deathSaveFailures: number; conditions: string; spellSlots: string; resources: string }>>(batch.beforeJson, []);
@@ -1883,7 +1890,7 @@ export class CharactersService {
     const current = new Map(rows.map((row) => [row.id, row]));
     if (after.some((item) => { const row = current.get(item.characterId); return !row || row.hpCurrent !== item.hpAfter || row.hpTemp !== item.hpTempAfter || row.deathState !== item.deathStateAfter || row.conditions !== toJsonText(item.conditionsAfter) || row.spellSlots !== toJsonText(item.spellSlotsAfter) || row.resources !== toJsonText(item.resourcesAfter); })) throw new ConflictException('A participant changed after this recovery; undo would overwrite it.');
     const at = nowIso();
-    this.db.transaction((tx) => { for (const snapshot of before) tx.update(characters).set({ hpCurrent: snapshot.hpCurrent, hpTemp: snapshot.hpTemp, deathState: snapshot.deathState, deathSaveSuccesses: snapshot.deathSaveSuccesses, deathSaveFailures: snapshot.deathSaveFailures, conditions: snapshot.conditions, spellSlots: snapshot.spellSlots, resources: snapshot.resources, updatedAt: at }).where(eq(characters.id, snapshot.id)).run(); tx.update(partyRestBatches).set({ status: 'undone', undoneAt: at }).where(eq(partyRestBatches.id, batchId)).run(); });
+    this.db.transaction((tx) => { for (const snapshot of before) { const result = tx.update(characters).set({ hpCurrent: snapshot.hpCurrent, hpTemp: snapshot.hpTemp, deathState: snapshot.deathState, deathSaveSuccesses: snapshot.deathSaveSuccesses, deathSaveFailures: snapshot.deathSaveFailures, conditions: snapshot.conditions, spellSlots: snapshot.spellSlots, resources: snapshot.resources, updatedAt: at }).where(and(eq(characters.id, snapshot.id), eq(characters.campaignId, campaignId))).run(); if (result.changes !== 1) throw new ConflictException('A participant disappeared while undoing recovery.'); } const result = tx.update(partyRestBatches).set({ status: 'undone', undoneAt: at }).where(and(eq(partyRestBatches.id, batchId), eq(partyRestBatches.status, 'applied'))).run(); if (result.changes !== 1) throw new ConflictException('Recovery was undone concurrently.'); });
     await this.audit.log({ actor: auditActor(user), actorRole: role, action: 'party.rest.undo', entityType: 'party_rest_batch', entityId: batchId, campaignId, detail: JSON.stringify({ batchId, characterIds: before.map((s) => s.id), idempotencyKey }) });
     for (const snapshot of before) this.emitCharacterUpdated(campaignId, snapshot.id, user.id);
     return { batchId, undone: true };
