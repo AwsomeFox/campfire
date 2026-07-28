@@ -28,7 +28,7 @@
  * runner as the other `.unit.spec.ts` files without needing the seeded server.
  */
 import { expect, test } from '@playwright/test';
-import { AI_DM_MODE_CAPABILITIES, type AiDmMode } from '@campfire/schema';
+import { AI_DM_MODE_CAPABILITIES } from '@campfire/schema';
 import { MODES as AI_DM_CARD_MODES } from '../../src/features/settings/AiDmCard';
 import { FEATURES as LOGIN_FEATURES } from '../../src/features/auth/LoginPage';
 import aiOnboarding from '../../src/i18n/locales/en/aiOnboarding.json';
