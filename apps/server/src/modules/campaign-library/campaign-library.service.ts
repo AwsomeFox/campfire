@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, eq, isNull, sql } from 'drizzle-orm';
+import { and, eq, isNull, ne, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import {
   CampaignLibraryMonster,
@@ -393,29 +393,48 @@ export class CampaignLibraryService {
    * One role-filtered inventory of campaign content.  This intentionally builds a
    * small, explicit projection rather than exposing arbitrary table columns: the
    * manager can never accidentally leak a dmSecret while new entity kinds are added.
+   *
+   * Role/visibility/soft-delete filters and column projection are pushed into SQL so
+   * each request materializes only the summary fields for rows the caller may see —
+   * never full entity rows (dmSecret, encounter map state, monster statblocks, …).
+   * Faceting across the polymorphic union still happens in-process after that
+   * projection; a later SQL facet rewrite can replace that without changing the API.
    */
   async search(campaignId: number, role: Role, raw: unknown): Promise<LibrarySearchPage> {
     const query = LibrarySearchQuery.parse(raw);
     const isDm = role === 'dm';
     const [questRows, npcRows, locationRows, factionRows, encounterRows, timelineRows, inventoryRows, attachmentRows, monsterRows] = await Promise.all([
-      this.db.select().from(quests).where(eq(quests.campaignId, campaignId)), this.db.select().from(npcs).where(eq(npcs.campaignId, campaignId)),
-      this.db.select().from(locations).where(eq(locations.campaignId, campaignId)), this.db.select().from(factions).where(eq(factions.campaignId, campaignId)),
-      this.db.select().from(encounters).where(eq(encounters.campaignId, campaignId)), this.db.select().from(timelineEvents).where(eq(timelineEvents.campaignId, campaignId)),
-      this.db.select().from(inventoryItems).where(eq(inventoryItems.campaignId, campaignId)), this.db.select().from(attachments).where(eq(attachments.campaignId, campaignId)),
-      this.db.select().from(campaignLibraryMonsters).where(eq(campaignLibraryMonsters.campaignId, campaignId)),
-    ]);
-    let items: LibraryEntitySummary[] = [
-      ...questRows.filter((r) => !r.deletedAt && (isDm || !r.hidden)).map((r) => ({ entityType: 'quest' as const, entityId: r.id, name: r.title, description: r.body, visibility: r.hidden ? 'hidden' : 'public', status: r.status, owner: null, tags: [], collections: [] })),
-      ...npcRows.filter((r) => !r.deletedAt && (isDm || !r.hidden)).map((r) => ({ entityType: 'npc' as const, entityId: r.id, name: r.name, description: r.body, visibility: r.hidden ? 'hidden' : 'public', status: r.disposition, owner: null, tags: [], collections: [] })),
+      this.db.select({ id: quests.id, title: quests.title, body: quests.body, status: quests.status, hidden: quests.hidden })
+        .from(quests).where(and(eq(quests.campaignId, campaignId), isNull(quests.deletedAt), ...(isDm ? [] : [eq(quests.hidden, false)]))),
+      this.db.select({ id: npcs.id, name: npcs.name, body: npcs.body, disposition: npcs.disposition, hidden: npcs.hidden })
+        .from(npcs).where(and(eq(npcs.campaignId, campaignId), isNull(npcs.deletedAt), ...(isDm ? [] : [eq(npcs.hidden, false)]))),
       // Locations use `unexplored` as their entity-level DM-only state; unlike a
       // dmSecret field it must be withheld wholesale from non-DMs.
-      ...locationRows.filter((r) => !r.deletedAt && (isDm || r.status !== 'unexplored')).map((r) => ({ entityType: 'location' as const, entityId: r.id, name: r.name, description: r.body, visibility: r.status === 'unexplored' ? 'hidden' : 'public', status: r.status, owner: null, tags: [], collections: [] })),
-      ...factionRows.filter((r) => !r.deletedAt && (isDm || !r.hidden)).map((r) => ({ entityType: 'faction' as const, entityId: r.id, name: r.name, description: r.body, visibility: r.hidden ? 'hidden' : 'public', status: r.standing, owner: null, tags: [], collections: [] })),
-      ...encounterRows.filter((r) => !r.deletedAt && (isDm || !r.hidden)).map((r) => ({ entityType: 'encounter' as const, entityId: r.id, name: r.name, description: '', visibility: r.hidden ? 'hidden' : 'public', status: r.status, owner: null, tags: [], collections: [] })),
-      ...timelineRows.filter((r) => !r.deletedAt && (isDm || !r.hidden)).map((r) => ({ entityType: 'timeline_event' as const, entityId: r.id, name: r.title, description: r.body, visibility: r.hidden ? 'hidden' : 'public', status: null, owner: null, tags: [], collections: [] })),
-      ...inventoryRows.filter((r) => !r.deletedAt).map((r) => ({ entityType: 'inventory_item' as const, entityId: r.id, name: r.name, description: r.notes, visibility: 'public', status: null, owner: r.ownerType === 'party' ? 'party' : `character:${r.characterId}`, tags: [], collections: [] })),
-      ...attachmentRows.filter((r) => r.state === 'committed' && (isDm || !r.hidden)).map((r) => ({ entityType: 'attachment' as const, entityId: r.id, name: r.filename, description: r.mime, visibility: r.hidden ? 'hidden' : 'public', status: r.kind, owner: r.uploaderUserId, tags: [], collections: [] })),
-      ...monsterRows.map((r) => ({ entityType: 'campaign_library_monster' as const, entityId: r.id, name: r.name, description: '', visibility: 'public', status: null, owner: null, tags: [], collections: [] })),
+      this.db.select({ id: locations.id, name: locations.name, body: locations.body, status: locations.status })
+        .from(locations).where(and(eq(locations.campaignId, campaignId), isNull(locations.deletedAt), ...(isDm ? [] : [ne(locations.status, 'unexplored')]))),
+      this.db.select({ id: factions.id, name: factions.name, body: factions.body, standing: factions.standing, hidden: factions.hidden })
+        .from(factions).where(and(eq(factions.campaignId, campaignId), isNull(factions.deletedAt), ...(isDm ? [] : [eq(factions.hidden, false)]))),
+      this.db.select({ id: encounters.id, name: encounters.name, status: encounters.status, hidden: encounters.hidden })
+        .from(encounters).where(and(eq(encounters.campaignId, campaignId), isNull(encounters.deletedAt), ...(isDm ? [] : [eq(encounters.hidden, false)]))),
+      this.db.select({ id: timelineEvents.id, title: timelineEvents.title, body: timelineEvents.body, hidden: timelineEvents.hidden })
+        .from(timelineEvents).where(and(eq(timelineEvents.campaignId, campaignId), isNull(timelineEvents.deletedAt), ...(isDm ? [] : [eq(timelineEvents.hidden, false)]))),
+      this.db.select({ id: inventoryItems.id, name: inventoryItems.name, notes: inventoryItems.notes, ownerType: inventoryItems.ownerType, characterId: inventoryItems.characterId })
+        .from(inventoryItems).where(and(eq(inventoryItems.campaignId, campaignId), isNull(inventoryItems.deletedAt))),
+      this.db.select({ id: attachments.id, filename: attachments.filename, mime: attachments.mime, kind: attachments.kind, hidden: attachments.hidden, uploaderUserId: attachments.uploaderUserId })
+        .from(attachments).where(and(eq(attachments.campaignId, campaignId), eq(attachments.state, 'committed'), ...(isDm ? [] : [eq(attachments.hidden, false)]))),
+      this.db.select({ id: campaignLibraryMonsters.id, name: campaignLibraryMonsters.name })
+        .from(campaignLibraryMonsters).where(eq(campaignLibraryMonsters.campaignId, campaignId)),
+    ]);
+    let items: LibraryEntitySummary[] = [
+      ...questRows.map((r) => ({ entityType: 'quest' as const, entityId: r.id, name: r.title, description: r.body, visibility: r.hidden ? 'hidden' as const : 'public' as const, status: r.status, owner: null, tags: [], collections: [] })),
+      ...npcRows.map((r) => ({ entityType: 'npc' as const, entityId: r.id, name: r.name, description: r.body, visibility: r.hidden ? 'hidden' as const : 'public' as const, status: r.disposition, owner: null, tags: [], collections: [] })),
+      ...locationRows.map((r) => ({ entityType: 'location' as const, entityId: r.id, name: r.name, description: r.body, visibility: r.status === 'unexplored' ? 'hidden' as const : 'public' as const, status: r.status, owner: null, tags: [], collections: [] })),
+      ...factionRows.map((r) => ({ entityType: 'faction' as const, entityId: r.id, name: r.name, description: r.body, visibility: r.hidden ? 'hidden' as const : 'public' as const, status: r.standing, owner: null, tags: [], collections: [] })),
+      ...encounterRows.map((r) => ({ entityType: 'encounter' as const, entityId: r.id, name: r.name, description: '', visibility: r.hidden ? 'hidden' as const : 'public' as const, status: r.status, owner: null, tags: [], collections: [] })),
+      ...timelineRows.map((r) => ({ entityType: 'timeline_event' as const, entityId: r.id, name: r.title, description: r.body, visibility: r.hidden ? 'hidden' as const : 'public' as const, status: null, owner: null, tags: [], collections: [] })),
+      ...inventoryRows.map((r) => ({ entityType: 'inventory_item' as const, entityId: r.id, name: r.name, description: r.notes, visibility: 'public' as const, status: null, owner: r.ownerType === 'party' ? 'party' : `character:${r.characterId}`, tags: [], collections: [] })),
+      ...attachmentRows.map((r) => ({ entityType: 'attachment' as const, entityId: r.id, name: r.filename, description: r.mime, visibility: r.hidden ? 'hidden' as const : 'public' as const, status: r.kind, owner: r.uploaderUserId, tags: [], collections: [] })),
+      ...monsterRows.map((r) => ({ entityType: 'campaign_library_monster' as const, entityId: r.id, name: r.name, description: '', visibility: 'public' as const, status: null, owner: null, tags: [], collections: [] })),
     ];
     const links = await this.db.select().from(campaignLibraryEntityTaxonomy).where(eq(campaignLibraryEntityTaxonomy.campaignId, campaignId));
     const [tags, collections] = await Promise.all([this.listTags(campaignId), this.listCollections(campaignId)]);
