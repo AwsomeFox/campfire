@@ -2,12 +2,12 @@
   "tracked": [
     {
       "pr": 1625,
-      "status": "babysitting",
+      "status": "merged",
       "url": "https://github.com/AwsomeFox/campfire/pull/1625",
       "headBranch": "fix/issue-738",
       "baseBranch": "main",
-      "updatedAt": "2026-07-28T04:43:21Z",
-      "notes": "Head 2db94948: merged main (0139 migration), OpenAPI ApiOperation on refresh/state. Prior review threads resolved. Waiting on CI after coverage failure + conflict fix."
+      "updatedAt": "2026-07-28T05:27:53Z",
+      "notes": "Merged 2026-07-28 via squash 7405c4c3. Head 2db94948 (main merge + OpenAPI ApiOperation). Review threads resolved; CI green."
     }
   ]
 }
