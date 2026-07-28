@@ -29,7 +29,7 @@ export class HealthController {
   @ApiResponse({ status: 503, description: 'Database is unavailable (locked/corrupted/unmounted volume).' })
   readyz() {
     const result = this.diagnostics.readiness();
-    const body = { ok: result.ready, version: APP_VERSION, degraded: false, checks: Object.fromEntries(Object.entries(result.checks).map(([key, value]) => [key, value.code])) };
+    const body = { ok: result.ready, version: APP_VERSION, degraded: result.status === 'degraded', checks: Object.fromEntries(Object.entries(result.checks).map(([key, value]) => [key, value.code])) };
     if (!result.ready) throw new ServiceUnavailableException(body);
     return body;
   }

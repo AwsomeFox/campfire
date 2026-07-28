@@ -1034,6 +1034,14 @@ export const serverMeta = sqliteTable('server_meta', {
   updatedAt: text('updated_at').notNull(),
 });
 
+/** Bootstrap-only diagnostics state; never carries application data. */
+export const healthIntegrityResults = sqliteTable('health_integrity_results', {
+  kind: text('kind').primaryKey(),
+  status: text('status').notNull(),
+  code: text('code').notNull(),
+  checkedAt: text('checked_at').notNull(),
+});
+
 export const campaignMembers = sqliteTable('campaign_members', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   campaignId: integer('campaign_id').notNull(),
