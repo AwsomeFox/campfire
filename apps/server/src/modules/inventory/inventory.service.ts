@@ -1,8 +1,8 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, count, desc, eq, isNotNull, isNull, lt, sql } from 'drizzle-orm';
 import type { z } from 'zod';
-import { InventoryFromCompendium, InventoryItemCreate, InventoryItemUpdate, TreasuryPatch } from '@campfire/schema';
-import type { InventoryItem, Treasury, Role, CompendiumRef, CompendiumSnapshot } from '@campfire/schema';
+import { CompendiumSnapshot, InventoryFromCompendium, InventoryItemCreate, InventoryItemUpdate, TreasuryPatch } from '@campfire/schema';
+import type { InventoryItem, Treasury, Role, CompendiumRef } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { inventoryItems, inventoryQtyIdempotency, partyTreasury, characters, ruleEntries, rulePacks } from '../../db/schema';
 import { buildCompendiumRef, buildCompendiumSnapshot, compendiumRefKey, computeRuleEntryContentHash, parseCompendiumRef } from '../campaigns/compendium-import';
@@ -50,7 +50,8 @@ function qtyFingerprint(input: InventoryItemUpdateInput): string {
 
 function toDomain(row: typeof inventoryItems.$inferSelect): InventoryItem {
   const ref = parseCompendiumRef(row.compendiumRef ? safeJson(row.compendiumRef) : null);
-  const snapshot = row.compendiumSnapshot ? safeJson(row.compendiumSnapshot) as CompendiumSnapshot : null;
+  const parsedSnapshot = row.compendiumSnapshot ? CompendiumSnapshot.safeParse(safeJson(row.compendiumSnapshot)) : null;
+  const snapshot = parsedSnapshot?.success ? parsedSnapshot.data : null;
   return {
     id: row.id,
     campaignId: row.campaignId,
@@ -63,7 +64,7 @@ function toDomain(row: typeof inventoryItems.$inferSelect): InventoryItem {
     ruleEntryId: row.ruleEntryId ?? null,
     compendiumRef: ref,
     compendiumSnapshot: snapshot,
-    compendiumState: (row.compendiumState as InventoryItem['compendiumState']) ?? null,
+    compendiumState: ['linked', 'linked_updated', 'overridden', 'detached'].includes(row.compendiumState ?? '') ? row.compendiumState as InventoryItem['compendiumState'] : null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     deletedAt: row.deletedAt ?? null,
@@ -238,13 +239,14 @@ export class InventoryService {
     const ref = buildCompendiumRef(entry, pack);
     const snapshot = buildCompendiumSnapshot(entry);
     const fingerprint = JSON.stringify({ campaignId, ruleEntryId: entry.id, ownerType, characterId, qty: input.qty, notes: input.notes, duplicateMode: input.duplicateMode });
-    let row!: typeof inventoryItems.$inferSelect;
+    let row!: typeof inventoryItems.$inferSelect; let replayed = false;
     this.db.transaction((tx) => {
       if (input.idempotencyKey) {
         const [prior] = tx.select().from(inventoryQtyIdempotency).where(eq(inventoryQtyIdempotency.key, input.idempotencyKey)).limit(1).all();
         if (prior) {
           if (prior.userId !== user.id || prior.fingerprint !== fingerprint) throw new ConflictException({ code: 'IDEMPOTENCY_KEY_REUSE' });
           row = JSON.parse(prior.responseJson) as typeof inventoryItems.$inferSelect;
+          replayed = true;
           return;
         }
       }
@@ -262,7 +264,7 @@ export class InventoryService {
       }
       if (input.idempotencyKey) tx.insert(inventoryQtyIdempotency).values({ key: input.idempotencyKey, itemId: row.id, userId: user.id, fingerprint, responseJson: JSON.stringify(row), createdAt: ts }).run();
     });
-    await this.audit.log({ actor: auditActor(user), actorRole: role, action: 'item.acquire_compendium', entityType: 'inventory_item', entityId: row.id, campaignId });
+    if (!replayed) await this.audit.log({ actor: auditActor(user), actorRole: role, action: 'item.acquire_compendium', entityType: 'inventory_item', entityId: row.id, campaignId });
     return this.withCompendiumState(row);
   }
 

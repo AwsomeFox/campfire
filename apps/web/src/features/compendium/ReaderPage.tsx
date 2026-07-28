@@ -20,6 +20,7 @@ import { IconPicker } from '../../components/IconPicker';
 import { ruleEntryIconSlug } from '../../lib/ruleEntryIcon';
 import { useCampaign } from '../../app/CampaignContext';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
+import { useAuth } from '../../app/auth';
 import { PageTitle } from '../../components/PageTitle';
 import {
   COMPENDIUM_SOURCE_COPIED_LABEL,
@@ -38,6 +39,7 @@ export default function ReaderPage() {
   // Only the DM (of this campaign) may set an entry's icon override (issue #305) — the
   // PATCH is server-side gated to admin/DM too; this just hides the control for players.
   const { isDm, canDmWrite, canPlayerWrite } = useCampaignAccess();
+  const { me } = useAuth();
 
   const [entry, setEntry] = useState<RuleEntry | null>(null);
   const [pack, setPack] = useState<RulePack | null>(null);
@@ -94,7 +96,7 @@ export default function ReaderPage() {
     };
   }, [entryId]);
 
-  useEffect(() => { if (acquiring) void api.get<Character[]>(`${API}/campaigns/${id}/characters`).then(setOwners).catch(() => setOwners([])); }, [acquiring, id]);
+  useEffect(() => { if (acquiring) void api.get<Character[]>(`${API}/campaigns/${id}/characters`).then((all) => setOwners(isDm ? all : all.filter((owner) => owner.ownerUserId === String(me?.user.id ?? '')))).catch(() => setOwners([])); }, [acquiring, id, isDm, me?.user.id]);
 
   async function acquire(duplicateMode: 'confirm' | 'increment' | 'separate' = 'confirm') {
     if (!entry) return;

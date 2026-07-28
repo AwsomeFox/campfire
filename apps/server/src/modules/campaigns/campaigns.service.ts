@@ -16,6 +16,8 @@ import {
   CAMPAIGN_CLONE_PREVIEW_FORMAT_VERSION,
   AiExternalContentPolicy,
   NarrationLanguage,
+  CompendiumRef,
+  CompendiumSnapshot,
 } from '@campfire/schema';
 import type { Campaign, CampaignClonePreview, CampaignSummary, Role, TrashedEntity, CampaignImportPreflight, OnUnresolvedCompendium } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -2339,11 +2341,11 @@ export class CampaignsService {
             iconSlug: str(item.iconSlug), // issue #307 — preserve icon override on import
             // Numeric ids are local only; retained ref/snapshot keep imports play-safe.
             ruleEntryId: null,
-            compendiumRef: item.compendiumRef && typeof item.compendiumRef === 'object' ? JSON.stringify(item.compendiumRef) : null,
-            compendiumSnapshot: item.compendiumSnapshot && typeof item.compendiumSnapshot === 'object' ? JSON.stringify(item.compendiumSnapshot) : null,
+            compendiumRef: CompendiumRef.safeParse(item.compendiumRef).success ? JSON.stringify(CompendiumRef.parse(item.compendiumRef)) : null,
+            compendiumSnapshot: CompendiumSnapshot.safeParse(item.compendiumSnapshot).success ? JSON.stringify(CompendiumSnapshot.parse(item.compendiumSnapshot)) : null,
             // A cross-install numeric id cannot be trusted. Keep the snapshot play-safe
             // and surface a detached link rather than pretending it can be refreshed.
-            compendiumState: item.compendiumRef && item.compendiumSnapshot ? 'detached' : null,
+            compendiumState: CompendiumRef.safeParse(item.compendiumRef).success && CompendiumSnapshot.safeParse(item.compendiumSnapshot).success ? 'detached' : null,
             createdAt: ts,
             updatedAt: ts,
           })
