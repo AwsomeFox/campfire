@@ -39,6 +39,7 @@
       "loadIntegrity": "تعذّر تحميل تشخيصات سلامة العضوية.",
       "assignRecoveryDm": "تعذّر تعيين سيد اللعبة للاسترداد.",
       "loadCampaigns": "تعذّر تحميل الحملات.",
+      "loadExportRequests": "تعذّر تحميل طلبات التصدير.",
       "loadAuditLog": "تعذّر تحميل سجل التدقيق.",
       "loadCharacters": "تعذّر تحميل الشخصيات للربط.",
       "loadGuestDmGrants": "تعذّر تحميل منح سيد اللعبة الضيف.",
@@ -306,6 +307,31 @@
         "testing": "جارٍ الاختبار…",
         "none": "لم يتم ضبط أي مزوّد ذكاء اصطناعي بعد.",
         "serverDefault": "افتراضي الخادم"
+      }
+    },
+    "exportRequests": {
+      "heading": "طلبات التصدير",
+      "hint": "الطلبات التي رفعتَها أنت أو مشغّل آخر عبر فهرس الحملات، وكيف أجاب عليها سيد لعبة كل حملة. الموافقة تسجّل الموافقة فقط — لا يزال سيد اللعبة هو من ينتج التصدير نفسه من أدوات التصدير الخاصة بالحملة.",
+      "pendingBadge": "{{count}} معلّق",
+      "pendingBadgeAtLeast": "{{count}}+ معلّق",
+      "filterLabel": "التصفية إلى حملة واحدة",
+      "filterPlaceholder": "معرّف الحملة",
+      "filterApply": "تصفية",
+      "filterClear": "مسح التصفية",
+      "empty": "لم يُرفع أي طلب تصدير بعد.",
+      "emptyFiltered": "لا توجد طلبات تصدير للحملة رقم {{id}}.",
+      "campaignLink": "الحملة رقم {{id}}",
+      "requestedLine": "طلب {{who}} تصدير {{profile}} في {{date}}.",
+      "justificationLabel": "سبب الطلب:",
+      "decidedHeading": "المقرَّرة",
+      "decidedBy": "قرّره {{who}} في {{date}}",
+      "decisionNoteLabel": "ملاحظة:",
+      "showMore": "عرض الطلبات الأقدم ({{shown}} من {{total}})",
+      "status": {
+        "pending": "معلّق",
+        "approved": "موافَق عليه",
+        "denied": "مرفوض",
+        "cancelled": "ملغى"
       }
     }
   }

@@ -35,12 +35,17 @@ import {
   rollBranchDamage,
   ruleSystemAdapter,
   signedModifier,
+  // #1571 — the SAME overspend rule `CharactersService.patchSpellSlots` enforces (#1039),
+  // routed through here rather than re-implemented, so the standalone spend path and the
+  // apply_action path cannot drift apart on what "overspend" means.
+  applySpellSlotDelta,
   type ActionRollFn,
   type CharacterAction,
   type OutcomeKey,
   type PendingConcentrationCheck,
   type ResolverAdapter,
   type RuleSystemAdapter,
+  type SpellSlotMap,
   type TargetDefenses,
 } from '@campfire/schema';
 
@@ -53,7 +58,7 @@ import { fromJsonText, toJsonText } from '../../common/json';
 import { conditionWriteSetFromNames, readConditionInstances, sheetConditionWriteSetFromNames } from '../../common/conditions';
 import { nowIso } from '../../common/time';
 import { rollDice } from '../../common/dice';
-import { auditActor } from '../../common/user.types';
+import { auditActor, roleAtLeast } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import {
   applyCombatantHp,
@@ -384,6 +389,15 @@ export class ActionResolverService {
   /** Determine the apply policy + whether THIS caller may commit, from campaign settings + role. */
   private policyFor(campaignId: number, actor: typeof combatants.$inferSelect, user: RequestUser, role: Role): { policy: ActionApplyPolicy; canApply: boolean } {
     if (role === 'dm') return { policy: 'automatic', canApply: true };
+    // Issue #1450 defense in depth: this service must be safe regardless of how it is
+    // called (REST route or MCP tool) or what upstream gate ran, since both call sites
+    // resolve the caller's role from the SAME `requireMember(..., { write: true })`-style
+    // helper that a viewer also passes. A viewer owns nothing to act with under normal
+    // play, but must never be treated as authorized to apply consequences even if some
+    // future caller forgets the role gate.
+    if (!roleAtLeast(role, 'player')) {
+      throw new ForbiddenException('Viewers may not resolve or apply combat actions.');
+    }
     // Non-DM: must own the actor character (enforced by the caller before this point).
     const c = this.db
       .select({ dmControlsTurns: campaigns.dmControlsTurns, requireDmTurnConfirmation: campaigns.requireDmTurnConfirmation })
@@ -817,6 +831,42 @@ export class ActionResolverService {
     const consequenceLogs: Array<{ type: 'damage' | 'heal' | 'condition' | 'death' | 'effect' | 'note' | 'resource_changed'; target?: string; targetId?: number; detail: string }> = [];
 
     this.db.transaction((tx) => {
+      // #1571 — VALIDATE THE SPELL SLOT SPEND FIRST, before any target consequence (damage,
+      // saves, conditions) is written. `patchSpellSlots` (the standalone spend path, #1039)
+      // fails loudly on overspend instead of silently clamping; this used to be a second,
+      // looser copy of that rule — `Math.min(slot.max, used + 1)` — which let a caster at
+      // `used === max` "cast" for free, with nothing reporting the slot was never paid for.
+      // Routing through the same `applySpellSlotDelta` this transaction now calls means a
+      // future change to the overspend policy cannot land on one path and miss the other.
+      //
+      // Deciding this validates HERE, ahead of the target loop below, rather than deducting
+      // at the bottom and unwinding on failure: unwinding already-written HP/condition/death
+      // state is the more fragile design, and it leaves a partial-application window between
+      // "damage landed" and "the cast turned out to be unpayable". Failing before any of that
+      // is written keeps the transaction simple and gives the caller (frequently the AI
+      // Driver) a clean retry — nothing here to undo.
+      let spellSlotSpend: { characterId: number; slots: SpellSlotMap } | null = null;
+      if (resolution.spellLevelSpent > 0 && actor.characterId !== null) {
+        const character = tx.select().from(characters).where(eq(characters.id, actor.characterId)).get();
+        if (character) {
+          const slots = fromJsonText<SpellSlotMap>(character.spellSlots, {});
+          const outcome = applySpellSlotDelta(slots, resolution.spellLevelSpent, 1);
+          if (!outcome.ok) {
+            // Same shape `patchSpellSlots` throws (#1570): `code`/`message` plus `remaining`
+            // and `max` so the caller — an AI Driver as often as a human — can self-correct
+            // (cast at a different level, or take a rest) instead of retrying blind.
+            throw new BadRequestException({
+              code: outcome.reason,
+              message: outcome.message,
+              level: outcome.level,
+              remaining: outcome.remaining,
+              max: outcome.max,
+            });
+          }
+          spellSlotSpend = { characterId: actor.characterId, slots: outcome.slots };
+        }
+      }
+
       // Snapshot concentration BEFORE any target consequences. The actor can target itself,
       // and target processing may enqueue a check for this very action; that generated check
       // is not part of the pre-apply state an undo must restore.
@@ -861,7 +911,7 @@ export class ActionResolverService {
       }
 
       for (const t of resolution.targets) {
-        const fresh = tx.select().from(combatants).where(eq(combatants.id, t.combatantId)).limit(1).all()[0];
+        const fresh = tx.select().from(combatants).where(eq(combatants.id, t.combatantId)).get();
         if (!fresh) continue;
         const conditionsBefore = fromJsonText<string[]>(fresh.conditions, []);
         const effects = fromJsonText<Array<Record<string, unknown>>>(fresh.activeEffects, []);
@@ -945,12 +995,11 @@ export class ActionResolverService {
 
         // Mirror the HP/condition slice onto a linked, live character sheet (issue #711/#486).
         if (fresh.kind === 'character' && fresh.characterId !== null && encounter.status !== 'ended') {
-          const [sheetRow] = tx
+          const sheetRow = tx
             .select({ conditionInstances: characters.conditionInstances })
             .from(characters)
             .where(eq(characters.id, fresh.characterId))
-            .limit(1)
-            .all();
+            .get();
           const sheetPriorInstances = sheetRow?.conditionInstances ?? null;
           tx.update(characters)
             .set({
@@ -979,7 +1028,7 @@ export class ActionResolverService {
       }
 
       // Spend the actor's resources: action-economy slot, spell slot, concentration.
-      const actorFresh = tx.select().from(combatants).where(eq(combatants.id, actor.id)).limit(1).all()[0];
+      const actorFresh = tx.select().from(combatants).where(eq(combatants.id, actor.id)).get();
       if (actorFresh) {
         const turnState = CombatantTurnState.parse(fromJsonText<unknown>(actorFresh.turnState, null) ?? {});
         if (resolution.costSlot && resolution.costCount > 0) {
@@ -993,17 +1042,13 @@ export class ActionResolverService {
         }
         tx.update(combatants).set({ turnState: toJsonText(turnState) }).where(eq(combatants.id, actor.id)).run();
       }
-      if (resolution.spellLevelSpent > 0 && actor.characterId !== null) {
-        const character = tx.select().from(characters).where(eq(characters.id, actor.characterId)).limit(1).all()[0];
-        if (character) {
-          const slots = fromJsonText<Record<string, { max: number; used: number }>>(character.spellSlots, {});
-          const key = String(resolution.spellLevelSpent);
-          const slot = slots[key];
-          if (slot) {
-            slot.used = Math.min(slot.max, (slot.used ?? 0) + 1);
-            tx.update(characters).set({ spellSlots: toJsonText(slots), updatedAt: nowIso() }).where(eq(characters.id, actor.characterId)).run();
-          }
-        }
+      // The spend was already validated (and the replacement blob computed) at the top of
+      // this transaction, before any consequence above was written — this is just the write.
+      if (spellSlotSpend) {
+        tx.update(characters)
+          .set({ spellSlots: toJsonText(spellSlotSpend.slots), updatedAt: nowIso() })
+          .where(eq(characters.id, spellSlotSpend.characterId))
+          .run();
       }
     });
 
@@ -1050,6 +1095,13 @@ export class ActionResolverService {
     if (token.encounterId !== encounterId) throw new BadRequestException('Undo token is for a different encounter.');
     const actor = this.combatantRowOrThrow(encounterId, token.actorCombatantId);
     if (role !== 'dm') {
+      // Issue #1450 defense in depth: undo() never routes through policyFor, so it needs
+      // its own role floor. Ownership alone is not enough — a member demoted from player
+      // to viewer keeps `characters.ownerUserId`, so the ownership check below would
+      // otherwise still pass for them.
+      if (!roleAtLeast(role, 'player')) {
+        throw new ForbiddenException('Viewers may not undo combat actions.');
+      }
       if (actor.kind !== 'character' || !this.isCharacterOwnedBy(actor, user)) {
         throw new ForbiddenException('Only the DM may undo a monster/NPC action.');
       }
@@ -1057,7 +1109,7 @@ export class ActionResolverService {
 
     this.db.transaction((tx) => {
       for (const t of token.targets) {
-        const fresh = tx.select().from(combatants).where(eq(combatants.id, t.combatantId)).limit(1).all()[0];
+        const fresh = tx.select().from(combatants).where(eq(combatants.id, t.combatantId)).get();
         if (!fresh) continue;
         const effects = fromJsonText<Array<Record<string, unknown>>>(fresh.activeEffects, []);
         const keptEffects = effects.filter((e) => !t.effectIdsAdded.includes(String(e.id)));
@@ -1086,12 +1138,11 @@ export class ActionResolverService {
           .where(eq(combatants.id, fresh.id))
           .run();
         if (fresh.kind === 'character' && fresh.characterId !== null && encounter.status !== 'ended') {
-          const [undoSheetRow] = tx
+          const undoSheetRow = tx
             .select({ conditionInstances: characters.conditionInstances })
             .from(characters)
             .where(eq(characters.id, fresh.characterId))
-            .limit(1)
-            .all();
+            .get();
           const undoSheetPriorInstances = undoSheetRow?.conditionInstances ?? null;
           tx.update(characters)
             .set({
@@ -1109,7 +1160,7 @@ export class ActionResolverService {
         }
       }
       // Refund the actor's resources.
-      const actorFresh = tx.select().from(combatants).where(eq(combatants.id, actor.id)).limit(1).all()[0];
+      const actorFresh = tx.select().from(combatants).where(eq(combatants.id, actor.id)).get();
       if (actorFresh) {
         const turnState = CombatantTurnState.parse(fromJsonText<unknown>(actorFresh.turnState, null) ?? {});
         if (token.costSlot && token.costCount > 0) {
@@ -1124,7 +1175,7 @@ export class ActionResolverService {
         tx.update(combatants).set({ turnState: toJsonText(turnState) }).where(eq(combatants.id, actor.id)).run();
       }
       if (token.spellLevelSpent > 0 && actor.characterId !== null) {
-        const character = tx.select().from(characters).where(eq(characters.id, actor.characterId)).limit(1).all()[0];
+        const character = tx.select().from(characters).where(eq(characters.id, actor.characterId)).get();
         if (character) {
           const slots = fromJsonText<Record<string, { max: number; used: number }>>(character.spellSlots, {});
           const slot = slots[String(token.spellLevelSpent)];

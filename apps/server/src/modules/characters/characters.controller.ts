@@ -9,7 +9,7 @@ import { ProposalRecordsService } from '../proposals/proposal-records.service';
 import { requireWriteMode } from '../../common/proposed.util';
 import { Proposable } from '../../common/decorators/proposable.decorator';
 import { CharactersService } from './characters.service';
-import { CharacterCreateDto, CharacterUpdateDto, HpPatchDto, ConditionsPatchDto, SpellSlotPatchDto, XpPatchDto, XpAwardDto, LevelUpDto, DdbCharacterImportDto, CheckRollRequestDto, CheckRequestCreateDto, RestPatchDto } from './characters.dto';
+import { CharacterCreateDto, CharacterUpdateDto, HpPatchDto, ConditionsPatchDto, SpellSlotPatchDto, ResourcePatchDto, XpPatchDto, XpAwardDto, LevelUpDto, DdbCharacterImportDto, CheckRollRequestDto, CheckRequestCreateDto, RestPatchDto } from './characters.dto';
 
 @ApiTags('characters')
 @Controller('campaigns/:campaignId/characters')
@@ -287,6 +287,47 @@ export class CharactersController {
     const row = await this.characters.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'player');
     return this.characters.patchSpellSlots(id, body, user, role);
+  }
+
+  @Get(':id/resource-vocabulary')
+  @ApiOperation({
+    summary: "List a character's available resource vocabulary",
+    description:
+      'Requires campaign membership. Returns the campaign rule system\'s STANDARD resource pools (issue #422) — ' +
+      '5e hitDice/rage/actionSurge/kiPoints/inspiration, PF2e focusPoints/hitDice/heroPoints, and so on — plus any ' +
+      'CUSTOM resource already on this character\'s sheet, sourced from the campaign\'s RuleSystemAdapter so no ' +
+      'client hardcodes one system\'s resource names. `key` from an entry is what POST :id/resources expects; the ' +
+      'write endpoint itself still accepts a key outside this list (a homebrew resource is never blocked), this is ' +
+      'only for discovering the adapter-declared ones ahead of time.',
+  })
+  @ApiResponse({ status: 200, description: "The character's resource vocabulary." })
+  async listResourceVocabulary(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const row = await this.characters.getRowOrThrow(id);
+    await this.access.requireMember(user, row.campaignId);
+    return this.characters.listResourceVocabulary(id);
+  }
+
+  @Post(':id/resources')
+  @ApiOperation({
+    summary: 'Spend, restore, or configure a bounded character resource',
+    description:
+      'dm or the owning player (issue #422) — same authority as spell slots. Body is { key, delta?, used?, max?, ' +
+      'name?, recharge? }: `delta` adjusts relative to the resource\'s current `used`, `used` sets it absolutely ' +
+      '(applied first when both are sent). Spending past 0 or restoring past `max` is a 400, never a silent clamp — ' +
+      'an AI narrating a reroll it did not pay for is exactly the failure this refuses. `key` is not restricted to ' +
+      'GET :id/resource-vocabulary\'s list: a key the adapter does not declare creates a custom resource using ' +
+      '`max`/`name`/`recharge` from this request (or their defaults) the first time it is touched.',
+  })
+  @ApiResponse({ status: 201, description: 'Updated character.' })
+  @ApiResponse({ status: 400, description: 'Resulting used would fall outside [0, max].' })
+  async patchResource(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: ResourcePatchDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const row = await this.characters.getRowOrThrow(id);
+    const role = await this.access.requireRole(user, row.campaignId, 'player');
+    return this.characters.adjustResource(id, body, user, role);
   }
 }
 
