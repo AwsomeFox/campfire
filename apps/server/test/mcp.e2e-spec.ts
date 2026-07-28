@@ -3553,6 +3553,56 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
       expect(restored.spellSlots['1'].used).toBe(0);
     });
 
+    // Issue #422/#1578: the character-resource system had no MCP tool at all. Same
+    // requireRole('player') gate as adjust_spell_slots — a viewer-scoped PAT must be
+    // refused, matching the REST route's own authorization test.
+    it('list_character_resources surfaces the adapter vocabulary; adjust_character_resource spends and restores', async () => {
+      const client = await mcpClient(dmToken);
+      const charRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/characters`).send({ name: '1578 martial' });
+      const characterId = charRes.body.id as number;
+
+      const vocab = parseResult(
+        await client.callTool({ name: 'list_character_resources', arguments: { characterId } }),
+      ) as Array<{ key: string }>;
+      expect(vocab.map((r) => r.key)).toEqual(expect.arrayContaining(['hitDice', 'rage', 'actionSurge', 'kiPoints']));
+
+      const spent = parseResult(
+        await client.callTool({
+          name: 'adjust_character_resource',
+          arguments: { characterId, key: 'kiPoints', delta: 1, max: 3, name: 'Ki Points', recharge: 'short-rest' },
+        }),
+      ) as { resources: Record<string, { used: number; max: number }> };
+      expect(spent.resources.kiPoints).toMatchObject({ used: 1, max: 3 });
+
+      const restored = parseResult(
+        await client.callTool({
+          name: 'adjust_character_resource',
+          arguments: { characterId, key: 'kiPoints', delta: -1 },
+        }),
+      ) as { resources: Record<string, { used: number }> };
+      expect(restored.resources.kiPoints.used).toBe(0);
+
+      // Overspend is a real error, not a clamp — same #1039 rule spell slots follow.
+      const overspend = await client.callTool({
+        name: 'adjust_character_resource',
+        arguments: { characterId, key: 'kiPoints', delta: 100 },
+      });
+      expect(overspend.isError).toBe(true);
+    });
+
+    it('adjust_character_resource: a viewer-scoped PAT is refused, matching adjust_spell_slots', async () => {
+      const charRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/characters`).send({ name: '1578 viewer target' });
+      const characterId = charRes.body.id as number;
+
+      const viewerClient = await mcpClient(viewerToken);
+      const denied = await viewerClient.callTool({
+        name: 'adjust_character_resource',
+        arguments: { characterId, key: 'kiPoints', delta: 1 },
+      });
+      expect(denied.isError).toBe(true);
+      expect((denied.content as TextContent[])[0].text).toContain('403');
+    });
+
     it('reveal_attachment, hide_attachment, delete_attachment manage metadata only', async () => {
       const client = await mcpClient(dmToken);
       const upload = await dmAgent
