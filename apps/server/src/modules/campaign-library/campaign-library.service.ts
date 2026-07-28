@@ -247,7 +247,6 @@ export class CampaignLibraryService {
         for (const row of journal.snapshots) {
           const name = table(row.entityType);
           const value = z.record(z.string(), z.unknown()).parse(row.value);
-          const scalar = z.object({ value: z.union([z.string(), z.number(), z.null()]) }).parse(value);
           if (request.operation === 'set_visibility') {
             const before = z.object({ value: z.union([z.string(), z.number()]) }).parse(value).value;
             const after = row.entityType === 'location' ? (request.visibility === 'hidden' ? 'unexplored' : before === 'unexplored' ? 'explored' : before) : request.visibility === 'hidden' ? 1 : 0;
@@ -256,6 +255,7 @@ export class CampaignLibraryService {
             tx.run(sql`update ${sql.raw(name)} set ${sql.raw(field)}=${before}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`);
           }
           else if (request.operation === 'set_status') {
+            const scalar = z.object({ value: z.string() }).parse(value);
             const field = row.entityType === 'npc' ? 'disposition' : row.entityType === 'faction' ? 'standing' : 'status';
             if (!tx.get(sql`select id from ${sql.raw(name)} where id=${row.entityId} and campaign_id=${campaignId} and ${sql.raw(field)}=${request.status}`)) throw new ConflictException('A target changed after this bulk operation; undo would overwrite it');
             tx.run(sql`update ${sql.raw(name)} set ${sql.raw(field)}=${scalar.value}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`);
@@ -264,6 +264,7 @@ export class CampaignLibraryService {
             if (!tx.get(sql`select id from inventory_items where id=${row.entityId} and campaign_id=${campaignId} and owner_type=${request.ownerType} and character_id is ${request.characterId ?? null}`)) throw new ConflictException('A target changed after this bulk operation; undo would overwrite it');
             tx.run(sql`update inventory_items set owner_type=${before.ownerType}, character_id=${before.characterId}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`);
           } else {
+            const scalar = z.object({ value: z.string().nullable() }).parse(value);
             const after = request.operation === 'archive' ? operation.createdAt : null;
             if (!tx.get(sql`select id from ${sql.raw(name)} where id=${row.entityId} and campaign_id=${campaignId} and deleted_at is ${after}`)) throw new ConflictException('A target changed after this bulk operation; undo would overwrite it');
             tx.run(sql`update ${sql.raw(name)} set deleted_at=${scalar.value}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`);
