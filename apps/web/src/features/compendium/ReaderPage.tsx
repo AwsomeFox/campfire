@@ -60,6 +60,10 @@ export default function ReaderPage() {
   const [revisions, setRevisions] = useState<Array<{ id: number; createdAt: string; actor: string }> | null>(null);
   const [editing, setEditing] = useState(false);
   const [editBody, setEditBody] = useState('');
+  const [editSummary, setEditSummary] = useState('');
+  const [editName, setEditName] = useState('');
+  const [editDataJson, setEditDataJson] = useState('{}');
+  const [editRaw, setEditRaw] = useState(true);
   const [editError, setEditError] = useState<string | null>(null);
   const [savingEdit, setSavingEdit] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -82,7 +86,7 @@ export default function ReaderPage() {
   async function duplicateHomebrew() { if (!entry) return; setActing(true); setActionError(null); try { const copy = await api.post<RuleEntry>(`${API}/campaigns/${id}/homebrew/${entry.id}/duplicate`, {}); navigate(`/c/${id}/compendium/${copy.id}`); } catch (err) { setActionError(translateApiError(err, t, { fallbackKey: 'compendium.errors.loadEntry' })); } finally { setActing(false); } }
   async function archiveHomebrew() { if (!entry) return; setActing(true); setActionError(null); try { await api.post(`${API}/campaigns/${id}/homebrew/${entry.id}/archive`, {}); navigate(`/c/${id}/compendium`); } catch (err) { setActionError(translateApiError(err, t, { fallbackKey: 'compendium.errors.loadEntry' })); } finally { setActing(false); } }
   async function showRevisions() { if (!entry) return; setActing(true); setActionError(null); try { setRevisions(await api.get(`${API}/campaigns/${id}/homebrew/${entry.id}/revisions`)); } catch (err) { setActionError(translateApiError(err, t, { fallbackKey: 'compendium.errors.loadEntry' })); } finally { setActing(false); } }
-  async function saveEdit() { if (!entry) return; setSavingEdit(true); setEditError(null); try { const payload = { body: editBody, expectedUpdatedAt: entry.updatedAt }; const updated = await api.patch<RuleEntry>(`${API}/campaigns/${id}/homebrew/${entry.id}${isDm ? '' : '?proposed=true'}`, payload); if (isDm) setEntry(updated); setEditing(false); } catch (err) { setEditError(translateApiError(err, t, { fallbackKey: 'compendium.errors.loadEntry' })); } finally { setSavingEdit(false); } }
+  async function saveEdit() { if (!entry) return; setSavingEdit(true); setEditError(null); try { try { const data: unknown = JSON.parse(editDataJson); if (!data || Array.isArray(data) || typeof data !== 'object') throw new Error(); } catch { setEditError('Raw data must be a JSON object.'); return; } const payload = { name: editName, summary: editSummary, body: editBody, dataJson: editDataJson, expectedUpdatedAt: entry.updatedAt }; const updated = await api.patch<RuleEntry>(`${API}/campaigns/${id}/homebrew/${entry.id}${isDm ? '' : '?proposed=true'}`, payload); if (isDm) setEntry(updated); setEditing(false); } catch (err) { setEditError(translateApiError(err, t, { fallbackKey: 'compendium.errors.loadEntry' })); } finally { setSavingEdit(false); } }
 
   useEffect(() => {
     if (!entryId) return;
@@ -186,11 +190,11 @@ export default function ReaderPage() {
                 )}
               </span>
             )}
-            {entry.campaignId && <span className="flex gap-1.5" style={{ marginLeft: 'auto' }}><Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={acting} onClick={() => { setEditBody(entry.body); setEditing(true); }}>{isDm && canDmWrite ? 'Edit' : 'Propose edit'}</Btn>{isDm && canDmWrite && <><Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={acting} onClick={duplicateHomebrew}>Duplicate</Btn><Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={acting} onClick={archiveHomebrew}>Archive</Btn><Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={acting} onClick={showRevisions}>Revisions</Btn></>}</span>}
+            {entry.campaignId && <span className="flex gap-1.5" style={{ marginLeft: 'auto' }}><Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={acting} onClick={() => { setEditBody(entry.body); setEditName(entry.name); setEditSummary(entry.summary); setEditDataJson(entry.dataJson ?? '{}'); setEditing(true); }}>{isDm && canDmWrite ? 'Edit' : 'Propose edit'}</Btn>{isDm && canDmWrite && <><Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={acting} onClick={duplicateHomebrew}>Duplicate</Btn><Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={acting} onClick={archiveHomebrew}>Archive</Btn><Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={acting} onClick={showRevisions}>Revisions</Btn></>}</span>}
           </div>
           {iconError && <ErrorNote message={iconError} />}
           {actionError && <ErrorNote message={actionError} />}
-          {editing && <div className="flex flex-col gap-2"><textarea className="input" aria-label="Edit homebrew body" value={editBody} onChange={(e) => setEditBody(e.target.value)} />{editError && <ErrorNote message={editError} />}<Btn onClick={saveEdit} disabled={savingEdit}>{savingEdit ? 'Saving…' : isDm ? 'Save' : 'Submit proposal'}</Btn></div>}
+          {editing && <div className="flex flex-col gap-2"><input className="input" aria-label="Edit homebrew name" value={editName} onChange={(e) => setEditName(e.target.value)} /><input className="input" aria-label="Edit homebrew summary" value={editSummary} onChange={(e) => setEditSummary(e.target.value)} /><textarea className="input" aria-label="Edit homebrew body" value={editBody} onChange={(e) => setEditBody(e.target.value)} /><label><input type="checkbox" checked={editRaw} onChange={(e) => setEditRaw(e.target.checked)} /> Raw JSON data</label><textarea className="input" aria-label="Edit homebrew JSON object" value={editDataJson} onChange={(e) => setEditDataJson(e.target.value)} />{editError && <ErrorNote message={editError} />}<Btn onClick={saveEdit} disabled={savingEdit}>{savingEdit ? 'Saving…' : isDm ? 'Save' : 'Submit proposal'}</Btn></div>}
           {revisions && <div className="text-muted" style={{ fontSize: 12 }}>{revisions.map((revision) => <p key={revision.id} style={{ margin: 0 }}>{revision.createdAt} · {revision.actor}</p>)}</div>}
           {/* Monster entries carry an empty `body` — their stats live in `dataJson`
               (issue #142). Render the structured statblock when there's no prose body
