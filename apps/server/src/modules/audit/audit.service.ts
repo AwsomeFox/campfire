@@ -22,6 +22,15 @@ import { BACKUP_CADENCE_KEY, type BackupCadenceState } from '../backup/backup-ca
 import { clampAuditListLimit, decodeAuditCursor } from './audit-pagination';
 
 /**
+ * Either the top-level handle or a live transaction callback's `tx` (issue #1581).
+ * Same alias as every other service that writes inside `db.transaction(...)` —
+ * see e.g. `organized-play.service.ts` / `scheduling.service.ts` — restated here
+ * rather than imported from one of them, since audit is a lower-level module
+ * those services depend ON and must not depend back.
+ */
+type SyncDb = DrizzleDb | Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
+
+/**
  * #74: how long audit rows are retained before the background sweep prunes them.
  * Overridable via AUDIT_RETENTION_DAYS (0 or negative disables pruning entirely —
  * e.g. for operators who ship the log off-box and want to keep everything).
@@ -134,6 +143,26 @@ function retentionDetail(policy: AuditRetentionPolicy): string {
   ].join(', ');
 }
 
+/** Shared by {@link AuditService.log} and {@link AuditService.logInTx} — one row shape, two write paths. */
+export type AuditLogParams = {
+  actor: string;
+  actorRole: AuditActorRole;
+  action: string;
+  entityType?: string | null;
+  entityId?: number | null;
+  campaignId?: number | null;
+  detail?: string;
+  /**
+   * Overrides the ambient correlation id (#684). Pass `null` to write a row with NO
+   * requestId — the deliberate de-correlation path for issue #599's anonymous safety
+   * holds. `requestId` is a DM-queryable filter on the audit list, so an intentionally
+   * unattributed row that still carries the correlation id of the request that produced
+   * it is one join away from being attributed the moment any other row is ever written
+   * under that same request. Omit the field entirely for normal rows.
+   */
+  requestId?: string | null;
+};
+
 @Injectable()
 export class AuditService implements OnApplicationBootstrap {
   private readonly logger = new Logger(AuditService.name);
@@ -243,25 +272,9 @@ export class AuditService implements OnApplicationBootstrap {
     res.setHeader('X-Audit-Auto-Prune', policy.autoPruneEnabled ? '1' : '0');
   }
 
-  async log(params: {
-    actor: string;
-    actorRole: AuditActorRole;
-    action: string;
-    entityType?: string | null;
-    entityId?: number | null;
-    campaignId?: number | null;
-    detail?: string;
-    /**
-     * Overrides the ambient correlation id (#684). Pass `null` to write a row with NO
-     * requestId — the deliberate de-correlation path for issue #599's anonymous safety
-     * holds. `requestId` is a DM-queryable filter on the audit list, so an intentionally
-     * unattributed row that still carries the correlation id of the request that produced
-     * it is one join away from being attributed the moment any other row is ever written
-     * under that same request. Omit the field entirely for normal rows.
-     */
-    requestId?: string | null;
-  }): Promise<void> {
-    await this.db.insert(auditLog).values({
+  /** Turn `log()`/`logInTx()`'s params into the literal row both insert. One place, not two. */
+  private buildRow(params: AuditLogParams): typeof auditLog.$inferInsert {
+    return {
       campaignId: params.campaignId ?? null,
       actor: params.actor,
       actorRole: params.actorRole,
@@ -271,7 +284,48 @@ export class AuditService implements OnApplicationBootstrap {
       detail: params.detail ?? '',
       requestId: params.requestId !== undefined ? params.requestId : (getRequestId() ?? null),
       createdAt: nowIso(),
-    });
+    };
+  }
+
+  /**
+   * Write an audit row through this service's OWN handle (issue #1581's "durable,
+   * best-effort" path — the only one that existed before this issue). Commits
+   * independently of whatever transaction the caller may itself be inside: if THIS
+   * insert throws, nothing the caller already wrote is undone, and if the caller's own
+   * transaction later aborts for an unrelated reason, this row survives anyway.
+   *
+   * That is the right guarantee for most callers (an audit subsystem outage must not
+   * roll back a user's work), and is why this method's shape does not change here — see
+   * {@link logInTx} for the opposite guarantee, and its doc comment for when to reach
+   * for which.
+   */
+  async log(params: AuditLogParams): Promise<void> {
+    await this.db.insert(auditLog).values(this.buildRow(params));
+  }
+
+  /**
+   * Write an audit row INSIDE the caller's own transaction (issue #1581).
+   *
+   * Opposite guarantee from {@link log}: this row commits or rolls back WITH whatever
+   * else `tx` does. Reach for it only when "the work happened but there is no record of
+   * it" is itself the incident — consent decisions, privacy-policy changes, anything
+   * where a silently-missing audit row is worse than the work not having happened at
+   * all. For everything else (the common case), `log()`'s post-commit, best-effort
+   * write is correct on purpose: an audit-subsystem hiccup must not undo a user's work,
+   * and every existing caller keeps that behaviour unless it was deliberately moved
+   * here — see the PR/commit for #1581 for exactly which ones were, and why.
+   *
+   * SYNCHRONOUS, and takes the caller's `tx`, on purpose: better-sqlite3 transaction
+   * callbacks passed to `db.transaction(...)` must be plain synchronous functions (no
+   * `await` inside — see every other `SyncDb` consumer in this codebase, e.g.
+   * `organized-play.service.ts`'s `extendSeries`), so this cannot share `log()`'s async
+   * body. Uses `.run()`, not `.then()`/`await`, so the insert executes and is checked
+   * for a thrown error before the transaction's synchronous callback returns — the same
+   * reason every other in-transaction write in this codebase uses `.run()`/`.all()`/`.get()`
+   * rather than `await`.
+   */
+  logInTx(tx: SyncDb, params: AuditLogParams): void {
+    tx.insert(auditLog).values(this.buildRow(params)).run();
   }
 
   /**

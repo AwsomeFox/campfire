@@ -3245,8 +3245,23 @@ export class AiDriverService {
           'The AI is mid-turn. Wait for it to finish before starting or wrapping up the session.',
         );
       }
-      // Queue the action instead of rejecting with 409
-      const queue = this.actionQueues.get(campaignId) ?? [];
+      // Queue the action instead of rejecting with 409.
+      //
+      // #1586: get-OR-CREATE-AND-SET the queue in this one synchronous region, before the
+      // `await` below. Two callers arriving while no queue exists used to each evaluate
+      // `?? []` and get their OWN distinct array; the await between that read and the eventual
+      // `.set()` is a yield point, so both proceeded and the second `.set()` replaced the map
+      // entry wholesale, discarding the first caller's array — and the queued entry inside it,
+      // whose promise then hung forever (nothing left held a reference to resolve/reject it).
+      // Same shape as the extendSeries hardening in #588: establish the shared mutable state
+      // before any await can interleave, not after. Every later read/write in this method
+      // (including inside the Promise executor below) operates on THIS array by reference, so
+      // a second caller that finds it already in the map shares it rather than racing it.
+      let queue = this.actionQueues.get(campaignId);
+      if (!queue) {
+        queue = [];
+        this.actionQueues.set(campaignId, queue);
+      }
       const maxDepth = await this.getActionQueueDepth(campaignId);
       if (queue.length >= maxDepth) {
         throw new ConflictException(
@@ -3261,8 +3276,11 @@ export class AiDriverService {
         // Carry the seq forward: when this entry is finally dequeued the row is buried under
         // the narration of the turn that was running, so it can no longer be found by position.
         const queuedOpts: RunTurnOptions = { ...opts, ...(queuedActionSeq !== null ? { actionSeq: queuedActionSeq } : {}) };
+        // `queue` is already the array installed in the map above (created here, or handed
+        // back by a concurrent caller's `.get()`) — push onto it directly. No `.set()` needed:
+        // mutating the array in place is visible to every holder of the same reference,
+        // and re-`.set()`-ing here is exactly the statement whose race this fix removes.
         queue.push({ input, characterId: opts.characterId, user: triggeredBy, opts: queuedOpts, resolve, reject, queuedAt: Date.now() });
-        this.actionQueues.set(campaignId, queue);
       });
     }
     // Reserve the turn slot NOW, synchronously, before any further await — so a concurrent caller

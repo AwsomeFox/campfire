@@ -47,10 +47,18 @@ export class NotificationsController {
   }
 
   @Get('unread-count')
-  @ApiOperation({ summary: 'Count my unread notifications', description: 'Cheap poll target for the bell badge.' })
-  @ApiResponse({ status: 200, description: '{ count }' })
+  @ApiOperation({
+    summary: 'Count my unread notifications',
+    description:
+      'Cheap poll target for the bell badge. Also reports `membershipChanged` (issue #1590): true ' +
+      "when an unread notification means the caller's own membership/role changed somewhere, so " +
+      "the account-wide poller that already runs regardless of which campaign (or none) is open " +
+      'can tell that from ordinary table activity and refresh `/me`. Both fields read only the ' +
+      "caller's own notifications, same as always.",
+  })
+  @ApiResponse({ status: 200, description: '{ count, membershipChanged }' })
   async unreadCount(@CurrentUser() user: RequestUser) {
-    return { count: await this.notifications.unreadCount(user) };
+    return this.notifications.unreadSummary(user);
   }
 
   @Get('preferences')

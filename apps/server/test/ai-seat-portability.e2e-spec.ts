@@ -8,6 +8,7 @@ import {
   readPortableAiSeat,
   type PortableAiSeat,
 } from '../src/modules/ai-dm/ai-seat-portability';
+import { AiDmSeat } from '@campfire/schema';
 
 /**
  * #1049 — the AI seat's DM-authored configuration must survive clone, export and import.
@@ -42,6 +43,12 @@ const PROACTIVE = {
   cooldownSeconds: 600,
   maxProactiveTokensPerHour: 1_500,
 } as const;
+
+const TOKEN_BUDGET_MAX = (() => {
+  const max = AiDmSeat.shape.tokenBudget.removeDefault().maxValue;
+  if (max === null) throw new Error('AiDmSeat.shape.tokenBudget must define a max for portability clamping');
+  return max;
+})();
 
 /**
  * The round-trip fixture: EVERY portable field, each at a distinctly non-default value.
@@ -329,15 +336,39 @@ describe('AI seat portability across clone / export / import (#1049)', () => {
     expect((await readSeat(negative.body.id)).body.actionQueueDepth).toBeGreaterThanOrEqual(1);
   });
 
+  it('clamps tokenBudget to the range AiDmSeat.shape.tokenBudget allows (issue #1593)', async () => {
+    // Before the fix this was `Math.max(0, …)` — a floor with no ceiling. An archive carrying
+    // a tokenBudget past the schema's own `.max(...)` imported without complaint and
+    // read back verbatim, holding a value the schema calls illegal. This is a schema-integrity
+    // fix, not a spend-safety one: assertWithinServerTokenCap governs actual consumption
+    // regardless of what the seat stores.
+    const tooHigh = await importWithSeat('Huge Budget', { tokenBudget: TOKEN_BUDGET_MAX + 1 });
+    expect(tooHigh.status).toBe(201);
+    const seat = await readSeat(tooHigh.body.id);
+    expect(seat.status).toBe(200);
+    expect(seat.body.tokenBudget).toBe(TOKEN_BUDGET_MAX);
+
+    // The floor still holds too — this half already worked, and stays covered so a future
+    // change to the clamp helper cannot silently drop it.
+    const negative = await importWithSeat('Negative Budget', { tokenBudget: -5 });
+    expect((await readSeat(negative.body.id)).body.tokenBudget).toBe(0);
+  });
+
   /**
    * The scalar sibling of the two JSON blocks (Devin review).
    *
    * This PR hardened `stylePresets` and `proactiveSettings` in this reader and left `mode`,
    * `enabled` and `tokenBudget` on bare coercion — a rule applied to the reported fields and
-   * not their siblings. Of the three, only `mode` actually needs anything: `boolOf` is TOTAL
-   * (anything that is not `true` is `false`) and `tokenBudget` is already floored at 0, so
-   * neither has an unrepresentable value to admit. `mode` is the one scalar with a closed
-   * domain that nothing enforced — `str(src.mode, 'off')` accepts any string at all.
+   * not their siblings. Of the three, `enabled` genuinely needs nothing further: `boolOf` is
+   * TOTAL (anything that is not `true` is `false`), so a boolean has no unrepresentable value
+   * to admit. `mode` is a scalar with a closed domain (`AiDmMode`) that nothing enforced —
+   * `str(src.mode, 'off')` accepted any string at all — and is fixed here.
+   *
+   * `tokenBudget` ALSO has a closed domain (`AiDmSeat.shape.tokenBudget`'s
+   * `.nonnegative().max(...)`), which this PR did NOT close — `Math.max(0, …)`
+   * enforced the floor but not the ceiling. That gap shipped in this PR and was closed
+   * separately in #1593, with its own test above; it is called out here rather than silently
+   * left implying "already handled," which is what an earlier version of this comment claimed.
    *
    * It is a milder defect than the JSON blocks and a real one. It does NOT wedge the seat: an
    * unknown mode is cast, not parsed (`(row.mode as AiDmMode) ?? 'off'`), so the seat stays

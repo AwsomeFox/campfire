@@ -1,6 +1,6 @@
 import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
-import { CharacterCreate, CharacterUpdate, HpPatch, ConditionsPatch, SpellSlotPatch, XpPatch, XpAward, LevelUp, DdbCharacterImport, ExpectedUpdatedAt, CheckRollRequest, CheckRequestCreate } from '@campfire/schema';
+import { CharacterCreate, CharacterUpdate, HpPatch, ConditionsPatch, SpellSlotPatch, ResourcePatch, XpPatch, XpAward, LevelUp, DdbCharacterImport, ExpectedUpdatedAt, CheckRollRequest, CheckRequestCreate } from '@campfire/schema';
 
 // .strict() applied here at the DTO layer only — see encounters.dto.ts header
 // comment for why the shared @campfire/schema exports themselves stay lenient
@@ -32,6 +32,8 @@ export const HpPatchDto = HpPatchDtoClass;
 export class ConditionsPatchDto extends createZodDto(ConditionsPatch.strict()) {}
 
 export class SpellSlotPatchDto extends createZodDto(SpellSlotPatch.strict()) {}
+// Issue #422/#1578: spend/restore/configure one bounded character resource.
+export class ResourcePatchDto extends createZodDto(ResourcePatch.strict()) {}
 // XpPatch is a z.union(...) like HpPatch — same no-extends DTO construction as
 // HpPatchDtoClass above (see that comment for why).
 class XpPatchDtoClass {

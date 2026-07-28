@@ -70,6 +70,7 @@ import {
   XpAward,
   AiDmTurnKind,
   InventoryItemCreate,
+  InventoryFromCompendium,
   InventoryItemUpdate,
   TreasuryPatch,
   TimelineEventCreate,
@@ -97,6 +98,7 @@ import {
   InviteCreate,
   InvitePolicyUpdate,
   SpellSlotPatch,
+  ResourcePatch,
   spellSlotsRemaining,
   EncounterReopen,
   ProposalRevise,
@@ -2878,6 +2880,65 @@ export class McpToolsService {
       },
     );
 
+    // #422/#1578 — the character-resource system had zero callers: adjustResource and
+    // resourceVocabularyForAdapter existed, race-free and rule-system-aware, with no REST
+    // route, MCP tool, or UI reaching either. These two mirror adjust_spell_slots/list_checks'
+    // shape exactly (same requireRole('player') gate as every other player-owns-their-sheet
+    // mutation, same read-the-adapter-don't-hardcode-a-vocabulary pattern).
+    this.tool(
+      server,
+      'list_character_resources',
+      "List a character's available resource vocabulary (issue #422): the campaign rule system's STANDARD pools " +
+        '(5e hitDice/rage/actionSurge/kiPoints/inspiration, PF2e focusPoints/hitDice/heroPoints, and so on) plus ' +
+        'any CUSTOM resource already on this sheet, sourced from the campaign RuleSystemAdapter — never hardcoded ' +
+        'to one system. Use a returned `key` with adjust_character_resource; that tool also accepts a key outside ' +
+        'this list to create a homebrew resource, so this is for DISCOVERING the adapter-declared ones, not gating them.',
+      { characterId: Id.describe('Character id — from list_members, get_party, or list_characters') },
+      async ({ characterId }) => {
+        const character = await this.characters.getRowOrThrow(characterId as number);
+        await this.access.requireMember(user, character.campaignId);
+        return this.characters.listResourceVocabulary(characterId as number);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'adjust_character_resource',
+      'Spend, restore, or configure one bounded character resource (issue #422) — dm or the owning player, same ' +
+        'authority as adjust_spell_slots. `delta` adjusts relative to the resource\'s current `used`; `used` sets it ' +
+        'absolutely (applied first when both are sent). Spending past 0 or restoring past `max` FAILS with a 400 — ' +
+        'never a silent clamp — so it is safe to treat success as "the resource was actually spent/restored"; do not ' +
+        'narrate a Second Wind or a Ki technique the call errored on. `key` is not restricted to ' +
+        'list_character_resources\' vocabulary: an unrecognised key creates a custom resource from `max`/`name`/' +
+        '`recharge` (or their defaults) the first time it is touched.',
+      { characterId: Id.describe('Character id'), ...ResourcePatch.shape },
+      async ({ characterId, ...patch }) => {
+        const row = await this.characters.getRowOrThrow(characterId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'player');
+        const validated = ResourcePatch.parse(patch);
+        const before = fromJsonText<Record<string, { used?: number }>>(row.resources, {})[validated.key]?.used ?? 0;
+        const updated = await this.characters.adjustResource(characterId as number, validated, user, role);
+        // Same best-effort combat-log convenience as adjust_spell_slots above, and for the same
+        // reason: CharactersService has no EncountersService edge, and a log failure must never
+        // undo a spend that already committed.
+        const after = updated.resources?.[validated.key]?.used ?? before;
+        if (after !== before) {
+          const spent = after > before;
+          const count = Math.abs(after - before);
+          const label = updated.resources?.[validated.key]?.name || validated.key;
+          await this.encounters
+            .appendActiveEncounterNote(
+              row.campaignId,
+              `${spent ? 'spent' : 'restored'} ${count} ${label} (${after} used, ${updated.resources?.[validated.key]?.max ?? '?'} max)`,
+              updated.name,
+            )
+            .catch(() => undefined);
+        }
+        return updated;
+      },
+    );
+
     this.writeTool(
       server,
       user,
@@ -4513,6 +4574,19 @@ export class McpToolsService {
         const validated = InventoryItemCreate.parse(fields);
         const role = await this.access.requireRole(user, campaignId as number, 'player');
         return this.inventory.create(campaignId as number, validated, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'acquire_compendium_item',
+      'player: acquire an installed compendium item into party or an owned character inventory. Captures its source, license and play-safe snapshot. An equivalent item returns INVENTORY_COMPENDIUM_DUPLICATE until duplicateMode is increment or separate.',
+      { campaignId: CampaignIdArg, ...InventoryFromCompendium.shape },
+      async ({ campaignId, ...fields }) => {
+        const validated = InventoryFromCompendium.parse(fields);
+        const role = await this.access.requireRole(user, campaignId as number, 'player');
+        return this.inventory.acquireFromCompendium(campaignId as number, validated, user, role);
       },
     );
 

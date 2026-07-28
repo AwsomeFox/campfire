@@ -25,6 +25,7 @@ export const MCP_TOOL_NAMES = [
   'get_character',
   'get_party',
   'list_checks',
+  'list_character_resources',
   'list_check_requests',
   'get_session_recaps',
   'get_session',
@@ -124,6 +125,7 @@ export const MCP_TOOL_NAMES = [
   'delete_character',
   'restore_character',
   'adjust_spell_slots',
+  'adjust_character_resource',
   'update_character_hp',
   'award_xp',
   'level_up_character',
@@ -206,6 +208,7 @@ export const MCP_TOOL_NAMES = [
   'draft_content',
   // write — inventory/timeline/comments/scheduling (issue #257)
   'add_inventory_item',
+  'acquire_compendium_item',
   'update_inventory_item',
   'delete_inventory_item',
   'adjust_treasury',

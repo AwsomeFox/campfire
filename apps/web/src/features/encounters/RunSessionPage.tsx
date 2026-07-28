@@ -913,6 +913,12 @@ export default function RunSessionPage() {
   const formattingLocale = useFormattingLocale();
   const timeFormat = useTimeFormat();
   const { isDm, canDmWrite, canPlayerWrite } = useCampaignAccess();
+  // #1589 — read from `attemptGridDefaults`, which can run from inside a mutation's
+  // `onSettled` callback (see `gridDefaultRetryOnFree`) rather than only from render, so it
+  // needs the CURRENT permission rather than whatever was in scope when that callback closure
+  // was created.
+  const canDmWriteRef = useRef(canDmWrite);
+  canDmWriteRef.current = canDmWrite;
   const campaign = useCampaign(Number.isFinite(cid) ? cid : undefined);
   const announce = useAnnounce();
 
@@ -1737,6 +1743,22 @@ export default function RunSessionPage() {
   // encounter; the SSE `encounter.updated` signal then propagates them to every other client.
   const pendingEncounterPatchKeys = useRef(new Set<string>());
   const gridDefaultAttempts = useRef(new Set<string>());
+  // #1589 — a default-normalization attempt that DEDUPES against another in-flight PATCH
+  // owning the same pending key (see `queueEncounterPatch` below) registers a wake-up here,
+  // keyed by that pending key. The bug this fixes: the dedup branch returns before recording
+  // any default-attempt intent, so nothing marked that a retry was still owed. The retry used
+  // to happen to work anyway, but only because the OWNING request's optimistic write (when it
+  // was itself a default attempt) diverged the query cache, and the eventual failure-driven
+  // refetch — differing from that diverged cache — changed `encounter`'s object reference and
+  // re-ran the effect below. When the owning request is a plain user edit instead (no
+  // optimistic write) and fresh server truth already arrived showing the same missing fields
+  // before that edit settles, the settle's own refetch reports THE SAME missing fields the
+  // effect already saw: React Query's structural sharing keeps the same reference, the effect
+  // never re-runs, and the retry is lost — permanently, for the life of the page. See
+  // `attemptGridDefaults` below: it is invoked BOTH by the effect (on a real reference change)
+  // and by this wake-up (the instant the pending key frees), so the retry no longer depends on
+  // which of those two things happens to occur.
+  const gridDefaultRetryOnFree = useRef(new Map<string, () => void>());
   const setMap = useMutation({
     mutationFn: ({ patch }: { patch: Record<string, unknown>; pendingKey: string; defaultAttemptKey?: string }) =>
       api.patch(`${API}/encounters/${eid}`, patch),
@@ -1747,6 +1769,29 @@ export default function RunSessionPage() {
     },
     onSettled: (_data, error, variables) => {
       pendingEncounterPatchKeys.current.delete(variables.pendingKey);
+      // #1589 — wake a default attempt that deduped against this exact pending key, but ONLY
+      // when the request that just settled was NOT itself a default attempt.
+      //
+      // A default attempt routinely dedupes against ITS OWN prior dispatch: its optimistic
+      // write (below) changes the cached encounter, which re-runs the normalization effect
+      // with data that now looks complete, which clears `gridDefaultAttempts`, so the NEXT
+      // refetch showing the (still genuinely pending) real fields computes the identical
+      // patch/attemptKey again and calls back in here — deduping against itself via the exact
+      // pendingKey it is still occupying. If this settle-hook fired the wake unconditionally,
+      // that self-dedup registration would fire the instant the original attempt succeeds,
+      // racing ahead of the success invalidate below and its refetch: `attemptGridDefaults`
+      // would run against cache that has not yet caught up with the write that just landed,
+      // see the fields as still missing, and dispatch a genuine duplicate PATCH.
+      //
+      // A default attempt's own settle is already handled correctly without this hook: success
+      // invalidates unconditionally (below) and the resulting fresh data drives the effect;
+      // failure deliberately withholds invalidate so the retry waits for real server truth
+      // (see the comment below). Restricting the wake to `error && !variables.defaultAttemptKey`
+      // targets exactly the case #1589 is about: another, non-default write owned the key and
+      // failed, leaving the retry dependent on this wake-up rather than a success refetch.
+      const wake = gridDefaultRetryOnFree.current.get(variables.pendingKey);
+      if (wake) gridDefaultRetryOnFree.current.delete(variables.pendingKey);
+      if (wake && error && !variables.defaultAttemptKey) wake();
       // A failed default write keeps its optimistic intent until a poll/SSE refresh supplies
       // server truth. That fresh missing-field snapshot is what permits the next retry, rather
       // than mutation-render churn immediately creating an unbounded failure loop.
@@ -1756,10 +1801,21 @@ export default function RunSessionPage() {
   const mutateMapRef = useRef(setMap.mutate);
   mutateMapRef.current = setMap.mutate;
 
+  const attemptGridDefaultsRef = useRef<() => void>(() => {});
+
   const queueEncounterPatch = useCallback(
     (patch: Record<string, unknown>, defaultAttemptKey?: string): boolean => {
       const pendingKey = `${eid}:${encounterPatchKey(patch)}`;
-      if (pendingEncounterPatchKeys.current.has(pendingKey)) return false;
+      if (pendingEncounterPatchKeys.current.has(pendingKey)) {
+        // #1589 — dedup against the in-flight request that already owns this exact body. A
+        // default-normalization attempt (`defaultAttemptKey` set) that loses this race must
+        // still get its retry once the owning request frees the key — see the ref's doc
+        // comment above for why the effect's own re-run cannot be trusted to do that alone.
+        if (defaultAttemptKey) {
+          gridDefaultRetryOnFree.current.set(pendingKey, () => attemptGridDefaultsRef.current());
+        }
+        return false;
+      }
       pendingEncounterPatchKeys.current.add(pendingKey);
       if (defaultAttemptKey) gridDefaultAttempts.current.add(defaultAttemptKey);
 
@@ -1777,6 +1833,28 @@ export default function RunSessionPage() {
     },
     [eid, queryClient],
   );
+
+  // #1589 — the single place that decides "is a grid default still missing, and have we not
+  // already attempted it". Reads the QUERY CLIENT directly rather than a closed-over
+  // `encounter` value, so it gives the same answer whether it runs from the effect below (on a
+  // real data change) or from the `gridDefaultRetryOnFree` wake-up above (fired from inside a
+  // mutation callback, where the component's own render-scoped `encounter` may be stale).
+  const attemptGridDefaults = useCallback(() => {
+    const current = queryClient.getQueryData<EncounterWithCombatants>(queryKeys.encounter(eid));
+    if (!canDmWriteRef.current || !current || current.status === 'ended') return;
+    const patch = missingGridDefaults(current);
+    const encounterPrefix = `${current.id}:`;
+    if (!patch) {
+      for (const key of gridDefaultAttempts.current) {
+        if (key.startsWith(encounterPrefix)) gridDefaultAttempts.current.delete(key);
+      }
+      return;
+    }
+    const attemptKey = gridDefaultAttemptKey(current.id, patch);
+    if (gridDefaultAttempts.current.has(attemptKey)) return;
+    queueEncounterPatch(patch, attemptKey);
+  }, [eid, queryClient, queueEncounterPatch]);
+  attemptGridDefaultsRef.current = attemptGridDefaults;
 
   const setEncounterMap = useCallback(
     (attachmentId: number | null) => queueEncounterPatch({ mapAttachmentId: attachmentId }),
@@ -1808,21 +1886,17 @@ export default function RunSessionPage() {
 
   // Issue #865: normalize placeholder grid defaults once per encounter + missing-field set.
   // This lives beside the mutation/cache boundary instead of inside BattleMap's render tree.
+  //
+  // #1589 — this is now ONE of two triggers for `attemptGridDefaults`, not the only one. This
+  // effect catches a genuine data change (the common case); `gridDefaultRetryOnFree` (declared
+  // above, by `queueEncounterPatch`) catches the case where the previous attempt deduped
+  // against another in-flight request and the settle of THAT request is the only signal a
+  // retry is owed — which does not always also produce a new `encounter` reference for this
+  // effect to react to. See that ref's doc comment for the full mechanism.
   useEffect(() => {
     if (!canDmWrite || !encounter || encounter.status === 'ended') return;
-    const patch = missingGridDefaults(encounter);
-    const encounterPrefix = `${encounter.id}:`;
-    if (!patch) {
-      for (const key of gridDefaultAttempts.current) {
-        if (key.startsWith(encounterPrefix)) gridDefaultAttempts.current.delete(key);
-      }
-      return;
-    }
-
-    const attemptKey = gridDefaultAttemptKey(encounter.id, patch);
-    if (gridDefaultAttempts.current.has(attemptKey)) return;
-    queueEncounterPatch(patch, attemptKey);
-  }, [encounter, canDmWrite, queueEncounterPatch]);
+    attemptGridDefaults();
+  }, [encounter, canDmWrite, attemptGridDefaults]);
 
   // Transient battle-map ping (issue #238). Fire-and-forget POST; the server broadcasts an
   // `encounter.ping` SSE signal that every client — including this one — renders and fades, so

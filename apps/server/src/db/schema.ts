@@ -1034,6 +1034,14 @@ export const serverMeta = sqliteTable('server_meta', {
   updatedAt: text('updated_at').notNull(),
 });
 
+/** Bootstrap-only diagnostics state; never carries application data. */
+export const healthIntegrityResults = sqliteTable('health_integrity_results', {
+  kind: text('kind').primaryKey(),
+  status: text('status').notNull(),
+  code: text('code').notNull(),
+  checkedAt: text('checked_at').notNull(),
+});
+
 export const campaignMembers = sqliteTable('campaign_members', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   campaignId: integer('campaign_id').notNull(),
@@ -1646,6 +1654,10 @@ export const inventoryItems = sqliteTable('inventory_items', {
   qty: integer('qty').notNull().default(1),
   notes: text('notes').notNull().default(''),
   iconSlug: text('icon_slug').notNull().default(''), // optional game-icons override (issue #307)
+  ruleEntryId: integer('rule_entry_id'),
+  compendiumRef: text('compendium_ref'),
+  compendiumSnapshot: text('compendium_snapshot'),
+  compendiumState: text('compendium_state'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
   // Soft-delete tombstone (issue #551): NULL == live; ISO timestamp == trashed.
