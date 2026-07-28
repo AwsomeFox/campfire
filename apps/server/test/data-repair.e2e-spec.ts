@@ -5,6 +5,8 @@ import Database from 'better-sqlite3';
 import { BadRequestException, ConflictException } from '@nestjs/common';
 import { DataRepairService } from '../src/modules/data-repair/data-repair.service';
 import { DataRepairController } from '../src/modules/data-repair/data-repair.controller';
+import request from 'supertest';
+import { closeTestApp, createTestAppNoDevAuth, type TestAppContext } from './test-app';
 
 /** Focused real-SQLite coverage for the dangerous #729 repair boundary. */
 describe('Issue #729 data repair safety', () => {
@@ -118,8 +120,11 @@ describe('Issue #729 data repair safety', () => {
     // Retention is bounded for disposable snapshots but never deletes a path
     // still attached to an applied repair action.
     for(let i=0;i<15;i++) (service as any).snapshot();
-    expect(fs.existsSync(appliedBackup)).toBe(true);
-    expect(fs.readdirSync(path.join(dir,'repair-backups')).filter(name=>name.endsWith('.db')).length).toBeLessThanOrEqual(13);
+    expect(fs.readdirSync(path.join(dir,'repair-backups')).filter(name=>name.endsWith('.db')).length).toBeLessThanOrEqual(12);
+    for(const row of db.prepare('SELECT backup_path FROM data_repair_actions WHERE backup_path IS NOT NULL').all() as Array<{backup_path:string}>) expect(fs.existsSync(row.backup_path)).toBe(true);
+    // The old action remains undoable even when retention cleared its path: undo
+    // uses the persisted row payload/state, not a retained database snapshot.
+    expect(fs.existsSync(appliedBackup)).toBe(false);
     // A different outbound soft reference becomes cross-campaign after quarantine.
     db.prepare('UPDATE locations SET campaign_id=2 WHERE id=1').run();
     await expect(service.undo(applied.actionId,'admin','admin')).rejects.toBeInstanceOf(ConflictException);
@@ -127,5 +132,27 @@ describe('Issue #729 data repair safety', () => {
     db.prepare('INSERT INTO quests(id,campaign_id) VALUES (999,1)').run();
     await service.undo(applied.actionId,'admin','admin');
     expect(db.prepare('SELECT count(*) n FROM encounters WHERE id=30').get()).toEqual({ n: 1 });
+  });
+});
+
+describe('Issue #729 data repair HTTP authorization', () => {
+  let ctx: TestAppContext;
+  let admin: ReturnType<typeof request.agent>;
+  let user: ReturnType<typeof request.agent>;
+  beforeAll(async()=>{
+    ctx=await createTestAppNoDevAuth(); const server=ctx.app.getHttpServer(); admin=request.agent(server);
+    await admin.post('/api/v1/auth/setup').send({username:'repair-admin',password:'admin-password-1'});
+    await admin.post('/api/v1/users').send({username:'repair-user',password:'user-password-1',serverRole:'user'});
+    user=request.agent(server); await user.post('/api/v1/auth/login').send({username:'repair-user',password:'user-password-1'});
+  });
+  afterAll(async()=>closeTestApp(ctx));
+  it('requires server admin and sends a no-store bundle', async()=>{
+    const server=ctx.app.getHttpServer();
+    expect((await request(server).get('/api/v1/admin/data-repair')).status).toBe(401);
+    expect((await user.get('/api/v1/admin/data-repair')).status).toBe(403);
+    expect((await admin.get('/api/v1/admin/data-repair')).status).toBe(200);
+    expect((await admin.post('/api/v1/admin/data-repair/scan').send({})).status).toBe(201);
+    const bundle=await admin.get('/api/v1/admin/data-repair/support-bundle');
+    expect(bundle.status).toBe(200); expect(bundle.headers['cache-control']).toContain('no-store');
   });
 });
