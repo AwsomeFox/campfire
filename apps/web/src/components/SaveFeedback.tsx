@@ -8,7 +8,14 @@ export function formatSavedAt(at: Date): string {
 }
 
 export function formatSaveFailure(subject: string, error: string): string {
-  if (/^could(?:n['’]t| not) save\s+.+[.]?$/i.test(error)) {
+  // Collapse ONLY the app's own generic no-detail fallback strings (e.g. "Couldn't save
+  // changes.", "Couldn't save the provider.") into the standard message below. The object
+  // is matched with `[^.]+` (not the greedy `.+` this used to be) so a single-line match
+  // cannot cross a sentence boundary — a multi-sentence server error like "Couldn't save
+  // the provider. Check your API key." no longer matches, and its actionable detail past
+  // the first period survives into the generic branch below instead of being discarded
+  // (issue #756 review: Devin).
+  if (/^could(?:n['’]t| not) save\s+[^.]+[.]?$/i.test(error)) {
     return `Save failed for ${subject}. Your edits are still here; try again.`;
   }
   return `Save failed for ${subject}. ${error.replace(/[.]$/, '')}. Your edits are still here; try again.`;

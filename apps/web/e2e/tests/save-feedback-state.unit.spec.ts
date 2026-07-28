@@ -38,6 +38,15 @@ test('error copy identifies the subject without duplicating save failure phrasin
   );
 });
 
+// Issue #756 review (Devin): the generic-fallback regex used to be greedy across sentence
+// boundaries, so a multi-sentence server error starting with "Couldn't save ..." collapsed
+// to the generic message and silently dropped the actionable detail after the first period.
+test('a multi-sentence server error starting like the generic fallback keeps its actionable detail', () => {
+  expect(formatSaveFailure('Server AI provider', "Couldn't save the provider. Check your API key.")).toBe(
+    "Save failed for Server AI provider. Couldn't save the provider. Check your API key. Your edits are still here; try again.",
+  );
+});
+
 test('every migrated editor associates its editable controls with shared save feedback', () => {
   const root = resolve(__dirname, '../../src/features');
   for (const relative of [
