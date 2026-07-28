@@ -19,6 +19,7 @@ import {
   applyDamageModifiers,
   damageDefensesFromStatblock,
   resolveAttackForAdapter,
+  checkProficiencyBonusForAdapter,
   classifySaveOutcome,
   combatantActionsFromStatblock,
   computeAttackModifier,
@@ -26,7 +27,6 @@ import {
   CombatantStatblock,
   CombatantTurnState,
   criticalDamageRuleForAdapter,
-  dnd5eProficiencyBonus,
   expandStatblockActions,
   isResolvableSpec,
   normalizeStats,
@@ -158,13 +158,16 @@ export class ActionResolverService {
   }
 
   /**
-   * Proficiency bonus for a character under this adapter. 5e's fixed +2..+6 by level is the
-   * one system whose proficiency is derivable from level alone; other systems (PF2e level+rank)
-   * need per-check rank the sheet action doesn't carry, so they return 0 and rely on the
-   * action's explicit attack bonus / fixed DC instead — never silent math.
+   * Proficiency bonus for a character under this adapter (issue #1599). The rule decision now
+   * lives on the adapter itself — {@link checkProficiencyBonusForAdapter} asks
+   * `adapter.checkProficiencyBonus` when the system declared one (5e's own level curve, PF2e's
+   * trained-floor rank bonus — see each adapter's declaration in index.ts) and falls back to 0
+   * for every adapter that has not (OSR, Open Legend, and any unaudited system), never silent
+   * 5e math on a table that isn't 5e. This resolver no longer asks "which system is this"
+   * itself for proficiency, matching the shape #1598 established for the attack roll.
    */
   private proficiencyBonus(adapter: RuleSystemAdapter, level: number): number {
-    return adapter.id === DND5E_ADAPTER_ID ? dnd5eProficiencyBonus(level) : 0;
+    return checkProficiencyBonusForAdapter(adapter, level);
   }
 
   private isFearPreventingEscalation(row: typeof combatants.$inferSelect): boolean {

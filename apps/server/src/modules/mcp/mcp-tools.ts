@@ -104,6 +104,7 @@ import {
   ProposalRevise,
   ProposalBatchResolve,
   NotificationPreferencesUpdate,
+  ruleSystemAdapter,
 } from '@campfire/schema';
 import { hasServerAdminPower, type RequestUser } from '../../common/user.types';
 import { buildMcpEnvelope } from '../../common/api-error.envelope';
@@ -3723,18 +3724,23 @@ export class McpToolsService {
     );
 
     // #1040: saving_throw — resolve a save server-side using the character's real stats
-    // + proficiency, comparing against a DC in one verifiable call. Uses the 5e formula
-    // (d20 + abilityMod + (proficient ? profBonus(level) : 0)); if the campaign uses a
-    // different rule system with different modifier math, a subsequent PR can route the
-    // computation through the rule-system adapter. Members may call this; the roll is
-    // audited and persisted to the shared dice log so every member sees it.
+    // + proficiency, comparing against a DC in one verifiable call.
+    //
+    // #1599: the modifier math is the CAMPAIGN'S rule-system adapter's own — ability
+    // modifier and proficiency bonus alike — not a hardcoded 5e formula. 5e (and every
+    // unaudited/homebrew system, via the adapter-agnostic default) still gets exactly the
+    // same numbers as before; PF2e/SF2e now get a real (non-zero) proficiency bonus instead
+    // of silently 5e's. See `checkProficiencyBonusForAdapter` (action-resolver.ts) for the
+    // full reasoning, including why PF2e's answer is a "trained" floor rather than an exact
+    // per-save rank (the character sheet does not track rank, only proficient/not).
     this.writeTool(
       server,
       user,
       'saving_throw',
-      'Roll a saving throw for a character using their actual stats + proficiency (5e). Server reads the ability score, ' +
-        'computes the modifier (floor((score - 10) / 2)), adds the proficiency bonus (2 + floor((max(1, level) - 1) / 4); ' +
-        'level is clamped to at least 1) when the ability is in saveProficiencies, rolls 1d20 (or 2d20kh1/kl1), and compares ' +
+      'Roll a saving throw for a character using their actual stats + proficiency, under the campaign\'s own rule system. ' +
+        'Server reads the ability score, computes the modifier via the campaign\'s rule-system adapter, adds that adapter\'s ' +
+        'proficiency bonus (0 for a system that has not implemented one — e.g. OSR, whose saves are a different shape ' +
+        'entirely — never a silent guess) when the ability is in saveProficiencies, rolls 1d20 (or 2d20kh1/kl1), and compares ' +
         'to the DC. Returns ' +
         '{characterId, ability, dc, mode, score, abilityMod, profBonus, proficient, bonus, total, rolls, success, diceLogId}. ' +
         'Optionally set advantage="advantage"|"disadvantage" to roll 2d20 keep-highest/lowest.',
@@ -3751,11 +3757,14 @@ export class McpToolsService {
         const dcNum = dc as number;
         const rollMode = (advantage as 'normal' | 'advantage' | 'disadvantage' | undefined) ?? 'normal';
 
+        const campaign = await this.campaigns.getOrThrow(character.campaignId);
+        const adapter = ruleSystemAdapter(campaign.ruleSystem);
         const resolved = resolveSavingThrow({
           stats: fromJsonText<Record<string, number>>(character.stats, {}),
           saveProficiencies: fromJsonText<string[]>(character.saveProficiencies, []),
           ability: abilityKey,
           level: character.level,
+          adapter,
         });
         const { score, abilityMod, proficient, profBonus, bonus } = resolved;
 
