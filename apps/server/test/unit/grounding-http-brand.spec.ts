@@ -3,6 +3,10 @@ import { markHttpProjected, type HttpProjected } from '../../src/modules/ai-driv
 import type { AiDmTurnRunResult } from '../../src/modules/ai-driver/ai-driver.service';
 import type { GroundingVerdict } from '../../src/modules/ai-driver/driver-grounding';
 
+// @ts-expect-error — `HTTP_PROJECTED` is intentionally module-private; this type-only
+// import is erased at runtime but must fail during type checking if the public API stays safe.
+import type { HTTP_PROJECTED as _HTTP_PROJECTED } from '../../src/modules/ai-driver/grounding-projection.interceptor';
+
 /**
  * Issue #1639 — role redaction of a grounding verdict is enforced by
  * `GroundingProjectionInterceptor`, a runtime property of `AiDriverController`
@@ -17,17 +21,18 @@ import type { GroundingVerdict } from '../../src/modules/ai-driver/driver-ground
  * `Promise<HttpProjected<AiDmTurnRunResult>>`, and the brand key is a module-private
  * `unique symbol` that only `markHttpProjected` can produce a matching value for.
  *
- * THIS FILE IS THE COMPILE-LEVEL PROOF THE ISSUE ASKS FOR, NOT A RUNTIME ONE. Each
- * `@ts-expect-error` below asserts "the following line fails to type-check." If the brand
- * is ever weakened (the symbol accidentally exported, the field made optional, the
- * intersection dropped, …) so that a raw, unprojected value newly satisfies
- * `HttpProjected<T>`, the directive itself becomes an error — "unused '@ts-expect-error'
- * directive" — and `npx tsc --noEmit` / `ts-jest`'s own type-checking (this project does
- * not run Jest with `isolatedModules`, so ts-jest type-checks every file it transforms)
- * fails this SUITE, not just some assertion inside it. That is what makes this a
- * compile-level test rather than a behavioral one: it proves a property of the TYPES, and
- * would fail differently (a red suite that never gets to `it()`) than a broken runtime
- * assertion would.
+ * THIS FILE IS THE COMPILE-LEVEL PROOF THE ISSUE ASKS FOR, NOT A RUNTIME ONE. The
+ * top-level `HTTP_PROJECTED` type-only import asserts that the brand key itself remains
+ * absent from the module's public API. The `@ts-expect-error` directives inside the suite
+ * assert "the following line fails to type-check." If the brand is ever weakened (the
+ * field made optional, the intersection dropped, …) so that a raw, unprojected value
+ * newly satisfies `HttpProjected<T>`, the directive itself becomes an error — "unused
+ * '@ts-expect-error' directive" — and `npx tsc --noEmit` / `ts-jest`'s own type-checking
+ * (this project does not run Jest with `isolatedModules`, so ts-jest type-checks every
+ * file it transforms) fails this SUITE, not just some assertion inside it. That is what
+ * makes this a compile-level test rather than a behavioral one: it proves a property of
+ * the TYPES, and would fail differently (a red suite that never gets to `it()`) than a
+ * broken runtime assertion would.
  *
  * The #1632 runtime specs (removing the interceptor and observing 4 real leaks) remain
  * the behavioral backstop this does not replace — see the interceptor file's own comment
