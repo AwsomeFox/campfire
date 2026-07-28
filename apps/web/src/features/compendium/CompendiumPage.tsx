@@ -363,7 +363,8 @@ export default function CompendiumPage() {
   }
   async function applyImport() {
     if (!importEntries) return;
-    try { await api.post(`${API}/campaigns/${id}/homebrew/import/apply`, { entries: importEntries, strategy: importStrategy }); setImportEntries(null); setImportPreview(null); setReloadToken((n) => n + 1); }
+    const expectedUpdatedAt = Object.fromEntries((importPreview ?? []).flatMap((row) => row.conflict ? [[row.slug, row.conflict.updatedAt] as const] : []));
+    try { await api.post(`${API}/campaigns/${id}/homebrew/import/apply`, { entries: importEntries, strategy: importStrategy, expectedUpdatedAt: importStrategy === 'replace' ? expectedUpdatedAt : undefined }); setImportEntries(null); setImportPreview(null); setReloadToken((n) => n + 1); }
     catch (err) { setAuthorError(translateApiError(err, t, { fallbackKey: 'compendium.errors.search' })); }
   }
 
