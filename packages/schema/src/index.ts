@@ -639,11 +639,15 @@ export const ConditionsPatch = z.object({
  * itself requires `stacks >= 1`). Going below 0 or above the track's `max` is a 400, not a
  * clamp, matching every other bounded-resource write in this schema (#1039).
  */
-export const ConditionLevelPatch = z.object({
-  name: z.string().min(1).max(40),
-  delta: z.number().int().optional(),
-  level: z.number().int().min(0).max(99).optional(),
-});
+export const ConditionLevelPatch = z
+  .object({
+    name: z.string().min(1).max(40),
+    delta: z.number().int().optional(),
+    level: z.number().int().min(0).max(99).optional(),
+  })
+  .refine((v) => v.delta !== undefined || v.level !== undefined, {
+    message: 'at least one of delta or level is required',
+  });
 export type ConditionLevelPatch = z.infer<typeof ConditionLevelPatch>;
 /**
  * Canonical 5e condition vocabulary — the single source of truth shared across
