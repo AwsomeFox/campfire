@@ -96,6 +96,20 @@ describe('Issue #729 data repair safety', () => {
     expect(response.setHeader).toHaveBeenCalledWith('Cache-Control', 'private, no-store');
   });
 
+  it('keeps the current snapshot under tied mtimes and safely tolerates cleanup failure', () => {
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(123456);
+    const snapshots = Array.from({ length: 14 }, () => (service as any).snapshot());
+    const newest = snapshots.at(-1).file as string;
+    expect(fs.existsSync(newest)).toBe(true);
+    expect(fs.readdirSync(path.join(dir, 'repair-backups')).filter(name => name.endsWith('.db')).length).toBeLessThanOrEqual(12);
+    const unlink = jest.spyOn(fs, 'unlinkSync').mockImplementationOnce(() => { throw new Error('simulated cleanup failure'); });
+    const next = (service as any).snapshot();
+    expect(fs.existsSync(next.file)).toBe(true);
+    // A failed unlink leaves a disposable file behind, never a dangling action path.
+    for(const row of db.prepare('SELECT backup_path FROM data_repair_actions WHERE backup_path IS NOT NULL').all() as Array<{backup_path:string}>) expect(fs.existsSync(row.backup_path)).toBe(true);
+    unlink.mockRestore(); clock.mockRestore();
+  });
+
   it('quarantine checks real inbound rows, restores only safe full rows, and preserves applied backups', async () => {
     db.prepare('INSERT INTO campaigns(id) VALUES (1),(2)').run();
     db.prepare('INSERT INTO locations(id,campaign_id) VALUES (1,1),(2,2)').run();
