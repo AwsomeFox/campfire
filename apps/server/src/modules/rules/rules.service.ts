@@ -1261,6 +1261,9 @@ export class RulesService implements OnModuleInit {
   private homebrewPayload(row: typeof ruleEntries.$inferSelect): Record<string, unknown> {
     return { slug: row.slug, name: row.name, type: row.type, summary: row.summary, body: row.body, dataJson: row.dataJson ?? undefined, rightsStatus: row.rightsStatus, license: row.license, attribution: row.attribution, author: row.author, sourceUrl: row.sourceUrl, iconSlug: row.iconSlug };
   }
+  private async auditHomebrew(campaignId: number, row: RuleEntry, user: RequestUser, action: string): Promise<void> {
+    await this.audit.log({ campaignId, actor: auditActor(user), actorRole: auditActorRole(user), action, entityType: 'rule_entry', entityId: row.id, detail: row.slug });
+  }
 
   async listCampaignHomebrew(campaignId: number, user: RequestUser, includeArchived = false): Promise<RuleEntry[]> {
     await this.homebrewRole(campaignId, user);
@@ -1289,7 +1292,9 @@ export class RulesService implements OnModuleInit {
         tx.insert(ruleEntryRevisions).values({ ruleEntryId: row.id, campaignId, actor: String(user.id), beforeJson: '{}', afterJson: JSON.stringify(this.homebrewPayload(row)), createdAt: now }).run();
         return [row];
       });
-      return entryToDomain(row);
+      const entry = entryToDomain(row);
+      await this.auditHomebrew(campaignId, entry, user, 'homebrew.create');
+      return entry;
     } catch (err) { if (isUniqueConstraintError(err)) throw new ConflictException('A homebrew entry already uses this slug'); throw err; }
   }
 
@@ -1301,9 +1306,10 @@ export class RulesService implements OnModuleInit {
     const merged = this.normalizedHomebrew({ ...this.homebrewPayload((await this.db.select().from(ruleEntries).where(eq(ruleEntries.id, id)).get())!), ...patch }); const now = nowIso();
     const [row] = await this.db.transaction((tx) => {
       const before = tx.select().from(ruleEntries).where(and(eq(ruleEntries.id, id), eq(ruleEntries.campaignId, campaignId))).get(); if (!before) throw new NotFoundException('Homebrew rule entry not found');
-      const row = tx.update(ruleEntries).set({ ...merged, updatedAt: now }).where(eq(ruleEntries.id, id)).returning().get();
+      const row = tx.update(ruleEntries).set({ ...merged, updatedAt: now }).where(and(eq(ruleEntries.id, id), eq(ruleEntries.campaignId, campaignId), expected ? eq(ruleEntries.updatedAt, expected) : undefined)).returning().get();
+      if (!row) throw new ConflictException('Homebrew entry has changed; reload before saving');
       tx.insert(ruleEntryRevisions).values({ ruleEntryId: id, campaignId, actor: String(user.id), beforeJson: JSON.stringify(this.homebrewPayload(before)), afterJson: JSON.stringify(this.homebrewPayload(row)), createdAt: now }).run(); return [row];
-    }); return entryToDomain(row);
+    }); const entry = entryToDomain(row); await this.auditHomebrew(campaignId, entry, user, 'homebrew.update'); return entry;
   }
 
   async duplicateCampaignHomebrew(campaignId: number, id: number, user: RequestUser): Promise<RuleEntry> {
@@ -1315,7 +1321,7 @@ export class RulesService implements OnModuleInit {
 
   async archiveCampaignHomebrew(campaignId: number, id: number, user: RequestUser): Promise<RuleEntry> {
     await this.homebrewRole(campaignId, user, true); const now = nowIso();
-    const [row] = await this.db.transaction((tx) => { const before = tx.select().from(ruleEntries).where(and(eq(ruleEntries.id, id), eq(ruleEntries.campaignId, campaignId))).get(); if (!before) throw new NotFoundException('Homebrew rule entry not found'); const row = tx.update(ruleEntries).set({ archivedAt: now, updatedAt: now }).where(eq(ruleEntries.id, id)).returning().get(); tx.insert(ruleEntryRevisions).values({ ruleEntryId: id, campaignId, actor: String(user.id), beforeJson: JSON.stringify(this.homebrewPayload(before)), afterJson: JSON.stringify(this.homebrewPayload(row)), createdAt: now }).run(); return [row]; }); return entryToDomain(row);
+    const [row] = await this.db.transaction((tx) => { const before = tx.select().from(ruleEntries).where(and(eq(ruleEntries.id, id), eq(ruleEntries.campaignId, campaignId))).get(); if (!before) throw new NotFoundException('Homebrew rule entry not found'); const row = tx.update(ruleEntries).set({ archivedAt: now, updatedAt: now }).where(and(eq(ruleEntries.id, id), eq(ruleEntries.campaignId, campaignId))).returning().get(); tx.insert(ruleEntryRevisions).values({ ruleEntryId: id, campaignId, actor: String(user.id), beforeJson: JSON.stringify(this.homebrewPayload(before)), afterJson: JSON.stringify(this.homebrewPayload(row)), createdAt: now }).run(); return [row]; }); const entry = entryToDomain(row); await this.auditHomebrew(campaignId, entry, user, 'homebrew.archive'); return entry;
   }
 
   async homebrewRevisions(campaignId: number, id: number, user: RequestUser) { await this.getCampaignHomebrew(campaignId, id, user); return this.db.select().from(ruleEntryRevisions).where(and(eq(ruleEntryRevisions.campaignId, campaignId), eq(ruleEntryRevisions.ruleEntryId, id))).orderBy(asc(ruleEntryRevisions.id)); }

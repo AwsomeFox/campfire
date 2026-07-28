@@ -62,6 +62,10 @@ import {
   CheckRequestCreate,
   RulePackInstall,
   RuleEntryType,
+  HomebrewRuleEntryInput,
+  HomebrewRuleEntryUpdate,
+  HomebrewImportPreview,
+  HomebrewImportApply,
   RECAP_TEMPLATE,
   SessionCreate,
   SessionUpdate,
@@ -1222,6 +1226,16 @@ export class McpToolsService {
       { entryId: Id.describe('Rule entry id — from lookup_rule') },
       async ({ entryId }) => this.rules.getEntryOrThrow(entryId as number),
     );
+
+    this.tool(server, 'list_campaign_homebrew', 'List non-archived private homebrew for one campaign.', { campaignId: CampaignIdArg, includeArchived: z.boolean().optional() }, async ({ campaignId, includeArchived }) => this.rules.listCampaignHomebrew(campaignId as number, user, Boolean(includeArchived)));
+    this.tool(server, 'get_campaign_homebrew', 'Get a campaign-private homebrew entry by id.', { campaignId: CampaignIdArg, entryId: Id }, async ({ campaignId, entryId }) => this.rules.getCampaignHomebrew(campaignId as number, entryId as number, user));
+    this.tool(server, 'create_campaign_homebrew', 'Create campaign homebrew (DM only).', { campaignId: CampaignIdArg, entry: HomebrewRuleEntryInput }, async ({ campaignId, entry }) => this.rules.createCampaignHomebrew(campaignId as number, entry, user));
+    this.tool(server, 'update_campaign_homebrew', 'Update campaign homebrew with optional optimistic concurrency.', { campaignId: CampaignIdArg, entryId: Id, patch: HomebrewRuleEntryUpdate }, async ({ campaignId, entryId, patch }) => this.rules.updateCampaignHomebrew(campaignId as number, entryId as number, patch as Record<string, unknown>, user));
+    this.tool(server, 'duplicate_campaign_homebrew', 'Duplicate a campaign homebrew entry.', { campaignId: CampaignIdArg, entryId: Id }, async ({ campaignId, entryId }) => this.rules.duplicateCampaignHomebrew(campaignId as number, entryId as number, user));
+    this.tool(server, 'archive_campaign_homebrew', 'Archive a campaign homebrew entry.', { campaignId: CampaignIdArg, entryId: Id }, async ({ campaignId, entryId }) => this.rules.archiveCampaignHomebrew(campaignId as number, entryId as number, user));
+    this.tool(server, 'list_campaign_homebrew_revisions', 'List immutable revisions for a campaign homebrew entry.', { campaignId: CampaignIdArg, entryId: Id }, async ({ campaignId, entryId }) => this.rules.homebrewRevisions(campaignId as number, entryId as number, user));
+    this.tool(server, 'preview_campaign_homebrew_import', 'Dry-run a campaign homebrew import and report slug conflicts.', { campaignId: CampaignIdArg, input: HomebrewImportPreview }, async ({ campaignId, input }) => this.rules.previewHomebrewImport(campaignId as number, input as { entries: unknown[] }, user));
+    this.tool(server, 'apply_campaign_homebrew_import', 'Apply a validated campaign homebrew import with skip, replace, or duplicate conflict handling.', { campaignId: CampaignIdArg, input: HomebrewImportApply }, async ({ campaignId, input }) => this.rules.applyHomebrewImport(campaignId as number, input as { entries: unknown[]; strategy: 'skip' | 'replace' | 'duplicate'; expectedUpdatedAt?: Record<string, string> }, user));
 
     this.tool(
       server,

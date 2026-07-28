@@ -3159,7 +3159,7 @@ export const RuleEntry = z.object({
   license: z.string().max(160).default(''),
   attribution: z.string().max(500).default(''),
   author: z.string().max(200).default(''),
-  sourceUrl: z.string().max(500).default(''),
+  sourceUrl: z.string().max(500).refine((url) => !url || /^https?:\/\//i.test(url), 'Source URL must be http(s)').default(''),
   // Optional manual icon override (issue #305): the slug of a bundled game-icons.net
   // entity icon (see apps/web/src/lib/icons) shown in the compendium list + reader in
   // place of the type/school-derived default. '' means "no override — the web app
@@ -3230,7 +3230,7 @@ export const HomebrewRuleEntryUpdate = z.object({
   data: HomebrewDataObject.optional(), dataJson: z.string().max(100_000).optional(),
   rightsStatus: HomebrewRightsStatus.optional(), license: z.string().max(160).optional(),
   attribution: z.string().max(500).optional(), author: z.string().max(200).optional(),
-  sourceUrl: z.string().max(500).optional(), iconSlug: z.string().max(80).optional(),
+  sourceUrl: z.string().max(500).refine((url) => !url || /^https?:\/\//i.test(url), 'Source URL must be http(s)').optional(), iconSlug: z.string().max(80).optional(),
   expectedUpdatedAt: ExpectedUpdatedAt,
 });
 export type HomebrewRuleEntryUpdate = z.infer<typeof HomebrewRuleEntryUpdate>;
