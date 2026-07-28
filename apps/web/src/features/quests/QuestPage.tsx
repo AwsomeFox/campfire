@@ -30,6 +30,7 @@ import { QuestStatusBadge } from '../../components/EntitySemanticBadges';
 import { Markdown } from '../../components/Markdown';
 import { PrintControl } from '../../components/PrintControl';
 import { PrintOnly } from '../../components/PrintOnly';
+import { PageTitle } from '../../components/PageTitle';
 import { NotFoundState } from '../../components/NotFoundState';
 import { NotesRail } from '../../components/NotesRail';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
@@ -500,7 +501,14 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
       </PrintOnly>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-        <h3 className="min-w-0 break-words" style={{ margin: 0 }}>{quest.title}</h3>
+        {/* Issue #1711 (sibling audit off the Dashboard <h1> gap): this route's only real
+            <h1> was inside the screen-hidden PrintOnly reference sheet above — the visible
+            title here was a bare <h3> with no font-size override at all (Tailwind preflight
+            resets heading sizes to inherit), so it rendered at plain body size. `size="compact"`
+            gives it PageTitle's real semantics while keeping it visually modest enough to sit
+            inline with the status badge/print control row, matching the Dashboard's identical
+            title-plus-chips shape. */}
+        <PageTitle size="compact" className="min-w-0 break-words" style={{ margin: 0 }}>{quest.title}</PageTitle>
         <QuestStatusBadge status={quest.status} />
         <PrintControl
           resetKey={quest.id}

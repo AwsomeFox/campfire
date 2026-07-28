@@ -40,6 +40,7 @@ import {
 import { api, API, ApiError, translateApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { GameIcon } from '../../components/GameIcon';
+import { PageTitle } from '../../components/PageTitle';
 import {
   queryKeys,
   useAiDmSeat,
@@ -870,10 +871,18 @@ export default function AiTablePage() {
   // ---- Gated / off / loading states --------------------------------------
   // The onboarding issue (#343) owns the rich explainer/checklist; here we render only
   // the minimal fallback the issue calls for (message + a settings link).
+  //
+  // Issue #1711 (sibling audit off the Dashboard <h1> gap): this route had NO heading
+  // element at all — the "Scene" label below is a small uppercase tag, not a heading,
+  // and `Gate`'s `title` renders as a plain `<p>`. Every early-return branch below gets
+  // its own sr-only `<PageTitle>` (rather than restructuring the control flow into one
+  // shared wrapper) so the one-h1-per-route landmark exists regardless of which state
+  // the table is in, without changing any of this page's visible design.
 
   if (seatQuery.isLoading) {
     return (
       <div className="max-w-3xl mx-auto px-4 mt-8">
+        <PageTitle className="sr-only">{t('table.title')}</PageTitle>
         <Skeleton lines={6} />
       </div>
     );
@@ -883,25 +892,31 @@ export default function AiTablePage() {
     // Onboarding (#343): a blocked seat read maps to a friendly explainer + deep link
     // (aiGate.ts) instead of a bare 403, and a DM gets the full setup checklist.
     return (
-      <Gate campaignId={campaignId} isDm={isDm} isAdmin={isAdmin} error={seatQuery.error} />
+      <>
+        <PageTitle className="sr-only">{t('table.title')}</PageTitle>
+        <Gate campaignId={campaignId} isDm={isDm} isAdmin={isAdmin} error={seatQuery.error} />
+      </>
     );
   }
 
   if (!isDriver) {
     const off = seat?.mode === 'off';
     return (
-      <Gate
-        campaignId={campaignId}
-        isDm={isDm}
-        isAdmin={isAdmin}
-        icon={off ? 'moon' : 'shaking-hands'}
-        title={off ? t('table.offTitle') : t('table.coDmTitle')}
-        hint={off ? t('table.offHint') : t('table.coDmHint')}
-        // Off + DM → the setup checklist. Co-DM → the transparency explainer (the AI
-        // co-DMs via proposals, so the Table isn't where it's played).
-        showChecklist={off && isDm}
-        showTransparency={!off}
-      />
+      <>
+        <PageTitle className="sr-only">{t('table.title')}</PageTitle>
+        <Gate
+          campaignId={campaignId}
+          isDm={isDm}
+          isAdmin={isAdmin}
+          icon={off ? 'moon' : 'shaking-hands'}
+          title={off ? t('table.offTitle') : t('table.coDmTitle')}
+          hint={off ? t('table.offHint') : t('table.coDmHint')}
+          // Off + DM → the setup checklist. Co-DM → the transparency explainer (the AI
+          // co-DMs via proposals, so the Table isn't where it's played).
+          showChecklist={off && isDm}
+          showTransparency={!off}
+        />
+      </>
     );
   }
 
@@ -927,6 +942,8 @@ export default function AiTablePage() {
       className="max-w-3xl mx-auto w-full px-4 py-5 flex flex-col gap-3 min-h-0"
       style={{ height: 'calc(100dvh - 60px)' }}
     >
+      {/* Issue #1711: sr-only landmark — see the comment above the gated-state returns. */}
+      <PageTitle className="sr-only">{t('table.title')}</PageTitle>
       {/* Header: scene, status pill, token budget, DM pause/resume */}
       <Card density="default">
         <div className="flex items-start gap-3 flex-wrap">

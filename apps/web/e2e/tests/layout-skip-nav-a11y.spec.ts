@@ -79,8 +79,16 @@ test.describe('Layout skip link and route focus (#591)', () => {
 
     await page.goBack();
     await expect(page).toHaveURL(new RegExp(`/c/${campaignId}$`));
-    await expect(page.locator(`#${MAIN_CONTENT_ID}`)).toBeFocused();
-    await expect(page).toHaveTitle(/Dashboard · .*Cinderhaven · Campfire/);
+    // Issue #1711: the Dashboard now exposes a real h1 (the campaign name), so
+    // route-focus's "prefer the page h1; fall back to the stable main landmark" rule
+    // (routeFocus.ts) lands here instead of on #main-content, matching every other
+    // route in this file. Before #1711 the Dashboard had no h1 at all, so this
+    // assertion documented the fallback path rather than the intended one.
+    await expect(page.getByRole('heading', { level: 1, name: 'E2E — Cinderhaven' })).toBeFocused();
+    // The Dashboard's h1 IS the campaign name (unlike every other route's distinct
+    // section label), so formatDocumentTitle dedupes the would-be-doubled segment —
+    // see its #1711 doc comment in routeFocus.ts.
+    await expect(page).toHaveTitle('E2E — Cinderhaven · Campfire');
   });
 
   test('unknown routes focus the not-found heading and set document title', async ({ page }) => {

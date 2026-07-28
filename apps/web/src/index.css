@@ -1009,6 +1009,16 @@ h1, h2, h3, h4, h5, h6 {
   letter-spacing: -0.02em;
 }
 
+/* Issue #1711 — documented size variant for a page title that shares its row with
+   chips/badges (Dashboard's campaign name + session/danger/location chips, a quest
+   detail page's title + status badge) rather than standing alone atop the page.
+   Only font-size differs from .cf-page-title above — never hand-override fontSize
+   inline on a <PageTitle> instead of using this class; that inline-override pattern
+   (a bare <h3> wearing this component's class) is the exact defect #1711 found. */
+.cf-page-title--compact {
+  font-size: 1.35rem;
+}
+
 /* Signed-in ambient layer — fixed behind scrollable content, never traps focus. */
 .cf-ember-layer {
   position: fixed;
