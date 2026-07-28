@@ -165,8 +165,12 @@ describe('attachments (e2e)', () => {
     expect(saved.body.title).toBe('Corrected');
     const stale = await request(server).patch(`/api/v1/attachments/${up.body.id}/metadata`).set(player).send({ title: 'Stale', updatedAt: up.body.updatedAt });
     expect(stale.status).toBe(409);
+    const unrelated = await request(server).patch(`/api/v1/attachments/${up.body.id}/metadata`).set({ 'x-dev-role': 'player', 'x-dev-user': 'player-2' }).send({ title: 'Nope', updatedAt: saved.body.updatedAt });
+    expect(unrelated.status).toBe(403);
+    const dmEdit = await request(server).patch(`/api/v1/attachments/${up.body.id}/metadata`).set(dm).send({ title: 'DM corrected', updatedAt: saved.body.updatedAt });
+    expect(dmEdit.status).toBe(200);
     const db = ctx.app.get<DrizzleDb>(DB);
-    const revision = db.get<{ before: string; after: string }>(sql`SELECT before_json AS before, after_json AS after FROM attachment_metadata_revisions WHERE attachment_id = ${up.body.id} ORDER BY id DESC LIMIT 1`);
+    const revision = db.get<{ before: string; after: string }>(sql`SELECT before_json AS before, after_json AS after FROM attachment_metadata_revisions WHERE attachment_id = ${up.body.id} ORDER BY id ASC LIMIT 1`);
     expect(JSON.parse(revision!.before).title).toBe('');
     expect(JSON.parse(revision!.after).title).toBe('Corrected');
     const audit = db.get<{ action: string }>(sql`SELECT action FROM audit_log WHERE entity_type = 'attachment' AND entity_id = ${up.body.id} ORDER BY id DESC LIMIT 1`);

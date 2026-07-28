@@ -21,11 +21,9 @@ import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { MapConceptGlossary, MapPurposePreview } from '../../components/mapOnboarding';
 
 // Kept local until every consumer has rebuilt its generated schema declaration.
-type AttachmentDisplayMetadata = { title: string; caption: string; altText: string; creator: string; sourceUrl: string; license: string; attribution: string };
-const displayMetadata = (attachment: Attachment): AttachmentDisplayMetadata => attachment as Attachment & AttachmentDisplayMetadata;
-type MetadataDraft = AttachmentDisplayMetadata & { rights: string };
+type MetadataDraft = Pick<Attachment, 'title' | 'caption' | 'altText' | 'creator' | 'sourceUrl' | 'license' | 'rights' | 'attribution'>;
 const blankMetadata: MetadataDraft = { title: '', caption: '', altText: '', creator: '', sourceUrl: '', license: '', rights: '', attribution: '' };
-const draftFor = (attachment: Attachment): MetadataDraft => ({ ...blankMetadata, ...displayMetadata(attachment), rights: (attachment as Attachment & { rights?: string }).rights ?? '' });
+const draftFor = (attachment: Attachment): MetadataDraft => ({ title: attachment.title, caption: attachment.caption, altText: attachment.altText, creator: attachment.creator, sourceUrl: attachment.sourceUrl, license: attachment.license, rights: attachment.rights, attribution: attachment.attribution });
 
 export function HandoutsCard({ campaignId }: { campaignId: number }) {
   const { isDm, canDmWrite } = useCampaignAccess();
@@ -143,7 +141,7 @@ export function HandoutsCard({ campaignId }: { campaignId: number }) {
             </p>
           ) : (
             visible.map((a) => {
-              const meta = displayMetadata(a);
+              const meta = a;
               return (
               <div
                 key={a.id}

@@ -4125,7 +4125,6 @@ function migrateAttachmentMetadata735(sqlite: Database.Database): void {
 }
 
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
-  { name: '0137_attachment_metadata_735', run: migrateAttachmentMetadata735 },
   { name: '0001_users_oidc', run: migrateUsersTableForOidc },
   { name: '0002_campaigns_rule_system', run: migrateCampaignsTableForRuleSystem },
   { name: '0003_users_accent_color', run: migrateUsersTableForAccentColor },
@@ -4396,6 +4395,9 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // This one is NOT purely additive, unlike its neighbours: it REPLACES two partial unique
   // indexes. It must therefore never be reordered above 0040, which creates the originals.
   { name: '0135_ai_provider_config_fallback_role_1052', run: migrateAiProviderConfigFallbackRole1052 },
+  // #735 is additive but belongs at the execution tail: attachment provenance is
+  // independent of earlier table work and migration arrays are read chronologically.
+  { name: '0137_attachment_metadata_735', run: migrateAttachmentMetadata735 },
 ];
 
 /**

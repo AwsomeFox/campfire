@@ -13,6 +13,7 @@ import {
   CampaignImport,
   CampaignPurge,
   CampaignUpdate,
+  AttachmentMetadata,
   CAMPAIGN_CLONE_PREVIEW_FORMAT_VERSION,
   AiExternalContentPolicy,
   NarrationLanguage,
@@ -3051,21 +3052,25 @@ export class CampaignsService {
         attachmentsSkipped += 1;
         continue;
       }
+      // Archives are untrusted input too. Parse provenance through the same bounded
+      // current contract used by uploads/patches so an unsafe URL never becomes a
+      // clickable Handouts link after import.
+      const metadata = AttachmentMetadata.safeParse({
+        title: str(a.title), caption: str(a.caption), altText: str(a.altText), creator: str(a.creator),
+        sourceUrl: str(a.sourceUrl), license: str(a.license), rights: str(a.rights), attribution: str(a.attribution),
+        checksumSha256: declaredChecksum || null,
+      });
+      if (!metadata.success) {
+        attachmentsSkipped += 1;
+        continue;
+      }
       attachmentFiles.push({
         srcId,
         kind: str(a.kind, 'image'),
         filename: sanitizeAttachmentFilename(str(a.filename, `attachment-${srcId}`)),
         mime,
         bytes,
-        title: str(a.title),
-        caption: str(a.caption),
-        altText: str(a.altText),
-        creator: str(a.creator),
-        sourceUrl: str(a.sourceUrl),
-        license: str(a.license),
-        rights: str(a.rights),
-        attribution: str(a.attribution),
-        checksumSha256: declaredChecksum || null,
+        ...metadata.data,
       });
     }
 
