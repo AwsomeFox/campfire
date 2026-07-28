@@ -120,8 +120,14 @@ export async function closeTestApp(ctx: TestAppContext): Promise<void> {
   fs.rmSync(ctx.dataDir, { recursive: true, force: true });
 }
 
-/** For the auth-flow suites that need DEV_AUTH unset (real cookie sessions only). */
-export async function createTestAppNoDevAuth(): Promise<TestAppContext> {
+/**
+ * For the auth-flow suites that need DEV_AUTH unset (real cookie sessions / PATs only).
+ * Accepts the same `overrides` seam as createTestApp so a suite driving real MCP/PAT auth
+ * can still swap in a deterministic double (e.g. the inbox-sweep classifier, issue #1645).
+ */
+export async function createTestAppNoDevAuth(
+  options: Pick<CreateTestAppOptions, 'overrides'> = {},
+): Promise<TestAppContext> {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'campfire-test-'));
   process.env.DATA_DIR = dataDir;
   delete process.env.DEV_AUTH;
@@ -130,9 +136,11 @@ export async function createTestAppNoDevAuth(): Promise<TestAppContext> {
   process.env.THROTTLE_DISABLED = '1';
   process.env.AI_PROVIDER_ALLOW_PRIVATE_HOSTS = '1';
 
-  const moduleRef = await Test.createTestingModule({
-    imports: [AppModule],
-  }).compile();
+  let builder = Test.createTestingModule({ imports: [AppModule] });
+  for (const { token, useValue } of options.overrides ?? []) {
+    builder = builder.overrideProvider(token).useValue(useValue);
+  }
+  const moduleRef = await builder.compile();
 
   const app = moduleRef.createNestApplication({ bodyParser: false });
   app.use(cookieParser());

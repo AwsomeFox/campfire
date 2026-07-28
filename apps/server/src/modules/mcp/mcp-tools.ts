@@ -159,6 +159,7 @@ import { RollsService } from '../rolls/rolls.service';
 import { InvitesService } from '../membership/invites.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { BulkNotificationSchema } from '../notifications/notifications.dto';
+import { InboxSweepService } from '../inbox-sweep/inbox-sweep.service';
 
 import { APP_VERSION } from '../../common/build-metadata';
 
@@ -432,6 +433,11 @@ export class McpToolsService {
     // with placeholder arguments, so inserting a parameter in the middle would silently
     // shift every dependency after it rather than failing loudly.
     private readonly sessionZeroConsent: SessionZeroConsentService,
+    // Issue #1645: the MCP surface for the inbox sweep (#1644) — calls the exact same
+    // InboxSweepService.sweep() orchestration the REST POST /campaigns/:id/inbox/sweep
+    // route uses, never a second implementation. Appended last for the same positional-
+    // constructor-test reason as sessionZeroConsent above.
+    private readonly inboxSweep: InboxSweepService,
   ) {}
 
   /**
@@ -3321,6 +3327,39 @@ export class McpToolsService {
           role,
         );
       },
+    );
+
+    // Issue #1645 — MCP parity for the inbox sweep (#1644). Calls the EXACT SAME
+    // InboxSweepService.sweep() orchestration the REST POST /campaigns/:id/inbox/sweep
+    // route uses — no reimplementation, so MCP/REST behavior can never drift apart.
+    // dm role required (same as the REST controller), which also enforces the
+    // archived-campaign read-only gate via requireRole. sweep() only ever files PENDING
+    // PROPOSALS (never a direct canon write), so unlike run_scribe this is reachable by a
+    // 'propose'-writeScope token too — only a 'none' (read-only) token is rejected.
+    this.tool(
+      server,
+      'sweep_inbox',
+      'DM only: sweep the campaign inbox — reads every OPEN inbox item, infers create/update/dismiss per capture ' +
+        '(unsupported cases like objective ticks or HP/combat writes always skip with a stated reason), files each ' +
+        'inferred change as a PENDING PROPOSAL (never a direct canon write, so this works with a propose-writeScope ' +
+        'token), and resolves swept items. Safe to re-run: an item already swept is never re-classified or re-proposed. ' +
+        'Returns the recorded job + a per-item outcome (proposed / skipped / errored). Identical behavior to REST ' +
+        'POST /campaigns/:id/inbox/sweep and the web trigger — same orchestration path.',
+      { campaignId: CampaignIdArg },
+      async ({ campaignId }) => {
+        // Always propose-only under the hood, so gate like a proposal-capable write:
+        // reject a 'none' (read-only) token, but allow both 'propose' and 'direct'
+        // writeScope tokens (and session auth) through — requireWriteMode(user, true)
+        // gives exactly that (throws only on 'none'; its boolean return is unused here
+        // since sweep() never branches on write mode itself).
+        requireWriteMode(user, true);
+        const role = await this.access.requireRole(user, campaignId as number, 'dm');
+        return this.inboxSweep.sweep(campaignId as number, user, role);
+      },
+      true, // mutating — recorded on the DriverTool; not proposal-capable-tagged (no `propose`
+      // arg) and NOT in DRIVER_LIVE_PLAY_TOOLS, so the driver seat cannot trigger a bulk sweep
+      // mid-session — this is an administrative/out-of-session action, same posture as
+      // run_scribe.
     );
 
     this.writeTool(
