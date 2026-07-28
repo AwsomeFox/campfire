@@ -50,13 +50,23 @@ import { fromJsonText, toJsonText } from './json';
  *     table over the moment the column existed. An audit taken before the change would have
  *     cleared them, correctly, and been useless.
  *
- * The audit that catches this is mechanical, so run it as the LAST step:
+ * The audit that catches this is mechanical — issue #1666, after #1664 found a SEVENTH such
+ * writer (`CharactersService.restParty`, fixed in PR #1665) by accident, years after #1575,
+ * which is exactly the "a documented convention plus a grep nobody runs is not enforcement"
+ * problem #1666 exists to close. `test/unit/condition-columns-single-writer.spec.ts` now runs
+ * this audit on every test run, not just when someone remembers to: it scans every `.set()` /
+ * `.values()` call in `apps/server/src` (outside this file) for a write that sets `conditions`
+ * or `conditionInstances` without its sibling and without spreading one of the helpers below,
+ * and fails CI on a new one rather than merging it quietly. Its own doc comment explains what it
+ * does and does not see (a `.values(identifier)` built from a `.map()` elsewhere is a known gap,
+ * verified safe by hand where it occurs today) and is proven against #1664's exact shape via a
+ * synthetic fixture, independent of whatever the live tree currently contains.
  *
- *     grep -rn "conditions: toJsonText\|conditionInstances: toJsonText" apps/server/src \
- *       | grep -v common/conditions.ts        # must print nothing
- *
- * A guarantee you can grep for is worth more than one you assert in a comment — including
- * this comment.
+ * The one-line grep this comment used to recommend running by hand is intentionally retired: it
+ * only matched `toJsonText(...)` writes, so a literal `conditions: '[]'` or
+ * `conditions: jsonCol(...)` (both real shapes in this codebase, see the sweep in #1666) passed
+ * it silently — an inaccurate audit is worse than an accurate one nobody runs, because it looks
+ * like coverage. Run the real one: `npx jest condition-columns-single-writer` from `apps/server`.
  */
 
 /** A metadata-free instance for a condition that only ever existed as a string. */
