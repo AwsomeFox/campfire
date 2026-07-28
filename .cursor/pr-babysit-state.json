@@ -6,8 +6,8 @@
       "url": "https://github.com/AwsomeFox/campfire/pull/1656",
       "headBranch": "fix/issue-741",
       "baseBranch": "main",
-      "updatedAt": "2026-07-28T11:20:00Z",
-      "notes": "Tracking started. MERGEABLE (no conflicts). No review threads yet. CI in progress on open; mergeStateStatus BLOCKED pending required checks. Will merge main into head and babysit through green CI."
+      "updatedAt": "2026-07-28T11:22:00Z",
+      "notes": "Head 6e863d8d. Already up to date with main. Pushed CI fix: registered 9 homebrew MCP tools + regenerated surfaces (233 tools) and added @ApiOperation on CampaignHomebrewController. No open review threads. Cursor Approval Agent marked high risk / no approve (non-blocking; required_approving_review_count=0). Awaiting required CI on 6e863d8d."
     }
   ]
 }
