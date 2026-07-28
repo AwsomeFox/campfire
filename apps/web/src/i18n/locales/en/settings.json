@@ -71,7 +71,22 @@
         "sectionTitle": "Narration language",
         "body": "Governs AI-generated narration from the Driver, co-DM drafts, and Scribe recaps. This is separate from your personal UI language in Preferences.",
         "label": "Campaign narration language",
-        "save": "Save language"
+        "save": "Save language",
+        "options": {
+          "en": "English",
+          "fr": "French",
+          "de": "German",
+          "es": "Spanish",
+          "it": "Italian",
+          "pt": "Portuguese",
+          "ja": "Japanese",
+          "ko": "Korean",
+          "zh": "Chinese",
+          "ar": "Arabic",
+          "he": "Hebrew",
+          "ru": "Russian",
+          "multilingual": "Multilingual (match speakers)"
+        }
       },
       "mode": {
         "sectionTitle": "Operating mode"
@@ -83,6 +98,13 @@
         "readyTag": "credential ready",
         "missingTag": "credential missing",
         "readyDetail": "Credential source: {{source}}. {{scopeNote}}",
+        "credentialSourceLabels": {
+          "stored": "stored encrypted key",
+          "environment": "environment credential",
+          "server": "server-default credential",
+          "not-required": "no credential required",
+          "none": "no credential available"
+        },
         "scopeNoteCampaign": "This campaign overrides the server default below.",
         "scopeNoteServer": "Inherited from the server default set by your server admin.",
         "missingDetail": "The provider settings exist, but no usable credential is available. Ask the server admin to set a key or environment credential.",
@@ -111,7 +133,46 @@
       "tableStyle": {
         "sectionTitle": "Table style",
         "body": "Asks the AI to narrate a certain way. Each choice adds a line of guidance to its prompt — it steers voice and pacing, it does not change what is true, and a model can ignore it. Leave an axis on Default to say nothing about it.",
-        "save": "Save table style"
+        "save": "Save table style",
+        "axes": {
+          "tone": "Tone",
+          "pacing": "Pacing",
+          "verbosity": "Verbosity",
+          "combatStyle": "Combat style",
+          "npcDepth": "NPC depth"
+        },
+        "options": {
+          "tone": {
+            "default": "Default (no preference)",
+            "gritty": "Gritty — consequences bite",
+            "heroic": "Heroic — competent and bright",
+            "whimsical": "Whimsical — playful and absurd",
+            "noir": "Noir — moral greys, rain-slick",
+            "cozy": "Cozy — warm and low-stakes"
+          },
+          "pacing": {
+            "default": "Default (no preference)",
+            "brisk": "Brisk — cut to the moment",
+            "deliberate": "Deliberate — let scenes breathe"
+          },
+          "verbosity": {
+            "default": "Default (no preference)",
+            "concise": "Concise — short beats",
+            "vivid": "Vivid — rich description"
+          },
+          "combatStyle": {
+            "default": "Default (no preference)",
+            "tactical": "Tactical — positions and options",
+            "cinematic": "Cinematic — momentum and imagery",
+            "lethal": "Lethal — enemies fight to win",
+            "forgiving": "Forgiving — setbacks over death"
+          },
+          "npcDepth": {
+            "default": "Default (no preference)",
+            "light": "Light — a name and a trait",
+            "deep": "Deep — voices and motives"
+          }
+        }
       }
     }
   }

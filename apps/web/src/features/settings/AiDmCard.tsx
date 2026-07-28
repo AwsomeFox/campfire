@@ -91,6 +91,13 @@ const INHERITED_FIELD_LABEL: Record<string, string> = {
   tokenBudget: 'token budget',
   actionQueueDepth: 'action queue depth',
 };
+const CREDENTIAL_SOURCE_LABEL: Record<AiProviderEffectiveView['credentialSource'], string> = {
+  stored: 'stored encrypted key',
+  environment: 'environment credential',
+  server: 'server-default credential',
+  'not-required': 'no credential required',
+  none: 'no credential available',
+};
 
 const MODE_TAG: Record<AiDmMode, string> = { off: 'tag-neutral', co_dm: 'tag-accent-2', driver: 'tag-accent' };
 
@@ -305,7 +312,7 @@ function NarrationLanguageSection({
         >
           {NARRATION_LANGUAGE_OPTIONS.map((opt) => (
             <option key={opt.value} value={opt.value}>
-              {opt.label}
+              {t(`settings.aiDm.narrationLanguage.options.${opt.value}`, { defaultValue: opt.label })}
             </option>
           ))}
         </select>
@@ -420,6 +427,11 @@ function EffectiveProviderSection({
     ? t('settings.aiDm.provider.sourceCampaign')
     : t('settings.aiDm.provider.sourceServer');
   const sourceTag = effective?.source === 'campaign' ? 'tag-accent' : 'tag-accent-2';
+  const credentialSourceLabel = effective
+    ? t(`settings.aiDm.provider.credentialSourceLabels.${effective.credentialSource}`, {
+        defaultValue: CREDENTIAL_SOURCE_LABEL[effective.credentialSource],
+      })
+    : '';
 
   return (
     <Section title={t('settings.aiDm.provider.sectionTitle')} id="ai-dm-provider">
@@ -437,7 +449,7 @@ function EffectiveProviderSection({
           <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
             {effective.ready
               ? t('settings.aiDm.provider.readyDetail', {
-                  source: effective.credentialSource.replace('-', ' '),
+                  source: credentialSourceLabel,
                   scopeNote:
                     effective.source === 'campaign'
                       ? t('settings.aiDm.provider.scopeNoteCampaign')
@@ -730,7 +742,9 @@ function TableStyleSection({
       <div className="flex gap-2 flex-wrap">
         {AI_DM_STYLE_PRESET_AXES.map((axis) => (
           <div className="field" style={{ maxWidth: 260 }} key={axis.key}>
-            <label htmlFor={aiDmStyleSelectId(axis.key)}>{axis.label}</label>
+            <label htmlFor={aiDmStyleSelectId(axis.key)}>
+              {t(`settings.aiDm.tableStyle.axes.${axis.key}`, { defaultValue: axis.label })}
+            </label>
             <select
               id={aiDmStyleSelectId(axis.key)}
               className="input"
@@ -740,7 +754,7 @@ function TableStyleSection({
             >
               {AI_DM_STYLE_PRESET_OPTIONS[axis.key].map((opt) => (
                 <option key={opt.value} value={opt.value}>
-                  {opt.label}
+                  {t(`settings.aiDm.tableStyle.options.${axis.key}.${opt.value}`, { defaultValue: opt.label })}
                 </option>
               ))}
             </select>
