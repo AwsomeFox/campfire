@@ -164,14 +164,6 @@ export default function CompendiumPage() {
     // otherwise campaignPack is transiently '' and we'd fire an UNSCOPED search
     // that flashes entries from outside this campaign's rule system.
     if (campaign === undefined) return;
-    if (noRuleSystemChosen || noPacksInstalled) {
-      setResults([]);
-      setFacets([]);
-      setTotal(0);
-      setHasMore(false);
-      setNextCursor(undefined);
-      return;
-    }
     let cancelled = false;
     const gen = ++fetchGeneration.current;
     (async () => {
@@ -183,11 +175,18 @@ export default function CompendiumPage() {
         if (type !== 'all') params.set('type', type);
         if (campaignPack) params.set('pack', campaignPack);
         if (urlCursor) params.set('cursor', urlCursor);
-        const page = await api.get<RuleSearchPage>(`${API}/rules/search?${params.toString()}`);
+        const [page, homebrew] = await Promise.all([
+          campaignPack ? api.get<RuleSearchPage>(`${API}/rules/search?${params.toString()}`) : Promise.resolve<RuleSearchPage>({ items: [], total: 0, hasMore: false, limit: 50, facets: [] }),
+          api.get<RuleEntry[]>(`${API}/campaigns/${id}/homebrew`),
+        ]);
+        const needle = searchQuery.trim().toLowerCase();
+        const campaignEntries = homebrew.filter((entry) =>
+          (type === 'all' || entry.type === type) && (!needle || `${entry.name} ${entry.summary} ${entry.body}`.toLowerCase().includes(needle)),
+        );
         if (cancelled || gen !== fetchGeneration.current) return;
-        setResults(page.items);
+        setResults([...campaignEntries, ...page.items]);
         setFacets(page.facets ?? []);
-        setTotal(page.total);
+        setTotal(page.total + campaignEntries.length);
         setHasMore(page.hasMore);
         setNextCursor(page.nextCursor);
       } catch (err) {

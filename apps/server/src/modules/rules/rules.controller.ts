@@ -5,7 +5,7 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { ServerRoles } from '../../common/decorators/server-roles.decorator';
 import { type RequestUser } from '../../common/user.types';
 import { RulesService } from './rules.service';
-import { RulePackInstallDto, RulePackUploadDto, RuleEntryUpdateDto } from './rules.dto';
+import { RulePackInstallDto, RulePackUploadDto, RuleEntryUpdateDto, HomebrewRuleEntryDto, HomebrewRuleEntryUpdateDto, HomebrewImportPreviewDto, HomebrewImportApplyDto } from './rules.dto';
 
 /**
  * Rule packs (Compendium backend). Reads (list packs, search, entry fetch, install-job
@@ -231,4 +231,32 @@ export class RulesController {
   ) {
     return this.rules.updateEntry(id, body);
   }
+}
+
+/** Campaign-scoped private compendium authoring. Kept separate from global /rules. */
+@ApiTags('campaign homebrew')
+@Controller('campaigns/:campaignId/homebrew')
+export class CampaignHomebrewController {
+  constructor(private readonly rules: RulesService) {}
+
+  @Get()
+  list(@Param('campaignId', ParseIntPipe) campaignId: number, @Query('includeArchived') includeArchived: string | undefined, @CurrentUser() user: RequestUser) {
+    return this.rules.listCampaignHomebrew(campaignId, user, includeArchived === 'true');
+  }
+  @Post()
+  create(@Param('campaignId', ParseIntPipe) campaignId: number, @Body() body: HomebrewRuleEntryDto, @CurrentUser() user: RequestUser) { return this.rules.createCampaignHomebrew(campaignId, body, user); }
+  @Post('import/preview')
+  previewImport(@Param('campaignId', ParseIntPipe) campaignId: number, @Body() body: HomebrewImportPreviewDto, @CurrentUser() user: RequestUser) { return this.rules.previewHomebrewImport(campaignId, body, user); }
+  @Post('import/apply')
+  applyImport(@Param('campaignId', ParseIntPipe) campaignId: number, @Body() body: HomebrewImportApplyDto, @CurrentUser() user: RequestUser) { return this.rules.applyHomebrewImport(campaignId, body, user); }
+  @Get(':id/revisions')
+  revisions(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) { return this.rules.homebrewRevisions(campaignId, id, user); }
+  @Post(':id/duplicate')
+  duplicate(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) { return this.rules.duplicateCampaignHomebrew(campaignId, id, user); }
+  @Post(':id/archive')
+  archive(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) { return this.rules.archiveCampaignHomebrew(campaignId, id, user); }
+  @Patch(':id')
+  update(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('id', ParseIntPipe) id: number, @Body() body: HomebrewRuleEntryUpdateDto, @CurrentUser() user: RequestUser) { return this.rules.updateCampaignHomebrew(campaignId, id, body as Record<string, unknown>, user); }
+  @Get(':id')
+  get(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) { return this.rules.getCampaignHomebrew(campaignId, id, user); }
 }

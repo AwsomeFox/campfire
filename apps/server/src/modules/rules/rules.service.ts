@@ -1,6 +1,6 @@
 import { randomUUID, createHash } from 'node:crypto';
-import { BadRequestException, Inject, Injectable, NotFoundException, OnModuleInit } from '@nestjs/common';
-import { and, asc, eq, inArray, sql } from 'drizzle-orm';
+import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException, OnModuleInit } from '@nestjs/common';
+import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import {
   PF2E_PACK_SLUG,
   SF2E_PACK_SLUG,
@@ -16,15 +16,16 @@ import {
   type RulePackInstallSource,
   type RulePackUpload,
   type RuleSearchFacet,
-  type RuleSearchPage,
+  type RuleSearchPage, HomebrewRuleEntryInput,
 } from '@campfire/schema';
 import { DB, RULE_ENTRIES_FTS_AVAILABLE, type DrizzleDb } from '../../db/db.module';
-import { rulePacks, ruleEntries, combatants, campaigns, importJobs } from '../../db/schema';
+import { rulePacks, ruleEntries, ruleEntryRevisions, combatants, campaigns, importJobs } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { foldForSearch } from '../../common/text-search';
 import { AuditService } from '../audit/audit.service';
 import { auditActor, auditActorRole } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
+import { CampaignAccessService } from '../membership/campaign-access.service';
 import {
   clampRuleSearchLimit,
   decodeRuleSearchCursor,
@@ -196,7 +197,10 @@ function packToDomain(row: typeof rulePacks.$inferSelect): RulePack {
   };
 }
 
-function entryToDomain(row: typeof ruleEntries.$inferSelect): RuleEntry {
+// Keep this projection tolerant of pre-#741 fixture rows: production selects always
+// include campaign/provenance columns, but importer tests intentionally use legacy rows.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function entryToDomain(row: any): RuleEntry {
   return {
     id: row.id,
     packId: row.packId,
@@ -214,6 +218,9 @@ function entryToDomain(row: typeof ruleEntries.$inferSelect): RuleEntry {
     author: row.author ?? '',
     sourceUrl: row.sourceUrl ?? '',
     iconSlug: row.iconSlug ?? '',
+    campaignId: row.campaignId,
+    rightsStatus: row.rightsStatus as RuleEntry['rightsStatus'],
+    archivedAt: row.archivedAt,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -560,6 +567,7 @@ export class RulesService implements OnModuleInit {
     @Inject(DB) private readonly db: DrizzleDb,
     @Inject(RULE_ENTRIES_FTS_AVAILABLE) private readonly ftsAvailable: boolean,
     private readonly audit: AuditService,
+    private readonly access: CampaignAccessService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -1159,7 +1167,7 @@ export class RulesService implements OnModuleInit {
   }
 
   async listPacks(): Promise<RulePack[]> {
-    const rows = await this.db.select().from(rulePacks);
+    const rows = await this.db.select().from(rulePacks).where(sql`${rulePacks.slug} != '__campaign_homebrew_internal__'`);
     const usage = await this.countCampaignsByRuleSystem();
     return rows.map((row) => ({ ...packToDomain(row), usageCount: usage.get(row.slug) ?? 0 }));
   }
@@ -1191,7 +1199,7 @@ export class RulesService implements OnModuleInit {
   }
 
   async getEntryOrThrow(id: number): Promise<RuleEntry> {
-    const [row] = await this.db.select().from(ruleEntries).where(eq(ruleEntries.id, id)).limit(1);
+    const [row] = await this.db.select().from(ruleEntries).where(and(eq(ruleEntries.id, id), isNull(ruleEntries.campaignId))).limit(1);
     if (!row) throw new NotFoundException(`Rule entry ${id} not found`);
     return entryToDomain(row);
   }
@@ -1228,10 +1236,107 @@ export class RulesService implements OnModuleInit {
     const [row] = await this.db
       .update(ruleEntries)
       .set(set)
-      .where(eq(ruleEntries.id, id))
+      .where(and(eq(ruleEntries.id, id), isNull(ruleEntries.campaignId)))
       .returning();
     if (!row) throw new NotFoundException(`Rule entry ${id} not found`);
     return entryToDomain(row);
+  }
+
+  private async homebrewPackId(): Promise<number> {
+    const slug = '__campaign_homebrew_internal__';
+    let [pack] = await this.db.select().from(rulePacks).where(eq(rulePacks.slug, slug)).limit(1);
+    if (!pack) {
+      const now = nowIso();
+      try { [pack] = await this.db.insert(rulePacks).values({ slug, name: 'Campaign homebrew (internal)', version: '', license: '', sourceUrl: '', installedAt: now, entryCount: 0 }).returning(); }
+      catch { [pack] = await this.db.select().from(rulePacks).where(eq(rulePacks.slug, slug)).limit(1); }
+    }
+    if (!pack) throw new BadRequestException('Unable to initialize campaign homebrew');
+    return pack.id;
+  }
+
+  private async homebrewRole(campaignId: number, user: RequestUser, write = false) {
+    return write ? this.access.requireRole(user, campaignId, 'dm') : this.access.requireMember(user, campaignId);
+  }
+
+  private homebrewPayload(row: typeof ruleEntries.$inferSelect): Record<string, unknown> {
+    return { slug: row.slug, name: row.name, type: row.type, summary: row.summary, body: row.body, dataJson: row.dataJson ?? undefined, rightsStatus: row.rightsStatus, license: row.license, attribution: row.attribution, author: row.author, sourceUrl: row.sourceUrl, iconSlug: row.iconSlug };
+  }
+
+  async listCampaignHomebrew(campaignId: number, user: RequestUser, includeArchived = false): Promise<RuleEntry[]> {
+    await this.homebrewRole(campaignId, user);
+    const conditions = [eq(ruleEntries.campaignId, campaignId), includeArchived ? undefined : isNull(ruleEntries.archivedAt)].filter(Boolean) as any[];
+    return (await this.db.select().from(ruleEntries).where(and(...conditions)).orderBy(asc(ruleEntries.name), asc(ruleEntries.id))).map(entryToDomain);
+  }
+
+  async getCampaignHomebrew(campaignId: number, id: number, user: RequestUser): Promise<RuleEntry> {
+    await this.homebrewRole(campaignId, user);
+    const [row] = await this.db.select().from(ruleEntries).where(and(eq(ruleEntries.id, id), eq(ruleEntries.campaignId, campaignId))).limit(1);
+    if (!row) throw new NotFoundException(`Homebrew rule entry ${id} not found`);
+    return entryToDomain(row);
+  }
+
+  private normalizedHomebrew(input: unknown) {
+    const parsed = HomebrewRuleEntryInput.parse(input);
+    return { ...parsed, dataJson: parsed.data !== undefined ? JSON.stringify(parsed.data) : (parsed.dataJson ?? null) };
+  }
+
+  async createCampaignHomebrew(campaignId: number, input: unknown, user: RequestUser): Promise<RuleEntry> {
+    await this.homebrewRole(campaignId, user, true);
+    const value = this.normalizedHomebrew(input); const now = nowIso(); const packId = await this.homebrewPackId();
+    try {
+      const [row] = await this.db.transaction((tx) => {
+        const row = tx.insert(ruleEntries).values({ packId, campaignId, ...value, source: '', provenance: 'campaign_homebrew', archivedAt: null, createdAt: now, updatedAt: now }).returning().get();
+        tx.insert(ruleEntryRevisions).values({ ruleEntryId: row.id, campaignId, actor: String(user.id), beforeJson: '{}', afterJson: JSON.stringify(this.homebrewPayload(row)), createdAt: now }).run();
+        return [row];
+      });
+      return entryToDomain(row);
+    } catch (err) { if (isUniqueConstraintError(err)) throw new ConflictException('A homebrew entry already uses this slug'); throw err; }
+  }
+
+  async updateCampaignHomebrew(campaignId: number, id: number, patch: Record<string, unknown>, user: RequestUser): Promise<RuleEntry> {
+    await this.homebrewRole(campaignId, user, true);
+    const expected = typeof patch.expectedUpdatedAt === 'string' ? patch.expectedUpdatedAt : undefined; delete patch.expectedUpdatedAt;
+    const current = await this.getCampaignHomebrew(campaignId, id, user);
+    if (expected && current.updatedAt !== expected) throw new ConflictException('Homebrew entry has changed; reload before saving');
+    const merged = this.normalizedHomebrew({ ...this.homebrewPayload((await this.db.select().from(ruleEntries).where(eq(ruleEntries.id, id)).get())!), ...patch }); const now = nowIso();
+    const [row] = await this.db.transaction((tx) => {
+      const before = tx.select().from(ruleEntries).where(and(eq(ruleEntries.id, id), eq(ruleEntries.campaignId, campaignId))).get(); if (!before) throw new NotFoundException('Homebrew rule entry not found');
+      const row = tx.update(ruleEntries).set({ ...merged, updatedAt: now }).where(eq(ruleEntries.id, id)).returning().get();
+      tx.insert(ruleEntryRevisions).values({ ruleEntryId: id, campaignId, actor: String(user.id), beforeJson: JSON.stringify(this.homebrewPayload(before)), afterJson: JSON.stringify(this.homebrewPayload(row)), createdAt: now }).run(); return [row];
+    }); return entryToDomain(row);
+  }
+
+  async duplicateCampaignHomebrew(campaignId: number, id: number, user: RequestUser): Promise<RuleEntry> {
+    const source = await this.getCampaignHomebrew(campaignId, id, user);
+    const base = `${source.slug}-copy`; let slug = base; let i = 2;
+    while ((await this.db.select({ id: ruleEntries.id }).from(ruleEntries).where(and(eq(ruleEntries.campaignId, campaignId), eq(ruleEntries.slug, slug))).limit(1)).length) slug = `${base}-${i++}`;
+    return this.createCampaignHomebrew(campaignId, { ...this.homebrewPayload((await this.db.select().from(ruleEntries).where(eq(ruleEntries.id, id)).get())!), slug, name: `${source.name} (copy)` }, user);
+  }
+
+  async archiveCampaignHomebrew(campaignId: number, id: number, user: RequestUser): Promise<RuleEntry> {
+    await this.homebrewRole(campaignId, user, true); const now = nowIso();
+    const [row] = await this.db.transaction((tx) => { const before = tx.select().from(ruleEntries).where(and(eq(ruleEntries.id, id), eq(ruleEntries.campaignId, campaignId))).get(); if (!before) throw new NotFoundException('Homebrew rule entry not found'); const row = tx.update(ruleEntries).set({ archivedAt: now, updatedAt: now }).where(eq(ruleEntries.id, id)).returning().get(); tx.insert(ruleEntryRevisions).values({ ruleEntryId: id, campaignId, actor: String(user.id), beforeJson: JSON.stringify(this.homebrewPayload(before)), afterJson: JSON.stringify(this.homebrewPayload(row)), createdAt: now }).run(); return [row]; }); return entryToDomain(row);
+  }
+
+  async homebrewRevisions(campaignId: number, id: number, user: RequestUser) { await this.getCampaignHomebrew(campaignId, id, user); return this.db.select().from(ruleEntryRevisions).where(and(eq(ruleEntryRevisions.campaignId, campaignId), eq(ruleEntryRevisions.ruleEntryId, id))).orderBy(asc(ruleEntryRevisions.id)); }
+
+  async previewHomebrewImport(campaignId: number, input: { entries: unknown[] }, user: RequestUser) {
+    await this.homebrewRole(campaignId, user);
+    const existing = await this.db.select({ slug: ruleEntries.slug, id: ruleEntries.id, updatedAt: ruleEntries.updatedAt }).from(ruleEntries).where(eq(ruleEntries.campaignId, campaignId));
+    const bySlug = new Map(existing.map((row) => [row.slug, row]));
+    return { entries: input.entries.map((raw, index) => { const entry = this.normalizedHomebrew(raw); const conflict = bySlug.get(entry.slug); return { index, slug: entry.slug, valid: true, conflict: conflict ? { id: conflict.id, updatedAt: conflict.updatedAt } : null, entry }; }) };
+  }
+
+  async applyHomebrewImport(campaignId: number, input: { entries: unknown[]; strategy: 'skip' | 'replace' | 'duplicate'; expectedUpdatedAt?: Record<string, string> }, user: RequestUser) {
+    await this.homebrewRole(campaignId, user, true); const preview = await this.previewHomebrewImport(campaignId, input, user); const created: RuleEntry[] = []; let skipped = 0; let replaced = 0;
+    for (const item of preview.entries) {
+      if (!item.conflict) { created.push(await this.createCampaignHomebrew(campaignId, item.entry, user)); continue; }
+      if (input.strategy === 'skip') { skipped++; continue; }
+      if (input.strategy === 'replace') { const expected = input.expectedUpdatedAt?.[item.slug] ?? item.conflict.updatedAt; created.push(await this.updateCampaignHomebrew(campaignId, item.conflict.id, { ...item.entry, expectedUpdatedAt: expected }, user)); replaced++; continue; }
+      let slug = `${item.entry.slug}-import`; let suffix = 2; while ((await this.db.select({ id: ruleEntries.id }).from(ruleEntries).where(and(eq(ruleEntries.campaignId, campaignId), eq(ruleEntries.slug, slug))).limit(1)).length) slug = `${item.entry.slug}-import-${suffix++}`;
+      created.push(await this.createCampaignHomebrew(campaignId, { ...item.entry, slug }, user));
+    }
+    return { entries: created, created: created.length - replaced, replaced, skipped };
   }
 
   /**
@@ -2296,6 +2401,7 @@ export class RulesService implements OnModuleInit {
   }): Promise<RuleSearchPage> {
     const cursor = decodeRuleSearchCursor(opts.cursor, 'browse') as BrowseCursor | undefined;
     const baseConditions = [
+      isNull(ruleEntries.campaignId),
       opts.type ? eq(ruleEntries.type, opts.type) : undefined,
       opts.packId !== undefined ? eq(ruleEntries.packId, opts.packId) : undefined,
     ].filter((c): c is NonNullable<typeof c> => c !== undefined);
@@ -2348,6 +2454,7 @@ export class RulesService implements OnModuleInit {
     const cursor = decodeRuleSearchCursor(opts.cursor, 'fts') as FtsCursor | undefined;
     const rankExpr = nameMatchRank(opts.q);
     const baseConditions = [
+      isNull(ruleEntries.campaignId),
       sql`rule_entries_fts MATCH ${opts.ftsQuery}`,
       opts.type ? eq(ruleEntries.type, opts.type) : undefined,
       opts.packId !== undefined ? eq(ruleEntries.packId, opts.packId) : undefined,
@@ -2363,6 +2470,7 @@ export class RulesService implements OnModuleInit {
     const conditions = [...baseConditions, keyset].filter((c): c is NonNullable<typeof c> => c !== undefined);
 
     const matchConditions = [
+      isNull(ruleEntries.campaignId),
       sql`rule_entries_fts MATCH ${opts.ftsQuery}`,
       opts.packId !== undefined ? eq(ruleEntries.packId, opts.packId) : undefined,
     ].filter((c): c is NonNullable<typeof c> => c !== undefined);
@@ -2409,6 +2517,7 @@ export class RulesService implements OnModuleInit {
     const rankExpr = nameMatchRank(opts.q);
     const like = `%${opts.q.replace(/[%_]/g, '')}%`;
     const baseConditions = [
+      isNull(ruleEntries.campaignId),
       sql`(${ruleEntries.name} LIKE ${like} OR ${ruleEntries.summary} LIKE ${like} OR ${ruleEntries.body} LIKE ${like})`,
       opts.type ? eq(ruleEntries.type, opts.type) : undefined,
       opts.packId !== undefined ? eq(ruleEntries.packId, opts.packId) : undefined,
@@ -2424,6 +2533,7 @@ export class RulesService implements OnModuleInit {
     const conditions = [...baseConditions, keyset].filter((c): c is NonNullable<typeof c> => c !== undefined);
 
     const matchConditions = [
+      isNull(ruleEntries.campaignId),
       sql`(${ruleEntries.name} LIKE ${like} OR ${ruleEntries.summary} LIKE ${like} OR ${ruleEntries.body} LIKE ${like})`,
       opts.packId !== undefined ? eq(ruleEntries.packId, opts.packId) : undefined,
     ].filter((c): c is NonNullable<typeof c> => c !== undefined);
@@ -2467,7 +2577,7 @@ export class RulesService implements OnModuleInit {
 
   /** Conditions that scope a query to the active pack only (no query/type filter). */
   private packScopeConditions(packId?: number): Array<ReturnType<typeof eq>> {
-    return packId === undefined ? [] : [eq(ruleEntries.packId, packId)];
+    return (packId === undefined ? [isNull(ruleEntries.campaignId)] : [isNull(ruleEntries.campaignId), eq(ruleEntries.packId, packId)]) as Array<ReturnType<typeof eq>>;
   }
 
   private async groupEntryCounts(

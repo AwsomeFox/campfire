@@ -81,7 +81,10 @@ export default function ReaderPage() {
       setError(null);
       try {
         const [data, packs] = await Promise.all([
-          api.get<RuleEntry>(`${API}/rules/entries/${entryId}`),
+          // Campaign route is the privacy boundary for homebrew. It returns no
+          // cross-campaign/private entry by id; global entries retain the legacy
+          // reader fallback below for installed packs.
+          api.get<RuleEntry>(`${API}/campaigns/${id}/homebrew/${entryId}`).catch(() => api.get<RuleEntry>(`${API}/rules/entries/${entryId}`)),
           api.get<RulePack[]>(`${API}/rules/packs`).catch(() => []),
         ]);
         if (!cancelled) {
