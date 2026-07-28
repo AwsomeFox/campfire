@@ -657,7 +657,7 @@ export function planPartyCustomRecovery(
       deathStateAfter: character.deathState, deathSaveSuccessesAfter: character.deathSaveSuccesses,
       deathSaveFailuresAfter: character.deathSaveFailures, spellSlotsAfter: { ...character.spellSlots },
       resourcesAfter, conditionsAfter: [...character.conditions], conditionsCleared: [],
-      conditionsKept: [...character.conditions], resourcesRecovered, spellSlotLevelsRecovered: [],
+      conditionsKept: character.conditions.map((condition) => condition.name), conditionsDecremented: [], resourcesRecovered, spellSlotLevelsRecovered: [],
       hitDiceSpent: 0, hitDiceRolls: [], hitDiceRecovered: 0,
     });
   }

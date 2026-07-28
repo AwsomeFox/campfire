@@ -718,18 +718,27 @@ export class CharactersService {
    * recovery transaction only.  They return encounter ids so SSE can be emitted
    * after commit (never from a transaction that might roll back).
    */
-  private syncRecoveryCombatantsInTx(tx: SyncDb, campaignId: number, characterId: number, hpCurrent: number, deathState: string, conditionsJson: string, sheetUpdatedAt: string): number[] {
+  private syncRecoveryCombatantsInTx(tx: SyncDb, campaignId: number, characterId: number, hpCurrent: number, deathState: string, sheetInstances: readonly ConditionInstance[], sheetUpdatedAt: string): number[] {
     const rows = tx.select({ combatant: combatants, encounterId: encounters.id })
       .from(combatants).innerJoin(encounters, eq(combatants.encounterId, encounters.id))
       .where(and(eq(encounters.campaignId, campaignId), eq(combatants.characterId, characterId), ne(encounters.status, 'ended'), notDeleted(encounters.deletedAt))).all();
     for (const { combatant } of rows) {
       tx.update(combatants).set({
         hpCurrent: clampHpCurrent(hpCurrent, combatant.hpMax), deathState,
-        ...conditionWriteSetFromNames(fromJsonText<string[]>(conditionsJson, []), combatant.conditionInstances),
+        ...conditionWriteSetMergingSheetStacks(sheetInstances, combatant.conditionInstances),
         sheetSyncedUpdatedAt: sheetUpdatedAt,
       }).where(eq(combatants.id, combatant.id)).run();
     }
     return rows.map((row) => row.encounterId);
+  }
+
+  private recoveryConditionInstances(after: readonly RestConditionState[], priorJson: string | null, priorNamesJson: string): ConditionInstance[] {
+    const prior = new Map(readConditionInstances(priorJson, priorNamesJson).map((instance) => [instance.name.trim().toLowerCase(), instance]));
+    return after.flatMap((condition) => {
+      const existing = prior.get(condition.name.trim().toLowerCase());
+      const base = existing ?? legacyConditionInstance(condition.name);
+      return base ? [{ ...base, stacks: condition.stacks }] : [];
+    });
   }
 
   /**
@@ -1850,7 +1859,7 @@ export class CharactersService {
     const states: RestCharacterState[] = targets.map((row) => ({
       id: row.id, name: row.name, level: row.level, hpCurrent: row.hpCurrent, hpMax: row.hpMax, hpTemp: row.hpTemp,
       deathState: row.deathState as RestCharacterState['deathState'], deathSaveSuccesses: row.deathSaveSuccesses,
-      deathSaveFailures: row.deathSaveFailures, conditions: fromJsonText<string[]>(row.conditions, []),
+      deathSaveFailures: row.deathSaveFailures, conditions: readConditionInstances(row.conditionInstances, row.conditions).map((instance): RestConditionState => ({ name: instance.name, stacks: instance.stacks })),
       stats: fromJsonText<Record<string, number>>(row.stats, {}), spellSlots: fromJsonText<Record<string, SpellSlotLevel>>(row.spellSlots, {}),
       resources: fromJsonText<Record<string, CharacterResource>>(row.resources, {}),
     }));
@@ -1864,7 +1873,7 @@ export class CharactersService {
     const previewToken = randomUUID();
     const linked = await this.db.select({ characterId: combatants.characterId }).from(combatants).innerJoin(encounters, eq(combatants.encounterId, encounters.id)).where(and(eq(encounters.campaignId, campaignId), eq(encounters.status, 'running'), notDeleted(encounters.deletedAt)));
     const runningCombatantCharacterIds = [...new Set(linked.map((row) => row.characterId).filter((id): id is number => id != null && request.characterIds.includes(id)))];
-    const before = targets.map((row) => ({ id: row.id, updatedAt: row.updatedAt, hpCurrent: row.hpCurrent, hpTemp: row.hpTemp, deathState: row.deathState, deathSaveSuccesses: row.deathSaveSuccesses, deathSaveFailures: row.deathSaveFailures, conditions: row.conditions, spellSlots: row.spellSlots, resources: row.resources }));
+    const before = targets.map((row) => ({ id: row.id, updatedAt: row.updatedAt, hpCurrent: row.hpCurrent, hpTemp: row.hpTemp, deathState: row.deathState, deathSaveSuccesses: row.deathSaveSuccesses, deathSaveFailures: row.deathSaveFailures, conditions: row.conditions, conditionInstances: row.conditionInstances, spellSlots: row.spellSlots, resources: row.resources }));
     const fingerprint = createHash('sha256').update(canonicalJson({ actorUserId: user.id, campaignId, request })).digest('hex');
     await this.db.insert(partyRestBatches).values({ campaignId, actorUserId: user.id, previewToken, requestFingerprint: fingerprint, status: 'previewed', beforeJson: toJsonText(before), planJson: toJsonText(plan), createdAt: nowIso() });
     const deltas = plan.plans.map((item) => {
@@ -1881,8 +1890,8 @@ export class CharactersService {
     if (batch.actorUserId !== user.id) throw new ForbiddenException('Only the DM who created this recovery preview can apply it.');
     if (batch.status === 'applied' && batch.idempotencyKey === input.idempotencyKey) return fromJsonText<PartyRecoveryApplyResult>(batch.resultJson, { batchId: batch.id, kind: 'long', ruleSystem: '', characterIds: [] });
     if (batch.status !== 'previewed' || (batch.idempotencyKey && batch.idempotencyKey !== input.idempotencyKey)) throw new ConflictException('Recovery preview was already used for another intent.');
-    const before = fromJsonText<Array<{ id: number; updatedAt: string }>>(batch.beforeJson, []);
-    const plan = fromJsonText<{ kind: RestKind; ruleSystem: string; plans: Array<{ characterId: number; characterName: string; hpAfter: number; hpTempAfter: number; deathStateAfter: string; deathSaveSuccessesAfter: number; deathSaveFailuresAfter: number; conditionsAfter: string[]; spellSlotsAfter: Record<string, SpellSlotLevel>; resourcesAfter: Record<string, CharacterResource> }> }>(batch.planJson, { kind: 'short', ruleSystem: '', plans: [] });
+    const before = fromJsonText<Array<{ id: number; updatedAt: string; conditions: string; conditionInstances: string | null }>>(batch.beforeJson, []);
+    const plan = fromJsonText<{ kind: RestKind | 'custom'; ruleSystem: string; plans: Array<{ characterId: number; characterName: string; hpAfter: number; hpTempAfter: number; deathStateAfter: string; deathSaveSuccessesAfter: number; deathSaveFailuresAfter: number; conditionsAfter: RestConditionState[]; spellSlotsAfter: Record<string, SpellSlotLevel>; resourcesAfter: Record<string, CharacterResource> }> }>(batch.planJson, { kind: 'short', ruleSystem: '', plans: [] });
     const ids = before.map((s) => s.id);
     const linked = await this.db.select({ characterId: combatants.characterId }).from(combatants).innerJoin(encounters, eq(combatants.encounterId, encounters.id)).where(and(eq(encounters.campaignId, campaignId), eq(encounters.status, 'running'), notDeleted(encounters.deletedAt)));
     if (linked.some((row) => row.characterId != null && ids.includes(row.characterId)) && !input.acknowledgeRunningCombatants) throw new ConflictException('A running combatant will be synchronized; acknowledgement is required.');
@@ -1902,10 +1911,11 @@ export class CharactersService {
     const resultBody: PartyRecoveryApplyResult = { batchId: batch.id, kind: plan.kind, ruleSystem: plan.ruleSystem, characterIds: ids };
     this.db.transaction((tx) => {
       for (const item of plan.plans) {
-        const expected = before.find((snapshot) => snapshot.id === item.characterId)!.updatedAt;
-        const result = tx.update(characters).set({ hpCurrent: item.hpAfter, hpTemp: item.hpTempAfter, deathState: item.deathStateAfter, deathSaveSuccesses: item.deathSaveSuccessesAfter, deathSaveFailures: item.deathSaveFailuresAfter, conditions: toJsonText(item.conditionsAfter), spellSlots: toJsonText(item.spellSlotsAfter), resources: toJsonText(item.resourcesAfter), updatedAt: at }).where(and(eq(characters.id, item.characterId), eq(characters.campaignId, campaignId), eq(characters.updatedAt, expected))).run();
+        const snapshot = before.find((candidate) => candidate.id === item.characterId)!;
+        const nextInstances = this.recoveryConditionInstances(item.conditionsAfter, snapshot.conditionInstances, snapshot.conditions);
+        const result = tx.update(characters).set({ hpCurrent: item.hpAfter, hpTemp: item.hpTempAfter, deathState: item.deathStateAfter, deathSaveSuccesses: item.deathSaveSuccessesAfter, deathSaveFailures: item.deathSaveFailuresAfter, ...sheetConditionWriteSetFromInstances(nextInstances), spellSlots: toJsonText(item.spellSlotsAfter), resources: toJsonText(item.resourcesAfter), updatedAt: at }).where(and(eq(characters.id, item.characterId), eq(characters.campaignId, campaignId), eq(characters.updatedAt, snapshot.updatedAt))).run();
         if (result.changes !== 1) throw new ConflictException('A participant changed while recovery was applying.');
-        for (const encounterId of this.syncRecoveryCombatantsInTx(tx, campaignId, item.characterId, item.hpAfter, item.deathStateAfter, toJsonText(item.conditionsAfter), at)) touchedEncounterIds.add(encounterId);
+        for (const encounterId of this.syncRecoveryCombatantsInTx(tx, campaignId, item.characterId, item.hpAfter, item.deathStateAfter, nextInstances, at)) touchedEncounterIds.add(encounterId);
       }
       const result = tx.update(partyRestBatches).set({ status: 'applied', idempotencyKey: input.idempotencyKey, afterJson: toJsonText(plan.plans), resultJson: toJsonText(resultBody), appliedAt: at }).where(and(eq(partyRestBatches.id, batch.id), eq(partyRestBatches.status, 'previewed'))).run();
       if (result.changes !== 1) throw new ConflictException('Recovery preview was applied concurrently.');
@@ -1926,8 +1936,8 @@ export class CharactersService {
       throw new ConflictException('This recovery was already undone with a different idempotency key.');
     }
     if (batch.status !== 'applied') throw new ConflictException('Only an applied recovery can be undone.');
-    const before = fromJsonText<Array<{ id: number; hpCurrent: number; hpTemp: number; deathState: string; deathSaveSuccesses: number; deathSaveFailures: number; conditions: string; spellSlots: string; resources: string }>>(batch.beforeJson, []);
-    const after = fromJsonText<Array<{ characterId: number; hpAfter: number; hpTempAfter: number; deathStateAfter: string; deathSaveSuccessesAfter: number; deathSaveFailuresAfter: number; conditionsAfter: string[]; spellSlotsAfter: Record<string, SpellSlotLevel>; resourcesAfter: Record<string, CharacterResource> }>>(batch.afterJson, []);
+    const before = fromJsonText<Array<{ id: number; hpCurrent: number; hpTemp: number; deathState: string; deathSaveSuccesses: number; deathSaveFailures: number; conditions: string; conditionInstances: string | null; spellSlots: string; resources: string }>>(batch.beforeJson, []);
+    const after = fromJsonText<Array<{ characterId: number; hpAfter: number; hpTempAfter: number; deathStateAfter: string; deathSaveSuccessesAfter: number; deathSaveFailuresAfter: number; conditionsAfter: RestConditionState[]; spellSlotsAfter: Record<string, SpellSlotLevel>; resourcesAfter: Record<string, CharacterResource> }>>(batch.afterJson, []);
     const at = nowIso();
     const undoResult = { batchId, undone: true };
     const touchedEncounterIds = new Set<number>();
@@ -1938,9 +1948,10 @@ export class CharactersService {
       for (const snapshot of before) {
         const item = after.find((candidate) => candidate.characterId === snapshot.id);
         if (!item) throw new ConflictException('Recovery snapshot is incomplete.');
-        const result = tx.update(characters).set({ hpCurrent: snapshot.hpCurrent, hpTemp: snapshot.hpTemp, deathState: snapshot.deathState, deathSaveSuccesses: snapshot.deathSaveSuccesses, deathSaveFailures: snapshot.deathSaveFailures, conditions: snapshot.conditions, spellSlots: snapshot.spellSlots, resources: snapshot.resources, updatedAt: at }).where(and(eq(characters.id, snapshot.id), eq(characters.campaignId, campaignId), eq(characters.hpCurrent, item.hpAfter), eq(characters.hpTemp, item.hpTempAfter), eq(characters.deathState, item.deathStateAfter), eq(characters.deathSaveSuccesses, item.deathSaveSuccessesAfter), eq(characters.deathSaveFailures, item.deathSaveFailuresAfter), eq(characters.conditions, toJsonText(item.conditionsAfter)), eq(characters.spellSlots, toJsonText(item.spellSlotsAfter)), eq(characters.resources, toJsonText(item.resourcesAfter)))).run();
+        const afterInstances = this.recoveryConditionInstances(item.conditionsAfter, snapshot.conditionInstances, snapshot.conditions);
+        const result = tx.update(characters).set({ hpCurrent: snapshot.hpCurrent, hpTemp: snapshot.hpTemp, deathState: snapshot.deathState, deathSaveSuccesses: snapshot.deathSaveSuccesses, deathSaveFailures: snapshot.deathSaveFailures, ...sheetConditionWriteSetFromInstances(readConditionInstances(snapshot.conditionInstances, snapshot.conditions)), spellSlots: snapshot.spellSlots, resources: snapshot.resources, updatedAt: at }).where(and(eq(characters.id, snapshot.id), eq(characters.campaignId, campaignId), eq(characters.hpCurrent, item.hpAfter), eq(characters.hpTemp, item.hpTempAfter), eq(characters.deathState, item.deathStateAfter), eq(characters.deathSaveSuccesses, item.deathSaveSuccessesAfter), eq(characters.deathSaveFailures, item.deathSaveFailuresAfter), eq(characters.conditions, toJsonText(afterInstances.map((instance) => instance.name))), eq(characters.conditionInstances, toJsonText(afterInstances)), eq(characters.spellSlots, toJsonText(item.spellSlotsAfter)), eq(characters.resources, toJsonText(item.resourcesAfter)))).run();
         if (result.changes !== 1) throw new ConflictException('A participant changed after this recovery; undo would overwrite it.');
-        for (const encounterId of this.syncRecoveryCombatantsInTx(tx, campaignId, snapshot.id, snapshot.hpCurrent, snapshot.deathState, snapshot.conditions, at)) touchedEncounterIds.add(encounterId);
+        for (const encounterId of this.syncRecoveryCombatantsInTx(tx, campaignId, snapshot.id, snapshot.hpCurrent, snapshot.deathState, readConditionInstances(snapshot.conditionInstances, snapshot.conditions), at)) touchedEncounterIds.add(encounterId);
       }
       const result = tx.update(partyRestBatches).set({ status: 'undone', undoneAt: at, undoIdempotencyKey: idempotencyKey, undoResultJson: toJsonText(undoResult) }).where(and(eq(partyRestBatches.id, batchId), eq(partyRestBatches.status, 'applied'))).run();
       if (result.changes !== 1) throw new ConflictException('Recovery was undone concurrently.');
