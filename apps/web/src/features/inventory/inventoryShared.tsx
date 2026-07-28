@@ -8,6 +8,7 @@ import type { Character, InventoryItem } from '@campfire/schema';
 import { api, API, translateApiError } from '../../lib/api';
 import { useAnnounce } from '../../components/Announcer';
 import { Card, Btn } from '../../components/ui';
+import { UIIcon } from '../../components/UIIcon';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { Field } from '../../components/Field';
 import {
@@ -256,7 +257,7 @@ export function ItemRow({
             onClick={() => setConfirmingDelete(true)}
             aria-label={t('inventory.deleteAria', { name: committed.name })}
           >
-            ✕
+            <UIIcon name="close" size="xs" />
           </Btn>
           {committed.compendiumState && committed.compendiumState !== 'detached' && <>
             {committed.compendiumState === 'linked_updated' && <Btn density="xs" ghost className="!px-2 text-xs" disabled={busy} onClick={() => void compendiumAction('refresh')}>Refresh source</Btn>}

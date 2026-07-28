@@ -25,6 +25,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState, type MouseEve
 import { useParams, useNavigate } from 'react-router-dom';
 import { useLiveEncounterState } from '../../lib/useLiveEncounterState';
 import { DetailPageWayfinding } from '../../components/DetailPageWayfinding';
+import { UIIcon } from '../../components/UIIcon';
 import { CharacterSheetNav } from './CharacterSheetNav';
 import { CHARACTER_SHEET_SECTION_LABEL, characterSheetSectionId } from './characterSheetTabs';
 import { useCharacterSheetTab } from './useCharacterSheetTab';
@@ -1755,7 +1756,7 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
                     color: 'inherit',
                   }}
                 >
-                  ✕
+                  <UIIcon name="close" size="xs" />
                 </button>
               </div>
             )}
@@ -2392,7 +2393,7 @@ function ConditionsRow({
                 color: 'inherit',
               }}
             >
-              ✕
+              <UIIcon name="close" size="xs" />
             </button>
           )}
         </span>

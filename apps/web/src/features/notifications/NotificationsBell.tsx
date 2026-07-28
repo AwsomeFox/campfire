@@ -24,6 +24,7 @@ import { useAuth } from '../../app/auth';
 import { useCampaigns } from '../../app/CampaignContext';
 import { api, API } from '../../lib/api';
 import { Btn, ErrorNote, Skeleton } from '../../components/ui';
+import { UIIcon } from '../../components/UIIcon';
 import { useAnnounce } from '../../components/Announcer';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { GameIcon } from '../../components/GameIcon';
@@ -830,12 +831,11 @@ function CloseButton({ onClose, label }: { onClose: () => void; label: string })
         width: 36,
         height: 36,
         color: 'var(--color-text)',
-        fontSize: 18,
         lineHeight: 1,
         border: '1px solid var(--color-divider)',
       }}
     >
-      ✕
+      <UIIcon name="close" size="sm" />
     </button>
   );
 }
