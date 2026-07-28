@@ -65,6 +65,22 @@ const DRIFT_PATTERNS: ReadonlyArray<{ name: string; pattern: RegExp; why: string
       'floor directly in nocturne.css (issue #1693) — !min-h-0 zeroes that floor with ' +
       '!important and nothing in the ramp catches the regression',
   },
+  {
+    name: 'legacy .btn geometry override',
+    // Ported from #1697/issue #1695 (ported rather than merged separately — see PR
+    // description) — ties directly into #1683's own retirement of !min-h-0/!py-* on
+    // .btn: this codebase now expresses the sub-default floor through the xs density
+    // step (`cf-density-xs`/`density="xs"`, `.btn.cf-density-xs` at 0,0,2,0
+    // specificity) rather than a hand-pinned `!min-h-[24px]`. Deliberately excludes
+    // cf-btn (handled by the pattern above) via the negative lookbehind — `.btn` is
+    // the pre-cf-btn Nocturne class, which index.css aliases to the ramp's default
+    // 44px control height ("Nocturne .btn aliases default-density controls (issue
+    // #674)"). `!min-h-0` zeroes that alias out via Tailwind's !important, same
+    // failure mode as cf-btn, just on a plain (not cf-) button class.
+    pattern: /(?<!cf-)\bbtn\b[^"'`\n]*!min-h-0/,
+    why: 'use <Btn density="xs"> / add cf-density-xs instead of !min-h-0 on .btn — ' +
+      '.btn aliases to the ramp default and !min-h-0 zeroes that out entirely (issue #1695)',
+  },
 ];
 
 /**
@@ -151,6 +167,26 @@ test.describe('Design-system density (#674, #1683)', () => {
     expect(px, 'xs control-min-height must be >= 24px (WCAG 2.2 SC 2.5.8)').toBeGreaterThanOrEqual(24);
   });
 
+  test('seg-opt (outside the ramp) pins its own 24px WCAG 2.2 SC 2.5.8 floor (#1693)', () => {
+    const css = READ(NOCTURNE_CSS);
+    const rule = /\.seg-opt\s*\{[^}]*\}/.exec(css);
+    expect(rule, '.seg-opt rule must exist in nocturne.css').not.toBeNull();
+    expect(rule![0], '.seg-opt must pin a literal 24px min-height floor').toMatch(
+      /min-height:\s*24px/,
+    );
+  });
+
+  // NOTE for #1700/#1698 (checked, not ported): a ported version of #1700's own test
+  // (".cf-target-24/.cf-target-44 floors cannot be silently overridden") FAILS against
+  // this branch — confirmed by measurement (getComputedStyle against the real compiled
+  // CSS, apps/web/e2e/lib/computedStyle.ts): a bare `.btn` combined with `.cf-target-24`
+  // still renders at 44px, not 24px, because `.btn`'s later "Nocturne .btn aliases
+  // default-density controls" rule (below, issue #674) wins at equal specificity (both
+  // are single, non-compound class selectors) on source order alone. This PR does not
+  // touch that mechanism — it only adds `.btn.cf-density-xs`, a HIGHER-specificity
+  // compound selector, an unrelated fix. #1700 is therefore NOT superseded here and its
+  // test is intentionally left off this branch (it would fail); #1700 still needs to
+  // land, separately, after this merges.
   test('ui.tsx exports canonical primitives with density support', () => {
     const ui = READ(UI_TSX);
     const density = READ(DENSITY_TS);
