@@ -1,0 +1,11 @@
+{
+  "tracked": [
+    {
+      "pr": 1678,
+      "url": "https://github.com/AwsomeFox/campfire/pull/1678",
+      "branch": "fix/issue-1645",
+      "status": "babysitting",
+      "note": "Stacked base #1649 merged; review threads resolved; retargeting base to main and awaiting CI on 77131dce"
+    }
+  ]
+}
