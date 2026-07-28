@@ -41,10 +41,8 @@ import {
 } from '@campfire/schema';
 import type {
   Character,
-  ConditionInstance,
   CharacterAction,
   CharacterResource,
-  ConditionInstance,
   Role,
   SkillRank,
   SpellSlotLevel,

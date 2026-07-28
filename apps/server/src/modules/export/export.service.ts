@@ -809,6 +809,44 @@ export class ExportService {
    * No dmSecret, no other members' data, no audit/members roster. `role` is the
    * caller's effective role, threaded through to the character/notes services so
    * a dm calling their own member export sees the same owner-scoped slice.
+   *
+   * DELIBERATELY DOES NOT use `fieldsFor`/`pickFields`/`DM_SECRET_FIELDS` (issue
+   * #1680 audit). That machinery (export-profiles.ts) allowlists fields for the
+   * campaign-wide `handoff`/`publish` bundle — a redistribution problem: turning
+   * ONE DM's full backup, pooled across every member, into a document safe to hand
+   * to a new DM or a stranger. This method solves a different problem — "give this
+   * ONE caller back only what they themselves authored/own" — and covers entities
+   * (`note`, `comment`, `proposal`) that #586's per-entity allowlists don't even
+   * model, so routing through that machinery would not be a drop-in fit.
+   *
+   * Instead this relies on each composed service already doing its OWN role-based
+   * redaction/scoping, identical to the live REST/MCP surface for that entity and
+   * role — so this export can never show a caller more than the live API already
+   * would:
+   *  - characters: `CharactersService.listForCampaign` calls `redactSecrets()`
+   *    (common/redact.ts), which strips `dmSecret` for any non-dm role.
+   *  - notes: `mine: true` restricts to `authorUserId === caller` regardless of
+   *    visibility (their own writing needs no visibility check) — note this is
+   *    authored-BY, not visible-TO: a whisper sent TO the caller by someone else
+   *    is intentionally absent even though the caller can read it live.
+   *  - comments: `authorUserId` filter + `CommentsService`'s own per-role anchor-
+   *    visibility check (a comment's hidden-entity anchor still gates it).
+   *  - proposals: `proposerUserId` filter + `projectProposal()` (issue #817),
+   *    which strips `dmSecret` from BOTH `payload` and `snapshot` for a non-dm
+   *    proposer, even for their own submission (the persisted snapshot is the
+   *    full DM-review copy).
+   * `export-redaction.ts`'s `collectPrivateIdentifiers` free-text sweep also does
+   * not apply here, correctly: it exists to catch OTHER members' account
+   * identities a DM typed into free text before a redistributable module ships to
+   * strangers. Every string this method returns was authored by (or belongs to)
+   * the caller — there is no third party for the sweep to protect them from.
+   *
+   * Pinned by test/export-member-field-policy.e2e-spec.ts: dmSecret redaction on
+   * an owned character AND a submitted proposal's snapshot/payload, ownership
+   * scoping, and note authored-by scoping. If a future change to any of the four
+   * composed services (or to Character/Note/Comment/Proposal's schema) removes or
+   * weakens the redaction this method leans on, that suite fails loudly instead of
+   * this method silently drifting out of sync with the rest of the export system.
    */
   async buildMemberExport(campaignId: number, user: RequestUser, role: 'dm' | 'player' | 'viewer') {
     const [campaign, characterList, noteList, commentList, proposalList, supportPreference] = await Promise.all([
