@@ -200,8 +200,11 @@ export default function InboxPage() {
   // changes without InboxPage unmounting. Sweep result/error/body state is
   // campaign-scoped (a sweep outcome from campaign A means nothing once the DM has
   // switched to campaign B), so clear it whenever cid changes rather than leaving
-  // the previous campaign's outcome card visible indefinitely.
+  // the previous campaign's outcome card visible indefinitely. Also release the
+  // busy flag: an in-flight sweep's finally block intentionally skips state updates
+  // once cidRef.current has moved on, but that leaves sweepBusy stuck true.
   useEffect(() => {
+    setSweepBusy(false);
     setSweepResult(null);
     setSweepItemBodies({});
     setSweepError(null);
