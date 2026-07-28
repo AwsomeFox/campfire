@@ -139,6 +139,21 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(awardProps.includeNonActive.description).toContain('explicit opt-in');
   });
 
+  it('runs the campaign-library taxonomy, search, bulk, undo, and template flow through MCP', async () => {
+    const dmClient = await mcpClient(dmToken); const viewerClient = await mcpClient(viewerToken);
+    const quest = parseResult(await dmClient.callTool({ name: 'create_quest', arguments: { campaignId, title: 'MCP library quest' } })) as { id: number };
+    const tag = parseResult(await dmClient.callTool({ name: 'create_campaign_library_tag', arguments: { campaignId, name: 'MCP tag' } })) as { id: number };
+    const searched = parseResult(await dmClient.callTool({ name: 'search_campaign_library', arguments: { campaignId, q: 'MCP library' } })) as { items: Array<{ entityId: number }> };
+    expect(searched.items.some((entry) => entry.entityId === quest.id)).toBe(true);
+    const bulk = parseResult(await dmClient.callTool({ name: 'bulk_campaign_library', arguments: { campaignId, request: { operation: 'add_tag', taxonomyId: tag.id, targets: [{ entityType: 'quest', entityId: quest.id }] } } })) as { operationId: number };
+    expect(bulk.operationId).toBeTruthy();
+    expect(parseResult(await dmClient.callTool({ name: 'undo_campaign_library_bulk', arguments: { campaignId, operationId: bulk.operationId } }))).toMatchObject({ undone: true });
+    const template = parseResult(await dmClient.callTool({ name: 'save_campaign_library_template', arguments: { campaignId, entityType: 'quest', entityId: quest.id, name: 'MCP quest template', description: '' } })) as { id: number };
+    expect(parseResult(await dmClient.callTool({ name: 'instantiate_campaign_library_template', arguments: { campaignId, templateId: template.id, name: 'MCP template copy', refs: {} } }))).toMatchObject({ entityType: 'quest' });
+    const denied = parseResult(await viewerClient.callTool({ name: 'create_campaign_library_tag', arguments: { campaignId, name: 'Denied tag' } })) as { error?: { status?: number } };
+    expect(denied.error?.status).toBe(403);
+  });
+
   it('tools/list advertises additionalProperties:false on every tool that accepts args (issue #567)', async () => {
     const client = await mcpClient(dmToken);
     const { tools } = await client.listTools();
