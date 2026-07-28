@@ -434,7 +434,16 @@ export function createOsrVariantAdapter(profile: OsrMechanicsProfile): RuleSyste
       const naturalRoll = r.rolls[0] ?? r.total;
       const thac0 = attackBonusToThac0(input.modifier);
       const hit = osrAttackHits({ roll: naturalRoll, thac0, targetAc: input.targetAc, mode: profile.acMode });
-      return { total: naturalRoll + input.modifier, naturalRoll, outcome: hit ? 'hit' : 'miss' };
+      const total = naturalRoll + input.modifier;
+      return {
+        total,
+        naturalRoll,
+        outcome: hit ? 'hit' : 'miss',
+        targetLabel:
+          profile.acMode === 'descending'
+            ? `ascending AC ${descendingToAscendingAc(input.targetAc)} (descending AC ${input.targetAc})`
+            : undefined,
+      };
     },
     mapStatblock(d: Record<string, unknown>): MonsterStatblockData {
       const abilityScores = (d.abilityScores ?? d.ability_scores) as Record<string, unknown> | undefined;

@@ -180,6 +180,7 @@ describe('resolveAttackForAdapter / defaultAttackRoll — issue #1598', () => {
     const result = resolveAttackForAdapter(BasicFantasyAdapter, input);
     expect(result.outcome).toBe('miss');
     expect(result.naturalRoll).toBe(10);
+    expect(result.targetLabel).toBe('ascending AC 24 (descending AC -5)');
   });
 
   it('OSR descending AC: a real hit against ordinary armour still lands (not just "always miss now")', () => {
@@ -189,6 +190,7 @@ describe('resolveAttackForAdapter / defaultAttackRoll — issue #1598', () => {
     const result = resolveAttackForAdapter(OldSchoolEssentialsAdapter, { modifier: 5, targetAc: 9, roll });
     expect(result.outcome).toBe('hit');
     expect(result.naturalRoll).toBe(15);
+    expect(result.targetLabel).toBeUndefined();
   });
 
   it('OSR: a natural 1 always misses and a natural 20 always hits, matching osrAttackHits', () => {

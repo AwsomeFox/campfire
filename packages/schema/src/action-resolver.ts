@@ -115,6 +115,13 @@ export interface AttackRollResult {
   readonly total: number;
   readonly naturalRoll: number | null;
   readonly outcome: OutcomeKey;
+  /**
+   * Optional adapter-owned target text for human-readable attack evidence. The numeric
+   * `targetAc` input stays in the system's native convention; this lets an adapter surface the
+   * display comparison that matches its maths (for example, an effective ascending threshold for
+   * a descending-AC OSR target) without the server learning that system's conversion rules.
+   */
+  readonly targetLabel?: string;
 }
 
 /**

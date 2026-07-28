@@ -528,10 +528,11 @@ export class ActionResolverService {
       // `nat` is null for a system with no single "natural roll" to show as d20-style evidence
       // (Open Legend's exploding pool) — named separately so the byte-identical `(d20 N +M)`
       // phrasing every existing #414 test asserts on is UNCHANGED for every system that has one.
+      const targetLabel = attackResult.targetLabel ?? `AC ${ac}`;
       dmDetail =
         nat === null
-          ? `attack ${total}${detail} vs AC ${ac} → ${outcome}`
-          : `attack ${total} (d20 ${nat} ${signedModifier(modifier)}${detail}) vs AC ${ac} → ${outcome}`;
+          ? `attack ${total}${detail} vs ${targetLabel} → ${outcome}`
+          : `attack ${total} (d20 ${nat} ${signedModifier(modifier)}${detail}) vs ${targetLabel} → ${outcome}`;
     } else if (spec.mode === 'save' || spec.mode === 'check') {
       const { dc } = computeSaveDc(spec.save.dc, adapter, actorStats, prof);
       if (dc === null) throw new BadRequestException(`"${actionName}" has no resolvable DC — resolve manually rather than inventing one.`);
