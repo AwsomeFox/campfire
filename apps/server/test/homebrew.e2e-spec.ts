@@ -1,6 +1,6 @@
 import request from 'supertest';
 import type { Server } from 'node:http';
-import { closeTestApp, createTestApp, type TestAppContext } from './test-app';
+import { closeTestApp, createTestApp, createTestAppNoDevAuth, type TestAppContext } from './test-app';
 import { McpToolsService } from '../src/modules/mcp/mcp-tools';
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'homebrew-dm' };
@@ -52,5 +52,29 @@ describe('campaign homebrew (e2e)', () => {
     expect(preview.isError).toBe(false); expect(JSON.parse(preview.text).entries[0].conflict).toBeTruthy();
     const deniedImport = await playerTools.call('apply_campaign_homebrew_import', { campaignId, input: { entries: [{ slug: 'player-import', name: 'Player import', type: 'item', rightsStatus: 'private_original' }], strategy: 'skip' } }); expect(deniedImport.isError).toBe(true);
     const appliedImport = await tools.call('apply_campaign_homebrew_import', { campaignId, input: { entries: [{ slug: 'dm-import', name: 'DM import', type: 'item', rightsStatus: 'private_original' }], strategy: 'skip' } }); expect(appliedImport.isError).toBe(false);
+  });
+});
+
+describe('campaign homebrew membership and encounter isolation (e2e)', () => {
+  let ctx: TestAppContext;
+  beforeAll(async () => { ctx = await createTestAppNoDevAuth(); });
+  afterAll(async () => closeTestApp(ctx));
+
+  it('allows same-campaign combat use and denies cross-campaign reads/writes/use', async () => {
+    const server = ctx.app.getHttpServer();
+    const admin = request.agent(server); await admin.post('/api/v1/auth/setup').send({ username: 'hb-admin', password: 'admin-password-1' });
+    await admin.post('/api/v1/users').send({ username: 'hb-a', password: 'password-a-1', serverRole: 'user' });
+    await admin.post('/api/v1/users').send({ username: 'hb-b', password: 'password-b-1', serverRole: 'user' });
+    const a = request.agent(server); await a.post('/api/v1/auth/login').send({ username: 'hb-a', password: 'password-a-1' });
+    const b = request.agent(server); await b.post('/api/v1/auth/login').send({ username: 'hb-b', password: 'password-b-1' });
+    const ca = await a.post('/api/v1/campaigns').send({ name: 'A' }); const cb = await b.post('/api/v1/campaigns').send({ name: 'B' });
+    const monster = { slug: 'private-beast', name: 'Private Beast', type: 'monster', data: { hp: 12, ac: 13, cr: 1 }, rightsStatus: 'private_original' };
+    const ea = await a.post(`/api/v1/campaigns/${ca.body.id}/homebrew`).send(monster); const eb = await b.post(`/api/v1/campaigns/${cb.body.id}/homebrew`).send({ ...monster, slug: 'b-beast' });
+    expect((await b.get(`/api/v1/campaigns/${ca.body.id}/homebrew`)).status).toBe(403);
+    expect((await b.get(`/api/v1/campaigns/${ca.body.id}/homebrew/${ea.body.id}`)).status).toBe(403);
+    expect((await b.patch(`/api/v1/campaigns/${ca.body.id}/homebrew/${ea.body.id}`).send({ name: 'stolen' })).status).toBe(403);
+    const encounter = await a.post(`/api/v1/campaigns/${ca.body.id}/encounters`).send({ name: 'Fight' });
+    expect((await a.post(`/api/v1/encounters/${encounter.body.id}/combatants`).send({ kind: 'monster', ruleEntryId: ea.body.id })).status).toBe(201);
+    expect((await a.post(`/api/v1/encounters/${encounter.body.id}/combatants`).send({ kind: 'monster', ruleEntryId: eb.body.id })).status).toBe(400);
   });
 });
