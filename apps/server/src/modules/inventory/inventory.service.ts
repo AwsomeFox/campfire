@@ -261,7 +261,10 @@ export class InventoryService {
   async acquireFromCompendium(campaignId: number, input: InventoryFromCompendiumInput, user: RequestUser, role: Role): Promise<InventoryItem> {
     const ownerType = input.ownerType ?? 'party';
     const characterId = input.characterId ?? null;
-    await this.assertCanWriteOwner(ownerType, characterId, campaignId, user, role);
+    const character = await this.assertCanWriteOwner(ownerType, characterId, campaignId, user, role);
+    if (ownerType === 'character' && character == null) {
+      throw new BadRequestException(`characterId ${characterId} does not exist in this campaign`);
+    }
     const [entry] = await this.db.select().from(ruleEntries).where(eq(ruleEntries.id, input.ruleEntryId)).limit(1);
     if (!entry || entry.type !== 'item') throw new BadRequestException('ruleEntryId must identify an installed item entry');
     const [pack] = await this.db.select().from(rulePacks).where(eq(rulePacks.id, entry.packId)).limit(1);

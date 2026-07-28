@@ -45,6 +45,11 @@ describe('compendium inventory (#738 e2e)', () => {
     });
     expect((await request(server).post(url).set(player).send({ ruleEntryId: entryId, ownerType: 'character', characterId: ownCharacterId })).status).toBe(201);
     expect((await request(server).post(url).set(player).send({ ruleEntryId: entryId, ownerType: 'character', characterId: foreignCharacterId })).status).toBe(403);
+    // DM still cannot attach loot to a character that is not in this campaign.
+    const otherCampaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Other campaign' })).body.id;
+    const otherCharacterId = (await request(server).post(`/api/v1/campaigns/${otherCampaignId}/characters`).set(dm).send({ name: 'Elsewhere' })).body.id;
+    expect((await request(server).post(url).set(dm).send({ ruleEntryId: entryId, ownerType: 'character', characterId: otherCharacterId })).status).toBe(400);
+    expect((await request(server).post(url).set(dm).send({ ruleEntryId: entryId, ownerType: 'character', characterId: 999999 })).status).toBe(400);
     expect((await request(server).post(`/api/v1/campaigns/${campaignId}/inventory`).set(player).send({ name: 'forged', ruleEntryId: entryId })).status).toBe(400);
     const first = await request(server).post(url).set(player).send({ ruleEntryId: entryId, qty: 2, notes: 'local', idempotencyKey: 'acq-738' });
     expect(first.status).toBe(201); expect(first.body.compendiumSnapshot.license).toBe('CC-BY');
