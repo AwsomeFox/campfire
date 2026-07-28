@@ -1648,6 +1648,36 @@ CREATE TABLE IF NOT EXISTS ai_scribe_jobs (
 CREATE INDEX IF NOT EXISTS idx_ai_scribe_jobs_campaign ON ai_scribe_jobs(campaign_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_ai_scribe_jobs_session_trigger ON ai_scribe_jobs(campaign_id, scheduled_session_id, trigger);
 
+CREATE TABLE IF NOT EXISTS inbox_sweep_jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  status TEXT NOT NULL,
+  items_total INTEGER NOT NULL DEFAULT 0,
+  items_proposed INTEGER NOT NULL DEFAULT 0,
+  items_skipped INTEGER NOT NULL DEFAULT 0,
+  items_errored INTEGER NOT NULL DEFAULT 0,
+  detail TEXT NOT NULL DEFAULT '',
+  created_by TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_inbox_sweep_jobs_campaign ON inbox_sweep_jobs(campaign_id, created_at);
+
+CREATE TABLE IF NOT EXISTS inbox_sweep_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  note_id INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+  job_id INTEGER NOT NULL REFERENCES inbox_sweep_jobs(id) ON DELETE CASCADE,
+  outcome TEXT NOT NULL,
+  entity_type TEXT,
+  entity_id INTEGER,
+  proposal_id INTEGER,
+  reason TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(campaign_id, note_id)
+);
+CREATE INDEX IF NOT EXISTS idx_inbox_sweep_items_job ON inbox_sweep_items(job_id);
+
 CREATE TABLE IF NOT EXISTS combatants (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   encounter_id INTEGER NOT NULL REFERENCES encounters(id) ON DELETE CASCADE,

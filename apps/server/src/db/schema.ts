@@ -1869,6 +1869,42 @@ export const aiScribeJobs = sqliteTable('ai_scribe_jobs', {
   createdAt: text('created_at').notNull(),
 });
 
+// Inbox sweep (issue #1644) — one row per `POST /campaigns/:id/inbox/sweep` call, the
+// auditable job record the issue requires. Per-item outcomes live in `inboxSweepItems`.
+export const inboxSweepJobs = sqliteTable('inbox_sweep_jobs', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  campaignId: integer('campaign_id').notNull(), // FK->campaigns ON DELETE CASCADE
+  status: text('status').notNull(), // InboxSweepJobStatus: 'succeeded' | 'disabled'
+  itemsTotal: integer('items_total').notNull().default(0),
+  itemsProposed: integer('items_proposed').notNull().default(0),
+  itemsSkipped: integer('items_skipped').notNull().default(0),
+  itemsErrored: integer('items_errored').notNull().default(0),
+  detail: text('detail').notNull().default(''),
+  createdBy: text('created_by').notNull().default(''),
+  createdAt: text('created_at').notNull(),
+});
+
+// Per-inbox-item sweep ledger (issue #1644). Serves two purposes: (1) the durable
+// per-item outcome the response is built from, and (2) the IDEMPOTENCY mechanism — a
+// UNIQUE(campaign_id, note_id) row is written the moment a proposal is filed (or an
+// item is dismissed/skipped-as-unsupported) so a re-sweep never re-infers or refiles a
+// SECOND proposal for the same inbox item. `errored` outcomes are deliberately NOT
+// persisted here (see inbox-sweep.service.ts) so a transient failure is retried by the
+// next sweep rather than permanently stuck.
+export const inboxSweepItems = sqliteTable('inbox_sweep_items', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  campaignId: integer('campaign_id').notNull(), // FK->campaigns ON DELETE CASCADE
+  noteId: integer('note_id').notNull(), // FK->notes.id (the inbox item)
+  jobId: integer('job_id').notNull(), // the sweep run that first produced this outcome
+  outcome: text('outcome').notNull(), // InboxSweepOutcome: 'proposed' | 'skipped'
+  entityType: text('entity_type'), // InboxSweepEntityType, when outcome='proposed' + action='update'
+  entityId: integer('entity_id'),
+  proposalId: integer('proposal_id'), // set when outcome='proposed'
+  reason: text('reason').notNull().default(''),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
 export const combatants = sqliteTable('combatants', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   encounterId: integer('encounter_id').notNull(),

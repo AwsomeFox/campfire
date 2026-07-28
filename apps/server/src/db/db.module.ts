@@ -3142,6 +3142,44 @@ function migrateCampaignCatchUpCursorsTable(sqlite: Database.Database): void {
   `);
 }
 
+/**
+ * Issue #1644 — inbox sweep auditable job record + per-item idempotency ledger.
+ * Fresh DBs get both tables from BOOTSTRAP_SQL; upgraded installs create them here.
+ */
+function migrateInboxSweepTables1644(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS inbox_sweep_jobs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+      status TEXT NOT NULL,
+      items_total INTEGER NOT NULL DEFAULT 0,
+      items_proposed INTEGER NOT NULL DEFAULT 0,
+      items_skipped INTEGER NOT NULL DEFAULT 0,
+      items_errored INTEGER NOT NULL DEFAULT 0,
+      detail TEXT NOT NULL DEFAULT '',
+      created_by TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_inbox_sweep_jobs_campaign ON inbox_sweep_jobs(campaign_id, created_at);
+
+    CREATE TABLE IF NOT EXISTS inbox_sweep_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+      note_id INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+      job_id INTEGER NOT NULL REFERENCES inbox_sweep_jobs(id) ON DELETE CASCADE,
+      outcome TEXT NOT NULL,
+      entity_type TEXT,
+      entity_id INTEGER,
+      proposal_id INTEGER,
+      reason TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(campaign_id, note_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_inbox_sweep_items_job ON inbox_sweep_items(job_id);
+  `);
+}
+
 function migrateAiScribeSessionScope499(sqlite: Database.Database): void {
   const hasConfigs = sqlite
     .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ai_scribe_configs'")
@@ -4398,6 +4436,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // #735 is additive but belongs at the execution tail: attachment provenance is
   // independent of earlier table work and migration arrays are read chronologically.
   { name: '0137_attachment_metadata_735', run: migrateAttachmentMetadata735 },
+  { name: '0139_inbox_sweep_1644', run: migrateInboxSweepTables1644 },
 ];
 
 /**
