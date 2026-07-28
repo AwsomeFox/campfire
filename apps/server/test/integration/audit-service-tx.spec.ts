@@ -27,17 +27,14 @@ import { makeTempDataDir } from './fixtures';
  */
 describe('AuditService transaction-aware write path (#1581)', () => {
   let dataDir: string;
-  let orm: DrizzleDb | null = null;
 
   afterEach(() => {
-    orm = null;
     if (dataDir) fs.rmSync(dataDir, { recursive: true, force: true });
   });
 
   function boot(): { audit: AuditService; db: DrizzleDb } {
     dataDir = makeTempDataDir();
     const { orm: db } = openDatabase(dataDir);
-    orm = db;
     return { audit: new AuditService(db), db };
   }
 
