@@ -3,15 +3,20 @@ import {
   CharacterAction,
   Dnd5eAdapter,
   Pf2eAdapter,
+  Sf2eAdapter,
   BasicFantasyAdapter,
   OldSchoolEssentialsAdapter,
   OpenLegendAdapter,
   applyDamageModifiers,
+  checkProficiencyBonusForAdapter,
+  defaultCheckProficiencyBonus,
   classifyAttackOutcome,
   classifySaveOutcome,
   computeAttackModifier,
   computeSaveDc,
   defaultAttackRoll,
+  dnd5eProficiencyBonus,
+  pf2eProficiencyBonus,
   resolveAttackForAdapter,
   halveDamage,
   isResolvableSpec,
@@ -235,6 +240,37 @@ describe('resolveAttackForAdapter / defaultAttackRoll — issue #1598', () => {
   it('Open Legend: a negative or non-finite modifier degrades to the score-0 disadvantage pool rather than throwing', () => {
     const roll = fixedRoller({ '1d20': 10 });
     expect(() => resolveAttackForAdapter(OpenLegendAdapter, { modifier: -3, targetAc: 5, roll })).not.toThrow();
+  });
+});
+
+describe('checkProficiencyBonusForAdapter — issue #1599', () => {
+  it('5e: declares its own hook and matches dnd5eProficiencyBonus exactly (no behaviour change)', () => {
+    for (const level of [1, 4, 5, 8, 9, 12, 13, 17, 20]) {
+      expect(checkProficiencyBonusForAdapter(Dnd5eAdapter, level)).toBe(dnd5eProficiencyBonus(level));
+    }
+  });
+
+  it('PF2e: a real, non-zero bonus — the trained floor, level + 2 — not the old silent 0', () => {
+    // Level 5, trained: matches pf2eProficiencyBonus(5, 'trained') exactly.
+    expect(checkProficiencyBonusForAdapter(Pf2eAdapter, 5)).toBe(pf2eProficiencyBonus(5, 'trained'));
+    expect(checkProficiencyBonusForAdapter(Pf2eAdapter, 5)).toBe(7);
+    // THE BUG, reproduced directly: before #1599, every non-5e adapter returned 0 here
+    // regardless of level — the exact silent-understatement the issue was filed about.
+    expect(checkProficiencyBonusForAdapter(Pf2eAdapter, 5)).not.toBe(0);
+  });
+
+  it('SF2e inherits PF2e proficiency via the adapter spread', () => {
+    expect(checkProficiencyBonusForAdapter(Sf2eAdapter, 5)).toBe(pf2eProficiencyBonus(5, 'trained'));
+  });
+
+  it('OSR and Open Legend: no hook declared, default (0) applies — same as before #1599', () => {
+    // Deliberately 0, not 5e's formula: see defaultCheckProficiencyBonus's own comment for why
+    // "add nothing" is the only safe default for a system nobody has audited, unlike the
+    // attack roll's default (which IS a reasonable universal guess).
+    expect(checkProficiencyBonusForAdapter(BasicFantasyAdapter, 5)).toBe(0);
+    expect(checkProficiencyBonusForAdapter(OldSchoolEssentialsAdapter, 5)).toBe(0);
+    expect(checkProficiencyBonusForAdapter(OpenLegendAdapter, 5)).toBe(0);
+    expect(defaultCheckProficiencyBonus()).toBe(0);
   });
 });
 

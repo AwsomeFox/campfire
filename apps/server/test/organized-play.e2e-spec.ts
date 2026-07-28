@@ -1549,6 +1549,89 @@ describe('organized play (e2e)', () => {
     expect((await api().post(`/api/v1/schedule/${oneOff.body.id}/restore`).set(dm)).status).toBe(201);
   });
 
+  // Issue #1555: a genuinely completed occurrence must NOT release its room/DM.
+  it('a genuinely completed occurrence still blocks a rival booking over its window', async () => {
+    const room = (await api().post(`/api/v1/organized-play/venues/${venueId}/rooms`).set(dm).send({ name: 'Completed Room' })).body;
+    const mine = await api()
+      .post(`/api/v1/campaigns/${campaignId}/series`)
+      .set(dm)
+      .send({ title: 'Played It', timezone: 'UTC', startDate: '2099-05-05', startTime: '18:00', durationMinutes: 180, freq: 'weekly', count: 1, roomId: room.id });
+    expect(mine.status).toBe(201);
+    const occ = mine.body.occurrences[0];
+
+    // Link a real recap — the row becomes GENUINELY completed (not the
+    // missing-recap artefact case), which used to fall out of conflict detection
+    // entirely.
+    const session = await api().post(`/api/v1/campaigns/${campaignId}/sessions`).set(dm).send({ title: 'Recap' });
+    expect(session.status).toBe(201);
+    const linked = await api().post(`/api/v1/schedule/${occ.id}/link/${session.body.id}`).set(dm);
+    expect(linked.status).toBe(201);
+    expect(linked.body.status).toBe('completed');
+
+    // A rival campaign tries to book the SAME room over the SAME window while the
+    // night is completed. Before the fix this succeeded silently — the completed
+    // row was invisible to findConflictRows.
+    const rival = await api()
+      .post(`/api/v1/campaigns/${otherCampaignId}/series`)
+      .set(dm)
+      .send({ title: 'Should Not Fit', timezone: 'UTC', startDate: '2099-05-05', startTime: '18:00', durationMinutes: 180, freq: 'weekly', count: 1, roomId: room.id });
+    expect(rival.status).toBe(409);
+    expect(rival.body.code).toBe('SCHEDULE_CONFLICT');
+    expect(rival.body.conflicts.some((c: { kind: string }) => c.kind === 'room')).toBe(true);
+
+    // Unlinking the recap flips the row back to `scheduled` with no schedule-write
+    // probe at all today — but since the room was never released, that flip
+    // cannot manufacture a double-booking: the room was already (correctly)
+    // reported taken the entire time.
+    const unlinked = await api().patch(`/api/v1/sessions/${session.body.id}`).set(dm).send({ scheduledSessionId: null });
+    expect(unlinked.status).toBe(200);
+    const afterUnlink = await api().get(`/api/v1/schedule/${occ.id}`).set(dm);
+    expect(afterUnlink.body.status).toBe('scheduled');
+    // The occurrence itself still shows up as holding the room — it never
+    // stopped, so nothing needed to re-acquire it.
+    const stillHeld = await api()
+      .post('/api/v1/organized-play/conflicts')
+      .set(dm)
+      .send({ scheduledAt: occ.scheduledAt, durationMinutes: 180, roomId: room.id });
+    expect(stillHeld.status).toBe(201);
+    expect(stillHeld.body.conflicts.some((c: { kind: string }) => c.kind === 'room')).toBe(true);
+  });
+
+  // Issue #1555: the DERIVED revival path — trashing (not deleting) the linked
+  // recap makes a completed night read as `scheduled` again with no schedule
+  // write at all (projectLink's read-time reconciliation). The room must stay
+  // held throughout, exactly as it does for the direct-write unlink path above.
+  it('trashing a linked recap does not release the room the completed night held', async () => {
+    const room = (await api().post(`/api/v1/organized-play/venues/${venueId}/rooms`).set(dm).send({ name: 'Trash Room' })).body;
+    const mine = await api()
+      .post(`/api/v1/campaigns/${campaignId}/series`)
+      .set(dm)
+      .send({ title: 'Played And Trashed', timezone: 'UTC', startDate: '2099-05-12', startTime: '18:00', durationMinutes: 180, freq: 'weekly', count: 1, roomId: room.id });
+    expect(mine.status).toBe(201);
+    const occ = mine.body.occurrences[0];
+
+    const session = await api().post(`/api/v1/campaigns/${campaignId}/sessions`).set(dm).send({ title: 'Recap' });
+    const linked = await api().post(`/api/v1/schedule/${occ.id}/link/${session.body.id}`).set(dm);
+    expect(linked.status).toBe(201);
+    expect(linked.body.status).toBe('completed');
+
+    // Trash the recap — the schedule row is NOT written at all, but reads back
+    // as `scheduled` (projectLink) as soon as the recap is invisible.
+    expect((await api().delete(`/api/v1/sessions/${session.body.id}`).set(dm)).status).toBe(200);
+    const afterTrash = await api().get(`/api/v1/schedule/${occ.id}`).set(dm);
+    expect(afterTrash.body.status).toBe('scheduled');
+
+    // The room must still be reported taken for that window: a rival booking is
+    // exactly the double-booking a probe-free revival would have permitted.
+    const rival = await api()
+      .post(`/api/v1/campaigns/${otherCampaignId}/series`)
+      .set(dm)
+      .send({ title: 'Should Not Fit Either', timezone: 'UTC', startDate: '2099-05-12', startTime: '18:00', durationMinutes: 180, freq: 'weekly', count: 1, roomId: room.id });
+    expect(rival.status).toBe(409);
+    expect(rival.body.code).toBe('SCHEDULE_CONFLICT');
+    expect(rival.body.conflicts.some((c: { kind: string }) => c.kind === 'room')).toBe(true);
+  });
+
   it('re-probes the room a cancelled night was MOVED to, not the one it held when restore began', async () => {
     const scheduling = ctx.app.get(SchedulingService);
     const opService = ctx.app.get(OrganizedPlayService);

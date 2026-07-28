@@ -3,7 +3,7 @@ import type { ScheduleConflict } from '@campfire/schema';
 import { campaigns, playRooms, playVenues, scheduledSessions, sessionRsvps } from '../../db/schema';
 import type { DrizzleDb } from '../../db/db.module';
 import type { SyncDb } from './scheduling.service';
-import { scheduleLiveSql, scheduleOrganizedPlaySql, scheduleOverlapsSql } from './scheduling-queries';
+import { scheduleOrganizedPlaySql, scheduleOverlapsSql, scheduleResourceHeldSql } from './scheduling-queries';
 
 /**
  * The booking-conflict primitive (issue #588), extracted so that EVERY write path
@@ -152,8 +152,16 @@ export type RawConflict = {
  * Only rows in the shared organized-play pool are considered
  * (scheduleOrganizedPlaySql): a private home game holds no shared resource, so
  * it can neither be collided with nor be revealed by this query. Cancelled rows
- * are excluded via scheduleLiveSql — a cancelled night has RELEASED its room,
- * which is exactly why restoring one has to probe before taking it back.
+ * are excluded via scheduleResourceHeldSql — a cancelled night has RELEASED its
+ * room, which is exactly why restoring one has to probe before taking it back.
+ *
+ * Deliberately scheduleResourceHeldSql(), NOT scheduleLiveSql() (issue #1555): a
+ * genuinely completed night (a live recap linked) still occupies the window it was
+ * played in, so it must keep colliding with anything that would overlap that window.
+ * scheduleLiveSql() answers a different question — "does this still need the DM's
+ * attention as upcoming/no-recap" — and deliberately excludes exactly those rows,
+ * which used to let a completed occurrence's room/DM look permanently free here. See
+ * scheduleResourceHeldSql()'s doc comment for the full reasoning.
  */
 export function findConflictRows(
   db: SyncDb,
@@ -166,7 +174,7 @@ export function findConflictRows(
     excludeScheduleId?: number;
   },
 ): RawConflict[] {
-  const base = [scheduleLiveSql(), scheduleOrganizedPlaySql(), scheduleOverlapsSql(q.startsAt, q.endsAt)];
+  const base = [scheduleResourceHeldSql(), scheduleOrganizedPlaySql(), scheduleOverlapsSql(q.startsAt, q.endsAt)];
   if (q.excludeScheduleId != null) base.push(ne(scheduledSessions.id, q.excludeScheduleId));
 
   const select = {

@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import { eq } from 'drizzle-orm';
-import { ActionResolveRequest, CombatantTurnState } from '@campfire/schema';
+import { ActionResolveRequest, ActionSpec, CombatantTurnState } from '@campfire/schema';
 import { openDatabase } from '../../src/db/db.module';
 import { campaigns, characters, combatants, encounterEvents, encounters, ruleEntries, rulePacks } from '../../src/db/schema';
 import { AuditService } from '../../src/modules/audit/audit.service';
@@ -230,6 +230,73 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(t.totalDamage).toBeGreaterThan(0);
     const hpAfter = orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.hpCurrent;
     expect(hpAfter).toBe(60 - t.totalDamage);
+  });
+
+  function resolvePinnedPf2eTarget(spec: ActionSpec, fixed: Record<string, number> = { '1d20': 1, '2d6': 7, '4d6': 14 }) {
+    const { service, encounterId, actor, bob } = seed({ ruleSystem: 'pf2e' });
+    const encounter = (service as any).encounterRowOrThrow(encounterId);
+    const actorRow = (service as any).combatantRowOrThrow(encounterId, actor);
+    const targetRow = (service as any).combatantRowOrThrow(encounterId, bob);
+    const adapter = (service as any).adapterForCampaign(encounter.campaignId);
+    const { stats, level } = (service as any).actorStats(actorRow);
+    const prof = (service as any).proficiencyBonus(adapter, level);
+    const fixedRoller = (expr: string) => ({ total: fixed[expr] ?? 0, rolls: [fixed[expr] ?? 0] });
+
+    return (service as any).resolveOneTarget(spec, 'Test Save Spell', adapter, encounter, actorRow, stats, prof, fixedRoller, targetRow);
+  }
+
+  it('#1600: a PF2e critical save FAILURE doubles damage (double-total), not just an attack crit', () => {
+    // resolveOneTarget is private — this drives it directly (same pattern as export-markdown-zip.spec.ts's
+    // (service as any).<privateMethod>()) so the natural d20 roll is pinned via a fixed roller rather than
+    // real crypto randomness, which PF2e's degree-of-success nat-1/nat-20 step adjustment makes otherwise
+    // impossible to guarantee a critical failure against (a nat 20 always bumps the step UP, so no DC/mod
+    // combination guarantees criticalFailure across every possible roll — only a pinned roll can).
+    // nat 1 vs Bob's DEX 10 (mod 0) = total 1, DC 15 → 1 <= 15-10 → criticalFailure, and a nat 1
+    // only ever pushes the degree further toward failure, never away from it, so this is deterministic.
+    const spec = ActionSpec.parse({
+      mode: 'save',
+      save: { ability: 'DEX', dc: { kind: 'fixed', dc: 15 } },
+      // No critFailure branch authored — pickOutcomeBranch falls back to `failure`, whose damage
+      // is the full-damage branch of a basic save (ordinary success is half); the resolver itself
+      // must apply PF2e's double-total rule on top.
+      outcomes: { failure: { damage: [{ formula: '2d6', flat: 3, type: 'fire' }] }, success: { halfDamage: true } },
+    });
+
+    const result = resolvePinnedPf2eTarget(spec);
+    expect(result.degree).toBe('criticalFailure');
+    // Base (2d6=7)+3 = 10; PF2e double-total doubles the WHOLE thing after the flat modifier → 20.
+    expect(result.damage[0].amount).toBe(20);
+    expect(result.totalDamage).toBe(20);
+  });
+
+  it('#1600: a PF2e critical check failure does not double an authored failure branch', () => {
+    const spec = ActionSpec.parse({
+      mode: 'check',
+      save: { ability: 'DEX', dc: { kind: 'fixed', dc: 15 } },
+      outcomes: { failure: { damage: [{ formula: '2d6', flat: 3, type: 'fire' }] } },
+    });
+
+    const result = resolvePinnedPf2eTarget(spec);
+    expect(result.degree).toBe('criticalFailure');
+    expect(result.damage[0].amount).toBe(10);
+    expect(result.totalDamage).toBe(10);
+  });
+
+  it('#1600: a PF2e critical save failure does not double an explicit critFailure branch', () => {
+    const spec = ActionSpec.parse({
+      mode: 'save',
+      save: { ability: 'DEX', dc: { kind: 'fixed', dc: 15 } },
+      outcomes: {
+        failure: { damage: [{ formula: '2d6', flat: 3, type: 'fire' }] },
+        success: { halfDamage: true },
+        critFailure: { damage: [{ formula: '4d6', type: 'fire' }] },
+      },
+    });
+
+    const result = resolvePinnedPf2eTarget(spec);
+    expect(result.degree).toBe('criticalFailure');
+    expect(result.damage[0].amount).toBe(14);
+    expect(result.totalDamage).toBe(14);
   });
 
   it('returns a concentration save request for effective structured-action damage', () => {
