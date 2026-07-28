@@ -71,9 +71,9 @@ import { seriesIcsUid } from './ics.util';
 import { recurrenceLocalDateFor, scheduledSessionToDomain, seriesTimezoneInTx, type SyncDb } from './scheduling.service';
 import {
   scheduleEffectiveStatusSql,
-  scheduleLiveSql,
   scheduleOrganizedPlaySql,
   scheduleOverlapsSql,
+  scheduleResourceHeldSql,
 } from './scheduling-queries';
 // The booking probe lives in its own leaf module so SchedulingService can run the
 // identical check when a restore re-acquires a released room/DM (see #588).
@@ -1421,13 +1421,16 @@ export class OrganizedPlayService {
         .all();
       const affected = future.filter((occ) => !overriddenIds.has(occ.id));
       // A CANCELLED occurrence is a metadata target but NOT a booking
-      // participant. Cancelling releases the room and DM — `scheduleLiveSql()`
-      // drops the row from conflict detection, so another campaign may
-      // legitimately have taken that window — and `restore()` is what re-acquires
-      // them, with its own probe. Counting a cancelled row here would therefore
-      // demand `force` for a collision that does not exist, on behalf of a night
-      // that is not happening. Same rule as the SEQUENCE decision below: cancelled
-      // rows keep receiving metadata, and take no part in booking.
+      // participant. Cancelling releases the room and DM — `scheduleResourceHeldSql()`
+      // (issue #1555/#1671) drops the row from conflict detection, so another
+      // campaign may legitimately have taken that window — and `restore()` is what
+      // re-acquires them, with its own probe. Counting a cancelled row here would
+      // therefore demand `force` for a collision that does not exist, on behalf of
+      // a night that is not happening. Same rule as the SEQUENCE decision below:
+      // cancelled rows keep receiving metadata, and take no part in booking.
+      // (A `completed` row is correctly still a booking participant here — this is
+      // the plain `.filter(occ.status !== 'cancelled')` below, already equivalent
+      // to `scheduleResourceHeldSql()` without a second SQL predicate.)
       const booking = affected.filter((occ) => occ.status !== 'cancelled');
       // A cancelled night is not one the party can be told to turn up to, so it
       // is not a notification subject either — the same line `booking` draws.
@@ -1716,6 +1719,22 @@ export class OrganizedPlayService {
    * keep publishing STATUS:CANCELLED under each UID, and a cancelled night that
    * vanished would take the party's RSVP history with it). Past occurrences are
    * left exactly as they are: they already happened.
+   *
+   * The "which future occurrences does this actually touch" filter is
+   * `scheduleResourceHeldSql()` (`status != 'cancelled'`), NOT `scheduleLiveSql()`
+   * (issue #1671). #1555 established that only cancellation releases a room/DM — a
+   * genuinely completed occurrence still holds its resource. `scheduleLiveSql()`
+   * excludes exactly that case (it answers "does this still need the DM's
+   * attention", not "does this still hold a resource"), so a future-dated
+   * occurrence completed early or out of order — reachable via
+   * `POST /schedule/:id/link/:sessionId` before its nominal window arrives — used
+   * to fall straight through this filter untouched: still `completed`, still
+   * counted by `findConflictRows()`, forever, for a series that no longer exists.
+   * `scheduleResourceHeldSql()` is the same predicate `findConflictRows()` itself
+   * probes against, so "everything this cancel releases" and "everything a future
+   * booking can collide with" cannot drift apart again. Idempotent by construction:
+   * an already-cancelled row is excluded, so a second cancel of the same series
+   * cannot re-append a `cancel` ledger entry or re-bump SEQUENCE for it.
    */
   async cancelSeries(id: number, reason: string, user: RequestUser, role: Role, nowMs: number = Date.now()): Promise<SessionSeriesWithOccurrences> {
     const existing = await this.getSeriesRowOrThrow(id);
@@ -1726,7 +1745,7 @@ export class OrganizedPlayService {
       const future = tx
         .select()
         .from(scheduledSessions)
-        .where(and(eq(scheduledSessions.seriesId, id), sql`${scheduledSessions.scheduledAt} > ${nowStr}`, scheduleLiveSql()))
+        .where(and(eq(scheduledSessions.seriesId, id), sql`${scheduledSessions.scheduledAt} > ${nowStr}`, scheduleResourceHeldSql()))
         .all();
       for (const occ of future) {
         tx.update(scheduledSessions)

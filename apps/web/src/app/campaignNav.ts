@@ -64,6 +64,7 @@ export function buildCampaignNavGroups(
         { key: 'session-zero', label: t('nav.sessionZero'), to: `${base}/session-zero`, termId: 'sessionZero' },
         ...(isDm ? [{ key: 'storylines', label: t('nav.storylines'), to: `${base}/storylines`, termId: 'storylines' as const }] : []),
         { key: 'compendium', label: t('nav.compendium'), to: `${base}/compendium`, termId: 'compendium' },
+        { key: 'library', label: 'Library', to: `${base}/library` },
       ],
     },
     {

@@ -11,6 +11,13 @@
     "undated": "Undated",
     "moreActions": "More actions",
     "pageActionsMenu": "Page actions",
-    "noCampaign": "No campaign selected."
+    "noCampaign": "No campaign selected.",
+    "saveFeedback": {
+      "dirty": "{{subject}} has unsaved changes.",
+      "saving": "Saving {{subject}}…",
+      "saved": "{{subject}} saved {{savedAt}}.",
+      "failure": "Save failed for {{subject}}. Your edits are still here; try again.",
+      "failureWithDetail": "Save failed for {{subject}}. {{error}}. Your edits are still here; try again."
+    }
   }
 }

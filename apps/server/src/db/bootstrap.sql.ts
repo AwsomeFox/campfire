@@ -1763,6 +1763,41 @@ CREATE TABLE IF NOT EXISTS campaign_library_monsters (
 );
 CREATE INDEX IF NOT EXISTS idx_campaign_library_monsters_campaign ON campaign_library_monsters(campaign_id);
 
+-- Campaign library management taxonomy (issue #742).  Entity ids are polymorphic;
+-- services prove campaign ownership before a join row is created.
+CREATE TABLE IF NOT EXISTS campaign_library_tags (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  name TEXT NOT NULL, aliases_json TEXT NOT NULL DEFAULT '[]', color TEXT NOT NULL DEFAULT '#64748b', description TEXT NOT NULL DEFAULT '',
+  parent_tag_id INTEGER REFERENCES campaign_library_tags(id) ON DELETE SET NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  UNIQUE(campaign_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_campaign_library_tags_campaign ON campaign_library_tags(campaign_id);
+CREATE TABLE IF NOT EXISTS campaign_library_collections (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  name TEXT NOT NULL, aliases_json TEXT NOT NULL DEFAULT '[]', color TEXT NOT NULL DEFAULT '#64748b', description TEXT NOT NULL DEFAULT '',
+  parent_collection_id INTEGER REFERENCES campaign_library_collections(id) ON DELETE SET NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  UNIQUE(campaign_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_campaign_library_collections_campaign ON campaign_library_collections(campaign_id);
+CREATE TABLE IF NOT EXISTS campaign_library_entity_taxonomy (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  entity_type TEXT NOT NULL, entity_id INTEGER NOT NULL, tag_id INTEGER REFERENCES campaign_library_tags(id) ON DELETE CASCADE,
+  collection_id INTEGER REFERENCES campaign_library_collections(id) ON DELETE CASCADE, created_at TEXT NOT NULL,
+  CHECK ((tag_id IS NOT NULL) != (collection_id IS NOT NULL))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_campaign_library_entity_tag ON campaign_library_entity_taxonomy(campaign_id, entity_type, entity_id, tag_id) WHERE tag_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_campaign_library_entity_collection ON campaign_library_entity_taxonomy(campaign_id, entity_type, entity_id, collection_id) WHERE collection_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_campaign_library_entity_taxonomy_entity ON campaign_library_entity_taxonomy(campaign_id, entity_type, entity_id);
+CREATE TABLE IF NOT EXISTS campaign_library_bulk_operations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE, actor TEXT NOT NULL, operation TEXT NOT NULL,
+  before_json TEXT NOT NULL, after_json TEXT NOT NULL, inverse_json TEXT NOT NULL, undone_at TEXT, undone_by TEXT, created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS campaign_library_templates (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE, entity_type TEXT NOT NULL, name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '', snapshot_json TEXT NOT NULL, source_entity_id INTEGER, archived_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_campaign_library_templates_campaign ON campaign_library_templates(campaign_id, entity_type, archived_at);
+
 -- Persistent per-encounter combat log (issue #61). New table, so a plain
 -- CREATE TABLE IF NOT EXISTS in bootstrap (no migrate fn needed). See db/schema.ts
 -- for column docs; detail deliberately omits monster exact-HP totals (only deltas)

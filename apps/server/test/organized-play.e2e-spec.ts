@@ -583,6 +583,100 @@ describe('organized play (e2e)', () => {
     expect(ledger.body.map((e: { kind: string }) => e.kind)).toEqual(['cancel', 'restore']);
   });
 
+  // Issue #1671: #1555 established that only cancellation releases a room/DM — a
+  // genuinely completed occurrence still holds its resource. cancelSeries() used to
+  // filter its "which future occurrences do I touch" query on scheduleLiveSql(),
+  // which excludes a genuinely completed row, so a future-dated occurrence completed
+  // early (or out of order — the DM linked a recap before the occurrence's own
+  // scheduledAt arrived) fell straight through untouched: still `completed`, still
+  // holding its room, forever, for a series that no longer exists.
+  it('cancelling a series releases the room held by a future-dated occurrence already marked completed', async () => {
+    const room = (await api().post(`/api/v1/organized-play/venues/${venueId}/rooms`).set(dm).send({ name: 'Early Room' })).body;
+    const series = await api()
+      .post(`/api/v1/campaigns/${campaignId}/series`)
+      .set(dm)
+      .send({
+        title: 'Played Ahead Of Schedule',
+        timezone: 'UTC',
+        startDate: '2099-08-06',
+        startTime: '18:00',
+        durationMinutes: 180,
+        freq: 'weekly',
+        count: 1,
+        roomId: room.id,
+      });
+    expect(series.status).toBe(201);
+    const occ = series.body.occurrences[0];
+
+    // The DM ran the session ahead of its scheduled slot and linked the recap
+    // immediately — the occurrence is genuinely `completed` while its own
+    // `scheduledAt` is still in the future.
+    const recap = await api().post(`/api/v1/campaigns/${campaignId}/sessions`).set(dm).send({ title: 'Played early' });
+    const linked = await api().post(`/api/v1/schedule/${occ.id}/link/${recap.body.id}`).set(dm);
+    expect(linked.status).toBe(201);
+    expect(linked.body.status).toBe('completed');
+
+    // While completed, the room is correctly still reported taken (#1555) — a
+    // rival campaign cannot book straight over it.
+    const stillHeld = await api()
+      .post('/api/v1/organized-play/conflicts')
+      .set(dm)
+      .send({ scheduledAt: occ.scheduledAt, durationMinutes: 180, roomId: room.id });
+    expect(stillHeld.body.conflicts.some((c: { kind: string }) => c.kind === 'room')).toBe(true);
+
+    // Cancel the whole series.
+    const cancelled = await api().delete(`/api/v1/campaigns/${campaignId}/series/${series.body.id}`).set(dm).send({ reason: 'campaign folded' });
+    expect(cancelled.status).toBe(200);
+
+    // The completed-but-future occurrence must be swept into the cancellation like
+    // every other future occurrence — it is not left behind as a permanently
+    // resource-holding orphan of a series that no longer exists.
+    const after = await api().get(`/api/v1/schedule/${occ.id}`).set(dm);
+    expect(after.body.status).toBe('cancelled');
+    expect(after.body.cancellationReason).toBe('campaign folded');
+
+    // …so the room is free again: a rival campaign can now book the exact same
+    // window without a conflict or `force`.
+    const rival = await api()
+      .post(`/api/v1/campaigns/${otherCampaignId}/series`)
+      .set(dm)
+      .send({ title: 'Took The Room After Cancel', timezone: 'UTC', startDate: '2099-08-06', startTime: '18:00', durationMinutes: 180, freq: 'weekly', count: 1, roomId: room.id });
+    expect(rival.status).toBe(201);
+  });
+
+  it('restoring a cancelled future occurrence with a live recap preserves completed status', async () => {
+    const room = (await api().post(`/api/v1/organized-play/venues/${venueId}/rooms`).set(dm).send({ name: 'Restore Completed Room' })).body;
+    const series = await api()
+      .post(`/api/v1/campaigns/${campaignId}/series`)
+      .set(dm)
+      .send({
+        title: 'Restore Played Early',
+        timezone: 'UTC',
+        startDate: '2099-08-13',
+        startTime: '18:00',
+        durationMinutes: 180,
+        freq: 'weekly',
+        count: 1,
+        roomId: room.id,
+      });
+    expect(series.status).toBe(201);
+    const occ = series.body.occurrences[0];
+
+    const recap = await api().post(`/api/v1/campaigns/${campaignId}/sessions`).set(dm).send({ title: 'Restored recap' });
+    expect(recap.status).toBe(201);
+    const linked = await api().post(`/api/v1/schedule/${occ.id}/link/${recap.body.id}`).set(dm);
+    expect(linked.status).toBe(201);
+    expect(linked.body.status).toBe('completed');
+
+    const cancelled = await api().delete(`/api/v1/campaigns/${campaignId}/series/${series.body.id}`).set(dm).send({ reason: 'pause series' });
+    expect(cancelled.status).toBe(200);
+    expect((await api().get(`/api/v1/schedule/${occ.id}`).set(dm)).body).toMatchObject({ status: 'cancelled', sessionId: null });
+
+    const restored = await api().post(`/api/v1/schedule/${occ.id}/restore`).set(dm).send({});
+    expect(restored.status).toBe(201);
+    expect(restored.body).toMatchObject({ status: 'completed', sessionId: recap.body.id });
+  });
+
   // ----- ICS -----
 
   it('publishes stable UIDs: a rescheduled night keeps its UID with a higher SEQUENCE, and a cancelled one emits STATUS:CANCELLED', async () => {

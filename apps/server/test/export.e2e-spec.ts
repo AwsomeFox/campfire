@@ -2,10 +2,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import request from 'supertest';
 import JSZip from 'jszip';
+import { eq } from 'drizzle-orm';
+import type { ConditionInstance } from '@campfire/schema';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
 import { DB, type DrizzleDb } from '../src/db/db.module';
-import { auditLog } from '../src/db/schema';
+import { auditLog, characters as charactersTable } from '../src/db/schema';
 import { AuditService, computeCampaignAuditExportTruncated } from '../src/modules/audit/audit.service';
+import { sheetConditionWriteSetFromInstances } from '../src/common/conditions';
 
 // Minimal valid 1x1 PNG (smallest possible real PNG payload) — matches the fixture
 // used in attachments.e2e-spec.ts.
@@ -27,10 +30,12 @@ describe('export (e2e, real cookie sessions)', () => {
   let sessionId: number;
   let factionId: number;
   let encounterId: number;
+  let db: DrizzleDb;
 
   beforeAll(async () => {
     ctx = await createTestAppNoDevAuth();
     const server = ctx.app.getHttpServer();
+    db = ctx.app.get<DrizzleDb>(DB);
 
     dmAgent = request.agent(server);
     await dmAgent.post('/api/v1/auth/setup').send({ username: 'export-dm', password: 'dm-password-1' });
@@ -241,6 +246,24 @@ describe('export (e2e, real cookie sessions)', () => {
     // Player owns a character (create-path grants ownership to a non-dm) and writes a private note.
     const myChar = await playerAgent.post(`/api/v1/campaigns/${campaignId}/characters`).send({ name: 'My Own Hero' });
     expect(myChar.status).toBe(201);
+    const exhaustion: ConditionInstance = {
+      id: 'member_exhaustion',
+      name: 'Exhausted',
+      ruleEntryId: null,
+      source: 'Member export seed',
+      sourceCombatantId: null,
+      durationRounds: null,
+      roundsRemaining: null,
+      timing: 'none',
+      saveTiming: 'none',
+      saveDc: null,
+      saveAbility: null,
+      isConcentration: false,
+      stacks: 2,
+      notes: '',
+      custom: false,
+    };
+    await db.update(charactersTable).set(sheetConditionWriteSetFromInstances([exhaustion])).where(eq(charactersTable.id, myChar.body.id));
     await playerAgent.post(`/api/v1/campaigns/${campaignId}/notes`).send({ body: 'my secret plan', visibility: 'private' });
 
     const res = await playerAgent.get(`/api/v1/campaigns/${campaignId}/export/me`);
@@ -252,6 +275,11 @@ describe('export (e2e, real cookie sessions)', () => {
 
     // Their own character + note are present.
     expect(res.body.characters.some((c: { name: string }) => c.name === 'My Own Hero')).toBe(true);
+    const exportedMine = res.body.characters.find((c: { name: string }) => c.name === 'My Own Hero');
+    expect(exportedMine.conditions).toEqual(['Exhausted']);
+    expect(exportedMine.conditionInstances).toEqual([
+      expect.objectContaining({ name: 'Exhausted', stacks: 2, source: 'Member export seed' }),
+    ]);
     expect(res.body.notes.some((n: { body: string }) => n.body === 'my secret plan')).toBe(true);
     expect(res.body.comments.some((c: { body: string }) => c.body === 'A line worth keeping.')).toBe(true);
 

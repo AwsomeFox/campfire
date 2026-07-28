@@ -10,9 +10,10 @@
  *     (the DRIVER_LIVE_PLAY_TOOLS allow-list in ai-driver.service.ts). Canon edits still
  *     become proposals in both modes.
  *
- * This test imports the ACTUAL copy sources (the i18n catalog, the settings card MODES,
- * the login FEATURES) plus the canonical `AI_DM_MODE_CAPABILITIES` manifest from
- * @campfire/schema, and asserts:
+ * This test imports the ACTUAL copy sources (the i18n catalog — including the
+ * `settings.aiDm.modeOptions.*.blurb` strings the settings card renders via `t()`,
+ * the settings card MODES fallback constants, the login FEATURES) plus the canonical
+ * `AI_DM_MODE_CAPABILITIES` manifest from @campfire/schema, and asserts:
  *   1. the dishonest blanket promise ("never touches canon without approval" applied to
  *      BOTH modes) is gone from every surface;
  *   2. every surface that mentions both modes keeps them distinct (Co-DM "proposes" /
@@ -27,13 +28,26 @@
  * runner as the other `.unit.spec.ts` files without needing the seeded server.
  */
 import { expect, test } from '@playwright/test';
-import { AI_DM_MODE_CAPABILITIES, type AiDmMode } from '@campfire/schema';
+import { AI_DM_MODE_CAPABILITIES } from '@campfire/schema';
 import { MODES as AI_DM_CARD_MODES } from '../../src/features/settings/AiDmCard';
 import { FEATURES as LOGIN_FEATURES } from '../../src/features/auth/LoginPage';
 import aiOnboarding from '../../src/i18n/locales/en/aiOnboarding.json';
+import settingsAr from '../../src/i18n/locales/ar/settings.json';
+import settingsEn from '../../src/i18n/locales/en/settings.json';
 import table from '../../src/i18n/locales/en/table.json';
 
 const ai = aiOnboarding.aiOnboarding;
+const modeOptions = settingsEn.settings.aiDm.modeOptions;
+const arModeOptions = settingsAr.settings.aiDm.modeOptions;
+
+/**
+ * English catalog blurbs the settings card actually renders via
+ * `t('settings.aiDm.modeOptions.<mode>.blurb', { defaultValue: m.blurb })`.
+ * Because the keys exist in `en/settings.json`, i18next returns these catalog
+ * values - not the MODES fallback - for English users. #752 must guard these.
+ */
+const SETTINGS_CARD_CO_DM_BLURB = modeOptions.co_dm.blurb;
+const SETTINGS_CARD_DRIVER_BLURB = modeOptions.driver.blurb;
 
 /** Every user-facing string that discusses the AI DM, gathered by surface. */
 const TRUST_SURFACES: ReadonlyArray<{ name: string; text: string; mentionsBoth: boolean }> = [
@@ -44,12 +58,12 @@ const TRUST_SURFACES: ReadonlyArray<{ name: string; text: string; mentionsBoth: 
   },
   {
     name: 'settings card — Co-DM blurb',
-    text: AI_DM_CARD_MODES.find((m) => m.value === 'co_dm')?.blurb ?? '',
+    text: SETTINGS_CARD_CO_DM_BLURB,
     mentionsBoth: false,
   },
   {
     name: 'settings card — Driver blurb',
-    text: AI_DM_CARD_MODES.find((m) => m.value === 'driver')?.blurb ?? '',
+    text: SETTINGS_CARD_DRIVER_BLURB,
     mentionsBoth: false,
   },
   {
@@ -110,6 +124,24 @@ const driverKeywords = AI_DM_MODE_CAPABILITIES.driver.directActions
   .filter((k: string): k is string => k.length > 0);
 
 test.describe('AI trust copy — Co-DM proposals vs Driver direct authority (#752)', () => {
+  test('en catalog mode blurbs stay equal to the MODES fallback constants', () => {
+    // AiDmCard renders catalog values when the key exists; MODES is only the
+    // `defaultValue` fallback / fixture. Keep them byte-identical so a catalog-only
+    // edit cannot bypass the capability assertions below (#1579 / Devin review).
+    for (const mode of AI_DM_CARD_MODES) {
+      const catalog = modeOptions[mode.value as keyof typeof modeOptions];
+      expect(catalog.label, `${mode.value} label catalog==MODES`).toBe(mode.label);
+      expect(catalog.blurb, `${mode.value} blurb catalog==MODES`).toBe(mode.blurb);
+    }
+
+    // Arabic is intentionally not the English keyword policy source, but it must keep real
+    // localized entries for the same rendered catalog keys instead of falling through to MODES.
+    for (const mode of ['co_dm', 'driver'] as const) {
+      expect(arModeOptions[mode].blurb, `ar settings.aiDm.modeOptions.${mode}.blurb`).toBeTruthy();
+      expect(arModeOptions[mode].blurb).not.toBe(modeOptions[mode].blurb);
+    }
+  });
+
   test('no surface repeats the retired blanket "never touches canon" promise', () => {
     for (const surface of TRUST_SURFACES) {
       expect(
@@ -143,7 +175,7 @@ test.describe('AI trust copy — Co-DM proposals vs Driver direct authority (#75
       ai.checklist.checkDetails.mode.coDm,
       ai.checklist.allDoneCoDm,
       table.table.coDmHint,
-      AI_DM_CARD_MODES.find((m) => m.value === ('co_dm' as AiDmMode))?.blurb ?? '',
+      SETTINGS_CARD_CO_DM_BLURB,
     ];
     for (const text of coDmSurfaces) {
       // Co-DM must be described as proposing/awaiting approval, never as acting directly.
@@ -159,7 +191,7 @@ test.describe('AI trust copy — Co-DM proposals vs Driver direct authority (#75
 
   test('Driver copy claims direct authority (holds the DM seat / acts directly)', () => {
     const driverSurfaces = [
-      { name: 'settings card Driver blurb', text: AI_DM_CARD_MODES.find((m) => m.value === ('driver' as AiDmMode))?.blurb ?? '' },
+      { name: 'settings card Driver blurb', text: SETTINGS_CARD_DRIVER_BLURB },
       { name: 'allDone Driver', text: ai.checklist.allDoneDriver },
       { name: 'mode doneDriver', text: ai.checklist.steps.mode.doneDriver },
       { name: 'readiness mode check (driver)', text: ai.checklist.checkDetails.mode.driver },
@@ -182,7 +214,7 @@ test.describe('AI trust copy — Co-DM proposals vs Driver direct authority (#75
     // representative direct actions the seat performs so a DM enables Driver mode with
     // accurate expectations. Keywords come from AI_DM_MODE_CAPABILITIES — the same
     // source the server's DRIVER_LIVE_PLAY_TOOLS concept backs.
-    const driverCopy = AI_DM_CARD_MODES.find((m) => m.value === ('driver' as AiDmMode))?.blurb ?? '';
+    const driverCopy = SETTINGS_CARD_DRIVER_BLURB;
     const missing: string[] = [];
     for (const keyword of driverKeywords) {
       if (!driverCopy.toLowerCase().includes(keyword.toLowerCase())) {
@@ -200,7 +232,7 @@ test.describe('AI trust copy — Co-DM proposals vs Driver direct authority (#75
     // becomes a proposal. The trust copy must keep this honest alongside Driver's
     // direct authority, so Driver never reads as "edits canon at will". The copy must
     // co-locate the words "canon" and "proposal" so a reader sees the boundary.
-    const driverCard = AI_DM_CARD_MODES.find((m) => m.value === ('driver' as AiDmMode))?.blurb ?? '';
+    const driverCard = SETTINGS_CARD_DRIVER_BLURB;
     const transparency = ai.transparency.body;
     expect(driverCard, 'Driver copy must disclose canon edits still become proposals').toMatch(
       /proposal/i,

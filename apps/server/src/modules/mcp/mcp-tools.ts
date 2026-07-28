@@ -19,6 +19,15 @@ import {
   CampaignCreate,
   CampaignLibraryMonsterCreate,
   CampaignLibraryMonsterUpdate,
+  CampaignLibraryTagCreate,
+  CampaignLibraryTagUpdate,
+  CampaignLibraryCollectionCreate,
+  CampaignLibraryCollectionUpdate,
+  CampaignLibraryTemplateSave,
+  CampaignLibraryTemplateInstantiate,
+  LibraryBulkRequest,
+  LibraryEntityType,
+  LibrarySearchQuery,
   CampaignUpdate,
   CharacterCreate,
   CharacterUpdate,
@@ -4571,6 +4580,26 @@ export class McpToolsService {
         return this.campaignLibrary.clone(libraryMonsterId as number, name as string, user, role, campaignId as number);
       },
     );
+
+    this.tool(server, 'search_campaign_library', 'Search the role-safe campaign library, including tags and facets (issue #742).', { campaignId: CampaignIdArg, ...LibrarySearchQuery.shape }, async ({ campaignId, ...query }) => {
+      const role = await this.access.requireMember(user, campaignId as number);
+      return this.campaignLibrary.search(campaignId as number, role, LibrarySearchQuery.parse(query));
+    });
+    this.tool(server, 'list_campaign_library_tags', 'List campaign library tags (issue #742).', { campaignId: CampaignIdArg }, async ({ campaignId }) => { await this.access.requireMember(user, campaignId as number); return this.campaignLibrary.listTags(campaignId as number); });
+    this.tool(server, 'list_campaign_library_collections', 'List campaign library collections (issue #742).', { campaignId: CampaignIdArg }, async ({ campaignId }) => { await this.access.requireMember(user, campaignId as number); return this.campaignLibrary.listCollections(campaignId as number); });
+    this.writeTool(server, user, 'create_campaign_library_tag', 'DM only: create a campaign library tag.', { campaignId: CampaignIdArg, ...CampaignLibraryTagCreate.shape }, async ({ campaignId, ...body }) => { const role = await this.access.requireRole(user, campaignId as number, 'dm'); return this.campaignLibrary.createTag(campaignId as number, CampaignLibraryTagCreate.parse(body), user, role); });
+    this.writeTool(server, user, 'update_campaign_library_tag', 'DM only: edit a campaign library tag.', { campaignId: CampaignIdArg, tagId: Id, ...CampaignLibraryTagUpdate.shape }, async ({ campaignId, tagId, ...body }) => { const role = await this.access.requireRole(user, campaignId as number, 'dm'); return this.campaignLibrary.updateTag(campaignId as number, tagId as number, CampaignLibraryTagUpdate.parse(body), user, role); });
+    this.writeTool(server, user, 'delete_campaign_library_tag', 'DM only: delete a campaign library tag.', { campaignId: CampaignIdArg, tagId: Id }, async ({ campaignId, tagId }) => { const role = await this.access.requireRole(user, campaignId as number, 'dm'); await this.campaignLibrary.removeTag(campaignId as number, tagId as number, user, role); return { ok: true }; });
+    this.writeTool(server, user, 'create_campaign_library_collection', 'DM only: create a campaign library collection.', { campaignId: CampaignIdArg, ...CampaignLibraryCollectionCreate.shape }, async ({ campaignId, ...body }) => { const role = await this.access.requireRole(user, campaignId as number, 'dm'); return this.campaignLibrary.createCollection(campaignId as number, CampaignLibraryCollectionCreate.parse(body), user, role); });
+    this.writeTool(server, user, 'update_campaign_library_collection', 'DM only: edit a campaign library collection.', { campaignId: CampaignIdArg, collectionId: Id, ...CampaignLibraryCollectionUpdate.shape }, async ({ campaignId, collectionId, ...body }) => { const role = await this.access.requireRole(user, campaignId as number, 'dm'); return this.campaignLibrary.updateCollection(campaignId as number, collectionId as number, CampaignLibraryCollectionUpdate.parse(body), user, role); });
+    this.writeTool(server, user, 'delete_campaign_library_collection', 'DM only: delete a campaign library collection.', { campaignId: CampaignIdArg, collectionId: Id }, async ({ campaignId, collectionId }) => { const role = await this.access.requireRole(user, campaignId as number, 'dm'); await this.campaignLibrary.removeCollection(campaignId as number, collectionId as number, user, role); return { ok: true }; });
+    this.writeTool(server, user, 'bulk_campaign_library', 'DM only: atomically mutate up to 500 campaign library entities.', { campaignId: CampaignIdArg, request: LibraryBulkRequest }, async ({ campaignId, request }) => { const role = await this.access.requireRole(user, campaignId as number, 'dm'); return this.campaignLibrary.bulk(campaignId as number, request, user, role); });
+    this.writeTool(server, user, 'undo_campaign_library_bulk', 'DM only: undo one campaign library bulk operation when no later edit conflicts.', { campaignId: CampaignIdArg, operationId: Id }, async ({ campaignId, operationId }) => { const role = await this.access.requireRole(user, campaignId as number, 'dm'); return this.campaignLibrary.undoBulk(campaignId as number, operationId as number, user, role); });
+    this.tool(server, 'list_campaign_library_templates', 'DM only: list active campaign library templates.', { campaignId: CampaignIdArg }, async ({ campaignId }) => { await this.access.requireRole(user, campaignId as number, 'dm'); return this.campaignLibrary.listTemplates(campaignId as number); });
+    this.writeTool(server, user, 'save_campaign_library_template', 'DM only: save a current-format entity template.', { campaignId: CampaignIdArg, ...CampaignLibraryTemplateSave.shape }, async ({ campaignId, ...body }) => { const role = await this.access.requireRole(user, campaignId as number, 'dm'); return this.campaignLibrary.saveTemplate(campaignId as number, body, user, role); });
+    this.writeTool(server, user, 'instantiate_campaign_library_template', 'DM only: instantiate an active campaign library template.', { campaignId: CampaignIdArg, templateId: Id, ...CampaignLibraryTemplateInstantiate.shape }, async ({ campaignId, templateId, ...body }) => { const role = await this.access.requireRole(user, campaignId as number, 'dm'); return this.campaignLibrary.instantiateTemplate(campaignId as number, templateId as number, body, user, role); });
+    this.writeTool(server, user, 'archive_campaign_library_template', 'DM only: archive a campaign library template.', { campaignId: CampaignIdArg, templateId: Id }, async ({ campaignId, templateId }) => { const role = await this.access.requireRole(user, campaignId as number, 'dm'); return this.campaignLibrary.archiveTemplate(campaignId as number, templateId as number, user, role); });
+    this.writeTool(server, user, 'duplicate_campaign_library_entity', 'DM only: duplicate a campaign library entity through its current-format adapter.', { campaignId: CampaignIdArg, entityType: LibraryEntityType, entityId: Id, ...CampaignLibraryTemplateInstantiate.shape }, async ({ campaignId, entityType, entityId, ...body }) => { const role = await this.access.requireRole(user, campaignId as number, 'dm'); return this.campaignLibrary.duplicateEntity(campaignId as number, LibraryEntityType.parse(entityType), entityId as number, body, user, role); });
 
     this.writeTool(
       server,
