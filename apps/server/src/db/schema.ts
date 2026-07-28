@@ -1948,6 +1948,30 @@ export const campaignLibraryMonsters = sqliteTable('campaign_library_monsters', 
   updatedAt: text('updated_at').notNull(),
 });
 
+/** Campaign-owned taxonomy for the central library manager (issue #742). */
+export const campaignLibraryTags = sqliteTable('campaign_library_tags', {
+  id: integer('id').primaryKey({ autoIncrement: true }), campaignId: integer('campaign_id').notNull(),
+  name: text('name').notNull(), aliasesJson: text('aliases_json').notNull().default('[]'), color: text('color').notNull().default('#64748b'),
+  description: text('description').notNull().default(''), parentTagId: integer('parent_tag_id'), createdAt: text('created_at').notNull(), updatedAt: text('updated_at').notNull(),
+});
+export const campaignLibraryCollections = sqliteTable('campaign_library_collections', {
+  id: integer('id').primaryKey({ autoIncrement: true }), campaignId: integer('campaign_id').notNull(),
+  name: text('name').notNull(), aliasesJson: text('aliases_json').notNull().default('[]'), color: text('color').notNull().default('#64748b'),
+  description: text('description').notNull().default(''), parentCollectionId: integer('parent_collection_id'), createdAt: text('created_at').notNull(), updatedAt: text('updated_at').notNull(),
+});
+export const campaignLibraryEntityTaxonomy = sqliteTable('campaign_library_entity_taxonomy', {
+  id: integer('id').primaryKey({ autoIncrement: true }), campaignId: integer('campaign_id').notNull(), entityType: text('entity_type').notNull(), entityId: integer('entity_id').notNull(),
+  tagId: integer('tag_id'), collectionId: integer('collection_id'), createdAt: text('created_at').notNull(),
+});
+export const campaignLibraryBulkOperations = sqliteTable('campaign_library_bulk_operations', {
+  id: integer('id').primaryKey({ autoIncrement: true }), campaignId: integer('campaign_id').notNull(), actor: text('actor').notNull(), operation: text('operation').notNull(),
+  beforeJson: text('before_json').notNull(), afterJson: text('after_json').notNull(), inverseJson: text('inverse_json').notNull(), undoneAt: text('undone_at'), undoneBy: text('undone_by'), createdAt: text('created_at').notNull(),
+});
+export const campaignLibraryTemplates = sqliteTable('campaign_library_templates', {
+  id: integer('id').primaryKey({ autoIncrement: true }), campaignId: integer('campaign_id').notNull(), entityType: text('entity_type').notNull(), name: text('name').notNull(), description: text('description').notNull().default(''),
+  snapshotJson: text('snapshot_json').notNull(), sourceEntityId: integer('source_entity_id'), archivedAt: text('archived_at'), createdAt: text('created_at').notNull(), updatedAt: text('updated_at').notNull(),
+});
+
 /**
  * Durable responsive derivatives for image attachments (issue #604). See the DDL in
  * bootstrap.sql.ts for the full rationale; in short, one row per (attachment, ladder
