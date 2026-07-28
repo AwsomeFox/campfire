@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { api, API } from '../../lib/api';
 import { Btn, Card } from '../../components/ui';
 
@@ -8,6 +9,7 @@ type Preview = { previewToken:string; expiresAt:string; automaticBackup:boolean;
 
 /** Deliberately requires a server-generated, short-lived preview before Apply. */
 export function DataRepairCard() {
+  useTranslation();
   const [overview,setOverview]=useState<Overview|null>(null); const [findings,setFindings]=useState<Finding[]>([]);
   const [preview,setPreview]=useState<Record<number,Preview>>({}); const [replacement,setReplacement]=useState<Record<number,string>>({}); const [error,setError]=useState<string|null>(null); const [busy,setBusy]=useState(false);
   const load=useCallback(async()=>{ const [nextOverview,nextFindings]=await Promise.all([api.get<Overview>(`${API}/admin/data-repair`),api.get<Finding[]>(`${API}/admin/data-repair/findings?status=open`)]); setOverview(nextOverview);setFindings(nextFindings);setPreview({}); },[]);
