@@ -123,6 +123,35 @@ async function openTable(page: Page, campaignId: number) {
 }
 
 test.describe('AI transcript privacy (#573)', () => {
+  // #1592 — block the PWA service worker. Root cause of the reported flake
+  // (`ai-transcript-privacy.spec.ts:154` timing out on `getByRole('log', { name: 'Table
+  // transcript' })`): `vite.config.ts` registers every `GET /api/**` route with workbox under
+  // a `NetworkOnly` strategy, and once the SW has installed and taken control of THIS page — it
+  // does not control the tab that registered it, only the NEXT navigation onward — a `fetch`
+  // the page issues is intercepted by the SW's own `fetch` listener and re-issued from the
+  // service-worker thread, not the document. `page.route()` only intercepts requests the
+  // PAGE/frame initiates; a request replayed by the SW is a different initiator and sails
+  // straight past it to the real server.
+  //
+  // This test signs in as two different accounts across THREE full navigations
+  // (`openTable`/`signIn` both `page.goto`), which is enough time for the SW's install →
+  // activate → claim sequence to complete partway through. On the run where it does, the
+  // THIRD `openTable`'s `GET /campaigns/:id/ai-dm` bypasses `mockDriverTable`'s route
+  // entirely and returns the campaign's real (non-driver) seat — confirmed by capturing the
+  // response body during a failing run: `{"mode":"co_dm",...}` instead of the mocked
+  // `{"mode":"driver",...}`. The app then correctly renders the Co-DM gate instead of the
+  // transcript for data it genuinely received; nothing in `AiTablePage`/`RunSessionPage`
+  // gates the transcript on `/safety`, `/mentions`, or any other campaign query (`useAiDmSeat`
+  // / `useAiDmSession` depend on nothing but `campaignId`), and stalling those endpoints WITH
+  // the service worker blocked has no effect on the transcript at all — verified directly, see
+  // the PR for #1592.
+  //
+  // Any spec that establishes `page.route` mocks and then does more than one full navigation
+  // (especially across a sign-out/sign-in identity switch, which the OTHER `ai-*` specs with
+  // comparable navigation counts do not) needs this, per the SAME pattern already used by
+  // `confirm-dialog-pending-labels.spec.ts`, `notifications.spec.ts`, and others.
+  test.use({ serviceWorkers: 'block' });
+
   test('the device grant defaults to off and writes nothing until it is given', async ({ page }) => {
     const { campaignId } = seed();
     await mockDriverTable(page, campaignId);
