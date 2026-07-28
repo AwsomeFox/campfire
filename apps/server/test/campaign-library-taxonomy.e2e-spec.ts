@@ -2,7 +2,7 @@ import request from 'supertest';
 import { and, eq } from 'drizzle-orm';
 import { closeTestApp, createTestApp, type TestAppContext } from './test-app';
 import { DB, type DrizzleDb } from '../src/db/db.module';
-import { auditLog, campaignLibraryEntityTaxonomy, inventoryItems, locations, npcs, quests } from '../src/db/schema';
+import { auditLog, campaignLibraryEntityTaxonomy, characters, inventoryItems, locations, npcs, quests } from '../src/db/schema';
 
 describe('campaign library taxonomy (issue #742)', () => {
   let ctx: TestAppContext;
@@ -137,5 +137,26 @@ describe('campaign library taxonomy (issue #742)', () => {
     expect((await db.select().from(inventoryItems).where(eq(inventoryItems.id, item.id))).at(0)?.ownerType).toBe('party');
     const bad = await request(server).post(`/api/v1/campaigns/${campaignId}/library/bulk`).set(dm).send({ operation: 'set_visibility', visibility: 'hidden', targets: [{ entityType: 'quest', entityId: quest.id }, { entityType: 'inventory_item', entityId: item.id }] });
     expect(bad.status).toBe(400);
+  });
+
+  it('moves an item to a campaign character and undoes it without parsing a scalar journal', async () => {
+    const server = ctx.app.getHttpServer(); const db = ctx.app.get<DrizzleDb>(DB); const ts = new Date().toISOString();
+    const [character] = await db.insert(characters).values({ campaignId, name: 'Owner', createdAt: ts, updatedAt: ts }).returning();
+    const [item] = await db.insert(inventoryItems).values({ campaignId, name: 'Undo owner', ownerType: 'party', createdAt: ts, updatedAt: ts }).returning();
+    const moved = await request(server).post(`/api/v1/campaigns/${campaignId}/library/bulk`).set(dm).send({ operation: 'move_inventory_owner', ownerType: 'character', characterId: character.id, targets: [{ entityType: 'inventory_item', entityId: item.id }] });
+    expect(moved.status).toBe(201);
+    expect((await request(server).post(`/api/v1/campaigns/${campaignId}/library/bulk/${moved.body.operationId}/undo`).set(dm)).status).toBe(201);
+    expect((await db.select().from(inventoryItems).where(eq(inventoryItems.id, item.id))).at(0)).toMatchObject({ ownerType: 'party', characterId: null });
+  });
+
+  it('maps location visibility across unexplored, explored, and current without regressing progression', async () => {
+    const server = ctx.app.getHttpServer(); const db = ctx.app.get<DrizzleDb>(DB); const ts = new Date().toISOString();
+    const rows = await db.insert(locations).values(['unexplored', 'explored', 'current'].map((status) => ({ campaignId, name: `Place ${status}`, status, createdAt: ts, updatedAt: ts }))).returning();
+    const show = await request(server).post(`/api/v1/campaigns/${campaignId}/library/bulk`).set(dm).send({ operation: 'set_visibility', visibility: 'public', targets: rows.map((row) => ({ entityType: 'location', entityId: row.id })) });
+    expect(show.status).toBe(201);
+    const afterShow = await db.select().from(locations).where(eq(locations.campaignId, campaignId));
+    expect(afterShow.filter((r) => rows.some((row) => row.id === r.id)).map((r) => r.status).sort()).toEqual(['current', 'explored', 'explored']);
+    expect((await request(server).post(`/api/v1/campaigns/${campaignId}/library/bulk`).set(dm).send({ operation: 'set_visibility', visibility: 'hidden', targets: [{ entityType: 'location', entityId: rows[1].id }] })).status).toBe(201);
+    expect((await db.select().from(locations).where(eq(locations.id, rows[1].id))).at(0)?.status).toBe('unexplored');
   });
 });
