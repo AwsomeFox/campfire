@@ -6,8 +6,8 @@
       "url": "https://github.com/AwsomeFox/campfire/pull/1618",
       "headBranch": "fix/issue-724",
       "baseBranch": "main",
-      "updatedAt": "2026-07-28T03:20:00Z",
-      "notes": "OpenAPI diagnostics docs added (42563d3d). Review threads resolved. Awaiting CI after main merges and coverage fix."
+      "updatedAt": "2026-07-28T03:50:00Z",
+      "notes": "Head c4635930: snapshot TTL refresh for admin metrics; documented intentional /readyz codes. All review threads resolved. Awaiting CI."
     }
   ]
 }
