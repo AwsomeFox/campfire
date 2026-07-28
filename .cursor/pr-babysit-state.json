@@ -1,0 +1,13 @@
+{
+  "tracked": [
+    {
+      "pr": 1661,
+      "status": "babysitting",
+      "url": "https://github.com/AwsomeFox/campfire/pull/1661",
+      "headBranch": "fix/issue-1600",
+      "baseBranch": "main",
+      "updatedAt": "2026-07-28T12:52:00Z",
+      "notes": "Primary tracker cursor/pull-request-babysitting-1385. Head 976a5577 already limits critical-failure doubling to basic saves (Codex P1). MERGEABLE but 4 commits behind main; unresolved outdated Codex thread. Awaiting main sync + CI."
+    }
+  ]
+}
