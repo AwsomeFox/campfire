@@ -18,7 +18,7 @@ import {
   type Role,
 } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { attachments, auditLog, campaignLibraryBulkOperations, campaignLibraryCollections, campaignLibraryEntityTaxonomy, campaignLibraryMonsters, campaignLibraryTags, campaignLibraryTemplates, characters, encounters, factions, inventoryItems, locations, npcs, quests, timelineEvents } from '../../db/schema';
+import { attachments, auditLog, campaignLibraryBulkOperations, campaignLibraryCollections, campaignLibraryEntityTaxonomy, campaignLibraryMonsters, campaignLibraryTags, campaignLibraryTemplates, encounters, factions, inventoryItems, locations, npcs, quests, timelineEvents } from '../../db/schema';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { nowIso } from '../../common/time';
 import { getRequestId } from '../../common/request-context';
