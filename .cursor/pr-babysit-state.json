@@ -1,0 +1,13 @@
+{
+  "tracked": [
+    {
+      "pr": 1657,
+      "status": "babysitting",
+      "url": "https://github.com/AwsomeFox/campfire/pull/1657",
+      "headBranch": "fix/issue-757",
+      "baseBranch": "main",
+      "updatedAt": "2026-07-28T11:37:00Z",
+      "notes": "Tracking started on cursor/pull-request-babysitting-8f94. Head 7738358a. MERGEABLE vs main (up to date with merge-base 1fac8d33). No review threads yet. CI run 30355409914 in progress."
+    }
+  ]
+}
