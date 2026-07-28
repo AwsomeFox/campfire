@@ -421,18 +421,36 @@ export class CampaignLibraryService {
     });
     const needle = query.q?.toLocaleLowerCase();
     if (needle) items = items.filter((item) => [item.name, item.description, ...item.tags.flatMap((tag) => [tag.name, ...tag.aliases]), ...item.collections.flatMap((collection) => [collection.name, ...collection.aliases])].join(' ').toLocaleLowerCase().includes(needle));
-    if (query.tagId) items = items.filter((item) => item.tags.some((tag) => tag.id === query.tagId));
-    if (query.collectionId) items = items.filter((item) => item.collections.some((collection) => collection.id === query.collectionId));
-    if (query.visibility) items = items.filter((item) => item.visibility === query.visibility);
-    if (query.status) items = items.filter((item) => item.status === query.status);
-    if (query.owner) items = items.filter((item) => item.owner === query.owner);
-    // Type facets must ignore the active type filter so the UI can switch categories
-    // without first resetting to "All types".
+    // Each facet is counted with every active filter except its own dimension, so
+    // clients can switch filters without first clearing the current selection.
+    const matches = (item: LibraryEntitySummary, except: 'type' | 'tag' | 'collection' | 'visibility' | 'status' | 'owner' | null) =>
+      (except === 'type' || !query.type || item.entityType === query.type)
+      && (except === 'tag' || !query.tagId || item.tags.some((tag) => tag.id === query.tagId))
+      && (except === 'collection' || !query.collectionId || item.collections.some((collection) => collection.id === query.collectionId))
+      && (except === 'visibility' || !query.visibility || item.visibility === query.visibility)
+      && (except === 'status' || !query.status || item.status === query.status)
+      && (except === 'owner' || !query.owner || item.owner === query.owner);
     const count = <T extends string | number>(values: T[], label: (value: T) => string) => [...new Map(values.map((value) => [value, (values.filter((entry) => entry === value).length)])).entries()].map(([id, total]) => ({ id, label: label(id), count: total }));
-    const typeFacets = count(items.map((item) => item.entityType), (type) => type);
-    if (query.type) items = items.filter((item) => item.entityType === query.type);
+    const forTypes = items.filter((item) => matches(item, 'type'));
+    const forTags = items.filter((item) => matches(item, 'tag'));
+    const forCollections = items.filter((item) => matches(item, 'collection'));
+    const forVisibility = items.filter((item) => matches(item, 'visibility'));
+    const forStatus = items.filter((item) => matches(item, 'status'));
+    items = items.filter((item) => matches(item, null));
     items.sort((a, b) => a.name.localeCompare(b.name) || a.entityType.localeCompare(b.entityType) || a.entityId - b.entityId);
-    return LibrarySearchPage.parse({ items: items.slice(query.offset, query.offset + query.limit), total: items.length, limit: query.limit, offset: query.offset, facets: { types: typeFacets, tags: tags.map((tag) => ({ id: tag.id, label: tag.name, count: items.filter((item) => item.tags.some((value) => value.id === tag.id)).length })).filter((facet) => facet.count > 0), collections: collections.map((collection) => ({ id: collection.id, label: collection.name, count: items.filter((item) => item.collections.some((value) => value.id === collection.id)).length })).filter((facet) => facet.count > 0), visibility: count(items.map((item) => item.visibility ?? 'public'), (value) => value), status: count(items.flatMap((item) => item.status == null ? [] : [item.status]), (value) => value) } });
+    return LibrarySearchPage.parse({
+      items: items.slice(query.offset, query.offset + query.limit),
+      total: items.length,
+      limit: query.limit,
+      offset: query.offset,
+      facets: {
+        types: count(forTypes.map((item) => item.entityType), (type) => type),
+        tags: tags.map((tag) => ({ id: tag.id, label: tag.name, count: forTags.filter((item) => item.tags.some((value) => value.id === tag.id)).length })).filter((facet) => facet.count > 0),
+        collections: collections.map((collection) => ({ id: collection.id, label: collection.name, count: forCollections.filter((item) => item.collections.some((value) => value.id === collection.id)).length })).filter((facet) => facet.count > 0),
+        visibility: count(forVisibility.map((item) => item.visibility ?? 'public'), (value) => value),
+        status: count(forStatus.flatMap((item) => item.status == null ? [] : [item.status]), (value) => value),
+      },
+    });
   }
 
   async getRowOrThrow(id: number, campaignId?: number) {

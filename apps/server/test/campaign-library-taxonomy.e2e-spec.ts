@@ -84,6 +84,9 @@ describe('campaign library taxonomy (issue #742)', () => {
     expect(typed.status).toBe(200);
     expect(typed.body.items.every((item: { entityType: string }) => item.entityType === 'quest')).toBe(true);
     expect(typed.body.facets.types.map((facet: { id: string }) => facet.id)).toEqual(expect.arrayContaining(['quest', 'npc', 'location']));
+    const hidden = await request(server).get(`/api/v1/campaigns/${campaignId}/library/search?visibility=hidden`).set(dm);
+    expect(hidden.body.facets.visibility.map((facet: { id: string }) => facet.id)).toEqual(expect.arrayContaining(['hidden', 'public']));
+    expect(hidden.body.items.every((item: { visibility: string }) => item.visibility === 'hidden')).toBe(true);
   });
 
   it('bulk move is atomic, auditable, and undo preserves a later unrelated collection', async () => {
