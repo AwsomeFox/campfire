@@ -2765,12 +2765,24 @@ export const InboxSweepJob = z.object({
   id: Id,
   campaignId: Id,
   status: InboxSweepJobStatus,
+  // Total per-outcome counts for this job, INCLUDING items recovered from an earlier,
+  // already-acknowledged sweep's ledger row (see `itemsNewly*` below).
   itemsTotal: z.number().int().nonnegative(),
   itemsProposed: z.number().int().nonnegative(),
   itemsSkipped: z.number().int().nonnegative(),
   itemsErrored: z.number().int().nonnegative(),
-  /** Number of proposals actually created in this sweep (excludes recovered prior rows). */
+  // Issue #1717: `itemsProposed`/`itemsSkipped`/`itemsErrored` above conflate two very
+  // different things — an outcome decided freshly by THIS sweep, and a ledger row
+  // recovered from an earlier, already-acknowledged run (the crash-recovery path: a
+  // terminal ledger row was written but the inbox item never got resolved). A client
+  // driving a "bump the badge by N" UI off the total double-counts every recovered row.
+  // These `itemsNewly*` counts exclude recovered rows — optional (rather than always
+  // required) so older persisted job rows / mocked responses without this breakdown still
+  // validate; a client should fall back to the corresponding total when a `itemsNewly*`
+  // field is absent.
   itemsNewlyProposed: z.number().int().nonnegative().optional(),
+  itemsNewlySkipped: z.number().int().nonnegative().optional(),
+  itemsNewlyErrored: z.number().int().nonnegative().optional(),
   detail: z.string(),
   createdBy: z.string(),
   createdAt: z.string(),

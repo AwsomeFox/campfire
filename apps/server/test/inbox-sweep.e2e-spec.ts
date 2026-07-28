@@ -601,9 +601,9 @@ describe('inbox sweep (e2e)', () => {
     });
   });
 
-  it('returns the capture body for a recovered prior ledger row too, not just a freshly classified item', async () => {
-    const campaignId = await newCampaign('Sweep Ledger Recovery Body');
-    const body = 'A create proposal was filed before resolution crashed (body recovery check).';
+  it('issue #1717: a recovered ledger row bumps itemsProposed but NOT itemsNewlyProposed — the badge must bump by zero', async () => {
+    const campaignId = await newCampaign('Sweep Recovery Badge Honesty');
+    const body = 'A create proposal was filed before resolution crashed, take two.';
     const noteId = await submitInbox(campaignId, body);
     const db = ctx.app.get<DrizzleDb>(DB);
     const ts = nowIso();
@@ -628,8 +628,8 @@ describe('inbox sweep (e2e)', () => {
       outcome: 'proposed',
       entityType: 'quest',
       entityId: null,
-      proposalId: 9998,
-      reason: 'filed as create proposal #9998',
+      proposalId: 12345,
+      reason: 'filed as create proposal #12345',
       createdAt: ts,
       updatedAt: ts,
     });
@@ -638,6 +638,65 @@ describe('inbox sweep (e2e)', () => {
     expect(res.status).toBe(201);
     expect(classifier.calls).toHaveLength(0);
     expect(res.body.items[0]).toMatchObject({ noteId, body, outcome: 'proposed' });
+    expect(res.body.job.itemsProposed).toBe(1);
+    expect(res.body.job.itemsNewlyProposed).toBe(0);
+    expect(res.body.job.itemsNewlySkipped).toBe(0);
+    expect(res.body.job.itemsNewlyErrored).toBe(0);
+    expect(classifier.calls).toHaveLength(0);
+  });
+
+  it('issue #1717: mixes a recovered proposal with a genuinely new one — only the new one counts toward itemsNewlyProposed', async () => {
+    const campaignId = await newCampaign('Sweep Recovery Badge Mixed');
+    const recoveredNoteId = await submitInbox(campaignId, 'Recovered: a create proposal was filed before resolution crashed.');
+    const newNoteId = await submitInbox(campaignId, 'Brand new: the party wants a quest about the sunken bell.');
+    classifier.script.set('Brand new: the party wants a quest about the sunken bell.', {
+      action: 'create',
+      entityType: 'quest',
+      targetId: null,
+      fields: { title: 'The Sunken Bell' },
+      reason: 'players raised a new quest hook',
+    });
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const ts = nowIso();
+    const [job] = await db
+      .insert(inboxSweepJobs)
+      .values({
+        campaignId,
+        status: 'succeeded',
+        itemsTotal: 1,
+        itemsProposed: 1,
+        itemsSkipped: 0,
+        itemsErrored: 0,
+        detail: 'seeded recovery job',
+        createdBy: 'test',
+        createdAt: ts,
+      })
+      .returning();
+    await db.insert(inboxSweepItems).values({
+      campaignId,
+      noteId: recoveredNoteId,
+      jobId: job.id,
+      outcome: 'proposed',
+      entityType: 'quest',
+      entityId: null,
+      proposalId: 54321,
+      reason: 'filed as create proposal #54321',
+      createdAt: ts,
+      updatedAt: ts,
+    });
+
+    const res = await request(server).post(`/api/v1/campaigns/${campaignId}/inbox/sweep`).set(dm);
+    expect(res.status).toBe(201);
+    expect(res.body.job.itemsTotal).toBe(2);
+    // Total conflates the recovered row and the new one — this is the pre-existing field's
+    // documented (and now correctly-narrower) meaning.
+    expect(res.body.job.itemsProposed).toBe(2);
+    // Only the genuinely new proposal (for newNoteId) should move the badge.
+    expect(res.body.job.itemsNewlyProposed).toBe(1);
+    expect(classifier.calls).toHaveLength(1);
+    expect(classifier.calls[0].capture.noteId).toBe(newNoteId);
+>>>>>>> 3d3e275d9 (fix(inbox-sweep): distinguish new vs recovered ledger rows in sweep counts (#1717))
   });
 
   it('reports a disabled job with a stated reason when no AI provider is configured, and touches nothing', async () => {
