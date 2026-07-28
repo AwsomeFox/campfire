@@ -6,8 +6,8 @@
       "url": "https://github.com/AwsomeFox/campfire/pull/1625",
       "headBranch": "fix/issue-738",
       "baseBranch": "main",
-      "updatedAt": "2026-07-28T02:53:51Z",
-      "notes": "Opened PR; MERGEABLE; no review threads yet; CI in progress (run 30324368927)."
+      "updatedAt": "2026-07-28T02:59:54Z",
+      "notes": "Review fixes in 179378d8 (snapshot URL strip, NPC bootstrap cleanup, useDialog, N+1 batch, MCP catalog 222). Copilot threads resolved. Waiting on CI for new head."
     }
   ]
 }
