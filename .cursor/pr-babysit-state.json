@@ -4,8 +4,8 @@
       "pr": 1676,
       "url": "https://github.com/AwsomeFox/campfire/pull/1676",
       "branch": "fix/issue-1674",
-      "status": "babysitting",
-      "note": "Review threads resolved (movement unbound in 78f7f11); MERGEABLE vs main; awaiting CI on head 78f7f11"
+      "status": "merged",
+      "note": "Merged 2026-07-28 via squash 33f0ef28 by app/cursor; review threads resolved; CI green on 78f7f11"
     }
   ]
 }
