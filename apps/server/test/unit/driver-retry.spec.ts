@@ -41,7 +41,7 @@ describe('error-kind retry disposition (#1052)', () => {
     // The map is `Record<AiErrorKind, …>`, so this list going stale is a compile error at the
     // map itself. Restating it here makes the intent legible.
     expect(Object.keys(ERROR_KIND_RETRY).sort()).toEqual(
-      ['auth', 'content_filter', 'context_length', 'invalid_request', 'rate_limit', 'server', 'timeout', 'transport', 'unknown'].sort(),
+      ['auth', 'content_filter', 'context_length', 'invalid_request', 'invalid_response', 'rate_limit', 'server', 'timeout', 'transport', 'unknown'].sort(),
     );
   });
 
