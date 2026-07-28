@@ -131,7 +131,6 @@ import {
   skillProficiencyLabel,
 } from './characterSheetA11y';
 import { useFormattingLocale } from '../../lib/format';
-import { useTranslation } from 'react-i18next';
 import { findSpecialResource, resourceAvailability } from './specialCharacterResource';
 
 export default function CharacterPage() {
