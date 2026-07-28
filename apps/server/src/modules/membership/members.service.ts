@@ -26,6 +26,9 @@ type GuestDmGrantCreateInput = z.infer<typeof GuestDmGrantCreate>;
 type SyncDb = DrizzleDb | Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
 const MAX_GUEST_DM_GRANT_MS = 30 * 24 * 60 * 60 * 1000;
 
+/** Display label for a role-change notification title (issue #1590). */
+const ROLE_LABEL: Record<Role, string> = { dm: 'DM', player: 'Player', viewer: 'Viewer' };
+
 /**
  * SQLITE_CONSTRAINT_* on a unique-index race (issue #819 exclusive character seat).
  * Mirrors the combatants / rules helpers — better-sqlite3 surfaces these codes on
@@ -883,6 +886,33 @@ export class MembersService {
         userId: String(updated.userId),
         memberId: updated.id,
         role: updated.role,
+      });
+
+      // Issue #1590: the SSE event above only reaches a browser that already has THIS
+      // campaign's stream open. #1546 found and fixed that exact gap for the admin
+      // `reassign_owner` bulk operation by ALSO sending an account-wide notification
+      // (see admin-catalog.service.ts's `planReassignOwner` doc comment) — but this is
+      // the far more common path a role change actually happens through: a DM
+      // promoting or demoting an existing player from inside their own campaign, not a
+      // rare admin bulk action. Leaving it SSE-only here left the common case with no
+      // account-wide signal at all, while the rare one had just been fixed.
+      //
+      // Reuses `added_to_campaign` rather than a new type, matching the precedent: both
+      // describe "your membership fact changed, your cached `/me` may be stale" and a
+      // client reacts to them identically (see MEMBERSHIP_NOTIFICATION_TYPES). Best-
+      // effort and self-suppressing — `notifyUser` no-ops when the actor IS the target,
+      // e.g. a DM stepping down as part of a co-DM handoff that also demotes themselves.
+      const [campaignRow] = await this.db
+        .select({ name: campaigns.name })
+        .from(campaigns)
+        .where(eq(campaigns.id, campaignId))
+        .limit(1);
+      await this.notifications.notifyUser(updated.userId, campaignId, actor, {
+        type: 'added_to_campaign',
+        title: `Your role in ${campaignRow?.name || 'a campaign'} changed to ${ROLE_LABEL[updated.role]}`,
+        entityType: 'campaign',
+        entityId: campaignId,
+        actorName: actor.name,
       });
     }
 

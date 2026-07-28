@@ -948,12 +948,15 @@ describe('Issue #587: campaign catalog paging, filtering and bulk lifecycle (e2e
       expect(again.status).toBe(400); // already decided
     });
 
-    it('returns the truthful decision when the audit write fails after it committed', async () => {
-      // The decision commits before either audit mirror is written. A failure there used
-      // to surface as a 500 while the request really was approved — so the DM's client
-      // still showed `pending`, retrying got "already decided", and they were left unable
-      // to tell whether their campaign's data was now exportable. For a CONSENT decision
-      // that ambiguity is exactly what the workflow exists to prevent.
+    it('returns the truthful decision when its SERVER-ADMIN audit mirror fails after commit (#1581)', async () => {
+      // #1581 split this write in two. The PRIMARY (campaign-scoped) audit row is now
+      // ATOMIC with the decision itself via AuditService#logInTx — see the dedicated
+      // rollback test below. This test is about the remaining post-commit half: the
+      // server-admin mirror is a convenience duplicate (findable without campaign
+      // access), not the record of consent, so IT still uses AuditService#log on the
+      // best-effort path and must not turn a genuinely-committed decision into a
+      // reported failure. Spying on `audit.log` (not `logInTx`) is what isolates that:
+      // the primary write no longer goes through `log` at all.
       const target = aIds[2];
       const raise = await bulk({
         operation: 'request_export',
@@ -985,6 +988,51 @@ describe('Issue #587: campaign catalog paging, filtering and bulk lifecycle (e2e
       const after = await dmA.get(`/api/v1/campaigns/${target}/catalog/export-requests`);
       const stored = (after.body.items as Array<{ id: number; status: string }>).find((r) => r.id === pending!.id);
       expect(stored!.status).toBe('approved');
+    });
+
+    it('rolls the decision itself back if its PRIMARY audit row fails to write (#1581)', async () => {
+      // The opposite guarantee from the test above, and the whole point of #1581: the
+      // campaign-scoped audit row IS the record of consent, so it is now written via
+      // AuditService#logInTx INSIDE the same transaction as the status UPDATE. If that
+      // insert throws, the transaction rolls back — the decision reverts to `pending`
+      // rather than silently existing with no record of who consented or why. Before
+      // this fix there was no way to get this guarantee at all: `log()` had no
+      // transaction-aware overload, so the decision always committed regardless of
+      // whether its audit row did.
+      const target = aIds[3];
+      const raise = await bulk({
+        operation: 'request_export',
+        campaignIds: [target],
+        exportProfile: 'backup',
+        dryRun: false,
+        reason: 'primary audit failure drill for the decision path',
+      });
+      expect(raise.status).toBe(201);
+
+      const inbox = await dmA.get(`/api/v1/campaigns/${target}/catalog/export-requests`);
+      const pending = (inbox.body.items as Array<{ id: number; status: string }>).find((r) => r.status === 'pending');
+      expect(pending).toBeDefined();
+
+      const audit = ctx.app.get(AuditService);
+      const spy = jest.spyOn(audit, 'logInTx').mockImplementation(() => {
+        throw new Error('audit table is unavailable');
+      });
+      try {
+        const decide = await dmA
+          .post(`/api/v1/campaigns/${target}/catalog/export-requests/${pending!.id}/decision`)
+          .send({ decision: 'approved', note: 'should not take effect' });
+        // The transaction threw, so this surfaces as a failure rather than a false success.
+        expect(decide.status).toBeGreaterThanOrEqual(500);
+      } finally {
+        spy.mockRestore();
+      }
+
+      // The status UPDATE rolled back WITH the failed audit insert: still pending, not
+      // silently approved with no record. A DM who sees this error can safely retry —
+      // nothing landed halfway.
+      const after = await dmA.get(`/api/v1/campaigns/${target}/catalog/export-requests`);
+      const stored = (after.body.items as Array<{ id: number; status: string }>).find((r) => r.id === pending!.id);
+      expect(stored!.status).toBe('pending');
     });
 
     it('lets exactly one of two concurrent decisions win', async () => {

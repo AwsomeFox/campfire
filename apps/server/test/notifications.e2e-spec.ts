@@ -64,10 +64,13 @@ describe('notifications (e2e)', () => {
     expect(await listFor(player)).toEqual([]);
     const count = await player.get('/api/v1/notifications/unread-count');
     expect(count.status).toBe(200);
-    expect(count.body).toEqual({ count: 0 });
+    // Issue #1590: `membershipChanged` — the account-wide-refresh discriminator the poll
+    // that already runs everywhere (not just campaign routes) uses to tell "your role
+    // changed" apart from ordinary table activity.
+    expect(count.body).toEqual({ count: 0, membershipChanged: false });
   });
 
-  it('added_to_campaign: adding a member notifies the added user (not the acting dm)', async () => {
+  it('added_to_campaign: adding a member notifies the added user (not the acting dm), and flags membershipChanged (#1590)', async () => {
     const add = await dm.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: playerId, role: 'player' });
     expect(add.status).toBe(201);
 
@@ -80,8 +83,24 @@ describe('notifications (e2e)', () => {
     expect(added[0].actorName).toBe('Dana DM');
     expect(added[0].readAt).toBeNull();
 
+    // #1590 — an `added_to_campaign` row is membership-shaped: the newly-added player's
+    // poller must be told to refresh /me even though this is a fresh notification, not a
+    // reassignment of an existing seat.
+    const playerCount = await player.get('/api/v1/notifications/unread-count');
+    expect(playerCount.body.membershipChanged).toBe(true);
+
     const dmList = await listFor(dm);
     expect(dmList.filter((n) => n.type === 'added_to_campaign')).toHaveLength(0);
+    // The acting DM has no unread membership-shaped notification of their own.
+    const dmCount = await dm.get('/api/v1/notifications/unread-count');
+    expect(dmCount.body.membershipChanged).toBe(false);
+
+    // Reading it clears the flag — a stale poll must not keep re-triggering the client's
+    // refresh forever.
+    const markRead = await player.post(`/api/v1/notifications/${added[0].id}/read`);
+    expect(markRead.status).toBe(201);
+    const afterRead = await player.get('/api/v1/notifications/unread-count');
+    expect(afterRead.body.membershipChanged).toBe(false);
   });
 
   it('recap_posted: creating a session with a recap notifies members, not the author', async () => {
