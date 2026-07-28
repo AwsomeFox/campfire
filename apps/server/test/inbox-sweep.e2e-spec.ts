@@ -36,6 +36,12 @@ class ScriptedClassifier implements InboxSweepClassifier {
   noProvider = false;
   failWith: Error | null = null;
   beforeReturn: (() => Promise<void>) | null = null;
+  // Issue #1724: consumed FIFO, one entry per `classify()` call, when non-empty. `script`/
+  // `failWith` are shared across every call for a given capture body, so they cannot give
+  // concurrent call #1 and call #2 (same note, racing) different outcomes — this can, which
+  // is what's needed to force a race THROUGH a specific recovery call site rather than just
+  // any of them.
+  sequence: Array<InboxSweepClassification | Error> = [];
 
   async classify(
     capture: InboxSweepCapture,
@@ -44,7 +50,12 @@ class ScriptedClassifier implements InboxSweepClassifier {
   ): Promise<InboxSweepClassification> {
     this.calls.push({ capture, context, config });
     if (this.noProvider) throw new NoProviderConfiguredError();
+    const queued = this.sequence.length > 0 ? this.sequence.shift() : undefined;
     if (this.beforeReturn) await this.beforeReturn();
+    if (queued !== undefined) {
+      if (queued instanceof Error) throw queued;
+      return queued;
+    }
     if (this.failWith) throw this.failWith;
     const scripted = this.script.get(capture.body);
     if (!scripted) throw new Error(`no scripted classification for: ${capture.body}`);
@@ -235,6 +246,17 @@ describe('inbox sweep (e2e)', () => {
     const proposals = await request(server).get(`/api/v1/campaigns/${campaignId}/proposals?status=pending`).set(dm);
     const npcProposals = proposals.body.filter((p: { entityType: string }) => p.entityType === 'npc');
     expect(npcProposals).toHaveLength(1);
+
+    // Issue #1724: exactly one proposal was created for this note, so a client bumping
+    // the "Pending Proposals" badge by `itemsNewlyProposed` off EACH response must move it
+    // by exactly one in total — not two. Whichever request lost the race recovers the
+    // winner's row via `applyClassification`'s own findLedger fallback, returning outcome
+    // 'proposed' indistinguishable in SHAPE from the winner's fresh 'proposed' result — the
+    // main per-item loop must not count that recovered instance as "newly proposed" just
+    // because it cannot tell the two apart by outcome alone (the pre-fix bug: it could not,
+    // and did).
+    const newlyProposedTotal = first.body.job.itemsNewlyProposed + second.body.job.itemsNewlyProposed;
+    expect(newlyProposedTotal).toBe(1);
   });
 
   it('does not commit a proposal when the inbox item changes while classification is in flight', async () => {
@@ -324,6 +346,67 @@ describe('inbox sweep (e2e)', () => {
     const ledger = await db.select().from(inboxSweepItems).where(eq(inboxSweepItems.noteId, noteId));
     expect(ledger).toHaveLength(1);
     expect(ledger[0].outcome).toBe('skipped');
+  });
+
+  it('issue #1724: a race where the OTHER side hits a classifier error still moves the badge by exactly one', async () => {
+    // Complements the race test above, which recovers through `applyClassification`'s own
+    // findLedger fallback (both requests get the SAME scripted classification — that is the
+    // one that actually regresses against pre-fix code: the old main loop counted BOTH a
+    // fresh 'proposed' and its own recovered 'proposed' as newly proposed). This test gives
+    // the two concurrent calls DIFFERENT outcomes — one a valid create, one an invalid
+    // classifier response — so the losing side recovers via `recordError`'s findLedger
+    // fallback instead, exercising the other of the two call sites Devin's review thread
+    // discussed. (That site was, on inspection, never independently over-counting — a
+    // `recordError()` call can only ever return outcome 'proposed' via this exact recovery,
+    // never as a fresh decision, so its old omission of a `newlyProposed` increment was
+    // coincidentally correct. This test does not fail against pre-fix code; it pins that the
+    // new shared `resultFromLedger`/`tallyOutcome` mechanism keeps this call site correct
+    // too, by construction, rather than leaving it correct by accident.)
+    //
+    // Which request wins the DB write is inherently nondeterministic — but the invariant
+    // holds either way: exactly one proposal can ever exist for this note (the UNIQUE
+    // ledger constraint guarantees it), so `itemsNewlyProposed` summed across both
+    // responses must always be exactly 1, regardless of which call site did the recovering.
+    const campaignId = await newCampaign('Sweep Concurrent Mixed Outcome');
+    const noteId = await submitInbox(campaignId, 'A capture racing a valid classification against an invalid one.');
+    classifier.sequence = [
+      { action: 'create', entityType: 'npc', targetId: null, fields: { name: 'Racing Ferryman' }, reason: 'named NPC mentioned in play' },
+      new InvalidInboxSweepClassificationError('invalid classifier response: not JSON'),
+    ];
+
+    let seen = 0;
+    let release!: () => void;
+    const bothClassified = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    classifier.beforeReturn = async () => {
+      seen += 1;
+      if (seen === 2) release();
+      await bothClassified;
+    };
+
+    const [first, second] = await Promise.all([
+      request(server).post(`/api/v1/campaigns/${campaignId}/inbox/sweep`).set(dm),
+      request(server).post(`/api/v1/campaigns/${campaignId}/inbox/sweep`).set(dm),
+    ]);
+
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(201);
+    expect(classifier.calls).toHaveLength(2);
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const ledger = await db.select().from(inboxSweepItems).where(eq(inboxSweepItems.noteId, noteId));
+    expect(ledger).toHaveLength(1);
+    expect(ledger[0].outcome).toBe('proposed');
+
+    const proposals = await request(server).get(`/api/v1/campaigns/${campaignId}/proposals?status=pending`).set(dm);
+    const npcProposals = proposals.body.filter((p: { entityType: string }) => p.entityType === 'npc');
+    expect(npcProposals).toHaveLength(1);
+
+    // The assertion that actually pins the contract (per #1724): exactly one proposal
+    // exists, so the badge must move by exactly one — not two, and not zero.
+    const newlyProposedTotal = first.body.job.itemsNewlyProposed + second.body.job.itemsNewlyProposed;
+    expect(newlyProposedTotal).toBe(1);
   });
 
   it('withholds external-provider captures until the author has external AI consent', async () => {

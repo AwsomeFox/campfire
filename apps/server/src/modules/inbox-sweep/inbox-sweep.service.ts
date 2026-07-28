@@ -61,6 +61,56 @@ class StaleInboxSweepItemError extends Error {
   }
 }
 
+/**
+ * An `InboxSweepItemResult` plus whether it was RECOVERED from an existing ledger row —
+ * either the pre-loop `existingByNote` lookup (a prior, already-acknowledged run) or a
+ * same-run concurrent-race recovery via `findLedger` inside `recordSkip`/`recordError`/
+ * `applyClassification` — rather than decided fresh by this call (issues #1717/#1724).
+ *
+ * `resultFromLedger` (below) is the ONLY place a recovered result is ever constructed, so
+ * it is also the only place that stamps `recovered: true`; every other constructor of an
+ * `InboxSweepItemResult` in this file goes through `freshOutcome`, which is `recovered:
+ * false` by construction. Every counting site MUST route through `tallyOutcome` rather than
+ * re-deriving "is this new" from `result.outcome` — that per-call-site re-derivation is
+ * exactly how two call sites (an inline classifier-error branch and the main per-item loop)
+ * independently reached opposite answers for the identical race-recovered case (#1724).
+ */
+interface SweepOutcome {
+  result: InboxSweepItemResult;
+  recovered: boolean;
+}
+
+/** Running per-outcome counts for one `sweep()` call. See `tallyOutcome`. */
+interface SweepCounts {
+  proposed: number;
+  skipped: number;
+  errored: number;
+  /** Subset of `proposed` that was decided fresh by this call — excludes recovered rows. */
+  newlyProposed: number;
+}
+
+function freshOutcome(result: InboxSweepItemResult): SweepOutcome {
+  return { result, recovered: false };
+}
+
+/**
+ * The single place that turns a `SweepOutcome` into the running counts. `recovered` is read
+ * off the outcome, never re-derived — so a recovered `outcome: 'proposed'` (a same-run race
+ * recovery, or a prior-run ledger row) always increments the total but never `newlyProposed`,
+ * regardless of which of the several call sites below produced it.
+ */
+function tallyOutcome(counts: SweepCounts, outcome: SweepOutcome): void {
+  const { result, recovered } = outcome;
+  if (result.outcome === 'proposed') {
+    counts.proposed++;
+    if (!recovered) counts.newlyProposed++;
+  } else if (result.outcome === 'errored') {
+    counts.errored++;
+  } else {
+    counts.skipped++;
+  }
+}
+
 type InboxSweepEgress = 'external' | 'local';
 type InboxSweepTx = Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
 
@@ -158,7 +208,9 @@ export class InboxSweepService {
         itemsErrored: 0,
         detail: 'no open inbox items',
       });
-      return { job: jobToDomain(job), items: [] };
+      // itemsNewlyProposed is set on every return path (issue #1717) — nothing here to
+      // recover from, so the client's `?? itemsProposed` fallback is genuinely dead.
+      return { job: { ...jobToDomain(job), itemsNewlyProposed: 0 }, items: [] };
     }
 
     const existing = await this.db
@@ -185,10 +237,7 @@ export class InboxSweepService {
       characters: (summary?.characters ?? []).map((c) => ({ id: c.id, name: c.name })),
     };
     const results: InboxSweepItemResult[] = [];
-    let proposed = 0;
-    let newlyProposed = 0;
-    let skipped = 0;
-    let errored = 0;
+    const counts: SweepCounts = { proposed: 0, skipped: 0, errored: 0, newlyProposed: 0 };
 
     // Placeholder job row so ledger rows have a valid job_id from the start; totals are
     // corrected with a single UPDATE once the loop below finishes (best-effort auditable
@@ -211,10 +260,9 @@ export class InboxSweepService {
           const link = this.resolveLinkForPrior(prior);
           await this.tryResolve(item.id, user, role, prior.reason, link.entityType, link.entityId);
         }
-        results.push(this.resultFromLedger(item.id, prior, bodyByNoteId.get(item.id) ?? ''));
-        if (prior.outcome === 'proposed') proposed++;
-        else if (prior.outcome === 'errored') errored++;
-        else skipped++;
+        const outcome = this.resultFromLedger(item.id, prior, bodyByNoteId.get(item.id) ?? '');
+        results.push(outcome.result);
+        tallyOutcome(counts, outcome);
         continue;
       }
 
@@ -222,8 +270,7 @@ export class InboxSweepService {
       const externalAiGate = await this.externalAiGate(campaignId, config);
       const withheldReason = this.externalAiWithheldReason(item, externalAiGate);
       if (withheldReason) {
-        errored++;
-        results.push({
+        const outcome = freshOutcome({
           noteId: item.id,
           outcome: 'errored',
           entityType: null,
@@ -232,6 +279,8 @@ export class InboxSweepService {
           reason: withheldReason,
           body: item.body,
         });
+        results.push(outcome.result);
+        tallyOutcome(counts, outcome);
         continue;
       }
 
@@ -245,23 +294,20 @@ export class InboxSweepService {
           const disabledJob = await this.updateJob(job.id, {
             status: 'disabled',
             itemsTotal: openItems.length,
-            itemsProposed: proposed,
-            itemsSkipped: skipped,
-            itemsErrored: errored,
+            itemsProposed: counts.proposed,
+            itemsSkipped: counts.skipped,
+            itemsErrored: counts.errored,
             detail: 'no AI provider configured for this campaign',
           });
-          return { job: { ...jobToDomain(disabledJob), itemsNewlyProposed: newlyProposed }, items: results };
+          return { job: { ...jobToDomain(disabledJob), itemsNewlyProposed: counts.newlyProposed }, items: results };
         }
         const reason = `classification failed: ${err instanceof Error ? err.message : String(err)}`;
         if (err instanceof InvalidInboxSweepClassificationError) {
           const outcome = await this.recordError(campaignId, job.id, item.id, reason, user, role, item.body);
-          results.push(outcome);
-          if (outcome.outcome === 'proposed') proposed++;
-          else if (outcome.outcome === 'errored') errored++;
-          else skipped++;
+          results.push(outcome.result);
+          tallyOutcome(counts, outcome);
         } else {
-          errored++;
-          results.push({
+          const outcome = freshOutcome({
             noteId: item.id,
             outcome: 'errored',
             entityType: null,
@@ -270,6 +316,8 @@ export class InboxSweepService {
             reason,
             body: item.body,
           });
+          results.push(outcome.result);
+          tallyOutcome(counts, outcome);
         }
         continue;
       }
@@ -284,23 +332,19 @@ export class InboxSweepService {
         user,
         role,
       );
-      results.push(outcome);
-      if (outcome.outcome === 'proposed') {
-        proposed++;
-        newlyProposed++;
-      } else if (outcome.outcome === 'errored') errored++;
-      else skipped++;
+      results.push(outcome.result);
+      tallyOutcome(counts, outcome);
     }
 
     const finalJob = await this.updateJob(job.id, {
       status: 'succeeded',
       itemsTotal: openItems.length,
-      itemsProposed: proposed,
-      itemsSkipped: skipped,
-      itemsErrored: errored,
-      detail: `swept ${openItems.length} item(s): ${proposed} proposed, ${skipped} skipped, ${errored} errored`,
+      itemsProposed: counts.proposed,
+      itemsSkipped: counts.skipped,
+      itemsErrored: counts.errored,
+      detail: `swept ${openItems.length} item(s): ${counts.proposed} proposed, ${counts.skipped} skipped, ${counts.errored} errored`,
     });
-    return { job: { ...jobToDomain(finalJob), itemsNewlyProposed: newlyProposed }, items: results };
+    return { job: { ...jobToDomain(finalJob), itemsNewlyProposed: counts.newlyProposed }, items: results };
   }
 
   private async applyClassification(
@@ -312,7 +356,7 @@ export class InboxSweepService {
     classification: InboxSweepClassification,
     user: RequestUser,
     role: Role,
-  ): Promise<InboxSweepItemResult> {
+  ): Promise<SweepOutcome> {
     const supportedEntityType =
       classification.entityType != null && classification.entityType in ENTITY_SCHEMAS ? classification.entityType : null;
 
@@ -385,10 +429,10 @@ export class InboxSweepService {
         classification.action === 'update' ? entityType : null,
         classification.action === 'update' ? targetId : null,
       );
-      return { noteId, outcome: 'proposed', entityType, entityId: targetId, proposalId: proposal.id, reason, body: originalBody };
+      return freshOutcome({ noteId, outcome: 'proposed', entityType, entityId: targetId, proposalId: proposal.id, reason, body: originalBody });
     } catch (err) {
       if (err instanceof StaleInboxSweepItemError) {
-        return {
+        return freshOutcome({
           noteId,
           outcome: 'errored',
           entityType: null,
@@ -396,7 +440,7 @@ export class InboxSweepService {
           proposalId: null,
           reason: `${err.message}; re-run the sweep if it is still open`,
           body: originalBody,
-        };
+        });
       }
       if (err instanceof NotFoundException) {
         const reason = `failed to file ${classification.action} proposal: ${err.message}`;
@@ -409,7 +453,7 @@ export class InboxSweepService {
         return this.resultFromLedger(noteId, concurrent, originalBody);
       }
       const reason = `failed to file ${classification.action} proposal: ${err instanceof Error ? err.message : String(err)}`;
-      return { noteId, outcome: 'errored', entityType: null, entityId: null, proposalId: null, reason, body: originalBody };
+      return freshOutcome({ noteId, outcome: 'errored', entityType: null, entityId: null, proposalId: null, reason, body: originalBody });
     }
   }
 
@@ -427,7 +471,7 @@ export class InboxSweepService {
     user: RequestUser,
     role: Role,
     body: string,
-  ): Promise<InboxSweepItemResult> {
+  ): Promise<SweepOutcome> {
     try {
       await this.persistLedger(campaignId, jobId, noteId, 'skipped', null, null, null, reason);
     } catch (err) {
@@ -445,7 +489,7 @@ export class InboxSweepService {
       // ledger-write failure must never abort the whole sweep loop and strand every
       // remaining item without a result. With no ledger row, this item can be retried on
       // a later sweep if it was not resolved by hand.
-      return {
+      return freshOutcome({
         noteId,
         outcome: 'errored',
         entityType: null,
@@ -453,10 +497,10 @@ export class InboxSweepService {
         proposalId: null,
         reason: `failed to record skip: ${message}`,
         body,
-      };
+      });
     }
     await this.tryResolve(noteId, user, role, reason, null, null);
-    return { noteId, outcome: 'skipped', entityType: null, entityId: null, proposalId: null, reason, body };
+    return freshOutcome({ noteId, outcome: 'skipped', entityType: null, entityId: null, proposalId: null, reason, body });
   }
 
   /**
@@ -473,7 +517,7 @@ export class InboxSweepService {
     user: RequestUser,
     role: Role,
     body: string,
-  ): Promise<InboxSweepItemResult> {
+  ): Promise<SweepOutcome> {
     try {
       await this.persistLedger(campaignId, jobId, noteId, 'errored', null, null, null, reason);
     } catch (err) {
@@ -485,7 +529,7 @@ export class InboxSweepService {
       }
       const message = err instanceof Error ? err.message : String(err);
       this.logger.warn(`Failed to persist error ledger for inbox item ${noteId}: ${message}`);
-      return {
+      return freshOutcome({
         noteId,
         outcome: 'errored',
         entityType: null,
@@ -493,11 +537,11 @@ export class InboxSweepService {
         proposalId: null,
         reason: `failed to record error: ${message}`,
         body,
-      };
+      });
     }
 
     await this.tryResolve(noteId, user, role, reason, null, null);
-    return { noteId, outcome: 'errored', entityType: null, entityId: null, proposalId: null, reason, body };
+    return freshOutcome({ noteId, outcome: 'errored', entityType: null, entityId: null, proposalId: null, reason, body });
   }
 
   /** Best-effort: the ledger row above is what makes a re-sweep idempotent, not this. */
@@ -538,15 +582,24 @@ export class InboxSweepService {
     return { entityType: (row.entityType as InboxSweepEntityType | null) ?? null, entityId: row.entityId };
   }
 
-  private resultFromLedger(noteId: number, row: typeof inboxSweepItems.$inferSelect, body: string): InboxSweepItemResult {
+  /**
+   * The ONLY place a recovered `SweepOutcome` is constructed (issues #1717/#1724) — every
+   * call site that recovers a row from the ledger (the pre-loop prior-run lookup, or a
+   * same-run concurrent-race recovery) must route through here, never build its own
+   * `{ result, recovered: true }` by hand, so "is this recovered" has exactly one answer.
+   */
+  private resultFromLedger(noteId: number, row: typeof inboxSweepItems.$inferSelect, body: string): SweepOutcome {
     return {
-      noteId,
-      outcome: row.outcome as InboxSweepOutcome,
-      entityType: (row.entityType as InboxSweepEntityType | null) ?? null,
-      entityId: row.entityId,
-      proposalId: row.proposalId,
-      reason: row.reason || 'previously swept',
-      body,
+      result: {
+        noteId,
+        outcome: row.outcome as InboxSweepOutcome,
+        entityType: (row.entityType as InboxSweepEntityType | null) ?? null,
+        entityId: row.entityId,
+        proposalId: row.proposalId,
+        reason: row.reason || 'previously swept',
+        body,
+      },
+      recovered: true,
     };
   }
 
