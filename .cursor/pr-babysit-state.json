@@ -6,8 +6,8 @@
       "url": "https://github.com/AwsomeFox/campfire/pull/1656",
       "headBranch": "fix/issue-741",
       "baseBranch": "main",
-      "updatedAt": "2026-07-28T11:28:00Z",
-      "notes": "Head 84930a74. Addressed Codex P1s: inventory acquire/refresh/linked-state scoped to global|same-campaign; homebrew structured edit merge clears opposing data/dataJson. Resolved both review threads. Prior 6e863d8d registered MCP catalog + @ApiOperation. Awaiting required CI on 84930a74."
+      "updatedAt": "2026-07-28T11:45:00Z",
+      "notes": "Head 679fb8c0. Addressed Codex P1s (inventory scope + data/dataJson merge) and Devin write-mode finding (homebrew MCP writers via writeTool + requireWriteMode; #393 e2e extended). All three review threads resolved. Awaiting required CI on 679fb8c0."
     }
   ]
 }
