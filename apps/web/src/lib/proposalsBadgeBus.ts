@@ -10,19 +10,48 @@
  * most one Layout mounted at a time; a listener that outlives its component is a no-op
  * once nothing calls the returned unsubscribe is skipped (Layout always unsubscribes
  * on unmount).
+ *
+ * campaignId is the originating campaign (issue #1679 review): a sweep started on
+ * campaign A can resolve after the DM has already switched to campaign B, and without
+ * it the bump would land on whichever campaign Layout currently displays — inflating
+ * B's badge with a count that belongs to A. Layout ignores bumps whose campaignId
+ * doesn't match the one it's currently showing.
  */
-type BumpListener = (delta: number) => void;
+type BumpListener = (delta: number, campaignId: number) => void;
 
-const listeners = new Set<BumpListener>();
+const proposalListeners = new Set<BumpListener>();
 
 /** Called by a producer (e.g. InboxPage after a sweep) once N proposals were filed. */
-export function bumpPendingProposalsBadge(delta: number): void {
+export function bumpPendingProposalsBadge(delta: number, campaignId: number): void {
   if (delta <= 0) return;
-  for (const listener of listeners) listener(delta);
+  for (const listener of proposalListeners) listener(delta, campaignId);
 }
 
 /** Called by Layout to subscribe; returns an unsubscribe function. */
 export function onPendingProposalsBadgeBump(listener: BumpListener): () => void {
-  listeners.add(listener);
-  return () => listeners.delete(listener);
+  proposalListeners.add(listener);
+  return () => proposalListeners.delete(listener);
+}
+
+/**
+ * Same problem, the inbox count's own badge (issue #1679 review): Layout's `inboxCount`
+ * only re-fetches on campaignId/isDm/location.pathname change, none of which fire when
+ * a sweep resolves items while the DM stays on /inbox — the sidebar count is stale until
+ * the next route change. Unlike the proposals bus this carries an absolute count, not a
+ * delta: InboxPage already has the authoritative post-sweep total from its own reload,
+ * so there is no drift risk in just handing that number over directly.
+ */
+type InboxCountListener = (total: number, campaignId: number) => void;
+
+const inboxCountListeners = new Set<InboxCountListener>();
+
+/** Called by a producer (e.g. InboxPage after its post-sweep reload) with the fresh open total. */
+export function setInboxCountBadge(total: number, campaignId: number): void {
+  for (const listener of inboxCountListeners) listener(total, campaignId);
+}
+
+/** Called by Layout to subscribe; returns an unsubscribe function. */
+export function onInboxCountBadgeSet(listener: InboxCountListener): () => void {
+  inboxCountListeners.add(listener);
+  return () => inboxCountListeners.delete(listener);
 }

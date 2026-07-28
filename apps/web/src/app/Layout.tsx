@@ -53,7 +53,7 @@ import {
 } from '../lib/connectionSync';
 import { KeyboardCommandProvider, useKeyboardCommands, useKeyboardCommandHint } from '../components/KeyboardCommandProvider';
 import { SafetyHoldBar } from '../components/SafetyHoldBar';
-import { onPendingProposalsBadgeBump } from '../lib/proposalsBadgeBus';
+import { onPendingProposalsBadgeBump, onInboxCountBadgeSet } from '../lib/proposalsBadgeBus';
 import {
   buildCampaignNavGroups,
   isActiveNavPath,
@@ -661,8 +661,22 @@ function LayoutContent() {
   // without this the badge would only catch up on the next route change.
   useEffect(() => {
     if (!isDm) return;
-    return onPendingProposalsBadgeBump((delta) => setPendingProposals((n) => n + delta));
-  }, [isDm]);
+    return onPendingProposalsBadgeBump((delta, bumpCampaignId) => {
+      if (bumpCampaignId !== campaignId) return;
+      setPendingProposals((n) => n + delta);
+    });
+  }, [isDm, campaignId]);
+
+  // Same staleness problem as the proposals badge above, for the inbox count itself
+  // (issue #1679 review): a sweep resolves items while the DM stays on /inbox, which
+  // changes none of this badge's own re-fetch dependencies (campaignId/isDm/pathname).
+  useEffect(() => {
+    if (!isDm) return;
+    return onInboxCountBadgeSet((total, sourceCampaignId) => {
+      if (sourceCampaignId !== campaignId) return;
+      setInboxCount(total);
+    });
+  }, [isDm, campaignId]);
 
   // me.memberships is fetched once at login, so it's stale the moment a DM changes
   // someone's access mid-session. Once the campaign list has loaded, if this campaign

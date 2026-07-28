@@ -22,7 +22,7 @@ import { api, API, ApiError, translateApiError } from '../../lib/api';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { useCampaign } from '../../app/CampaignContext';
 import { archivedWriteBlockedReason } from '../../app/campaignAccess';
-import { bumpPendingProposalsBadge } from '../../lib/proposalsBadgeBus';
+import { bumpPendingProposalsBadge, setInboxCountBadge } from '../../lib/proposalsBadgeBus';
 import { Card, Chip, Btn, TextArea, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
 import { GameIcon } from '../../components/GameIcon';
@@ -81,6 +81,12 @@ export default function InboxPage() {
   const { t } = useTranslation();
   const { campaignId } = useParams<{ campaignId: string }>();
   const cid = Number(campaignId);
+  // Live pointer to the currently-viewed campaign, for async callbacks (the sweep
+  // request below) that need to detect a campaign switch that happened while they
+  // were in flight — a plain closure over `cid` only ever sees the value from the
+  // render that started the request, never a later one.
+  const cidRef = useRef(cid);
+  cidRef.current = cid;
   const { isDm, canDmWrite } = useCampaignAccess();
   const campaign = useCampaign(Number.isFinite(cid) ? cid : undefined);
   const [searchParams] = useSearchParams();
@@ -118,7 +124,10 @@ export default function InboxPage() {
     [cid],
   );
 
-  const load = useCallback(async () => {
+  // Returns the fresh open total on success (undefined if superseded/failed) — sweepInbox
+  // uses this to push Layout's inbox badge the authoritative post-sweep count (issue
+  // #1679 review) without a second round-trip just for a number it already fetched here.
+  const load = useCallback(async (): Promise<number | undefined> => {
     const gen = ++fetchGeneration.current;
     setError(null);
     setForbidden(false);
@@ -128,7 +137,7 @@ export default function InboxPage() {
         api.get<NoteListPage>(inboxUrl(false)),
         api.get<NoteListPage>(inboxUrl(true)),
       ]);
-      if (gen !== fetchGeneration.current) return;
+      if (gen !== fetchGeneration.current) return undefined;
       setOpenList({
         items: open.items,
         total: open.total,
@@ -141,13 +150,15 @@ export default function InboxPage() {
         hasMore: resolved.hasMore,
         nextCursor: resolved.nextCursor,
       });
+      return open.total;
     } catch (e) {
-      if (gen !== fetchGeneration.current) return;
+      if (gen !== fetchGeneration.current) return undefined;
       if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
         setForbidden(true);
       } else {
         setError(t('notes.inboxCouldntLoad'));
       }
+      return undefined;
     } finally {
       if (gen === fetchGeneration.current) setLoading(false);
     }
@@ -184,6 +195,17 @@ export default function InboxPage() {
   useEffect(() => {
     if (Number.isFinite(cid) && isDm) void load();
   }, [cid, isDm, load]);
+
+  // The campaign switcher reuses this route component (issue #1679 review) — cid
+  // changes without InboxPage unmounting. Sweep result/error/body state is
+  // campaign-scoped (a sweep outcome from campaign A means nothing once the DM has
+  // switched to campaign B), so clear it whenever cid changes rather than leaving
+  // the previous campaign's outcome card visible indefinitely.
+  useEffect(() => {
+    setSweepResult(null);
+    setSweepItemBodies({});
+    setSweepError(null);
+  }, [cid]);
 
   // Notification deep-links use /inbox?inbox=:id#entity-inbox-:id. Resolved rows
   // only render under History, so switch the tab before EntityDeepLinkFocus runs.
@@ -257,6 +279,10 @@ export default function InboxPage() {
   // to a "working" state — see the render below — rather than the page looking inert.
   async function sweepInbox() {
     if (sweepBusy) return;
+    // Captured so a completion that lands after the DM has switched campaigns (the
+    // campaign switcher reuses this component — issue #1679 review) can be told apart
+    // from one that's still for the currently-viewed campaign, and ignored.
+    const sweepCid = cid;
     setSweepBusy(true);
     setSweepError(null);
     setSweepResult(null);
@@ -266,16 +292,21 @@ export default function InboxPage() {
     // panel show "which capture" a reason applies to, not just a bare note id.
     setSweepItemBodies(Object.fromEntries(openList.items.map((n) => [n.id, n.body])));
     try {
-      const result = await api.post<InboxSweepResult>(`${API}/campaigns/${cid}/inbox/sweep`);
+      const result = await api.post<InboxSweepResult>(`${API}/campaigns/${sweepCid}/inbox/sweep`);
+      if (sweepCid !== cidRef.current) return;
       setSweepResult(result);
       // Server-truth reconciliation still happens on the next route change (Layout's
       // effect); this just makes the badge catch up without waiting for that.
-      if (result.job.itemsProposed > 0) bumpPendingProposalsBadge(result.job.itemsProposed);
-      await load();
+      if (result.job.itemsProposed > 0) bumpPendingProposalsBadge(result.job.itemsProposed, sweepCid);
+      const freshOpenTotal = await load();
+      if (sweepCid === cidRef.current && freshOpenTotal !== undefined) {
+        setInboxCountBadge(freshOpenTotal, sweepCid);
+      }
     } catch (e) {
+      if (sweepCid !== cidRef.current) return;
       setSweepError(translateApiError(e, t, { fallbackKey: 'notes.sweepFailed' }));
     } finally {
-      setSweepBusy(false);
+      if (sweepCid === cidRef.current) setSweepBusy(false);
     }
   }
 
@@ -309,11 +340,18 @@ export default function InboxPage() {
 
   // Precedence: archived beats "nothing to sweep" — an archived campaign is disabled
   // for a reason the DM can't fix by resolving items, so that's the more useful message.
+  // "nothing to sweep" is also gated on the initial load having settled (issue #1679
+  // review): openList starts at EMPTY_LIST (total 0) while loading is true, so without
+  // this a DM opening a large/slow inbox briefly sees a false "the inbox is empty"
+  // message and disabled button before the real count arrives. Disable-without-a-
+  // misleading-reason during that window instead.
   const sweepDisabledReason = !canDmWrite
     ? archivedWriteBlockedReason(campaign)
-    : openList.total === 0
-      ? t('notes.sweepNothingToSweep')
-      : null;
+    : loading
+      ? null
+      : openList.total === 0
+        ? t('notes.sweepNothingToSweep')
+        : null;
 
   return (
     <div className="max-w-3xl mx-auto px-4 mt-5 space-y-3 pb-20 md:pb-10" style={{ maxWidth: 760 }}>
@@ -332,7 +370,18 @@ export default function InboxPage() {
         .
       </p>
 
-      <SweepControl busy={sweepBusy} disabledReason={sweepDisabledReason} onSweep={() => void sweepInbox()} />
+      <SweepControl
+        busy={sweepBusy}
+        disabledReason={sweepDisabledReason}
+        // canDmWrite is false both when the campaign is genuinely archived (covered by
+        // sweepDisabledReason's text above) AND, momentarily, while `campaign` (loaded
+        // separately via useCampaign) hasn't resolved yet — archivedWriteBlockedReason
+        // returns null for the latter, which would otherwise leave the button enabled
+        // with write access still unconfirmed (issue #1679 review). Hard-disable on
+        // !canDmWrite regardless of whether there's a reason to show yet.
+        hardDisabled={!canDmWrite}
+        onSweep={() => void sweepInbox()}
+      />
       {sweepError && <ErrorNote message={sweepError} onRetry={() => void sweepInbox()} />}
       {sweepResult && (
         <SweepResultCard
@@ -358,7 +407,7 @@ export default function InboxPage() {
         </button>
       </div>
 
-      {error && <ErrorNote message={error} onRetry={load} />}
+      {error && <ErrorNote message={error} onRetry={() => void load()} />}
 
       {loading && openList.items.length === 0 && historyList.items.length === 0 ? (
         <Card>
@@ -434,17 +483,21 @@ export default function InboxPage() {
 function SweepControl({
   busy,
   disabledReason,
+  hardDisabled = false,
   onSweep,
 }: {
   busy: boolean;
   disabledReason: string | null;
+  /** Disable the control even when there's no text reason to show yet (e.g. write
+   *  access not confirmed while the campaign is still loading). */
+  hardDisabled?: boolean;
   onSweep: () => void;
 }) {
   const { t } = useTranslation();
   return (
     <div className="cf-inset p-3 space-y-1.5">
       <div className="flex items-center gap-2 flex-wrap">
-        <Btn className="!min-h-0 !py-1.5 text-xs" onClick={onSweep} disabled={busy || disabledReason !== null}>
+        <Btn className="!min-h-0 !py-1.5 text-xs" onClick={onSweep} disabled={busy || disabledReason !== null || hardDisabled}>
           {busy ? t('notes.sweepButtonBusy') : t('notes.sweepButton')}
         </Btn>
         <p className="text-[11px] text-secondary m-0 flex-1 min-w-0">{t('notes.sweepHint')}</p>
@@ -497,7 +550,7 @@ function SweepResultCard({
       <div className="cf-inset p-3 space-y-1.5">
         <p className="m-0 text-sm text-amber-200">{job.detail || t('notes.sweepNoProvider')}</p>
         <div className="flex items-center gap-3">
-          <Link to={`/c/${campaignId}/settings`} className="text-xs text-purple-400 hover:underline">
+          <Link to={`/c/${campaignId}/settings#ai-dm-provider`} className="text-xs text-purple-400 hover:underline">
             {t('notes.sweepOpenAiSettings')}
           </Link>
           <button type="button" className="text-xs text-secondary hover:text-white" onClick={onDismiss}>
