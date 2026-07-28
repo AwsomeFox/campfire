@@ -41,6 +41,7 @@ import {
 } from '@campfire/schema';
 import type {
   Character,
+  ConditionInstance,
   CharacterAction,
   CharacterResource,
   Role,
