@@ -2,12 +2,12 @@
   "tracked": [
     {
       "pr": 1655,
-      "status": "babysitting",
+      "status": "merged",
       "url": "https://github.com/AwsomeFox/campfire/pull/1655",
       "headBranch": "fix/issue-742",
       "baseBranch": "main",
-      "updatedAt": "2026-07-28T15:18:13Z",
-      "notes": "Head a1beba15 (bulk status UI align). MERGEABLE; no unresolved threads. Waiting CI 30371996932."
+      "updatedAt": "2026-07-28T15:59:46Z",
+      "notes": "Squash-merged after CI green on a1beba15; comments addressed; no conflicts."
     }
   ]
 }
