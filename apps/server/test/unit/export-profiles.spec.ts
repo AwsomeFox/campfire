@@ -217,17 +217,15 @@ describe('allowlist projection (#586)', () => {
     expect(identifiers).not.toContain('Hero');
   });
 
-  it('collects the organized-play running DM (via membership) and sweeps it out of free text (#588)', () => {
-    // #1548: `assignedDmUserId` itself no longer reaches `collectPrivateIdentifiers` at all —
-    // ExportService now builds `raw.scheduledSessions` via `toScheduledSessionExport(...)`,
+  it('collects a campaign-member running DM and sweeps it out of free text (#588)', () => {
+    // #1548: `assignedDmUserId` itself no longer reaches `collectPrivateIdentifiers` as a field
+    // on `raw` — ExportService now builds `raw.scheduledSessions` via `toScheduledSessionExport(...)`,
     // which omits every organized-play decoration field (including assignedDmUserId) BEFORE `raw`
-    // is constructed, so scanning for it here would be a no-op on real data (see the comment on
-    // the removed `add(s.assignedDmUserId)` call in export-redaction.ts). That's fine because the
-    // organized-play running DM is always a campaign member, so their id is already covered by the
-    // `raw.members[].userId` sweep a few lines above — same as any other member. This test now pins
-    // THAT guarantee: a DM typing the running DM's account id into publishable prose is what the
-    // free-text sweep exists for, and no field allowlist can catch it, because a quest body is
-    // content a published module must carry.
+    // is constructed. When the running DM also happens to be a campaign member (the common case),
+    // their id is still covered by the `raw.members[].userId` sweep a few lines above — same as any
+    // other member. This test pins THAT guarantee: a DM typing the running DM's account id into
+    // publishable prose is what the free-text sweep exists for, and no field allowlist can catch it,
+    // because a quest body is content a published module must carry.
     const raw = rawPayload();
     (raw.members as Array<Record<string, unknown>>).push({ id: 2, campaignId: 1, userId: 'dev:grace-hopper', username: 'grace', displayName: 'Grace Hopper', role: 'dm' });
     (raw.quests as Array<Record<string, unknown>>)[0].body = 'Ask dev:grace-hopper about the vault key';
@@ -238,6 +236,32 @@ describe('allowlist projection (#586)', () => {
     expect(out.scannedIdentifiers).toContain('dev:grace-hopper');
     expect(JSON.stringify(out.data)).not.toContain('grace-hopper');
     expect((out.data.quests as Array<Record<string, unknown>>)[0].body).toContain('[redacted]');
+  });
+
+  it('collects a NON-member running DM via the `extra` sideband and sweeps it out of free text (#588)', () => {
+    // Devin/Codex review on #1548: `createSeries` accepts an arbitrary `assignedDmUserId` without
+    // requiring the assignee be a member of the campaign being exported (organized-play.service.ts),
+    // so the "always a campaign member" assumption behind the previous fix does NOT generally hold.
+    // ExportService now re-fetches the pre-strip scheduled-session rows separately (cheap,
+    // bounded-per-campaign) and threads their assignedDmUserId values into collectPrivateIdentifiers
+    // / projectExport via the `extra` parameter — NEVER attached to `raw` itself, so they cannot leak
+    // into the exported document under any profile (including 'backup's unredacted pass-through).
+    // This test proves the sweep still catches a DM id that is genuinely absent from raw.members.
+    const raw = rawPayload();
+    (raw.quests as Array<Record<string, unknown>>)[0].body = 'Ask dev:grace-hopper about the vault key';
+    const extra = ['dev:grace-hopper'];
+
+    expect(collectPrivateIdentifiers(raw)).not.toContain('dev:grace-hopper');
+    expect(collectPrivateIdentifiers(raw, extra)).toContain('dev:grace-hopper');
+
+    const out = projectExport(raw, resolveExportPolicy('publish'), extra);
+    expect(out.scannedIdentifiers).toContain('dev:grace-hopper');
+    expect(JSON.stringify(out.data)).not.toContain('grace-hopper');
+    expect((out.data.quests as Array<Record<string, unknown>>)[0].body).toContain('[redacted]');
+
+    // `extra` is never attached to `raw` itself — confirm the sideband identifiers used for the
+    // sweep did not also get added as a new field anywhere on the raw payload.
+    expect(JSON.stringify(raw)).not.toContain('assignedDmUserId');
   });
 });
 
