@@ -13,8 +13,8 @@ import {
   LibraryBulkRequest, LibraryBulkResult,
   QuestStatus, FactionStanding, LocationStatus,
   CampaignLibraryTemplate, CampaignLibraryTemplateSave, CampaignLibraryTemplateInstantiate,
+  LibraryEntityType,
   type LibraryEntitySummary,
-  type LibraryEntityType,
   type CampaignLibraryTemplate as CampaignLibraryTemplateType,
   type Role,
 } from '@campfire/schema';
@@ -26,6 +26,9 @@ import { getRequestId } from '../../common/request-context';
 import { AuditService } from '../audit/audit.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
+
+type LibraryTransaction = Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
+type TemplateRef = { key: string; table: string; attachmentCommitted?: boolean };
 
 function toDomain(row: typeof campaignLibraryMonsters.$inferSelect): CampaignLibraryMonster {
   return CampaignLibraryMonster.parse({
@@ -453,17 +456,17 @@ export class CampaignLibraryService {
    * Keeping the field lists here makes adding an entity an intentional reviewable
    * decision and prevents ids, tombstones and encounter play state leaking through.
    */
-  private readonly templateAdapters: Record<Exclude<LibraryEntityType, 'attachment'>, { table: string; fields: readonly string[]; refs: Record<string, string> }> = {
-    quest: { table: 'quests', fields: ['parent_id', 'title', 'body', 'status', 'giver_npc_id', 'reward', 'dm_secret', 'hidden', 'sort_order'], refs: { parent_id: 'quests', giver_npc_id: 'npcs' } },
-    npc: { table: 'npcs', fields: ['name', 'role', 'disposition', 'location_id', 'faction_id', 'body', 'dm_secret', 'portrait_url', 'icon_slug', 'hidden'], refs: { location_id: 'locations', faction_id: 'factions' } },
-    location: { table: 'locations', fields: ['parent_id', 'name', 'kind', 'status', 'map_x', 'map_y', 'body', 'dm_secret', 'portrait_url'], refs: { parent_id: 'locations' } },
+  private readonly templateAdapters: Record<Exclude<LibraryEntityType, 'attachment'>, { table: string; fields: readonly string[]; refs: Record<string, TemplateRef> }> = {
+    quest: { table: 'quests', fields: ['parent_id', 'title', 'body', 'status', 'giver_npc_id', 'reward', 'dm_secret', 'hidden', 'sort_order'], refs: { parent_id: { key: 'parentId', table: 'quests' }, giver_npc_id: { key: 'giverNpcId', table: 'npcs' } } },
+    npc: { table: 'npcs', fields: ['name', 'role', 'disposition', 'location_id', 'faction_id', 'body', 'dm_secret', 'portrait_url', 'icon_slug', 'hidden'], refs: { location_id: { key: 'locationId', table: 'locations' }, faction_id: { key: 'factionId', table: 'factions' } } },
+    location: { table: 'locations', fields: ['parent_id', 'name', 'kind', 'status', 'map_x', 'map_y', 'body', 'dm_secret', 'portrait_url'], refs: { parent_id: { key: 'parentId', table: 'locations' } } },
     faction: { table: 'factions', fields: ['name', 'kind', 'body', 'goals', 'dm_secret', 'hidden', 'reputation', 'standing', 'portrait_url'], refs: {} },
     timeline_event: { table: 'timeline_events', fields: ['title', 'in_world_date', 'body', 'era', 'sort_index', 'dm_secret', 'hidden'], refs: {} },
-    inventory_item: { table: 'inventory_items', fields: ['owner_type', 'character_id', 'name', 'qty', 'notes', 'icon_slug'], refs: { character_id: 'characters' } },
-    campaign_library_monster: { table: 'campaign_library_monsters', fields: ['name', 'statblock_json', 'source_rule_entry_id'], refs: { source_rule_entry_id: 'rule_entries' } },
+    inventory_item: { table: 'inventory_items', fields: ['owner_type', 'character_id', 'name', 'qty', 'notes', 'icon_slug'], refs: { character_id: { key: 'characterId', table: 'characters' } } },
+    campaign_library_monster: { table: 'campaign_library_monsters', fields: ['name', 'statblock_json', 'source_rule_entry_id'], refs: { source_rule_entry_id: { key: 'sourceRuleEntryId', table: 'rule_entries' } } },
     // Encounters are prep templates only.  No combatants, turn pointer, rolls,
     // completion state or idempotency state can be reintroduced by instantiation.
-    encounter: { table: 'encounters', fields: ['name', 'location_id', 'quest_id', 'session_id', 'map_attachment_id', 'grid_size', 'grid_scale', 'grid_unit', 'grid_snap', 'fog', 'grid_type', 'hex_orientation', 'aoe', 'grid_offset_x', 'grid_offset_y', 'grid_cell_height', 'grid_rotation', 'grid_opacity', 'hidden'], refs: { location_id: 'locations', quest_id: 'quests', session_id: 'sessions', map_attachment_id: 'attachments' } },
+    encounter: { table: 'encounters', fields: ['name', 'location_id', 'quest_id', 'session_id', 'map_attachment_id', 'grid_size', 'grid_scale', 'grid_unit', 'grid_snap', 'fog', 'grid_type', 'hex_orientation', 'aoe', 'grid_offset_x', 'grid_offset_y', 'grid_cell_height', 'grid_rotation', 'grid_opacity', 'hidden'], refs: { location_id: { key: 'locationId', table: 'locations' }, quest_id: { key: 'questId', table: 'quests' }, session_id: { key: 'sessionId', table: 'sessions' }, map_attachment_id: { key: 'mapAttachmentId', table: 'attachments', attachmentCommitted: true } } },
   };
 
   private templateRow(row: typeof campaignLibraryTemplates.$inferSelect): CampaignLibraryTemplateType {
@@ -475,22 +478,31 @@ export class CampaignLibraryService {
     return this.templateAdapters[type];
   }
 
-  private assertTemplateRefs(tx: any, campaignId: number, adapter: { refs: Record<string, string> }, snapshot: Record<string, unknown>) {
-    for (const [field, table] of Object.entries(adapter.refs)) {
+  private assertTemplateRefs(tx: LibraryTransaction, campaignId: number, adapter: { refs: Record<string, TemplateRef> }, snapshot: Record<string, unknown>) {
+    for (const [field, ref] of Object.entries(adapter.refs)) {
       const value = snapshot[field];
       if (value == null) continue;
-      if (!Number.isInteger(value) || !tx.get(sql`select id from ${sql.raw(table)} where id=${value as number} and campaign_id=${campaignId}`)) {
-        throw new BadRequestException(`${field} must reference an entity in this campaign`);
+      if (!Number.isInteger(value)) throw new BadRequestException(`${ref.key} must be an integer id`);
+      // Rule entries are globally scoped on this branch.  Do not assume #741's
+      // campaign-owned compendium migration exists here.
+      const valid = ref.table === 'rule_entries'
+        ? tx.get(sql`select id from rule_entries where id=${value as number}`)
+        : ref.attachmentCommitted
+          ? tx.get(sql`select id from attachments where id=${value as number} and campaign_id=${campaignId} and state='committed'`)
+          : tx.get(sql`select id from ${sql.raw(ref.table)} where id=${value as number} and campaign_id=${campaignId}`);
+      if (!valid) {
+        throw new BadRequestException(`${ref.key} must reference a valid entity in this campaign`);
       }
     }
   }
 
-  private createFromSnapshot(tx: any, campaignId: number, type: Exclude<LibraryEntityType, 'attachment'>, snapshot: Record<string, unknown>, name?: string, refs: Record<string, number> = {}) {
+  private createFromSnapshot(tx: LibraryTransaction, campaignId: number, type: Exclude<LibraryEntityType, 'attachment'>, snapshot: Record<string, unknown>, name?: string, refs: Record<string, number> = {}) {
     const adapter = this.adapter(type);
     const values: Record<string, unknown> = { ...snapshot };
     for (const [key, value] of Object.entries(refs)) {
-      if (!(key in adapter.refs)) throw new BadRequestException(`Unknown template reference override: ${key}`);
-      values[key] = value;
+      const entry = Object.entries(adapter.refs).find(([, ref]) => ref.key === key);
+      if (!entry) throw new BadRequestException(`Unknown template reference override: ${key}`);
+      values[entry[0]] = value;
     }
     if (name) values[type === 'quest' || type === 'timeline_event' ? 'title' : 'name'] = name;
     this.assertTemplateRefs(tx, campaignId, adapter, values);
@@ -529,11 +541,12 @@ export class CampaignLibraryService {
     return this.db.transaction((tx) => {
       const template = tx.select().from(campaignLibraryTemplates).where(and(eq(campaignLibraryTemplates.id, templateId), eq(campaignLibraryTemplates.campaignId, campaignId), isNull(campaignLibraryTemplates.archivedAt))).get();
       if (!template) throw new NotFoundException(`Active template ${templateId} not found in this campaign`);
-      const type = template.entityType as LibraryEntityType;
+      const type = LibraryEntityType.safeParse(template.entityType);
+      if (!type.success || type.data === 'attachment') throw new BadRequestException('Template has an unsupported entity type');
       const snapshot = z.record(z.string(), z.unknown()).parse(fromJsonText(template.snapshotJson, {}));
-      const id = this.createFromSnapshot(tx, campaignId, type as Exclude<LibraryEntityType, 'attachment'>, snapshot, input.name, input.refs);
-      tx.insert(auditLog).values({ campaignId, actor: auditActor(user), actorRole: role, action: 'campaign_library.template.instantiate', entityType: type, entityId: id, detail: template.name, requestId: getRequestId() ?? null, createdAt: ts }).run();
-      return { entityType: type, entityId: id };
+      const id = this.createFromSnapshot(tx, campaignId, type.data, snapshot, input.name, input.refs);
+      tx.insert(auditLog).values({ campaignId, actor: auditActor(user), actorRole: role, action: 'campaign_library.template.instantiate', entityType: type.data, entityId: id, detail: template.name, requestId: getRequestId() ?? null, createdAt: ts }).run();
+      return { entityType: type.data, entityId: id };
     });
   }
 
