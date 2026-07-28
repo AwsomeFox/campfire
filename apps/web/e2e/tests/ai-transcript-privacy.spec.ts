@@ -125,8 +125,9 @@ async function openTable(page: Page, campaignId: number) {
 test.describe('AI transcript privacy (#573)', () => {
   // #1592 — block the PWA service worker. Root cause of the reported flake
   // (`ai-transcript-privacy.spec.ts:154` timing out on `getByRole('log', { name: 'Table
-  // transcript' })`): `vite.config.ts` registers every `GET /api/**` route with workbox under
-  // a `NetworkOnly` strategy, and once the SW has installed and taken control of THIS page — it
+  // transcript' })`): `vite.config.ts` registers API GET routes with workbox runtime
+  // caching (NetworkOnly for sensitive exclusions, NetworkFirst for allowlisted JSON/images).
+  // Once the SW has installed and taken control of THIS page — it
   // does not control the tab that registered it, only the NEXT navigation onward — a `fetch`
   // the page issues is intercepted by the SW's own `fetch` listener and re-issued from the
   // service-worker thread, not the document. `page.route()` only intercepts requests the
@@ -136,8 +137,9 @@ test.describe('AI transcript privacy (#573)', () => {
   // This test signs in as two different accounts across THREE full navigations
   // (`openTable`/`signIn` both `page.goto`), which is enough time for the SW's install →
   // activate → claim sequence to complete partway through. On the run where it does, the
-  // THIRD `openTable`'s `GET /campaigns/:id/ai-dm` bypasses `mockDriverTable`'s route
-  // entirely and returns the campaign's real (non-driver) seat — confirmed by capturing the
+  // THIRD `openTable`'s `GET **/api/v1/campaigns/${campaignId}/ai-dm**` bypasses
+  // `mockDriverTable`'s route entirely and returns the campaign's real (non-driver) seat —
+  // confirmed by capturing the
   // response body during a failing run: `{"mode":"co_dm",...}` instead of the mocked
   // `{"mode":"driver",...}`. The app then correctly renders the Co-DM gate instead of the
   // transcript for data it genuinely received; nothing in `AiTablePage`/`RunSessionPage`
