@@ -18,6 +18,7 @@ import { Card, ErrorNote, Skeleton } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
 import { ruleEntryIconSlug } from '../../lib/ruleEntryIcon';
 import { useCampaign, useCampaigns } from '../../app/CampaignContext';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { PageTitle } from '../../components/PageTitle';
 import { TermHelp } from '../../components/TermHelp';
 import {
@@ -67,6 +68,7 @@ export default function CompendiumPage() {
   const id = Number(campaignId);
   const [searchParams, setSearchParams] = useSearchParams();
   const campaign = useCampaign(Number.isFinite(id) ? id : undefined);
+  const { isDm, canDmWrite } = useCampaignAccess();
   const { loading: campaignsLoading, error: campaignsError, refresh: refreshCampaigns } = useCampaigns();
   const campaignPack = campaign?.ruleSystem || '';
   // The campaign record comes from the shared campaigns list; if that list failed
@@ -128,6 +130,13 @@ export default function CompendiumPage() {
   const [facets, setFacets] = useState<RuleSearchFacet[]>([]);
   const [total, setTotal] = useState<number | null>(null);
   const [hasMore, setHasMore] = useState(false);
+  const [authoring, setAuthoring] = useState(false);
+  const [rawMode, setRawMode] = useState(false);
+  const [draft, setDraft] = useState({ name: '', slug: '', type: 'spell', summary: '', body: '', rightsStatus: 'private_original', license: '', attribution: '', sourceUrl: '', dataJson: '{}' });
+  const [authorError, setAuthorError] = useState<string | null>(null);
+  const [importPreview, setImportPreview] = useState<any[] | null>(null);
+  const [importEntries, setImportEntries] = useState<any[] | null>(null);
+  const [importStrategy, setImportStrategy] = useState<'skip' | 'replace' | 'duplicate'>('skip');
   const [nextCursor, setNextCursor] = useState<string | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -319,6 +328,36 @@ export default function CompendiumPage() {
     focusChip(next);
   }
 
+  async function saveHomebrew() {
+    setAuthorError(null);
+    let data: Record<string, unknown> | undefined;
+    try { data = JSON.parse(draft.dataJson); if (!data || Array.isArray(data) || typeof data !== 'object') throw new Error(); }
+    catch { setAuthorError('Raw data must be a JSON object.'); return; }
+    const payload = { ...draft, data: rawMode ? undefined : data, dataJson: rawMode ? draft.dataJson : undefined };
+    try {
+      const proposed = !isDm;
+      await api.post(`${API}/campaigns/${id}/homebrew${proposed ? '?proposed=true' : ''}`, payload);
+      setAuthoring(false); setDraft({ name: '', slug: '', type: 'spell', summary: '', body: '', rightsStatus: 'private_original', license: '', attribution: '', sourceUrl: '', dataJson: '{}' });
+      setReloadToken((n) => n + 1);
+    } catch (err) { setAuthorError(translateApiError(err, t, { fallbackKey: 'compendium.errors.search' })); }
+  }
+
+  async function chooseImport(file: File | undefined) {
+    if (!file) return;
+    try {
+      const parsed: unknown = JSON.parse(await file.text());
+      const entries = Array.isArray(parsed) ? parsed : (parsed as { entries?: unknown[] }).entries;
+      if (!Array.isArray(entries)) throw new Error('Expected a JSON array or { entries: [...] }');
+      const preview = await api.post<{ entries: any[] }>(`${API}/campaigns/${id}/homebrew/import/preview`, { entries });
+      setImportEntries(entries); setImportPreview(preview.entries);
+    } catch (err) { setAuthorError(err instanceof Error ? err.message : 'Could not read import file'); }
+  }
+  async function applyImport() {
+    if (!importEntries) return;
+    try { await api.post(`${API}/campaigns/${id}/homebrew/import/apply`, { entries: importEntries, strategy: importStrategy }); setImportEntries(null); setImportPreview(null); setReloadToken((n) => n + 1); }
+    catch (err) { setAuthorError(translateApiError(err, t, { fallbackKey: 'compendium.errors.search' })); }
+  }
+
   if (!Number.isFinite(id)) {
     return (
       <div className="max-w-4xl mx-auto px-4 mt-5">
@@ -344,6 +383,30 @@ export default function CompendiumPage() {
       </div>
 
       <div className="flex flex-col gap-1.5">
+        <div className="flex gap-2 flex-wrap">
+          <button className="btn btn-ghost" type="button" onClick={() => setAuthoring((v) => !v)}>{isDm && canDmWrite ? 'Add homebrew' : 'Propose homebrew'}</button>
+          {isDm && canDmWrite && <label className="btn btn-ghost" style={{ cursor: 'pointer' }}>Import JSON<input aria-label="Import homebrew JSON" type="file" accept="application/json,.json" hidden onChange={(e) => chooseImport(e.target.files?.[0])} /></label>}
+        </div>
+        {authoring && (
+          <Card>
+            <h2 style={{ margin: 0, fontSize: 15 }}>{isDm && canDmWrite ? 'Campaign homebrew' : 'Homebrew proposal'}</h2>
+            <div className="flex gap-2 flex-wrap">
+              <input className="input" placeholder="Name" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value, slug: draft.slug || e.target.value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') })} />
+              <input className="input" placeholder="stable-slug" value={draft.slug} onChange={(e) => setDraft({ ...draft, slug: e.target.value })} />
+              <select className="input" value={draft.type} onChange={(e) => setDraft({ ...draft, type: e.target.value })}><option value="spell">Spell</option><option value="monster">Monster</option><option value="item">Item</option><option value="other">Other</option></select>
+            </div>
+            <input className="input" placeholder="Summary" value={draft.summary} onChange={(e) => setDraft({ ...draft, summary: e.target.value })} />
+            <textarea className="input" placeholder="Markdown details" value={draft.body} onChange={(e) => setDraft({ ...draft, body: e.target.value })} />
+            <label><input type="checkbox" checked={rawMode} onChange={(e) => setRawMode(e.target.checked)} /> Raw JSON data</label>
+            {!rawMode && <p className="text-muted" style={{ margin: 0, fontSize: 12 }}>{draft.type === 'spell' ? 'Structured spell fields: level, school, casting time, range, duration.' : draft.type === 'monster' ? 'Structured monster fields: AC, HP, CR, abilities, actions.' : draft.type === 'item' ? 'Structured item fields: category, rarity, weight, value.' : 'Structured fields.'}</p>}
+            <textarea className="input" aria-label="Homebrew JSON object" value={draft.dataJson} onChange={(e) => setDraft({ ...draft, dataJson: e.target.value })} />
+            <select className="input" value={draft.rightsStatus} onChange={(e) => setDraft({ ...draft, rightsStatus: e.target.value })}><option value="private_original">Private original — no license required</option><option value="permission_granted">Permission granted</option><option value="open_licensed">Open licensed</option></select>
+            {draft.rightsStatus !== 'private_original' && <><input className="input" placeholder="License" value={draft.license} onChange={(e) => setDraft({ ...draft, license: e.target.value })} /><input className="input" placeholder="Attribution" value={draft.attribution} onChange={(e) => setDraft({ ...draft, attribution: e.target.value })} /><input className="input" placeholder="https:// source URL" value={draft.sourceUrl} onChange={(e) => setDraft({ ...draft, sourceUrl: e.target.value })} /></>}
+            {authorError && <ErrorNote message={authorError} />}
+            <button className="btn btn-primary" type="button" onClick={saveHomebrew}>{isDm && canDmWrite ? 'Save homebrew' : 'Submit proposal'}</button>
+          </Card>
+        )}
+        {importPreview && <Card><h2 style={{ margin: 0, fontSize: 15 }}>Import preview</h2><p>{importPreview.filter((row) => row.conflict).length} slug conflicts found.</p><select className="input" value={importStrategy} onChange={(e) => setImportStrategy(e.target.value as typeof importStrategy)}><option value="skip">Skip conflicts</option><option value="replace">Replace conflicts</option><option value="duplicate">Duplicate conflicts</option></select><button className="btn btn-primary" type="button" onClick={applyImport}>Apply import</button></Card>}
         <label htmlFor={COMPENDIUM_SEARCH_ID} style={{ fontSize: 12, fontWeight: 600 }}>
           {COMPENDIUM_SEARCH_LABEL}
         </label>
