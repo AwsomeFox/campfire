@@ -304,7 +304,7 @@ describe('action resolver (real SQLite, service layer)', () => {
 
   it('#1571: a caster at 0 remaining slots at a level cannot cast at that level through apply_action, and nothing else is written', () => {
     const { orm, service, encounterId, actor, aliceChar, drake } = seed();
-    // Exhaust Alice's only level-3 slot first, exactly like the prior test — then the SECOND
+    // Exhaust Alice's level-3 slots first, exactly like the prior test — then the NEXT
     // cast at that level is the one #1571 is about.
     orm.update(characters).set({ spellSlots: JSON.stringify({ '3': { max: 2, used: 2 } }) }).where(eq(characters.id, aliceChar.id)).run();
 

@@ -838,7 +838,7 @@ export class ActionResolverService {
       // Driver) a clean retry — nothing here to undo.
       let spellSlotSpend: { characterId: number; slots: SpellSlotMap } | null = null;
       if (resolution.spellLevelSpent > 0 && actor.characterId !== null) {
-        const character = tx.select().from(characters).where(eq(characters.id, actor.characterId)).limit(1).all()[0];
+        const character = tx.select().from(characters).where(eq(characters.id, actor.characterId)).get();
         if (character) {
           const slots = fromJsonText<SpellSlotMap>(character.spellSlots, {});
           const outcome = applySpellSlotDelta(slots, resolution.spellLevelSpent, 1);
@@ -902,7 +902,7 @@ export class ActionResolverService {
       }
 
       for (const t of resolution.targets) {
-        const fresh = tx.select().from(combatants).where(eq(combatants.id, t.combatantId)).limit(1).all()[0];
+        const fresh = tx.select().from(combatants).where(eq(combatants.id, t.combatantId)).get();
         if (!fresh) continue;
         const conditionsBefore = fromJsonText<string[]>(fresh.conditions, []);
         const effects = fromJsonText<Array<Record<string, unknown>>>(fresh.activeEffects, []);
@@ -986,12 +986,11 @@ export class ActionResolverService {
 
         // Mirror the HP/condition slice onto a linked, live character sheet (issue #711/#486).
         if (fresh.kind === 'character' && fresh.characterId !== null && encounter.status !== 'ended') {
-          const [sheetRow] = tx
+          const sheetRow = tx
             .select({ conditionInstances: characters.conditionInstances })
             .from(characters)
             .where(eq(characters.id, fresh.characterId))
-            .limit(1)
-            .all();
+            .get();
           const sheetPriorInstances = sheetRow?.conditionInstances ?? null;
           tx.update(characters)
             .set({
@@ -1020,7 +1019,7 @@ export class ActionResolverService {
       }
 
       // Spend the actor's resources: action-economy slot, spell slot, concentration.
-      const actorFresh = tx.select().from(combatants).where(eq(combatants.id, actor.id)).limit(1).all()[0];
+      const actorFresh = tx.select().from(combatants).where(eq(combatants.id, actor.id)).get();
       if (actorFresh) {
         const turnState = CombatantTurnState.parse(fromJsonText<unknown>(actorFresh.turnState, null) ?? {});
         if (resolution.costSlot && resolution.costCount > 0) {
@@ -1094,7 +1093,7 @@ export class ActionResolverService {
 
     this.db.transaction((tx) => {
       for (const t of token.targets) {
-        const fresh = tx.select().from(combatants).where(eq(combatants.id, t.combatantId)).limit(1).all()[0];
+        const fresh = tx.select().from(combatants).where(eq(combatants.id, t.combatantId)).get();
         if (!fresh) continue;
         const effects = fromJsonText<Array<Record<string, unknown>>>(fresh.activeEffects, []);
         const keptEffects = effects.filter((e) => !t.effectIdsAdded.includes(String(e.id)));
@@ -1123,12 +1122,11 @@ export class ActionResolverService {
           .where(eq(combatants.id, fresh.id))
           .run();
         if (fresh.kind === 'character' && fresh.characterId !== null && encounter.status !== 'ended') {
-          const [undoSheetRow] = tx
+          const undoSheetRow = tx
             .select({ conditionInstances: characters.conditionInstances })
             .from(characters)
             .where(eq(characters.id, fresh.characterId))
-            .limit(1)
-            .all();
+            .get();
           const undoSheetPriorInstances = undoSheetRow?.conditionInstances ?? null;
           tx.update(characters)
             .set({
@@ -1146,7 +1144,7 @@ export class ActionResolverService {
         }
       }
       // Refund the actor's resources.
-      const actorFresh = tx.select().from(combatants).where(eq(combatants.id, actor.id)).limit(1).all()[0];
+      const actorFresh = tx.select().from(combatants).where(eq(combatants.id, actor.id)).get();
       if (actorFresh) {
         const turnState = CombatantTurnState.parse(fromJsonText<unknown>(actorFresh.turnState, null) ?? {});
         if (token.costSlot && token.costCount > 0) {
@@ -1161,7 +1159,7 @@ export class ActionResolverService {
         tx.update(combatants).set({ turnState: toJsonText(turnState) }).where(eq(combatants.id, actor.id)).run();
       }
       if (token.spellLevelSpent > 0 && actor.characterId !== null) {
-        const character = tx.select().from(characters).where(eq(characters.id, actor.characterId)).limit(1).all()[0];
+        const character = tx.select().from(characters).where(eq(characters.id, actor.characterId)).get();
         if (character) {
           const slots = fromJsonText<Record<string, { max: number; used: number }>>(character.spellSlots, {});
           const slot = slots[String(token.spellLevelSpent)];
