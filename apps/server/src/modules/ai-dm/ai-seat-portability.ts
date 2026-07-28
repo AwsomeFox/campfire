@@ -1,5 +1,5 @@
 import type { aiDmSeats } from '../../db/schema';
-import { AiDmMode, AiDmProactiveSettings, AiDmStylePresets } from '@campfire/schema';
+import { AiDmMode, AiDmProactiveSettings, AiDmSeat, AiDmStylePresets } from '@campfire/schema';
 
 /**
  * Which AI-seat fields travel on clone / export / import — stated ONCE (issue #1049).
@@ -219,6 +219,20 @@ const ACTION_QUEUE_DEPTH_MAX = 20;
 const ACTION_QUEUE_DEPTH_DEFAULT = 8;
 
 /**
+ * `tokenBudget` bounds, READ from {@link AiDmSeat} rather than re-typed here (issue #1593).
+ *
+ * A literal `1_000_000_000` beside this reader would be a SECOND place that number lives —
+ * exactly the defect this issue closes, one door over. `AiDmSeat.shape.tokenBudget` is
+ * `z.number().int().nonnegative().max(1_000_000_000).default(0)`; `.removeDefault()` un-wraps
+ * the `ZodDefault` to reach the `ZodNumber`, whose public `.minValue`/`.maxValue` getters report
+ * the effective bounds from its `.nonnegative()`/`.max()` checks. If the schema's cap ever
+ * changes, this reads the new value automatically — nothing here needs to be told.
+ */
+const TOKEN_BUDGET_SCHEMA = AiDmSeat.shape.tokenBudget.removeDefault();
+const TOKEN_BUDGET_MIN = TOKEN_BUDGET_SCHEMA.minValue ?? 0;
+const TOKEN_BUDGET_MAX = TOKEN_BUDGET_SCHEMA.maxValue ?? Number.MAX_SAFE_INTEGER;
+
+/**
  * Read the portable seat fields out of an untrusted export payload.
  *
  * Returns `PortableAiSeat`, so this literal is held to the same derived key set as
@@ -268,14 +282,25 @@ export function readPortableAiSeat(
     // Falls back to `off` rather than to `co_dm`: a mode we could not read is not consent to
     // arm the seat, and `off` is the only value that gate treats as disarmed.
     mode: enumOrDefault(AiDmMode, src.mode, 'off', 'mode', warn),
-    // `enabled` and `tokenBudget` need no equivalent and get none — deliberately, not by
-    // oversight. `boolOf` is TOTAL (anything not `true` becomes `false`) and the budget is
-    // floored at 0 below, so neither has an unrepresentable value left to admit. `mode` was the
-    // only scalar here with a closed domain that nothing enforced.
+    // `enabled` needs no equivalent to `mode`'s enum check and gets none — deliberately, not
+    // by oversight. `boolOf` is TOTAL (anything not `true` becomes `false`), so a boolean has
+    // no unrepresentable value left to admit; `mode` was the only scalar here with a CLOSED
+    // domain that nothing enforced. `tokenBudget` is NOT in that position — see below, it has
+    // its own closed domain (`AiDmSeat.shape.tokenBudget`'s `.nonnegative().max(...)`) and,
+    // until this fix, nothing here enforced its upper bound either.
     enabled: boolOf(src.enabled),
     model: str(src.model),
     instructions: str(src.instructions),
-    tokenBudget: Math.max(0, intOr(src.tokenBudget, 0)),
+    // CLAMPED to `AiDmSeat`'s own `tokenBudget` bounds (issue #1593), not merely floored at 0.
+    //
+    // `Math.max(0, …)` enforced the floor but not the schema's `.max(1_000_000_000)` ceiling —
+    // so an archive carrying `tokenBudget: 5e9` imported without complaint and read back
+    // verbatim, holding a value the schema itself calls illegal. `assertWithinServerTokenCap`
+    // governs actual spend regardless of what the seat stores, so this was a schema-integrity
+    // gap, not a spend-safety one — but a seat should not report a limit larger than the
+    // schema admits. `TOKEN_BUDGET_MIN`/`MAX` are read from the schema (see above), so this
+    // cannot silently drift from `AiDmSeat.shape.tokenBudget` the way a re-typed literal could.
+    tokenBudget: clamp(intOr(src.tokenBudget, 0), TOKEN_BUDGET_MIN, TOKEN_BUDGET_MAX),
     proactiveSettings: parseOrDefault(AiDmProactiveSettings, src.proactiveSettings, 'proactiveSettings', warn),
     stylePresets: parseOrDefault(AiDmStylePresets, src.stylePresets, 'stylePresets', warn),
     // CLAMPED to the same 1..20 the seat schema enforces, not merely floored at 0.
