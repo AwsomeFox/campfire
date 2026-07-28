@@ -8,13 +8,23 @@
  * Optional encounter hooks let Layout reuse this single stream for live-encounter
  * chrome (issue #637) instead of opening a second /campaigns/:id/events socket.
  *
- * `onRevoked` (issue #1640) is the other half of membership change: unlike a role change,
- * a revocation removes the membership entirely, so re-rendering chrome in place is not
- * enough — the caller (Layout) must move the user off this campaign. Wired to the SSE
- * stream's `onForbidden`, not to a `membership.revoked` frame: the server never puts that
- * frame on the data path (it is a control signal that closes the stream instead, #527), so
- * the reliable client-side observation is "this stream 403'd" rather than "I received a
- * revocation event". That fires within one reconnect attempt of the stream closing —
+ * `onRevoked` (issue #1640, widened by #1707) is the other half of membership change: unlike
+ * a role change, a revocation — or the whole campaign being trashed — removes the membership
+ * (or its meaning) entirely, so re-rendering chrome in place is not enough; the caller
+ * (Layout) must move the user off this campaign. Wired to the SSE stream's `onForbidden`, not
+ * to a `membership.revoked`/`campaign.trashed` frame: the server never puts either on the
+ * data path (both are control signals that close the stream instead, #527/#867).
+ *
+ * The client-side observation this actually rests on is NOT uniformly "this stream 403'd" —
+ * that was true only for revocation, and was wrong for trash until #1707: a still-a-member
+ * subscriber reconnecting to a TRASHED campaign gets 404 from `assertLifecycleAccess`
+ * (`campaign-access.service.ts`), by design, to keep a trashed campaign indistinguishable
+ * from one that never existed. `useCampaignEvents.ts` now opts that 404 into the same
+ * `onForbidden` callback via `treatNotFoundAsForbidden` (scoped to this one endpoint, not a
+ * change to the shared 401/403 classifier — see its own doc comment). So the reliable
+ * observation `onRevoked` actually rests on is "this campaign's stream terminated with a
+ * proven, non-retryable connect failure" — 403 for revocation, 404 for trash — not "403"
+ * specifically. Either way it fires within one reconnect attempt of the stream closing —
  * effectively immediate for a tab that has this campaign open, no polling wait.
  */
 import { useCallback, useEffect, useRef } from 'react';

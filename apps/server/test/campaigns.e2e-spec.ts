@@ -617,6 +617,142 @@ describe('campaign soft-delete + trash/restore/purge (e2e, issue #116)', () => {
 });
 
 /**
+ * Issue #1707 — trash's sibling gap next to #1640/#1653's membership-revocation signal: a
+ * member with an open tab on a campaign that gets TRASHED (not removed as a member — the
+ * campaign itself vanishes) got no signal of any kind. `CampaignsService.remove()` now sends
+ * an account-wide `campaign_trashed` notification, mirroring `MembersService.remove()`'s
+ * `removed_from_campaign`, so a tab with no SSE stream open on the affected campaign still
+ * learns via the same backstop #1590/#1634 built.
+ *
+ * Also covers the sibling bug found while fixing this: the `revokeInvites: true` branch of
+ * `remove()` used to `return` before ever reaching the SSE teardown / notification tail, so
+ * trashing a campaign with "also revoke invites" checked left the signal entirely unsent.
+ * Both branches now share one tail — tested explicitly below so they can't diverge again.
+ */
+describe('campaign trash notifies account-wide (e2e, real cookie sessions, issue #1707)', () => {
+  let ctx: TestAppContext;
+  let adminAgent: ReturnType<typeof request.agent>;
+  let dmAgent: ReturnType<typeof request.agent>;
+  let playerAgent: ReturnType<typeof request.agent>;
+  let dmId: number;
+  let playerId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    const server = ctx.app.getHttpServer();
+
+    adminAgent = request.agent(server);
+    await adminAgent.post('/api/v1/auth/setup').send({ username: 'trash-admin', password: 'admin-password-1' });
+
+    const createDm = await adminAgent
+      .post('/api/v1/users')
+      .send({ username: 'trash-dm', password: 'trash-dm-password', serverRole: 'user' });
+    dmId = createDm.body.id;
+    dmAgent = request.agent(server);
+    await dmAgent.post('/api/v1/auth/login').send({ username: 'trash-dm', password: 'trash-dm-password' });
+
+    const createPlayer = await adminAgent
+      .post('/api/v1/users')
+      .send({ username: 'trash-player', password: 'trash-player-password', serverRole: 'user' });
+    playerId = createPlayer.body.id;
+    playerAgent = request.agent(server);
+    await playerAgent.post('/api/v1/auth/login').send({ username: 'trash-player', password: 'trash-player-password' });
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('trashing a campaign notifies every OTHER member account-wide, and NOT the acting dm', async () => {
+    const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'Doomed Campaign' });
+    const campaignId = campRes.body.id;
+    const addRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: playerId, role: 'player' });
+    expect(addRes.status).toBe(201);
+
+    const del = await dmAgent.delete(`/api/v1/campaigns/${campaignId}`);
+    expect(del.status).toBe(200);
+
+    // /me's memberships list already excludes trashed campaigns (auth.service.ts) — confirms
+    // this really is a `/me`-staleness event, not just campaign-list staleness.
+    const meRes = await playerAgent.get('/api/v1/me');
+    expect(meRes.body.memberships.some((m: { campaignId: number }) => m.campaignId === campaignId)).toBe(false);
+
+    const notes = await playerAgent.get('/api/v1/notifications');
+    const items = Array.isArray(notes.body) ? notes.body : notes.body.items;
+    const trashed = items.find(
+      (n: { type: string; campaignId: number }) => n.type === 'campaign_trashed' && n.campaignId === campaignId,
+    );
+    expect(trashed).toBeDefined();
+    expect(trashed.readAt).toBeNull();
+
+    const playerCount = await playerAgent.get('/api/v1/notifications/unread-count');
+    expect(playerCount.body.membershipChanged).toBe(true);
+
+    // The acting dm is not a recipient and gets no self-notification.
+    const dmCount = await dmAgent.get('/api/v1/notifications/unread-count');
+    expect(dmCount.body.membershipChanged).toBe(false);
+
+    // The notification can actually be marked read (issue #1707's read-filter exemption) —
+    // without CAMPAIGN_LIFECYCLE_NOTIFICATION_TYPES this row would 404 on mark-read forever,
+    // since campaigns.deletedAt is already set by the time anyone reads it.
+    const markRes = await playerAgent.post(`/api/v1/notifications/${trashed.id}/read`);
+    expect(markRes.status).toBe(201);
+    const afterRead = await playerAgent.get('/api/v1/notifications/unread-count');
+    expect(afterRead.body.membershipChanged).toBe(false);
+  });
+
+  it('a member who blocked the acting dm still receives the trash signal (mirrors the #597 revocation hardening)', async () => {
+    const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'Doomed Campaign 2' });
+    const campaignId = campRes.body.id;
+    const addRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: playerId, role: 'player' });
+    expect(addRes.status).toBe(201);
+
+    const blockRes = await playerAgent.post(`/api/v1/campaigns/${campaignId}/safety/blocks`).send({ targetUserId: String(dmId) });
+    expect(blockRes.status).toBe(201);
+
+    const del = await dmAgent.delete(`/api/v1/campaigns/${campaignId}`);
+    expect(del.status).toBe(200);
+
+    const notes = await playerAgent.get('/api/v1/notifications');
+    const items = Array.isArray(notes.body) ? notes.body : notes.body.items;
+    const trashed = items.find(
+      (n: { type: string; campaignId: number }) => n.type === 'campaign_trashed' && n.campaignId === campaignId,
+    );
+    expect(trashed).toBeDefined();
+  });
+
+  it('trashing with revokeInvites=true ALSO notifies (the sibling gap found while fixing #1707: this branch used to return before the shared tail)', async () => {
+    const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'Doomed Campaign 3' });
+    const campaignId = campRes.body.id;
+    const addRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: playerId, role: 'player' });
+    expect(addRes.status).toBe(201);
+
+    const del = await dmAgent.delete(`/api/v1/campaigns/${campaignId}?revokeInvites=true`);
+    expect(del.status).toBe(200);
+
+    const notes = await playerAgent.get('/api/v1/notifications');
+    const items = Array.isArray(notes.body) ? notes.body : notes.body.items;
+    const trashed = items.find(
+      (n: { type: string; campaignId: number }) => n.type === 'campaign_trashed' && n.campaignId === campaignId,
+    );
+    expect(trashed).toBeDefined();
+  });
+
+  it('a member reconnecting to a trashed campaign\'s SSE stream gets 404 (member branch of assertLifecycleAccess), not 403', async () => {
+    const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'Doomed Campaign 4' });
+    const campaignId = campRes.body.id;
+    const addRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: playerId, role: 'player' });
+    expect(addRes.status).toBe(201);
+
+    const del = await dmAgent.delete(`/api/v1/campaigns/${campaignId}`);
+    expect(del.status).toBe(200);
+
+    const streamRes = await playerAgent.get(`/api/v1/campaigns/${campaignId}/events`);
+    expect(streamRes.status).toBe(404);
+  });
+});
+
+/**
  * Entity soft-delete + restore round-trip (issue #116) — a quest here stands in for the
  * shared convention across quests/npcs/locations/sessions/notes/characters: DELETE hides
  * the row from normal reads, POST :id/restore brings it back exactly as it was.

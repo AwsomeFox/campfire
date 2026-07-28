@@ -193,7 +193,11 @@ function typeIcon(type: Notification['type']): string {
       return 'top-hat';
     case 'added_to_campaign':
       return 'campfire';
+    // Issue #1707: campaign_trashed shares the same "you lost access to this campaign"
+    // concept as removed_from_campaign, so it reuses its icon (matches the padlock the
+    // Layout lost-access screen already uses).
     case 'removed_from_campaign':
+    case 'campaign_trashed':
       return 'padlock';
     case 'character_reassigned':
       return 'meeple';
