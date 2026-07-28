@@ -2,12 +2,12 @@
   "tracked": [
     {
       "pr": 1656,
-      "status": "babysitting",
+      "status": "merged",
       "url": "https://github.com/AwsomeFox/campfire/pull/1656",
       "headBranch": "fix/issue-741",
       "baseBranch": "main",
-      "updatedAt": "2026-07-28T11:56:00Z",
-      "notes": "Head 6da58863. Addressed Codex P1s, Devin write-mode, and Devin loadMore total regression. All known review threads resolved. Awaiting required CI on 6da58863 (coverage typically ~35–40m)."
+      "updatedAt": "2026-07-28T12:46:00Z",
+      "notes": "Merged 2026-07-28. Final head 6da58863 addressed Codex P1s (inventory scope + data/dataJson merge), Devin write-mode (writeTool + requireWriteMode), Devin loadMore total, plus MCP catalog/@ApiOperation. Review threads resolved; required CI green."
     }
   ]
 }
