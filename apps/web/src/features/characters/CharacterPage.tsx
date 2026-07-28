@@ -58,6 +58,7 @@ import {
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { useCampaign } from '../../app/CampaignContext';
 import { Card, Chip, Btn, TextInput, TextArea, ErrorNote, HpBar } from '../../components/ui';
+import { useTranslation } from 'react-i18next';
 import { CharacterDetailLoadingSkeleton } from './CharacterDetailLoadingSkeleton';
 import { Field } from '../../components/Field';
 import {
