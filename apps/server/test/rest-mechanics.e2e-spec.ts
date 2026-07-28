@@ -113,6 +113,23 @@ describe('rest mechanics (#1041, e2e)', () => {
     expect(combatant.hpCurrent).toBe(40);
   });
 
+  it('replays an undo key and refuses a different key or later sheet edit', async () => {
+    const id = await batteredCharacter('Undo replay');
+    const preview = await characters.previewPartyRecovery(campaignId, { kind: 'long', characterIds: [id] }, dmUser, 'dm');
+    const applied = await characters.applyPartyRecovery(campaignId, { previewToken: preview.previewToken, idempotencyKey: 'undo-apply-key', acknowledgeRunningCombatants: true }, dmUser, 'dm');
+    const undo = await characters.undoPartyRecovery(campaignId, applied.batchId, 'undo-replay-key', dmUser, 'dm');
+    await expect(characters.undoPartyRecovery(campaignId, applied.batchId, 'undo-replay-key', dmUser, 'dm')).resolves.toEqual(undo);
+    await expect(characters.undoPartyRecovery(campaignId, applied.batchId, 'different-undo-key', dmUser, 'dm')).rejects.toMatchObject({ status: 409 });
+
+    const second = await batteredCharacter('Undo changed');
+    const secondPreview = await characters.previewPartyRecovery(campaignId, { kind: 'long', characterIds: [second] }, dmUser, 'dm');
+    const secondApplied = await characters.applyPartyRecovery(campaignId, { previewToken: secondPreview.previewToken, idempotencyKey: 'undo-changed-apply', acknowledgeRunningCombatants: true }, dmUser, 'dm');
+    await db.update(charactersTable).set({ hpCurrent: 17, updatedAt: new Date().toISOString() }).where(eq(charactersTable.id, second));
+    await expect(characters.undoPartyRecovery(campaignId, secondApplied.batchId, 'undo-changed-key', dmUser, 'dm')).rejects.toMatchObject({ status: 409 });
+    const [after] = await db.select().from(charactersTable).where(eq(charactersTable.id, second));
+    expect(after.hpCurrent).toBe(17);
+  });
+
   /** Mark a character dead without going through a route that may not accept the field. */
   async function kill(id: number): Promise<void> {
     await db.update(charactersTable).set({ deathState: 'dead' }).where(eq(charactersTable.id, id));
