@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { BadRequestException, ConflictException } from '@nestjs/common';
+import { BOOTSTRAP_SQL, CAMPAIGN_SEARCH_FTS_SQL } from '../src/db/bootstrap.sql';
 import { DataRepairService } from '../src/modules/data-repair/data-repair.service';
 import { DataRepairController } from '../src/modules/data-repair/data-repair.controller';
 import request from 'supertest';
@@ -96,6 +97,16 @@ describe('Issue #729 data repair safety', () => {
     expect(response.setHeader).toHaveBeenCalledWith('Cache-Control', 'private, no-store');
   });
 
+  it('publicHealth stays bounded for readiness probes', () => {
+    db.prepare("INSERT INTO data_repair_runs(source,started_at,completed_at,strict_count,soft_count) VALUES ('manual',?,?,1,0)").run('2026-01-01T00:00:00.000Z','2026-01-01T00:00:01.000Z');
+    const prepare = jest.spyOn(db, 'prepare');
+    expect(service.publicHealth()).toEqual({ degraded: false, openCount: 0, latestRunAt: '2026-01-01T00:00:01.000Z' });
+    const sql = prepare.mock.calls.map(([query]) => String(query));
+    expect(sql.some(query => query.includes('data_repair_actions'))).toBe(false);
+    expect(sql.some(query => query.includes('LIMIT 20'))).toBe(false);
+    prepare.mockRestore();
+  });
+
   it('keeps the current snapshot under tied mtimes and safely tolerates cleanup failure', () => {
     const clock = jest.spyOn(Date, 'now').mockReturnValue(123456);
     const snapshots = Array.from({ length: 14 }, () => (service as any).snapshot());
@@ -146,6 +157,15 @@ describe('Issue #729 data repair safety', () => {
     db.prepare('INSERT INTO quests(id,campaign_id) VALUES (999,1)').run();
     await service.undo(applied.actionId,'admin','admin');
     expect(db.prepare('SELECT count(*) n FROM encounters WHERE id=30').get()).toEqual({ n: 1 });
+  });
+});
+
+describe('Issue #729 data repair bootstrap placement', () => {
+  it('creates repair tables in always-run BOOTSTRAP_SQL, not FTS-only SQL', () => {
+    expect(BOOTSTRAP_SQL).toContain('CREATE TABLE IF NOT EXISTS data_repair_runs');
+    expect(BOOTSTRAP_SQL).toContain('CREATE TABLE IF NOT EXISTS data_repair_findings');
+    expect(CAMPAIGN_SEARCH_FTS_SQL).not.toContain('data_repair_runs');
+    expect(CAMPAIGN_SEARCH_FTS_SQL).not.toContain('data_repair_findings');
   });
 });
 

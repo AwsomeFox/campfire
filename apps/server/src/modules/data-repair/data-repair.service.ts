@@ -69,7 +69,13 @@ export class DataRepairService implements OnApplicationBootstrap {
   }
   run(id:number) { return this.db().prepare('SELECT * FROM data_repair_runs WHERE id=?').get(id); }
   latest() { const db=this.db(); return {run:db.prepare('SELECT * FROM data_repair_runs ORDER BY id DESC LIMIT 1').get() ?? null,openCount:Number((db.prepare("SELECT count(*) n FROM data_repair_findings WHERE status='open'").get() as any).n),history:db.prepare('SELECT * FROM data_repair_runs ORDER BY id DESC LIMIT 20').all(),actions:db.prepare("SELECT id,action,status,created_at FROM data_repair_actions WHERE status='applied' ORDER BY id DESC LIMIT 20").all()}; }
-  publicHealth() { const latest=this.latest(); return {degraded:latest.openCount>0,openCount:latest.openCount,latestRunAt:(latest.run as any)?.completed_at ?? null}; }
+  /** Bounded readiness metadata only — never pull admin history lists on /readyz. */
+  publicHealth() {
+    const db = this.db();
+    const openCount = Number((db.prepare("SELECT count(*) n FROM data_repair_findings WHERE status='open'").get() as { n: number }).n);
+    const latestRunAt = (db.prepare('SELECT completed_at FROM data_repair_runs ORDER BY id DESC LIMIT 1').get() as { completed_at: string | null } | undefined)?.completed_at ?? null;
+    return { degraded: openCount > 0, openCount, latestRunAt };
+  }
   findings(status?:string, limit=100, offset=0) { if(status && !['open','resolved','quarantined'].includes(status)) throw new BadRequestException('Unsupported finding status'); return this.db().prepare(`SELECT * FROM data_repair_findings ${status?'WHERE status=?':''} ORDER BY last_seen_at DESC LIMIT ? OFFSET ?`).all(...(status?[status,Math.min(Math.max(limit,1),200),Math.max(offset,0)]:[Math.min(Math.max(limit,1),200),Math.max(offset,0)])); }
   private getFinding(id:number) { const finding=this.db().prepare('SELECT * FROM data_repair_findings WHERE id=?').get(id) as Finding|undefined; if(!finding) throw new NotFoundException('Finding not found'); return finding; }
   private reference(f:Finding):Reference { const known=SOFT_REFERENCE_CATALOG.find(ref=>ref.childTable===f.child_table&&ref.childColumn===f.child_column&&ref.parentTable===f.parent_table&&ref.parentColumn===f.parent_column); if(known) return known; const column=this.columns(f.child_table).find(c=>c.name===f.child_column); const fk=(this.db().prepare(`PRAGMA foreign_key_list(${quote(f.child_table)})`).all() as Array<any>).find(entry=>entry.from===f.child_column&&entry.table===f.parent_table&&entry.to===f.parent_column); if(!column || !fk) throw new ConflictException('The current schema no longer matches this strict finding'); return {childTable:f.child_table,childColumn:f.child_column,parentTable:f.parent_table,parentColumn:f.parent_column,nullable:column.notnull===0,quarantine:false}; }
@@ -84,7 +90,19 @@ export class DataRepairService implements OnApplicationBootstrap {
     const file = path.join(dir, `repair-${Date.now()}-${crypto.randomUUID()}.db`);
     this.db().exec(`VACUUM INTO ${literal(file)}`);
     fs.chmodSync(file, 0o600);
-    const checksum = crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+    // Chunked sync hash — avoid loading the whole SQLite snapshot into memory.
+    const hash = crypto.createHash('sha256');
+    const fd = fs.openSync(file, 'r');
+    try {
+      const buf = Buffer.alloc(64 * 1024);
+      let bytesRead = 0;
+      while ((bytesRead = fs.readSync(fd, buf, 0, buf.length, null)) > 0) {
+        hash.update(buf.subarray(0, bytesRead));
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+    const checksum = hash.digest('hex');
     const current = path.basename(file);
     // Never consider the newly-created snapshot for cleanup. Keep at most
     // BACKUP_LIMIT - 1 older files, which makes the total hard bound exact.

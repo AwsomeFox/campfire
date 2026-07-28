@@ -40,6 +40,13 @@ export class HealthController {
       throw new ServiceUnavailableException({ ok: false, version: APP_VERSION, error: 'database unavailable' });
     }
     // Public health exposes bounded metadata only; detailed findings are admin-only.
-    return { ok: true, version: APP_VERSION, dataRepair: this.repairs.publicHealth() };
+    // Never let optional integrity metadata fail the readiness probe itself.
+    let dataRepair: { degraded: boolean; openCount: number | null; latestRunAt: string | null; error?: string };
+    try {
+      dataRepair = this.repairs.publicHealth();
+    } catch {
+      dataRepair = { degraded: true, openCount: null, latestRunAt: null, error: 'unavailable' };
+    }
+    return { ok: true, version: APP_VERSION, dataRepair };
   }
 }

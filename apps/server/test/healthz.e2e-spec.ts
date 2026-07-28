@@ -24,7 +24,16 @@ describe('healthz (e2e)', () => {
   it('GET /readyz -> {ok:true, version} with no auth while the DB answers', async () => {
     const res = await request(ctx.app.getHttpServer()).get('/readyz');
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ ok: true, version: APP_VERSION });
+    // Issue #729: readiness also returns bounded data-repair integrity metadata.
+    expect(res.body.ok).toBe(true);
+    expect(res.body.version).toBe(APP_VERSION);
+    expect(res.body.dataRepair).toEqual(
+      expect.objectContaining({
+        degraded: expect.any(Boolean),
+        openCount: expect.any(Number),
+      }),
+    );
+    expect(res.body.dataRepair.latestRunAt === null || typeof res.body.dataRepair.latestRunAt === 'string').toBe(true);
   });
 
   // Issue #52: /healthz is liveness-only, so with a broken DB the process must
