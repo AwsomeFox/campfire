@@ -3,7 +3,7 @@ import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
 import { eq } from 'drizzle-orm';
 import { CharactersService } from '../src/modules/characters/characters.service';
 import { DB, type DrizzleDb } from '../src/db/db.module';
-import { characters as charactersTable } from '../src/db/schema';
+import { characters as charactersTable, combatants, encounters } from '../src/db/schema';
 import { HIT_DICE_RESOURCE_KEY } from '@campfire/schema';
 import type { RequestUser } from '../src/common/user.types';
 
@@ -98,6 +98,19 @@ describe('rest mechanics (#1041, e2e)', () => {
     const [bAfter] = await db.select().from(charactersTable).where(eq(charactersTable.id, b));
     expect(aAfter.hpCurrent).toBe(5);
     expect(bAfter.hpCurrent).toBe(7);
+  });
+
+  it('requires acknowledgement for a running linked combatant before synchronizing it', async () => {
+    const id = await batteredCharacter('Combat rest');
+    const now = new Date().toISOString();
+    const [encounter] = await db.insert(encounters).values({ campaignId, name: 'Running rest', status: 'running', createdAt: now, updatedAt: now }).returning();
+    await db.insert(combatants).values({ encounterId: encounter.id, kind: 'character', characterId: id, name: 'Combat rest', hpCurrent: 5, hpMax: 40, createdAt: now, updatedAt: now });
+    const preview = await characters.previewPartyRecovery(campaignId, { kind: 'long', characterIds: [id] }, dmUser, 'dm');
+    expect(preview.runningCombatantCharacterIds).toContain(id);
+    await expect(characters.applyPartyRecovery(campaignId, { previewToken: preview.previewToken, idempotencyKey: 'combat-ack-rest', acknowledgeRunningCombatants: false }, dmUser, 'dm')).rejects.toMatchObject({ status: 409 });
+    await characters.applyPartyRecovery(campaignId, { previewToken: preview.previewToken, idempotencyKey: 'combat-ack-rest', acknowledgeRunningCombatants: true }, dmUser, 'dm');
+    const [combatant] = await db.select().from(combatants).where(eq(combatants.characterId, id));
+    expect(combatant.hpCurrent).toBe(40);
   });
 
   /** Mark a character dead without going through a route that may not accept the field. */
