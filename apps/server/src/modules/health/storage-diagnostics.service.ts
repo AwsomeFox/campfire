@@ -42,8 +42,10 @@ const bytes = (file: string): number | null => { try { return fs.statSync(file).
 const DEGRADED_FREE = Number(process.env.DIAGNOSTICS_DEGRADED_FREE_BYTES ?? 2 * 1024 ** 3);
 const CRITICAL_FREE = Number(process.env.DIAGNOSTICS_CRITICAL_FREE_BYTES ?? 256 * 1024 ** 2);
 const LARGE_WAL = Number(process.env.DIAGNOSTICS_LARGE_WAL_BYTES ?? 512 * 1024 ** 2);
-/** Throttle BEGIN IMMEDIATE write probes on unauthenticated /readyz without masking later DB failures. */
+/** Throttle failed/degraded BEGIN IMMEDIATE write probes on unauthenticated /readyz. */
 const writeProbeCacheMs = () => Number(process.env.DIAGNOSTICS_WRITE_PROBE_CACHE_MS ?? 5_000);
+/** Successful probes use a shorter reuse window so a newly unwritable disk is not masked. */
+const writeProbeOkCacheMs = () => Number(process.env.DIAGNOSTICS_WRITE_PROBE_OK_CACHE_MS ?? 1_000);
 /** Admin metrics polls reuse a scan, but must not freeze at boot forever. */
 const snapshotCacheMs = () => Number(process.env.DIAGNOSTICS_SNAPSHOT_CACHE_MS ?? 60_000);
 
@@ -160,7 +162,13 @@ export class StorageDiagnosticsService implements OnModuleInit {
 
   private databaseCheck(): DiagnosticCheck { try { this.holder.raw.prepare('SELECT 1').get(); return check('ok', 'DATABASE_OK', 'Database responds to a bounded query.'); } catch { return check('failed', 'DATABASE_UNAVAILABLE', 'Database is unavailable.'); } }
   private writeCheck(): DiagnosticCheck {
-    if (this.writeProbeCache && Date.now() - this.writeProbeCache.at < writeProbeCacheMs()) return this.writeProbeCache.result;
+    if (this.writeProbeCache) {
+      // Reuse failed/degraded results for the full window to avoid hammering a broken store.
+      // WRITE_OK uses a shorter window so ENOSPC/EROFS appearing after a pass is not masked
+      // for the entire throttle interval (issue #724 / Devin review).
+      const ttl = this.writeProbeCache.result.status === 'ok' ? writeProbeOkCacheMs() : writeProbeCacheMs();
+      if (Date.now() - this.writeProbeCache.at < ttl) return this.writeProbeCache.result;
+    }
     const db = this.holder.raw; let old = 0;
     let result: DiagnosticCheck;
     try {

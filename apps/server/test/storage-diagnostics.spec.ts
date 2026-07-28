@@ -267,4 +267,22 @@ describe('StorageDiagnosticsService (issue #724)', () => {
     expect(second.code).toBe('WRITE_OK');
     expect(raw.exec.mock.calls.filter(([sql]) => String(sql).startsWith('BEGIN')).length).toBe(1);
   });
+
+  it('re-probes after a short WRITE_OK cache so a newly unwritable disk is not masked', () => {
+    const previous = process.env.DIAGNOSTICS_WRITE_PROBE_OK_CACHE_MS;
+    process.env.DIAGNOSTICS_WRITE_PROBE_OK_CACHE_MS = '1';
+    const raw = (holder() as unknown as { raw: { exec: jest.Mock; pragma: jest.Mock; prepare: jest.Mock } }).raw;
+    const service = new StorageDiagnosticsService({ raw } as never);
+    expect((service as unknown as { writeCheck(): { code: string } }).writeCheck().code).toBe('WRITE_OK');
+    (service as unknown as { writeProbeCache: { at: number } }).writeProbeCache!.at = Date.now() - 10;
+    raw.exec.mockImplementation((sql: string) => {
+      if (sql.startsWith('BEGIN')) throw Object.assign(new Error('SQLITE_FULL'), { code: 'SQLITE_FULL' });
+    });
+    expect((service as unknown as { writeCheck(): { status: string; code: string } }).writeCheck()).toMatchObject({
+      status: 'failed',
+      code: 'WRITE_ENOSPC',
+    });
+    if (previous === undefined) delete process.env.DIAGNOSTICS_WRITE_PROBE_OK_CACHE_MS;
+    else process.env.DIAGNOSTICS_WRITE_PROBE_OK_CACHE_MS = previous;
+  });
 });
