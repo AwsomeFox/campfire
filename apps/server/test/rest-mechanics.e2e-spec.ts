@@ -95,7 +95,9 @@ describe('rest mechanics (#1041, e2e)', () => {
     await db.update(charactersTable).set({ hpCurrent: 7, updatedAt: new Date().toISOString() }).where(eq(charactersTable.id, b));
     await expect(characters.applyPartyRecovery(campaignId, { previewToken: preview.previewToken, idempotencyKey: 'stale-party-apply', acknowledgeRunningCombatants: true }, dmUser, 'dm')).rejects.toMatchObject({ status: 409 });
     const [aAfter] = await db.select().from(charactersTable).where(eq(charactersTable.id, a));
+    const [bAfter] = await db.select().from(charactersTable).where(eq(charactersTable.id, b));
     expect(aAfter.hpCurrent).toBe(5);
+    expect(bAfter.hpCurrent).toBe(7);
   });
 
   /** Mark a character dead without going through a route that may not accept the field. */
