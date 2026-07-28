@@ -21,6 +21,9 @@ describe('campaign homebrew (e2e)', () => {
     const beforeRollback = await request(server).get(`/api/v1/campaigns/${campaignId}/homebrew`).set(dm);
     const rollback = await request(server).post(`/api/v1/campaigns/${campaignId}/homebrew/import/apply`).set(dm).send({ entries: [{ ...body, slug: 'would-rollback' }, { ...body, slug: 'bad-raw', dataJson: '[]' }], strategy: 'duplicate' }); expect(rollback.status).toBe(400);
     const afterRollback = await request(server).get(`/api/v1/campaigns/${campaignId}/homebrew`).set(dm); expect(afterRollback.body).toHaveLength(beforeRollback.body.length);
+    const proposal = await request(server).post(`/api/v1/campaigns/${campaignId}/homebrew?proposed=true`).set({ 'x-dev-role': 'player', 'x-dev-user': 'homebrew-player' }).send({ ...body, slug: 'proposed-spark' }); expect(proposal.status).toBe(201); expect(proposal.body.status).toBe('pending');
+    const approved = await request(server).post(`/api/v1/proposals/${proposal.body.id}/approve`).set(dm).send({}); expect(approved.status).toBe(201);
+    const proposedEntry = await request(server).get(`/api/v1/campaigns/${campaignId}/homebrew`).set(dm); expect(proposedEntry.body.some((entry: { slug: string }) => entry.slug === 'proposed-spark')).toBe(true);
     const archived = await request(server).post(`/api/v1/campaigns/${campaignId}/homebrew/${created.body.id}/archive`).set(dm).send({}); expect(archived.status).toBe(201);
     const listed = await request(server).get(`/api/v1/campaigns/${campaignId}/homebrew`).set(dm); expect(listed.body.some((entry: { id: number }) => entry.id === created.body.id)).toBe(false);
   });
