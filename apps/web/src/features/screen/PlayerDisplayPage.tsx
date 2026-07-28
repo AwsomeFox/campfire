@@ -732,7 +732,14 @@ export default function PlayerDisplayPage() {
   // postMessage/BroadcastChannel (the URL itself is the #547 credential).
   useEffect(() => {
     if (!Number.isFinite(cid)) return;
-    const status = (): CastDisplayStatus => ({ type: 'ready', campaignId: cid, encounterId: encounter?.id ?? null });
+    // The encounter name has already crossed the server's player-safe projection
+    // boundary. It is status metadata, not a cast credential or DM-only detail.
+    const status = (): CastDisplayStatus => ({
+      type: 'ready',
+      campaignId: cid,
+      encounterId: encounter?.id ?? null,
+      encounterName: encounter?.name ?? null,
+    });
     const publish = (message: CastDisplayStatus) => {
       try {
         window.opener?.postMessage(message, window.location.origin);
@@ -754,7 +761,7 @@ export default function PlayerDisplayPage() {
       window.removeEventListener('pagehide', onPageHide);
       channel?.close();
     };
-  }, [cid, encounter?.id]);
+  }, [cid, encounter?.id, encounter?.name]);
 
   // A popup opened by the DM is allowed to *ask* for fullscreen in its own
   // browsing context. Browsers that require an additional activation reject it;

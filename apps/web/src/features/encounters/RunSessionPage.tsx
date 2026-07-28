@@ -126,6 +126,7 @@ import {
   type CastDisplayStatus,
   displayStatusLabel,
   focusCastWindow,
+  isCastDisplayStatusForCampaign,
   navigateCastWindow,
   openCastWindow,
   type CastWindowState,
@@ -1043,15 +1044,16 @@ export default function RunSessionPage() {
   // Keep only the window handle and non-secret status here; cast capabilities never
   // cross BroadcastChannel/postMessage (issue #762 / #547).
   const castWindowRef = useRef<Window | null>(null);
+  const castConnectionSequenceRef = useRef(0);
   const [castWindowState, setCastWindowState] = useState<CastWindowState>('idle');
-  const [castFollowedEncounterId, setCastFollowedEncounterId] = useState<number | null>(null);
+  const [castFollowedEncounter, setCastFollowedEncounter] = useState<{ id: number | null; name: string | null }>({ id: null, name: null });
   const [castDisplayNotice, setCastDisplayNotice] = useState<string | null>(null);
 
   const receiveCastDisplayStatus = useCallback((status: CastDisplayStatus) => {
     if (status.campaignId !== cid) return;
     if (status.type === 'ready') {
       setCastWindowState('ready');
-      setCastFollowedEncounterId(status.encounterId);
+      setCastFollowedEncounter({ id: status.encounterId, name: status.encounterName });
       return;
     }
     setCastWindowState('window-closed');
@@ -1061,16 +1063,15 @@ export default function RunSessionPage() {
     if (!Number.isFinite(cid)) return;
     const onMessage = (event: MessageEvent<unknown>) => {
       if (event.origin !== window.location.origin || !event.data || typeof event.data !== 'object') return;
-      const data = event.data as Partial<CastDisplayStatus>;
-      if ((data.type === 'ready' || data.type === 'closed') && data.campaignId === cid) {
-        receiveCastDisplayStatus(data as CastDisplayStatus);
-      }
+      if (isCastDisplayStatusForCampaign(event.data, cid)) receiveCastDisplayStatus(event.data);
     };
     window.addEventListener('message', onMessage);
     // BroadcastChannel is an enhancement, not the only protocol: opener postMessage
     // keeps named-window focus/status functional in older embedded/tablet browsers.
     const channel = typeof BroadcastChannel === 'undefined' ? null : new BroadcastChannel(CAST_DISPLAY_CHANNEL);
-    if (channel) channel.onmessage = (event: MessageEvent<CastDisplayStatus>) => receiveCastDisplayStatus(event.data);
+    if (channel) channel.onmessage = (event: MessageEvent<unknown>) => {
+      if (isCastDisplayStatusForCampaign(event.data, cid)) receiveCastDisplayStatus(event.data);
+    };
     return () => {
       window.removeEventListener('message', onMessage);
       channel?.close();
@@ -1086,6 +1087,26 @@ export default function RunSessionPage() {
     return new URL(created.url, window.location.origin).href;
   }, [cid]);
 
+  const connectPlayerDisplay = useCallback((target: Window, source: 'open' | 'reconnect') => {
+    const sequence = ++castConnectionSequenceRef.current;
+    setCastWindowState('opening');
+    setCastDisplayNotice(null);
+    void mintCastLink()
+      .then((url) => {
+        if (sequence !== castConnectionSequenceRef.current) return;
+        if (!navigateCastWindow(target, url)) {
+          setCastWindowState('window-closed');
+          setCastDisplayNotice('The display window closed before it could connect. Open display to try again.');
+        }
+      })
+      .catch((error: unknown) => {
+        if (sequence !== castConnectionSequenceRef.current) return;
+        setCastWindowState('idle');
+        const prefix = source === 'reconnect' ? "Couldn't reconnect the safe player display" : "Couldn't create a safe display link";
+        setCastDisplayNotice(error instanceof Error ? `${prefix}: ${error.message}` : `${prefix}. Try again.`);
+      });
+  }, [mintCastLink]);
+
   const openPlayerDisplay = useCallback(() => {
     // `openCastWindow` intentionally happens before any await: this is the user
     // gesture that prevents popup blockers from stealing the display workflow.
@@ -1096,20 +1117,8 @@ export default function RunSessionPage() {
       return;
     }
     castWindowRef.current = target;
-    setCastWindowState('opening');
-    setCastDisplayNotice(null);
-    void mintCastLink()
-      .then((url) => {
-        if (!navigateCastWindow(target, url)) {
-          setCastWindowState('window-closed');
-          setCastDisplayNotice('The display window closed before it could connect. Open display to try again.');
-        }
-      })
-      .catch((error: unknown) => {
-        setCastWindowState('idle');
-        setCastDisplayNotice(error instanceof Error ? `Couldn't create a safe display link: ${error.message}` : "Couldn't create a safe display link. Try again.");
-      });
-  }, [mintCastLink]);
+    connectPlayerDisplay(target, 'open');
+  }, [connectPlayerDisplay]);
 
   const copyPlayerDisplayLink = useCallback(() => {
     setCastDisplayNotice(null);
@@ -1125,13 +1134,22 @@ export default function RunSessionPage() {
   }, [mintCastLink]);
 
   const reconnectPlayerDisplay = useCallback(() => {
-    if (focusCastWindow(castWindowRef.current)) {
+    const target = castWindowRef.current;
+    if (castWindowState === 'ready' && focusCastWindow(target)) {
       setCastDisplayNotice('Focused the existing player display.');
+      return;
+    }
+    // A live blank/expired/error page cannot be healed by focus alone. Re-mint a
+    // capability and navigate that same named handle; only a truly closed handle
+    // needs a fresh popup (which happens synchronously in openPlayerDisplay).
+    if (target && !target.closed) {
+      focusCastWindow(target);
+      connectPlayerDisplay(target, 'reconnect');
       return;
     }
     setCastWindowState('window-closed');
     openPlayerDisplay();
-  }, [openPlayerDisplay]);
+  }, [castWindowState, connectPlayerDisplay, openPlayerDisplay]);
 
   // Reads via TanStack Query (issue #73). Each is polled while the tab is visible
   // (refetchInterval pauses in the background by default) as a backstop to the SSE
@@ -2300,7 +2318,13 @@ export default function RunSessionPage() {
               >
                 {displayStatusLabel(
                   castWindowState,
-                  castFollowedEncounterId === encounter?.id ? encounter.name : null,
+                  castWindowState === 'ready'
+                    ? {
+                        encounterId: castFollowedEncounter.id,
+                        encounterName: castFollowedEncounter.name,
+                        isCurrentEncounter: castFollowedEncounter.id === encounter?.id,
+                      }
+                    : null,
                 )}
               </span>
             </div>

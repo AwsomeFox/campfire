@@ -9,10 +9,22 @@ export const CAST_WINDOW_NAME = 'campfire-player-display';
 export const CAST_DISPLAY_CHANNEL = 'campfire-player-display-status-v1';
 
 export type CastDisplayStatus =
-  | { type: 'ready'; campaignId: number; encounterId: number | null }
+  | { type: 'ready'; campaignId: number; encounterId: number | null; encounterName: string | null }
   | { type: 'closed'; campaignId: number };
 
 export type CastWindowState = 'idle' | 'opening' | 'popup-blocked' | 'window-closed' | 'ready';
+
+/** Accept only the non-secret status protocol for this campaign. This keeps a
+ * random same-origin message from making the cockpit claim a display is ready. */
+export function isCastDisplayStatusForCampaign(value: unknown, campaignId: number): value is CastDisplayStatus {
+  if (!value || typeof value !== 'object') return false;
+  const status = value as Partial<CastDisplayStatus>;
+  if (status.campaignId !== campaignId) return false;
+  if (status.type === 'closed') return true;
+  return status.type === 'ready'
+    && (typeof status.encounterId === 'number' || status.encounterId === null)
+    && (typeof status.encounterName === 'string' || status.encounterName === null);
+}
 
 export function openCastWindow(open: Window['open'] = window.open.bind(window)): Window | null {
   // Must stay synchronous with the gesture that called this function. Browsers
@@ -42,7 +54,10 @@ export function navigateCastWindow(target: Window, url: string): boolean {
   }
 }
 
-export function displayStatusLabel(state: CastWindowState, encounterName: string | null): string {
+export function displayStatusLabel(
+  state: CastWindowState,
+  followed: { encounterId: number | null; encounterName: string | null; isCurrentEncounter: boolean } | null,
+): string {
   switch (state) {
     case 'opening':
       return 'Opening the player display…';
@@ -51,7 +66,9 @@ export function displayStatusLabel(state: CastWindowState, encounterName: string
     case 'window-closed':
       return 'Display window was closed. Open display to reconnect.';
     case 'ready':
-      return encounterName ? `Display connected · following ${encounterName}` : 'Display connected · no running encounter';
+      if (!followed?.encounterId) return 'Display connected · no running encounter';
+      if (followed.isCurrentEncounter) return `Display connected · following ${followed.encounterName ?? `encounter #${followed.encounterId}`}`;
+      return `Display connected · following another encounter (${followed.encounterName ?? `#${followed.encounterId}`})`;
     default:
       return 'Display not connected.';
   }

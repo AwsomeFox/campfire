@@ -5,7 +5,7 @@ import { seed, stateFor, restoreSeedEncounter } from './seed';
 /**
  * Combat tracker cross-role checks (issue #81):
  *  - DM: exact turn/initiative + HP math renders, and the DM-only run controls
- *    (Start/Roll initiative/Next turn/End/Cast) are present.
+ *    (Start/Roll initiative/Next turn/End/player-display actions) are present.
  *  - player & viewer: a monster's exact HP is redacted to a coarse band, and the
  *    DM-only controls + per-combatant edit controls are absent (the silent
  *    permission-drift the audit called out).
@@ -52,11 +52,27 @@ test.describe('combat tracker — DM view', () => {
     // DM-only run controls exist.
     await expect(page.getByRole('button', { name: 'Next turn →' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'End', exact: true })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Cast', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Open display', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Copy link', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Reconnect/focus', exact: true })).toBeVisible();
 
     // On the RUNNING encounter the DM's per-combatant HP controls are present — this is the
     // interactive marker the ended-encounter test below asserts is gone (issue #368).
     await expect(page.getByRole('button', { name: new RegExp(`(Reduce|Increase) ${boss.name}'s HP`) }).first()).toBeVisible();
+  });
+
+  test('opens the safe display from keyboard without leaving the DM cockpit (#762)', async ({ page }) => {
+    await openEncounter(page);
+    const openDisplay = page.getByRole('button', { name: 'Open display', exact: true });
+    const popupPromise = page.waitForEvent('popup');
+    await openDisplay.focus();
+    await page.keyboard.press('Enter');
+    const popup = await popupPromise;
+
+    await expect(page).toHaveURL(encounterUrl());
+    await expect(popup).toHaveURL(/\/cast\/\d+\/cf_cast_/);
+    await expect(page.getByTestId('player-display-status')).toContainText(/opening|connected/i);
+    await popup.close();
   });
 
   test('DM can clear initiative back to the unrolled state via the Clear control (issue #715)', async ({ page }) => {
