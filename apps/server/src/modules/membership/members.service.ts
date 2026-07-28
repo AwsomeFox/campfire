@@ -1001,6 +1001,69 @@ export class MembersService {
       memberId,
     });
 
+    // Issue #1640: the SSE event above only reaches a browser that already has THIS
+    // campaign's stream open — and closes that stream outright (#527), which is enough for
+    // a tab actively looking at the campaign to react immediately client-side. It reaches
+    // nothing else: a tab on the dashboard, a different campaign, or /admin has no signal at
+    // all that its cached /me memberships (and the campaign list built from them) just went
+    // stale. This mirrors the exact gap #1590/#1634 closed for role changes on
+    // `members.service.ts#update`, reusing the same account-wide notification channel — see
+    // that method's own comment for why an SSE-only signal was never enough on its own.
+    //
+    // `removed_from_campaign` rather than reusing `added_to_campaign`: a role change leaves
+    // the membership in place (re-render chrome from fresh /me, stay put); a revocation
+    // removes it (a route scoped to this campaign must navigate the user away). Both still
+    // discriminate the SAME account-wide `membershipChanged` flag on GET
+    // /notifications/unread-count (see MEMBERSHIP_NOTIFICATION_TYPES) — that flag is computed
+    // from the recipient's OWN unread rows and discloses nothing new; it does not change
+    // shape or scope for this type.
+    //
+    // `allowSelf: true` only for self-leave: the actor and the removed member are the same
+    // person, and the whole point of this signal is reaching OTHER open tabs of theirs — the
+    // default self-suppression (correct for a DM acting on someone ELSE) would silence it
+    // exactly when it is needed. A DM removing SOMEONE ELSE never hits this branch (actor !==
+    // recipient there), so the default suppression still applies for that case as normal.
+    //
+    // Actor passed as `null` (Codex review): `notifyUser` forwards the actor's id to
+    // NotificationsService.dispatch()'s block-based suppression (#597) — deliberate for
+    // ordinary sender-authored notifications, so an abuser can't reach someone who blocked
+    // them by choosing a different event type. But this signal carries no actor content; it
+    // exists purely so the removed member's OTHER tabs learn their access changed. Gating it
+    // on whether the removed member blocked the DM who removed them defeats that purpose in
+    // exactly the case that matters most: the member's cached membership silently goes stale
+    // with no signal ever reaching them. `opts.selfLeave` (computed by the controller as
+    // `actor === recipient`, BEFORE this method runs) already fully covers the self-suppression
+    // check `notifyUser` would otherwise use `actor` for, so passing `null` here does not
+    // reintroduce a self-notification.
+    //
+    // `actorName` deliberately omitted (Codex review, #1653): `actor.name` is a
+    // user-editable display name (PATCH /me/preferences), so it is actor-controlled
+    // content. NotificationsPage renders it verbatim as "By {actorName}". Because this
+    // signal already bypasses the #597 block filter above (actor passed as `null`) so it
+    // reaches even a recipient who blocked the removing DM, including `actor.name` would
+    // hand that DM a guaranteed, unblockable channel to put abusive text in front of
+    // someone who blocked them specifically to avoid seeing their content. The signal is
+    // access-revocation, not sender-authored, so it stays actor-name-free too.
+    //
+    // `campaigns.name` deliberately omitted (Codex review, #1653): campaign names are
+    // DM-editable metadata. Because this access-control signal bypasses actor blocking by
+    // design, including the campaign name would give a blocked DM one unblockable message
+    // carrying actor-controlled text. Keep the notice generic; the cache invalidation is the
+    // important behavior.
+    const title = opts?.selfLeave ? 'You left a campaign' : 'You were removed from a campaign';
+    await this.notifications.notifyUser(
+      existing.userId,
+      campaignId,
+      null,
+      {
+        type: 'removed_from_campaign',
+        title,
+        entityType: 'campaign',
+        entityId: campaignId,
+      },
+      { allowSelf: opts?.selfLeave === true },
+    );
+
     try {
       await this.audit.log({
         actor: auditActor(actor),

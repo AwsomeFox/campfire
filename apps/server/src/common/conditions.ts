@@ -50,13 +50,23 @@ import { fromJsonText, toJsonText } from './json';
  *     table over the moment the column existed. An audit taken before the change would have
  *     cleared them, correctly, and been useless.
  *
- * The audit that catches this is mechanical, so run it as the LAST step:
+ * The audit that catches this is mechanical — issue #1666, after #1664 found a SEVENTH such
+ * writer (`CharactersService.restParty`, fixed in PR #1665) by accident, years after #1575,
+ * which is exactly the "a documented convention plus a grep nobody runs is not enforcement"
+ * problem #1666 exists to close. `test/unit/condition-columns-single-writer.spec.ts` now runs
+ * this audit on every test run, not just when someone remembers to: it scans every `.set()` /
+ * `.values()` call in `apps/server/src` (outside this file) for a write that sets `conditions`
+ * or `conditionInstances` without its sibling and without spreading one of the helpers below,
+ * and fails CI on a new one rather than merging it quietly. Its own doc comment explains what it
+ * does and does not see (a `.values(identifier)` built from a `.map()` elsewhere is a known gap,
+ * verified safe by hand where it occurs today) and is proven against #1664's exact shape via a
+ * synthetic fixture, independent of whatever the live tree currently contains.
  *
- *     grep -rn "conditions: toJsonText\|conditionInstances: toJsonText" apps/server/src \
- *       | grep -v common/conditions.ts        # must print nothing
- *
- * A guarantee you can grep for is worth more than one you assert in a comment — including
- * this comment.
+ * The one-line grep this comment used to recommend running by hand is intentionally retired: it
+ * only matched `toJsonText(...)` writes, so a literal `conditions: '[]'` or
+ * `conditions: jsonCol(...)` (both real shapes in this codebase, see the sweep in #1666) passed
+ * it silently — an inaccurate audit is worse than an accurate one nobody runs, because it looks
+ * like coverage. Run the real one: `npx jest condition-columns-single-writer` from `apps/server`.
  */
 
 /** A metadata-free instance for a condition that only ever existed as a string. */
@@ -143,6 +153,36 @@ export function conditionWriteSetFromInstances(
 ): { conditions: string; conditionInstances: string } {
   const bounded = instances.slice(0, 50);
   return { conditions: toJsonText(deriveConditionNames(bounded)), conditionInstances: toJsonText(bounded) };
+}
+
+/**
+ * Sheet → live combatant when the sheet already computed authoritative instances
+ * (e.g. `adjustConditionLevel` moving Exhaustion stacks — issue #1643).
+ *
+ * Name-authoritative reconcile (`conditionWriteSetFromNames`) deliberately PRESERVES a
+ * surviving combatant instance's `stacks`, which is correct for presence-only sheet
+ * patches but wrong when the sheet just changed the level: an existing Exhaustion would
+ * keep its old stacks, and a newly added one would land at stacks: 1 even if the sheet
+ * was set to 3. Here the sheet's instances are SoT for presence and stacks; combat-scoped
+ * fields (duration, save timing, sourceCombatantId, …) on a matching prior combatant
+ * instance are kept so a mid-fight timer isn't wiped by a level-only sheet write.
+ */
+export function conditionWriteSetMergingSheetStacks(
+  sheetInstances: readonly ConditionInstance[],
+  priorCombatantInstancesText: string | null,
+): { conditions: string; conditionInstances: string } {
+  const prior = parseConditionInstancesText(priorCombatantInstancesText);
+  const priorByKey = new Map(prior.map((i) => [i.name.trim().toLowerCase(), i] as const));
+  const merged: ConditionInstance[] = [];
+  const seen = new Set<string>();
+  for (const sheetInst of sheetInstances) {
+    const key = sheetInst.name.trim().toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    const priorInst = priorByKey.get(key);
+    merged.push(priorInst ? { ...priorInst, stacks: sheetInst.stacks } : sheetInst);
+  }
+  return conditionWriteSetFromInstances(merged);
 }
 
 /* ── the sheet boundary (issue #1047) ────────────────────────────────────────────────────

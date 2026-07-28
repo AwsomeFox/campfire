@@ -1,7 +1,7 @@
 import {
   Dnd5eAdapter,
   HIT_DICE_RESOURCE_KEY,
-  isClearedByRest,
+  restConditionOutcome,
   NEUTRAL_REST_MODEL,
   planCharacterRest,
   planPartyRest,
@@ -12,6 +12,7 @@ import {
   UNTAGGED_RESOURCE_CADENCE,
   type RestAdapter,
   type RestCharacterState,
+  type RestConditionState,
   type RestKind,
   type RestRechargeCadence,
 } from '@campfire/schema';
@@ -29,6 +30,9 @@ import {
 const maxRoll = (sides: number) => sides;
 /** Always 1, for asserting the low end. */
 const minRoll = () => 1;
+
+/** A condition at a given stack count (default 1 — a plain, non-leveled condition). */
+const cond = (name: string, stacks = 1): RestConditionState => ({ name, stacks });
 
 function character(over: Partial<RestCharacterState> = {}): RestCharacterState {
   return {
@@ -133,52 +137,103 @@ describe('recharge cadence → rest mapping (#1041)', () => {
 
 describe('conditions: an allowlist that fails CLOSED (#1041 × #1047)', () => {
   it('clears only what the adapter says a rest clears', () => {
-    const state = character({ conditions: ['Exhaustion', 'Petrified'] });
+    // Exhaustion at 1 stack decrements to 0 — which IS a full clear (issue #1641): there is no
+    // "exhaustion 0" state for a leveled condition to sit at. See the dedicated decrement tests
+    // below for the level 5 → 4 case this issue actually exists to fix.
+    const state = character({ conditions: [cond('Exhaustion'), cond('Petrified')] });
     const plan = planOf(fiveE, state, 'long');
     expect(plan.conditionsCleared).toEqual(['Exhaustion']);
     expect(plan.conditionsKept).toEqual(['Petrified']);
-    expect(plan.conditionsAfter).toEqual(['Petrified']);
+    expect(plan.conditionsAfter).toEqual([cond('Petrified')]);
   });
 
   it('LEAVES an unrecognised condition in place rather than deleting it', () => {
     // This is the whole reason the list is an allowlist. Conditions are bare strings with a
     // user-extensible vocabulary; a denylist of "permanent" conditions would silently delete
     // a homebrew curse on a night's sleep and nobody could tell from the result.
-    const state = character({ conditions: ['lycanthropy', 'Level Drain', 'DM: cursed by the idol'] });
+    const state = character({ conditions: [cond('lycanthropy'), cond('Level Drain'), cond('DM: cursed by the idol')] });
     const plan = planOf(fiveE, state, 'long');
     expect(plan.conditionsCleared).toEqual([]);
-    expect(plan.conditionsAfter).toEqual(['lycanthropy', 'Level Drain', 'DM: cursed by the idol']);
+    expect(plan.conditionsAfter).toEqual([cond('lycanthropy'), cond('Level Drain'), cond('DM: cursed by the idol')]);
   });
 
   it('matches case-insensitively and preserves the stored casing', () => {
-    const state = character({ conditions: ['EXHAUSTION', 'unconscious'] });
+    const state = character({ conditions: [cond('EXHAUSTION'), cond('unconscious')] });
     const plan = planOf(fiveE, state, 'long');
     expect(plan.conditionsCleared).toEqual(['EXHAUSTION', 'unconscious']);
   });
 
   it('a short rest clears nothing under 5e', () => {
-    const state = character({ conditions: ['Exhaustion'] });
+    const state = character({ conditions: [cond('Exhaustion')] });
     expect(planOf(fiveE, state, 'short').conditionsCleared).toEqual([]);
   });
 
   it('an adapter with no rest model clears nothing at all', () => {
     // A 13th Age or Ironsworn table must not inherit 5e's condition list just because 5e is the
-    // fallback adapter.
-    const state = character({ conditions: ['Exhaustion', 'Prone'] });
+    // fallback adapter — nor does an unrecognised adapter id inherit 5e's leveled-condition track.
+    const state = character({ conditions: [cond('Exhaustion'), cond('Prone')] });
     expect(planOf(bareAdapter, state, 'long').conditionsCleared).toEqual([]);
     expect(restModelForAdapter(bareAdapter)).toEqual(NEUTRAL_REST_MODEL);
   });
 
   it('never treats an empty or whitespace condition as clearable', () => {
-    expect(isClearedByRest('', 'long', restModelForAdapter(fiveE))).toBe(false);
-    expect(isClearedByRest('   ', 'long', restModelForAdapter(fiveE))).toBe(false);
+    expect(restConditionOutcome('', 'long', restModelForAdapter(fiveE), fiveE.id)).toBe('keep');
+    expect(restConditionOutcome('   ', 'long', restModelForAdapter(fiveE), fiveE.id)).toBe('keep');
   });
 
   it('5e does not end conditions that need a cure', () => {
     const model = restModelForAdapter(fiveE);
     for (const needsCure of ['Petrified', 'Paralyzed', 'Charmed', 'Poisoned', 'Restrained', 'Blinded']) {
-      expect(isClearedByRest(needsCure, 'long', model)).toBe(false);
+      expect(restConditionOutcome(needsCure, 'long', model, fiveE.id)).toBe('keep');
     }
+  });
+});
+
+describe('5e exhaustion is a LEVEL a long rest drops by one, not a switch it clears (#1641)', () => {
+  it('exhaustion 5 -> long rest -> 4, not 0', () => {
+    const state = character({ conditions: [cond('Exhaustion', 5)] });
+    const plan = planOf(fiveE, state, 'long');
+    expect(plan.conditionsCleared).toEqual([]);
+    expect(plan.conditionsKept).toEqual(['Exhaustion']);
+    expect(plan.conditionsDecremented).toEqual([{ name: 'Exhaustion', stacksBefore: 5, stacksAfter: 4 }]);
+    expect(plan.conditionsAfter).toEqual([cond('Exhaustion', 4)]);
+  });
+
+  it('exhaustion 1 -> long rest -> condition gone entirely', () => {
+    const state = character({ conditions: [cond('Exhaustion', 1)] });
+    const plan = planOf(fiveE, state, 'long');
+    expect(plan.conditionsCleared).toEqual(['Exhaustion']);
+    expect(plan.conditionsKept).toEqual([]);
+    expect(plan.conditionsDecremented).toEqual([]);
+    expect(plan.conditionsAfter).toEqual([]);
+  });
+
+  it('a SHORT rest does not touch exhaustion at all', () => {
+    const state = character({ conditions: [cond('Exhaustion', 3)] });
+    const plan = planOf(fiveE, state, 'short');
+    expect(plan.conditionsCleared).toEqual([]);
+    expect(plan.conditionsDecremented).toEqual([]);
+    expect(plan.conditionsAfter).toEqual([cond('Exhaustion', 3)]);
+  });
+
+  it('a non-stacked long-rest-cleared condition still clears entirely, regardless of its stacks', () => {
+    // The regression guard: Prone/Frightened/Unconscious are in `clearedByLongRest`, not the
+    // leveled-condition track, so they must be removed OUTRIGHT — never decremented — no matter
+    // what `stacks` happens to hold. Get this backwards and every 5e rest breaks.
+    const state = character({ conditions: [cond('Prone'), cond('Frightened'), cond('Unconscious')] });
+    const plan = planOf(fiveE, state, 'long');
+    expect(plan.conditionsCleared.sort()).toEqual(['Frightened', 'Prone', 'Unconscious']);
+    expect(plan.conditionsDecremented).toEqual([]);
+    expect(plan.conditionsAfter).toEqual([]);
+  });
+
+  it('PF2e has no exhaustion track: a same-named condition just survives (allowlist fails closed)', () => {
+    const pf2e = ruleSystemAdapter('pf2e') as unknown as RestAdapter;
+    const state = character({ conditions: [cond('Exhaustion', 5)] });
+    const plan = planOf(pf2e, state, 'long');
+    expect(plan.conditionsCleared).toEqual([]);
+    expect(plan.conditionsDecremented).toEqual([]);
+    expect(plan.conditionsKept).toEqual(['Exhaustion']);
   });
 });
 
