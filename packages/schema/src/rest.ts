@@ -53,13 +53,12 @@ export type RestKind = 'short' | 'long';
  * only restores resource pools the DM names.  It never guesses at HP, slots, or
  * conditions, which are rule-specific state rather than generic "reset" data.
  */
-export const PartyRecoveryRequest = z.object({
-  kind: z.enum(['short', 'long', 'custom']),
-  characterIds: z.array(z.number().int().positive()).min(1),
-  perCharacter: z.record(z.string(), z.object({ spendHitDice: z.number().int().min(0).optional(), hitDie: z.number().int().min(2).max(100).optional() })).default({}),
-  /** Resource keys to restore for custom recovery; cadence is never inferred. */
-  customResourceKeys: z.array(z.string().min(1).max(80)).default([]),
-});
+const PartyRecoveryBase = { characterIds: z.array(z.number().int().positive()).min(1) };
+export const PartyRecoveryRequest = z.discriminatedUnion('kind', [
+  z.object({ ...PartyRecoveryBase, kind: z.literal('short'), perCharacter: z.record(z.string(), z.object({ spendHitDice: z.number().int().min(0).optional(), hitDie: z.number().int().min(2).max(100).optional() })).default({}) }),
+  z.object({ ...PartyRecoveryBase, kind: z.literal('long') }),
+  z.object({ ...PartyRecoveryBase, kind: z.literal('custom'), customResourceKeys: z.array(z.string().min(1).max(80)).min(1) }),
+]);
 export type PartyRecoveryRequest = z.infer<typeof PartyRecoveryRequest>;
 
 /** Apply adds the preview token and a client-generated idempotency key. */

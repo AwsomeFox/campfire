@@ -1825,7 +1825,7 @@ export class CharactersService {
       stats: fromJsonText<Record<string, number>>(row.stats, {}), spellSlots: fromJsonText<Record<string, SpellSlotLevel>>(row.spellSlots, {}),
       resources: fromJsonText<Record<string, CharacterResource>>(row.resources, {}),
     }));
-    const options = Object.fromEntries(Object.entries(request.perCharacter).map(([id, value]) => [Number(id), value]));
+    const options = request.kind === 'short' ? Object.fromEntries(Object.entries(request.perCharacter).map(([id, value]) => [Number(id), value])) : {};
     const plan = request.kind === 'custom'
       ? planPartyCustomRecovery(adapter, states, request.customResourceKeys)
       : planPartyRest(adapter, states, request.kind, options, (sides) => rollDice(`1d${sides}`).total);

@@ -15,7 +15,7 @@ export function PartyRestPanel({ campaignId, characters, onClose, onApplied }: {
   const ids = [...selected];
   async function makePreview() {
     setBusy(true); setError(null);
-    try { setPreview(await api.post<Preview>(`${API}/campaigns/${campaignId}/characters/rest/preview`, { kind, characterIds: ids, perCharacter: {}, customResourceKeys: [] })); }
+    try { setPreview(await api.post<Preview>(`${API}/campaigns/${campaignId}/characters/rest/preview`, kind === 'short' ? { kind, characterIds: ids, perCharacter: {} } : kind === 'custom' ? { kind, characterIds: ids, customResourceKeys: [] } : { kind, characterIds: ids })); }
     catch (err) { setError(err instanceof ApiError ? err.message : 'Could not preview recovery.'); }
     finally { setBusy(false); }
   }
