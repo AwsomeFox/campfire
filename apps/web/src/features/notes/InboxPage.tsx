@@ -297,8 +297,9 @@ export default function InboxPage() {
       setSweepResult(result);
       // Server-truth reconciliation still happens on the next route change (Layout's
       // effect); this just makes the badge catch up without waiting for that.
-      // Use newlyProposed so a re-swept/recovered prior row doesn't inflate the badge.
-      const newlyProposed = result.job.itemsNewlyProposed ?? 0;
+      // Use newlyProposed so a re-swept/recovered prior row doesn't inflate the badge;
+      // fall back to itemsProposed for mocked/legacy responses.
+      const newlyProposed = result.job.itemsNewlyProposed ?? result.job.itemsProposed;
       if (newlyProposed > 0) bumpPendingProposalsBadge(newlyProposed, sweepCid);
       const freshOpenTotal = await load();
       if (sweepCid === cidRef.current && freshOpenTotal !== undefined) {
