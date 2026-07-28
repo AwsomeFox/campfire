@@ -217,16 +217,19 @@ describe('allowlist projection (#586)', () => {
     expect(identifiers).not.toContain('Hero');
   });
 
-  it('collects the organized-play assigned DM and sweeps it out of free text (#588)', () => {
-    // `assignedDmUserId` is an account id in the same space as `cancelledBy` and
-    // `Note.authorUserId`. It arrived with the organized-play columns AFTER this
-    // collector was written, so it is exactly the kind of field that starts
-    // leaving the install without anyone noticing it skipped the sweep.
-    const raw = rawPayload();
-    (raw.scheduledSessions as Array<Record<string, unknown>>)[0].assignedDmUserId = 'dev:grace-hopper';
-    // A DM typing the running DM's account id into publishable prose is what the
-    // sweep exists for: no field allowlist can catch it, because a quest body is
+  it('collects the organized-play running DM (via membership) and sweeps it out of free text (#588)', () => {
+    // #1548: `assignedDmUserId` itself no longer reaches `collectPrivateIdentifiers` at all —
+    // ExportService now builds `raw.scheduledSessions` via `ScheduledSessionExport.array().parse(...)`,
+    // which omits every organized-play decoration field (including assignedDmUserId) BEFORE `raw`
+    // is constructed, so scanning for it here would be a no-op on real data (see the comment on
+    // the removed `add(s.assignedDmUserId)` call in export-redaction.ts). That's fine because the
+    // organized-play running DM is always a campaign member, so their id is already covered by the
+    // `raw.members[].userId` sweep a few lines above — same as any other member. This test now pins
+    // THAT guarantee: a DM typing the running DM's account id into publishable prose is what the
+    // free-text sweep exists for, and no field allowlist can catch it, because a quest body is
     // content a published module must carry.
+    const raw = rawPayload();
+    (raw.members as Array<Record<string, unknown>>).push({ id: 2, campaignId: 1, userId: 'dev:grace-hopper', username: 'grace', displayName: 'Grace Hopper', role: 'dm' });
     (raw.quests as Array<Record<string, unknown>>)[0].body = 'Ask dev:grace-hopper about the vault key';
 
     expect(collectPrivateIdentifiers(raw)).toContain('dev:grace-hopper');
