@@ -4,25 +4,39 @@
  * `PlayerDisplayPage.tsx` renders a `<style>{SCREEN_CSS}</style>` tag for its
  * TV/cast-display presentation. A `<style>` element applies to the WHOLE document
  * regardless of where it sits in the DOM tree — nesting it inside `<main class="cf-screen">`
- * provides no real scoping. SCREEN_CSS used to redefine the bare, app-wide `.cf-chip` and
- * `.cf-hp` class names (also used by 23 and 2 other source files respectively, including the
- * session runner's own HP bar) with its own rules, INCLUDING three hardcoded HP-fill hex
+ * provided no scoping by itself. SCREEN_CSS used to redefine the bare, app-wide `.cf-chip`
+ * and `.cf-hp` class names (also used by 23 and 2 other source files respectively, including
+ * the session runner's own HP bar) with its own rules, INCLUDING three hardcoded HP-fill hex
  * colours (`#5bd18b` / `#e5c15b` / `#e5735b`) that had drifted from the token values
  * `index.css`'s `.cf-hp` actually uses (`--cf-success` / `--color-accent` / `--cf-danger`) —
  * so the identical HP bar rendered a different colour on the TV display than in the session
  * runner, and while the Player Display route was mounted, every OTHER `.cf-chip`/`.cf-hp` on
  * the page (present now or added later, e.g. a global toast/banner) was silently reskinned.
  *
- * Fix: renamed the colliding class families to `cf-screen-chip*` / `cf-screen-hp*` (matching
- * every other selector in this stylesheet, which was already uniquely prefixed) and replaced
- * the hardcoded hex with the same tokens `index.css`'s `.cf-hp` uses. The larger cqh/cqw sizing
- * for the across-the-room TV surface is kept — deliberate, and expressed as a same-token
- * override under a collision-proof name, not deleted and not left as hardcoded hex.
+ * Fix, two parts:
+ * 1. Colours: replaced the hardcoded hex with the same tokens `index.css`'s `.cf-hp` uses.
+ *    The larger cqh/cqw sizing for the across-the-room TV surface is kept — deliberate, and
+ *    expressed as a same-token override, not deleted and not left as hardcoded hex.
+ * 2. Scoping: renaming the two colliding families to `cf-screen-chip*`/`cf-screen-hp*` closes
+ *    today's known collisions, but a bare, un-anchored selector for a name that DOESN'T
+ *    currently collide with anything (e.g. `.cf-init`, `.cf-cond`) still applies document-wide
+ *    and would silently reskin any future element sharing that name — renaming is closing one
+ *    hole, not scoping the pipe. So every selector in SCREEN_CSS (other than the
+ *    `.cf-screen`/`.cf-screen.centered` root rule itself) is now ALSO prefixed with the
+ *    `.cf-screen ` ancestor — the actual `<main>` this stylesheet renders inside — which
+ *    confines every rule to this subtree regardless of naming. This is real, load-bearing
+ *    scoping (a plain descendant combinator, universally supported — deliberately not
+ *    `@scope`, since this is a TV/cast surface plausibly reached by more unusual browser
+ *    environments than the rest of the app), not merely an absence-of-collision argument.
  *
- * This suite makes the "cannot leak" guarantee structural rather than a one-off spot-check:
- * it extracts every class name SCREEN_CSS actually selects and asserts NONE of them are also
- * defined by index.css/nocturne.css or used by any OTHER .tsx file in the app — exhaustive,
- * not a fixed allowlist, so a future contributor reusing a common name is caught immediately.
+ * This suite makes BOTH halves structural rather than a one-off spot-check:
+ * - Test 1 asserts every selector's leftmost simple selector is EXACTLY the `.cf-screen`
+ *   scope root (i.e. ancestor-scoping is total, not partial) — this is the primary guarantee
+ *   the issue's "does not leak outside its route" criterion asks for, true by construction.
+ * - Test 1 also keeps a collision backstop (no class name SCREEN_CSS uses, including
+ *   `cf-screen` itself, collides with a name index.css/nocturne.css defines or another .tsx
+ *   file uses) — a second, independent line of defence in case ancestor-scoping is ever
+ *   accidentally dropped from a new rule.
  *
  * Pure source scan — no browser, no server — runs under playwright.unit.config.ts (the
  * config `npm run test:unit` / CI actually invoke; NOT pw-unit.config.ts, which is currently
@@ -121,12 +135,25 @@ const CSS_FILES = collectFiles(ROOT, /\.css$/);
 const TSX_FILES = collectFiles(ROOT, /\.tsx$/).filter((f) => f !== PAGE_PATH);
 
 test.describe('PlayerDisplayPage injected CSS does not leak (#1685)', () => {
-  test('SCREEN_CSS has no bare, un-anchored selector for a class name used elsewhere in the app', () => {
+  test('every SCREEN_CSS rule is ancestor-scoped under .cf-screen — the only bare leftmost selector', () => {
     const pageSource = READ(PAGE_PATH);
     const screenCss = extractScreenCss(pageSource);
     const screenClassNames = bareLeftmostClassNames(screenCss);
-    expect(screenClassNames.size, 'SCREEN_CSS should select a non-trivial number of bare top-level classes').toBeGreaterThan(20);
 
+    // The scope root itself (`.cf-screen` / `.cf-screen.centered`) is the ONE legitimate bare
+    // selector — it targets the <main> the stylesheet renders inside. Every other rule's
+    // leftmost simple selector must be that same `.cf-screen` (as the ancestor of a descendant
+    // combinator, e.g. `.cf-screen .cf-init { }`) — if this set contains anything besides
+    // `cf-screen`, some rule regressed to an unscoped, document-wide selector.
+    expect(
+      [...screenClassNames].sort(),
+      'issue #1685 — every SCREEN_CSS rule must be scoped under the .cf-screen ancestor; ' +
+        'a bare selector here applies document-wide for as long as the Player Display route ' +
+        'is mounted, whether or not the name happens to collide with anything today',
+    ).toEqual(['cf-screen']);
+
+    // Backstop: even the one legitimate bare name (`cf-screen`) must not collide with
+    // anything defined/used elsewhere in the app — independent of the scoping check above.
     const externalNames = new Set<string>();
     for (const file of CSS_FILES) {
       for (const n of cssSelectorClassNames(READ(file))) externalNames.add(n);
@@ -134,13 +161,11 @@ test.describe('PlayerDisplayPage injected CSS does not leak (#1685)', () => {
     for (const file of TSX_FILES) {
       for (const n of tsxClassNameTokens(READ(file))) externalNames.add(n);
     }
-
     const collisions = [...screenClassNames].filter((n) => externalNames.has(n)).sort();
     expect(
       collisions,
-      `issue #1685 — PlayerDisplayPage's <style> tag is unscoped (a <style> element applies ` +
-        `document-wide); these class names also exist elsewhere and would be silently ` +
-        `reskinned for as long as the Player Display route is mounted:\n${collisions.join(', ')}`,
+      `these class names also exist elsewhere and would be silently reskinned if ancestor-` +
+        `scoping were ever removed:\n${collisions.join(', ')}`,
     ).toEqual([]);
   });
 
@@ -169,9 +194,8 @@ test.describe('PlayerDisplayPage injected CSS does not leak (#1685)', () => {
   test('HP fill colours use the same tokens as index.css .cf-hp, not hardcoded hex', () => {
     const screenCss = extractScreenCss(READ(PAGE_PATH));
     // Pin the three specific rule bodies to a token reference with no hex literal in them —
-    // scoped to just these rules (not the whole file) since other, unrelated pre-existing
-    // `var(--color-danger, #e5735b)` inline fallbacks elsewhere in this stylesheet are out of
-    // this issue's scope and coincidentally reuse one of the same digits.
+    // scoped to just these rules (not the whole file) so this stays precise about which
+    // colours the issue is actually about.
     const hpDefaultRule = screenCss.match(/\.cf-screen-hp\s*>\s*div\s*\{([^}]*)\}/)?.[1] ?? '';
     const hpLowRule = screenCss.match(/\.cf-screen-hp\.low\s*>\s*div\s*\{([^}]*)\}/)?.[1] ?? '';
     const hpCritRule = screenCss.match(/\.cf-screen-hp\.crit\s*>\s*div\s*\{([^}]*)\}/)?.[1] ?? '';
@@ -191,5 +215,10 @@ test.describe('PlayerDisplayPage injected CSS does not leak (#1685)', () => {
     expect(appHpRule?.[1]).toMatch(/var\(--cf-success\)/);
     expect(appHpLow?.[1]).toMatch(/var\(--color-accent\)/);
     expect(appHpCrit?.[1]).toMatch(/var\(--cf-danger\)/);
+  });
+
+  test('no dead --color-danger hex fallback (it is an unconditional :root token, never runtime-optional)', () => {
+    const screenCss = extractScreenCss(READ(PAGE_PATH));
+    expect(screenCss).not.toMatch(/var\(--color-danger\s*,/);
   });
 });
