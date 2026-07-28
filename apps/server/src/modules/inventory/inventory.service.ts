@@ -237,18 +237,27 @@ export class InventoryService {
     if (!pack) throw new NotFoundException('The rule entry pack is not installed');
     const ref = buildCompendiumRef(entry, pack);
     const snapshot = buildCompendiumSnapshot(entry);
-    const existing = await this.db.select().from(inventoryItems).where(and(eq(inventoryItems.campaignId, campaignId), eq(inventoryItems.ownerType, ownerType), characterId == null ? isNull(inventoryItems.characterId) : eq(inventoryItems.characterId, characterId), eq(inventoryItems.compendiumRef, JSON.stringify(ref)), isNull(inventoryItems.deletedAt))).limit(1);
-    if (existing[0] && input.duplicateMode === 'confirm') {
-      throw new ConflictException({ code: 'INVENTORY_COMPENDIUM_DUPLICATE', existing: await this.withCompendiumState(existing[0]) });
-    }
-    const ts = nowIso();
-    let row: typeof inventoryItems.$inferSelect;
-    if (existing[0] && input.duplicateMode === 'increment') {
-      const [updated] = await this.db.update(inventoryItems).set({ qty: sql`${inventoryItems.qty} + ${input.qty}`, notes: input.notes ? sql`CASE WHEN ${inventoryItems.notes} = '' THEN ${input.notes} ELSE ${inventoryItems.notes} END` : undefined, updatedAt: ts }).where(eq(inventoryItems.id, existing[0].id)).returning();
-      row = updated;
-    } else {
-      [row] = await this.db.insert(inventoryItems).values({ campaignId, ownerType, characterId, name: entry.name, qty: input.qty, notes: input.notes, iconSlug: entry.iconSlug ?? '', ruleEntryId: entry.id, compendiumRef: JSON.stringify(ref), compendiumSnapshot: JSON.stringify(snapshot), compendiumState: 'linked', createdAt: ts, updatedAt: ts }).returning();
-    }
+    const fingerprint = JSON.stringify({ campaignId, ruleEntryId: entry.id, ownerType, characterId, qty: input.qty, notes: input.notes, duplicateMode: input.duplicateMode });
+    let row!: typeof inventoryItems.$inferSelect;
+    this.db.transaction((tx) => {
+      if (input.idempotencyKey) {
+        const [prior] = tx.select().from(inventoryQtyIdempotency).where(eq(inventoryQtyIdempotency.key, input.idempotencyKey)).limit(1).all();
+        if (prior) {
+          if (prior.userId !== user.id || prior.fingerprint !== fingerprint) throw new ConflictException({ code: 'IDEMPOTENCY_KEY_REUSE' });
+          row = JSON.parse(prior.responseJson) as typeof inventoryItems.$inferSelect;
+          return;
+        }
+      }
+      const [existing] = tx.select().from(inventoryItems).where(and(eq(inventoryItems.campaignId, campaignId), eq(inventoryItems.ownerType, ownerType), characterId == null ? isNull(inventoryItems.characterId) : eq(inventoryItems.characterId, characterId), eq(inventoryItems.compendiumRef, JSON.stringify(ref)), isNull(inventoryItems.deletedAt))).limit(1).all();
+      if (existing && input.duplicateMode === 'confirm') throw new ConflictException({ code: 'INVENTORY_COMPENDIUM_DUPLICATE', existing: toDomain(existing) });
+      const ts = nowIso();
+      if (existing && input.duplicateMode === 'increment') {
+        [row] = tx.update(inventoryItems).set({ qty: sql`${inventoryItems.qty} + ${input.qty}`, notes: input.notes ? sql`CASE WHEN ${inventoryItems.notes} = '' THEN ${input.notes} ELSE ${inventoryItems.notes} END` : undefined, updatedAt: ts }).where(eq(inventoryItems.id, existing.id)).returning().all();
+      } else {
+        [row] = tx.insert(inventoryItems).values({ campaignId, ownerType, characterId, name: entry.name, qty: input.qty, notes: input.notes, iconSlug: entry.iconSlug ?? '', ruleEntryId: entry.id, compendiumRef: JSON.stringify(ref), compendiumSnapshot: JSON.stringify(snapshot), compendiumState: 'linked', createdAt: ts, updatedAt: ts }).returning().all();
+      }
+      if (input.idempotencyKey) tx.insert(inventoryQtyIdempotency).values({ key: input.idempotencyKey, itemId: row.id, userId: user.id, fingerprint, responseJson: JSON.stringify(row), createdAt: ts }).run();
+    });
     await this.audit.log({ actor: auditActor(user), actorRole: role, action: 'item.acquire_compendium', entityType: 'inventory_item', entityId: row.id, campaignId });
     return this.withCompendiumState(row);
   }

@@ -1385,6 +1385,10 @@ export class CampaignsService {
               qty: item.qty,
               notes: item.notes,
               iconSlug: item.iconSlug,
+              ruleEntryId: item.ruleEntryId,
+              compendiumRef: item.compendiumRef,
+              compendiumSnapshot: item.compendiumSnapshot,
+              compendiumState: item.compendiumState,
               createdAt: ts,
               updatedAt: ts,
             })
@@ -2333,6 +2337,11 @@ export class CampaignsService {
             qty: intOr(item.qty, 1),
             notes: str(item.notes),
             iconSlug: str(item.iconSlug), // issue #307 — preserve icon override on import
+            // Numeric ids are local only; retained ref/snapshot keep imports play-safe.
+            ruleEntryId: null,
+            compendiumRef: typeof item.compendiumRef === 'string' ? item.compendiumRef : null,
+            compendiumSnapshot: typeof item.compendiumSnapshot === 'string' ? item.compendiumSnapshot : null,
+            compendiumState: typeof item.compendiumState === 'string' ? item.compendiumState : null,
             createdAt: ts,
             updatedAt: ts,
           })
