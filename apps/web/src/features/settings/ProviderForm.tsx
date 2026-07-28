@@ -472,7 +472,7 @@ export function ProviderForm({
           <button
             className="btn btn-primary"
             style={{ fontSize: 12.5 }}
-            disabled={saving || clearing}
+            disabled={saving || clearing || removing}
             onClick={() => void save()}
           >
             {saving ? 'Saving…' : 'Save provider'}
