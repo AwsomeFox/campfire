@@ -1545,6 +1545,66 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(tooHigh.isError).toBe(true);
   });
 
+  it('#1599 saving_throw routes proficiency through the campaign rule-system adapter (PF2e: non-zero, not the old silent 0)', async () => {
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'MCP PF2e Saves' });
+    expect(campRes.status).toBe(201);
+    const pf2eCampaignId = campRes.body.id;
+    await db.update(campaigns).set({ ruleSystem: PF2E_PACK_SLUG }).where(eq(campaigns.id, pf2eCampaignId));
+
+    const client = await mcpClient(dmToken);
+    // Level-5 DEX 16 + save proficiency. Ability mod is the same floor((16-10)/2)=+3 as 5e
+    // (PF2e's abilityModifier), but proficiency must now be PF2e's own: level + the "trained"
+    // rank bonus (the sheet has no rank field, only proficient/not — see checkProficiencyBonus
+    // on Pf2eAdapter for why "trained" is the correct floor). 5 + 2 = +7, not 5e's flat +3 at
+    // this level and NOT the pre-#1599 silent 0 for every non-5e adapter.
+    const charResult = await client.callTool({
+      name: 'upsert_character',
+      arguments: {
+        campaignId: pf2eCampaignId,
+        name: 'PF2e Save Tester',
+        level: 5,
+        stats: { DEX: 16 },
+        saveProficiencies: ['DEX'],
+        hpMax: 20,
+      },
+    });
+    expect(charResult.isError).toBeFalsy();
+    const character = parseResult(charResult) as { id: number };
+
+    const saveResult = await client.callTool({
+      name: 'saving_throw',
+      arguments: { characterId: character.id, ability: 'DEX', dc: 1 },
+    });
+    expect(saveResult.isError).toBeFalsy();
+    const save = parseResult(saveResult) as {
+      score: number;
+      abilityMod: number;
+      profBonus: number;
+      proficient: boolean;
+      bonus: number;
+    };
+    expect(save).toMatchObject({
+      score: 16,
+      abilityMod: 3,
+      proficient: true,
+      profBonus: 7, // pf2eProficiencyBonus(5, 'trained') = 5 + 2
+      bonus: 10, // +3 dex, +7 prof — NOT +3 (5e) and NOT +3 alone (the pre-#1599 bug's silent 0)
+    });
+
+    // An unproficient save on the same PF2e character does not APPLY the proficiency bonus —
+    // `profBonus` reports the rate this adapter/level would give if proficient (unconditional,
+    // same shape the existing #1040 5e test already relies on); `bonus` is what actually lands
+    // on the roll, and stays STR's bare +0 modifier with nothing added.
+    const unprof = await client.callTool({
+      name: 'saving_throw',
+      arguments: { characterId: character.id, ability: 'STR', dc: 1 },
+    });
+    expect(unprof.isError).toBeFalsy();
+    const unprofResult = parseResult(unprof) as { proficient: boolean; profBonus: number; bonus: number };
+    expect(unprofResult).toMatchObject({ proficient: false, profBonus: 7, bonus: 0 });
+  });
+
   it('admin-owned campaign-scoped PAT 403s on a different campaign, incl. an MCP tool call (punch list item 12)', async () => {
     // mcp-dm is the server admin (first user via /auth/setup — see beforeAll comment).
     // RoleResolver.effectiveRole()'s PAT cap says a campaign-bound token treats the
@@ -3616,6 +3676,68 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
       });
       expect(denied.isError).toBe(true);
       expect((denied.content as TextContent[])[0].text).toContain('403');
+    });
+
+    // Issue #1643 — "verify what already works first": before this PR, exhaustion was
+    // storable (ConditionInstance.stacks, #1047/#1073) but nothing could actually MOVE
+    // the level on a character sheet — set_character_conditions only adds/removes a bare
+    // name and preserves stacks unchanged. adjust_character_condition_level (this PR) is
+    // that path. Proves the AI-DM story from #1073 end to end: a failed forced-march save
+    // increments exhaustion by one, through the real MCP tool, against a real campaign.
+    it('#1643: an AI DM can raise/lower 5e Exhaustion through adjust_character_condition_level on a real (default/5e) campaign', async () => {
+      const client = await mcpClient(dmToken);
+      const charRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/characters`).send({ name: '1643 exhaustion target' });
+      const characterId = charRes.body.id as number;
+
+      // The failed forced-march save: +1.
+      const first = parseResult(
+        await client.callTool({ name: 'adjust_character_condition_level', arguments: { characterId, name: 'Exhaustion', delta: 1 } }),
+      ) as { conditions: string[]; conditionInstances: Array<{ name: string; stacks: number }> };
+      expect(first.conditions).toContain('Exhaustion');
+      expect(first.conditionInstances.find((i) => i.name === 'Exhaustion')).toMatchObject({ stacks: 1 });
+
+      // A second failed save: +1 again -> level 2. (set_character_conditions could not
+      // have done this — add-when-already-present is a no-op on stacks.)
+      const second = parseResult(
+        await client.callTool({ name: 'adjust_character_condition_level', arguments: { characterId, name: 'Exhaustion', delta: 1 } }),
+      ) as { conditionInstances: Array<{ name: string; stacks: number }> };
+      expect(second.conditionInstances.find((i) => i.name === 'Exhaustion')).toMatchObject({ stacks: 2 });
+
+      // A long rest / restorative magic lowers it: -1 -> level 1.
+      const lowered = parseResult(
+        await client.callTool({ name: 'adjust_character_condition_level', arguments: { characterId, name: 'Exhaustion', delta: -1 } }),
+      ) as { conditionInstances: Array<{ name: string; stacks: number }> };
+      expect(lowered.conditionInstances.find((i) => i.name === 'Exhaustion')).toMatchObject({ stacks: 1 });
+
+      // Driving it to level 6 (death) then one more is a real error, not a clamp (#1039).
+      const toCap = await client.callTool({
+        name: 'adjust_character_condition_level',
+        arguments: { characterId, name: 'Exhaustion', level: 6 },
+      });
+      expect(toCap.isError).toBeFalsy();
+      const overCap = await client.callTool({
+        name: 'adjust_character_condition_level',
+        arguments: { characterId, name: 'Exhaustion', delta: 1 },
+      });
+      expect(overCap.isError).toBe(true);
+    });
+
+    it('#1643: adjust_character_condition_level 400s on a PF2e campaign — no leveled condition track declared', async () => {
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'MCP PF2e No Exhaustion' });
+      expect(campRes.status).toBe(201);
+      const pf2eId = campRes.body.id as number;
+      await db.update(campaigns).set({ ruleSystem: PF2E_PACK_SLUG }).where(eq(campaigns.id, pf2eId));
+
+      const client = await mcpClient(dmToken);
+      const charRes = await dmAgent.post(`/api/v1/campaigns/${pf2eId}/characters`).send({ name: '1643 pf2e target' });
+      const characterId = charRes.body.id as number;
+
+      const result = await client.callTool({
+        name: 'adjust_character_condition_level',
+        arguments: { characterId, name: 'Exhaustion', delta: 1 },
+      });
+      expect(result.isError).toBe(true);
     });
 
     // Issue #1642 — "verify the end-to-end path first": #1073's inspiration/heroPoints

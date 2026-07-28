@@ -30,10 +30,14 @@ import {
   planPartyRest,
   type RestAdapter,
   type RestCharacterState,
+  type RestConditionState,
   type RestKind,
   // #422/#1578 — the adapter-owned resource vocabulary (standard pools + the character's own
   // custom ones), so the surface never hardcodes one system's resource names.
   resourceVocabularyForAdapter,
+  // #1643 — the adapter-owned leveled condition track (5e Exhaustion; PF2e has none).
+  ConditionLevelPatch,
+  leveledConditionTrackFor,
 } from '@campfire/schema';
 import type {
   Character,
@@ -58,7 +62,14 @@ import { auditLog, campaigns, characters, checkRequests, combatants, encounters 
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { fromJsonText, toJsonText } from '../../common/json';
-import { conditionWriteSetFromNames, sheetConditionWriteSetFromNames } from '../../common/conditions';
+import {
+  conditionWriteSetFromNames,
+  conditionWriteSetMergingSheetStacks,
+  legacyConditionInstance,
+  readConditionInstances,
+  sheetConditionWriteSetFromInstances,
+  sheetConditionWriteSetFromNames,
+} from '../../common/conditions';
 import { redactSecret, redactSecrets } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
@@ -130,6 +141,10 @@ export function toDomain(row: typeof characters.$inferSelect): Character {
     deathSaveSuccesses: row.deathSaveSuccesses,
     deathSaveFailures: row.deathSaveFailures,
     conditions: fromJsonText<string[]>(row.conditions, []),
+    // Issue #1643: structured instances (so a client can read a leveled condition's
+    // `stacks`, e.g. 5e Exhaustion), union-on-read same as the combatant side —
+    // materialises a bare legacy name with no instance yet into one (stacks: 1).
+    conditionInstances: readConditionInstances(row.conditionInstances, row.conditions),
     saveProficiencies: fromJsonText<Character['saveProficiencies']>(row.saveProficiencies, []),
     skills: fromJsonText<Record<string, SkillRank>>(row.skills, {}),
     actions: fromJsonText<CharacterAction[]>(row.actions, []),
@@ -157,6 +172,8 @@ export interface RestPartyCharacterResult {
   resourcesRecovered: string[];
   conditionsCleared: string[];
   conditionsKept: string[];
+  /** Conditions whose `stacks` the rest reduced by one rather than clearing (issue #1641). */
+  conditionsDecremented: { name: string; stacksBefore: number; stacksAfter: number }[];
   logLine: string;
 }
 
@@ -602,7 +619,15 @@ export class CharactersService {
   private async syncActiveCombatantConditions(
     characterId: number,
     conditionsJson: string,
-    opts?: { campaignId?: number },
+    opts?: {
+      campaignId?: number;
+      /**
+       * When set, the sheet already computed authoritative instances (including stacks).
+       * Use stack-merging write so a level change (issue #1643) lands on the live tracker
+       * instead of name-reconcile preserving stale stacks / inventing stacks: 1.
+       */
+      conditionInstancesJson?: string | null;
+    },
   ): Promise<void> {
     const rows = await this.db
       .select({ combatant: combatants, campaignId: encounters.campaignId, encounterId: encounters.id })
@@ -618,6 +643,10 @@ export class CharactersService {
       .where(eq(characters.id, characterId))
       .limit(1);
     const sheetSyncedUpdatedAt = sheetMeta?.updatedAt;
+    const sheetInstances =
+      opts?.conditionInstancesJson !== undefined
+        ? readConditionInstances(opts.conditionInstancesJson, conditionsJson)
+        : null;
     for (const { combatant, campaignId: encCampaignId, encounterId } of rows) {
       await this.db
         .update(combatants)
@@ -625,10 +654,12 @@ export class CharactersService {
           // Reconcile the structured copy too, or a sheet-side REMOVAL leaves its instance
           // behind and the next tracker write derives the condition straight back (#423 ×
           // #486). See common/conditions.ts.
-          ...conditionWriteSetFromNames(
-            fromJsonText<string[]>(conditionsJson, []),
-            combatant.conditionInstances,
-          ),
+          ...(sheetInstances != null
+            ? conditionWriteSetMergingSheetStacks(sheetInstances, combatant.conditionInstances)
+            : conditionWriteSetFromNames(
+                fromJsonText<string[]>(conditionsJson, []),
+                combatant.conditionInstances,
+              )),
           ...(sheetSyncedUpdatedAt != null ? { sheetSyncedUpdatedAt } : {}),
         })
         .where(eq(combatants.id, combatant.id));
@@ -1282,6 +1313,109 @@ export class CharactersService {
   }
 
   /**
+   * Raise or lower the LEVEL of a leveled condition track (issue #1643) — e.g. 5e
+   * Exhaustion — on a character sheet. `patchConditions` above only adds/removes a bare
+   * name and PRESERVES whatever `stacks` an existing instance already has; there was no
+   * path anywhere (REST, MCP, or the general character PATCH) that actually moved
+   * `stacks`, on a character rather than a combatant. This is that path.
+   *
+   * Rule-system aware by construction: `patch.name` must match the CURRENT campaign
+   * adapter's declared track (`leveledConditionTrackFor`), so a PF2e campaign (which
+   * declares none) 400s on every call rather than silently accepting an arbitrary name at
+   * an arbitrary cap — there is nothing here for it to level.
+   *
+   * Same delta/level-are-alternatives, never-a-silent-clamp shape as {@link adjustResource}
+   * (#1039): `level` sets the level absolutely (applied first when both are sent), `delta`
+   * adjusts relative to the CURRENT level, and a result outside [0, track.max] is a 400.
+   * Level 0 removes the condition entirely — `ConditionInstance.stacks` itself requires
+   * `stacks >= 1`, so "zero" has no on-disk representation as an instance.
+   *
+   * CONCURRENCY. The read of current stacks, the decision, and the write happen inside ONE
+   * `this.db.transaction`, re-reading the row inside it (same pattern as adjustResource /
+   * patchSpellSlots). Without that, two concurrent `delta: 1` calls both read level N and
+   * both write N+1, losing an exhaustion increment.
+   */
+  async adjustConditionLevel(id: number, patch: ConditionLevelPatch, user: RequestUser, role: Role): Promise<Character> {
+    const existing = await this.getRowOrThrow(id);
+    this.assertCanWrite(existing, user, role);
+
+    const adapter = await this.adapterForCampaign(existing.campaignId);
+    const track = leveledConditionTrackFor(adapter.id);
+    const wantedName = patch.name.trim();
+    if (!track || track.name.toLowerCase() !== wantedName.toLowerCase()) {
+      throw new BadRequestException(
+        `'${wantedName}' is not a leveled condition track for this campaign's rule system (${adapter.label})`,
+      );
+    }
+
+    const trackKey = track.name.toLowerCase();
+    let currentLevel = 0;
+    let nextLevel = 0;
+    /**
+     * #1073 / #1039 — READ, DECIDE AND WRITE IN ONE SYNCHRONOUS TRANSACTION.
+     *
+     * `existing` above still serves the permission check (not order-sensitive). The stacks
+     * snapshot that the race turns on is re-read inside `tx`, matching adjustResource.
+     */
+    const row = this.db.transaction((tx) => {
+      const fresh = tx.select().from(characters).where(eq(characters.id, id)).get();
+      if (!fresh || fresh.deletedAt !== null) throw new NotFoundException(`Character ${id} not found`);
+
+      const priorInstances = readConditionInstances(fresh.conditionInstances, fresh.conditions);
+      const currentInstance = priorInstances.find((i) => i.name.trim().toLowerCase() === trackKey);
+      currentLevel = currentInstance?.stacks ?? 0;
+      nextLevel = patch.level !== undefined ? patch.level : currentLevel;
+      if (patch.delta !== undefined) nextLevel += patch.delta;
+
+      // Deliberately an ERROR, never a clamp (#1039): the same "never silently under- or
+      // over-report a resource change" rule as adjustResource/patchSpellSlots. A clamp here
+      // would let an AI narrate a 7th exhaustion level (or a -1'th) that never actually
+      // landed on the sheet.
+      if (nextLevel < 0 || nextLevel > track.max) {
+        throw new BadRequestException(`${track.name} level (${nextLevel}) must be in [0, ${track.max}]`);
+      }
+      if (!currentInstance && nextLevel > 0 && priorInstances.length >= 50) {
+        throw new BadRequestException(`${track.name} cannot be added because the character already has 50 condition instances`);
+      }
+
+      const nextInstances =
+        nextLevel === 0
+          ? priorInstances.filter((i) => i.name.trim().toLowerCase() !== trackKey)
+          : currentInstance
+            ? priorInstances.map((i) => (i === currentInstance ? { ...i, stacks: nextLevel } : i))
+            : // `legacyConditionInstance` only returns null for an empty name; `track.name`
+              // is always a non-empty constant ('Exhaustion'), so this cannot actually be null.
+              [...priorInstances, { ...legacyConditionInstance(track.name)!, stacks: nextLevel }];
+      const [written] = tx
+        .update(characters)
+        .set({ ...sheetConditionWriteSetFromInstances(nextInstances), updatedAt: nowIso() })
+        .where(eq(characters.id, id))
+        .returning()
+        .all();
+      return written;
+    });
+
+    // Issue #486 / #1643: sheet → live combatant with structured instances so stacks land
+    // on the tracker (name-only reconcile would preserve stale stacks / invent stacks: 1).
+    await this.syncActiveCombatantConditions(id, row.conditions, {
+      campaignId: existing.campaignId,
+      conditionInstancesJson: row.conditionInstances,
+    });
+
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'character.conditionLevel',
+      entityType: 'character',
+      entityId: id,
+      campaignId: existing.campaignId,
+      detail: JSON.stringify({ name: track.name, from: currentLevel, to: nextLevel }),
+    });
+    this.emitCharacterUpdated(existing.campaignId, id, user.id);
+    return redactSecret(toDomain(row), role);
+  }
+
+  /**
    * Spend (+delta) or restore (-delta) slots at one spell level (#1039).
    *
    * BEHAVIOUR CHANGE: an overspend now FAILS instead of clamping. Previously, casting at a
@@ -1496,6 +1630,12 @@ export class CharactersService {
     const targets = characterIds.map((id) => byId.get(id)!);
     for (const row of targets) this.assertCanWrite(row, user, role);
 
+    // Issue #1641: a rest needs each condition's `stacks` (5e Exhaustion's LEVEL), not just its
+    // bare name, to be able to decrement rather than clear it — `readConditionInstances` unions
+    // the structured `conditionInstances` column with any bare `conditions` name that has no
+    // instance yet (pre-#1047 rows), so this is complete even for a character never touched
+    // since before that migration.
+    const priorInstances = new Map(targets.map((row) => [row.id, readConditionInstances(row.conditionInstances, row.conditions)]));
     const states: RestCharacterState[] = targets.map((row) => ({
       id: row.id,
       name: row.name,
@@ -1506,7 +1646,7 @@ export class CharactersService {
       deathState: row.deathState as RestCharacterState['deathState'],
       deathSaveSuccesses: row.deathSaveSuccesses,
       deathSaveFailures: row.deathSaveFailures,
-      conditions: fromJsonText<string[]>(row.conditions, []),
+      conditions: priorInstances.get(row.id)!.map((inst): RestConditionState => ({ name: inst.name, stacks: inst.stacks })),
       stats: fromJsonText<Record<string, number>>(row.stats, {}),
       spellSlots: fromJsonText<Record<string, SpellSlotLevel>>(row.spellSlots, {}),
       resources: fromJsonText<Record<string, CharacterResource>>(row.resources, {}),
@@ -1524,9 +1664,28 @@ export class CharactersService {
       });
     }
 
+    // Pre-existing defect fixed here, not introduced by #1641: this write used to set only the
+    // legacy `conditions` name column and never touched `conditionInstances`, violating the
+    // single-writer invariant documented in common/conditions.ts (its own audit grep —
+    // `conditions: toJsonText` outside that file — would have caught it). Concretely: any rest
+    // that cleared a condition left a stale instance behind in `conditionInstances`, so the
+    // combat tracker / character-sheet level display (#1662) could still show a condition the
+    // sheet itself claims is gone. #1641 cannot avoid touching this either way — a decremented
+    // `stacks` value has nowhere honest to persist except that same structured column — so it is
+    // fixed here rather than left half-migrated a second time.
+    const nameKey = (name: string) => name.trim().toLowerCase();
     const at = nowIso();
     this.db.transaction((tx) => {
       for (const p of plan.plans) {
+        const clearedSet = new Set(p.conditionsCleared.map(nameKey));
+        const decrementedStacks = new Map(p.conditionsDecremented.map((d) => [nameKey(d.name), d.stacksAfter]));
+        const nextInstances = (priorInstances.get(p.characterId) ?? [])
+          .filter((inst) => !clearedSet.has(nameKey(inst.name)))
+          .map((inst) => {
+            const stacksAfter = decrementedStacks.get(nameKey(inst.name));
+            return stacksAfter === undefined ? inst : { ...inst, stacks: stacksAfter };
+          });
+        const conditionWriteSet = sheetConditionWriteSetFromInstances(nextInstances);
         tx.update(characters)
           .set({
             hpCurrent: p.hpAfter,
@@ -1534,7 +1693,7 @@ export class CharactersService {
             deathState: p.deathStateAfter,
             deathSaveSuccesses: p.deathSaveSuccessesAfter,
             deathSaveFailures: p.deathSaveFailuresAfter,
-            conditions: toJsonText(p.conditionsAfter),
+            ...conditionWriteSet,
             spellSlots: toJsonText(p.spellSlotsAfter),
             resources: toJsonText(p.resourcesAfter),
             updatedAt: at,
@@ -1553,7 +1712,12 @@ export class CharactersService {
         campaignId,
         deathState: p.deathStateAfter,
       }).catch(() => undefined);
-      await this.syncActiveCombatantConditions(p.characterId, toJsonText(p.conditionsAfter), {
+      // Name-only, matching this mirror's existing (pre-#1641) contract: `conditionsAfter` now
+      // carries `{ name, stacks }` (issue #1641), but `syncActiveCombatantConditions` reconciles
+      // by NAME against the target combatant's own prior instance and does not touch `stacks` —
+      // widening it to also propagate a decremented level onto an active combat mirror is a
+      // separate, combat-tracker-side change, not this issue's.
+      await this.syncActiveCombatantConditions(p.characterId, toJsonText(p.conditionsAfter.map((c) => c.name)), {
         campaignId,
       }).catch(() => undefined);
     }
@@ -1572,6 +1736,7 @@ export class CharactersService {
         hitDiceSpent: plan.plans.reduce((n, p) => n + p.hitDiceSpent, 0),
         conditionsCleared: plan.plans.flatMap((p) => p.conditionsCleared),
         conditionsKept: plan.plans.flatMap((p) => p.conditionsKept),
+        conditionsDecremented: plan.plans.flatMap((p) => p.conditionsDecremented),
       }),
     });
 
@@ -1596,6 +1761,7 @@ export class CharactersService {
         // Surfaced deliberately: the DM must be able to see what a night's sleep did NOT fix
         // without diffing two sheets. See the allowlist rationale in packages/schema/src/rest.ts.
         conditionsKept: p.conditionsKept,
+        conditionsDecremented: p.conditionsDecremented,
         logLine: describeRestForLog(p, kind),
       })),
     };

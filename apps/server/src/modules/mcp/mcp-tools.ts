@@ -112,11 +112,13 @@ import {
   InvitePolicyUpdate,
   SpellSlotPatch,
   ResourcePatch,
+  ConditionLevelPatch,
   spellSlotsRemaining,
   EncounterReopen,
   ProposalRevise,
   ProposalBatchResolve,
   NotificationPreferencesUpdate,
+  ruleSystemAdapter,
 } from '@campfire/schema';
 import { hasServerAdminPower, type RequestUser } from '../../common/user.types';
 import { buildMcpEnvelope } from '../../common/api-error.envelope';
@@ -3154,6 +3156,45 @@ export class McpToolsService {
       },
     );
 
+    // Issue #1643: set_character_conditions above only adds/removes a bare name and
+    // PRESERVES an existing instance's `stacks` — there was no way for the AI (or a human
+    // via REST) to actually MOVE the level of a leveled condition track (5e Exhaustion) on
+    // a character sheet, only toggle its presence. This is that path: same
+    // delta/level-are-alternatives shape as adjust_character_resource, gated to whichever
+    // ONE condition (if any) the campaign's rule-system adapter declares as leveled — a
+    // PF2e campaign 400s on every call, since it declares none.
+    this.writeTool(
+      server,
+      user,
+      'adjust_character_condition_level',
+      "Raise or lower the LEVEL of the campaign's leveled condition track (issue #1643) — 5e Exhaustion (1-6), " +
+        'or nothing on a system with no such track (e.g. PF2e — every call 400s there). player owner or DM, same ' +
+        'authority as adjust_character_resource. `delta` adjusts relative to the current level; `level` sets it ' +
+        'absolutely (applied first when both are sent). Resulting level outside [0, the track\'s max] FAILS with a ' +
+        '400 — never a silent clamp — so a success can be trusted as "the level actually changed by that amount." ' +
+        'Level 0 removes the condition. `name` must match the track this campaign actually has.',
+      // ConditionLevelPatch is a ZodEffects (.refine requiring delta|level), so it has no
+      // `.shape` to spread — list the wire fields here and re-validate with .parse below.
+      {
+        characterId: Id.describe('Character id'),
+        name: z.string().min(1).max(40).describe("Leveled condition track name for this campaign (5e: 'Exhaustion')"),
+        delta: z.number().int().optional().describe('Relative level adjustment (at least one of delta or level required)'),
+        level: z
+          .number()
+          .int()
+          .min(0)
+          .max(99)
+          .optional()
+          .describe('Absolute level; 0 removes (at least one of delta or level required)'),
+      },
+      async ({ characterId, ...patch }) => {
+        const row = await this.characters.getRowOrThrow(characterId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'player');
+        const validated = ConditionLevelPatch.parse(patch);
+        return this.characters.adjustConditionLevel(characterId as number, validated, user, role);
+      },
+    );
+
     this.writeTool(
       server,
       user,
@@ -3757,22 +3798,30 @@ export class McpToolsService {
       },
     );
 
-    // #1040: saving_throw — resolve a save server-side using the character's real stats
-    // + proficiency, comparing against a DC in one verifiable call. Uses the 5e formula
-    // (d20 + abilityMod + (proficient ? profBonus(level) : 0)); if the campaign uses a
-    // different rule system with different modifier math, a subsequent PR can route the
-    // computation through the rule-system adapter. Members may call this; the roll is
-    // audited and persisted to the shared dice log so every member sees it.
+    // #1040: saving_throw — resolve a legacy d20 save server-side using the character's
+    // real stats + proficiency, comparing the final total against a DC in one verifiable call.
+    //
+    // #1599: the modifier math is the CAMPAIGN'S rule-system adapter's own — ability
+    // modifier and proficiency bonus alike — not a hardcoded 5e formula. 5e (and every
+    // unaudited/homebrew system, via the adapter-agnostic default) still gets exactly the
+    // same numbers as before; PF2e/SF2e now get a real (non-zero) proficiency bonus instead
+    // of silently 5e's. See `checkProficiencyBonusForAdapter` (action-resolver.ts) for the
+    // full reasoning, including why PF2e's answer is a "trained" floor rather than an exact
+    // per-save rank (the character sheet does not track rank, only proficient/not). Outcome
+    // classification is intentionally still the legacy d20 total-vs-DC boolean; callers that
+    // need PF2e/SF2e degree-of-success or system-specific roll modes should use `roll_check`.
     this.writeTool(
       server,
       user,
       'saving_throw',
-      'Roll a saving throw for a character using their actual stats + proficiency (5e). Server reads the ability score, ' +
-        'computes the modifier (floor((score - 10) / 2)), adds the proficiency bonus (2 + floor((max(1, level) - 1) / 4); ' +
-        'level is clamped to at least 1) when the ability is in saveProficiencies, rolls 1d20 (or 2d20kh1/kl1), and compares ' +
-        'to the DC. Returns ' +
+      'Roll a legacy d20 saving throw for a character using their actual stats + proficiency. ' +
+        'Server reads the ability score, computes the modifier via the campaign\'s rule-system adapter, adds that adapter\'s ' +
+        'proficiency bonus (0 for a system that has not implemented one — e.g. OSR, whose saves are a different shape ' +
+        'entirely — never a silent guess) when the ability is in saveProficiencies, then rolls 1d20 (or 2d20kh1/kl1). ' +
+        'The returned success boolean is only a legacy total >= DC comparison; it does not apply PF2e/SF2e degree-of-success ' +
+        'or natural-1/natural-20 outcome shifts. Use roll_check for adapter-owned outcome classification. Returns ' +
         '{characterId, ability, dc, mode, score, abilityMod, profBonus, proficient, bonus, total, rolls, success, diceLogId}. ' +
-        'Optionally set advantage="advantage"|"disadvantage" to roll 2d20 keep-highest/lowest.',
+        'Optionally set advantage="advantage"|"disadvantage" to use the legacy 2d20 keep-highest/lowest mode.',
       {
         characterId: Id.describe('Character id — from list_members or get_party'),
         ability: z.enum(['STR', 'DEX', 'CON', 'INT', 'WIS', 'CHA']).describe('Save ability key'),
@@ -3786,11 +3835,14 @@ export class McpToolsService {
         const dcNum = dc as number;
         const rollMode = (advantage as 'normal' | 'advantage' | 'disadvantage' | undefined) ?? 'normal';
 
+        const campaign = await this.campaigns.getOrThrow(character.campaignId);
+        const adapter = ruleSystemAdapter(campaign.ruleSystem);
         const resolved = resolveSavingThrow({
           stats: fromJsonText<Record<string, number>>(character.stats, {}),
           saveProficiencies: fromJsonText<string[]>(character.saveProficiencies, []),
           ability: abilityKey,
           level: character.level,
+          adapter,
         });
         const { score, abilityMod, proficient, profBonus, bonus } = resolved;
 
