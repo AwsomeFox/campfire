@@ -1,0 +1,170 @@
+name: Watch main CI
+
+# Issue #1703: every automated and human process here is PR-scoped (sweeps
+# enumerate open PRs, review bots comment on PRs, merge gating evaluates a
+# PR's head sha). Nothing watches `main`'s OWN push-triggered CI runs, so a
+# break that only shows up after merge — e.g. two individually-green PRs
+# combining into a duplicate import (#1702) — produces a red run nobody is
+# looking at. This workflow is the fix for the first checkbox only: poll
+# main's latest commit's check-runs on a schedule, and surface a genuine
+# failure where a human or agent will see it (a GitHub issue, created once
+# and updated/closed rather than duplicated on every run).
+#
+# Deliberately out of scope here (left for separate work, see #1703):
+#   - the `strict_required_status_checks_policy` ruleset change
+#   - a duplicate-import guard
+#
+# Why this alerts on `ci: failure` specifically, and ONLY `failure`:
+# `ci` (.github/workflows/ci.yml) is the aggregate required check, and after
+# #1594 it reports:
+#   - `success`   — every required gate passed.
+#   - `failure`   — at least one required gate genuinely failed. This is the
+#                   only state that should ever open/keep open an issue.
+#   - `failure`, self-explaining summary — a dependency was `cancelled` (a
+#                   later push superseded this run) with no real failure.
+#                   `ci` still reports `failure` here (see #1594), which
+#                   would make this watcher fire on every superseded push to
+#                   main if it alerted on any red `ci`. It does not: see
+#                   below.
+#   - not completed (`in_progress`/`queued`) — no verdict yet.
+#
+# `main` has no PR head to "supersede" in the branch-protection sense, but
+# pushes to `main` still cancel each other via ci.yml's concurrency group
+# (`ci-${{ github.ref }}`), so the same cancelled-dependency noise #1594
+# describes for PRs can happen here too. Alerting on any non-success `ci`
+# conclusion (skipped/cancelled/pending) would make this watcher cry wolf on
+# ordinary superseded pushes and get disabled within a day — the exact
+# failure mode the issue warns about. So this workflow only ever acts when
+# the check-run's `conclusion` is the literal string `failure`, and does
+# nothing for `cancelled`, `skipped`, `neutral`, or a still-`in_progress`
+# run. A `failure`-vs-"was this superseded" ambiguity does not apply here:
+# unlike a PR, there is only one `main`, and `ci`'s `failure` conclusion on
+# main's latest commit at poll time IS the current verdict for that commit —
+# there is no newer main commit whose green run supersedes it, or the next
+# poll will simply pick up whatever commit is now latest.
+on:
+  schedule:
+    # Every 15 minutes. Cheap (two `gh api` calls in the common case) and
+    # frequent enough that a break is caught well within a working session.
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: main-ci-watch
+  cancel-in-progress: true
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure the tracking label exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        # `--force` makes this idempotent: creates the label on first run,
+        # harmlessly re-applies the same color/description on every run after.
+        run: |
+          gh label create main-ci-broken --repo "$REPO" --force \
+            --color b60205 \
+            --description "Opened automatically by main-ci-watch.yml when ci fails on main's latest commit"
+
+      - name: Poll main's latest commit and reconcile the tracking issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TRACKING_LABEL: main-ci-broken
+        run: |
+          set -euo pipefail
+
+          sha=$(gh api "repos/${REPO}/commits/main" --jq '.sha')
+          echo "main is at ${sha}"
+
+          # There can be more than one "ci" check-run for a sha (reruns); the
+          # one with the highest id is the most recent.
+          ci_run=$(gh api "repos/${REPO}/commits/${sha}/check-runs" --paginate \
+            --jq '[.check_runs[] | select(.name == "ci")] | sort_by(.id) | last // empty')
+
+          if [ -z "$ci_run" ]; then
+            echo "No 'ci' check-run for ${sha} yet (not triggered, or still queued) — nothing to do."
+            exit 0
+          fi
+
+          status=$(echo "$ci_run" | jq -r '.status')
+          conclusion=$(echo "$ci_run" | jq -r '.conclusion // empty')
+          run_html_url=$(echo "$ci_run" | jq -r '.html_url')
+          echo "ci status=${status} conclusion=${conclusion}"
+
+          existing=$(gh issue list --repo "$REPO" --label "$TRACKING_LABEL" --state open \
+            --json number --jq '.[0].number // empty')
+
+          if [ "$status" != "completed" ]; then
+            echo "ci is still ${status} on ${sha} — no verdict yet, not alerting."
+            exit 0
+          fi
+
+          if [ "$conclusion" = "failure" ]; then
+            body=$(cat <<EOF
+          \`ci\` failed on \`main\`'s latest commit.
+
+          - Commit: ${sha}
+          - Check run: ${run_html_url}
+          - Commit: https://github.com/${REPO}/commit/${sha}
+
+          This issue is opened/kept open automatically by
+          \`.github/workflows/main-ci-watch.yml\` while \`ci\` reports an
+          explicit \`failure\` on main's latest commit (never on
+          \`cancelled\`/\`skipped\`/pending — see the workflow's header
+          comment for why). It will be closed automatically once \`ci\`
+          reports \`success\` on a later commit.
+
+          <!-- main-ci-watch:last-failing-sha=${sha} -->
+          EOF
+          )
+
+            if [ -z "$existing" ]; then
+              echo "Opening a new tracking issue for ${sha}."
+              gh issue create --repo "$REPO" \
+                --title "main CI is red (ci: failure at ${sha:0:10})" \
+                --label "$TRACKING_LABEL" \
+                --body "$body"
+              exit 0
+            fi
+
+            # Idempotent update: only touch the issue if this is a NEW
+            # failing commit since the last time we recorded one. Re-running
+            # every 15 minutes against the same still-broken sha must not
+            # post a fresh comment each time, or this gets muted within a
+            # day exactly like the issue warns.
+            last_recorded=$(gh issue view "$existing" --repo "$REPO" --json body \
+              --jq '.body' | grep -o 'main-ci-watch:last-failing-sha=[0-9a-f]*' | cut -d= -f2 || true)
+
+            if [ "$last_recorded" = "$sha" ]; then
+              echo "Issue #${existing} already tracks ${sha} — nothing to update."
+              exit 0
+            fi
+
+            echo "Updating existing issue #${existing}: still red, now at ${sha}."
+            gh issue edit "$existing" --repo "$REPO" --body "$body"
+            gh issue comment "$existing" --repo "$REPO" \
+              --body "Still red on a newer commit: ${sha} (${run_html_url})."
+            exit 0
+          fi
+
+          # conclusion is success / neutral / skipped / cancelled / etc. Only
+          # "success" actually resolves the tracking issue; anything else
+          # (skipped/cancelled/neutral on the CURRENT latest commit) simply
+          # is not a failure signal, so there's nothing to alert on, but it
+          # also is not proof the break is fixed — leave any existing
+          # tracking issue open rather than closing it on ambiguous evidence.
+          if [ -n "$existing" ] && [ "$conclusion" = "success" ]; then
+            echo "ci is green on ${sha} — closing tracking issue #${existing}."
+            gh issue comment "$existing" --repo "$REPO" \
+              --body "\`ci\` is green again on ${sha} (${run_html_url}). Closing."
+            gh issue close "$existing" --repo "$REPO"
+          else
+            echo "Nothing to do (conclusion=${conclusion}, existing issue=${existing:-none})."
+          fi
