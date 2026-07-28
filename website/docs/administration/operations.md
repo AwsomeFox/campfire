@@ -184,6 +184,16 @@ with fresh ids and every internal reference remapped, becoming its DM. Imported 
 characters come in unowned, and members, audit history and proposals are not carried
 over. This is how you move a campaign between servers.
 
+Export/import is scoped to **the campaign** — not to scheduling/planning, and not to
+venues or rooms. Organized-play scheduling nights export as plain planned game nights
+(when, how long, where as free text, RSVPs): the recurring **series** structure,
+**venue**/**room** bookings, assigned DM, seat capacity, event/season grouping keys,
+and the stable ICS identity used to keep an external calendar subscription in place are
+**not** carried, because venues and rooms are install-level resources a target server
+may not share, and there is nowhere for those references to land on import. Importing
+a campaign with organized-play scheduling therefore flattens every occurrence into an
+ordinary one-off night — this is intentional, not a bug (issue #1548).
+
 ## Upgrading
 
 1. **Take a backup first** (see below).

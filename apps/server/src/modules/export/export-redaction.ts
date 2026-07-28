@@ -82,12 +82,22 @@ function withheldFields(raw: Row[], projected: Row[]): string[] {
  * content a publishable module exists to carry, and sweeping them out of prose
  * would gut the artifact.
  */
-export function collectPrivateIdentifiers(raw: Row): string[] {
+export function collectPrivateIdentifiers(raw: Row, extra: ReadonlyArray<unknown> = []): string[] {
   const found: string[] = [];
   const add = (value: unknown) => {
     const s = str(value);
     if (s) found.push(s);
   };
+  // #1548/#588 — `assignedDmUserId` (organized-play running DM) never appears on
+  // `raw.scheduledSessions` any more: ExportService strips it (with the rest of
+  // organized-play decoration) before `raw` is built, so it can't be scanned as a
+  // field on `raw` here. It is NOT reliably a campaign member either — createSeries
+  // accepts an assignedDmUserId without requiring membership in the exported
+  // campaign (organized-play.service.ts), so `raw.members[].userId` cannot be
+  // trusted to already cover it. ExportService passes the pre-strip values through
+  // `extra` instead, purely for this free-text sweep — they are never added back to
+  // `raw` and so cannot leak into the projected/exported document itself.
+  for (const value of extra) add(value);
 
   for (const m of asRows(raw.members)) {
     add(m.userId != null ? String(m.userId) : null);
@@ -120,13 +130,13 @@ export function collectPrivateIdentifiers(raw: Row): string[] {
   }
   for (const s of asRows(raw.scheduledSessions)) {
     add(s.cancelledBy);
-    // #588: the organized-play running DM. Same id space as `Note.authorUserId`
-    // and as `cancelledBy` directly above — an account identity, not in-fiction
-    // content — so it belongs in the scan for exactly the reason they do. It
-    // arrived with the organized-play columns, after this collector was written;
-    // a field that leaves the install carrying a real user id while sitting
-    // outside the sweep is precisely the gap this function exists to close.
-    add(s.assignedDmUserId);
+    // #588 added `assignedDmUserId` (the organized-play running DM) here as an
+    // account identity to scan, same reasoning as `cancelledBy` above. #1548
+    // stripped `assignedDmUserId` out of `raw.scheduledSessions` entirely
+    // (organized-play decoration import never restores), so it can no longer be
+    // scanned as a field here — see the `extra` parameter above, which is how
+    // ExportService still sweeps it from free text without shipping it in the
+    // export payload.
     for (const rsvp of asRows(s.rsvps)) {
       add(rsvp.userId);
       add(rsvp.userName);
@@ -180,10 +190,10 @@ export const MODULE_EXCLUSION_REASONS: Record<string, string> = {
  * profile this returns it verbatim (with an empty inventory of redactions) — backup
  * must remain byte-for-byte the artifact it always was.
  */
-export function projectExport(raw: Row, policy: ResolvedExportPolicy): ExportProjection {
+export function projectExport(raw: Row, policy: ResolvedExportPolicy, extra: ReadonlyArray<unknown> = []): ExportProjection {
   const pseudonymizer = new ExportPseudonymizer();
   const rows: ExportInventoryRow[] = [];
-  const identifiers = collectPrivateIdentifiers(raw);
+  const identifiers = collectPrivateIdentifiers(raw, extra);
   const { scannable, unscannable } = partitionIdentifiers(identifiers);
 
   if (!policy.allowlistProjection) {
