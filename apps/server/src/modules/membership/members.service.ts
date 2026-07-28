@@ -1035,12 +1035,38 @@ export class MembersService {
     // `actor === recipient`, BEFORE this method runs) already fully covers the self-suppression
     // check `notifyUser` would otherwise use `actor` for, so passing `null` here does not
     // reintroduce a self-notification.
-    const [campaignRow] = await this.db
-      .select({ name: campaigns.name })
-      .from(campaigns)
-      .where(eq(campaigns.id, campaignId))
-      .limit(1);
-    const campaignName = campaignRow?.name || 'a campaign';
+    //
+    // `actorName` deliberately omitted (Codex review, #1653): `actor.name` is a
+    // user-editable display name (PATCH /me/preferences), so it is actor-controlled
+    // content. NotificationsPage renders it verbatim as "By {actorName}". Because this
+    // signal already bypasses the #597 block filter above (actor passed as `null`) so it
+    // reaches even a recipient who blocked the removing DM, including `actor.name` would
+    // hand that DM a guaranteed, unblockable channel to put abusive text in front of
+    // someone who blocked them specifically to avoid seeing their content. The signal is
+    // access-revocation, not sender-authored, so it stays actor-name-free too.
+    //
+    // Campaign-name lookup is best-effort (Codex review, #1653): the delete above already
+    // committed and the SSE `membership.revoked` event above already fired, so the remove
+    // itself has unconditionally succeeded from here on. If this SELECT throws (e.g. a
+    // transient DB blip right after commit), letting it propagate would turn an already-
+    // successful removal into a 500 — and a client retry would then 404 (the membership
+    // is gone), reporting failure for an operation that actually worked. Falling back to
+    // the generic "a campaign" title keeps the notification (and the whole method)
+    // best-effort past this point, matching the audit-log try/catch below.
+    let campaignName = 'a campaign';
+    try {
+      const [campaignRow] = await this.db
+        .select({ name: campaigns.name })
+        .from(campaigns)
+        .where(eq(campaigns.id, campaignId))
+        .limit(1);
+      if (campaignRow?.name) campaignName = campaignRow.name;
+    } catch (err) {
+      const logger = new Logger(MembersService.name);
+      const message = `membership.revoked emitted for memberId=${memberId} but campaign-name lookup failed — falling back to generic notification title.`;
+      if (err instanceof Error) logger.error(message, err.stack);
+      else logger.error(`${message} Underlying error: ${String(err)}`);
+    }
     await this.notifications.notifyUser(
       existing.userId,
       campaignId,
@@ -1050,7 +1076,6 @@ export class MembersService {
         title: opts?.selfLeave ? `You left ${campaignName}` : `You were removed from ${campaignName}`,
         entityType: 'campaign',
         entityId: campaignId,
-        actorName: actor.name,
       },
       { allowSelf: opts?.selfLeave === true },
     );
