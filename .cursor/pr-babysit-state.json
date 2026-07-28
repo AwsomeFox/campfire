@@ -2,12 +2,12 @@
   "tracked": [
     {
       "pr": 1629,
-      "status": "babysitting",
+      "status": "merged",
       "url": "https://github.com/AwsomeFox/campfire/pull/1629",
       "headBranch": "fix/issue-1592",
       "baseBranch": "main",
-      "updatedAt": "2026-07-28T09:56:00Z",
-      "notes": "MERGEABLE; Copilot threads resolved; no open review comments. lint/build/build-test/e2e/pwa/unit-web green on run 30348162352. Awaiting coverage (~35–40m). mergeStateStatus BLOCKED pending required checks."
+      "updatedAt": "2026-07-28T10:32:00Z",
+      "notes": "Merged 2026-07-28 via squash 68e1d9eb by app/cursor. Head 5682d73d. Copilot threads resolved before merge; CI green including aggregate ci/coverage/e2e."
     }
   ]
 }
