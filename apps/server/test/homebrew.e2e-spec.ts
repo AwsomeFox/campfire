@@ -1,6 +1,7 @@
 import request from 'supertest';
 import type { Server } from 'node:http';
 import { closeTestApp, createTestApp, type TestAppContext } from './test-app';
+import { McpToolsService } from '../src/modules/mcp/mcp-tools';
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'homebrew-dm' };
 
@@ -27,5 +28,13 @@ describe('campaign homebrew (e2e)', () => {
     const proposedEntry = await request(server).get(`/api/v1/campaigns/${campaignId}/homebrew`).set(dm); expect(proposedEntry.body.some((entry: { slug: string }) => entry.slug === 'proposed-spark')).toBe(true);
     const archived = await request(server).post(`/api/v1/campaigns/${campaignId}/homebrew/${created.body.id}/archive`).set(dm).send({}); expect(archived.status).toBe(201);
     const listed = await request(server).get(`/api/v1/campaigns/${campaignId}/homebrew`).set(dm); expect(listed.body.some((entry: { id: number }) => entry.id === created.body.id)).toBe(false);
+  });
+
+  it('executes campaign homebrew through the MCP registry', async () => {
+    const tools = ctx.app.get(McpToolsService).buildToolset({ id: 'mcp-homebrew', name: 'MCP homebrew', devRole: 'dm', serverRole: 'admin', tokenContext: undefined });
+    const created = await tools.call('create_campaign_homebrew', { campaignId, entry: { slug: 'mcp-spark', name: 'MCP Spark', type: 'item', rightsStatus: 'private_original' } });
+    expect(created.isError).toBe(false);
+    const listed = await tools.call('list_campaign_homebrew', { campaignId });
+    expect(listed.isError).toBe(false); expect(listed.text).toContain('mcp-spark');
   });
 });
