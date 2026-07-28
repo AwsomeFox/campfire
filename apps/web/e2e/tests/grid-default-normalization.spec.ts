@@ -149,7 +149,26 @@ test.describe('battle-grid default normalization — issue #865', () => {
     expect(await meaningfulDefaultAuditCount(page, encounterId)).toBe(1);
   });
 
-  test('a deduped default attempt retries after the non-default request owning the pending key fails', async ({ page }) => {
+  // #1589 — this test's name and body used to assert a mechanism that does not exist: that a
+  // marker set by the deduped default effect suppresses the retry. It cannot, because the
+  // dedup branch in `queueEncounterPatch` returns BEFORE any marker is set — that early return
+  // is precisely the bug (nothing recorded that a retry was owed). The real defect was that
+  // NOTHING woke a retry at all once deduped, unless the eventual refetch happened to return
+  // data that differed (by object identity, via React Query's structural sharing) from what
+  // was already cached — which it usually would not, since the refetch after the owning
+  // request's failure reports the SAME still-missing fields the effect had already observed.
+  // See `gridDefaultRetryOnFree` in RunSessionPage.tsx for the fix: the deduped attempt now
+  // registers an explicit wake-up against the pending key it lost to, independent of whether
+  // the eventual refetch changes the cached object's reference.
+  //
+  // This test also used to be flaky-passing over that real bug rather than simply flaky: it
+  // depended on the `gridScale: null` refetch landing BEFORE the held request's 503, and in
+  // the opposite interleaving the effect never deduped in the first place (so the retry it
+  // exercises never actually ran) and the test went green regardless. `waitForResponse` below
+  // pins that ordering explicitly — awaited BEFORE `releaseFirst()` — so this test fails
+  // deterministically against the unfixed code instead of only in the runs that happened to
+  // land the race one particular way.
+  test('a deduped default attempt retries once the request owning the pending key settles, even though the refetch it triggers reports unchanged data', async ({ page }) => {
     const { campaignId } = seed();
     const encounterId = await createGridEncounter(page, 'Grid normalization — deduped retry');
 
@@ -225,14 +244,39 @@ test.describe('battle-grid default normalization — issue #865', () => {
     // the normalization effect to dedupe against this request.
     await page.getByLabel('scale').fill('5');
     await expect.poll(() => attempts).toBe(1);
+
+    // #1589 — PIN THE ORDERING. The bug this test exists for only manifests when the app's own
+    // encounter GET reports the field missing (again) BEFORE the held request settles — that is
+    // what makes the normalization effect dedupe against the held request in the first place.
+    // Wait for the PAGE's own network traffic (its poll/SSE-driven refetch), not just the
+    // server's authoritative state, to observe `gridScale: null` — and do that BEFORE releasing
+    // the held request, so this ordering is guaranteed rather than raced. Set up the wait first
+    // so no response arriving between the PATCH and the `waitForResponse` call is missed.
+    const observedMissingField = page.waitForResponse(async (response) => {
+      if (response.request().method() !== 'GET') return false;
+      if (!response.url().includes(`/api/v1/encounters/${encounterId}`)) return false;
+      try {
+        const body = (await response.json()) as EncounterResponse;
+        return body.gridScale === null;
+      } catch {
+        return false;
+      }
+    });
     const cleared = await page.request.patch(`/api/v1/encounters/${encounterId}`, { data: { gridScale: null } });
     expect(cleared.ok()).toBe(true);
-    await expect.poll(async () => (await readEncounter(page, encounterId)).gridScale).toBeNull();
+    await observedMissingField;
+    // The response landing in the page's network layer does not itself guarantee React has
+    // committed the resulting query update and run the normalization effect — that happens a
+    // handful of microtask hops later, entirely inside the page, with nothing left to await
+    // from Node. A short buffer converts that from a race into a comfortably-satisfied margin:
+    // effect scheduling here is sub-millisecond, so anything short of a global stall clears it.
+    await page.waitForTimeout(300);
     releaseFirst();
 
-    // A fresh authoritative read still sees the missing fields. The normalization effect must
-    // be able to own a new attempt after the request that previously held the equivalent
-    // pending key failed; a marker from the deduped effect may not suppress this retry.
+    // Fresh authoritative server truth (confirmed missing, above) plus the request that held
+    // the equivalent pending key having now settled must together be enough to retry — the
+    // effect's own re-run is NOT the only thing driving that retry (see the wake-up mechanism
+    // in RunSessionPage.tsx this test pins).
     await expect.poll(() => attempts, { timeout: 7_000 }).toBe(2);
     await expect
       .poll(async () => readEncounter(page, encounterId))

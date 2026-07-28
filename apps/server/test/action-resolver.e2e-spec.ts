@@ -17,6 +17,11 @@ import { rulePacks, ruleEntries } from '../src/db/schema';
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' };
 const player = { 'x-dev-role': 'player', 'x-dev-user': 'p-1' };
 const otherPlayer = { 'x-dev-role': 'player', 'x-dev-user': 'p-2' };
+// Issue #1450: the SAME account as `player` (owns actorId), but with the campaign's
+// read-only role. `requireMember(..., { write: true })` used to return this role
+// unchanged (it only asserts the CAMPAIGN is writable, not caller authority), and
+// ownership alone let the request through downstream — this is the exploited seat.
+const viewer = { 'x-dev-role': 'viewer', 'x-dev-user': 'p-1' };
 
 // A DEX-save spell that always fails vs a +0 monster (DC 21), dealing flat 6 fire on a failure
 // (a formula-free DamagePart so the total is deterministic without a roller). Its freeform
@@ -156,5 +161,126 @@ describe('action resolver (e2e HTTP)', () => {
       .set(player)
       .send({ actorCombatantId: actorId, spec: { mode: 'attack' }, targetIds: [monsterId] });
     expect(res.status).toBe(400);
+  });
+
+  // Issue #1450 — a read-only viewer (even one who OWNS the acting character, e.g. a
+  // player demoted mid-session) must not reach any consequence-writing path. Ownership
+  // checks alone (isCharacterOwnedBy) never protected against this: they only gate WHICH
+  // character a non-DM may act with, not whether the caller may act at all.
+  describe('issue #1450: viewer may not resolve, apply, or undo combat actions', () => {
+    it('viewer -> /actions/resolve with commit:true is 403, with no combatant mutation and no combat-log event', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const before = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+      const monsterBefore = before.body.combatants.find((c: { id: number }) => c.id === monsterId).hpCurrent;
+      const eventsBefore = await request(server).get(`/api/v1/encounters/${encounterId}/events`).set(dm);
+      const eventCountBefore = eventsBefore.body.length;
+
+      const res = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/actions/resolve`)
+        .set(viewer)
+        .send({ actorCombatantId: actorId, actionIndex: 0, targetIds: [monsterId], commit: true });
+      expect(res.status).toBe(403);
+
+      const after = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+      const monsterAfter = after.body.combatants.find((c: { id: number }) => c.id === monsterId).hpCurrent;
+      expect(monsterAfter).toBe(monsterBefore);
+
+      const eventsAfter = await request(server).get(`/api/v1/encounters/${encounterId}/events`).set(dm);
+      expect(eventsAfter.body.length).toBe(eventCountBefore);
+    });
+
+    it('viewer -> /actions/apply is 403', async () => {
+      const server = ctx.app.getHttpServer();
+      // A real, valid resolution (preview-only, no commit) so the request body passes DTO
+      // validation and the 403 is proven to come from the authorization gate, not a shape error.
+      const previewRes = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/actions/resolve`)
+        .set(player)
+        .send({ actorCombatantId: actorId, actionIndex: 0, targetIds: [monsterId], commit: false });
+      expect(previewRes.status).toBe(200);
+
+      const res = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/actions/apply`)
+        .set(viewer)
+        .send(previewRes.body.resolution);
+      expect(res.status).toBe(403);
+    });
+
+    it('viewer -> /actions/undo is 403', async () => {
+      const server = ctx.app.getHttpServer();
+      // A player resolves+commits for real to mint a genuine undo token, then the SAME
+      // owned actor's viewer seat attempts to consume it.
+      const resolveRes = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/actions/resolve`)
+        .set(player)
+        .send({ actorCombatantId: actorId, actionIndex: 0, targetIds: [monsterId], commit: true });
+      expect(resolveRes.status).toBe(200);
+      const undoToken = resolveRes.body.undoToken;
+
+      const before = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+      const monsterBefore = before.body.combatants.find((c: { id: number }) => c.id === monsterId).hpCurrent;
+
+      const res = await request(server).post(`/api/v1/encounters/${encounterId}/actions/undo`).set(viewer).send(undoToken);
+      expect(res.status).toBe(403);
+
+      // Undo never ran — HP stays at the applied (damaged) value, not restored.
+      const after = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+      const monsterAfter = after.body.combatants.find((c: { id: number }) => c.id === monsterId).hpCurrent;
+      expect(monsterAfter).toBe(monsterBefore);
+
+      // Clean up via the DM so later tests see a known HP baseline.
+      const cleanup = await request(server).post(`/api/v1/encounters/${encounterId}/actions/undo`).set(dm).send(undoToken);
+      expect(cleanup.status).toBe(200);
+    });
+
+    it('a player demoted to viewer mid-session loses action-resolver access on the very next request', async () => {
+      const server = ctx.app.getHttpServer();
+
+      // Same account, same owned character: succeeds as `player`...
+      const asPlayer = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/actions/resolve`)
+        .set(player)
+        .send({ actorCombatantId: actorId, actionIndex: 0, targetIds: [monsterId], commit: false });
+      expect(asPlayer.status).toBe(200);
+
+      // ...and is refused on the IMMEDIATELY NEXT request once the campaign now reports
+      // this account as `viewer` — nothing about the request changed except the role, so a
+      // stale/cached authorization decision would incorrectly let this through.
+      const demoted = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/actions/resolve`)
+        .set(viewer)
+        .send({ actorCombatantId: actorId, actionIndex: 0, targetIds: [monsterId], commit: false });
+      expect(demoted.status).toBe(403);
+    });
+  });
+
+  // Regression: the fix must not touch the DM or the automatic-policy player path.
+  describe('issue #1450 regression: dm and player paths keep working under each policy', () => {
+    it('dm previews a player PC action directly (automatic policy)', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/actions/resolve`)
+        .set(dm)
+        .send({ actorCombatantId: actorId, actionIndex: 0, targetIds: [monsterId], commit: false });
+      expect(res.status).toBe(200);
+      expect(res.body.canApply).toBe(true);
+      expect(res.body.policy).toBe('automatic');
+    });
+
+    it('a player under the default automatic policy still resolves + applies + undoes their own PC action', async () => {
+      const server = ctx.app.getHttpServer();
+      const resolveRes = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/actions/resolve`)
+        .set(player)
+        .send({ actorCombatantId: actorId, actionIndex: 0, targetIds: [monsterId], commit: true });
+      expect(resolveRes.status).toBe(200);
+      expect(resolveRes.body.applied).toBe(true);
+      const undo = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/actions/undo`)
+        .set(player)
+        .send(resolveRes.body.undoToken);
+      expect(undo.status).toBe(200);
+    });
   });
 });
