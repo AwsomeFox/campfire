@@ -6,8 +6,8 @@
       "url": "https://github.com/AwsomeFox/campfire/pull/1629",
       "headBranch": "fix/issue-1592",
       "baseBranch": "main",
-      "updatedAt": "2026-07-28T09:49:00Z",
-      "notes": "Tracking started. MERGEABLE (no conflicts with main). Copilot review threads already resolved after clarify-comments commit 5682d73d. CI in progress after synchronize; mergeStateStatus BLOCKED pending checks."
+      "updatedAt": "2026-07-28T09:56:00Z",
+      "notes": "MERGEABLE; Copilot threads resolved; no open review comments. lint/build/build-test/e2e/pwa/unit-web green on run 30348162352. Awaiting coverage (~35–40m). mergeStateStatus BLOCKED pending required checks."
     }
   ]
 }
