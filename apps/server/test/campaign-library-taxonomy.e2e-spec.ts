@@ -159,4 +159,16 @@ describe('campaign library taxonomy (issue #742)', () => {
     expect((await request(server).post(`/api/v1/campaigns/${campaignId}/library/bulk`).set(dm).send({ operation: 'set_visibility', visibility: 'hidden', targets: [{ entityType: 'location', entityId: rows[1].id }] })).status).toBe(201);
     expect((await db.select().from(locations).where(eq(locations.id, rows[1].id))).at(0)?.status).toBe('unexplored');
   });
+
+  it('rolls back a multi-target undo when a later edit conflicts, leaving every target at post-bulk state', async () => {
+    const server = ctx.app.getHttpServer(); const db = ctx.app.get<DrizzleDb>(DB); const ts = new Date().toISOString();
+    const rows = await db.insert(quests).values(['One', 'Two'].map((title) => ({ campaignId, title, hidden: false, createdAt: ts, updatedAt: ts }))).returning();
+    const bulk = await request(server).post(`/api/v1/campaigns/${campaignId}/library/bulk`).set(dm).send({ operation: 'set_visibility', visibility: 'hidden', targets: rows.map((row) => ({ entityType: 'quest', entityId: row.id })) });
+    expect(bulk.status).toBe(201);
+    await db.update(quests).set({ hidden: false, updatedAt: new Date(Date.now() + 1_000).toISOString() }).where(eq(quests.id, rows[1].id));
+    expect((await request(server).post(`/api/v1/campaigns/${campaignId}/library/bulk/${bulk.body.operationId}/undo`).set(dm)).status).toBe(409);
+    const current = await db.select().from(quests).where(eq(quests.campaignId, campaignId));
+    expect(current.find((row) => row.id === rows[0].id)?.hidden).toBe(true); // first inverse was rolled back
+    expect(current.find((row) => row.id === rows[1].id)?.hidden).toBe(false);
+  });
 });
