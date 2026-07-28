@@ -772,6 +772,8 @@ CREATE TABLE IF NOT EXISTS party_rest_batches (
   request_fingerprint TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'previewed',
   idempotency_key TEXT,
+  undo_idempotency_key TEXT,
+  undo_result_json TEXT NOT NULL DEFAULT '{}',
   before_json TEXT NOT NULL DEFAULT '{}',
   plan_json TEXT NOT NULL DEFAULT '{}',
   after_json TEXT NOT NULL DEFAULT '{}',

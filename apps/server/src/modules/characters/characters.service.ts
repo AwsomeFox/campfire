@@ -1886,7 +1886,10 @@ export class CharactersService {
     const [batch] = await this.db.select().from(partyRestBatches).where(and(eq(partyRestBatches.campaignId, campaignId), eq(partyRestBatches.id, batchId))).limit(1);
     if (!batch) throw new NotFoundException('Party recovery batch not found.');
     if (batch.actorUserId !== user.id) throw new ForbiddenException('Only the DM who applied this recovery can undo it.');
-    if (batch.status === 'undone') return { batchId, undone: true, replayed: true };
+    if (batch.status === 'undone') {
+      if (batch.undoIdempotencyKey === idempotencyKey) return fromJsonText(batch.undoResultJson, { batchId, undone: true, replayed: true });
+      throw new ConflictException('This recovery was already undone with a different idempotency key.');
+    }
     if (batch.status !== 'applied') throw new ConflictException('Only an applied recovery can be undone.');
     const before = fromJsonText<Array<{ id: number; hpCurrent: number; hpTemp: number; deathState: string; deathSaveSuccesses: number; deathSaveFailures: number; conditions: string; spellSlots: string; resources: string }>>(batch.beforeJson, []);
     const after = fromJsonText<Array<{ characterId: number; hpAfter: number; hpTempAfter: number; deathStateAfter: string; deathSaveSuccessesAfter: number; deathSaveFailuresAfter: number; conditionsAfter: string[]; spellSlotsAfter: Record<string, SpellSlotLevel>; resourcesAfter: Record<string, CharacterResource> }>>(batch.afterJson, []);
@@ -1894,10 +1897,11 @@ export class CharactersService {
     const current = new Map(rows.map((row) => [row.id, row]));
     if (after.some((item) => { const row = current.get(item.characterId); return !row || row.hpCurrent !== item.hpAfter || row.hpTemp !== item.hpTempAfter || row.deathState !== item.deathStateAfter || row.conditions !== toJsonText(item.conditionsAfter) || row.spellSlots !== toJsonText(item.spellSlotsAfter) || row.resources !== toJsonText(item.resourcesAfter); })) throw new ConflictException('A participant changed after this recovery; undo would overwrite it.');
     const at = nowIso();
-    this.db.transaction((tx) => { for (const snapshot of before) { const result = tx.update(characters).set({ hpCurrent: snapshot.hpCurrent, hpTemp: snapshot.hpTemp, deathState: snapshot.deathState, deathSaveSuccesses: snapshot.deathSaveSuccesses, deathSaveFailures: snapshot.deathSaveFailures, conditions: snapshot.conditions, spellSlots: snapshot.spellSlots, resources: snapshot.resources, updatedAt: at }).where(and(eq(characters.id, snapshot.id), eq(characters.campaignId, campaignId))).run(); if (result.changes !== 1) throw new ConflictException('A participant disappeared while undoing recovery.'); } const result = tx.update(partyRestBatches).set({ status: 'undone', undoneAt: at }).where(and(eq(partyRestBatches.id, batchId), eq(partyRestBatches.status, 'applied'))).run(); if (result.changes !== 1) throw new ConflictException('Recovery was undone concurrently.'); });
+    const undoResult = { batchId, undone: true };
+    this.db.transaction((tx) => { for (const snapshot of before) { const result = tx.update(characters).set({ hpCurrent: snapshot.hpCurrent, hpTemp: snapshot.hpTemp, deathState: snapshot.deathState, deathSaveSuccesses: snapshot.deathSaveSuccesses, deathSaveFailures: snapshot.deathSaveFailures, conditions: snapshot.conditions, spellSlots: snapshot.spellSlots, resources: snapshot.resources, updatedAt: at }).where(and(eq(characters.id, snapshot.id), eq(characters.campaignId, campaignId))).run(); if (result.changes !== 1) throw new ConflictException('A participant disappeared while undoing recovery.'); } const result = tx.update(partyRestBatches).set({ status: 'undone', undoneAt: at, undoIdempotencyKey: idempotencyKey, undoResultJson: toJsonText(undoResult) }).where(and(eq(partyRestBatches.id, batchId), eq(partyRestBatches.status, 'applied'))).run(); if (result.changes !== 1) throw new ConflictException('Recovery was undone concurrently.'); });
     await this.audit.log({ actor: auditActor(user), actorRole: role, action: 'party.rest.undo', entityType: 'party_rest_batch', entityId: batchId, campaignId, detail: JSON.stringify({ batchId, characterIds: before.map((s) => s.id), idempotencyKey }) });
     for (const snapshot of before) this.emitCharacterUpdated(campaignId, snapshot.id, user.id);
-    return { batchId, undone: true };
+    return undoResult;
   }
 
   /**

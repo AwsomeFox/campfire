@@ -3066,6 +3066,9 @@ function migratePartyRestBatches759(sqlite: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_party_rest_batches_campaign ON party_rest_batches(campaign_id, created_at DESC);
   `);
+  const columns = sqlite.pragma('table_info(party_rest_batches)') as Array<{ name: string }>;
+  if (!columns.some((column) => column.name === 'undo_idempotency_key')) sqlite.exec('ALTER TABLE party_rest_batches ADD COLUMN undo_idempotency_key TEXT');
+  if (!columns.some((column) => column.name === 'undo_result_json')) sqlite.exec("ALTER TABLE party_rest_batches ADD COLUMN undo_result_json TEXT NOT NULL DEFAULT '{}'");
 }
 
 function _migrateImportJobsTable(sqlite: Database.Database): void {

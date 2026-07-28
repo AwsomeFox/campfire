@@ -836,6 +836,8 @@ export const partyRestBatches = sqliteTable('party_rest_batches', {
   requestFingerprint: text('request_fingerprint').notNull(),
   status: text('status').notNull().default('previewed'), // previewed | applied | undone
   idempotencyKey: text('idempotency_key'),
+  undoIdempotencyKey: text('undo_idempotency_key'),
+  undoResultJson: text('undo_result_json').notNull().default('{}'),
   beforeJson: text('before_json').notNull().default('{}'),
   planJson: text('plan_json').notNull().default('{}'),
   afterJson: text('after_json').notNull().default('{}'),
