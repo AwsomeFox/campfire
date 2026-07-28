@@ -1,0 +1,13 @@
+{
+  "tracked": [
+    {
+      "pr": 1653,
+      "status": "babysitting",
+      "url": "https://github.com/AwsomeFox/campfire/pull/1653",
+      "headBranch": "fix/issue-1640",
+      "baseBranch": "main",
+      "updatedAt": "2026-07-28T12:20:00Z",
+      "notes": "Tracking started on cursor/pull-request-babysitting-8be0. Head 319ffe8d. MERGEABLE, not behind main. Codex P1 (actor-block suppressing removed_from_campaign) fixed in 319ffe8d and thread resolved. Awaiting CI run 30358357831 after synchronize."
+    }
+  ]
+}
