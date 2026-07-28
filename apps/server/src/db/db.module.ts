@@ -1439,6 +1439,17 @@ function migrateInventoryItemsTableForSoftDelete(sqlite: Database.Database): voi
   }
 }
 
+/** Issue #738: portable compendium item provenance; additive so installed alpha DBs upgrade in place. */
+function migrateInventoryItemsCompendium738(sqlite: Database.Database): void {
+  const table = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='inventory_items'").get();
+  if (!table) return;
+  const columns = sqlite.prepare('PRAGMA table_info(inventory_items)').all() as Array<{ name: string }>;
+  const additions: Array<[string, string]> = [
+    ['rule_entry_id', 'INTEGER'], ['compendium_ref', 'TEXT'], ['compendium_snapshot', 'TEXT'], ['compendium_state', 'TEXT'],
+  ];
+  for (const [name, type] of additions) if (!columns.some((column) => column.name === name)) sqlite.exec(`ALTER TABLE inventory_items ADD COLUMN ${name} ${type}`);
+}
+
 /**
  * Migration for DBs created before the AI-DM operating mode (issue #311): the
  * `ai_dm_seats.mode` column didn't exist. Plain NOT NULL DEFAULT 'off' ADD COLUMN —
@@ -4399,6 +4410,9 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // #735 is additive but belongs at the execution tail: attachment provenance is
   // independent of earlier table work and migration arrays are read chronologically.
   { name: '0137_attachment_metadata_735', run: migrateAttachmentMetadata735 },
+  // #738: additive inventory provenance columns; 0139 avoids colliding with
+  // 0137 (#735) and 0138 (#1051) already used earlier in this array.
+  { name: '0139_inventory_compendium_738', run: migrateInventoryItemsCompendium738 },
 ];
 
 /**
