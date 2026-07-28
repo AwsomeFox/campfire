@@ -27,7 +27,7 @@ export function PartyRestPanel({ campaignId, characters, onClose, onApplied }: {
     if (!preview) return;
     setBusy(true); setError(null);
     try { const result = await api.post<{ batchId: number }>(`${API}/campaigns/${campaignId}/characters/rest/apply`, { previewToken: preview.previewToken, idempotencyKey: `party-rest-${preview.previewToken}`, acknowledgeRunningCombatants: combatAck }); setApplied({ batchId: result.batchId, key: `undo-${preview.previewToken}` }); onApplied(); }
-    catch (err) { setError(err instanceof ApiError ? err.message : 'Could not apply recovery.'); }
+    catch (err) { if (err instanceof ApiError && err.status === 409) { setPreview(null); setCombatAck(false); } setError(err instanceof ApiError ? err.message : 'Could not apply recovery.'); }
     finally { setBusy(false); }
   }
   return <Card className="space-y-3" aria-labelledby="party-rest-title">

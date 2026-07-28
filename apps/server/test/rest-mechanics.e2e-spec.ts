@@ -228,10 +228,10 @@ describe('rest mechanics (#1041, e2e)', () => {
       isConcentration: false, stacks: 5, notes: 'keep sheet note', custom: false,
     };
     const combatantExhaustion = { ...sheetExhaustion, id: 'combat-exhaustion', source: 'combat-only source', sourceCombatantId: 999, durationRounds: 4, roundsRemaining: 3, timing: 'end', saveTiming: 'end', saveDc: 14, saveAbility: 'con', notes: 'keep combat note' };
-    await db.update(charactersTable).set({ conditions: JSON.stringify(['Exhaustion']), conditionInstances: JSON.stringify([sheetExhaustion]) }).where(eq(charactersTable.id, id));
+    await db.update(charactersTable).set({ hpTemp: 6, deathSaveSuccesses: 2, deathSaveFailures: 1, conditions: JSON.stringify(['Exhaustion']), conditionInstances: JSON.stringify([sheetExhaustion]) }).where(eq(charactersTable.id, id));
     const now = new Date().toISOString();
     const [encounter] = await db.insert(encounters).values({ campaignId, name: 'Structured recovery', status: 'running', createdAt: now, updatedAt: now }).returning();
-    const [combatant] = await db.insert(combatants).values({ encounterId: encounter.id, kind: 'character', characterId: id, name: 'Structured batch', hpCurrent: 5, hpMax: 40, conditions: JSON.stringify(['Exhaustion']), conditionInstances: JSON.stringify([combatantExhaustion]) }).returning();
+    const [combatant] = await db.insert(combatants).values({ encounterId: encounter.id, kind: 'character', characterId: id, name: 'Structured batch', hpCurrent: 5, hpMax: 40, hpTemp: 6, deathSaveSuccesses: 2, deathSaveFailures: 1, conditions: JSON.stringify(['Exhaustion']), conditionInstances: JSON.stringify([combatantExhaustion]) }).returning();
 
     const preview = await characters.previewPartyRecovery(campaignId, { kind: 'long', characterIds: [id] }, dmUser, 'dm');
     const applied = await characters.applyPartyRecovery(campaignId, { previewToken: preview.previewToken, idempotencyKey: 'structured-batch-apply', acknowledgeRunningCombatants: true }, dmUser, 'dm');
@@ -240,6 +240,7 @@ describe('rest mechanics (#1041, e2e)', () => {
     expect(JSON.parse(appliedSheet.conditions!)).toEqual(['Exhaustion']);
     expect(JSON.parse(appliedSheet.conditionInstances!)[0]).toMatchObject({ name: 'Exhaustion', stacks: 4, notes: 'keep sheet note' });
     expect(JSON.parse(appliedCombatant.conditions!)).toEqual(['Exhaustion']);
+    expect(appliedCombatant).toMatchObject({ hpTemp: 0, deathSaveSuccesses: 0, deathSaveFailures: 0 });
     expect(JSON.parse(appliedCombatant.conditionInstances!)[0]).toMatchObject({ name: 'Exhaustion', stacks: 4, id: 'combat-exhaustion', source: 'combat-only source', sourceCombatantId: 999, roundsRemaining: 3, notes: 'keep combat note' });
 
     await characters.undoPartyRecovery(campaignId, applied.batchId, 'structured-batch-undo', dmUser, 'dm');
@@ -247,6 +248,7 @@ describe('rest mechanics (#1041, e2e)', () => {
     const [undoneCombatant] = await db.select().from(combatants).where(eq(combatants.id, combatant.id));
     expect(JSON.parse(undoneSheet.conditions!)).toEqual(['Exhaustion']);
     expect(JSON.parse(undoneSheet.conditionInstances!)[0]).toMatchObject({ name: 'Exhaustion', stacks: 5, notes: 'keep sheet note' });
+    expect(undoneCombatant).toMatchObject({ hpTemp: 6, deathSaveSuccesses: 2, deathSaveFailures: 1 });
     expect(JSON.parse(undoneCombatant.conditionInstances!)[0]).toMatchObject({ name: 'Exhaustion', stacks: 5, id: 'combat-exhaustion', source: 'combat-only source', sourceCombatantId: 999, roundsRemaining: 3, notes: 'keep combat note' });
   });
 
