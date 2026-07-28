@@ -2655,7 +2655,7 @@ export const InboxSweepItemResult = z.object({
   entityType: InboxSweepEntityType.nullable(),
   entityId: Id.nullable(),
   proposalId: Id.nullable(),
-  reason: z.string(),
+  reason: z.string().min(1),
 });
 export type InboxSweepItemResult = z.infer<typeof InboxSweepItemResult>;
 

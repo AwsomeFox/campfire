@@ -1,6 +1,6 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { and, eq, inArray } from 'drizzle-orm';
-import type { InboxSweepEntityType, InboxSweepItemResult, InboxSweepJob, InboxSweepOutcome, InboxSweepResult, Role } from '@campfire/schema';
+import type { AiExternalContentPolicy, InboxSweepEntityType, InboxSweepItemResult, InboxSweepJob, InboxSweepOutcome, InboxSweepResult, Role } from '@campfire/schema';
 import {
   CharacterCreate,
   CharacterUpdate,
@@ -13,12 +13,13 @@ import {
 } from '@campfire/schema';
 import type { z } from 'zod';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { inboxSweepItems, inboxSweepJobs } from '../../db/schema';
+import { campaignMembers, campaigns, inboxSweepItems, inboxSweepJobs } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { auditActor, type RequestUser } from '../../common/user.types';
 import { NotesService } from '../notes/notes.service';
 import { ProposalRecordsService } from '../proposals/proposal-records.service';
 import { CampaignsService } from '../campaigns/campaigns.service';
+import { AiProviderConfigService } from '../ai-provider-config/ai-provider-config.service';
 import {
   INBOX_SWEEP_CLASSIFIER,
   NoProviderConfiguredError,
@@ -36,6 +37,14 @@ const ENTITY_SCHEMAS: Record<InboxSweepEntityType, { create: z.ZodTypeAny; updat
 
 const UNSUPPORTED_WRITE_REASON =
   'objective ticks, HP changes, and combat/initiative writes are not handled by the inbox sweep — resolve this item directly';
+
+type InboxSweepEgress = 'external' | 'local';
+
+interface ExternalAiGate {
+  egress: InboxSweepEgress;
+  policy: AiExternalContentPolicy;
+  consentingMemberIds: ReadonlySet<string>;
+}
 
 interface JobRow {
   id: number;
@@ -102,11 +111,14 @@ function jobToDomain(row: JobRow): InboxSweepJob {
  */
 @Injectable()
 export class InboxSweepService {
+  private readonly logger = new Logger(InboxSweepService.name);
+
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly notes: NotesService,
     private readonly proposals: ProposalRecordsService,
     private readonly campaigns: CampaignsService,
+    private readonly providerConfig: AiProviderConfigService,
     @Inject(INBOX_SWEEP_CLASSIFIER) private readonly classifier: InboxSweepClassifier,
   ) {}
 
@@ -124,31 +136,29 @@ export class InboxSweepService {
       return { job: jobToDomain(job), items: [] };
     }
 
-    const existing =
-      openItems.length === 0
-        ? []
-        : await this.db
-            .select()
-            .from(inboxSweepItems)
-            .where(
-              and(
-                eq(inboxSweepItems.campaignId, campaignId),
-                inArray(
-                  inboxSweepItems.noteId,
-                  openItems.map((n) => n.id),
-                ),
-              ),
-            );
+    const existing = await this.db
+      .select()
+      .from(inboxSweepItems)
+      .where(
+        and(
+          eq(inboxSweepItems.campaignId, campaignId),
+          inArray(
+            inboxSweepItems.noteId,
+            openItems.map((n) => n.id),
+          ),
+        ),
+      );
     const existingByNote = new Map(existing.map((r) => [r.noteId, r]));
 
     const summary = await this.campaigns.summary(campaignId, 'dm');
     const context: InboxSweepContext = {
       campaignId,
-      quests: summary.quests.map((q) => ({ id: q.id, name: q.title })),
-      npcs: summary.npcs.map((n) => ({ id: n.id, name: n.name })),
-      locations: summary.locations.map((l) => ({ id: l.id, name: l.name })),
-      characters: summary.characters.map((c) => ({ id: c.id, name: c.name })),
+      quests: (summary?.quests ?? []).map((q) => ({ id: q.id, name: q.title })),
+      npcs: (summary?.npcs ?? []).map((n) => ({ id: n.id, name: n.name })),
+      locations: (summary?.locations ?? []).map((l) => ({ id: l.id, name: l.name })),
+      characters: (summary?.characters ?? []).map((c) => ({ id: c.id, name: c.name })),
     };
+    const externalAiGate = await this.externalAiGate(campaignId);
 
     const results: InboxSweepItemResult[] = [];
     let proposed = 0;
@@ -170,21 +180,29 @@ export class InboxSweepService {
       const prior = existingByNote.get(item.id);
       if (prior) {
         // Already swept in an earlier run — never re-classify or re-propose. Self-heal
-        // the one crash window this design has to guard against: a proposal was filed
-        // and the ledger row written, but the process died before `resolveInbox` ran.
-        if (prior.outcome === 'proposed' && !item.resolved) {
-          await this.tryResolve(item.id, user, role, prior.reason, prior.entityType as InboxSweepEntityType | null, prior.entityId);
+        // the crash window where a terminal ledger row was written but the inbox close
+        // did not complete.
+        if (!item.resolved) {
+          const link = this.resolveLinkForPrior(prior);
+          await this.tryResolve(item.id, user, role, prior.reason, link.entityType, link.entityId);
         }
-        results.push({
-          noteId: item.id,
-          outcome: prior.outcome as InboxSweepOutcome,
-          entityType: (prior.entityType as InboxSweepEntityType | null) ?? null,
-          entityId: prior.entityId,
-          proposalId: prior.proposalId,
-          reason: prior.reason,
-        });
+        results.push(this.resultFromLedger(item.id, prior));
         if (prior.outcome === 'proposed') proposed++;
         else skipped++;
+        continue;
+      }
+
+      const withheldReason = this.externalAiWithheldReason(item, externalAiGate);
+      if (withheldReason) {
+        errored++;
+        results.push({
+          noteId: item.id,
+          outcome: 'errored',
+          entityType: null,
+          entityId: null,
+          proposalId: null,
+          reason: withheldReason,
+        });
         continue;
       }
 
@@ -282,9 +300,34 @@ export class InboxSweepService {
     }
 
     try {
-      const proposal = await this.proposals.create(campaignId, entityType, targetId, classification.action, validated, user, role);
-      const reason = classification.reason || `filed as ${classification.action} proposal #${proposal.id}`;
-      await this.persistLedger(campaignId, jobId, noteId, 'proposed', entityType, targetId, proposal.id, reason);
+      const { proposal, result: reason } = await this.proposals.createWithTransaction(
+        campaignId,
+        entityType,
+        targetId,
+        classification.action,
+        validated,
+        user,
+        role,
+        (tx, proposalRow) => {
+          const reason = classification.reason || `filed as ${classification.action} proposal #${proposalRow.id}`;
+          const ts = nowIso();
+          tx.insert(inboxSweepItems)
+            .values({
+              campaignId,
+              noteId,
+              jobId,
+              outcome: 'proposed',
+              entityType,
+              entityId: targetId,
+              proposalId: proposalRow.id,
+              reason,
+              createdAt: ts,
+              updatedAt: ts,
+            })
+            .run();
+          return reason;
+        },
+      );
       await this.tryResolve(
         noteId,
         user,
@@ -295,6 +338,12 @@ export class InboxSweepService {
       );
       return { noteId, outcome: 'proposed', entityType, entityId: targetId, proposalId: proposal.id, reason };
     } catch (err) {
+      const concurrent = await this.findLedger(campaignId, noteId);
+      if (concurrent) {
+        const link = this.resolveLinkForPrior(concurrent);
+        await this.tryResolve(noteId, user, role, concurrent.reason, link.entityType, link.entityId);
+        return this.resultFromLedger(noteId, concurrent);
+      }
       const reason = `failed to file ${classification.action} proposal: ${err instanceof Error ? err.message : String(err)}`;
       return { noteId, outcome: 'errored', entityType: null, entityId: null, proposalId: null, reason };
     }
@@ -320,11 +369,93 @@ export class InboxSweepService {
         user,
         role,
       );
-    } catch {
+    } catch (err) {
       // Already resolved with a different terminal payload, or some other transient
       // failure — the ledger row already recorded the outcome, so a later sweep (or the
       // DM resolving it by hand) is what happens next. Not fatal to this run.
+      this.logger.warn(
+        `Failed to resolve inbox item ${noteId} after sweep decision: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
+  }
+
+  private resolveLinkForPrior(row: typeof inboxSweepItems.$inferSelect): {
+    entityType: InboxSweepEntityType | null;
+    entityId: number | null;
+  } {
+    if (row.entityId == null) return { entityType: null, entityId: null };
+    return { entityType: (row.entityType as InboxSweepEntityType | null) ?? null, entityId: row.entityId };
+  }
+
+  private resultFromLedger(noteId: number, row: typeof inboxSweepItems.$inferSelect): InboxSweepItemResult {
+    return {
+      noteId,
+      outcome: row.outcome as InboxSweepOutcome,
+      entityType: (row.entityType as InboxSweepEntityType | null) ?? null,
+      entityId: row.entityId,
+      proposalId: row.proposalId,
+      reason: row.reason || 'previously swept',
+    };
+  }
+
+  private async findLedger(campaignId: number, noteId: number): Promise<typeof inboxSweepItems.$inferSelect | null> {
+    const [row] = await this.db
+      .select()
+      .from(inboxSweepItems)
+      .where(and(eq(inboxSweepItems.campaignId, campaignId), eq(inboxSweepItems.noteId, noteId)))
+      .limit(1);
+    return row ?? null;
+  }
+
+  private operatorDeclaredLocalEndpoint(): boolean {
+    const raw = process.env.AI_PROVIDER_ENDPOINT_IS_LOCAL?.trim().toLowerCase();
+    return raw === '1' || raw === 'true';
+  }
+
+  private async resolveEgress(campaignId: number): Promise<InboxSweepEgress> {
+    const view = await this.providerConfig.getEffectiveView(campaignId);
+    if (!view.configured) return 'local';
+    return this.operatorDeclaredLocalEndpoint() ? 'local' : 'external';
+  }
+
+  private async aiContentPolicy(campaignId: number): Promise<AiExternalContentPolicy> {
+    const [row] = await this.db
+      .select({ aiExternalContentPolicy: campaigns.aiExternalContentPolicy })
+      .from(campaigns)
+      .where(eq(campaigns.id, campaignId))
+      .limit(1);
+    return (row?.aiExternalContentPolicy ?? 'member_consent') as AiExternalContentPolicy;
+  }
+
+  private async consentingMemberIds(campaignId: number): Promise<Set<string>> {
+    const rows = await this.db
+      .select({ userId: campaignMembers.userId })
+      .from(campaignMembers)
+      .where(and(eq(campaignMembers.campaignId, campaignId), eq(campaignMembers.aiExternalUseConsent, true)));
+    return new Set(rows.map((row) => String(row.userId)));
+  }
+
+  private async externalAiGate(campaignId: number): Promise<ExternalAiGate> {
+    const egress = await this.resolveEgress(campaignId);
+    const policy = await this.aiContentPolicy(campaignId);
+    const consentingMemberIds =
+      egress === 'external' && policy === 'member_consent'
+        ? await this.consentingMemberIds(campaignId)
+        : new Set<string>();
+    return { egress, policy, consentingMemberIds };
+  }
+
+  private externalAiWithheldReason(
+    item: { authorUserId: string | null },
+    gate: ExternalAiGate,
+  ): string | null {
+    if (gate.egress !== 'external') return null;
+    if (gate.policy === 'disabled') {
+      return "withheld because this campaign's AI content policy disallows external use of member-authored inbox captures";
+    }
+    const authorUserId = item.authorUserId ?? '';
+    if (authorUserId && gate.consentingMemberIds.has(authorUserId)) return null;
+    return 'withheld pending author consent for external AI use';
   }
 
   private async persistLedger(

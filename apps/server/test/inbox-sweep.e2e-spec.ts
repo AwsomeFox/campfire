@@ -1,5 +1,10 @@
 import request from 'supertest';
+import { eq } from 'drizzle-orm';
 import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
+import { DB, type DrizzleDb } from '../src/db/db.module';
+import { inboxSweepItems, inboxSweepJobs } from '../src/db/schema';
+import { nowIso } from '../src/common/time';
+import { AiProviderConfigService } from '../src/modules/ai-provider-config/ai-provider-config.service';
 import {
   INBOX_SWEEP_CLASSIFIER,
   NoProviderConfiguredError,
@@ -27,10 +32,12 @@ class ScriptedClassifier implements InboxSweepClassifier {
   script = new Map<string, InboxSweepClassification>();
   calls: Array<{ capture: InboxSweepCapture; context: InboxSweepContext }> = [];
   noProvider = false;
+  beforeReturn: (() => Promise<void>) | null = null;
 
   async classify(capture: InboxSweepCapture, context: InboxSweepContext): Promise<InboxSweepClassification> {
     this.calls.push({ capture, context });
     if (this.noProvider) throw new NoProviderConfiguredError();
+    if (this.beforeReturn) await this.beforeReturn();
     const scripted = this.script.get(capture.body);
     if (!scripted) throw new Error(`no scripted classification for: ${capture.body}`);
     return scripted;
@@ -56,6 +63,7 @@ describe('inbox sweep (e2e)', () => {
     classifier.script.clear();
     classifier.calls = [];
     classifier.noProvider = false;
+    classifier.beforeReturn = null;
   });
 
   async function newCampaign(name: string): Promise<number> {
@@ -182,6 +190,127 @@ describe('inbox sweep (e2e)', () => {
     const npcProposals = proposals.body.filter((p: { entityType: string }) => p.entityType === 'npc');
     expect(npcProposals).toHaveLength(1);
     expect(npcProposals[0].id).toBe(proposalId);
+  });
+
+  it('does not duplicate proposals when two sweeps race on the same open item', async () => {
+    const campaignId = await newCampaign('Sweep Concurrent Idempotency');
+    await submitInbox(campaignId, 'Please add an NPC for the apothecary, Tamsin.');
+    classifier.script.set('Please add an NPC for the apothecary, Tamsin.', {
+      action: 'create',
+      entityType: 'npc',
+      targetId: null,
+      fields: { name: 'Tamsin' },
+      reason: 'named NPC mentioned in play',
+    });
+
+    let seen = 0;
+    let release!: () => void;
+    const bothClassified = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    classifier.beforeReturn = async () => {
+      seen += 1;
+      if (seen === 2) release();
+      await bothClassified;
+    };
+
+    const [first, second] = await Promise.all([
+      request(server).post(`/api/v1/campaigns/${campaignId}/inbox/sweep`).set(dm),
+      request(server).post(`/api/v1/campaigns/${campaignId}/inbox/sweep`).set(dm),
+    ]);
+
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(201);
+    expect(classifier.calls).toHaveLength(2);
+
+    const proposals = await request(server).get(`/api/v1/campaigns/${campaignId}/proposals?status=pending`).set(dm);
+    const npcProposals = proposals.body.filter((p: { entityType: string }) => p.entityType === 'npc');
+    expect(npcProposals).toHaveLength(1);
+  });
+
+  it('withholds external-provider captures until the author has external AI consent', async () => {
+    const campaignId = await newCampaign('Sweep External Consent');
+    const noteId = await submitInbox(campaignId, 'Please add a quest from a non-consenting author.');
+    const configs = ctx.app.get(AiProviderConfigService);
+    const spy = jest.spyOn(configs, 'getEffectiveView').mockResolvedValue({
+      configured: true,
+      providerType: 'mock',
+      model: 'mock',
+      source: 'campaign',
+      credentialSource: 'stored',
+      ready: true,
+    });
+
+    try {
+      const res = await request(server).post(`/api/v1/campaigns/${campaignId}/inbox/sweep`).set(dm);
+      expect(res.status).toBe(201);
+      expect(res.body.job.itemsErrored).toBe(1);
+      expect(res.body.items[0]).toMatchObject({
+        noteId,
+        outcome: 'errored',
+        entityType: null,
+        entityId: null,
+        proposalId: null,
+      });
+      expect(res.body.items[0].reason).toContain('withheld pending author consent');
+      expect(classifier.calls).toHaveLength(0);
+
+      const inbox = await request(server).get(`/api/v1/campaigns/${campaignId}/inbox`).set(dm);
+      const stillOpen = inbox.body.items.find((i: { id: number }) => i.id === noteId);
+      expect(stillOpen).toBeDefined();
+      expect(stillOpen.resolved).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('retries resolution for prior ledger rows and avoids type-with-null-id links for recovered creates', async () => {
+    const campaignId = await newCampaign('Sweep Ledger Recovery');
+    const noteId = await submitInbox(campaignId, 'A create proposal was filed before resolution crashed.');
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const ts = nowIso();
+    const [job] = await db
+      .insert(inboxSweepJobs)
+      .values({
+        campaignId,
+        status: 'succeeded',
+        itemsTotal: 1,
+        itemsProposed: 1,
+        itemsSkipped: 0,
+        itemsErrored: 0,
+        detail: 'seeded recovery job',
+        createdBy: 'test',
+        createdAt: ts,
+      })
+      .returning();
+    await db.insert(inboxSweepItems).values({
+      campaignId,
+      noteId,
+      jobId: job.id,
+      outcome: 'proposed',
+      entityType: 'quest',
+      entityId: null,
+      proposalId: 9999,
+      reason: 'filed as create proposal #9999',
+      createdAt: ts,
+      updatedAt: ts,
+    });
+
+    const res = await request(server).post(`/api/v1/campaigns/${campaignId}/inbox/sweep`).set(dm);
+    expect(res.status).toBe(201);
+    expect(res.body.job.itemsProposed).toBe(1);
+    expect(classifier.calls).toHaveLength(0);
+
+    const inbox = await request(server).get(`/api/v1/campaigns/${campaignId}/inbox?resolved=true`).set(dm);
+    const resolved = inbox.body.items.find((i: { id: number }) => i.id === noteId);
+    expect(resolved).toBeDefined();
+    expect(resolved.resolved).toBe(true);
+    expect(resolved.entityType).toBeNull();
+    expect(resolved.entityId).toBeNull();
+
+    const [ledger] = await db.select().from(inboxSweepItems).where(eq(inboxSweepItems.noteId, noteId)).limit(1);
+    expect(ledger.entityType).toBe('quest');
+    expect(ledger.entityId).toBeNull();
   });
 
   it('reports a disabled job with a stated reason when no AI provider is configured, and touches nothing', async () => {
