@@ -10,4 +10,5 @@ test('data repair card makes preview tokens mandatory and exposes scan, undo and
   expect(source).toContain('Undo safely');
   expect(source).toContain('support-bundle');
   expect(source).toContain('setPreview({})');
+  expect(source).toContain('clearPreview(finding.id)');
 });

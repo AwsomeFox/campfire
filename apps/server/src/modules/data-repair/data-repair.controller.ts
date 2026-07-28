@@ -20,7 +20,7 @@ export class DataRepairController {
 
   @Post('scan')
   @ApiOperation({ summary: 'Run a persisted, read-only integrity scan' })
-  scan() { return this.repairs.scan('admin'); }
+  scan(@CurrentUser() actor: RequestUser) { return this.repairs.scan('admin', auditActor(actor), auditActorRole(actor)); }
 
   @Get('findings')
   @ApiOperation({ summary: 'List persisted integrity findings' })

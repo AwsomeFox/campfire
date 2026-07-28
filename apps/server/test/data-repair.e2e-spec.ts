@@ -4,6 +4,7 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import { BadRequestException, ConflictException } from '@nestjs/common';
 import { DataRepairService } from '../src/modules/data-repair/data-repair.service';
+import { DataRepairController } from '../src/modules/data-repair/data-repair.controller';
 
 /** Focused real-SQLite coverage for the dangerous #729 repair boundary. */
 describe('Issue #729 data repair safety', () => {
@@ -40,24 +41,28 @@ describe('Issue #729 data repair safety', () => {
     db.prepare('INSERT INTO campaigns(id) VALUES (1),(2)').run();
     db.prepare('INSERT INTO locations(id,campaign_id) VALUES (20,2)').run();
     db.prepare('INSERT INTO encounters(id,campaign_id,location_id) VALUES (10,1,777),(11,1,20)').run();
-    await service.scan('admin');
+    await service.scan('admin', 'actual-admin', 'admin');
     expect(service.latest().openCount).toBe(3);
     await service.scan();
     expect(service.latest().openCount).toBe(3);
     expect(audit.log).toHaveBeenCalledWith(expect.objectContaining({ action: 'data-repair.scan' }));
+    expect(audit.log).toHaveBeenCalledWith(expect.objectContaining({ actor: 'actual-admin' }));
 
     const missing = (service.findings('open') as any[]).find(f => f.child_row_id === 10)!;
     const before = db.prepare('SELECT location_id FROM encounters WHERE id=10').get() as any;
     const preview = service.preview({ findingId: missing.id, action: 'null', expectedVersion: missing.version });
     expect(db.prepare('SELECT location_id FROM encounters WHERE id=10').get()).toEqual(before);
     await expect(service.apply({ findingId: missing.id, action: 'null', expectedVersion: missing.version, previewToken: 'missing' }, 'admin', 'admin')).rejects.toBeInstanceOf(ConflictException);
-    const applied = await service.apply({ findingId: missing.id, action: 'null', expectedVersion: missing.version, previewToken: preview.previewToken }, 'admin', 'admin');
+    db.prepare('UPDATE data_repair_previews SET expires_at=? WHERE token=?').run('2000-01-01T00:00:00.000Z', preview.previewToken);
+    await expect(service.apply({ findingId: missing.id, action: 'null', expectedVersion: missing.version, previewToken: preview.previewToken }, 'admin', 'admin')).rejects.toBeInstanceOf(ConflictException);
+    const freshPreview = service.preview({ findingId: missing.id, action: 'null', expectedVersion: missing.version });
+    const applied = await service.apply({ findingId: missing.id, action: 'null', expectedVersion: missing.version, previewToken: freshPreview.previewToken }, 'admin', 'admin');
     expect(db.prepare('SELECT location_id FROM encounters WHERE id=10').get()).toEqual({ location_id: null });
     const action = db.prepare('SELECT * FROM data_repair_actions WHERE id=?').get(applied.actionId) as any;
     expect(fs.existsSync(action.backup_path)).toBe(true);
     expect(fs.statSync(action.backup_path).mode & 0o777).toBe(0o600);
     expect(action.backup_checksum).toMatch(/^[a-f0-9]{64}$/);
-    await expect(service.apply({ findingId: missing.id, action: 'null', expectedVersion: missing.version, previewToken: preview.previewToken }, 'admin', 'admin')).rejects.toBeInstanceOf(ConflictException);
+    await expect(service.apply({ findingId: missing.id, action: 'null', expectedVersion: missing.version, previewToken: freshPreview.previewToken }, 'admin', 'admin')).rejects.toBeInstanceOf(ConflictException);
     // Undo refuses to recreate the known-bad reference until a valid same-campaign
     // parent exists; this is why it cannot be a blind inverse operation.
     await expect(service.undo(applied.actionId, 'admin', 'admin')).rejects.toBeInstanceOf(ConflictException);
@@ -74,5 +79,11 @@ describe('Issue #729 data repair safety', () => {
     db.prepare('UPDATE encounters SET location_id=20 WHERE id=10').run();
     await service.scan();
     expect((service.findings('open') as any[]).some(f => f.child_row_id === 10 && f.reference_value === '777')).toBe(false);
+  });
+
+  it('marks the downloadable admin bundle no-store', () => {
+    const response = { setHeader: jest.fn(), type: jest.fn().mockReturnThis(), attachment: jest.fn().mockReturnThis(), send: jest.fn() };
+    new DataRepairController({ bundle: () => ({ ok: true }) } as any).supportBundle(response as any);
+    expect(response.setHeader).toHaveBeenCalledWith('Cache-Control', 'private, no-store');
   });
 });
