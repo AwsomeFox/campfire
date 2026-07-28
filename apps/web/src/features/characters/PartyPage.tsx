@@ -13,6 +13,7 @@ import type { Character, CampaignMember, RuleSystemAdapter } from '@campfire/sch
 import { levelForXpForAdapter, ddbImportSupported, ruleSystemAdapter, xpProgressionSupported } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { usePollWhileVisible } from '../../lib/usePollWhileVisible';
+import { useCampaignEvents } from '../../lib/useCampaignEvents';
 import { useAuth } from '../../app/auth';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { useCampaign } from '../../app/CampaignContext';
@@ -115,6 +116,11 @@ export default function PartyPage() {
   // Paused while an undo is pending so a restore in flight isn't clobbered by a
   // fresh list fetch that hasn't yet observed the restored row.
   usePollWhileVisible(() => void load(), 5000, Number.isFinite(id) && !pendingUndo);
+  useCampaignEvents(Number.isFinite(id) ? id : undefined, {
+    onEvent: useCallback((event) => {
+      if (event.type === 'party.rest.updated' || event.type === 'character.updated') void load();
+    }, [load]),
+  });
 
   // Roster trash (issue #716) — soft-delete the character, drop the card locally, and
   // surface an Undo. The card's own menu runs the DELETE; this handler is the page-level

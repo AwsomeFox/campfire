@@ -721,7 +721,7 @@ export class CharactersService {
   private syncRecoveryCombatantsInTx(tx: SyncDb, campaignId: number, characterId: number, hpCurrent: number, deathState: string, conditionsJson: string, sheetUpdatedAt: string): number[] {
     const rows = tx.select({ combatant: combatants, encounterId: encounters.id })
       .from(combatants).innerJoin(encounters, eq(combatants.encounterId, encounters.id))
-      .where(and(eq(encounters.campaignId, campaignId), eq(combatants.characterId, characterId), ne(encounters.status, 'ended'))).all();
+      .where(and(eq(encounters.campaignId, campaignId), eq(combatants.characterId, characterId), ne(encounters.status, 'ended'), notDeleted(encounters.deletedAt))).all();
     for (const { combatant } of rows) {
       tx.update(combatants).set({
         hpCurrent: clampHpCurrent(hpCurrent, combatant.hpMax), deathState,
@@ -1947,7 +1947,7 @@ export class CharactersService {
       this.audit.logInTx(tx, { actor: auditActor(user), actorRole: role, action: 'party.rest.undo', entityType: 'party_rest_batch', entityId: batchId, campaignId, detail: JSON.stringify({ batchId, characterIds: before.map((s) => s.id), idempotencyKey }) });
     });
     for (const encounterId of touchedEncounterIds) this.emitEncounterUpdatedIfVisible(campaignId, encounterId);
-    for (const snapshot of before) this.emitCharacterUpdated(campaignId, snapshot.id, user.id);
+    this.events.emit({ type: 'party.rest.updated', campaignId, batchId, characterIds: before.map((snapshot) => snapshot.id) });
     return undoResult;
   }
 

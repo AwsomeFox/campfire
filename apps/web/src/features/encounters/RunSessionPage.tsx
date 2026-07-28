@@ -1165,6 +1165,12 @@ export default function RunSessionPage() {
   useCampaignEvents(Number.isFinite(cid) ? cid : undefined, {
     onEvent: useCallback(
       (event) => {
+        if (event.type === 'party.rest.updated') {
+          // This one event represents the whole atomic recovery batch. Linked
+          // encounter rows emit their own post-commit encounter.updated frame.
+          invalidateCampaignCharacters(queryClient, cid);
+          return;
+        }
         // Sheet / membership frames have no encounterId — must not fall into the
         // encounterId filter below (that was the #421 bug: character events ignored).
         if (shouldInvalidateInlineCharacters(event)) {
