@@ -19,8 +19,8 @@ export function importExpectedUpdatedAt(rows: Array<{ slug: string; conflict: { 
   return Object.fromEntries(rows.flatMap((row) => row.conflict ? [[row.slug, row.conflict.updatedAt] as const] : []));
 }
 
-export function shouldRenderCompendiumResults(opts: { campaignResolved: boolean; homebrewCount: number }): boolean {
-  return opts.campaignResolved && opts.homebrewCount >= 0;
+export function shouldRenderCompendiumResults(opts: { campaignResolved: boolean; homebrewCount: number; hasGlobalPack: boolean }): boolean {
+  return opts.campaignResolved && (opts.hasGlobalPack || opts.homebrewCount > 0);
 }
 
 export function ruleEntryIconEndpoint(apiRoot: string, campaignId: number, entry: { id: number; campaignId?: number | null }): string {

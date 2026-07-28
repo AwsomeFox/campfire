@@ -1266,8 +1266,10 @@ export class RulesService implements OnModuleInit {
 
   async listCampaignHomebrew(campaignId: number, user: RequestUser, includeArchived = false): Promise<RuleEntry[]> {
     await this.homebrewRole(campaignId, user);
-    const conditions = [eq(ruleEntries.campaignId, campaignId), includeArchived ? undefined : isNull(ruleEntries.archivedAt)].filter(Boolean) as any[];
-    return (await this.db.select().from(ruleEntries).where(and(...conditions)).orderBy(asc(ruleEntries.name), asc(ruleEntries.id))).map(entryToDomain);
+    const scope = includeArchived
+      ? eq(ruleEntries.campaignId, campaignId)
+      : and(eq(ruleEntries.campaignId, campaignId), isNull(ruleEntries.archivedAt));
+    return (await this.db.select().from(ruleEntries).where(scope).orderBy(asc(ruleEntries.name), asc(ruleEntries.id))).map(entryToDomain);
   }
 
   async getCampaignHomebrew(campaignId: number, id: number, user: RequestUser): Promise<RuleEntry> {

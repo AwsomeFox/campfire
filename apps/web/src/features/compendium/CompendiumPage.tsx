@@ -36,7 +36,7 @@ import {
   parseCompendiumTypeParam,
   type CompendiumUrlType,
 } from './compendiumA11y';
-import { importExpectedUpdatedAt, serializeHomebrewEditor } from './homebrewEditor';
+import { importExpectedUpdatedAt, serializeHomebrewEditor, shouldRenderCompendiumResults } from './homebrewEditor';
 
 type TypeChip = { key: CompendiumUrlType; label: string; count?: number };
 
@@ -131,6 +131,7 @@ export default function CompendiumPage() {
   const [facets, setFacets] = useState<RuleSearchFacet[]>([]);
   const [total, setTotal] = useState<number | null>(null);
   const [hasMore, setHasMore] = useState(false);
+  const [homebrewCount, setHomebrewCount] = useState(0);
   const [authoring, setAuthoring] = useState(false);
   const [rawMode, setRawMode] = useState(false);
   const [draft, setDraft] = useState({ name: '', slug: '', type: 'spell', summary: '', body: '', rightsStatus: 'private_original', license: '', attribution: '', sourceUrl: '', dataJson: '{}' });
@@ -195,6 +196,7 @@ export default function CompendiumPage() {
         const campaignEntries = homebrew.filter((entry) =>
           (type === 'all' || entry.type === type) && (!needle || `${entry.name} ${entry.summary} ${entry.body}`.toLowerCase().includes(needle)),
         );
+        setHomebrewCount(homebrew.length);
         if (cancelled || gen !== fetchGeneration.current) return;
         setResults([...campaignEntries, ...page.items]);
         setFacets(page.facets ?? []);
@@ -489,6 +491,11 @@ export default function CompendiumPage() {
           <Card>
             <Skeleton lines={4} />
           </Card>
+        ) : !shouldRenderCompendiumResults({ campaignResolved: campaign !== undefined, homebrewCount, hasGlobalPack: Boolean(campaignPack && !noPacksInstalled) }) ? (
+          <div className="card items-center text-center" style={{ padding: 24 }}>
+            <p style={{ margin: 0, fontSize: 13, color: 'var(--color-neutral-200)' }}>No rule system or campaign homebrew yet.</p>
+            <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 12 }}>Create homebrew above, or select an installed rule system in Campaign settings.</p>
+          </div>
         ) : (
           <>
             {error && (

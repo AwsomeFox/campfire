@@ -698,9 +698,19 @@ export class EncountersService {
     db: SyncDb = this.db,
   ): TargetDefenses {
     if (row.ruleEntryId === null) return { resistances: [], vulnerabilities: [], immunities: [] };
-    // This helper has only a combatant, not the encounter/campaign scope. Fail
-    // closed to global rows rather than allowing another campaign's private entry.
-    const entry = db.select({ dataJson: ruleEntries.dataJson }).from(ruleEntries).where(and(eq(ruleEntries.id, row.ruleEntryId), isNull(ruleEntries.campaignId))).get();
+    const encounter = db
+      .select({ campaignId: encounters.campaignId })
+      .from(encounters)
+      .where(eq(encounters.id, row.encounterId))
+      .get();
+    const campaignScope = encounter
+      ? or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, encounter.campaignId))
+      : isNull(ruleEntries.campaignId);
+    const entry = db
+      .select({ dataJson: ruleEntries.dataJson })
+      .from(ruleEntries)
+      .where(and(eq(ruleEntries.id, row.ruleEntryId), campaignScope))
+      .get();
     const data = entry ? fromJsonText<Record<string, unknown>>(entry.dataJson, {}) : {};
     return damageDefensesFromStatblock(data, damageTypes);
   }

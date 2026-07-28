@@ -23,5 +23,7 @@ test('builds replacement CAS versions and chooses campaign icon route', () => {
 });
 
 test('homebrew-only campaign renders results without a global pack', () => {
-  expect(shouldRenderCompendiumResults({ campaignResolved: true, homebrewCount: 1 })).toBe(true);
+  expect(shouldRenderCompendiumResults({ campaignResolved: true, homebrewCount: 1, hasGlobalPack: false })).toBe(true);
+  expect(shouldRenderCompendiumResults({ campaignResolved: true, homebrewCount: 0, hasGlobalPack: false })).toBe(false);
+  expect(shouldRenderCompendiumResults({ campaignResolved: true, homebrewCount: 0, hasGlobalPack: true })).toBe(true);
 });
