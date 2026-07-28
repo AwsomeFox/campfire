@@ -1,0 +1,13 @@
+{
+  "tracked": [
+    {
+      "pr": 1660,
+      "status": "babysitting",
+      "url": "https://github.com/AwsomeFox/campfire/pull/1660",
+      "headBranch": "fix/issue-1599",
+      "baseBranch": "main",
+      "updatedAt": "2026-07-28T12:53:00Z",
+      "notes": "Primary tracker cursor/pull-request-babysitting-7bef. Codex P2 on saving_throw description addressed by 8c810414 (outdated unresolved thread). MERGEABLE; auto-merges main cleanly. CI queued on 8c810414; merging main next."
+    }
+  ]
+}
