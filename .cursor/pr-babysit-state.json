@@ -3,12 +3,14 @@
     {
       "pr": 1691,
       "url": "https://github.com/AwsomeFox/campfire/pull/1691",
-      "status": "babysitting",
+      "status": "merged",
       "headBranch": "devin/organized-play-reschedule-1603",
       "baseBranch": "main",
       "title": "fix(sessions): avoid 409 on idempotent reschedule retry in forced overlap (#1603)",
-      "updatedAt": "2026-07-28T16:04:40Z",
-      "note": "Addressed Devin review (originalScheduledAt no-op repair); awaiting CI on 9a3c1009; merge with main clean"
+      "updatedAt": "2026-07-28T16:50:08Z",
+      "note": "Squash-merged after Devin review fix (originalScheduledAt no-op repair) and green CI on 9a3c1009",
+      "mergedAt": "2026-07-28T16:49:59Z",
+      "mergeCommit": "f651045992c8bb8589ea64e75ead5f7e8cebae2a"
     }
   ]
 }
