@@ -1222,7 +1222,13 @@ function XpCard({
               </p>
             )}
           </div>
-          <Btn density="xs" className="" style={{ minHeight: 44 }} disabled={busy || !amount.trim()} onClick={addXp}>
+          {/* No density prop (issue #1683 review): this is the card's primary write
+              action, not a dense inline row control — density="xs" would be a no-op
+              here anyway, since the inline minHeight below already governs the
+              rendered height, but carrying it was misleading (reads as "this is a
+              24px xs control" when it renders at 44px). Dropped rather than kept
+              alongside a comment, since there is nothing for xs to actually do here. */}
+          <Btn className="" style={{ minHeight: 44 }} disabled={busy || !amount.trim()} onClick={addXp}>
             + Award XP
           </Btn>
           {!atCap && !levellingUp && (
@@ -1303,6 +1309,15 @@ function RollChip({
   disabled: boolean;
 }) {
   return (
+    // The inline minHeight is deliberate (issue #1683 review), not a leftover: this
+    // dense inline action-row chip intentionally sits at a bespoke 32px — above the
+    // xs floor (24px, WCAG 2.2 SC 2.5.8 legal minimum) but below the ramp default
+    // (44px), because rolling dice is a meaningful action worth more than the bare
+    // minimum without needing a full-size control in a row that packs several of
+    // these per action. density="xs" still supplies the font-size/padding for this
+    // chip; only the height is pinned above what xs alone would give it. Removing
+    // this inline style would shrink the click target from 32px to 24px — do not
+    // "clean this up" as redundant with density="xs".
     <Btn density="xs" ghost type="button" className="text-xs" style={{ minHeight: 32 }} onClick={onClick} disabled={disabled} title={title}>
       <GameIcon slug="rolling-dices" size={13} className="inline align-text-bottom mr-1" />{label}
     </Btn>
