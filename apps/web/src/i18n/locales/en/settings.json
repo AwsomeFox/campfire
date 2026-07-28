@@ -69,6 +69,7 @@
       },
       "narrationLanguage": {
         "sectionTitle": "Narration language",
+        "feedbackSubject": "Narration language",
         "body": "Governs AI-generated narration from the Driver, co-DM drafts, and Scribe recaps. This is separate from your personal UI language in Preferences.",
         "label": "Campaign narration language",
         "save": "Save language",
@@ -114,6 +115,7 @@
       },
       "budget": {
         "sectionTitle": "Budget & usage",
+        "feedbackSubject": "AI budget",
         "body": "A hard token cap. Turns stop once it's reached — a positive budget is required to run Driver mode.",
         "label": "Token budget",
         "save": "Save budget",
@@ -126,12 +128,14 @@
       },
       "instructions": {
         "sectionTitle": "Steering instructions",
+        "feedbackSubject": "AI instructions",
         "body": "DM-only persona / house rules for the AI. Never shown to players — this is where plot secrets can live.",
         "placeholder": "e.g. Be terse and grim. Never reveal the traitor's identity until Act 3.",
         "save": "Save instructions"
       },
       "tableStyle": {
         "sectionTitle": "Table style",
+        "feedbackSubject": "Table style",
         "body": "Asks the AI to narrate a certain way. Each choice adds a line of guidance to its prompt — it steers voice and pacing, it does not change what is true, and a model can ignore it. Leave an axis on Default to say nothing about it.",
         "save": "Save table style",
         "axes": {
@@ -173,6 +177,12 @@
             "deep": "Deep — voices and motives"
           }
         }
+      }
+    },
+    "providerForm": {
+      "feedbackSubject": {
+        "server": "Server AI provider",
+        "campaign": "Campaign AI provider"
       }
     }
   }

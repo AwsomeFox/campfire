@@ -12,6 +12,7 @@
  * and the plaintext is never retained in state after a save.
  */
 import { useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import {
   AI_EXTERNAL_PROVIDER_PRIVACY,
   type AiProviderConfigType,
@@ -74,12 +75,13 @@ export function ProviderForm({
   const [provider, setProvider] = useState<AiProviderConfigView | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const { t } = useTranslation();
 
   const [providerType, setProviderType] = useState<AiProviderConfigType>('openai');
   const [model, setModel] = useState('');
   const [baseUrl, setBaseUrl] = useState('');
   const [apiKey, setApiKey] = useState(''); // write-only; blank keeps the stored key
-  const feedback = useSaveFeedback(`${scope === 'server' ? 'Server' : 'Campaign'} AI provider`);
+  const feedback = useSaveFeedback(t(`settings.providerForm.feedbackSubject.${scope}`));
   const saving = feedback.state === 'saving';
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [fetchingModels, setFetchingModels] = useState(false);

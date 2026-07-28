@@ -224,7 +224,7 @@ function CapsEditor({
 }) {
   const { t } = useTranslation();
   const [cap, setCap] = useState(String(ov.serverTokenCap));
-  const feedback = useSaveFeedback('Server token cap');
+  const feedback = useSaveFeedback(t('admin.aiConsole.caps.feedbackSubject'));
   const saving = feedback.state === 'saving';
 
   useEffect(() => {
@@ -301,7 +301,7 @@ function AllowlistEditor({
   const { t } = useTranslation();
   const savedText = ov.allowedModels.join('\n');
   const [text, setText] = useState(savedText);
-  const feedback = useSaveFeedback('Model allowlist');
+  const feedback = useSaveFeedback(t('admin.aiConsole.allowlist.feedbackSubject'));
   const saving = feedback.state === 'saving';
   const validation = useMemo(() => validateAllowlistDraft(text), [text]);
   const hasErrors = validation.errors.length > 0;

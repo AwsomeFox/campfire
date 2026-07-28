@@ -47,6 +47,17 @@ test('a multi-sentence server error starting like the generic fallback keeps its
   );
 });
 
+test('error copy can be supplied by localized catalog formatters', () => {
+  const copy = {
+    generic: (subject: string) => `GENERIC ${subject}`,
+    withDetail: (subject: string, error: string) => `DETAIL ${subject}: ${error}`,
+  };
+  expect(formatSaveFailure('AI budget', "Couldn't save the budget.", copy)).toBe('GENERIC AI budget');
+  expect(formatSaveFailure('AI budget', 'Enter a non-negative number.', copy)).toBe(
+    'DETAIL AI budget: Enter a non-negative number',
+  );
+});
+
 test('every migrated editor associates its editable controls with shared save feedback', () => {
   const root = resolve(__dirname, '../../src/features');
   for (const relative of [

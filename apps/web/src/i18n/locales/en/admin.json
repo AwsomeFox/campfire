@@ -254,6 +254,7 @@
       },
       "caps": {
         "heading": "Budgets & cost caps",
+        "feedbackSubject": "Server token cap",
         "body": "A server-wide <0>hard</0> token cap across every campaign. 0 = unlimited. Once the total metered tokens reach it, new turns are refused with a clear reason (per-campaign budgets are set per row below).",
         "label": "Server token cap",
         "saved": "Saved.",
@@ -268,6 +269,7 @@
       },
       "allowlist": {
         "heading": "Model allowlist",
+        "feedbackSubject": "Model allowlist",
         "effectiveLabel": "Effective state:",
         "effectiveAriaLabel": "Effective allowlist state",
         "unrestricted": "Unrestricted — any model ID is allowed.",

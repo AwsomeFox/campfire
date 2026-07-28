@@ -272,7 +272,7 @@ function NarrationLanguageSection({
 }) {
   const { t } = useTranslation();
   const [narrationLanguage, setNarrationLanguage] = useState<NarrationLanguage>(campaign.narrationLanguage);
-  const feedback = useSaveFeedback('Narration language');
+  const feedback = useSaveFeedback(t('settings.aiDm.narrationLanguage.feedbackSubject'));
   const saving = feedback.state === 'saving';
   const dirty = narrationLanguage !== campaign.narrationLanguage;
 
@@ -499,7 +499,7 @@ function BudgetSection({
 }) {
   const { t } = useTranslation();
   const [tokenBudget, setTokenBudget] = useState(String(seat.tokenBudget));
-  const feedback = useSaveFeedback('AI budget');
+  const feedback = useSaveFeedback(t('settings.aiDm.budget.feedbackSubject'));
   const saving = feedback.state === 'saving';
 
   // #1065 — the cost basis rides along on readiness, which the checklist in this same card
@@ -624,7 +624,7 @@ function InstructionsSection({
 }) {
   const { t } = useTranslation();
   const [instructions, setInstructions] = useState(seat.instructions ?? '');
-  const feedback = useSaveFeedback('AI instructions');
+  const feedback = useSaveFeedback(t('settings.aiDm.instructions.feedbackSubject'));
   const saving = feedback.state === 'saving';
 
   async function save() {
@@ -691,7 +691,7 @@ function TableStyleSection({
 }) {
   const { t } = useTranslation();
   const [presets, setPresets] = useState<AiDmStylePresets>(seat.stylePresets);
-  const feedback = useSaveFeedback('Table style');
+  const feedback = useSaveFeedback(t('settings.aiDm.tableStyle.feedbackSubject'));
   const saving = feedback.state === 'saving';
 
   // Deliberately NOT re-synced from `seat`, matching InstructionsSection above.
