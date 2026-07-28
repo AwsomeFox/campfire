@@ -1,5 +1,5 @@
 import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import {
   ActionApplyPolicy,
   ActionResolution,
@@ -179,7 +179,7 @@ export class ActionResolverService {
   /** The statblock `dataJson` for a monster/NPC combatant with a linked rule entry (else null). */
   private statblockData(row: typeof combatants.$inferSelect): Record<string, unknown> | null {
     if (row.ruleEntryId === null) return null;
-    const entry = this.db.select({ dataJson: ruleEntries.dataJson }).from(ruleEntries).where(eq(ruleEntries.id, row.ruleEntryId)).get();
+    const entry = this.db.select({ dataJson: ruleEntries.dataJson }).from(ruleEntries).where(and(eq(ruleEntries.id, row.ruleEntryId), isNull(ruleEntries.campaignId))).get();
     return entry ? fromJsonText<Record<string, unknown>>(entry.dataJson, {}) : null;
   }
 

@@ -1283,7 +1283,7 @@ export class RulesService implements OnModuleInit {
     return { ...parsed, dataJson: parsed.data !== undefined ? JSON.stringify(parsed.data) : (parsed.dataJson ?? null) };
   }
 
-  async createCampaignHomebrew(campaignId: number, input: unknown, user: RequestUser): Promise<RuleEntry> {
+  async createCampaignHomebrew(campaignId: number, input: unknown, user: RequestUser, auditAction = 'homebrew.create'): Promise<RuleEntry> {
     await this.homebrewRole(campaignId, user, true);
     const value = this.normalizedHomebrew(input); const now = nowIso(); const packId = await this.homebrewPackId();
     try {
@@ -1293,7 +1293,7 @@ export class RulesService implements OnModuleInit {
         return [row];
       });
       const entry = entryToDomain(row);
-      await this.auditHomebrew(campaignId, entry, user, 'homebrew.create');
+      await this.auditHomebrew(campaignId, entry, user, auditAction);
       return entry;
     } catch (err) { if (isUniqueConstraintError(err)) throw new ConflictException('A homebrew entry already uses this slug'); throw err; }
   }
@@ -1324,7 +1324,7 @@ export class RulesService implements OnModuleInit {
     const source = await this.getCampaignHomebrew(campaignId, id, user);
     const base = `${source.slug}-copy`; let slug = base; let i = 2;
     while ((await this.db.select({ id: ruleEntries.id }).from(ruleEntries).where(and(eq(ruleEntries.campaignId, campaignId), eq(ruleEntries.slug, slug))).limit(1)).length) slug = `${base}-${i++}`;
-    return this.createCampaignHomebrew(campaignId, { ...this.homebrewPayload((await this.db.select().from(ruleEntries).where(eq(ruleEntries.id, id)).get())!), slug, name: `${source.name} (copy)` }, user);
+    return this.createCampaignHomebrew(campaignId, { ...this.homebrewPayload((await this.db.select().from(ruleEntries).where(eq(ruleEntries.id, id)).get())!), slug, name: `${source.name} (copy)` }, user, 'homebrew.duplicate');
   }
 
   async archiveCampaignHomebrew(campaignId: number, id: number, user: RequestUser): Promise<RuleEntry> {
