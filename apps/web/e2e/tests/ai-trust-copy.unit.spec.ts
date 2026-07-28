@@ -32,17 +32,19 @@ import { AI_DM_MODE_CAPABILITIES, type AiDmMode } from '@campfire/schema';
 import { MODES as AI_DM_CARD_MODES } from '../../src/features/settings/AiDmCard';
 import { FEATURES as LOGIN_FEATURES } from '../../src/features/auth/LoginPage';
 import aiOnboarding from '../../src/i18n/locales/en/aiOnboarding.json';
-import settings from '../../src/i18n/locales/en/settings.json';
+import settingsAr from '../../src/i18n/locales/ar/settings.json';
+import settingsEn from '../../src/i18n/locales/en/settings.json';
 import table from '../../src/i18n/locales/en/table.json';
 
 const ai = aiOnboarding.aiOnboarding;
-const modeOptions = settings.settings.aiDm.modeOptions;
+const modeOptions = settingsEn.settings.aiDm.modeOptions;
+const arModeOptions = settingsAr.settings.aiDm.modeOptions;
 
 /**
  * English catalog blurbs the settings card actually renders via
  * `t('settings.aiDm.modeOptions.<mode>.blurb', { defaultValue: m.blurb })`.
  * Because the keys exist in `en/settings.json`, i18next returns these catalog
- * values — not the MODES fallback — for English users. #752 must guard these.
+ * values - not the MODES fallback - for English users. #752 must guard these.
  */
 const SETTINGS_CARD_CO_DM_BLURB = modeOptions.co_dm.blurb;
 const SETTINGS_CARD_DRIVER_BLURB = modeOptions.driver.blurb;
@@ -130,6 +132,13 @@ test.describe('AI trust copy — Co-DM proposals vs Driver direct authority (#75
       const catalog = modeOptions[mode.value as keyof typeof modeOptions];
       expect(catalog.label, `${mode.value} label catalog==MODES`).toBe(mode.label);
       expect(catalog.blurb, `${mode.value} blurb catalog==MODES`).toBe(mode.blurb);
+    }
+
+    // Arabic is intentionally not the English keyword policy source, but it must keep real
+    // localized entries for the same rendered catalog keys instead of falling through to MODES.
+    for (const mode of ['co_dm', 'driver'] as const) {
+      expect(arModeOptions[mode].blurb, `ar settings.aiDm.modeOptions.${mode}.blurb`).toBeTruthy();
+      expect(arModeOptions[mode].blurb).not.toBe(modeOptions[mode].blurb);
     }
   });
 
