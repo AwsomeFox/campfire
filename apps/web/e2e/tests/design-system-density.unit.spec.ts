@@ -12,6 +12,7 @@ import { join, resolve } from 'node:path';
 
 const ROOT = resolve(__dirname, '../../src');
 const INDEX_CSS = resolve(ROOT, 'index.css');
+const NOCTURNE_CSS = resolve(ROOT, 'nocturne.css');
 const UI_TSX = resolve(ROOT, 'components/ui.tsx');
 const DENSITY_TS = resolve(ROOT, 'components/density.ts');
 
@@ -46,6 +47,13 @@ const DRIFT_PATTERNS: ReadonlyArray<{ name: string; pattern: RegExp; why: string
     pattern: /cf-btn[^"'\n]*!min-h-0/,
     why: 'use <Btn density="compact"> instead of !min-h-0 / !py-* on cf-btn (issue #674)',
   },
+  {
+    name: 'seg-opt floor override',
+    pattern: /seg-opt[^"'\n]*!min-h-0/,
+    why: 'seg-opt sits outside the cf-density ramp and pins its own 24px WCAG 2.2 SC 2.5.8 ' +
+      'floor directly in nocturne.css (issue #1693) — !min-h-0 zeroes that floor with ' +
+      '!important and nothing in the ramp catches the regression',
+  },
 ];
 
 test.describe('Design-system density (#674)', () => {
@@ -66,6 +74,15 @@ test.describe('Design-system density (#674)', () => {
     expect(css).toMatch(/\.cf-btn\.cf-density-compact\s*\{/);
     expect(css).toMatch(/\.dialog\.cf-density-default\s*\{/);
     expect(css, 'Nocturne .card aliases compact density').toMatch(/^\.card\s*\{/m);
+  });
+
+  test('seg-opt (outside the ramp) pins its own 24px WCAG 2.2 SC 2.5.8 floor (#1693)', () => {
+    const css = READ(NOCTURNE_CSS);
+    const rule = /\.seg-opt\s*\{[^}]*\}/.exec(css);
+    expect(rule, '.seg-opt rule must exist in nocturne.css').not.toBeNull();
+    expect(rule![0], '.seg-opt must pin a literal 24px min-height floor').toMatch(
+      /min-height:\s*24px/,
+    );
   });
 
   test('ui.tsx exports canonical primitives with density support', () => {
