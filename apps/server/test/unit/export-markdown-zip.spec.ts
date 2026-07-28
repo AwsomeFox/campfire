@@ -51,7 +51,7 @@ function buildService(entities: {
     // scheduling — the archive reads listForExport, deliberately the RAW rows (#504);
     // exposing only that method keeps the stub honest if the call site ever changes back.
     { listForExport: async () => [] } as any,
-    { listForCampaign: async () => entities.characters ?? [] } as any, // characters
+    { listForExport: async () => entities.characters ?? [] } as any, // characters (#1667: buildExport reads listForExport)
     { listForCampaign: noop as any, listAllForCampaign: async () => [] } as any, // notes
     { listForCampaign: noop as any } as any, // comments
     { listForCampaign: noop as any } as any, // members

@@ -37,6 +37,7 @@ import {
 } from '@campfire/schema';
 import type {
   Character,
+  ConditionInstance,
   CharacterAction,
   CharacterResource,
   Role,
@@ -58,7 +59,7 @@ import { auditLog, campaigns, characters, checkRequests, combatants, encounters 
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { fromJsonText, toJsonText } from '../../common/json';
-import { conditionWriteSetFromNames, sheetConditionWriteSetFromNames } from '../../common/conditions';
+import { conditionWriteSetFromNames, sheetConditionWriteSetFromNames, readConditionInstances } from '../../common/conditions';
 import { redactSecret, redactSecrets } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
@@ -194,6 +195,32 @@ export class CharactersService {
   async listForCampaign(campaignId: number, role: Role): Promise<Character[]> {
     const rows = await this.db.select().from(characters).where(and(eq(characters.campaignId, campaignId), notDeleted(characters.deletedAt)));
     return redactSecrets(rows.map(toDomain), role);
+  }
+
+  /**
+   * Export-only read: {@link listForCampaign}'s rows, each carrying its resolved
+   * `conditionInstances` (issue #1555 half B / #1667).
+   *
+   * `conditionInstances` is deliberately NOT on the public `Character` schema — the
+   * general sheet API only exposes the legacy `conditions` name list, the same way it
+   * did before #1047 added the structured column, so this does not widen
+   * `CharacterCreate`/`CharacterUpdate` or any MCP tool's input shape. It is
+   * EXPORT-SCOPED structured game state (the sheet-scoped counterpart to
+   * `combatant.conditionInstances`, which IS public), attached only to the object this
+   * method returns so `export-profiles.ts`'s `PLAYED_STATE_FIELDS.character` allowlist
+   * has something to actually project. `readConditionInstances` is the same
+   * union-on-read helper every other reader of this pair uses (common/conditions.ts),
+   * so a legacy character with a NULL `condition_instances` column still exports a
+   * faithful (bare, metadata-free) instance for every name in `conditions` rather than
+   * an empty list.
+   */
+  async listForExport(campaignId: number, role: Role): Promise<Array<Character & { conditionInstances: ConditionInstance[] }>> {
+    const rows = await this.db.select().from(characters).where(and(eq(characters.campaignId, campaignId), notDeleted(characters.deletedAt)));
+    const withInstances = rows.map((row) => ({
+      ...toDomain(row),
+      conditionInstances: readConditionInstances(row.conditionInstances, row.conditions),
+    }));
+    return redactSecrets(withInstances, role);
   }
 
   async getRowOrThrow(id: number, includeDeleted = false) {

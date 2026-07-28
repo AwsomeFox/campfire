@@ -2346,7 +2346,16 @@ export class CampaignsService {
             ac: intOrNull(c.ac),
             hpCurrent: intOr(c.hpCurrent, 10),
             hpMax: intOr(c.hpMax, 10),
+            // #1667 half B: written in the SAME .values() call as `conditions`, per the
+            // single-writer invariant in common/conditions.ts (a `conditions` write with
+            // no paired `conditionInstances` write is exactly the half-write that module
+            // exists to prevent). An older export/backup with no `conditionInstances` key
+            // at all falls back to '[]' — the same fallback `conditions` already uses —
+            // which is harmless: readConditionInstances() unions the legacy `conditions`
+            // names back in at read time regardless of whether this column is NULL or
+            // an explicit empty array.
             conditions: jsonCol(c.conditions, '[]'),
+            conditionInstances: jsonCol(c.conditionInstances, '[]'),
             saveProficiencies: jsonCol(c.saveProficiencies, '[]'),
             skills: jsonCol(c.skills, '{}'),
             actions: jsonCol(c.actions, '[]'),
