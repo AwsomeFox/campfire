@@ -1,0 +1,13 @@
+{
+  "tracked": [
+    {
+      "pr": 1629,
+      "status": "babysitting",
+      "url": "https://github.com/AwsomeFox/campfire/pull/1629",
+      "headBranch": "fix/issue-1592",
+      "baseBranch": "main",
+      "updatedAt": "2026-07-28T09:49:00Z",
+      "notes": "Tracking started. MERGEABLE (no conflicts with main). Copilot review threads already resolved after clarify-comments commit 5682d73d. CI in progress after synchronize; mergeStateStatus BLOCKED pending checks."
+    }
+  ]
+}
