@@ -2,12 +2,14 @@
   "tracked": [
     {
       "pr": 1659,
-      "status": "babysitting",
+      "status": "merged",
       "url": "https://github.com/AwsomeFox/campfire/pull/1659",
       "headBranch": "fix/issue-756",
       "baseBranch": "main",
-      "updatedAt": "2026-07-28T13:27:55Z",
-      "notes": "Head 4f2c3aa1 (merged main ae3e2886 after review follow-ups 32ea4b27/9a68c7b0/b9f5973e). All 8 review threads resolved. Awaiting required CI."
+      "updatedAt": "2026-07-28T14:22:12Z",
+      "notes": "Merged 2026-07-28 via squash f1d74e0d by cursor[bot]. Head 4f2c3aa1; review threads resolved; required CI green on 30363582015.",
+      "mergedAt": "2026-07-28T14:09:57Z",
+      "mergeCommit": "f1d74e0d007216ac63f65636fd534e6190fdbb02"
     }
   ]
 }
