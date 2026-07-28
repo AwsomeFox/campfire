@@ -776,7 +776,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
 -- holding prose on schedule. See db/schema.ts for the full reasoning and column docs.
 CREATE TABLE IF NOT EXISTS moderation_evidence (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  campaign_id INTEGER NOT NULL,
   target_type TEXT NOT NULL,
   target_id INTEGER,
   reason TEXT NOT NULL,
@@ -808,7 +808,7 @@ CREATE INDEX IF NOT EXISTS idx_moderation_evidence_expiry ON moderation_evidence
 
 CREATE TABLE IF NOT EXISTS moderation_reports (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  campaign_id INTEGER NOT NULL,
   target_type TEXT NOT NULL,
   target_id INTEGER,
   reporter_user_id TEXT NOT NULL,

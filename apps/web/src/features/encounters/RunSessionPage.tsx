@@ -5516,7 +5516,10 @@ export function BattleMap({
         <UndoSnackbar
           message="Token batch applied."
           successMessage="Token batch undone."
-          onUndo={() => onUndoTokenBatch?.(tokenBatchUndo) ?? Promise.resolve()}
+          onUndo={async () => {
+            await (onUndoTokenBatch?.(tokenBatchUndo) ?? Promise.resolve());
+            setTokenBatchUndo(null);
+          }}
           onExpire={() => setTokenBatchUndo(null)}
         />
       )}
