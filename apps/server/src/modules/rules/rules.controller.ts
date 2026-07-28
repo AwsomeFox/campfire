@@ -242,27 +242,36 @@ export class CampaignHomebrewController {
   constructor(private readonly rules: RulesService, private readonly access: CampaignAccessService, private readonly proposals: ProposalRecordsService) {}
 
   @Get()
+  @ApiOperation({ summary: 'List campaign homebrew', description: 'Requires campaign membership. Returns non-archived private homebrew unless includeArchived=true.' })
   list(@Param('campaignId', ParseIntPipe) campaignId: number, @Query('includeArchived') includeArchived: string | undefined, @CurrentUser() user: RequestUser) {
     return this.rules.listCampaignHomebrew(campaignId, user, includeArchived === 'true');
   }
   @Post()
+  @ApiOperation({ summary: 'Create campaign homebrew', description: 'DM creates directly; non-DM (or proposed=true) submits a rule_entry create proposal for review.' })
   async create(@Param('campaignId', ParseIntPipe) campaignId: number, @Body() body: HomebrewRuleEntryDto, @Query('proposed') proposed: string | undefined, @CurrentUser() user: RequestUser) {
     const role = await this.access.requireMember(user, campaignId, { write: true });
     if (role !== 'dm' || proposed === 'true') return this.proposals.create(campaignId, 'rule_entry', null, 'create', body as unknown as Record<string, unknown>, user, role);
     return this.rules.createCampaignHomebrew(campaignId, body, user);
   }
   @Post('import/preview')
+  @ApiOperation({ summary: 'Preview campaign homebrew import', description: 'Dry-run import and report slug conflicts. Requires campaign membership.' })
   previewImport(@Param('campaignId', ParseIntPipe) campaignId: number, @Body() body: HomebrewImportPreviewDto, @CurrentUser() user: RequestUser) { return this.rules.previewHomebrewImport(campaignId, body, user); }
   @Post('import/apply')
+  @ApiOperation({ summary: 'Apply campaign homebrew import', description: 'DM write. Applies a validated import with skip, replace, or duplicate conflict handling.' })
   applyImport(@Param('campaignId', ParseIntPipe) campaignId: number, @Body() body: HomebrewImportApplyDto, @CurrentUser() user: RequestUser) { return this.rules.applyHomebrewImport(campaignId, body, user); }
   @Get(':id/revisions')
+  @ApiOperation({ summary: 'List homebrew revisions', description: 'Requires campaign membership. Returns immutable revisions for one campaign homebrew entry.' })
   revisions(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) { return this.rules.homebrewRevisions(campaignId, id, user); }
   @Post(':id/duplicate')
+  @ApiOperation({ summary: 'Duplicate campaign homebrew', description: 'DM write. Creates a copy with a new slug.' })
   duplicate(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) { return this.rules.duplicateCampaignHomebrew(campaignId, id, user); }
   @Post(':id/archive')
+  @ApiOperation({ summary: 'Archive campaign homebrew', description: 'DM write. Soft-archives a private homebrew entry.' })
   archive(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) { return this.rules.archiveCampaignHomebrew(campaignId, id, user); }
   @Patch(':id')
+  @ApiOperation({ summary: 'Update campaign homebrew', description: 'DM updates directly; non-DM (or proposed=true) submits a rule_entry update proposal for review.' })
   async update(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('id', ParseIntPipe) id: number, @Body() body: HomebrewRuleEntryUpdateDto, @Query('proposed') proposed: string | undefined, @CurrentUser() user: RequestUser) { const role = await this.access.requireMember(user, campaignId, { write: true }); if (role !== 'dm' || proposed === 'true') return this.proposals.create(campaignId, 'rule_entry', id, 'update', body as Record<string, unknown>, user, role); return this.rules.updateCampaignHomebrew(campaignId, id, body as Record<string, unknown>, user); }
   @Get(':id')
+  @ApiOperation({ summary: 'Get campaign homebrew', description: 'Requires campaign membership. Returns one private homebrew entry by id.' })
   get(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) { return this.rules.getCampaignHomebrew(campaignId, id, user); }
 }
