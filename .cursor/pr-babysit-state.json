@@ -6,8 +6,8 @@
       "url": "https://github.com/AwsomeFox/campfire/pull/1656",
       "headBranch": "fix/issue-741",
       "baseBranch": "main",
-      "updatedAt": "2026-07-28T11:45:00Z",
-      "notes": "Head 679fb8c0. Addressed Codex P1s (inventory scope + data/dataJson merge) and Devin write-mode finding (homebrew MCP writers via writeTool + requireWriteMode; #393 e2e extended). All three review threads resolved. Awaiting required CI on 679fb8c0."
+      "updatedAt": "2026-07-28T11:56:00Z",
+      "notes": "Head 6da58863. Addressed Codex P1s, Devin write-mode, and Devin loadMore total regression. All known review threads resolved. Awaiting required CI on 6da58863 (coverage typically ~35–40m)."
     }
   ]
 }
