@@ -117,16 +117,16 @@ export default function AiDmCard({
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  const loadEffective = async () => {
+  const loadEffective = useCallback(async () => {
     try {
       setEffective(await api.get<AiProviderEffectiveView>(`${API}/campaigns/${campaignId}/ai-provider/effective`));
     } catch {
       // Non-fatal: the status line degrades gracefully if this read fails.
       setEffective(null);
     }
-  };
+  }, [campaignId]);
 
-  const load = async () => {
+  const load = useCallback(async () => {
     setLoading(true);
     setLoadError(null);
     try {
@@ -140,12 +140,11 @@ export default function AiDmCard({
     } finally {
       setLoading(false);
     }
-  };
+  }, [campaignId, loadEffective, t]);
 
   useEffect(() => {
     void load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [campaignId]);
+  }, [load]);
 
   if (loading && !seat) {
     return <SkeletonCard sections={3} lines={2} label={t('settings.aiDm.loading')} />;

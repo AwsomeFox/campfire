@@ -116,8 +116,8 @@ test.describe('AiDmCard / AiConsoleCard / AiPricingEditor localization (#1579)',
       }
       return out;
     };
-    const allEnValues = [...flat(settingsEn), ...flat(adminEn)];
-    expect(allEnValues.some((v) => v.includes('requires a positive token budget'))).toBe(false);
-    expect(allEnValues.some((v) => v.includes('server-wide ai token cap'))).toBe(false);
+    const allTouchedCatalogValues = [...flat(settingsEn), ...flat(settingsAr), ...flat(adminEn), ...flat(adminAr)];
+    expect(allTouchedCatalogValues.some((v) => v.includes('requires a positive token budget'))).toBe(false);
+    expect(allTouchedCatalogValues.some((v) => v.includes('server-wide ai token cap'))).toBe(false);
   });
 });
