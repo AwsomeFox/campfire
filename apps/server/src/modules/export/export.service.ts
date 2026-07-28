@@ -257,7 +257,10 @@ export class ExportService {
       // Full recaps — an export must carry the complete session bodies, not the
       // dashboard's list-shape excerpts (issue #71).
       this.sessions.listRecapsForCampaign(campaignId, role),
-      this.characters.listForCampaign(campaignId, role),
+      // #1667: export-only read that also resolves `conditionInstances` (not on the
+      // public Character schema — see CharactersService.listForExport) so the
+      // played-state allowlist below has structured condition data to project.
+      this.characters.listForExport(campaignId, role),
       this.notes.listAllForCampaign(campaignId, user, role, {}),
       this.comments.listForCampaign(campaignId, role),
       this.members.listForCampaign(campaignId),
@@ -810,7 +813,7 @@ export class ExportService {
   async buildMemberExport(campaignId: number, user: RequestUser, role: 'dm' | 'player' | 'viewer') {
     const [campaign, characterList, noteList, commentList, proposalList, supportPreference] = await Promise.all([
       this.campaigns.getOrThrow(campaignId),
-      this.characters.listForCampaign(campaignId, role),
+      this.characters.listForExport(campaignId, role),
       this.notes.listAllForCampaign(campaignId, user, role, { mine: true }),
       this.comments.listForCampaign(campaignId, role, { authorUserId: user.id }),
       this.proposals.listForCampaign(campaignId, undefined, role, { proposerUserId: user.id }),

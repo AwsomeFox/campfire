@@ -2,8 +2,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import JSZip from 'jszip';
 import request from 'supertest';
+import { eq } from 'drizzle-orm';
+import type { ConditionInstance } from '@campfire/schema';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
 import { MembersService } from '../src/modules/membership/members.service';
+import { DB, type DrizzleDb } from '../src/db/db.module';
+import { characters as charactersTable } from '../src/db/schema';
+import { sheetConditionWriteSetFromInstances } from '../src/common/conditions';
 
 // Minimal valid 1x1 PNG — same fixture as attachments/export specs.
 const TINY_PNG = Buffer.from(
@@ -894,6 +899,223 @@ describe('campaign import — atomic staged commit (issue #725)', () => {
     if (fs.existsSync(stagingRoot())) {
       expect(fs.readdirSync(stagingRoot()).length).toBe(0);
     }
+  });
+});
+
+/**
+ * Issue #1667 half B — a character's structured `conditionInstances` (the field
+ * #1047 added; #1641 stores exhaustion as ConditionInstance.stacks) is played state
+ * that the export allowlist and the importer must agree on, the same way `conditions`
+ * already does. Before this fix `PLAYED_STATE_FIELDS.character` never listed
+ * `conditionInstances` — an exhaustive allowlist, so the field could not leave the
+ * install under ANY policy, including this suite's default full backup — and the
+ * importer's character insert never read it back even if it had.
+ *
+ * `conditionInstances` has no public write endpoint on the Character API (only
+ * `POST /characters/:id/conditions` writes bare names), so this seeds it directly on
+ * the row via the same single-writer helper (`common/conditions.ts`) every sanctioned
+ * writer uses — never via a raw `.set({ conditionInstances: ... })`, which is exactly
+ * the half-write that helper exists to prevent.
+ *
+ * Half A (combatant mid-combat `conditionInstances` on import) is DELIBERATELY
+ * EXCLUDED from this fix — it depends on a product decision the maintainer has not
+ * made (whether import should restore mid-combat state at all; see issue #1667). The
+ * second `it` below pins that boundary: a combatant's structured instance metadata
+ * (its `source`, `isConcentration`) does NOT survive import today, only the bare
+ * legacy name does — proving half A stayed exactly as broken as before, on purpose.
+ */
+describe('campaign import — character conditionInstances round-trip (issue #1667 half B)', () => {
+  let ctx: TestAppContext;
+  let dmAgent: ReturnType<typeof request.agent>;
+  let db: DrizzleDb;
+  let campaignId: number;
+  let characterId: number;
+  let combatantId: number;
+  let exportDoc: Record<string, unknown>;
+
+  const exhaustion: ConditionInstance = {
+    id: 'exhaustion_1',
+    name: 'Exhausted',
+    ruleEntryId: null,
+    source: 'Three days without rest',
+    sourceCombatantId: null,
+    durationRounds: null,
+    roundsRemaining: null,
+    timing: 'none',
+    saveTiming: 'none',
+    saveDc: null,
+    saveAbility: null,
+    isConcentration: false,
+    stacks: 3,
+    notes: 'Desert crossing',
+    custom: false,
+  };
+
+  const concentrating: ConditionInstance = {
+    id: 'concentration_1',
+    name: 'Concentrating',
+    ruleEntryId: null,
+    source: 'Bless',
+    sourceCombatantId: null,
+    durationRounds: 10,
+    roundsRemaining: 7,
+    timing: 'end-of-turn',
+    saveTiming: 'none',
+    saveDc: null,
+    saveAbility: null,
+    isConcentration: true,
+    stacks: 1,
+    notes: '',
+    custom: false,
+  };
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    db = ctx.app.get(DB);
+    const server = ctx.app.getHttpServer();
+
+    dmAgent = request.agent(server);
+    await dmAgent.post('/api/v1/auth/setup').send({ username: 'i1667-dm', password: 'dm-password-1' });
+
+    const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'Exhausted Party' });
+    campaignId = campRes.body.id;
+
+    const charRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/characters`).send({ name: 'Wanderer', className: 'Ranger', level: 5 });
+    characterId = charRes.body.id;
+    // Seed exhaustion at stacks:3 directly on the row, via the one sanctioned writer
+    // for the character condition columns (common/conditions.ts) — writes BOTH
+    // `conditions` and `conditionInstances` together so the pair stays consistent,
+    // same invariant #1668's scanner enforces for every other writer.
+    await db.update(charactersTable).set(sheetConditionWriteSetFromInstances([exhaustion])).where(eq(charactersTable.id, characterId));
+
+    const encRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Ambush' });
+    const combatantRes = await dmAgent.post(`/api/v1/encounters/${encRes.body.id}/combatants`).send({ kind: 'monster', name: 'Blessed Cleric', hpMax: 20 });
+    combatantId = combatantRes.body.id;
+    await dmAgent
+      .patch(`/api/v1/encounters/${encRes.body.id}/combatants/${combatantId}`)
+      .send({ conditionInstances: [concentrating] });
+
+    // Default profile = full backup: played state (and everything else) travels
+    // unconditionally, no opt-in flags needed.
+    const exportRes = await dmAgent.get(`/api/v1/campaigns/${campaignId}/export?format=json`);
+    exportDoc = exportRes.body;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('the export payload carries the character’s structured conditionInstances, not just the bare name', () => {
+    const exportedChar = (exportDoc.characters as Array<{ id: number; conditions: string[]; conditionInstances?: unknown }>).find(
+      (c) => c.id === characterId,
+    );
+    expect(exportedChar).toBeDefined();
+    expect(exportedChar!.conditions).toEqual(['Exhausted']);
+    expect(Array.isArray(exportedChar!.conditionInstances)).toBe(true);
+    const instances = exportedChar!.conditionInstances as ConditionInstance[];
+    expect(instances).toHaveLength(1);
+    expect(instances[0]).toMatchObject({ name: 'Exhausted', stacks: 3, source: 'Three days without rest', notes: 'Desert crossing' });
+  });
+
+  it('a character with exhaustion at level 3 survives export -> import with stacks intact', async () => {
+    const res = await dmAgent.post('/api/v1/campaigns/import').send(exportDoc);
+    expect(res.status).toBe(201);
+    const imported = res.body;
+    expect(imported.id).not.toBe(campaignId);
+
+    const chars = await dmAgent.get(`/api/v1/campaigns/${imported.id}/characters`);
+    const importedChar = chars.body.find((c: { name: string }) => c.name === 'Wanderer');
+    expect(importedChar).toBeDefined();
+    expect(importedChar.id).not.toBe(characterId);
+    // The public Character API only ever exposed the bare legacy name — that part
+    // already round-tripped before this fix.
+    expect(importedChar.conditions).toEqual(['Exhausted']);
+
+    // conditionInstances has no public read endpoint (see the module doc comment
+    // above), so the structured data is verified directly on the row: this is the
+    // part #1667 half B fixes — before it, the importer never wrote this column at
+    // all, so it would have been NULL here regardless of what the export carried.
+    const [importedRow] = await db.select().from(charactersTable).where(eq(charactersTable.id, importedChar.id));
+    expect(importedRow).toBeDefined();
+    const importedInstances = JSON.parse(importedRow!.conditionInstances ?? '[]') as ConditionInstance[];
+    expect(importedInstances).toHaveLength(1);
+    expect(importedInstances[0]).toMatchObject({
+      name: 'Exhausted',
+      stacks: 3,
+      source: 'Three days without rest',
+      notes: 'Desert crossing',
+      isConcentration: false,
+      custom: false,
+    });
+  });
+
+  it('reconciles hand-edited character condition columns through sheet helpers before import', async () => {
+    const doc = structuredClone(exportDoc) as Record<string, unknown>;
+    const exportedChar = (doc.characters as Array<Record<string, unknown>>).find((c) => c.id === characterId);
+    expect(exportedChar).toBeDefined();
+    exportedChar!.conditions = ['Exhausted'];
+    exportedChar!.conditionInstances = [
+      {
+        ...exhaustion,
+        durationRounds: 8,
+        roundsRemaining: 4,
+        timing: 'end-of-turn',
+        saveTiming: 'end-of-turn',
+        saveDc: 14,
+        saveAbility: 'CON',
+        sourceCombatantId: combatantId,
+      },
+      concentrating,
+    ];
+
+    const res = await dmAgent.post('/api/v1/campaigns/import').send(doc);
+    expect(res.status).toBe(201);
+    const imported = res.body;
+    const chars = await dmAgent.get(`/api/v1/campaigns/${imported.id}/characters`);
+    const importedChar = chars.body.find((c: { name: string }) => c.name === 'Wanderer');
+    expect(importedChar.conditions).toEqual(['Exhausted']);
+
+    const [importedRow] = await db.select().from(charactersTable).where(eq(charactersTable.id, importedChar.id));
+    expect(importedRow).toBeDefined();
+    expect(JSON.parse(importedRow!.conditions)).toEqual(['Exhausted']);
+    const importedInstances = JSON.parse(importedRow!.conditionInstances ?? '[]') as ConditionInstance[];
+    expect(importedInstances).toHaveLength(1);
+    expect(importedInstances[0]).toMatchObject({
+      name: 'Exhausted',
+      stacks: 3,
+      durationRounds: null,
+      roundsRemaining: null,
+      timing: 'none',
+      saveTiming: 'none',
+      saveDc: null,
+      saveAbility: null,
+      sourceCombatantId: null,
+    });
+  });
+
+  it('pins the boundary: a combatant’s structured conditionInstances do NOT survive import (half A, deliberately excluded)', async () => {
+    const res = await dmAgent.post('/api/v1/campaigns/import').send(exportDoc);
+    expect(res.status).toBe(201);
+    const imported = res.body;
+
+    const encs = await dmAgent.get(`/api/v1/campaigns/${imported.id}/encounters`);
+    const encDetail = await dmAgent.get(`/api/v1/encounters/${encs.body[0].id}`);
+    const importedCombatant = encDetail.body.combatants.find((c: { name: string }) => c.name === 'Blessed Cleric');
+    expect(importedCombatant).toBeDefined();
+    expect(importedCombatant.id).not.toBe(combatantId);
+
+    // The bare name survived (combatant.conditions was already imported pre-#1667).
+    expect(importedCombatant.conditions).toEqual(['Concentrating']);
+    // But the structured metadata — source, isConcentration, the 7-round countdown —
+    // did NOT: the importer still never reads combatant conditionInstances back, so
+    // the read path derives a bare legacy instance from the name alone instead of
+    // restoring the one the export actually carried. This is issue #1667 half A,
+    // deliberately left unfixed pending the maintainer's mid-combat-restore decision.
+    expect(importedCombatant.conditionInstances).toHaveLength(1);
+    expect(importedCombatant.conditionInstances[0]).toMatchObject({ name: 'Concentrating' });
+    expect(importedCombatant.conditionInstances[0].isConcentration).toBe(false);
+    expect(importedCombatant.conditionInstances[0].source).toBeNull();
+    expect(importedCombatant.conditionInstances[0].id).not.toBe(concentrating.id);
   });
 });
 
