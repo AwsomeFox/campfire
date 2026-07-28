@@ -36,7 +36,7 @@ describe('compendium inventory acquisition (#738)', () => {
     expect(service).toContain("item.compendiumState = 'linked_updated'");
     expect(service).toContain('async refreshCompendium');
     expect(service).toContain("state: 'overridden' | 'detached'");
-    expect(service).toContain('compendiumSnapshot: JSON.stringify(buildCompendiumSnapshot(entry))');
+    expect(service).toContain('compendiumSnapshot: JSON.stringify(snapshot)');
   });
 
   it('imports exported object provenance as a detached, play-safe snapshot', () => {
@@ -45,7 +45,9 @@ describe('compendium inventory acquisition (#738)', () => {
     expect(campaigns).toContain("compendiumState: safeImportedCompendiumRef(item.compendiumRef) && safeImportedCompendiumSnapshot(item.compendiumSnapshot) ? 'detached' : null");
     expect(campaigns).toContain("sourceUrl: ''");
     expect(service).toContain('sanitizeCompendiumSnapshot');
+    expect(service).toContain('sanitizeCompendiumSnapshot(buildCompendiumSnapshot(entry))');
     expect(service).toContain('withCompendiumStates');
     expect(service).toContain('inArray(ruleEntries.id, linkedIds)');
+    expect(service).toContain('return this.withCompendiumState(row);');
   });
 });

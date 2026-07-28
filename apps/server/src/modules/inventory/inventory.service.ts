@@ -270,7 +270,8 @@ export class InventoryService {
     const [pack] = await this.db.select().from(rulePacks).where(eq(rulePacks.id, entry.packId)).limit(1);
     if (!pack) throw new NotFoundException('The rule entry pack is not installed');
     const ref = buildCompendiumRef(entry, pack);
-    const snapshot = buildCompendiumSnapshot(entry);
+    const snapshot = sanitizeCompendiumSnapshot(buildCompendiumSnapshot(entry));
+    if (!snapshot) throw new BadRequestException('ruleEntryId must identify a play-safe item entry');
     const fingerprint = JSON.stringify({ campaignId, ruleEntryId: entry.id, ownerType, characterId, qty: input.qty, notes: input.notes, duplicateMode: input.duplicateMode });
     let row!: typeof inventoryItems.$inferSelect; let replayed = false;
     this.db.transaction((tx) => {
@@ -307,7 +308,9 @@ export class InventoryService {
     const [entry] = await this.db.select().from(ruleEntries).where(eq(ruleEntries.id, existing.ruleEntryId)).limit(1);
     if (!entry || entry.type !== 'item') throw new NotFoundException('The linked source item is unavailable');
     const [pack] = await this.db.select().from(rulePacks).where(eq(rulePacks.id, entry.packId)).limit(1); if (!pack) throw new NotFoundException('The linked source pack is unavailable');
-    const [row] = await this.db.update(inventoryItems).set({ compendiumRef: JSON.stringify(buildCompendiumRef(entry, pack)), compendiumSnapshot: JSON.stringify(buildCompendiumSnapshot(entry)), compendiumState: 'linked', updatedAt: nowIso() }).where(eq(inventoryItems.id, id)).returning();
+    const snapshot = sanitizeCompendiumSnapshot(buildCompendiumSnapshot(entry));
+    if (!snapshot) throw new BadRequestException('The linked source item is not play-safe');
+    const [row] = await this.db.update(inventoryItems).set({ compendiumRef: JSON.stringify(buildCompendiumRef(entry, pack)), compendiumSnapshot: JSON.stringify(snapshot), compendiumState: 'linked', updatedAt: nowIso() }).where(eq(inventoryItems.id, id)).returning();
     return this.withCompendiumState(row);
   }
 
@@ -315,7 +318,7 @@ export class InventoryService {
     const existing = await this.getRowOrThrow(id); await this.assertCanWriteOwner(existing.ownerType as 'party' | 'character', existing.characterId, existing.campaignId, user, role);
     if (!existing.compendiumSnapshot) throw new BadRequestException('This item has no compendium snapshot');
     const [row] = await this.db.update(inventoryItems).set({ compendiumState: state, ruleEntryId: state === 'detached' ? null : existing.ruleEntryId, updatedAt: nowIso() }).where(eq(inventoryItems.id, id)).returning();
-    return toDomain(row);
+    return this.withCompendiumState(row);
   }
 
   async update(id: number, input: InventoryItemUpdateInput, user: RequestUser, role: Role): Promise<InventoryItem> {
