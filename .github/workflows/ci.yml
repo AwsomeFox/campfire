@@ -335,10 +335,15 @@ jobs:
   # makes it legible on the PR, and keeps it independently promotable to the
   # required set once it has a stability record.
   #
-  # Why NOT in the required `ci` gate yet: it is a browser test that waits on
-  # service-worker activation, and the required check blocks every PR in the
-  # repo. It runs alongside e2e-web for signal; the zero-flake half of `test:pwa`
-  # (the dist contract) is what sits in the required gate today.
+  # Issue #1594: this job (and the four e2e-web shards) used to be excluded from
+  # the `ci` aggregate on the theory that a browser check waiting on
+  # service-worker activation shouldn't block every PR. That left a standing
+  # trap instead: `ci: success` could sit next to `e2e-web (1/4): failure` (see
+  # #1547), and anyone reading `ci` as "CI passed" was reading it wrong. Both
+  # are already required checks in their own right, so folding them into `ci`
+  # adds no new gating — it only makes the aggregate's name true. See the `ci`
+  # job below for the tradeoff this reintroduces (more slow jobs => more
+  # superseded-push noise) and why that's an acceptable, non-gating cost.
   pwa-web:
     name: pwa-web
     needs: build
@@ -386,28 +391,141 @@ jobs:
           path: apps/web/playwright-report/
           if-no-files-found: ignore
 
-  # Aggregate required status check for the branch ruleset (context name: "ci").
-  # Depends on the green required gates only. e2e-web and pwa-web still run
-  # independently for signal; main currently fails dozens of unrelated Playwright
-  # tests, and a browser check in the required set would block every PR on a
-  # service-worker timing race.
+  # Aggregate required status check for the branch ruleset (context name: "ci",
+  # required by ruleset 19205904 — do NOT rename this job; renaming it silently
+  # makes that ruleset requirement unsatisfiable). Since #1594's investigation,
+  # `ci` now genuinely aggregates every required gate, including the four
+  # e2e-web shards and pwa-web (previously excluded — see #1547 for the
+  # `ci: success` next to `e2e-web (1/4): failure` trap that left). All eight
+  # dependencies below are already required checks individually, so this adds
+  # no new gating; it only makes the aggregate's name honest.
+  #
+  # Issue #1594 — what a `cancelled` dependency means here, backed by evidence:
+  #
+  # `coverage` (and now e2e-web/pwa-web) can take 20-40 minutes, and the
+  # workflow's concurrency group cancels the in-flight run on every new push to
+  # the same ref. That produces a `ci: failure` on the SUPERSEDED sha whenever a
+  # PR gets a review-fix push mid-run — which reads exactly like a real
+  # regression and trains readers to assume any red `ci` is spurious, which is
+  # the habit that lets a genuine failure sit unexamined.
+  #
+  # The premise that this failure actually blocks merging was checked directly
+  # against the API, not assumed:
+  #   - Run 30374145136 (PR #1689, sha 91dcb176f9): `coverage` came back
+  #     `cancelled` while every other job (build, lint, both build-test shards,
+  #     unit-web, all 4 e2e-web shards, pwa-web) had already completed
+  #     `success`. `ci` (if: always()) still ran, asserted `coverage == success`,
+  #     and failed — reproducing the issue exactly.
+  #   - That sha was already superseded: `gh pr view 1689` on the PR's actual
+  #     head showed `ci: SUCCESS` and `coverage: SUCCESS` in
+  #     `statusCheckRollup`, with `mergeStateStatus: BLOCKED` from a missing
+  #     review, not from checks. GitHub's required-check rollup is keyed to the
+  #     head sha; a check run on an abandoned sha is structurally invisible to
+  #     it. So the red `ci` here never gated anything — it's a display/legibility
+  #     problem, not a merge-safety one.
+  #
+  # That ruled out "fix" attempts that change whether `ci` runs at all. Run
+  # 30378726387 (sha 5ea218310e) is the proof: when `build` failed, its
+  # dependents `build-test-24`, `e2e-web`, and `pwa-web` — all on the default
+  # implicit `if: success()` — came back `skipped`, not `cancelled`. Per
+  # GitHub's own docs, `skipped` (like `neutral`) counts as a PASSING status for
+  # required checks — it does not block merging. So making `ci` itself skip on
+  # a cancelled dependency (e.g. `if: ${{ !cancelled() }}`, or excluding
+  # `coverage`'s result from the `if:`) would silently turn today's honest-but-
+  # confusing red into a GREEN required check while coverage was never actually
+  # verified. That is strictly worse than the bug. Do not "fix" this by making
+  # the job skip — re-derive from runs 30374145136 / 30378726387 above rather
+  # than re-deriving from first principles if this comes up again.
+  #
+  # The fix actually shipped: keep `if: always()` and keep failing on any real
+  # `failure` (a mixed cancelled+failure state stays an ordinary loud red — see
+  # below). The only change is that a *cancelled-only, no-failure* state still
+  # fails (so the required check stays un-green — right call under GitHub's
+  # skip-passes semantics) but writes a self-explaining summary so a reader
+  # doesn't have to re-derive the diagnosis via `git log origin/<branch>`.
   ci:
     name: ci
     if: always()
-    needs: [lint, build, build-test-22, build-test-24, coverage, unit-web]
+    needs:
+      [
+        lint,
+        build,
+        build-test-22,
+        build-test-24,
+        coverage,
+        unit-web,
+        e2e-web,
+        pwa-web,
+      ]
     runs-on: ubuntu-latest
     steps:
-      - name: Required gates succeeded
+      - name: Evaluate required gates
         run: |
-          echo "lint=${{ needs.lint.result }}"
-          echo "build=${{ needs.build.result }}"
-          echo "build-test-22=${{ needs.build-test-22.result }}"
-          echo "build-test-24=${{ needs.build-test-24.result }}"
-          echo "coverage=${{ needs.coverage.result }}"
-          echo "unit-web=${{ needs.unit-web.result }}"
-          test "${{ needs.lint.result }}" = "success"
-          test "${{ needs.build.result }}" = "success"
-          test "${{ needs.build-test-22.result }}" = "success"
-          test "${{ needs.build-test-24.result }}" = "success"
-          test "${{ needs.coverage.result }}" = "success"
-          test "${{ needs.unit-web.result }}" = "success"
+          # Plain "name:result" pairs, not an associative array — keeps this
+          # portable across bash versions and gives deterministic ordering.
+          GATES=(
+            "lint:${{ needs.lint.result }}"
+            "build:${{ needs.build.result }}"
+            "build-test-22:${{ needs.build-test-22.result }}"
+            "build-test-24:${{ needs.build-test-24.result }}"
+            "coverage:${{ needs.coverage.result }}"
+            "unit-web:${{ needs.unit-web.result }}"
+            "e2e-web:${{ needs.e2e-web.result }}"
+            "pwa-web:${{ needs.pwa-web.result }}"
+          )
+
+          failed=()
+          non_success=()
+          for gate in "${GATES[@]}"; do
+            name="${gate%%:*}"
+            result="${gate#*:}"
+            echo "${name}=${result}"
+            if [ "$result" = "failure" ]; then
+              failed+=("$name")
+            elif [ "$result" != "success" ]; then
+              # cancelled (or, in principle, skipped) — not a pass, not a failure.
+              non_success+=("${name}:${result}")
+            fi
+          done
+
+          if [ "${#failed[@]}" -gt 0 ]; then
+            {
+              echo "### ci: FAILED"
+              echo
+              echo "Required gate(s) reported an explicit failure: ${failed[*]}"
+              if [ "${#non_success[@]}" -gt 0 ]; then
+                echo
+                echo "Also non-success (not failed, not passed): ${non_success[*]}"
+              fi
+            } >>"$GITHUB_STEP_SUMMARY"
+            echo "Required gate(s) failed: ${failed[*]}" >&2
+            exit 1
+          fi
+
+          if [ "${#non_success[@]}" -gt 0 ]; then
+            {
+              echo "### ci: red, but likely superseded — probably not a merge blocker"
+              echo
+              echo "No dependency reported an explicit failure, but these did not"
+              echo "reach success: ${non_success[*]}"
+              echo
+              echo "The most common cause: a newer push to this ref cancelled an"
+              echo "in-flight run (the workflow's concurrency group cancels on every"
+              echo "push). GitHub evaluates required status checks against the PR's"
+              echo "CURRENT head sha only — a check run attached to a superseded sha"
+              echo "is invisible to the merge button and to statusCheckRollup."
+              echo
+              echo "Before treating this as a regression: check whether this run's"
+              echo "sha is still the PR's head (\`gh pr view <n> --json headRefOid\`)."
+              echo "If it is not, this failure does not block merge — the newer"
+              echo "push's own \`ci\` run is the one that matters."
+              echo
+              echo "This job intentionally still reports failure here (not skipped):"
+              echo "GitHub treats a skipped required check as a PASS, which would be"
+              echo "worse than this confusing-but-honest red. See issue #1594 for the"
+              echo "evidence (runs 30374145136 and 30378726387)."
+            } >>"$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          echo "All required gates passed." >>"$GITHUB_STEP_SUMMARY"
