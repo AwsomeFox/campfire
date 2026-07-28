@@ -5893,6 +5893,12 @@ export class EncountersService {
       const cellPercent = Math.max(1, encounter.gridSize ?? 5);
       const batchSizes: Record<string, number> = { tiny: .5, small: 1, medium: 1, large: 2, huge: 3, gargantuan: 4 };
       const radius = (row: { tokenSize: string | null }) => (batchSizes[row.tokenSize ?? 'medium'] ?? 1) * cellPercent / 2;
+      for (let i = 0; i < plan.length; i++) {
+        const source = liveById.get(plan[i].combatantId)!;
+        const sourceRadius = radius(source);
+        if (plan[i].x - sourceRadius < 0 || plan[i].x + sourceRadius > 100 || plan[i].y - sourceRadius < 0 || plan[i].y + sourceRadius > 100) throw new ConflictException('Grid size changed and a token no longer fits; refresh preview');
+        for (let j = 0; j < i; j++) if (Math.hypot(plan[i].x - plan[j].x, plan[i].y - plan[j].y) < sourceRadius + radius(liveById.get(plan[j].combatantId)!) - .001) throw new ConflictException('Grid size changed and batch tokens now overlap; refresh preview');
+      }
       for (const p of plan) for (const other of live) {
         if (selected.has(other.id) || other.tokenX == null || other.tokenY == null) continue;
         if (Math.hypot(p.x - other.tokenX, p.y - other.tokenY) < radius(liveById.get(p.combatantId)!) + radius(other) - .001) throw new ConflictException('A token moved into this batch placement; refresh preview');

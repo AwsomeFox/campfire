@@ -1913,6 +1913,7 @@ export default function RunSessionPage() {
   // Move a combatant's token on the battle map. The server clamps to 0–100 and gates on
   // role (DM moves any; a player only their own character's token).
   const moveToken = (combatantId: number, x: number, y: number) => patchCombatant(combatantId, { tokenX: x, tokenY: y });
+  const tokenUndoKeys = useRef(new Map<string, string>());
   // Batch map changes deliberately use the preview/apply protocol rather than a loop of
   // individual PATCHes: either every token lands or the roster remains unchanged.
   const batchMoveTokens = useCallback(async (placements: Array<{ combatantId: number; x: number; y: number }>) => {
@@ -1925,7 +1926,10 @@ export default function RunSessionPage() {
     return applied;
   }, [eid, queryClient]);
   const undoTokenBatch = useCallback(async (undoToken: string) => {
-    await api.post(`${API}/encounters/${eid}/token-batches/undo`, { undoToken, idempotencyKey: newOperationId() });
+    const idempotencyKey = tokenUndoKeys.current.get(undoToken) ?? newOperationId();
+    tokenUndoKeys.current.set(undoToken, idempotencyKey);
+    await api.post(`${API}/encounters/${eid}/token-batches/undo`, { undoToken, idempotencyKey });
+    tokenUndoKeys.current.delete(undoToken);
     await invalidateEncounter(queryClient, eid);
   }, [eid, queryClient]);
   // Unplace a token (issue #271): clear its position back to null so it returns to the
