@@ -63,6 +63,7 @@ export * from './character-action';
 export * from './combatant-statblock';
 export * from './character-creation';
 export * from './narration-language';
+export * from './leveled-conditions';
 
 export {
   DifficultyBand,
@@ -558,6 +559,18 @@ export const Character = z.object({
   deathSaveSuccesses: z.number().int().min(0).max(3).default(0),
   deathSaveFailures: z.number().int().min(0).max(3).default(0),
   conditions: z.array(z.string().max(40)).default([]),
+  // Issue #1643: structured condition instances (source/duration/saves/`stacks`) were
+  // already written to this row's `condition_instances` column by #1047, and already
+  // exposed on `Combatant` (below, `conditionInstances`) — but never on `Character`, so a
+  // client had no way to read a leveled condition's LEVEL (5e Exhaustion's `stacks`) off a
+  // sheet, only its bare name. `z.lazy` because `ConditionInstance` is defined much later
+  // in this file (the encounter/combat section) and `Character` is defined here, early —
+  // a direct forward reference would read `ConditionInstance` before its own `const`
+  // initializer has run. Same encounter-only-field-stripping as the write side
+  // (`toSheetConditionInstance` in common/conditions.ts): a sheet instance's
+  // durationRounds/timing/saveDc/etc. are always null/none, since there is no round loop
+  // outside combat.
+  conditionInstances: z.lazy(() => z.array(ConditionInstance).max(50).default([])),
   saveProficiencies: z.array(AbilityKey).default([]), // abilities with saving-throw proficiency
   skills: z.record(z.string().max(40), SkillRank).default({}), // skill name -> rank; absent = unproficient
   actions: z.array(CharacterAction).max(100).default([]),
@@ -570,7 +583,19 @@ export const Character = z.object({
   ...timestamps,
 });
 export type Character = z.infer<typeof Character>;
-export const CharacterCreate = Character.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ name: true });
+// `conditionInstances` is omitted here (issue #1643): it's a READ projection Character
+// exposes so a client can see a leveled condition's `stacks`, not a general write surface —
+// writes go through the dedicated POST :id/conditions (names) and POST :id/conditions/level
+// (a leveled track's level) endpoints, same division as `resources` (read via GET
+// :id/resource-vocabulary + the Character.resources projection, written via POST
+// :id/resources, never the general update). Also a real necessity, not just tidiness: its
+// `z.lazy()` (see the field's own doc comment on `Character`) makes zod-to-json-schema emit
+// a `$ref` for any tool whose input schema spreads `CharacterUpdate.shape` — some MCP
+// clients don't resolve `$ref`, which is exactly what upsert_character's own test asserts
+// never happens (`test/mcp.e2e-spec.ts`, "no tool schema may contain a $ref at all").
+export const CharacterCreate = Character.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true, conditionInstances: true })
+  .partial()
+  .required({ name: true });
 export const CharacterUpdate = CharacterCreate.partial();
 
 /**
@@ -602,6 +627,30 @@ export const ConditionsPatch = z.object({
   add: z.array(z.string().max(40)).optional(),
   remove: z.array(z.string().max(40)).optional(),
 });
+/**
+ * Set/adjust the LEVEL of one leveled condition track (issue #1643) — e.g. 5e Exhaustion —
+ * on a character sheet. `ConditionsPatch` above is presence-only (`add`/`remove` a bare
+ * name); it preserves an existing instance's `stacks` unchanged and has no way to move it,
+ * which is exactly the gap #1643 found: nothing could raise or lower exhaustion without
+ * hand-editing the stored condition. `delta`/`level` are alternatives, not a pair — same
+ * shape as {@link ResourcePatch} (`delta` adjusts relative to the current level, `level`
+ * sets it absolutely, `level` is applied first when both are sent). `level`/resulting level
+ * 0 removes the condition entirely (there is no zero-stacks instance — `ConditionInstance`
+ * itself requires `stacks >= 1`). Going below 0 or above the track's `max` is a 400, not a
+ * clamp, matching every other bounded-resource write in this schema (#1039).
+ */
+export const ConditionLevelPatchShape = {
+  name: z.string().min(1).max(40),
+  delta: z.number().int().optional().describe('Relative level change. Required unless `level` is provided.'),
+  level: z.number().int().min(0).max(99).optional().describe('Absolute level to set. Required unless `delta` is provided.'),
+} as const;
+export const ConditionLevelPatch = z
+  .object(ConditionLevelPatchShape)
+  .strict()
+  .refine((patch) => patch.delta !== undefined || patch.level !== undefined, {
+    message: 'Either delta or level is required',
+  });
+export type ConditionLevelPatch = z.infer<typeof ConditionLevelPatch>;
 /**
  * Canonical 5e condition vocabulary — the single source of truth shared across
  * the character sheet, the encounter tracker, and the compendium (issue #111).

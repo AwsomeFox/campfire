@@ -85,6 +85,7 @@ function character(overrides: Partial<Character> = {}): Character {
     deathSaveSuccesses: 0,
     deathSaveFailures: 0,
     conditions: [],
+    conditionInstances: [],
     saveProficiencies: [],
     skills: {},
     actions: [],

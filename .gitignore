@@ -12,3 +12,5 @@ data/
 .env.local
 .DS_Store
 *.tsbuildinfo
+# Internal agent-tooling state, not project content (issue #1662 review: Devin).
+.cursor/pr-babysit-state.json

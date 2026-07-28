@@ -3663,6 +3663,68 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
       expect((denied.content as TextContent[])[0].text).toContain('403');
     });
 
+    // Issue #1643 — "verify what already works first": before this PR, exhaustion was
+    // storable (ConditionInstance.stacks, #1047/#1073) but nothing could actually MOVE
+    // the level on a character sheet — set_character_conditions only adds/removes a bare
+    // name and preserves stacks unchanged. adjust_character_condition_level (this PR) is
+    // that path. Proves the AI-DM story from #1073 end to end: a failed forced-march save
+    // increments exhaustion by one, through the real MCP tool, against a real campaign.
+    it('#1643: an AI DM can raise/lower 5e Exhaustion through adjust_character_condition_level on a real (default/5e) campaign', async () => {
+      const client = await mcpClient(dmToken);
+      const charRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/characters`).send({ name: '1643 exhaustion target' });
+      const characterId = charRes.body.id as number;
+
+      // The failed forced-march save: +1.
+      const first = parseResult(
+        await client.callTool({ name: 'adjust_character_condition_level', arguments: { characterId, name: 'Exhaustion', delta: 1 } }),
+      ) as { conditions: string[]; conditionInstances: Array<{ name: string; stacks: number }> };
+      expect(first.conditions).toContain('Exhaustion');
+      expect(first.conditionInstances.find((i) => i.name === 'Exhaustion')).toMatchObject({ stacks: 1 });
+
+      // A second failed save: +1 again -> level 2. (set_character_conditions could not
+      // have done this — add-when-already-present is a no-op on stacks.)
+      const second = parseResult(
+        await client.callTool({ name: 'adjust_character_condition_level', arguments: { characterId, name: 'Exhaustion', delta: 1 } }),
+      ) as { conditionInstances: Array<{ name: string; stacks: number }> };
+      expect(second.conditionInstances.find((i) => i.name === 'Exhaustion')).toMatchObject({ stacks: 2 });
+
+      // A long rest / restorative magic lowers it: -1 -> level 1.
+      const lowered = parseResult(
+        await client.callTool({ name: 'adjust_character_condition_level', arguments: { characterId, name: 'Exhaustion', delta: -1 } }),
+      ) as { conditionInstances: Array<{ name: string; stacks: number }> };
+      expect(lowered.conditionInstances.find((i) => i.name === 'Exhaustion')).toMatchObject({ stacks: 1 });
+
+      // Driving it to level 6 (death) then one more is a real error, not a clamp (#1039).
+      const toCap = await client.callTool({
+        name: 'adjust_character_condition_level',
+        arguments: { characterId, name: 'Exhaustion', level: 6 },
+      });
+      expect(toCap.isError).toBeFalsy();
+      const overCap = await client.callTool({
+        name: 'adjust_character_condition_level',
+        arguments: { characterId, name: 'Exhaustion', delta: 1 },
+      });
+      expect(overCap.isError).toBe(true);
+    });
+
+    it('#1643: adjust_character_condition_level 400s on a PF2e campaign — no leveled condition track declared', async () => {
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'MCP PF2e No Exhaustion' });
+      expect(campRes.status).toBe(201);
+      const pf2eId = campRes.body.id as number;
+      await db.update(campaigns).set({ ruleSystem: PF2E_PACK_SLUG }).where(eq(campaigns.id, pf2eId));
+
+      const client = await mcpClient(dmToken);
+      const charRes = await dmAgent.post(`/api/v1/campaigns/${pf2eId}/characters`).send({ name: '1643 pf2e target' });
+      const characterId = charRes.body.id as number;
+
+      const result = await client.callTool({
+        name: 'adjust_character_condition_level',
+        arguments: { characterId, name: 'Exhaustion', delta: 1 },
+      });
+      expect(result.isError).toBe(true);
+    });
+
     // Issue #1642 — "verify the end-to-end path first": #1073's inspiration/heroPoints
     // vocabulary, #422's adjustResource, and #1578's MCP surface (list_character_resources
     // / adjust_character_resource, exercised generically with kiPoints just above) were
