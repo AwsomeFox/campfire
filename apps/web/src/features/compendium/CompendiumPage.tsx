@@ -148,6 +148,8 @@ export default function CompendiumPage() {
   const [packsLoading, setPacksLoading] = useState(true);
   const [reloadToken, setReloadToken] = useState(0);
   const fetchGeneration = useRef(0);
+  /** Filtered homebrew rows prepended into results — kept so loadMore can keep Showing X of Y stable. */
+  const listedHomebrewCount = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -198,6 +200,7 @@ export default function CompendiumPage() {
         );
         setHomebrewCount(homebrew.length);
         if (cancelled || gen !== fetchGeneration.current) return;
+        listedHomebrewCount.current = campaignEntries.length;
         setResults([...campaignEntries, ...page.items]);
         setFacets(page.facets ?? []);
         setTotal(page.total + campaignEntries.length);
@@ -245,7 +248,8 @@ export default function CompendiumPage() {
       // primary fetch and replace the accumulated list with a single page.
       setResults((prev) => [...(prev ?? []), ...page.items]);
       setFacets(page.facets ?? []);
-      setTotal(page.total);
+      // page.total is pack-only; keep the homebrew rows that the primary fetch prepended.
+      setTotal(page.total + listedHomebrewCount.current);
       setHasMore(page.hasMore);
       setNextCursor(page.nextCursor);
     } catch (err) {
