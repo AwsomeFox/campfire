@@ -1,0 +1,14 @@
+{
+  "tracked": [
+    {
+      "pr": 1681,
+      "url": "https://github.com/AwsomeFox/campfire/pull/1681",
+      "status": "babysitting",
+      "headBranch": "fix/issue-1680",
+      "baseBranch": "main",
+      "title": "test: pin buildMemberExport's field policy and document why it bypasses fieldsFor/pickFields (#1680)",
+      "updatedAt": "2026-07-28T16:35:00Z",
+      "note": "Tracking started; merging main to fix CI Duplicate ConditionInstance on merge ref; review threads pending resolve"
+    }
+  ]
+}
