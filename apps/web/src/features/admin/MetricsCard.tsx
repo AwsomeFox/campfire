@@ -65,7 +65,7 @@ export function MetricsCard() {
     } catch (err) {
       setError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     }
-  }, []);
+  }, [t]);
 
   const runCheck = useCallback(async (kind: 'quick-check' | 'integrity-check') => {
     setScanning(true);

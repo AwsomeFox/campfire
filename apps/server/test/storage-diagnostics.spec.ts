@@ -74,7 +74,7 @@ describe('StorageDiagnosticsService (issue #724)', () => {
   });
 
   it('treats missing uploads as safe only with no committed attachment rows', () => {
-    const db = holder({ prepare: jest.fn((sql: string) => ({ get: jest.fn(), all: jest.fn(), pluck: jest.fn(function () { return this; }), run: jest.fn(), ...(sql.includes('count(*)') ? { get: jest.fn(() => 1) } : {}) })) });
+    const db = holder({ prepare: jest.fn((sql: string) => ({ get: jest.fn(), all: jest.fn(), pluck: jest.fn(function () { return this; }), run: jest.fn(), ...(sql.includes("state = 'committed'") ? { get: jest.fn(() => ({ 1: 1 })) } : {}) })) });
     const service = new StorageDiagnosticsService(db);
     const previous = process.env.DATA_DIR; process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'campfire-health-'));
     expect((service as unknown as { uploadsCheck(): { code: string } }).uploadsCheck().code).toBe('UPLOADS_MISSING');
@@ -105,10 +105,11 @@ describe('StorageDiagnosticsService (issue #724)', () => {
   it('fails missing uploads when a committed attachment row exists', () => {
     const raw = (holder() as unknown as { raw: { prepare: jest.Mock } }).raw;
     raw.prepare.mockImplementation((sql: string) => ({
-      get: jest.fn(() => sql.includes('count(*)') ? 1 : undefined), all: jest.fn(() => []), pluck: jest.fn(function () { return this; }), run: jest.fn(),
+      get: jest.fn(() => sql.includes("state = 'committed'") ? { 1: 1 } : undefined), all: jest.fn(() => []), pluck: jest.fn(function () { return this; }), run: jest.fn(),
     }));
     const service = new StorageDiagnosticsService({ raw } as never, probe());
     expect((service as unknown as { uploadsCheck(): { code: string } }).uploadsCheck().code).toBe('UPLOADS_MISSING');
+    expect(raw.prepare).toHaveBeenCalledWith(expect.stringContaining('LIMIT 1'));
   });
 
   it('fails closed for missing or malformed install sentinels', () => {
@@ -177,5 +178,57 @@ describe('StorageDiagnosticsService (issue #724)', () => {
     } finally {
       tempDir.mockRestore(); fs.rmSync(tmp, { recursive: true, force: true });
     }
+  });
+
+  it('keeps checkedAt null until an integrity check has actually run', () => {
+    const service = new StorageDiagnosticsService(holder());
+    expect(service.cachedSnapshot().integrity.quickCheck).toMatchObject({ code: 'QUICK_CHECK_NOT_RUN', checkedAt: null });
+    expect(service.cachedSnapshot().integrity.integrityCheck).toMatchObject({ code: 'INTEGRITY_CHECK_NOT_RUN', checkedAt: null });
+  });
+
+  it('judges snapshot disk status with bavail like readiness, and keeps disk when walks hit scan limits', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'campfire-health-snap-'));
+    const previous = process.env.DATA_DIR;
+    process.env.DATA_DIR = dir;
+    fs.writeFileSync(path.join(dir, 'campfire.db'), '');
+    const uploads = path.join(dir, 'uploads');
+    fs.mkdirSync(uploads);
+    const realReaddir = fs.readdirSync.bind(fs);
+    // Force walk() to throw via the entry/depth guard without creating 10k files.
+    const readdir = jest.spyOn(fs, 'readdirSync').mockImplementation(((target: fs.PathLike, options?: { withFileTypes?: boolean }) => {
+      if (String(target) === uploads) throw new Error('scan limit');
+      return realReaddir(target, options as never) as never;
+    }) as typeof fs.readdirSync);
+    const tempDir = jest.spyOn(os, 'tmpdir').mockReturnValue(path.join(dir, 'tmp-empty'));
+    fs.mkdirSync(path.join(dir, 'tmp-empty'));
+    try {
+      const service = new StorageDiagnosticsService(holder(), probe({
+        dataDir: () => dir,
+        // bfree looks healthy; bavail is critically low — snapshot must follow bavail.
+        statfs: () => ({ bfree: 10_000_000, bavail: 1, blocks: 20_000_000, bsize: 4096 } as ReturnType<typeof fs.statfsSync>),
+        exists: (file) => fs.existsSync(file),
+        stat: (file) => fs.statSync(file),
+        readSentinel: () => ({ present: true, sentinel: { instanceId: 'instance-a', createdAt: '2026-01-01T00:00:00.000Z', sentinelVersion: 1 } }),
+      }));
+      const snap = service.snapshot();
+      expect(snap.checks.disk.code).toBe('DISK_SPACE_CRITICAL');
+      expect(snap.storage.availableBytes).toBe(4096);
+      expect(snap.storage.uploadsBytes).toBeNull();
+    } finally {
+      readdir.mockRestore();
+      tempDir.mockRestore();
+      if (previous === undefined) delete process.env.DATA_DIR; else process.env.DATA_DIR = previous;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('throttles repeated write probes within the cache window', () => {
+    const raw = (holder() as unknown as { raw: { exec: jest.Mock; pragma: jest.Mock; prepare: jest.Mock } }).raw;
+    const service = new StorageDiagnosticsService({ raw } as never);
+    const first = (service as unknown as { writeCheck(): { code: string } }).writeCheck();
+    const second = (service as unknown as { writeCheck(): { code: string } }).writeCheck();
+    expect(first.code).toBe('WRITE_OK');
+    expect(second.code).toBe('WRITE_OK');
+    expect(raw.exec.mock.calls.filter(([sql]) => String(sql).startsWith('BEGIN')).length).toBe(1);
   });
 });
