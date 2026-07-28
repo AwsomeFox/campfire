@@ -2,12 +2,12 @@
   "tracked": [
     {
       "pr": 1620,
-      "status": "babysitting",
+      "status": "merged",
       "url": "https://github.com/AwsomeFox/campfire/pull/1620",
       "headBranch": "spellslot-clamp-apply-action",
       "baseBranch": "main",
-      "updatedAt": "2026-07-28T09:52:30Z",
-      "notes": "Tracking started. MERGEABLE (no conflicts with main). Copilot review threads already resolved after address-comments commit c942cb58 (.get() single-row read + test comment wording). CI in progress after synchronize; mergeStateStatus BLOCKED pending checks."
+      "updatedAt": "2026-07-28T10:36:43Z",
+      "notes": "Merged via squash cf99eac7 by app/cursor at 2026-07-28T10:33:53Z after CI green (lint/build/build-test/coverage/e2e). Copilot threads were already resolved; no conflicts with main."
     }
   ]
 }
