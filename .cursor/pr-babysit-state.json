@@ -1,0 +1,13 @@
+{
+  "tracked": [
+    {
+      "pr": 1686,
+      "url": "https://github.com/AwsomeFox/campfire/pull/1686",
+      "status": "babysitting",
+      "headBranch": "fix/issue-1684",
+      "baseBranch": "main",
+      "title": "fix(a11y): make focus distinguishable from hover on the page-header menu and status picker",
+      "updatedAt": "2026-07-28T16:32:00Z"
+    }
+  ]
+}
