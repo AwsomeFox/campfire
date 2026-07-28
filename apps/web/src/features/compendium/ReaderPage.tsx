@@ -29,6 +29,7 @@ import {
   COMPENDIUM_SOURCE_COPY_LABEL,
   resolveCompendiumSource,
 } from './compendiumProvenance';
+import { serializeHomebrewEditor } from './homebrewEditor';
 
 export default function ReaderPage() {
   const { t } = useTranslation();
@@ -86,7 +87,7 @@ export default function ReaderPage() {
   async function duplicateHomebrew() { if (!entry) return; setActing(true); setActionError(null); try { const copy = await api.post<RuleEntry>(`${API}/campaigns/${id}/homebrew/${entry.id}/duplicate`, {}); navigate(`/c/${id}/compendium/${copy.id}`); } catch (err) { setActionError(translateApiError(err, t, { fallbackKey: 'compendium.errors.loadEntry' })); } finally { setActing(false); } }
   async function archiveHomebrew() { if (!entry) return; setActing(true); setActionError(null); try { await api.post(`${API}/campaigns/${id}/homebrew/${entry.id}/archive`, {}); navigate(`/c/${id}/compendium`); } catch (err) { setActionError(translateApiError(err, t, { fallbackKey: 'compendium.errors.loadEntry' })); } finally { setActing(false); } }
   async function showRevisions() { if (!entry) return; setActing(true); setActionError(null); try { setRevisions(await api.get(`${API}/campaigns/${id}/homebrew/${entry.id}/revisions`)); } catch (err) { setActionError(translateApiError(err, t, { fallbackKey: 'compendium.errors.loadEntry' })); } finally { setActing(false); } }
-  async function saveEdit() { if (!entry) return; setSavingEdit(true); setEditError(null); try { try { const data: unknown = JSON.parse(editDataJson); if (!data || Array.isArray(data) || typeof data !== 'object') throw new Error(); } catch { setEditError('Raw data must be a JSON object.'); return; } const payload = { name: editName, summary: editSummary, body: editBody, dataJson: editDataJson, expectedUpdatedAt: entry.updatedAt }; const updated = await api.patch<RuleEntry>(`${API}/campaigns/${id}/homebrew/${entry.id}${isDm ? '' : '?proposed=true'}`, payload); if (isDm) setEntry(updated); setEditing(false); } catch (err) { setEditError(translateApiError(err, t, { fallbackKey: 'compendium.errors.loadEntry' })); } finally { setSavingEdit(false); } }
+  async function saveEdit() { if (!entry) return; setSavingEdit(true); setEditError(null); try { const serialized = serializeHomebrewEditor({ name: editName, slug: entry.slug, type: entry.type, summary: editSummary, body: editBody, rightsStatus: entry.rightsStatus, license: entry.license, attribution: entry.attribution, author: entry.author, sourceUrl: entry.sourceUrl, dataJson: editDataJson }, {}, editRaw); if (!serialized.ok) { setEditError(serialized.error); return; } const payload = { ...serialized.value, expectedUpdatedAt: entry.updatedAt }; const updated = await api.patch<RuleEntry>(`${API}/campaigns/${id}/homebrew/${entry.id}${isDm ? '' : '?proposed=true'}`, payload); if (isDm) setEntry(updated); setEditing(false); } catch (err) { setEditError(translateApiError(err, t, { fallbackKey: 'compendium.errors.loadEntry' })); } finally { setSavingEdit(false); } }
 
   useEffect(() => {
     if (!entryId) return;
