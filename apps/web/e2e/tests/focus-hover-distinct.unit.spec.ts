@@ -123,6 +123,14 @@ test.describe('Focus is visually distinct from hover (#1684)', () => {
     expect(classLine).not.toMatch(/focus:bg-slate-700/);
     expect(classLine).toMatch(/hover:bg-slate-700/);
     expect(classLine).toMatch(/focus-visible:outline\b/);
+    // The bug this guards: `focus-visible:outline-[2px_solid_var(--color-accent)]` compiles to
+    // no CSS at all in Tailwind v4 (the outline-[...] arbitrary form only resolves to
+    // outline-width or outline-color, never the shorthand), so a plain substring check on
+    // `focus-visible:outline` would still pass if that broken form were reintroduced. Assert
+    // the split form explicitly instead.
+    expect(classLine).not.toMatch(/focus-visible:outline-\[[^\]]*\s[^\]]*\]/);
+    expect(classLine).toMatch(/focus-visible:outline\s/);
+    expect(classLine).toMatch(/focus-visible:outline-2\b/);
   });
 
   test('no CSS rule merges a :hover selector with a :focus/:focus-visible selector for the ' +
