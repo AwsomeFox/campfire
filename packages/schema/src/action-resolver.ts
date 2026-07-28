@@ -377,20 +377,13 @@ export type AppliedEffect = z.infer<typeof AppliedEffect>;
 /**
  * Everything an outcome branch does to a target.
  *
- * CONVENTION (issue #1600, extending #1053's `formula`/`flat` split to which BRANCH a critical
- * lands in): {@link damage} on every branch — including a hand-authored `crit` or `critFailure`
- * branch — is always the BASE (non-critical) amount. The resolver, never the branch author, owns
- * critical doubling: `resolveOneTarget` sets a `critical` flag from the roll (attack `crit`,
- * PF2e/SF2e save `criticalFailure`) and passes it to {@link rollBranchDamage} alongside
- * {@link CriticalDamageRule}, which multiplies whatever branch `pickOutcomeBranch` selected —
- * the outcome-specific branch when the spec author defined one, the base branch otherwise. This
- * was already the contract for `crit` under #1053 (a defined `crit` branch's damage still goes
- * through the doubling engine, it isn't pre-doubled prose); #1600 makes `critFailure` follow the
- * identical rule rather than inventing a second convention. An author who writes a `crit` /
- * `critFailure` branch is authoring outcome-specific TEXT/EFFECTS (e.g. an extra condition on a
- * crit), not outcome-specific damage math — pre-doubling `formula`/`flat` here would be doubled
- * a second time by the engine, exactly like folding a modifier into `formula` was already wrong
- * under #1053.
+ * CONVENTION (issues #1053/#1600): attack critical doubling belongs to the resolver, so a
+ * hand-authored `crit` branch still describes base damage and lets {@link rollBranchDamage}
+ * apply the campaign system's {@link CriticalDamageRule}. Save/check degree branches are
+ * different: an explicit `critFailure` branch is a degree-specific consequence as authored and
+ * is not automatically multiplied again. PF2e/SF2e basic saves get their double damage only when
+ * `critFailure` falls back to the ordinary `failure` branch and `success` is marked
+ * `halfDamage`; that shape means the branch is the basic-save full-damage baseline.
  */
 export const OutcomeBranch = z.object({
   damage: z.array(DamagePart).max(12).default([]),
