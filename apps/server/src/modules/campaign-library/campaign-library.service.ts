@@ -29,6 +29,13 @@ import type { RequestUser } from '../../common/user.types';
 type LibraryTransaction = Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
 type TemplateRef = { key: string; table: string; attachmentCommitted?: boolean };
 
+function isUniqueConstraintError(err: unknown): boolean {
+  const code = (err as { code?: string } | undefined)?.code;
+  if (code === 'SQLITE_CONSTRAINT_UNIQUE' || code === 'SQLITE_CONSTRAINT_PRIMARYKEY') return true;
+  const message = err instanceof Error ? err.message : '';
+  return /UNIQUE constraint failed/i.test(message);
+}
+
 function toDomain(row: typeof campaignLibraryMonsters.$inferSelect): CampaignLibraryMonster {
   return CampaignLibraryMonster.parse({
     id: row.id,
@@ -75,11 +82,23 @@ export class CampaignLibraryService {
 
   async createTag(campaignId: number, input: CampaignLibraryTagCreate): Promise<CampaignLibraryTag> {
     await this.assertParent(campaignLibraryTags, campaignId, input.parentTagId); const ts = nowIso();
-    const [row] = await this.db.insert(campaignLibraryTags).values({ campaignId, name: input.name.trim(), aliasesJson: toJsonText(input.aliases ?? []), color: input.color ?? '#64748b', description: input.description ?? '', parentTagId: input.parentTagId ?? null, createdAt: ts, updatedAt: ts }).returning().all(); return this.tag(row);
+    try {
+      const [row] = await this.db.insert(campaignLibraryTags).values({ campaignId, name: input.name.trim(), aliasesJson: toJsonText(input.aliases ?? []), color: input.color ?? '#64748b', description: input.description ?? '', parentTagId: input.parentTagId ?? null, createdAt: ts, updatedAt: ts }).returning().all();
+      return this.tag(row);
+    } catch (err) {
+      if (isUniqueConstraintError(err)) throw new ConflictException('A tag with that name already exists in this campaign.');
+      throw err;
+    }
   }
   async createCollection(campaignId: number, input: CampaignLibraryCollectionCreate): Promise<CampaignLibraryCollection> {
     await this.assertParent(campaignLibraryCollections, campaignId, input.parentCollectionId); const ts = nowIso();
-    const [row] = await this.db.insert(campaignLibraryCollections).values({ campaignId, name: input.name.trim(), aliasesJson: toJsonText(input.aliases ?? []), color: input.color ?? '#64748b', description: input.description ?? '', parentCollectionId: input.parentCollectionId ?? null, createdAt: ts, updatedAt: ts }).returning().all(); return this.collection(row);
+    try {
+      const [row] = await this.db.insert(campaignLibraryCollections).values({ campaignId, name: input.name.trim(), aliasesJson: toJsonText(input.aliases ?? []), color: input.color ?? '#64748b', description: input.description ?? '', parentCollectionId: input.parentCollectionId ?? null, createdAt: ts, updatedAt: ts }).returning().all();
+      return this.collection(row);
+    } catch (err) {
+      if (isUniqueConstraintError(err)) throw new ConflictException('A collection with that name already exists in this campaign.');
+      throw err;
+    }
   }
 
   private async tagRowOrThrow(campaignId: number, id: number) {
@@ -103,8 +122,13 @@ export class CampaignLibraryService {
     if (input.color !== undefined) patch.color = input.color;
     if (input.description !== undefined) patch.description = input.description;
     if (input.parentTagId !== undefined) patch.parentTagId = input.parentTagId;
-    const [row] = await this.db.update(campaignLibraryTags).set(patch).where(and(eq(campaignLibraryTags.id, id), eq(campaignLibraryTags.campaignId, campaignId))).returning().all();
-    return this.tag(row);
+    try {
+      const [row] = await this.db.update(campaignLibraryTags).set(patch).where(and(eq(campaignLibraryTags.id, id), eq(campaignLibraryTags.campaignId, campaignId))).returning().all();
+      return this.tag(row);
+    } catch (err) {
+      if (isUniqueConstraintError(err)) throw new ConflictException('A tag with that name already exists in this campaign.');
+      throw err;
+    }
   }
 
   async updateCollection(campaignId: number, id: number, input: CampaignLibraryCollectionUpdate): Promise<CampaignLibraryCollection> {
@@ -116,8 +140,13 @@ export class CampaignLibraryService {
     if (input.color !== undefined) patch.color = input.color;
     if (input.description !== undefined) patch.description = input.description;
     if (input.parentCollectionId !== undefined) patch.parentCollectionId = input.parentCollectionId;
-    const [row] = await this.db.update(campaignLibraryCollections).set(patch).where(and(eq(campaignLibraryCollections.id, id), eq(campaignLibraryCollections.campaignId, campaignId))).returning().all();
-    return this.collection(row);
+    try {
+      const [row] = await this.db.update(campaignLibraryCollections).set(patch).where(and(eq(campaignLibraryCollections.id, id), eq(campaignLibraryCollections.campaignId, campaignId))).returning().all();
+      return this.collection(row);
+    } catch (err) {
+      if (isUniqueConstraintError(err)) throw new ConflictException('A collection with that name already exists in this campaign.');
+      throw err;
+    }
   }
 
   /** Delete is intentionally destructive in alpha: taxonomy references are removed, children become roots. */

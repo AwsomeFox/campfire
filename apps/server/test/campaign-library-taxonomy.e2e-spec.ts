@@ -35,6 +35,20 @@ describe('campaign library taxonomy (issue #742)', () => {
     expect(await db.select().from(campaignLibraryEntityTaxonomy).where(and(eq(campaignLibraryEntityTaxonomy.campaignId, campaignId), eq(campaignLibraryEntityTaxonomy.tagId, parent.body.id)))).toEqual([]);
   });
 
+  it('returns 409 for duplicate tag and collection names on create and rename', async () => {
+    const server = ctx.app.getHttpServer();
+    const tag = await request(server).post(`/api/v1/campaigns/${campaignId}/library/tags`).set(dm).send({ name: 'Unique tag' });
+    expect(tag.status).toBe(201);
+    expect((await request(server).post(`/api/v1/campaigns/${campaignId}/library/tags`).set(dm).send({ name: 'Unique tag' })).status).toBe(409);
+    const otherTag = await request(server).post(`/api/v1/campaigns/${campaignId}/library/tags`).set(dm).send({ name: 'Other tag' });
+    expect((await request(server).patch(`/api/v1/campaigns/${campaignId}/library/tags/${otherTag.body.id}`).set(dm).send({ name: 'Unique tag' })).status).toBe(409);
+    const collection = await request(server).post(`/api/v1/campaigns/${campaignId}/library/collections`).set(dm).send({ name: 'Unique collection' });
+    expect(collection.status).toBe(201);
+    expect((await request(server).post(`/api/v1/campaigns/${campaignId}/library/collections`).set(dm).send({ name: 'Unique collection' })).status).toBe(409);
+    const otherCollection = await request(server).post(`/api/v1/campaigns/${campaignId}/library/collections`).set(dm).send({ name: 'Other collection' });
+    expect((await request(server).patch(`/api/v1/campaigns/${campaignId}/library/collections/${otherCollection.body.id}`).set(dm).send({ name: 'Unique collection' })).status).toBe(409);
+  });
+
   it('enforces campaign scope and DM writes for collection lifecycle', async () => {
     const server = ctx.app.getHttpServer();
     expect((await request(server).post(`/api/v1/campaigns/${campaignId}/library/collections`).set(player).send({ name: 'Secret' })).status).toBe(403);
@@ -45,7 +59,7 @@ describe('campaign library taxonomy (issue #742)', () => {
     expect(patched.body).toMatchObject({ aliases: ['Intro'], color: '#abcdef', description: 'Opening scene' });
     expect((await request(server).delete(`/api/v1/campaigns/${campaignId}/library/collections/${parent.body.id}`).set(dm)).status).toBe(200);
     const collections = await request(server).get(`/api/v1/campaigns/${campaignId}/library/collections`).set(dm);
-    expect(collections.body).toEqual([expect.objectContaining({ id: child.body.id, parentCollectionId: null })]);
+    expect(collections.body).toEqual(expect.arrayContaining([expect.objectContaining({ id: child.body.id, parentCollectionId: null })]));
     const other = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Other taxonomy' });
     expect((await request(server).patch(`/api/v1/campaigns/${other.body.id}/library/collections/${child.body.id}`).set(dm).send({ name: 'Wrong campaign' })).status).toBe(404);
   });
