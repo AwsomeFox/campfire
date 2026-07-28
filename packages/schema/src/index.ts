@@ -11934,3 +11934,75 @@ export const CampaignCatalogPrivacyUpdate = z
   .object({ catalogPrivacy: CampaignCatalogPrivacy })
   .strict();
 export type CampaignCatalogPrivacyUpdate = z.infer<typeof CampaignCatalogPrivacyUpdate>;
+
+// ---------- campaign library management (issue #742) ----------
+// These contracts deliberately describe a clean, campaign-owned taxonomy.  They do
+// not contain a migration/version field: early-alpha clients all speak this shape.
+export const LibraryEntityType = z.enum([
+  'quest', 'npc', 'location', 'faction', 'encounter', 'timeline_event', 'inventory_item', 'attachment', 'campaign_library_monster',
+]);
+export type LibraryEntityType = z.infer<typeof LibraryEntityType>;
+
+const LibraryName = z.string().trim().min(1).max(120);
+const LibraryAliases = z.array(LibraryName).max(30).default([]);
+const LibraryColor = z.string().regex(/^#[0-9a-fA-F]{6}$/, 'color must be a #RRGGBB value').default('#64748b');
+export const CampaignLibraryTag = z.object({
+  id: Id, campaignId: Id, name: LibraryName, aliases: LibraryAliases, color: LibraryColor,
+  description: z.string().max(2000).default(''), parentTagId: Id.nullable().default(null), createdAt: IsoDate, updatedAt: IsoDate,
+});
+export type CampaignLibraryTag = z.infer<typeof CampaignLibraryTag>;
+export const CampaignLibraryTagCreate = CampaignLibraryTag.pick({ name: true, aliases: true, color: true, description: true, parentTagId: true }).partial({ aliases: true, color: true, description: true, parentTagId: true });
+export const CampaignLibraryTagUpdate = CampaignLibraryTagCreate.partial();
+export type CampaignLibraryTagCreate = z.infer<typeof CampaignLibraryTagCreate>;
+export type CampaignLibraryTagUpdate = z.infer<typeof CampaignLibraryTagUpdate>;
+
+export const CampaignLibraryCollection = z.object({
+  id: Id, campaignId: Id, name: LibraryName, aliases: LibraryAliases, color: LibraryColor,
+  description: z.string().max(2000).default(''), parentCollectionId: Id.nullable().default(null), createdAt: IsoDate, updatedAt: IsoDate,
+});
+export type CampaignLibraryCollection = z.infer<typeof CampaignLibraryCollection>;
+export const CampaignLibraryCollectionCreate = CampaignLibraryCollection.pick({ name: true, aliases: true, color: true, description: true, parentCollectionId: true }).partial({ aliases: true, color: true, description: true, parentCollectionId: true });
+export const CampaignLibraryCollectionUpdate = CampaignLibraryCollectionCreate.partial();
+export type CampaignLibraryCollectionCreate = z.infer<typeof CampaignLibraryCollectionCreate>;
+export type CampaignLibraryCollectionUpdate = z.infer<typeof CampaignLibraryCollectionUpdate>;
+
+export const LibraryEntityRef = z.object({ entityType: LibraryEntityType, entityId: Id });
+export type LibraryEntityRef = z.infer<typeof LibraryEntityRef>;
+const LibraryBulkTargets = z.array(LibraryEntityRef).min(1).max(500).superRefine((items, ctx) => {
+  const seen = new Set<string>();
+  items.forEach((item, index) => { const key = `${item.entityType}:${item.entityId}`; if (seen.has(key)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [index], message: 'targets must be unique' }); seen.add(key); });
+});
+export const LibraryBulkOperation = z.enum(['add_tag', 'remove_tag', 'add_collection', 'remove_collection', 'move_collection', 'set_visibility', 'set_status', 'move_inventory_owner', 'archive', 'restore']);
+/** Discriminated so an action can never receive ambiguous or ignored fields. */
+const LibraryBulkRequestBase = z.discriminatedUnion('operation', [
+  z.object({ operation: z.literal('add_tag'), targets: LibraryBulkTargets, taxonomyId: Id }).strict(),
+  z.object({ operation: z.literal('remove_tag'), targets: LibraryBulkTargets, taxonomyId: Id }).strict(),
+  z.object({ operation: z.literal('add_collection'), targets: LibraryBulkTargets, taxonomyId: Id }).strict(),
+  z.object({ operation: z.literal('remove_collection'), targets: LibraryBulkTargets, taxonomyId: Id }).strict(),
+  z.object({ operation: z.literal('move_collection'), targets: LibraryBulkTargets, taxonomyId: Id }).strict(),
+  z.object({ operation: z.literal('set_visibility'), targets: LibraryBulkTargets, visibility: z.enum(['public', 'hidden']) }).strict(),
+  z.object({ operation: z.literal('set_status'), targets: LibraryBulkTargets, status: z.string().trim().min(1).max(80) }).strict(),
+  z.object({ operation: z.literal('move_inventory_owner'), targets: LibraryBulkTargets, ownerType: z.enum(['party', 'character']), characterId: Id.nullable().optional() }).strict(),
+  z.object({ operation: z.literal('archive'), targets: LibraryBulkTargets }).strict(),
+  z.object({ operation: z.literal('restore'), targets: LibraryBulkTargets }).strict(),
+]);
+export const LibraryBulkRequest = LibraryBulkRequestBase.superRefine((value, ctx) => {
+  if (value.operation !== 'move_inventory_owner') return;
+  if (value.ownerType === 'character' && value.characterId == null) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['characterId'], message: 'characterId is required for character ownership' });
+  if (value.ownerType === 'party' && value.characterId != null) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['characterId'], message: 'party ownership cannot include characterId' });
+});
+export type LibraryBulkRequest = z.infer<typeof LibraryBulkRequest>;
+export const LibraryBulkResult = z.object({ operationId: Id, applied: z.number().int().nonnegative(), undoAvailable: z.boolean() });
+export type LibraryBulkResult = z.infer<typeof LibraryBulkResult>;
+export const LibraryEntitySummary = z.object({ entityType: LibraryEntityType, entityId: Id, name: z.string(), description: z.string().default(''), visibility: z.string().nullable().default(null), status: z.string().nullable().default(null), owner: z.string().nullable().default(null), tags: z.array(CampaignLibraryTag), collections: z.array(CampaignLibraryCollection) });
+export type LibraryEntitySummary = z.infer<typeof LibraryEntitySummary>;
+export const LibraryFacet = z.object({ id: z.union([Id, z.string()]), label: z.string(), count: z.number().int().nonnegative() });
+export const LibrarySearchPage = z.object({ items: z.array(LibraryEntitySummary), total: z.number().int().nonnegative(), limit: z.number().int().positive(), offset: z.number().int().nonnegative(), facets: z.object({ types: z.array(LibraryFacet), tags: z.array(LibraryFacet), collections: z.array(LibraryFacet), visibility: z.array(LibraryFacet), status: z.array(LibraryFacet) }) });
+export type LibrarySearchPage = z.infer<typeof LibrarySearchPage>;
+export const LibrarySearchQuery = z.object({ q: z.string().trim().max(200).optional(), type: LibraryEntityType.optional(), tagId: z.coerce.number().int().positive().optional(), collectionId: z.coerce.number().int().positive().optional(), visibility: z.enum(['public', 'hidden']).optional(), status: z.string().trim().max(80).optional(), owner: z.string().trim().max(120).optional(), limit: z.coerce.number().int().min(1).max(100).default(50), offset: z.coerce.number().int().min(0).default(0) }).strict();
+export const CampaignLibraryTemplate = z.object({ id: Id, campaignId: Id, entityType: LibraryEntityType, name: LibraryName, description: z.string().max(2000).default(''), snapshot: z.unknown(), sourceEntityId: Id.nullable().default(null), archivedAt: IsoDate.nullable().default(null), createdAt: IsoDate, updatedAt: IsoDate });
+export type CampaignLibraryTemplate = z.infer<typeof CampaignLibraryTemplate>;
+export const CampaignLibraryTemplateSave = z.object({ entityType: LibraryEntityType, entityId: Id, name: LibraryName, description: z.string().max(2000).default('') }).strict();
+export type CampaignLibraryTemplateSave = z.infer<typeof CampaignLibraryTemplateSave>;
+export const CampaignLibraryTemplateInstantiate = z.object({ name: LibraryName.optional(), refs: z.record(z.string().max(80), Id).default({}) }).strict();
+export type CampaignLibraryTemplateInstantiate = z.infer<typeof CampaignLibraryTemplateInstantiate>;
