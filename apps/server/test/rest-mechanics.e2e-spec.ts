@@ -119,6 +119,55 @@ describe('rest mechanics (#1041, e2e)', () => {
     expect(entry.logLine).toContain('still Petrified');
   });
 
+  it('#1641: a long rest drops exhaustion by ONE LEVEL, not to zero — and persists the level in conditionInstances', async () => {
+    const id = await batteredCharacter('Vael');
+    // Seed exhaustion at level 5 via the STRUCTURED column, the way #1073's `stacks` convention
+    // actually stores a leveled condition — bare `conditions: ['Exhaustion']` alone (as
+    // `batteredCharacter` sets it) carries no level at all.
+    await db
+      .update(charactersTable)
+      .set({
+        conditions: JSON.stringify(['Exhaustion']),
+        conditionInstances: JSON.stringify([
+          {
+            id: 'exhaustion-1',
+            name: 'Exhaustion',
+            ruleEntryId: null,
+            source: null,
+            sourceCombatantId: null,
+            durationRounds: null,
+            roundsRemaining: null,
+            timing: 'none',
+            saveTiming: 'none',
+            saveDc: null,
+            saveAbility: null,
+            isConcentration: false,
+            stacks: 5,
+            notes: '',
+            custom: false,
+          },
+        ]),
+      })
+      .where(eq(charactersTable.id, id));
+
+    const result = await characters.restParty(campaignId, 'long', [id], {}, dmUser, 'dm');
+    const entry = result.characters[0];
+    expect(entry.conditionsCleared).toEqual([]);
+    expect(entry.conditionsDecremented).toEqual([{ name: 'Exhaustion', stacksBefore: 5, stacksAfter: 4 }]);
+    expect(entry.logLine).toContain('Exhaustion reduced to 4');
+
+    const [row] = await db.select().from(charactersTable).where(eq(charactersTable.id, id));
+    expect(JSON.parse(row.conditions!)).toEqual(['Exhaustion']);
+    const instances = JSON.parse(row.conditionInstances!);
+    expect(instances).toHaveLength(1);
+    expect(instances[0]).toMatchObject({ name: 'Exhaustion', stacks: 4 });
+
+    // A SECOND long rest continues the countdown rather than re-reading the original level —
+    // proves the decremented stacks round-tripped through the write, not just the in-memory plan.
+    const again = await characters.restParty(campaignId, 'long', [id], {}, dmUser, 'dm');
+    expect(again.characters[0].conditionsDecremented).toEqual([{ name: 'Exhaustion', stacksBefore: 4, stacksAfter: 3 }]);
+  });
+
   it('a short rest spends hit dice and touches nothing a long rest owns', async () => {
     const id = await batteredCharacter('Kel');
     // The battered fixture has all four hit dice already spent (that is what makes the long-rest
