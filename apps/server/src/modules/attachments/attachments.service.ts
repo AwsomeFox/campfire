@@ -17,8 +17,6 @@ import { and, desc, eq, isNotNull, like, sql } from 'drizzle-orm';
 import type {
   Attachment,
   AttachmentKind,
-  AttachmentMetadata,
-  AttachmentMetadataPatch,
   Role,
   StorageCleanupResult,
   StorageStats,
@@ -119,6 +117,9 @@ function sniffUploadMime(buffer: Buffer): string | null {
   return null;
 }
 
+type AttachmentMetadata = { title: string; caption: string; altText: string; creator: string; sourceUrl: string; license: string; rights: string; attribution: string };
+type AttachmentMetadataPatch = Partial<AttachmentMetadata>;
+
 function toDomain(row: typeof attachments.$inferSelect): Attachment {
   return {
     id: row.id,
@@ -140,7 +141,7 @@ function toDomain(row: typeof attachments.$inferSelect): Attachment {
     hidden: row.hidden,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
-  };
+  } as Attachment;
 }
 
 /**

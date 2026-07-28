@@ -23,6 +23,9 @@ import { MapConceptGlossary, MapPurposePreview } from '../../components/mapOnboa
 // Kept local until every consumer has rebuilt its generated schema declaration.
 type AttachmentDisplayMetadata = { title: string; caption: string; altText: string; creator: string; sourceUrl: string; license: string; attribution: string };
 const displayMetadata = (attachment: Attachment): AttachmentDisplayMetadata => attachment as Attachment & AttachmentDisplayMetadata;
+type MetadataDraft = AttachmentDisplayMetadata & { rights: string };
+const blankMetadata: MetadataDraft = { title: '', caption: '', altText: '', creator: '', sourceUrl: '', license: '', rights: '', attribution: '' };
+const draftFor = (attachment: Attachment): MetadataDraft => ({ ...blankMetadata, ...displayMetadata(attachment), rights: (attachment as Attachment & { rights?: string }).rights ?? '' });
 
 export function HandoutsCard({ campaignId }: { campaignId: number }) {
   const { isDm, canDmWrite } = useCampaignAccess();
@@ -31,6 +34,10 @@ export function HandoutsCard({ campaignId }: { campaignId: number }) {
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<number | null>(null);
   const [pendingReveal, setPendingReveal] = useState<Attachment | null>(null);
+  const [editing, setEditing] = useState<Attachment | null>(null);
+  const [draft, setDraft] = useState<MetadataDraft>(blankMetadata);
+  const [savingMetadata, setSavingMetadata] = useState(false);
+  const [uploadMetadata, setUploadMetadata] = useState<MetadataDraft>(blankMetadata);
   // Concurrent load()/Retry callers share one promise so `await load()` never
   // resolves before the in-flight attachments fetch settles (#691).
   const loadInFlight = useRef<Promise<void> | null>(null);
@@ -87,6 +94,18 @@ export function HandoutsCard({ campaignId }: { campaignId: number }) {
       return;
     }
     void commitVisibilityToggle(a);
+  }
+
+  async function saveMetadata() {
+    if (!editing) return;
+    setSavingMetadata(true); setError(null);
+    try {
+      await api.patch(`${API}/attachments/${editing.id}/metadata`, { ...draft, updatedAt: editing.updatedAt });
+      setEditing(null); await load();
+    } catch (err) {
+      setError(err instanceof ApiError && err.status === 409 ? 'This handout changed elsewhere. Reloaded the latest version; review and save again.' : err instanceof ApiError ? err.message : "Couldn't save handout metadata.");
+      if (err instanceof ApiError && err.status === 409) await load();
+    } finally { setSavingMetadata(false); }
   }
 
   // Players/viewers don't manage portraits here — only shared visual handouts.
@@ -207,6 +226,9 @@ export function HandoutsCard({ campaignId }: { campaignId: number }) {
                   </div>
                 </div>
                 {canDmWrite && (
+                  <Btn ghost className="!min-h-0 !py-1 text-[11px]" onClick={() => { setEditing(a); setDraft(draftFor(a)); }}>Edit details</Btn>
+                )}
+                {canDmWrite && (
                   <Btn
                     ghost
                     className="!min-h-0 !py-1 text-[11px]"
@@ -224,6 +246,10 @@ export function HandoutsCard({ campaignId }: { campaignId: number }) {
 
           {canDmWrite && (
             <div style={{ marginTop: 4 }}>
+              <details className="text-[12px]" style={{ marginBottom: 8 }}>
+                <summary>Handout details (optional)</summary>
+                <MetadataFields value={uploadMetadata} onChange={setUploadMetadata} />
+              </details>
               <ImageUpload
                 campaignId={campaignId}
                 kind="image"
@@ -231,6 +257,7 @@ export function HandoutsCard({ campaignId }: { campaignId: number }) {
                 label="Drop a handout image, or click to choose (PDFs also accepted; stays hidden until you reveal it)"
                 onUploaded={() => void load()}
                 onError={setError}
+                metadata={uploadMetadata}
               />
             </div>
           )}
@@ -261,6 +288,22 @@ export function HandoutsCard({ campaignId }: { campaignId: number }) {
           onCancel={() => setPendingReveal(null)}
         />
       )}
+      {editing && (
+        <ConfirmDialog
+          title="Edit handout details"
+          body={<MetadataFields value={draft} onChange={setDraft} />}
+          confirmLabel="Save details"
+          pendingLabel="Saving…"
+          busy={savingMetadata}
+          onConfirm={() => void saveMetadata()}
+          onCancel={() => setEditing(null)}
+        />
+      )}
     </div>
   );
+}
+
+function MetadataFields({ value, onChange }: { value: MetadataDraft; onChange: (next: MetadataDraft) => void }) {
+  const fields: Array<[keyof MetadataDraft, string]> = [['title', 'Title'], ['caption', 'Caption'], ['altText', 'Alt text'], ['creator', 'Creator'], ['sourceUrl', 'Source URL'], ['license', 'License'], ['rights', 'Rights'], ['attribution', 'Attribution']];
+  return <div className="space-y-2" data-testid="handout-metadata-fields">{fields.map(([key, label]) => <label key={key} className="block text-xs">{label}<input aria-label={label} value={value[key]} onChange={(e) => onChange({ ...value, [key]: e.target.value })} className="w-full rounded px-2 py-1 text-slate-900" /></label>)}</div>;
 }
