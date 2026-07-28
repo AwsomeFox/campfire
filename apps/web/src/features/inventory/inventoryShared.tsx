@@ -148,6 +148,15 @@ export function ItemRow({
     }
   }
 
+  async function compendiumAction(action: 'refresh' | 'overridden' | 'detached') {
+    setBusy(true); setError(null);
+    try {
+      const updated = await api.post<InventoryItem>(`${API}/inventory/${committed.id}/compendium/${action}`);
+      setCommitted(updated); onChanged();
+    } catch (err) { setError(translateApiError(err, t, { fallbackKey: 'inventory.errors.updateItem' })); }
+    finally { setBusy(false); }
+  }
+
   function onMove(value: string) {
     if (value === 'party') {
       if (committed.ownerType !== 'party') void patch({ ownerType: 'party' });
@@ -187,6 +196,18 @@ export function ItemRow({
           {committed.qty !== 1 && <span className="text-secondary font-normal"> ×{committed.qty}</span>}
         </p>
         {committed.notes && <Markdown className="!text-[12px] !text-secondary">{committed.notes}</Markdown>}
+        {committed.compendiumState && (
+          <div className="mt-1 text-[11px] text-secondary space-y-1" data-testid="compendium-inventory-source">
+            <span className="tag tag-neutral">{committed.compendiumState.replace('_', ' ')}</span>
+            {committed.compendiumSnapshot && <>
+              <span className="ml-1">{committed.compendiumSnapshot.source || committed.compendiumRef?.packSlug}{committed.compendiumSnapshot.license ? ` · ${committed.compendiumSnapshot.license}` : ''}</span>
+              {committed.compendiumSnapshot.body && <details><summary>Source details</summary><Markdown className="!text-[12px]">{committed.compendiumSnapshot.body}</Markdown></details>}
+              {committed.compendiumSnapshot.dataJson && <details><summary>Item data</summary><pre className="text-xs whitespace-pre-wrap">{committed.compendiumSnapshot.dataJson}</pre></details>}
+              {committed.ruleEntryId != null && committed.compendiumState !== 'detached' && <a className="ml-1 underline" href={`/c/${committed.campaignId}/compendium/${committed.ruleEntryId}`}>Open in Compendium</a>}
+              {committed.compendiumSnapshot.sourceUrl && <a className="ml-1 underline" href={committed.compendiumSnapshot.sourceUrl} target="_blank" rel="noreferrer">Source ↗</a>}
+            </>}
+          </div>
+        )}
         {error && <p className="text-[12px] text-rose-400">{error}</p>}
       </div>
       {editable && (
@@ -237,6 +258,11 @@ export function ItemRow({
           >
             ✕
           </Btn>
+          {committed.compendiumState && committed.compendiumState !== 'detached' && <>
+            {committed.compendiumState === 'linked_updated' && <Btn ghost className="!min-h-0 !py-0.5 !px-2 text-xs" disabled={busy} onClick={() => void compendiumAction('refresh')}>Refresh source</Btn>}
+            <Btn ghost className="!min-h-0 !py-0.5 !px-2 text-xs" disabled={busy} onClick={() => void compendiumAction('overridden')}>Keep local</Btn>
+            <Btn ghost className="!min-h-0 !py-0.5 !px-2 text-xs" disabled={busy} onClick={() => void compendiumAction('detached')}>Detach</Btn>
+          </>}
         </div>
       )}
       {confirmingDelete && (

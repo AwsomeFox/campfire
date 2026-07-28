@@ -21,10 +21,18 @@ describe('healthz (e2e)', () => {
     expect(res.body).toEqual({ ok: true, version: APP_VERSION });
   });
 
-  it('GET /readyz -> {ok:true, version} with no auth while the DB answers', async () => {
+  it('GET /readyz exposes only safe stable diagnostic codes with no auth', async () => {
     const res = await request(ctx.app.getHttpServer()).get('/readyz');
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ ok: true, version: APP_VERSION });
+    expect(res.body).toMatchObject({ ok: true, version: APP_VERSION, degraded: expect.any(Boolean) });
+    expect(JSON.stringify(res.body)).not.toContain('campfire.db');
+    expect(res.body.dataRepair).toEqual(
+      expect.objectContaining({
+        degraded: expect.any(Boolean),
+        openCount: expect.any(Number),
+      }),
+    );
+    expect(res.body.dataRepair.latestRunAt === null || typeof res.body.dataRepair.latestRunAt === 'string').toBe(true);
   });
 
   // Issue #52: /healthz is liveness-only, so with a broken DB the process must
@@ -41,7 +49,8 @@ describe('healthz (e2e)', () => {
 
     const ready = await request(ctx.app.getHttpServer()).get('/readyz');
     expect(ready.status).toBe(503);
-    expect(ready.body).toEqual({ ok: false, version: APP_VERSION, error: 'database unavailable' });
+    expect(ready.body).toMatchObject({ ok: false, version: APP_VERSION, degraded: false });
+    expect(JSON.stringify(ready.body)).not.toContain('database unavailable');
 
     const live = await request(ctx.app.getHttpServer()).get('/healthz');
     expect(live.status).toBe(200);

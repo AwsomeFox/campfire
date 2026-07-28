@@ -2896,6 +2896,21 @@ export const NotificationType = z.enum([
 ]);
 export type NotificationType = z.infer<typeof NotificationType>;
 
+/**
+ * Notification types that mean "your membership or role somewhere changed", as opposed to
+ * ordinary table activity (issue #1590). The single canonical list, so the server-side
+ * `unreadCount` query and the client-side account-wide /me refresh it drives agree on exactly
+ * what counts — a type added here without updating a hand-maintained duplicate elsewhere is
+ * the failure mode this constant exists to rule out.
+ *
+ * Deliberately narrow: `added_to_campaign` already covers being added, promoted (including the
+ * admin `reassign_owner` path, #1546), and — after #1590 — a DM's own promote/demote of an
+ * existing member (issue #437's `members.service.ts#update`). It is reused rather than split
+ * into a separate "role changed" type because both describe the same fact a client needs to
+ * react to: re-fetch `/me`, the memberships list may be stale.
+ */
+export const MEMBERSHIP_NOTIFICATION_TYPES = ['added_to_campaign'] as const satisfies readonly NotificationType[];
+
 export const Notification = z.object({
   id: Id,
   userId: Id, // recipient (users.id) — never exposed to anyone but the recipient
@@ -2922,7 +2937,20 @@ export const Notification = z.object({
 });
 export type Notification = z.infer<typeof Notification>;
 
-export const NotificationUnreadCount = z.object({ count: z.number().int().nonnegative() });
+export const NotificationUnreadCount = z.object({
+  count: z.number().int().nonnegative(),
+  /**
+   * Issue #1590 — true when at least one UNREAD notification is membership-shaped (see
+   * {@link MEMBERSHIP_NOTIFICATION_TYPES}). Computed from the same user-scoped row set
+   * `count` already reads — this endpoint has never returned anyone's notifications but the
+   * caller's own, so the flag discloses nothing the caller could not already learn by paging
+   * `GET /notifications` themselves. It exists so a poller that already runs account-wide
+   * (mounted once per authenticated session, not per campaign) has something to discriminate
+   * on: today `unread-count` is a bare number, and nothing distinguishes "a recap posted" from
+   * "your role changed and cached /me is now wrong".
+   */
+  membershipChanged: z.boolean(),
+});
 export type NotificationUnreadCount = z.infer<typeof NotificationUnreadCount>;
 
 // ---------- notification preferences (issue #789) ----------
@@ -8152,6 +8180,32 @@ export type ScribeRunResult = z.infer<typeof ScribeRunResult>;
 // ---------- attachments (uploaded images: character portraits, campaign maps) ----------
 export const AttachmentKind = z.enum(['portrait', 'map', 'image']);
 
+// Attribution is deliberately optional: ordinary table uploads should remain a
+// one-click operation, while imports and generated assets can record provenance.
+/** http(s) URL or empty; preprocess trims so whitespace-only becomes ''. */
+export const AttachmentSourceUrl = z.preprocess(
+  (v) => (typeof v === 'string' ? v.trim() : v),
+  z.union([
+    z.literal(''),
+    z.string().url().refine((v) => /^https?:\/\//i.test(v), 'Must be an http(s) URL'),
+  ]),
+);
+
+export const AttachmentMetadata = z.object({
+  title: z.string().trim().max(255).default(''),
+  caption: z.string().trim().max(2_000).default(''),
+  altText: z.string().trim().max(1_000).default(''),
+  creator: z.string().trim().max(255).default(''),
+  sourceUrl: AttachmentSourceUrl.default(''),
+  license: z.string().trim().max(255).default(''),
+  rights: z.string().trim().max(1_000).default(''),
+  attribution: z.string().trim().max(1_000).default(''),
+  checksumSha256: z.string().regex(/^[a-f0-9]{64}$/).nullable().default(null),
+});
+export type AttachmentMetadata = z.infer<typeof AttachmentMetadata>;
+export const AttachmentMetadataPatch = AttachmentMetadata.omit({ checksumSha256: true }).partial().strict();
+export type AttachmentMetadataPatch = z.infer<typeof AttachmentMetadataPatch>;
+
 export const Attachment = z.object({
   id: Id,
   campaignId: Id,
@@ -8160,6 +8214,7 @@ export const Attachment = z.object({
   filename: z.string().max(255), // original client filename, display only
   mime: z.string().max(80),
   size: z.number().int().nonnegative(), // bytes
+  ...AttachmentMetadata.shape,
   // Per-attachment visibility / staged reveal (issue #97). `hidden` gates the file
   // bytes AND the row itself: a hidden attachment is DM-only — non-DM members get a
   // 404 on GET /attachments/:id/file and never see it in the campaign list, so an
@@ -9854,6 +9909,11 @@ export const InventoryItem = z.object({
   // default icon. '' means "no override" — the UI falls back to a name/type
   // heuristic. Same bundled icon library as NPCs (#302); see apps/web/src/lib/icons.
   iconSlug: z.string().max(80).default(''),
+  /** Stable compendium provenance.  Numeric ruleEntryId is only a local cache. */
+  ruleEntryId: Id.nullable().default(null),
+  compendiumRef: CompendiumRef.nullable().default(null),
+  compendiumSnapshot: CompendiumSnapshot.nullable().default(null),
+  compendiumState: z.enum(['linked', 'linked_updated', 'overridden', 'detached']).nullable().default(null),
   ...timestamps,
   // Soft-delete tombstone (issue #551). NULL on live items; ISO timestamp + actor
   // id when the item is in the campaign trash. Not user-writable via create/update.
@@ -9868,7 +9928,23 @@ export const InventoryItemCreate = InventoryItem.omit({
   updatedAt: true,
   deletedAt: true,
   deletedBy: true,
+  ruleEntryId: true,
+  compendiumRef: true,
+  compendiumSnapshot: true,
+  compendiumState: true,
 }).partial().required({ name: true });
+
+/** Acquire a play-safe snapshot of an installed compendium item. */
+export const InventoryFromCompendium = z.object({
+  ruleEntryId: Id,
+  ownerType: ItemOwnerType.default('party'),
+  characterId: Id.nullable().optional(),
+  qty: z.number().int().min(1).max(999_999).default(1),
+  notes: z.string().max(5_000).default(''),
+  duplicateMode: z.enum(['confirm', 'increment', 'separate']).default('confirm'),
+  idempotencyKey: z.string().min(1).max(128).optional(),
+});
+export type InventoryFromCompendium = z.infer<typeof InventoryFromCompendium>;
 // Issue #782: quantity writes are either an atomic relative `qtyDelta` (preferred for
 // +/-; requires a per-action `idempotencyKey` so retries never double-apply) or an
 // absolute `qty` reconciliation that MUST carry `expectedUpdatedAt` (CAS) so a stale
@@ -10865,9 +10941,13 @@ export const AdminMetricsCounts = z.object({
 export type AdminMetricsCounts = z.infer<typeof AdminMetricsCounts>;
 
 export const AdminMetricsDatabase = z.object({
-  sizeBytes: z.number().int().nonnegative(), // page_count * page_size (on-disk file size)
+  /** SQLite's allocated logical pages; this is not necessarily the DB file's physical bytes. */
+  sizeBytes: z.number().int().nonnegative(),
   pageCount: z.number().int().nonnegative(),
   pageSize: z.number().int().nonnegative(),
+  dbFileBytes: z.number().int().nonnegative().nullable(),
+  walBytes: z.number().int().nonnegative().nullable(),
+  shmBytes: z.number().int().nonnegative().nullable(),
 });
 export type AdminMetricsDatabase = z.infer<typeof AdminMetricsDatabase>;
 
@@ -10881,6 +10961,16 @@ export const AdminMetrics = z.object({
   activeSessions: z.number().int().nonnegative(), // non-expired rows in user_sessions
   counts: AdminMetricsCounts,
   database: AdminMetricsDatabase,
+  storage: z.object({
+    freeBytes: z.number().int().nonnegative().nullable(),
+    totalBytes: z.number().int().nonnegative().nullable(),
+    availableBytes: z.number().int().nonnegative().nullable(),
+    uploadsBytes: z.number().int().nonnegative().nullable(),
+    backupsBytes: z.number().int().nonnegative().nullable(),
+    tempBytes: z.number().int().nonnegative().nullable(),
+    status: z.enum(['ok', 'degraded', 'failed', 'unknown']),
+    quickCheck: z.object({ status: z.enum(['ok', 'degraded', 'failed', 'unknown']), checkedAt: IsoDate.nullable() }),
+  }),
   recentActivity: z.array(AuditEntry), // most-recent audit rows (read-only, newest first)
 });
 export type AdminMetrics = z.infer<typeof AdminMetrics>;

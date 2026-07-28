@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import JSZip from 'jszip';
 import request from 'supertest';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
 import { MembersService } from '../src/modules/membership/members.service';
@@ -370,6 +371,9 @@ describe('campaign ZIP import — attachments round-trip (e2e)', () => {
     const mapUpload = await dmAgent
       .post(`/api/v1/campaigns/${campaignId}/attachments`)
       .field('kind', 'map')
+      .field('title', 'Overworld atlas').field('caption', 'Known roads').field('altText', 'A labelled fantasy overworld')
+      .field('creator', 'Cartographer').field('sourceUrl', 'https://example.test/atlas').field('license', 'Custom table licence')
+      .field('rights', 'Table use').field('attribution', 'Cartographer — Custom table licence')
       .attach('file', TINY_PNG, { filename: 'overworld.png', contentType: 'image/png' });
     mapAttachmentId = mapUpload.body.id;
     await dmAgent.patch(`/api/v1/campaigns/${campaignId}`).send({ mapAttachmentId });
@@ -425,6 +429,9 @@ describe('campaign ZIP import — attachments round-trip (e2e)', () => {
     // Every new id differs from every source id — no collision with the source campaign.
     const sourceIds = new Set([mapAttachmentId, portraitAttachmentId, battleMapAttachmentId]);
     for (const a of atts.body) expect(sourceIds.has(a.id)).toBe(false);
+    const restoredMap = atts.body.find((a: { id: number }) => a.id === imported.mapAttachmentId);
+    expect(restoredMap).toMatchObject({ title: 'Overworld atlas', caption: 'Known roads', altText: 'A labelled fantasy overworld', creator: 'Cartographer', sourceUrl: 'https://example.test/atlas', license: 'Custom table licence', rights: 'Table use', attribution: 'Cartographer — Custom table licence' });
+    expect(restoredMap.checksumSha256).toMatch(/^[a-f0-9]{64}$/);
 
     // The bytes are on disk and fetchable — and identical to what we uploaded.
     const mapFile = await getBuffer(dmAgent, `/api/v1/attachments/${imported.mapAttachmentId}/file`);
@@ -457,6 +464,19 @@ describe('campaign ZIP import — attachments round-trip (e2e)', () => {
     // The source campaign is untouched — its map still points at its own attachment.
     const sourceCamp = await dmAgent.get(`/api/v1/campaigns/${campaignId}`);
     expect(sourceCamp.body.mapAttachmentId).toBe(mapAttachmentId);
+  });
+
+  it('skips crafted archive attachment metadata with an unsafe source URL', async () => {
+    const zipRes = await getBuffer(dmAgent, `/api/v1/campaigns/${campaignId}/export?format=mdzip`);
+    const zip = await JSZip.loadAsync(zipRes.body as Buffer);
+    const manifest = JSON.parse(await zip.file('campaign.json')!.async('string'));
+    manifest.attachments[0].sourceUrl = 'javascript:alert(1)';
+    zip.file('campaign.json', JSON.stringify(manifest));
+    const crafted = await zip.generateAsync({ type: 'nodebuffer' });
+    const importRes = await dmAgent.post('/api/v1/campaigns/import/archive').attach('file', crafted, { filename: 'unsafe.zip', contentType: 'application/zip' });
+    expect(importRes.status).toBe(201);
+    const atts = await dmAgent.get(`/api/v1/campaigns/${importRes.body.id}/attachments`);
+    expect(atts.body.some((a: { title: string }) => a.title === 'Overworld atlas')).toBe(false);
   });
 
   // Issue #630: Unicode attachment filenames must survive export → import and
