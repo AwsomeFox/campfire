@@ -23,6 +23,16 @@ export type AiErrorKind =
   | 'invalid_request'
   /** Provider-side 5xx. Retryable. */
   | 'server'
+  /**
+   * Issue #1602: the HTTP exchange completed but the body is not the JSON the adapter
+   * asked for — an HTML error page injected by a proxy, an empty 200, a payload the
+   * upstream truncated at the application layer. Deliberately NOT retryable: the same
+   * bytes will parse identically on every attempt, so a retry loop here would spend the
+   * table's whole token budget re-requesting garbage. Distinct from `transport` (the
+   * body never finished arriving — genuinely worth another attempt) and from `unknown`
+   * (which means "we did not classify this"; this case we did).
+   */
+  | 'invalid_response'
   /** Anything unclassified. Not retryable by default. */
   | 'unknown';
 

@@ -15,7 +15,6 @@ export function jsonResponse(body: unknown, status = 200, headers: Record<string
     status,
     headers: { get: (n: string) => headers[n.toLowerCase()] ?? null },
     text: async () => text,
-    json: async () => JSON.parse(text),
     body: null,
   };
 }
@@ -27,7 +26,37 @@ export function errorResponse(status: number, bodyText = '', headers: Record<str
     status,
     headers: { get: (n: string) => headers[n.toLowerCase()] ?? null },
     text: async () => bodyText,
-    json: async () => JSON.parse(bodyText || '{}'),
+    body: null,
+  };
+}
+
+/**
+ * Issue #1602: a 2xx `FetchResponse` whose body is arbitrary bytes rather than JSON —
+ * the HTML error page a proxy substitutes, an empty 200, a truncated payload.
+ */
+export function nonJsonResponse(bodyText: string, status = 200, headers: Record<string, string> = {}): FetchResponse {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: { get: (n: string) => headers[n.toLowerCase()] ?? null },
+    text: async () => bodyText,
+    body: null,
+  };
+}
+
+/**
+ * Issue #1602: a 2xx `FetchResponse` whose body read REJECTS — the connection dying
+ * after the headers landed but before the body finished. Distinct from
+ * {@link nonJsonResponse}: this one is retryable, that one is not.
+ */
+export function bodyReadFailureResponse(cause: unknown = new TypeError('terminated'), status = 200): FetchResponse {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: { get: () => null },
+    text: async () => {
+      throw cause;
+    },
     body: null,
   };
 }
@@ -52,7 +81,6 @@ export function streamResponse(chunks: string[], status = 200): FetchResponse {
     status,
     headers: { get: () => null },
     text: async () => chunks.join(''),
-    json: async () => ({}),
     body: sseStream(chunks),
   };
 }

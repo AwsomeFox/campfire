@@ -83,7 +83,6 @@ describe('provider stream abort races (#558)', () => {
       status: 200,
       headers: { get: () => null },
       text: async () => '',
-      json: async () => ({}),
       body: hanging,
     });
     const provider = new OpenAiProvider({ apiKey: 'k', model: 'm', fetchImpl });
@@ -124,7 +123,6 @@ describe('provider stream abort races (#558)', () => {
       status: 200,
       headers: { get: () => null },
       text: async () => '',
-      json: async () => ({}),
       body: hanging,
     });
     const provider = new AnthropicProvider({ apiKey: 'k', model: 'm', fetchImpl });
