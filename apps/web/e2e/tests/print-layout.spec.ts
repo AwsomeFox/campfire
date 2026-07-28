@@ -29,7 +29,7 @@ async function mockPublicRecap(page: Page): Promise<void> {
 
 async function expectPrintSurface(page: Page): Promise<void> {
   await page.emulateMedia({ media: 'print' });
-  await expect(page.getByRole('button', { name: 'Print' })).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Print / Save PDF' })).toBeHidden();
   const chrome = page.locator('.cf-print-chrome');
   await expect(chrome).not.toHaveCount(0);
   await expect.poll(() => chrome.evaluateAll(
@@ -45,7 +45,7 @@ test.describe('print layouts (#667)', () => {
     const page = await context.newPage();
     try {
       await page.goto(`/c/${seed().campaignId}/characters/${seed().navigation.characterId}`);
-      await expect(page.getByRole('button', { name: 'Print' })).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Print / Save PDF' })).toBeVisible();
       await expectPrintSurface(page);
       await expect(page.getByTestId('character-sheet-tabs')).toBeHidden();
       await expect(page.getByTestId('character-sheet-panel-play')).toBeVisible();
@@ -75,10 +75,10 @@ test.describe('print layouts (#667)', () => {
     try {
       const { campaignId, navigation } = seed();
       await page.goto(`/c/${campaignId}/sessions?session=${navigation.sessionId}`);
-      await expect(page.getByRole('button', { name: 'Print' })).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Print / Save PDF' })).toBeVisible();
       await expect(page.getByRole('button', { name: 'Edit recap' })).toBeVisible();
       await page.emulateMedia({ media: 'print' });
-      await expect(page.getByRole('button', { name: 'Print' })).toBeHidden();
+      await expect(page.getByRole('button', { name: 'Print / Save PDF' })).toBeHidden();
       await expect(page.getByRole('button', { name: 'Edit recap' })).toBeHidden();
       await expect(page.locator('[data-entity-type="session"]')).toHaveCSS('color', 'rgb(0, 0, 0)');
       await expect(page.locator('[data-entity-type="session"]').getByText('The party crossed the moon gate.')).toBeVisible();
@@ -91,7 +91,7 @@ test.describe('print layouts (#667)', () => {
 
       await page.emulateMedia({ media: 'screen' });
       await page.getByRole('button', { name: 'Edit recap' }).click();
-      await expect(page.getByRole('button', { name: 'Print' })).toHaveCount(0);
+      await expect(page.getByRole('button', { name: 'Print / Save PDF' })).toHaveCount(0);
       await page.emulateMedia({ media: 'print' });
       await expect(page.locator('.cf-print-editor')).toBeHidden();
       await expect(page.locator('.cf-print-only').getByText('The party crossed the moon gate.')).toBeVisible();
@@ -105,7 +105,120 @@ test.describe('print layouts (#667)', () => {
     await page.goto(`/share/${SHARED_TOKEN}`);
     await expect(page.getByRole('heading', { name: 'A printable shared recap' })).toBeVisible();
     await page.emulateMedia({ media: 'print' });
-    await expect(page.getByRole('button', { name: 'Print' })).toBeHidden();
+    await expect(page.getByRole('button', { name: 'Print / Save PDF' })).toBeHidden();
     await expect(page.locator('main')).toHaveCSS('color', 'rgb(0, 0, 0)');
+  });
+
+  test('prints NPC, quest, location and encounter reference surfaces', async ({ browser }) => {
+    const context = await browser.newContext({ storageState: stateFor('dm') });
+    const page = await context.newPage();
+    try {
+      const { campaignId, navigation } = seed();
+      for (const path of [
+        `/c/${campaignId}/npcs/${navigation.npcId}`,
+        `/c/${campaignId}/quests/${navigation.questId}`,
+        `/c/${campaignId}/locations/${navigation.locationId}`,
+      ]) {
+        await page.goto(path);
+        await expect(page.getByRole('button', { name: 'Print / Save PDF' })).toBeVisible();
+        await page.emulateMedia({ media: 'print' });
+        await expect(page.getByRole('button', { name: 'Print / Save PDF' })).toBeHidden();
+        await expect.poll(() => page.locator('.cf-print-chrome').evaluateAll(
+          (elements) => elements.every((element) => getComputedStyle(element).display === 'none'),
+        )).toBe(true);
+        await expect(page.locator('.cf-print-reference > .cf-print-only')).toBeVisible();
+        await expect(page.locator('.cf-print-reference > .cf-print-columns')).toBeHidden();
+        await page.emulateMedia({ media: 'screen' });
+      }
+
+      await page.goto(`/c/${campaignId}/encounters/${navigation.encounterId}`);
+      await page.emulateMedia({ media: 'print' });
+      const roster = page.locator('.cf-print-roster');
+      await expect(roster).toBeVisible();
+      await expect(roster).toContainText('Initiative / order');
+      await expect(roster).toContainText('Current / max / temp HP');
+      await expect(page.locator('.cf-print-only')).toHaveCSS('overflow', 'visible');
+    } finally {
+      await context.close();
+    }
+  });
+
+  test('keeps DM secrets opt-in and page-local', async ({ browser }) => {
+    const dmContext = await browser.newContext({ storageState: stateFor('dm') });
+    const dmPage = await dmContext.newPage();
+    const { campaignId, navigation } = seed();
+    const secret = 'PRINT-ONLY DM SECRET';
+    let previousSecret = '';
+    try {
+      const existing = await dmPage.request.get(`/api/v1/npcs/${navigation.npcId}`);
+      expect(existing.ok()).toBe(true);
+      previousSecret = (await existing.json() as { dmSecret?: string }).dmSecret ?? '';
+      const patch = await dmPage.request.patch(`/api/v1/npcs/${navigation.npcId}`, { data: { dmSecret: secret } });
+      expect(patch.ok()).toBe(true);
+      await dmPage.goto(`/c/${campaignId}/npcs/${navigation.npcId}`);
+      await expect(dmPage.getByLabel('Include DM secrets')).toBeVisible();
+      await dmPage.emulateMedia({ media: 'print' });
+      await expect(dmPage.locator('.cf-print-only .cf-print-secret')).toBeHidden();
+      await dmPage.emulateMedia({ media: 'screen' });
+      await dmPage.getByLabel('Include DM secrets').check();
+      await dmPage.emulateMedia({ media: 'print' });
+      await expect(dmPage.locator('.cf-print-only .cf-print-secret')).toBeVisible();
+      await dmPage.emulateMedia({ media: 'screen' });
+      await dmPage.goto(`/c/${campaignId}/quests/${navigation.questId}`);
+      await expect.poll(() => dmPage.evaluate(() => document.documentElement.classList.contains('cf-print-include-secrets'))).toBe(false);
+
+      // Same route component reuse (NPC → NPC) must also require a fresh opt-in.
+      const otherNpc = await dmPage.request.post(`/api/v1/campaigns/${campaignId}/npcs`, {
+        data: {
+          name: `Print secret neighbor ${Date.now()}`,
+          role: 'Test double',
+          body: 'Another printable NPC.',
+        },
+      });
+      expect(otherNpc.ok()).toBe(true);
+      const otherNpcId = (await otherNpc.json() as { id: number }).id;
+      const secretPatch = await dmPage.request.patch(`/api/v1/npcs/${otherNpcId}`, {
+        data: { dmSecret: 'NEIGHBOR DM SECRET' },
+      });
+      expect(secretPatch.ok()).toBe(true);
+      try {
+        await dmPage.goto(`/c/${campaignId}/npcs/${navigation.npcId}`);
+        await dmPage.getByLabel('Include DM secrets').check();
+        await expect.poll(() => dmPage.evaluate(() => document.documentElement.classList.contains('cf-print-include-secrets'))).toBe(true);
+        await dmPage.goto(`/c/${campaignId}/npcs/${otherNpcId}`);
+        await expect.poll(() => dmPage.evaluate(() => document.documentElement.classList.contains('cf-print-include-secrets'))).toBe(false);
+        await expect(dmPage.getByLabel('Include DM secrets')).not.toBeChecked();
+      } finally {
+        await dmPage.request.delete(`/api/v1/npcs/${otherNpcId}`);
+      }
+    } finally {
+      await dmPage.request.patch(`/api/v1/npcs/${navigation.npcId}`, { data: { dmSecret: previousSecret } });
+      await dmContext.close();
+    }
+
+    const playerContext = await browser.newContext({ storageState: stateFor('viewer') });
+    const playerPage = await playerContext.newPage();
+    try {
+      await playerPage.goto(`/c/${campaignId}/npcs/${navigation.npcId}`);
+      await expect(playerPage.getByLabel('Include DM secrets')).toHaveCount(0);
+      await expect(playerPage.getByText(secret)).toHaveCount(0);
+    } finally {
+      await playerContext.close();
+    }
+  });
+
+  test('keeps encounter paper prep DM-only', async ({ browser }) => {
+    const context = await browser.newContext({ storageState: stateFor('viewer') });
+    const page = await context.newPage();
+    try {
+      const { campaignId, navigation } = seed();
+      await page.goto(`/c/${campaignId}/encounters/${navigation.encounterId}`);
+      await expect(page.getByRole('button', { name: 'Print / Save PDF' })).toHaveCount(0);
+      await page.emulateMedia({ media: 'print' });
+      await expect(page.locator('.cf-print-roster')).toHaveCount(0);
+      await expect(page.locator('[aria-label="Encounter reference sheet"]')).toHaveCount(0);
+    } finally {
+      await context.close();
+    }
   });
 });

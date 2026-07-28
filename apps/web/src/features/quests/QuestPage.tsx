@@ -24,9 +24,12 @@ import {
   EmptyState,
   Skeleton,
   ErrorNote,
+  DmPanel,
 } from '../../components/ui';
 import { QuestStatusBadge } from '../../components/EntitySemanticBadges';
 import { Markdown } from '../../components/Markdown';
+import { PrintControl } from '../../components/PrintControl';
+import { PrintOnly } from '../../components/PrintOnly';
 import { NotFoundState } from '../../components/NotFoundState';
 import { NotesRail } from '../../components/NotesRail';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
@@ -462,11 +465,11 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
   });
 
   return (
-    <div className="max-w-6xl mx-auto px-4 mt-5 pb-20 lg:pb-10" style={{ display: 'flex', flexDirection: 'column', gap: 14 }} {...entityTargetProps('quest', quest.id)}>
-      {error && <ErrorNote message={error} onRetry={load} />}
+    <div className="cf-print-root cf-print-reference max-w-6xl mx-auto px-4 mt-5 pb-20 lg:pb-10" style={{ display: 'flex', flexDirection: 'column', gap: 14 }} {...entityTargetProps('quest', quest.id)}>
+      {error && <div className="cf-print-hide"><ErrorNote message={error} onRetry={load} /></div>}
 
       {canDmWrite && (
-        <VisibleToPlayersBar
+        <div className="cf-print-hide"><VisibleToPlayersBar
           visible={!quest.hidden}
           onHide={async () => {
             const updated = await api.patch<Quest>(`${API}/quests/${quest.id}`, { hidden: true });
@@ -476,21 +479,37 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
             const updated = await api.patch<Quest>(`${API}/quests/${quest.id}`, { hidden: false });
             setQuest({ ...quest, ...updated });
           }}
-        />
+        /></div>
       )}
 
-      <DetailPageWayfinding
+      <div className="cf-print-chrome"><DetailPageWayfinding
         campaignId={campaignId}
         defaultPath={`/c/${campaignId}/quests`}
         defaultLabel={t('quests.backToQuests')}
-      />
+      /></div>
+      <PrintOnly>
+        <section className="cf-print-only cf-print-paper">
+          <h1>{quest.title}</h1>
+          <p><strong>Status:</strong> {questStatusWord(t, quest.status)}</p>
+          <Markdown>{quest.body || 'No description yet.'}</Markdown>
+          <h2>{t('quests.objectives')}</h2>
+          <ul>{quest.objectives.map((objective) => <li key={objective.id}>{objective.done ? 'Done — ' : 'Open — '}{objective.text}</li>)}</ul>
+          <p><strong>{t('quests.reward')}:</strong> {quest.reward || '—'} · <strong>{t('quests.givenBy')}:</strong> {giver?.name || '—'}</p>
+          {isDm && quest.dmSecret && <div className="cf-print-secret"><DmPanel>{quest.dmSecret}</DmPanel></div>}
+        </section>
+      </PrintOnly>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         <h3 className="min-w-0 break-words" style={{ margin: 0 }}>{quest.title}</h3>
         <QuestStatusBadge status={quest.status} />
+        <PrintControl
+          resetKey={quest.id}
+          allowSecrets={isDm && Boolean(quest.dmSecret)}
+          className="ml-auto"
+        />
         {isDm && quest.hidden && <Chip variant="failed">{t('quests.hiddenChip')}</Chip>}
         {canDmWrite && (
-          <>
+          <div className="cf-print-hide flex items-center gap-2">
             <EntitySecrecyControls
               entityKind="quest"
               entityName={quest.title}
@@ -534,10 +553,10 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
             <Btn danger className="!min-h-0 !py-1.5 text-xs" onClick={() => setConfirmingDelete(true)}>
               {t('quests.delete')}
             </Btn>
-          </>
+          </div>
         )}
         {!isDm && role !== null && (
-          <>
+          <div className="cf-print-hide flex items-center gap-2">
             <div style={{ flex: 1 }} />
             <Btn
               ghost
@@ -547,7 +566,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
             >
               {t('quests.suggestEdit')}
             </Btn>
-          </>
+          </div>
         )}
       </div>
 
@@ -560,7 +579,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
         </Card>
       )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+      <div className="cf-print-columns grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
         <div className="lg:col-span-7" style={{ display: 'flex', flexDirection: 'column', gap: 16, minWidth: 0 }}>
           <div className="card elev-sm">
             {editingBody ? (
@@ -745,7 +764,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
 
           {showSecret && (
             <div
-              className="card"
+              className="cf-print-secret card"
               style={{
                 border: '1px solid var(--color-accent-700)',
                 background: 'color-mix(in srgb, var(--color-accent) 5%, var(--color-surface))',
@@ -796,7 +815,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
 
           <EncounterBacklinksCard campaignId={campaignId} encounters={quest.linkedEncounters ?? []} />
 
-          <EntityDiscussion campaignId={campaignId} entityType="quest" entityId={quest.id} />
+          <div className="cf-print-hide"><EntityDiscussion campaignId={campaignId} entityType="quest" entityId={quest.id} /></div>
         </div>
 
         <div className="lg:col-span-5" style={{ display: 'flex', flexDirection: 'column', gap: 16, minWidth: 0 }}>
@@ -826,7 +845,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
             </div>
           </div>
 
-          <NotesRail campaignId={campaignId} entityType="quest" entityId={questId} />
+          <div className="cf-print-hide"><NotesRail campaignId={campaignId} entityType="quest" entityId={questId} /></div>
         </div>
       </div>
 

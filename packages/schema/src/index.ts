@@ -32,7 +32,14 @@ import {
   sortOrderAscTiebreak,
   type InitiativeTiebreakCombatant,
 } from './initiative-tiebreak';
-import { ActionSpec, RESOLVER_MATH_D20_5E, type CriticalDamageRule, type ResolverMathProfile } from './action-resolver';
+import {
+  ActionSpec,
+  MAX_PENDING_CONCENTRATION_CHECKS,
+  PendingConcentrationCheck,
+  RESOLVER_MATH_D20_5E,
+  type CriticalDamageRule,
+  type ResolverMathProfile,
+} from './action-resolver';
 import { RestModel } from './rest';
 import { CharacterAction } from './character-action';
 import { CombatantStatblock } from './combatant-statblock';
@@ -9279,7 +9286,8 @@ export function deriveConditionNames(instances: readonly ConditionInstance[]): s
  * Per-turn action-economy + resource tracking on a combatant (issue #413). `used` counts
  * consumption against the adapter's {@link ActionEconomyModel} slot keys (e.g. `{ action: 1,
  * bonus: 0 }`); `movementUsedFt` is feet moved this turn; `concentration` names the effect the
- * combatant is concentrating on (null = none). `delaying` / `readied` capture the DM/table
+ * combatant is concentrating on (null = none). `pendingConcentrationChecks` is the durable,
+ * bounded queue created when 5e damage lands. `delaying` / `readied` capture the DM/table
  * turn-order tools (a combatant who delayed, or a readied action + its trigger). The whole
  * `used` map (including reaction) and movement reset at the START of the owner's turn by the
  * service — a 5e reaction refreshes at the start of your turn — while `concentration` persists
@@ -9292,6 +9300,10 @@ export const CombatantTurnState = z.object({
   used: z.record(z.string().max(40), z.number().int().nonnegative()).default(() => ({})),
   movementUsedFt: z.number().nonnegative().default(0),
   concentration: z.string().max(160).nullable().default(null),
+  pendingConcentrationChecks: z
+    .array(PendingConcentrationCheck)
+    .max(MAX_PENDING_CONCENTRATION_CHECKS)
+    .default(() => []),
   delaying: z.boolean().default(false),
   readied: z.string().max(200).nullable().default(null),
 });
@@ -9302,6 +9314,7 @@ export const EMPTY_TURN_STATE: CombatantTurnState = {
   used: {},
   movementUsedFt: 0,
   concentration: null,
+  pendingConcentrationChecks: [],
   delaying: false,
   readied: null,
 };
@@ -9378,6 +9391,7 @@ export const Combatant = z.object({
     used: {},
     movementUsedFt: 0,
     concentration: null,
+    pendingConcentrationChecks: [],
     delaying: false,
     readied: null,
   })),
@@ -9797,6 +9811,7 @@ export type EncounterNextTurn = z.infer<typeof EncounterNextTurn>;
  *  - setSlotUsed: set a slot's usage to an absolute count (movement uses moveFt instead);
  *  - moveFt: add feet to movementUsedFt (negative to correct); resetMovement clears it;
  *  - concentration: set/clear what the combatant is concentrating on;
+ *  - resolveConcentrationCheck: pass/fail the first durable pending check by id;
  *  - addEffect / removeEffectId: add or drop a structured ActiveEffect;
  *  - delaying / readied: the delay/ready turn-order tools;
  *  - resetTurn: clear the per-turn slice (the whole `used` map + movement; concentration is kept).
@@ -9809,6 +9824,12 @@ export const CombatantTurnStatePatch = z.object({
   moveFt: z.number().optional(),
   resetMovement: z.boolean().optional(),
   concentration: z.string().max(160).nullable().optional(),
+  resolveConcentrationCheck: z
+    .object({
+      id: z.string().min(1).max(120),
+      outcome: z.enum(['pass', 'fail']),
+    })
+    .optional(),
   addEffect: ActiveEffect.optional(),
   removeEffectId: z.string().max(40).optional(),
   delaying: z.boolean().optional(),

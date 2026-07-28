@@ -109,6 +109,7 @@ describe('resetTurnStateForStart (issue #413)', () => {
       used: { action: 1, bonus: 1, reaction: 1, legendary: 2 },
       movementUsedFt: 30,
       concentration: 'Bless',
+      pendingConcentrationChecks: [{ id: 'check-1', damage: 8, dc: 10 }],
       delaying: true,
       readied: 'Attack when they approach',
     };
@@ -116,6 +117,7 @@ describe('resetTurnStateForStart (issue #413)', () => {
     expect(reset.used).toEqual({ legendary: 2 });
     expect(reset.movementUsedFt).toBe(0);
     expect(reset.concentration).toBe('Bless');
+    expect(reset.pendingConcentrationChecks).toEqual([{ id: 'check-1', damage: 8, dc: 10 }]);
     expect(reset.delaying).toBe(false);
     expect(reset.readied).toBeNull();
   });

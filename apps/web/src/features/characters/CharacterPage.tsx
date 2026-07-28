@@ -81,6 +81,7 @@ import {
 } from '../../components/formFieldLabels';
 import { NotFoundState } from '../../components/NotFoundState';
 import { Markdown } from '../../components/Markdown';
+import { PrintControl } from '../../components/PrintControl';
 import { NotesRail } from '../../components/NotesRail';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
 import { ImageUpload, attachmentFileUrl } from '../../components/ImageUpload';
@@ -338,14 +339,10 @@ export default function CharacterPage() {
         {isOwner && <Chip variant="dm">You can edit</Chip>}
         <div className="flex items-center gap-1 ml-auto">
           {!editingSheet && (
-            <Btn
-              ghost
-              type="button"
-              className="cf-print-hide !min-h-0 !py-1.5 text-xs"
-              onClick={() => window.print()}
-            >
-              Print
-            </Btn>
+            <PrintControl
+              resetKey={character.id}
+              allowSecrets={isDm && Boolean(character.dmSecret)}
+            />
           )}
           {canEdit && !editingSheet && (
             <Btn ghost className="cf-print-hide !min-h-0 !py-1.5 text-xs" onClick={() => setEditingSheet(true)}>
@@ -604,7 +601,7 @@ export default function CharacterPage() {
             <section
               id={characterSheetSectionId('dm-secret')}
               aria-label={CHARACTER_SHEET_SECTION_LABEL['dm-secret']}
-              className="scroll-mt-24"
+              className="scroll-mt-24 cf-print-secret"
             >
               <DmSecretCard character={character} onChange={load} onError={setActionError} />
             </section>

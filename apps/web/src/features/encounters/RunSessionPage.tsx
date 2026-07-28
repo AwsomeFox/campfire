@@ -15,6 +15,8 @@ import { useTranslation } from 'react-i18next';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type RefObject } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { DetailPageWayfinding } from '../../components/DetailPageWayfinding';
+import { PrintControl } from '../../components/PrintControl';
+import { PrintOnly } from '../../components/PrintOnly';
 import { useKeyboardCommandHint, useKeyboardGuardedAction } from '../../components/KeyboardCommandProvider';
 import type {
   ActionSpec,
@@ -1483,7 +1485,7 @@ export default function RunSessionPage() {
       damageDice?: number;
       idempotencyKey: string;
     }) =>
-      api.patch(
+      api.patch<Combatant>(
         `${API}/encounters/${eid}/combatants/${combatantId}`,
         hpPatchWithActor({ hpDelta: delta, damageType, saveOutcome, isCrit, damageDice, idempotencyKey }, actorId, combatantId, isDm),
       ),
@@ -1564,7 +1566,7 @@ export default function RunSessionPage() {
       const bulkOperationId = newOperationId();
       try {
         for (const { combatantId, damage } of applications) {
-          await api.patch(
+          await api.patch<Combatant>(
             `${API}/encounters/${eid}/combatants/${combatantId}`,
             hpPatchWithActor(
               { hpDelta: delta, ...damage, idempotencyKey: `${bulkOperationId}:${combatantId}` },
@@ -1949,13 +1951,62 @@ export default function RunSessionPage() {
   // `turnIndex % length` guesswork that desyncs the moment a combatant is added or
   // removed mid-fight.
   const orderedCombatants = encounter.combatants;
+  // Prefer a combatant the viewer can resolve. Fall back only to character combatants
+  // (party HP is shared table knowledge); never surface monster/NPC concentration
+  // queues to non-resolvers — those embed secret exact damage/DC (#43 / #606).
+  const concentrationCheckCombatant =
+    orderedCombatants.find(
+      (combatant) =>
+        combatant.turnState.pendingConcentrationChecks.length > 0 &&
+        canEditCombatantPermission(combatant),
+    ) ??
+    orderedCombatants.find(
+      (combatant) =>
+        combatant.kind === 'character' &&
+        combatant.turnState.pendingConcentrationChecks.length > 0,
+    );
+  const pendingConcentrationCheck = concentrationCheckCombatant?.turnState.pendingConcentrationChecks[0] ?? null;
+  const canResolveConcentrationCheck =
+    concentrationCheckCombatant != null && canEditCombatantPermission(concentrationCheckCombatant);
   // Issue #420: DM header actions come from an explicit lifecycle matrix (not
   // ad-hoc status !== 'ended' checks) so Preparing never offers the invalid End.
   const lifecycle = dmLifecycleActions(encounter.status);
   const deleteCopy = deleteConfirmCopy(encounter.status);
 
   return (
-    <div className="reading-surface max-w-4xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" {...entityTargetProps('encounter', encounter.id)}>
+    <div
+      className={`cf-print-root reading-surface max-w-4xl lg:max-w-6xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10${isDm ? ' cf-print-encounter' : ''}`}
+      {...entityTargetProps('encounter', encounter.id)}
+    >
+      {isDm && (
+        <PrintOnly>
+          <section className="cf-print-only cf-print-paper" aria-label="Encounter reference sheet">
+            <h1>{encounter.name}</h1>
+            <p><strong>Status:</strong> {STATUS_LABEL[encounter.status]} · <strong>Round:</strong> {encounter.round}</p>
+            <table className="cf-print-roster">
+              <thead><tr><th>Initiative / order</th><th>Combatant</th><th>Type</th><th>AC</th><th>Current / max / temp HP</th><th>Conditions / status</th><th>Notes / tracking</th></tr></thead>
+              <tbody>{orderedCombatants.map((combatant, index) => (
+                <tr key={combatant.id}>
+                  <td>{combatant.initiative ?? '—'} / {index + 1}</td>
+                  <td>{combatant.name}</td>
+                  <td>{combatant.kind}</td>
+                  <td>{combatant.eac != null || combatant.kac != null
+                    ? [combatant.eac != null ? `EAC ${combatant.eac}` : null, combatant.kac != null ? `KAC ${combatant.kac}` : null].filter(Boolean).join(' / ')
+                    : combatant.statblock?.ac ?? '—'}</td>
+                  <td>{combatant.hpCurrent == null || combatant.hpMax == null ? '—' : `${combatant.hpCurrent} / ${combatant.hpMax} / ${combatant.hpTemp ?? 0}`}</td>
+                  <td>{[
+                    ...combatant.conditions,
+                    combatant.deathState !== 'none'
+                      ? (DEATH_STATE_LABEL[combatant.deathState] ?? combatant.deathState)
+                      : '',
+                  ].filter(Boolean).join(', ') || '—'}</td>
+                  <td aria-label={`Notes for ${combatant.name}`} />
+                </tr>
+              ))}</tbody>
+            </table>
+          </section>
+        </PrintOnly>
+      )}
       <DetailPageWayfinding
         campaignId={cid}
         defaultPath={`/c/${cid}/encounters`}
@@ -2028,6 +2079,7 @@ export default function RunSessionPage() {
           </span>
         )}
         <DifficultyBadge difficulty={difficulty} />
+        {isDm && <PrintControl resetKey={encounter.id} className="ml-auto" />}
         <span
           className={`cf-chip ${encounterSyncChipClass(encounterSync)}`}
           data-testid="encounter-sync-chip"
@@ -2445,6 +2497,59 @@ export default function RunSessionPage() {
         />
       )}
 
+      {concentrationCheckCombatant && pendingConcentrationCheck && (
+        <div className="card border border-warning" role="alert" aria-live="assertive" style={{ padding: 12 }} data-testid="concentration-check-prompt">
+          <strong>{concentrationCheckCombatant.name} must make a Constitution saving throw.</strong>
+          <p className="text-muted" style={{ margin: '4px 0 10px' }}>
+            Concentration check: DC {pendingConcentrationCheck.dc} ({pendingConcentrationCheck.damage} damage).
+          </p>
+          {canResolveConcentrationCheck ? (
+            <div className="flex gap-2">
+              <button
+                type="button"
+                className="btn btn-ghost"
+                disabled={combatantTurnState.isPending}
+                onClick={() =>
+                  combatantTurnState.mutate({
+                    combatantId: concentrationCheckCombatant.id,
+                    patch: {
+                      resolveConcentrationCheck: {
+                        id: pendingConcentrationCheck.id,
+                        outcome: 'pass',
+                      },
+                    },
+                  })
+                }
+              >
+                Passed
+              </button>
+              <button
+                type="button"
+                className="btn btn-danger"
+                disabled={combatantTurnState.isPending}
+                onClick={() =>
+                  combatantTurnState.mutate({
+                    combatantId: concentrationCheckCombatant.id,
+                    patch: {
+                      resolveConcentrationCheck: {
+                        id: pendingConcentrationCheck.id,
+                        outcome: 'fail',
+                      },
+                    },
+                  })
+                }
+              >
+                Failed — end concentration
+              </button>
+            </div>
+          ) : (
+            <p className="text-muted" style={{ margin: 0 }}>
+              Waiting for the DM or this combatant&apos;s owner to resolve the save.
+            </p>
+          )}
+        </div>
+      )}
+
       {pendingActionUse && (
         <ActionUsePanel
           encounterId={eid}
@@ -2458,7 +2563,7 @@ export default function RunSessionPage() {
           applyDisabled={riskyBlocked}
           onDismiss={() => setPendingActionUse(null)}
           onError={surfaceActionError}
-          onApplied={(token, _policy) => {
+          onApplied={(token) => {
             void invalidateEncounter(queryClient, eid);
             setPendingActionUse(null);
             setActionUndo({ token, label: pendingActionUse.actionName });
@@ -2477,145 +2582,164 @@ export default function RunSessionPage() {
         />
       )}
 
-      <div className="card elev-sm" style={{ padding: '6px 0', gap: 0 }}>
-        {sheetsStatusLabel && (
-          <p
-            className="text-muted"
-            data-testid="inline-character-sheets-status"
-            style={{ fontSize: 11, margin: 0, padding: '8px 14px 0' }}
-            role="status"
-            aria-live="polite"
-          >
-            {sheetsStatusLabel}
-          </p>
-        )}
-        {orderedCombatants.length === 0 ? (
-          <div style={{ padding: 16 }}>
-            <EmptyState
-              icon="crossed-swords"
-              title={t('encounters.empty.noCombatants')}
-              hint={
-                isDm
-                  ? characters.some((c) => c.status === 'active')
-                    ? t('encounters.empty.noCombatantsHintDmActive')
-                    : t('encounters.empty.noCombatantsHintDmNoParty')
-                  : t('encounters.empty.noCombatantsHintPlayer')
-              }
-            />
+      {/*
+          Keep the tracker and its live history in the same cockpit on large screens.
+          The source order deliberately remains tracker → logs: on smaller viewports the
+          grid collapses to the existing single-column reading flow, and keyboard users
+          reach the turn order before its supporting history. `lg:sticky` keeps the
+          right rail visible while a long roster (or expanded character cards) scrolls.
+      */}
+      <div
+        data-testid="encounter-cockpit"
+        className="grid gap-4 min-w-0 lg:grid-cols-[minmax(0,1fr)_20rem] lg:items-start"
+      >
+        <div className="space-y-4 min-w-0">
+          <div className="card elev-sm" style={{ padding: '6px 0', gap: 0 }}>
+            {sheetsStatusLabel && (
+              <p
+                className="text-muted"
+                data-testid="inline-character-sheets-status"
+                style={{ fontSize: 11, margin: 0, padding: '8px 14px 0' }}
+                role="status"
+                aria-live="polite"
+              >
+                {sheetsStatusLabel}
+              </p>
+            )}
+            {orderedCombatants.length === 0 ? (
+              <div style={{ padding: 16 }}>
+                <EmptyState
+                  icon="crossed-swords"
+                  title={t('encounters.empty.noCombatants')}
+                  hint={
+                    isDm
+                      ? characters.some((c) => c.status === 'active')
+                        ? t('encounters.empty.noCombatantsHintDmActive')
+                        : t('encounters.empty.noCombatantsHintDmNoParty')
+                      : t('encounters.empty.noCombatantsHintPlayer')
+                  }
+                />
+              </div>
+            ) : (
+              orderedCombatants.map((c) => (
+                <CombatantRow
+                  key={c.id}
+                  rowRef={(el) => setCombatantRowRef(c.id, el)}
+                  encounterId={eid}
+                  combatant={c}
+                  isCurrentTurn={c.id === currentCombatantId}
+                  canEdit={canEditCombatant(c)}
+                  canEditIdentity={canDmWrite && encounter.status !== 'ended'}
+                  canViewStatblock={isDm}
+                  canRemove={canDmWrite}
+                  canSetInitiative={canDmWrite && encounter.status !== 'ended'}
+                  running={encounter.status === 'running'}
+                  character={c.characterId != null ? charactersById.get(c.characterId) ?? null : null}
+                  openCardByDefault={c.characterId != null && ownedCharacterIds.has(c.characterId)}
+                  // Omit campaignId while sheets are stale so click-to-roll cannot use obsolete mods (#421).
+                  campaignId={sheetsInteractive ? cid : undefined}
+                  onRollError={surfaceActionError}
+                  onApplyDamage={(amount, label, diceTotal) => onApplyDamageRolled(amount, label, diceTotal, c.id)}
+                  onUseAction={
+                    canEditCombatant(c) && c.characterId != null
+                      ? (actionIndex) => {
+                          const ch = charactersById.get(c.characterId!);
+                          const act = ch?.actions[actionIndex];
+                          if (!act?.spec) return;
+                          onUseActionRequested(c.id, c.name, actionIndex, act.name, act.spec);
+                        }
+                      : undefined
+                  }
+                  onUseMonsterAction={
+                    canEditCombatant(c) && c.characterId == null && (c.kind === 'monster' || c.kind === 'npc')
+                      ? (actionIndex, actionName, spec) => onUseActionRequested(c.id, c.name, actionIndex, actionName, spec)
+                      : undefined
+                  }
+                  busy={pendingCombatantIds.has(c.id) || reconcileBlocks}
+                  conditionSuggestions={conditionSuggestions}
+                  conditionSourceOptions={canDmWrite ? orderedCombatants.map((source) => ({ id: source.id, name: source.name })) : [{ id: c.id, name: c.name }]}
+                  defaultConditionSourceCombatantId={currentCombatantId ?? c.id}
+                  ruleSystem={ruleSystem}
+                  onHpDelta={(delta) => {
+                    // Belt-and-braces with the `busy` prop above: never let a second damage
+                    // intent start while the outcome of the previous one is still unknown (#580).
+                    if (reconcileBlocks) return;
+                    const actorId = hpLogActorId(currentCombatantId, c.id);
+                    hpDelta.mutate({ combatantId: c.id, delta, actorId });
+                  }}
+                  onSetTempHp={(value) => patchCombatant(c.id, { hpTemp: value })}
+                  onSetDeathSaves={(patch) => patchCombatant(c.id, patch)}
+                  onRollDeathSave={() => rollDeathSave(c)}
+                  onSetInitiative={(value) => patchCombatant(c.id, { initiative: value })}
+                  onClearInitiative={() => patchCombatant(c.id, { initiative: null })}
+                  onAddCondition={(cond) => patchCombatant(c.id, { addConditions: [cond] })}
+                  onRemoveCondition={(cond) => patchCombatant(c.id, { removeConditions: [cond] })}
+                  onRename={(name) => patchCombatant(c.id, { name })}
+                  onSetHpMax={(value) => patchCombatant(c.id, { hpMax: value })}
+                  onSetTokenSize={(size) => setTokenSize(c.id, size)}
+                  onPatchCombatant={(patch) => patchCombatant(c.id, patch)}
+                  onPatchSourceTurnState={
+                    canDmWrite || c.id === currentCombatantId
+                      ? (sourceCombatantId, patch) => patchCombatantTurnState(sourceCombatantId, patch)
+                      : undefined
+                  }
+                  legendaryActions={c.legendaryActions}
+                  onUseLegendary={
+                    canDmWrite && c.legendaryActions
+                      ? () => patchCombatantTurnState(c.id, { useSlot: LEGENDARY_ACTION_SLOT })
+                      : undefined
+                  }
+                  onReleaseLegendary={
+                    canDmWrite && c.legendaryActions && c.legendaryActions.used > 0
+                      ? () => patchCombatantTurnState(c.id, { releaseSlot: LEGENDARY_ACTION_SLOT })
+                      : undefined
+                  }
+                  canEndMyTurn={
+                    c.id === currentCombatantId &&
+                    turnWorkspace?.canEndTurn === true &&
+                    turnWorkspace.isYourTurn === true
+                  }
+                  onEndMyTurn={
+                    c.id === currentCombatantId
+                      ? () => endTurn.mutate({ expectedCurrentCombatantId: c.id })
+                      : undefined
+                  }
+                  onPatchTurnState={
+                    canEditCombatant(c) && c.id === currentCombatantId && encounter.status === 'running'
+                      ? (patch) => patchCombatantTurnState(c.id, patch)
+                      : undefined
+                  }
+                  onRemove={() => setConfirmRemoveCombatantId(c.id)}
+                />
+              ))
+            )}
           </div>
-        ) : (
-          orderedCombatants.map((c) => (
-            <CombatantRow
-              key={c.id}
-              rowRef={(el) => setCombatantRowRef(c.id, el)}
+
+          {canDmWrite && encounter.status !== 'ended' && (
+            <AddCombatantPanel
               encounterId={eid}
-              combatant={c}
-              isCurrentTurn={c.id === currentCombatantId}
-              canEdit={canEditCombatant(c)}
-              canEditIdentity={canDmWrite && encounter.status !== 'ended'}
-              canViewStatblock={isDm}
-              canRemove={canDmWrite}
-              canSetInitiative={canDmWrite && encounter.status !== 'ended'}
-              running={encounter.status === 'running'}
-              character={c.characterId != null ? charactersById.get(c.characterId) ?? null : null}
-              openCardByDefault={c.characterId != null && ownedCharacterIds.has(c.characterId)}
-              // Omit campaignId while sheets are stale so click-to-roll cannot use obsolete mods (#421).
-              campaignId={sheetsInteractive ? cid : undefined}
-              onRollError={surfaceActionError}
-              onApplyDamage={(amount, label, diceTotal) => onApplyDamageRolled(amount, label, diceTotal, c.id)}
-              onUseAction={
-                canEditCombatant(c) && c.characterId != null
-                  ? (actionIndex) => {
-                      const ch = charactersById.get(c.characterId!);
-                      const act = ch?.actions[actionIndex];
-                      if (!act?.spec) return;
-                      onUseActionRequested(c.id, c.name, actionIndex, act.name, act.spec);
-                    }
-                  : undefined
-              }
-              onUseMonsterAction={
-                canEditCombatant(c) && c.characterId == null && (c.kind === 'monster' || c.kind === 'npc')
-                  ? (actionIndex, actionName, spec) => onUseActionRequested(c.id, c.name, actionIndex, actionName, spec)
-                  : undefined
-              }
-              busy={pendingCombatantIds.has(c.id) || reconcileBlocks}
-              conditionSuggestions={conditionSuggestions}
-              conditionSourceOptions={canDmWrite ? orderedCombatants.map((source) => ({ id: source.id, name: source.name })) : [{ id: c.id, name: c.name }]}
-              defaultConditionSourceCombatantId={currentCombatantId ?? c.id}
-              ruleSystem={ruleSystem}
-              onHpDelta={(delta) => {
-                // Belt-and-braces with the `busy` prop above: never let a second damage
-                // intent start while the outcome of the previous one is still unknown (#580).
-                if (reconcileBlocks) return;
-                const actorId = hpLogActorId(currentCombatantId, c.id);
-                hpDelta.mutate({ combatantId: c.id, delta, actorId });
-              }}
-              onSetTempHp={(value) => patchCombatant(c.id, { hpTemp: value })}
-              onSetDeathSaves={(patch) => patchCombatant(c.id, patch)}
-              onRollDeathSave={() => rollDeathSave(c)}
-              onSetInitiative={(value) => patchCombatant(c.id, { initiative: value })}
-              onClearInitiative={() => patchCombatant(c.id, { initiative: null })}
-              onAddCondition={(cond) => patchCombatant(c.id, { addConditions: [cond] })}
-              onRemoveCondition={(cond) => patchCombatant(c.id, { removeConditions: [cond] })}
-              onRename={(name) => patchCombatant(c.id, { name })}
-              onSetHpMax={(value) => patchCombatant(c.id, { hpMax: value })}
-              onSetTokenSize={(size) => setTokenSize(c.id, size)}
-              onPatchCombatant={(patch) => patchCombatant(c.id, patch)}
-              onPatchSourceTurnState={
-                canDmWrite || c.id === currentCombatantId
-                  ? (sourceCombatantId, patch) => patchCombatantTurnState(sourceCombatantId, patch)
-                  : undefined
-              }
-              legendaryActions={c.legendaryActions}
-              onUseLegendary={
-                canDmWrite && c.legendaryActions
-                  ? () => patchCombatantTurnState(c.id, { useSlot: LEGENDARY_ACTION_SLOT })
-                  : undefined
-              }
-              onReleaseLegendary={
-                canDmWrite && c.legendaryActions && c.legendaryActions.used > 0
-                  ? () => patchCombatantTurnState(c.id, { releaseSlot: LEGENDARY_ACTION_SLOT })
-                  : undefined
-              }
-              canEndMyTurn={
-                c.id === currentCombatantId &&
-                turnWorkspace?.canEndTurn === true &&
-                turnWorkspace.isYourTurn === true
-              }
-              onEndMyTurn={
-                c.id === currentCombatantId
-                  ? () => endTurn.mutate({ expectedCurrentCombatantId: c.id })
-                  : undefined
-              }
-              onPatchTurnState={
-                canEditCombatant(c) && c.id === currentCombatantId && encounter.status === 'running'
-                  ? (patch) => patchCombatantTurnState(c.id, patch)
-                  : undefined
-              }
-              onRemove={() => setConfirmRemoveCombatantId(c.id)}
+              campaignId={cid}
+              characters={characters}
+              existingCombatantCharacterIds={new Set(encounter.combatants.map((c) => c.characterId).filter((id): id is number => id != null))}
+              rulePack={campaign?.ruleSystem || ''}
+              onAdded={() => queryClient.invalidateQueries({ queryKey: queryKeys.encounter(eid) })}
             />
-          ))
-        )}
+          )}
+        </div>
+
+        <aside
+          className="min-w-0 space-y-4 lg:sticky lg:top-4 lg:max-h-[calc(100vh-1rem)] lg:overflow-y-auto lg:overscroll-contain"
+          aria-label="Encounter activity"
+        >
+          <CombatLog events={events} />
+
+          <SharedDiceLog campaignId={cid} />
+        </aside>
       </div>
-
-      {canDmWrite && encounter.status !== 'ended' && (
-        <AddCombatantPanel
-          encounterId={eid}
-          campaignId={cid}
-          characters={characters}
-          existingCombatantCharacterIds={new Set(encounter.combatants.map((c) => c.characterId).filter((id): id is number => id != null))}
-          rulePack={campaign?.ruleSystem || ''}
-          onAdded={() => queryClient.invalidateQueries({ queryKey: queryKeys.encounter(eid) })}
-        />
-      )}
-
-      <CombatLog events={events} />
 
       {/* Issue #415: DM control to request a check/save from a character. DM-only; players see
           the resulting prompt above via CheckRequestPrompts. */}
       {canDmWrite && <CheckRequestPanel campaignId={cid} characters={characters} encounterId={eid} onError={surfaceActionError} />}
-
-      <SharedDiceLog campaignId={cid} />
 
       <EntityDiscussion campaignId={cid} entityType="encounter" entityId={encounter.id} />
 
@@ -6680,7 +6804,7 @@ function CombatLog({ events }: { events: EncounterEvent[] }) {
   }, [events]);
 
   return (
-    <Card className="space-y-2" id="combat-log">
+    <Card className="space-y-2 min-w-0" id="combat-log">
       <h2 id={headingId} className="card-kicker" style={{ margin: 0 }}>Combat log</h2>
       <div
         ref={logRef}
@@ -6688,8 +6812,8 @@ function CombatLog({ events }: { events: EncounterEvent[] }) {
         aria-labelledby={headingId}
         aria-live="off"
         tabIndex={0}
-        className="reading-supporting"
-        style={{ maxHeight: 260, overflowY: 'auto', overflowAnchor: 'none' }}
+        className="reading-supporting min-w-0"
+        style={{ maxHeight: 260, overflowY: 'auto', overflowX: 'hidden', overflowAnchor: 'none', overflowWrap: 'anywhere' }}
       >
         {events.length === 0 ? (
           <p className="text-muted" style={{ fontSize: 12, margin: 0 }}>

@@ -30,6 +30,8 @@ import {
 import { LocationStatusLabel, LOCATION_STATUS_LABEL } from '../../components/LocationStatusLabel';
 import { NotFoundState } from '../../components/NotFoundState';
 import { Markdown } from '../../components/Markdown';
+import { PrintControl } from '../../components/PrintControl';
+import { PrintOnly } from '../../components/PrintOnly';
 import { NotesRail } from '../../components/NotesRail';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
 import { ImageUpload, attachmentFileUrl } from '../../components/ImageUpload';
@@ -498,8 +500,8 @@ export default function LocationPage() {
   });
 
   return (
-    <div className="max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" {...entityTargetProps('location', location.id)}>
-      <DetailPageWayfinding
+    <div className="cf-print-root cf-print-reference max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" {...entityTargetProps('location', location.id)}>
+      <div className="cf-print-chrome"><DetailPageWayfinding
         campaignId={cid}
         defaultPath={`/c/${cid}/locations`}
         defaultLabel="← Back to locations"
@@ -512,13 +514,22 @@ export default function LocationPage() {
             : undefined
         }
         currentLabel={!editing ? location.name : undefined}
-      />
+      /></div>
+      <PrintOnly>
+        <section className="cf-print-only cf-print-paper">
+          <h1>{location.name}</h1>
+          <p>{location.kind || 'Location'} · {LOCATION_STATUS_LABEL[location.status]}</p>
+          <Markdown>{location.body || 'No description yet.'}</Markdown>
+          <p><strong>Within:</strong> {ancestors.length > 0 ? ancestors[ancestors.length - 1].name : '—'}</p>
+          {isDm && location.dmSecret && <div className="cf-print-secret"><DmPanel>{location.dmSecret}</DmPanel></div>}
+        </section>
+      </PrintOnly>
 
-      {error && <ErrorNote message={error} onRetry={load} />}
-      {actionError && <ErrorNote message={actionError} onRetry={() => setActionError(null)} />}
+      {error && <div className="cf-print-hide"><ErrorNote message={error} onRetry={load} /></div>}
+      {actionError && <div className="cf-print-hide"><ErrorNote message={actionError} onRetry={() => setActionError(null)} /></div>}
 
       {proposeDone && !editing && (
-        <Card density="compact" className="flex items-center justify-between gap-3 border border-[var(--color-accent-700)] text-sm">
+        <Card density="compact" className="cf-print-hide flex items-center justify-between gap-3 border border-[var(--color-accent-700)] text-sm">
           <span className="text-slate-200">✅ Suggestion sent to the DM — it's waiting for approval.</span>
           <Link to={`/c/${cid}/proposals`} className="text-purple-400 hover:underline shrink-0">
             View my proposals
@@ -528,7 +539,7 @@ export default function LocationPage() {
 
       {!editing && (
         <>
-          <div className="flex items-center gap-2.5 flex-wrap">
+          <div className="flex items-start gap-2.5 flex-wrap">
             {canDmWrite ? (
               <div className="w-32 h-20 shrink-0">
                 <ImageUpload
@@ -554,75 +565,82 @@ export default function LocationPage() {
             )}
             <h1 className="text-2xl font-extrabold text-white min-w-0 break-words">{location.name}</h1>
             <Chip variant={statusVariant(location.status)}><LocationStatusLabel status={location.status} /></Chip>
-            {isDm && location.status === 'unexplored' && (
-              <Chip variant="failed" className="!ml-0"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players</span></Chip>
-            )}
-            {canDmWrite && (
-              <EntitySecrecyControls
-                entityKind="location"
-                entityName={location.name}
-                hidden={location.status === 'unexplored'}
-                preview={revealPreview}
-                onReveal={async () => {
-                  await setStatus('explored');
-                }}
-                onUndoReveal={async () => {
-                  await setStatus('unexplored');
-                }}
+            {/* One right-aligned action cluster — a second ml-auto would split the row and can
+                park Edit under the tall Landmark upload hit-target. */}
+            <div className="relative z-10 ml-auto flex items-center gap-2 flex-wrap shrink-0">
+              <PrintControl
+                resetKey={location.id}
+                allowSecrets={isDm && Boolean(location.dmSecret)}
               />
-            )}
-            {canDmWrite && nextStatus && location.status !== 'unexplored' && (
-              <Btn
-                className="!min-h-0 !py-1.5 text-xs"
-                disabled={statusSaving}
-                onClick={() => setStatus(nextStatus)}
-                title={NEXT_STATUS_LABEL[location.status]}
-              >
-                {NEXT_STATUS_LABEL[location.status]}
-              </Btn>
-            )}
-            {!isDm && role !== null && (
-              <div className="flex gap-2 shrink-0 ml-auto">
-                <Btn
-                  ghost
-                  className="!min-h-0 !py-1.5 text-xs"
-                  onClick={startPropose}
-                  title="Suggest a change to the DM for approval"
-                >
-                  ✎ Suggest an edit
-                </Btn>
-              </div>
-            )}
-            {canDmWrite && (
-              <div className="flex gap-2 shrink-0 ml-auto">
-                <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={startEdit}>
-                  ✎ Edit
-                </Btn>
-                <StatusMenuButton
-                  className="cf-btn cf-btn-ghost cf-density-compact text-xs"
-                  triggerLabel={`Location status: ${LOCATION_STATUS_LABEL[location.status]}`}
-                  triggerDescription="DM: set status directly"
-                  value={location.status}
-                  options={(LocationStatus.options as Location['status'][]).map((s) => ({
-                    value: s,
-                    label: <LocationStatusLabel status={s} />,
-                  }))}
+              {isDm && location.status === 'unexplored' && (
+                <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players</span></Chip>
+              )}
+              {canDmWrite && (
+                <div className="cf-print-hide"><EntitySecrecyControls
+                  entityKind="location"
+                  entityName={location.name}
+                  hidden={location.status === 'unexplored'}
+                  preview={revealPreview}
+                  onReveal={async () => {
+                    await setStatus('explored');
+                  }}
+                  onUndoReveal={async () => {
+                    await setStatus('unexplored');
+                  }}
+                /></div>
+              )}
+              {canDmWrite && nextStatus && location.status !== 'unexplored' && (
+                <Btn className="cf-print-hide !min-h-0 !py-1.5 text-xs"
                   disabled={statusSaving}
-                  triggerText="Status ▾"
-                  onSelect={(s) => setStatus(s)}
-                  announceFailure={announce}
-                  failureMessage="Couldn't update status."
-                />
-              </div>
-            )}
+                  onClick={() => setStatus(nextStatus)}
+                  title={NEXT_STATUS_LABEL[location.status]}
+                >
+                  {NEXT_STATUS_LABEL[location.status]}
+                </Btn>
+              )}
+              {!isDm && role !== null && (
+                <div className="cf-print-hide flex gap-2 shrink-0">
+                  <Btn
+                    ghost
+                    className="!min-h-0 !py-1.5 text-xs"
+                    onClick={startPropose}
+                    title="Suggest a change to the DM for approval"
+                  >
+                    ✎ Suggest an edit
+                  </Btn>
+                </div>
+              )}
+              {canDmWrite && (
+                <div className="cf-print-hide flex gap-2 shrink-0">
+                  <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={startEdit}>
+                    ✎ Edit
+                  </Btn>
+                  <StatusMenuButton
+                    className="cf-btn cf-btn-ghost cf-density-compact text-xs"
+                    triggerLabel={`Location status: ${LOCATION_STATUS_LABEL[location.status]}`}
+                    triggerDescription="DM: set status directly"
+                    value={location.status}
+                    options={(LocationStatus.options as Location['status'][]).map((s) => ({
+                      value: s,
+                      label: <LocationStatusLabel status={s} />,
+                    }))}
+                    disabled={statusSaving}
+                    triggerText="Status ▾"
+                    onSelect={(s) => setStatus(s)}
+                    announceFailure={announce}
+                    failureMessage="Couldn't update status."
+                  />
+                </div>
+              )}
+            </div>
           </div>
           {location.kind && <p className="text-sm text-slate-400 -mt-3">{location.kind}</p>}
 
-          <div className="grid grid-cols-1 md:grid-cols-[1fr_320px] gap-4 items-start">
+          <div className="cf-print-columns grid grid-cols-1 md:grid-cols-[1fr_320px] gap-4 items-start">
             <div className="space-y-4 min-w-0">
               <Card className="space-y-4">
                 {/* Mini pin map */}
-                <div className="relative cf-inset overflow-hidden h-36">
+                <div className="cf-print-hide relative cf-inset overflow-hidden h-36">
                   {campaign?.mapAttachmentId ? (
                     <img
                       src={attachmentFileUrl(campaign.mapAttachmentId)}
@@ -704,11 +722,11 @@ export default function LocationPage() {
                 {location.body ? <Markdown>{location.body}</Markdown> : <p className="text-sm text-secondary italic">No description yet.</p>}
               </Card>
 
-              {isDm && location.dmSecret && <DmPanel>{location.dmSecret}</DmPanel>}
+              {isDm && location.dmSecret && <div className="cf-print-secret"><DmPanel>{location.dmSecret}</DmPanel></div>}
 
               {/* Body revision history + restore (#157/#233) — DM-only, so a clobbered or
                   regretted edit is recoverable. Refetches after each save. */}
-              {isDm && (
+              {isDm && (<div className="cf-print-hide">
                 <RevisionHistoryPanel
                   entityType="location"
                   entityId={id}
@@ -720,7 +738,7 @@ export default function LocationPage() {
                     void reloadLatest();
                   }}
                 />
-              )}
+              </div>)}
 
               <Card className="space-y-3">
                 <h2 className="font-bold text-white text-sm">Here &amp; connected</h2>
@@ -801,7 +819,7 @@ export default function LocationPage() {
 
               <EncounterBacklinksCard campaignId={cid} encounters={location.linkedEncounters ?? []} />
 
-              <EntityDiscussion campaignId={cid} entityType="location" entityId={id} />
+              <div className="cf-print-hide"><EntityDiscussion campaignId={cid} entityType="location" entityId={id} /></div>
             </div>
 
             <div className="space-y-4 min-w-0">
@@ -821,14 +839,14 @@ export default function LocationPage() {
                 </div>
               </Card>
 
-              <NotesRail campaignId={cid} entityType="location" entityId={id} />
+              <div className="cf-print-hide"><NotesRail campaignId={cid} entityType="location" entityId={id} /></div>
             </div>
           </div>
         </>
       )}
 
       {editing && (
-        <Card className="space-y-3" data-testid="location-editor-fields">
+        <Card className="cf-print-editor space-y-3" data-testid="location-editor-fields">
           {proposeMode && (
             <p className="text-xs text-slate-400 m-0 rounded-[var(--radius-md)] bg-[var(--color-accent)]/10 border border-[var(--color-accent-700)] px-3 py-2">
               <GameIcon slug="light-bulb" size={12} className="inline align-text-bottom mr-1" />You're suggesting an edit. Your changes go to the DM as a proposal — nothing changes until they approve it.

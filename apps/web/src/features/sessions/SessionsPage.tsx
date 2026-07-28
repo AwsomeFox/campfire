@@ -25,6 +25,8 @@ import { formatDate as formatLocaleDate, formatDateTime, useFormattingLocale } f
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Card, Btn, TextInput, TextArea, EmptyState, Skeleton, SkeletonConditionalRegion, ErrorNote } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
+import { PrintControl } from '../../components/PrintControl';
+import { PrintOnly } from '../../components/PrintOnly';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { useAnnounce } from '../../components/Announcer';
@@ -935,14 +937,7 @@ function SessionDetail({
         </h2>
         <span className="text-muted text-xs">{formatDate(session.playedAt)}</span>
         {!editing && (
-          <Btn
-            ghost
-            type="button"
-            className="cf-print-hide !min-h-0 !py-1.5 text-xs ml-auto"
-            onClick={() => window.print()}
-          >
-            Print
-          </Btn>
+          <PrintControl resetKey={session.id} className="ml-auto" />
         )}
       </div>
 
@@ -1100,14 +1095,17 @@ function SessionDetail({
           </form>
         </Card>
         {/* Browser print (Ctrl/Cmd+P) while editing should still yield the draft
-            recap rather than a blank page once the editor chrome is print-hidden. */}
-        <Card className="cf-print-only cf-print-paper min-w-0">
-          {recapDraft.trim() ? (
-            <Markdown>{recapDraft}</Markdown>
-          ) : (
-            <p className="text-sm">No recap written yet.</p>
-          )}
-        </Card>
+            recap rather than a blank page once the editor chrome is print-hidden.
+            Mount only under print media so the draft does not duplicate screen DOM. */}
+        <PrintOnly>
+          <Card className="cf-print-only cf-print-paper min-w-0">
+            {recapDraft.trim() ? (
+              <Markdown>{recapDraft}</Markdown>
+            ) : (
+              <p className="text-sm">No recap written yet.</p>
+            )}
+          </Card>
+        </PrintOnly>
         </>
       ) : (
         <Card>
