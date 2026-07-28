@@ -311,6 +311,14 @@ export class InventoryService {
     const snapshot = sanitizeCompendiumSnapshot(buildCompendiumSnapshot(entry));
     if (!snapshot) throw new BadRequestException('The linked source item is not play-safe');
     const [row] = await this.db.update(inventoryItems).set({ compendiumRef: JSON.stringify(buildCompendiumRef(entry, pack)), compendiumSnapshot: JSON.stringify(snapshot), compendiumState: 'linked', updatedAt: nowIso() }).where(eq(inventoryItems.id, id)).returning();
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'item.refresh_compendium',
+      entityType: 'inventory_item',
+      entityId: id,
+      campaignId: existing.campaignId,
+    });
     return this.withCompendiumState(row);
   }
 
@@ -318,6 +326,15 @@ export class InventoryService {
     const existing = await this.getRowOrThrow(id); await this.assertCanWriteOwner(existing.ownerType as 'party' | 'character', existing.characterId, existing.campaignId, user, role);
     if (!existing.compendiumSnapshot) throw new BadRequestException('This item has no compendium snapshot');
     const [row] = await this.db.update(inventoryItems).set({ compendiumState: state, ruleEntryId: state === 'detached' ? null : existing.ruleEntryId, updatedAt: nowIso() }).where(eq(inventoryItems.id, id)).returning();
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'item.compendium_state',
+      entityType: 'inventory_item',
+      entityId: id,
+      campaignId: existing.campaignId,
+      detail: state,
+    });
     return this.withCompendiumState(row);
   }
 
