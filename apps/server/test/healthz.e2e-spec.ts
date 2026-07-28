@@ -26,6 +26,13 @@ describe('healthz (e2e)', () => {
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ ok: true, version: APP_VERSION, degraded: expect.any(Boolean) });
     expect(JSON.stringify(res.body)).not.toContain('campfire.db');
+    expect(res.body.dataRepair).toEqual(
+      expect.objectContaining({
+        degraded: expect.any(Boolean),
+        openCount: expect.any(Number),
+      }),
+    );
+    expect(res.body.dataRepair.latestRunAt === null || typeof res.body.dataRepair.latestRunAt === 'string').toBe(true);
   });
 
   // Issue #52: /healthz is liveness-only, so with a broken DB the process must

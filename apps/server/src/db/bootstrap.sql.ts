@@ -2007,6 +2007,40 @@ CREATE INDEX IF NOT EXISTS idx_campaign_export_requests_campaign
   ON campaign_export_requests(campaign_id, id);
 CREATE INDEX IF NOT EXISTS idx_campaign_export_requests_status
   ON campaign_export_requests(status, id);
+
+-- Issue #729: durable, metadata-only data repair diagnostics. These tables must
+-- live in BOOTSTRAP_SQL (always-run), not CAMPAIGN_SEARCH_FTS_SQL — fts5-less
+-- SQLite builds skip the FTS block via try/catch and would never create them,
+-- which would break /readyz and admin repair endpoints.
+CREATE TABLE IF NOT EXISTS data_repair_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT NOT NULL, started_at TEXT NOT NULL,
+  completed_at TEXT, strict_count INTEGER NOT NULL DEFAULT 0, soft_count INTEGER NOT NULL DEFAULT 0,
+  error_detail TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS data_repair_findings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, fingerprint TEXT NOT NULL UNIQUE, reference_type TEXT NOT NULL,
+  child_table TEXT NOT NULL, child_row_id INTEGER NOT NULL, child_column TEXT NOT NULL,
+  parent_table TEXT NOT NULL, parent_column TEXT NOT NULL, reference_value TEXT NOT NULL,
+  campaign_id INTEGER, first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, last_run_id INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open', resolution_action TEXT, resolved_at TEXT, version INTEGER NOT NULL DEFAULT 1,
+  detail TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS data_repair_actions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, finding_id INTEGER NOT NULL, action TEXT NOT NULL, actor TEXT NOT NULL,
+  before_value TEXT, after_value TEXT, backup_checksum TEXT, backup_path TEXT, undo_payload TEXT, status TEXT NOT NULL DEFAULT 'applied',
+  created_at TEXT NOT NULL, undone_at TEXT
+);
+CREATE TABLE IF NOT EXISTS data_repair_quarantine (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, action_id INTEGER NOT NULL, child_table TEXT NOT NULL, child_row_id INTEGER NOT NULL,
+  payload TEXT NOT NULL, created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS data_repair_previews (
+  token TEXT PRIMARY KEY, finding_id INTEGER NOT NULL, finding_version INTEGER NOT NULL, action TEXT NOT NULL,
+  replacement_parent_id INTEGER, expires_at TEXT NOT NULL, created_at TEXT NOT NULL, used_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_data_repair_runs_completed ON data_repair_runs(completed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_data_repair_findings_open ON data_repair_findings(status, last_seen_at DESC);
+CREATE INDEX IF NOT EXISTS idx_data_repair_findings_campaign ON data_repair_findings(campaign_id, status);
 ${CAMPAIGN_MODULES_DDL}`;
 
 /**

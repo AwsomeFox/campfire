@@ -3,11 +3,15 @@ import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { Public } from '../../common/decorators/public.decorator';
 import { APP_VERSION } from '../../common/build-metadata';
 import { StorageDiagnosticsService } from './storage-diagnostics.service';
+import { DataRepairService } from '../data-repair/data-repair.service';
 
 @ApiTags('health')
 @Controller()
 export class HealthController {
-  constructor(private readonly diagnostics: StorageDiagnosticsService) {}
+  constructor(
+    private readonly diagnostics: StorageDiagnosticsService,
+    private readonly repairs: DataRepairService,
+  ) {}
 
   @Public()
   @Get('healthz')
@@ -23,14 +27,27 @@ export class HealthController {
     summary: 'Readiness check',
     description:
       'Unauthenticated. Performs bounded database, rollback-only write, schema, and storage-identity checks — 503 when serving is unsafe. ' +
-      'The Docker HEALTHCHECK targets this endpoint so a broken DB marks the container unhealthy (issue #52).',
+      'Includes bounded data-repair integrity metadata when a persisted finding remains open. ' +
+      'The Docker HEALTHCHECK targets this endpoint so a broken DB marks the container unhealthy (issue #52/#724/#729).',
   })
   @ApiResponse({ status: 200, description: 'Server is up and the database answers queries.' })
   @ApiResponse({ status: 503, description: 'Database is unavailable (locked/corrupted/unmounted volume).' })
   readyz() {
     const result = this.diagnostics.readiness();
-    const body = { ok: result.ready, version: APP_VERSION, degraded: result.status === 'degraded', checks: Object.fromEntries(Object.entries(result.checks).map(([key, value]) => [key, value.code])) };
+    const body = {
+      ok: result.ready,
+      version: APP_VERSION,
+      degraded: result.status === 'degraded',
+      checks: Object.fromEntries(Object.entries(result.checks).map(([key, value]) => [key, value.code])),
+    };
     if (!result.ready) throw new ServiceUnavailableException(body);
-    return body;
+
+    let dataRepair: { degraded: boolean; openCount: number | null; latestRunAt: string | null; error?: string };
+    try {
+      dataRepair = this.repairs.publicHealth();
+    } catch {
+      dataRepair = { degraded: true, openCount: null, latestRunAt: null, error: 'unavailable' };
+    }
+    return { ...body, dataRepair };
   }
 }
