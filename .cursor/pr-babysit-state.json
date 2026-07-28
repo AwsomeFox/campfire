@@ -2,12 +2,12 @@
   "tracked": [
     {
       "pr": 1652,
-      "status": "babysitting",
+      "status": "merged",
       "url": "https://github.com/AwsomeFox/campfire/pull/1652",
       "headBranch": "fix/issue-1639",
       "baseBranch": "main",
-      "updatedAt": "2026-07-28T11:36:00Z",
-      "notes": "Tracking started on cursor/pull-request-babysitting-94a6. Head 63cf2843 already includes Codex P2 fix (assert HTTP_PROJECTED stays unexported). One outdated Codex thread remains to resolve. MERGEABLE vs main; CI run 30355271139 in progress."
+      "updatedAt": "2026-07-28T12:20:00Z",
+      "notes": "Merged via squash 57123402 by app/cursor. Codex P2 thread resolved; CI run 30355271139 green (coverage 39m)."
     }
   ]
 }
