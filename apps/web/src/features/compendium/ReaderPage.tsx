@@ -11,7 +11,7 @@ import { useTranslation } from 'react-i18next';
 import { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { api, API, translateApiError } from '../../lib/api';
-import type { RuleEntry, RulePack } from '@campfire/schema';
+import type { Character, RuleEntry, RulePack } from '@campfire/schema';
 import { Card, ErrorNote, Skeleton, Btn } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
 import { StatBlock, hasMonsterStatblock } from '../../components/StatBlock';
@@ -37,7 +37,7 @@ export default function ReaderPage() {
   const ruleSystem = useCampaign(Number.isFinite(id) ? id : undefined)?.ruleSystem ?? null;
   // Only the DM (of this campaign) may set an entry's icon override (issue #305) — the
   // PATCH is server-side gated to admin/DM too; this just hides the control for players.
-  const { isDm, canDmWrite } = useCampaignAccess();
+  const { isDm, canDmWrite, canPlayerWrite } = useCampaignAccess();
 
   const [entry, setEntry] = useState<RuleEntry | null>(null);
   const [pack, setPack] = useState<RulePack | null>(null);
@@ -46,6 +46,12 @@ export default function ReaderPage() {
   const [pickingIcon, setPickingIcon] = useState(false);
   const [savingIcon, setSavingIcon] = useState(false);
   const [iconError, setIconError] = useState<string | null>(null);
+  const [acquiring, setAcquiring] = useState(false);
+  const [acquireError, setAcquireError] = useState<string | null>(null);
+  const [owners, setOwners] = useState<Character[]>([]);
+  const [ownerId, setOwnerId] = useState('party');
+  const [qty, setQty] = useState('1');
+  const [notes, setNotes] = useState('');
 
   async function saveIcon(slug: string) {
     if (!entry) return;
@@ -87,6 +93,20 @@ export default function ReaderPage() {
       cancelled = true;
     };
   }, [entryId]);
+
+  useEffect(() => { if (acquiring) void api.get<Character[]>(`${API}/campaigns/${id}/characters`).then(setOwners).catch(() => setOwners([])); }, [acquiring, id]);
+
+  async function acquire(duplicateMode: 'confirm' | 'increment' | 'separate' = 'confirm') {
+    if (!entry) return;
+    try {
+      setAcquireError(null);
+      await api.post(`${API}/campaigns/${id}/inventory/from-compendium`, { ruleEntryId: entry.id, ownerType: ownerId === 'party' ? 'party' : 'character', characterId: ownerId === 'party' ? null : Number(ownerId), qty: Math.max(1, Number(qty) || 1), notes, duplicateMode });
+      setAcquiring(false); navigate(`/c/${id}/inventory`);
+    } catch (err) {
+      const code = err instanceof Error && 'body' in err ? (err as any).body?.code : '';
+      setAcquireError(code === 'INVENTORY_COMPENDIUM_DUPLICATE' ? 'That item is already here. Choose increment or create a separate copy.' : translateApiError(err, t, { fallbackKey: 'inventory.errors.load' }));
+    }
+  }
 
   if (!Number.isFinite(id)) {
     return (
@@ -131,6 +151,7 @@ export default function ReaderPage() {
             </span>
             <PageTitle style={{ margin: 0 }}>{entry.name}</PageTitle>
             <span className="tag tag-neutral" style={{ fontSize: 9.5 }}>{entry.type}</span>
+            {entry.type === 'item' && canPlayerWrite && <Btn className="!min-h-0 !py-1.5 text-xs" onClick={() => setAcquiring(true)}>Add to inventory</Btn>}
             {isDm && canDmWrite && (
               <span className="flex items-center gap-1.5" style={{ marginLeft: 'auto' }}>
                 <Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={savingIcon} onClick={() => setPickingIcon(true)}>
@@ -183,6 +204,15 @@ export default function ReaderPage() {
       )}
       {pickingIcon && entry && (
         <IconPicker value={entry.iconSlug} onSelect={saveIcon} onClose={() => setPickingIcon(false)} />
+      )}
+      {acquiring && entry && (
+        <div className="modal-backdrop"><Card className="max-w-md w-full space-y-3"><h2>Add {entry.name} to inventory</h2>
+          <label>Owner <select value={ownerId} onChange={(e) => setOwnerId(e.target.value)}><option value="party">Party stash</option>{owners.map((owner) => <option key={owner.id} value={owner.id}>{owner.name}</option>)}</select></label>
+          <label>Quantity <input value={qty} type="number" min="1" onChange={(e) => setQty(e.target.value)} /></label>
+          <label>Notes <textarea value={notes} onChange={(e) => setNotes(e.target.value)} /></label>
+          {acquireError && <ErrorNote message={acquireError} />}
+          <div className="flex gap-2"><Btn onClick={() => void acquire()}>Add</Btn>{acquireError?.startsWith('That item') && <><Btn ghost onClick={() => void acquire('increment')}>Increment existing</Btn><Btn ghost onClick={() => void acquire('separate')}>Create separate</Btn></>}<Btn ghost onClick={() => setAcquiring(false)}>Cancel</Btn></div>
+        </Card></div>
       )}
     </div>
   );

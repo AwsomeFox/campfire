@@ -1,10 +1,11 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, count, desc, eq, isNotNull, isNull, lt, sql } from 'drizzle-orm';
 import type { z } from 'zod';
-import { InventoryItemCreate, InventoryItemUpdate, TreasuryPatch } from '@campfire/schema';
-import type { InventoryItem, Treasury, Role } from '@campfire/schema';
+import { InventoryFromCompendium, InventoryItemCreate, InventoryItemUpdate, TreasuryPatch } from '@campfire/schema';
+import type { InventoryItem, Treasury, Role, CompendiumRef, CompendiumSnapshot } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { inventoryItems, inventoryQtyIdempotency, partyTreasury, characters } from '../../db/schema';
+import { inventoryItems, inventoryQtyIdempotency, partyTreasury, characters, ruleEntries, rulePacks } from '../../db/schema';
+import { buildCompendiumRef, buildCompendiumSnapshot, computeRuleEntryContentHash, parseCompendiumRef } from '../campaigns/compendium-import';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { AuditService } from '../audit/audit.service';
@@ -14,6 +15,7 @@ import type { RequestUser } from '../../common/user.types';
 
 type InventoryItemCreateInput = z.infer<typeof InventoryItemCreate>;
 type InventoryItemUpdateInput = z.infer<typeof InventoryItemUpdate>;
+type InventoryFromCompendiumInput = z.infer<typeof InventoryFromCompendium>;
 type TreasuryPatchInput = z.infer<typeof TreasuryPatch>;
 
 type CoinKey = 'cp' | 'sp' | 'ep' | 'gp' | 'pp';
@@ -47,6 +49,8 @@ function qtyFingerprint(input: InventoryItemUpdateInput): string {
 }
 
 function toDomain(row: typeof inventoryItems.$inferSelect): InventoryItem {
+  const ref = parseCompendiumRef(row.compendiumRef ? safeJson(row.compendiumRef) : null);
+  const snapshot = row.compendiumSnapshot ? safeJson(row.compendiumSnapshot) as CompendiumSnapshot : null;
   return {
     id: row.id,
     campaignId: row.campaignId,
@@ -56,12 +60,18 @@ function toDomain(row: typeof inventoryItems.$inferSelect): InventoryItem {
     qty: row.qty,
     notes: row.notes,
     iconSlug: row.iconSlug,
+    ruleEntryId: row.ruleEntryId ?? null,
+    compendiumRef: ref,
+    compendiumSnapshot: snapshot,
+    compendiumState: (row.compendiumState as InventoryItem['compendiumState']) ?? null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     deletedAt: row.deletedAt ?? null,
     deletedBy: row.deletedBy ?? null,
   };
 }
+
+function safeJson(value: string): unknown { try { return JSON.parse(value); } catch { return null; } }
 
 function treasuryToDomain(row: typeof partyTreasury.$inferSelect): Treasury {
   return {
@@ -90,7 +100,7 @@ export class InventoryService {
       .select()
       .from(inventoryItems)
       .where(and(eq(inventoryItems.campaignId, campaignId), notDeleted(inventoryItems.deletedAt)));
-    return rows.map(toDomain);
+    return Promise.all(rows.map((row) => this.withCompendiumState(row)));
   }
 
   /**
@@ -128,7 +138,16 @@ export class InventoryService {
   }
 
   async getOrThrow(id: number): Promise<InventoryItem> {
-    return toDomain(await this.getRowOrThrow(id));
+    return this.withCompendiumState(await this.getRowOrThrow(id));
+  }
+
+  /** Compute volatile linked_updated without mutating snapshots or player-owned fields. */
+  private async withCompendiumState(row: typeof inventoryItems.$inferSelect): Promise<InventoryItem> {
+    const item = toDomain(row);
+    if (!item.compendiumRef || item.compendiumState !== 'linked' || item.ruleEntryId == null) return item;
+    const [entry] = await this.db.select().from(ruleEntries).where(eq(ruleEntries.id, item.ruleEntryId)).limit(1);
+    if (!entry || computeRuleEntryContentHash(entry) !== item.compendiumRef.contentHash) item.compendiumState = 'linked_updated';
+    return item;
   }
 
   /**
@@ -205,6 +224,49 @@ export class InventoryService {
       entityId: row.id,
       campaignId,
     });
+    return toDomain(row);
+  }
+
+  async acquireFromCompendium(campaignId: number, input: InventoryFromCompendiumInput, user: RequestUser, role: Role): Promise<InventoryItem> {
+    const ownerType = input.ownerType ?? 'party';
+    const characterId = input.characterId ?? null;
+    await this.assertCanWriteOwner(ownerType, characterId, campaignId, user, role);
+    const [entry] = await this.db.select().from(ruleEntries).where(eq(ruleEntries.id, input.ruleEntryId)).limit(1);
+    if (!entry || entry.type !== 'item') throw new BadRequestException('ruleEntryId must identify an installed item entry');
+    const [pack] = await this.db.select().from(rulePacks).where(eq(rulePacks.id, entry.packId)).limit(1);
+    if (!pack) throw new NotFoundException('The rule entry pack is not installed');
+    const ref = buildCompendiumRef(entry, pack);
+    const snapshot = buildCompendiumSnapshot(entry);
+    const existing = await this.db.select().from(inventoryItems).where(and(eq(inventoryItems.campaignId, campaignId), eq(inventoryItems.ownerType, ownerType), characterId == null ? isNull(inventoryItems.characterId) : eq(inventoryItems.characterId, characterId), eq(inventoryItems.compendiumRef, JSON.stringify(ref)), isNull(inventoryItems.deletedAt))).limit(1);
+    if (existing[0] && input.duplicateMode === 'confirm') {
+      throw new ConflictException({ code: 'INVENTORY_COMPENDIUM_DUPLICATE', existing: await this.withCompendiumState(existing[0]) });
+    }
+    const ts = nowIso();
+    let row: typeof inventoryItems.$inferSelect;
+    if (existing[0] && input.duplicateMode === 'increment') {
+      const [updated] = await this.db.update(inventoryItems).set({ qty: sql`${inventoryItems.qty} + ${input.qty}`, notes: input.notes ? sql`CASE WHEN ${inventoryItems.notes} = '' THEN ${input.notes} ELSE ${inventoryItems.notes} END` : undefined, updatedAt: ts }).where(eq(inventoryItems.id, existing[0].id)).returning();
+      row = updated;
+    } else {
+      [row] = await this.db.insert(inventoryItems).values({ campaignId, ownerType, characterId, name: entry.name, qty: input.qty, notes: input.notes, iconSlug: entry.iconSlug ?? '', ruleEntryId: entry.id, compendiumRef: JSON.stringify(ref), compendiumSnapshot: JSON.stringify(snapshot), compendiumState: 'linked', createdAt: ts, updatedAt: ts }).returning();
+    }
+    await this.audit.log({ actor: auditActor(user), actorRole: role, action: 'item.acquire_compendium', entityType: 'inventory_item', entityId: row.id, campaignId });
+    return this.withCompendiumState(row);
+  }
+
+  async refreshCompendium(id: number, user: RequestUser, role: Role): Promise<InventoryItem> {
+    const existing = await this.getRowOrThrow(id); await this.assertCanWriteOwner(existing.ownerType as 'party' | 'character', existing.characterId, existing.campaignId, user, role);
+    if (!existing.ruleEntryId) throw new BadRequestException('This item is detached from the compendium');
+    const [entry] = await this.db.select().from(ruleEntries).where(eq(ruleEntries.id, existing.ruleEntryId)).limit(1);
+    if (!entry || entry.type !== 'item') throw new NotFoundException('The linked source item is unavailable');
+    const [pack] = await this.db.select().from(rulePacks).where(eq(rulePacks.id, entry.packId)).limit(1); if (!pack) throw new NotFoundException('The linked source pack is unavailable');
+    const [row] = await this.db.update(inventoryItems).set({ compendiumRef: JSON.stringify(buildCompendiumRef(entry, pack)), compendiumSnapshot: JSON.stringify(buildCompendiumSnapshot(entry)), compendiumState: 'linked', updatedAt: nowIso() }).where(eq(inventoryItems.id, id)).returning();
+    return this.withCompendiumState(row);
+  }
+
+  async setCompendiumState(id: number, state: 'overridden' | 'detached', user: RequestUser, role: Role): Promise<InventoryItem> {
+    const existing = await this.getRowOrThrow(id); await this.assertCanWriteOwner(existing.ownerType as 'party' | 'character', existing.characterId, existing.campaignId, user, role);
+    if (!existing.compendiumSnapshot) throw new BadRequestException('This item has no compendium snapshot');
+    const [row] = await this.db.update(inventoryItems).set({ compendiumState: state, ruleEntryId: state === 'detached' ? null : existing.ruleEntryId, updatedAt: nowIso() }).where(eq(inventoryItems.id, id)).returning();
     return toDomain(row);
   }
 

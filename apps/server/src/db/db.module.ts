@@ -1438,6 +1438,17 @@ function migrateInventoryItemsTableForSoftDelete(sqlite: Database.Database): voi
   }
 }
 
+/** Issue #738: portable compendium item provenance; additive so installed alpha DBs upgrade in place. */
+function migrateInventoryItemsCompendium738(sqlite: Database.Database): void {
+  const table = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='inventory_items'").get();
+  if (!table) return;
+  const columns = sqlite.prepare('PRAGMA table_info(inventory_items)').all() as Array<{ name: string }>;
+  const additions: Array<[string, string]> = [
+    ['rule_entry_id', 'INTEGER'], ['compendium_ref', 'TEXT'], ['compendium_snapshot', 'TEXT'], ['compendium_state', 'TEXT'],
+  ];
+  for (const [name, type] of additions) if (!columns.some((column) => column.name === name)) sqlite.exec(`ALTER TABLE inventory_items ADD COLUMN ${name} ${type}`);
+}
+
 /**
  * Migration for DBs created before the AI-DM operating mode (issue #311): the
  * `ai_dm_seats.mode` column didn't exist. Plain NOT NULL DEFAULT 'off' ADD COLUMN —
@@ -4201,6 +4212,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0092_dice_rolls_manual_provenance', run: migrateDiceRollsTableForManualProvenance },
   { name: '0093_proposals_base_snapshot', run: migrateProposalsTableForBaseSnapshot },
   { name: '0094_inventory_items_soft_delete', run: migrateInventoryItemsTableForSoftDelete },
+  { name: '0137_inventory_compendium_738', run: migrateInventoryItemsCompendium738 },
   { name: '0095_campaign_catch_up_cursors', run: migrateCampaignCatchUpCursorsTable },
   { name: '0096_encounter_events_provenance', run: migrateEncounterEventsTableForProvenance },
   { name: '0097_npcs_portrait_url', run: migrateNpcsTableForPortraitUrl },

@@ -9854,6 +9854,11 @@ export const InventoryItem = z.object({
   // default icon. '' means "no override" — the UI falls back to a name/type
   // heuristic. Same bundled icon library as NPCs (#302); see apps/web/src/lib/icons.
   iconSlug: z.string().max(80).default(''),
+  /** Stable compendium provenance.  Numeric ruleEntryId is only a local cache. */
+  ruleEntryId: Id.nullable().default(null),
+  compendiumRef: CompendiumRef.nullable().default(null),
+  compendiumSnapshot: CompendiumSnapshot.nullable().default(null),
+  compendiumState: z.enum(['linked', 'linked_updated', 'overridden', 'detached']).nullable().default(null),
   ...timestamps,
   // Soft-delete tombstone (issue #551). NULL on live items; ISO timestamp + actor
   // id when the item is in the campaign trash. Not user-writable via create/update.
@@ -9869,6 +9874,18 @@ export const InventoryItemCreate = InventoryItem.omit({
   deletedAt: true,
   deletedBy: true,
 }).partial().required({ name: true });
+
+/** Acquire a play-safe snapshot of an installed compendium item. */
+export const InventoryFromCompendium = z.object({
+  ruleEntryId: Id,
+  ownerType: ItemOwnerType.default('party'),
+  characterId: Id.nullable().optional(),
+  qty: z.number().int().min(1).max(999_999).default(1),
+  notes: z.string().max(5_000).default(''),
+  duplicateMode: z.enum(['confirm', 'increment', 'separate']).default('confirm'),
+  idempotencyKey: z.string().min(1).max(128).optional(),
+});
+export type InventoryFromCompendium = z.infer<typeof InventoryFromCompendium>;
 // Issue #782: quantity writes are either an atomic relative `qtyDelta` (preferred for
 // +/-; requires a per-action `idempotencyKey` so retries never double-apply) or an
 // absolute `qty` reconciliation that MUST carry `expectedUpdatedAt` (CAS) so a stale
