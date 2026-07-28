@@ -325,6 +325,13 @@ textarea.input { min-height: 90px; line-height: 1.45; resize: vertical; }
 .seg-opt {
   display: inline-flex; align-items: center; gap: 6px;
   padding: 7px 12px; font-size: var(--type-control); line-height: 1.2; cursor: pointer;
+  /* .seg-opt sits outside the cf-density ramp (issue #1693) — it carries its
+     own hardcoded geometry rather than composing .cf-btn, so nothing in the
+     ramp's 24px WCAG 2.2 SC 2.5.8 floor (#1683) reaches it. Pin a floor here
+     directly; callers that shrink the padding (e.g. RsvpChooser's compact
+     variant) must not zero this out with !min-h-0 — see the drift-pattern
+     tripwire in design-system-density.unit.spec.ts. */
+  min-height: 24px;
 }
 /* On a narrow rail (e.g. an NPC's Notes panel at ~1280px) a 4-option segmented
    control can't fit on one row; without wrapping the last option ('🤫 Whisper')

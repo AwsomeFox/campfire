@@ -70,7 +70,7 @@ export function RsvpChooser({ value, onChange, disabled = false, ...rest }: Rsvp
             disabled={disabled}
             onClick={() => onChange(opt.status)}
             onKeyDown={(e) => onKeyDown(e, opt)}
-            className="seg-opt cf-schedule-rsvp-opt !min-h-0 !py-1 !px-2.5 text-xs"
+            className="seg-opt cf-schedule-rsvp-opt !py-1 !px-2.5 text-xs"
             style={
               checked
                 ? { color: 'var(--color-accent)', boxShadow: 'inset 0 0 0 1px var(--color-accent)' }
