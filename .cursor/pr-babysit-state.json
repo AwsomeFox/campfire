@@ -6,8 +6,8 @@
       "url": "https://github.com/AwsomeFox/campfire/pull/1622",
       "headBranch": "fix/issue-735",
       "baseBranch": "main",
-      "updatedAt": "2026-07-28T02:43:02Z",
-      "notes": "Added to tracked. MERGEABLE; up to date with main. No review comments yet. Waiting on required CI (run 30323864538)."
+      "updatedAt": "2026-07-28T02:53:00Z",
+      "notes": "Addressed Devin+Copilot review threads in a0fcf4f8 (409 editor refresh, toDomain cast, .get(), AttachmentSourceUrl trim). All 5 threads resolved. Waiting on CI for new head."
     }
   ]
 }
