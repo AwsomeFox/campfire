@@ -25,6 +25,94 @@
         "label": "Lifecycle",
         "description": "Archive, resume, or move this campaign to the Trash."
       }
+    },
+    "aiDm": {
+      "title": "AI Dungeon Master",
+      "loading": "Loading AI DM settings…",
+      "saved": "Saved.",
+      "statusTag": "AI is currently: {{mode}}",
+      "intro": "Experimental. A server admin must enable server-side AI and set the provider + API key in the AI console for any of this to take effect; until then, saving here returns a clear \"disabled\" message. This page carries only the settings that vary per table — mode, budget, and steering.",
+      "inheritedNotice": "Using the server-wide defaults for <0>{{fields}}</0>. This campaign hasn't been configured yet, so it follows the server default and moves when an admin changes it. Saving any setting below keeps the current values and stops following.",
+      "modeStatusLabels": {
+        "off": "Off",
+        "co_dm": "Co-DM",
+        "driver": "Driver"
+      },
+      "inheritedFieldLabels": {
+        "mode": "operating mode",
+        "instructions": "steering",
+        "tokenBudget": "token budget",
+        "actionQueueDepth": "action queue depth"
+      },
+      "modeOptions": {
+        "off": {
+          "label": "Off",
+          "blurb": "No AI participation. The seat is idle — nothing is proposed or narrated."
+        },
+        "co_dm": {
+          "label": "Co-DM (assist)",
+          "blurb": "Asks. The AI only proposes — every draft lands in your approval queue, and nothing changes until a human DM accepts or rejects it. The AI never writes to canon directly. Recommended."
+        },
+        "driver": {
+          "label": "Driver",
+          "blurb": "Acts. The AI holds the DM seat and runs the session directly — it narrates, rolls dice, applies HP and conditions, awards XP, advances turns, creates an encounter when the scene calls for one (always as DM-only prep, hidden until you reveal it), reveals map regions, and jots table notes within the budget you set. Canon edits (new NPCs, quests, locations) still become proposals for your review. Requires the experimental server flag, a positive token budget, and a configured provider."
+        }
+      },
+      "errors": {
+        "load": "Couldn't load AI DM settings.",
+        "saveMode": "Couldn't change the mode.",
+        "saveNarrationLanguage": "Couldn't save narration language.",
+        "saveBudget": "Couldn't save the budget.",
+        "saveInstructions": "Couldn't save the instructions.",
+        "saveTableStyle": "Could not save table style.",
+        "invalidBudget": "Enter a non-negative number."
+      },
+      "narrationLanguage": {
+        "sectionTitle": "Narration language",
+        "body": "Governs AI-generated narration from the Driver, co-DM drafts, and Scribe recaps. This is separate from your personal UI language in Preferences.",
+        "label": "Campaign narration language",
+        "save": "Save language"
+      },
+      "mode": {
+        "sectionTitle": "Operating mode"
+      },
+      "provider": {
+        "sectionTitle": "AI provider",
+        "sourceCampaign": "campaign override",
+        "sourceServer": "server default",
+        "readyTag": "credential ready",
+        "missingTag": "credential missing",
+        "readyDetail": "Credential source: {{source}}. {{scopeNote}}",
+        "scopeNoteCampaign": "This campaign overrides the server default below.",
+        "scopeNoteServer": "Inherited from the server default set by your server admin.",
+        "missingDetail": "The provider settings exist, but no usable credential is available. Ask the server admin to set a key or environment credential.",
+        "noneConfigured": "No AI provider configured — ask your server admin to set one in the AI console. You can also set a campaign-specific override below.",
+        "advancedToggle": "Advanced: override provider for this campaign",
+        "advancedIntro": "Optional. Most campaigns leave this blank and use the server default. Set a provider here to override it for this table only (a key is optional — a keyless override still uses the server key with the server's endpoint)."
+      },
+      "budget": {
+        "sectionTitle": "Budget & usage",
+        "body": "A hard token cap. Turns stop once it's reached — a positive budget is required to run Driver mode.",
+        "label": "Token budget",
+        "save": "Save budget",
+        "usageLine": "{{used}} used · {{reserved}} reserved · {{unknown}} unknown · {{remaining}} / {{budget}} remaining · {{turns}}",
+        "turnsOne": "1 turn",
+        "turnsSome": "{{n}} turns",
+        "lastTurnSuffix": " · last {{when}}",
+        "refundedLine": "{{refunded}} refunded",
+        "overageSuffix": " · {{overage}} overage recorded"
+      },
+      "instructions": {
+        "sectionTitle": "Steering instructions",
+        "body": "DM-only persona / house rules for the AI. Never shown to players — this is where plot secrets can live.",
+        "placeholder": "e.g. Be terse and grim. Never reveal the traitor's identity until Act 3.",
+        "save": "Save instructions"
+      },
+      "tableStyle": {
+        "sectionTitle": "Table style",
+        "body": "Asks the AI to narrate a certain way. Each choice adds a line of guidance to its prompt — it steers voice and pacing, it does not change what is true, and a model can ignore it. Leave an axis on Default to say nothing about it.",
+        "save": "Save table style"
+      }
     }
   }
 }
