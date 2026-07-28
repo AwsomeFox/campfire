@@ -36,6 +36,7 @@ import {
   parseCompendiumTypeParam,
   type CompendiumUrlType,
 } from './compendiumA11y';
+import { serializeHomebrewEditor } from './homebrewEditor';
 
 type TypeChip = { key: CompendiumUrlType; label: string; count?: number };
 
@@ -332,17 +333,8 @@ export default function CompendiumPage() {
 
   async function saveHomebrew() {
     setAuthorError(null);
-    let data: Record<string, unknown> | undefined;
-    try { data = JSON.parse(draft.dataJson); if (!data || Array.isArray(data) || typeof data !== 'object') throw new Error(); }
-    catch { setAuthorError('Raw data must be a JSON object.'); return; }
-    const structured: Record<string, unknown> = Object.fromEntries(Object.entries(structuredData).filter(([, value]) => value.trim() !== ''));
-    for (const field of ['level', 'ac', 'hp', 'cr', 'weight', 'value']) {
-      if (typeof structured[field] === 'string') { const value = Number(structured[field]); if (!Number.isFinite(value)) { setAuthorError(`${field} must be a number.`); return; } structured[field] = value; }
-    }
-    for (const field of ['abilities', 'actions']) {
-      if (typeof structured[field] === 'string' && structured[field]) { try { structured[field] = JSON.parse(structured[field] as string); } catch { setAuthorError(`${field} must be valid JSON.`); return; } }
-    }
-    const payload = { ...draft, data: rawMode ? undefined : structured, dataJson: rawMode ? draft.dataJson : undefined };
+    const serialized = serializeHomebrewEditor(draft, structuredData, rawMode); if (!serialized.ok) { setAuthorError(serialized.error); return; }
+    const payload = serialized.value;
     try {
       const proposed = !isDm;
       await api.post(`${API}/campaigns/${id}/homebrew${proposed ? '?proposed=true' : ''}`, payload);
