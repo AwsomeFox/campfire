@@ -6,8 +6,8 @@
       "url": "https://github.com/AwsomeFox/campfire/pull/1655",
       "headBranch": "fix/issue-742",
       "baseBranch": "main",
-      "updatedAt": "2026-07-28T14:41:10Z",
-      "notes": "Head 9b7a7385: SQL projection+visibility filters for search (Devin perf). Thread resolved. Waiting CI."
+      "updatedAt": "2026-07-28T14:57:32Z",
+      "notes": "Resolved main conflict: library migration \u2192 0141. Head after merge; awaiting CI. No unresolved threads."
     }
   ]
 }
