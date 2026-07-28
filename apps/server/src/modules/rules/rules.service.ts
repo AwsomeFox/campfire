@@ -197,10 +197,10 @@ function packToDomain(row: typeof rulePacks.$inferSelect): RulePack {
   };
 }
 
-// Keep this projection tolerant of pre-#741 fixture rows: production selects always
-// include campaign/provenance columns, but importer tests intentionally use legacy rows.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function entryToDomain(row: any): RuleEntry {
+// Projection accepts legacy global fixtures while retaining a checked shape for every
+// field this API emits; campaign-only columns remain optional on pre-migration rows.
+type EntryProjection = Pick<typeof ruleEntries.$inferSelect, 'id' | 'packId' | 'slug' | 'name' | 'type' | 'summary' | 'body' | 'dataJson' | 'source' | 'license' | 'attribution' | 'author' | 'sourceUrl' | 'iconSlug' | 'createdAt' | 'updatedAt'> & Partial<Pick<typeof ruleEntries.$inferSelect, 'campaignId' | 'rightsStatus' | 'archivedAt'>>;
+function entryToDomain(row: EntryProjection): RuleEntry {
   return {
     id: row.id,
     packId: row.packId,
@@ -219,7 +219,7 @@ function entryToDomain(row: any): RuleEntry {
     sourceUrl: row.sourceUrl ?? '',
     iconSlug: row.iconSlug ?? '',
     campaignId: row.campaignId,
-    rightsStatus: row.rightsStatus as RuleEntry['rightsStatus'],
+    rightsStatus: (row.rightsStatus === 'private_original' || row.rightsStatus === 'permission_granted' || row.rightsStatus === 'open_licensed' ? row.rightsStatus : 'open_licensed'),
     archivedAt: row.archivedAt,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -1194,7 +1194,7 @@ export class RulesService implements OnModuleInit {
 
   async getPackOrThrow(id: number) {
     const [row] = await this.db.select().from(rulePacks).where(eq(rulePacks.id, id)).limit(1);
-    if (!row) throw new NotFoundException(`Rule pack ${id} not found`);
+    if (!row || row.slug === '__campaign_homebrew_internal__') throw new NotFoundException(`Rule pack ${id} not found`);
     return row;
   }
 
