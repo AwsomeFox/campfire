@@ -6,8 +6,9 @@
       "url": "https://github.com/AwsomeFox/campfire/pull/1655",
       "headBranch": "fix/issue-742",
       "baseBranch": "main",
-      "updatedAt": "2026-07-28T12:55:00Z",
-      "notes": "Head b7837904: main merge (0140 migration, 249 MCP tools) + prior review fixes. MERGEABLE; no unresolved threads. Awaiting CI green to merge."
+      "updatedAt": "2026-07-28T12:30:00Z",
+      "notes": "Head b7837904: main merge (0140 migration, 249 MCP tools) + prior review fixes. MERGEABLE; no unresolved threads. Awaiting CI green to merge.",
+      "note": "Coverage CI failing on missing @ApiOperation; fix pushed (ApiOperation on taxonomy+search handlers). Waiting for CI re-run."
     }
   ]
 }
