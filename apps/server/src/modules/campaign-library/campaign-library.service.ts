@@ -28,6 +28,7 @@ import type { RequestUser } from '../../common/user.types';
 
 type LibraryTransaction = Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
 type TemplateRef = { key: string; table: string; attachmentCommitted?: boolean };
+const SOFT_DELETABLE_TEMPLATE_TABLES = new Set(['characters', 'quests', 'npcs', 'locations', 'factions', 'sessions', 'encounters', 'timeline_events', 'inventory_items']);
 
 function isUniqueConstraintError(err: unknown): boolean {
   const code = (err as { code?: string } | undefined)?.code;
@@ -282,7 +283,8 @@ export class CampaignLibraryService {
       if (locationPromotion && locationCurrentTargets[0]) {
         tx.update(campaigns).set({ currentLocationId: locationCurrentTargets[0].entityId, updatedAt: ts }).where(eq(campaigns.id, campaignId)).run();
       }
-      const journal = { kind: 'field' as const, snapshots, ...(locationPromotion ? { locationPromotion } : {}) };
+      const afterVersions = request.targets.map((target) => ({ entityType: target.entityType, entityId: target.entityId, updatedAt: ts }));
+      const journal = { kind: 'field' as const, snapshots, afterVersions, ...(locationPromotion ? { locationPromotion } : {}) };
       const inserted = tx.insert(campaignLibraryBulkOperations).values({ campaignId, actor: auditActor(user), operation: request.operation, beforeJson: toJsonText(journal), afterJson: toJsonText(request), inverseJson: toJsonText(journal), createdAt: ts }).returning({ id: campaignLibraryBulkOperations.id }).get();
       tx.insert(auditLog).values({ campaignId, actor: auditActor(user), actorRole: role, action: 'campaign_library.bulk', entityType: 'campaign_library_bulk_operation', entityId: inserted.id, detail: request.operation, requestId: getRequestId() ?? null, createdAt: ts }).run();
       return inserted.id;
@@ -303,6 +305,7 @@ export class CampaignLibraryService {
         const FieldJournal = z.object({
           kind: z.literal('field'),
           snapshots: z.array(z.object({ entityType: z.string(), entityId: z.number().int(), value: z.unknown() }).strict()),
+          afterVersions: z.array(z.object({ entityType: z.string(), entityId: z.number().int(), updatedAt: z.string() }).strict()).optional(),
           locationPromotion: z.object({
             previousCurrentLocationId: z.number().int().nullable(),
             demoted: z.array(z.object({ entityId: z.number().int(), previousStatus: z.string() }).strict()),
@@ -310,6 +313,10 @@ export class CampaignLibraryService {
         }).strict();
         const journal = FieldJournal.parse(JSON.parse(operation.beforeJson));
         const table = (type: string) => ({ quest: 'quests', npc: 'npcs', location: 'locations', faction: 'factions', encounter: 'encounters', timeline_event: 'timeline_events', inventory_item: 'inventory_items', attachment: 'attachments' } as Record<string, string>)[type];
+        const versionFence = (row: { entityType: string; entityId: number }) => {
+          const version = journal.afterVersions?.find((entry) => entry.entityType === row.entityType && entry.entityId === row.entityId)?.updatedAt;
+          return version == null ? sql`` : sql` and updated_at=${version}`;
+        };
         for (const row of journal.snapshots) {
           const name = table(row.entityType);
           const value = z.record(z.string(), z.unknown()).parse(row.value);
@@ -317,22 +324,22 @@ export class CampaignLibraryService {
             const before = z.object({ value: z.union([z.string(), z.number()]) }).parse(value).value;
             const after = row.entityType === 'location' ? (request.visibility === 'hidden' ? 'unexplored' : before === 'unexplored' ? 'explored' : before) : request.visibility === 'hidden' ? 1 : 0;
             const field = row.entityType === 'location' ? 'status' : 'hidden';
-            if (!tx.get(sql`select id from ${sql.raw(name)} where id=${row.entityId} and campaign_id=${campaignId} and ${sql.raw(field)}=${after}`)) throw new ConflictException('A target changed after this bulk operation; undo would overwrite it');
+            if (!tx.get(sql`select id from ${sql.raw(name)} where id=${row.entityId} and campaign_id=${campaignId} and ${sql.raw(field)}=${after}${versionFence(row)}`)) throw new ConflictException('A target changed after this bulk operation; undo would overwrite it');
             tx.run(sql`update ${sql.raw(name)} set ${sql.raw(field)}=${before}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`);
           }
           else if (request.operation === 'set_status') {
             const scalar = z.object({ value: z.string() }).parse(value);
             const field = row.entityType === 'npc' ? 'disposition' : row.entityType === 'faction' ? 'standing' : 'status';
-            if (!tx.get(sql`select id from ${sql.raw(name)} where id=${row.entityId} and campaign_id=${campaignId} and ${sql.raw(field)}=${request.status}`)) throw new ConflictException('A target changed after this bulk operation; undo would overwrite it');
+            if (!tx.get(sql`select id from ${sql.raw(name)} where id=${row.entityId} and campaign_id=${campaignId} and ${sql.raw(field)}=${request.status}${versionFence(row)}`)) throw new ConflictException('A target changed after this bulk operation; undo would overwrite it');
             tx.run(sql`update ${sql.raw(name)} set ${sql.raw(field)}=${scalar.value}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`);
           } else if (request.operation === 'move_inventory_owner') {
             const before = z.object({ ownerType: z.string(), characterId: z.number().int().nullable() }).parse(value);
-            if (!tx.get(sql`select id from inventory_items where id=${row.entityId} and campaign_id=${campaignId} and owner_type=${request.ownerType} and character_id is ${request.characterId ?? null}`)) throw new ConflictException('A target changed after this bulk operation; undo would overwrite it');
+            if (!tx.get(sql`select id from inventory_items where id=${row.entityId} and campaign_id=${campaignId} and owner_type=${request.ownerType} and character_id is ${request.characterId ?? null}${versionFence(row)}`)) throw new ConflictException('A target changed after this bulk operation; undo would overwrite it');
             tx.run(sql`update inventory_items set owner_type=${before.ownerType}, character_id=${before.characterId}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`);
           } else {
             const scalar = z.object({ value: z.string().nullable() }).parse(value);
             const after = request.operation === 'archive' ? operation.createdAt : null;
-            if (!tx.get(sql`select id from ${sql.raw(name)} where id=${row.entityId} and campaign_id=${campaignId} and deleted_at is ${after}`)) throw new ConflictException('A target changed after this bulk operation; undo would overwrite it');
+            if (!tx.get(sql`select id from ${sql.raw(name)} where id=${row.entityId} and campaign_id=${campaignId} and deleted_at is ${after}${versionFence(row)}`)) throw new ConflictException('A target changed after this bulk operation; undo would overwrite it');
             tx.run(sql`update ${sql.raw(name)} set deleted_at=${scalar.value}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`);
           }
         }
@@ -588,6 +595,12 @@ export class CampaignLibraryService {
     return this.templateAdapters[type];
   }
 
+  private templateSource(tx: LibraryTransaction, table: string, entityId: number, campaignId: number) {
+    return SOFT_DELETABLE_TEMPLATE_TABLES.has(table)
+      ? tx.get(sql`select * from ${sql.raw(table)} where id=${entityId} and campaign_id=${campaignId} and deleted_at is null`) as Record<string, unknown> | undefined
+      : tx.get(sql`select * from ${sql.raw(table)} where id=${entityId} and campaign_id=${campaignId}`) as Record<string, unknown> | undefined;
+  }
+
   private assertTemplateRefs(tx: LibraryTransaction, campaignId: number, adapter: { refs: Record<string, TemplateRef> }, snapshot: Record<string, unknown>) {
     for (const [field, ref] of Object.entries(adapter.refs)) {
       const value = snapshot[field];
@@ -599,7 +612,9 @@ export class CampaignLibraryService {
         ? tx.get(sql`select id from rule_entries where id=${value as number}`)
         : ref.attachmentCommitted
           ? tx.get(sql`select id from attachments where id=${value as number} and campaign_id=${campaignId} and state='committed'`)
-          : tx.get(sql`select id from ${sql.raw(ref.table)} where id=${value as number} and campaign_id=${campaignId}`);
+          : SOFT_DELETABLE_TEMPLATE_TABLES.has(ref.table)
+            ? tx.get(sql`select id from ${sql.raw(ref.table)} where id=${value as number} and campaign_id=${campaignId} and deleted_at is null`)
+            : tx.get(sql`select id from ${sql.raw(ref.table)} where id=${value as number} and campaign_id=${campaignId}`);
       if (!valid) {
         throw new BadRequestException(`${ref.key} must reference a valid entity in this campaign`);
       }
@@ -618,6 +633,7 @@ export class CampaignLibraryService {
     // `current` is campaign play-state, not template content. Reset it so copies
     // cannot violate LocationsService.discover's single-current invariant.
     if (type === 'location' && values.status === 'current') values.status = 'explored';
+    if (type === 'inventory_item') this.assertInventoryOwner(values);
     this.assertTemplateRefs(tx, campaignId, adapter, values);
     const ts = nowIso();
     const fields = ['campaign_id', ...adapter.fields, 'created_at', 'updated_at'];
@@ -625,6 +641,20 @@ export class CampaignLibraryService {
     const row = tx.get(sql`insert into ${sql.raw(adapter.table)} (${sql.join(fields.map((field) => sql.raw(field)), sql`, `)}) values (${sql.join(args.map((value) => sql`${value}`), sql`, `)}) returning id`);
     if (!row) throw new BadRequestException('Template instantiation failed');
     return (row as { id: number }).id;
+  }
+
+  private assertInventoryOwner(values: Record<string, unknown>) {
+    const ownerType = values.owner_type;
+    const characterId = values.character_id;
+    if (ownerType === 'party') {
+      if (characterId != null) throw new BadRequestException('Party-owned inventory templates cannot set a characterId.');
+      return;
+    }
+    if (ownerType === 'character') {
+      if (!Number.isInteger(characterId)) throw new BadRequestException('Character-owned inventory templates require a characterId.');
+      return;
+    }
+    throw new BadRequestException('Inventory templates must be party-owned or character-owned.');
   }
 
   async listTemplates(campaignId: number, includeArchived = false): Promise<Array<z.infer<typeof CampaignLibraryTemplate>>> {
@@ -637,7 +667,7 @@ export class CampaignLibraryService {
     const adapter = this.adapter(input.entityType);
     const ts = nowIso();
     const result = this.db.transaction((tx) => {
-      const source = tx.get(sql`select * from ${sql.raw(adapter.table)} where id=${input.entityId} and campaign_id=${campaignId}`) as Record<string, unknown> | undefined;
+      const source = this.templateSource(tx, adapter.table, input.entityId, campaignId);
       if (!source) throw new NotFoundException(`${input.entityType} ${input.entityId} not found in this campaign`);
       const snapshot = Object.fromEntries(adapter.fields.map((field) => [field, source[field]]));
       if (input.entityType === 'location' && snapshot.status === 'current') snapshot.status = 'explored';
@@ -669,7 +699,7 @@ export class CampaignLibraryService {
     const adapter = this.adapter(type);
     const ts = nowIso();
     return this.db.transaction((tx) => {
-      const source = tx.get(sql`select * from ${sql.raw(adapter.table)} where id=${entityId} and campaign_id=${campaignId}`) as Record<string, unknown> | undefined;
+      const source = this.templateSource(tx, adapter.table, entityId, campaignId);
       if (!source) throw new NotFoundException(`${type} ${entityId} not found in this campaign`);
       const snapshot = Object.fromEntries(adapter.fields.map((field) => [field, source[field]]));
       const id = this.createFromSnapshot(tx, campaignId, type as Exclude<LibraryEntityType, 'attachment'>, snapshot, input.name, input.refs);
