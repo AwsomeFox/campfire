@@ -36,7 +36,7 @@ import {
   parseCompendiumTypeParam,
   type CompendiumUrlType,
 } from './compendiumA11y';
-import { serializeHomebrewEditor } from './homebrewEditor';
+import { importExpectedUpdatedAt, serializeHomebrewEditor } from './homebrewEditor';
 
 type TypeChip = { key: CompendiumUrlType; label: string; count?: number };
 
@@ -355,7 +355,7 @@ export default function CompendiumPage() {
   }
   async function applyImport() {
     if (!importEntries) return;
-    const expectedUpdatedAt = Object.fromEntries((importPreview ?? []).flatMap((row) => row.conflict ? [[row.slug, row.conflict.updatedAt] as const] : []));
+    const expectedUpdatedAt = importExpectedUpdatedAt(importPreview ?? []);
     try { await api.post(`${API}/campaigns/${id}/homebrew/import/apply`, { entries: importEntries, strategy: importStrategy, expectedUpdatedAt: importStrategy === 'replace' ? expectedUpdatedAt : undefined }); setImportEntries(null); setImportPreview(null); setReloadToken((n) => n + 1); }
     catch (err) { setAuthorError(translateApiError(err, t, { fallbackKey: 'compendium.errors.search' })); }
   }

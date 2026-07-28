@@ -14,3 +14,15 @@ export function serializeHomebrewEditor(draft: HomebrewEditorDraft, structured: 
   else { const allowed = new Set(STRUCTURED_KEYS[draft.type] ?? STRUCTURED_KEYS.other); data = Object.fromEntries(Object.entries(structured).filter(([key, value]) => allowed.has(key) && value.trim() !== '')); for (const key of ['level', 'ac', 'hp', 'cr', 'weight', 'value']) if (typeof data[key] === 'string') { const n = Number(data[key]); if (!Number.isFinite(n)) return { ok: false, error: `${key} must be a number.` }; data[key] = n; } for (const key of ['abilities', 'actions']) if (typeof data[key] === 'string') try { data[key] = JSON.parse(data[key] as string); } catch { return { ok: false, error: `${key} must be valid JSON.` }; } }
   return { ok: true, value: { ...draft, data, dataJson: undefined } };
 }
+
+export function importExpectedUpdatedAt(rows: Array<{ slug: string; conflict: { updatedAt: string } | null }>): Record<string, string> {
+  return Object.fromEntries(rows.flatMap((row) => row.conflict ? [[row.slug, row.conflict.updatedAt] as const] : []));
+}
+
+export function shouldRenderCompendiumResults(opts: { campaignResolved: boolean; homebrewCount: number }): boolean {
+  return opts.campaignResolved && opts.homebrewCount >= 0;
+}
+
+export function ruleEntryIconEndpoint(apiRoot: string, campaignId: number, entry: { id: number; campaignId?: number | null }): string {
+  return entry.campaignId ? `${apiRoot}/campaigns/${campaignId}/homebrew/${entry.id}` : `${apiRoot}/rules/entries/${entry.id}`;
+}

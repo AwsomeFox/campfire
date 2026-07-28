@@ -29,7 +29,7 @@ import {
   COMPENDIUM_SOURCE_COPY_LABEL,
   resolveCompendiumSource,
 } from './compendiumProvenance';
-import { serializeHomebrewEditor } from './homebrewEditor';
+import { ruleEntryIconEndpoint, serializeHomebrewEditor } from './homebrewEditor';
 
 export default function ReaderPage() {
   const { t } = useTranslation();
@@ -84,7 +84,7 @@ export default function ReaderPage() {
     setSavingIcon(true);
     setIconError(null);
     try {
-      const updated = await api.patch<RuleEntry>(entry.campaignId ? `${API}/campaigns/${id}/homebrew/${entry.id}` : `${API}/rules/entries/${entry.id}`, entry.campaignId ? { iconSlug: slug, expectedUpdatedAt: entry.updatedAt } : { iconSlug: slug });
+      const updated = await api.patch<RuleEntry>(ruleEntryIconEndpoint(API, id, entry), entry.campaignId ? { iconSlug: slug, expectedUpdatedAt: entry.updatedAt } : { iconSlug: slug });
       setEntry(updated);
     } catch (err) {
       setIconError(translateApiError(err, t, { fallbackKey: 'compendium.errors.updateIcon' }));

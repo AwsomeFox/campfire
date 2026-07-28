@@ -19,6 +19,10 @@ describe('campaign homebrew (e2e)', () => {
     const preview = await request(server).post(`/api/v1/campaigns/${campaignId}/homebrew/import/preview`).set(dm).send({ entries: [body] }); expect(preview.body.entries[0].conflict.id).toBe(created.body.id);
     const skipped = await request(server).post(`/api/v1/campaigns/${campaignId}/homebrew/import/apply`).set(dm).send({ entries: [body], strategy: 'skip' }); expect(skipped.body.skipped).toBe(1);
     const staleReplace = await request(server).post(`/api/v1/campaigns/${campaignId}/homebrew/import/apply`).set(dm).send({ entries: [{ ...body, body: 'replace' }], strategy: 'replace', expectedUpdatedAt: { spark: 'stale' } }); expect(staleReplace.status).toBe(409);
+    const betaBody = { ...body, slug: 'beta', name: 'Beta' };
+    const beta = await request(server).post(`/api/v1/campaigns/${campaignId}/homebrew`).set(dm).send(betaBody); expect(beta.status).toBe(201);
+    const atomicReplace = await request(server).post(`/api/v1/campaigns/${campaignId}/homebrew/import/apply`).set(dm).send({ entries: [{ ...body, body: 'must-not-commit' }, { ...betaBody, body: 'stale-second' }], strategy: 'replace', expectedUpdatedAt: { spark: created.body.updatedAt, beta: 'stale' } }); expect(atomicReplace.status).toBe(409);
+    const sparkAfterAtomicFailure = await request(server).get(`/api/v1/campaigns/${campaignId}/homebrew/${created.body.id}`).set(dm); expect(sparkAfterAtomicFailure.body.body).toBe('');
     const duplicated = await request(server).post(`/api/v1/campaigns/${campaignId}/homebrew/import/apply`).set(dm).send({ entries: [body], strategy: 'duplicate' }); expect(duplicated.body.created).toBe(1);
     const beforeRollback = await request(server).get(`/api/v1/campaigns/${campaignId}/homebrew`).set(dm);
     const rollback = await request(server).post(`/api/v1/campaigns/${campaignId}/homebrew/import/apply`).set(dm).send({ entries: [{ ...body, slug: 'would-rollback' }, { ...body, slug: 'bad-raw', dataJson: '[]' }], strategy: 'duplicate' }); expect(rollback.status).toBe(400);
@@ -46,5 +50,7 @@ describe('campaign homebrew (e2e)', () => {
     expect(updated.isError).toBe(false); expect(JSON.parse(updated.text).summary).toBe('MCP updated');
     const preview = await tools.call('preview_campaign_homebrew_import', { campaignId, input: { entries: [{ slug: 'mcp-spark', name: 'MCP Spark', type: 'item', rightsStatus: 'private_original' }] } });
     expect(preview.isError).toBe(false); expect(JSON.parse(preview.text).entries[0].conflict).toBeTruthy();
+    const deniedImport = await playerTools.call('apply_campaign_homebrew_import', { campaignId, input: { entries: [{ slug: 'player-import', name: 'Player import', type: 'item', rightsStatus: 'private_original' }], strategy: 'skip' } }); expect(deniedImport.isError).toBe(true);
+    const appliedImport = await tools.call('apply_campaign_homebrew_import', { campaignId, input: { entries: [{ slug: 'dm-import', name: 'DM import', type: 'item', rightsStatus: 'private_original' }], strategy: 'skip' } }); expect(appliedImport.isError).toBe(false);
   });
 });
