@@ -6,8 +6,8 @@
       "url": "https://github.com/AwsomeFox/campfire/pull/1625",
       "headBranch": "fix/issue-738",
       "baseBranch": "main",
-      "updatedAt": "2026-07-28T03:23:05Z",
-      "notes": "Head c6443562: Copilot+Devin+Kilo threads resolved. Waiting on CI (coverage)."
+      "updatedAt": "2026-07-28T03:44:17Z",
+      "notes": "Head 784898dd: export allowlist provenance + prior review fixes. All known threads resolved. Waiting on CI."
     }
   ]
 }
