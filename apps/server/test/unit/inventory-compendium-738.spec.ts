@@ -7,6 +7,7 @@ const service = readFileSync(resolve(ROOT, 'src/modules/inventory/inventory.serv
 const controller = readFileSync(resolve(ROOT, 'src/modules/inventory/inventory.controller.ts'), 'utf8');
 const mcp = readFileSync(resolve(ROOT, 'src/modules/mcp/mcp-tools.ts'), 'utf8');
 const campaigns = readFileSync(resolve(ROOT, 'src/modules/campaigns/campaigns.service.ts'), 'utf8');
+const exportProfiles = readFileSync(resolve(ROOT, 'src/modules/export/export-profiles.ts'), 'utf8');
 
 describe('compendium inventory acquisition (#738)', () => {
   it('has one strict acquisition contract for REST and MCP', () => {
@@ -49,5 +50,7 @@ describe('compendium inventory acquisition (#738)', () => {
     expect(service).toContain('withCompendiumStates');
     expect(service).toContain('inArray(ruleEntries.id, linkedIds)');
     expect(service).toContain('return this.withCompendiumState(row);');
+    // Handoff/publish allowlists must retain portable provenance (ruleEntryId is nulled on import).
+    expect(exportProfiles).toContain("'ruleEntryId', 'compendiumRef', 'compendiumSnapshot', 'compendiumState'");
   });
 });
