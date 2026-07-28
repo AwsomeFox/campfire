@@ -830,7 +830,7 @@ export const auditLog = sqliteTable('audit_log', {
 /** One durable plan/apply/undo record for a party recovery (issue #759). */
 export const partyRestBatches = sqliteTable('party_rest_batches', {
   id: integer('id').primaryKey({ autoIncrement: true }),
-  campaignId: integer('campaign_id').notNull(),
+  campaignId: integer('campaign_id').notNull().references(() => campaigns.id, { onDelete: 'cascade' }),
   actorUserId: text('actor_user_id').notNull(),
   previewToken: text('preview_token').notNull().unique(),
   requestFingerprint: text('request_fingerprint').notNull(),
@@ -845,7 +845,7 @@ export const partyRestBatches = sqliteTable('party_rest_batches', {
   createdAt: text('created_at').notNull(),
   appliedAt: text('applied_at'),
   undoneAt: text('undone_at'),
-});
+}, (t) => ({ campaignCreatedIdx: index('idx_party_rest_batches_campaign').on(t.campaignId, t.createdAt), actorKeyUnique: uniqueIndex('idx_party_rest_batches_actor_key').on(t.campaignId, t.actorUserId, t.idempotencyKey) }));
 
 // ---------------------------------------------------------------------------
 // Moderation / abuse incidents (issue #601)

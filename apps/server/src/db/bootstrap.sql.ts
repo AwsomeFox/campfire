@@ -781,7 +781,7 @@ CREATE TABLE IF NOT EXISTS party_rest_batches (
   created_at TEXT NOT NULL,
   applied_at TEXT,
   undone_at TEXT,
-  UNIQUE(campaign_id, idempotency_key)
+  UNIQUE(campaign_id, actor_user_id, idempotency_key)
 );
 CREATE INDEX IF NOT EXISTS idx_party_rest_batches_campaign ON party_rest_batches(campaign_id, created_at DESC);
 
