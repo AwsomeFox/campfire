@@ -5,6 +5,7 @@ import {
   NEUTRAL_REST_MODEL,
   planCharacterRest,
   planPartyRest,
+  planPartyCustomRecovery,
   RECHARGE_RECOVERED_BY_REST,
   resetSpellSlotsForRest,
   restModelForAdapter,
@@ -405,5 +406,15 @@ describe('party planning is all-or-nothing (#1041)', () => {
     expect(plan.plans[0].hitDiceSpent).toBe(2);
     expect(plan.plans[1].hitDiceSpent).toBe(0);
     expect(plan.plans[1].hpAfter).toBe(10);
+  });
+
+  it('custom recovery restores only explicitly selected pools and keeps every other sheet field', () => {
+    const plan = planPartyCustomRecovery(fiveE, [character({ resources: { rage: { max: 3, used: 2 }, actionSurge: { max: 1, used: 1 } }, hpCurrent: 9, conditions: ['poisoned'] })], ['rage']);
+    expect(plan.kind).toBe('custom');
+    expect(plan.failures).toEqual([]);
+    expect(plan.plans[0].resourcesAfter.rage.used).toBe(0);
+    expect(plan.plans[0].resourcesAfter.actionSurge.used).toBe(1);
+    expect(plan.plans[0].hpAfter).toBe(9);
+    expect(plan.plans[0].conditionsAfter).toEqual(['poisoned']);
   });
 });
