@@ -198,6 +198,14 @@ describe('campaign library taxonomy (issue #742)', () => {
     const npcCopy = await request(server).post(`/api/v1/campaigns/${campaignId}/library/templates/${npcTemplate.body.id}/instantiate`).set(dm).send({ name: 'NPC copy', refs: { locationId: place.id } });
     expect(npcCopy.status).toBe(201);
     expect((await db.select().from(npcs).where(eq(npcs.id, npcCopy.body.entityId))).at(0)).toMatchObject({ name: 'NPC copy', locationId: place.id });
+    const otherCampaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Outside references' });
+    const [outsidePlace] = await db.insert(locations).values({ campaignId: otherCampaign.body.id, name: 'Outside place', createdAt: ts, updatedAt: ts }).returning();
+    const npcCountBefore = (await db.select().from(npcs).where(eq(npcs.campaignId, campaignId))).length;
+    const auditCountBefore = (await db.select().from(auditLog).where(and(eq(auditLog.campaignId, campaignId), eq(auditLog.action, 'campaign_library.template.instantiate')))).length;
+    const crossCampaign = await request(server).post(`/api/v1/campaigns/${campaignId}/library/templates/${npcTemplate.body.id}/instantiate`).set(dm).send({ name: 'Should not exist', refs: { locationId: outsidePlace.id } });
+    expect(crossCampaign.status).toBe(400);
+    expect((await db.select().from(npcs).where(eq(npcs.campaignId, campaignId))).length).toBe(npcCountBefore);
+    expect((await db.select().from(auditLog).where(and(eq(auditLog.campaignId, campaignId), eq(auditLog.action, 'campaign_library.template.instantiate')))).length).toBe(auditCountBefore);
     const locationCopy = await request(server).post(`/api/v1/campaigns/${campaignId}/library/entities/location/${place.id}/duplicate`).set(dm).send({ name: 'Location copy' });
     expect(locationCopy.status).toBe(201);
     expect((await db.select().from(locations).where(eq(locations.id, locationCopy.body.entityId))).at(0)?.name).toBe('Location copy');
@@ -207,6 +215,7 @@ describe('campaign library taxonomy (issue #742)', () => {
     expect(monsterCopy.status).toBe(201);
     expect((await db.select().from(campaignLibraryMonsters).where(eq(campaignLibraryMonsters.id, monsterCopy.body.entityId))).at(0)?.name).toBe('Monster copy');
     expect((await request(server).post(`/api/v1/campaigns/${campaignId}/library/templates/${saved.body.id}/archive`).set(dm)).status).toBe(201);
+    expect((await request(server).get(`/api/v1/campaigns/${campaignId}/library/templates`).set(dm)).body.map((template: { id: number }) => template.id)).not.toContain(saved.body.id);
     expect((await request(server).post(`/api/v1/campaigns/${campaignId}/library/templates/${saved.body.id}/instantiate`).set(dm).send({})).status).toBe(404);
     expect((await request(server).post(`/api/v1/campaigns/${campaignId}/library/templates`).set(dm).send({ entityType: 'attachment', entityId: 1, name: 'Bytes missing' })).status).toBe(400);
   });
