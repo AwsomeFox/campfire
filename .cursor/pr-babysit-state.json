@@ -6,8 +6,8 @@
       "url": "https://github.com/AwsomeFox/campfire/pull/1659",
       "headBranch": "fix/issue-756",
       "baseBranch": "main",
-      "updatedAt": "2026-07-28T12:31:00Z",
-      "notes": "Head b8cb7b46 (merged main 57123402, no conflicts). Review threads resolved. Awaiting required CI after main sync."
+      "updatedAt": "2026-07-28T12:46:40Z",
+      "notes": "Head 9761c96b (merged main 5a85aeb3, no conflicts). All review threads resolved. Awaiting required CI after second main sync."
     }
   ]
 }
