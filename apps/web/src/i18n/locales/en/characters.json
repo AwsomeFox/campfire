@@ -6,6 +6,13 @@
       "level": "{{level}} of {{max}} — {{name}} level",
       "count": "{{level}}/{{max}}",
       "updateError": "Couldn't update {{name}}."
+    },
+    "resources": {
+      "spend": "Spend",
+      "restore": "Restore",
+      "available": "{{available}} of {{max}} — {{name}} available",
+      "count": "{{available}}/{{max}}",
+      "updateError": "Couldn't update {{name}}."
     }
   }
 }
