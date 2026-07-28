@@ -78,6 +78,16 @@ describe('rest mechanics (#1041, e2e)', () => {
     return id;
   }
 
+  it('persists a previewed recovery and replays the same apply key', async () => {
+    const id = await batteredCharacter('Preview replay');
+    const preview = await characters.previewPartyRecovery(campaignId, { kind: 'long', characterIds: [id] }, dmUser, 'dm');
+    expect(preview.failures).toEqual([]);
+    const first = await characters.applyPartyRecovery(campaignId, { previewToken: preview.previewToken, idempotencyKey: 'apply-preview-replay', acknowledgeRunningCombatants: true }, dmUser, 'dm');
+    const replay = await characters.applyPartyRecovery(campaignId, { previewToken: preview.previewToken, idempotencyKey: 'apply-preview-replay', acknowledgeRunningCombatants: true }, dmUser, 'dm');
+    expect(replay).toEqual(first);
+    await expect(characters.applyPartyRecovery(campaignId, { previewToken: preview.previewToken, idempotencyKey: 'different-apply-key', acknowledgeRunningCombatants: true }, dmUser, 'dm')).rejects.toMatchObject({ status: 409 });
+  });
+
   /** Mark a character dead without going through a route that may not accept the field. */
   async function kill(id: number): Promise<void> {
     await db.update(charactersTable).set({ deathState: 'dead' }).where(eq(charactersTable.id, id));
