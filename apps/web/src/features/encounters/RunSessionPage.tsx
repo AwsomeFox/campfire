@@ -1786,12 +1786,12 @@ export default function RunSessionPage() {
       // A default attempt's own settle is already handled correctly without this hook: success
       // invalidates unconditionally (below) and the resulting fresh data drives the effect;
       // failure deliberately withholds invalidate so the retry waits for real server truth
-      // (see the comment below). Restricting the wake to `!variables.defaultAttemptKey`
-      // targets exactly the case #1589 is about — another, non-default write owned the key —
-      // without perturbing either of those already-correct paths.
+      // (see the comment below). Restricting the wake to `error && !variables.defaultAttemptKey`
+      // targets exactly the case #1589 is about: another, non-default write owned the key and
+      // failed, leaving the retry dependent on this wake-up rather than a success refetch.
       const wake = gridDefaultRetryOnFree.current.get(variables.pendingKey);
       if (wake) gridDefaultRetryOnFree.current.delete(variables.pendingKey);
-      if (wake && !variables.defaultAttemptKey) wake();
+      if (wake && error && !variables.defaultAttemptKey) wake();
       // A failed default write keeps its optimistic intent until a poll/SSE refresh supplies
       // server truth. That fresh missing-field snapshot is what permits the next retry, rather
       // than mutation-render churn immediately creating an unbounded failure loop.
