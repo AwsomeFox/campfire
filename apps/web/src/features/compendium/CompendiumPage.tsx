@@ -13,7 +13,7 @@ import { useTranslation } from 'react-i18next';
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { api, API, translateApiError } from '../../lib/api';
-import type { RuleEntry, RulePack, RuleSearchFacet, RuleSearchPage } from '@campfire/schema';
+import type { RuleEntry, RulePack, RuleSearchFacet, RuleSearchPage, HomebrewRuleEntryInput } from '@campfire/schema';
 import { Card, ErrorNote, Skeleton } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
 import { ruleEntryIconSlug } from '../../lib/ruleEntryIcon';
@@ -135,8 +135,9 @@ export default function CompendiumPage() {
   const [draft, setDraft] = useState({ name: '', slug: '', type: 'spell', summary: '', body: '', rightsStatus: 'private_original', license: '', attribution: '', sourceUrl: '', dataJson: '{}' });
   const [authorError, setAuthorError] = useState<string | null>(null);
   const [structuredData, setStructuredData] = useState<Record<string, string>>({ level: '', school: '', castingTime: '', range: '', duration: '', ac: '', hp: '', cr: '', abilities: '', actions: '', category: '', rarity: '', weight: '', value: '' });
-  const [importPreview, setImportPreview] = useState<any[] | null>(null);
-  const [importEntries, setImportEntries] = useState<any[] | null>(null);
+  type ImportPreviewRow = { index: number; slug: string; valid: boolean; conflict: { id: number; updatedAt: string } | null; entry: HomebrewRuleEntryInput };
+  const [importPreview, setImportPreview] = useState<ImportPreviewRow[] | null>(null);
+  const [importEntries, setImportEntries] = useState<unknown[] | null>(null);
   const [importStrategy, setImportStrategy] = useState<'skip' | 'replace' | 'duplicate'>('skip');
   const [nextCursor, setNextCursor] = useState<string | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
@@ -356,7 +357,7 @@ export default function CompendiumPage() {
       const parsed: unknown = JSON.parse(await file.text());
       const entries = Array.isArray(parsed) ? parsed : (parsed as { entries?: unknown[] }).entries;
       if (!Array.isArray(entries)) throw new Error('Expected a JSON array or { entries: [...] }');
-      const preview = await api.post<{ entries: any[] }>(`${API}/campaigns/${id}/homebrew/import/preview`, { entries });
+      const preview = await api.post<{ entries: ImportPreviewRow[] }>(`${API}/campaigns/${id}/homebrew/import/preview`, { entries });
       setImportEntries(entries); setImportPreview(preview.entries);
     } catch (err) { setAuthorError(err instanceof Error ? err.message : 'Could not read import file'); }
   }
@@ -416,7 +417,7 @@ export default function CompendiumPage() {
             <button className="btn btn-primary" type="button" onClick={saveHomebrew}>{isDm && canDmWrite ? 'Save homebrew' : 'Submit proposal'}</button>
           </Card>
         )}
-        {importPreview && <Card><h2 style={{ margin: 0, fontSize: 15 }}>Import preview</h2><p>{importPreview.filter((row) => row.conflict).length} slug conflicts found.</p><select className="input" value={importStrategy} onChange={(e) => setImportStrategy(e.target.value as typeof importStrategy)}><option value="skip">Skip conflicts</option><option value="replace">Replace conflicts</option><option value="duplicate">Duplicate conflicts</option></select><button className="btn btn-primary" type="button" onClick={applyImport}>Apply import</button></Card>}
+        {importPreview && <Card><h2 style={{ margin: 0, fontSize: 15 }}>Import preview</h2><div>{importPreview.map((row) => <p key={`${row.index}-${row.slug}`} className="text-muted" style={{ margin: 0 }}>{row.slug}: {row.conflict ? `conflict with #${row.conflict.id} — ${importStrategy}` : 'new entry'}</p>)}</div><select className="input" value={importStrategy} onChange={(e) => setImportStrategy(e.target.value as typeof importStrategy)}><option value="skip">Skip conflicts</option><option value="replace">Replace conflicts</option><option value="duplicate">Duplicate conflicts</option></select><button className="btn btn-primary" type="button" onClick={applyImport}>Apply import</button></Card>}
         <label htmlFor={COMPENDIUM_SEARCH_ID} style={{ fontSize: 12, fontWeight: 600 }}>
           {COMPENDIUM_SEARCH_LABEL}
         </label>
