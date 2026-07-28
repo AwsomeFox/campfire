@@ -131,7 +131,7 @@ function hasHelperSpread(object: ts.ObjectLiteralExpression): boolean {
 /**
  * The scanner. Returns one {@link Violation} per `.set()`/`.values()` call whose argument object
  * sets `conditions` or `conditionInstances` WITHOUT its sibling and without a helper spread — the
- * exact shape of #1664's `restParty` bug. See {@link writerCallArgSpans} for what this does and
+ * exact shape of #1664's `restParty` bug. See {@link writerCallArgObjects} for what this does and
  * does not see.
  */
 export function findUnpairedConditionWrites(source: string): Violation[] {
