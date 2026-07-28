@@ -1,0 +1,13 @@
+{
+  "tracked": [
+    {
+      "number": 1672,
+      "url": "https://github.com/AwsomeFox/campfire/pull/1672",
+      "status": "babysitting",
+      "branch": "fix/issue-1671",
+      "title": "fix(organized-play): cancelSeries releases resources held by future-completed occurrences (#1671)",
+      "updatedAt": "2026-07-28T15:02:00Z",
+      "notes": "Initial track. MERGEABLE, 6 commits behind main. Codex P2 restore-completed thread already resolved via ee7325a0. CI in progress on synchronize."
+    }
+  ]
+}
