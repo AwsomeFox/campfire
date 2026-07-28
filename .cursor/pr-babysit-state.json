@@ -1,0 +1,13 @@
+{
+  "tracked": [
+    {
+      "pr": 1654,
+      "status": "babysitting",
+      "url": "https://github.com/AwsomeFox/campfire/pull/1654",
+      "headBranch": "fix/issue-1642",
+      "baseBranch": "main",
+      "updatedAt": "2026-07-28T12:00:00Z",
+      "notes": "Tracking started on cursor/pull-request-babysitting-2d7a. Head 4180d8c8. MERGEABLE but 2 commits behind main. Open review threads: Devin+Codex max overwrite on adjust; Codex P1 untreated resources shown as full. CI run 30356997692 queued after golden screenshot update."
+    }
+  ]
+}
