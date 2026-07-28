@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, count, desc, eq, inArray, isNotNull, isNull, lt, sql } from 'drizzle-orm';
+import { and, count, desc, eq, inArray, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import { CompendiumRef, CompendiumSnapshot, InventoryFromCompendium, InventoryItem, InventoryItemCreate, InventoryItemUpdate, TreasuryPatch } from '@campfire/schema';
 import type { Treasury, Role } from '@campfire/schema';
@@ -174,7 +174,9 @@ export class InventoryService {
     for (const item of items) {
       if (!item.compendiumRef || item.compendiumState !== 'linked' || item.ruleEntryId == null) continue;
       const entry = byId.get(item.ruleEntryId);
-      if (!entry || computeRuleEntryContentHash(entry) !== item.compendiumRef.contentHash) {
+      // Campaign-private homebrew is only a valid linked source for that campaign.
+      const inScope = entry != null && (entry.campaignId == null || entry.campaignId === item.campaignId);
+      if (!inScope || computeRuleEntryContentHash(entry) !== item.compendiumRef.contentHash) {
         item.compendiumState = 'linked_updated';
       }
     }
@@ -265,7 +267,13 @@ export class InventoryService {
     if (ownerType === 'character' && character == null) {
       throw new BadRequestException(`characterId ${characterId} does not exist in this campaign`);
     }
-    const [entry] = await this.db.select().from(ruleEntries).where(eq(ruleEntries.id, input.ruleEntryId)).limit(1);
+    // Accept global pack entries or this campaign's private homebrew only — never
+    // leak another campaign's homebrew body/data into a CompendiumSnapshot.
+    const [entry] = await this.db
+      .select()
+      .from(ruleEntries)
+      .where(and(eq(ruleEntries.id, input.ruleEntryId), or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, campaignId))))
+      .limit(1);
     if (!entry || entry.type !== 'item') throw new BadRequestException('ruleEntryId must identify an installed item entry');
     const [pack] = await this.db.select().from(rulePacks).where(eq(rulePacks.id, entry.packId)).limit(1);
     if (!pack) throw new NotFoundException('The rule entry pack is not installed');
@@ -305,7 +313,11 @@ export class InventoryService {
   async refreshCompendium(id: number, user: RequestUser, role: Role): Promise<InventoryItem> {
     const existing = await this.getRowOrThrow(id); await this.assertCanWriteOwner(existing.ownerType as 'party' | 'character', existing.characterId, existing.campaignId, user, role);
     if (!existing.ruleEntryId) throw new BadRequestException('This item is detached from the compendium');
-    const [entry] = await this.db.select().from(ruleEntries).where(eq(ruleEntries.id, existing.ruleEntryId)).limit(1);
+    const [entry] = await this.db
+      .select()
+      .from(ruleEntries)
+      .where(and(eq(ruleEntries.id, existing.ruleEntryId), or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, existing.campaignId))))
+      .limit(1);
     if (!entry || entry.type !== 'item') throw new NotFoundException('The linked source item is unavailable');
     const [pack] = await this.db.select().from(rulePacks).where(eq(rulePacks.id, entry.packId)).limit(1); if (!pack) throw new NotFoundException('The linked source pack is unavailable');
     const snapshot = sanitizeCompendiumSnapshot(buildCompendiumSnapshot(entry));
