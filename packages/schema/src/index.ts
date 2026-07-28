@@ -3112,7 +3112,7 @@ export const RulePack = z.object({
   name: z.string().min(1).max(120),
   version: z.string().max(40).default(''),
   license: z.string().max(120).default(''), // e.g. "OGL 1.0a", "CC-BY-4.0"
-  sourceUrl: z.string().max(500).default(''),
+  sourceUrl: z.string().max(500).refine((url) => !url || /^https?:\/\//i.test(url), 'Source URL must be http(s)').default(''),
   installedAt: IsoDate,
   entryCount: z.number().int().nonnegative().default(0),
   // Authoritative, server-wide count of campaigns whose `ruleSystem` == this pack's slug
@@ -3205,7 +3205,7 @@ export const HomebrewRuleEntryInput = z.object({
   license: z.string().max(160).default(''),
   attribution: z.string().max(500).default(''),
   author: z.string().max(200).default(''),
-  sourceUrl: z.string().max(500).default(''),
+  sourceUrl: z.string().max(500).refine((url) => !url || /^https?:\/\//i.test(url), 'Source URL must be http(s)').default(''),
   iconSlug: z.string().max(80).default(''),
 }).superRefine((value, ctx) => {
   if (value.data !== undefined && value.dataJson !== undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Provide data or dataJson, not both' });
