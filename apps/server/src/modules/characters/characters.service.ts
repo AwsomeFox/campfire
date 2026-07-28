@@ -63,7 +63,7 @@ import { redactSecret, redactSecrets } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
 import { RevisionsService } from '../revisions/revisions.service';
-import { auditActor } from '../../common/user.types';
+import { auditActor, roleAtLeast } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { parseDdbId, fetchDdbCharacter, mapDdbCharacter, type DdbFetch } from './ddb-importer';
 import type { DdbCharacterImport } from '@campfire/schema';
@@ -446,6 +446,17 @@ export class CharactersService {
   async resolveCheckRequest(id: number, user: RequestUser, role: Role): Promise<CheckRequestResolution> {
     const req = await this.getCheckRequestRowOrThrow(id);
     const charRow = await this.getRowOrThrow(req.characterId);
+    // Issue #1636 defense in depth: `assertCanWrite` below is dm-or-owner, and
+    // `ownerUserId` is untouched by a role change, so a member demoted from player to
+    // viewer who owns this character would still pass it. The floor is placed HERE
+    // rather than inside `assertCanWrite` itself, because that helper is shared by
+    // roughly a dozen other call sites in this file (sheet field writes, HP, inventory,
+    // etc.) that were not part of this issue's audit — widening its contract would be a
+    // larger change than #1636 asks for. The REST/MCP callers already gate on
+    // requireRole('player'); this keeps the service safe on its own too.
+    if (!roleAtLeast(role, 'player')) {
+      throw new ForbiddenException('Viewers may not answer check requests.');
+    }
     // dm-or-owner may answer — same gate as writing the sheet.
     this.assertCanWrite(charRow, user, role);
     // Atomically CLAIM the request (pending -> resolved) BEFORE rolling so the "roll once"

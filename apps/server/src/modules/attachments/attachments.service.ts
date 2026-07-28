@@ -27,7 +27,7 @@ import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
 import { FsDeletionService, type FsDeletionOutcome } from './fs-deletion.service';
 import { uploadsRoot } from './uploads-path';
-import { auditActor } from '../../common/user.types';
+import { auditActor, roleAtLeast } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { persistedFogConcealsPixels } from '../../common/fog';
 import { sanitizeAttachmentFilename } from './filename';
@@ -1217,6 +1217,14 @@ export class AttachmentsService implements OnApplicationBootstrap {
    */
   async remove(id: number, user: RequestUser, role: Role): Promise<FsDeletionOutcome> {
     const existing = await this.getRowOrThrow(id);
+    // Issue #1636 defense in depth: `uploaderUserId` is never cleared by a role change, so
+    // the ownership check below alone would still let a member demoted from player to
+    // viewer delete files they uploaded while a player. Both callers (REST + MCP) already
+    // gate on requireRole('player'), but this service must stay safe even if a future
+    // caller forgets that, matching #1450's defense-in-depth pattern.
+    if (!roleAtLeast(role, 'player')) {
+      throw new ForbiddenException('Viewers may not delete attachments.');
+    }
     if (role !== 'dm' && existing.uploaderUserId !== user.id) {
       throw new ForbiddenException('Only the uploader or dm may delete this attachment');
     }

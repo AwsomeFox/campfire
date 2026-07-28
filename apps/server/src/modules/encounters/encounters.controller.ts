@@ -411,7 +411,13 @@ export class EncountersController {
   async ping(@Param('id', ParseIntPipe) id: number, @Body() body: MapPingDto, @CurrentUser() user: RequestUser) {
     const row = await this.encounters.getRowOrThrow(id);
     // Role drives hidden-encounter secrecy (issue #869): a non-DM must not learn a
-    // prepared fight exists via ping — 404, matching roster/events/difficulty.
+    // prepared fight exists via ping — 404, matching roster/events/difficulty. Issue
+    // #1636: this stays `requireMember` (not `requireRole('player')`) DELIBERATELY —
+    // requireRole would 403 a viewer before pingMap's hidden-visibility check ever
+    // runs, which would leak a hidden encounter's existence to a viewer via 403
+    // instead of the 404 issue #869 requires. The "any DM or player" role floor is
+    // enforced inside pingMap itself, AFTER the hidden check, so hidden stays 404 for
+    // everyone non-DM while a merely-visible encounter now correctly 403s a viewer.
     const role = await this.access.requireMember(user, row.campaignId, { write: true });
     this.encounters.pingMap(id, row.campaignId, body, role, row.hidden);
     return { ok: true };
@@ -689,7 +695,7 @@ export class EncountersController {
   @ApiOperation({
     summary: 'Resolve a structured action, optionally committing atomically (issue #414)',
     description:
-      'Requires campaign write membership. Rolls the attack or the targets’ saves with the correct modifiers, compares ' +
+      'Requires at least the player role (issue #1450). Rolls the attack or the targets’ saves with the correct modifiers, compares ' +
       'against AC / DC, classifies the outcome (5e hit/miss/crit or PF2e degrees), and returns a per-target PREVIEW with ' +
       'player-safe text separated from DM-only mechanics. A player may resolve only their OWN character’s action (a ' +
       'monster/NPC action is DM-only) but may target anyone — so a player can finish an attack against a monster ' +
@@ -703,7 +709,10 @@ export class EncountersController {
   @HttpCode(200)
   async resolveAction(@Param('id', ParseIntPipe) id: number, @Body() body: ActionResolveRequestDto, @CurrentUser() user: RequestUser) {
     const row = await this.encounters.getRowOrThrow(id);
-    const role = await this.access.requireMember(user, row.campaignId, { write: true });
+    // Issue #1450: `requireMember(..., { write: true })` only asserts the CAMPAIGN is
+    // writable, not that the CALLER has write authority — it returns a viewer's role
+    // unchanged. This route writes HP/conditions/effects, so it needs requireRole('player').
+    const role = await this.access.requireRole(user, row.campaignId, 'player');
     return this.actions.resolve(id, body, user, role);
   }
 
@@ -711,7 +720,7 @@ export class EncountersController {
   @ApiOperation({
     summary: 'Apply a previewed action resolution (issue #414 confirm path)',
     description:
-      'Requires campaign write membership. Commits a resolution returned by /actions/resolve, applying its rolled ' +
+      'Requires at least the player role (issue #1450). Commits a resolution returned by /actions/resolve, applying its rolled ' +
       'consequences verbatim so the committed result equals the preview. The DM may apply any resolution; a player only ' +
       'their own character’s action under an automatic policy. Returns an undo token that reverses the whole apply.',
   })
@@ -720,7 +729,8 @@ export class EncountersController {
   @HttpCode(200)
   async applyAction(@Param('id', ParseIntPipe) id: number, @Body() body: ActionResolutionDto, @CurrentUser() user: RequestUser) {
     const row = await this.encounters.getRowOrThrow(id);
-    const role = await this.access.requireMember(user, row.campaignId, { write: true });
+    // Issue #1450: see resolveAction — write:true does not assert caller authority.
+    const role = await this.access.requireRole(user, row.campaignId, 'player');
     return this.actions.apply(id, body, user, role);
   }
 
@@ -728,7 +738,7 @@ export class EncountersController {
   @ApiOperation({
     summary: 'Undo an applied action resolution (issue #414)',
     description:
-      'Requires campaign write membership. Restores every target’s HP / temp HP / death state / conditions to the ' +
+      'Requires at least the player role (issue #1450). Restores every target’s HP / temp HP / death state / conditions to the ' +
       'pre-apply snapshot, removes the effects the apply added, and refunds the actor’s action-economy slot, spell slot, ' +
       'and concentration. The DM may undo any action; a player only one whose actor is their own character.',
   })
@@ -736,7 +746,8 @@ export class EncountersController {
   @HttpCode(200)
   async undoAction(@Param('id', ParseIntPipe) id: number, @Body() body: ActionUndoTokenDto, @CurrentUser() user: RequestUser) {
     const row = await this.encounters.getRowOrThrow(id);
-    const role = await this.access.requireMember(user, row.campaignId, { write: true });
+    // Issue #1450: see resolveAction — write:true does not assert caller authority.
+    const role = await this.access.requireRole(user, row.campaignId, 'player');
     return this.actions.undo(id, body, user, role);
   }
 }

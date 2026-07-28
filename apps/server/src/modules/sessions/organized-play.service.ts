@@ -154,6 +154,25 @@ function occurrenceExceptionKind(existing: ScheduleRow, next: Partial<ScheduleRo
   return null;
 }
 
+/**
+ * better-sqlite3 throws a synchronous Error with `.code` set to one of the
+ * SQLITE_CONSTRAINT_* codes on a constraint violation (issue #1638). `createRoom` and
+ * `updateRoom` each run a sibling-name clash check before writing, but that check is
+ * a plain SELECT outside any transaction — it narrows the race, it does not close it.
+ * This is the backstop: catch a lost race on play_rooms' UNIQUE(venue_id, name) index
+ * and translate it into the same clean 400 the up-front check produces, instead of a
+ * raw constraint-violation 500. Same helper other services already use for this exact
+ * shape (rules.service.ts, encounters.service.ts, members.service.ts,
+ * campaign-modules.service.ts) — no shared util exists for it, so this follows the
+ * established per-service local-helper convention rather than introducing one now.
+ */
+function isUniqueConstraintError(err: unknown): boolean {
+  const code = (err as { code?: string } | undefined)?.code;
+  if (code === 'SQLITE_CONSTRAINT_UNIQUE' || code === 'SQLITE_CONSTRAINT_PRIMARYKEY') return true;
+  const message = err instanceof Error ? err.message : '';
+  return /UNIQUE constraint failed/i.test(message);
+}
+
 function venueToDomain(row: typeof playVenues.$inferSelect): PlayVenue {
   return {
     id: row.id,
@@ -467,27 +486,68 @@ export class OrganizedPlayService {
     return { deleted: true };
   }
 
+  /**
+   * The sibling-name clash message, shared verbatim by createRoom's up-front check,
+   * updateRoom's up-front check, AND both methods' constraint-violation backstop
+   * (issue #1638) — one string, one place, so the three call sites cannot drift to
+   * three different wordings for what is the exact same rule.
+   */
+  private roomNameClashMessage(name: string): string {
+    return `Venue already has a room named "${name}"`;
+  }
+
+  /**
+   * Up-front sibling-name check (issue #1638). This is a plain SELECT outside any
+   * transaction — it gives a fast, correct 400 in the common (non-racing) case, but it
+   * CANNOT by itself close the window between the check and the write: two concurrent
+   * callers can both pass it before either writes. `runRoomWrite` below is the actual
+   * safety net; this check exists only so the ordinary single-caller case doesn't have
+   * to round-trip through a failed write to get the same error.
+   */
+  private async assertRoomNameAvailable(venueId: number, name: string, excludeRoomId: number | null): Promise<void> {
+    const conditions = excludeRoomId === null
+      ? and(eq(playRooms.venueId, venueId), eq(playRooms.name, name))
+      : and(eq(playRooms.venueId, venueId), eq(playRooms.name, name), ne(playRooms.id, excludeRoomId));
+    const [clash] = await this.db.select({ id: playRooms.id }).from(playRooms).where(conditions).limit(1);
+    if (clash) throw new BadRequestException(this.roomNameClashMessage(name));
+  }
+
+  /**
+   * Runs a room INSERT/UPDATE, translating a lost race on the UNIQUE(venue_id, name)
+   * index into the same clean 400 `assertRoomNameAvailable` produces (issue #1638),
+   * instead of letting the raw SQLITE_CONSTRAINT error surface as a 500. Both
+   * createRoom and updateRoom route their write through this so they cannot diverge
+   * on how the race is handled — that divergence (create validated, update didn't) is
+   * exactly the bug updateRoom's clash check was originally added to fix, and the
+   * point of this issue is that the race reintroduces it in a narrower window.
+   */
+  private async runRoomWrite<T>(name: string, write: () => Promise<T>): Promise<T> {
+    try {
+      return await write();
+    } catch (err) {
+      if (isUniqueConstraintError(err)) throw new BadRequestException(this.roomNameClashMessage(name));
+      throw err;
+    }
+  }
+
   async createRoom(venueId: number, input: PlayRoomCreate, user: RequestUser): Promise<PlayRoom> {
     await this.getVenueOrThrow(venueId);
     const ts = nowIso();
     const name = input.name.trim();
-    const [clash] = await this.db
-      .select({ id: playRooms.id })
-      .from(playRooms)
-      .where(and(eq(playRooms.venueId, venueId), eq(playRooms.name, name)))
-      .limit(1);
-    if (clash) throw new BadRequestException(`Venue already has a room named "${name}"`);
-    const [row] = await this.db
-      .insert(playRooms)
-      .values({
-        venueId,
-        name,
-        capacity: input.capacity ?? 0,
-        notes: input.notes ?? '',
-        createdAt: ts,
-        updatedAt: ts,
-      })
-      .returning();
+    await this.assertRoomNameAvailable(venueId, name, null);
+    const [row] = await this.runRoomWrite(name, () =>
+      this.db
+        .insert(playRooms)
+        .values({
+          venueId,
+          name,
+          capacity: input.capacity ?? 0,
+          notes: input.notes ?? '',
+          createdAt: ts,
+          updatedAt: ts,
+        })
+        .returning(),
+    );
     await this.audit.log({
       actor: auditActor(user),
       actorRole: 'admin',
@@ -505,26 +565,24 @@ export class OrganizedPlayService {
     // a rename onto a sibling's name reached the raw UNIQUE(venue_id, name) index
     // and surfaced as a 500 — the create path validated and the update path did
     // not, so identical bad input produced a clean 400 or an opaque server error
-    // depending on which endpoint you used.
-    if (input.name !== undefined) {
-      const name = input.name.trim();
-      const [clash] = await this.db
-        .select({ id: playRooms.id })
-        .from(playRooms)
-        .where(and(eq(playRooms.venueId, existing.venueId), eq(playRooms.name, name), ne(playRooms.id, existing.id)))
-        .limit(1);
-      if (clash) throw new BadRequestException(`Venue already has a room named "${name}"`);
+    // depending on which endpoint you used. See runRoomWrite (issue #1638) for how
+    // that same inconsistency is closed for the narrower check-then-write race.
+    const trimmedName = input.name !== undefined ? input.name.trim() : undefined;
+    if (trimmedName !== undefined) {
+      await this.assertRoomNameAvailable(existing.venueId, trimmedName, existing.id);
     }
-    const [row] = await this.db
-      .update(playRooms)
-      .set({
-        ...(input.name !== undefined ? { name: input.name.trim() } : {}),
-        ...(input.capacity !== undefined ? { capacity: input.capacity } : {}),
-        ...(input.notes !== undefined ? { notes: input.notes } : {}),
-        updatedAt: nowIso(),
-      })
-      .where(eq(playRooms.id, existing.id))
-      .returning();
+    const [row] = await this.runRoomWrite(trimmedName ?? existing.name, () =>
+      this.db
+        .update(playRooms)
+        .set({
+          ...(trimmedName !== undefined ? { name: trimmedName } : {}),
+          ...(input.capacity !== undefined ? { capacity: input.capacity } : {}),
+          ...(input.notes !== undefined ? { notes: input.notes } : {}),
+          updatedAt: nowIso(),
+        })
+        .where(eq(playRooms.id, existing.id))
+        .returning(),
+    );
     await this.audit.log({
       actor: auditActor(user),
       actorRole: 'admin',

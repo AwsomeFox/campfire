@@ -3927,7 +3927,9 @@ export class McpToolsService {
       },
       async ({ requestId }) => {
         const campaignId = await this.characters.campaignIdForCheckRequest(requestId as number);
-        const role = await this.access.requireMember(user, campaignId, { write: true });
+        // Issue #1636: see characters.controller.ts's roll() — write:true does not assert
+        // caller authority, and this reaches the identical resolveCheckRequest() path.
+        const role = await this.access.requireRole(user, campaignId, 'player');
         return this.characters.resolveCheckRequest(requestId as number, user, role);
       },
     );
@@ -4342,7 +4344,10 @@ export class McpToolsService {
       { encounterId: Id.describe('Encounter id'), ...ActionResolveRequest.shape },
       async ({ encounterId, ...fields }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
-        const role = await this.access.requireMember(user, row.campaignId, { write: true });
+        // Issue #1450: write:true only asserts the campaign is writable, not caller
+        // authority — MCP reaches the same resolve() path as the REST route, so it needs
+        // the same requireRole('player') gate (a viewer must not resolve combat actions).
+        const role = await this.access.requireRole(user, row.campaignId, 'player');
         const validated = ActionResolveRequest.parse(fields);
         return this.actionResolver.resolve(encounterId as number, validated, user, role);
       },
@@ -4359,7 +4364,8 @@ export class McpToolsService {
       { encounterId: Id.describe('Encounter id'), ...ActionResolution.shape },
       async ({ encounterId, ...fields }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
-        const role = await this.access.requireMember(user, row.campaignId, { write: true });
+        // Issue #1450: see resolve_action — write:true does not assert caller authority.
+        const role = await this.access.requireRole(user, row.campaignId, 'player');
         const validated = ActionResolution.parse(fields);
         return this.actionResolver.apply(encounterId as number, validated, user, role);
       },
@@ -4377,7 +4383,8 @@ export class McpToolsService {
       async ({ ...fields }) => {
         const validated = ActionUndoToken.parse(fields);
         const row = await this.encounters.getRowOrThrow(validated.encounterId);
-        const role = await this.access.requireMember(user, row.campaignId, { write: true });
+        // Issue #1450: see resolve_action — write:true does not assert caller authority.
+        const role = await this.access.requireRole(user, row.campaignId, 'player');
         return this.actionResolver.undo(validated.encounterId, validated, user, role);
       },
     );
@@ -5013,7 +5020,9 @@ export class McpToolsService {
       { attachmentId: Id.describe('Attachment id') },
       async ({ attachmentId }) => {
         const row = await this.attachments.getRowOrThrow(attachmentId as number);
-        const role = await this.access.requireMember(user, row.campaignId, { write: true });
+        // Issue #1636: see attachments.controller.ts's remove() — write:true does not
+        // assert caller authority, and this reaches the identical service.remove() path.
+        const role = await this.access.requireRole(user, row.campaignId, 'player');
         return this.attachments.remove(attachmentId as number, user, role);
       },
     );
