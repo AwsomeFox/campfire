@@ -197,9 +197,8 @@ function packToDomain(row: typeof rulePacks.$inferSelect): RulePack {
   };
 }
 
-// Projection accepts legacy global fixtures while retaining a checked shape for every
-// field this API emits; campaign-only columns remain optional on pre-migration rows.
-type EntryProjection = Pick<typeof ruleEntries.$inferSelect, 'id' | 'packId' | 'slug' | 'name' | 'type' | 'summary' | 'body' | 'dataJson' | 'source' | 'license' | 'attribution' | 'author' | 'sourceUrl' | 'iconSlug' | 'createdAt' | 'updatedAt'> & Partial<Pick<typeof ruleEntries.$inferSelect, 'campaignId' | 'rightsStatus' | 'archivedAt'>>;
+/** Exact current DB projection; fresh alpha format deliberately has no legacy shape. */
+type EntryProjection = typeof ruleEntries.$inferSelect;
 function entryToDomain(row: EntryProjection): RuleEntry {
   return {
     id: row.id,
