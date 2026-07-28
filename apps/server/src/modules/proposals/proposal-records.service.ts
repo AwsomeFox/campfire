@@ -529,6 +529,32 @@ export class ProposalRecordsService {
           updatedAt: row.updatedAt,
         };
       }
+      case 'rule_entry': {
+        const row = db
+          .select()
+          .from(ruleEntries)
+          .where(and(eq(ruleEntries.id, entityId), eq(ruleEntries.campaignId, campaignId)))
+          .limit(1)
+          .get();
+        if (!row) throw new NotFoundException(`Homebrew rule entry ${entityId} not found`);
+        return {
+          id: row.id,
+          slug: row.slug,
+          name: row.name,
+          type: row.type,
+          summary: row.summary,
+          body: row.body,
+          dataJson: row.dataJson,
+          rightsStatus: row.rightsStatus,
+          license: row.license,
+          attribution: row.attribution,
+          author: row.author,
+          sourceUrl: row.sourceUrl,
+          iconSlug: row.iconSlug,
+          updatedAt: row.updatedAt,
+          archivedAt: row.archivedAt,
+        };
+      }
     }
   }
 
