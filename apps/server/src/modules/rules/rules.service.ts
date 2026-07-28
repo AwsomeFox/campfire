@@ -1342,15 +1342,33 @@ export class RulesService implements OnModuleInit {
   }
 
   async applyHomebrewImport(campaignId: number, input: { entries: unknown[]; strategy: 'skip' | 'replace' | 'duplicate'; expectedUpdatedAt?: Record<string, string> }, user: RequestUser) {
-    await this.homebrewRole(campaignId, user, true); const preview = await this.previewHomebrewImport(campaignId, input, user); const created: RuleEntry[] = []; let skipped = 0; let replaced = 0;
-    for (const item of preview.entries) {
-      if (!item.conflict) { created.push(await this.createCampaignHomebrew(campaignId, item.entry, user)); continue; }
-      if (input.strategy === 'skip') { skipped++; continue; }
-      if (input.strategy === 'replace') { const expected = input.expectedUpdatedAt?.[item.slug] ?? item.conflict.updatedAt; created.push(await this.updateCampaignHomebrew(campaignId, item.conflict.id, { ...item.entry, expectedUpdatedAt: expected }, user)); replaced++; continue; }
-      let slug = `${item.entry.slug}-import`; let suffix = 2; while ((await this.db.select({ id: ruleEntries.id }).from(ruleEntries).where(and(eq(ruleEntries.campaignId, campaignId), eq(ruleEntries.slug, slug))).limit(1)).length) slug = `${item.entry.slug}-import-${suffix++}`;
-      created.push(await this.createCampaignHomebrew(campaignId, { ...item.entry, slug }, user));
-    }
-    return { entries: created, created: created.length - replaced, replaced, skipped };
+    await this.homebrewRole(campaignId, user, true);
+    // Parse every payload before opening the write transaction: malformed later rows
+    // must never leave an earlier half of the file imported.
+    const planned = input.entries.map((raw) => this.normalizedHomebrew(raw));
+    const packId = await this.homebrewPackId(); const now = nowIso();
+    const result = this.db.transaction((tx) => {
+      const existing = tx.select().from(ruleEntries).where(eq(ruleEntries.campaignId, campaignId)).all();
+      const bySlug = new Map(existing.map((row) => [row.slug, row])); const used = new Set(existing.map((row) => row.slug));
+      const rows: typeof ruleEntries.$inferSelect[] = []; let skipped = 0; let replaced = 0;
+      for (const entry of planned) {
+        const conflict = bySlug.get(entry.slug);
+        if (conflict && input.strategy === 'skip') { skipped++; continue; }
+        if (conflict && input.strategy === 'replace') {
+          const expected = input.expectedUpdatedAt?.[entry.slug] ?? conflict.updatedAt;
+          const row = tx.update(ruleEntries).set({ ...entry, updatedAt: now }).where(and(eq(ruleEntries.id, conflict.id), eq(ruleEntries.campaignId, campaignId), eq(ruleEntries.updatedAt, expected))).returning().get();
+          if (!row) throw new ConflictException(`Homebrew entry ${entry.slug} has changed; reload import preview`);
+          tx.insert(ruleEntryRevisions).values({ ruleEntryId: row.id, campaignId, actor: String(user.id), beforeJson: JSON.stringify(this.homebrewPayload(conflict)), afterJson: JSON.stringify(this.homebrewPayload(row)), createdAt: now }).run(); rows.push(row); replaced++; continue;
+        }
+        let slug = entry.slug; if (conflict) { slug = `${slug}-import`; let n = 2; while (used.has(slug)) slug = `${entry.slug}-import-${n++}`; }
+        const row = tx.insert(ruleEntries).values({ packId, campaignId, ...entry, slug, source: '', provenance: 'campaign_homebrew_import', archivedAt: null, createdAt: now, updatedAt: now }).returning().get();
+        tx.insert(ruleEntryRevisions).values({ ruleEntryId: row.id, campaignId, actor: String(user.id), beforeJson: '{}', afterJson: JSON.stringify(this.homebrewPayload(row)), createdAt: now }).run(); rows.push(row); used.add(slug); bySlug.set(slug, row);
+      }
+      return { rows, skipped, replaced };
+    });
+    const entries = result.rows.map(entryToDomain);
+    await this.audit.log({ campaignId, actor: auditActor(user), actorRole: auditActorRole(user), action: 'homebrew.import', entityType: 'rule_entry', detail: `${entries.length} entries (${result.replaced} replaced, ${result.skipped} skipped)` });
+    return { entries, created: entries.length - result.replaced, replaced: result.replaced, skipped: result.skipped };
   }
 
   /**
