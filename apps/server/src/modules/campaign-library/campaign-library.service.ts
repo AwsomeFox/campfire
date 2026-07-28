@@ -11,6 +11,7 @@ import {
   LibrarySearchQuery,
   LibrarySearchPage,
   LibraryBulkRequest, LibraryBulkResult,
+  QuestStatus, FactionStanding, LocationStatus,
   type LibraryEntitySummary,
   type Role,
 } from '@campfire/schema';
@@ -178,7 +179,7 @@ export class CampaignLibraryService {
     const ts = nowIso();
     const result = this.db.transaction((tx) => {
       const config = request.operation === 'set_visibility'
-        ? { allowed: new Set(['quest', 'npc', 'faction', 'encounter', 'timeline_event', 'attachment']), field: 'hidden' }
+        ? { allowed: new Set(['quest', 'npc', 'location', 'faction', 'encounter', 'timeline_event', 'attachment']), field: 'hidden' }
         : request.operation === 'set_status'
           ? { allowed: new Set(['quest', 'npc', 'location', 'faction']), field: 'status' }
           : request.operation === 'move_inventory_owner'
@@ -191,13 +192,14 @@ export class CampaignLibraryService {
         if (!config.allowed.has(target.entityType)) throw new BadRequestException(`${request.operation} is not supported for ${target.entityType}`);
         const name = table(target.entityType);
         if (request.operation === 'set_status') {
-          const allowed = target.entityType === 'quest' ? ['available', 'active', 'completed', 'failed']
-            : target.entityType === 'npc' ? ['friendly', 'neutral', 'hostile']
-              : target.entityType === 'faction' ? ['allied', 'friendly', 'neutral', 'unfriendly', 'hostile']
-                : ['unexplored', 'known', 'visited'];
-          if (!allowed.includes(request.status)) throw new BadRequestException(`${request.status} is not a valid ${target.entityType} status`);
+          if (target.entityType === 'npc') {
+            if (request.status.length > 40) throw new BadRequestException('NPC disposition cannot exceed 40 characters');
+          } else {
+            const validator = target.entityType === 'quest' ? QuestStatus : target.entityType === 'faction' ? FactionStanding : LocationStatus;
+            if (!validator.safeParse(request.status).success) throw new BadRequestException(`${request.status} is not a valid ${target.entityType} status`);
+          }
         }
-        const field = request.operation === 'set_status' ? (target.entityType === 'npc' ? 'disposition' : target.entityType === 'faction' ? 'standing' : 'status') : config.field;
+        const field = request.operation === 'set_status' ? (target.entityType === 'npc' ? 'disposition' : target.entityType === 'faction' ? 'standing' : 'status') : request.operation === 'set_visibility' && target.entityType === 'location' ? 'status' : config.field;
         const row = request.operation === 'move_inventory_owner'
           ? tx.get(sql`select owner_type as ownerType, character_id as characterId from ${sql.raw(name)} where id=${target.entityId} and campaign_id=${campaignId}`)
           : tx.get(sql`select ${sql.raw(field)} as value from ${sql.raw(name)} where id=${target.entityId} and campaign_id=${campaignId}`);
@@ -206,7 +208,16 @@ export class CampaignLibraryService {
       }
       for (const target of request.targets) {
         const name = table(target.entityType);
-        if (request.operation === 'set_visibility') tx.run(sql`update ${sql.raw(name)} set hidden=${request.visibility === 'hidden' ? 1 : 0}, updated_at=${ts} where id=${target.entityId} and campaign_id=${campaignId}`);
+        if (request.operation === 'set_visibility') {
+          // Locations use progression state as their whole-entity secrecy marker.
+          // Revealing keeps any progressed state, while a fresh unexplored location
+          // becomes explored rather than inventing a parallel hidden flag.
+          if (target.entityType === 'location') {
+            if (request.visibility === 'hidden') tx.run(sql`update locations set status='unexplored', updated_at=${ts} where id=${target.entityId} and campaign_id=${campaignId}`);
+            else tx.run(sql`update locations set status=case when status='unexplored' then 'explored' else status end, updated_at=${ts} where id=${target.entityId} and campaign_id=${campaignId}`);
+          }
+          else tx.run(sql`update ${sql.raw(name)} set hidden=${request.visibility === 'hidden' ? 1 : 0}, updated_at=${ts} where id=${target.entityId} and campaign_id=${campaignId}`);
+        }
         else if (request.operation === 'set_status') {
           const field = target.entityType === 'npc' ? 'disposition' : target.entityType === 'faction' ? 'standing' : 'status';
           tx.run(sql`update ${sql.raw(name)} set ${sql.raw(field)}=${request.status}, updated_at=${ts} where id=${target.entityId} and campaign_id=${campaignId}`);
@@ -235,14 +246,28 @@ export class CampaignLibraryService {
         const table = (type: string) => ({ quest: 'quests', npc: 'npcs', location: 'locations', faction: 'factions', encounter: 'encounters', timeline_event: 'timeline_events', inventory_item: 'inventory_items', attachment: 'attachments' } as Record<string, string>)[type];
         for (const row of journal.snapshots) {
           const name = table(row.entityType);
-          if (!tx.get(sql`select id from ${sql.raw(name)} where id=${row.entityId} and campaign_id=${campaignId} and updated_at=${operation.createdAt}`)) throw new ConflictException('A target changed after this bulk operation; undo would overwrite it');
           const value = z.record(z.string(), z.unknown()).parse(row.value);
-          if (request.operation === 'set_visibility') tx.run(sql`update ${sql.raw(name)} set hidden=${value.value as number}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`);
+          const scalar = z.object({ value: z.union([z.string(), z.number(), z.null()]) }).parse(value);
+          if (request.operation === 'set_visibility') {
+            const before = z.object({ value: z.union([z.string(), z.number()]) }).parse(value).value;
+            const after = row.entityType === 'location' ? (request.visibility === 'hidden' ? 'unexplored' : before === 'unexplored' ? 'explored' : before) : request.visibility === 'hidden' ? 1 : 0;
+            const field = row.entityType === 'location' ? 'status' : 'hidden';
+            if (!tx.get(sql`select id from ${sql.raw(name)} where id=${row.entityId} and campaign_id=${campaignId} and ${sql.raw(field)}=${after}`)) throw new ConflictException('A target changed after this bulk operation; undo would overwrite it');
+            tx.run(sql`update ${sql.raw(name)} set ${sql.raw(field)}=${before}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`);
+          }
           else if (request.operation === 'set_status') {
             const field = row.entityType === 'npc' ? 'disposition' : row.entityType === 'faction' ? 'standing' : 'status';
-            tx.run(sql`update ${sql.raw(name)} set ${sql.raw(field)}=${value.value as string}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`);
-          } else if (request.operation === 'move_inventory_owner') tx.run(sql`update inventory_items set owner_type=${value.ownerType as string}, character_id=${value.characterId as number | null}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`);
-          else tx.run(sql`update ${sql.raw(name)} set deleted_at=${value.value as string | null}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`);
+            if (!tx.get(sql`select id from ${sql.raw(name)} where id=${row.entityId} and campaign_id=${campaignId} and ${sql.raw(field)}=${request.status}`)) throw new ConflictException('A target changed after this bulk operation; undo would overwrite it');
+            tx.run(sql`update ${sql.raw(name)} set ${sql.raw(field)}=${scalar.value}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`);
+          } else if (request.operation === 'move_inventory_owner') {
+            const before = z.object({ ownerType: z.string(), characterId: z.number().int().nullable() }).parse(value);
+            if (!tx.get(sql`select id from inventory_items where id=${row.entityId} and campaign_id=${campaignId} and owner_type=${request.ownerType} and character_id is ${request.characterId ?? null}`)) throw new ConflictException('A target changed after this bulk operation; undo would overwrite it');
+            tx.run(sql`update inventory_items set owner_type=${before.ownerType}, character_id=${before.characterId}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`);
+          } else {
+            const after = request.operation === 'archive' ? operation.createdAt : null;
+            if (!tx.get(sql`select id from ${sql.raw(name)} where id=${row.entityId} and campaign_id=${campaignId} and deleted_at is ${after}`)) throw new ConflictException('A target changed after this bulk operation; undo would overwrite it');
+            tx.run(sql`update ${sql.raw(name)} set deleted_at=${scalar.value}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`);
+          }
         }
         tx.insert(auditLog).values({ campaignId, actor: auditActor(user), actorRole: role, action: 'campaign_library.bulk.undo', entityType: 'campaign_library_bulk_operation', entityId: operationId, detail: operation.operation, requestId: getRequestId() ?? null, createdAt: nowIso() }).run();
         return { operationId, undone: true, alreadyUndone: false };

@@ -135,7 +135,7 @@ describe('campaign library taxonomy (issue #742)', () => {
     expect((await db.select().from(quests).where(eq(quests.id, quest.id))).at(0)?.deletedAt).not.toBeNull();
     expect((await request(server).post(`/api/v1/campaigns/${campaignId}/library/bulk`).set(dm).send({ operation: 'move_inventory_owner', ownerType: 'party', targets: [{ entityType: 'inventory_item', entityId: item.id }] })).status).toBe(201);
     expect((await db.select().from(inventoryItems).where(eq(inventoryItems.id, item.id))).at(0)?.ownerType).toBe('party');
-    const bad = await request(server).post(`/api/v1/campaigns/${campaignId}/library/bulk`).set(dm).send({ operation: 'set_visibility', visibility: 'hidden', targets: [{ entityType: 'quest', entityId: quest.id }, { entityType: 'location', entityId: 123456 }] });
+    const bad = await request(server).post(`/api/v1/campaigns/${campaignId}/library/bulk`).set(dm).send({ operation: 'set_visibility', visibility: 'hidden', targets: [{ entityType: 'quest', entityId: quest.id }, { entityType: 'inventory_item', entityId: item.id }] });
     expect(bad.status).toBe(400);
   });
 });
