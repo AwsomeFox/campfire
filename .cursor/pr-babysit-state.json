@@ -1,0 +1,13 @@
+{
+  "tracked": [
+    {
+      "pr": 1635,
+      "status": "babysitting",
+      "url": "https://github.com/AwsomeFox/campfire/pull/1635",
+      "headBranch": "fix/issue-1598",
+      "baseBranch": "main",
+      "updatedAt": "2026-07-28T10:05:00Z",
+      "notes": "Tracking started. MERGEABLE (no conflicts). Devin descending-AC DM-detail thread addressed by af6d91e7 and already resolved. Cursor Approval APPROVED on e4414068. Main has new commits ahead of head merge-base; merging main next. CI in progress on synchronize; mergeStateStatus BLOCKED pending required checks."
+    }
+  ]
+}
