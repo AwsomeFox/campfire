@@ -22,6 +22,8 @@ describe('Issue #729 data repair safety', () => {
       CREATE TABLE campaigns (id INTEGER PRIMARY KEY, current_location_id INTEGER, map_attachment_id INTEGER, active_encounter_id INTEGER);
       CREATE TABLE locations (id INTEGER PRIMARY KEY, campaign_id INTEGER NOT NULL, parent_id INTEGER);
       CREATE TABLE encounters (id INTEGER PRIMARY KEY, campaign_id INTEGER NOT NULL, location_id INTEGER, quest_id INTEGER, session_id INTEGER);
+      CREATE TABLE quests (id INTEGER PRIMARY KEY, campaign_id INTEGER NOT NULL, parent_id INTEGER, giver_npc_id INTEGER);
+      CREATE TABLE inbound_strict (id INTEGER PRIMARY KEY, encounter_id INTEGER REFERENCES encounters(id));
       CREATE TABLE strict_parent (id INTEGER PRIMARY KEY);
       CREATE TABLE strict_child (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES strict_parent(id));
       CREATE TABLE data_repair_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT NOT NULL, started_at TEXT NOT NULL, completed_at TEXT, strict_count INTEGER NOT NULL DEFAULT 0, soft_count INTEGER NOT NULL DEFAULT 0, error_detail TEXT NOT NULL DEFAULT '');
@@ -55,6 +57,11 @@ describe('Issue #729 data repair safety', () => {
     await expect(service.apply({ findingId: missing.id, action: 'null', expectedVersion: missing.version, previewToken: 'missing' }, 'admin', 'admin')).rejects.toBeInstanceOf(ConflictException);
     db.prepare('UPDATE data_repair_previews SET expires_at=? WHERE token=?').run('2000-01-01T00:00:00.000Z', preview.previewToken);
     await expect(service.apply({ findingId: missing.id, action: 'null', expectedVersion: missing.version, previewToken: preview.previewToken }, 'admin', 'admin')).rejects.toBeInstanceOf(ConflictException);
+    const staleValue = service.preview({ findingId: missing.id, action: 'null', expectedVersion: missing.version });
+    db.prepare('UPDATE encounters SET location_id=778 WHERE id=10').run();
+    await expect(service.apply({ findingId: missing.id, action: 'null', expectedVersion: missing.version, previewToken: staleValue.previewToken }, 'admin', 'admin')).rejects.toBeInstanceOf(ConflictException);
+    expect(db.prepare('SELECT used_at FROM data_repair_previews WHERE token=?').get(staleValue.previewToken)).toEqual({ used_at:null });
+    db.prepare('UPDATE encounters SET location_id=777 WHERE id=10').run();
     const freshPreview = service.preview({ findingId: missing.id, action: 'null', expectedVersion: missing.version });
     const applied = await service.apply({ findingId: missing.id, action: 'null', expectedVersion: missing.version, previewToken: freshPreview.previewToken }, 'admin', 'admin');
     expect(db.prepare('SELECT location_id FROM encounters WHERE id=10').get()).toEqual({ location_id: null });
@@ -85,5 +92,40 @@ describe('Issue #729 data repair safety', () => {
     const response = { setHeader: jest.fn(), type: jest.fn().mockReturnThis(), attachment: jest.fn().mockReturnThis(), send: jest.fn() };
     new DataRepairController({ bundle: () => ({ ok: true }) } as any).supportBundle(response as any);
     expect(response.setHeader).toHaveBeenCalledWith('Cache-Control', 'private, no-store');
+  });
+
+  it('quarantine checks real inbound rows, restores only safe full rows, and preserves applied backups', async () => {
+    db.prepare('INSERT INTO campaigns(id) VALUES (1),(2)').run();
+    db.prepare('INSERT INTO locations(id,campaign_id) VALUES (1,1),(2,2)').run();
+    // The broken quest is the finding; location is independently valid so undo
+    // can prove it checks *all* outbound references rather than just quest_id.
+    db.prepare('INSERT INTO encounters(id,campaign_id,location_id,quest_id) VALUES (30,1,1,999)').run();
+    db.prepare('INSERT INTO inbound_strict(id,encounter_id) VALUES (1,30)').run();
+    await service.scan();
+    const finding=(service.findings('open') as any[]).find(f=>f.child_row_id===30&&f.child_column==='quest_id');
+    expect(() => service.preview({ findingId:finding.id,action:'quarantine',expectedVersion:finding.version })).toThrow(ConflictException);
+    db.prepare('DELETE FROM inbound_strict').run();
+    db.prepare('UPDATE campaigns SET active_encounter_id=30 WHERE id=1').run();
+    expect(() => service.preview({ findingId:finding.id,action:'quarantine',expectedVersion:finding.version })).toThrow(ConflictException);
+    db.prepare('UPDATE campaigns SET active_encounter_id=NULL WHERE id=1').run();
+    const preview=service.preview({ findingId:finding.id,action:'quarantine',expectedVersion:finding.version });
+    const applied=await service.apply({ findingId:finding.id,action:'quarantine',expectedVersion:finding.version,previewToken:preview.previewToken },'admin','admin');
+    expect(db.prepare('SELECT count(*) n FROM encounters WHERE id=30').get()).toEqual({ n: 0 });
+    expect(db.prepare('SELECT count(*) n FROM data_repair_quarantine WHERE action_id=?').get(applied.actionId)).toEqual({ n: 1 });
+    expect(db.prepare('SELECT status FROM data_repair_findings WHERE id=?').get(finding.id)).toEqual({ status:'quarantined' });
+    const appliedBackup=(db.prepare('SELECT backup_path FROM data_repair_actions WHERE id=?').get(applied.actionId) as any).backup_path;
+    expect(fs.existsSync(appliedBackup)).toBe(true);
+    // Retention is bounded for disposable snapshots but never deletes a path
+    // still attached to an applied repair action.
+    for(let i=0;i<15;i++) (service as any).snapshot();
+    expect(fs.existsSync(appliedBackup)).toBe(true);
+    expect(fs.readdirSync(path.join(dir,'repair-backups')).filter(name=>name.endsWith('.db')).length).toBeLessThanOrEqual(13);
+    // A different outbound soft reference becomes cross-campaign after quarantine.
+    db.prepare('UPDATE locations SET campaign_id=2 WHERE id=1').run();
+    await expect(service.undo(applied.actionId,'admin','admin')).rejects.toBeInstanceOf(ConflictException);
+    db.prepare('UPDATE locations SET campaign_id=1 WHERE id=1').run();
+    db.prepare('INSERT INTO quests(id,campaign_id) VALUES (999,1)').run();
+    await service.undo(applied.actionId,'admin','admin');
+    expect(db.prepare('SELECT count(*) n FROM encounters WHERE id=30').get()).toEqual({ n: 1 });
   });
 });
