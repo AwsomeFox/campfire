@@ -883,11 +883,11 @@ export default function PlayerDisplayPage() {
     </div>
   );
   const renderScreen = (content: ReactNode, centered = false) => (
-    // Issue #1685: `.cf-screen` on THIS <main> is what every selector in SCREEN_CSS is
-    // ancestor-scoped to (`.cf-screen .whatever { … }`, see SCREEN_CSS below). A <style>
-    // element applies document-wide regardless of its position in the DOM tree, so nesting
-    // it inside <main> alone provided no scoping — the ancestor class on every selector is
-    // what actually confines these rules to this subtree.
+    // Issue #1685: `.cf-screen` on THIS <main> is what most selectors in SCREEN_CSS
+    // are ancestor-scoped to (`.cf-screen .whatever { … }`, see SCREEN_CSS below). A
+    // <style> element applies document-wide regardless of its position in the DOM tree,
+    // so nesting it inside <main> alone provided no scoping — the ancestor class on each
+    // non-portalled selector is what actually confines those rules to this subtree.
     <main className={`cf-screen${centered ? ' centered' : ''}`}>
       <style>{SCREEN_CSS}</style>
       {operatorControls}
@@ -1379,7 +1379,7 @@ function QuestsScene({
                   <span className="cf-quest-title cf-clamp-1" title={q.title}>
                     {q.title}
                   </span>
-                  <QuestStatusBadge status={q.status} className="cf-screen-chip-sm" iconSize={14} />
+                  <QuestStatusBadge status={q.status} className="cf-screen-chip cf-screen-chip-sm" iconSize={14} />
                 </div>
                 {q.objectives.length > 0 && (
                   <ul className="cf-objs">
@@ -1416,7 +1416,7 @@ function QuestsScene({
                 {n.role && <span className="cf-npc-role cf-clamp-1">{n.role}</span>}
                 <NpcDispositionBadge
                   disposition={n.disposition}
-                  className="cf-screen-chip-sm cf-npc-disposition"
+                  className="cf-screen-chip cf-screen-chip-sm cf-npc-disposition"
                   iconSize={14}
                 />
               </div>
@@ -1570,14 +1570,16 @@ function CenteredMessage({
 // scale identically at 720p, 1080p, 4K, and 200% zoom. Colors come from the
 // shared Nocturne tokens.
 //
-// Issue #1685: every selector below (other than the `.cf-screen`/`.cf-screen.centered`
-// root rule itself) is prefixed with the `.cf-screen ` ancestor — a plain descendant
-// combinator, not `@scope` (this is a TV/cast surface, plausibly reached by more
-// unusual browser environments than the rest of the app, and a descendant combinator
-// has zero extra browser-support risk vs. the container-query units this file already
-// depends on). `.cf-screen` is the outer <main> this stylesheet renders inside (see
-// renderScreen above), so this is real, load-bearing scoping — a bare `<style>` tag has
-// none of its own from where it sits in the DOM. This is IN ADDITION TO, not instead of,
+// Issue #1685: every non-portalled selector below (other than the
+// `.cf-screen`/`.cf-screen.centered` root rule itself) is prefixed with the `.cf-screen `
+// ancestor — a plain descendant combinator, not `@scope` (this is a TV/cast surface,
+// plausibly reached by more unusual browser environments than the rest of the app, and
+// a descendant combinator has zero extra browser-support risk vs. the container-query
+// units this file already depends on). `.cf-screen` is the outer <main> this stylesheet
+// renders inside (see renderScreen above), so this is real, load-bearing scoping — a bare
+// `<style>` tag has none of its own from where it sits in the DOM. The kiosk-exit PIN
+// dialog is the lone exception because it is portalled to <body>; its unique
+// `.cf-exit-pin` selectors must match there. This is IN ADDITION TO, not instead of,
 // giving the two previously-colliding families (`cf-chip`→`cf-screen-chip`,
 // `cf-hp`→`cf-screen-hp`) unique names: the ancestor prefix confines every rule
 // (including ones whose name doesn't currently collide with anything, e.g. `.cf-init`,
@@ -1715,7 +1717,7 @@ const SCREEN_CSS = `
   line-height: 1.4;
   box-shadow: 0 8px 24px color-mix(in srgb, #000 38%, transparent);
 }
-.cf-screen .cf-exit-pin {
+.cf-exit-pin {
   position: fixed;
   inset: 0;
   z-index: 40;
@@ -1724,7 +1726,7 @@ const SCREEN_CSS = `
   padding: 24px;
   background: color-mix(in srgb, #000 72%, transparent);
 }
-.cf-screen .cf-exit-pin form {
+.cf-exit-pin form {
   width: min(420px, 100%);
   border: 1px solid var(--color-divider);
   border-radius: var(--radius-lg, 16px);
@@ -1733,12 +1735,12 @@ const SCREEN_CSS = `
   padding: 20px;
   box-shadow: 0 18px 48px color-mix(in srgb, #000 55%, transparent);
 }
-.cf-screen .cf-exit-pin h2 { margin: 0 0 8px; font-family: var(--font-heading); font-size: 22px; }
-.cf-screen .cf-exit-pin p { margin: 0 0 14px; color: var(--color-neutral-300); font-size: 14px; }
-.cf-screen .cf-exit-pin label { display: block; margin-bottom: 6px; font-size: 13px; font-weight: 700; }
-.cf-screen .cf-exit-pin input { width: 100%; margin-bottom: 12px; }
-.cf-screen .cf-exit-pin-error { color: #fca5a5 !important; }
-.cf-screen .cf-exit-pin-actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+.cf-exit-pin h2 { margin: 0 0 8px; font-family: var(--font-heading); font-size: 22px; }
+.cf-exit-pin p { margin: 0 0 14px; color: var(--color-neutral-300); font-size: 14px; }
+.cf-exit-pin label { display: block; margin-bottom: 6px; font-size: 13px; font-weight: 700; }
+.cf-exit-pin input { width: 100%; margin-bottom: 12px; }
+.cf-exit-pin-error { color: #fca5a5 !important; }
+.cf-exit-pin-actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
 
 /* Fixed-aspect letterboxed stage. */
 .cf-screen .cf-stage-wrap {
@@ -1825,8 +1827,8 @@ const SCREEN_CSS = `
 
 /* Issue #1685: named cf-screen-chip*, NOT the app-wide .cf-chip (index.css) —
    reusing the bare .cf-chip name here silently overrode every .cf-chip in the
-   app for as long as this route was mounted. Every selector in this
-   stylesheet is now ALSO prefixed with the .cf-screen ancestor (the <main>
+   app for as long as this route was mounted. Non-portalled selectors in this
+   stylesheet are now ALSO prefixed with the .cf-screen ancestor (the <main>
    this <style> tag renders inside, see the render call below) — a <style>
    element has no scoping of its own from where it sits in the DOM, so the
    ancestor prefix is real, load-bearing scoping, not the unique name alone.
