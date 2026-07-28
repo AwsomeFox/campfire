@@ -55,10 +55,10 @@ export type RestKind = 'short' | 'long';
  */
 const PartyRecoveryBase = { characterIds: z.array(z.number().int().positive()).min(1) };
 export const PartyRecoveryRequest = z.discriminatedUnion('kind', [
-  z.object({ ...PartyRecoveryBase, kind: z.literal('short'), perCharacter: z.record(z.string(), z.object({ spendHitDice: z.number().int().min(0).optional(), hitDie: z.number().int().min(2).max(100).optional() })).default({}) }).superRefine((value, ctx) => { if (new Set(value.characterIds).size !== value.characterIds.length) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'characterIds must be unique' }); for (const key of Object.keys(value.perCharacter)) { if (!/^[1-9]\d*$/.test(key) || !value.characterIds.includes(Number(key))) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'perCharacter keys must be selected canonical character IDs' }); } }),
+  z.object({ ...PartyRecoveryBase, kind: z.literal('short'), perCharacter: z.record(z.string(), z.object({ spendHitDice: z.number().int().min(0).optional(), hitDie: z.number().int().min(2).max(100).optional() })).default({}) }),
   z.object({ ...PartyRecoveryBase, kind: z.literal('long') }),
   z.object({ ...PartyRecoveryBase, kind: z.literal('custom'), customResourceKeys: z.array(z.string().min(1).max(80)).min(1) }),
-]);
+]).superRefine((value, ctx) => { if (new Set(value.characterIds).size !== value.characterIds.length) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'characterIds must be unique' }); if (value.kind === 'short') for (const key of Object.keys(value.perCharacter)) if (!/^[1-9]\d*$/.test(key) || !value.characterIds.includes(Number(key))) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'perCharacter keys must be selected canonical character IDs' }); if (value.kind === 'custom' && new Set(value.customResourceKeys).size !== value.customResourceKeys.length) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'customResourceKeys must be unique' }); });
 export type PartyRecoveryRequest = z.infer<typeof PartyRecoveryRequest>;
 
 /** Apply adds the preview token and a client-generated idempotency key. */

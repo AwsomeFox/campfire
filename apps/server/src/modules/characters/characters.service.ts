@@ -86,6 +86,12 @@ import type { DdbCharacterImport } from '@campfire/schema';
 type CharacterCreateInput = z.infer<typeof CharacterCreate>;
 type CharacterUpdateInput = z.infer<typeof CharacterUpdate>;
 type HpPatchInput = z.infer<typeof HpPatch>;
+/** Stable object serialization for idempotency identity; object key order never changes the intent. */
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value && typeof value === 'object') { const record = value as Record<string, unknown>; return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(',')}}`; }
+  return JSON.stringify(value);
+}
 type ConditionsPatchInput = z.infer<typeof ConditionsPatch>;
 type SpellSlotPatchInput = z.infer<typeof SpellSlotPatch>;
 type XpPatchInput = z.infer<typeof XpPatch>;
@@ -1836,7 +1842,7 @@ export class CharactersService {
     const linked = await this.db.select({ characterId: combatants.characterId }).from(combatants).innerJoin(encounters, eq(combatants.encounterId, encounters.id)).where(and(eq(encounters.campaignId, campaignId), eq(encounters.status, 'running'), notDeleted(encounters.deletedAt)));
     const runningCombatantCharacterIds = [...new Set(linked.map((row) => row.characterId).filter((id): id is number => id != null && request.characterIds.includes(id)))];
     const before = targets.map((row) => ({ id: row.id, updatedAt: row.updatedAt, hpCurrent: row.hpCurrent, hpTemp: row.hpTemp, deathState: row.deathState, deathSaveSuccesses: row.deathSaveSuccesses, deathSaveFailures: row.deathSaveFailures, conditions: row.conditions, spellSlots: row.spellSlots, resources: row.resources }));
-    const fingerprint = createHash('sha256').update(JSON.stringify(request)).digest('hex');
+    const fingerprint = createHash('sha256').update(canonicalJson({ actorUserId: user.id, campaignId, request })).digest('hex');
     await this.db.insert(partyRestBatches).values({ campaignId, actorUserId: user.id, previewToken, requestFingerprint: fingerprint, status: 'previewed', beforeJson: toJsonText(before), planJson: toJsonText(plan), createdAt: nowIso() });
     const deltas = plan.plans.map((item) => {
       const state = states.find((candidate) => candidate.id === item.characterId)!;
@@ -1855,7 +1861,7 @@ export class CharactersService {
     const before = fromJsonText<Array<{ id: number; updatedAt: string }>>(batch.beforeJson, []);
     const plan = fromJsonText<{ kind: RestKind; ruleSystem: string; plans: Array<{ characterId: number; characterName: string; hpAfter: number; hpTempAfter: number; deathStateAfter: string; deathSaveSuccessesAfter: number; deathSaveFailuresAfter: number; conditionsAfter: string[]; spellSlotsAfter: Record<string, SpellSlotLevel>; resourcesAfter: Record<string, CharacterResource> }> }>(batch.planJson, { kind: 'short', ruleSystem: '', plans: [] });
     const ids = before.map((s) => s.id);
-    const linked = await this.db.select({ characterId: combatants.characterId }).from(combatants).innerJoin(encounters, eq(combatants.encounterId, encounters.id)).where(and(eq(encounters.campaignId, campaignId), ne(encounters.status, 'ended')));
+    const linked = await this.db.select({ characterId: combatants.characterId }).from(combatants).innerJoin(encounters, eq(combatants.encounterId, encounters.id)).where(and(eq(encounters.campaignId, campaignId), eq(encounters.status, 'running'), notDeleted(encounters.deletedAt)));
     if (linked.some((row) => row.characterId != null && ids.includes(row.characterId)) && !input.acknowledgeRunningCombatants) throw new ConflictException('A running combatant will be synchronized; acknowledgement is required.');
     const storedPlan = fromJsonText<{ failures?: unknown[] }>(batch.planJson, {});
     if ((storedPlan.failures?.length ?? 0) > 0) throw new BadRequestException('A recovery preview with ineligible participants cannot be applied.');
