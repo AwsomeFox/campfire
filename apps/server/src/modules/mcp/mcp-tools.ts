@@ -70,6 +70,7 @@ import {
   XpAward,
   AiDmTurnKind,
   InventoryItemCreate,
+  InventoryFromCompendium,
   InventoryItemUpdate,
   TreasuryPatch,
   TimelineEventCreate,
@@ -4515,6 +4516,19 @@ export class McpToolsService {
         const validated = InventoryItemCreate.parse(fields);
         const role = await this.access.requireRole(user, campaignId as number, 'player');
         return this.inventory.create(campaignId as number, validated, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'acquire_compendium_item',
+      'player: acquire an installed compendium item into party or an owned character inventory. Captures its source, license and play-safe snapshot. An equivalent item returns INVENTORY_COMPENDIUM_DUPLICATE until duplicateMode is increment or separate.',
+      { campaignId: CampaignIdArg, ...InventoryFromCompendium.shape },
+      async ({ campaignId, ...fields }) => {
+        const validated = InventoryFromCompendium.parse(fields);
+        const role = await this.access.requireRole(user, campaignId as number, 'player');
+        return this.inventory.acquireFromCompendium(campaignId as number, validated, user, role);
       },
     );
 

@@ -18,7 +18,7 @@ import {
   type ReactNode,
 } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import type { Notification, TimeFormat } from '@campfire/schema';
+import type { Notification, NotificationUnreadCount, TimeFormat } from '@campfire/schema';
 import { parseScheduleNotificationData } from '@campfire/schema';
 import { useAuth } from '../../app/auth';
 import { api, API } from '../../lib/api';
@@ -65,6 +65,13 @@ const NOTIFICATIONS_COUNT_ID = 'notifications-dialog-item-count';
 type CountSnapshot = {
   count: number;
   refreshedAt: number;
+  /**
+   * Issue #1590 — carried through the snapshot (not just the raw API response) so a tab that
+   * receives this via BroadcastChannel/localStorage, not just the one that made the fetch,
+   * also reacts. See the `membershipSignalRef` edge-trigger below for why this alone must not
+   * cause a refresh loop.
+   */
+  membershipChanged: boolean;
 };
 
 type NotificationSyncMessage =
@@ -112,6 +119,39 @@ function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === 'AbortError';
 }
 
+/** What `nextMembershipSignalState` remembers between polls. */
+export type MembershipSignalState = { membershipChanged: boolean; count: number } | null;
+
+/**
+ * Issue #1590 — pure trigger decision, pulled out of the component so it is testable
+ * without rendering React: given what was last observed and what the newest poll reports,
+ * decide the next remembered state and whether THIS observation should fire an
+ * account-wide `/me` refresh.
+ *
+ * NOT a plain `false -> true` edge trigger on `membershipChanged` alone — that was tried
+ * and is wrong, caught by this function's own test: a fresh account already has an unread
+ * `added_to_campaign` notification from the ORIGINAL "you were added" event, so
+ * `membershipChanged` reads true from the very first poll, before any role change ever
+ * happens. A pure boolean edge would treat every LATER role change as `true -> true` (no
+ * edge) and never refresh again for that account, for as long as ANY membership-shaped
+ * notification stays unread — which is indefinitely, since reading it is a manual action.
+ *
+ * Instead this also tracks `count` (the same total unread count the bell badge shows) and
+ * refreshes whenever `membershipChanged` is true AND either it was NOT true last time, or
+ * the unread count has changed since — a new membership-shaped notification necessarily
+ * changes the total, so "count moved while the flag is on" is a reliable proxy for "a NEW
+ * signal arrived" without needing to fetch and diff the notification list itself just to
+ * decide whether to refresh `/me`.
+ */
+export function nextMembershipSignalState(
+  previous: MembershipSignalState,
+  observed: { membershipChanged: boolean; count: number },
+): { next: MembershipSignalState; shouldRefresh: boolean } {
+  if (!observed.membershipChanged) return { next: { membershipChanged: false, count: observed.count }, shouldRefresh: false };
+  const isNewSignal = !previous || !previous.membershipChanged || previous.count !== observed.count;
+  return { next: { membershipChanged: true, count: observed.count }, shouldRefresh: isNewSignal };
+}
+
 function parseSnapshot(value: string | null): CountSnapshot | null {
   if (!value) return null;
   try {
@@ -123,7 +163,14 @@ function parseSnapshot(value: string | null): CountSnapshot | null {
       && typeof parsed.refreshedAt === 'number'
       && Number.isFinite(parsed.refreshedAt)
     ) {
-      return { count: parsed.count, refreshedAt: parsed.refreshedAt };
+      // #1590: a snapshot written by a pre-#1590 tab (or a stale localStorage entry from
+      // before this deploy) has no `membershipChanged` field at all — default it to false
+      // rather than rejecting an otherwise-good cached count.
+      return {
+        count: parsed.count,
+        refreshedAt: parsed.refreshedAt,
+        membershipChanged: parsed.membershipChanged === true,
+      };
     }
   } catch {
     /* malformed/blocked storage is just an empty cache */
@@ -200,7 +247,7 @@ function BellIcon({ size = 17 }: { size?: number }) {
 }
 
 export function NotificationsProvider({ children }: { children: ReactNode }) {
-  const { me } = useAuth();
+  const { me, refresh } = useAuth();
   const userId = me?.user.id;
   const location = useLocation();
   const navigate = useNavigate();
@@ -224,6 +271,16 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
   const countRequestRef = useRef<{ controller: AbortController; promise: Promise<void>; generation: number } | null>(null);
   const listRequestRef = useRef<{ controller: AbortController; generation: number } | null>(null);
   const previousPathRef = useRef(location.pathname);
+  // Issue #1590 — this is the account-wide `/me` refresh trigger. `refresh` itself is stable
+  // per AuthProvider render, but read through a ref anyway so `applyMembershipSignal` below
+  // does not need it in its own dependency array (it is called from effects that must not
+  // re-subscribe every render).
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
+  // See `nextMembershipSignalState` for what this tracks and why a plain boolean is not
+  // enough (a fresh account's own "you were added" notification already makes
+  // `membershipChanged` true before any role change ever happens).
+  const membershipSignalRef = useRef<MembershipSignalState>(null);
 
   const storageKey = userId === undefined ? null : `campfire.notifications.count.${userId}`;
   const lockName = userId === undefined ? null : `campfire.notifications.poll.${userId}`;
@@ -233,6 +290,32 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
     const safe = Math.max(0, Math.trunc(next));
     countRef.current = safe;
     if (mountedRef.current) setCount(safe);
+  }, []);
+
+  /**
+   * Issue #1590 — the account-wide `/me` refresh, driven off the SAME poll every mounted
+   * tab already runs regardless of which campaign (or none) it has open. See the module
+   * doc comment on `membershipChanged` (schema) for why this is safe to read here: it is
+   * derived from the caller's own notifications, nothing new is disclosed.
+   *
+   * Scenarios this closes: a user with no tab open on the affected campaign (the gap
+   * #1546 documented and could not close from its own module), and a user with one tab
+   * open on a DIFFERENT campaign or no campaign at all (dashboard, /admin, /preferences).
+   * Latency: up to one poll interval (60s), or immediate on the next visibility/route
+   * change, or immediate for a tab that DOES have the affected campaign's SSE open (that
+   * path — `useMembershipLiveSync` — is unchanged and still fires first).
+   *
+   * Scenarios this does NOT close: `/c/:id/screen` (the cast display) is mounted outside
+   * Layout and never gets a NotificationsProvider at all; and this only fires for a
+   * signal the server actually sends — `members.service.ts#remove` (removal from a
+   * campaign) does not send an account-wide notification today, only the campaign-scoped
+   * `membership.revoked` SSE frame. See the PR for #1590 for why that is deliberately
+   * out of scope here rather than folded in.
+   */
+  const applyMembershipSignal = useCallback((membershipChanged: boolean, count: number) => {
+    const next = nextMembershipSignalState(membershipSignalRef.current, { membershipChanged, count });
+    membershipSignalRef.current = next.next;
+    if (next.shouldRefresh) void refreshRef.current();
   }, []);
 
   const readStoredSnapshot = useCallback((): CountSnapshot | null => {
@@ -249,11 +332,13 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
     latestSnapshotRef.current = snapshot;
     snapshotVersionRef.current += 1;
     applyCount(snapshot.count);
-  }, [applyCount]);
+    applyMembershipSignal(snapshot.membershipChanged, snapshot.count);
+  }, [applyCount, applyMembershipSignal]);
 
   const publishSnapshot = useCallback((snapshot: CountSnapshot) => {
     latestSnapshotRef.current = snapshot;
     snapshotVersionRef.current += 1;
+    applyMembershipSignal(snapshot.membershipChanged, snapshot.count);
     applyCount(snapshot.count);
     if (storageKey) {
       try {
@@ -263,7 +348,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
       }
     }
     channelRef.current?.postMessage({ type: 'snapshot', snapshot } satisfies NotificationSyncMessage);
-  }, [applyCount, storageKey]);
+  }, [applyCount, applyMembershipSignal, storageKey]);
 
   const cancelCountRequest = useCallback(() => {
     countGenerationRef.current += 1;
@@ -295,17 +380,17 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
 
     const load = async () => {
       if (!isDocumentActive()) return;
-      const res = await api.get<{ count: number }>(`${API}/notifications/unread-count`, {
+      const res = await api.get<NotificationUnreadCount>(`${API}/notifications/unread-count`, {
         signal: controller.signal,
       });
       if (countGenerationRef.current !== generation) {
         return;
       }
       if (allReadAtRef.current !== null) {
-        publishSnapshot({ count: 0, refreshedAt: Date.now() });
+        publishSnapshot({ count: 0, refreshedAt: Date.now(), membershipChanged: false });
         return;
       }
-      publishSnapshot({ count: res.count, refreshedAt: Date.now() });
+      publishSnapshot({ count: res.count, refreshedAt: Date.now(), membershipChanged: res.membershipChanged });
     };
 
     const run = async () => {
@@ -553,7 +638,14 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
         const readAt = new Date().toISOString();
         syncReadMessage({ type: 'read', id: notification.id, readAt });
         channelRef.current?.postMessage({ type: 'read', id: notification.id, readAt } satisfies NotificationSyncMessage);
-        publishSnapshot({ count: Math.max(0, countRef.current - 1), refreshedAt: Date.now() });
+        // Optimistic — this single read may or may not have been the membership-shaped
+        // notification, so the flag is carried through unchanged rather than guessed. The
+        // forced `refreshCount(true)` below corrects it from the server within the same tick.
+        publishSnapshot({
+          count: Math.max(0, countRef.current - 1),
+          refreshedAt: Date.now(),
+          membershipChanged: latestSnapshotRef.current?.membershipChanged ?? false,
+        });
       } catch {
         announce("Couldn't mark notification as read.", { assertive: true });
       }
@@ -569,7 +661,11 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
         cancelCountRequest();
         syncReadMessage({ type: 'unread', id: notification.id });
         channelRef.current?.postMessage({ type: 'unread', id: notification.id } satisfies NotificationSyncMessage);
-        publishSnapshot({ count: countRef.current + 1, refreshedAt: Date.now() });
+        publishSnapshot({
+          count: countRef.current + 1,
+          refreshedAt: Date.now(),
+          membershipChanged: latestSnapshotRef.current?.membershipChanged ?? false,
+        });
       } catch {
         announce("Couldn't mark notification as unread.", { assertive: true });
       }
@@ -585,11 +681,17 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
       if (opts.all) {
         syncReadMessage({ type: 'read-all', readAt });
         channelRef.current?.postMessage({ type: 'read-all', readAt } satisfies NotificationSyncMessage);
-        publishSnapshot({ count: 0, refreshedAt: Date.now() });
+        // Every notification in the caller's inbox is read, `opts.all` — none can still be
+        // an unread membership signal.
+        publishSnapshot({ count: 0, refreshedAt: Date.now(), membershipChanged: false });
       } else {
         syncReadMessage({ type: 'read-bulk', ids: res.updatedIds, readAt });
         channelRef.current?.postMessage({ type: 'read-bulk', ids: res.updatedIds, readAt } satisfies NotificationSyncMessage);
-        publishSnapshot({ count: Math.max(0, countRef.current - res.updated), refreshedAt: Date.now() });
+        publishSnapshot({
+          count: Math.max(0, countRef.current - res.updated),
+          refreshedAt: Date.now(),
+          membershipChanged: latestSnapshotRef.current?.membershipChanged ?? false,
+        });
       }
       void refreshCount(true);
       return res;
@@ -605,7 +707,11 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
       cancelCountRequest();
       syncReadMessage({ type: 'unread-bulk', ids: res.updatedIds });
       channelRef.current?.postMessage({ type: 'unread-bulk', ids: res.updatedIds } satisfies NotificationSyncMessage);
-      publishSnapshot({ count: countRef.current + res.updated, refreshedAt: Date.now() });
+      publishSnapshot({
+        count: countRef.current + res.updated,
+        refreshedAt: Date.now(),
+        membershipChanged: latestSnapshotRef.current?.membershipChanged ?? false,
+      });
       void refreshCount(true);
       return res;
     } catch {
@@ -628,7 +734,8 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
         syncReadMessage({ type: 'read-all', readAt });
         channelRef.current?.postMessage({ type: 'read-all', readAt } satisfies NotificationSyncMessage);
       }
-      publishSnapshot({ count: 0, refreshedAt: Date.now() });
+      // Everything just got marked read — no unread membership signal can remain.
+      publishSnapshot({ count: 0, refreshedAt: Date.now(), membershipChanged: false });
       return true;
     } catch {
       return false;

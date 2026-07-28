@@ -381,6 +381,133 @@ describe('ai-dm driver — grounding: creative narration vs. factual claims (#57
     });
   });
 
+  /**
+   * #1591 — `nudge` and `flag` are the other two player-callable routes on this controller
+   * that run a full driver turn (via `runTurn`) and so return the identical `AiDmTurnRunResult`
+   * shape carrying `grounding`. #1561's security review confirmed both had the SAME unprojected
+   * shape as `start-session` on `main`, predating that issue — and confirmed they are closed as
+   * a SIDE EFFECT of `GroundingProjectionInterceptor` being applied at the controller boundary
+   * rather than per-handler (see the interceptor's own doc comment). Nothing here was broken;
+   * this pins that "side effect" down as an explicit, named guarantee for these two routes
+   * specifically, so a future narrowing of the interceptor's scope (e.g. moving it onto only the
+   * handlers whose author remembers to ask for it — the exact failure mode #1043 already closed
+   * once) would fail a test that names the route, not just silently regress.
+   */
+  it('never leaks a DM-only id through nudge — a replayed turn carries the same grounding shape (#1591)', async () => {
+    const campaignId = await armedCampaign('Grounding nudge leak');
+
+    const npc = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/npcs`)
+      .set(dm)
+      .send({ name: 'The Cartographer', body: 'Secretly maps the black market.', hidden: true });
+    expect(npc.status).toBe(201);
+    const npcId = npc.body.id as number;
+
+    const grant = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/ai-dm/secret-approval`)
+      .set(dm)
+      .send({ action: 'grant', tool: 'get_npc', entityId: npcId, note: 'may reason about the cartographer' });
+    expect(grant.status).toBe(201);
+
+    // Turn 1 (establishes the replay input nudge will replay) and turn 2 (the nudge's own
+    // replayed turn) both perform the approved read and cite it — a nudge is a genuine retry,
+    // so the tool call and citation happen again rather than being cached.
+    h.script(
+      {
+        toolCalls: [{ id: 'c1', name: 'get_npc', arguments: { npcId } }],
+      },
+      {
+        text: 'The cartographer\'s ledgers are hidden in plain sight.' + groundingBlock([
+          { text: 'The cartographer keeps hidden ledgers.', kind: 'canon', cites: [{ type: 'npc', id: npcId }] },
+        ]),
+      },
+      { toolCalls: [{ id: 'c2', name: 'get_npc', arguments: { npcId } }] },
+      {
+        text: 'Once more: the cartographer\'s ledgers are hidden in plain sight.' + groundingBlock([
+          { text: 'The cartographer keeps hidden ledgers.', kind: 'canon', cites: [{ type: 'npc', id: npcId }] },
+        ]),
+      },
+    );
+    const first = await h.sendMessage(campaignId, { input: 'What do you know of the cartographer?' }, player);
+    expect(first.status).toBe(201);
+
+    // Approvals are single-use (consumed by the first read); the nudge's replayed turn performs
+    // its OWN read and needs its own grant.
+    const grant2 = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/ai-dm/secret-approval`)
+      .set(dm)
+      .send({ action: 'grant', tool: 'get_npc', entityId: npcId, note: 'may reason about the cartographer again' });
+    expect(grant2.status).toBe(201);
+
+    const nudged = await h.lever(campaignId, 'nudge', {}, player);
+    expect(nudged.status).toBe(201);
+    expect(nudged.body.grounding.status).toBe('clean');
+
+    // The nudge's OWN result — the thing #1591 is about — must not name the hidden entity.
+    expect(JSON.stringify(nudged.body.grounding)).not.toContain(`/npcs/${npcId}`);
+    expect(nudged.body.grounding.retrievals.some((r: { id: number }) => r.id === npcId)).toBe(false);
+    expect(nudged.body.grounding.claims[0].citations[0]).toMatchObject({ status: 'supported', id: 0, redacted: true });
+
+    // The DM's own copy still resolves the real id — the guarantee redacts, it does not destroy.
+    const asDm = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/grounding`).set(dm);
+    expect(asDm.status).toBe(200);
+    expect(JSON.stringify(asDm.body)).toContain(`/npcs/${npcId}`);
+  });
+
+  it('never leaks a DM-only id through flag — a disputed-and-redecided turn carries the same grounding shape (#1591)', async () => {
+    const campaignId = await armedCampaign('Grounding flag leak');
+
+    const npc = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/npcs`)
+      .set(dm)
+      .send({ name: 'The Broker', body: 'Secretly fences stolen goods.', hidden: true });
+    expect(npc.status).toBe(201);
+    const npcId = npc.body.id as number;
+
+    const grant = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/ai-dm/secret-approval`)
+      .set(dm)
+      .send({ action: 'grant', tool: 'get_npc', entityId: npcId, note: 'may reason about the broker' });
+    expect(grant.status).toBe(201);
+
+    h.script(
+      { toolCalls: [{ id: 'c1', name: 'get_npc', arguments: { npcId } }] },
+      {
+        text: 'The broker denies everything.' + groundingBlock([
+          { text: 'The broker denies everything.', kind: 'canon', cites: [{ type: 'npc', id: npcId }] },
+        ]),
+      },
+      { toolCalls: [{ id: 'c2', name: 'get_npc', arguments: { npcId } }] },
+      {
+        text: 'On reconsideration, the broker admits the deal.' + groundingBlock([
+          { text: 'The broker admits the deal.', kind: 'canon', cites: [{ type: 'npc', id: npcId }] },
+        ]),
+      },
+    );
+    const first = await h.sendMessage(campaignId, { input: 'Press the broker for the truth.' }, player);
+    expect(first.status).toBe(201);
+
+    // Approvals are single-use; the re-decided turn performs its own read and needs its own grant.
+    const grant2 = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/ai-dm/secret-approval`)
+      .set(dm)
+      .send({ action: 'grant', tool: 'get_npc', entityId: npcId, note: 'may reason about the broker again' });
+    expect(grant2.status).toBe(201);
+
+    const flagged = await h.lever(campaignId, 'flag', { objection: 'That ruling let the broker off too easily.' }, player);
+    expect(flagged.status).toBe(201);
+    expect(flagged.body.grounding.status).toBe('clean');
+
+    // The re-decided turn's OWN result must not name the hidden entity either.
+    expect(JSON.stringify(flagged.body.grounding)).not.toContain(`/npcs/${npcId}`);
+    expect(flagged.body.grounding.retrievals.some((r: { id: number }) => r.id === npcId)).toBe(false);
+    expect(flagged.body.grounding.claims[0].citations[0]).toMatchObject({ status: 'supported', id: 0, redacted: true });
+
+    const asDm = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/grounding`).set(dm);
+    expect(asDm.status).toBe(200);
+    expect(JSON.stringify(asDm.body)).toContain(`/npcs/${npcId}`);
+  });
+
   it('the stored narration is exactly the prose the table watched stream by stream', async () => {
     const campaignId = await armedCampaign('Grounding narration parity');
     const streamSvc = h.ctx.app.get(AiDmStreamService);

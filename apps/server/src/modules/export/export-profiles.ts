@@ -258,7 +258,11 @@ export const PUBLISHABLE_FIELDS = {
   timelineEvent: ['id', 'campaignId', 'title', 'inWorldDate', 'body', 'era', 'sortIndex'],
   timelineCalendar: ['campaignId', 'note'],
   sessionZero: ['campaignId', 'houseRules', 'toneAndExpectations'],
-  inventoryItem: ['id', 'campaignId', 'ownerType', 'characterId', 'name', 'qty', 'notes', 'iconSlug'],
+  inventoryItem: [
+    'id', 'campaignId', 'ownerType', 'characterId', 'name', 'qty', 'notes', 'iconSlug',
+    // Issue #738: portable provenance (numeric ruleEntryId is local-only on import).
+    'ruleEntryId', 'compendiumRef', 'compendiumSnapshot', 'compendiumState',
+  ],
   treasury: ['campaignId', 'cp', 'sp', 'ep', 'gp', 'pp'],
   attachment: ['id', 'kind', 'filename', 'mime', 'size', 'file', 'fileRoute', 'present'],
 } as const satisfies Record<string, readonly string[]>;

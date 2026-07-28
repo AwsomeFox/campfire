@@ -38,7 +38,8 @@ import {
   settings,
   users,
 } from '../../db/schema';
-import { AuditService } from '../audit/audit.service';
+import { AuditService, type AuditLogParams } from '../audit/audit.service';
+import { auditBestEffort } from '../audit/audit-best-effort';
 import { CampaignEventsService } from '../events/campaign-events.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { SettingsService } from '../settings/settings.service';
@@ -639,8 +640,13 @@ export class AdminCatalogService {
     // then cannot tell what landed, and re-running is unsafe precisely because some of
     // it did. The summary is a convenience for the audit trail; the per-item verdicts
     // are the thing that must survive.
-    try {
-      await this.audit.log({
+    // Deliberately best-effort too, same reasoning as the per-item write (#1581): every
+    // campaign in the batch already committed independently, so a failure here must not
+    // retroactively cast doubt on results that already happened.
+    await auditBestEffort(
+      this.audit,
+      this.logger,
+      {
         actor,
         actorRole,
         action: req.dryRun ? 'campaign.catalog.bulk.dryrun' : 'campaign.catalog.bulk',
@@ -650,14 +656,11 @@ export class AdminCatalogService {
           `wouldApply=${result.wouldApply}, skipped=${result.skipped}, failed=${result.failed}` +
           `, ${this.describeTargets(results)}` +
           (req.reason ? `, reason=${req.reason.slice(0, 300)}` : ''),
-      });
-    } catch (err) {
-      this.logger.error(
+      },
+      () =>
         `bulk ${req.operation} completed (applied=${result.applied}, skipped=${result.skipped}, ` +
-          `failed=${result.failed}) but its summary audit row failed to write`,
-        err instanceof Error ? err.stack : String(err),
-      );
-    }
+        `failed=${result.failed}) but its summary audit row failed to write`,
+    );
 
     return result;
   }
@@ -891,27 +894,30 @@ export class AdminCatalogService {
     // item as `failed` would send the operator to retry an operation that already
     // happened, which for a non-idempotent op is how a batch gets applied twice.
     // So the outcome stays `applied` and the audit failure is carried in `reason`.
-    let auditNote = '';
-    try {
-      await this.audit.log({
-        actor: actor.actor,
-        actorRole: actor.actorRole,
-        action: `campaign.catalog.${req.operation}`,
-        entityType: 'campaign',
-        entityId: campaignId,
-        campaignId,
-        detail:
-          `${plan.summary.field}: ${plan.summary.before} -> ${plan.summary.after}` +
-          (req.reason ? ` (${req.reason.slice(0, 300)})` : ''),
-      });
-    } catch (err) {
-      // Surfaced, never swallowed: an unaudited admin action is itself an incident.
-      this.logger.error(
-        `campaign.catalog.${req.operation} applied to campaign ${campaignId} but its audit row failed to write`,
-        err instanceof Error ? err.stack : String(err),
-      );
-      auditNote = 'applied, but the audit row could not be written';
-    }
+    //
+    // Deliberately still POST-COMMIT / best-effort, not moved onto AuditService#logInTx
+    // (#1581): this is a bulk catalog operation (archive/pause/requota), not a consent
+    // decision, and re-litigating an already-applied campaign-state change because the
+    // audit subsystem hiccuped is a worse outcome than a loudly-logged missing row. See
+    // `decideExportRequest` below for the sibling write #1581 DID move onto the
+    // transactional path, and why that one is different.
+    const auditNote =
+      (await auditBestEffort(
+        this.audit,
+        this.logger,
+        {
+          actor: actor.actor,
+          actorRole: actor.actorRole,
+          action: `campaign.catalog.${req.operation}`,
+          entityType: 'campaign',
+          entityId: campaignId,
+          campaignId,
+          detail:
+            `${plan.summary.field}: ${plan.summary.before} -> ${plan.summary.after}` +
+            (req.reason ? ` (${req.reason.slice(0, 300)})` : ''),
+        },
+        () => `campaign.catalog.${req.operation} applied to campaign ${campaignId} but its audit row failed to write`,
+      )) ?? '';
 
     return { campaignId, outcome: 'applied', reason: auditNote, ...plan.summary, stateVersion };
   }
@@ -1245,23 +1251,50 @@ export class AdminCatalogService {
     // match a row that has already been decided, so the loser changes nothing and is
     // told so. Same shape as the fix in #1039: a predicate that cannot match a stale
     // state, rather than a check that can go stale across an await.
-    const [updated] = await this.db
-      .update(campaignExportRequests)
-      .set({
-        status: decision.decision,
-        decidedBy: actor,
-        decidedAt: ts,
-        decisionNote: decision.note.slice(0, 2000),
-        updatedAt: ts,
-      })
-      .where(
-        and(
-          eq(campaignExportRequests.id, requestId),
-          eq(campaignExportRequests.campaignId, campaignId),
-          eq(campaignExportRequests.status, 'pending'),
-        ),
-      )
-      .returning();
+    //
+    // ATOMIC WITH ITS PRIMARY AUDIT ROW (#1581). This is exactly the case that issue names
+    // as wanting the strict guarantee: "we decided it but there is no record" IS the
+    // incident for a consent decision, more than for any other write in this file — a DM
+    // who approved an export and is handed a 500 either approves again (refused with
+    // "already decided") or concludes it did not happen, and both leave them wrong about
+    // whether their campaign's data is now exportable. So unlike the bulk writes above,
+    // if the audit insert throws here, the whole transaction rolls back: the decision
+    // itself is undone, the DM sees a clean error, and retrying is safe (the same
+    // status='pending' predicate protects it, exactly as a genuine concurrent decision
+    // does below).
+    const primaryEntry: AuditLogParams = {
+      actor,
+      actorRole: 'dm',
+      action: `campaign.export_request.${decision.decision}`,
+      entityType: 'campaign_export_request',
+      entityId: requestId,
+      campaignId,
+      detail: `profile=${row.profile}, requestedBy=${row.requestedBy || 'server-admin'}`,
+    };
+    const [updated] = this.db.transaction((tx) => {
+      const rows = tx
+        .update(campaignExportRequests)
+        .set({
+          status: decision.decision,
+          decidedBy: actor,
+          decidedAt: ts,
+          decisionNote: decision.note.slice(0, 2000),
+          updatedAt: ts,
+        })
+        .where(
+          and(
+            eq(campaignExportRequests.id, requestId),
+            eq(campaignExportRequests.campaignId, campaignId),
+            eq(campaignExportRequests.status, 'pending'),
+          ),
+        )
+        .returning()
+        .all();
+      // Only write the audit row when the update actually matched a row — a lost race
+      // (see below) changed nothing, and must not audit a decision that did not happen.
+      if (rows.length > 0) this.audit.logInTx(tx, primaryEntry);
+      return rows;
+    });
 
     // Zero rows means another DM decided it in the gap. Returning success here would
     // hand this DM the OTHER DM's decision as though it were their own, so it is
@@ -1272,60 +1305,31 @@ export class AdminCatalogService {
       throw new ConflictException('Another DM decided this export request first');
     }
 
-    // THE DECISION HAS COMMITTED. Everything below is record-keeping, and record-keeping
-    // must not be able to turn a recorded consent decision into a reported failure.
-    //
-    // Same shape as the bulk path's per-item write, and the consequence is sharper here
-    // because this is CONSENT. A DM who approved an export and is handed a 500 either
-    // approves again — and is refused with "already decided" — or concludes it did not
-    // happen. Both leave them wrong about whether their campaign's data is now
-    // exportable, which is the one thing this workflow exists to make unambiguous.
-    //
-    // Atomicity is not available without restructuring AuditService: `log()` writes
-    // through its own db handle and cannot join a transaction opened here. So the
-    // truthful decision state is returned and the audit failure is made loud rather than
-    // fatal. The two mirrors are attempted independently so one failing cannot suppress
-    // the other — a partial trail beats no trail when reconstructing who consented.
-    const auditMirrors: Array<[string, Parameters<AuditService['log']>[0]]> = [
-      [
-        'campaign',
-        {
-          actor,
-          actorRole: 'dm',
-          action: `campaign.export_request.${decision.decision}`,
-          entityType: 'campaign_export_request',
-          entityId: requestId,
-          campaignId,
-          detail: `profile=${row.profile}, requestedBy=${row.requestedBy || 'server-admin'}`,
-        },
-      ],
-      // Server-scoped mirror so the operator who asked can see the answer in the
-      // server-admin trail, which excludes campaign rows.
-      [
-        'server-admin',
-        {
-          actor,
-          actorRole: 'dm',
-          action: `campaign.export_request.${decision.decision}`,
-          entityType: 'campaign_export_request',
-          entityId: requestId,
-          detail: `campaign=${campaignId}, profile=${row.profile}`,
-        },
-      ],
-    ];
-
-    for (const [mirror, entry] of auditMirrors) {
-      try {
-        await this.audit.log(entry);
-      } catch (err) {
-        // Surfaced, never swallowed: an unaudited consent decision is itself an incident.
-        this.logger.error(
-          `export request ${requestId} for campaign ${campaignId} was ${decision.decision}, ` +
-            `but its ${mirror} audit row failed to write`,
-          err instanceof Error ? err.stack : String(err),
-        );
-      }
-    }
+    // THE DECISION HAS COMMITTED (with its primary audit row, atomically — see above).
+    // This second mirror is deliberately NOT part of that transaction: it is a
+    // convenience duplicate in the server-admin trail (which excludes campaign rows) so
+    // the operator who raised the request can find the answer without campaign access.
+    // The primary row IS the record of consent; this one is an index onto it. Losing it
+    // to a transient audit failure is a worse UX (operator has to search harder) but not
+    // "we did it with no record" — the campaign-scoped row already IS that record — so it
+    // stays on the best-effort, post-commit path rather than folding into the same
+    // transaction and risking a healthy consent decision rolling back over a duplicate
+    // convenience row.
+    await auditBestEffort(
+      this.audit,
+      this.logger,
+      {
+        actor,
+        actorRole: 'dm',
+        action: `campaign.export_request.${decision.decision}`,
+        entityType: 'campaign_export_request',
+        entityId: requestId,
+        detail: `campaign=${campaignId}, profile=${row.profile}`,
+      },
+      () =>
+        `export request ${requestId} for campaign ${campaignId} was ${decision.decision}, ` +
+        `but its server-admin audit mirror failed to write`,
+    );
 
     return this.toExportRequest(updated);
   }

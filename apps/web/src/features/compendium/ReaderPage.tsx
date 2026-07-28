@@ -8,18 +8,21 @@ import { useTranslation } from 'react-i18next';
  * shape) with just the back link. RuleEntry only carries packId, so the
  * owning pack (for name + license) is resolved from GET /rules/packs.
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useNavigate, useParams } from 'react-router-dom';
 import { api, API, translateApiError } from '../../lib/api';
-import type { RuleEntry, RulePack } from '@campfire/schema';
+import type { Character, RuleEntry, RulePack } from '@campfire/schema';
 import { Card, ErrorNote, Skeleton, Btn } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
 import { StatBlock, hasMonsterStatblock } from '../../components/StatBlock';
 import { GameIcon } from '../../components/GameIcon';
 import { IconPicker } from '../../components/IconPicker';
+import { useDialog } from '../../components/useDialog';
 import { ruleEntryIconSlug } from '../../lib/ruleEntryIcon';
 import { useCampaign } from '../../app/CampaignContext';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
+import { useAuth } from '../../app/auth';
 import { PageTitle } from '../../components/PageTitle';
 import {
   COMPENDIUM_SOURCE_COPIED_LABEL,
@@ -37,7 +40,8 @@ export default function ReaderPage() {
   const ruleSystem = useCampaign(Number.isFinite(id) ? id : undefined)?.ruleSystem ?? null;
   // Only the DM (of this campaign) may set an entry's icon override (issue #305) — the
   // PATCH is server-side gated to admin/DM too; this just hides the control for players.
-  const { isDm, canDmWrite } = useCampaignAccess();
+  const { isDm, canDmWrite, canPlayerWrite } = useCampaignAccess();
+  const { me } = useAuth();
 
   const [entry, setEntry] = useState<RuleEntry | null>(null);
   const [pack, setPack] = useState<RulePack | null>(null);
@@ -46,6 +50,13 @@ export default function ReaderPage() {
   const [pickingIcon, setPickingIcon] = useState(false);
   const [savingIcon, setSavingIcon] = useState(false);
   const [iconError, setIconError] = useState<string | null>(null);
+  const [acquiring, setAcquiring] = useState(false);
+  const [acquireError, setAcquireError] = useState<string | null>(null);
+  const [owners, setOwners] = useState<Character[]>([]);
+  const [ownerId, setOwnerId] = useState('party');
+  const [qty, setQty] = useState('1');
+  const [notes, setNotes] = useState('');
+  const acquireTitleId = useId();
 
   async function saveIcon(slug: string) {
     if (!entry) return;
@@ -87,6 +98,20 @@ export default function ReaderPage() {
       cancelled = true;
     };
   }, [entryId]);
+
+  useEffect(() => { if (acquiring) void api.get<Character[]>(`${API}/campaigns/${id}/characters`).then((all) => setOwners(isDm ? all : all.filter((owner) => owner.ownerUserId === String(me?.user.id ?? '')))).catch(() => setOwners([])); }, [acquiring, id, isDm, me?.user.id]);
+
+  async function acquire(duplicateMode: 'confirm' | 'increment' | 'separate' = 'confirm') {
+    if (!entry) return;
+    try {
+      setAcquireError(null);
+      await api.post(`${API}/campaigns/${id}/inventory/from-compendium`, { ruleEntryId: entry.id, ownerType: ownerId === 'party' ? 'party' : 'character', characterId: ownerId === 'party' ? null : Number(ownerId), qty: Math.max(1, Number(qty) || 1), notes, duplicateMode });
+      setAcquiring(false); navigate(`/c/${id}/inventory`);
+    } catch (err) {
+      const code = err instanceof Error && 'body' in err ? (err as any).body?.code : '';
+      setAcquireError(code === 'INVENTORY_COMPENDIUM_DUPLICATE' ? 'That item is already here. Choose increment or create a separate copy.' : translateApiError(err, t, { fallbackKey: 'inventory.errors.load' }));
+    }
+  }
 
   if (!Number.isFinite(id)) {
     return (
@@ -131,6 +156,7 @@ export default function ReaderPage() {
             </span>
             <PageTitle style={{ margin: 0 }}>{entry.name}</PageTitle>
             <span className="tag tag-neutral" style={{ fontSize: 9.5 }}>{entry.type}</span>
+            {entry.type === 'item' && canPlayerWrite && <Btn className="!min-h-0 !py-1.5 text-xs" onClick={() => setAcquiring(true)}>Add to inventory</Btn>}
             {isDm && canDmWrite && (
               <span className="flex items-center gap-1.5" style={{ marginLeft: 'auto' }}>
                 <Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={savingIcon} onClick={() => setPickingIcon(true)}>
@@ -184,7 +210,88 @@ export default function ReaderPage() {
       {pickingIcon && entry && (
         <IconPicker value={entry.iconSlug} onSelect={saveIcon} onClose={() => setPickingIcon(false)} />
       )}
+      {acquiring && entry && (
+        <AcquireInventoryDialog
+          titleId={acquireTitleId}
+          entryName={entry.name}
+          owners={owners}
+          ownerId={ownerId}
+          qty={qty}
+          notes={notes}
+          acquireError={acquireError}
+          onOwnerIdChange={setOwnerId}
+          onQtyChange={setQty}
+          onNotesChange={setNotes}
+          onAcquire={(mode) => void acquire(mode)}
+          onClose={() => setAcquiring(false)}
+        />
+      )}
     </div>
+  );
+}
+
+function AcquireInventoryDialog({
+  titleId,
+  entryName,
+  owners,
+  ownerId,
+  qty,
+  notes,
+  acquireError,
+  onOwnerIdChange,
+  onQtyChange,
+  onNotesChange,
+  onAcquire,
+  onClose,
+}: {
+  titleId: string;
+  entryName: string;
+  owners: Character[];
+  ownerId: string;
+  qty: string;
+  notes: string;
+  acquireError: string | null;
+  onOwnerIdChange: (value: string) => void;
+  onQtyChange: (value: string) => void;
+  onNotesChange: (value: string) => void;
+  onAcquire: (mode?: 'confirm' | 'increment' | 'separate') => void;
+  onClose: () => void;
+}) {
+  const dialogRef = useDialog<HTMLDivElement>({ onClose, inertBackground: true });
+  return createPortal(
+    <div
+      className="dialog-backdrop"
+      data-overlay="dialog"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        className="dialog w-full max-w-md space-y-3"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <h2 id={titleId} className="dialog-title">Add {entryName} to inventory</h2>
+        <label>Owner <select value={ownerId} onChange={(e) => onOwnerIdChange(e.target.value)}><option value="party">Party stash</option>{owners.map((owner) => <option key={owner.id} value={owner.id}>{owner.name}</option>)}</select></label>
+        <label>Quantity <input value={qty} type="number" min="1" onChange={(e) => onQtyChange(e.target.value)} /></label>
+        <label>Notes <textarea value={notes} onChange={(e) => onNotesChange(e.target.value)} /></label>
+        {acquireError && <ErrorNote message={acquireError} />}
+        <div className="flex gap-2 flex-wrap">
+          <Btn onClick={() => onAcquire()}>Add</Btn>
+          {acquireError?.startsWith('That item') && (
+            <>
+              <Btn ghost onClick={() => onAcquire('increment')}>Increment existing</Btn>
+              <Btn ghost onClick={() => onAcquire('separate')}>Create separate</Btn>
+            </>
+          )}
+          <Btn ghost onClick={onClose}>Cancel</Btn>
+        </div>
+      </div>
+    </div>,
+    document.body,
   );
 }
 

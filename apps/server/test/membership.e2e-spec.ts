@@ -84,6 +84,52 @@ describe('membership + effective roles (e2e, real cookie sessions)', () => {
   });
 
   /**
+   * Issue #1590 — a DM promoting/demoting an EXISTING member (issue #437's own-campaign
+   * path, `MembersService.update`) is the common way a role actually changes day to day —
+   * far more common than the admin bulk `reassign_owner` path #1546 already covered. Before
+   * this, `update()` emitted only the campaign-scoped `membership.updated` SSE event, which
+   * only reaches a browser that already has THIS campaign's stream open. Now it also sends
+   * the same account-wide `added_to_campaign`-typed notification #1546 established for the
+   * admin path, so the target's poller (which runs regardless of which campaign, or none,
+   * they're currently viewing) has something to react to.
+   */
+  it("promoting an existing member notifies them account-wide and flags membershipChanged (#1590)", async () => {
+    const membersBefore = await userA.get(`/api/v1/campaigns/${campaignId}/members`);
+    const bMember = membersBefore.body.find((m: { userId: number }) => m.userId === userBId);
+    expect(bMember).toBeDefined();
+
+    const promote = await userA.patch(`/api/v1/campaigns/${campaignId}/members/${bMember.id}`).send({ role: 'dm' });
+    expect(promote.status).toBe(200);
+    expect(promote.body.role).toBe('dm');
+
+    const bNotifications = await userB.get('/api/v1/notifications');
+    const items = Array.isArray(bNotifications.body) ? bNotifications.body : bNotifications.body.items;
+    const roleChange = items.find(
+      (n: { type: string; campaignId: number }) => n.type === 'added_to_campaign' && n.campaignId === campaignId,
+    );
+    expect(roleChange).toBeDefined();
+    expect(roleChange.title).toContain('DM');
+    expect(roleChange.readAt).toBeNull();
+
+    const bCount = await userB.get('/api/v1/notifications/unread-count');
+    expect(bCount.body.membershipChanged).toBe(true);
+
+    // The acting DM (A) is not the target and gets no self-notification.
+    const aCount = await userA.get('/api/v1/notifications/unread-count');
+    expect(aCount.body.membershipChanged).toBe(false);
+
+    // Restore B to 'player' so the rest of this describe block's assumptions
+    // (roles === ['dm', 'player'], B treated as an ordinary player member) still hold.
+    const demote = await userA.patch(`/api/v1/campaigns/${campaignId}/members/${bMember.id}`).send({ role: 'player' });
+    expect(demote.status).toBe(200);
+    expect(demote.body.role).toBe('player');
+
+    // The demotion is ALSO membership-shaped — same mechanism, either direction.
+    const bCountAfterDemote = await userB.get('/api/v1/notifications/unread-count');
+    expect(bCountAfterDemote.body.membershipChanged).toBe(true);
+  });
+
+  /**
    * Issue #501 — AI consent is a personal preference in a way a role is not, so the roster
    * discloses it only to the DM (who needs it to understand why a recap withheld material)
    * and to the member themselves (who needs it to render their own consent control).
