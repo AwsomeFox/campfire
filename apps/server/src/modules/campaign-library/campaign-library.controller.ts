@@ -117,6 +117,18 @@ export class CampaignLibrarySearchController {
     const role = await this.access.requireMember(user, campaignId);
     return this.library.search(campaignId, role, query);
   }
+
+  @Post('bulk')
+  async bulk(@Param('campaignId', ParseIntPipe) campaignId: number, @Body() body: unknown, @CurrentUser() user: RequestUser) {
+    const role = await this.access.requireRole(user, campaignId, 'dm');
+    return this.library.bulk(campaignId, body, user, role);
+  }
+
+  @Post('bulk/:operationId/undo')
+  async undo(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('operationId', ParseIntPipe) operationId: number, @CurrentUser() user: RequestUser) {
+    const role = await this.access.requireRole(user, campaignId, 'dm');
+    return this.library.undoBulk(campaignId, operationId, user, role);
+  }
 }
 
 @ApiTags('campaign-library')

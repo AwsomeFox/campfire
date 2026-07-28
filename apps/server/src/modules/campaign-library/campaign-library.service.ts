@@ -1,5 +1,6 @@
 import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, isNull, sql } from 'drizzle-orm';
+import { z } from 'zod';
 import {
   CampaignLibraryMonster,
   CampaignLibraryMonsterCreate,
@@ -9,11 +10,12 @@ import {
   CombatantStatblock,
   LibrarySearchQuery,
   LibrarySearchPage,
+  LibraryBulkRequest, LibraryBulkResult,
   type LibraryEntitySummary,
   type Role,
 } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { attachments, campaignLibraryCollections, campaignLibraryEntityTaxonomy, campaignLibraryMonsters, campaignLibraryTags, encounters, factions, inventoryItems, locations, npcs, quests, timelineEvents } from '../../db/schema';
+import { attachments, auditLog, campaignLibraryBulkOperations, campaignLibraryCollections, campaignLibraryEntityTaxonomy, campaignLibraryMonsters, campaignLibraryTags, characters, encounters, factions, inventoryItems, locations, npcs, quests, timelineEvents } from '../../db/schema';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
@@ -127,6 +129,72 @@ export class CampaignLibraryService {
       tx.delete(campaignLibraryEntityTaxonomy).where(and(eq(campaignLibraryEntityTaxonomy.campaignId, campaignId), eq(campaignLibraryEntityTaxonomy.collectionId, id))).run();
       tx.update(campaignLibraryCollections).set({ parentCollectionId: null, updatedAt: nowIso() }).where(and(eq(campaignLibraryCollections.campaignId, campaignId), eq(campaignLibraryCollections.parentCollectionId, id))).run();
       tx.delete(campaignLibraryCollections).where(and(eq(campaignLibraryCollections.id, id), eq(campaignLibraryCollections.campaignId, campaignId))).run();
+    });
+  }
+
+  private async assertBulkTarget(campaignId: number, type: string, id: number): Promise<void> {
+    const table = ({ quest: quests, npc: npcs, location: locations, faction: factions, encounter: encounters, timeline_event: timelineEvents, inventory_item: inventoryItems, attachment: attachments, campaign_library_monster: campaignLibraryMonsters } as const)[type as 'quest'];
+    if (!table) throw new BadRequestException(`Unsupported library entity type: ${type}`);
+    const [row] = await this.db.select({ id: table.id }).from(table).where(and(eq(table.id, id), eq(table.campaignId, campaignId))).limit(1);
+    if (!row) throw new NotFoundException(`${type} ${id} not found in campaign ${campaignId}`);
+  }
+
+  async bulk(campaignId: number, raw: unknown, user: RequestUser, role: Role): Promise<LibraryBulkResult> {
+    const request = LibraryBulkRequest.parse(raw);
+    if (!['add_tag', 'remove_tag', 'add_collection', 'remove_collection', 'move_collection'].includes(request.operation)) throw new BadRequestException(`Bulk operation ${request.operation} is not yet supported for these entity types`);
+    const isTag = request.operation === 'add_tag' || request.operation === 'remove_tag';
+    if (!('taxonomyId' in request)) throw new BadRequestException('Bulk operation needs a taxonomyId');
+    const taxonomyId = request.taxonomyId;
+    const ts = nowIso(); let operationId = 0;
+    this.db.transaction((tx) => {
+      // Everything is validated under the same lock/transaction as the write.  In
+      // particular, a later bad target cannot leave an earlier target modified.
+      const taxonomyTable = isTag ? 'campaign_library_tags' : 'campaign_library_collections';
+      if (!tx.get(sql`select id from ${sql.raw(taxonomyTable)} where id=${taxonomyId} and campaign_id=${campaignId}`)) throw new NotFoundException('Taxonomy entry not found in this campaign');
+      for (const target of request.targets) {
+        const entry = ({ quest: 'quests', npc: 'npcs', location: 'locations', faction: 'factions', encounter: 'encounters', timeline_event: 'timeline_events', inventory_item: 'inventory_items', attachment: 'attachments', campaign_library_monster: 'campaign_library_monsters' } as const)[target.entityType];
+        if (!tx.get(sql`select id from ${sql.raw(entry)} where id=${target.entityId} and campaign_id=${campaignId}`)) throw new NotFoundException(`${target.entityType} ${target.entityId} not found in this campaign`);
+      }
+      const targetKeys = new Set(request.targets.map((target) => `${target.entityType}:${target.entityId}`));
+      const TaxonomyJournalRow = z.object({ id: z.number().int(), campaignId: z.number().int(), entityType: z.string(), entityId: z.number().int(), tagId: z.number().int().nullable(), collectionId: z.number().int().nullable(), createdAt: z.string() }).strict();
+      const relevant = tx.all(sql`select id, campaign_id as campaignId, entity_type as entityType, entity_id as entityId, tag_id as tagId, collection_id as collectionId, created_at as createdAt from campaign_library_entity_taxonomy where campaign_id=${campaignId}`)
+        .map((row) => TaxonomyJournalRow.parse(row)).filter((row) => targetKeys.has(`${row.entityType}:${row.entityId}`));
+      for (const target of request.targets) {
+        const predicate = and(eq(campaignLibraryEntityTaxonomy.campaignId, campaignId), eq(campaignLibraryEntityTaxonomy.entityType, target.entityType), eq(campaignLibraryEntityTaxonomy.entityId, target.entityId), isTag ? eq(campaignLibraryEntityTaxonomy.tagId, taxonomyId) : eq(campaignLibraryEntityTaxonomy.collectionId, taxonomyId));
+        if (request.operation === 'add_tag' || request.operation === 'add_collection' || request.operation === 'move_collection') {
+          // A move replaces the target's entire collection membership, not merely
+          // a duplicate of the destination collection.
+          if (request.operation === 'move_collection') tx.delete(campaignLibraryEntityTaxonomy).where(and(eq(campaignLibraryEntityTaxonomy.campaignId, campaignId), eq(campaignLibraryEntityTaxonomy.entityType, target.entityType), eq(campaignLibraryEntityTaxonomy.entityId, target.entityId), isNull(campaignLibraryEntityTaxonomy.tagId))).run();
+          tx.insert(campaignLibraryEntityTaxonomy).values({ campaignId, entityType: target.entityType, entityId: target.entityId, tagId: isTag ? taxonomyId : null, collectionId: isTag ? null : taxonomyId, createdAt: ts }).onConflictDoNothing().run();
+        } else tx.delete(campaignLibraryEntityTaxonomy).where(predicate).run();
+      }
+      const inserted = tx.insert(campaignLibraryBulkOperations).values({ campaignId, actor: auditActor(user), operation: request.operation, beforeJson: toJsonText(relevant), afterJson: toJsonText(request), inverseJson: toJsonText(relevant), createdAt: ts }).returning({ id: campaignLibraryBulkOperations.id }).get(); operationId = inserted.id;
+      tx.insert(auditLog).values({ campaignId, actor: auditActor(user), actorRole: role, action: 'campaign_library.bulk', entityType: 'campaign_library_bulk_operation', entityId: operationId, detail: request.operation, requestId: null, createdAt: ts }).run();
+    });
+    return { operationId, applied: request.targets.length, undoAvailable: true };
+  }
+
+  async undoBulk(campaignId: number, operationId: number, user: RequestUser, role: Role) {
+    const JournalRows = z.array(z.object({ id: z.number().int(), campaignId: z.number().int(), entityType: z.string(), entityId: z.number().int(), tagId: z.number().int().nullable(), collectionId: z.number().int().nullable(), createdAt: z.string() }).strict());
+    return this.db.transaction((tx) => {
+      // Claim before inverse writes; this gives concurrent callers exactly one winner.
+      const claimed = tx.update(campaignLibraryBulkOperations).set({ undoneAt: nowIso(), undoneBy: auditActor(user) }).where(and(eq(campaignLibraryBulkOperations.id, operationId), eq(campaignLibraryBulkOperations.campaignId, campaignId), isNull(campaignLibraryBulkOperations.undoneAt))).run();
+      if (claimed.changes === 0) return { operationId, undone: true, alreadyUndone: true };
+      const operation = tx.select().from(campaignLibraryBulkOperations).where(and(eq(campaignLibraryBulkOperations.id, operationId), eq(campaignLibraryBulkOperations.campaignId, campaignId))).get();
+      if (!operation) throw new NotFoundException(`Bulk operation ${operationId} not found`);
+      const request = LibraryBulkRequest.parse(JSON.parse(operation.afterJson));
+      const rows = JournalRows.parse(JSON.parse(operation.beforeJson));
+      if (!('taxonomyId' in request)) throw new BadRequestException('This bulk operation has no reversible taxonomy journal');
+      const isTag = request.operation === 'add_tag' || request.operation === 'remove_tag';
+      for (const target of request.targets) {
+        // Undo only the dimension this operation touched.  A tag or collection a
+        // collaborator added later is never deleted by an older undo.
+        if (request.operation === 'move_collection') tx.delete(campaignLibraryEntityTaxonomy).where(and(eq(campaignLibraryEntityTaxonomy.campaignId, campaignId), eq(campaignLibraryEntityTaxonomy.entityType, target.entityType), eq(campaignLibraryEntityTaxonomy.entityId, target.entityId), isNull(campaignLibraryEntityTaxonomy.tagId))).run();
+        else tx.delete(campaignLibraryEntityTaxonomy).where(and(eq(campaignLibraryEntityTaxonomy.campaignId, campaignId), eq(campaignLibraryEntityTaxonomy.entityType, target.entityType), eq(campaignLibraryEntityTaxonomy.entityId, target.entityId), isTag ? eq(campaignLibraryEntityTaxonomy.tagId, request.taxonomyId) : eq(campaignLibraryEntityTaxonomy.collectionId, request.taxonomyId))).run();
+      }
+      for (const row of rows) tx.insert(campaignLibraryEntityTaxonomy).values({ campaignId: row.campaignId, entityType: row.entityType, entityId: row.entityId, tagId: row.tagId, collectionId: row.collectionId, createdAt: row.createdAt }).onConflictDoNothing().run();
+      tx.insert(auditLog).values({ campaignId, actor: auditActor(user), actorRole: role, action: 'campaign_library.bulk.undo', entityType: 'campaign_library_bulk_operation', entityId: operationId, detail: operation.operation, requestId: null, createdAt: nowIso() }).run();
+      return { operationId, undone: true, alreadyUndone: false };
     });
   }
 
