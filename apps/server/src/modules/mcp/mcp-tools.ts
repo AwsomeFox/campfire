@@ -3723,8 +3723,8 @@ export class McpToolsService {
       },
     );
 
-    // #1040: saving_throw — resolve a save server-side using the character's real stats
-    // + proficiency, comparing against a DC in one verifiable call.
+    // #1040: saving_throw — resolve a legacy d20 save server-side using the character's
+    // real stats + proficiency, comparing the final total against a DC in one verifiable call.
     //
     // #1599: the modifier math is the CAMPAIGN'S rule-system adapter's own — ability
     // modifier and proficiency bonus alike — not a hardcoded 5e formula. 5e (and every
@@ -3732,18 +3732,21 @@ export class McpToolsService {
     // same numbers as before; PF2e/SF2e now get a real (non-zero) proficiency bonus instead
     // of silently 5e's. See `checkProficiencyBonusForAdapter` (action-resolver.ts) for the
     // full reasoning, including why PF2e's answer is a "trained" floor rather than an exact
-    // per-save rank (the character sheet does not track rank, only proficient/not).
+    // per-save rank (the character sheet does not track rank, only proficient/not). Outcome
+    // classification is intentionally still the legacy d20 total-vs-DC boolean; callers that
+    // need PF2e/SF2e degree-of-success or system-specific roll modes should use `roll_check`.
     this.writeTool(
       server,
       user,
       'saving_throw',
-      'Roll a saving throw for a character using their actual stats + proficiency, under the campaign\'s own rule system. ' +
+      'Roll a legacy d20 saving throw for a character using their actual stats + proficiency. ' +
         'Server reads the ability score, computes the modifier via the campaign\'s rule-system adapter, adds that adapter\'s ' +
         'proficiency bonus (0 for a system that has not implemented one — e.g. OSR, whose saves are a different shape ' +
-        'entirely — never a silent guess) when the ability is in saveProficiencies, rolls 1d20 (or 2d20kh1/kl1), and compares ' +
-        'to the DC. Returns ' +
+        'entirely — never a silent guess) when the ability is in saveProficiencies, then rolls 1d20 (or 2d20kh1/kl1). ' +
+        'The returned success boolean is only a legacy total >= DC comparison; it does not apply PF2e/SF2e degree-of-success ' +
+        'or natural-1/natural-20 outcome shifts. Use roll_check for adapter-owned outcome classification. Returns ' +
         '{characterId, ability, dc, mode, score, abilityMod, profBonus, proficient, bonus, total, rolls, success, diceLogId}. ' +
-        'Optionally set advantage="advantage"|"disadvantage" to roll 2d20 keep-highest/lowest.',
+        'Optionally set advantage="advantage"|"disadvantage" to use the legacy 2d20 keep-highest/lowest mode.',
       {
         characterId: Id.describe('Character id — from list_members or get_party'),
         ability: z.enum(['STR', 'DEX', 'CON', 'INT', 'WIS', 'CHA']).describe('Save ability key'),
