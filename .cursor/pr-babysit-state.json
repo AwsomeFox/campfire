@@ -6,8 +6,8 @@
       "url": "https://github.com/AwsomeFox/campfire/pull/1655",
       "headBranch": "fix/issue-742",
       "baseBranch": "main",
-      "updatedAt": "2026-07-28T14:23:24Z",
-      "notes": "Head d484408e: main re-merged after ApiOperation fix. Prior CI green on 0fa3e192; waiting CI on merge commit. No unresolved threads."
+      "updatedAt": "2026-07-28T14:41:10Z",
+      "notes": "Head 9b7a7385: SQL projection+visibility filters for search (Devin perf). Thread resolved. Waiting CI."
     }
   ]
 }
