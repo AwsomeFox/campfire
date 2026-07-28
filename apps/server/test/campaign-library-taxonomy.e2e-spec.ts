@@ -2,7 +2,7 @@ import request from 'supertest';
 import { and, eq } from 'drizzle-orm';
 import { closeTestApp, createTestApp, type TestAppContext } from './test-app';
 import { DB, type DrizzleDb } from '../src/db/db.module';
-import { campaignLibraryEntityTaxonomy, npcs, quests } from '../src/db/schema';
+import { campaignLibraryEntityTaxonomy, locations, npcs, quests } from '../src/db/schema';
 
 describe('campaign library taxonomy (issue #742)', () => {
   let ctx: TestAppContext;
@@ -55,6 +55,7 @@ describe('campaign library taxonomy (issue #742)', () => {
     const tag = await request(server).post(`/api/v1/campaigns/${campaignId}/library/tags`).set(dm).send({ name: 'Plot hook', aliases: ['lead'] });
     const [visibleQuest] = await db.insert(quests).values({ campaignId, title: 'Find the observatory', body: 'A lead in the hills', status: 'available', hidden: false, createdAt: ts, updatedAt: ts }).returning();
     await db.insert(quests).values({ campaignId, title: 'Secret cult', body: 'DM only', status: 'available', hidden: true, createdAt: ts, updatedAt: ts });
+    await db.insert(locations).values({ campaignId, name: 'Uncharted vault', body: 'DM only location', status: 'unexplored', createdAt: ts, updatedAt: ts });
     await db.insert(npcs).values({ campaignId, name: 'Mira', body: 'Knows the observatory', hidden: false, createdAt: ts, updatedAt: ts });
     await db.insert(campaignLibraryEntityTaxonomy).values({ campaignId, entityType: 'quest', entityId: visibleQuest.id, tagId: tag.body.id, collectionId: null, createdAt: ts });
     const playerSearch = await request(server).get(`/api/v1/campaigns/${campaignId}/library/search?q=lead&tagId=${tag.body.id}`).set(player);
@@ -62,7 +63,8 @@ describe('campaign library taxonomy (issue #742)', () => {
     expect(playerSearch.body).toMatchObject({ total: 1, items: [expect.objectContaining({ entityType: 'quest', entityId: visibleQuest.id })], facets: { tags: [expect.objectContaining({ id: tag.body.id, count: 1 })] } });
     const playerAll = await request(server).get(`/api/v1/campaigns/${campaignId}/library/search`).set(player);
     expect(playerAll.body.items.some((item: { name: string }) => item.name === 'Secret cult')).toBe(false);
+    expect(playerAll.body.items.some((item: { name: string }) => item.name === 'Uncharted vault')).toBe(false);
     const dmAll = await request(server).get(`/api/v1/campaigns/${campaignId}/library/search?visibility=hidden`).set(dm);
-    expect(dmAll.body.items).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'Secret cult', visibility: 'hidden' })]));
+    expect(dmAll.body.items).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'Secret cult', visibility: 'hidden' }), expect.objectContaining({ name: 'Uncharted vault', visibility: 'hidden' })]));
   });
 });

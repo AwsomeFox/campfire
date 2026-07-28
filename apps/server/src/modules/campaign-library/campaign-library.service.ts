@@ -148,7 +148,9 @@ export class CampaignLibraryService {
     let items: LibraryEntitySummary[] = [
       ...questRows.filter((r) => !r.deletedAt && (isDm || !r.hidden)).map((r) => ({ entityType: 'quest' as const, entityId: r.id, name: r.title, description: r.body, visibility: r.hidden ? 'hidden' : 'public', status: r.status, owner: null, tags: [], collections: [] })),
       ...npcRows.filter((r) => !r.deletedAt && (isDm || !r.hidden)).map((r) => ({ entityType: 'npc' as const, entityId: r.id, name: r.name, description: r.body, visibility: r.hidden ? 'hidden' : 'public', status: r.disposition, owner: null, tags: [], collections: [] })),
-      ...locationRows.filter((r) => !r.deletedAt).map((r) => ({ entityType: 'location' as const, entityId: r.id, name: r.name, description: r.body, visibility: 'public', status: r.status, owner: null, tags: [], collections: [] })),
+      // Locations use `unexplored` as their entity-level DM-only state; unlike a
+      // dmSecret field it must be withheld wholesale from non-DMs.
+      ...locationRows.filter((r) => !r.deletedAt && (isDm || r.status !== 'unexplored')).map((r) => ({ entityType: 'location' as const, entityId: r.id, name: r.name, description: r.body, visibility: r.status === 'unexplored' ? 'hidden' : 'public', status: r.status, owner: null, tags: [], collections: [] })),
       ...factionRows.filter((r) => !r.deletedAt && (isDm || !r.hidden)).map((r) => ({ entityType: 'faction' as const, entityId: r.id, name: r.name, description: r.body, visibility: r.hidden ? 'hidden' : 'public', status: r.standing, owner: null, tags: [], collections: [] })),
       ...encounterRows.filter((r) => !r.deletedAt && (isDm || !r.hidden)).map((r) => ({ entityType: 'encounter' as const, entityId: r.id, name: r.name, description: '', visibility: r.hidden ? 'hidden' : 'public', status: r.status, owner: null, tags: [], collections: [] })),
       ...timelineRows.filter((r) => !r.deletedAt && (isDm || !r.hidden)).map((r) => ({ entityType: 'timeline_event' as const, entityId: r.id, name: r.title, description: r.body, visibility: r.hidden ? 'hidden' : 'public', status: null, owner: null, tags: [], collections: [] })),
