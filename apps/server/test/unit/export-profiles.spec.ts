@@ -242,10 +242,11 @@ describe('allowlist projection (#586)', () => {
     // Devin/Codex review on #1548: `createSeries` accepts an arbitrary `assignedDmUserId` without
     // requiring the assignee be a member of the campaign being exported (organized-play.service.ts),
     // so the "always a campaign member" assumption behind the previous fix does NOT generally hold.
-    // ExportService now re-fetches the pre-strip scheduled-session rows separately (cheap,
-    // bounded-per-campaign) and threads their assignedDmUserId values into collectPrivateIdentifiers
-    // / projectExport via the `extra` parameter — NEVER attached to `raw` itself, so they cannot leak
-    // into the exported document under any profile (including 'backup's unredacted pass-through).
+    // ExportService reuses the pre-strip scheduled-session rows from buildExport's own
+    // snapshot and threads their assignedDmUserId values into collectPrivateIdentifiers
+    // / projectExport via the `extra` parameter — NEVER attached to `raw` itself, so
+    // they cannot leak into the exported document under any profile (including
+    // 'backup's unredacted pass-through).
     // This test proves the sweep still catches a DM id that is genuinely absent from raw.members.
     const raw = rawPayload();
     (raw.quests as Array<Record<string, unknown>>)[0].body = 'Ask dev:grace-hopper about the vault key';
