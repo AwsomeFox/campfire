@@ -1,0 +1,13 @@
+{
+  "tracked": [
+    {
+      "pr": 1656,
+      "status": "babysitting",
+      "url": "https://github.com/AwsomeFox/campfire/pull/1656",
+      "headBranch": "fix/issue-741",
+      "baseBranch": "main",
+      "updatedAt": "2026-07-28T11:20:00Z",
+      "notes": "Tracking started. MERGEABLE (no conflicts). No review threads yet. CI in progress on open; mergeStateStatus BLOCKED pending required checks. Will merge main into head and babysit through green CI."
+    }
+  ]
+}
