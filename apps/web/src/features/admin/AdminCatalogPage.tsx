@@ -21,6 +21,8 @@ import type {
   CampaignCatalogPage,
   CampaignCatalogPrivacyPolicy,
   CampaignCatalogSort,
+  CampaignExportRequest,
+  CampaignExportRequestPage,
 } from '@campfire/schema';
 import { api, API, translateApiError } from '../../lib/api';
 import { Btn, Card, Chip, ErrorNote, EmptyState, Skeleton, TextInput } from '../../components/ui';
@@ -150,6 +152,247 @@ function PrivacyPolicyCard({
       <p className="text-xs text-secondary">{t('admin.catalog.privacy.tightenOnly')}</p>
       {saved && !dirty && <p className="text-xs text-emerald-300">{t('admin.catalog.privacy.saved')}</p>}
       {error && <ErrorNote message={error} />}
+    </Card>
+  );
+}
+
+/** Rows fetched per read of the admin's cross-campaign export-request queue. */
+const EXPORT_REQUEST_ADMIN_PAGE = 25;
+
+const EXPORT_PROFILE_KEY: Record<string, string> = {
+  backup: 'admin.catalog.args.profileBackup',
+  handoff: 'admin.catalog.args.profileHandoff',
+  publish: 'admin.catalog.args.profilePublish',
+};
+
+/**
+ * Server-admin export-request queue (issue #1585).
+ *
+ * `GET /admin/campaigns/export-requests` shipped with #587 — paged, with a real `total`,
+ * audited — and nothing in the web app ever called it. An operator could RAISE a request
+ * (the bulk `request_export` operation above) but had no way to see what happened to it:
+ * whether it is still pending, whether the DM approved or denied it, or read the decision
+ * note the DM wrote back. That is the other half of the same workflow
+ * `ExportRequestsCard` (CampaignSettingsPage.tsx) gives the DM — this is the requester's
+ * half, and it was entirely missing.
+ *
+ * PATTERN REUSE, DELIBERATELY. This mirrors `ExportRequestsCard` rather than inventing a
+ * second shape for the same data: load-on-mount (not polling — every read of this endpoint
+ * writes an audit row, specifically BECAUSE it discloses requester justifications and DM
+ * decision notes, so a poll would produce audit volume proportional to the poll rate; see
+ * the endpoint's own doc comment), offset paging via a growing "show more" window rather
+ * than a shrinking `limit`, and the same pending/decided split. The one addition is the
+ * `campaignId` filter the admin endpoint supports and the DM one has no reason to.
+ *
+ * CAMPAIGN NAMES ARE DELIBERATELY NOT RESOLVED. `GET /admin/campaigns/:campaignId` would
+ * do it, but that route is ALSO audited (twice: the server-admin trail and the campaign's
+ * own) — resolving a name per unique campaign in the queue would multiply exactly the
+ * audit volume this card exists to keep flat. Each row shows `Campaign #<id>` instead,
+ * which doubles as the affordance for filtering the queue down to that campaign.
+ *
+ * PENDING COUNT IS SCOPED TO THE LOADED WINDOW. The admin endpoint orders newest-first by
+ * id, not pending-first like the DM's per-campaign inbox — across every campaign there is
+ * no single natural ordering that would put all outstanding asks on page one. The initial
+ * load asks for a full page at the server's own max size so the common case (a queue that
+ * fits in one page) reports an exact count, and the badge is phrased to say "in view"
+ * rather than claim a global total the endpoint cannot cheaply provide.
+ */
+function ExportRequestsQueueCard() {
+  const { t } = useTranslation();
+  const [requests, setRequests] = useState<CampaignExportRequest[] | null>(null);
+  const [total, setTotal] = useState(0);
+  const [pagesLoaded, setPagesLoaded] = useState(1);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [campaignFilterDraft, setCampaignFilterDraft] = useState('');
+  const [campaignFilter, setCampaignFilter] = useState<number | undefined>(undefined);
+
+  const load = useCallback(
+    async (pages = 1) => {
+      setError(null);
+      try {
+        const collected: CampaignExportRequest[] = [];
+        let seenTotal = 0;
+        let fetched = 0;
+        for (let i = 0; i < pages; i += 1) {
+          const qs = new URLSearchParams({
+            limit: String(EXPORT_REQUEST_ADMIN_PAGE),
+            offset: String(i * EXPORT_REQUEST_ADMIN_PAGE),
+          });
+          if (campaignFilter !== undefined) qs.set('campaignId', String(campaignFilter));
+          const page = await api.get<CampaignExportRequestPage>(
+            `${API}/admin/campaigns/export-requests?${qs.toString()}`,
+          );
+          collected.push(...page.items);
+          seenTotal = page.total;
+          fetched += 1;
+          if (!page.hasMore) break;
+        }
+        setRequests(collected);
+        setTotal(seenTotal);
+        setPagesLoaded(Math.max(1, fetched));
+      } catch (err) {
+        setError(translateApiError(err, t, { fallbackKey: 'admin.errors.loadExportRequests' }));
+      } finally {
+        setLoading(false);
+      }
+    },
+    [campaignFilter, t],
+  );
+
+  // Load on mount, and again whenever the applied campaign filter changes — never on a
+  // timer (see the class doc comment on why polling this endpoint is the wrong shape).
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  async function showMore() {
+    setLoadingMore(true);
+    try {
+      await load(pagesLoaded + 1);
+    } finally {
+      setLoadingMore(false);
+    }
+  }
+
+  function applyCampaignFilter(id: number | undefined) {
+    setCampaignFilterDraft(id === undefined ? '' : String(id));
+    setCampaignFilter(id);
+  }
+
+  const pending = (requests ?? []).filter((r) => r.status === 'pending');
+  const decided = (requests ?? []).filter((r) => r.status !== 'pending');
+  // True only while the loaded window already covers the entire queue — otherwise a
+  // pending request could still be sitting further back than this card has fetched.
+  const pendingCountIsComplete = requests !== null && requests.length >= total;
+
+  if (loading && requests === null) {
+    return (
+      <Card>
+        <Skeleton lines={4} />
+      </Card>
+    );
+  }
+
+  return (
+    <Card className="space-y-3" data-testid="admin-export-requests">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <h2 className="text-sm font-bold text-white">{t('admin.exportRequests.heading')}</h2>
+        {pending.length > 0 && (
+          <Chip variant="failed">
+            {pendingCountIsComplete
+              ? t('admin.exportRequests.pendingBadge', { count: pending.length })
+              : t('admin.exportRequests.pendingBadgeAtLeast', { count: pending.length })}
+          </Chip>
+        )}
+      </div>
+      <p className="text-xs text-secondary">{t('admin.exportRequests.hint')}</p>
+
+      <div className="flex flex-wrap gap-2 items-end">
+        <label className="flex flex-col gap-1 text-xs text-secondary">
+          {t('admin.exportRequests.filterLabel')}
+          <TextInput
+            inputMode="numeric"
+            value={campaignFilterDraft}
+            onChange={(e) => setCampaignFilterDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key !== 'Enter') return;
+              const n = Number(campaignFilterDraft);
+              applyCampaignFilter(Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined);
+            }}
+            placeholder={t('admin.exportRequests.filterPlaceholder')}
+          />
+        </label>
+        <Btn
+          ghost
+          onClick={() => {
+            const n = Number(campaignFilterDraft);
+            applyCampaignFilter(Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined);
+          }}
+        >
+          {t('admin.exportRequests.filterApply')}
+        </Btn>
+        {campaignFilter !== undefined && (
+          <Btn ghost onClick={() => applyCampaignFilter(undefined)}>
+            {t('admin.exportRequests.filterClear')}
+          </Btn>
+        )}
+      </div>
+
+      {error && <ErrorNote message={error} onRetry={() => void load(pagesLoaded)} />}
+
+      {requests !== null && requests.length === 0 && !error && (
+        <p className="text-xs text-secondary">
+          {campaignFilter !== undefined
+            ? t('admin.exportRequests.emptyFiltered', { id: campaignFilter })
+            : t('admin.exportRequests.empty')}
+        </p>
+      )}
+
+      {pending.map((r) => (
+        <div key={r.id} className="flex flex-col gap-1" style={{ borderTop: '1px solid var(--color-divider)', paddingTop: 8 }}>
+          <p className="text-xs text-secondary">
+            <button
+              type="button"
+              className="underline underline-offset-2"
+              style={{ color: 'var(--color-accent)' }}
+              onClick={() => applyCampaignFilter(r.campaignId)}
+            >
+              {t('admin.exportRequests.campaignLink', { id: r.campaignId })}
+            </button>{' '}
+            {t('admin.exportRequests.requestedLine', {
+              who: r.requestedBy,
+              profile: r.profile && EXPORT_PROFILE_KEY[r.profile] ? t(EXPORT_PROFILE_KEY[r.profile]) : r.profile || t('admin.catalog.args.profileBackup'),
+              date: r.createdAt.slice(0, 10),
+            })}
+          </p>
+          {r.justification && (
+            <p className="text-xs text-secondary">
+              <span>{t('admin.exportRequests.justificationLabel')} </span>
+              <span className="text-white">{r.justification}</span>
+            </p>
+          )}
+        </div>
+      ))}
+
+      {decided.length > 0 && (
+        <div style={{ borderTop: '1px solid var(--color-divider)', paddingTop: 8 }}>
+          <p className="text-xs text-secondary">{t('admin.exportRequests.decidedHeading')}</p>
+          <ul className="space-y-1" style={{ margin: '4px 0 0', paddingInlineStart: 16 }}>
+            {decided.map((r) => (
+              <li key={r.id} className="text-xs text-secondary">
+                <button
+                  type="button"
+                  className="underline underline-offset-2"
+                  style={{ color: 'var(--color-accent)' }}
+                  onClick={() => applyCampaignFilter(r.campaignId)}
+                >
+                  {t('admin.exportRequests.campaignLink', { id: r.campaignId })}
+                </button>{' '}
+                {r.createdAt.slice(0, 10)} — {r.requestedBy}:{' '}
+                <Chip variant={r.status === 'approved' ? 'completed' : r.status === 'denied' ? 'failed' : 'neutral'}>
+                  {t(`admin.exportRequests.status.${r.status}`)}
+                </Chip>
+                {r.decidedBy && (
+                  <span> {t('admin.exportRequests.decidedBy', { who: r.decidedBy, date: (r.decidedAt ?? '').slice(0, 10) })}</span>
+                )}
+                {r.decisionNote && (
+                  <div className="text-white">
+                    {t('admin.exportRequests.decisionNoteLabel')} {r.decisionNote}
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {requests !== null && requests.length < total && (
+        <Btn ghost disabled={loadingMore} aria-busy={loadingMore || undefined} onClick={() => void showMore()}>
+          {t('admin.exportRequests.showMore', { shown: requests.length, total })}
+        </Btn>
+      )}
     </Card>
   );
 }
@@ -746,6 +989,12 @@ export default function AdminCatalogPage() {
   useTranslation();
   return (
     <RequireServerAdmin>
+      <div className="max-w-6xl mx-auto px-4 mt-5">
+        {/* #1585 — surfaced above the catalog itself: an operator landing on this page
+            should see whether anything is waiting on a DM's decision without having to
+            scroll past the filters and the campaign table first. */}
+        <ExportRequestsQueueCard />
+      </div>
       <AdminCatalog />
     </RequireServerAdmin>
   );
