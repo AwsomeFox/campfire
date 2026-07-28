@@ -5,9 +5,9 @@
       "url": "https://github.com/AwsomeFox/campfire/pull/1623",
       "branch": "fix/issue-1593",
       "title": "fix(ai-dm): clamp tokenBudget to its own schema bounds on import (#1593)",
-      "status": "babysitting",
-      "updatedAt": "2026-07-28T09:56:00Z",
-      "notes": "MERGEABLE vs main; Copilot threads resolved after address-comments commit 520c5e68; awaiting required CI (lint/coverage/build/build-test/e2e)"
+      "status": "merged",
+      "updatedAt": "2026-07-28T10:39:00Z",
+      "notes": "Merged after required CI green; Copilot threads resolved; head 520c5e68"
     }
   ]
 }
