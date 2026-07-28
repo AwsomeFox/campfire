@@ -261,6 +261,9 @@ export default function PlayerDisplayPage() {
   const [mapPings, setMapPings] = useState<Array<{ key: number; x: number; y: number }>>([]);
   const mapPingSeq = useRef(0);
   const fullscreenActiveRef = useRef(isFullscreen);
+  /** A popup gets one best-effort fullscreen request. Browser activation rules
+   * commonly reject it after the capability fetch; retrying would trap Escape. */
+  const autoFullscreenAttemptedRef = useRef(false);
   const controlsRef = useRef<HTMLDivElement | null>(null);
   const loadSequencerRef = useRef(new PlayerDisplayLoadSequencer());
 
@@ -727,6 +730,26 @@ export default function PlayerDisplayPage() {
     }
   }, [syncFullscreen]);
 
+  // On SPA exit the document remains alive, so pagehide alone cannot notify the
+  // cockpit. Publish a close from the component's actual unmount path as well.
+  // This effect keys only on campaign identity: normal encounter refreshes must
+  // not briefly report the display as closed.
+  useEffect(() => {
+    return () => {
+      const closed: CastDisplayStatus = { type: 'closed', campaignId: cid };
+      try {
+        window.opener?.postMessage(closed, window.location.origin);
+      } catch {
+        /* opener closed while the display unmounted */
+      }
+      if (typeof BroadcastChannel !== 'undefined') {
+        const channel = new BroadcastChannel(CAST_DISPLAY_CHANNEL);
+        channel.postMessage(closed);
+        channel.close();
+      }
+    };
+  }, [cid]);
+
   // The separate window reports only operational state back to the cockpit.
   // In particular, neither the cast URL nor its bearer token is ever sent over
   // postMessage/BroadcastChannel (the URL itself is the #547 credential).
@@ -768,9 +791,10 @@ export default function PlayerDisplayPage() {
   // toggleFullscreen turns that into the existing explicit, recoverable notice.
   // Direct `/cast` links and normal `/screen` previews keep their manual control.
   useEffect(() => {
-    if (window.name !== CAST_WINDOW_NAME || !isCastMode || isFullscreen || fullscreenPending) return;
+    if (window.name !== CAST_WINDOW_NAME || !isCastMode || autoFullscreenAttemptedRef.current) return;
+    autoFullscreenAttemptedRef.current = true;
     void toggleFullscreen();
-  }, [fullscreenPending, isCastMode, isFullscreen, toggleFullscreen]);
+  }, [isCastMode, toggleFullscreen]);
 
   const displayedFullscreenNotice = fullscreenSupported
     ? fullscreenNotice
