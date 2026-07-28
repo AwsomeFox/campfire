@@ -6,7 +6,7 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { CampaignLibraryService } from './campaign-library.service';
-import { CampaignLibraryCollectionCreateDto, CampaignLibraryCollectionUpdateDto, CampaignLibraryMonsterCreateDto, CampaignLibraryMonsterUpdateDto, CampaignLibraryTagCreateDto, CampaignLibraryTagUpdateDto } from './campaign-library.dto';
+import { CampaignLibraryCollectionCreateDto, CampaignLibraryCollectionUpdateDto, CampaignLibraryMonsterCreateDto, CampaignLibraryMonsterUpdateDto, CampaignLibraryTagCreateDto, CampaignLibraryTagUpdateDto, LibrarySearchQueryDto } from './campaign-library.dto';
 
 @ApiTags('campaign-library')
 @Controller('campaigns/:campaignId/library/monsters')
@@ -103,6 +103,19 @@ export class CampaignLibraryTaxonomyController {
   @Delete('collections/:id')
   async removeCollection(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     await this.access.requireRole(user, campaignId, 'dm'); await this.library.removeCollection(campaignId, id); return { ok: true };
+  }
+}
+
+@ApiTags('campaign-library')
+@Controller('campaigns/:campaignId/library')
+export class CampaignLibrarySearchController {
+  constructor(private readonly library: CampaignLibraryService, private readonly access: CampaignAccessService) {}
+
+  @Get('search')
+  @ApiOperation({ summary: 'Search and filter the role-safe campaign library (issue #742)' })
+  async search(@Param('campaignId', ParseIntPipe) campaignId: number, @Query() query: LibrarySearchQueryDto, @CurrentUser() user: RequestUser) {
+    const role = await this.access.requireMember(user, campaignId);
+    return this.library.search(campaignId, role, query);
   }
 }
 

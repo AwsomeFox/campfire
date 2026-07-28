@@ -7,10 +7,13 @@ import {
   CampaignLibraryTag, CampaignLibraryTagCreate, CampaignLibraryTagUpdate,
   CampaignLibraryCollection, CampaignLibraryCollectionCreate, CampaignLibraryCollectionUpdate,
   CombatantStatblock,
+  LibrarySearchQuery,
+  LibrarySearchPage,
+  type LibraryEntitySummary,
   type Role,
 } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { campaignLibraryCollections, campaignLibraryEntityTaxonomy, campaignLibraryMonsters, campaignLibraryTags } from '../../db/schema';
+import { attachments, campaignLibraryCollections, campaignLibraryEntityTaxonomy, campaignLibraryMonsters, campaignLibraryTags, encounters, factions, inventoryItems, locations, npcs, quests, timelineEvents } from '../../db/schema';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
@@ -125,6 +128,54 @@ export class CampaignLibraryService {
       tx.update(campaignLibraryCollections).set({ parentCollectionId: null, updatedAt: nowIso() }).where(and(eq(campaignLibraryCollections.campaignId, campaignId), eq(campaignLibraryCollections.parentCollectionId, id))).run();
       tx.delete(campaignLibraryCollections).where(and(eq(campaignLibraryCollections.id, id), eq(campaignLibraryCollections.campaignId, campaignId))).run();
     });
+  }
+
+  /**
+   * One role-filtered inventory of campaign content.  This intentionally builds a
+   * small, explicit projection rather than exposing arbitrary table columns: the
+   * manager can never accidentally leak a dmSecret while new entity kinds are added.
+   */
+  async search(campaignId: number, role: Role, raw: unknown): Promise<LibrarySearchPage> {
+    const query = LibrarySearchQuery.parse(raw);
+    const isDm = role === 'dm';
+    const [questRows, npcRows, locationRows, factionRows, encounterRows, timelineRows, inventoryRows, attachmentRows, monsterRows] = await Promise.all([
+      this.db.select().from(quests).where(eq(quests.campaignId, campaignId)), this.db.select().from(npcs).where(eq(npcs.campaignId, campaignId)),
+      this.db.select().from(locations).where(eq(locations.campaignId, campaignId)), this.db.select().from(factions).where(eq(factions.campaignId, campaignId)),
+      this.db.select().from(encounters).where(eq(encounters.campaignId, campaignId)), this.db.select().from(timelineEvents).where(eq(timelineEvents.campaignId, campaignId)),
+      this.db.select().from(inventoryItems).where(eq(inventoryItems.campaignId, campaignId)), this.db.select().from(attachments).where(eq(attachments.campaignId, campaignId)),
+      this.db.select().from(campaignLibraryMonsters).where(eq(campaignLibraryMonsters.campaignId, campaignId)),
+    ]);
+    let items: LibraryEntitySummary[] = [
+      ...questRows.filter((r) => !r.deletedAt && (isDm || !r.hidden)).map((r) => ({ entityType: 'quest' as const, entityId: r.id, name: r.title, description: r.body, visibility: r.hidden ? 'hidden' : 'public', status: r.status, owner: null, tags: [], collections: [] })),
+      ...npcRows.filter((r) => !r.deletedAt && (isDm || !r.hidden)).map((r) => ({ entityType: 'npc' as const, entityId: r.id, name: r.name, description: r.body, visibility: r.hidden ? 'hidden' : 'public', status: r.disposition, owner: null, tags: [], collections: [] })),
+      ...locationRows.filter((r) => !r.deletedAt).map((r) => ({ entityType: 'location' as const, entityId: r.id, name: r.name, description: r.body, visibility: 'public', status: r.status, owner: null, tags: [], collections: [] })),
+      ...factionRows.filter((r) => !r.deletedAt && (isDm || !r.hidden)).map((r) => ({ entityType: 'faction' as const, entityId: r.id, name: r.name, description: r.body, visibility: r.hidden ? 'hidden' : 'public', status: r.standing, owner: null, tags: [], collections: [] })),
+      ...encounterRows.filter((r) => !r.deletedAt && (isDm || !r.hidden)).map((r) => ({ entityType: 'encounter' as const, entityId: r.id, name: r.name, description: '', visibility: r.hidden ? 'hidden' : 'public', status: r.status, owner: null, tags: [], collections: [] })),
+      ...timelineRows.filter((r) => !r.deletedAt && (isDm || !r.hidden)).map((r) => ({ entityType: 'timeline_event' as const, entityId: r.id, name: r.title, description: r.body, visibility: r.hidden ? 'hidden' : 'public', status: null, owner: null, tags: [], collections: [] })),
+      ...inventoryRows.filter((r) => !r.deletedAt).map((r) => ({ entityType: 'inventory_item' as const, entityId: r.id, name: r.name, description: r.notes, visibility: 'public', status: null, owner: r.ownerType === 'party' ? 'party' : `character:${r.characterId}`, tags: [], collections: [] })),
+      ...attachmentRows.filter((r) => r.state === 'committed' && (isDm || !r.hidden)).map((r) => ({ entityType: 'attachment' as const, entityId: r.id, name: r.filename, description: r.mime, visibility: r.hidden ? 'hidden' : 'public', status: r.kind, owner: r.uploaderUserId, tags: [], collections: [] })),
+      ...monsterRows.map((r) => ({ entityType: 'campaign_library_monster' as const, entityId: r.id, name: r.name, description: '', visibility: 'public', status: null, owner: null, tags: [], collections: [] })),
+    ];
+    const links = await this.db.select().from(campaignLibraryEntityTaxonomy).where(eq(campaignLibraryEntityTaxonomy.campaignId, campaignId));
+    const [tags, collections] = await Promise.all([this.listTags(campaignId), this.listCollections(campaignId)]);
+    const tagsById = new Map(tags.map((tag) => [tag.id, tag])); const collectionsById = new Map(collections.map((collection) => [collection.id, collection]));
+    const byEntity = new Map<string, typeof links>();
+    for (const link of links) { const key = `${link.entityType}:${link.entityId}`; byEntity.set(key, [...(byEntity.get(key) ?? []), link]); }
+    items = items.map((item) => {
+      const entityLinks = byEntity.get(`${item.entityType}:${item.entityId}`) ?? [];
+      return { ...item, tags: entityLinks.flatMap((link) => link.tagId == null ? [] : [tagsById.get(link.tagId)]).filter((x): x is CampaignLibraryTag => Boolean(x)), collections: entityLinks.flatMap((link) => link.collectionId == null ? [] : [collectionsById.get(link.collectionId)]).filter((x): x is CampaignLibraryCollection => Boolean(x)) };
+    });
+    const needle = query.q?.toLocaleLowerCase();
+    if (needle) items = items.filter((item) => [item.name, item.description, ...item.tags.flatMap((tag) => [tag.name, ...tag.aliases]), ...item.collections.flatMap((collection) => [collection.name, ...collection.aliases])].join(' ').toLocaleLowerCase().includes(needle));
+    if (query.type) items = items.filter((item) => item.entityType === query.type);
+    if (query.tagId) items = items.filter((item) => item.tags.some((tag) => tag.id === query.tagId));
+    if (query.collectionId) items = items.filter((item) => item.collections.some((collection) => collection.id === query.collectionId));
+    if (query.visibility) items = items.filter((item) => item.visibility === query.visibility);
+    if (query.status) items = items.filter((item) => item.status === query.status);
+    if (query.owner) items = items.filter((item) => item.owner === query.owner);
+    items.sort((a, b) => a.name.localeCompare(b.name) || a.entityType.localeCompare(b.entityType) || a.entityId - b.entityId);
+    const count = <T extends string | number>(values: T[], label: (value: T) => string) => [...new Map(values.map((value) => [value, (values.filter((entry) => entry === value).length)])).entries()].map(([id, total]) => ({ id, label: label(id), count: total }));
+    return LibrarySearchPage.parse({ items: items.slice(query.offset, query.offset + query.limit), total: items.length, limit: query.limit, offset: query.offset, facets: { types: count(items.map((item) => item.entityType), (type) => type), tags: tags.map((tag) => ({ id: tag.id, label: tag.name, count: items.filter((item) => item.tags.some((value) => value.id === tag.id)).length })).filter((facet) => facet.count > 0), collections: collections.map((collection) => ({ id: collection.id, label: collection.name, count: items.filter((item) => item.collections.some((value) => value.id === collection.id)).length })).filter((facet) => facet.count > 0), visibility: count(items.map((item) => item.visibility ?? 'public'), (value) => value), status: count(items.flatMap((item) => item.status == null ? [] : [item.status]), (value) => value) } });
   }
 
   async getRowOrThrow(id: number, campaignId?: number) {
