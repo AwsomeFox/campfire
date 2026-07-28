@@ -1222,6 +1222,11 @@ function GeneralCard({
         dmControlsProgression,
         aiExternalContentPolicy,
       });
+      setName(updated.name);
+      setDescription(updated.description);
+      setDangerLevel(updated.dangerLevel);
+      setDmControlsProgression(updated.dmControlsProgression);
+      setAiExternalContentPolicy(updated.aiExternalContentPolicy);
       onSaved(updated);
       feedback.succeed();
     } catch (err) {

@@ -130,6 +130,14 @@ export function ProviderForm({
     else setApiKey(value);
   }
 
+  function currentDraft(): ProviderDraft {
+    return { providerType, model, baseUrl, apiKey };
+  }
+
+  function syncCurrentDraftFeedback() {
+    feedback.syncDirty(isProviderDraftDirty(provider, currentDraft()));
+  }
+
   function invalidateTestForAction() {
     draftRevision.current += 1;
     currentDraftFingerprint.current = draftFingerprint(
@@ -266,6 +274,7 @@ export function ProviderForm({
         role: 'alert',
         text: err instanceof ApiError ? err.message : "Couldn't remove the provider.",
       });
+      syncCurrentDraftFeedback();
     } finally {
       setRemoving(false);
     }
@@ -288,6 +297,7 @@ export function ProviderForm({
         role: 'alert',
         text: err instanceof ApiError ? err.message : "Couldn't clear the stored key.",
       });
+      syncCurrentDraftFeedback();
     } finally {
       setClearing(false);
     }
