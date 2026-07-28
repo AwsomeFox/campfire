@@ -644,6 +644,39 @@ describe('organized play (e2e)', () => {
     expect(rival.status).toBe(201);
   });
 
+  it('restoring a cancelled future occurrence with a live recap preserves completed status', async () => {
+    const room = (await api().post(`/api/v1/organized-play/venues/${venueId}/rooms`).set(dm).send({ name: 'Restore Completed Room' })).body;
+    const series = await api()
+      .post(`/api/v1/campaigns/${campaignId}/series`)
+      .set(dm)
+      .send({
+        title: 'Restore Played Early',
+        timezone: 'UTC',
+        startDate: '2099-08-13',
+        startTime: '18:00',
+        durationMinutes: 180,
+        freq: 'weekly',
+        count: 1,
+        roomId: room.id,
+      });
+    expect(series.status).toBe(201);
+    const occ = series.body.occurrences[0];
+
+    const recap = await api().post(`/api/v1/campaigns/${campaignId}/sessions`).set(dm).send({ title: 'Restored recap' });
+    expect(recap.status).toBe(201);
+    const linked = await api().post(`/api/v1/schedule/${occ.id}/link/${recap.body.id}`).set(dm);
+    expect(linked.status).toBe(201);
+    expect(linked.body.status).toBe('completed');
+
+    const cancelled = await api().delete(`/api/v1/campaigns/${campaignId}/series/${series.body.id}`).set(dm).send({ reason: 'pause series' });
+    expect(cancelled.status).toBe(200);
+    expect((await api().get(`/api/v1/schedule/${occ.id}`).set(dm)).body).toMatchObject({ status: 'cancelled', sessionId: null });
+
+    const restored = await api().post(`/api/v1/schedule/${occ.id}/restore`).set(dm).send({});
+    expect(restored.status).toBe(201);
+    expect(restored.body).toMatchObject({ status: 'completed', sessionId: recap.body.id });
+  });
+
   // ----- ICS -----
 
   it('publishes stable UIDs: a rescheduled night keeps its UID with a higher SEQUENCE, and a cancelled one emits STATUS:CANCELLED', async () => {
