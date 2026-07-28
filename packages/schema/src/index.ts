@@ -2896,6 +2896,21 @@ export const NotificationType = z.enum([
 ]);
 export type NotificationType = z.infer<typeof NotificationType>;
 
+/**
+ * Notification types that mean "your membership or role somewhere changed", as opposed to
+ * ordinary table activity (issue #1590). The single canonical list, so the server-side
+ * `unreadCount` query and the client-side account-wide /me refresh it drives agree on exactly
+ * what counts — a type added here without updating a hand-maintained duplicate elsewhere is
+ * the failure mode this constant exists to rule out.
+ *
+ * Deliberately narrow: `added_to_campaign` already covers being added, promoted (including the
+ * admin `reassign_owner` path, #1546), and — after #1590 — a DM's own promote/demote of an
+ * existing member (issue #437's `members.service.ts#update`). It is reused rather than split
+ * into a separate "role changed" type because both describe the same fact a client needs to
+ * react to: re-fetch `/me`, the memberships list may be stale.
+ */
+export const MEMBERSHIP_NOTIFICATION_TYPES = ['added_to_campaign'] as const satisfies readonly NotificationType[];
+
 export const Notification = z.object({
   id: Id,
   userId: Id, // recipient (users.id) — never exposed to anyone but the recipient
@@ -2922,7 +2937,20 @@ export const Notification = z.object({
 });
 export type Notification = z.infer<typeof Notification>;
 
-export const NotificationUnreadCount = z.object({ count: z.number().int().nonnegative() });
+export const NotificationUnreadCount = z.object({
+  count: z.number().int().nonnegative(),
+  /**
+   * Issue #1590 — true when at least one UNREAD notification is membership-shaped (see
+   * {@link MEMBERSHIP_NOTIFICATION_TYPES}). Computed from the same user-scoped row set
+   * `count` already reads — this endpoint has never returned anyone's notifications but the
+   * caller's own, so the flag discloses nothing the caller could not already learn by paging
+   * `GET /notifications` themselves. It exists so a poller that already runs account-wide
+   * (mounted once per authenticated session, not per campaign) has something to discriminate
+   * on: today `unread-count` is a bare number, and nothing distinguishes "a recap posted" from
+   * "your role changed and cached /me is now wrong".
+   */
+  membershipChanged: z.boolean(),
+});
 export type NotificationUnreadCount = z.infer<typeof NotificationUnreadCount>;
 
 // ---------- notification preferences (issue #789) ----------
