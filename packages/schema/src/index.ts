@@ -4053,6 +4053,14 @@ export interface RuleSystemAdapter {
    * still withhold `resolverMath` until its saves are correct too.
    */
   resolveAttack?(input: AttackRollInput): AttackRollResult;
+  /**
+   * OPTIONAL — this system's own proficiency/training bonus (issue #1599), the way
+   * {@link resolveAttack} owns the attack roll. Omit it and the resolver falls back to 0 (see
+   * `defaultCheckProficiencyBonus` in action-resolver.ts for why the safe default is 0, not 5e's
+   * formula, unlike the attack default). `Dnd5eAdapter` declares it explicitly rather than
+   * relying on that default; `Pf2eAdapter` (inherited by SF2e) declares its own.
+   */
+  checkProficiencyBonus?(level: number): number;
   /** Map a monster rule-entry's `dataJson` to canonical statblock fields (AC/HP/CR/abilities/…). */
   mapStatblock(data: Record<string, unknown>): MonsterStatblockData;
   /** Resolve a monster's numeric max HP from its `dataJson`, or null when unavailable. */
@@ -4237,6 +4245,11 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
   // Unknown / empty / homebrew slugs resolve to this adapter via `ruleSystemAdapter`, so they
   // inherit the declaration, which is correct: 5e maths is exactly what those campaigns get.
   resolverMath: RESOLVER_MATH_D20_5E,
+  // #1599 — 5e is the one adapter that opts OUT of `checkProficiencyBonus`'s own default (0):
+  // that default is deliberately "add nothing" for every UNAUDITED system, but 5e's curve is
+  // exactly this formula, so 5e declares it explicitly rather than relying on a default that
+  // exists precisely so nobody ELSE has to make this claim by accident.
+  checkProficiencyBonus: dnd5eProficiencyBonus,
   presentation: DND5E_STATBLOCK_PRESENTATION,
   characterSheet: {
     abilityFields: STANDARD_D20_ABILITY_FIELDS,
@@ -4270,13 +4283,19 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
   // never a denylist of what is "permanent" — see the RestModel docs for why that direction is
   // the safe one when conditions are bare strings with no metadata (#1047).
   //
-  // These four are the 5e conditions a long rest ends on its own: exhaustion drops a level,
-  // and the three that PHB rest/unconsciousness rules resolve without an external cure. The
-  // conditions deliberately ABSENT are the ones that need a specific remedy — petrified,
+  // These three are the 5e conditions a long rest ends OUTRIGHT on its own — the PHB rest/
+  // unconsciousness rules resolve them without an external cure. Exhaustion is deliberately
+  // ABSENT from this list (issue #1641 — it used to be here, which was the bug: this allowlist
+  // can only express "removed entirely", and 5e's actual rule is "a long rest reduces
+  // exhaustion by ONE LEVEL", not to zero). Exhaustion's presence is instead read off
+  // `leveledConditionTrackFor('dnd5e')` (`leveled-conditions.ts`, issue #1643) by
+  // `restConditionOutcome`, which decrements it by one stack on a long rest and only fully
+  // removes it once that reaches 0 — see `rest.ts` for the mechanics. The conditions
+  // deliberately absent from BOTH lists are the ones that need a specific remedy — petrified,
   // paralyzed, charmed, poisoned, restrained, grappled, blinded, deafened, invisible — because
   // a rest that silently ended a Medusa's petrification would erase the DM's scene.
   restModel: {
-    clearedByLongRest: ['Exhaustion', 'Unconscious', 'Prone', 'Frightened'],
+    clearedByLongRest: ['Unconscious', 'Prone', 'Frightened'],
     clearedByShortRest: [],
     // 5e hit dice are per-class (d6 sorcerer … d12 barbarian) and the class die is NOT stored
     // on the sheet in this repo, so there is no honest default: `null` makes a short rest that
@@ -5471,6 +5490,19 @@ export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
     return typeof hp === 'number' && hp > 0 ? Math.round(hp) : null;
   },
   proficiencyBonus: pf2eProficiencyBonus,
+  // #1599 — the structured resolver's own save/attack proficiency hook. Distinct from
+  // `proficiencyBonus` just above: that one takes an explicit RANK (used by the roll catalog,
+  // which knows which skill/save it is building a check for); this one is the resolver's
+  // one-argument seam (`ResolverAdapter.checkProficiencyBonus`), which only ever knows a
+  // boolean "is this character proficient" — `character.saveProficiencies` records no rank.
+  // TRAINED is the correct floor for "marked proficient" with no finer data, the same degrade
+  // `initiativeModifier` above already makes for Perception: exact for an actual Trained
+  // character, an UNDERSTATEMENT for Expert/Master/Legendary (a real improvement over the
+  // previous blanket 0, not a full fix — see ResolverMathProfile's #1599 conclusion for why
+  // that residual gap keeps this adapter from declaring `resolverMath`).
+  checkProficiencyBonus(level: number): number {
+    return pf2eProficiencyBonus(Math.max(0, Math.trunc(level)), 'trained');
+  },
   levelBasedDC: pf2eLevelBasedDC,
   simpleDC: pf2eSimpleDC,
   degreeOfSuccess: pf2eDegreeOfSuccess,
