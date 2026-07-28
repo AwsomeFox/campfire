@@ -17,6 +17,7 @@ describe('campaign homebrew (e2e)', () => {
     const stale = await request(server).patch(`/api/v1/campaigns/${campaignId}/homebrew/${created.body.id}`).set(dm).send({ body: 'one', expectedUpdatedAt: 'stale' }); expect(stale.status).toBe(409);
     const preview = await request(server).post(`/api/v1/campaigns/${campaignId}/homebrew/import/preview`).set(dm).send({ entries: [body] }); expect(preview.body.entries[0].conflict.id).toBe(created.body.id);
     const skipped = await request(server).post(`/api/v1/campaigns/${campaignId}/homebrew/import/apply`).set(dm).send({ entries: [body], strategy: 'skip' }); expect(skipped.body.skipped).toBe(1);
+    const staleReplace = await request(server).post(`/api/v1/campaigns/${campaignId}/homebrew/import/apply`).set(dm).send({ entries: [{ ...body, body: 'replace' }], strategy: 'replace', expectedUpdatedAt: { spark: 'stale' } }); expect(staleReplace.status).toBe(409);
     const duplicated = await request(server).post(`/api/v1/campaigns/${campaignId}/homebrew/import/apply`).set(dm).send({ entries: [body], strategy: 'duplicate' }); expect(duplicated.body.created).toBe(1);
     const beforeRollback = await request(server).get(`/api/v1/campaigns/${campaignId}/homebrew`).set(dm);
     const rollback = await request(server).post(`/api/v1/campaigns/${campaignId}/homebrew/import/apply`).set(dm).send({ entries: [{ ...body, slug: 'would-rollback' }, { ...body, slug: 'bad-raw', dataJson: '[]' }], strategy: 'duplicate' }); expect(rollback.status).toBe(400);
