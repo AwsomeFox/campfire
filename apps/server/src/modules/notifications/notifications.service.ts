@@ -165,11 +165,30 @@ export class NotificationsService implements OnApplicationBootstrap {
     timer.unref();
   }
 
-  /** Notify a single user (e.g. "you were added to a campaign"). Skips the actor themself. */
-  async notifyUser(userId: number | string, campaignId: number, actor: RequestUser | null, event: NotificationEvent): Promise<void> {
+  /**
+   * Notify a single user (e.g. "you were added to a campaign"). Skips the actor themself by
+   * default — the usual case is a DM acting on someone ELSE's membership, and self-notifying
+   * would just be noise about your own action.
+   *
+   * `opts.allowSelf` (issue #1640) opts out of that suppression for the one case where actor
+   * and recipient being the SAME person still needs the signal: a member removing their own
+   * seat (self-leave). The account-wide notification here is what OTHER open tabs of that same
+   * user — not the tab that made the request, which already knows synchronously from the
+   * response — learn to redirect off a campaign they just left. Role changes never need this
+   * (members.service.ts#update self-suppresses on purpose, matching the default here): a DM
+   * demoting themselves as part of a co-DM handoff doesn't need every other tab to reload, only
+   * to re-render with the new role next time /me is fetched anyway.
+   */
+  async notifyUser(
+    userId: number | string,
+    campaignId: number,
+    actor: RequestUser | null,
+    event: NotificationEvent,
+    opts?: { allowSelf?: boolean },
+  ): Promise<void> {
     const recipient = numericUserId(userId);
     if (recipient === null) return;
-    if (actor && recipient === numericUserId(actor.id)) return;
+    if (actor && recipient === numericUserId(actor.id) && !opts?.allowSelf) return;
     try {
       await this.dispatch([recipient], campaignId, event, actor?.id ?? null);
     } catch (err) {
