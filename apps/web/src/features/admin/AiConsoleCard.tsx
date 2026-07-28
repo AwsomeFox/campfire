@@ -17,6 +17,7 @@ import { api, API, translateApiError } from '../../lib/api';
 import { Card, Btn, TextInput, Skeleton, ErrorNote } from '../../components/ui';
 import { ProviderForm } from '../settings/ProviderForm';
 import { AiPricingEditor } from './AiPricingEditor';
+import { useSaveFeedback } from '../../components/SaveFeedback';
 
 function fmt(n: number): string {
   return n.toLocaleString();
@@ -144,13 +145,13 @@ export function AiConsoleCard() {
           <UsageSummary ov={ov} />
 
           {/* Budgets & caps */}
-          <CapsEditor ov={ov} onSaved={setOv} onError={setError} />
+          <CapsEditor ov={ov} onSaved={setOv} />
 
           {/* Default AI provider + write-only key (issue #399) — the fallback every campaign inherits. */}
           <ProviderDefaultSection ov={ov} onChanged={load} />
 
           {/* Model allowlist — kept next to the provider it constrains. */}
-          <AllowlistEditor ov={ov} onSaved={setOv} onError={setError} />
+          <AllowlistEditor ov={ov} onSaved={setOv} />
           {/* #1065 — model pricing sits next to the allowlist: both are admin-owned facts
               about models that every campaign resolves against. */}
           <AiPricingEditor onError={setError} />
@@ -199,16 +200,14 @@ function Stat({ label, value, sub }: { label: string; value: string; sub?: strin
 function CapsEditor({
   ov,
   onSaved,
-  onError,
 }: {
   ov: AiConsoleOverview;
   onSaved: (o: AiConsoleOverview) => void;
-  onError: (msg: string | null) => void;
 }) {
   const { t } = useTranslation();
   const [cap, setCap] = useState(String(ov.serverTokenCap));
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
+  const feedback = useSaveFeedback('Server token cap');
+  const saving = feedback.state === 'saving';
 
   useEffect(() => {
     setCap(String(ov.serverTokenCap));
@@ -216,17 +215,13 @@ function CapsEditor({
 
   async function save() {
     const n = Math.max(0, Math.floor(Number(cap) || 0));
-    setSaving(true);
-    onError(null);
-    setSaved(false);
+    if (saving) return;
+    feedback.begin();
     try {
       onSaved(await api.put<AiConsoleOverview>(`${API}/settings/ai/caps`, { serverTokenCap: n }));
-      setSaved(true);
-      setTimeout(() => setSaved(false), 1500);
+      feedback.succeed();
     } catch (err) {
-      onError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
-    } finally {
-      setSaving(false);
+      feedback.fail(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     }
   }
 
@@ -245,10 +240,12 @@ function CapsEditor({
             type="number"
             min={0}
             value={cap}
-            onChange={(e) => setCap(e.target.value)}
+            aria-describedby={feedback.statusId}
+            disabled={saving}
+            onChange={(e) => { const value = e.target.value; setCap(value); feedback.syncDirty(value !== String(ov.serverTokenCap)); }}
           />
         </label>
-        {saved && <span className="text-xs text-emerald-400 mb-2">Saved.</span>}
+        {feedback.announcement}
         <Btn className="!min-h-0 !py-1.5 text-xs mb-0.5" onClick={save} disabled={saving}>
           {saving ? 'Saving…' : 'Save cap'}
         </Btn>
@@ -281,17 +278,15 @@ function ProviderDefaultSection({ ov, onChanged }: { ov: AiConsoleOverview; onCh
 function AllowlistEditor({
   ov,
   onSaved,
-  onError,
 }: {
   ov: AiConsoleOverview;
   onSaved: (o: AiConsoleOverview) => void;
-  onError: (msg: string | null) => void;
 }) {
   const { t } = useTranslation();
   const savedText = ov.allowedModels.join('\n');
   const [text, setText] = useState(savedText);
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
+  const feedback = useSaveFeedback('Model allowlist');
+  const saving = feedback.state === 'saving';
   const validation = useMemo(() => validateAllowlistDraft(text), [text]);
   const hasErrors = validation.errors.length > 0;
   const inputId = 'ai-allowed-model-ids';
@@ -305,21 +300,17 @@ function AllowlistEditor({
 
   async function save() {
     if (hasErrors) return;
-    setSaving(true);
-    onError(null);
-    setSaved(false);
+    if (saving) return;
+    feedback.begin();
     try {
       onSaved(
         await api.put<AiConsoleOverview>(`${API}/settings/ai/allowlist`, {
           allowedModels: validation.allowedModels,
         }),
       );
-      setSaved(true);
-      setTimeout(() => setSaved(false), 1500);
+      feedback.succeed();
     } catch (err) {
-      onError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
-    } finally {
-      setSaving(false);
+      feedback.fail(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     }
   }
 
@@ -356,12 +347,13 @@ function AllowlistEditor({
         rows={3}
         placeholder="gpt-4o-mini&#10;claude-3-5-haiku"
         value={text}
-        aria-describedby={`${helpId}${hasErrors ? ` ${errorId}` : ''}`}
+        disabled={saving}
+        aria-describedby={`${helpId}${hasErrors ? ` ${errorId}` : ''} ${feedback.statusId}`}
         aria-invalid={hasErrors}
         aria-errormessage={hasErrors ? errorId : undefined}
         onChange={(e) => {
           setText(e.target.value);
-          setSaved(false);
+          feedback.syncDirty(e.target.value !== savedText);
         }}
       />
       {hasErrors && (
@@ -377,7 +369,7 @@ function AllowlistEditor({
         </div>
       )}
       <div className="flex gap-2 justify-end items-center flex-wrap">
-        {saved && <span className="text-xs text-emerald-400 mr-auto">Saved.</span>}
+        {feedback.announcement}
         <Btn className="!min-h-0 !py-1.5 text-xs" onClick={save} disabled={saving || hasErrors}>
           {saving ? 'Saving…' : 'Save allowlist'}
         </Btn>
