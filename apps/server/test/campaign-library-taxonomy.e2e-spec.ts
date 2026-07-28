@@ -2,7 +2,7 @@ import request from 'supertest';
 import { and, eq } from 'drizzle-orm';
 import { closeTestApp, createTestApp, type TestAppContext } from './test-app';
 import { DB, type DrizzleDb } from '../src/db/db.module';
-import { campaignLibraryEntityTaxonomy, locations, npcs, quests } from '../src/db/schema';
+import { auditLog, campaignLibraryEntityTaxonomy, locations, npcs, quests } from '../src/db/schema';
 
 describe('campaign library taxonomy (issue #742)', () => {
   let ctx: TestAppContext;
@@ -95,5 +95,30 @@ describe('campaign library taxonomy (issue #742)', () => {
     expect(failure.status).toBe(404);
     expect(await db.select().from(campaignLibraryEntityTaxonomy).where(and(eq(campaignLibraryEntityTaxonomy.campaignId, campaignId), eq(campaignLibraryEntityTaxonomy.entityId, quest.id), eq(campaignLibraryEntityTaxonomy.tagId, tag.body.id)))).toEqual([]);
     expect((await request(server).post(`/api/v1/campaigns/${campaignId}/library/bulk/999999/undo`).set(dm)).status).toBe(404);
+  });
+
+  it('accepts exactly 500 unique targets, rejects 501, writes one audit row, and is DM-only', async () => {
+    const server = ctx.app.getHttpServer(); const db = ctx.app.get<DrizzleDb>(DB); const ts = new Date().toISOString();
+    const rows = await db.insert(quests).values(Array.from({ length: 501 }, (_, n) => ({ campaignId, title: `Boundary ${n}`, createdAt: ts, updatedAt: ts }))).returning({ id: quests.id });
+    const tag = await request(server).post(`/api/v1/campaigns/${campaignId}/library/tags`).set(dm).send({ name: 'Boundary' });
+    const targets = rows.slice(0, 500).map((row) => ({ entityType: 'quest', entityId: row.id }));
+    expect((await request(server).post(`/api/v1/campaigns/${campaignId}/library/bulk`).set(player).send({ operation: 'add_tag', taxonomyId: tag.body.id, targets })).status).toBe(403);
+    const applied = await request(server).post(`/api/v1/campaigns/${campaignId}/library/bulk`).set(dm).send({ operation: 'add_tag', taxonomyId: tag.body.id, targets });
+    expect(applied.status).toBe(201);
+    expect(applied.body.applied).toBe(500);
+    const auditRows = await db.select().from(auditLog).where(and(eq(auditLog.campaignId, campaignId), eq(auditLog.entityId, applied.body.operationId), eq(auditLog.action, 'campaign_library.bulk')));
+    expect(auditRows).toHaveLength(1);
+    expect((await request(server).post(`/api/v1/campaigns/${campaignId}/library/bulk`).set(dm).send({ operation: 'add_tag', taxonomyId: tag.body.id, targets: [...targets, { entityType: 'quest', entityId: rows[500].id }] })).status).toBe(400);
+  });
+
+  it('rejects cross-campaign target and taxonomy identifiers', async () => {
+    const server = ctx.app.getHttpServer(); const db = ctx.app.get<DrizzleDb>(DB); const ts = new Date().toISOString();
+    const other = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Other bulk campaign' });
+    const [otherQuest] = await db.insert(quests).values({ campaignId: other.body.id, title: 'Foreign', createdAt: ts, updatedAt: ts }).returning();
+    const foreignTag = await request(server).post(`/api/v1/campaigns/${other.body.id}/library/tags`).set(dm).send({ name: 'Foreign tag' });
+    const [ownQuest] = await db.insert(quests).values({ campaignId, title: 'Own', createdAt: ts, updatedAt: ts }).returning();
+    expect((await request(server).post(`/api/v1/campaigns/${campaignId}/library/bulk`).set(dm).send({ operation: 'add_tag', taxonomyId: foreignTag.body.id, targets: [{ entityType: 'quest', entityId: ownQuest.id }] })).status).toBe(404);
+    const localTag = await request(server).post(`/api/v1/campaigns/${campaignId}/library/tags`).set(dm).send({ name: 'Local tag' });
+    expect((await request(server).post(`/api/v1/campaigns/${campaignId}/library/bulk`).set(dm).send({ operation: 'add_tag', taxonomyId: localTag.body.id, targets: [{ entityType: 'quest', entityId: otherQuest.id }] })).status).toBe(404);
   });
 });

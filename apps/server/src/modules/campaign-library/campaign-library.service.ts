@@ -1,4 +1,4 @@
-import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, eq, isNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import {
@@ -135,6 +135,10 @@ export class CampaignLibraryService {
 
   async bulk(campaignId: number, raw: unknown, user: RequestUser, role: Role): Promise<LibraryBulkResult> {
     const request = LibraryBulkRequest.parse(raw);
+    switch (request.operation) {
+      case 'set_visibility': case 'set_status': case 'move_inventory_owner': case 'archive': case 'restore':
+        return this.bulkEntityFields(campaignId, request, user, role);
+    }
     if (!['add_tag', 'remove_tag', 'add_collection', 'remove_collection', 'move_collection'].includes(request.operation)) throw new BadRequestException(`Bulk operation ${request.operation} is not yet supported for these entity types`);
     const isTag = request.operation === 'add_tag' || request.operation === 'remove_tag';
     if (!('taxonomyId' in request)) throw new BadRequestException('Bulk operation needs a taxonomyId');
@@ -168,6 +172,46 @@ export class CampaignLibraryService {
     return { operationId, applied: request.targets.length, undoAvailable: true };
   }
 
+  /** Non-taxonomy mutations journal precisely the one column they own.  Undo uses
+   * updated_at as a CAS fence so it never overwrites a subsequent editor's change. */
+  private bulkEntityFields(campaignId: number, request: Exclude<LibraryBulkRequest, { taxonomyId: number }>, user: RequestUser, role: Role): LibraryBulkResult {
+    const ts = nowIso();
+    const result = this.db.transaction((tx) => {
+      const config = request.operation === 'set_visibility'
+        ? { allowed: new Set(['quest', 'npc', 'faction', 'encounter', 'timeline_event', 'attachment']), field: 'hidden' }
+        : request.operation === 'set_status'
+          ? { allowed: new Set(['quest', 'npc', 'location', 'faction', 'encounter']), field: 'status' }
+          : request.operation === 'move_inventory_owner'
+            ? { allowed: new Set(['inventory_item']), field: 'owner' }
+            : { allowed: new Set(['quest', 'npc', 'location', 'faction', 'encounter', 'timeline_event', 'inventory_item']), field: 'deleted_at' };
+      const table = (type: string) => ({ quest: 'quests', npc: 'npcs', location: 'locations', faction: 'factions', encounter: 'encounters', timeline_event: 'timeline_events', inventory_item: 'inventory_items', attachment: 'attachments' } as Record<string, string>)[type];
+      const snapshots: Array<{ entityType: string; entityId: number; value: unknown }> = [];
+      if (request.operation === 'move_inventory_owner' && request.ownerType === 'character' && !tx.get(sql`select id from characters where id=${request.characterId!} and campaign_id=${campaignId}`)) throw new BadRequestException('Character owner must belong to this campaign');
+      for (const target of request.targets) {
+        if (!config.allowed.has(target.entityType)) throw new BadRequestException(`${request.operation} is not supported for ${target.entityType}`);
+        const name = table(target.entityType);
+        const row = request.operation === 'move_inventory_owner'
+          ? tx.get(sql`select owner_type as ownerType, character_id as characterId from ${sql.raw(name)} where id=${target.entityId} and campaign_id=${campaignId}`)
+          : tx.get(sql`select ${sql.raw(config.field)} as value from ${sql.raw(name)} where id=${target.entityId} and campaign_id=${campaignId}`);
+        if (!row) throw new NotFoundException(`${target.entityType} ${target.entityId} not found in this campaign`);
+        snapshots.push({ entityType: target.entityType, entityId: target.entityId, value: row });
+      }
+      for (const target of request.targets) {
+        const name = table(target.entityType);
+        if (request.operation === 'set_visibility') tx.run(sql`update ${sql.raw(name)} set hidden=${request.visibility === 'hidden' ? 1 : 0}, updated_at=${ts} where id=${target.entityId} and campaign_id=${campaignId}`);
+        else if (request.operation === 'set_status') {
+          const field = target.entityType === 'npc' ? 'disposition' : target.entityType === 'faction' ? 'standing' : 'status';
+          tx.run(sql`update ${sql.raw(name)} set ${sql.raw(field)}=${request.status}, updated_at=${ts} where id=${target.entityId} and campaign_id=${campaignId}`);
+        } else if (request.operation === 'move_inventory_owner') tx.run(sql`update inventory_items set owner_type=${request.ownerType}, character_id=${request.characterId ?? null}, updated_at=${ts} where id=${target.entityId} and campaign_id=${campaignId}`);
+        else tx.run(sql`update ${sql.raw(name)} set deleted_at=${request.operation === 'archive' ? ts : null}, updated_at=${ts} where id=${target.entityId} and campaign_id=${campaignId}`);
+      }
+      const inserted = tx.insert(campaignLibraryBulkOperations).values({ campaignId, actor: auditActor(user), operation: request.operation, beforeJson: toJsonText({ kind: 'field', snapshots }), afterJson: toJsonText(request), inverseJson: toJsonText({ kind: 'field', snapshots }), createdAt: ts }).returning({ id: campaignLibraryBulkOperations.id }).get();
+      tx.insert(auditLog).values({ campaignId, actor: auditActor(user), actorRole: role, action: 'campaign_library.bulk', entityType: 'campaign_library_bulk_operation', entityId: inserted.id, detail: request.operation, requestId: getRequestId() ?? null, createdAt: ts }).run();
+      return inserted.id;
+    });
+    return { operationId: result, applied: request.targets.length, undoAvailable: true };
+  }
+
   async undoBulk(campaignId: number, operationId: number, user: RequestUser, role: Role) {
     const JournalRows = z.array(z.object({ id: z.number().int(), campaignId: z.number().int(), entityType: z.string(), entityId: z.number().int(), tagId: z.number().int().nullable(), collectionId: z.number().int().nullable(), createdAt: z.string() }).strict());
     return this.db.transaction((tx) => {
@@ -177,8 +221,25 @@ export class CampaignLibraryService {
       const claimed = tx.update(campaignLibraryBulkOperations).set({ undoneAt: nowIso(), undoneBy: auditActor(user) }).where(and(eq(campaignLibraryBulkOperations.id, operationId), eq(campaignLibraryBulkOperations.campaignId, campaignId), isNull(campaignLibraryBulkOperations.undoneAt))).run();
       if (claimed.changes === 0) return { operationId, undone: true, alreadyUndone: true };
       const request = LibraryBulkRequest.parse(JSON.parse(operation.afterJson));
+      if (!('taxonomyId' in request)) {
+        const FieldJournal = z.object({ kind: z.literal('field'), snapshots: z.array(z.object({ entityType: z.string(), entityId: z.number().int(), value: z.unknown() }).strict()) }).strict();
+        const journal = FieldJournal.parse(JSON.parse(operation.beforeJson));
+        const table = (type: string) => ({ quest: 'quests', npc: 'npcs', location: 'locations', faction: 'factions', encounter: 'encounters', timeline_event: 'timeline_events', inventory_item: 'inventory_items', attachment: 'attachments' } as Record<string, string>)[type];
+        for (const row of journal.snapshots) {
+          const name = table(row.entityType);
+          if (!tx.get(sql`select id from ${sql.raw(name)} where id=${row.entityId} and campaign_id=${campaignId} and updated_at=${operation.createdAt}`)) throw new ConflictException('A target changed after this bulk operation; undo would overwrite it');
+          const value = z.record(z.string(), z.unknown()).parse(row.value);
+          if (request.operation === 'set_visibility') tx.run(sql`update ${sql.raw(name)} set hidden=${value.value as number}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`);
+          else if (request.operation === 'set_status') {
+            const field = row.entityType === 'npc' ? 'disposition' : row.entityType === 'faction' ? 'standing' : 'status';
+            tx.run(sql`update ${sql.raw(name)} set ${sql.raw(field)}=${value.value as string}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`);
+          } else if (request.operation === 'move_inventory_owner') tx.run(sql`update inventory_items set owner_type=${value.ownerType as string}, character_id=${value.characterId as number | null}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`);
+          else tx.run(sql`update ${sql.raw(name)} set deleted_at=${value.value as string | null}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`);
+        }
+        tx.insert(auditLog).values({ campaignId, actor: auditActor(user), actorRole: role, action: 'campaign_library.bulk.undo', entityType: 'campaign_library_bulk_operation', entityId: operationId, detail: operation.operation, requestId: getRequestId() ?? null, createdAt: nowIso() }).run();
+        return { operationId, undone: true, alreadyUndone: false };
+      }
       const rows = JournalRows.parse(JSON.parse(operation.beforeJson));
-      if (!('taxonomyId' in request)) throw new BadRequestException('This bulk operation has no reversible taxonomy journal');
       const isTag = request.operation === 'add_tag' || request.operation === 'remove_tag';
       for (const target of request.targets) {
         // Undo only the dimension this operation touched.  A tag or collection a
