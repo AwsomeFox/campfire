@@ -1,9 +1,10 @@
 import zlib from 'node:zlib';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import request from 'supertest';
 import sharp from 'sharp';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { createTestApp, createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
 import { AttachmentsService } from '../src/modules/attachments/attachments.service';
 import { DB, DB_HOLDER, type DrizzleDb } from '../src/db/db.module';
@@ -137,6 +138,39 @@ describe('attachments (e2e)', () => {
     expect(res.body.filename).toBe('me.png');
     expect(res.body.size).toBe(TINY_PNG.length);
     expect(res.body.id).toBeGreaterThan(0);
+  });
+
+  it('persists optional metadata and computes the checksum from uploaded bytes', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).post(`/api/v1/campaigns/${campaignId}/attachments`).set(dm)
+      .field('kind', 'image').field('title', 'A title').field('altText', 'A meaningful scene')
+      .field('creator', 'Ada').field('sourceUrl', 'https://example.test/source').field('license', 'Made-up custom license')
+      .field('rights', 'All table rights reserved').field('attribution', 'Ada — custom')
+      .attach('file', TINY_PNG, { filename: 'metadata.png', contentType: 'image/png' });
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({ title: 'A title', altText: 'A meaningful scene', license: 'Made-up custom license' });
+    expect(res.body.checksumSha256).toBe(crypto.createHash('sha256').update(TINY_PNG).digest('hex'));
+    const badUrl = await request(server).post(`/api/v1/campaigns/${campaignId}/attachments`).set(dm).field('kind', 'image').field('sourceUrl', 'javascript:bad').attach('file', TINY_PNG, { filename: 'bad.png', contentType: 'image/png' });
+    expect(badUrl.status).toBe(400);
+    const clientChecksum = await request(server).post(`/api/v1/campaigns/${campaignId}/attachments`).set(dm).field('kind', 'image').field('checksumSha256', '0'.repeat(64)).attach('file', TINY_PNG, { filename: 'client-checksum.png', contentType: 'image/png' });
+    expect(clientChecksum.status).toBe(400);
+  });
+
+  it('audits optimistic metadata corrections and rejects stale updates', async () => {
+    const server = ctx.app.getHttpServer();
+    const up = await request(server).post(`/api/v1/campaigns/${campaignId}/attachments`).set(player).field('kind', 'portrait').attach('file', TINY_PNG, { filename: 'editable.png', contentType: 'image/png' });
+    expect(up.status).toBe(201);
+    const saved = await request(server).patch(`/api/v1/attachments/${up.body.id}/metadata`).set(player).send({ title: 'Corrected', updatedAt: up.body.updatedAt });
+    expect(saved.status).toBe(200);
+    expect(saved.body.title).toBe('Corrected');
+    const stale = await request(server).patch(`/api/v1/attachments/${up.body.id}/metadata`).set(player).send({ title: 'Stale', updatedAt: up.body.updatedAt });
+    expect(stale.status).toBe(409);
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const revision = db.get<{ before: string; after: string }>(sql`SELECT before_json AS before, after_json AS after FROM attachment_metadata_revisions WHERE attachment_id = ${up.body.id} ORDER BY id DESC LIMIT 1`);
+    expect(JSON.parse(revision!.before).title).toBe('');
+    expect(JSON.parse(revision!.after).title).toBe('Corrected');
+    const audit = db.get<{ action: string }>(sql`SELECT action FROM audit_log WHERE entity_type = 'attachment' AND entity_id = ${up.body.id} ORDER BY id DESC LIMIT 1`);
+    expect(audit?.action).toBe('attachment.metadata.update');
   });
 
   it('viewer gets 403 uploading a portrait', async () => {
