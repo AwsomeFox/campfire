@@ -53,6 +53,7 @@ import {
 } from '../lib/connectionSync';
 import { KeyboardCommandProvider, useKeyboardCommands, useKeyboardCommandHint } from '../components/KeyboardCommandProvider';
 import { SafetyHoldBar } from '../components/SafetyHoldBar';
+import { onPendingProposalsBadgeBump } from '../lib/proposalsBadgeBus';
 import {
   buildCampaignNavGroups,
   isActiveNavPath,
@@ -642,6 +643,14 @@ function LayoutContent() {
     prevProposalFiledCountRef.current = liveActivity.proposalFiledCount;
     if (delta > 0 && isDm) setPendingProposals((n) => n + delta);
   }, [liveActivity.proposalFiledCount, isDm]);
+
+  // Same immediate-bump idea (issue #1646), for a producer with no SSE channel: the
+  // inbox sweep control files proposals via a plain REST POST and stays on /inbox, so
+  // without this the badge would only catch up on the next route change.
+  useEffect(() => {
+    if (!isDm) return;
+    return onPendingProposalsBadgeBump((delta) => setPendingProposals((n) => n + delta));
+  }, [isDm]);
 
   // me.memberships is fetched once at login, so it's stale the moment a DM changes
   // someone's access mid-session. Once the campaign list has loaded, if this campaign

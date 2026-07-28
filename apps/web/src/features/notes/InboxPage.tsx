@@ -16,10 +16,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
-import type { Note, NoteListPage } from '@campfire/schema';
+import type { InboxSweepItemResult, InboxSweepResult, Note, NoteListPage } from '@campfire/schema';
 import { NOTES_LIST_DEFAULT_LIMIT } from '@campfire/schema';
-import { api, API, ApiError } from '../../lib/api';
+import { api, API, ApiError, translateApiError } from '../../lib/api';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
+import { useCampaign } from '../../app/CampaignContext';
+import { archivedWriteBlockedReason } from '../../app/campaignAccess';
+import { bumpPendingProposalsBadge } from '../../lib/proposalsBadgeBus';
 import { Card, Chip, Btn, TextArea, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
 import { GameIcon } from '../../components/GameIcon';
@@ -79,6 +82,7 @@ export default function InboxPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const cid = Number(campaignId);
   const { isDm, canDmWrite } = useCampaignAccess();
+  const campaign = useCampaign(Number.isFinite(cid) ? cid : undefined);
   const [searchParams] = useSearchParams();
   const inboxParam = searchParams.get('inbox');
   const deepInboxId = inboxParam != null && inboxParam !== '' ? Number(inboxParam) : Number.NaN;
@@ -92,6 +96,16 @@ export default function InboxPage() {
   const [forbidden, setForbidden] = useState(false);
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const fetchGeneration = useRef(0);
+
+  // Inbox sweep (issue #1646) — a real DM-facing control for the server orchestration
+  // that already shipped (#1644). Kept as component state rather than folded into the
+  // load()/error state above: a sweep result is its own "session" (a completed run's
+  // outcome), not part of the open/history lists, and must survive load() refreshing
+  // those lists underneath it.
+  const [sweepBusy, setSweepBusy] = useState(false);
+  const [sweepResult, setSweepResult] = useState<InboxSweepResult | null>(null);
+  const [sweepItemBodies, setSweepItemBodies] = useState<Record<number, string>>({});
+  const [sweepError, setSweepError] = useState<string | null>(null);
 
   const inboxUrl = useCallback(
     (resolved: boolean, cursor?: string) => {
@@ -237,6 +251,34 @@ export default function InboxPage() {
     }
   }
 
+  // Long-running (issue #1646): the endpoint classifies every open capture before it
+  // responds, so this can take a while with a large inbox. `sweepBusy` disables the
+  // trigger for the whole duration (no double-fire) and the button's own label switches
+  // to a "working" state — see the render below — rather than the page looking inert.
+  async function sweepInbox() {
+    if (sweepBusy) return;
+    setSweepBusy(true);
+    setSweepError(null);
+    setSweepResult(null);
+    // Snapshot bodies for the items about to be swept — the sweep call resolves them,
+    // so by the time the result comes back they've fallen out of openList (the reload
+    // below moves them to history). Keeping this snapshot is what lets the outcome
+    // panel show "which capture" a reason applies to, not just a bare note id.
+    setSweepItemBodies(Object.fromEntries(openList.items.map((n) => [n.id, n.body])));
+    try {
+      const result = await api.post<InboxSweepResult>(`${API}/campaigns/${cid}/inbox/sweep`);
+      setSweepResult(result);
+      // Server-truth reconciliation still happens on the next route change (Layout's
+      // effect); this just makes the badge catch up without waiting for that.
+      if (result.job.itemsProposed > 0) bumpPendingProposalsBadge(result.job.itemsProposed);
+      await load();
+    } catch (e) {
+      setSweepError(translateApiError(e, t, { fallbackKey: 'notes.sweepFailed' }));
+    } finally {
+      setSweepBusy(false);
+    }
+  }
+
   if (!Number.isFinite(cid)) {
     return (
       <div className="max-w-3xl mx-auto px-4 mt-5">
@@ -265,6 +307,14 @@ export default function InboxPage() {
     );
   }
 
+  // Precedence: archived beats "nothing to sweep" — an archived campaign is disabled
+  // for a reason the DM can't fix by resolving items, so that's the more useful message.
+  const sweepDisabledReason = !canDmWrite
+    ? archivedWriteBlockedReason(campaign)
+    : openList.total === 0
+      ? t('notes.sweepNothingToSweep')
+      : null;
+
   return (
     <div className="max-w-3xl mx-auto px-4 mt-5 space-y-3 pb-20 md:pb-10" style={{ maxWidth: 760 }}>
       <div className="flex items-center gap-2 flex-wrap">
@@ -275,9 +325,23 @@ export default function InboxPage() {
         {t('notes.inboxIntro')}
       </p>
       <p className="text-muted text-xs m-0">
-        &quot;Claude&quot; here means any MCP-capable assistant (like Claude) connected with an API token — set one
-        up in <Link to="/tokens" className="text-purple-400 hover:underline">API tokens</Link>.
+        {t('notes.inboxMcpNote')}{' '}
+        <Link to="/tokens" className="text-purple-400 hover:underline">
+          {t('notes.inboxMcpNoteLinkLabel')}
+        </Link>
+        .
       </p>
+
+      <SweepControl busy={sweepBusy} disabledReason={sweepDisabledReason} onSweep={() => void sweepInbox()} />
+      {sweepError && <ErrorNote message={sweepError} onRetry={() => void sweepInbox()} />}
+      {sweepResult && (
+        <SweepResultCard
+          campaignId={cid}
+          result={sweepResult}
+          itemBodies={sweepItemBodies}
+          onDismiss={() => setSweepResult(null)}
+        />
+      )}
 
       <div className="flex gap-1.5 flex-wrap">
         <button onClick={() => setView('open')}>
@@ -357,6 +421,138 @@ export default function InboxPage() {
         );
       })()}
     </div>
+  );
+}
+
+/**
+ * The sweep trigger (issue #1646) — a real DM control for the server orchestration
+ * (#1644) that already reads every open item, infers create/update/dismiss, and files
+ * each as a pending proposal. `disabledReason`, when set, both disables the button and
+ * is shown as the reason (archived campaign, or nothing open to sweep) rather than
+ * leaving the DM to guess why it's greyed out.
+ */
+function SweepControl({
+  busy,
+  disabledReason,
+  onSweep,
+}: {
+  busy: boolean;
+  disabledReason: string | null;
+  onSweep: () => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className="cf-inset p-3 space-y-1.5">
+      <div className="flex items-center gap-2 flex-wrap">
+        <Btn className="!min-h-0 !py-1.5 text-xs" onClick={onSweep} disabled={busy || disabledReason !== null}>
+          {busy ? t('notes.sweepButtonBusy') : t('notes.sweepButton')}
+        </Btn>
+        <p className="text-[11px] text-secondary m-0 flex-1 min-w-0">{t('notes.sweepHint')}</p>
+      </div>
+      {/* aria-live: the only feedback while a sweep is in flight — it can take a while
+          for a large inbox, so this is what tells the DM the button did something
+          rather than the page just looking stuck (issue #1646). */}
+      {busy && (
+        <p className="text-[11px] text-amber-200 m-0" aria-live="polite">
+          {t('notes.sweepInProgress')}
+        </p>
+      )}
+      {!busy && disabledReason && (
+        <p className="text-[11px] text-secondary m-0">{disabledReason}</p>
+      )}
+    </div>
+  );
+}
+
+const SWEEP_OUTCOME_TAG: Record<InboxSweepItemResult['outcome'], { cls: string; labelKey: string }> = {
+  proposed: { cls: 'tag tag-accent', labelKey: 'notes.sweepOutcomeProposed' },
+  skipped: { cls: 'tag tag-neutral', labelKey: 'notes.sweepOutcomeSkipped' },
+  errored: { cls: 'tag', labelKey: 'notes.sweepOutcomeErrored' },
+};
+
+/**
+ * Sweep outcome (issue #1646). The server force-skips unsupported captures (objective
+ * ticks, HP/combat writes) with a stated `reason` regardless of what the classifier
+ * decided — that reason MUST reach the DM here, not just the job totals, or a
+ * considered "couldn't do this because X" reads as an indistinguishable silent
+ * failure. Every item in `result.items` renders its `reason` unconditionally, for
+ * every outcome (proposed/skipped/errored alike).
+ */
+function SweepResultCard({
+  campaignId,
+  result,
+  itemBodies,
+  onDismiss,
+}: {
+  campaignId: number;
+  result: InboxSweepResult;
+  itemBodies: Record<number, string>;
+  onDismiss: () => void;
+}) {
+  const { t } = useTranslation();
+  const { job, items } = result;
+
+  if (job.status === 'disabled') {
+    return (
+      <div className="cf-inset p-3 space-y-1.5">
+        <p className="m-0 text-sm text-amber-200">{job.detail || t('notes.sweepNoProvider')}</p>
+        <div className="flex items-center gap-3">
+          <Link to={`/c/${campaignId}/settings`} className="text-xs text-purple-400 hover:underline">
+            {t('notes.sweepOpenAiSettings')}
+          </Link>
+          <button type="button" className="text-xs text-secondary hover:text-white" onClick={onDismiss}>
+            {t('notes.sweepDismiss')}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <Card density="default" className="space-y-2.5">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <p className="m-0 text-sm">
+          {t('notes.sweepSummary', {
+            total: job.itemsTotal,
+            proposed: job.itemsProposed,
+            skipped: job.itemsSkipped,
+            errored: job.itemsErrored,
+          })}
+        </p>
+        <button type="button" className="text-xs text-secondary hover:text-white shrink-0" onClick={onDismiss}>
+          {t('notes.sweepDismiss')}
+        </button>
+      </div>
+      {job.itemsProposed > 0 && (
+        <Link to={`/c/${campaignId}/proposals`} className="text-xs text-purple-400 hover:underline">
+          {t('notes.sweepReviewProposals')}
+        </Link>
+      )}
+      {items.length === 0 ? (
+        <p className="text-xs text-secondary m-0">{t('notes.sweepNothingToSweep')}</p>
+      ) : (
+        <ul className="m-0 p-0 space-y-2" style={{ listStyle: 'none' }}>
+          {items.map((item) => {
+            const tag = SWEEP_OUTCOME_TAG[item.outcome];
+            const body = itemBodies[item.noteId];
+            return (
+              <li key={item.noteId} className="cf-inset p-2.5 space-y-1">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className={tag.cls} style={{ fontSize: 10 }}>
+                    {t(tag.labelKey)}
+                  </span>
+                  <span className="text-[11px] text-secondary truncate">
+                    {body ? body : t('notes.sweepItemFallbackLabel', { noteId: item.noteId })}
+                  </span>
+                </div>
+                {/* The stated reason — always rendered, every outcome (see doc comment above). */}
+                <p className="text-xs text-slate-400 m-0">{item.reason}</p>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </Card>
   );
 }
 
