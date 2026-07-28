@@ -22,6 +22,7 @@ import { RevisionsService } from '../revisions/revisions.service';
 import { auditActor, roleAtLeast } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import {
+  actionEconomySlotMax,
   advanceEncounterTurn,
   applyCombatantHp,
   buildEncounterRoster,
@@ -4909,23 +4910,49 @@ export class EncountersService {
       const effects = zod.array(ActiveEffect).safeParse(fromJsonText<unknown>(fresh.activeEffects, null));
       const activeEffects: ActiveEffectType[] = effects.success ? effects.data : [];
 
+      // #1674 — bound EVERY slot against the same adapter-owned action-economy model the
+      // action-resolver's apply_action spend path consumes (#1637), not a second copy of the
+      // rule: `actionEconomySlotMax` (encounters.logic.ts) is the one place "how many of this
+      // slot does this combatant have" is computed for the whole encounters module. Legendary
+      // composes into that same helper via the `hasLegendaryActions` flag this method already
+      // derived above (outside the transaction, unlike the resolver's in-transaction lookup —
+      // different structural shape, same rule per #1637/#1674's shared reasoning).
+      //
+      // Convention (#1570/#1571, extended by #1637): count-based spends error, restores clamp.
+      // `useSlot` / `setSlotUsed` past the slot's max is a 400 carrying
+      // `code`/`slot`/`remaining`/`max` in the exact shape #1637 established; `releaseSlot`
+      // keeps flooring at 0 with no error, matching `applySpellSlotDelta`'s refund asymmetry.
+      // Movement is tracked as a distance, not a fixed spendable slot: adapter movement `max`
+      // is an advisory/default display value and cannot represent per-combatant speed, Dash,
+      // or gridless systems where `max === 0` means "undefined/unbounded".
+      const hasLegendaryActions = legendaryMax > 0;
+      const rejectSlotOverflow = (slot: string, usedBefore: number, max: number): never => {
+        const remaining = Math.max(0, max - usedBefore);
+        throw new BadRequestException({
+          code: 'action_economy_exhausted',
+          message: `Only ${remaining} of ${max} "${slot}" remain this turn.`,
+          slot,
+          remaining,
+          max,
+        });
+      };
+
       if (patch.resetTurn) {
         turnState.used = {};
         turnState.movementUsedFt = 0;
       }
       if (patch.useSlot) {
+        const usedBefore = turnState.used[patch.useSlot] ?? 0;
+        const max = actionEconomySlotMax(adapter, patch.useSlot, hasLegendaryActions);
+        // `max === null`: an unrecognised slot key — deliberately left unbounded rather than
+        // guessed at, matching `actionEconomySlotMax`'s documented "refuse rather than guess".
+        if (max !== null && usedBefore + 1 > max) {
+          rejectSlotOverflow(patch.useSlot, usedBefore, max);
+        }
+        const next = usedBefore + 1;
+        turnState.used[patch.useSlot] = next;
         if (patch.useSlot === LEGENDARY_ACTION_SLOT) {
-          if (legendaryMax <= 0) {
-            throw new BadRequestException('This combatant does not have legendary actions.');
-          }
-          const next = (turnState.used[LEGENDARY_ACTION_SLOT] ?? 0) + 1;
-          if (next > legendaryMax) {
-            throw new BadRequestException(`Only ${legendaryMax} legendary actions per round.`);
-          }
-          turnState.used[LEGENDARY_ACTION_SLOT] = next;
           logs.push({ detail: `used legendary action (${next}/${legendaryMax})` });
-        } else {
-          turnState.used[patch.useSlot] = (turnState.used[patch.useSlot] ?? 0) + 1;
         }
       }
       if (patch.releaseSlot) {
@@ -4939,16 +4966,19 @@ export class EncountersService {
         }
       }
       if (patch.setSlotUsed) {
-        if (patch.setSlotUsed.key === LEGENDARY_ACTION_SLOT) {
-          if (legendaryMax <= 0) throw new BadRequestException('This combatant does not have legendary actions.');
-          if (patch.setSlotUsed.used > legendaryMax) {
-            throw new BadRequestException(`Only ${legendaryMax} legendary actions per round.`);
-          }
+        const { key, used: requested } = patch.setSlotUsed;
+        const usedBefore = turnState.used[key] ?? 0;
+        const max = actionEconomySlotMax(adapter, key, hasLegendaryActions);
+        if (max !== null && requested > max) {
+          rejectSlotOverflow(key, usedBefore, max);
         }
-        turnState.used[patch.setSlotUsed.key] = patch.setSlotUsed.used;
+        turnState.used[key] = requested;
       }
       if (patch.resetMovement) turnState.movementUsedFt = 0;
-      if (patch.moveFt !== undefined) turnState.movementUsedFt = Math.max(0, turnState.movementUsedFt + patch.moveFt);
+      if (patch.moveFt !== undefined) {
+        const next = turnState.movementUsedFt + patch.moveFt;
+        turnState.movementUsedFt = Math.max(0, next);
+      }
 
       const clearConcentration = (): void => {
         turnState.concentration = null;

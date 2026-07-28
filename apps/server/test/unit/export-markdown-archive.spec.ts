@@ -68,7 +68,10 @@ function buildService(entities: {
     // scheduling — the archive reads listForExport, deliberately the RAW rows (#504);
     // exposing only that method keeps the stub honest if the call site ever changes back.
     { listForExport: async () => entities.scheduledSessions ?? [] } as any,
-    { listForCampaign: async () => entities.characters ?? [] } as any,
+    // characters — #1667: the archive reads listForExport, which also resolves
+    // conditionInstances (not on the public Character schema); exposing only that
+    // method keeps the stub honest if the call site ever changes back.
+    { listForExport: async () => entities.characters ?? [] } as any,
     // Pagination (#608): export walks the full set via listAllForCampaign.
     { listAllForCampaign: async () => entities.notes ?? [] } as any,
     { listForCampaign: async () => entities.comments ?? [] } as any,

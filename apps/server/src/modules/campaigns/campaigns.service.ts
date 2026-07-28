@@ -103,6 +103,7 @@ import { APP_VERSION } from '../../common/build-metadata';
 import { CURRENT_SCHEMA_REVISION } from '../backup/backup-manifest';
 import { freshAiSeatCounters, portableAiSeat, readPortableAiSeat } from '../ai-dm/ai-seat-portability';
 import { AiDmService } from '../ai-dm/ai-dm.service';
+import { readConditionInstances, sheetConditionWriteSetFromInstances, sheetConditionWriteSetFromNames } from '../../common/conditions';
 import {
   assertCompendiumImportAllowed,
   buildResolutionMap,
@@ -290,6 +291,14 @@ const jsonCol = (v: unknown, fallback: string): string => {
   } catch {
     return fallback;
   }
+};
+const importedConditionNames = (v: unknown): string[] | null =>
+  Array.isArray(v) ? v.filter((name): name is string => typeof name === 'string') : null;
+const characterConditionWriteSetForImport = (row: Rec): { conditions: string; conditionInstances: string } => {
+  const names = importedConditionNames(row.conditions);
+  const instancesText = jsonCol(row.conditionInstances, '[]');
+  if (names) return sheetConditionWriteSetFromNames(names, instancesText);
+  return sheetConditionWriteSetFromInstances(readConditionInstances(instancesText, '[]'));
 };
 
 function toDomain(row: typeof campaigns.$inferSelect): Campaign {
@@ -2346,7 +2355,10 @@ export class CampaignsService {
             ac: intOrNull(c.ac),
             hpCurrent: intOr(c.hpCurrent, 10),
             hpMax: intOr(c.hpMax, 10),
-            conditions: jsonCol(c.conditions, '[]'),
+            // #1667 half B: write the paired condition columns through the sheet helper.
+            // When both import fields are present but disagree, the legacy name list is
+            // authoritative; stale instances are dropped and combat-only fields are nulled.
+            ...characterConditionWriteSetForImport(c),
             saveProficiencies: jsonCol(c.saveProficiencies, '[]'),
             skills: jsonCol(c.skills, '{}'),
             actions: jsonCol(c.actions, '[]'),
