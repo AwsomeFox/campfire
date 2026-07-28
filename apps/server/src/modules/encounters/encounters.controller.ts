@@ -411,7 +411,13 @@ export class EncountersController {
   async ping(@Param('id', ParseIntPipe) id: number, @Body() body: MapPingDto, @CurrentUser() user: RequestUser) {
     const row = await this.encounters.getRowOrThrow(id);
     // Role drives hidden-encounter secrecy (issue #869): a non-DM must not learn a
-    // prepared fight exists via ping — 404, matching roster/events/difficulty.
+    // prepared fight exists via ping — 404, matching roster/events/difficulty. Issue
+    // #1636: this stays `requireMember` (not `requireRole('player')`) DELIBERATELY —
+    // requireRole would 403 a viewer before pingMap's hidden-visibility check ever
+    // runs, which would leak a hidden encounter's existence to a viewer via 403
+    // instead of the 404 issue #869 requires. The "any DM or player" role floor is
+    // enforced inside pingMap itself, AFTER the hidden check, so hidden stays 404 for
+    // everyone non-DM while a merely-visible encounter now correctly 403s a viewer.
     const role = await this.access.requireMember(user, row.campaignId, { write: true });
     this.encounters.pingMap(id, row.campaignId, body, role, row.hidden);
     return { ok: true };

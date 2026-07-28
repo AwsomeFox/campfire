@@ -363,7 +363,13 @@ export class CheckRequestsController {
   @ApiResponse({ status: 404, description: 'No such check request.' })
   async roll(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const campaignId = await this.characters.campaignIdForCheckRequest(id);
-    const role = await this.access.requireMember(user, campaignId, { write: true });
+    // Issue #1636: `requireMember(..., { write: true })` only asserts the CAMPAIGN is
+    // writable, not that the CALLER has write authority — it returns a viewer's role
+    // unchanged. Downstream, `assertCanWrite` checks dm-or-owner, and `ownerUserId` is
+    // untouched by a role change, so a member demoted from player to viewer who owns the
+    // character could still roll (and thereby resolve) a pending check request.
+    // requireRole('player') closes that; assertCanWrite's dm-or-owner check still applies.
+    const role = await this.access.requireRole(user, campaignId, 'player');
     return this.characters.resolveCheckRequest(id, user, role);
   }
 }
