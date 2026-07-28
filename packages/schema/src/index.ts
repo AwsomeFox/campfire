@@ -10892,9 +10892,13 @@ export const AdminMetricsCounts = z.object({
 export type AdminMetricsCounts = z.infer<typeof AdminMetricsCounts>;
 
 export const AdminMetricsDatabase = z.object({
-  sizeBytes: z.number().int().nonnegative(), // page_count * page_size (on-disk file size)
+  /** SQLite's allocated logical pages; this is not necessarily the DB file's physical bytes. */
+  sizeBytes: z.number().int().nonnegative(),
   pageCount: z.number().int().nonnegative(),
   pageSize: z.number().int().nonnegative(),
+  dbFileBytes: z.number().int().nonnegative().nullable(),
+  walBytes: z.number().int().nonnegative().nullable(),
+  shmBytes: z.number().int().nonnegative().nullable(),
 });
 export type AdminMetricsDatabase = z.infer<typeof AdminMetricsDatabase>;
 
@@ -10908,6 +10912,16 @@ export const AdminMetrics = z.object({
   activeSessions: z.number().int().nonnegative(), // non-expired rows in user_sessions
   counts: AdminMetricsCounts,
   database: AdminMetricsDatabase,
+  storage: z.object({
+    freeBytes: z.number().int().nonnegative().nullable(),
+    totalBytes: z.number().int().nonnegative().nullable(),
+    availableBytes: z.number().int().nonnegative().nullable(),
+    uploadsBytes: z.number().int().nonnegative().nullable(),
+    backupsBytes: z.number().int().nonnegative().nullable(),
+    tempBytes: z.number().int().nonnegative().nullable(),
+    status: z.enum(['ok', 'degraded', 'failed', 'unknown']),
+    quickCheck: z.object({ status: z.enum(['ok', 'degraded', 'failed', 'unknown']), checkedAt: IsoDate.nullable() }),
+  }),
   recentActivity: z.array(AuditEntry), // most-recent audit rows (read-only, newest first)
 });
 export type AdminMetrics = z.infer<typeof AdminMetrics>;
