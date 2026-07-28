@@ -52,7 +52,7 @@ function toDomain(row: typeof inventoryItems.$inferSelect): InventoryItem {
   const parsedRef = CompendiumRef.safeParse(row.compendiumRef ? safeJson(row.compendiumRef) : null);
   const ref = parsedRef.success ? parsedRef.data : null;
   const parsedSnapshot = row.compendiumSnapshot ? CompendiumSnapshot.safeParse(safeJson(row.compendiumSnapshot)) : null;
-  const snapshot = parsedSnapshot?.success ? parsedSnapshot.data : null;
+  const snapshot = parsedSnapshot?.success && (!parsedSnapshot.data.sourceUrl || /^https?:\/\//i.test(parsedSnapshot.data.sourceUrl)) ? parsedSnapshot.data : null;
   return {
     id: row.id,
     campaignId: row.campaignId,

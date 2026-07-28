@@ -23,6 +23,9 @@ describe('compendium inventory (#738 e2e)', () => {
   it('executes acquisition permission, duplicate, idempotency, and link transitions', async () => {
     const server = ctx.app.getHttpServer(); const url = `/api/v1/campaigns/${campaignId}/inventory/from-compendium`;
     expect((await request(server).post(url).set(viewer).send({ ruleEntryId: entryId })).status).toBe(403);
+    // Manual inventory DTO is strict: malformed provenance never enters live storage.
+    const forged = await request(server).post(`/api/v1/campaigns/${campaignId}/inventory`).set(player).send({ name: 'unsafe', compendiumRef: { packSlug: 'x', packVersion: '', entrySlug: 'x', entryType: 'not-a-type', contentHash: '0'.repeat(64) }, compendiumSnapshot: { slug: 'x', name: 'x', type: 'item', sourceUrl: 'javascript:alert(1)' }, compendiumState: 'bad-state' });
+    expect(forged.status).toBe(400);
     expect((await request(server).post(url).set(player).send({ ruleEntryId: entryId, ownerType: 'character', characterId: ownCharacterId })).status).toBe(201);
     expect((await request(server).post(url).set(player).send({ ruleEntryId: entryId, ownerType: 'character', characterId: foreignCharacterId })).status).toBe(403);
     expect((await request(server).post(`/api/v1/campaigns/${campaignId}/inventory`).set(player).send({ name: 'forged', ruleEntryId: entryId })).status).toBe(400);
