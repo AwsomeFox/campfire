@@ -71,6 +71,12 @@ describe('AI map generation (e2e, issue #410)', () => {
     expect(row.kind).toBe('map');
     expect(row.mime).toBe('image/svg+xml');
     expect(row.hidden).toBe(true);
+    expect(row).toMatchObject({
+      title: expect.stringMatching(/^AI map/),
+      altText: 'AI-generated battle map',
+      license: '',
+      attribution: expect.stringMatching(/procedural renderer/i),
+    });
   });
 
   it('is idempotent on the Idempotency-Key header', async () => {
