@@ -66,14 +66,14 @@ export interface Violation {
  * This is AST-based rather than a parenthesis-counting string walk: strings, comments, and
  * templates can contain arbitrary `(`/`)` text without changing what the writer-call argument is.
  *
- * KNOWN LIMITATION, stated rather than hidden: `.values(someIdentifier)` where `someIdentifier`
- * is built elsewhere (e.g. via `.map()` returning row objects, as `encounters.service.ts`'s
- * batch monster insert does) is NOT resolved back to its definition — the scanner sees only the
- * bare identifier text and finds nothing to check. That one shape in this codebase was verified
- * safe by hand during #1666's sweep (fresh rows, no prior data to desync from) and is out of
- * this scanner's reach rather than silently "passing" it. Every direct inline `.set({...})` /
- * `.values({...})` write in this codebase — which is every UPDATE and most INSERTs, including
- * the one #1664 actually found — IS covered.
+ * KNOWN LIMITATION, stated rather than hidden: `.set(someIdentifier)` / `.values(someIdentifier)`
+ * where `someIdentifier` is built elsewhere (e.g. via `.map()` returning row objects, as
+ * `encounters.service.ts`'s batch monster insert does) is NOT resolved back to its definition —
+ * the scanner sees only the bare identifier text and finds nothing to check. Those shapes in this
+ * codebase were verified safe by hand during #1666's sweep (fresh rows, no prior data to desync
+ * from, or a paired object assembled before the write) and are out of this scanner's reach rather
+ * than silently "passing" them. Every direct inline `.set({...})` / `.values({...})` write in this
+ * codebase — including the one #1664 actually found — IS covered.
  */
 function writerCallArgObjects(source: string): { sourceFile: ts.SourceFile; object: ts.ObjectLiteralExpression; span: string }[] {
   const sourceFile = ts.createSourceFile('condition-scan.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
@@ -284,23 +284,25 @@ describe('single-writer invariant for conditions/conditionInstances (issue #1666
     expect(findUnpairedConditionWrites(shortAliasWrite).map((v) => v.key)).toEqual(['conditions']);
   });
 
-  it("does NOT flag encounters.service.ts's end-of-encounter sheet sync (issue #1666 review note)", () => {
-    // Called out explicitly during review: this site builds { conditions, conditionInstances }
-    // via `...sheetConditionWriteSetFromInstances(readConditionInstances(...))` spread into an
-    // INTERMEDIATE accumulator object (characterWrites.push({...})) — a different object literal
-    // than the one that reaches `.set()` — and only later, in a separate statement, copies both
-    // resulting properties across as literal `conditions: w.conditions, conditionInstances:
-    // w.conditionInstances` keys into the actual `.set({...})` call. A scanner that only
-    // recognised the direct-helper-spread-inside-.set() shape would false-positive here (only
-    // ONE literal key visible at the helper site, and no helper marker text at the .set() site) —
-    // exactly the kind of "right about the known violation, wrong about a legitimate site" defect
-    // that makes a guardrail worth disabling. This scanner survives it because the .set() call
-    // itself carries BOTH literal keys side by side, which the "hasConditions && hasInstances"
-    // branch accepts without needing to see the helper.
-    const syncSource = readFileSync(join(SRC_ROOT, 'modules', 'encounters', 'encounters.service.ts'), 'utf8');
-    const violations = findUnpairedConditionWrites(syncSource);
-    const syncViolations = violations.filter((v) => v.fullSpan.includes('deathSaveFailures: w.deathSaveFailures'));
-    expect(syncViolations).toEqual([]);
+  it('SYNTHETIC CONTROL: a paired end-of-encounter-style inline write is scanned and accepted', () => {
+    // The live end-of-encounter sync currently calls `.set(set)` with an identifier, which this
+    // scanner deliberately documents as out of scope. This fixture keeps the intended safety
+    // control meaningful by using the same paired `w.conditions` / `w.conditionInstances` payload
+    // shape inline, then first proving the scanner inspected it before asserting no violation.
+    const pairedSheetSync = `
+      tx.update(characters)
+        .set({
+          hpCurrent: w.hpCurrent,
+          deathSaveFailures: w.deathSaveFailures,
+          conditions: w.conditions,
+          conditionInstances: w.conditionInstances,
+          updatedAt: at,
+        })
+        .where(eq(characters.id, w.characterId))
+        .run();
+    `;
+    expect(writerCallArgObjects(pairedSheetSync)).toHaveLength(1);
+    expect(findUnpairedConditionWrites(pairedSheetSync)).toEqual([]);
   });
 
   it('LIVE SWEEP: every unpaired write in apps/server/src is a known, justified exception', () => {
