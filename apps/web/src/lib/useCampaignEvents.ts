@@ -35,6 +35,15 @@ export interface CampaignEventsHandlers {
   onStreamRecovery?: () => void;
   /** Lets last-known-data surfaces distinguish a healthy stream from a dropped/offline one. */
   onStatusChange?: (status: CampaignEventsStatus) => void;
+  /**
+   * Fires the instant this campaign's stream 403s (issue #1640) — the subscriber is no
+   * longer a member (removed, or the campaign was trashed). See `sseReconnect.ts`'s
+   * `onForbidden` for the full mechanism: the server closes the stream reactively
+   * (#527/#867) the moment revocation happens, so a tab with this campaign open learns
+   * about it on the very next reconnect attempt, not on the next unrelated request that
+   * happens to 403.
+   */
+  onForbidden?: () => void;
 }
 
 export type CampaignEventsStatus = SseStreamStatus;
@@ -113,6 +122,7 @@ export function useCampaignEvents(campaignId: number | undefined, handlers: Camp
       onReconnect: () => handlersRef.current.onReconnect?.(),
       onStreamRecovery: () => handlersRef.current.onStreamRecovery?.(),
       onStatusChange: (status) => handlersRef.current.onStatusChange?.(status),
+      onForbidden: () => handlersRef.current.onForbidden?.(),
     });
 
     return () => loop.dispose();

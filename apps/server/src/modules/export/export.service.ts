@@ -8,6 +8,7 @@ import path from 'node:path';
 import { Transform, type Writable } from 'node:stream';
 import { finished, pipeline } from 'node:stream/promises';
 import { eq } from 'drizzle-orm';
+import { toScheduledSessionExport } from '@campfire/schema';
 import type { EncounterEvent, EncounterWithCombatants } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { aiDmSeats, aiScribeConfigs, aiScribeJobs } from '../../db/schema';
@@ -201,6 +202,19 @@ export class ExportService {
    * members' private notes are excluded, same rule as GET /notes).
    */
   async buildExport(campaignId: number, user: RequestUser) {
+    return (await this.buildExportInternal(campaignId, user)).document;
+  }
+
+  /**
+   * Same snapshot as {@link buildExport}, but also returns the pre-strip
+   * `scheduledSessionList` rows the document's `scheduledSessions` field was
+   * derived from. `buildProfileExport` needs those rows' `assignedDmUserId`
+   * values for the free-text identifier sweep (issue #1548) — reusing THIS
+   * snapshot instead of re-querying `this.scheduling.listForExport` avoids a
+   * TOCTOU window where a reassignment/deletion between two separate queries
+   * could desync the sweep from the prose it's meant to cover.
+   */
+  private async buildExportInternal(campaignId: number, user: RequestUser) {
     const role = 'dm' as const;
 
     // Issue #731: capture the audit trail from a stable id ceiling BEFORE the rest of
@@ -359,7 +373,7 @@ export class ExportService {
 
     const auditMeta = await this.audit.finalizeCampaignExportMeta(campaignId, auditExport.meta);
 
-    return {
+    const document = {
       campaign,
       quests: questList,
       npcs: npcList,
@@ -400,7 +414,17 @@ export class ExportService {
       // Issue #813: version authorship + replacer metadata round-trips with remapped ids.
       revisions: revisionList,
       // Issue #436: schedules + RSVPs and session attendance round-trip on import.
-      scheduledSessions: scheduledSessionList,
+      // Issue #1548: `importCampaign` never restores organized-play decoration
+      // (series/venue/room/assignedDm/capacity/event+season keys/ics identity/
+      // occurrence lineage) — only the legacy fields below. Per the maintainer's
+      // ruling on #1548, campaign export/import stays scoped to the campaign, not
+      // install-level scheduling/venue/room resources, so that decoration is
+      // dropped HERE rather than carried and silently discarded on import.
+      // `toScheduledSessionExport` strips via {@link ORGANIZED_PLAY_OMIT} — the
+      // exact field set import's create literal already never reads — without
+      // re-parsing the row through Zod (imported campaigns can hold out-of-schema
+      // values that SQLite accepted; export must not 500 on those).
+      scheduledSessions: scheduledSessionList.map(toScheduledSessionExport),
       sessionAttendance: sessionAttendanceList,
       diceRolls: diceRollList,
       // Issue #1078: AI seat + scribe config (DM-authored steering, NOT runtime counters or provider keys).
@@ -444,6 +468,8 @@ export class ExportService {
         'and clones. Each participant can export their own submission with GET /campaigns/:id/export/me; full-server ' +
         'backup/restore preserves the database rows and ownership.',
     };
+
+    return { document, scheduledSessionList };
   }
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -477,10 +503,23 @@ export class ExportService {
     } = {},
   ): Promise<ProfileExportResult & { projection: ExportProjection; attachmentBytes: Map<number, AttachmentByteDecision> }> {
     const policy = resolveExportPolicy(profile, options);
-    const raw = (await this.buildExport(campaignId, user)) as unknown as Record<string, unknown>;
-    const projection = projectExport(raw, policy);
+    const { document, scheduledSessionList } = await this.buildExportInternal(campaignId, user);
+    const raw = document as unknown as Record<string, unknown>;
+    // #1548 stripped assignedDmUserId (the organized-play running DM) out of
+    // raw.scheduledSessions, so it can no longer be scanned as a raw field — and it is
+    // NOT reliably a campaign member either (createSeries never requires it: see
+    // organized-play.service.ts), so raw.members[].userId cannot be assumed to already
+    // cover it. Reuse the SAME pre-strip rows buildExportInternal already fetched (the
+    // ones `document.scheduledSessions` was derived from) for their assignedDmUserId
+    // values ONLY, and feed them into the free-text sweep as `extra` — never attached to
+    // `raw` itself, so they cannot leak into the exported document under any profile,
+    // including 'backup's unredacted pass-through. A second, separate query here would
+    // reopen a TOCTOU window: a reassignment/deletion between two queries could desync
+    // the scan from the prose snapshot it's meant to cover (see PR #1651 review).
+    const extraScanIdentifiers = scheduledSessionList.map((s) => s.assignedDmUserId);
+    const projection = projectExport(raw, policy, extraScanIdentifiers);
 
-    const { scannable } = partitionIdentifiers(collectPrivateIdentifiers(raw));
+    const { scannable } = partitionIdentifiers(collectPrivateIdentifiers(raw, extraScanIdentifiers));
     const format = opts.format ?? 'json';
     const attachmentBytes = opts.inspectAttachmentBytes
       ? await this.planAttachmentBytes(

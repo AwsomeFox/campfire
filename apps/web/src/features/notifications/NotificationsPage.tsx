@@ -44,6 +44,8 @@ function typeIcon(type: Notification['type']): string {
       return 'top-hat';
     case 'added_to_campaign':
       return 'campfire';
+    case 'removed_from_campaign':
+      return 'padlock';
     case 'character_reassigned':
       return 'meeple';
     case 'session_scheduled':
@@ -102,6 +104,7 @@ const NOTIFICATION_TYPES: { type: NotificationType; label: string }[] = [
   { type: 'note_reply', label: 'Note Reply' },
   { type: 'note_shared', label: 'Note Shared' },
   { type: 'added_to_campaign', label: 'Added to Campaign' },
+  { type: 'removed_from_campaign', label: 'Removed from Campaign' },
   { type: 'session_scheduled', label: 'Session Scheduled' },
   { type: 'session_rsvp', label: 'Session RSVP' },
   { type: 'quest_updated', label: 'Quest Updated' },
