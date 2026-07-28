@@ -1,0 +1,11 @@
+{
+  "tracked": [
+    {
+      "pr": 1676,
+      "url": "https://github.com/AwsomeFox/campfire/pull/1676",
+      "branch": "fix/issue-1674",
+      "status": "babysitting",
+      "note": "Review threads resolved (movement unbound in 78f7f11); MERGEABLE vs main; awaiting CI on head 78f7f11"
+    }
+  ]
+}
