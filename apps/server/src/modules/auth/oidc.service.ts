@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
 import { randomBytes } from 'node:crypto';
 import type * as client from 'openid-client';
 import { pkceS256Challenge } from '../../common/crypto';
@@ -141,6 +141,7 @@ function loadClient(): Promise<typeof client> {
  */
 @Injectable()
 export class OidcService {
+  private readonly logger = new Logger(OidcService.name);
   private configPromise: Promise<client.Configuration> | null = null;
   private cachedConfig: client.Configuration | null = null;
 
@@ -316,7 +317,33 @@ export class OidcService {
           },
         });
       }
-      const doc = (await res.json()) as Record<string, unknown>;
+      const contentType = res.headers.get('content-type') ?? 'unknown';
+      const bodyText = await res.text();
+      let doc: Record<string, unknown>;
+      try {
+        doc = JSON.parse(bodyText) as Record<string, unknown>;
+      } catch {
+        const rawBodyPrefix = bodyText.length <= 200 ? bodyText : `${bodyText.slice(0, 200)}…`;
+        this.logger.warn(
+          `OIDC discovery at ${discoveryUrl} returned a non-JSON response (HTTP ${res.status}, ${bodyText.length} bytes, content-type ${contentType}). Raw body prefix: ${rawBodyPrefix}`,
+        );
+        return OidcTestResultSchema.parse({
+          ...base,
+          ok: false,
+          message: `Discovery endpoint returned a non-JSON response (${bodyText.length} bytes, content-type ${contentType}).`,
+          authorizationEndpoint: null,
+          tokenEndpoint: null,
+          checks: {
+            discovery: checkFail(
+              `Discovery endpoint returned a non-JSON response (${bodyText.length} bytes, content-type ${contentType}).`,
+            ),
+            redirectClient: checkSkip('Skipped — discovery did not succeed.'),
+            tokenExchange: checkSkip('Requires end-to-end test login.'),
+            requiredClaims: checkSkip('Requires end-to-end test login.'),
+            groupPolicy: checkSkip('Requires end-to-end test login.'),
+          },
+        });
+      }
       discoveredIssuer = typeof doc.issuer === 'string' ? doc.issuer : null;
       authorizationEndpoint = typeof doc.authorization_endpoint === 'string' ? doc.authorization_endpoint : null;
       tokenEndpoint = typeof doc.token_endpoint === 'string' ? doc.token_endpoint : null;
