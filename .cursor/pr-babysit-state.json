@@ -6,8 +6,8 @@
       "url": "https://github.com/AwsomeFox/campfire/pull/1618",
       "headBranch": "fix/issue-724",
       "baseBranch": "main",
-      "updatedAt": "2026-07-28T02:35:00Z",
-      "notes": "Review fixes on 62b7e4aa; all 7 threads resolved. e2e-web(2/4) failed once on unrelated grid-default-normalization flake (passed on prior run); empty commit retriggered CI. Coverage still pending on previous run."
+      "updatedAt": "2026-07-28T03:20:00Z",
+      "notes": "OpenAPI diagnostics docs added (42563d3d). Review threads resolved. Awaiting CI after main merges and coverage fix."
     }
   ]
 }
