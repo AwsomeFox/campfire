@@ -278,6 +278,58 @@ describe('encounter condition sync (issue #486, service layer)', () => {
       return fromJsonText<ConditionInstance[]>(row.conditionInstances, []);
     }
 
+    function readCombatantInstances(orm: ReturnType<typeof build>['orm'], combatantId: number) {
+      const [row] = orm.select().from(combatants).where(eq(combatants.id, combatantId)).limit(1).all();
+      return fromJsonText<ConditionInstance[]>(row.conditionInstances, []);
+    }
+
+    /**
+     * Issue #1643 — adjustConditionLevel must push the new stacks onto the live tracker.
+     * Name-only sync would preserve an existing Exhaustion's old stacks (or invent stacks: 1
+     * for a brand-new name), so the tracker and sheet would disagree until the next
+     * combatant write mirrored the stale level back onto the sheet.
+     */
+    it('adjustConditionLevel syncs Exhaustion stacks onto the live combatant', async () => {
+      const ctx = seedRunningFight();
+      // Pre-seed the tracker with Exhaustion at stacks: 1 (as a presence-only add would).
+      await ctx.charactersService.patchConditions(ctx.characterId, { add: ['Exhaustion'] }, dmUser, 'dm');
+      expect(readCombatantInstances(ctx.orm, ctx.combatantId).find((i) => i.name === 'Exhaustion')).toMatchObject({
+        stacks: 1,
+      });
+
+      // Absolute set to 3 — must land on the combatant, not leave stacks: 1 behind.
+      await ctx.charactersService.adjustConditionLevel(
+        ctx.characterId,
+        { name: 'Exhaustion', level: 3 },
+        dmUser,
+        'dm',
+      );
+      expect(readSheetInstances(ctx.orm, ctx.characterId).find((i) => i.name === 'Exhaustion')).toMatchObject({
+        stacks: 3,
+      });
+      expect(readCombatantInstances(ctx.orm, ctx.combatantId).find((i) => i.name === 'Exhaustion')).toMatchObject({
+        stacks: 3,
+      });
+
+      // Relative +1 on a fresh character with no prior Exhaustion must create stacks: 1, not
+      // leave the tracker empty while the sheet has it (or invent the wrong level).
+      await ctx.charactersService.adjustConditionLevel(
+        ctx.characterId,
+        { name: 'Exhaustion', level: 0 },
+        dmUser,
+        'dm',
+      );
+      await ctx.charactersService.adjustConditionLevel(
+        ctx.characterId,
+        { name: 'Exhaustion', delta: 2 },
+        dmUser,
+        'dm',
+      );
+      expect(readCombatantInstances(ctx.orm, ctx.combatantId).find((i) => i.name === 'Exhaustion')).toMatchObject({
+        stacks: 2,
+      });
+    });
+
     it('strips round-scoped fields when a condition travels to the sheet on /end', async () => {
       const ctx = seedRunningFight();
       // A condition with a live round counter and a repeat save, as combat produces.

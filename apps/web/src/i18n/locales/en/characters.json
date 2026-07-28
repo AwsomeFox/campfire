@@ -1,5 +1,12 @@
 {
   "characters": {
+    "conditionLevel": {
+      "raise": "Raise",
+      "lower": "Lower",
+      "level": "{{level}} of {{max}} — {{name}} level",
+      "count": "{{level}}/{{max}}",
+      "updateError": "Couldn't update {{name}}."
+    },
     "resources": {
       "spend": "Spend",
       "restore": "Restore",
