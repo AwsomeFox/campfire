@@ -3779,6 +3779,42 @@ describe('encounters — issue #238: hex grid, shared AoE templates & pings (e2e
     expect((await request(server).post(`/api/v1/encounters/${encounterId}/ping`).set(player).send({ x: 10, y: 10 })).status).toBe(201);
     expect((await request(server).post(`/api/v1/encounters/${encounterId}/ping`).set(dm).send({ x: 200, y: 10 })).status).toBe(400);
   });
+
+  // Issue #1636: `POST /encounters/:id/ping` was gated only by
+  // `requireMember(..., { write: true })`, which asserts the CAMPAIGN is writable, not
+  // that the CALLER has write authority — a viewer passed it unchanged, and no
+  // downstream check enforced the route's own documented "any DM or player" contract.
+  // Dev-auth's role header IS the effective role per request (no DB membership row
+  // backs it), so sending the SAME dev-user with a different `x-dev-role` on a later
+  // request faithfully simulates "demoted mid-session, same identity".
+  it("a member demoted from player to viewer loses ping authority on the very next request, and no ping event is broadcast (#1636)", async () => {
+    const server = ctx.app.getHttpServer();
+    const demotedPlayer = { 'x-dev-role': 'viewer', 'x-dev-user': 'p-1' }; // same identity as `player`, now viewer
+
+    const broadcasts: Array<{ type: string; encounterId?: number }> = [];
+    const subscription = ctx.app
+      .get(CampaignEventsService)
+      .streamFor(campaignId)
+      .subscribe((event) => broadcasts.push(event));
+
+    try {
+      const res = await request(server).post(`/api/v1/encounters/${encounterId}/ping`).set(demotedPlayer).send({ x: 50, y: 50 });
+      expect(res.status).toBe(403);
+
+      // State assertion (the point of the issue): nothing was persisted by ping in the
+      // first place, but the SIGNAL (the SSE broadcast every open client renders) must
+      // also not have gone out — a 403 that still broadcasts would be the bug this
+      // test pins.
+      expect(broadcasts.filter((event) => event.type === 'encounter.ping' && event.encounterId === encounterId)).toHaveLength(0);
+    } finally {
+      subscription.unsubscribe();
+    }
+
+    // The still-player identity can still ping — proves the 403 above was really the
+    // role floor and not some unrelated breakage.
+    const stillPlayer = await request(server).post(`/api/v1/encounters/${encounterId}/ping`).set(player).send({ x: 51, y: 51 });
+    expect(stillPlayer.status).toBe(201);
+  });
 });
 
 // Issue #126 (location/quest/session linking + summary + note pinning) and

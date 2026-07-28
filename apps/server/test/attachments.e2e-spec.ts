@@ -1587,3 +1587,87 @@ describe('attachments (e2e, real cookie sessions — non-member access)', () => 
     });
   });
 });
+
+// Issue #1636 — `DELETE /attachments/:id` was gated only by
+// `requireMember(..., { write: true })`, which asserts the CAMPAIGN is writable, not
+// that the CALLER has write authority: it returns a viewer's role unchanged. The
+// service's downstream check is `role !== 'dm' && uploaderUserId !== user.id` — pure
+// ownership, untouched by a role change — so a member demoted from player to viewer
+// kept the ability to delete files they uploaded while they were still a player.
+// Real cookie sessions (not dev-auth headers, which always resolve admin/dm) are
+// required to express "a member demoted mid-session", same pattern as the
+// membership-removal scenario above.
+describe('attachments (e2e, real cookie sessions — demotion revokes delete authority, #1636)', () => {
+  let ctx: TestAppContext;
+  let dmAgent: ReturnType<typeof request.agent>;
+  let uploaderAgent: ReturnType<typeof request.agent>;
+  let campaignId: number;
+  let memberId: number; // membership row id, for the role PATCH
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    const server = ctx.app.getHttpServer();
+
+    const adminAgent = request.agent(server);
+    await adminAgent.post('/api/v1/auth/setup').send({ username: 'root-admin-1636', password: 'admin-password-1636' });
+    await adminAgent.post('/api/v1/users').send({ username: 'dm-1636', password: 'password-dm-1636', serverRole: 'user' });
+    const createUploader = await adminAgent
+      .post('/api/v1/users')
+      .send({ username: 'uploader-1636', password: 'password-up-1636', serverRole: 'user' });
+    const uploaderId = createUploader.body.id;
+
+    dmAgent = request.agent(server);
+    await dmAgent.post('/api/v1/auth/login').send({ username: 'dm-1636', password: 'password-dm-1636' });
+
+    uploaderAgent = request.agent(server);
+    await uploaderAgent.post('/api/v1/auth/login').send({ username: 'uploader-1636', password: 'password-up-1636' });
+
+    const createRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'Demotion Delete Campaign' });
+    campaignId = createRes.body.id;
+
+    const addMember = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/members`)
+      .send({ userId: uploaderId, role: 'player' });
+    expect(addMember.status).toBe(201);
+    memberId = addMember.body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('a member demoted from player to viewer AFTER uploading loses delete authority on the next request, and the attachment row is unchanged', async () => {
+    // Still a player: upload succeeds and the uploader owns the row. 'portrait' is the
+    // one kind a player (not just dm) may upload — see attachments.controller.ts's minRole.
+    const upload = await uploaderAgent
+      .post(`/api/v1/campaigns/${campaignId}/attachments`)
+      .field('kind', 'portrait')
+      .attach('file', TINY_PNG, { filename: 'mine.png', contentType: 'image/png' });
+    expect(upload.status).toBe(201);
+    const attachmentId = upload.body.id;
+
+    // Sanity: while still a player, the uploader really could delete their own upload
+    // (proves the 403 below is caused by the demotion, not some unrelated gate).
+    // Reveal isn't needed for delete-authorization purposes — uploader-owns is enough
+    // regardless of hidden — so skip straight to the demotion.
+
+    // Demoted mid-session: player -> viewer.
+    const demote = await dmAgent.patch(`/api/v1/campaigns/${campaignId}/members/${memberId}`).send({ role: 'viewer' });
+    expect(demote.status).toBe(200);
+    expect(demote.body.role).toBe('viewer');
+
+    // The very next request from the same (now-viewer) session must 403 — not delete.
+    const del = await uploaderAgent.delete(`/api/v1/attachments/${attachmentId}`);
+    expect(del.status).toBe(403);
+
+    // State assertion (the point of the issue): the attachment row must still exist —
+    // a 403 with a completed delete underneath it would be the bug this test pins.
+    const list = await dmAgent.get(`/api/v1/campaigns/${campaignId}/attachments`);
+    expect(list.status).toBe(200);
+    expect(list.body.some((a: { id: number }) => a.id === attachmentId)).toBe(true);
+
+    // The dm can still delete it (dm branch of the ownership check is untouched by this fix).
+    const dmDelete = await dmAgent.delete(`/api/v1/attachments/${attachmentId}`);
+    expect(dmDelete.status).toBe(200);
+  });
+});
