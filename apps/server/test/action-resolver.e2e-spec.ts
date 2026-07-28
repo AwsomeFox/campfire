@@ -257,7 +257,7 @@ describe('action resolver (e2e HTTP)', () => {
 
   // Regression: the fix must not touch the DM or the automatic-policy player path.
   describe('issue #1450 regression: dm and player paths keep working under each policy', () => {
-    it('dm resolves + commits a monster/NPC action directly (automatic policy)', async () => {
+    it('dm previews a player PC action directly (automatic policy)', async () => {
       const server = ctx.app.getHttpServer();
       const res = await request(server)
         .post(`/api/v1/encounters/${encounterId}/actions/resolve`)
