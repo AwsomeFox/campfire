@@ -9813,6 +9813,37 @@ export const Combatant = z.object({
 });
 export type Combatant = z.infer<typeof Combatant>;
 
+// Current (intentionally unversioned) contract for atomic battle-map placement.
+// A preview is opaque to clients: it captures the exact roster slice the server
+// checked, and apply rejects it rather than silently accepting a stale partial plan.
+export const TokenBatchPlacement = z.object({
+  combatantId: Id,
+  x: z.number().min(0).max(100),
+  y: z.number().min(0).max(100),
+});
+export type TokenBatchPlacement = z.infer<typeof TokenBatchPlacement>;
+export const TokenBatchPreviewRequest = z.object({
+  placements: z.array(TokenBatchPlacement).min(1).max(100),
+});
+export type TokenBatchPreviewRequest = z.infer<typeof TokenBatchPreviewRequest>;
+export const TokenBatchApply = z.object({
+  previewToken: z.string().min(16).max(4096),
+  idempotencyKey: z.string().min(1).max(128),
+});
+export type TokenBatchApply = z.infer<typeof TokenBatchApply>;
+export const TokenBatchUndo = z.object({
+  undoToken: z.string().min(16).max(4096),
+  idempotencyKey: z.string().min(1).max(128),
+});
+export type TokenBatchUndo = z.infer<typeof TokenBatchUndo>;
+export const SavedTokenFormation = z.object({
+  name: z.string().trim().min(1).max(80),
+  // Formation slots deliberately name a side/kind, never a roster id.  A saved
+  // formation is campaign reusable rather than tied to the encounter that created it.
+  slots: z.array(z.object({ side: z.enum(['party', 'enemy', 'any']).default('any'), kind: CombatantKind.optional(), x: z.number().min(-100).max(100), y: z.number().min(-100).max(100) })).min(1).max(100),
+});
+export type SavedTokenFormation = z.infer<typeof SavedTokenFormation>;
+
 export const CombatantCreate = z.object({
   kind: CombatantKind,
   name: z.string().min(1).max(120).optional(), // required unless resolvable from ruleEntryId
@@ -9987,7 +10018,7 @@ export type EncounterRollInitiativeResult = z.infer<typeof EncounterRollInitiati
 // 'effect' (issue #413) records a start/end-of-turn effect resolution (ongoing damage,
 // regeneration tick, an expired effect, a prompted repeat save). Appended alongside the
 // existing types by the turn-advancement path; free-text column, so older DBs are unaffected.
-export const EncounterEventType = z.enum(['damage', 'heal', 'condition', 'death', 'roll', 'turn', 'note', 'override', 'correction', 'effect', 'resource_changed']);
+export const EncounterEventType = z.enum(['damage', 'heal', 'condition', 'death', 'roll', 'turn', 'note', 'override', 'correction', 'effect', 'resource_changed', 'token_batch']);
 export type EncounterEventType = z.infer<typeof EncounterEventType>;
 
 /** Phase within an action-resolution event chain (issue #426). */

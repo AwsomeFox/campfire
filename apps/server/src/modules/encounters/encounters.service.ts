@@ -1,12 +1,13 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { and, eq, gt, inArray, isNull, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
+import { randomUUID } from 'node:crypto';
 import type { z } from 'zod';
 import { ActiveEffect, AoeTemplate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
 import { z as zod } from 'zod';
 import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { attachments, campaigns, characters, combatants, encounterEvents, encounters, locations, npcs, quests, ruleEntries, rulePacks, sessions } from '../../db/schema';
+import { attachments, campaigns, characters, combatants, encounterEvents, encounters, locations, npcs, quests, ruleEntries, rulePacks, sessions, encounterTokenBatches, campaignTokenFormations } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { filterHidden, isVisibleTo, resolveCreateHidden } from '../../common/redact';
@@ -5812,5 +5813,115 @@ export class EncountersService {
     if (!encounter.hidden) this.events.emit({ type: 'encounter.updated', campaignId: encounter.campaignId, encounterId: encounter.id });
 
     return this.getRowOrThrow(encounterId);
+  }
+
+  async listTokenFormations(campaignId: number, _role: Role) {
+    return this.db.select().from(campaignTokenFormations).where(eq(campaignTokenFormations.campaignId, campaignId));
+  }
+  async createTokenFormation(campaignId: number, input: { name: string; slots: unknown[] }, user: RequestUser, role: Role) {
+    if (role !== 'dm') throw new ForbiddenException('Only dm may save formations');
+    try {
+      return this.db.insert(campaignTokenFormations).values({ campaignId, name: input.name.trim(), layoutJson: toJsonText(input.slots), createdBy: user.id, createdAt: nowIso() }).returning().get();
+    } catch (error) {
+      if (String(error).includes('UNIQUE constraint failed')) throw new ConflictException('A formation with this name already exists');
+      throw error;
+    }
+  }
+  async deleteTokenFormation(campaignId: number, formationId: number, role: Role) {
+    if (role !== 'dm') throw new ForbiddenException('Only dm may delete formations');
+    const row = this.db.delete(campaignTokenFormations).where(and(eq(campaignTokenFormations.id, formationId), eq(campaignTokenFormations.campaignId, campaignId))).returning().get();
+    if (!row) throw new NotFoundException('Formation not found'); return { ok: true };
+  }
+
+  async previewTokenBatch(encounterId: number, input: { placements: Array<{ combatantId: number; x: number; y: number }> }, user: RequestUser, role: Role) {
+    if (role !== 'dm') throw new ForbiddenException('Only dm may batch-place tokens');
+    const encounter = await this.getRowOrThrow(encounterId); this.assertMutable(encounter);
+    const ids = input.placements.map(p => p.combatantId);
+    if (new Set(ids).size !== ids.length) throw new BadRequestException('Each combatant may appear once');
+    const rows = await this.db.select().from(combatants).where(eq(combatants.encounterId, encounterId));
+    const byId = new Map(rows.map(r => [r.id, r]));
+    if (ids.some(id => !byId.has(id))) throw new BadRequestException('A token is not in this encounter');
+    // Coordinates are token centres. Check every requested footprint against the
+    // untouched roster and one another before persisting a preview, so a caller can
+    // never turn "Place all" into overlapping tokens by bypassing the UI planner.
+    const sizeCells: Record<string, number> = { tiny: .5, small: 1, medium: 1, large: 2, huge: 3, gargantuan: 4 };
+    const cellPercent = Math.max(1, encounter.gridSize ?? 5);
+    const radius = (row: { tokenSize: string | null }) => (sizeCells[row.tokenSize ?? 'medium'] ?? 1) * cellPercent / 2;
+    const requested = input.placements.map(p => ({ ...p, radius: radius(byId.get(p.combatantId)!) }));
+    for (const p of requested) {
+      if (p.x - p.radius < 0 || p.x + p.radius > 100 || p.y - p.radius < 0 || p.y + p.radius > 100) throw new BadRequestException('A token footprint is outside the map');
+      for (const existing of rows) {
+        if (ids.includes(existing.id) || existing.tokenX == null || existing.tokenY == null) continue;
+        if (Math.hypot(p.x - existing.tokenX, p.y - existing.tokenY) < p.radius + radius(existing) - .001) throw new ConflictException('A token placement overlaps an existing token');
+      }
+    }
+    for (let i = 0; i < requested.length; i++) for (let j = 0; j < i; j++) {
+      const a = requested[i], b = requested[j];
+      if (Math.hypot(a.x - b.x, a.y - b.y) < a.radius + b.radius - .001) throw new ConflictException('Token batch placements overlap');
+    }
+    const before = input.placements.map(p => { const r = byId.get(p.combatantId)!; return { id: r.id, tokenX: r.tokenX, tokenY: r.tokenY, tokenSize: r.tokenSize }; });
+    const fingerprint = encounterOpFingerprint(input);
+    const previewToken = randomUUID();
+    this.db.insert(encounterTokenBatches).values({ encounterId, campaignId: encounter.campaignId, actorId: user.id, previewToken, fingerprint, status: 'previewed', beforeJson: toJsonText(before), planJson: toJsonText(input.placements), createdAt: nowIso() }).run();
+    return { previewToken, included: input.placements, omitted: [], conflicts: [], expiresAt: null };
+  }
+
+  async applyTokenBatch(encounterId: number, input: { previewToken: string; idempotencyKey: string }, user: RequestUser, role: Role) {
+    if (role !== 'dm') throw new ForbiddenException('Only dm may batch-place tokens');
+    const encounter = await this.getRowOrThrow(encounterId);
+    this.assertMutable(encounter);
+    const batch = this.db.select().from(encounterTokenBatches).where(eq(encounterTokenBatches.previewToken, input.previewToken)).get();
+    if (!batch || batch.encounterId !== encounterId || batch.actorId !== user.id) throw new NotFoundException('Token batch preview not found');
+    const keyOwner = this.db.select().from(encounterTokenBatches).where(and(eq(encounterTokenBatches.actorId, user.id), eq(encounterTokenBatches.applyKey, input.idempotencyKey))).get();
+    if (keyOwner && keyOwner.id !== batch.id) throw new ConflictException('Idempotency key was already used for a different token batch');
+    if (batch.status === 'applied') {
+      if (batch.applyKey !== input.idempotencyKey) throw new ConflictException('Idempotency key was reused for a different token batch');
+      return fromJsonText<{ batchId: number; undoToken: string; placements: Array<{ combatantId: number; x: number; y: number }>}>(batch.resultJson, { batchId: batch.id, undoToken: batch.previewToken, placements: [] });
+    }
+    if (batch.status !== 'previewed') throw new ConflictException('Token batch is no longer applicable');
+    const before = fromJsonText<Array<{ id:number; tokenX:number|null; tokenY:number|null; tokenSize?: string | null }>>(batch.beforeJson, []);
+    const plan = fromJsonText<Array<{ combatantId:number; x:number; y:number }>>(batch.planJson, []);
+    const result = { batchId: batch.id, undoToken: batch.previewToken, placements: plan };
+    this.db.transaction(tx => {
+      for (const slice of before) { const r = tx.select().from(combatants).where(eq(combatants.id, slice.id)).get(); if (!r || r.tokenX !== slice.tokenX || r.tokenY !== slice.tokenY || r.tokenSize !== slice.tokenSize) throw new ConflictException('Token positions changed; refresh preview'); }
+      // Preview's obstacle snapshot is only advisory: an unselected token may have
+      // moved while the operator reviewed the plan. Re-check it under the same write
+      // transaction so batch placement can never commit into a newly occupied cell.
+      const live = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all();
+      const selected = new Set(plan.map(p => p.combatantId));
+      const liveById = new Map(live.map(row => [row.id, row]));
+      const cellPercent = Math.max(1, encounter.gridSize ?? 5);
+      const batchSizes: Record<string, number> = { tiny: .5, small: 1, medium: 1, large: 2, huge: 3, gargantuan: 4 };
+      const radius = (row: { tokenSize: string | null }) => (batchSizes[row.tokenSize ?? 'medium'] ?? 1) * cellPercent / 2;
+      for (const p of plan) for (const other of live) {
+        if (selected.has(other.id) || other.tokenX == null || other.tokenY == null) continue;
+        if (Math.hypot(p.x - other.tokenX, p.y - other.tokenY) < radius(liveById.get(p.combatantId)!) + radius(other) - .001) throw new ConflictException('A token moved into this batch placement; refresh preview');
+      }
+      for (const p of plan) tx.update(combatants).set({ tokenX: clampPercent(p.x), tokenY: clampPercent(p.y) }).where(eq(combatants.id, p.combatantId)).run();
+      tx.insert(encounterEvents).values({ encounterId, round: encounter.round, type: 'token_batch', actor: user.name, actorId: null, target: null, targetId: null, detail: `${plan.length} token placements`, createdAt: nowIso() }).run();
+      this.audit.logInTx(tx, { actor: auditActor(user), actorRole: role, action: 'encounter.token_batch.apply', entityType: 'encounter', entityId: encounterId, campaignId: batch.campaignId, detail: `${plan.length} token placements` });
+      const changed = tx.update(encounterTokenBatches).set({ status: 'applied', applyKey: input.idempotencyKey, afterJson: toJsonText(plan), resultJson: toJsonText(result), appliedAt: nowIso() }).where(and(eq(encounterTokenBatches.id, batch.id), eq(encounterTokenBatches.status, 'previewed'))).run();
+      if (changed.changes !== 1) throw new ConflictException('Token batch was applied concurrently');
+    });
+    this.emitEncounterEvent('encounter.updated', batch.campaignId, encounterId, false);
+    return result;
+  }
+
+  async undoTokenBatch(encounterId: number, input: { undoToken: string; idempotencyKey: string }, user: RequestUser, role: Role) {
+    if (role !== 'dm') throw new ForbiddenException('Only dm may undo a token batch');
+    const encounter = await this.getRowOrThrow(encounterId);
+    this.assertMutable(encounter);
+    const batch = this.db.select().from(encounterTokenBatches).where(eq(encounterTokenBatches.previewToken, input.undoToken)).get();
+    if (!batch || batch.encounterId !== encounterId || batch.actorId !== user.id) throw new NotFoundException('Token batch not found');
+    const keyOwner = this.db.select().from(encounterTokenBatches).where(and(eq(encounterTokenBatches.actorId, user.id), eq(encounterTokenBatches.undoKey, input.idempotencyKey))).get();
+    if (keyOwner && keyOwner.id !== batch.id) throw new ConflictException('Idempotency key was already used for a different token undo');
+    if (batch.status === 'undone') {
+      if (batch.undoKey !== input.idempotencyKey) throw new ConflictException('Idempotency key was reused for a different undo');
+      return { ok: true, idempotent: true };
+    }
+    if (batch.status !== 'applied') throw new ConflictException('Token batch cannot be undone');
+    const before = fromJsonText<Array<{ id:number; tokenX:number|null; tokenY:number|null; tokenSize?: string | null }>>(batch.beforeJson, []); const after = fromJsonText<Array<{ combatantId:number; x:number; y:number }>>(batch.afterJson, []);
+    this.db.transaction(tx => { for (const p of after) { const r = tx.select().from(combatants).where(eq(combatants.id, p.combatantId)).get(); if (!r || r.tokenX !== p.x || r.tokenY !== p.y) throw new ConflictException('A token changed after this batch'); } const selected = new Set(before.map(p => p.id)); const live = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all(); const radius = (size: string | null) => ({ tiny:.5, small:1, medium:1, large:2, huge:3, gargantuan:4 }[size ?? 'medium'] ?? 1) * Math.max(1, encounter.gridSize ?? 5) / 2; for (const p of before) if (p.tokenX != null && p.tokenY != null) for (const other of live) if (!selected.has(other.id) && other.tokenX != null && other.tokenY != null && Math.hypot(p.tokenX - other.tokenX, p.tokenY - other.tokenY) < radius(p.tokenSize ?? null) + radius(other.tokenSize) - .001) throw new ConflictException('A token moved into this batch\'s prior position; cannot undo'); for (const p of before) tx.update(combatants).set({ tokenX:p.tokenX, tokenY:p.tokenY }).where(eq(combatants.id,p.id)).run(); tx.insert(encounterEvents).values({ encounterId, round: encounter.round, type: 'token_batch', actor: user.name, actorId: null, target: null, targetId: null, detail: `${before.length} token placements undone`, createdAt: nowIso() }).run(); this.audit.logInTx(tx, { actor: auditActor(user), actorRole: role, action: 'encounter.token_batch.undo', entityType: 'encounter', entityId: encounterId, campaignId: batch.campaignId, detail: `${before.length} token placements` }); const changed = tx.update(encounterTokenBatches).set({ status:'undone', undoKey: input.idempotencyKey, undoneAt:nowIso() }).where(and(eq(encounterTokenBatches.id,batch.id), eq(encounterTokenBatches.status, 'applied'))).run(); if (changed.changes !== 1) throw new ConflictException('Token batch changed concurrently'); });
+    this.emitEncounterEvent('encounter.updated', batch.campaignId, encounterId, false); return { ok:true };
   }
 }

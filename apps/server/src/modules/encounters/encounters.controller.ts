@@ -7,7 +7,7 @@ import { CampaignAccessService } from '../membership/campaign-access.service';
 import { contentDispositionHeader } from '../attachments/filename';
 import { DERIVATIVE_VARIANT_NAMES, isDerivativeVariantName } from '../attachments/image-derivatives';
 import { EncountersService } from './encounters.service';
-import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterEscalationUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, EncounterNextTurnDto, RollRequestDto, ActionRollRequestDto, ManualRollRequestDto, MapPingDto, ActionResolveRequestDto, ActionResolutionDto, ActionUndoTokenDto } from './encounters.dto';
+import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterEscalationUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, EncounterNextTurnDto, RollRequestDto, ActionRollRequestDto, ManualRollRequestDto, MapPingDto, ActionResolveRequestDto, ActionResolutionDto, ActionUndoTokenDto, TokenBatchPreviewDto, TokenBatchApplyDto, TokenBatchUndoDto, SavedTokenFormationDto } from './encounters.dto';
 import { EncounterMapService } from './encounter-map.service';
 import { ActionResolverService } from './action-resolver.service';
 import type { Request, Response } from 'express';
@@ -22,6 +22,19 @@ export class CampaignEncountersController {
     private readonly encounters: EncountersService,
     private readonly access: CampaignAccessService,
   ) {}
+
+  @Get('token-formations')
+  async listTokenFormations(@Param('campaignId', ParseIntPipe) campaignId: number, @CurrentUser() user: RequestUser) {
+    const role = await this.access.requireMember(user, campaignId); return this.encounters.listTokenFormations(campaignId, role);
+  }
+  @Post('token-formations')
+  async createTokenFormation(@Param('campaignId', ParseIntPipe) campaignId: number, @Body() body: SavedTokenFormationDto, @CurrentUser() user: RequestUser) {
+    const role = await this.access.requireRole(user, campaignId, 'dm'); return this.encounters.createTokenFormation(campaignId, body, user, role);
+  }
+  @Delete('token-formations/:formationId')
+  async deleteTokenFormation(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('formationId', ParseIntPipe) formationId: number, @CurrentUser() user: RequestUser) {
+    const role = await this.access.requireRole(user, campaignId, 'dm'); return this.encounters.deleteTokenFormation(campaignId, formationId, role);
+  }
 
   @Post()
   @ApiOperation({ summary: 'Create an encounter', description: 'dm role required. Auto-adds the campaign party as combatants, with initMod derived from each character\'s DEX.' })
@@ -492,6 +505,19 @@ export class EncountersController {
     const row = await this.encounters.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'player');
     return this.encounters.updateCombatant(id, cid, body, user, role);
+  }
+
+  @Post(':id/token-batches/preview') @HttpCode(200)
+  async previewTokenBatch(@Param('id', ParseIntPipe) id: number, @Body() body: TokenBatchPreviewDto, @CurrentUser() user: RequestUser) {
+    const row = await this.encounters.getRowOrThrow(id); const role = await this.access.requireRole(user, row.campaignId, 'dm'); return this.encounters.previewTokenBatch(id, body, user, role);
+  }
+  @Post(':id/token-batches/apply')
+  async applyTokenBatch(@Param('id', ParseIntPipe) id: number, @Body() body: TokenBatchApplyDto, @CurrentUser() user: RequestUser) {
+    const row = await this.encounters.getRowOrThrow(id); const role = await this.access.requireRole(user, row.campaignId, 'dm'); return this.encounters.applyTokenBatch(id, body, user, role);
+  }
+  @Post(':id/token-batches/undo')
+  async undoTokenBatch(@Param('id', ParseIntPipe) id: number, @Body() body: TokenBatchUndoDto, @CurrentUser() user: RequestUser) {
+    const row = await this.encounters.getRowOrThrow(id); const role = await this.access.requireRole(user, row.campaignId, 'dm'); return this.encounters.undoTokenBatch(id, body, user, role);
   }
 
   @Delete(':id/combatants/:cid')

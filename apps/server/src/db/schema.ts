@@ -1494,6 +1494,35 @@ export const encounters = sqliteTable('encounters', {
   updatedAt: text('updated_at').notNull(),
 });
 
+/** Current-format, server-authoritative token batch intents (issue #761). */
+export const encounterTokenBatches = sqliteTable('encounter_token_batches', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  encounterId: integer('encounter_id').notNull().references(() => encounters.id, { onDelete: 'cascade' }),
+  campaignId: integer('campaign_id').notNull().references(() => campaigns.id, { onDelete: 'cascade' }),
+  actorId: text('actor_id').notNull(),
+  previewToken: text('preview_token').notNull(),
+  fingerprint: text('fingerprint').notNull(),
+  status: text('status').notNull().default('previewed'),
+  beforeJson: text('before_json').notNull(),
+  planJson: text('plan_json').notNull(),
+  afterJson: text('after_json'),
+  resultJson: text('result_json'),
+  applyKey: text('apply_key'),
+  undoKey: text('undo_key'),
+  createdAt: text('created_at').notNull(),
+  appliedAt: text('applied_at'),
+  undoneAt: text('undone_at'),
+}, (table) => ({ preview: uniqueIndex('idx_encounter_token_batches_preview').on(table.previewToken), actorApply: uniqueIndex('idx_encounter_token_batches_actor_apply').on(table.actorId, table.applyKey), actorUndo: uniqueIndex('idx_encounter_token_batches_actor_undo').on(table.actorId, table.undoKey) }));
+
+export const campaignTokenFormations = sqliteTable('campaign_token_formations', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  campaignId: integer('campaign_id').notNull().references(() => campaigns.id, { onDelete: 'cascade' }),
+  name: text('name').notNull(),
+  layoutJson: text('layout_json').notNull(),
+  createdBy: text('created_by').notNull(),
+  createdAt: text('created_at').notNull(),
+}, (table) => ({ campaign: index('idx_campaign_token_formations_campaign').on(table.campaignId), name: uniqueIndex('idx_campaign_token_formations_name').on(table.campaignId, table.name) }));
+
 // Shared dice log (issue #35) — see modules/rolls. Every POST /campaigns/:id/roll
 // persists a row here so all campaign members share one roll feed. `rolls` is the
 // per-die results array stored as JSON text (same convention as characters.conditions).

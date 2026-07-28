@@ -1,5 +1,5 @@
 import { createZodDto } from 'nestjs-zod';
-import { EncounterCreate, EncounterGenerate, EncounterPreviewRequest, EncounterCommit, EncounterUpdate, EncounterEscalationUpdate, EncounterReopen, CombatantCreate, CombatantUpdate, CombatantTurnStatePatch, EncounterEndTurn, EncounterNextTurn, RollRequest, ActionRollRequest, ManualRollRequest, MapPing, ExpectedUpdatedAt, ActionResolveRequest, ActionResolution, ActionUndoToken } from '@campfire/schema';
+import { EncounterCreate, EncounterGenerate, EncounterPreviewRequest, EncounterCommit, EncounterUpdate, EncounterEscalationUpdate, EncounterReopen, CombatantCreate, CombatantUpdate, CombatantTurnStatePatch, EncounterEndTurn, EncounterNextTurn, RollRequest, ActionRollRequest, ManualRollRequest, MapPing, ExpectedUpdatedAt, ActionResolveRequest, ActionResolution, ActionUndoToken, TokenBatchPreviewRequest, TokenBatchApply, TokenBatchUndo, SavedTokenFormation } from '@campfire/schema';
 
 export class EncounterCreateDto extends createZodDto(EncounterCreate.strict()) {}
 // Encounter generator request (issue #304). .strict() so an unknown/misspelled key 400s
@@ -57,3 +57,7 @@ export class CombatantTurnStatePatchDto extends createZodDto(CombatantTurnStateP
 export class ActionResolveRequestDto extends createZodDto(ActionResolveRequest.strict()) {}
 export class ActionResolutionDto extends createZodDto(ActionResolution) {}
 export class ActionUndoTokenDto extends createZodDto(ActionUndoToken) {}
+export class TokenBatchPreviewDto extends createZodDto(TokenBatchPreviewRequest.strict()) {}
+export class TokenBatchApplyDto extends createZodDto(TokenBatchApply.strict()) {}
+export class TokenBatchUndoDto extends createZodDto(TokenBatchUndo.strict()) {}
+export class SavedTokenFormationDto extends createZodDto(SavedTokenFormation.strict()) {}
