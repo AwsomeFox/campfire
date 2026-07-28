@@ -518,12 +518,7 @@ export class ActionResolverService {
       const attackResult = resolveAttackForAdapter(adapter, { modifier, targetAc: ac, roll });
       const { total, naturalRoll: nat, outcome: resolvedOutcome } = attackResult;
       outcome = resolvedOutcome;
-      // #1053 review — `critical` is set in ATTACK mode only. A PF2e critical save FAILURE also
-      // doubles damage under that system, and this flag never becomes true in save/check mode,
-      // so `double-total` is wired to attacks and not to saves. Left deliberately rather than
-      // overlooked: a `critFailure` branch may already be authored with the doubled numbers, so
-      // wiring it needs a decision about double-counting, not a one-line change. Tracked in #1600 —
-      // called out here so the seam is not mistaken for complete.
+      // #1598: attack crit — see the save/check branch below for the #1600 counterpart.
       critical = outcome === 'crit';
       base.attackTotal = total;
       base.naturalRoll = nat;
@@ -555,6 +550,15 @@ export class ActionResolverService {
       const total = nat + saveMod;
       const { outcome: o, degree } = classifySaveOutcome(adapter, total, nat, dc);
       outcome = o;
+      // #1600 — a PF2e/SF2e critical save FAILURE doubles damage exactly like an attack crit does
+      // (see criticalDamageRuleForAdapter / rollBranchDamage's `double-total` rule). `degree` only
+      // reaches `criticalFailure` when the adapter implements degreeOfSuccess (PF2e/SF2e); 5e's
+      // classifySaveOutcome fallback never produces it, so this is a no-op there — `critical` stays
+      // `false` for every 5e save, keeping the #414 suite byte-identical. See the OutcomeBranch
+      // doc comment in packages/schema/src/action-resolver.ts for why this does not double-count
+      // an author-defined `critFailure` branch: branch damage is always the BASE amount, and the
+      // engine (not the branch) owns the doubling, the same contract `crit` already had under #1053.
+      critical = degree === 'criticalFailure';
       base.saveTotal = total;
       base.saveDc = dc;
       base.naturalRoll = nat;
