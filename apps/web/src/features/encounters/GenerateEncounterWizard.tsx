@@ -29,6 +29,7 @@ import { UIIcon } from '../../components/UIIcon';
 import { Field } from '../../components/Field';
 import { AudienceField, audienceToHidden, type AudienceValue } from '../../components/AudienceField';
 import { GameIcon } from '../../components/GameIcon';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 type NamedRow = { id: number; name?: string; title?: string; number?: number };
 
@@ -202,7 +203,7 @@ export function GenerateEncounterWizard({
     <Card className="space-y-4" data-testid="generate-encounter-wizard">
       <div className="flex items-center justify-between gap-2 flex-wrap">
         <h2 className="font-bold text-white text-sm inline-flex items-center gap-2">
-          <GameIcon slug="dice-twenty-faces-twenty" size={16} /> Generate encounter
+          <GameIcon slug="dice-twenty-faces-twenty" size={UI_ICON_SIZE.sm} /> Generate encounter
         </h2>
         <Btn ghost type="button" onClick={onCancel}>
           Close
@@ -446,7 +447,7 @@ function WarningsPanel({ preview }: { preview: EncounterPreview }) {
       {preview.warnings.map((w, i) => (
         <li key={i} className="text-xs flex items-start gap-2">
           <span className={w.severity === 'warn' ? 'text-rose-400' : 'text-slate-400'}>
-            <GameIcon slug={w.severity === 'warn' ? 'hazard-sign' : 'info'} size={12} />
+            <GameIcon slug={w.severity === 'warn' ? 'hazard-sign' : 'info'} size={UI_ICON_SIZE.xs} />
           </span>
           <span className={w.severity === 'warn' ? 'text-rose-300' : 'text-slate-400'}>{w.message}</span>
         </li>
@@ -484,13 +485,13 @@ function RosterSlotRow({
           onClick={onToggleExpand}
           aria-expanded={expanded}
         >
-          <GameIcon slug={expanded ? 'up-card' : 'card-random'} size={12} />
+          <GameIcon slug={expanded ? 'up-card' : 'card-random'} size={UI_ICON_SIZE.xs} />
           {slot.name}
         </button>
         {slot.pinned && (
           <Chip variant="active">
             <span className="inline-flex items-center gap-1">
-              <GameIcon slug="pin" size={10} /> Pinned
+              <GameIcon slug="pin" size={UI_ICON_SIZE.xs} /> Pinned
             </span>
           </Chip>
         )}

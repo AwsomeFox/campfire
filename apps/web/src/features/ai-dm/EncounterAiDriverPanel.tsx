@@ -28,6 +28,7 @@ import { useDisclosure } from '../../components/useDisclosure';
 import { Btn, Card, Chip, EmptyState } from '../../components/ui';
 import { Field } from '../../components/Field';
 import { GameIcon } from '../../components/GameIcon';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 export const ENCOUNTER_DRIVER_PANEL_ID = 'encounter-ai-driver-panel';
 
@@ -282,7 +283,7 @@ export function EncounterAiDriverPanel({
           data-testid="encounter-ai-driver-toggle"
           {...buttonProps}
         >
-          <GameIcon slug="campfire" size={16} />
+          <GameIcon slug="campfire" size={UI_ICON_SIZE.sm} />
           {t('encounters.driver.toggle')}
           <Chip variant={statusKey === 'narrating' ? 'active' : statusKey === 'paused' ? 'private' : 'available'}>
             {statusLabel}

@@ -38,6 +38,7 @@ import {
   scheduleNotificationDisplayBody,
   scheduleNotificationDisplayTitle,
 } from '../../lib/scheduleNotificationCopy';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 /**
  * Reports whether the viewport is below the desktop breakpoint (768px), so the
@@ -1156,7 +1157,7 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
               }}
             >
               <span className="flex leading-none pt-0.5 text-[var(--color-neutral-300)]">
-                <GameIcon slug={typeIcon(notification.type)} size={16} />
+                <GameIcon slug={typeIcon(notification.type)} size={UI_ICON_SIZE.sm} />
               </span>
               <span className="min-w-0 flex-1">
                 <span className="flex items-center gap-1.5 flex-wrap">

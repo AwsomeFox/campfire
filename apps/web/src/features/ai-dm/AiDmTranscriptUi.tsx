@@ -13,6 +13,7 @@ import {
   type SystemEntry,
   type ToolEntry,
 } from './transcript';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 /** game-icons slug for a tool chip's resource family. */
 export const RESOURCE_ICON: Record<ToolResource, string> = {
@@ -110,7 +111,7 @@ export function TranscriptRow({
         className="cf-chip inline-flex items-center gap-1"
         style={{ color: tone, borderColor: 'var(--color-divider)' }}
       >
-        <span className="flex"><GameIcon slug={RESOURCE_ICON[chip.resource]} size={13} /></span>
+        <span className="flex"><GameIcon slug={RESOURCE_ICON[chip.resource]} size={UI_ICON_SIZE.xs} /></span>
         <span>{chip.label}</span>
       </span>
     );

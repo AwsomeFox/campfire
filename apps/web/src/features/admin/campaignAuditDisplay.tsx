@@ -1,6 +1,7 @@
 import { useTranslation } from 'react-i18next';
 import type { AuditActorRole, AuditEntry, CampaignMember } from '@campfire/schema';
 import { GameIcon } from '../../components/GameIcon';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 export const ACTOR_ICON: Record<AuditActorRole, string> = {
   dm: 'top-hat',
@@ -75,7 +76,7 @@ export function AuditEntryRow({
       className={`text-xs text-slate-400 rounded px-1 -mx-1 ${highlighted ? 'bg-amber-500/10 ring-1 ring-amber-500/40' : ''}`}
     >
       <span className="text-secondary">{timeAgo(entry.createdAt)}</span>{' '}
-      <GameIcon slug={ACTOR_ICON[entry.actorRole]} size={12} className="inline align-text-bottom" />{' '}
+      <GameIcon slug={ACTOR_ICON[entry.actorRole]} size={UI_ICON_SIZE.xs} className="inline align-text-bottom" />{' '}
       <b className="text-slate-300">{label}</b>{' '}
       {isToken && (
         <span className="tag tag-neutral" style={{ fontSize: 9 }}>

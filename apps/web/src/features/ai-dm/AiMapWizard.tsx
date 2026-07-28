@@ -19,6 +19,7 @@ import { GameIcon } from '../../components/GameIcon';
 import { UIIcon } from '../../components/UIIcon';
 import { useDialog } from '../../components/useDialog';
 import { useAuth } from '../../app/auth';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 /** DM-only entry button; opens the wizard modal. Renders nothing for non-DMs. */
 export function AiMapButton({
@@ -47,7 +48,7 @@ export function AiMapButton({
         aria-expanded={open}
         aria-controls={dialogId}
       >
-        <GameIcon slug="sparkles" size={12} className="inline align-text-bottom mr-1" />AI map
+        <GameIcon slug="sparkles" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />AI map
       </button>
       {open && (
         <AiMapModal
@@ -203,7 +204,7 @@ function AiMapModal({
       >
         <div className="flex items-start justify-between gap-2">
           <h2 id={titleId} className="flex items-center gap-2 text-base font-extrabold text-white m-0">
-            <GameIcon slug="sparkles" size={16} /> Generate a map with AI
+            <GameIcon slug="sparkles" size={UI_ICON_SIZE.sm} /> Generate a map with AI
           </h2>
           <button
             type="button"

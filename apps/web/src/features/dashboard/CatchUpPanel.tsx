@@ -10,6 +10,7 @@ import { api, API, ApiError } from '../../lib/api';
 import { Card, ErrorNote } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
 import { useAnnounce } from '../../components/Announcer';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 const MAX_SHOWN = 30;
 
@@ -119,7 +120,7 @@ export function CatchUpPanel({ campaignId }: { campaignId: number }) {
       style={{ borderColor: 'var(--color-accent-700)', background: 'var(--color-surface)' }}
     >
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, flexWrap: 'wrap' }}>
-        <GameIcon slug="campfire" size={22} reserveSpace />
+        <GameIcon slug="campfire" size={UI_ICON_SIZE.lg} reserveSpace />
         <div style={{ flex: 1, minWidth: 0 }}>
           <h2 id={titleId} className="font-bold text-white" style={{ fontSize: 15, margin: 0 }}>
             {t('catchUp.title')}

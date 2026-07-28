@@ -18,6 +18,7 @@ import { PageHeader } from '../../components/PageHeader';
 import { GameIcon } from '../../components/GameIcon';
 import { initials } from '../../lib/avatarText';
 import { formatStandingChip, standingVariant } from './standing';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 export default function FactionListPage() {
   const { t } = useTranslation();
@@ -111,7 +112,7 @@ export default function FactionListPage() {
       <Card className="space-y-4">
         <PageHeader
           variant="card"
-          icon={<GameIcon slug="black-flag" size={18} />}
+          icon={<GameIcon slug="black-flag" size={UI_ICON_SIZE.md} />}
           title="Factions"
           primaryAction={
             canDmWrite && !creating ? (
@@ -180,7 +181,7 @@ export default function FactionListPage() {
                   <Chip variant={standingVariant(faction.standing)}>
                     {formatStandingChip(faction.standing, faction.reputation, t)}
                   </Chip>
-                  {isDm && faction.hidden && <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden</span></Chip>}
+                  {isDm && faction.hidden && <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={UI_ICON_SIZE.xs} /> Hidden</span></Chip>}
                   {isDm && faction.dmSecret && <Chip variant="proposal">DM secret</Chip>}
                 </div>
               </ListDetailLink>

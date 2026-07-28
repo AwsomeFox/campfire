@@ -45,6 +45,7 @@ import {
   type StorylineContentDraft,
 } from './StorylineContentEditor';
 import type { ConflictField } from '../../components/StaleWriteConflict';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 /** Minimal shapes for the play-record link-picker option lists (issue #264). */
 type NamedRow = { id: number; name?: string; title?: string; number?: number };
@@ -1389,17 +1390,17 @@ function BeatRow({
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 22, flexWrap: 'wrap', fontSize: 12 }}>
           {beat.sessionId != null && (
             <Link className="tag tag-neutral" style={{ fontSize: 10, textDecoration: 'none' }} to={entityHref(cid, { type: 'session', id: beat.sessionId })}>
-              <GameIcon slug="book-cover" size={11} className="inline align-text-bottom mr-1" />{linkedSession ? sessionLabel(linkedSession) : `Session #${beat.sessionId}`}
+              <GameIcon slug="book-cover" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />{linkedSession ? sessionLabel(linkedSession) : `Session #${beat.sessionId}`}
             </Link>
           )}
           {beat.questId != null && (
             <Link className="tag tag-neutral" style={{ fontSize: 10, textDecoration: 'none' }} to={entityHref(cid, { type: 'quest', id: beat.questId })}>
-              <GameIcon slug="scroll-unfurled" size={11} className="inline align-text-bottom mr-1" />{linkedQuest?.title ?? `Quest #${beat.questId}`}
+              <GameIcon slug="scroll-unfurled" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />{linkedQuest?.title ?? `Quest #${beat.questId}`}
             </Link>
           )}
           {beat.encounterId != null && (
             <Link className="tag tag-neutral" style={{ fontSize: 10, textDecoration: 'none' }} to={entityHref(cid, { type: 'encounter', id: beat.encounterId })}>
-              <GameIcon slug="crossed-swords" size={11} className="inline align-text-bottom mr-1" />{linkedEncounter?.name ?? `Encounter #${beat.encounterId}`}
+              <GameIcon slug="crossed-swords" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />{linkedEncounter?.name ?? `Encounter #${beat.encounterId}`}
             </Link>
           )}
         </div>
@@ -1478,7 +1479,7 @@ function BeatRow({
             disabled={busy}
             onClick={() => setEditingLinks(true)}
           >
-            <GameIcon slug="linked-rings" size={11} className="inline align-text-bottom mr-1" />{hasLinks ? 'Edit links' : 'Link to play'}
+            <GameIcon slug="linked-rings" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />{hasLinks ? 'Edit links' : 'Link to play'}
           </button>
         ))}
 

@@ -37,6 +37,7 @@ import {
   type CompendiumUrlType,
 } from './compendiumA11y';
 import { importExpectedUpdatedAt, serializeHomebrewEditor, shouldRenderCompendiumResults } from './homebrewEditor';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 type TypeChip = { key: CompendiumUrlType; label: string; count?: number };
 
@@ -585,7 +586,7 @@ export default function CompendiumPage() {
                         aria-hidden="true"
                         style={{ flex: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', width: 26, color: 'var(--color-accent)' }}
                       >
-                        <GameIcon slug={ruleEntryIconSlug(entry)} size={22} />
+                        <GameIcon slug={ruleEntryIconSlug(entry)} size={UI_ICON_SIZE.lg} />
                       </span>
                       <span style={{ flex: 1, minWidth: 0 }}>
                         <span style={{ display: 'flex', gap: 7, alignItems: 'center', flexWrap: 'wrap', fontSize: 14 }}>

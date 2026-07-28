@@ -23,6 +23,7 @@ import { getIcon } from '../../lib/icons';
 import { defaultItemIconSlug, itemIconSlug } from '../../lib/inventoryIcons';
 import { parseLocalizedInteger } from '../../lib/i18nNumbers';
 import { useFormattingLocale } from '../../lib/format';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 /** Add-item quantity bounds (issue #459). */
 export const ITEM_QTY_MIN = 0;
@@ -63,7 +64,7 @@ export function ItemSection({
   const body = (
     <>
       <h2 className="flex items-center gap-2 font-bold text-white text-sm">
-        <GameIcon slug={icon} size={16} /> {title}
+        <GameIcon slug={icon} size={UI_ICON_SIZE.sm} /> {title}
       </h2>
       {items.length === 0 ? (
         <p className="text-sm text-secondary">{t('inventory.empty')}</p>
@@ -184,11 +185,11 @@ export function ItemRow({
           aria-label={t('inventory.iconAriaChange', { name: committed.name })}
           className="shrink-0 mt-0.5 text-[var(--color-accent)] hover:text-[var(--color-accent-700)]"
         >
-          <GameIcon slug={iconSlug} size={22} title={committed.name} />
+          <GameIcon slug={iconSlug} size={UI_ICON_SIZE.lg} title={committed.name} />
         </button>
       ) : (
         <span className="shrink-0 mt-0.5 text-[var(--color-accent)]">
-          <GameIcon slug={iconSlug} size={22} title={committed.name} />
+          <GameIcon slug={iconSlug} size={UI_ICON_SIZE.lg} title={committed.name} />
         </span>
       )}
       <div className="flex-1 min-w-0">
@@ -450,7 +451,7 @@ export function AddItemForm({
         </div>
         <div className="flex items-center gap-3">
           <span className="inline-flex h-10 w-10 items-center justify-center rounded-md text-[var(--color-accent)] shrink-0" style={{ background: 'var(--color-neutral-800)' }}>
-            <GameIcon slug={previewSlug} size={24} title={getIcon(previewSlug)?.name} />
+            <GameIcon slug={previewSlug} size={UI_ICON_SIZE.lg} title={getIcon(previewSlug)?.name} />
           </span>
           <Btn density="xs" ghost type="button" className="text-xs" onClick={() => setPickingIcon(true)}>
             {iconSlug ? t('inventory.changeIcon') : t('inventory.chooseIcon')}

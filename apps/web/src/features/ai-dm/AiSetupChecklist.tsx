@@ -31,6 +31,7 @@ import { GameIcon } from '../../components/GameIcon';
 import { Btn, Card } from '../../components/ui';
 import { CostDisclosure } from './CostDisclosure';
 import { formatUsdRangeValue } from './costEstimate';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 /** One computed checklist step. `done: null` = state is unknown (e.g. flag, for a non-admin). */
 interface Step {
@@ -360,7 +361,7 @@ export function AiDmDashboardOnboarding({
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:gap-3 sm:flex-wrap">
           <div className="flex items-start gap-3">
             <span className="flex shrink-0 text-[var(--color-accent)]" aria-hidden>
-              <GameIcon slug="sparkles" size={20} />
+              <GameIcon slug="sparkles" size={UI_ICON_SIZE.md} />
             </span>
             <div className="min-w-0 flex-1">
               <p className="font-bold text-[var(--color-text)]">{t('aiOnboarding.dashboard.hintTitle')}</p>

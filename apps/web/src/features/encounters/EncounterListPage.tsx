@@ -33,6 +33,7 @@ import {
   ENCOUNTER_NAME_PLACEHOLDER,
 } from './postCreateGuidance';
 import { GenerateEncounterWizard } from './GenerateEncounterWizard';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 function encounterStatusLabel(status: EncounterStatus, t: ReturnType<typeof useTranslation>['t']): string {
   return t(`encounters.status.${status}`);
@@ -299,7 +300,7 @@ function EncounterCard({
         {showHidden && encounter.hidden && (
           <Chip variant="failed">
             <span className="inline-flex items-center gap-1">
-              <GameIcon slug="sight-disabled" size={12} /> Hidden
+              <GameIcon slug="sight-disabled" size={UI_ICON_SIZE.xs} /> Hidden
             </span>
           </Chip>
         )}
@@ -407,7 +408,7 @@ function NewEncounterForm({ campaignId, onCancel }: { campaignId: number; onCanc
             as="select"
             label={
               <span className="inline-flex items-center gap-1">
-                <GameIcon slug="treasure-map" size={12} /> {ENCOUNTER_LOCATION_LABEL}
+                <GameIcon slug="treasure-map" size={UI_ICON_SIZE.xs} /> {ENCOUNTER_LOCATION_LABEL}
               </span>
             }
             labelClassName="text-xs text-slate-400"
@@ -430,7 +431,7 @@ function NewEncounterForm({ campaignId, onCancel }: { campaignId: number; onCanc
             as="select"
             label={
               <span className="inline-flex items-center gap-1">
-                <GameIcon slug="scroll-unfurled" size={12} /> {ENCOUNTER_QUEST_LABEL}
+                <GameIcon slug="scroll-unfurled" size={UI_ICON_SIZE.xs} /> {ENCOUNTER_QUEST_LABEL}
               </span>
             }
             labelClassName="text-xs text-slate-400"
@@ -453,7 +454,7 @@ function NewEncounterForm({ campaignId, onCancel }: { campaignId: number; onCanc
             as="select"
             label={
               <span className="inline-flex items-center gap-1">
-                <GameIcon slug="book-cover" size={12} /> {ENCOUNTER_SESSION_LABEL}
+                <GameIcon slug="book-cover" size={UI_ICON_SIZE.xs} /> {ENCOUNTER_SESSION_LABEL}
               </span>
             }
             labelClassName="text-xs text-slate-400"

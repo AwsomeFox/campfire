@@ -19,6 +19,7 @@ import { ImageUpload, attachmentFileUrl } from '../../components/ImageUpload';
 import { GameIcon } from '../../components/GameIcon';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { MapConceptGlossary, MapPurposePreview } from '../../components/mapOnboarding';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 // Kept local until every consumer has rebuilt its generated schema declaration.
 type MetadataDraft = Pick<Attachment, 'title' | 'caption' | 'altText' | 'creator' | 'sourceUrl' | 'license' | 'rights' | 'attribution'>;
@@ -194,7 +195,7 @@ export function HandoutsCard({ campaignId }: { campaignId: number }) {
                     </div>
                   )}
                   <div style={{ marginTop: 2 }}>
-                    <Chip variant={a.hidden ? 'dm' : 'party'}>{a.hidden ? <><GameIcon slug="padlock" size={12} className="inline align-text-bottom" /> DM only</> : <><GameIcon slug="eyeball" size={12} className="inline align-text-bottom" /> Revealed</>}</Chip>
+                    <Chip variant={a.hidden ? 'dm' : 'party'}>{a.hidden ? <><GameIcon slug="padlock" size={UI_ICON_SIZE.xs} className="inline align-text-bottom" /> DM only</> : <><GameIcon slug="eyeball" size={UI_ICON_SIZE.xs} className="inline align-text-bottom" /> Revealed</>}</Chip>
                   </div>
                   <div style={{ marginTop: 4, display: 'flex', gap: 8, alignItems: 'center' }}>
                     <a

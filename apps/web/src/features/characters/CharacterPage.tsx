@@ -133,6 +133,7 @@ import {
 } from './characterSheetA11y';
 import { useFormattingLocale } from '../../lib/format';
 import { findSpecialResource, resourceAvailability } from './specialCharacterResource';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 export default function CharacterPage() {
   const { campaignId, characterId } = useParams<{ campaignId: string; characterId: string }>();
@@ -1329,7 +1330,7 @@ function RollChip({
     // this inline style would shrink the click target from 32px to 24px — do not
     // "clean this up" as redundant with density="xs".
     <Btn density="xs" ghost type="button" className="text-xs" style={{ minHeight: 32 }} onClick={onClick} disabled={disabled} title={title}>
-      <GameIcon slug="rolling-dices" size={13} className="inline align-text-bottom mr-1" />{label}
+      <GameIcon slug="rolling-dices" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />{label}
     </Btn>
   );
 }

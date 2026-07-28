@@ -20,7 +20,7 @@ import {
 } from './formFieldLabels';
 import { Markdown } from './Markdown';
 import { GameIcon } from './GameIcon';
-import { NOTE_VISIBILITY_ICON } from '../lib/uiIcons';
+import { NOTE_VISIBILITY_ICON, UI_ICON_SIZE } from '../lib/uiIcons';
 import {
   NOTE_BODY_HELP,
   NOTE_BODY_LABEL,
@@ -42,7 +42,7 @@ function VisLabel({ visibility }: { visibility: Note['visibility'] }) {
   const m = visMeta[visibility];
   return (
     <span className="inline-flex items-center gap-1">
-      <GameIcon slug={m.slug} size={12} /> {m.label}
+      <GameIcon slug={m.slug} size={UI_ICON_SIZE.xs} /> {m.label}
     </span>
   );
 }
@@ -176,7 +176,7 @@ export function NotesRail({ campaignId, entityType, entityId }: { campaignId: nu
 
   return (
     <Card className="space-y-3" data-testid="notes-rail">
-      <h2 className="flex items-center gap-2 font-bold text-white text-sm"><GameIcon slug="quill-ink" size={16} /> Notes</h2>
+      <h2 className="flex items-center gap-2 font-bold text-white text-sm"><GameIcon slug="quill-ink" size={UI_ICON_SIZE.sm} /> Notes</h2>
       {error && <ErrorNote message={error} onRetry={load} />}
       {notes.map((n) => (
         <div key={n.id} className="cf-inset p-3 space-y-1">
@@ -184,7 +184,7 @@ export function NotesRail({ campaignId, entityType, entityId }: { campaignId: nu
             <Chip variant={visMeta[n.visibility].chip}>
               {n.visibility === 'whisper' ? (
                 <span className="inline-flex items-center gap-1">
-                  <GameIcon slug={NOTE_VISIBILITY_ICON.whisper} size={12} /> Whisper{n.recipientName ? ` → ${n.recipientName}` : ''}
+                  <GameIcon slug={NOTE_VISIBILITY_ICON.whisper} size={UI_ICON_SIZE.xs} /> Whisper{n.recipientName ? ` → ${n.recipientName}` : ''}
                 </span>
               ) : (
                 <VisLabel visibility={n.visibility} />
@@ -272,7 +272,7 @@ export function NotesRail({ campaignId, entityType, entityId }: { campaignId: nu
             as="select"
             label={
               <span className="inline-flex items-center gap-1">
-                <GameIcon slug={NOTE_VISIBILITY_ICON.whisper} size={12} /> Whisper to
+                <GameIcon slug={NOTE_VISIBILITY_ICON.whisper} size={UI_ICON_SIZE.xs} /> Whisper to
               </span>
             }
             labelClassName="text-[11px] text-slate-400"

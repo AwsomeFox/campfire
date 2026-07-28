@@ -1,8 +1,8 @@
 /**
  * Control icon vocabulary + brand mark (issue #678).
  */
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { expect, test } from '@playwright/test';
 import { getIcon } from '../../src/lib/icons';
 import {
@@ -11,6 +11,19 @@ import {
 } from '../../src/lib/uiIcons';
 
 const ROOT = resolve(__dirname, '../../src');
+
+/** Recursively collect .tsx sources under `dir`. */
+function collectTsx(dir: string, out: string[] = []): string[] {
+  for (const entry of readdirSync(dir)) {
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) {
+      collectTsx(full, out);
+    } else if (entry.endsWith('.tsx')) {
+      out.push(full);
+    }
+  }
+  return out;
+}
 const CONTROL_SITES = [
   'features/home/HomePage.tsx',
   'components/Toggle.tsx',
@@ -104,17 +117,46 @@ test.describe('close-glyph vocabulary (issue #1715 Part 2)', () => {
   });
 
   test('UI_CONTROL_ICON.close is used by name, not just defined', () => {
-    // Issue #1715 Part 2: `check` was defined and never called through <UIIcon>
-    // (it's consumed directly via GameIcon in Toggle.tsx, which needs a
-    // computed size the fixed xs/sm/md/lg scale can't express — left as-is).
-    // `close` had the opposite problem before this migration: raw ✕/× glyphs
-    // everywhere instead of the vocabulary entry that already existed for it.
     let liveCallSites = 0;
     for (const rel of CLOSE_GLYPH_MIGRATED_SITES) {
       const text = readFileSync(resolve(ROOT, rel), 'utf8');
       liveCallSites += (text.match(/<UIIcon\s+name="close"/g) ?? []).length;
     }
     expect(liveCallSites).toBeGreaterThan(0);
+  });
+});
+
+test.describe('chrome-icon sizing (issue #1715 Part 1)', () => {
+  // Sizes that must ALWAYS resolve through UI_ICON_SIZE (xs:14/sm:16/md:20/lg:24)
+  // rather than a raw numeric literal, because they are not themselves one of
+  // the 4 canonical values — a raw `size={11}`/`size={12}`/etc. on <GameIcon>
+  // is exactly the sprawl this issue collapsed onto the 4-value scale. 14, 16,
+  // 20, and 24 are deliberately NOT in this set: they already equal a
+  // canonical value, so a raw literal there isn't itself sprawl (though the
+  // migration also swapped those to the constant for consistency where it
+  // touched them).
+  //
+  // Domain/decorative art sizes (26, 28, 30, 32, 36, 52, 56, 72, 96 — campaign
+  // covers, empty-state illustrations, icon-picker previews) are explicitly
+  // OUT OF SCOPE and deliberately absent from this set. They need their own
+  // canonical scale, which does not exist yet and is not built here — see the
+  // PR for #1715 Part 1 for the full accounting.
+  const NON_CANONICAL_CHROME_SIZES = [10, 11, 12, 13, 15, 18, 19, 22];
+
+  test('no <GameIcon> call site uses a non-canonical chrome-range literal size', () => {
+    const offenders: string[] = [];
+    const pattern = new RegExp(
+      `<GameIcon\\b[^>]*\\bsize=\\{(${NON_CANONICAL_CHROME_SIZES.join('|')})\\}`,
+    );
+    for (const file of collectTsx(ROOT)) {
+      const text = readFileSync(file, 'utf8');
+      // Strip block comments so a doc-comment mentioning `<GameIcon size={12}>`
+      // as an example doesn't false-positive.
+      const stripped = text.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '));
+      const m = stripped.match(pattern);
+      if (m) offenders.push(`${file.replace(ROOT + '/', '')}: size={${m[1]}}`);
+    }
+    expect(offenders, offenders.join('\n')).toEqual([]);
   });
 });
 

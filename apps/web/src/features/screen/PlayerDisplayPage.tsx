@@ -89,6 +89,7 @@ import {
   hiddenCount,
   type SceneId,
 } from './playerDisplayScene';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 /** Fixed-aspect stage budgets. Chosen so a full page comfortably fits the 16:9
  * safe area from 720p up to 4K without a scrollbar; overflow past these paginates
@@ -955,7 +956,7 @@ export default function PlayerDisplayPage() {
         {location ? (
           <span className="cf-screen-chip cf-screen-chip-accent cf-status-location">
             {location.isCurrent ? (
-              <GameIcon slug="position-marker" size={14} className="inline align-text-bottom mr-1" />
+              <GameIcon slug="position-marker" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />
             ) : null}
             <span className="cf-clamp-1">{location.name}</span>
           </span>
@@ -998,7 +999,7 @@ export default function PlayerDisplayPage() {
       )}
       {liveActivity.mode === 'driver' && liveActivity.lastNarration && (
         <p className="cf-ai-ticker">
-          <GameIcon slug="robot-golem" size={14} className="inline align-text-bottom mr-1" />
+          <GameIcon slug="robot-golem" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />
           <span className="cf-clamp-2">{liveActivity.lastNarration}</span>
         </p>
       )}

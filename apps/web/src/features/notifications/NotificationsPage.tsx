@@ -29,6 +29,7 @@ import {
   scheduleNotificationDisplayTitle,
 } from '../../lib/scheduleNotificationCopy';
 import { useNotifications } from './NotificationsBell';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 function typeIcon(type: Notification['type']): string {
   switch (type) {
@@ -590,7 +591,7 @@ export default function NotificationsPage() {
             >
               {/* Type Icon */}
               <span className="flex leading-none pt-1 text-[var(--color-neutral-300)] shrink-0">
-                <GameIcon slug={typeIcon(notification.type)} size={18} />
+                <GameIcon slug={typeIcon(notification.type)} size={UI_ICON_SIZE.md} />
               </span>
 
               {/* Main Info */}

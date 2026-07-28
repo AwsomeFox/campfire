@@ -20,6 +20,7 @@ import { itemIconSlug, COIN_ICON, COIN_COLORS } from '../../lib/inventoryIcons';
 import { parseLocalizedInteger } from '../../lib/i18nNumbers';
 import { useFormattingLocale } from '../../lib/format';
 import { AddItemForm, ItemSection } from './inventoryShared';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 const COIN_KEYS = [
   { key: 'pp', labelKey: 'inventory.coins.pp' },
@@ -494,7 +495,7 @@ function TreasuryCard({
   return (
     <Card className="space-y-3">
       <div className="flex items-center gap-2">
-        <h2 className="flex items-center gap-2 font-bold text-white text-sm"><GameIcon slug="coins" size={16} /> {t('inventory.partyTreasury')}</h2>
+        <h2 className="flex items-center gap-2 font-bold text-white text-sm"><GameIcon slug="coins" size={UI_ICON_SIZE.sm} /> {t('inventory.partyTreasury')}</h2>
         <div className="flex-1" />
         {canEdit && !editing && (
           <Btn density="xs" ghost className="text-xs" onClick={startEdit}>
@@ -597,7 +598,7 @@ function TreasuryCard({
             <div key={key} className="text-center rounded-md py-2" style={{ background: 'var(--color-neutral-800)' }}>
               <div className="flex items-center justify-center gap-1.5">
                 <span className="inline-flex shrink-0" style={{ color: COIN_COLORS[key] }}>
-                  <GameIcon slug={COIN_ICON} size={16} title={t('inventory.coinCoinsAria', { label })} />
+                  <GameIcon slug={COIN_ICON} size={UI_ICON_SIZE.sm} title={t('inventory.coinCoinsAria', { label })} />
                 </span>
                 <p className="text-lg font-extrabold text-white leading-none">{treasury[key]}</p>
               </div>
@@ -708,7 +709,7 @@ function TrashedItemRow({
   return (
     <li className="py-2 flex flex-wrap items-center gap-x-3 gap-y-2">
       <span className="shrink-0 mt-0.5 text-[var(--color-accent)]">
-        <GameIcon slug={iconSlug} size={22} title={item.name} />
+        <GameIcon slug={iconSlug} size={UI_ICON_SIZE.lg} title={item.name} />
       </span>
       <div className="flex-1 min-w-0">
         <p className="text-sm font-semibold text-white truncate">

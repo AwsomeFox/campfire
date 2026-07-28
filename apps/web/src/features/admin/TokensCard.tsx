@@ -17,6 +17,7 @@ import { Card, Btn, TextInput, Skeleton, EmptyState } from '../../components/ui'
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { CopyControl } from '../../components/CopyControl';
 import { GameIcon } from '../../components/GameIcon';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 type TokenScope = ApiToken['scope'];
 type WriteScope = ApiToken['writeScope'];
@@ -375,7 +376,7 @@ function NewTokenReveal({ created, onClose }: { created: ApiTokenCreated; onClos
     <div className="cf-dm-panel p-4 space-y-2">
       <div className="flex items-center justify-between gap-2">
         <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">
-          <GameIcon slug="key" size={12} className="inline align-text-bottom mr-1" />{created.apiToken.name} — shown once
+          <GameIcon slug="key" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />{created.apiToken.name} — shown once
         </p>
         <button type="button" className="text-[11px] text-secondary hover:text-white" onClick={onClose}>
           dismiss

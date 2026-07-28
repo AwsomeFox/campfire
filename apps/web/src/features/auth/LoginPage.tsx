@@ -33,6 +33,7 @@ import {
   describedBy,
   focusAuthError,
 } from './authFormA11y';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 /** Footer tagline on the login landing pitch (sourced from the privacy manifest). */
 export const LOGIN_FOOTER_TAGLINE = AI_EXTERNAL_PROVIDER_PRIVACY.loginTagline;
@@ -104,7 +105,7 @@ function LandingPitch() {
                 border: '1px solid var(--color-divider)',
               }}
             >
-              <GameIcon slug={f.icon} size={19} className="text-[var(--color-accent)]" title={f.title} />
+              <GameIcon slug={f.icon} size={UI_ICON_SIZE.md} className="text-[var(--color-accent)]" title={f.title} />
             </span>
             <div className="flex flex-col" style={{ gap: 2 }}>
               <span style={{ fontSize: 13.5, fontWeight: 700, color: 'var(--color-text)' }}>{f.title}</span>
