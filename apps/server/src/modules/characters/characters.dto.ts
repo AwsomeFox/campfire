@@ -31,6 +31,8 @@ export const HpPatchDto = HpPatchDtoClass;
 
 export class ConditionsPatchDto extends createZodDto(ConditionsPatch.strict()) {}
 // Issue #1643: raise/lower a leveled condition track's level (5e Exhaustion).
+// ConditionLevelPatch is a ZodEffects (.refine requiring delta|level) — same no-.strict()
+// construction as DdbCharacterImportDto below.
 export class ConditionLevelPatchDto extends createZodDto(ConditionLevelPatch) {}
 
 export class SpellSlotPatchDto extends createZodDto(SpellSlotPatch.strict()) {}

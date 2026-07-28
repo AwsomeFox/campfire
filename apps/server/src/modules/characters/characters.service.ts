@@ -62,8 +62,8 @@ import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { fromJsonText, toJsonText } from '../../common/json';
 import {
-  conditionWriteSetFromInstances,
   conditionWriteSetFromNames,
+  conditionWriteSetMergingSheetStacks,
   sheetConditionWriteSetFromNames,
   legacyConditionInstance,
   readConditionInstances,
@@ -616,7 +616,15 @@ export class CharactersService {
   private async syncActiveCombatantConditions(
     characterId: number,
     conditionsJson: string,
-    opts?: { campaignId?: number; conditionInstancesJson?: string | null },
+    opts?: {
+      campaignId?: number;
+      /**
+       * When set, the sheet already computed authoritative instances (including stacks).
+       * Use stack-merging write so a level change (issue #1643) lands on the live tracker
+       * instead of name-reconcile preserving stale stacks / inventing stacks: 1.
+       */
+      conditionInstancesJson?: string | null;
+    },
   ): Promise<void> {
     const rows = await this.db
       .select({ combatant: combatants, campaignId: encounters.campaignId, encounterId: encounters.id })
@@ -632,7 +640,7 @@ export class CharactersService {
       .where(eq(characters.id, characterId))
       .limit(1);
     const sheetSyncedUpdatedAt = sheetMeta?.updatedAt;
-    const authoritativeInstances =
+    const sheetInstances =
       opts?.conditionInstancesJson !== undefined
         ? readConditionInstances(opts.conditionInstancesJson, conditionsJson)
         : null;
@@ -643,8 +651,8 @@ export class CharactersService {
           // Reconcile the structured copy too, or a sheet-side REMOVAL leaves its instance
           // behind and the next tracker write derives the condition straight back (#423 ×
           // #486). See common/conditions.ts.
-          ...(authoritativeInstances
-            ? conditionWriteSetFromInstances(authoritativeInstances)
+          ...(sheetInstances != null
+            ? conditionWriteSetMergingSheetStacks(sheetInstances, combatant.conditionInstances)
             : conditionWriteSetFromNames(
                 fromJsonText<string[]>(conditionsJson, []),
                 combatant.conditionInstances,
@@ -1318,6 +1326,11 @@ export class CharactersService {
    * adjusts relative to the CURRENT level, and a result outside [0, track.max] is a 400.
    * Level 0 removes the condition entirely — `ConditionInstance.stacks` itself requires
    * `stacks >= 1`, so "zero" has no on-disk representation as an instance.
+   *
+   * CONCURRENCY. The read of current stacks, the decision, and the write happen inside ONE
+   * `this.db.transaction`, re-reading the row inside it (same pattern as adjustResource /
+   * patchSpellSlots). Without that, two concurrent `delta: 1` calls both read level N and
+   * both write N+1, losing an exhaustion increment.
    */
   async adjustConditionLevel(id: number, patch: ConditionLevelPatch, user: RequestUser, role: Role): Promise<Character> {
     const existing = await this.getRowOrThrow(id);
@@ -1332,14 +1345,20 @@ export class CharactersService {
       );
     }
 
+    const trackKey = track.name.toLowerCase();
     let currentLevel = 0;
     let nextLevel = 0;
+    /**
+     * #1073 / #1039 — READ, DECIDE AND WRITE IN ONE SYNCHRONOUS TRANSACTION.
+     *
+     * `existing` above still serves the permission check (not order-sensitive). The stacks
+     * snapshot that the race turns on is re-read inside `tx`, matching adjustResource.
+     */
     const row = this.db.transaction((tx) => {
       const fresh = tx.select().from(characters).where(eq(characters.id, id)).get();
       if (!fresh || fresh.deletedAt !== null) throw new NotFoundException(`Character ${id} not found`);
 
       const priorInstances = readConditionInstances(fresh.conditionInstances, fresh.conditions);
-      const trackKey = track.name.toLowerCase();
       const currentInstance = priorInstances.find((i) => i.name.trim().toLowerCase() === trackKey);
       currentLevel = currentInstance?.stacks ?? 0;
       nextLevel = patch.level !== undefined ? patch.level : currentLevel;
@@ -1361,17 +1380,17 @@ export class CharactersService {
             : // `legacyConditionInstance` only returns null for an empty name; `track.name`
               // is always a non-empty constant ('Exhaustion'), so this cannot actually be null.
               [...priorInstances, { ...legacyConditionInstance(track.name)!, stacks: nextLevel }];
-
-      const [updated] = tx
+      const [written] = tx
         .update(characters)
         .set({ ...sheetConditionWriteSetFromInstances(nextInstances), updatedAt: nowIso() })
         .where(eq(characters.id, id))
         .returning()
         .all();
-      return updated;
+      return written;
     });
 
-    // Issue #486: sheet → live combatant, same as patchConditions above.
+    // Issue #486 / #1643: sheet → live combatant with structured instances so stacks land
+    // on the tracker (name-only reconcile would preserve stale stacks / invent stacks: 1).
     await this.syncActiveCombatantConditions(id, row.conditions, {
       campaignId: existing.campaignId,
       conditionInstancesJson: row.conditionInstances,

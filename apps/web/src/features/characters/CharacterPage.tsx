@@ -28,7 +28,16 @@ import { DetailPageWayfinding } from '../../components/DetailPageWayfinding';
 import { CharacterSheetNav } from './CharacterSheetNav';
 import { CHARACTER_SHEET_SECTION_LABEL, characterSheetSectionId } from './characterSheetTabs';
 import { useCharacterSheetTab } from './useCharacterSheetTab';
-import type { Attachment, Character, CharacterAction, CampaignMember, CharacterStatus, SkillRank, AdapterResourceDef, LeveledConditionTrack } from '@campfire/schema';
+import type {
+  Attachment,
+  Character,
+  CharacterAction,
+  CampaignMember,
+  CharacterStatus,
+  SkillRank,
+  LeveledConditionTrack,
+  AdapterResourceDef,
+} from '@campfire/schema';
 import { abilityLabelForAdapter, xpProgressForCharacter, ruleSystemAdapter, type RuleSystemAdapter } from '@campfire/schema';
 import { findLeveledConditionTrack, conditionLevel } from './leveledCondition';
 import { CHARACTER_STATUSES, STATUS_LABEL, StatusTag } from './status';

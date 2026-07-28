@@ -104,7 +104,6 @@ import {
   SpellSlotPatch,
   ResourcePatch,
   ConditionLevelPatch,
-  ConditionLevelPatchShape,
   spellSlotsRemaining,
   EncounterReopen,
   ProposalRevise,
@@ -3164,7 +3163,20 @@ export class McpToolsService {
         'absolutely (applied first when both are sent). Resulting level outside [0, the track\'s max] FAILS with a ' +
         '400 — never a silent clamp — so a success can be trusted as "the level actually changed by that amount." ' +
         'Level 0 removes the condition. `name` must match the track this campaign actually has.',
-      { characterId: Id.describe('Character id'), ...ConditionLevelPatchShape },
+      // ConditionLevelPatch is a ZodEffects (.refine requiring delta|level), so it has no
+      // `.shape` to spread — list the wire fields here and re-validate with .parse below.
+      {
+        characterId: Id.describe('Character id'),
+        name: z.string().min(1).max(40).describe("Leveled condition track name for this campaign (5e: 'Exhaustion')"),
+        delta: z.number().int().optional().describe('Relative level adjustment (at least one of delta or level required)'),
+        level: z
+          .number()
+          .int()
+          .min(0)
+          .max(99)
+          .optional()
+          .describe('Absolute level; 0 removes (at least one of delta or level required)'),
+      },
       async ({ characterId, ...patch }) => {
         const row = await this.characters.getRowOrThrow(characterId as number);
         const role = await this.access.requireRole(user, row.campaignId, 'player');
