@@ -10,7 +10,11 @@ import type { DiceRoll } from '@campfire/schema';
 import { RolledDice } from '../features/dice/RolledDice';
 import { RolledTerms } from '../features/dice/RolledTerms';
 import { d20Flavor, d20TotalClasses } from '../lib/d20Flavor';
+<<<<<<< HEAD
 import { UIIcon } from './UIIcon';
+=======
+import { Btn } from './ui';
+>>>>>>> 7a204076d (refactor(web): migrate raw cf-btn <button> sites to <Btn> (issue #1713 Part A))
 
 const AUTO_DISMISS_MS = 15000;
 
@@ -80,24 +84,27 @@ export function RollResultToast({
         {roll.total}
       </span>
       {onApply && (
-        <button
+        <Btn
           type="button"
-          className="cf-btn cf-btn-ghost cf-roll-result-toast__apply"
+          ghost
+          className="cf-roll-result-toast__apply"
           onClick={apply}
           data-testid="roll-result-apply"
         >
           {t('dice.applyDamage')}
-        </button>
+        </Btn>
       )}
-      <button
+      <Btn
         type="button"
+        ghost
+        density="xs"
         aria-label={t('dice.dismissRollToast')}
         onClick={dismiss}
         className="cf-dismiss-target cf-roll-result-toast__dismiss"
         data-testid="roll-result-toast-dismiss"
       >
         <UIIcon name="close" size="sm" />
-      </button>
+      </Btn>
     </div>
   );
 }

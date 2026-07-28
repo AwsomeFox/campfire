@@ -510,26 +510,30 @@ export function ImageUpload({
             <span className="text-[11px] font-semibold text-rose-200">Upload failed</span>
             {state.error && <span className="text-[10px] text-rose-100/80 line-clamp-2">{state.error}</span>}
             <div className="flex gap-1.5">
-              <button
+              <Btn
                 type="button"
-                className="cf-btn cf-btn-ghost cf-density-compact !px-2 text-[10px]"
+                ghost
+                density="compact"
+                className="!px-2 text-[10px]"
                 onClick={(e) => {
                   e.stopPropagation();
                   onRetry();
                 }}
               >
                 Retry
-              </button>
-              <button
+              </Btn>
+              <Btn
                 type="button"
-                className="cf-btn cf-btn-ghost cf-density-compact !px-2 text-[10px]"
+                ghost
+                density="compact"
+                className="!px-2 text-[10px]"
                 onClick={(e) => {
                   e.stopPropagation();
                   onDiscard();
                 }}
               >
                 Discard
-              </button>
+              </Btn>
             </div>
           </div>
         )}

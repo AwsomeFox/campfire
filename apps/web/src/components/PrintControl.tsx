@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Btn } from './ui';
 
 type PrintControlProps = {
   /** Only DMs can choose to add secret content to a paper copy. */
@@ -40,13 +41,9 @@ export function PrintControl({ allowSecrets = false, className = '', resetKey }:
           Include DM secrets
         </label>
       )}
-      <button
-        type="button"
-        className="cf-btn cf-btn-ghost cf-density-compact text-xs"
-        onClick={() => window.print()}
-      >
+      <Btn type="button" ghost density="compact" className="text-xs" onClick={() => window.print()}>
         Print / Save PDF
-      </button>
+      </Btn>
     </div>
   );
 }
