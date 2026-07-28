@@ -40,10 +40,13 @@ there's a direct `submit_inbox_item`.)_
 each item you read the capture and **resolve** it — the moment to spin it into a new
 quest, update an NPC, or drop a line in a recap. Resolving clears it from the queue.
 
-!!! tip "Let an AI sweep it"
-    Connect an AI (see [Connect an AI](../ai/connect.md)) and ask it to sweep the
-    inbox — it can read the captures and propose the quest/NPC/recap updates for you
-    to approve, turning a pile of one-liners into structured canon.
+!!! tip "Sweep it instead of resolving one by one"
+    Click **Sweep inbox** at the top of the Scribe inbox page — no AI client or
+    token needed, just an AI provider configured for the campaign (Campaign
+    settings -> AI). It reads every open item and proposes the quest/NPC/recap
+    updates for you to approve, turning a pile of one-liners into structured canon.
+    Prefer your own assistant? [Connect one](../ai/connect.md) and ask it to sweep
+    the inbox — it calls the exact same `sweep_inbox` operation the button does.
 
 ## List capacity & pagination
 
