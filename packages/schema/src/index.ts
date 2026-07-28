@@ -63,6 +63,7 @@ export * from './character-action';
 export * from './combatant-statblock';
 export * from './character-creation';
 export * from './narration-language';
+export * from './leveled-conditions';
 
 export {
   DifficultyBand,
@@ -558,6 +559,18 @@ export const Character = z.object({
   deathSaveSuccesses: z.number().int().min(0).max(3).default(0),
   deathSaveFailures: z.number().int().min(0).max(3).default(0),
   conditions: z.array(z.string().max(40)).default([]),
+  // Issue #1643: structured condition instances (source/duration/saves/`stacks`) were
+  // already written to this row's `condition_instances` column by #1047, and already
+  // exposed on `Combatant` (below, `conditionInstances`) — but never on `Character`, so a
+  // client had no way to read a leveled condition's LEVEL (5e Exhaustion's `stacks`) off a
+  // sheet, only its bare name. `z.lazy` because `ConditionInstance` is defined much later
+  // in this file (the encounter/combat section) and `Character` is defined here, early —
+  // a direct forward reference would read `ConditionInstance` before its own `const`
+  // initializer has run. Same encounter-only-field-stripping as the write side
+  // (`toSheetConditionInstance` in common/conditions.ts): a sheet instance's
+  // durationRounds/timing/saveDc/etc. are always null/none, since there is no round loop
+  // outside combat.
+  conditionInstances: z.lazy(() => z.array(ConditionInstance).max(50).default([])),
   saveProficiencies: z.array(AbilityKey).default([]), // abilities with saving-throw proficiency
   skills: z.record(z.string().max(40), SkillRank).default({}), // skill name -> rank; absent = unproficient
   actions: z.array(CharacterAction).max(100).default([]),
@@ -570,7 +583,19 @@ export const Character = z.object({
   ...timestamps,
 });
 export type Character = z.infer<typeof Character>;
-export const CharacterCreate = Character.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ name: true });
+// `conditionInstances` is omitted here (issue #1643): it's a READ projection Character
+// exposes so a client can see a leveled condition's `stacks`, not a general write surface —
+// writes go through the dedicated POST :id/conditions (names) and POST :id/conditions/level
+// (a leveled track's level) endpoints, same division as `resources` (read via GET
+// :id/resource-vocabulary + the Character.resources projection, written via POST
+// :id/resources, never the general update). Also a real necessity, not just tidiness: its
+// `z.lazy()` (see the field's own doc comment on `Character`) makes zod-to-json-schema emit
+// a `$ref` for any tool whose input schema spreads `CharacterUpdate.shape` — some MCP
+// clients don't resolve `$ref`, which is exactly what upsert_character's own test asserts
+// never happens (`test/mcp.e2e-spec.ts`, "no tool schema may contain a $ref at all").
+export const CharacterCreate = Character.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true, conditionInstances: true })
+  .partial()
+  .required({ name: true });
 export const CharacterUpdate = CharacterCreate.partial();
 
 /**
@@ -602,6 +627,30 @@ export const ConditionsPatch = z.object({
   add: z.array(z.string().max(40)).optional(),
   remove: z.array(z.string().max(40)).optional(),
 });
+/**
+ * Set/adjust the LEVEL of one leveled condition track (issue #1643) — e.g. 5e Exhaustion —
+ * on a character sheet. `ConditionsPatch` above is presence-only (`add`/`remove` a bare
+ * name); it preserves an existing instance's `stacks` unchanged and has no way to move it,
+ * which is exactly the gap #1643 found: nothing could raise or lower exhaustion without
+ * hand-editing the stored condition. `delta`/`level` are alternatives, not a pair — same
+ * shape as {@link ResourcePatch} (`delta` adjusts relative to the current level, `level`
+ * sets it absolutely, `level` is applied first when both are sent). `level`/resulting level
+ * 0 removes the condition entirely (there is no zero-stacks instance — `ConditionInstance`
+ * itself requires `stacks >= 1`). Going below 0 or above the track's `max` is a 400, not a
+ * clamp, matching every other bounded-resource write in this schema (#1039).
+ */
+export const ConditionLevelPatchShape = {
+  name: z.string().min(1).max(40),
+  delta: z.number().int().optional().describe('Relative level change. Required unless `level` is provided.'),
+  level: z.number().int().min(0).max(99).optional().describe('Absolute level to set. Required unless `delta` is provided.'),
+} as const;
+export const ConditionLevelPatch = z
+  .object(ConditionLevelPatchShape)
+  .strict()
+  .refine((patch) => patch.delta !== undefined || patch.level !== undefined, {
+    message: 'Either delta or level is required',
+  });
+export type ConditionLevelPatch = z.infer<typeof ConditionLevelPatch>;
 /**
  * Canonical 5e condition vocabulary — the single source of truth shared across
  * the character sheet, the encounter tracker, and the compendium (issue #111).
@@ -1332,7 +1381,12 @@ export type ScheduledSession = z.infer<typeof ScheduledSession>;
  * adopt a night into someone else's series, or a `roomId` that skipped its
  * double-booking check.
  */
-const ORGANIZED_PLAY_OMIT = {
+/**
+ * Organized-play decoration keys that campaign export/import deliberately does
+ * not carry (issue #1548). Shared by {@link ScheduledSessionCreate}'s omit list
+ * and {@link toScheduledSessionExport}'s strip list so the two cannot drift.
+ */
+export const ORGANIZED_PLAY_OMIT = {
   seriesId: true,
   occurrenceIndex: true,
   venueId: true,
@@ -1454,6 +1508,49 @@ export type RsvpSet = z.infer<typeof RsvpSet>;
 
 export const ScheduledSessionWithRsvps = ScheduledSession.extend({ rsvps: z.array(SessionRsvp) });
 export type ScheduledSessionWithRsvps = z.infer<typeof ScheduledSessionWithRsvps>;
+
+/**
+ * Campaign-export shape for a scheduled session (issue #1548).
+ *
+ * `CampaignsService.importCampaign` has never restored organized-play decoration —
+ * it inserts scheduled sessions from a closed literal that writes only the legacy
+ * fields (`scheduledAt`, `durationMinutes`, `title`, `location`, `notes`, `status`,
+ * `cancelledAt`, `cancellationReason`), the same "drop install-local/cross-collection
+ * ids" discipline it already applies to `cancelledBy` and `sessionId`. A campaign
+ * export carrying `seriesId`/`venueId`/`roomId`/etc. anyway made an organized-play
+ * campaign's export LOOK like a full backup of its scheduling, when restoring it
+ * silently flattened every occurrence into a one-off — the export promised more than
+ * import could ever deliver. Per the maintainer's ruling on #1548: campaign
+ * export/import cares about the campaign, not install-level scheduling/venue/room
+ * resources, so the fix is to stop exporting decoration import was never going to
+ * restore, rather than teach import to restore it.
+ *
+ * Reuses {@link ORGANIZED_PLAY_OMIT} — the exact field set import already never
+ * reads on the CREATE path — rather than a second hand-maintained list that could
+ * drift from it.
+ */
+export const ScheduledSessionExport = ScheduledSessionWithRsvps.omit(ORGANIZED_PLAY_OMIT);
+export type ScheduledSessionExport = z.infer<typeof ScheduledSessionExport>;
+
+/**
+ * Drop organized-play decoration from a scheduled-session row for campaign export.
+ *
+ * Deliberately does **not** re-validate through {@link ScheduledSessionExport}.parse:
+ * `importCampaign` writes schedule fields through a closed insert literal into SQLite
+ * without enforcing Zod bounds (e.g. title length, RSVP status enum), so a previously
+ * exportable imported campaign can hold out-of-schema values. Re-parsing here would
+ * turn every JSON / mdzip / export-preview path into a 500 for those campaigns.
+ * Export's job is to project trusted stored rows; validation belongs at write boundaries.
+ */
+export function toScheduledSessionExport(
+  row: ScheduledSessionWithRsvps,
+): ScheduledSessionExport {
+  const out: Record<string, unknown> = { ...row };
+  for (const key of Object.keys(ORGANIZED_PLAY_OMIT) as Array<keyof typeof ORGANIZED_PLAY_OMIT>) {
+    delete out[key];
+  }
+  return out as ScheduledSessionExport;
+}
 
 /**
  * Paginated past-schedule list (issue #612). Most-recent ended nights first.
@@ -2938,6 +3035,11 @@ export const NotificationType = z.enum([
   'note_shared',
   'comment_reply',
   'added_to_campaign',
+  // Issue #1640: membership REVOKED (removed, or left) — as opposed to `added_to_campaign`,
+  // which also covers a role change on a membership you still hold. A different type because
+  // the client reaction differs: a role change re-renders chrome in place, a revocation must
+  // move the user off any page scoped to that campaign (see MEMBERSHIP_NOTIFICATION_TYPES).
+  'removed_from_campaign',
   // Issue #819: exclusive character seat transferred away from (or onto) this member.
   'character_reassigned',
   'session_scheduled',
@@ -2975,13 +3077,23 @@ export type NotificationType = z.infer<typeof NotificationType>;
  * what counts — a type added here without updating a hand-maintained duplicate elsewhere is
  * the failure mode this constant exists to rule out.
  *
- * Deliberately narrow: `added_to_campaign` already covers being added, promoted (including the
- * admin `reassign_owner` path, #1546), and — after #1590 — a DM's own promote/demote of an
- * existing member (issue #437's `members.service.ts#update`). It is reused rather than split
- * into a separate "role changed" type because both describe the same fact a client needs to
- * react to: re-fetch `/me`, the memberships list may be stale.
+ * `added_to_campaign` already covers being added, promoted (including the admin
+ * `reassign_owner` path, #1546), and — after #1590 — a DM's own promote/demote of an existing
+ * member (issue #437's `members.service.ts#update`). It is reused rather than split into a
+ * separate "role changed" type because both describe the same fact a client needs to react to:
+ * re-fetch `/me`, the memberships list may be stale.
+ *
+ * `removed_from_campaign` (issue #1640) is deliberately its OWN type rather than folded into
+ * `added_to_campaign` too: a role change leaves the membership in place (re-render chrome from
+ * fresh `/me` data, stay put), but a revocation removes it entirely — a client sitting on a
+ * route scoped to that campaign must navigate away, not just re-render. Both still belong in
+ * this same list because the account-wide `membershipChanged` discriminator below only needs
+ * to answer "is `/me` possibly stale", not which of the two happened.
  */
-export const MEMBERSHIP_NOTIFICATION_TYPES = ['added_to_campaign'] as const satisfies readonly NotificationType[];
+export const MEMBERSHIP_NOTIFICATION_TYPES = [
+  'added_to_campaign',
+  'removed_from_campaign',
+] as const satisfies readonly NotificationType[];
 
 export const Notification = z.object({
   id: Id,
@@ -3043,7 +3155,7 @@ export const NotificationCategory = z.enum([
   'quests', // quest_updated
   'proposals', // proposal_submitted, proposal_resolved
   'inbox', // inbox_submitted
-  'access', // added_to_campaign, character_reassigned, charter_published — ALWAYS ON (access control)
+  'access', // added_to_campaign, removed_from_campaign, character_reassigned, charter_published — ALWAYS ON (access control)
   'security', // ai_dm_alert, safety_hold — ALWAYS ON (security/recovery)
 ]);
 export type NotificationCategory = z.infer<typeof NotificationCategory>;
@@ -3079,6 +3191,7 @@ export const NOTIFICATION_TYPE_CATEGORY: Record<NotificationType, NotificationCa
   note_shared: 'notes',
   comment_reply: 'comments',
   added_to_campaign: 'access',
+  removed_from_campaign: 'access',
   character_reassigned: 'access',
   session_scheduled: 'schedule',
   session_rsvp: 'schedule',
@@ -4052,6 +4165,14 @@ export interface RuleSystemAdapter {
    * still withhold `resolverMath` until its saves are correct too.
    */
   resolveAttack?(input: AttackRollInput): AttackRollResult;
+  /**
+   * OPTIONAL — this system's own proficiency/training bonus (issue #1599), the way
+   * {@link resolveAttack} owns the attack roll. Omit it and the resolver falls back to 0 (see
+   * `defaultCheckProficiencyBonus` in action-resolver.ts for why the safe default is 0, not 5e's
+   * formula, unlike the attack default). `Dnd5eAdapter` declares it explicitly rather than
+   * relying on that default; `Pf2eAdapter` (inherited by SF2e) declares its own.
+   */
+  checkProficiencyBonus?(level: number): number;
   /** Map a monster rule-entry's `dataJson` to canonical statblock fields (AC/HP/CR/abilities/…). */
   mapStatblock(data: Record<string, unknown>): MonsterStatblockData;
   /** Resolve a monster's numeric max HP from its `dataJson`, or null when unavailable. */
@@ -4236,6 +4357,11 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
   // Unknown / empty / homebrew slugs resolve to this adapter via `ruleSystemAdapter`, so they
   // inherit the declaration, which is correct: 5e maths is exactly what those campaigns get.
   resolverMath: RESOLVER_MATH_D20_5E,
+  // #1599 — 5e is the one adapter that opts OUT of `checkProficiencyBonus`'s own default (0):
+  // that default is deliberately "add nothing" for every UNAUDITED system, but 5e's curve is
+  // exactly this formula, so 5e declares it explicitly rather than relying on a default that
+  // exists precisely so nobody ELSE has to make this claim by accident.
+  checkProficiencyBonus: dnd5eProficiencyBonus,
   presentation: DND5E_STATBLOCK_PRESENTATION,
   characterSheet: {
     abilityFields: STANDARD_D20_ABILITY_FIELDS,
@@ -4269,13 +4395,19 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
   // never a denylist of what is "permanent" — see the RestModel docs for why that direction is
   // the safe one when conditions are bare strings with no metadata (#1047).
   //
-  // These four are the 5e conditions a long rest ends on its own: exhaustion drops a level,
-  // and the three that PHB rest/unconsciousness rules resolve without an external cure. The
-  // conditions deliberately ABSENT are the ones that need a specific remedy — petrified,
+  // These three are the 5e conditions a long rest ends OUTRIGHT on its own — the PHB rest/
+  // unconsciousness rules resolve them without an external cure. Exhaustion is deliberately
+  // ABSENT from this list (issue #1641 — it used to be here, which was the bug: this allowlist
+  // can only express "removed entirely", and 5e's actual rule is "a long rest reduces
+  // exhaustion by ONE LEVEL", not to zero). Exhaustion's presence is instead read off
+  // `leveledConditionTrackFor('dnd5e')` (`leveled-conditions.ts`, issue #1643) by
+  // `restConditionOutcome`, which decrements it by one stack on a long rest and only fully
+  // removes it once that reaches 0 — see `rest.ts` for the mechanics. The conditions
+  // deliberately absent from BOTH lists are the ones that need a specific remedy — petrified,
   // paralyzed, charmed, poisoned, restrained, grappled, blinded, deafened, invisible — because
   // a rest that silently ended a Medusa's petrification would erase the DM's scene.
   restModel: {
-    clearedByLongRest: ['Exhaustion', 'Unconscious', 'Prone', 'Frightened'],
+    clearedByLongRest: ['Unconscious', 'Prone', 'Frightened'],
     clearedByShortRest: [],
     // 5e hit dice are per-class (d6 sorcerer … d12 barbarian) and the class die is NOT stored
     // on the sheet in this repo, so there is no honest default: `null` makes a short rest that
@@ -5470,6 +5602,19 @@ export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
     return typeof hp === 'number' && hp > 0 ? Math.round(hp) : null;
   },
   proficiencyBonus: pf2eProficiencyBonus,
+  // #1599 — the structured resolver's own save/attack proficiency hook. Distinct from
+  // `proficiencyBonus` just above: that one takes an explicit RANK (used by the roll catalog,
+  // which knows which skill/save it is building a check for); this one is the resolver's
+  // one-argument seam (`ResolverAdapter.checkProficiencyBonus`), which only ever knows a
+  // boolean "is this character proficient" — `character.saveProficiencies` records no rank.
+  // TRAINED is the correct floor for "marked proficient" with no finer data, the same degrade
+  // `initiativeModifier` above already makes for Perception: exact for an actual Trained
+  // character, an UNDERSTATEMENT for Expert/Master/Legendary (a real improvement over the
+  // previous blanket 0, not a full fix — see ResolverMathProfile's #1599 conclusion for why
+  // that residual gap keeps this adapter from declaring `resolverMath`).
+  checkProficiencyBonus(level: number): number {
+    return pf2eProficiencyBonus(Math.max(0, Math.trunc(level)), 'trained');
+  },
   levelBasedDC: pf2eLevelBasedDC,
   simpleDC: pf2eSimpleDC,
   degreeOfSuccess: pf2eDegreeOfSuccess,
@@ -11789,3 +11934,75 @@ export const CampaignCatalogPrivacyUpdate = z
   .object({ catalogPrivacy: CampaignCatalogPrivacy })
   .strict();
 export type CampaignCatalogPrivacyUpdate = z.infer<typeof CampaignCatalogPrivacyUpdate>;
+
+// ---------- campaign library management (issue #742) ----------
+// These contracts deliberately describe a clean, campaign-owned taxonomy.  They do
+// not contain a migration/version field: early-alpha clients all speak this shape.
+export const LibraryEntityType = z.enum([
+  'quest', 'npc', 'location', 'faction', 'encounter', 'timeline_event', 'inventory_item', 'attachment', 'campaign_library_monster',
+]);
+export type LibraryEntityType = z.infer<typeof LibraryEntityType>;
+
+const LibraryName = z.string().trim().min(1).max(120);
+const LibraryAliases = z.array(LibraryName).max(30).default([]);
+const LibraryColor = z.string().regex(/^#[0-9a-fA-F]{6}$/, 'color must be a #RRGGBB value').default('#64748b');
+export const CampaignLibraryTag = z.object({
+  id: Id, campaignId: Id, name: LibraryName, aliases: LibraryAliases, color: LibraryColor,
+  description: z.string().max(2000).default(''), parentTagId: Id.nullable().default(null), createdAt: IsoDate, updatedAt: IsoDate,
+});
+export type CampaignLibraryTag = z.infer<typeof CampaignLibraryTag>;
+export const CampaignLibraryTagCreate = CampaignLibraryTag.pick({ name: true, aliases: true, color: true, description: true, parentTagId: true }).partial({ aliases: true, color: true, description: true, parentTagId: true });
+export const CampaignLibraryTagUpdate = CampaignLibraryTagCreate.partial();
+export type CampaignLibraryTagCreate = z.infer<typeof CampaignLibraryTagCreate>;
+export type CampaignLibraryTagUpdate = z.infer<typeof CampaignLibraryTagUpdate>;
+
+export const CampaignLibraryCollection = z.object({
+  id: Id, campaignId: Id, name: LibraryName, aliases: LibraryAliases, color: LibraryColor,
+  description: z.string().max(2000).default(''), parentCollectionId: Id.nullable().default(null), createdAt: IsoDate, updatedAt: IsoDate,
+});
+export type CampaignLibraryCollection = z.infer<typeof CampaignLibraryCollection>;
+export const CampaignLibraryCollectionCreate = CampaignLibraryCollection.pick({ name: true, aliases: true, color: true, description: true, parentCollectionId: true }).partial({ aliases: true, color: true, description: true, parentCollectionId: true });
+export const CampaignLibraryCollectionUpdate = CampaignLibraryCollectionCreate.partial();
+export type CampaignLibraryCollectionCreate = z.infer<typeof CampaignLibraryCollectionCreate>;
+export type CampaignLibraryCollectionUpdate = z.infer<typeof CampaignLibraryCollectionUpdate>;
+
+export const LibraryEntityRef = z.object({ entityType: LibraryEntityType, entityId: Id });
+export type LibraryEntityRef = z.infer<typeof LibraryEntityRef>;
+const LibraryBulkTargets = z.array(LibraryEntityRef).min(1).max(500).superRefine((items, ctx) => {
+  const seen = new Set<string>();
+  items.forEach((item, index) => { const key = `${item.entityType}:${item.entityId}`; if (seen.has(key)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [index], message: 'targets must be unique' }); seen.add(key); });
+});
+export const LibraryBulkOperation = z.enum(['add_tag', 'remove_tag', 'add_collection', 'remove_collection', 'move_collection', 'set_visibility', 'set_status', 'move_inventory_owner', 'archive', 'restore']);
+/** Discriminated so an action can never receive ambiguous or ignored fields. */
+const LibraryBulkRequestBase = z.discriminatedUnion('operation', [
+  z.object({ operation: z.literal('add_tag'), targets: LibraryBulkTargets, taxonomyId: Id }).strict(),
+  z.object({ operation: z.literal('remove_tag'), targets: LibraryBulkTargets, taxonomyId: Id }).strict(),
+  z.object({ operation: z.literal('add_collection'), targets: LibraryBulkTargets, taxonomyId: Id }).strict(),
+  z.object({ operation: z.literal('remove_collection'), targets: LibraryBulkTargets, taxonomyId: Id }).strict(),
+  z.object({ operation: z.literal('move_collection'), targets: LibraryBulkTargets, taxonomyId: Id }).strict(),
+  z.object({ operation: z.literal('set_visibility'), targets: LibraryBulkTargets, visibility: z.enum(['public', 'hidden']) }).strict(),
+  z.object({ operation: z.literal('set_status'), targets: LibraryBulkTargets, status: z.string().trim().min(1).max(80) }).strict(),
+  z.object({ operation: z.literal('move_inventory_owner'), targets: LibraryBulkTargets, ownerType: z.enum(['party', 'character']), characterId: Id.nullable().optional() }).strict(),
+  z.object({ operation: z.literal('archive'), targets: LibraryBulkTargets }).strict(),
+  z.object({ operation: z.literal('restore'), targets: LibraryBulkTargets }).strict(),
+]);
+export const LibraryBulkRequest = LibraryBulkRequestBase.superRefine((value, ctx) => {
+  if (value.operation !== 'move_inventory_owner') return;
+  if (value.ownerType === 'character' && value.characterId == null) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['characterId'], message: 'characterId is required for character ownership' });
+  if (value.ownerType === 'party' && value.characterId != null) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['characterId'], message: 'party ownership cannot include characterId' });
+});
+export type LibraryBulkRequest = z.infer<typeof LibraryBulkRequest>;
+export const LibraryBulkResult = z.object({ operationId: Id, applied: z.number().int().nonnegative(), undoAvailable: z.boolean() });
+export type LibraryBulkResult = z.infer<typeof LibraryBulkResult>;
+export const LibraryEntitySummary = z.object({ entityType: LibraryEntityType, entityId: Id, name: z.string(), description: z.string().default(''), visibility: z.string().nullable().default(null), status: z.string().nullable().default(null), owner: z.string().nullable().default(null), tags: z.array(CampaignLibraryTag), collections: z.array(CampaignLibraryCollection) });
+export type LibraryEntitySummary = z.infer<typeof LibraryEntitySummary>;
+export const LibraryFacet = z.object({ id: z.union([Id, z.string()]), label: z.string(), count: z.number().int().nonnegative() });
+export const LibrarySearchPage = z.object({ items: z.array(LibraryEntitySummary), total: z.number().int().nonnegative(), limit: z.number().int().positive(), offset: z.number().int().nonnegative(), facets: z.object({ types: z.array(LibraryFacet), tags: z.array(LibraryFacet), collections: z.array(LibraryFacet), visibility: z.array(LibraryFacet), status: z.array(LibraryFacet) }) });
+export type LibrarySearchPage = z.infer<typeof LibrarySearchPage>;
+export const LibrarySearchQuery = z.object({ q: z.string().trim().max(200).optional(), type: LibraryEntityType.optional(), tagId: z.coerce.number().int().positive().optional(), collectionId: z.coerce.number().int().positive().optional(), visibility: z.enum(['public', 'hidden']).optional(), status: z.string().trim().max(80).optional(), owner: z.string().trim().max(120).optional(), limit: z.coerce.number().int().min(1).max(100).default(50), offset: z.coerce.number().int().min(0).default(0) }).strict();
+export const CampaignLibraryTemplate = z.object({ id: Id, campaignId: Id, entityType: LibraryEntityType, name: LibraryName, description: z.string().max(2000).default(''), snapshot: z.unknown(), sourceEntityId: Id.nullable().default(null), archivedAt: IsoDate.nullable().default(null), createdAt: IsoDate, updatedAt: IsoDate });
+export type CampaignLibraryTemplate = z.infer<typeof CampaignLibraryTemplate>;
+export const CampaignLibraryTemplateSave = z.object({ entityType: LibraryEntityType, entityId: Id, name: LibraryName, description: z.string().max(2000).default('') }).strict();
+export type CampaignLibraryTemplateSave = z.infer<typeof CampaignLibraryTemplateSave>;
+export const CampaignLibraryTemplateInstantiate = z.object({ name: LibraryName.optional(), refs: z.record(z.string().max(80), Id).default({}) }).strict();
+export type CampaignLibraryTemplateInstantiate = z.infer<typeof CampaignLibraryTemplateInstantiate>;

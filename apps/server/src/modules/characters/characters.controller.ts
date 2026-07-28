@@ -9,7 +9,7 @@ import { ProposalRecordsService } from '../proposals/proposal-records.service';
 import { requireWriteMode } from '../../common/proposed.util';
 import { Proposable } from '../../common/decorators/proposable.decorator';
 import { CharactersService } from './characters.service';
-import { CharacterCreateDto, CharacterUpdateDto, HpPatchDto, ConditionsPatchDto, SpellSlotPatchDto, ResourcePatchDto, XpPatchDto, XpAwardDto, LevelUpDto, DdbCharacterImportDto, CheckRollRequestDto, CheckRequestCreateDto, RestPatchDto } from './characters.dto';
+import { CharacterCreateDto, CharacterUpdateDto, HpPatchDto, ConditionsPatchDto, ConditionLevelPatchDto, SpellSlotPatchDto, ResourcePatchDto, XpPatchDto, XpAwardDto, LevelUpDto, DdbCharacterImportDto, CheckRollRequestDto, CheckRequestCreateDto, RestPatchDto } from './characters.dto';
 
 @ApiTags('characters')
 @Controller('campaigns/:campaignId/characters')
@@ -242,6 +242,30 @@ export class CharactersController {
     const row = await this.characters.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'player');
     return this.characters.patchConditions(id, body, user, role);
+  }
+
+  @Post(':id/conditions/level')
+  @ApiOperation({
+    summary: "Raise or lower a leveled condition track's level (issue #1643)",
+    description:
+      "dm or the owning player. For the ONE condition the campaign's rule system tracks as an escalating level " +
+      "(5e Exhaustion, 1-6) rather than a plain present/absent flag — see GET :id/resource-vocabulary's sibling " +
+      "concept for resources. Body is { name, delta?, level? }: delta adjusts relative to the current level, level " +
+      'sets it absolutely (applied first when both are sent). Resulting level outside [0, the track\'s max] is a ' +
+      "400, never a silent clamp. Level 0 removes the condition entirely. A `name` that is not this campaign's " +
+      "leveled track (including every name on a system with none, e.g. PF2e) is also a 400 — unlike POST " +
+      ':id/conditions, this endpoint does not create an arbitrary custom condition.',
+  })
+  @ApiResponse({ status: 201, description: 'Updated character.' })
+  @ApiResponse({ status: 400, description: "Not this system's leveled condition, or the result is outside [0, max]." })
+  async patchConditionLevel(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: ConditionLevelPatchDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const row = await this.characters.getRowOrThrow(id);
+    const role = await this.access.requireRole(user, row.campaignId, 'player');
+    return this.characters.adjustConditionLevel(id, body, user, role);
   }
 
   @Get(':id/checks')

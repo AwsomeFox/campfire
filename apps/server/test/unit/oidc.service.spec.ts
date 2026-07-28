@@ -149,4 +149,26 @@ describe('OidcService diagnostics (issue #848)', () => {
     expect(latest?.kind).toBe('e2e');
     expect(latest?.ok).toBe(false);
   });
+
+  it('testConnection reports a non-JSON discovery response without leaking raw parser errors (issue #1612)', async () => {
+    const mockedFetch = jest.spyOn(global, 'fetch').mockResolvedValue(
+      new Response('<html><body>Sign in</body></html>', {
+        status: 200,
+        headers: { 'content-type': 'text/html; charset=utf-8' },
+      }),
+    );
+    try {
+      const result = await service.testConnection({ issuer: 'https://idp.example.com' });
+      expect(result.ok).toBe(false);
+      expect(result.message).toMatch(/non-JSON response/);
+      expect(result.message).not.toMatch(/Unexpected token/);
+      expect(result.message).toMatch(/text\/html/);
+      expect(result.message).toMatch(/33 bytes/);
+      expect(result.checks.discovery.status).toBe('fail');
+      expect(result.checks.discovery.message).toMatch(/non-JSON response/);
+      expect(result.checks.discovery.message).not.toMatch(/Unexpected token/);
+    } finally {
+      mockedFetch.mockRestore();
+    }
+  });
 });

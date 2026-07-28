@@ -28,8 +28,18 @@ import { DetailPageWayfinding } from '../../components/DetailPageWayfinding';
 import { CharacterSheetNav } from './CharacterSheetNav';
 import { CHARACTER_SHEET_SECTION_LABEL, characterSheetSectionId } from './characterSheetTabs';
 import { useCharacterSheetTab } from './useCharacterSheetTab';
-import type { Attachment, Character, CharacterAction, CampaignMember, CharacterStatus, SkillRank, AdapterResourceDef } from '@campfire/schema';
+import type {
+  Attachment,
+  Character,
+  CharacterAction,
+  CampaignMember,
+  CharacterStatus,
+  SkillRank,
+  LeveledConditionTrack,
+  AdapterResourceDef,
+} from '@campfire/schema';
 import { abilityLabelForAdapter, xpProgressForCharacter, ruleSystemAdapter, type RuleSystemAdapter } from '@campfire/schema';
+import { findLeveledConditionTrack, conditionLevel } from './leveledCondition';
 import { CHARACTER_STATUSES, STATUS_LABEL, StatusTag } from './status';
 import { api, API, ApiError } from '../../lib/api';
 import {
@@ -48,6 +58,7 @@ import {
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { useCampaign } from '../../app/CampaignContext';
 import { Card, Chip, Btn, TextInput, TextArea, ErrorNote, HpBar } from '../../components/ui';
+import { useTranslation } from 'react-i18next';
 import { CharacterDetailLoadingSkeleton } from './CharacterDetailLoadingSkeleton';
 import { Field } from '../../components/Field';
 import {
@@ -120,7 +131,6 @@ import {
   skillProficiencyLabel,
 } from './characterSheetA11y';
 import { useFormattingLocale } from '../../lib/format';
-import { useTranslation } from 'react-i18next';
 import { findSpecialResource, resourceAvailability } from './specialCharacterResource';
 
 export default function CharacterPage() {
@@ -254,6 +264,9 @@ export default function CharacterPage() {
   const showSavingThrowEditor = adapter.characterSheet?.supportsSavingThrowEditor ?? true;
   const showSkillEditor = adapter.characterSheet?.supportsSkillEditor ?? true;
   const showSpellSlotEditor = adapter.characterSheet?.supportsSpellSlotEditor ?? true;
+  // Issue #1643: whichever leveled condition track (if any) THIS campaign's adapter
+  // declares — 5e Exhaustion, or nothing for a system with none (PF2e). Never assumed.
+  const leveledConditionTrack = findLeveledConditionTrack(adapter);
   // Issue #1642: whichever of the two special counted resources THIS campaign's adapter
   // actually declares (5e `inspiration`, PF2e `heroPoints`, or neither) — never assumed.
   // A system declaring neither renders nothing here; see specialCharacterResource.ts.
@@ -502,7 +515,23 @@ export default function CharacterPage() {
         >
           <Card className="space-y-2.5">
             <p className="card-kicker mb-0">Conditions</p>
-            <ConditionsRow character={character} canEdit={canEdit} onChange={load} onError={setActionError} adapter={adapter} />
+            {leveledConditionTrack && (
+              <ConditionLevelRow
+                character={character}
+                canEdit={canEdit}
+                onChange={load}
+                onError={setActionError}
+                track={leveledConditionTrack}
+              />
+            )}
+            <ConditionsRow
+              character={character}
+              canEdit={canEdit}
+              onChange={load}
+              onError={setActionError}
+              adapter={adapter}
+              excludeName={leveledConditionTrack?.name}
+            />
           </Card>
         </section>
 
@@ -2183,18 +2212,86 @@ function HpEditor({
   );
 }
 
+/**
+ * Issue #1643 — the campaign's leveled condition track (5e Exhaustion, levels 1-6), shown
+ * as a level with +/- controls rather than a plain add/remove chip (`ConditionsRow` below,
+ * which drops this name from its own list once this renders — see its `excludeName` doc
+ * comment). Only rendered at all when `findLeveledConditionTrack` found one for this
+ * campaign's adapter — a system with none (PF2e) never reaches this component.
+ */
+function ConditionLevelRow({
+  character,
+  canEdit,
+  onChange,
+  onError,
+  track,
+}: SheetCardProps & { track: LeveledConditionTrack }) {
+  const { t } = useTranslation();
+  const [busy, setBusy] = useState(false);
+  const level = conditionLevel(track, character);
+
+  async function adjust(delta: number) {
+    if (busy) return;
+    setBusy(true);
+    onError(null);
+    try {
+      await api.post(`${API}/characters/${character.id}/conditions/level`, { name: track.name, delta });
+      onChange();
+    } catch (err) {
+      onError(err instanceof ApiError ? err.message : t('characters.conditionLevel.updateError', { name: track.name }));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-2.5 flex-wrap">
+      <span className="text-[11px] text-secondary font-bold uppercase">{track.name}</span>
+      <span
+        className="tracking-[3px] text-[15px] leading-none"
+        aria-label={t('characters.conditionLevel.level', { level, max: track.max, name: track.name })}
+      >
+        {Array.from({ length: track.max }, (_, i) => (
+          <span key={i} style={{ color: i < level ? 'var(--color-accent-300)' : 'var(--color-text-disabled)' }}>
+            {i < level ? '●' : '○'}
+          </span>
+        ))}
+      </span>
+      <span className="text-[11px] text-secondary">{t('characters.conditionLevel.count', { level, max: track.max })}</span>
+      {canEdit && (
+        <span className="inline-flex gap-1 ml-auto">
+          <Btn ghost className="!min-h-0 !py-1 text-xs" disabled={busy || level === 0} onClick={() => void adjust(-1)}>
+            {t('characters.conditionLevel.lower')}
+          </Btn>
+          <Btn ghost className="!min-h-0 !py-1 text-xs" disabled={busy || level >= track.max} onClick={() => void adjust(1)}>
+            {t('characters.conditionLevel.raise')}
+          </Btn>
+        </span>
+      )}
+    </div>
+  );
+}
+
 function ConditionsRow({
   character,
   canEdit,
   onChange,
   onError,
   adapter,
+  excludeName,
 }: {
   character: Character;
   canEdit: boolean;
   onChange: () => void;
   onError: (msg: string | null) => void;
   adapter: RuleSystemAdapter;
+  /**
+   * Issue #1643: the campaign's leveled condition track's name (5e "Exhaustion"), if any —
+   * it gets its OWN level widget (`ConditionLevelRow`) above this list, so it is dropped
+   * from the plain add/remove chip row here to avoid showing it twice with two different,
+   * disagreeing controls (a bare-name remove here would wipe the level with no warning).
+   */
+  excludeName?: string;
 }) {
   const [adding, setAdding] = useState(false);
   const [value, setValue] = useState('');
@@ -2237,9 +2334,18 @@ function ConditionsRow({
     }
   }
 
+  const excludeKey = excludeName?.trim().toLowerCase();
+  const visibleConditions = excludeKey ? character.conditions.filter((c) => c.trim().toLowerCase() !== excludeKey) : character.conditions;
+  // Issue #1643 review (Codex): the leveled track (e.g. Exhaustion) is excluded from this
+  // list because it has its own widget above, NOT because it isn't active — so when it's the
+  // ONLY condition on the sheet, `visibleConditions` goes empty and this used to print "None
+  // — feeling fine." directly under an active "Exhaustion 3", visibly contradicting itself.
+  // Gate the empty state on whether the excluded track is ALSO inactive.
+  const excludedTrackActive = excludeKey ? character.conditions.some((c) => c.trim().toLowerCase() === excludeKey) : false;
+
   return (
     <div className="flex items-center gap-1.5 flex-wrap">
-      {character.conditions.map((cond) => (
+      {visibleConditions.map((cond) => (
         <span key={cond} className="tag tag-outline" style={{ gap: 6 }}>
           {cond}
           {canEdit && (
@@ -2263,7 +2369,9 @@ function ConditionsRow({
           )}
         </span>
       ))}
-      {character.conditions.length === 0 && <span className="text-muted text-xs">None — feeling fine.</span>}
+      {visibleConditions.length === 0 && !excludedTrackActive && (
+        <span className="text-muted text-xs">None — feeling fine.</span>
+      )}
       {canEdit &&
         (adding ? (
           <form

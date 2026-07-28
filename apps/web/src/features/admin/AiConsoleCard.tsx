@@ -1,4 +1,3 @@
-import { useTranslation } from 'react-i18next';
 /**
  * Admin AI console (issue #315) — the server-admin cockpit over the AI program
  * (epic #308), rendered on /admin. One card that surfaces and drives:
@@ -10,13 +9,26 @@ import { useTranslation } from 'react-i18next';
  *   - a provider-health "test all".
  *
  * All backed by /settings/ai/* (admin-only). No key or raw prompt is ever shown.
+ *
+ * i18n (#1579): every literal here now routes through `t()`. Before this pass, all
+ * four subcomponents called `useTranslation()` and destructured `t`, but only ever
+ * passed it into `translateApiError()` — never called directly — so the card's OWN
+ * copy (the card title, section headings, and button labels) stayed hardcoded
+ * English while `CostDisclosure`/`AiPricingEditor` next to it were already
+ * localized. That mixed state is the bug: a reader in `ar` got some lines in Arabic
+ * and some in English on the same card, which reads as broken rather than as
+ * "not translated yet". `validateAllowlistDraft` now returns translation keys +
+ * params instead of formatted English prose, since it runs outside any component
+ * and has no `t` to call.
  */
+import { useTranslation, Trans } from 'react-i18next';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { AiConsoleOverview, AiProviderHealthEntry } from '@campfire/schema';
-import { api, API, translateApiError } from '../../lib/api';
+import { api, API, ApiError, translateApiError } from '../../lib/api';
 import { Card, Btn, TextInput, Skeleton, ErrorNote } from '../../components/ui';
 import { ProviderForm } from '../settings/ProviderForm';
 import { AiPricingEditor } from './AiPricingEditor';
+import { useSaveFeedback } from '../../components/SaveFeedback';
 
 function fmt(n: number): string {
   return n.toLocaleString();
@@ -25,9 +37,15 @@ function fmt(n: number): string {
 const ALLOWLIST_MAX_MODELS = 200;
 const ALLOWLIST_MAX_MODEL_ID_LENGTH = 120;
 
+/** One allowlist validation finding as a translation KEY + params, never as prose (matches AiPricingEditor's `RowError`). */
+interface AllowlistError {
+  key: string;
+  params: Record<string, string | number>;
+}
+
 type AllowlistDraftValidation = {
   allowedModels: string[];
-  errors: string[];
+  errors: AllowlistError[];
 };
 
 function validateAllowlistDraft(text: string): AllowlistDraftValidation {
@@ -35,30 +53,31 @@ function validateAllowlistDraft(text: string): AllowlistDraftValidation {
     .split(/[\n,]/)
     .map((value) => value.trim())
     .filter(Boolean);
-  const errors: string[] = [];
+  const errors: AllowlistError[] = [];
   const firstEntryByModel = new Map<string, number>();
 
   allowedModels.forEach((model, index) => {
     const entryNumber = index + 1;
     if (model.length > ALLOWLIST_MAX_MODEL_ID_LENGTH) {
-      errors.push(
-        `Entry ${entryNumber} is ${model.length} characters; model IDs can be at most ${ALLOWLIST_MAX_MODEL_ID_LENGTH} characters.`,
-      );
+      errors.push({
+        key: 'admin.aiConsole.allowlist.errEntryLength',
+        params: { n: entryNumber, length: model.length, max: ALLOWLIST_MAX_MODEL_ID_LENGTH },
+      });
     }
     if (/\s/.test(model)) {
-      errors.push(`Entry ${entryNumber} contains whitespace. Separate model IDs with a comma or line break.`);
+      errors.push({ key: 'admin.aiConsole.allowlist.errWhitespace', params: { n: entryNumber } });
     }
 
     const firstEntry = firstEntryByModel.get(model);
     if (firstEntry !== undefined) {
-      errors.push(`Entry ${entryNumber} duplicates entry ${firstEntry}: “${model}”.`);
+      errors.push({ key: 'admin.aiConsole.allowlist.errDuplicate', params: { n: entryNumber, first: firstEntry, model } });
     } else {
       firstEntryByModel.set(model, entryNumber);
     }
   });
 
   if (allowedModels.length > ALLOWLIST_MAX_MODELS) {
-    errors.push(`The allowlist has ${allowedModels.length} entries; it can contain at most ${ALLOWLIST_MAX_MODELS}.`);
+    errors.push({ key: 'admin.aiConsole.allowlist.errTooMany', params: { n: allowedModels.length, max: ALLOWLIST_MAX_MODELS } });
   }
 
   return { allowedModels, errors };
@@ -75,9 +94,9 @@ export function AiConsoleCard() {
     try {
       setOv(await api.get<AiConsoleOverview>(`${API}/settings/ai`));
     } catch (err) {
-      setError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
+      setError(translateApiError(err, t, { fallbackKey: 'admin.errors.loadAiConsole' }));
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     void load();
@@ -90,7 +109,7 @@ export function AiConsoleCard() {
     try {
       setOv(await api.post<AiConsoleOverview>(`${API}/settings/ai/kill`, { enabled: !ov.killSwitchEnabled }));
     } catch (err) {
-      setError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
+      setError(translateApiError(err, t, { fallbackKey: 'admin.errors.toggleKillSwitch' }));
     } finally {
       setBusy(false);
     }
@@ -99,10 +118,10 @@ export function AiConsoleCard() {
   return (
     <Card className="space-y-4">
       <div className="flex items-center justify-between border-b border-slate-700 pb-2">
-        <h2 className="font-bold text-white text-sm">AI console</h2>
+        <h2 className="font-bold text-white text-sm">{t('admin.aiConsole.title')}</h2>
         {ov && (
           <span className={`cf-chip ${ov.killSwitchEnabled ? 'cf-chip-completed' : 'cf-chip-failed'}`}>
-            {ov.killSwitchEnabled ? 'AI enabled' : 'AI paused'}
+            {ov.killSwitchEnabled ? t('admin.aiConsole.statusEnabled') : t('admin.aiConsole.statusPaused')}
           </span>
         )}
       </div>
@@ -114,18 +133,17 @@ export function AiConsoleCard() {
       ) : (
         <>
           <p className="text-[11px] text-secondary">
-            Opt in, cap spend, watch usage, and stop everything with one switch. The kill switch pauses{' '}
-            <strong>all</strong> AI server-wide instantly — no new turn can start while it&apos;s off.
+            <Trans i18nKey="admin.aiConsole.intro" components={[<strong key="all" />]} />
           </p>
 
           {/* Kill switch */}
           <div className="cf-inset p-3.5 flex items-center justify-between gap-3 flex-wrap">
             <div>
-              <p className="text-sm font-semibold text-white">Server-wide AI</p>
+              <p className="text-sm font-semibold text-white">{t('admin.aiConsole.killSwitch.heading')}</p>
               <p className="text-[11px] text-secondary">
                 {ov.killSwitchEnabled
-                  ? 'AI is enabled. Turn this off to pause every campaign immediately.'
-                  : 'AI is paused server-wide. Turn on to opt the server in.'}
+                  ? t('admin.aiConsole.killSwitch.enabledBody')
+                  : t('admin.aiConsole.killSwitch.pausedBody')}
               </p>
             </div>
             <button
@@ -136,7 +154,7 @@ export function AiConsoleCard() {
               disabled={busy}
               className={`cf-btn cf-density-compact text-xs ${ov.killSwitchEnabled ? '' : '!bg-rose-600 !border-rose-500'}`}
             >
-              {ov.killSwitchEnabled ? 'On — click to pause' : 'Paused — click to enable'}
+              {ov.killSwitchEnabled ? t('admin.aiConsole.killSwitch.onButton') : t('admin.aiConsole.killSwitch.offButton')}
             </button>
           </div>
 
@@ -144,13 +162,13 @@ export function AiConsoleCard() {
           <UsageSummary ov={ov} />
 
           {/* Budgets & caps */}
-          <CapsEditor ov={ov} onSaved={setOv} onError={setError} />
+          <CapsEditor ov={ov} onSaved={setOv} />
 
           {/* Default AI provider + write-only key (issue #399) — the fallback every campaign inherits. */}
           <ProviderDefaultSection ov={ov} onChanged={load} />
 
           {/* Model allowlist — kept next to the provider it constrains. */}
-          <AllowlistEditor ov={ov} onSaved={setOv} onError={setError} />
+          <AllowlistEditor ov={ov} onSaved={setOv} />
           {/* #1065 — model pricing sits next to the allowlist: both are admin-owned facts
               about models that every campaign resolves against. */}
           <AiPricingEditor onError={setError} />
@@ -167,20 +185,21 @@ export function AiConsoleCard() {
 }
 
 function UsageSummary({ ov }: { ov: AiConsoleOverview }) {
+  const { t } = useTranslation();
   const u = ov.usage;
   return (
     <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-      <Stat label="Tokens used" value={fmt(u.totalTokensUsed)} />
-      <Stat label="Turns" value={fmt(u.totalTurns)} />
-      <Stat label="Active seats" value={`${u.activeSeatCount} / ${u.seatCount}`} />
+      <Stat label={t('admin.aiConsole.usage.tokensUsed')} value={fmt(u.totalTokensUsed)} />
+      <Stat label={t('admin.aiConsole.usage.turns')} value={fmt(u.totalTurns)} />
+      <Stat label={t('admin.aiConsole.usage.activeSeats')} value={`${u.activeSeatCount} / ${u.seatCount}`} />
       <Stat
-        label="Server cap"
+        label={t('admin.aiConsole.usage.serverCap')}
         value={
           u.serverTokenCap > 0
-            ? `${fmt(u.serverBudgetRemaining ?? 0)} left`
-            : 'Unlimited'
+            ? t('admin.aiConsole.usage.leftSuffix', { n: fmt(u.serverBudgetRemaining ?? 0) })
+            : t('admin.aiConsole.usage.unlimited')
         }
-        sub={u.serverTokenCap > 0 ? `of ${fmt(u.serverTokenCap)}` : undefined}
+        sub={u.serverTokenCap > 0 ? t('admin.aiConsole.usage.ofTotal', { n: fmt(u.serverTokenCap) }) : undefined}
       />
     </div>
   );
@@ -199,16 +218,14 @@ function Stat({ label, value, sub }: { label: string; value: string; sub?: strin
 function CapsEditor({
   ov,
   onSaved,
-  onError,
 }: {
   ov: AiConsoleOverview;
   onSaved: (o: AiConsoleOverview) => void;
-  onError: (msg: string | null) => void;
 }) {
   const { t } = useTranslation();
   const [cap, setCap] = useState(String(ov.serverTokenCap));
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
+  const feedback = useSaveFeedback(t('admin.aiConsole.caps.feedbackSubject'));
+  const saving = feedback.state === 'saving';
 
   useEffect(() => {
     setCap(String(ov.serverTokenCap));
@@ -216,41 +233,40 @@ function CapsEditor({
 
   async function save() {
     const n = Math.max(0, Math.floor(Number(cap) || 0));
-    setSaving(true);
-    onError(null);
-    setSaved(false);
+    if (saving) return;
+    feedback.begin();
     try {
       onSaved(await api.put<AiConsoleOverview>(`${API}/settings/ai/caps`, { serverTokenCap: n }));
-      setSaved(true);
-      setTimeout(() => setSaved(false), 1500);
+      feedback.succeed();
     } catch (err) {
-      onError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
-    } finally {
-      setSaving(false);
+      feedback.fail(translateApiError(err, t, { fallbackKey: 'admin.errors.saveCap' }), {
+        generic: !(err instanceof ApiError) || (!err.code && !err.message),
+      });
     }
   }
 
   return (
     <div className="cf-inset p-3.5 space-y-2">
-      <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">Budgets &amp; cost caps</p>
+      <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">{t('admin.aiConsole.caps.heading')}</p>
       <p className="text-[11px] text-secondary">
-        A server-wide <strong>hard</strong> token cap across every campaign. 0 = unlimited. Once the total metered
-        tokens reach it, new turns are refused with a clear reason (per-campaign budgets are set per row below).
+        <Trans i18nKey="admin.aiConsole.caps.body" components={[<strong key="hard" />]} />
       </p>
       <div className="flex items-end gap-2 flex-wrap">
         <label className="block">
-          <span className="text-[10px] uppercase tracking-widest text-secondary font-bold">Server token cap</span>
+          <span className="text-[10px] uppercase tracking-widest text-secondary font-bold">{t('admin.aiConsole.caps.label')}</span>
           <TextInput
             className="!min-h-0 !py-2 text-sm mt-1 w-40"
             type="number"
             min={0}
             value={cap}
-            onChange={(e) => setCap(e.target.value)}
+            aria-describedby={feedback.statusId}
+            disabled={saving}
+            onChange={(e) => { const value = e.target.value; setCap(value); feedback.syncDirty(value !== String(ov.serverTokenCap)); }}
           />
         </label>
-        {saved && <span className="text-xs text-emerald-400 mb-2">Saved.</span>}
+        {feedback.announcement}
         <Btn className="!min-h-0 !py-1.5 text-xs mb-0.5" onClick={save} disabled={saving}>
-          {saving ? 'Saving…' : 'Save cap'}
+          {saving ? t('common.saving') : t('admin.aiConsole.caps.save')}
         </Btn>
       </div>
     </div>
@@ -258,20 +274,19 @@ function CapsEditor({
 }
 
 function ProviderDefaultSection({ ov, onChanged }: { ov: AiConsoleOverview; onChanged: () => void }) {
+  const { t } = useTranslation();
   return (
     <div className="cf-inset p-3.5 space-y-2">
       <div className="flex items-center justify-between gap-2 flex-wrap">
-        <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">Default AI provider</p>
+        <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">{t('admin.aiConsole.providerDefault.heading')}</p>
         <span className={`cf-chip ${ov.serverProviderReady ? 'cf-chip-completed' : 'cf-chip-private'}`}>
           {ov.serverProviderConfigured
-            ? `${ov.serverProviderReady ? 'Ready' : 'Credential missing'}${ov.serverProviderType ? ` · ${ov.serverProviderType}` : ''}`
-            : 'Not set'}
+            ? `${ov.serverProviderReady ? t('admin.aiConsole.providerDefault.ready') : t('admin.aiConsole.providerDefault.credentialMissing')}${ov.serverProviderType ? ` · ${ov.serverProviderType}` : ''}`
+            : t('admin.aiConsole.providerDefault.notSet')}
         </span>
       </div>
       <p className="text-[11px] text-secondary">
-        One set of credentials, one bill. This is the server default every campaign falls back to unless a DM sets a
-        per-campaign override. The API key is <strong>write-only</strong> — it is never shown back, only its last 4
-        digits. Setting it here is all a DM needs to run AI (no per-campaign key required).
+        <Trans i18nKey="admin.aiConsole.providerDefault.body" components={[<strong key="wo" />]} />
       </p>
       <ProviderForm basePath="/settings/ai-provider" scope="server" onChanged={onChanged} />
     </div>
@@ -281,17 +296,15 @@ function ProviderDefaultSection({ ov, onChanged }: { ov: AiConsoleOverview; onCh
 function AllowlistEditor({
   ov,
   onSaved,
-  onError,
 }: {
   ov: AiConsoleOverview;
   onSaved: (o: AiConsoleOverview) => void;
-  onError: (msg: string | null) => void;
 }) {
   const { t } = useTranslation();
   const savedText = ov.allowedModels.join('\n');
   const [text, setText] = useState(savedText);
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
+  const feedback = useSaveFeedback(t('admin.aiConsole.allowlist.feedbackSubject'));
+  const saving = feedback.state === 'saving';
   const validation = useMemo(() => validateAllowlistDraft(text), [text]);
   const hasErrors = validation.errors.length > 0;
   const inputId = 'ai-allowed-model-ids';
@@ -305,50 +318,49 @@ function AllowlistEditor({
 
   async function save() {
     if (hasErrors) return;
-    setSaving(true);
-    onError(null);
-    setSaved(false);
+    if (saving) return;
+    feedback.begin();
     try {
       onSaved(
         await api.put<AiConsoleOverview>(`${API}/settings/ai/allowlist`, {
           allowedModels: validation.allowedModels,
         }),
       );
-      setSaved(true);
-      setTimeout(() => setSaved(false), 1500);
+      feedback.succeed();
     } catch (err) {
-      onError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
-    } finally {
-      setSaving(false);
+      feedback.fail(translateApiError(err, t, { fallbackKey: 'admin.errors.saveAllowlist' }), {
+        generic: !(err instanceof ApiError) || (!err.code && !err.message),
+      });
     }
   }
 
   return (
     <div className="cf-inset p-3.5 space-y-2 min-w-0" data-testid="ai-model-allowlist">
       <div className="flex items-center justify-between gap-2 flex-wrap">
-        <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">Model allowlist</p>
+        <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">{t('admin.aiConsole.allowlist.heading')}</p>
         <p
           id={effectiveStateId}
           role="status"
           aria-live="polite"
-          aria-label="Effective allowlist state"
+          aria-label={t('admin.aiConsole.allowlist.effectiveAriaLabel')}
           className="text-[11px] text-slate-400"
         >
-          <span className="font-semibold text-slate-300">Effective state:</span>{' '}
+          <span className="font-semibold text-slate-300">{t('admin.aiConsole.allowlist.effectiveLabel')}</span>{' '}
           {ov.allowedModels.length === 0
-            ? 'Unrestricted — any model ID is allowed.'
-            : `Restricted to ${ov.allowedModels.length} model ${ov.allowedModels.length === 1 ? 'ID' : 'IDs'}.`}
+            ? t('admin.aiConsole.allowlist.unrestricted')
+            : ov.allowedModels.length === 1
+              ? t('admin.aiConsole.allowlist.restrictedOne')
+              : t('admin.aiConsole.allowlist.restrictedSome', { n: ov.allowedModels.length })}
         </p>
       </div>
       <p className="text-[11px] text-slate-400">
-        When restricted, campaign provider overrides may only select a model on this list. Requires a configured
-        server-default provider.
+        {t('admin.aiConsole.allowlist.body')}
       </p>
       <label htmlFor={inputId} className="block text-[10px] uppercase tracking-widest text-slate-400 font-bold">
-        Allowed model IDs
+        {t('admin.aiConsole.allowlist.inputLabel')}
       </label>
       <p id={helpId} className="text-[11px] text-slate-400">
-        Separate model IDs with commas or line breaks. Leave blank to allow any model ID.
+        {t('admin.aiConsole.allowlist.help')}
       </p>
       <textarea
         id={inputId}
@@ -356,30 +368,31 @@ function AllowlistEditor({
         rows={3}
         placeholder="gpt-4o-mini&#10;claude-3-5-haiku"
         value={text}
-        aria-describedby={`${helpId}${hasErrors ? ` ${errorId}` : ''}`}
+        disabled={saving}
+        aria-describedby={`${helpId}${hasErrors ? ` ${errorId}` : ''} ${feedback.statusId}`}
         aria-invalid={hasErrors}
         aria-errormessage={hasErrors ? errorId : undefined}
         onChange={(e) => {
           setText(e.target.value);
-          setSaved(false);
+          feedback.syncDirty(e.target.value !== savedText);
         }}
       />
       {hasErrors && (
         <div id={errorId} role="alert" className="text-[11px] text-rose-400 min-w-0">
-          <p className="font-semibold">Fix the following before saving:</p>
+          <p className="font-semibold">{t('admin.aiConsole.allowlist.fixErrors')}</p>
           <ul className="list-disc pl-5 space-y-0.5">
-            {validation.errors.map((validationError) => (
-              <li key={validationError} className="break-words">
-                {validationError}
+            {validation.errors.map((validationError, i) => (
+              <li key={`${validationError.key}:${i}`} className="break-words">
+                {t(validationError.key, validationError.params)}
               </li>
             ))}
           </ul>
         </div>
       )}
       <div className="flex gap-2 justify-end items-center flex-wrap">
-        {saved && <span className="text-xs text-emerald-400 mr-auto">Saved.</span>}
+        {feedback.announcement}
         <Btn className="!min-h-0 !py-1.5 text-xs" onClick={save} disabled={saving || hasErrors}>
-          {saving ? 'Saving…' : 'Save allowlist'}
+          {saving ? t('common.saving') : t('admin.aiConsole.allowlist.save')}
         </Btn>
       </div>
     </div>
@@ -387,26 +400,27 @@ function AllowlistEditor({
 }
 
 function CampaignUsageTable({ ov }: { ov: AiConsoleOverview }) {
+  const { t } = useTranslation();
   const rows = ov.usage.byCampaign;
   if (rows.length === 0) {
     return (
       <p className="text-[11px] text-secondary">
-        No campaign has configured an AI-DM seat yet. Once a DM enables one, its usage and budget show up here.
+        {t('admin.aiConsole.usageTable.empty')}
       </p>
     );
   }
   return (
     <div className="space-y-2">
-      <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Usage by campaign</p>
+      <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{t('admin.aiConsole.usageTable.heading')}</p>
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
             <tr className="text-[10px] uppercase text-secondary text-left">
-              <th className="py-2 pr-4 font-bold">Campaign</th>
-              <th className="pr-4 font-bold">Model</th>
-              <th className="pr-4 font-bold">Seat</th>
-              <th className="pr-4 font-bold text-right">Used / budget</th>
-              <th className="pr-4 font-bold text-right">Turns</th>
+              <th className="py-2 pr-4 font-bold">{t('admin.aiConsole.usageTable.colCampaign')}</th>
+              <th className="pr-4 font-bold">{t('admin.aiConsole.usageTable.colModel')}</th>
+              <th className="pr-4 font-bold">{t('admin.aiConsole.usageTable.colSeat')}</th>
+              <th className="pr-4 font-bold text-right">{t('admin.aiConsole.usageTable.colUsedBudget')}</th>
+              <th className="pr-4 font-bold text-right">{t('admin.aiConsole.usageTable.colTurns')}</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-800">
@@ -419,18 +433,18 @@ function CampaignUsageTable({ ov }: { ov: AiConsoleOverview }) {
                   <td className="pr-4 text-slate-400">{r.model || <span className="text-secondary">—</span>}</td>
                   <td className="pr-4">
                     <span className={`cf-chip ${r.enabled ? 'cf-chip-completed' : 'cf-chip-private'}`}>
-                      {r.enabled ? 'On' : 'Off'}
+                      {r.enabled ? t('admin.aiConsole.usageTable.seatOn') : t('admin.aiConsole.usageTable.seatOff')}
                     </span>
                   </td>
                   <td className={`pr-4 text-right ${over ? 'text-rose-400' : 'text-slate-300'}`}>
                     <div>{fmt(r.tokensUsed)} / {r.tokenBudget > 0 ? fmt(r.tokenBudget) : '∞'}</div>
                     {(r.tokensReserved > 0 || r.tokensUnknown > 0 || r.tokensOverage > 0) && (
                       <div className="text-[10px] text-secondary">
-                        {r.tokensReserved > 0 ? `${fmt(r.tokensReserved)} reserved` : ''}
+                        {r.tokensReserved > 0 ? t('admin.aiConsole.usageTable.reservedSuffix', { n: fmt(r.tokensReserved) }) : ''}
                         {r.tokensReserved > 0 && (r.tokensUnknown > 0 || r.tokensOverage > 0) ? ' · ' : ''}
-                        {r.tokensUnknown > 0 ? `${fmt(r.tokensUnknown)} unknown` : ''}
+                        {r.tokensUnknown > 0 ? t('admin.aiConsole.usageTable.unknownSuffix', { n: fmt(r.tokensUnknown) }) : ''}
                         {r.tokensUnknown > 0 && r.tokensOverage > 0 ? ' · ' : ''}
-                        {r.tokensOverage > 0 ? `${fmt(r.tokensOverage)} overage` : ''}
+                        {r.tokensOverage > 0 ? t('admin.aiConsole.usageTable.overageSuffix', { n: fmt(r.tokensOverage) }) : ''}
                       </div>
                     )}
                   </td>
@@ -443,18 +457,17 @@ function CampaignUsageTable({ ov }: { ov: AiConsoleOverview }) {
       </div>
       {ov.usage.byModel.length > 0 && (
         <p className="text-[11px] text-secondary">
-          By model:{' '}
+          {t('admin.aiConsole.usageTable.byModel')}{' '}
           {ov.usage.byModel.map((m, i) => (
             <span key={m.model || `_${i}`}>
               {i > 0 && ' · '}
-              <span className="text-slate-300">{m.model || '(unset)'}</span> {fmt(m.tokensUsed)} tok
+              <span className="text-slate-300">{m.model || t('admin.aiConsole.usageTable.unsetModel')}</span> {t('admin.aiConsole.usageTable.tokensSuffix', { n: fmt(m.tokensUsed) })}
             </span>
           ))}
         </p>
       )}
       <p className="text-[11px] text-secondary">
-        Set a campaign&apos;s budget from its own AI-DM settings, or raise the server cap above. Usage aggregates the
-        per-turn metering, active reservations, and conservative unknown-usage holds.
+        {t('admin.aiConsole.usageTable.footnote')}
       </p>
     </div>
   );
@@ -471,7 +484,7 @@ function HealthPanel({ onError }: { onError: (msg: string | null) => void }) {
     try {
       setResults(await api.post<AiProviderHealthEntry[]>(`${API}/settings/ai/health`));
     } catch (err) {
-      onError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
+      onError(translateApiError(err, t, { fallbackKey: 'admin.errors.runHealthCheck' }));
     } finally {
       setTesting(false);
     }
@@ -480,13 +493,13 @@ function HealthPanel({ onError }: { onError: (msg: string | null) => void }) {
   return (
     <div className="cf-inset p-3.5 space-y-2">
       <div className="flex items-center justify-between">
-        <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">Provider health</p>
+        <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">{t('admin.aiConsole.health.heading')}</p>
         <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={testAll} disabled={testing}>
-          {testing ? 'Testing…' : 'Test all'}
+          {testing ? t('admin.aiConsole.health.testing') : t('admin.aiConsole.health.testAll')}
         </Btn>
       </div>
       {results && results.length === 0 && (
-        <p className="text-[11px] text-secondary">No AI provider is configured yet.</p>
+        <p className="text-[11px] text-secondary">{t('admin.aiConsole.health.none')}</p>
       )}
       {results && results.length > 0 && (
         <ul className="space-y-1">
@@ -494,7 +507,7 @@ function HealthPanel({ onError }: { onError: (msg: string | null) => void }) {
             <li key={`${r.scope}-${r.campaignId ?? 'server'}-${i}`} className="text-[11px] flex items-center gap-2">
               <span className={r.ok ? 'text-emerald-400' : 'text-rose-400'}>{r.ok ? '✓' : '✗'}</span>
               <span className="text-slate-300">
-                {r.scope === 'server' ? 'Server default' : r.campaignName}
+                {r.scope === 'server' ? t('admin.aiConsole.health.serverDefault') : r.campaignName}
               </span>
               <span className="text-secondary">·</span>
               <span className="text-secondary">

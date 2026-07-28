@@ -1004,8 +1004,9 @@ export class SchedulingService {
       // #588: a restore is a BOOKING, not merely a status flip.
       //
       // Cancelling RELEASES the resource — a cancelled row keeps its `room_id`
-      // and `assigned_dm_user_id`, but `scheduleLiveSql()` excludes it from
-      // conflict detection, so while it is cancelled another campaign can
+      // and `assigned_dm_user_id`, but `scheduleResourceHeldSql()` excludes it
+      // from conflict detection (issue #1555: cancellation is the ONLY status
+      // that releases), so while it is cancelled another campaign can
       // legitimately take that room or that DM and the server correctly tells
       // them it is free. Flipping the row back to `scheduled` with no probe
       // silently recreates exactly the double-booking this feature exists to
@@ -1031,9 +1032,18 @@ export class SchedulingService {
       // took is not an override, and restore was the one force-taking path still
       // returning a payload with nowhere to say so.
       forced = conflicts;
+      const restoresLiveRecap =
+        booked.sessionId == null
+          ? false
+          : tx
+            .select({ id: sessions.id })
+            .from(sessions)
+            .where(and(eq(sessions.id, booked.sessionId), notDeleted(sessions.deletedAt)))
+            .limit(1)
+            .all().length > 0;
       tx.update(scheduledSessions)
         .set({
-          status: 'scheduled',
+          status: restoresLiveRecap ? 'completed' : 'scheduled',
           cancelledAt: null,
           cancelledBy: null,
           cancellationReason: '',

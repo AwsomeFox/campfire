@@ -12,6 +12,7 @@ import { AiModeBadge } from '../ai-dm/AiModeBadge';
 import { GameIcon } from '../../components/GameIcon';
 import { CampaignCover } from '../../components/CampaignCover';
 import { TermHelp } from '../../components/TermHelp';
+import { useSaveFeedback } from '../../components/SaveFeedback';
 
 const DANGER_LABEL: Record<DangerLevel, string> = {
   low: 'Low',
@@ -40,55 +41,74 @@ export function StatusHeader({
   const [name, setName] = useState(campaign.name);
   const [description, setDescription] = useState(campaign.description);
   const [dangerLevel, setDangerLevel] = useState<DangerLevel>(campaign.dangerLevel);
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // Local baseline so a successful PATCH clears dirty even if the parent summary
+  // reload is slow or fails (DashboardPage fires load() without awaiting it).
+  const [baseline, setBaseline] = useState({
+    name: campaign.name,
+    description: campaign.description,
+    dangerLevel: campaign.dangerLevel,
+  });
+  const feedback = useSaveFeedback('Campaign details');
+  const saving = feedback.state === 'saving';
 
-  // Inline editor status line mirrors the Settings card: a transient "Saved."
-  // confirmation after a successful write, cleared by a short timer.
-  const dirty = isCampaignMetadataDirty(campaign, { name, description, dangerLevel });
+  // Inline editor and Settings share the same durable explicit-save lifecycle.
+  const dirty = isCampaignMetadataDirty(baseline, { name, description, dangerLevel });
   // Issue #760: block Switch campaign while the inline dashboard editor is dirty.
   useUnsavedWork(`dashboard-metadata:${campaignId}`, editing && dirty);
 
   function startEdit() {
-    setName(campaign.name);
-    setDescription(campaign.description);
-    setDangerLevel(campaign.dangerLevel);
-    setError(null);
-    setSaved(false);
+    const nextBaseline = {
+      name: campaign.name,
+      description: campaign.description,
+      dangerLevel: campaign.dangerLevel,
+    };
+    setBaseline(nextBaseline);
+    setName(nextBaseline.name);
+    setDescription(nextBaseline.description);
+    setDangerLevel(nextBaseline.dangerLevel);
+    feedback.reset();
     setEditing(true);
   }
 
   function cancel() {
-    // Reset to baseline so reopening never shows stale edits (issue #750).
+    // Reset to the live campaign prop so reopening never shows stale edits (issue #750).
     setName(campaign.name);
     setDescription(campaign.description);
     setDangerLevel(campaign.dangerLevel);
-    setError(null);
-    setSaved(false);
+    feedback.reset();
     setEditing(false);
   }
 
   async function save() {
     if (!name.trim()) {
-      setError('Campaign name is required.');
+      feedback.fail('Campaign name is required.');
       return;
     }
-    setSaving(true);
-    setError(null);
-    setSaved(false);
+    if (saving) return;
+    feedback.begin();
     try {
-      await api.patch(`${API}/campaigns/${campaignId}`, { name: name.trim(), description, dangerLevel });
-      setSaved(true);
-      setEditing(false);
+      const updated = await api.patch<Campaign>(`${API}/campaigns/${campaignId}`, {
+        name: name.trim(),
+        description,
+        dangerLevel,
+      });
+      // Re-baseline from the persisted response before claiming Saved — do not
+      // wait on the fire-and-forget parent reload.
+      const nextBaseline = {
+        name: updated.name,
+        description: updated.description,
+        dangerLevel: updated.dangerLevel,
+      };
+      setBaseline(nextBaseline);
+      setName(nextBaseline.name);
+      setDescription(nextBaseline.description);
+      setDangerLevel(nextBaseline.dangerLevel);
+      feedback.succeed();
       onChange();
-      setTimeout(() => setSaved(false), 2000);
     } catch (err) {
       // Preserve the in-flight values on failure so a transient 5xx doesn't
       // silently discard what the DM typed (issue #750 acceptance criterion).
-      setError(err instanceof ApiError ? err.message : "Couldn't save changes.");
-    } finally {
-      setSaving(false);
+      feedback.fail(err instanceof ApiError ? err.message : "Couldn't save changes.");
     }
   }
 
@@ -100,14 +120,14 @@ export function StatusHeader({
           name={name}
           description={description}
           dangerLevel={dangerLevel}
-          onNameChange={setName}
-          onDescriptionChange={setDescription}
-          onDangerLevelChange={setDangerLevel}
-          error={error}
+          onNameChange={(value) => { setName(value); feedback.syncDirty(isCampaignMetadataDirty(baseline, { name: value, description, dangerLevel })); }}
+          onDescriptionChange={(value) => { setDescription(value); feedback.syncDirty(isCampaignMetadataDirty(baseline, { name, description: value, dangerLevel })); }}
+          onDangerLevelChange={(value) => { setDangerLevel(value); feedback.syncDirty(isCampaignMetadataDirty(baseline, { name, description, dangerLevel: value })); }}
+          describedBy={feedback.statusId}
           disabled={saving}
         />
         <div className="flex gap-2 justify-end items-center">
-          {saved && <span className="text-muted" style={{ fontSize: 12 }}>Saved.</span>}
+          {feedback.announcement}
           <Btn ghost onClick={cancel} disabled={saving}>
             Cancel
           </Btn>
@@ -183,12 +203,7 @@ export function StatusHeader({
           </>
         )}
       </div>
-      {error && <p role="alert" className="text-xs text-rose-400" style={{ width: '100%', margin: 0 }}>{error}</p>}
-      {saved && (
-        <p role="status" className="text-xs" style={{ width: '100%', margin: 0, color: 'var(--color-success, #34d399)' }}>
-          Saved.
-        </p>
-      )}
+      {feedback.announcement}
       </div>
     </section>
   );

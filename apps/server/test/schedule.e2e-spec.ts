@@ -716,7 +716,8 @@ describe('session scheduling (e2e)', () => {
     });
 
     // Hidden at READ time only — nothing was thrown away. The export still records the
-    // stored link, and restoring the SCHEDULE brings it back with no repair write.
+    // stored link, and restoring the SCHEDULE brings back the completed lifecycle with
+    // no repair write.
     const exported = await request(server).get(`/api/v1/campaigns/${campaignId}/export`).set(dm);
     expect(exported.body.scheduledSessions.find((s: { id: number }) => s.id === scheduleId)).toMatchObject({
       status: 'cancelled',
@@ -725,7 +726,7 @@ describe('session scheduling (e2e)', () => {
 
     const restored = await request(server).post(`/api/v1/schedule/${scheduleId}/restore`).set(dm);
     expect(restored.status).toBe(201);
-    expect(restored.body).toMatchObject({ id: scheduleId, status: 'scheduled', sessionId });
+    expect(restored.body).toMatchObject({ id: scheduleId, status: 'completed', sessionId });
   });
 
   it('rejects an edit to a cancelled night rather than notifying the party about it', async () => {

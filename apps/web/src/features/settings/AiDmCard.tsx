@@ -12,9 +12,17 @@
  * Everything here is gated server-side on the experimental flag: writes 403 with a
  * clear reason when a server admin hasn't enabled the feature, and Driver mode 409s
  * unless a budget + provider are set. We surface those server messages verbatim.
+ *
+ * i18n (#1579): every literal here routes through `t()`. Two errors intentionally do
+ * NOT come from this file's own catalog keys: server 403/409 messages are surfaced
+ * verbatim (see the class doc above), and `apps/web/src/features/ai-dm/aiGate.ts`
+ * substring-matches specific server strings ('requires a positive token budget',
+ * 'server-wide ai token cap') to classify those gates — those come from the server and
+ * are out of scope for this card's localization.
  */
 import { useCallback, useEffect, useState } from 'react';
 import { useLocation } from 'react-router-dom';
+import { useTranslation, Trans } from 'react-i18next';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
   AiCostBasis,
@@ -43,10 +51,19 @@ import { AiSetupChecklist } from '../ai-dm/AiSetupChecklist';
 import { CostDisclosure } from '../ai-dm/CostDisclosure';
 import { formatUsdRange } from '../ai-dm/costEstimate';
 import { TermHelp } from '../../components/TermHelp';
+import { useSaveFeedback } from '../../components/SaveFeedback';
 
 const AI_DM_INSTRUCTIONS_SECTION_ID = 'ai-dm-instructions';
 const AI_DM_INSTRUCTIONS_INPUT_ID = 'ai-dm-instructions-input';
 
+/**
+ * The three operating modes, in display order. `label`/`blurb` are the English SOURCE
+ * copy — also the fallback `t()` passes as `defaultValue` for
+ * `settings.aiDm.modeOptions.<value>.{label,blurb}`, so a catalog miss degrades to this
+ * text instead of a blank. Exported: `ai-trust-copy.unit.spec.ts` (#752) asserts the
+ * canonical English Driver/Co-DM copy directly against the policy manifest, independent
+ * of which locale happens to be active.
+ */
 export const MODES: { value: AiDmMode; label: string; blurb: string }[] = [
   {
     value: 'off',
@@ -68,12 +85,19 @@ export const MODES: { value: AiDmMode; label: string; blurb: string }[] = [
 ];
 
 const MODE_LABEL: Record<AiDmMode, string> = { off: 'Off', co_dm: 'Co-DM', driver: 'Driver' };
-/** Field names as a DM would read them in the inherited-defaults notice (#1070). */
+/** Field names as a DM would read them in the inherited-defaults notice (#1070). English fallback. */
 const INHERITED_FIELD_LABEL: Record<string, string> = {
   mode: 'operating mode',
   instructions: 'steering',
   tokenBudget: 'token budget',
   actionQueueDepth: 'action queue depth',
+};
+const CREDENTIAL_SOURCE_LABEL: Record<AiProviderEffectiveView['credentialSource'], string> = {
+  stored: 'stored encrypted key',
+  environment: 'environment credential',
+  server: 'server-default credential',
+  'not-required': 'no credential required',
+  none: 'no credential available',
 };
 
 const MODE_TAG: Record<AiDmMode, string> = { off: 'tag-neutral', co_dm: 'tag-accent-2', driver: 'tag-accent' };
@@ -87,6 +111,7 @@ export default function AiDmCard({
   campaign: Campaign;
   onCampaignSaved: (c: Campaign) => void;
 }) {
+  const { t } = useTranslation();
   const { isAdmin } = useAuth();
   const queryClient = useQueryClient();
   // Every section below writes state the readiness checklist derives from (mode, budget,
@@ -100,16 +125,16 @@ export default function AiDmCard({
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  const loadEffective = async () => {
+  const loadEffective = useCallback(async () => {
     try {
       setEffective(await api.get<AiProviderEffectiveView>(`${API}/campaigns/${campaignId}/ai-provider/effective`));
     } catch {
       // Non-fatal: the status line degrades gracefully if this read fails.
       setEffective(null);
     }
-  };
+  }, [campaignId]);
 
-  const load = async () => {
+  const load = useCallback(async () => {
     setLoading(true);
     setLoadError(null);
     try {
@@ -119,28 +144,27 @@ export default function AiDmCard({
       ]);
       setSeat(s);
     } catch (err) {
-      setLoadError(err instanceof ApiError ? err.message : "Couldn't load AI DM settings.");
+      setLoadError(err instanceof ApiError ? err.message : t('settings.aiDm.errors.load'));
     } finally {
       setLoading(false);
     }
-  };
+  }, [campaignId, loadEffective, t]);
 
   useEffect(() => {
     void load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [campaignId]);
+  }, [load]);
 
   if (loading && !seat) {
-    return <SkeletonCard sections={3} lines={2} label="Loading AI DM settings…" />;
+    return <SkeletonCard sections={3} lines={2} label={t('settings.aiDm.loading')} />;
   }
 
   if (loadError && !seat) {
     return (
       <div className="card elev-sm">
-        <span className="card-kicker">AI Dungeon Master</span>
+        <span className="card-kicker">{t('settings.aiDm.title')}</span>
         <p className="text-sm" style={{ color: '#f87171' }}>{loadError}</p>
         <button className="btn btn-secondary" style={{ fontSize: 12.5, alignSelf: 'flex-start' }} onClick={() => void load()}>
-          Retry
+          {t('common.retry')}
         </button>
       </div>
     );
@@ -160,15 +184,15 @@ export default function AiDmCard({
       style={{ scrollMarginTop: 72 }}
     >
       <div className="flex items-center gap-2 flex-wrap">
-        <span id="ai-dm-heading" className="card-kicker" style={{ margin: 0 }}>AI Dungeon Master</span>
+        <span id="ai-dm-heading" className="card-kicker" style={{ margin: 0 }}>{t('settings.aiDm.title')}</span>
         <span className={`tag ${MODE_TAG[seat.mode]}`} style={{ fontSize: 10 }}>
-          AI is currently: {MODE_LABEL[seat.mode]}
+          {t('settings.aiDm.statusTag', {
+            mode: t(`settings.aiDm.modeStatusLabels.${seat.mode}`, { defaultValue: MODE_LABEL[seat.mode] }),
+          })}
         </span>
       </div>
       <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
-        Experimental. A server admin must enable server-side AI and set the provider + API key in the AI console for
-        any of this to take effect; until then, saving here returns a clear "disabled" message. This page carries only
-        the settings that vary per table — mode, budget, and steering.
+        {t('settings.aiDm.intro')}
       </p>
 
       {/*
@@ -180,10 +204,15 @@ export default function AiDmCard({
       */}
       {seat.inheritedFields.length > 0 && (
         <p className="cf-inset p-3 text-muted" style={{ margin: 0, fontSize: 11.5 }} data-testid="ai-dm-inherited-notice">
-          Using the server-wide defaults for{' '}
-          <strong>{seat.inheritedFields.map((f) => INHERITED_FIELD_LABEL[f] ?? f).join(', ')}</strong>. This campaign
-          hasn't been configured yet, so it follows the server default and moves when an admin changes it. Saving any
-          setting below keeps the current values and stops following.
+          <Trans
+            i18nKey="settings.aiDm.inheritedNotice"
+            values={{
+              fields: seat.inheritedFields
+                .map((f) => t(`settings.aiDm.inheritedFieldLabels.${f}`, { defaultValue: INHERITED_FIELD_LABEL[f] ?? f }))
+                .join(', '),
+            }}
+            components={[<strong key="f" />]}
+          />
         </p>
       )}
 
@@ -241,10 +270,10 @@ function NarrationLanguageSection({
   campaign: Campaign;
   onSaved: (c: Campaign) => void;
 }) {
+  const { t } = useTranslation();
   const [narrationLanguage, setNarrationLanguage] = useState<NarrationLanguage>(campaign.narrationLanguage);
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const feedback = useSaveFeedback(t('settings.aiDm.narrationLanguage.feedbackSubject'));
+  const saving = feedback.state === 'saving';
   const dirty = narrationLanguage !== campaign.narrationLanguage;
 
   useEffect(() => {
@@ -252,49 +281,48 @@ function NarrationLanguageSection({
   }, [campaign.id, campaign.narrationLanguage]);
 
   async function save() {
-    setSaving(true);
-    setError(null);
-    setSaved(false);
+    if (saving) return;
+    feedback.begin();
     try {
       const updated = await api.patch<Campaign>(`${API}/campaigns/${campaignId}`, { narrationLanguage });
       onSaved(updated);
-      setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
+      feedback.succeed();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't save narration language.");
-    } finally {
-      setSaving(false);
+      if (err instanceof ApiError) {
+        feedback.fail(err.message);
+      } else {
+        feedback.fail(t('settings.aiDm.errors.saveNarrationLanguage'), { generic: true });
+      }
     }
   }
 
   return (
-    <Section title="Narration language" id="ai-dm-narration-language">
+    <Section title={t('settings.aiDm.narrationLanguage.sectionTitle')} id="ai-dm-narration-language">
       <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
-        Governs AI-generated narration from the Driver, co-DM drafts, and Scribe recaps. This is separate from your
-        personal UI language in Preferences.
+        {t('settings.aiDm.narrationLanguage.body')}
       </p>
       <div className="field" style={{ maxWidth: 320 }}>
-        <label htmlFor="ai-dm-narration-language-select">Campaign narration language</label>
+        <label htmlFor="ai-dm-narration-language-select">{t('settings.aiDm.narrationLanguage.label')}</label>
         <select
           id="ai-dm-narration-language-select"
           className="input"
           value={narrationLanguage}
           disabled={saving}
-          onChange={(e) => setNarrationLanguage(e.target.value as NarrationLanguage)}
+          aria-describedby={feedback.statusId}
+          onChange={(e) => { const value = e.target.value as NarrationLanguage; setNarrationLanguage(value); feedback.syncDirty(value !== campaign.narrationLanguage); }}
         >
           {NARRATION_LANGUAGE_OPTIONS.map((opt) => (
             <option key={opt.value} value={opt.value}>
-              {opt.label}
+              {t(`settings.aiDm.narrationLanguage.options.${opt.value}`, { defaultValue: opt.label })}
             </option>
           ))}
         </select>
       </div>
-      {error && <p className="text-sm" style={{ color: '#f87171' }}>{error}</p>}
       <div className="flex gap-2 items-center">
         <button className="btn btn-primary" style={{ fontSize: 12.5 }} disabled={saving || !dirty} onClick={() => void save()}>
-          {saving ? 'Saving…' : 'Save language'}
+          {saving ? t('common.saving') : t('settings.aiDm.narrationLanguage.save')}
         </button>
-        {saved && <span className="text-muted" style={{ fontSize: 12 }}>Saved.</span>}
+        {feedback.announcement}
       </div>
     </Section>
   );
@@ -309,6 +337,7 @@ function ModeSection({
   seat: AiDmSeat;
   onChanged: (s: AiDmSeat) => void;
 }) {
+  const { t } = useTranslation();
   const [saving, setSaving] = useState<AiDmMode | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -321,14 +350,14 @@ function ModeSection({
       onChanged(updated);
     } catch (err) {
       // 409 = Driver preconditions not met; 403 = feature disabled. Surface verbatim.
-      setError(err instanceof ApiError ? err.message : "Couldn't change the mode.");
+      setError(err instanceof ApiError ? err.message : t('settings.aiDm.errors.saveMode'));
     } finally {
       setSaving(null);
     }
   }
 
   return (
-    <Section title="Operating mode" id="ai-dm-mode">
+    <Section title={t('settings.aiDm.mode.sectionTitle')} id="ai-dm-mode">
       <div className="flex flex-col gap-2">
         {MODES.map((m) => {
           const inputId = `ai-dm-mode-${m.value}`;
@@ -346,7 +375,7 @@ function ModeSection({
               <span className="flex flex-col">
                 <span className="inline-flex items-center gap-1 flex-wrap" style={{ fontSize: 13, fontWeight: 600 }}>
                   <label htmlFor={inputId} style={{ cursor: saving ? 'wait' : 'pointer' }}>
-                    {m.label}
+                    {t(`settings.aiDm.modeOptions.${m.value}.label`, { defaultValue: m.label })}
                   </label>
                   {m.value === 'co_dm' && <TermHelp termId="coDm" />}
                   {m.value === 'driver' && <TermHelp termId="driver" />}
@@ -356,7 +385,7 @@ function ModeSection({
                   className="text-muted"
                   style={{ cursor: saving ? 'wait' : 'pointer', fontSize: 11.5 }}
                 >
-                  {m.blurb}
+                  {t(`settings.aiDm.modeOptions.${m.value}.blurb`, { defaultValue: m.blurb })}
                 </label>
               </span>
             </div>
@@ -386,6 +415,7 @@ function EffectiveProviderSection({
   effective: AiProviderEffectiveView | null;
   onChanged: () => void;
 }) {
+  const { t } = useTranslation();
   const location = useLocation();
   const [showOverride, setShowOverride] = useState(() => location.hash === '#ai-dm-provider');
 
@@ -393,11 +423,18 @@ function EffectiveProviderSection({
     if (location.hash === '#ai-dm-provider') setShowOverride(true);
   }, [location.hash]);
 
-  const sourceLabel = effective?.source === 'campaign' ? 'campaign override' : 'server default';
+  const sourceLabel = effective?.source === 'campaign'
+    ? t('settings.aiDm.provider.sourceCampaign')
+    : t('settings.aiDm.provider.sourceServer');
   const sourceTag = effective?.source === 'campaign' ? 'tag-accent' : 'tag-accent-2';
+  const credentialSourceLabel = effective
+    ? t(`settings.aiDm.provider.credentialSourceLabels.${effective.credentialSource}`, {
+        defaultValue: CREDENTIAL_SOURCE_LABEL[effective.credentialSource],
+      })
+    : '';
 
   return (
-    <Section title="AI provider" id="ai-dm-provider">
+    <Section title={t('settings.aiDm.provider.sectionTitle')} id="ai-dm-provider">
       {effective?.configured ? (
         <div className="flex flex-col gap-1">
           <div className="flex items-center gap-2 flex-wrap">
@@ -406,23 +443,24 @@ function EffectiveProviderSection({
             </span>
             <span className={`tag ${sourceTag}`} style={{ fontSize: 10 }}>{sourceLabel}</span>
             <span className={`tag ${effective.ready ? 'tag-accent' : 'tag-neutral'}`} style={{ fontSize: 10 }}>
-              {effective.ready ? 'credential ready' : 'credential missing'}
+              {effective.ready ? t('settings.aiDm.provider.readyTag') : t('settings.aiDm.provider.missingTag')}
             </span>
           </div>
           <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
             {effective.ready
-              ? `Credential source: ${effective.credentialSource.replace('-', ' ')}. ${
-                  effective.source === 'campaign'
-                    ? 'This campaign overrides the server default below.'
-                    : 'Inherited from the server default set by your server admin.'
-                }`
-              : 'The provider settings exist, but no usable credential is available. Ask the server admin to set a key or environment credential.'}
+              ? t('settings.aiDm.provider.readyDetail', {
+                  source: credentialSourceLabel,
+                  scopeNote:
+                    effective.source === 'campaign'
+                      ? t('settings.aiDm.provider.scopeNoteCampaign')
+                      : t('settings.aiDm.provider.scopeNoteServer'),
+                })
+              : t('settings.aiDm.provider.missingDetail')}
           </p>
         </div>
       ) : (
         <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
-          No AI provider configured — ask your server admin to set one in the AI console. You can also set a
-          campaign-specific override below.
+          {t('settings.aiDm.provider.noneConfigured')}
         </p>
       )}
 
@@ -434,7 +472,7 @@ function EffectiveProviderSection({
           aria-expanded={showOverride}
           onClick={() => setShowOverride((v) => !v)}
         >
-          {showOverride ? '▾' : '▸'} Advanced: override provider for this campaign
+          {showOverride ? '▾' : '▸'} {t('settings.aiDm.provider.advancedToggle')}
         </button>
         {showOverride && (
           <div
@@ -442,9 +480,7 @@ function EffectiveProviderSection({
             style={{ borderLeft: '2px solid var(--color-divider)', paddingLeft: 12 }}
           >
             <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
-              Optional. Most campaigns leave this blank and use the server default. Set a provider here to override it
-              for this table only (a key is optional — a keyless override still uses the server key with the server's
-              endpoint).
+              {t('settings.aiDm.provider.advancedIntro')}
             </p>
             <ProviderForm basePath={`/campaigns/${campaignId}/ai-provider`} scope="campaign" onChanged={onChanged} />
           </div>
@@ -465,10 +501,10 @@ function BudgetSection({
   usagePct: number;
   onChanged: (s: AiDmSeat) => void;
 }) {
+  const { t } = useTranslation();
   const [tokenBudget, setTokenBudget] = useState(String(seat.tokenBudget));
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const feedback = useSaveFeedback(t('settings.aiDm.budget.feedbackSubject'));
+  const saving = feedback.state === 'saving';
 
   // #1065 — the cost basis rides along on readiness, which the checklist in this same card
   // has already fetched, so this shares that cache rather than adding a request. When it has
@@ -491,38 +527,40 @@ function BudgetSection({
   async function save() {
     const n = Number(tokenBudget);
     if (!Number.isFinite(n) || n < 0) {
-      setError('Enter a non-negative number.');
+      feedback.fail(t('settings.aiDm.errors.invalidBudget'));
       return;
     }
-    setSaving(true);
-    setError(null);
-    setSaved(false);
+    if (saving) return;
+    feedback.begin();
     try {
       const updated = await api.put<AiDmSeat>(`${API}/campaigns/${campaignId}/ai-dm`, { tokenBudget: Math.floor(n) });
       onChanged(updated);
-      setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
+      feedback.succeed();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't save the budget.");
-    } finally {
-      setSaving(false);
+      if (err instanceof ApiError) {
+        feedback.fail(err.message);
+      } else {
+        feedback.fail(t('settings.aiDm.errors.saveBudget'), { generic: true });
+      }
     }
   }
 
   return (
-    <Section title="Budget & usage" id={AI_DM_BUDGET_SECTION_ID}>
+    <Section title={t('settings.aiDm.budget.sectionTitle')} id={AI_DM_BUDGET_SECTION_ID}>
       <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
-        A hard token cap. Turns stop once it's reached — a positive budget is required to run Driver mode.
+        {t('settings.aiDm.budget.body')}
       </p>
       <div className="field" style={{ maxWidth: 200 }}>
-        <label htmlFor={AI_DM_BUDGET_INPUT_ID}>Token budget</label>
+        <label htmlFor={AI_DM_BUDGET_INPUT_ID}>{t('settings.aiDm.budget.label')}</label>
         <input
           id={AI_DM_BUDGET_INPUT_ID}
           className="input"
           type="number"
           min={0}
           value={tokenBudget}
-          onChange={(e) => setTokenBudget(e.target.value)}
+          disabled={saving}
+          aria-describedby={feedback.statusId}
+          onChange={(e) => { const value = e.target.value; setTokenBudget(value); feedback.syncDirty(value !== String(seat.tokenBudget)); }}
         />
       </div>
       {/* #1065 — what that budget is worth in real money, or an explicit statement that we
@@ -549,30 +587,35 @@ function BudgetSection({
           />
         </div>
         <span className="text-muted" style={{ fontSize: 11 }}>
-          {seat.tokensUsed.toLocaleString()} used
-          {' · '}
-          {seat.tokensReserved.toLocaleString()} reserved
-          {' · '}
-          {seat.tokensUnknown.toLocaleString()} unknown
-          {' · '}
-          {seat.budgetRemaining.toLocaleString()} / {seat.tokenBudget.toLocaleString()} remaining
-          {' · '}
-          {seat.turnCount} turn{seat.turnCount === 1 ? '' : 's'}
-          {seat.lastTurnAt ? ` · last ${new Date(seat.lastTurnAt).toLocaleString()}` : ''}
+          {t('settings.aiDm.budget.usageLine', {
+            used: seat.tokensUsed.toLocaleString(),
+            reserved: seat.tokensReserved.toLocaleString(),
+            unknown: seat.tokensUnknown.toLocaleString(),
+            remaining: seat.budgetRemaining.toLocaleString(),
+            budget: seat.tokenBudget.toLocaleString(),
+            turns:
+              seat.turnCount === 1
+                ? t('settings.aiDm.budget.turnsOne')
+                : t('settings.aiDm.budget.turnsSome', { n: seat.turnCount }),
+          })}
+          {seat.lastTurnAt
+            ? t('settings.aiDm.budget.lastTurnSuffix', { when: new Date(seat.lastTurnAt).toLocaleString() })
+            : ''}
         </span>
         {(seat.tokensRefunded > 0 || seat.tokensOverage > 0) && (
           <span className="text-muted" style={{ fontSize: 11 }}>
-            {seat.tokensRefunded.toLocaleString()} refunded
-            {seat.tokensOverage > 0 ? ` · ${seat.tokensOverage.toLocaleString()} overage recorded` : ''}
+            {t('settings.aiDm.budget.refundedLine', { refunded: seat.tokensRefunded.toLocaleString() })}
+            {seat.tokensOverage > 0
+              ? t('settings.aiDm.budget.overageSuffix', { overage: seat.tokensOverage.toLocaleString() })
+              : ''}
           </span>
         )}
       </div>
-      {error && <p className="text-sm" style={{ color: '#f87171' }}>{error}</p>}
       <div className="flex gap-2 items-center">
         <button className="btn btn-primary" style={{ fontSize: 12.5 }} disabled={saving} onClick={() => void save()}>
-          {saving ? 'Saving…' : 'Save budget'}
+          {saving ? t('common.saving') : t('settings.aiDm.budget.save')}
         </button>
-        {saved && <span className="text-muted" style={{ fontSize: 12 }}>Saved.</span>}
+        {feedback.announcement}
       </div>
     </Section>
   );
@@ -587,49 +630,50 @@ function InstructionsSection({
   seat: AiDmSeat;
   onChanged: (s: AiDmSeat) => void;
 }) {
+  const { t } = useTranslation();
   const [instructions, setInstructions] = useState(seat.instructions ?? '');
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const feedback = useSaveFeedback(t('settings.aiDm.instructions.feedbackSubject'));
+  const saving = feedback.state === 'saving';
 
   async function save() {
-    setSaving(true);
-    setError(null);
-    setSaved(false);
+    if (saving) return;
+    feedback.begin();
     try {
       const updated = await api.put<AiDmSeat>(`${API}/campaigns/${campaignId}/ai-dm`, { instructions });
       onChanged(updated);
-      setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
+      feedback.succeed();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't save the instructions.");
-    } finally {
-      setSaving(false);
+      if (err instanceof ApiError) {
+        feedback.fail(err.message);
+      } else {
+        feedback.fail(t('settings.aiDm.errors.saveInstructions'), { generic: true });
+      }
     }
   }
 
   return (
-    <Section title="Steering instructions" id={AI_DM_INSTRUCTIONS_SECTION_ID}>
+    <Section title={t('settings.aiDm.instructions.sectionTitle')} id={AI_DM_INSTRUCTIONS_SECTION_ID}>
       <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
-        DM-only persona / house rules for the AI. Never shown to players — this is where plot secrets can live.
+        {t('settings.aiDm.instructions.body')}
       </p>
       <div className="field">
-        <label htmlFor={AI_DM_INSTRUCTIONS_INPUT_ID} className="sr-only">Steering instructions</label>
+        <label htmlFor={AI_DM_INSTRUCTIONS_INPUT_ID} className="sr-only">{t('settings.aiDm.instructions.sectionTitle')}</label>
         <textarea
           id={AI_DM_INSTRUCTIONS_INPUT_ID}
           className="input"
           style={{ minHeight: 96 }}
           value={instructions}
-          onChange={(e) => setInstructions(e.target.value)}
-          placeholder="e.g. Be terse and grim. Never reveal the traitor's identity until Act 3."
+          disabled={saving}
+          aria-describedby={feedback.statusId}
+          onChange={(e) => { const value = e.target.value; setInstructions(value); feedback.syncDirty(value !== (seat.instructions ?? '')); }}
+          placeholder={t('settings.aiDm.instructions.placeholder')}
         />
       </div>
-      {error && <p className="text-sm" style={{ color: '#f87171' }}>{error}</p>}
       <div className="flex gap-2 items-center">
         <button className="btn btn-primary" style={{ fontSize: 12.5 }} disabled={saving} onClick={() => void save()}>
-          {saving ? 'Saving…' : 'Save instructions'}
+          {saving ? t('common.saving') : t('settings.aiDm.instructions.save')}
         </button>
-        {saved && <span className="text-muted" style={{ fontSize: 12 }}>Saved.</span>}
+        {feedback.announcement}
       </div>
     </Section>
   );
@@ -657,10 +701,10 @@ function TableStyleSection({
   seat: AiDmSeat;
   onChanged: (seat: AiDmSeat) => void;
 }) {
+  const { t } = useTranslation();
   const [presets, setPresets] = useState<AiDmStylePresets>(seat.stylePresets);
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const feedback = useSaveFeedback(t('settings.aiDm.tableStyle.feedbackSubject'));
+  const saving = feedback.state === 'saving';
 
   // Deliberately NOT re-synced from `seat`, matching InstructionsSection above.
   // Every section on this card shares one `seat` object in the parent, so saving the
@@ -671,57 +715,54 @@ function TableStyleSection({
   // section until the seat has loaded, so seeding once in useState is sufficient.
 
   async function save() {
-    setSaving(true);
-    setSaved(false);
-    setError(null);
+    if (saving) return;
+    feedback.begin();
     try {
       const updated = await api.put<AiDmSeat>(`${API}/campaigns/${campaignId}/ai-dm`, { stylePresets: presets });
       onChanged(updated);
-      setSaved(true);
-      // Matches every other section on this card: the confirmation is a flash, not a state.
-      // Without this the "Saved." line stays up indefinitely and reads as still-current
-      // after the DM has gone on to edit something else.
-      setTimeout(() => setSaved(false), 2000);
+      feedback.succeed();
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : 'Could not save table style.');
-    } finally {
-      setSaving(false);
+      if (e instanceof ApiError) {
+        feedback.fail(e.message);
+      } else {
+        feedback.fail(t('settings.aiDm.errors.saveTableStyle'), { generic: true });
+      }
     }
   }
 
   return (
-    <Section title="Table style" id={AI_DM_STYLE_SECTION_ID}>
+    <Section title={t('settings.aiDm.tableStyle.sectionTitle')} id={AI_DM_STYLE_SECTION_ID}>
       <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
-        Asks the AI to narrate a certain way. Each choice adds a line of guidance to its prompt — it steers voice and
-        pacing, it does not change what is true, and a model can ignore it. Leave an axis on Default to say nothing
-        about it.
+        {t('settings.aiDm.tableStyle.body')}
       </p>
       <div className="flex gap-2 flex-wrap">
         {AI_DM_STYLE_PRESET_AXES.map((axis) => (
           <div className="field" style={{ maxWidth: 260 }} key={axis.key}>
-            <label htmlFor={aiDmStyleSelectId(axis.key)}>{axis.label}</label>
+            <label htmlFor={aiDmStyleSelectId(axis.key)}>
+              {t(`settings.aiDm.tableStyle.axes.${axis.key}`, { defaultValue: axis.label })}
+            </label>
             <select
               id={aiDmStyleSelectId(axis.key)}
               className="input"
               value={presets[axis.key]}
               disabled={saving}
-              onChange={(e) => setPresets((prev) => ({ ...prev, [axis.key]: e.target.value }))}
+              aria-describedby={feedback.statusId}
+              onChange={(e) => { const value = e.target.value; const next = { ...presets, [axis.key]: value }; setPresets(next); feedback.syncDirty(JSON.stringify(next) !== JSON.stringify(seat.stylePresets)); }}
             >
               {AI_DM_STYLE_PRESET_OPTIONS[axis.key].map((opt) => (
                 <option key={opt.value} value={opt.value}>
-                  {opt.label}
+                  {t(`settings.aiDm.tableStyle.options.${axis.key}.${opt.value}`, { defaultValue: opt.label })}
                 </option>
               ))}
             </select>
           </div>
         ))}
       </div>
-      {error && <p className="text-sm" style={{ color: '#f87171' }}>{error}</p>}
       <div className="flex gap-2 items-center">
         <button className="btn btn-primary" style={{ fontSize: 12.5 }} disabled={saving} onClick={() => void save()}>
-          {saving ? 'Saving…' : 'Save table style'}
+          {saving ? t('common.saving') : t('settings.aiDm.tableStyle.save')}
         </button>
-        {saved && <span className="text-muted" style={{ fontSize: 12 }}>Saved.</span>}
+        {feedback.announcement}
       </div>
     </Section>
   );

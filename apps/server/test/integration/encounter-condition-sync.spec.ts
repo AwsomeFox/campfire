@@ -278,6 +278,58 @@ describe('encounter condition sync (issue #486, service layer)', () => {
       return fromJsonText<ConditionInstance[]>(row.conditionInstances, []);
     }
 
+    function readCombatantInstances(orm: ReturnType<typeof build>['orm'], combatantId: number) {
+      const [row] = orm.select().from(combatants).where(eq(combatants.id, combatantId)).limit(1).all();
+      return fromJsonText<ConditionInstance[]>(row.conditionInstances, []);
+    }
+
+    /**
+     * Issue #1643 — adjustConditionLevel must push the new stacks onto the live tracker.
+     * Name-only sync would preserve an existing Exhaustion's old stacks (or invent stacks: 1
+     * for a brand-new name), so the tracker and sheet would disagree until the next
+     * combatant write mirrored the stale level back onto the sheet.
+     */
+    it('adjustConditionLevel syncs Exhaustion stacks onto the live combatant', async () => {
+      const ctx = seedRunningFight();
+      // Pre-seed the tracker with Exhaustion at stacks: 1 (as a presence-only add would).
+      await ctx.charactersService.patchConditions(ctx.characterId, { add: ['Exhaustion'] }, dmUser, 'dm');
+      expect(readCombatantInstances(ctx.orm, ctx.combatantId).find((i) => i.name === 'Exhaustion')).toMatchObject({
+        stacks: 1,
+      });
+
+      // Absolute set to 3 — must land on the combatant, not leave stacks: 1 behind.
+      await ctx.charactersService.adjustConditionLevel(
+        ctx.characterId,
+        { name: 'Exhaustion', level: 3 },
+        dmUser,
+        'dm',
+      );
+      expect(readSheetInstances(ctx.orm, ctx.characterId).find((i) => i.name === 'Exhaustion')).toMatchObject({
+        stacks: 3,
+      });
+      expect(readCombatantInstances(ctx.orm, ctx.combatantId).find((i) => i.name === 'Exhaustion')).toMatchObject({
+        stacks: 3,
+      });
+
+      // Relative +1 on a fresh character with no prior Exhaustion must create stacks: 1, not
+      // leave the tracker empty while the sheet has it (or invent the wrong level).
+      await ctx.charactersService.adjustConditionLevel(
+        ctx.characterId,
+        { name: 'Exhaustion', level: 0 },
+        dmUser,
+        'dm',
+      );
+      await ctx.charactersService.adjustConditionLevel(
+        ctx.characterId,
+        { name: 'Exhaustion', delta: 2 },
+        dmUser,
+        'dm',
+      );
+      expect(readCombatantInstances(ctx.orm, ctx.combatantId).find((i) => i.name === 'Exhaustion')).toMatchObject({
+        stacks: 2,
+      });
+    });
+
     it('strips round-scoped fields when a condition travels to the sheet on /end', async () => {
       const ctx = seedRunningFight();
       // A condition with a live round counter and a repeat save, as combat produces.
@@ -345,6 +397,135 @@ describe('encounter condition sync (issue #486, service layer)', () => {
       // Adopted as indefinite: you did not walk in with a round timer already running.
       expect(carried.roundsRemaining).toBeNull();
       expect(carried.timing).toBe('none');
+    });
+  });
+
+  /**
+   * Issue #1670 — exhaustion (or any adapter-declared leveled condition) must not diverge
+   * between the sheet and a linked combatant. Two gaps, both closed here:
+   *
+   *   A. The combatant condition-instance write path (updateCombatant / update_combatant)
+   *      had no reference to the adapter's leveled-condition track at all, so a DM could
+   *      push `stacks` past what characters.service.ts's adjustConditionLevel would ever
+   *      allow on the sheet — and the sheet's own controls are bounded to [0, track.max],
+   *      so there was no way back down from the sheet once that happened.
+   *   B. restParty's long-rest decrement wrote the sheet's new `stacks` but mirrored the
+   *      linked combatant by NAME ONLY (syncActiveCombatantConditions with no
+   *      conditionInstancesJson) — the combat tracker kept the pre-rest level until
+   *      something else rewrote it.
+   *
+   * Both fixes reuse `leveledConditionTrackFor` — the SAME lookup adjustConditionLevel
+   * already consults — rather than a second cap or a second sync path, per the issue's
+   * explicit ask: one shared rule, not two more call sites each enforcing a copy.
+   */
+  describe('leveled-condition parity between sheet and combatant (#1670)', () => {
+    function readSheetInstances(orm: ReturnType<typeof build>['orm'], characterId: number) {
+      const [row] = orm.select().from(characters).where(eq(characters.id, characterId)).limit(1).all();
+      return fromJsonText<ConditionInstance[]>(row.conditionInstances, []);
+    }
+
+    function readCombatantInstances(orm: ReturnType<typeof build>['orm'], combatantId: number) {
+      const [row] = orm.select().from(combatants).where(eq(combatants.id, combatantId)).limit(1).all();
+      return fromJsonText<ConditionInstance[]>(row.conditionInstances, []);
+    }
+
+    const fullInstance = (over: Partial<ConditionInstance>): ConditionInstance => ({
+      id: 'inst_1',
+      name: 'Exhaustion',
+      ruleEntryId: null,
+      source: null,
+      sourceCombatantId: null,
+      durationRounds: null,
+      roundsRemaining: null,
+      timing: 'none',
+      saveTiming: 'none',
+      saveDc: null,
+      saveAbility: null,
+      isConcentration: false,
+      stacks: 1,
+      notes: '',
+      custom: false,
+      ...over,
+    });
+
+    // Half A.
+    it('updateCombatant rejects Exhaustion past the adapter cap, the same way adjustConditionLevel rejects it on the sheet', async () => {
+      const ctx = seedRunningFight();
+      await expect(
+        ctx.encountersService.updateCombatant(
+          ctx.encounterId,
+          ctx.combatantId,
+          { addConditionInstance: fullInstance({ id: 'inst_over', stacks: 9 }) },
+          dmUser,
+          'dm',
+        ),
+      ).rejects.toMatchObject({ status: 400 });
+      // Rejected, so nothing was written — the combatant still has no Exhaustion instance.
+      expect(readCombatantInstances(ctx.orm, ctx.combatantId).find((i) => i.name === 'Exhaustion')).toBeUndefined();
+
+      // The cap itself (6) is accepted — this is a ceiling, not an accidental exclusion of the max.
+      await ctx.encountersService.updateCombatant(
+        ctx.encounterId,
+        ctx.combatantId,
+        { addConditionInstance: fullInstance({ id: 'inst_at_cap', stacks: 6 }) },
+        dmUser,
+        'dm',
+      );
+      expect(readCombatantInstances(ctx.orm, ctx.combatantId).find((i) => i.name === 'Exhaustion')).toMatchObject({ stacks: 6 });
+
+      // A bulk `conditionInstances` replace is the same write path and must be checked too.
+      await expect(
+        ctx.encountersService.updateCombatant(
+          ctx.encounterId,
+          ctx.combatantId,
+          { conditionInstances: [fullInstance({ id: 'inst_bulk_over', stacks: 7 })] },
+          dmUser,
+          'dm',
+        ),
+      ).rejects.toMatchObject({ status: 400 });
+    });
+
+    // Half A's negative case: a system with no leveled-condition track (PF2e) is unaffected —
+    // an arbitrary stacks value on ANY name is accepted, matching adjustConditionLevel's own
+    // PF2e behaviour (every /conditions/level call 400s there for an unrelated reason — no
+    // track exists to name — while plain condition-instance writes are untouched).
+    it('a system with no leveled-condition track (PF2e) accepts any stacks value on the combatant', async () => {
+      const ctx = seedRunningFight();
+      ctx.orm.update(campaigns).set({ ruleSystem: 'pf2e' }).where(eq(campaigns.id, ctx.campaignId)).run();
+
+      await ctx.encountersService.updateCombatant(
+        ctx.encounterId,
+        ctx.combatantId,
+        { addConditionInstance: fullInstance({ id: 'inst_pf2e', name: 'Exhaustion', stacks: 99 }) },
+        dmUser,
+        'dm',
+      );
+      expect(readCombatantInstances(ctx.orm, ctx.combatantId).find((i) => i.name === 'Exhaustion')).toMatchObject({ stacks: 99 });
+    });
+
+    // Half B.
+    it('a long rest mid-encounter reconciles the linked combatant’s Exhaustion level, not just its presence', async () => {
+      const ctx = seedRunningFight();
+      await ctx.charactersService.adjustConditionLevel(ctx.characterId, { name: 'Exhaustion', level: 5 }, dmUser, 'dm');
+      expect(readCombatantInstances(ctx.orm, ctx.combatantId).find((i) => i.name === 'Exhaustion')).toMatchObject({ stacks: 5 });
+
+      await ctx.charactersService.restParty(ctx.campaignId, 'long', [ctx.characterId], {}, dmUser, 'dm');
+
+      // The sheet decremented by one level (#1641) …
+      expect(readSheetInstances(ctx.orm, ctx.characterId).find((i) => i.name === 'Exhaustion')).toMatchObject({ stacks: 4 });
+      // … and the combatant must agree, not still read the pre-rest level.
+      expect(readCombatantInstances(ctx.orm, ctx.combatantId).find((i) => i.name === 'Exhaustion')).toMatchObject({ stacks: 4 });
+    });
+
+    it('a long rest that fully clears Exhaustion removes it from the linked combatant too', async () => {
+      const ctx = seedRunningFight();
+      await ctx.charactersService.adjustConditionLevel(ctx.characterId, { name: 'Exhaustion', level: 1 }, dmUser, 'dm');
+      expect(readCombatantInstances(ctx.orm, ctx.combatantId).find((i) => i.name === 'Exhaustion')).toMatchObject({ stacks: 1 });
+
+      await ctx.charactersService.restParty(ctx.campaignId, 'long', [ctx.characterId], {}, dmUser, 'dm');
+
+      expect(readSheetInstances(ctx.orm, ctx.characterId).find((i) => i.name === 'Exhaustion')).toBeUndefined();
+      expect(readCombatantInstances(ctx.orm, ctx.combatantId).find((i) => i.name === 'Exhaustion')).toBeUndefined();
     });
   });
 });

@@ -51,7 +51,7 @@ function buildService(entities: {
     // scheduling — the archive reads listForExport, deliberately the RAW rows (#504);
     // exposing only that method keeps the stub honest if the call site ever changes back.
     { listForExport: async () => [] } as any,
-    { listForCampaign: async () => entities.characters ?? [] } as any, // characters
+    { listForExport: async () => entities.characters ?? [] } as any, // characters (#1667: buildExport reads listForExport)
     { listForCampaign: noop as any, listAllForCampaign: async () => [] } as any, // notes
     { listForCampaign: noop as any } as any, // comments
     { listForCampaign: noop as any } as any, // members
@@ -250,7 +250,12 @@ describe('buildMarkdownZip — filename collisions (issues #530 / #863)', () => 
     const readBytes = jest.fn();
     (service as any).attachments.hasExportFile = hasExportFile;
     (service as any).attachments.readBytesIfPresent = readBytes;
-    jest.spyOn(service, 'buildExport').mockResolvedValue({ attachments } as any);
+    // buildProfileExport reads its `raw` document AND the pre-strip scheduled-session
+    // rows (assignedDmUserId sweep, issue #1548) from one shared buildExportInternal
+    // snapshot rather than calling public buildExport() twice — mock that seam instead.
+    jest
+      .spyOn(service as any, 'buildExportInternal')
+      .mockResolvedValue({ document: { attachments }, scheduledSessionList: [] });
 
     const result = await (service as any).buildProfileExport(
       1,
@@ -275,6 +280,25 @@ describe('buildMarkdownZip — filename collisions (issues #530 / #863)', () => 
       included: 2,
       bytesWithheld: 1,
     });
+  });
+
+  it('reads the assignedDmUserId sweep from the same scheduling snapshot as the export document (#1548 P2 follow-up)', async () => {
+    // Codex review on PR #1651: buildProfileExport used to call
+    // scheduling.listForExport a SECOND time (after buildExport's own internal call)
+    // purely to recover the pre-strip assignedDmUserId values for the free-text sweep.
+    // Two separate queries meant a reassignment/deletion racing the export could desync
+    // the sweep from the prose snapshot it's meant to cover. buildProfileExport must now
+    // reuse buildExport's own snapshot instead of re-querying.
+    const service = serviceWithCollisions();
+    const listForExport = jest.fn(async () => [
+      { id: 1, campaignId: 1, assignedDmUserId: 'dev:non-member-dm' } as any,
+    ]);
+    (service as any).scheduling.listForExport = listForExport;
+
+    const result = await (service as any).buildProfileExport(1, USER, 'publish', {}, {});
+
+    expect(listForExport).toHaveBeenCalledTimes(1);
+    expect(result.projection.scannedIdentifiers).toContain('dev:non-member-dm');
   });
 
   it('asks backup Markdown ZIP previews to use attachment paths', async () => {

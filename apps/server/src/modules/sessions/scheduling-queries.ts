@@ -41,6 +41,12 @@ function completedByMissingRecapSql(): SQL {
  * real game night from the view they plan from. The single definition of "live" lives
  * here; schedulePastSql() below is its literal complement, so no row can land in both
  * projections or in neither.
+ *
+ * NOT the predicate for "does this row still hold its room/DM" (issue #1555) — a
+ * genuinely completed night (live recap, not the missing-recap artefact case above)
+ * is deliberately EXCLUDED here, but must NOT be treated as having released its
+ * resource. See scheduleResourceHeldSql() below for that question and why the two
+ * must stay separate.
  */
 export function scheduleLiveSql(): SQL {
   return sql`(${scheduledSessions.status} = 'scheduled' OR ${completedByMissingRecapSql()})`;
@@ -53,6 +59,43 @@ export function scheduleLiveSql(): SQL {
  */
 export function schedulePastSql(nowIso: string): SQL {
   return sql`(${scheduleEndedSql(nowIso)} OR NOT ${scheduleLiveSql()})`;
+}
+
+/**
+ * True for rows that still HOLD their shared room/DM for booking-conflict purposes
+ * (issue #1555). This is a DIFFERENT question from scheduleLiveSql() and must not be
+ * confused with it:
+ *
+ *   - scheduleLiveSql() answers "does this night still need the DM's attention as an
+ *     upcoming/no-recap game?" — genuinely completed (a live, non-trashed recap
+ *     exists) is deliberately EXCLUDED, because scribe draftability
+ *     (findNextEndedScheduledSession / resolveRunScope), the reminder sweep and the
+ *     Upcoming/Next projections all need "already has its recap" to mean "nothing left
+ *     to do here".
+ *   - scheduleResourceHeldSql() answers "did this row's booking ever release its room
+ *     or its assigned DM?" — and the answer is DECIDED HERE: only `cancelled` releases
+ *     a resource. A genuinely completed night still occupies the historical window it
+ *     was played in — cancelling is an explicit "this is not happening", completing is
+ *     not — so a completed row keeps colliding with anything that would overlap its
+ *     window, forever, the same as a merely-completed-on-paper (missing-recap) one.
+ *
+ * This is why `findConflictRows()` must use THIS predicate, not scheduleLiveSql():
+ * before this fix, a genuinely completed occurrence fell out of scheduleLiveSql() and
+ * therefore out of conflict detection entirely, so (a) another campaign could book
+ * straight over a completed night's own window while it was still current, and (b)
+ * `unlinkSessionInTx` / trashing the linked recap could flip the row back to
+ * `scheduled` (directly, or via projectLink()'s read-time reconciliation) with no
+ * re-probe, silently completing a double-booking. Defining "release" as "only
+ * cancellation releases" closes both: nothing ever stops holding its resource on the
+ * way to `completed`, so there is no re-acquisition for a revival path to skip.
+ *
+ * `scheduleOverlapsSql()` still does the real work of deciding whether any of this
+ * matters for a given probe — a completed row's window is normally in the past, so it
+ * naturally stops colliding with new bookings once nothing can overlap it, without this
+ * predicate needing to reason about time at all.
+ */
+export function scheduleResourceHeldSql(): SQL {
+  return sql`${scheduledSessions.status} != 'cancelled'`;
 }
 
 /**

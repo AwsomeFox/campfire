@@ -36,6 +36,7 @@
  * one transaction to apply it. A rest that half-applies is worse than no rest tool at all.
  */
 import { z } from 'zod';
+import { leveledConditionTrackFor } from './leveled-conditions';
 
 // ---------------------------------------------------------------------------
 // Rule-system seam (structural — no runtime import of index.ts, so no cycle).
@@ -169,6 +170,21 @@ export function restModelForAdapter(adapter: Pick<RestAdapter, 'restModel'>): Re
 // Input / output shapes
 // ---------------------------------------------------------------------------
 
+/**
+ * The minimal per-condition shape this module reads (issue #1641) — a NAME plus its `stacks`
+ * count. Mirrors `ConditionInstance.name` / `.stacks` structurally, declared locally rather than
+ * imported so this module keeps no runtime dependency on index.ts (same reasoning as
+ * `ResolverAdapter` in action-resolver.ts — `ConditionInstance` embeds nothing that would cycle
+ * back here, but the convention is to declare the narrow slice each module actually reads).
+ * `stacks` is what lets 5e exhaustion be a plain condition instance instead of a dedicated
+ * `exhaustionLevel` column (see apps/server/src/common/conditions.ts) — and therefore the only
+ * way a rest can tell "exhaustion 5" from "exhaustion 1" well enough to drop it by one.
+ */
+export interface RestConditionState {
+  readonly name: string;
+  readonly stacks: number;
+}
+
 /** The slice of a character this module needs. Mirrors the stored columns, nothing more. */
 export interface RestCharacterState {
   id: number;
@@ -180,7 +196,7 @@ export interface RestCharacterState {
   deathState: 'none' | 'dying' | 'stable' | 'dead';
   deathSaveSuccesses: number;
   deathSaveFailures: number;
-  conditions: readonly string[];
+  conditions: readonly RestConditionState[];
   /** Ability scores, e.g. `{ CON: 14 }`. Used only for the hit-die CON bonus. */
   stats: Readonly<Record<string, number>>;
   spellSlots: Readonly<Record<string, { max: number; used: number }>>;
@@ -229,14 +245,30 @@ export interface CharacterRestPlan {
   /** Full replacement blobs, ready to persist. */
   spellSlotsAfter: Record<string, { max: number; used: number }>;
   resourcesAfter: Record<string, { max: number; used: number; name?: string; recharge?: string }>;
-  conditionsAfter: string[];
-  /** Conditions the rest removed, in the casing they were stored in. */
+  /**
+   * Every condition that SURVIVES the rest — unchanged AND decremented — with its post-rest
+   * `stacks` (issue #1641). A condition decremented to 0 stacks does not appear here; it moved
+   * to {@link conditionsCleared} instead, since "exhaustion 1 → long rest" removes the condition
+   * exactly the same as an outright clear does.
+   */
+  conditionsAfter: RestConditionState[];
+  /**
+   * Conditions the rest removed OUTRIGHT, in the casing they were stored in — either because the
+   * adapter's `clearedBy*Rest` allowlist named them, or because a `decrementedBy*Rest` condition's
+   * stacks hit 0. The caller does not need to know which: either way the condition is gone.
+   */
   conditionsCleared: string[];
   /**
-   * Conditions the rest deliberately LEFT in place. Surfaced so a DM sees what a night's sleep
-   * did not fix rather than having to diff two sheets — the whole point of the allowlist.
+   * Conditions the rest deliberately LEFT in place — unchanged AND decremented-but-still-present.
+   * Surfaced so a DM sees what a night's sleep did not (fully) fix rather than having to diff two
+   * sheets. See {@link conditionsDecremented} for which of these actually moved.
    */
   conditionsKept: string[];
+  /**
+   * The subset of `conditionsKept` whose `stacks` the rest reduced by one (issue #1641) — 5e
+   * exhaustion's "drops a level" rule. Empty for every condition that was merely left alone.
+   */
+  conditionsDecremented: { name: string; stacksBefore: number; stacksAfter: number }[];
   /** Resource keys refilled, and the spell-slot levels refilled. */
   resourcesRecovered: string[];
   spellSlotLevelsRecovered: string[];
@@ -266,21 +298,50 @@ function normalizeCondition(name: string): string {
   return name.trim().toLowerCase();
 }
 
+/** What a rest does to one named condition: remove it, reduce its stacks by one, or leave it. */
+export type RestConditionOutcome = 'clear' | 'decrement' | 'keep';
+
 /**
- * Does a rest of `kind` clear this condition under this adapter?
+ * Does a rest of `kind` clear, decrement, or leave this condition under this adapter?
  *
- * SEAM FOR ISSUE #1047. Today this is a name match against the adapter's allowlist, because a
+ * SEAM FOR ISSUE #1047. Today `clear` is a name match against the adapter's allowlist, because a
  * character's conditions are bare strings with no duration or source. When #1047 gives sheet
  * conditions the metadata combatants already have (`ConditionInstance.durationRounds` /
  * `source` / `isConcentration`), THIS function is the single place that has to learn about it —
  * every caller already asks the question in these terms. The allowlist then becomes the
  * fallback for conditions that still carry no instance data, rather than being replaced.
+ *
+ * REPLACES the boolean `isClearedByRest` (issue #1641): a plain "cleared or not" cannot express
+ * 5e's actual long-rest rule for exhaustion — "reduces exhaustion by one level", not "removes
+ * exhaustion" — so a long rest was wiping a character from exhaustion 5 straight to 0.
+ *
+ * `decrement` is NOT a second `RestModel` allowlist. It asks `leveledConditionTrackFor(adapterId)`
+ * (issue #1643) — the existing, adapter-owned lookup of which ONE condition (if any) a system
+ * models as an escalating level rather than present/absent, keyed by adapter id so it needs no
+ * field on `RuleSystemAdapter`'s own (large, concurrently-edited) object literals. Reusing it
+ * here rather than inventing a parallel `decrementedByLongRest` allowlist is deliberate: two
+ * representations of "which condition is this system's leveled one" would be exactly the
+ * sibling-divergence this codebase keeps being burned by. `leveledConditionTrackFor('pf2e')` is
+ * `undefined` — PF2e has no exhaustion track — so `decrement` can never fire for it; every
+ * adapter that has not declared a track behaves exactly as before this issue. A LONG rest is the
+ * only rest kind checked because 5e's rule (the only leveled track that exists today) is a long-
+ * rest-only recovery; nothing here stops a future track from differing, since `kind` is already
+ * a parameter and the check is one `if`, not a hardcoded assumption.
+ *
+ * `clear` is checked FIRST and wins if a condition name were ever (accidentally) listed in both
+ * an adapter's `clearedByLongRest` and its leveled-condition track: a full clear must never be
+ * silently downgraded to a one-stack decrement.
  */
-export function isClearedByRest(condition: string, kind: RestKind, model: RestModel): boolean {
-  const list = kind === 'long' ? model.clearedByLongRest : model.clearedByShortRest;
+export function restConditionOutcome(condition: string, kind: RestKind, model: RestModel, adapterId: string): RestConditionOutcome {
   const target = normalizeCondition(condition);
-  if (!target) return false;
-  return list.some((c) => normalizeCondition(c) === target);
+  if (!target) return 'keep';
+  const clearedList = kind === 'long' ? model.clearedByLongRest : model.clearedByShortRest;
+  if (clearedList.some((c) => normalizeCondition(c) === target)) return 'clear';
+  if (kind === 'long') {
+    const track = leveledConditionTrackFor(adapterId);
+    if (track && normalizeCondition(track.name) === target) return 'decrement';
+  }
+  return 'keep';
 }
 
 /**
@@ -436,9 +497,30 @@ export function planCharacterRest(
   // ── conditions ───────────────────────────────────────────────────────────────────────
   const conditionsCleared: string[] = [];
   const conditionsKept: string[] = [];
-  for (const condition of character.conditions) {
-    if (isClearedByRest(condition, kind, model)) conditionsCleared.push(condition);
-    else conditionsKept.push(condition);
+  const conditionsDecremented: CharacterRestPlan['conditionsDecremented'] = [];
+  const conditionsAfter: RestConditionState[] = [];
+  for (const cond of character.conditions) {
+    const outcome = restConditionOutcome(cond.name, kind, model, adapter.id);
+    if (outcome === 'clear') {
+      conditionsCleared.push(cond.name);
+      continue;
+    }
+    if (outcome === 'decrement') {
+      // A rest that reduces a leveled condition to 0 stacks removes it entirely (issue #1641)
+      // — "exhaustion 1 → long rest → gone", not "exhaustion 1 → long rest → exhaustion 0",
+      // since there is no zero-level state for a leveled condition to sit at.
+      const stacksAfter = Math.max(0, Math.trunc(cond.stacks) - 1);
+      if (stacksAfter <= 0) {
+        conditionsCleared.push(cond.name);
+      } else {
+        conditionsDecremented.push({ name: cond.name, stacksBefore: cond.stacks, stacksAfter });
+        conditionsKept.push(cond.name);
+        conditionsAfter.push({ name: cond.name, stacks: stacksAfter });
+      }
+      continue;
+    }
+    conditionsKept.push(cond.name);
+    conditionsAfter.push(cond);
   }
 
   return {
@@ -453,9 +535,10 @@ export function planCharacterRest(
       deathSaveFailuresAfter,
       spellSlotsAfter,
       resourcesAfter,
-      conditionsAfter: conditionsKept,
+      conditionsAfter,
       conditionsCleared,
       conditionsKept,
+      conditionsDecremented,
       resourcesRecovered,
       spellSlotLevelsRecovered: levelsRecovered,
       hitDiceSpent,
@@ -507,7 +590,11 @@ export function describeRestForLog(plan: CharacterRestPlan, kind: RestKind): str
   if (plan.spellSlotLevelsRecovered.length > 0) parts.push('spell slots restored');
   if (plan.resourcesRecovered.length > 0) parts.push(`${plan.resourcesRecovered.length} resource(s) restored`);
   if (plan.conditionsCleared.length > 0) parts.push(`cleared ${plan.conditionsCleared.join(', ')}`);
-  if (plan.conditionsKept.length > 0) parts.push(`still ${plan.conditionsKept.join(', ')}`);
+  if (plan.conditionsDecremented.length > 0) {
+    parts.push(plan.conditionsDecremented.map((d) => `${d.name} reduced to ${d.stacksAfter}`).join(', '));
+  }
+  const unchangedKept = plan.conditionsKept.filter((name) => !plan.conditionsDecremented.some((d) => d.name === name));
+  if (unchangedKept.length > 0) parts.push(`still ${unchangedKept.join(', ')}`);
   const summary = parts.length > 0 ? parts.join('; ') : 'no change';
   return `${kind === 'long' ? 'Long rest' : 'Short rest'}: ${summary}`;
 }

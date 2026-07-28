@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import { eq } from 'drizzle-orm';
-import { ActionResolveRequest, CombatantTurnState } from '@campfire/schema';
+import { ActionResolveRequest, ActionSpec, CombatantTurnState } from '@campfire/schema';
 import { openDatabase } from '../../src/db/db.module';
 import { campaigns, characters, combatants, encounterEvents, encounters, ruleEntries, rulePacks } from '../../src/db/schema';
 import { AuditService } from '../../src/modules/audit/audit.service';
@@ -200,6 +200,244 @@ describe('action resolver (real SQLite, service layer)', () => {
     }
   });
 
+  it('#1637: an actor with no action remaining cannot spend one through apply_action — legible rejection, not a silent overwrite', () => {
+    const { orm, service, encounterId, actor, drake } = seed();
+    // The actor already spent their one 5e action this turn.
+    orm.update(combatants).set({ turnState: JSON.stringify({ used: { action: 1 } }) }).where(eq(combatants.id, actor)).run();
+
+    let threw: unknown;
+    try {
+      service.resolve(encounterId, ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: true }), alice, 'player');
+    } catch (e) {
+      threw = e;
+    }
+    expect(threw).toBeDefined();
+    const body = (threw as { getResponse?: () => unknown }).getResponse?.();
+    expect(body).toMatchObject({ code: 'action_economy_exhausted', slot: 'action', remaining: 0, max: 1 });
+
+    // Nothing was written: no damage landed, and `used.action` did not grow past its max.
+    expect(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.hpCurrent).toBe(60);
+    const actorAfter = JSON.parse(orm.select().from(combatants).where(eq(combatants.id, actor)).get()!.turnState ?? '{}');
+    expect(actorAfter.used.action).toBe(1);
+  });
+
+  it('#1637: multi-cost rejection messages do not append a naive plural suffix to slot keys', () => {
+    const { service, encounterId, actor } = seed();
+
+    let threw: unknown;
+    try {
+      service.resolve(
+        encounterId,
+        ActionResolveRequest.parse({
+          actorCombatantId: actor,
+          actionName: 'Quickened Flurry',
+          spec: {
+            mode: 'attack',
+            attack: { bonus: '+7' },
+            cost: { slot: 'bonus', count: 2 },
+            targets: { count: 0, allow: 'enemy' },
+            outcomes: {},
+          },
+          targetIds: [],
+          commit: true,
+        }),
+        alice,
+        'player',
+      );
+    } catch (e) {
+      threw = e;
+    }
+
+    const body = (threw as { getResponse?: () => unknown }).getResponse?.() as { message?: string } | undefined;
+    expect(body?.message).toContain('"Quickened Flurry" costs 2 bonus,');
+    expect(body?.message).not.toContain('bonuss');
+  });
+
+  it('#1637: PF2e default action costs spend the adapter actions slot and reject after it is exhausted', () => {
+    const { orm, service, encounterId, actor } = seed({ ruleSystem: 'pf2e' });
+    orm.update(combatants).set({ turnState: JSON.stringify({ used: { actions: 2 } }) }).where(eq(combatants.id, actor)).run();
+    const req = ActionResolveRequest.parse({
+      actorCombatantId: actor,
+      actionName: 'Interact',
+      spec: {
+        mode: 'attack',
+        attack: { bonus: '+7' },
+        targets: { count: 0, allow: 'enemy' },
+        outcomes: {},
+      },
+      targetIds: [],
+      commit: true,
+    });
+
+    const applied = service.resolve(encounterId, req, alice, 'player');
+    expect(applied.applied).toBe(true);
+    let state = CombatantTurnState.parse(
+      JSON.parse(orm.select().from(combatants).where(eq(combatants.id, actor)).get()!.turnState ?? '{}'),
+    );
+    expect(state.used.actions).toBe(3);
+    expect(state.used.action).toBeUndefined();
+
+    let threw: unknown;
+    try {
+      service.resolve(encounterId, req, alice, 'player');
+    } catch (e) {
+      threw = e;
+    }
+    const body = (threw as { getResponse?: () => unknown }).getResponse?.();
+    expect(body).toMatchObject({ code: 'action_economy_exhausted', slot: 'actions', remaining: 0, max: 3 });
+    state = CombatantTurnState.parse(
+      JSON.parse(orm.select().from(combatants).where(eq(combatants.id, actor)).get()!.turnState ?? '{}'),
+    );
+    expect(state.used.actions).toBe(3);
+    expect(state.used.action).toBeUndefined();
+
+    service.undo(encounterId, applied.undoToken!, alice, 'player');
+    state = CombatantTurnState.parse(
+      JSON.parse(orm.select().from(combatants).where(eq(combatants.id, actor)).get()!.turnState ?? '{}'),
+    );
+    expect(state.used.actions).toBe(2);
+    expect(state.used.action).toBeUndefined();
+  });
+
+  it('#1637: movement-cost actions validate and write movementUsedFt instead of used.movement', () => {
+    const { orm, service, encounterId, actor } = seed();
+    const req = ActionResolveRequest.parse({
+      actorCombatantId: actor,
+      actionName: 'Tactical Step',
+      spec: {
+        mode: 'attack',
+        attack: { bonus: '+7' },
+        cost: { slot: 'movement', count: 10 },
+        targets: { count: 0, allow: 'enemy' },
+        outcomes: {},
+      },
+      targetIds: [],
+      commit: true,
+    });
+
+    orm.update(combatants).set({ turnState: JSON.stringify({ used: {}, movementUsedFt: 25 }) }).where(eq(combatants.id, actor)).run();
+    let threw: unknown;
+    try {
+      service.resolve(encounterId, req, alice, 'player');
+    } catch (e) {
+      threw = e;
+    }
+    expect((threw as { getResponse?: () => unknown }).getResponse?.()).toMatchObject({
+      code: 'action_economy_exhausted',
+      slot: 'movement',
+      remaining: 5,
+      max: 30,
+    });
+    let state = CombatantTurnState.parse(
+      JSON.parse(orm.select().from(combatants).where(eq(combatants.id, actor)).get()!.turnState ?? '{}'),
+    );
+    expect(state.movementUsedFt).toBe(25);
+    expect(state.used.movement).toBeUndefined();
+
+    orm.update(combatants).set({ turnState: JSON.stringify({ used: {}, movementUsedFt: 20 }) }).where(eq(combatants.id, actor)).run();
+    const applied = service.resolve(encounterId, req, alice, 'player');
+    state = CombatantTurnState.parse(
+      JSON.parse(orm.select().from(combatants).where(eq(combatants.id, actor)).get()!.turnState ?? '{}'),
+    );
+    expect(state.movementUsedFt).toBe(30);
+    expect(state.used.movement).toBeUndefined();
+
+    service.undo(encounterId, applied.undoToken!, alice, 'player');
+    state = CombatantTurnState.parse(
+      JSON.parse(orm.select().from(combatants).where(eq(combatants.id, actor)).get()!.turnState ?? '{}'),
+    );
+    expect(state.movementUsedFt).toBe(20);
+    expect(state.used.movement).toBeUndefined();
+  });
+
+  it('#1637: inline statblock monsters with legendary actions can spend and refund that slot', () => {
+    const { orm, service, encounterId } = seed();
+    const [legendaryMonster] = orm
+      .insert(combatants)
+      .values({
+        encounterId,
+        kind: 'monster',
+        name: 'Inline Ancient',
+        initiative: 5,
+        hpCurrent: 80,
+        hpMax: 80,
+        sortOrder: 3,
+        statblockJson: JSON.stringify({
+          ac: 18,
+          abilityScores: { STR: 22, DEX: 10, CON: 18, INT: 10, WIS: 12, CHA: 14 },
+          actions: [
+            {
+              name: 'Tail Swipe',
+              kind: 'legendary',
+              spec: {
+                mode: 'attack',
+                attack: { bonus: '+9' },
+                cost: { slot: 'legendary', count: 1 },
+                targets: { count: 0, allow: 'enemy' },
+                outcomes: {},
+              },
+            },
+          ],
+        }),
+      })
+      .returning()
+      .all();
+
+    const applied = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: legendaryMonster.id, actionIndex: 0, targetIds: [], commit: true }),
+      dmUser,
+      'dm',
+    );
+    expect(applied.applied).toBe(true);
+    let state = CombatantTurnState.parse(
+      JSON.parse(orm.select().from(combatants).where(eq(combatants.id, legendaryMonster.id)).get()!.turnState ?? '{}'),
+    );
+    expect(state.used.legendary).toBe(1);
+
+    service.undo(encounterId, applied.undoToken!, dmUser, 'dm');
+    state = CombatantTurnState.parse(
+      JSON.parse(orm.select().from(combatants).where(eq(combatants.id, legendaryMonster.id)).get()!.turnState ?? '{}'),
+    );
+    expect(state.used.legendary).toBe(0);
+  });
+
+  it('#1637: legendary-action spend is bounded by the MONSTER statblock, not a fixed constant — a drake with none cannot spend any', () => {
+    const { orm, service, encounterId, drake } = seed();
+    // The drake's statblock (dataJson: { armor_class, hit_points, damage_resistances }) has no
+    // legendaryActions section at all, so its legendary-action max is 0 — spending even the
+    // first one must be rejected, mirroring encounters.service.ts's updateCombatantTurnState
+    // precedent for the same slot (issue #618): a monster WITHOUT legendary actions does not
+    // get to spend them unbounded.
+    let threw: unknown;
+    try {
+      service.resolve(
+        encounterId,
+        ActionResolveRequest.parse({
+          actorCombatantId: drake,
+          actionName: 'Tail Slam',
+          spec: {
+            mode: 'attack',
+            attack: { bonus: '+5' },
+            cost: { slot: 'legendary', count: 1 },
+            targets: { count: 0, allow: 'enemy' },
+            outcomes: {},
+          },
+          targetIds: [],
+          commit: true,
+        }),
+        dmUser,
+        'dm',
+      );
+    } catch (e) {
+      threw = e;
+    }
+    expect(threw).toBeDefined();
+    const body = (threw as { getResponse?: () => unknown }).getResponse?.();
+    expect(body).toMatchObject({ code: 'action_economy_exhausted', slot: 'legendary', remaining: 0, max: 0 });
+    expect(JSON.parse(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.turnState ?? '{}').used?.legendary ?? 0).toBe(0);
+  });
+
   it('OSR descending-AC attack evidence shows the effective ascending threshold, not native descending AC as the threshold', () => {
     const { orm, service, encounterId, actor, drake } = seed({ ruleSystem: 'basic-fantasy' });
     const target = orm.select().from(combatants).where(eq(combatants.id, drake)).get()!;
@@ -230,6 +468,73 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(t.totalDamage).toBeGreaterThan(0);
     const hpAfter = orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.hpCurrent;
     expect(hpAfter).toBe(60 - t.totalDamage);
+  });
+
+  function resolvePinnedPf2eTarget(spec: ActionSpec, fixed: Record<string, number> = { '1d20': 1, '2d6': 7, '4d6': 14 }) {
+    const { service, encounterId, actor, bob } = seed({ ruleSystem: 'pf2e' });
+    const encounter = (service as any).encounterRowOrThrow(encounterId);
+    const actorRow = (service as any).combatantRowOrThrow(encounterId, actor);
+    const targetRow = (service as any).combatantRowOrThrow(encounterId, bob);
+    const adapter = (service as any).adapterForCampaign(encounter.campaignId);
+    const { stats, level } = (service as any).actorStats(actorRow);
+    const prof = (service as any).proficiencyBonus(adapter, level);
+    const fixedRoller = (expr: string) => ({ total: fixed[expr] ?? 0, rolls: [fixed[expr] ?? 0] });
+
+    return (service as any).resolveOneTarget(spec, 'Test Save Spell', adapter, encounter, actorRow, stats, prof, fixedRoller, targetRow);
+  }
+
+  it('#1600: a PF2e critical save FAILURE doubles damage (double-total), not just an attack crit', () => {
+    // resolveOneTarget is private — this drives it directly (same pattern as export-markdown-zip.spec.ts's
+    // (service as any).<privateMethod>()) so the natural d20 roll is pinned via a fixed roller rather than
+    // real crypto randomness, which PF2e's degree-of-success nat-1/nat-20 step adjustment makes otherwise
+    // impossible to guarantee a critical failure against (a nat 20 always bumps the step UP, so no DC/mod
+    // combination guarantees criticalFailure across every possible roll — only a pinned roll can).
+    // nat 1 vs Bob's DEX 10 (mod 0) = total 1, DC 15 → 1 <= 15-10 → criticalFailure, and a nat 1
+    // only ever pushes the degree further toward failure, never away from it, so this is deterministic.
+    const spec = ActionSpec.parse({
+      mode: 'save',
+      save: { ability: 'DEX', dc: { kind: 'fixed', dc: 15 } },
+      // No critFailure branch authored — pickOutcomeBranch falls back to `failure`, whose damage
+      // is the full-damage branch of a basic save (ordinary success is half); the resolver itself
+      // must apply PF2e's double-total rule on top.
+      outcomes: { failure: { damage: [{ formula: '2d6', flat: 3, type: 'fire' }] }, success: { halfDamage: true } },
+    });
+
+    const result = resolvePinnedPf2eTarget(spec);
+    expect(result.degree).toBe('criticalFailure');
+    // Base (2d6=7)+3 = 10; PF2e double-total doubles the WHOLE thing after the flat modifier → 20.
+    expect(result.damage[0].amount).toBe(20);
+    expect(result.totalDamage).toBe(20);
+  });
+
+  it('#1600: a PF2e critical check failure does not double an authored failure branch', () => {
+    const spec = ActionSpec.parse({
+      mode: 'check',
+      save: { ability: 'DEX', dc: { kind: 'fixed', dc: 15 } },
+      outcomes: { failure: { damage: [{ formula: '2d6', flat: 3, type: 'fire' }] } },
+    });
+
+    const result = resolvePinnedPf2eTarget(spec);
+    expect(result.degree).toBe('criticalFailure');
+    expect(result.damage[0].amount).toBe(10);
+    expect(result.totalDamage).toBe(10);
+  });
+
+  it('#1600: a PF2e critical save failure does not double an explicit critFailure branch', () => {
+    const spec = ActionSpec.parse({
+      mode: 'save',
+      save: { ability: 'DEX', dc: { kind: 'fixed', dc: 15 } },
+      outcomes: {
+        failure: { damage: [{ formula: '2d6', flat: 3, type: 'fire' }] },
+        success: { halfDamage: true },
+        critFailure: { damage: [{ formula: '4d6', type: 'fire' }] },
+      },
+    });
+
+    const result = resolvePinnedPf2eTarget(spec);
+    expect(result.degree).toBe('criticalFailure');
+    expect(result.damage[0].amount).toBe(14);
+    expect(result.totalDamage).toBe(14);
   });
 
   it('returns a concentration save request for effective structured-action damage', () => {

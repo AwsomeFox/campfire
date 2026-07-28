@@ -71,9 +71,9 @@ import { seriesIcsUid } from './ics.util';
 import { recurrenceLocalDateFor, scheduledSessionToDomain, seriesTimezoneInTx, type SyncDb } from './scheduling.service';
 import {
   scheduleEffectiveStatusSql,
-  scheduleLiveSql,
   scheduleOrganizedPlaySql,
   scheduleOverlapsSql,
+  scheduleResourceHeldSql,
 } from './scheduling-queries';
 // The booking probe lives in its own leaf module so SchedulingService can run the
 // identical check when a restore re-acquires a released room/DM (see #588).
@@ -1421,13 +1421,16 @@ export class OrganizedPlayService {
         .all();
       const affected = future.filter((occ) => !overriddenIds.has(occ.id));
       // A CANCELLED occurrence is a metadata target but NOT a booking
-      // participant. Cancelling releases the room and DM — `scheduleLiveSql()`
-      // drops the row from conflict detection, so another campaign may
-      // legitimately have taken that window — and `restore()` is what re-acquires
-      // them, with its own probe. Counting a cancelled row here would therefore
-      // demand `force` for a collision that does not exist, on behalf of a night
-      // that is not happening. Same rule as the SEQUENCE decision below: cancelled
-      // rows keep receiving metadata, and take no part in booking.
+      // participant. Cancelling releases the room and DM — `scheduleResourceHeldSql()`
+      // (issue #1555/#1671) drops the row from conflict detection, so another
+      // campaign may legitimately have taken that window — and `restore()` is what
+      // re-acquires them, with its own probe. Counting a cancelled row here would
+      // therefore demand `force` for a collision that does not exist, on behalf of
+      // a night that is not happening. Same rule as the SEQUENCE decision below:
+      // cancelled rows keep receiving metadata, and take no part in booking.
+      // (A `completed` row is correctly still a booking participant here — this is
+      // the plain `.filter(occ.status !== 'cancelled')` below, already equivalent
+      // to `scheduleResourceHeldSql()` without a second SQL predicate.)
       const booking = affected.filter((occ) => occ.status !== 'cancelled');
       // A cancelled night is not one the party can be told to turn up to, so it
       // is not a notification subject either — the same line `booking` draws.
@@ -1716,6 +1719,22 @@ export class OrganizedPlayService {
    * keep publishing STATUS:CANCELLED under each UID, and a cancelled night that
    * vanished would take the party's RSVP history with it). Past occurrences are
    * left exactly as they are: they already happened.
+   *
+   * The "which future occurrences does this actually touch" filter is
+   * `scheduleResourceHeldSql()` (`status != 'cancelled'`), NOT `scheduleLiveSql()`
+   * (issue #1671). #1555 established that only cancellation releases a room/DM — a
+   * genuinely completed occurrence still holds its resource. `scheduleLiveSql()`
+   * excludes exactly that case (it answers "does this still need the DM's
+   * attention", not "does this still hold a resource"), so a future-dated
+   * occurrence completed early or out of order — reachable via
+   * `POST /schedule/:id/link/:sessionId` before its nominal window arrives — used
+   * to fall straight through this filter untouched: still `completed`, still
+   * counted by `findConflictRows()`, forever, for a series that no longer exists.
+   * `scheduleResourceHeldSql()` is the same predicate `findConflictRows()` itself
+   * probes against, so "everything this cancel releases" and "everything a future
+   * booking can collide with" cannot drift apart again. Idempotent by construction:
+   * an already-cancelled row is excluded, so a second cancel of the same series
+   * cannot re-append a `cancel` ledger entry or re-bump SEQUENCE for it.
    */
   async cancelSeries(id: number, reason: string, user: RequestUser, role: Role, nowMs: number = Date.now()): Promise<SessionSeriesWithOccurrences> {
     const existing = await this.getSeriesRowOrThrow(id);
@@ -1726,7 +1745,7 @@ export class OrganizedPlayService {
       const future = tx
         .select()
         .from(scheduledSessions)
-        .where(and(eq(scheduledSessions.seriesId, id), sql`${scheduledSessions.scheduledAt} > ${nowStr}`, scheduleLiveSql()))
+        .where(and(eq(scheduledSessions.seriesId, id), sql`${scheduledSessions.scheduledAt} > ${nowStr}`, scheduleResourceHeldSql()))
         .all();
       for (const occ of future) {
         tx.update(scheduledSessions)
@@ -1822,6 +1841,8 @@ export class OrganizedPlayService {
     let existing!: ScheduleRow;
     let scheduledAt!: string;
     let durationMinutes!: number;
+    let movedTime = false;
+    let kind: 'reschedule' | 'reassign' | null = null;
     this.db.transaction((tx) => {
       existing = this.getOccurrenceRowInTxOrThrow(tx, id);
       // Re-validated in here too: an occurrence cancelled in the gap must not be
@@ -1856,38 +1877,54 @@ export class OrganizedPlayService {
       durationMinutes = input.durationMinutes ?? existing.durationMinutes;
       const roomId = input.roomId === undefined ? existing.roomId : input.roomId;
       const venueId = roomId === existing.roomId || roomId == null ? existing.venueId : roomVenue;
-      const conflicts = this.findConflictRows(tx, {
-        startsAt: scheduledAt,
-        endsAt: endInstant(scheduledAt, durationMinutes),
-        roomId,
-        assignedDmUserId: existing.assignedDmUserId,
-        // No member check, deliberately, on this and every other WRITE path.
-        // A room and a running DM are resources this server ALLOCATES, so
-        // double-allocating them is a bug it must refuse. A player is not
-        // allocated: they RSVP, and being wanted at two tables is a fact about
-        // their evening, not a broken booking — the coordinator resolves it by
-        // talking to them. `POST /conflicts` still reports it, because a probe
-        // that answers "what would this cost?" should surface everything;
-        // rejecting a legal room booking over it would let one player's RSVP veto
-        // another campaign's table.
-        memberUserIds: [],
-        excludeScheduleId: id,
-      });
-      if (conflicts.length > 0 && !input.force) throw new SeriesConflictSignal(conflicts);
-      rawConflicts = conflicts;
-      // Did this request MOVE anything? Same predicate reassignOccurrence uses,
-      // over the columns this endpoint writes. A retry that resends the current
-      // instant must not file an override it can never withdraw, and must not
-      // push subscribers a fresh SEQUENCE for an unchanged VEVENT.
-      // TWO questions, deliberately separated. `movedTime` gates the SEQUENCE bump
-      // because only the instants render into the feed (DTSTART/DTEND) — a
-      // room-only edit through this endpoint must not push subscribers a revision
-      // of an unchanged VEVENT, exactly as reassignOccurrence declines to. `kind`
-      // gates the ledger and describes what actually changed, so a room-only edit
-      // made here is filed as `reassign` rather than mislabelled a time move.
+      // Did this request MOVE anything? Compute it BEFORE the probe so a retry
+      // that resends the current instant/duration/room/DM is not rejected over a
+      // forced overlap it did not cause. The same predicate gates the SEQUENCE bump
+      // and the ledger below, so all three decisions stay in lockstep.
       const next = { scheduledAt, durationMinutes, timezone, localStart, roomId, venueId };
-      const movedTime = changesOccurrence(existing, pickFields(next, OCCURRENCE_TIME_FIELDS));
-      const kind = occurrenceExceptionKind(existing, next);
+      movedTime = changesOccurrence(existing, pickFields(next, OCCURRENCE_TIME_FIELDS));
+      kind = occurrenceExceptionKind(existing, next);
+      // Only probe resources when the request actually changes them. Re-confirming
+      // an occurrence's existing time/room/DM would flag its own forced overlap
+      // as if a new edit had caused it.
+      if (kind !== null) {
+        const conflicts = this.findConflictRows(tx, {
+          startsAt: scheduledAt,
+          endsAt: endInstant(scheduledAt, durationMinutes),
+          roomId,
+          assignedDmUserId: existing.assignedDmUserId,
+          // No member check, deliberately, on this and every other WRITE path.
+          // A room and a running DM are resources this server ALLOCATES, so
+          // double-allocating them is a bug it must refuse. A player is not
+          // allocated: they RSVP, and being wanted at two tables is a fact about
+          // their evening, not a broken booking — the coordinator resolves it by
+          // talking to them. `POST /conflicts` still reports it, because a probe
+          // that answers "what would this cost?" should surface everything;
+          // rejecting a legal room booking over it would let one player's RSVP veto
+          // another campaign's table.
+          memberUserIds: [],
+          excludeScheduleId: id,
+        });
+        if (conflicts.length > 0 && !input.force) throw new SeriesConflictSignal(conflicts);
+        rawConflicts = conflicts;
+      }
+      if (kind === null) {
+        // Idempotent retry: skip conflict probe results, ledger, SEQUENCE bump,
+        // and notifications. Still back-fill a missing lineage anchor on legacy
+        // rows adopted into a series without one — that write does not change
+        // the schedule the client sent and cannot create a new overlap.
+        if (existing.originalScheduledAt == null) {
+          tx.update(scheduledSessions)
+            .set({
+              originalScheduledAt: existing.scheduledAt,
+              updatedAt: ts,
+            })
+            .where(eq(scheduledSessions.id, id))
+            .run();
+          existing = { ...existing, originalScheduledAt: existing.scheduledAt, updatedAt: ts };
+        }
+        return;
+      }
       tx.update(scheduledSessions)
         .set({
           scheduledAt,
@@ -1898,15 +1935,15 @@ export class OrganizedPlayService {
           venueId,
           // Set once, then preserved: the FIRST materialized instant is the
           // lineage anchor, so a twice-moved night still points at where it began.
-          // Stamped even on a no-op, which REPAIRS a legacy row adopted into a
-          // series with no anchor rather than leaving it without one.
+          // Missing anchors on no-op retries are repaired on the early-return
+          // path above without probing or filing a ledger entry.
           originalScheduledAt: existing.originalScheduledAt ?? existing.scheduledAt,
           ...(movedTime ? { icsSequence: existing.icsSequence + 1 } : {}),
           updatedAt: ts,
         })
         .where(eq(scheduledSessions.id, id))
         .run();
-      if (existing.seriesId != null && kind != null) {
+      if (existing.seriesId != null) {
         tx.insert(seriesExceptions)
           .values({
             seriesId: existing.seriesId,
@@ -1937,34 +1974,36 @@ export class OrganizedPlayService {
       }
     });
 
-    await this.audit.log({
-      actor: auditActor(user),
-      actorRole: role,
-      action: 'organized_play.occurrence_reschedule',
-      entityType: 'session',
-      entityId: id,
-      campaignId: existing.campaignId,
-      detail: `${existing.scheduledAt} -> ${scheduledAt}`,
-    });
-    this.events.emit({ type: 'schedule.updated', campaignId: existing.campaignId, scheduleId: id });
-    // NOTIFIES. The same diff `SchedulingService.update` runs, so a move made here and the
-    // identical move made through PATCH /schedule/:id announce themselves the
-    // same way. Location and notes cannot change on this route, so in practice
-    // this yields 'rescheduled'. Diffed against the row as it was read INSIDE the
-    // transaction, so a concurrent write cannot make this announce a move that
-    // did not happen (or stay silent about one that did).
-    const changedFields = diffScheduleNotificationFields(
-      { scheduledAt: existing.scheduledAt, durationMinutes: existing.durationMinutes, location: existing.location, notes: existing.notes },
-      { scheduledAt, durationMinutes, location: existing.location, notes: existing.notes },
-    );
-    if (shouldNotifyScheduleUpdate(changedFields)) {
-      await this.notifyOccurrenceChange(
-        existing.campaignId,
-        user,
-        [{ id, scheduledAt, durationMinutes, title: existing.title }],
-        scheduleNotificationChangeType(changedFields),
-        changedFields,
+    if (kind !== null) {
+      await this.audit.log({
+        actor: auditActor(user),
+        actorRole: role,
+        action: 'organized_play.occurrence_reschedule',
+        entityType: 'session',
+        entityId: id,
+        campaignId: existing.campaignId,
+        detail: `${existing.scheduledAt} -> ${scheduledAt}`,
+      });
+      this.events.emit({ type: 'schedule.updated', campaignId: existing.campaignId, scheduleId: id });
+      // NOTIFIES. The same diff `SchedulingService.update` runs, so a move made here and the
+      // identical move made through PATCH /schedule/:id announce themselves the
+      // same way. Location and notes cannot change on this route, so in practice
+      // this yields 'rescheduled'. Diffed against the row as it was read INSIDE the
+      // transaction, so a concurrent write cannot make this announce a move that
+      // did not happen (or stay silent about one that did).
+      const changedFields = diffScheduleNotificationFields(
+        { scheduledAt: existing.scheduledAt, durationMinutes: existing.durationMinutes, location: existing.location, notes: existing.notes },
+        { scheduledAt, durationMinutes, location: existing.location, notes: existing.notes },
       );
+      if (shouldNotifyScheduleUpdate(changedFields)) {
+        await this.notifyOccurrenceChange(
+          existing.campaignId,
+          user,
+          [{ id, scheduledAt, durationMinutes, title: existing.title }],
+          scheduleNotificationChangeType(changedFields),
+          changedFields,
+        );
+      }
     }
 
     const names = await this.lookupNames(
@@ -1972,7 +2011,9 @@ export class OrganizedPlayService {
       rawConflicts.flatMap((r) => (r.roomId != null ? [r.roomId] : [])),
     );
     return {
-      occurrence: scheduledSessionToDomain(await this.getOccurrenceRowOrThrow(id)),
+      occurrence: scheduledSessionToDomain(
+        kind !== null ? await this.getOccurrenceRowOrThrow(id) : existing,
+      ),
       conflicts: this.redactConflicts(rawConflicts, scope, names),
     };
   }
