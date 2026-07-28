@@ -30,6 +30,7 @@ import { UsersModule } from '../users/users.module';
 import { RevisionsModule } from '../revisions/revisions.module';
 import { RollsModule } from '../rolls/rolls.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { InboxSweepModule } from '../inbox-sweep/inbox-sweep.module';
 import { McpToolsService } from './mcp-tools';
 import { McpController } from './mcp.controller';
 
@@ -67,6 +68,7 @@ import { McpController } from './mcp.controller';
     RevisionsModule,
     RollsModule,
     NotificationsModule,
+    InboxSweepModule,
   ],
   controllers: [McpController],
   providers: [McpToolsService],
