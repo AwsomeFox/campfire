@@ -1,0 +1,11 @@
+{
+  "tracked": [
+    {
+      "pr": 1668,
+      "url": "https://github.com/AwsomeFox/campfire/pull/1668",
+      "branch": "fix/issue-1666",
+      "status": "babysitting",
+      "note": "Hardened scanner commit d4f65460 addresses Codex/Devin review; merging main and awaiting CI"
+    }
+  ]
+}
