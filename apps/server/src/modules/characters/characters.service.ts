@@ -1833,6 +1833,8 @@ export class CharactersService {
       throw new BadRequestException('A selected custom resource does not exist on any participant.');
     }
     const previewToken = randomUUID();
+    const linked = await this.db.select({ characterId: combatants.characterId }).from(combatants).innerJoin(encounters, eq(combatants.encounterId, encounters.id)).where(and(eq(encounters.campaignId, campaignId), ne(encounters.status, 'ended')));
+    const runningCombatantCharacterIds = linked.map((row) => row.characterId).filter((id): id is number => id != null && request.characterIds.includes(id));
     const before = targets.map((row) => ({ id: row.id, updatedAt: row.updatedAt, hpCurrent: row.hpCurrent, hpTemp: row.hpTemp, deathState: row.deathState, deathSaveSuccesses: row.deathSaveSuccesses, deathSaveFailures: row.deathSaveFailures, conditions: row.conditions, spellSlots: row.spellSlots, resources: row.resources }));
     const fingerprint = createHash('sha256').update(JSON.stringify(request)).digest('hex');
     await this.db.insert(partyRestBatches).values({ campaignId, actorUserId: user.id, previewToken, requestFingerprint: fingerprint, status: 'previewed', beforeJson: toJsonText(before), planJson: toJsonText(plan), createdAt: nowIso() });
@@ -1840,7 +1842,7 @@ export class CharactersService {
       const state = states.find((candidate) => candidate.id === item.characterId)!;
       return { characterId: item.characterId, name: item.characterName, hp: { before: item.hpBefore, after: item.hpAfter, tempBefore: state.hpTemp, tempAfter: item.hpTempAfter }, deathState: { before: state.deathState, after: item.deathStateAfter }, spellSlots: Object.fromEntries(Object.entries(item.spellSlotsAfter).filter(([key, value]) => state.spellSlots[key]?.used !== value.used).map(([key, value]) => [key, { before: state.spellSlots[key]?.used ?? 0, after: value.used }])), resources: Object.fromEntries(Object.entries(item.resourcesAfter).filter(([key, value]) => state.resources[key]?.used !== value.used).map(([key, value]) => [key, { before: state.resources[key]?.used ?? 0, after: value.used }])), conditionsCleared: item.conditionsCleared, conditionsKept: item.conditionsKept, hitDiceSpent: item.hitDiceSpent, hitDiceRolls: item.hitDiceRolls };
     });
-    return { previewToken, request, ruleSystem: plan.ruleSystem, failures: plan.failures, characters: deltas, runningCombatantCharacterIds: [] };
+    return { previewToken, request, ruleSystem: plan.ruleSystem, failures: plan.failures, characters: deltas, runningCombatantCharacterIds };
   }
 
   async applyPartyRecovery(campaignId: number, input: { previewToken: string; idempotencyKey: string; acknowledgeRunningCombatants: boolean }, user: RequestUser, role: Role) {
@@ -1853,6 +1855,8 @@ export class CharactersService {
     const before = fromJsonText<Array<{ id: number; updatedAt: string }>>(batch.beforeJson, []);
     const plan = fromJsonText<{ kind: RestKind; ruleSystem: string; plans: Array<{ characterId: number; characterName: string; hpAfter: number; hpTempAfter: number; deathStateAfter: string; deathSaveSuccessesAfter: number; deathSaveFailuresAfter: number; conditionsAfter: string[]; spellSlotsAfter: Record<string, SpellSlotLevel>; resourcesAfter: Record<string, CharacterResource> }> }>(batch.planJson, { kind: 'short', ruleSystem: '', plans: [] });
     const ids = before.map((s) => s.id);
+    const linked = await this.db.select({ characterId: combatants.characterId }).from(combatants).innerJoin(encounters, eq(combatants.encounterId, encounters.id)).where(and(eq(encounters.campaignId, campaignId), ne(encounters.status, 'ended')));
+    if (linked.some((row) => row.characterId != null && ids.includes(row.characterId)) && !input.acknowledgeRunningCombatants) throw new ConflictException('A running combatant will be synchronized; acknowledgement is required.');
     const storedPlan = fromJsonText<{ failures?: unknown[] }>(batch.planJson, {});
     if ((storedPlan.failures?.length ?? 0) > 0) throw new BadRequestException('A recovery preview with ineligible participants cannot be applied.');
     const rows = await this.db.select().from(characters).where(and(eq(characters.campaignId, campaignId), notDeleted(characters.deletedAt)));
@@ -1873,7 +1877,7 @@ export class CharactersService {
       await this.syncActiveCombatantConditions(item.characterId, toJsonText(item.conditionsAfter), { campaignId }).catch(() => undefined);
     }
     await this.audit.log({ actor: auditActor(user), actorRole: role, action: 'party.rest.apply', entityType: 'party_rest_batch', entityId: batch.id, campaignId, detail: JSON.stringify({ batchId: batch.id, characterIds: ids, idempotencyKey: input.idempotencyKey, kind: plan.kind }) });
-    for (const id of ids) this.emitCharacterUpdated(campaignId, id, user.id);
+    this.events.emit({ type: 'party.rest.updated', campaignId, batchId: batch.id, characterIds: ids });
     return { batchId: batch.id, kind: plan.kind, ruleSystem: plan.ruleSystem, characterIds: ids };
   }
 

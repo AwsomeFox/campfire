@@ -10527,6 +10527,7 @@ export const CampaignEventType = z.enum([
   'treasury.updated',
   // Issue #421: character sheet / member-resource writes (stats, actions, slots, …).
   'character.updated',
+  'party.rest.updated',
   // Issue #415: a DM asked one or more players to roll a check/save (check.requested), and a
   // targeted player answered it (check.resolved). Both are THIN id-only signals like the
   // encounter.* ticks — the payload (DC, consequence text, breakdown) is read back over the
@@ -10546,6 +10547,7 @@ export const CampaignEventType = z.enum([
 ]);
 export type CampaignEventType = z.infer<typeof CampaignEventType>;
 export const CampaignEvent = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('party.rest.updated'), campaignId: Id, batchId: Id, characterIds: z.array(Id), at: IsoDate }),
   z.object({
     type: z.literal('encounter.updated'),
     campaignId: Id,
