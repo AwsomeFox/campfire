@@ -2353,10 +2353,20 @@ a:hover .cf-name-reveal {
   text-decoration: none;
   cursor: pointer;
 }
-.cf-page-header__menuitem:hover,
-.cf-page-header__menuitem:focus-visible {
+.cf-page-header__menuitem:hover {
   background: color-mix(in srgb, var(--color-text) 10%, transparent);
-  outline: none;
+}
+/* Issue #1684: focus must be visually distinguishable from hover, not just
+   "also visible" — hover gets the tint above, focus-visible gets the
+   canonical accent ring instead (no tint), so a keyboard user can always
+   tell the two states apart at a glance. Inset (-2px) rather than the
+   default +2px outset because `.cf-page-header__menu` scrolls
+   (`overflow: auto`), which would clip an outset ring on the first/last
+   item — same convention as `.password-input__toggle:focus-visible` and
+   `.seg-opt:has(input:focus-visible)` in nocturne.css. */
+.cf-page-header__menuitem:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -2px;
 }
 
 @media (min-width: 40rem) {
