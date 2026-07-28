@@ -1032,9 +1032,18 @@ export class SchedulingService {
       // took is not an override, and restore was the one force-taking path still
       // returning a payload with nowhere to say so.
       forced = conflicts;
+      const restoresLiveRecap =
+        booked.sessionId == null
+          ? false
+          : tx
+            .select({ id: sessions.id })
+            .from(sessions)
+            .where(and(eq(sessions.id, booked.sessionId), notDeleted(sessions.deletedAt)))
+            .limit(1)
+            .all().length > 0;
       tx.update(scheduledSessions)
         .set({
-          status: 'scheduled',
+          status: restoresLiveRecap ? 'completed' : 'scheduled',
           cancelledAt: null,
           cancelledBy: null,
           cancellationReason: '',

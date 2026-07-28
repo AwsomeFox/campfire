@@ -1,9 +1,73 @@
 @import "tailwindcss";
-/* Nocturne design-system component classes (.card, .btn, .input, .field, .dialog, …) —
-   copied verbatim from design/claude-design/_ds/nocturne-…/styles.css (source of truth).
-   Inter is self-hosted via @fontsource/inter imports in main.tsx (issue #433) — do not
-   reintroduce a Google Fonts @import here or inside nocturne.css; nested @import url()
-   after Tailwind/generated rules triggers Vite's CSS optimizer warning and can drop the font. */
+
+/*
+  Issue #1682 (#1533 §1) — the Tailwind v4 `@theme` bridge.
+
+  Until this block, this codebase had NO `@theme` anywhere, so `p-*`/`rounded-*`/
+  `text-*` compiled against Tailwind's OWN built-in defaults, not the design
+  tokens declared below at plain `:root` — those tokens were only reachable by
+  dropping into an inline style / arbitrary value, which is why nobody did.
+
+  What actually needed a bridge, verified empirically (build the app, load the
+  compiled CSS, `getComputedStyle` a probe element — see #1682's PR description
+  for the harness) rather than assumed from source alone:
+
+   - RADIUS (`--radius-sm/md/lg`) turned out to ALREADY resolve to this file's
+     own values (4/8/14px), not Tailwind's (4/6/8px) — CSS cascade layers make
+     an UNLAYERED declaration always beat a LAYERED one regardless of source
+     order, and Tailwind emits its own defaults inside `@layer theme` while
+     this file's `:root` block below is plain, unlayered CSS. So `rounded-md`
+     was already 8px in the browser, not the 6px a source-only reading (no
+     `@theme`, so "must be using Tailwind's default") suggests. That said,
+     depending on an unlayered/layered accident is fragile — one future
+     `@layer` wrap around the block below would silently reintroduce the
+     6px/8px mismatch with no warning — so it's registered here anyway,
+     formalizing the value Tailwind's utilities already render. Same literal
+     values as the `:root` block below (can't `var()`-alias — the property
+     NAMES collide 1:1 with Tailwind's own theme keys, so a reference here
+     would be a self-reference); keep the two in sync by hand if either
+     changes. Zero visual change.
+   - `--text-xs` / `--text-sm` alias `--type-label` / `--type-control`, whose
+     existing values (12px / 14px) already coincidentally EQUAL Tailwind's own
+     defaults — zero visual change, now intentional instead of accidental.
+   - `--text-base` aliases `--type-body` (15px) — Tailwind's default is 16px,
+     so this is a real (if small, -6.25%) shift. Quantified in #1682: 9 call
+     sites app-wide, none inside a golden screenshot.
+
+  DELIBERATELY NOT included: the `--space-*` scale (`--spacing-1/2/3/4/6/8`,
+  i.e. every `p-*`/`m-*`/`gap-*`/`w-*`/`h-*`/… utility at those six numeric
+  keys). Unlike radius, there is no name collision and no accidental win here
+  — `p-3` genuinely renders Tailwind's own 12px today, not this file's 8.4px
+  `--space-3`. Registering `--spacing-3` etc. would fix that, but `--space-*`
+  is a uniform -30% rescale of Tailwind's spacing steps (2.8px vs 4px per
+  unit), and a repo-wide grep at exactly the six affected keys — across
+  p/px/py/pt/pr/pb/pl, m/mx/my/mt/mr/mb/ml, gap/gap-x/gap-y, space-x/space-y,
+  inset, top/right/bottom/left, translate-x/y, size/w/h/min-w/min-h/max-w/max-h —
+  found 2,124 call sites across 152 files, ~72% of every spacing utility in
+  the app, that would move all at once. The golden-screenshot suite (7 PNGs:
+  login responsive + character-sheet/session-recap print) covers none of that
+  surface. That is too large to land in this single, otherwise-additive
+  change — see #1682's PR description for the full count and a staged
+  rollout proposal. Do NOT add `--spacing-*` here without re-quantifying.
+
+  Nocturne design-system component classes (.card, .btn, .input, .field,
+  .dialog, …) — copied verbatim from
+  design/claude-design/_ds/nocturne-…/styles.css (source of truth). Inter is
+  self-hosted via @fontsource/inter imports in main.tsx (issue #433) — do not
+  reintroduce a Google Fonts @import here or inside nocturne.css; nested
+  @import url() after Tailwind/generated rules triggers Vite's CSS optimizer
+  warning and can drop the font.
+*/
+@theme {
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 14px;
+
+  --text-xs: var(--type-label);
+  --text-sm: var(--type-control);
+  --text-base: var(--type-body);
+}
+
 @import "./nocturne.css";
 
 /* Print only the readable page content. The app is intentionally optimized for
@@ -264,6 +328,11 @@
   --space-6: 16.8px;
   --space-8: 22.4px;
 
+  /* Issue #1682: these three names are ALSO registered (same literal values)
+     in the @theme block at the top of this file, so Tailwind's rounded-sm/md/lg
+     utilities compile against them explicitly instead of relying on the
+     unlayered-beats-layered cascade accident that made this already work.
+     Keep both copies numerically identical. */
   --radius-sm: 4px;
   --radius-md: 8px;
   --radius-lg: 14px;

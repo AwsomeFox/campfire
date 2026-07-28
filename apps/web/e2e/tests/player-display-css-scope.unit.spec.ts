@@ -22,21 +22,25 @@
  *    currently collide with anything (e.g. `.cf-init`, `.cf-cond`) still applies document-wide
  *    and would silently reskin any future element sharing that name — renaming is closing one
  *    hole, not scoping the pipe. So every selector in SCREEN_CSS (other than the
- *    `.cf-screen`/`.cf-screen.centered` root rule itself) is now ALSO prefixed with the
- *    `.cf-screen ` ancestor — the actual `<main>` this stylesheet renders inside — which
- *    confines every rule to this subtree regardless of naming. This is real, load-bearing
- *    scoping (a plain descendant combinator, universally supported — deliberately not
- *    `@scope`, since this is a TV/cast surface plausibly reached by more unusual browser
- *    environments than the rest of the app), not merely an absence-of-collision argument.
+ *    `.cf-screen`/`.cf-screen.centered` root rule itself and the portalled
+ *    `.cf-exit-pin*` family) is now ALSO prefixed with the `.cf-screen ` ancestor — the
+ *    actual `<main>` this stylesheet renders inside — which confines those rules to this
+ *    subtree regardless of naming. This is real, load-bearing scoping (a plain descendant
+ *    combinator, universally supported — deliberately not `@scope`, since this is a TV/cast
+ *    surface plausibly reached by more unusual browser environments than the rest of the
+ *    app), not merely an absence-of-collision argument.
+ *
+ *    Portal exception: `CastExitPinDialog` renders `.cf-exit-pin` into `document.body` via
+ *    `createPortal`, so those rules must stay bare (unique page-local names) to match.
  *
  * This suite makes BOTH halves structural rather than a one-off spot-check:
- * - Test 1 asserts every selector's leftmost simple selector is EXACTLY the `.cf-screen`
- *   scope root (i.e. ancestor-scoping is total, not partial) — this is the primary guarantee
- *   the issue's "does not leak outside its route" criterion asks for, true by construction.
+ * - Test 1 asserts every selector's leftmost simple selector is either the `.cf-screen`
+ *   scope root or an allowed `.cf-exit-pin*` portal exception — this is the primary
+ *   guarantee the issue's "does not leak outside its route" criterion asks for.
  * - Test 1 also keeps a collision backstop (no class name SCREEN_CSS uses, including
- *   `cf-screen` itself, collides with a name index.css/nocturne.css defines or another .tsx
- *   file uses) — a second, independent line of defence in case ancestor-scoping is ever
- *   accidentally dropped from a new rule.
+ *   `cf-screen` / `cf-exit-pin*`, collides with a name index.css/nocturne.css defines or
+ *   another .tsx file uses) — a second, independent line of defence in case ancestor-scoping
+ *   is ever accidentally dropped from a new rule.
  *
  * Pure source scan — no browser, no server — runs under playwright.unit.config.ts (the
  * config `npm run test:unit` / CI actually invoke; NOT pw-unit.config.ts, which is currently
@@ -135,25 +139,33 @@ const CSS_FILES = collectFiles(ROOT, /\.css$/);
 const TSX_FILES = collectFiles(ROOT, /\.tsx$/).filter((f) => f !== PAGE_PATH);
 
 test.describe('PlayerDisplayPage injected CSS does not leak (#1685)', () => {
-  test('every SCREEN_CSS rule is ancestor-scoped under .cf-screen — the only bare leftmost selector', () => {
+  test('every SCREEN_CSS rule is ancestor-scoped under .cf-screen — only allowlisted bare leftmost selectors', () => {
     const pageSource = READ(PAGE_PATH);
     const screenCss = extractScreenCss(pageSource);
     const screenClassNames = bareLeftmostClassNames(screenCss);
 
-    // The scope root itself (`.cf-screen` / `.cf-screen.centered`) is the ONE legitimate bare
-    // selector — it targets the <main> the stylesheet renders inside. Every other rule's
-    // leftmost simple selector must be that same `.cf-screen` (as the ancestor of a descendant
-    // combinator, e.g. `.cf-screen .cf-init { }`) — if this set contains anything besides
-    // `cf-screen`, some rule regressed to an unscoped, document-wide selector.
+    // Allowlisted bare leftmost selectors:
+    // - `.cf-screen` / `.cf-screen.centered`: the scope root on <main>
+    // - `.cf-exit-pin*`: CastExitPinDialog is createPortal'd to document.body, so these
+    //   unique page-local rules must match outside the .cf-screen subtree
+    // Every other rule's leftmost simple selector must be `.cf-screen` (as the ancestor of a
+    // descendant combinator, e.g. `.cf-screen .cf-init { }`).
+    const allowedBare = [
+      'cf-exit-pin',
+      'cf-exit-pin-actions',
+      'cf-exit-pin-error',
+      'cf-screen',
+    ];
     expect(
       [...screenClassNames].sort(),
-      'issue #1685 — every SCREEN_CSS rule must be scoped under the .cf-screen ancestor; ' +
-        'a bare selector here applies document-wide for as long as the Player Display route ' +
-        'is mounted, whether or not the name happens to collide with anything today',
-    ).toEqual(['cf-screen']);
+      'issue #1685 — every SCREEN_CSS rule must be scoped under the .cf-screen ancestor ' +
+        '(or be an allowlisted portal exception); a bare selector here applies document-wide ' +
+        'for as long as the Player Display route is mounted, whether or not the name happens ' +
+        'to collide with anything today',
+    ).toEqual(allowedBare);
 
-    // Backstop: even the one legitimate bare name (`cf-screen`) must not collide with
-    // anything defined/used elsewhere in the app — independent of the scoping check above.
+    // Backstop: allowlisted bare names must not collide with anything defined/used elsewhere
+    // in the app — independent of the scoping check above.
     const externalNames = new Set<string>();
     for (const file of CSS_FILES) {
       for (const n of cssSelectorClassNames(READ(file))) externalNames.add(n);

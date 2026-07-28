@@ -13,6 +13,11 @@ test.describe('shared save feedback (issue #756)', () => {
     expect(reduceSaveFeedback(saving, { type: 'begin' }).state).toBe('saving');
     const failed = reduceSaveFeedback(saving, { type: 'fail', error: 'offline' });
     expect(failed).toMatchObject({ state: 'error', error: 'offline' });
+    expect(reduceSaveFeedback(saving, { type: 'fail', error: "Couldn't save changes.", generic: true })).toMatchObject({
+      state: 'error',
+      error: "Couldn't save changes.",
+      genericError: true,
+    });
     const retried = reduceSaveFeedback(failed, { type: 'begin' });
     const at = new Date('2026-07-28T14:30:00.000Z');
     const saved = reduceSaveFeedback(retried, { type: 'succeed', at });
@@ -45,6 +50,18 @@ test('a multi-sentence server error starting like the generic fallback keeps its
   expect(formatSaveFailure('Server AI provider', "Couldn't save the provider. Check your API key.")).toBe(
     "Save failed for Server AI provider. Couldn't save the provider. Check your API key. Your edits are still here; try again.",
   );
+});
+
+test('error copy can be supplied by localized catalog formatters', () => {
+  const copy = {
+    generic: (subject: string) => `GENERIC ${subject}`,
+    withDetail: (subject: string, error: string) => `DETAIL ${subject}: ${error}`,
+  };
+  expect(formatSaveFailure('AI budget', "Couldn't save the budget.", copy)).toBe('GENERIC AI budget');
+  expect(formatSaveFailure('AI budget', 'Enter a non-negative number.', copy)).toBe(
+    'DETAIL AI budget: Enter a non-negative number',
+  );
+  expect(formatSaveFailure('AI budget', 'Localized generic fallback.', copy, true)).toBe('GENERIC AI budget');
 });
 
 test('every migrated editor associates its editable controls with shared save feedback', () => {

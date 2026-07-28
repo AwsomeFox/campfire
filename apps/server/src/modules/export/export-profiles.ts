@@ -285,7 +285,15 @@ export const PLAYED_STATE_FIELDS = {
   quest: ['status'],
   location: ['status'],
   session: ['playedAt', 'recap'],
-  character: ['status', 'xp', 'hpCurrent', 'hpTemp', 'deathState', 'deathSaveSuccesses', 'deathSaveFailures', 'conditions', 'spellSlots'],
+  // #1667 half B: `conditionInstances` sits beside `conditions` here, matching
+  // `combatant` below — a character's structured condition data (source, duration,
+  // concentration, `stacks` — this is how #1641's exhaustion level is stored) is
+  // played state, not identity data, and the allowlist is exhaustive: leaving it out
+  // meant a character's exhaustion level could never survive ANY export, including a
+  // full owner backup with playedState on. See CharactersService.listForExport for
+  // where the field actually gets resolved onto the exported row (it is not on the
+  // public Character schema).
+  character: ['status', 'xp', 'hpCurrent', 'hpTemp', 'deathState', 'deathSaveSuccesses', 'deathSaveFailures', 'conditions', 'conditionInstances', 'spellSlots'],
   encounter: ['status', 'round', 'turnIndex', 'currentCombatantId', 'turnPhase', 'escalationDie', 'endedAt'],
   combatant: ['initiative', 'hpCurrent', 'hpTemp', 'spCurrent', 'rpCurrent', 'deathState', 'deathSaveSuccesses', 'deathSaveFailures', 'conditions', 'conditionInstances', 'activeEffects'],
   storyArc: ['status'],
@@ -312,7 +320,9 @@ export const PRISTINE_STATE: Record<string, Record<string, unknown>> = {
   storyArc: { status: 'planned' },
   storyBeat: { status: 'planned' },
   timelineCalendar: { currentDate: '' },
-  character: { status: 'active', xp: 0, hpTemp: 0, deathState: 'none', deathSaveSuccesses: 0, deathSaveFailures: 0, conditions: [], spellSlots: {} },
+  // #1667: `conditionInstances: []` mirrors combatant's pristine default above — the
+  // same asymmetry the issue flagged for the allowlist existed here too.
+  character: { status: 'active', xp: 0, hpTemp: 0, deathState: 'none', deathSaveSuccesses: 0, deathSaveFailures: 0, conditions: [], conditionInstances: [], spellSlots: {} },
 };
 
 type Row = Record<string, unknown>;
