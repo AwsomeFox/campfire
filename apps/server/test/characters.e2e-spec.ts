@@ -667,6 +667,53 @@ describe('characters (e2e)', () => {
       await request(server).post(`/api/v1/characters/${characterId}/conditions/level`).set(dm).send({ name: 'Exhaustion', level: 0 });
     });
 
+    it('rejects adding Exhaustion when structured condition storage is full', async () => {
+      const server = ctx.app.getHttpServer();
+      const charRes = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(dm)
+        .send({ name: 'Full Condition Sheet' });
+      expect(charRes.status).toBe(201);
+      const targetId = charRes.body.id as number;
+
+      const fullInstances = Array.from({ length: 50 }, (_, idx) => ({
+        id: `full_${idx}`,
+        name: `Condition ${idx}`,
+        ruleEntryId: null,
+        source: null,
+        sourceCombatantId: null,
+        durationRounds: null,
+        roundsRemaining: null,
+        timing: 'none',
+        saveTiming: 'none',
+        saveDc: null,
+        saveAbility: null,
+        isConcentration: false,
+        stacks: 1,
+        notes: '',
+        custom: true,
+      }));
+      const db = ctx.app.get<DrizzleDb>(DB);
+      await db
+        .update(characters)
+        .set({
+          conditions: JSON.stringify(fullInstances.map((i) => i.name)),
+          conditionInstances: JSON.stringify(fullInstances),
+        })
+        .where(eq(characters.id, targetId));
+
+      const res = await request(server)
+        .post(`/api/v1/characters/${targetId}/conditions/level`)
+        .set(dm)
+        .send({ name: 'Exhaustion', level: 1 });
+      expect(res.status).toBe(400);
+
+      const [after] = await db.select().from(characters).where(eq(characters.id, targetId)).limit(1);
+      const afterInstances = JSON.parse(after.conditionInstances ?? '[]') as Array<{ name: string }>;
+      expect(afterInstances).toHaveLength(50);
+      expect(afterInstances.some((i) => i.name === 'Exhaustion')).toBe(false);
+    });
+
     it('relative level adjustments are not lost when two callers update at once', async () => {
       const server = ctx.app.getHttpServer();
       const charRes = await request(server)

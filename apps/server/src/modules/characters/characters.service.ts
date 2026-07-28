@@ -1374,6 +1374,9 @@ export class CharactersService {
       if (nextLevel < 0 || nextLevel > track.max) {
         throw new BadRequestException(`${track.name} level (${nextLevel}) must be in [0, ${track.max}]`);
       }
+      if (!currentInstance && nextLevel > 0 && priorInstances.length >= 50) {
+        throw new BadRequestException(`${track.name} cannot be added because the character already has 50 condition instances`);
+      }
 
       const nextInstances =
         nextLevel === 0
