@@ -1,0 +1,22 @@
+{
+  "tracked": [
+    {
+      "pr": 1625,
+      "status": "merged",
+      "url": "https://github.com/AwsomeFox/campfire/pull/1625",
+      "headBranch": "fix/issue-738",
+      "baseBranch": "main",
+      "updatedAt": "2026-07-28T05:27:53Z",
+      "notes": "Merged 2026-07-28 via squash 7405c4c3. Head 2db94948 (main merge + OpenAPI ApiOperation). Review threads resolved; CI green."
+    },
+    {
+      "pr": 1621,
+      "status": "babysitting",
+      "url": "https://github.com/AwsomeFox/campfire/pull/1621",
+      "headBranch": "fix/issue-1450",
+      "baseBranch": "main",
+      "updatedAt": "2026-07-28T09:50:00Z",
+      "notes": "Tracking opened. MERGEABLE; 5 behind main. Copilot thread on outdated test description already fixed in 1797982b — needs resolve. CI in progress on synchronize."
+    }
+  ]
+}
