@@ -1,0 +1,13 @@
+{
+  "tracked": [
+    {
+      "pr": 1624,
+      "status": "babysitting",
+      "url": "https://github.com/AwsomeFox/campfire/pull/1624",
+      "headBranch": "aidm-console-i18n",
+      "baseBranch": "main",
+      "updatedAt": "2026-07-28T09:58:00Z",
+      "notes": "Tracking started on cursor/pull-request-babysitting-6770 (prior 8d14 idle without pushed state). MERGEABLE; Copilot threads resolved; open Devin thread on trust-copy vs catalog blurbs; main has new commits since 9d054366; CI in progress."
+    }
+  ]
+}
