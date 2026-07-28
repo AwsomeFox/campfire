@@ -1049,6 +1049,50 @@ describe('campaign import — character conditionInstances round-trip (issue #16
     });
   });
 
+  it('reconciles hand-edited character condition columns through sheet helpers before import', async () => {
+    const doc = structuredClone(exportDoc) as Record<string, unknown>;
+    const exportedChar = (doc.characters as Array<Record<string, unknown>>).find((c) => c.id === characterId);
+    expect(exportedChar).toBeDefined();
+    exportedChar!.conditions = ['Exhausted'];
+    exportedChar!.conditionInstances = [
+      {
+        ...exhaustion,
+        durationRounds: 8,
+        roundsRemaining: 4,
+        timing: 'end-of-turn',
+        saveTiming: 'end-of-turn',
+        saveDc: 14,
+        saveAbility: 'CON',
+        sourceCombatantId: combatantId,
+      },
+      concentrating,
+    ];
+
+    const res = await dmAgent.post('/api/v1/campaigns/import').send(doc);
+    expect(res.status).toBe(201);
+    const imported = res.body;
+    const chars = await dmAgent.get(`/api/v1/campaigns/${imported.id}/characters`);
+    const importedChar = chars.body.find((c: { name: string }) => c.name === 'Wanderer');
+    expect(importedChar.conditions).toEqual(['Exhausted']);
+
+    const [importedRow] = await db.select().from(charactersTable).where(eq(charactersTable.id, importedChar.id));
+    expect(importedRow).toBeDefined();
+    expect(JSON.parse(importedRow!.conditions)).toEqual(['Exhausted']);
+    const importedInstances = JSON.parse(importedRow!.conditionInstances ?? '[]') as ConditionInstance[];
+    expect(importedInstances).toHaveLength(1);
+    expect(importedInstances[0]).toMatchObject({
+      name: 'Exhausted',
+      stacks: 3,
+      durationRounds: null,
+      roundsRemaining: null,
+      timing: 'none',
+      saveTiming: 'none',
+      saveDc: null,
+      saveAbility: null,
+      sourceCombatantId: null,
+    });
+  });
+
   it('pins the boundary: a combatant’s structured conditionInstances do NOT survive import (half A, deliberately excluded)', async () => {
     const res = await dmAgent.post('/api/v1/campaigns/import').send(exportDoc);
     expect(res.status).toBe(201);
@@ -1072,5 +1116,195 @@ describe('campaign import — character conditionInstances round-trip (issue #16
     expect(importedCombatant.conditionInstances[0].isConcentration).toBe(false);
     expect(importedCombatant.conditionInstances[0].source).toBeNull();
     expect(importedCombatant.conditionInstances[0].id).not.toBe(concentrating.id);
+  });
+});
+
+/**
+ * Issue #1548 — campaign export/import stays scoped to the campaign, not
+ * install-level scheduling/venue/room resources (maintainer ruling). #588 added
+ * organized-play decoration (series/venue/room/assignedDm/capacity/event+season
+ * keys/ics identity/occurrence lineage) to scheduled sessions, and it flowed
+ * into `SchedulingService.listForExport` even though `importCampaign` never
+ * restored it — an export that looked like a backup of the organized-play
+ * scheduling when it silently flattened on restore. Pins the omission the same
+ * way `cancelledBy: null` / `sessionId: null` are already pinned above: a
+ * deliberate, asserted boundary, not an accident.
+ */
+describe('campaign export/import — organized-play decoration is dropped, not carried (issue #1548)', () => {
+  let ctx: TestAppContext;
+  let dmAgent: ReturnType<typeof request.agent>;
+  const dropped = [
+    'seriesId',
+    'venueId',
+    'roomId',
+    'assignedDmUserId',
+    'capacity',
+    'eventId',
+    'seasonId',
+    'icsUid',
+    'icsSequence',
+    'originalScheduledAt',
+    'occurrenceIndex',
+  ] as const;
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    const server = ctx.app.getHttpServer();
+    dmAgent = request.agent(server);
+    await dmAgent.post('/api/v1/auth/setup').send({ username: 'op-export-dm', password: 'op-export-pw-1' });
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('an organized-play series (venue, room, assigned DM, capacity, event/season keys) exports as plain one-offs with no organized-play fields, and re-imports cleanly with no dangling references', async () => {
+    const campaign = await dmAgent.post('/api/v1/campaigns').send({ name: 'Organized Play Export Source' });
+    const srcId = campaign.body.id;
+
+    const venue = await dmAgent
+      .post('/api/v1/organized-play/venues')
+      .send({ name: 'The Export Test Tavern', timezone: 'America/New_York', address: '1 Portable St' });
+    expect(venue.status).toBe(201);
+    const room = await dmAgent.post(`/api/v1/organized-play/venues/${venue.body.id}/rooms`).send({ name: 'Back Room', capacity: 6 });
+    expect(room.status).toBe(201);
+
+    const series = await dmAgent
+      .post(`/api/v1/campaigns/${srcId}/series`)
+      .send({
+        title: 'Organized Play Night',
+        timezone: 'America/New_York',
+        startDate: '2099-01-06',
+        startTime: '19:00',
+        durationMinutes: 180,
+        freq: 'weekly',
+        interval: 1,
+        count: 3,
+        roomId: room.body.id,
+        assignedDmUserId: 'op-export-dm',
+        capacity: 6,
+        eventId: 'AL-EXPORT',
+        seasonId: 'S1',
+      });
+    expect(series.status).toBe(201);
+    expect(series.body.occurrences).toHaveLength(3);
+    const firstId = series.body.occurrences[0].id;
+
+    // Sanity: every occurrence really does carry the organized-play decoration
+    // BEFORE export, so the export-time absence below is meaningful — not just
+    // "it was never there".
+    for (const occ of series.body.occurrences) {
+      expect(occ.seriesId).toBe(series.body.id);
+      expect(occ.venueId).toBe(venue.body.id);
+      expect(occ.roomId).toBe(room.body.id);
+      expect(occ.assignedDmUserId).toBe('op-export-dm');
+      expect(occ.capacity).toBe(6);
+      expect(occ.eventId).toBe('AL-EXPORT');
+      expect(occ.seasonId).toBe('S1');
+      expect(occ.icsUid).toBeTruthy();
+      expect(occ.originalScheduledAt).toBeTruthy();
+    }
+
+    // Reschedule the first occurrence (bumps icsSequence, exercises the
+    // exception-lineage fields) and cancel the second, so the export carries a
+    // non-trivial organized-play history, not just freshly-materialized rows.
+    // A series occurrence can only be moved through the dedicated reschedule
+    // endpoint (the legacy PATCH /schedule/:id 400s on a move — it has no
+    // conflict probe or ledger entry, see organized-play.e2e-spec.ts).
+    const reschedule = await dmAgent
+      .post(`/api/v1/organized-play/occurrences/${firstId}/reschedule`)
+      .send({ localStart: '2099-01-06T20:00', reason: 'venue conflict', force: true });
+    expect(reschedule.status).toBe(201);
+    expect(reschedule.body.occurrence.icsSequence).toBeGreaterThan(0);
+    const cancel = await dmAgent.delete(`/api/v1/schedule/${series.body.occurrences[1].id}`).send({ reason: 'Table fell through' });
+    expect(cancel.status).toBe(200);
+
+    const exportRes = await dmAgent.get(`/api/v1/campaigns/${srcId}/export`);
+    expect(exportRes.status).toBe(200);
+    const exportDoc = exportRes.body as { scheduledSessions: Array<Record<string, unknown>>; campaign: Record<string, unknown> } & Record<
+      string,
+      unknown
+    >;
+    expect(Array.isArray(exportDoc.scheduledSessions)).toBe(true);
+    const exported = exportDoc.scheduledSessions.filter((s) => s.title === 'Organized Play Night' || s.status === 'cancelled');
+    expect(exported.length).toBeGreaterThanOrEqual(3);
+
+    // The pinned omission: none of the organized-play/scheduling decoration
+    // fields survive into the export document, on ANY exported row — cancelled,
+    // rescheduled, or untouched.
+    for (const row of exportDoc.scheduledSessions) {
+      for (const field of dropped) {
+        expect(row).not.toHaveProperty(field);
+      }
+      // The legacy fields import DOES restore are still there — this is a
+      // narrowing, not a wholesale drop of the collection.
+      expect(row).toHaveProperty('scheduledAt');
+      expect(row).toHaveProperty('title');
+      expect(row).toHaveProperty('status');
+      expect(row).toHaveProperty('cancelledBy'); // still exported; import nulls it out itself
+    }
+
+    // Re-import: every occurrence lands as a plain one-off, no dangling
+    // series/venue/room references (there is nothing left to point at one).
+    const importRes = await dmAgent.post('/api/v1/campaigns/import').send(exportDoc);
+    expect(importRes.status).toBe(201);
+    const importedId = importRes.body.id;
+
+    const importedSchedule = await dmAgent.get(`/api/v1/campaigns/${importedId}/schedule`);
+    expect(importedSchedule.status).toBe(200);
+    expect(importedSchedule.body.length).toBeGreaterThanOrEqual(3);
+    for (const row of importedSchedule.body) {
+      expect(row.seriesId).toBeNull();
+      expect(row.venueId).toBeNull();
+      expect(row.roomId).toBeNull();
+      expect(row.assignedDmUserId).toBe('');
+      expect(row.capacity).toBe(0);
+      expect(row.eventId).toBe('');
+      expect(row.seasonId).toBe('');
+      expect(row.occurrenceIndex).toBe(0);
+    }
+    // The cancelled occurrence's lifecycle status still round-trips (issue #504's
+    // rule, unaffected by #1548 — only the organized-play decoration is dropped).
+    const importedCancelled = importedSchedule.body.find((s: { status: string }) => s.status === 'cancelled');
+    expect(importedCancelled).toBeDefined();
+    expect(importedCancelled.cancellationReason).toBe('Table fell through');
+
+    // The source install's venue/room/series are untouched by the import — they
+    // are install-level resources this campaign's import never reaches at all.
+    const sourceSeriesStillThere = await dmAgent.get(`/api/v1/campaigns/${srcId}/series/${series.body.id}`);
+    expect(sourceSeriesStillThere.status).toBe(200);
+  });
+
+  it('importing a pre-#588 export (no organized-play fields at all) still works unchanged', async () => {
+    // A hand-built document in the SHAPE a pre-#588 export produced — no
+    // seriesId/venueId/etc. keys present at all, not even as null. Import must
+    // not choke on their absence, since it never read them even before #1548.
+    const legacyDoc = {
+      campaign: { name: 'Legacy Pre-588 Import' },
+      scheduledSessions: [
+        {
+          id: 999001,
+          campaignId: 1,
+          scheduledAt: '2030-05-01T19:00:00.000Z',
+          durationMinutes: 240,
+          title: 'Legacy Night',
+          location: "Sam's place",
+          notes: 'bring snacks',
+          status: 'scheduled',
+          cancelledAt: null,
+          cancelledBy: null,
+          cancellationReason: '',
+          sessionId: null,
+          rsvps: [],
+        },
+      ],
+    };
+
+    const res = await dmAgent.post('/api/v1/campaigns/import').send(legacyDoc);
+    expect(res.status).toBe(201);
+    const imported = await dmAgent.get(`/api/v1/campaigns/${res.body.id}/schedule`);
+    expect(imported.status).toBe(200);
+    expect(imported.body).toHaveLength(1);
+    expect(imported.body[0]).toMatchObject({ title: 'Legacy Night', location: "Sam's place", seriesId: null, venueId: null });
   });
 });

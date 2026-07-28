@@ -2,7 +2,7 @@ import request from 'supertest';
 import { eq } from 'drizzle-orm';
 import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
 import { DB, type DrizzleDb } from '../src/db/db.module';
-import { campaigns, characters } from '../src/db/schema';
+import { campaigns, characters, combatants } from '../src/db/schema';
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' };
 const owner = { 'x-dev-role': 'player', 'x-dev-user': 'owner-1' };
@@ -574,6 +574,242 @@ describe('characters (e2e)', () => {
       .send({ remove: ['prone'] });
     expect(removeRes.status).toBe(201);
     expect(removeRes.body.conditions).toEqual(['poisoned']);
+  });
+
+  // Issue #1643: exhaustion is a LEVEL (5e, 1-6, 6 = death), not opaque free text.
+  // `add`/`remove` above only toggle presence and preserve whatever `stacks` an existing
+  // instance already has — there was no way to actually MOVE the level. This campaign has
+  // no explicit ruleSystem, which resolves to the 5e adapter (ruleSystemAdapter('') falls
+  // back to Dnd5eAdapter), so it's a real 5e sheet.
+  describe('exhaustion level (issue #1643)', () => {
+    it('requires an actual delta or level adjustment', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/characters/${characterId}/conditions/level`)
+        .set(owner)
+        .send({ name: 'Exhaustion' });
+      expect(res.status).toBe(400);
+    });
+
+    it('delta increments from nothing, level sets absolutely, and level shows up in conditionInstances', async () => {
+      const server = ctx.app.getHttpServer();
+      // Starts at 0 (no Exhaustion instance yet) — delta +1 creates it at level 1.
+      const first = await request(server)
+        .post(`/api/v1/characters/${characterId}/conditions/level`)
+        .set(owner)
+        .send({ name: 'Exhaustion', delta: 1 });
+      expect(first.status).toBe(201);
+      expect(first.body.conditions).toContain('Exhaustion');
+      const inst1 = first.body.conditionInstances.find((i: { name: string }) => i.name === 'Exhaustion');
+      expect(inst1).toMatchObject({ stacks: 1 });
+
+      // Another failed save: delta +1 again -> level 2.
+      const second = await request(server)
+        .post(`/api/v1/characters/${characterId}/conditions/level`)
+        .set(owner)
+        .send({ name: 'Exhaustion', delta: 1 });
+      expect(second.status).toBe(201);
+      expect(second.body.conditionInstances.find((i: { name: string }) => i.name === 'Exhaustion')).toMatchObject({ stacks: 2 });
+
+      // Absolute set (a DM correcting the level directly).
+      const setAbs = await request(server)
+        .post(`/api/v1/characters/${characterId}/conditions/level`)
+        .set(dm)
+        .send({ name: 'Exhaustion', level: 4 });
+      expect(setAbs.status).toBe(201);
+      expect(setAbs.body.conditionInstances.find((i: { name: string }) => i.name === 'Exhaustion')).toMatchObject({ stacks: 4 });
+
+      // A long rest, extended stay, or magical cure: delta -1 -> level 3.
+      const decrement = await request(server)
+        .post(`/api/v1/characters/${characterId}/conditions/level`)
+        .set(dm)
+        .send({ name: 'Exhaustion', delta: -1 });
+      expect(decrement.status).toBe(201);
+      expect(decrement.body.conditionInstances.find((i: { name: string }) => i.name === 'Exhaustion')).toMatchObject({ stacks: 3 });
+
+      // Level 0 removes the condition entirely — no zero-stacks instance lingers.
+      const clear = await request(server)
+        .post(`/api/v1/characters/${characterId}/conditions/level`)
+        .set(dm)
+        .send({ name: 'Exhaustion', level: 0 });
+      expect(clear.status).toBe(201);
+      expect(clear.body.conditions).not.toContain('Exhaustion');
+      expect(clear.body.conditionInstances.find((i: { name: string }) => i.name === 'Exhaustion')).toBeUndefined();
+    });
+
+    it('respects the 5e cap: level 7 is a 400, not a clamp to 6, and nothing was written', async () => {
+      const server = ctx.app.getHttpServer();
+      await request(server).post(`/api/v1/characters/${characterId}/conditions/level`).set(dm).send({ name: 'Exhaustion', level: 0 });
+      const atCap = await request(server)
+        .post(`/api/v1/characters/${characterId}/conditions/level`)
+        .set(dm)
+        .send({ name: 'Exhaustion', level: 6 });
+      expect(atCap.status).toBe(201);
+      expect(atCap.body.conditionInstances.find((i: { name: string }) => i.name === 'Exhaustion')).toMatchObject({ stacks: 6 });
+
+      const overCap = await request(server)
+        .post(`/api/v1/characters/${characterId}/conditions/level`)
+        .set(dm)
+        .send({ name: 'Exhaustion', delta: 1 });
+      expect(overCap.status).toBe(400);
+
+      // Unchanged — still 6, not silently clamped and not left at some other value.
+      const after = await request(server).get(`/api/v1/characters/${characterId}`).set(dm);
+      expect(after.body.conditionInstances.find((i: { name: string }) => i.name === 'Exhaustion')).toMatchObject({ stacks: 6 });
+
+      const belowZero = await request(server)
+        .post(`/api/v1/characters/${characterId}/conditions/level`)
+        .set(dm)
+        .send({ name: 'Exhaustion', level: 0, delta: -1 });
+      expect(belowZero.status).toBe(400);
+
+      // Clean up for later tests in this file.
+      await request(server).post(`/api/v1/characters/${characterId}/conditions/level`).set(dm).send({ name: 'Exhaustion', level: 0 });
+    });
+
+    it('rejects adding Exhaustion when structured condition storage is full', async () => {
+      const server = ctx.app.getHttpServer();
+      const charRes = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(dm)
+        .send({ name: 'Full Condition Sheet' });
+      expect(charRes.status).toBe(201);
+      const targetId = charRes.body.id as number;
+
+      const fullInstances = Array.from({ length: 50 }, (_, idx) => ({
+        id: `full_${idx}`,
+        name: `Condition ${idx}`,
+        ruleEntryId: null,
+        source: null,
+        sourceCombatantId: null,
+        durationRounds: null,
+        roundsRemaining: null,
+        timing: 'none',
+        saveTiming: 'none',
+        saveDc: null,
+        saveAbility: null,
+        isConcentration: false,
+        stacks: 1,
+        notes: '',
+        custom: true,
+      }));
+      const db = ctx.app.get<DrizzleDb>(DB);
+      await db
+        .update(characters)
+        .set({
+          conditions: JSON.stringify(fullInstances.map((i) => i.name)),
+          conditionInstances: JSON.stringify(fullInstances),
+        })
+        .where(eq(characters.id, targetId));
+
+      const res = await request(server)
+        .post(`/api/v1/characters/${targetId}/conditions/level`)
+        .set(dm)
+        .send({ name: 'Exhaustion', level: 1 });
+      expect(res.status).toBe(400);
+
+      const [after] = await db.select().from(characters).where(eq(characters.id, targetId)).limit(1);
+      const afterInstances = JSON.parse(after.conditionInstances ?? '[]') as Array<{ name: string }>;
+      expect(afterInstances).toHaveLength(50);
+      expect(afterInstances.some((i) => i.name === 'Exhaustion')).toBe(false);
+    });
+
+    it('relative level adjustments are not lost when two callers update at once', async () => {
+      const server = ctx.app.getHttpServer();
+      const charRes = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(dm)
+        .send({ name: 'Concurrent Exhaustion Target' });
+      expect(charRes.status).toBe(201);
+      const targetId = charRes.body.id as number;
+
+      const [a, b] = await Promise.all([
+        request(server).post(`/api/v1/characters/${targetId}/conditions/level`).set(dm).send({ name: 'Exhaustion', delta: 1 }),
+        request(server).post(`/api/v1/characters/${targetId}/conditions/level`).set(dm).send({ name: 'Exhaustion', delta: 1 }),
+      ]);
+      expect([a.status, b.status].sort()).toEqual([201, 201]);
+
+      const after = await request(server).get(`/api/v1/characters/${targetId}`).set(dm);
+      expect(after.body.conditionInstances.find((i: { name: string }) => i.name === 'Exhaustion')).toMatchObject({ stacks: 2 });
+    });
+
+    it('syncs the adjusted level into a linked live combatant', async () => {
+      const server = ctx.app.getHttpServer();
+      const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Live Exhaustion Sync Campaign' });
+      expect(campRes.status).toBe(201);
+      const liveCampaignId = campRes.body.id as number;
+      const charRes = await request(server)
+        .post(`/api/v1/campaigns/${liveCampaignId}/characters`)
+        .set(dm)
+        .send({ name: 'Live Exhaustion Target' });
+      expect(charRes.status).toBe(201);
+      const liveCharacterId = charRes.body.id as number;
+      const encRes = await request(server).post(`/api/v1/campaigns/${liveCampaignId}/encounters`).set(dm).send({ name: 'Live Sync Fight' });
+      expect(encRes.status).toBe(201);
+      const combatantRes = await request(server)
+        .post(`/api/v1/encounters/${encRes.body.id}/combatants`)
+        .set(dm)
+        .send({ kind: 'character', characterId: liveCharacterId });
+      expect(combatantRes.status).toBe(201);
+
+      const adjusted = await request(server)
+        .post(`/api/v1/characters/${liveCharacterId}/conditions/level`)
+        .set(dm)
+        .send({ name: 'Exhaustion', level: 3 });
+      expect(adjusted.status).toBe(201);
+
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const [combatant] = await db.select().from(combatants).where(eq(combatants.characterId, liveCharacterId)).limit(1);
+      const instances = JSON.parse(combatant.conditionInstances ?? '[]') as Array<{ name: string; stacks: number }>;
+      expect(instances.find((i) => i.name === 'Exhaustion')).toMatchObject({ stacks: 3 });
+    });
+
+    it("a name that isn't this system's leveled track is a 400 (does not silently create a custom leveled condition)", async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/characters/${characterId}/conditions/level`)
+        .set(dm)
+        .send({ name: 'Poisoned', delta: 1 });
+      expect(res.status).toBe(400);
+    });
+  });
+
+  // Issue #1643's negative case: PF2e has no leveled condition track at all.
+  describe('exhaustion level — a system with no track (issue #1643)', () => {
+    let pf2eCampaignId: number;
+    let pf2eCharacterId: number;
+
+    beforeAll(async () => {
+      const server = ctx.app.getHttpServer();
+      const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'PF2e No-Exhaustion Campaign' });
+      pf2eCampaignId = campRes.body.id;
+      const db = ctx.app.get<DrizzleDb>(DB);
+      await db.update(campaigns).set({ ruleSystem: 'pf2e' }).where(eq(campaigns.id, pf2eCampaignId));
+
+      const charRes = await request(server)
+        .post(`/api/v1/campaigns/${pf2eCampaignId}/characters`)
+        .set(owner)
+        .send({ name: 'PF2e Test Character' });
+      pf2eCharacterId = charRes.body.id;
+    });
+
+    it('every level call 400s — PF2e declares no leveled condition track', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/characters/${pf2eCharacterId}/conditions/level`)
+        .set(owner)
+        .send({ name: 'Exhaustion', delta: 1 });
+      expect(res.status).toBe(400);
+
+      // The bare-name add/remove path still works normally — #1643 only closes the
+      // LEVEL gap, it does not touch presence-only conditions on any system.
+      const addRes = await request(server)
+        .post(`/api/v1/characters/${pf2eCharacterId}/conditions`)
+        .set(owner)
+        .send({ add: ['Fatigued'] });
+      expect(addRes.status).toBe(201);
+      expect(addRes.body.conditions).toContain('Fatigued');
+    });
   });
 
   // Issue #129: a player may own more than one character (backup PC, familiar, companion) —

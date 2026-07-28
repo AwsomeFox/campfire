@@ -63,6 +63,7 @@ export * from './character-action';
 export * from './combatant-statblock';
 export * from './character-creation';
 export * from './narration-language';
+export * from './leveled-conditions';
 
 export {
   DifficultyBand,
@@ -558,6 +559,18 @@ export const Character = z.object({
   deathSaveSuccesses: z.number().int().min(0).max(3).default(0),
   deathSaveFailures: z.number().int().min(0).max(3).default(0),
   conditions: z.array(z.string().max(40)).default([]),
+  // Issue #1643: structured condition instances (source/duration/saves/`stacks`) were
+  // already written to this row's `condition_instances` column by #1047, and already
+  // exposed on `Combatant` (below, `conditionInstances`) — but never on `Character`, so a
+  // client had no way to read a leveled condition's LEVEL (5e Exhaustion's `stacks`) off a
+  // sheet, only its bare name. `z.lazy` because `ConditionInstance` is defined much later
+  // in this file (the encounter/combat section) and `Character` is defined here, early —
+  // a direct forward reference would read `ConditionInstance` before its own `const`
+  // initializer has run. Same encounter-only-field-stripping as the write side
+  // (`toSheetConditionInstance` in common/conditions.ts): a sheet instance's
+  // durationRounds/timing/saveDc/etc. are always null/none, since there is no round loop
+  // outside combat.
+  conditionInstances: z.lazy(() => z.array(ConditionInstance).max(50).default([])),
   saveProficiencies: z.array(AbilityKey).default([]), // abilities with saving-throw proficiency
   skills: z.record(z.string().max(40), SkillRank).default({}), // skill name -> rank; absent = unproficient
   actions: z.array(CharacterAction).max(100).default([]),
@@ -570,7 +583,19 @@ export const Character = z.object({
   ...timestamps,
 });
 export type Character = z.infer<typeof Character>;
-export const CharacterCreate = Character.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ name: true });
+// `conditionInstances` is omitted here (issue #1643): it's a READ projection Character
+// exposes so a client can see a leveled condition's `stacks`, not a general write surface —
+// writes go through the dedicated POST :id/conditions (names) and POST :id/conditions/level
+// (a leveled track's level) endpoints, same division as `resources` (read via GET
+// :id/resource-vocabulary + the Character.resources projection, written via POST
+// :id/resources, never the general update). Also a real necessity, not just tidiness: its
+// `z.lazy()` (see the field's own doc comment on `Character`) makes zod-to-json-schema emit
+// a `$ref` for any tool whose input schema spreads `CharacterUpdate.shape` — some MCP
+// clients don't resolve `$ref`, which is exactly what upsert_character's own test asserts
+// never happens (`test/mcp.e2e-spec.ts`, "no tool schema may contain a $ref at all").
+export const CharacterCreate = Character.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true, conditionInstances: true })
+  .partial()
+  .required({ name: true });
 export const CharacterUpdate = CharacterCreate.partial();
 
 /**
@@ -602,6 +627,30 @@ export const ConditionsPatch = z.object({
   add: z.array(z.string().max(40)).optional(),
   remove: z.array(z.string().max(40)).optional(),
 });
+/**
+ * Set/adjust the LEVEL of one leveled condition track (issue #1643) — e.g. 5e Exhaustion —
+ * on a character sheet. `ConditionsPatch` above is presence-only (`add`/`remove` a bare
+ * name); it preserves an existing instance's `stacks` unchanged and has no way to move it,
+ * which is exactly the gap #1643 found: nothing could raise or lower exhaustion without
+ * hand-editing the stored condition. `delta`/`level` are alternatives, not a pair — same
+ * shape as {@link ResourcePatch} (`delta` adjusts relative to the current level, `level`
+ * sets it absolutely, `level` is applied first when both are sent). `level`/resulting level
+ * 0 removes the condition entirely (there is no zero-stacks instance — `ConditionInstance`
+ * itself requires `stacks >= 1`). Going below 0 or above the track's `max` is a 400, not a
+ * clamp, matching every other bounded-resource write in this schema (#1039).
+ */
+export const ConditionLevelPatchShape = {
+  name: z.string().min(1).max(40),
+  delta: z.number().int().optional().describe('Relative level change. Required unless `level` is provided.'),
+  level: z.number().int().min(0).max(99).optional().describe('Absolute level to set. Required unless `delta` is provided.'),
+} as const;
+export const ConditionLevelPatch = z
+  .object(ConditionLevelPatchShape)
+  .strict()
+  .refine((patch) => patch.delta !== undefined || patch.level !== undefined, {
+    message: 'Either delta or level is required',
+  });
+export type ConditionLevelPatch = z.infer<typeof ConditionLevelPatch>;
 /**
  * Canonical 5e condition vocabulary — the single source of truth shared across
  * the character sheet, the encounter tracker, and the compendium (issue #111).
@@ -1332,7 +1381,12 @@ export type ScheduledSession = z.infer<typeof ScheduledSession>;
  * adopt a night into someone else's series, or a `roomId` that skipped its
  * double-booking check.
  */
-const ORGANIZED_PLAY_OMIT = {
+/**
+ * Organized-play decoration keys that campaign export/import deliberately does
+ * not carry (issue #1548). Shared by {@link ScheduledSessionCreate}'s omit list
+ * and {@link toScheduledSessionExport}'s strip list so the two cannot drift.
+ */
+export const ORGANIZED_PLAY_OMIT = {
   seriesId: true,
   occurrenceIndex: true,
   venueId: true,
@@ -1454,6 +1508,49 @@ export type RsvpSet = z.infer<typeof RsvpSet>;
 
 export const ScheduledSessionWithRsvps = ScheduledSession.extend({ rsvps: z.array(SessionRsvp) });
 export type ScheduledSessionWithRsvps = z.infer<typeof ScheduledSessionWithRsvps>;
+
+/**
+ * Campaign-export shape for a scheduled session (issue #1548).
+ *
+ * `CampaignsService.importCampaign` has never restored organized-play decoration —
+ * it inserts scheduled sessions from a closed literal that writes only the legacy
+ * fields (`scheduledAt`, `durationMinutes`, `title`, `location`, `notes`, `status`,
+ * `cancelledAt`, `cancellationReason`), the same "drop install-local/cross-collection
+ * ids" discipline it already applies to `cancelledBy` and `sessionId`. A campaign
+ * export carrying `seriesId`/`venueId`/`roomId`/etc. anyway made an organized-play
+ * campaign's export LOOK like a full backup of its scheduling, when restoring it
+ * silently flattened every occurrence into a one-off — the export promised more than
+ * import could ever deliver. Per the maintainer's ruling on #1548: campaign
+ * export/import cares about the campaign, not install-level scheduling/venue/room
+ * resources, so the fix is to stop exporting decoration import was never going to
+ * restore, rather than teach import to restore it.
+ *
+ * Reuses {@link ORGANIZED_PLAY_OMIT} — the exact field set import already never
+ * reads on the CREATE path — rather than a second hand-maintained list that could
+ * drift from it.
+ */
+export const ScheduledSessionExport = ScheduledSessionWithRsvps.omit(ORGANIZED_PLAY_OMIT);
+export type ScheduledSessionExport = z.infer<typeof ScheduledSessionExport>;
+
+/**
+ * Drop organized-play decoration from a scheduled-session row for campaign export.
+ *
+ * Deliberately does **not** re-validate through {@link ScheduledSessionExport}.parse:
+ * `importCampaign` writes schedule fields through a closed insert literal into SQLite
+ * without enforcing Zod bounds (e.g. title length, RSVP status enum), so a previously
+ * exportable imported campaign can hold out-of-schema values. Re-parsing here would
+ * turn every JSON / mdzip / export-preview path into a 500 for those campaigns.
+ * Export's job is to project trusted stored rows; validation belongs at write boundaries.
+ */
+export function toScheduledSessionExport(
+  row: ScheduledSessionWithRsvps,
+): ScheduledSessionExport {
+  const out: Record<string, unknown> = { ...row };
+  for (const key of Object.keys(ORGANIZED_PLAY_OMIT) as Array<keyof typeof ORGANIZED_PLAY_OMIT>) {
+    delete out[key];
+  }
+  return out as ScheduledSessionExport;
+}
 
 /**
  * Paginated past-schedule list (issue #612). Most-recent ended nights first.
@@ -2635,6 +2732,54 @@ export const InboxResolve = z
     message: 'entityType and entityId must be provided together',
   });
 
+/**
+ * Inbox sweep (issue #1644) — server-side orchestration that reads a campaign's OPEN
+ * scribe-inbox captures, infers create/update/dismiss, and files PENDING PROPOSALS ONLY
+ * (never a direct canon write). Entity types are deliberately the four bootstrapped by
+ * `get_campaign_summary`/`CampaignsService.summary` — objective ticks, HP, and combat
+ * writes are explicitly unsupported and always skip with a stated reason.
+ */
+export const InboxSweepEntityType = z.enum(['quest', 'npc', 'location', 'character']);
+export type InboxSweepEntityType = z.infer<typeof InboxSweepEntityType>;
+
+/** Per-item outcome (issue #1644) — must survive to the caller, never just logged. */
+export const InboxSweepOutcome = z.enum(['proposed', 'skipped', 'errored']);
+export type InboxSweepOutcome = z.infer<typeof InboxSweepOutcome>;
+
+export const InboxSweepItemResult = z.object({
+  noteId: Id,
+  outcome: InboxSweepOutcome,
+  entityType: InboxSweepEntityType.nullable(),
+  entityId: Id.nullable(),
+  proposalId: Id.nullable(),
+  reason: z.string().min(1),
+});
+export type InboxSweepItemResult = z.infer<typeof InboxSweepItemResult>;
+
+/** `disabled` = no AI provider configured for the campaign (campaign or server default). */
+export const InboxSweepJobStatus = z.enum(['succeeded', 'disabled']);
+export type InboxSweepJobStatus = z.infer<typeof InboxSweepJobStatus>;
+
+export const InboxSweepJob = z.object({
+  id: Id,
+  campaignId: Id,
+  status: InboxSweepJobStatus,
+  itemsTotal: z.number().int().nonnegative(),
+  itemsProposed: z.number().int().nonnegative(),
+  itemsSkipped: z.number().int().nonnegative(),
+  itemsErrored: z.number().int().nonnegative(),
+  detail: z.string(),
+  createdBy: z.string(),
+  createdAt: z.string(),
+});
+export type InboxSweepJob = z.infer<typeof InboxSweepJob>;
+
+export const InboxSweepResult = z.object({
+  job: InboxSweepJob,
+  items: z.array(InboxSweepItemResult),
+});
+export type InboxSweepResult = z.infer<typeof InboxSweepResult>;
+
 /** Default page size for notes + inbox list endpoints (issue #608). */
 export const NOTES_LIST_DEFAULT_LIMIT = 50;
 /** Hard cap for `?limit=` on notes/inbox lists — clients page with `cursor`, not a huge page. */
@@ -2890,6 +3035,11 @@ export const NotificationType = z.enum([
   'note_shared',
   'comment_reply',
   'added_to_campaign',
+  // Issue #1640: membership REVOKED (removed, or left) — as opposed to `added_to_campaign`,
+  // which also covers a role change on a membership you still hold. A different type because
+  // the client reaction differs: a role change re-renders chrome in place, a revocation must
+  // move the user off any page scoped to that campaign (see MEMBERSHIP_NOTIFICATION_TYPES).
+  'removed_from_campaign',
   // Issue #819: exclusive character seat transferred away from (or onto) this member.
   'character_reassigned',
   'session_scheduled',
@@ -2927,13 +3077,23 @@ export type NotificationType = z.infer<typeof NotificationType>;
  * what counts — a type added here without updating a hand-maintained duplicate elsewhere is
  * the failure mode this constant exists to rule out.
  *
- * Deliberately narrow: `added_to_campaign` already covers being added, promoted (including the
- * admin `reassign_owner` path, #1546), and — after #1590 — a DM's own promote/demote of an
- * existing member (issue #437's `members.service.ts#update`). It is reused rather than split
- * into a separate "role changed" type because both describe the same fact a client needs to
- * react to: re-fetch `/me`, the memberships list may be stale.
+ * `added_to_campaign` already covers being added, promoted (including the admin
+ * `reassign_owner` path, #1546), and — after #1590 — a DM's own promote/demote of an existing
+ * member (issue #437's `members.service.ts#update`). It is reused rather than split into a
+ * separate "role changed" type because both describe the same fact a client needs to react to:
+ * re-fetch `/me`, the memberships list may be stale.
+ *
+ * `removed_from_campaign` (issue #1640) is deliberately its OWN type rather than folded into
+ * `added_to_campaign` too: a role change leaves the membership in place (re-render chrome from
+ * fresh `/me` data, stay put), but a revocation removes it entirely — a client sitting on a
+ * route scoped to that campaign must navigate away, not just re-render. Both still belong in
+ * this same list because the account-wide `membershipChanged` discriminator below only needs
+ * to answer "is `/me` possibly stale", not which of the two happened.
  */
-export const MEMBERSHIP_NOTIFICATION_TYPES = ['added_to_campaign'] as const satisfies readonly NotificationType[];
+export const MEMBERSHIP_NOTIFICATION_TYPES = [
+  'added_to_campaign',
+  'removed_from_campaign',
+] as const satisfies readonly NotificationType[];
 
 export const Notification = z.object({
   id: Id,
@@ -2995,7 +3155,7 @@ export const NotificationCategory = z.enum([
   'quests', // quest_updated
   'proposals', // proposal_submitted, proposal_resolved
   'inbox', // inbox_submitted
-  'access', // added_to_campaign, character_reassigned, charter_published — ALWAYS ON (access control)
+  'access', // added_to_campaign, removed_from_campaign, character_reassigned, charter_published — ALWAYS ON (access control)
   'security', // ai_dm_alert, safety_hold — ALWAYS ON (security/recovery)
 ]);
 export type NotificationCategory = z.infer<typeof NotificationCategory>;
@@ -3031,6 +3191,7 @@ export const NOTIFICATION_TYPE_CATEGORY: Record<NotificationType, NotificationCa
   note_shared: 'notes',
   comment_reply: 'comments',
   added_to_campaign: 'access',
+  removed_from_campaign: 'access',
   character_reassigned: 'access',
   session_scheduled: 'schedule',
   session_rsvp: 'schedule',
