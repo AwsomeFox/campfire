@@ -87,6 +87,23 @@ export interface ResolverAdapter {
    * exploding attribute dice pools, not a d20. An adapter that implements this decides both.
    */
   resolveAttack?(input: AttackRollInput): AttackRollResult;
+  /**
+   * OPTIONAL — this system's own proficiency/training bonus, added to an attacker's own bonus
+   * (for setting their save DC) or a defender's saving-throw total when they ARE proficient
+   * (issue #1599), the way {@link resolveAttack} owns the attack roll. Omit it and the resolver
+   * falls back to {@link defaultCheckProficiencyBonus} — which is 0, NOT 5e's formula; see that
+   * function's own comment for why the safe default here differs from {@link defaultAttackRoll}'s.
+   *
+   * Deliberately NOT named `proficiencyBonus` to avoid colliding with
+   * `Pf2eRuleSystemAdapter.proficiencyBonus`, which additionally takes a proficiency RANK
+   * (trained/expert/master/legendary). The resolver only ever knows a boolean "is this
+   * character proficient" — from `character.saveProficiencies`, a plain list with no rank — so
+   * it can only ever call a ONE-argument hook. PF2e's implementation of THIS hook (see
+   * `Pf2eAdapter` in index.ts) answers with `pf2eProficiencyBonus(level, 'trained')`: the
+   * correct floor for "marked proficient" given the sheet does not track finer rank — the same
+   * degrade `Pf2eAdapter.initiativeModifier` already makes for Perception.
+   */
+  checkProficiencyBonus?(level: number): number;
 }
 
 /**
@@ -154,6 +171,38 @@ export function resolveAttackForAdapter(adapter: ResolverAdapter, input: AttackR
 }
 
 /**
+ * The resolver's OWN proficiency/training bonus (issue #1599) — used when an adapter has not
+ * declared {@link ResolverAdapter.checkProficiencyBonus}.
+ *
+ * UNLIKE {@link defaultAttackRoll}, the safe default here is 0, not 5e's level-based formula.
+ * "Roll a d20 plus a modifier against a target number" is a reasonable universal guess for an
+ * unaudited system's attack — it is only wrong for the handful of systems with a genuinely
+ * different roll (OSR's descending AC, Open Legend's dice pool), both fixed by their own
+ * `resolveAttack`. 5e's SPECIFIC proficiency curve (`floor((level-1)/4)+2`) is a much narrower,
+ * system-specific assumption than that — silently applying it to an unaudited system would
+ * OVERSTATE that system's totals (adding a bonus that may not exist there at all) rather than
+ * merely picking a plausible-but-wrong comparison. 0 — "add nothing beyond the ability
+ * modifier" — is the one answer that is never an overclaim for a system nobody has audited.
+ *
+ * Because of that, 5e does NOT rely on this default the way it relies on {@link defaultAttackRoll}
+ * — it declares {@link ResolverAdapter.checkProficiencyBonus} explicitly (see `Dnd5eAdapter` in
+ * index.ts). 5e is the one adapter that opts OUT of its own default here.
+ */
+export function defaultCheckProficiencyBonus(): number {
+  return 0;
+}
+
+/**
+ * Resolve the check/save proficiency bonus through whichever maths apply — the adapter's own
+ * {@link ResolverAdapter.checkProficiencyBonus} when it declares one, else
+ * {@link defaultCheckProficiencyBonus} (issue #1599). Mirrors {@link resolveAttackForAdapter}'s
+ * shape exactly — one call site, so a future caller cannot reinvent (or forget) the fallback.
+ */
+export function checkProficiencyBonusForAdapter(adapter: ResolverAdapter, level: number): number {
+  return adapter.checkProficiencyBonus ? adapter.checkProficiencyBonus(level) : defaultCheckProficiencyBonus();
+}
+
+/**
  * Resolve the critical-damage rule for an adapter, defaulting to 5e's `double-dice`
  * (issue #1053). Always read the rule through this function: it is the single place the
  * default lives, so an adapter that has not declared one is never silently given PF2e math.
@@ -181,12 +230,40 @@ export function criticalDamageRuleForAdapter(adapter: Pick<ResolverAdapter, 'cri
  * STAYS A COMBINED CLAIM ON PURPOSE (issue #1598). #1598 gave OSR and Open Legend their own
  * {@link ResolverAdapter.resolveAttack}, so the ATTACK half of this profile is now true for
  * them too — but `resolverSpeaksCampaignSystem` gates guidance for BOTH `resolve_action` and
- * `saving_throw` off this ONE flag, and the PROFICIENCY half is still 5e-only (#1599: OSR's
- * saves are target-number checks with no DC at all, a shape `saving_throw` cannot express
- * regardless of proficiency). Widening `resolverMath` for OSR/Open Legend now would tell the AI
- * driver their SAVES are safe to resolve server-side, which is false. So this profile — and
- * this predicate's answer — is unchanged by #1598 on purpose; #1599 decides whether it widens,
- * whether it splits into an attack-only and a save-only flag, or something else.
+ * `saving_throw` off this ONE flag, and the PROFICIENCY half was still 5e-only. Widening
+ * `resolverMath` for OSR/Open Legend then would have told the AI driver their SAVES are safe to
+ * resolve server-side, which was false: OSR's saves are target-number checks with no DC at all
+ * (a shape `saving_throw` cannot express regardless of proficiency), and Open Legend has no
+ * proficiency concept in this slot either. So this profile stayed unchanged by #1598 on
+ * purpose, deferred to #1599.
+ *
+ * #1599 CONCLUSION: still does not widen — and could not, for PF2e/SF2e specifically, without
+ * this profile stopping being an honest name. `checkProficiencyBonusForAdapter` now gives
+ * PF2e/SF2e a real (non-zero) proficiency bonus instead of silently returning 0, which fixes
+ * the understated-total-flips-the-degree-of-success-branch bug this issue was filed about. But
+ * two things stop that from being "PF2e now satisfies `d20-ascending-ac-5e-proficiency`":
+ *   1. The name is not a euphemism — the third clause is SPECIFICALLY 5e's level-based curve.
+ *      PF2e's own proficiency (level + a trained/expert/master/legendary rank bonus) is a
+ *      different formula by construction, satisfied through its OWN
+ *      {@link ResolverAdapter.checkProficiencyBonus}, never through this 5e-named default.
+ *      Declaring `RESOLVER_MATH_D20_5E` for PF2e would be a false claim about WHICH maths ran,
+ *      even once the maths itself is close enough to be useful.
+ *   2. "Close enough to be useful" is not "correct". `character.saveProficiencies` records only
+ *      a boolean (proficient or not) — no rank — so PF2e's hook answers every proficient save
+ *      with the TRAINED floor (`pf2eProficiencyBonus(level, 'trained')`), same degrade
+ *      `Pf2eAdapter.initiativeModifier` already makes for Perception. That is a real
+ *      improvement over 0 for every proficient character, and exact for anyone actually
+ *      Trained — but it UNDERSTATES an Expert/Master/Legendary save (rank bonus +4/+6/+8, not
+ *      +2), which is exactly the failure mode this flag exists to gate on: an understated total
+ *      can still select the wrong degree-of-success branch, just less often (only when the true
+ *      rank exceeds Trained) than the old blanket 0. Turning on `commit:true` autonomy for that
+ *      residual case would be the same overclaim `resolverMath`'s whole design fights.
+ *
+ * A THIRD, PF2e-shaped profile value is the honest path to widening this gate for PF2e/SF2e —
+ * gated on the character sheet actually tracking per-save proficiency rank, not just a boolean.
+ * Not built here: it is a data-model change (a new field, a migration, sheet UI), not the
+ * narrow "make proficiency adapter-owned" scope this issue asked for. OSR/Open Legend remain
+ * excluded for the original, unchanged reason above.
  */
 export type ResolverMathProfile = 'd20-ascending-ac-5e-proficiency';
 

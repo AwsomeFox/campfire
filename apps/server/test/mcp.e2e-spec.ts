@@ -1530,6 +1530,66 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(tooHigh.isError).toBe(true);
   });
 
+  it('#1599 saving_throw routes proficiency through the campaign rule-system adapter (PF2e: non-zero, not the old silent 0)', async () => {
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'MCP PF2e Saves' });
+    expect(campRes.status).toBe(201);
+    const pf2eCampaignId = campRes.body.id;
+    await db.update(campaigns).set({ ruleSystem: PF2E_PACK_SLUG }).where(eq(campaigns.id, pf2eCampaignId));
+
+    const client = await mcpClient(dmToken);
+    // Level-5 DEX 16 + save proficiency. Ability mod is the same floor((16-10)/2)=+3 as 5e
+    // (PF2e's abilityModifier), but proficiency must now be PF2e's own: level + the "trained"
+    // rank bonus (the sheet has no rank field, only proficient/not — see checkProficiencyBonus
+    // on Pf2eAdapter for why "trained" is the correct floor). 5 + 2 = +7, not 5e's flat +3 at
+    // this level and NOT the pre-#1599 silent 0 for every non-5e adapter.
+    const charResult = await client.callTool({
+      name: 'upsert_character',
+      arguments: {
+        campaignId: pf2eCampaignId,
+        name: 'PF2e Save Tester',
+        level: 5,
+        stats: { DEX: 16 },
+        saveProficiencies: ['DEX'],
+        hpMax: 20,
+      },
+    });
+    expect(charResult.isError).toBeFalsy();
+    const character = parseResult(charResult) as { id: number };
+
+    const saveResult = await client.callTool({
+      name: 'saving_throw',
+      arguments: { characterId: character.id, ability: 'DEX', dc: 1 },
+    });
+    expect(saveResult.isError).toBeFalsy();
+    const save = parseResult(saveResult) as {
+      score: number;
+      abilityMod: number;
+      profBonus: number;
+      proficient: boolean;
+      bonus: number;
+    };
+    expect(save).toMatchObject({
+      score: 16,
+      abilityMod: 3,
+      proficient: true,
+      profBonus: 7, // pf2eProficiencyBonus(5, 'trained') = 5 + 2
+      bonus: 10, // +3 dex, +7 prof — NOT +3 (5e) and NOT +3 alone (the pre-#1599 bug's silent 0)
+    });
+
+    // An unproficient save on the same PF2e character does not APPLY the proficiency bonus —
+    // `profBonus` reports the rate this adapter/level would give if proficient (unconditional,
+    // same shape the existing #1040 5e test already relies on); `bonus` is what actually lands
+    // on the roll, and stays STR's bare +0 modifier with nothing added.
+    const unprof = await client.callTool({
+      name: 'saving_throw',
+      arguments: { characterId: character.id, ability: 'STR', dc: 1 },
+    });
+    expect(unprof.isError).toBeFalsy();
+    const unprofResult = parseResult(unprof) as { proficient: boolean; profBonus: number; bonus: number };
+    expect(unprofResult).toMatchObject({ proficient: false, profBonus: 7, bonus: 0 });
+  });
+
   it('admin-owned campaign-scoped PAT 403s on a different campaign, incl. an MCP tool call (punch list item 12)', async () => {
     // mcp-dm is the server admin (first user via /auth/setup — see beforeAll comment).
     // RoleResolver.effectiveRole()'s PAT cap says a campaign-bound token treats the
