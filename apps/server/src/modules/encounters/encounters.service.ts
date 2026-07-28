@@ -1911,7 +1911,7 @@ export class EncountersService {
       const entryRows = await this.db
         .select({ id: ruleEntries.id, dataJson: ruleEntries.dataJson })
         .from(ruleEntries)
-        .where(and(inArray(ruleEntries.id, ruleEntryIds), isNull(ruleEntries.campaignId)));
+        .where(and(inArray(ruleEntries.id, ruleEntryIds), or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, encounterRow.campaignId))));
       for (const r of entryRows) {
         const data = fromJsonText<Record<string, unknown>>(r.dataJson, {});
         // Statblock CR field mapping comes from the adapter (issue #70), not inline field names.
