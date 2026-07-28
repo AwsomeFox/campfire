@@ -4212,7 +4212,6 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0092_dice_rolls_manual_provenance', run: migrateDiceRollsTableForManualProvenance },
   { name: '0093_proposals_base_snapshot', run: migrateProposalsTableForBaseSnapshot },
   { name: '0094_inventory_items_soft_delete', run: migrateInventoryItemsTableForSoftDelete },
-  { name: '0137_inventory_compendium_738', run: migrateInventoryItemsCompendium738 },
   { name: '0095_campaign_catch_up_cursors', run: migrateCampaignCatchUpCursorsTable },
   { name: '0096_encounter_events_provenance', run: migrateEncounterEventsTableForProvenance },
   { name: '0097_npcs_portrait_url', run: migrateNpcsTableForPortraitUrl },
@@ -4390,6 +4389,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // This one is NOT purely additive, unlike its neighbours: it REPLACES two partial unique
   // indexes. It must therefore never be reordered above 0040, which creates the originals.
   { name: '0135_ai_provider_config_fallback_role_1052', run: migrateAiProviderConfigFallbackRole1052 },
+  { name: '0137_inventory_compendium_738', run: migrateInventoryItemsCompendium738 },
 ];
 
 /**
