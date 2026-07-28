@@ -1,4 +1,4 @@
-import { StorageDiagnosticsService } from '../src/modules/health/storage-diagnostics.service';
+import { StorageDiagnosticsService, type StorageDiagnosticsProbe } from '../src/modules/health/storage-diagnostics.service';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -16,6 +16,17 @@ function holder(overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
   return { raw } as never;
+}
+
+function probe(overrides: Partial<StorageDiagnosticsProbe> = {}): StorageDiagnosticsProbe {
+  return {
+    dataDir: () => '/diagnostic-test',
+    statfs: () => ({ bfree: 10_000_000, bavail: 10_000_000, blocks: 20_000_000, bsize: 4096 } as ReturnType<typeof fs.statfsSync>),
+    exists: () => false,
+    stat: () => ({ isFile: () => true } as fs.Stats),
+    readSentinel: () => ({ present: true, sentinel: { instanceId: 'instance-a', createdAt: '2026-01-01T00:00:00.000Z', sentinelVersion: 1 } }),
+    ...overrides,
+  };
 }
 
 describe('StorageDiagnosticsService (issue #724)', () => {
@@ -63,5 +74,24 @@ describe('StorageDiagnosticsService (issue #724)', () => {
     expect((service as unknown as { uploadsCheck(): { code: string } }).uploadsCheck().code).toBe('UPLOADS_MISSING');
     fs.rmSync(process.env.DATA_DIR, { recursive: true, force: true });
     if (previous === undefined) delete process.env.DATA_DIR; else process.env.DATA_DIR = previous;
+  });
+
+  it('uses injectable statfs, write, and sentinel probes for deterministic host-failure coverage', () => {
+    const raw = (holder() as unknown as { raw: { prepare: jest.Mock } }).raw;
+    raw.prepare.mockImplementation((sql: string) => ({
+      get: jest.fn(() => sql.includes('server_meta') ? 'instance-b' : undefined), all: jest.fn(() => []), pluck: jest.fn(function () { return this; }), run: jest.fn(),
+    }));
+    const service = new StorageDiagnosticsService({ raw } as never, probe({
+      statfs: () => { throw new Error('unsupported'); },
+      writeProbe: () => { throw Object.assign(new Error('full'), { code: 'SQLITE_FULL' }); },
+    }));
+    expect((service as unknown as { diskCheck(): { code: string } }).diskCheck().code).toBe('DISK_SPACE_UNKNOWN');
+    expect((service as unknown as { writeCheck(): { code: string } }).writeCheck().code).toBe('WRITE_ENOSPC');
+    expect((service as unknown as { identityCheck(): { code: string } }).identityCheck().code).toBe('STORAGE_IDENTITY_INVALID');
+  });
+
+  it('distinguishes missing uploads without committed rows from a failed committed-upload store', () => {
+    const noRows = new StorageDiagnosticsService(holder(), probe());
+    expect((noRows as unknown as { uploadsCheck(): { code: string } }).uploadsCheck().code).toBe('UPLOADS_EMPTY');
   });
 });

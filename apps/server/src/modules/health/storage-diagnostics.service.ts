@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger, type OnModuleInit } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional, type OnModuleInit } from '@nestjs/common';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -17,6 +17,24 @@ export interface StorageDiagnostics {
   };
   integrity: { quickCheck: DiagnosticCheck; integrityCheck: DiagnosticCheck };
 }
+/** Narrow host boundary used by diagnostics and deterministic fault-injection tests. */
+export interface StorageDiagnosticsProbe {
+  dataDir(): string;
+  statfs(dir: string): ReturnType<typeof fs.statfsSync>;
+  exists(file: string): boolean;
+  stat(file: string): fs.Stats;
+  readSentinel(file: string): ReturnType<typeof readInstallSentinel>;
+  /** Kept injectable so tests can model ENOSPC/EROFS/locks without mutating a host DB. */
+  writeProbe?(db: DbHolder['raw']): void;
+}
+export const STORAGE_DIAGNOSTICS_PROBE = Symbol('STORAGE_DIAGNOSTICS_PROBE');
+const hostProbe: StorageDiagnosticsProbe = {
+  dataDir: () => resolveDataDir(),
+  statfs: (dir) => fs.statfsSync(dir),
+  exists: (file) => fs.existsSync(file),
+  stat: (file) => fs.statSync(file),
+  readSentinel: (file) => readInstallSentinel(file),
+};
 
 const now = () => new Date().toISOString();
 const check = (status: DiagnosticStatus, code: string, message: string): DiagnosticCheck => ({ status, code, message, checkedAt: now() });
@@ -34,7 +52,14 @@ export class StorageDiagnosticsService implements OnModuleInit {
   private scanning = false;
   private cached: StorageDiagnostics | undefined;
 
-  constructor(@Inject(DB_HOLDER) private readonly holder: DbHolder) { this.loadIntegrity(); }
+  constructor(
+    @Inject(DB_HOLDER) private readonly holder: DbHolder,
+    @Optional() @Inject(STORAGE_DIAGNOSTICS_PROBE) injectedProbe?: StorageDiagnosticsProbe,
+  ) {
+    this.probe = { ...hostProbe, ...injectedProbe };
+    this.loadIntegrity();
+  }
+  private readonly probe: StorageDiagnosticsProbe;
 
   onModuleInit(): void { void this.runIntegrity('quick').finally(() => { this.snapshot(); }); }
 
@@ -52,20 +77,20 @@ export class StorageDiagnosticsService implements OnModuleInit {
 
   snapshot(): StorageDiagnostics {
     const ready = this.readiness();
-    const dbFile = dbFilePath(resolveDataDir());
+    const dbFile = dbFilePath(this.probe.dataDir());
     let storage: StorageDiagnostics['storage'];
     let disk: DiagnosticCheck;
     try {
-      const stat = fs.statfsSync(resolveDataDir());
+      const stat = this.probe.statfs(this.probe.dataDir());
       const freeBytes = Number(stat.bfree) * Number(stat.bsize);
       const availableBytes = Number(stat.bavail) * Number(stat.bsize);
       const totalBytes = Number(stat.blocks) * Number(stat.bsize);
       const status: DiagnosticStatus = freeBytes <= CRITICAL_FREE ? 'failed' : freeBytes <= DEGRADED_FREE ? 'degraded' : 'ok';
       disk = check(status, status === 'failed' ? 'DISK_SPACE_CRITICAL' : status === 'degraded' ? 'DISK_SPACE_LOW' : 'DISK_SPACE_OK', status === 'ok' ? 'Disk capacity is within configured thresholds.' : 'Free disk capacity is below a configured threshold.');
-      storage = { dbFileBytes: bytes(dbFile), walBytes: bytes(`${dbFile}-wal`), shmBytes: bytes(`${dbFile}-shm`), uploadsBytes: this.walk(path.join(resolveDataDir(), 'uploads')), backupsBytes: this.walk(process.env.BACKUP_DIR || path.join(resolveDataDir(), 'backups')), tempBytes: this.ownedTempBytes(), freeBytes, totalBytes, availableBytes };
+      storage = { dbFileBytes: bytes(dbFile), walBytes: bytes(`${dbFile}-wal`), shmBytes: bytes(`${dbFile}-shm`), uploadsBytes: this.walk(path.join(this.probe.dataDir(), 'uploads')), backupsBytes: this.walk(process.env.BACKUP_DIR || path.join(this.probe.dataDir(), 'backups')), tempBytes: this.ownedTempBytes(), freeBytes, totalBytes, availableBytes };
     } catch {
       disk = check('unknown', 'DISK_SPACE_UNKNOWN', 'Filesystem capacity is unavailable on this platform.');
-      storage = { dbFileBytes: safeBytes(dbFile), walBytes: safeBytes(`${dbFile}-wal`), shmBytes: safeBytes(`${dbFile}-shm`), uploadsBytes: safeWalk(path.join(resolveDataDir(), 'uploads')), backupsBytes: safeWalk(process.env.BACKUP_DIR || path.join(resolveDataDir(), 'backups')), tempBytes: null, freeBytes: null, totalBytes: null, availableBytes: null };
+      storage = { dbFileBytes: safeBytes(dbFile), walBytes: safeBytes(`${dbFile}-wal`), shmBytes: safeBytes(`${dbFile}-shm`), uploadsBytes: safeWalk(path.join(this.probe.dataDir(), 'uploads')), backupsBytes: safeWalk(process.env.BACKUP_DIR || path.join(this.probe.dataDir(), 'backups')), tempBytes: null, freeBytes: null, totalBytes: null, availableBytes: null };
     }
     const wal = this.walCheck(storage.walBytes);
     const checks = { ...ready.checks, disk, wal };
@@ -101,16 +126,16 @@ export class StorageDiagnosticsService implements OnModuleInit {
   private databaseCheck(): DiagnosticCheck { try { this.holder.raw.prepare('SELECT 1').get(); return check('ok', 'DATABASE_OK', 'Database responds to a bounded query.'); } catch { return check('failed', 'DATABASE_UNAVAILABLE', 'Database is unavailable.'); } }
   private writeCheck(): DiagnosticCheck {
     const db = this.holder.raw; let old = 0;
-    try { old = Number(db.prepare('PRAGMA busy_timeout').pluck().get() ?? 0); db.pragma('busy_timeout = 100'); db.exec("BEGIN IMMEDIATE; UPDATE health_write_probe SET touched_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = 1; ROLLBACK;"); return check('ok', 'WRITE_OK', 'Rollback-only write probe succeeded.'); }
+    try { old = Number(db.prepare('PRAGMA busy_timeout').pluck().get() ?? 0); db.pragma('busy_timeout = 100'); if (this.probe.writeProbe) this.probe.writeProbe(db); else db.exec("BEGIN IMMEDIATE; UPDATE health_write_probe SET touched_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = 1; ROLLBACK;"); return check('ok', 'WRITE_OK', 'Rollback-only write probe succeeded.'); }
     catch (error) { try { db.exec('ROLLBACK'); } catch {} const code = String((error as { code?: string }).code ?? ''); return check('failed', code.includes('FULL') ? 'WRITE_ENOSPC' : code.includes('READONLY') ? 'WRITE_EROFS' : code.includes('BUSY') || code.includes('LOCKED') ? 'WRITE_LOCKED' : 'WRITE_FAILED', 'Rollback-only database write probe failed.'); }
     finally { try { db.pragma(`busy_timeout = ${old}`); } catch {} }
   }
   private schemaCheck(): DiagnosticCheck { try { const db = this.holder.raw; for (const table of ['__migrations', '__db_meta', 'users', 'attachments']) if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table)) return check('failed', 'SCHEMA_MISMATCH', 'Required database schema is missing.'); const applied = new Set((db.prepare('SELECT name FROM __migrations').all() as Array<{ name: string }>).map((row) => row.name)); if (MIGRATION_NAMES.some((name) => !applied.has(name))) return check('failed', 'MIGRATION_MISSING', 'Required database migration is missing.'); const version = db.prepare("SELECT value FROM __db_meta WHERE key='app_version'").pluck().get(); if (typeof version !== 'string' || version.length === 0) return check('failed', 'MIGRATION_METADATA_MISSING', 'Database migration metadata is missing.'); return check('ok', 'SCHEMA_OK', 'Required schema and migration metadata are present.'); } catch { return check('failed', 'SCHEMA_UNAVAILABLE', 'Database schema could not be validated.'); } }
-  private identityCheck(): DiagnosticCheck { try { const dataDir = resolveDataDir(); const sentinel = readInstallSentinel(sentinelFilePath(dataDir)); const meta = this.holder.raw.prepare("SELECT instance_id FROM server_meta WHERE key = 'singleton'").pluck().get(); if (!sentinel.present || !sentinel.sentinel || !fs.statSync(dbFilePath(dataDir)).isFile() || (meta !== undefined && typeof meta !== 'string')) return check('failed', 'STORAGE_IDENTITY_INVALID', 'Storage identity could not be validated.'); return check('ok', 'STORAGE_IDENTITY_OK', 'Storage identity is valid.'); } catch { return check('failed', 'STORAGE_IDENTITY_INVALID', 'Storage identity could not be validated.'); } }
-  private uploadsCheck(): DiagnosticCheck { try { const committed = Number(this.holder.raw.prepare("SELECT count(*) FROM attachments WHERE state = 'committed'").pluck().get() ?? 0); const root = path.join(resolveDataDir(), 'uploads'); if (!fs.existsSync(root)) return committed > 0 ? check('failed', 'UPLOADS_MISSING', 'Committed uploads are missing from storage.') : check('ok', 'UPLOADS_EMPTY', 'No committed uploads require an uploads directory.'); return check('ok', 'UPLOADS_OK', 'Uploads storage is available.'); } catch { return check('unknown', 'UPLOADS_UNKNOWN', 'Uploads storage could not be validated.'); } }
+  private identityCheck(): DiagnosticCheck { try { const dataDir = this.probe.dataDir(); const sentinel = this.probe.readSentinel(sentinelFilePath(dataDir)); const meta = this.holder.raw.prepare("SELECT instance_id FROM server_meta WHERE key = 'singleton'").pluck().get(); if (!sentinel.present || !sentinel.sentinel || !this.probe.stat(dbFilePath(dataDir)).isFile() || (meta !== undefined && typeof meta !== 'string') || (typeof meta === 'string' && meta !== sentinel.sentinel.instanceId)) return check('failed', 'STORAGE_IDENTITY_INVALID', 'Storage identity could not be validated.'); return check('ok', 'STORAGE_IDENTITY_OK', 'Storage identity is valid.'); } catch { return check('failed', 'STORAGE_IDENTITY_INVALID', 'Storage identity could not be validated.'); } }
+  private uploadsCheck(): DiagnosticCheck { try { const committed = Number(this.holder.raw.prepare("SELECT count(*) FROM attachments WHERE state = 'committed'").pluck().get() ?? 0); const root = path.join(this.probe.dataDir(), 'uploads'); if (!this.probe.exists(root)) return committed > 0 ? check('failed', 'UPLOADS_MISSING', 'Committed uploads are missing from storage.') : check('ok', 'UPLOADS_EMPTY', 'No committed uploads require an uploads directory.'); return check('ok', 'UPLOADS_OK', 'Uploads storage is available.'); } catch { return check('unknown', 'UPLOADS_UNKNOWN', 'Uploads storage could not be validated.'); } }
   private walk(root: string): number | null { return walk(root); }
-  private diskCheck(): DiagnosticCheck { try { const stat = fs.statfsSync(resolveDataDir()); const free = Number(stat.bavail) * Number(stat.bsize); return free <= CRITICAL_FREE ? check('failed', 'DISK_SPACE_CRITICAL', 'Free disk capacity is critically low.') : free <= DEGRADED_FREE ? check('degraded', 'DISK_SPACE_LOW', 'Free disk capacity is below warning threshold.') : check('ok', 'DISK_SPACE_OK', 'Disk capacity is within configured thresholds.'); } catch { return check('unknown', 'DISK_SPACE_UNKNOWN', 'Filesystem capacity is unavailable on this platform.'); } }
-  private walCheck(value = safeBytes(`${dbFilePath(resolveDataDir())}-wal`)): DiagnosticCheck { return value !== null && value > LARGE_WAL ? check('degraded', 'WAL_LARGE', 'Write-ahead log exceeds the configured threshold.') : check('ok', 'WAL_OK', 'Write-ahead log is within configured threshold.'); }
+  private diskCheck(): DiagnosticCheck { try { const stat = this.probe.statfs(this.probe.dataDir()); const free = Number(stat.bavail) * Number(stat.bsize); return free <= CRITICAL_FREE ? check('failed', 'DISK_SPACE_CRITICAL', 'Free disk capacity is critically low.') : free <= DEGRADED_FREE ? check('degraded', 'DISK_SPACE_LOW', 'Free disk capacity is below warning threshold.') : check('ok', 'DISK_SPACE_OK', 'Disk capacity is within configured thresholds.'); } catch { return check('unknown', 'DISK_SPACE_UNKNOWN', 'Filesystem capacity is unavailable on this platform.'); } }
+  private walCheck(value = safeBytes(`${dbFilePath(this.probe.dataDir())}-wal`)): DiagnosticCheck { return value !== null && value > LARGE_WAL ? check('degraded', 'WAL_LARGE', 'Write-ahead log exceeds the configured threshold.') : check('ok', 'WAL_OK', 'Write-ahead log is within configured threshold.'); }
   private ownedTempBytes(): number | null { try { const prefixes = ['campfire-backup-', 'campfire-upload-', 'campfire-stage-']; return fs.readdirSync(os.tmpdir(), { withFileTypes: true }).filter((entry) => entry.isDirectory() && prefixes.some((prefix) => entry.name.startsWith(prefix))).reduce((total, entry) => total + (walk(path.join(os.tmpdir(), entry.name)) ?? 0), 0); } catch { return null; } }
   private loadIntegrity(): void { try { for (const row of this.holder.raw.prepare('SELECT kind, status, code, checked_at FROM health_integrity_results').all() as Array<{ kind: string; status: DiagnosticStatus; code: string; checked_at: string }>) { const value = { status: row.status, code: row.code, message: 'Cached integrity result.', checkedAt: row.checked_at }; if (row.kind === 'quick') this.quick = value; if (row.kind === 'full') this.integrity = value; } } catch { /* bootstrap may not exist on an externally damaged database */ } }
   private persistIntegrity(kind: string, result: DiagnosticCheck): void { try { this.holder.raw.prepare('INSERT INTO health_integrity_results (kind,status,code,checked_at) VALUES (?,?,?,?) ON CONFLICT(kind) DO UPDATE SET status=excluded.status, code=excluded.code, checked_at=excluded.checked_at').run(kind, result.status, result.code, result.checkedAt); } catch { this.logger.warn(`Could not persist ${kind} integrity result`); } }

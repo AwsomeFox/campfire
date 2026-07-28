@@ -54,6 +54,15 @@ describe('Issue #22: admin observability metrics (e2e)', () => {
       expect(res.status).toBe(200);
     });
 
+    it('diagnostic snapshots and manual checks remain server-admin only', async () => {
+      const server = ctx.app.getHttpServer();
+      expect((await request(server).get('/api/v1/admin/metrics/diagnostics')).status).toBe(401);
+      expect((await userAgent.post('/api/v1/admin/metrics/diagnostics/quick-check')).status).toBe(403);
+      const snapshot = await adminAgent.get('/api/v1/admin/metrics/diagnostics');
+      expect(snapshot.status).toBe(200);
+      expect(snapshot.body).toMatchObject({ status: expect.any(String), storage: expect.any(Object) });
+    });
+
     it('a scope-capped (non-adminEnabled) PAT -> 403; an adminEnabled PAT -> 200', async () => {
       const server = ctx.app.getHttpServer();
 
