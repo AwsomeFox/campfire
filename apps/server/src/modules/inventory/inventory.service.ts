@@ -5,7 +5,7 @@ import { InventoryFromCompendium, InventoryItemCreate, InventoryItemUpdate, Trea
 import type { InventoryItem, Treasury, Role, CompendiumRef, CompendiumSnapshot } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { inventoryItems, inventoryQtyIdempotency, partyTreasury, characters, ruleEntries, rulePacks } from '../../db/schema';
-import { buildCompendiumRef, buildCompendiumSnapshot, computeRuleEntryContentHash, parseCompendiumRef } from '../campaigns/compendium-import';
+import { buildCompendiumRef, buildCompendiumSnapshot, compendiumRefKey, computeRuleEntryContentHash, parseCompendiumRef } from '../campaigns/compendium-import';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { AuditService } from '../audit/audit.service';
@@ -248,7 +248,11 @@ export class InventoryService {
           return;
         }
       }
-      const [existing] = tx.select().from(inventoryItems).where(and(eq(inventoryItems.campaignId, campaignId), eq(inventoryItems.ownerType, ownerType), characterId == null ? isNull(inventoryItems.characterId) : eq(inventoryItems.characterId, characterId), eq(inventoryItems.compendiumRef, JSON.stringify(ref)), isNull(inventoryItems.deletedAt))).limit(1).all();
+      const candidates = tx.select().from(inventoryItems).where(and(eq(inventoryItems.campaignId, campaignId), eq(inventoryItems.ownerType, ownerType), characterId == null ? isNull(inventoryItems.characterId) : eq(inventoryItems.characterId, characterId), isNull(inventoryItems.deletedAt))).all();
+      const existing = candidates.find((candidate) => {
+        const candidateRef = parseCompendiumRef(candidate.compendiumRef ? safeJson(candidate.compendiumRef) : null);
+        return candidateRef != null && compendiumRefKey(candidateRef) === compendiumRefKey(ref);
+      });
       if (existing && input.duplicateMode === 'confirm') throw new ConflictException({ code: 'INVENTORY_COMPENDIUM_DUPLICATE', existing: toDomain(existing) });
       const ts = nowIso();
       if (existing && input.duplicateMode === 'increment') {

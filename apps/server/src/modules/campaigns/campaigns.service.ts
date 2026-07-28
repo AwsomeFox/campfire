@@ -2339,9 +2339,11 @@ export class CampaignsService {
             iconSlug: str(item.iconSlug), // issue #307 — preserve icon override on import
             // Numeric ids are local only; retained ref/snapshot keep imports play-safe.
             ruleEntryId: null,
-            compendiumRef: typeof item.compendiumRef === 'string' ? item.compendiumRef : null,
-            compendiumSnapshot: typeof item.compendiumSnapshot === 'string' ? item.compendiumSnapshot : null,
-            compendiumState: typeof item.compendiumState === 'string' ? item.compendiumState : null,
+            compendiumRef: item.compendiumRef && typeof item.compendiumRef === 'object' ? JSON.stringify(item.compendiumRef) : null,
+            compendiumSnapshot: item.compendiumSnapshot && typeof item.compendiumSnapshot === 'object' ? JSON.stringify(item.compendiumSnapshot) : null,
+            // A cross-install numeric id cannot be trusted. Keep the snapshot play-safe
+            // and surface a detached link rather than pretending it can be refreshed.
+            compendiumState: item.compendiumRef && item.compendiumSnapshot ? 'detached' : null,
             createdAt: ts,
             updatedAt: ts,
           })

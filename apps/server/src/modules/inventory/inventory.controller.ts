@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, HttpCode, Param, ParseIntPipe, Patch, Post } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, HttpCode, Param, ParseIntPipe, Patch, Post } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
@@ -145,7 +145,7 @@ export class InventoryController {
   @Post(':id/compendium/:state')
   @HttpCode(200)
   async compendiumState(@Param('id', ParseIntPipe) id: number, @Param('state') state: 'overridden' | 'detached', @CurrentUser() user: RequestUser) {
-    if (state !== 'overridden' && state !== 'detached') throw new Error('Unsupported compendium state');
+    if (state !== 'overridden' && state !== 'detached') throw new BadRequestException('Unsupported compendium state');
     const row = await this.inventory.getRowOrThrow(id); const role = await this.access.requireRole(user, row.campaignId, 'player');
     return this.inventory.setCompendiumState(id, state, user, role);
   }

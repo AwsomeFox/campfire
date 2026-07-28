@@ -9873,6 +9873,10 @@ export const InventoryItemCreate = InventoryItem.omit({
   updatedAt: true,
   deletedAt: true,
   deletedBy: true,
+  ruleEntryId: true,
+  compendiumRef: true,
+  compendiumSnapshot: true,
+  compendiumState: true,
 }).partial().required({ name: true });
 
 /** Acquire a play-safe snapshot of an installed compendium item. */
