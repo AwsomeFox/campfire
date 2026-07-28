@@ -44,6 +44,8 @@ const CRITICAL_FREE = Number(process.env.DIAGNOSTICS_CRITICAL_FREE_BYTES ?? 256 
 const LARGE_WAL = Number(process.env.DIAGNOSTICS_LARGE_WAL_BYTES ?? 512 * 1024 ** 2);
 /** Throttle BEGIN IMMEDIATE write probes on unauthenticated /readyz without masking later DB failures. */
 const writeProbeCacheMs = () => Number(process.env.DIAGNOSTICS_WRITE_PROBE_CACHE_MS ?? 5_000);
+/** Admin metrics polls reuse a scan, but must not freeze at boot forever. */
+const snapshotCacheMs = () => Number(process.env.DIAGNOSTICS_SNAPSHOT_CACHE_MS ?? 60_000);
 
 /** Bounded, safe diagnostics. Public readiness receives only its aggregate and stable codes. */
 @Injectable()
@@ -53,6 +55,7 @@ export class StorageDiagnosticsService implements OnModuleInit {
   private integrity = check('unknown', 'INTEGRITY_CHECK_NOT_RUN', 'Full integrity check has not run yet.', null);
   private scanning = false;
   private cached: StorageDiagnostics | undefined;
+  private cachedAt = 0;
   private writeProbeCache: { at: number; result: DiagnosticCheck } | undefined;
 
   constructor(
@@ -120,11 +123,19 @@ export class StorageDiagnosticsService implements OnModuleInit {
     const status: DiagnosticStatus = statuses.includes('failed') ? 'failed' : statuses.includes('degraded') ? 'degraded' : statuses.includes('unknown') ? 'unknown' : 'ok';
     const result = { status, ready: ready.ready, checks, storage, integrity: { quickCheck: this.quick, integrityCheck: this.integrity } };
     this.cached = result;
+    this.cachedAt = Date.now();
     return result;
   }
 
-  /** Metrics polls consume the last scan rather than walking storage each interval. */
-  cachedSnapshot(): StorageDiagnostics { return this.cached ?? { status: 'unknown', ready: false, checks: { cache: check('unknown', 'DIAGNOSTICS_NOT_SCANNED', 'Diagnostics scan has not completed.') }, storage: { dbFileBytes: null, walBytes: null, shmBytes: null, uploadsBytes: null, backupsBytes: null, tempBytes: null, freeBytes: null, totalBytes: null, availableBytes: null }, integrity: { quickCheck: this.quick, integrityCheck: this.integrity } }; }
+  /**
+   * Metrics polls consume the last scan rather than walking storage each interval.
+   * Once a scan exists, refresh it after DIAGNOSTICS_SNAPSHOT_CACHE_MS so the admin
+   * dashboard does not freeze at boot-time disk/upload figures forever.
+   */
+  cachedSnapshot(): StorageDiagnostics {
+    if (this.cached && Date.now() - this.cachedAt >= snapshotCacheMs()) return this.snapshot();
+    return this.cached ?? { status: 'unknown', ready: false, checks: { cache: check('unknown', 'DIAGNOSTICS_NOT_SCANNED', 'Diagnostics scan has not completed.') }, storage: { dbFileBytes: null, walBytes: null, shmBytes: null, uploadsBytes: null, backupsBytes: null, tempBytes: null, freeBytes: null, totalBytes: null, availableBytes: null }, integrity: { quickCheck: this.quick, integrityCheck: this.integrity } };
+  }
 
   async runIntegrity(kind: 'quick' | 'full'): Promise<DiagnosticCheck> {
     if (this.scanning) return check('degraded', 'INTEGRITY_SCAN_BUSY', 'An integrity scan is already running.');

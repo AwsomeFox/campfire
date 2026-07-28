@@ -60,6 +60,26 @@ describe('StorageDiagnosticsService (issue #724)', () => {
     expect(service.cachedSnapshot().checks.cache.code).toBe('DIAGNOSTICS_NOT_SCANNED');
   });
 
+  it('refreshes a stale cached snapshot for admin metrics polls', () => {
+    const previous = process.env.DIAGNOSTICS_SNAPSHOT_CACHE_MS;
+    process.env.DIAGNOSTICS_SNAPSHOT_CACHE_MS = '1';
+    try {
+      const service = new StorageDiagnosticsService(holder(), probe());
+      const first = service.snapshot();
+      expect(first.storage.availableBytes).toBe(10_000_000 * 4096);
+      // Force the cached scan past TTL, then prove cachedSnapshot walks again.
+      (service as unknown as { cachedAt: number }).cachedAt = Date.now() - 10;
+      const spy = jest.spyOn(service, 'snapshot');
+      const refreshed = service.cachedSnapshot();
+      expect(spy).toHaveBeenCalled();
+      expect(refreshed.storage.availableBytes).toBe(10_000_000 * 4096);
+      spy.mockRestore();
+    } finally {
+      if (previous === undefined) delete process.env.DIAGNOSTICS_SNAPSHOT_CACHE_MS;
+      else process.env.DIAGNOSTICS_SNAPSHOT_CACHE_MS = previous;
+    }
+  });
+
   it('reports statfs failure as unknown and a large WAL as degraded', () => {
     const service = new StorageDiagnosticsService(holder());
     const statfs = jest.spyOn(fs, 'statfsSync').mockImplementation(() => { throw new Error('EIO'); });

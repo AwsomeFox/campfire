@@ -28,12 +28,14 @@ export class HealthController {
     description:
       'Unauthenticated. Performs bounded database, rollback-only write, schema, and storage-identity checks — 503 when serving is unsafe. ' +
       'Includes bounded data-repair integrity metadata when a persisted finding remains open. ' +
-      'The Docker HEALTHCHECK targets this endpoint so a broken DB marks the container unhealthy (issue #52/#724/#729).',
+      'The Docker HEALTHCHECK targets this endpoint so a broken DB marks the container unhealthy (issue #52/#724/#729). ' +
+      'Response `checks` values are intentional stable machine codes (never filesystem paths) for operators/orchestrators.',
   })
   @ApiResponse({ status: 200, description: 'Server is up and the database answers queries.' })
   @ApiResponse({ status: 503, description: 'Database is unavailable (locked/corrupted/unmounted volume).' })
   readyz() {
     const result = this.diagnostics.readiness();
+    // Stable codes only — never absolute paths or host-specific strings (issue #724).
     const body = {
       ok: result.ready,
       version: APP_VERSION,
