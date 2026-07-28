@@ -6,8 +6,8 @@
       "url": "https://github.com/AwsomeFox/campfire/pull/1625",
       "headBranch": "fix/issue-738",
       "baseBranch": "main",
-      "updatedAt": "2026-07-28T03:09:32Z",
-      "notes": "Head ba911f67: Copilot+Devin threads resolved (snapshot URL strip, NPC bootstrap, useDialog, N+1 batch, MCP catalog, DM character campaign guard). Waiting on CI."
+      "updatedAt": "2026-07-28T03:23:05Z",
+      "notes": "Head c6443562: Copilot+Devin+Kilo threads resolved. Waiting on CI (coverage)."
     }
   ]
 }
