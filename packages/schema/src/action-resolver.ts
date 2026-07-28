@@ -74,6 +74,76 @@ export interface ResolverAdapter {
    * treated as NOT implemented by the structured resolver, which is the safe direction.
    */
   readonly resolverMath?: ResolverMathProfile;
+  /**
+   * OPTIONAL — this system's OWN attack roll and hit/miss/crit classification (issue #1598),
+   * the way {@link criticalDamage} owns the crit-damage rule. Omit it and the resolver falls
+   * back to {@link defaultAttackRoll} — today's behaviour, byte-identical — so every adapter
+   * that has not implemented its own combat maths keeps working exactly as before this hook
+   * existed.
+   *
+   * A FULL hook, not a rule enum, because unlike `criticalDamage` (one of two multipliers) the
+   * thing that differs per system here is not a parameter to one comparison — it is the
+   * comparison, and for at least one supported system (Open Legend) even the ROLL ITSELF:
+   * exploding attribute dice pools, not a d20. An adapter that implements this decides both.
+   */
+  resolveAttack?(input: AttackRollInput): AttackRollResult;
+}
+
+/**
+ * What an adapter's {@link ResolverAdapter.resolveAttack} hook receives (issue #1598). Mirrors
+ * exactly what the resolver already has in hand at the point it used to roll a d20 itself:
+ * the flat modifier {@link computeAttackModifier} already assembled (ability score/modifier,
+ * proficiency, and any system-specific adjustment applied before this point — e.g. the
+ * Archmage escalation die), the target's defence value in whatever convention
+ * `targetDefenseValue` returned it, and the same injected roller every other resolver
+ * calculation uses (`roll('1d20')` for a d20 system; an adapter that needs single dice, like
+ * Open Legend's pool, builds them from `roll('1d{sides}')` the same way).
+ */
+export interface AttackRollInput {
+  readonly modifier: number;
+  readonly targetAc: number;
+  readonly roll: ActionRollFn;
+}
+
+/**
+ * What an adapter's {@link ResolverAdapter.resolveAttack} hook returns (issue #1598).
+ * `naturalRoll` is the primary/anchor die's face for crit/fumble DISPLAY (`d20 14 +5` in the DM
+ * detail line) — `null` for a system with no single "natural roll" concept (Open Legend's total
+ * is a multi-die exploding sum with no one face to point at).
+ */
+export interface AttackRollResult {
+  readonly total: number;
+  readonly naturalRoll: number | null;
+  readonly outcome: OutcomeKey;
+}
+
+/**
+ * The resolver's OWN attack maths (issue #1598) — everything {@link ResolverAdapter.resolveAttack}
+ * exists to let a system override. Roll a single d20, add the flat modifier, and classify via
+ * {@link classifyAttackOutcome} (which already asks the adapter for degrees of success when it
+ * has them, so PF2e/SF2e are unaffected by this seam — they were never the ascending-AC-only
+ * problem). This is the exact sequence `resolveOneTarget` ran inline before this issue; moving
+ * it here (and calling it explicitly for an adapter with no `resolveAttack`) is what makes 5e
+ * behaviour a NAMED default instead of the only path that existed.
+ */
+export function defaultAttackRoll(adapter: ResolverAdapter, input: AttackRollInput): AttackRollResult {
+  const r = input.roll('1d20');
+  const naturalRoll = r.rolls[0] ?? r.total;
+  const total = naturalRoll + input.modifier;
+  const outcome = classifyAttackOutcome(adapter, total, naturalRoll, input.targetAc);
+  return { total, naturalRoll, outcome };
+}
+
+/**
+ * Resolve one attack through whichever maths apply — the adapter's own
+ * {@link ResolverAdapter.resolveAttack} when it declares one, else {@link defaultAttackRoll}
+ * (issue #1598). The ONE call site `resolveOneTarget` needs; keeping the "ask the adapter, else
+ * fall back" branch here rather than inline is what stops a future caller from reinventing the
+ * fallback (or forgetting it) the way `resolveOneTarget` itself used to skip the question
+ * entirely.
+ */
+export function resolveAttackForAdapter(adapter: ResolverAdapter, input: AttackRollInput): AttackRollResult {
+  return adapter.resolveAttack ? adapter.resolveAttack(input) : defaultAttackRoll(adapter, input);
 }
 
 /**
@@ -100,6 +170,16 @@ export function criticalDamageRuleForAdapter(adapter: Pick<ResolverAdapter, 'cri
  * level **plus a rank bonus**, and `ActionResolverService.proficiencyBonus` returns 0 for every
  * non-5e adapter, so a trained PF2e save total is understated and can select the wrong
  * degree-of-success branch. Today exactly one adapter can honestly declare this: 5e.
+ *
+ * STAYS A COMBINED CLAIM ON PURPOSE (issue #1598). #1598 gave OSR and Open Legend their own
+ * {@link ResolverAdapter.resolveAttack}, so the ATTACK half of this profile is now true for
+ * them too — but `resolverSpeaksCampaignSystem` gates guidance for BOTH `resolve_action` and
+ * `saving_throw` off this ONE flag, and the PROFICIENCY half is still 5e-only (#1599: OSR's
+ * saves are target-number checks with no DC at all, a shape `saving_throw` cannot express
+ * regardless of proficiency). Widening `resolverMath` for OSR/Open Legend now would tell the AI
+ * driver their SAVES are safe to resolve server-side, which is false. So this profile — and
+ * this predicate's answer — is unchanged by #1598 on purpose; #1599 decides whether it widens,
+ * whether it splits into an attack-only and a save-only flag, or something else.
  */
 export type ResolverMathProfile = 'd20-ascending-ac-5e-proficiency';
 
@@ -693,14 +773,17 @@ export function computeSaveDc(
  *  - Otherwise (5e / d20): a natural 20 is a crit, a natural 1 is an automatic miss (critMiss),
  *    else total ≥ AC hits.
  *
- * LIMIT (#1053 review): "total ≥ AC" assumes ASCENDING armour class, and the caller assumes the
- * roll is a d20. An OSR variant on the DESCENDING convention hits on `roll >= thac0 -
- * descendingAc` (`osrAttackHits` in osr-adapter.ts), so the comparison runs the wrong way round
- * — against descending AC 2 nearly any positive total reads as a hit. Open Legend does not roll
- * a d20 at all. Rather than enumerate the systems that break, ask
- * {@link resolverImplementsSystemMath}: only an adapter that declares
- * {@link ResolverMathProfile} is claimed to be served by this path, so an unaudited system
- * withholds instead of failing open. Widening it is tracked in #1598.
+ * "total ≥ AC" assumes ASCENDING armour class and a d20 roll — true for 5e, PF2e and SF2e, not
+ * universal (issue #1053 review found the OSR descending convention and Open Legend's dice pools
+ * as counterexamples). This function is no longer the only path to an attack outcome: it is now
+ * {@link defaultAttackRoll}'s comparison, used when an adapter has not implemented its OWN
+ * {@link ResolverAdapter.resolveAttack} (issue #1598) — OSR and Open Legend both now do, so they
+ * never reach this function's AC comparison for an attack. It stays exactly as written because
+ * every adapter that HAS NOT implemented `resolveAttack` still wants precisely this — including
+ * pathfinder-1e/starfinder-1e/archmage/cepheus, audited for #1598 and confirmed ascending-AC d20
+ * systems that this comparison already serves correctly (see the PR for #1598 for that audit).
+ * `resolverImplementsSystemMath`/{@link ResolverMathProfile} are a SEPARATE, still-open question
+ * about the AI DRIVER's guidance gate, not about which maths this function runs.
  */
 export function classifyAttackOutcome(
   adapter: ResolverAdapter,

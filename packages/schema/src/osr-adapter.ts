@@ -1,5 +1,6 @@
 import type { AbilityRepresentation, MonsterStatblockData, RuleSystemAdapter, StatblockPresentation } from './index';
 import { initModDescThenSortOrderAsc, sortOrderAscTiebreak } from './initiative-tiebreak';
+import type { AttackRollInput, AttackRollResult } from './action-resolver';
 
 // ---------- OSR (Old-School Renaissance) native adapters (issues #70, #300, #765) ----------
 // Each advertised retroclone variant owns its own mechanics profile — ability table,
@@ -411,6 +412,30 @@ export function createOsrVariantAdapter(profile: OsrMechanicsProfile): RuleSyste
     },
     initiativeTiebreak: tiebreak,
     conditions: OSR_CONDITIONS,
+    /**
+     * This variant's OWN attack roll (issue #1598), via {@link osrAttackHits} — the function
+     * this file already provided but nothing called. `osrAttackHits` reads the ATTACKER'S
+     * THAC0, which this codebase does not store per-character; `attackBonusToThac0` derives an
+     * equivalent THAC0 from the resolver's already-computed ascending-style `modifier` instead
+     * (an ability modifier from a d20-shaped `computeAttackModifier`), so no new stored field is
+     * needed and the two representations stay provably interchangeable (the pair is a bijection
+     * — see the round-trip test in osr-adapter.spec.ts). `roll` stays the NATURAL d20 face
+     * (never nat+modifier) because `osrAttackHits`' own nat-1-always-misses/nat-20-always-hits
+     * rule is defined in terms of the die face, exactly like the 5e path it replaces.
+     *
+     * No separate crit tier, on purpose: base OSR rules (B/X, OSRIC, Labyrinth Lord, OSE) have
+     * no critical-hit multiplier — a natural 20 always hits (already inside `osrAttackHits`) but
+     * does not double damage by the written rules. Reporting a nat-20 as `crit` here would
+     * invent a house rule this adapter has no authority to assume, the same "assume one
+     * system's convention" mistake #1598 exists to close on the OTHER side of the comparison.
+     */
+    resolveAttack(input: AttackRollInput): AttackRollResult {
+      const r = input.roll('1d20');
+      const naturalRoll = r.rolls[0] ?? r.total;
+      const thac0 = attackBonusToThac0(input.modifier);
+      const hit = osrAttackHits({ roll: naturalRoll, thac0, targetAc: input.targetAc, mode: profile.acMode });
+      return { total: naturalRoll + input.modifier, naturalRoll, outcome: hit ? 'hit' : 'miss' };
+    },
     mapStatblock(d: Record<string, unknown>): MonsterStatblockData {
       const abilityScores = (d.abilityScores ?? d.ability_scores) as Record<string, unknown> | undefined;
       return {

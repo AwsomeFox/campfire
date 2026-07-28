@@ -18,7 +18,7 @@ import {
   UsableAction,
   applyDamageModifiers,
   damageDefensesFromStatblock,
-  classifyAttackOutcome,
+  resolveAttackForAdapter,
   classifySaveOutcome,
   combatantActionsFromStatblock,
   computeAttackModifier,
@@ -492,11 +492,18 @@ export class ActionResolverService {
       const escalationPrevented = adapter.id === ARCHMAGE_ADAPTER_ID && actor.kind === 'character' && this.isFearPreventingEscalation(actor);
       const escalationApplied = actor.kind === 'character' && escalationDie > 0 && !escalationPrevented;
       if (escalationApplied) modifier += escalationDie;
-      const nat = this.rollD20(roll);
-      const total = nat + modifier;
       const ac = this.targetDefenseValue(target, adapter as unknown as RuleSystemAdapter);
       if (ac === null) throw new BadRequestException(`Target "${target.name}" has no known AC — resolve manually rather than inventing one.`);
-      outcome = classifyAttackOutcome(adapter, total, nat, ac);
+      // #1598 — the roll AND its classification are the adapter's own, not this resolver's:
+      // resolveAttackForAdapter asks adapter.resolveAttack when the system declared one (OSR's
+      // descending-AC thac0 comparison, Open Legend's exploding dice pool — see each adapter's
+      // own resolveAttack for why), and falls back to defaultAttackRoll (today's d20-vs-ascending
+      // -AC behaviour, byte-identical) for every adapter that has not. The resolver does not ask
+      // "which system is this" itself — see osr-adapter.ts / index.ts's OpenLegendAdapter for
+      // where that decision actually lives.
+      const attackResult = resolveAttackForAdapter(adapter, { modifier, targetAc: ac, roll });
+      const { total, naturalRoll: nat, outcome: resolvedOutcome } = attackResult;
+      outcome = resolvedOutcome;
       // #1053 review — `critical` is set in ATTACK mode only. A PF2e critical save FAILURE also
       // doubles damage under that system, and this flag never becomes true in save/check mode,
       // so `double-total` is wired to attacks and not to saves. Left deliberately rather than
@@ -518,7 +525,13 @@ export class ActionResolverService {
         else if (actor.kind !== 'character') parts.push('no escalation die for monsters/NPCs');
       }
       const detail = parts.length ? `; ${parts.join(', ')}` : '';
-      dmDetail = `attack ${total} (d20 ${nat} ${signedModifier(modifier)}${detail}) vs AC ${ac} → ${outcome}`;
+      // `nat` is null for a system with no single "natural roll" to show as d20-style evidence
+      // (Open Legend's exploding pool) — named separately so the byte-identical `(d20 N +M)`
+      // phrasing every existing #414 test asserts on is UNCHANGED for every system that has one.
+      dmDetail =
+        nat === null
+          ? `attack ${total}${detail} vs AC ${ac} → ${outcome}`
+          : `attack ${total} (d20 ${nat} ${signedModifier(modifier)}${detail}) vs AC ${ac} → ${outcome}`;
     } else if (spec.mode === 'save' || spec.mode === 'check') {
       const { dc } = computeSaveDc(spec.save.dc, adapter, actorStats, prof);
       if (dc === null) throw new BadRequestException(`"${actionName}" has no resolvable DC — resolve manually rather than inventing one.`);
