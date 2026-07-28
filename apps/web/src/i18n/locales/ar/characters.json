@@ -1,0 +1,11 @@
+{
+  "characters": {
+    "resources": {
+      "spend": "إنفاق",
+      "restore": "استعادة",
+      "available": "{{available}} من {{max}} — {{name}} متاح",
+      "count": "{{available}}/{{max}}",
+      "updateError": "تعذّر تحديث {{name}}."
+    }
+  }
+}
