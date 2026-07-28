@@ -1161,11 +1161,30 @@ CREATE TABLE IF NOT EXISTS attachments (
   filename TEXT NOT NULL,
   mime TEXT NOT NULL,
   size INTEGER NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  caption TEXT NOT NULL DEFAULT '',
+  alt_text TEXT NOT NULL DEFAULT '',
+  creator TEXT NOT NULL DEFAULT '',
+  source_url TEXT NOT NULL DEFAULT '',
+  license TEXT NOT NULL DEFAULT '',
+  rights TEXT NOT NULL DEFAULT '',
+  attribution TEXT NOT NULL DEFAULT '',
+  checksum_sha256 TEXT,
   hidden INTEGER NOT NULL DEFAULT 0,
   state TEXT NOT NULL DEFAULT 'committed' CHECK (state IN ('reserved', 'committed')),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS attachment_metadata_revisions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  attachment_id INTEGER NOT NULL REFERENCES attachments(id) ON DELETE CASCADE,
+  actor_user_id TEXT NOT NULL,
+  before_json TEXT NOT NULL,
+  after_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_attachment_metadata_revisions_attachment ON attachment_metadata_revisions(attachment_id, id);
 
 -- Durable responsive derivatives for image attachments (issue #604). One row per
 -- (attachment, ladder rung); the bytes live next to the original at

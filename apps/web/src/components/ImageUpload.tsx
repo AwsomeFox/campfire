@@ -220,9 +220,11 @@ export async function importMapWithAttribution(
 }
 
 /** Multipart upload helper — exported so callers that need a bare upload (no dropzone UI, e.g. the "Replace map" button) can reuse it. */
-export async function uploadAttachment(campaignId: number, kind: AttachmentKind, file: File): Promise<Attachment> {
+export type AttachmentUploadMetadata = Partial<Record<'title' | 'caption' | 'altText' | 'creator' | 'sourceUrl' | 'license' | 'rights' | 'attribution', string>>;
+export async function uploadAttachment(campaignId: number, kind: AttachmentKind, file: File, metadata: AttachmentUploadMetadata = {}): Promise<Attachment> {
   const form = new FormData();
   form.append('kind', kind);
+  for (const [key, value] of Object.entries(metadata)) if (typeof value === 'string' && value !== '') form.append(key, value);
   form.append('file', file);
 
   const headers: Record<string, string> = {};
@@ -261,6 +263,7 @@ export function ImageUpload({
   label = 'Drop an image, or click to choose',
   onUploaded,
   onError,
+  metadata,
 }: {
   campaignId: number;
   kind: AttachmentKind;
@@ -270,6 +273,7 @@ export function ImageUpload({
   label?: string;
   onUploaded: (attachment: Attachment) => void;
   onError?: (message: string) => void;
+  metadata?: AttachmentUploadMetadata;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   // The currently staged File, held in a ref (not state) so re-renders aren't
@@ -345,7 +349,7 @@ export function ImageUpload({
       dispatch({ type: 'select', stagedUrl: objectUrl });
 
       try {
-        const attachment = await uploadAttachment(campaignId, kind, file);
+        const attachment = await uploadAttachment(campaignId, kind, file, metadata);
         // Bytes are durably stored. Flip to "saving" so the badge reflects that
         // the linking PATCH (the caller's onUploaded) is the remaining step.
         const committedUrl = attachmentFileUrl(attachment.id, {
@@ -373,7 +377,7 @@ export function ImageUpload({
         dispatch({ type: 'upload-failed', error: message });
       }
     },
-    [campaignId, kind, onUploaded, onError],
+    [campaignId, kind, onUploaded, onError, metadata],
   );
 
   function onDrop(e: DragEvent<HTMLDivElement>) {
