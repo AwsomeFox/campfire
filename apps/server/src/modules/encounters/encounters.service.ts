@@ -2049,7 +2049,7 @@ export class EncountersService {
 
     const allowedTypes = filters?.includeHazards ? ['monster', 'hazard'] as const : ['monster'] as const;
     const typeWhere = inArray(ruleEntries.type, [...allowedTypes]);
-    const where = packId !== undefined ? and(typeWhere, eq(ruleEntries.packId, packId)) : typeWhere;
+    const where = packId !== undefined ? and(typeWhere, isNull(ruleEntries.campaignId), eq(ruleEntries.packId, packId)) : and(typeWhere, isNull(ruleEntries.campaignId));
     const rows = await this.db.select({ id: ruleEntries.id, name: ruleEntries.name, type: ruleEntries.type, dataJson: ruleEntries.dataJson }).from(ruleEntries).where(where);
 
     const typeNeedle = filters?.creatureType?.trim().toLowerCase();
@@ -2336,7 +2336,7 @@ export class EncountersService {
     const pickedIds = [...new Set(result.picks.map((p) => p.ruleEntryId))];
     const dataById = new Map<number, Record<string, unknown>>();
     if (pickedIds.length > 0) {
-      const rows = await this.db.select({ id: ruleEntries.id, dataJson: ruleEntries.dataJson }).from(ruleEntries).where(inArray(ruleEntries.id, pickedIds));
+      const rows = await this.db.select({ id: ruleEntries.id, dataJson: ruleEntries.dataJson }).from(ruleEntries).where(and(inArray(ruleEntries.id, pickedIds), isNull(ruleEntries.campaignId)));
       for (const r of rows) dataById.set(r.id, fromJsonText<Record<string, unknown>>(r.dataJson, {}));
     }
 
@@ -2458,7 +2458,7 @@ export class EncountersService {
 
     // Resolve each roster slot's statblock -> name/hp/initMod (outside the tx).
     const slotIds = [...new Set(input.roster.map((s) => s.ruleEntryId))];
-    const entryRows = await this.db.select().from(ruleEntries).where(inArray(ruleEntries.id, slotIds));
+    const entryRows = await this.db.select().from(ruleEntries).where(and(inArray(ruleEntries.id, slotIds), or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, campaignId))));
     const entryById = new Map(entryRows.map((r) => [r.id, r]));
     for (const s of input.roster) {
       if (!entryById.has(s.ruleEntryId)) {
@@ -4270,7 +4270,7 @@ export class EncountersService {
           const entryRows = tx
             .select({ id: ruleEntries.id, dataJson: ruleEntries.dataJson })
             .from(ruleEntries)
-            .where(inArray(ruleEntries.id, ruleEntryIds))
+            .where(and(inArray(ruleEntries.id, ruleEntryIds), isNull(ruleEntries.campaignId)))
             .all();
           for (const entry of entryRows) {
             const data = fromJsonText<Record<string, unknown>>(entry.dataJson ?? null, {});
@@ -4511,7 +4511,7 @@ export class EncountersService {
         const entryRows = tx
           .select({ id: ruleEntries.id, dataJson: ruleEntries.dataJson })
           .from(ruleEntries)
-          .where(inArray(ruleEntries.id, ruleEntryIds))
+          .where(and(inArray(ruleEntries.id, ruleEntryIds), isNull(ruleEntries.campaignId)))
           .all();
         for (const entry of entryRows) {
           const data = fromJsonText<Record<string, unknown>>(entry.dataJson ?? null, {});
@@ -4838,7 +4838,7 @@ export class EncountersService {
       const encounterRow = await this.getRowOrThrow(c.encounterId);
       const adapter = await this.adapterForCampaign(encounterRow.campaignId);
       const ruleSystem = await this.ruleSystemForCampaign(encounterRow.campaignId);
-      const [entry] = await this.db.select({ dataJson: ruleEntries.dataJson }).from(ruleEntries).where(eq(ruleEntries.id, c.ruleEntryId)).limit(1);
+      const [entry] = await this.db.select({ dataJson: ruleEntries.dataJson }).from(ruleEntries).where(and(eq(ruleEntries.id, c.ruleEntryId), or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, encounterRow.campaignId)))).limit(1);
       const data = fromJsonText<Record<string, unknown>>(entry?.dataJson ?? null, {});
       const expanded = expandStatblockActions(data, adapter, ruleSystem ?? '');
       pushAction('action', expanded, 0);
@@ -4887,7 +4887,7 @@ export class EncountersService {
       const [entry] = await this.db
         .select({ dataJson: ruleEntries.dataJson })
         .from(ruleEntries)
-        .where(eq(ruleEntries.id, existing.ruleEntryId))
+        .where(and(eq(ruleEntries.id, existing.ruleEntryId), or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, encounterRow.campaignId))))
         .limit(1);
       const mapped = adapter.mapStatblock(fromJsonText<Record<string, unknown>>(entry?.dataJson ?? null, {}));
       if (statblockSectionHasEntries(mapped.legendaryActions)) legendaryMax = LEGENDARY_ACTIONS_PER_ROUND;
