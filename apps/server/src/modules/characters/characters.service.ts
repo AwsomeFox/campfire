@@ -43,6 +43,7 @@ import type {
   Character,
   CharacterAction,
   CharacterResource,
+  ConditionInstance,
   Role,
   SkillRank,
   SpellSlotLevel,
@@ -1675,6 +1676,11 @@ export class CharactersService {
     // fixed here rather than left half-migrated a second time.
     const nameKey = (name: string) => name.trim().toLowerCase();
     const at = nowIso();
+    // Captured per character so the post-commit mirror loop below can pass the exact
+    // instances just written — including any decremented `stacks` — to
+    // syncActiveCombatantConditions, rather than recomputing them a second time (or
+    // reconciling by name only, which was issue #1670 half B: see that call below).
+    const nextInstancesByCharacter = new Map<number, ConditionInstance[]>();
     this.db.transaction((tx) => {
       for (const p of plan.plans) {
         const clearedSet = new Set(p.conditionsCleared.map(nameKey));
@@ -1685,6 +1691,7 @@ export class CharactersService {
             const stacksAfter = decrementedStacks.get(nameKey(inst.name));
             return stacksAfter === undefined ? inst : { ...inst, stacks: stacksAfter };
           });
+        nextInstancesByCharacter.set(p.characterId, nextInstances);
         const conditionWriteSet = sheetConditionWriteSetFromInstances(nextInstances);
         tx.update(characters)
           .set({
@@ -1712,13 +1719,15 @@ export class CharactersService {
         campaignId,
         deathState: p.deathStateAfter,
       }).catch(() => undefined);
-      // Name-only, matching this mirror's existing (pre-#1641) contract: `conditionsAfter` now
-      // carries `{ name, stacks }` (issue #1641), but `syncActiveCombatantConditions` reconciles
-      // by NAME against the target combatant's own prior instance and does not touch `stacks` —
-      // widening it to also propagate a decremented level onto an active combat mirror is a
-      // separate, combat-tracker-side change, not this issue's.
-      await this.syncActiveCombatantConditions(p.characterId, toJsonText(p.conditionsAfter.map((c) => c.name)), {
+      // Issue #1670 half B: pass the sheet's just-written instances (with decremented
+      // `stacks`), the same way adjustConditionLevel does, so a rest mid-encounter
+      // reconciles the linked combatant's LEVEL — not just presence/absence by name.
+      // Before this fix a rest that dropped Exhaustion from 3 to 2 left the combat
+      // tracker showing 3 until something else rewrote it.
+      const restedInstances = nextInstancesByCharacter.get(p.characterId) ?? [];
+      await this.syncActiveCombatantConditions(p.characterId, toJsonText(restedInstances.map((c) => c.name)), {
         campaignId,
+        conditionInstancesJson: toJsonText(restedInstances),
       }).catch(() => undefined);
     }
 
