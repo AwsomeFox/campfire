@@ -15,7 +15,6 @@ const BULK_STATUS_VALUES: Record<string, readonly string[]> = {
   quest: ['available', 'active', 'completed', 'failed'],
   location: ['unexplored', 'explored', 'current'],
   faction: ['hostile', 'unfriendly', 'neutral', 'friendly', 'allied'],
-  encounter: ['preparing', 'running', 'ended'],
 };
 const BULK_STATUS_TARGETS = new Set([...Object.keys(BULK_STATUS_VALUES), 'npc']);
 export function libraryQuery(filters: Record<string, string>) { const params = new URLSearchParams(); for (const [k, v] of Object.entries(filters)) if (v) params.set(k, v); return params.toString(); }
@@ -57,7 +56,7 @@ export default function CampaignLibraryPage() {
     if (!status) { setError('Enter a status value.'); return Promise.resolve(null); }
     if (targets.some((target) => target.entityType === 'npc') && status.length > 40) { setError('NPC disposition must be 40 characters or fewer.'); return Promise.resolve(null); }
     const unsupported = targets.find((target) => !BULK_STATUS_TARGETS.has(target.entityType));
-    if (unsupported) { setError('Set status supports quests, NPCs, locations, factions, and encounters.'); return Promise.resolve(null); }
+    if (unsupported) { setError('Set status supports quests, NPCs, locations, and factions.'); return Promise.resolve(null); }
     const invalid = targets.find((target) => {
       const allowed = BULK_STATUS_VALUES[target.entityType];
       return allowed && !allowed.includes(status);
