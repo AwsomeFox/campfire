@@ -1,4 +1,5 @@
 import { StorageDiagnosticsService, type StorageDiagnosticsProbe } from '../src/modules/health/storage-diagnostics.service';
+import { MIGRATION_NAMES } from '../src/db/db.module';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -33,6 +34,11 @@ describe('StorageDiagnosticsService (issue #724)', () => {
   it('fails quick check when a non-first SQLite row reports corruption', async () => {
     const db = holder({ pragma: jest.fn(() => [{ quick_check: 'ok' }, { quick_check: '*** in database main ***' }]) });
     const service = new StorageDiagnosticsService(db);
+    await expect(service.runIntegrity('quick')).resolves.toMatchObject({ status: 'failed', code: 'QUICK_CHECK_FAILED' });
+  });
+
+  it('fails quick check when SQLite returns no rows', async () => {
+    const service = new StorageDiagnosticsService(holder({ pragma: jest.fn(() => []) }));
     await expect(service.runIntegrity('quick')).resolves.toMatchObject({ status: 'failed', code: 'QUICK_CHECK_FAILED' });
   });
 
@@ -93,5 +99,66 @@ describe('StorageDiagnosticsService (issue #724)', () => {
   it('distinguishes missing uploads without committed rows from a failed committed-upload store', () => {
     const noRows = new StorageDiagnosticsService(holder(), probe());
     expect((noRows as unknown as { uploadsCheck(): { code: string } }).uploadsCheck().code).toBe('UPLOADS_EMPTY');
+  });
+
+  it('fails missing uploads when a committed attachment row exists', () => {
+    const raw = (holder() as unknown as { raw: { prepare: jest.Mock } }).raw;
+    raw.prepare.mockImplementation((sql: string) => ({
+      get: jest.fn(() => sql.includes('count(*)') ? 1 : undefined), all: jest.fn(() => []), pluck: jest.fn(function () { return this; }), run: jest.fn(),
+    }));
+    const service = new StorageDiagnosticsService({ raw } as never, probe());
+    expect((service as unknown as { uploadsCheck(): { code: string } }).uploadsCheck().code).toBe('UPLOADS_MISSING');
+  });
+
+  it('fails closed for missing, malformed, and mismatched install sentinels', () => {
+    const raw = (holder() as unknown as { raw: { prepare: jest.Mock } }).raw;
+    raw.prepare.mockImplementation((sql: string) => ({
+      get: jest.fn(() => sql.includes('server_meta') ? 'instance-a' : undefined), all: jest.fn(() => []), pluck: jest.fn(function () { return this; }), run: jest.fn(),
+    }));
+    for (const readSentinel of [
+      () => ({ present: false, sentinel: undefined }),
+      () => ({ present: true, sentinel: undefined }),
+      () => ({ present: true, sentinel: { instanceId: 'different', createdAt: '2026-01-01T00:00:00.000Z', sentinelVersion: 1 } }),
+    ]) {
+      const service = new StorageDiagnosticsService({ raw } as never, probe({ readSentinel }));
+      expect((service as unknown as { identityCheck(): { code: string } }).identityCheck().code).toBe('STORAGE_IDENTITY_INVALID');
+    }
+  });
+
+  it('detects a missing latest migration and missing or empty app-version metadata', () => {
+    const schemaService = (migrations: string[], version: unknown) => {
+      const raw = (holder() as unknown as { raw: { prepare: jest.Mock } }).raw;
+      raw.prepare.mockImplementation((sql: string) => ({
+        get: jest.fn(() => sql.includes('sqlite_master') ? { name: 'present' } : undefined),
+        all: jest.fn(() => sql.includes('SELECT name FROM __migrations') ? migrations.map((name) => ({ name })) : []),
+        pluck: jest.fn(function () { return this; }),
+        run: jest.fn(),
+      }));
+      // better-sqlite3's pluck().get() is what schemaCheck reads for version.
+      raw.prepare.mockImplementation((sql: string) => ({
+        get: jest.fn(() => sql.includes('sqlite_master') ? { name: 'present' } : undefined),
+        all: jest.fn(() => sql.includes('SELECT name FROM __migrations') ? migrations.map((name) => ({ name })) : []),
+        pluck: jest.fn(() => ({ get: jest.fn(() => version) })), run: jest.fn(),
+      }));
+      return new StorageDiagnosticsService({ raw } as never);
+    };
+    expect((schemaService(MIGRATION_NAMES.slice(0, -1), '0.14.1') as unknown as { schemaCheck(): { code: string } }).schemaCheck().code).toBe('MIGRATION_MISSING');
+    expect((schemaService([...MIGRATION_NAMES], undefined) as unknown as { schemaCheck(): { code: string } }).schemaCheck().code).toBe('MIGRATION_METADATA_MISSING');
+    expect((schemaService([...MIGRATION_NAMES], '') as unknown as { schemaCheck(): { code: string } }).schemaCheck().code).toBe('MIGRATION_METADATA_MISSING');
+  });
+
+  it('counts only Campfire-owned temporary directories', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'campfire-health-temp-'));
+    const owned = path.join(tmp, 'campfire-upload-abc');
+    const unrelated = path.join(tmp, 'unrelated-process');
+    fs.mkdirSync(owned); fs.mkdirSync(unrelated);
+    fs.writeFileSync(path.join(owned, 'payload'), 'owned'); fs.writeFileSync(path.join(unrelated, 'payload'), 'unrelated-content');
+    const tempDir = jest.spyOn(os, 'tmpdir').mockReturnValue(tmp);
+    try {
+      const service = new StorageDiagnosticsService(holder());
+      expect((service as unknown as { ownedTempBytes(): number }).ownedTempBytes()).toBe(5);
+    } finally {
+      tempDir.mockRestore(); fs.rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });

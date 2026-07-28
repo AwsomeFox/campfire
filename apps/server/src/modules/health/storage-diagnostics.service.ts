@@ -110,7 +110,9 @@ export class StorageDiagnosticsService implements OnModuleInit {
     try {
       const rows = this.holder.raw.pragma(kind === 'quick' ? 'quick_check' : 'integrity_check') as Array<Record<string, unknown>>;
       const values = rows.map((row) => String(Object.values(row)[0] ?? '')).filter(Boolean);
-      const result = values.every((value) => value.toLowerCase() === 'ok')
+      // SQLite returns at least one row for a successful pragma. An empty result
+      // means the driver/connection did not give us a trustworthy answer.
+      const result = values.length > 0 && values.every((value) => value.toLowerCase() === 'ok')
         ? check('ok', kind === 'quick' ? 'QUICK_CHECK_OK' : 'INTEGRITY_CHECK_OK', 'SQLite integrity check completed successfully.')
         : check('failed', kind === 'quick' ? 'QUICK_CHECK_FAILED' : 'INTEGRITY_CHECK_FAILED', 'SQLite integrity check reported corruption.');
       if (kind === 'quick') this.quick = result; else this.integrity = result;
