@@ -2,12 +2,14 @@
   "tracked": [
     {
       "pr": 1622,
-      "status": "babysitting",
+      "status": "merged",
       "url": "https://github.com/AwsomeFox/campfire/pull/1622",
       "headBranch": "fix/issue-735",
       "baseBranch": "main",
-      "updatedAt": "2026-07-28T03:34:30Z",
-      "notes": "Review fixes + coverage fix. Head c9b47911 updates export-markdown-archive column count (5→8) after attachments.md gained title/license/source columns. All review threads resolved. Waiting on CI for c9b47911."
+      "mergeCommit": "c430174c5d2b7456ca6c25cc201597dc5e31815b",
+      "mergedAt": "2026-07-28T04:15:08Z",
+      "updatedAt": "2026-07-28T04:15:20Z",
+      "notes": "Merged via squash after review fixes (409 editor refresh, toDomain/.get()/AttachmentSourceUrl) and coverage fix (8-column attachments.md assertion). CI run 30326280826 green; all review threads resolved."
     }
   ]
 }
