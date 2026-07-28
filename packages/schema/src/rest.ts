@@ -55,7 +55,7 @@ export type RestKind = 'short' | 'long';
  */
 const PartyRecoveryBase = { characterIds: z.array(z.number().int().positive()).min(1) };
 export const PartyRecoveryRequest = z.discriminatedUnion('kind', [
-  z.object({ ...PartyRecoveryBase, kind: z.literal('short'), perCharacter: z.record(z.string(), z.object({ spendHitDice: z.number().int().min(0).optional(), hitDie: z.number().int().min(2).max(100).optional() })).default({}) }),
+  z.object({ ...PartyRecoveryBase, kind: z.literal('short'), perCharacter: z.record(z.string(), z.object({ spendHitDice: z.number().int().min(0).optional(), hitDie: z.number().int().min(2).max(100).optional() })).default({}) }).superRefine((value, ctx) => { if (new Set(value.characterIds).size !== value.characterIds.length) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'characterIds must be unique' }); for (const key of Object.keys(value.perCharacter)) { if (!/^[1-9]\d*$/.test(key) || !value.characterIds.includes(Number(key))) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'perCharacter keys must be selected canonical character IDs' }); } }),
   z.object({ ...PartyRecoveryBase, kind: z.literal('long') }),
   z.object({ ...PartyRecoveryBase, kind: z.literal('custom'), customResourceKeys: z.array(z.string().min(1).max(80)).min(1) }),
 ]);
@@ -328,7 +328,7 @@ export interface CharacterRestPlan {
 
 /** The whole party's plan. `failures` non-empty means NOTHING should be applied. */
 export interface RestPlan {
-  kind: RestKind;
+  kind: RestKind | 'custom';
   ruleSystem: string;
   plans: CharacterRestPlan[];
   failures: RestPlanFailure[];
@@ -661,7 +661,7 @@ export function planPartyCustomRecovery(
       hitDiceSpent: 0, hitDiceRolls: [], hitDiceRecovered: 0,
     });
   }
-  return { kind: 'short', ruleSystem: adapter.id, plans, failures };
+  return { kind: 'custom', ruleSystem: adapter.id, plans, failures };
 }
 
 /**

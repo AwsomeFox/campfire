@@ -1833,8 +1833,8 @@ export class CharactersService {
       throw new BadRequestException('A selected custom resource does not exist on any participant.');
     }
     const previewToken = randomUUID();
-    const linked = await this.db.select({ characterId: combatants.characterId }).from(combatants).innerJoin(encounters, eq(combatants.encounterId, encounters.id)).where(and(eq(encounters.campaignId, campaignId), ne(encounters.status, 'ended')));
-    const runningCombatantCharacterIds = linked.map((row) => row.characterId).filter((id): id is number => id != null && request.characterIds.includes(id));
+    const linked = await this.db.select({ characterId: combatants.characterId }).from(combatants).innerJoin(encounters, eq(combatants.encounterId, encounters.id)).where(and(eq(encounters.campaignId, campaignId), eq(encounters.status, 'running'), notDeleted(encounters.deletedAt)));
+    const runningCombatantCharacterIds = [...new Set(linked.map((row) => row.characterId).filter((id): id is number => id != null && request.characterIds.includes(id)))];
     const before = targets.map((row) => ({ id: row.id, updatedAt: row.updatedAt, hpCurrent: row.hpCurrent, hpTemp: row.hpTemp, deathState: row.deathState, deathSaveSuccesses: row.deathSaveSuccesses, deathSaveFailures: row.deathSaveFailures, conditions: row.conditions, spellSlots: row.spellSlots, resources: row.resources }));
     const fingerprint = createHash('sha256').update(JSON.stringify(request)).digest('hex');
     await this.db.insert(partyRestBatches).values({ campaignId, actorUserId: user.id, previewToken, requestFingerprint: fingerprint, status: 'previewed', beforeJson: toJsonText(before), planJson: toJsonText(plan), createdAt: nowIso() });

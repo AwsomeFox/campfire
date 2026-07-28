@@ -59,7 +59,7 @@ export class DdbCharacterImportDto extends createZodDto(DdbCharacterImport) {}
 export class CheckRollRequestDto extends createZodDto(CheckRollRequest.strict()) {}
 // Issue #415: DM-initiated check request from one or more target characters.
 export class CheckRequestCreateDto extends createZodDto(CheckRequestCreate.strict()) {}
-export class PartyRecoveryPreviewDto extends createZodDto(PartyRecoveryRequest.strict()) {}
+export class PartyRecoveryPreviewDto extends createZodDto(PartyRecoveryRequest) {}
 export class PartyRecoveryApplyDto extends createZodDto(PartyRecoveryApplyRequest.strict()) {}
 export class PartyRecoveryUndoDto extends createZodDto(PartyRecoveryUndoRequest.strict()) {}
 
