@@ -938,7 +938,7 @@ function SessionDetail({
           // apply. Use plain :focus with an explicit ring (not focus:outline-none)
           // so the landing is never invisible, matching that established
           // convention instead of diverging from it.
-          className="text-xl font-extrabold text-white m-0 focus:outline-[2px_solid_var(--color-accent)] focus:outline-offset-2"
+          className="text-xl font-extrabold text-white m-0 focus:outline focus:outline-2 focus:outline-offset-[-2px] focus:outline-[var(--color-accent)]"
         >
           {session.title || 'Untitled session'}
         </h2>

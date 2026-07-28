@@ -414,7 +414,7 @@ export function StatusMenuButton<V extends string>({
                 aria-selected={selected}
                 aria-label={option.accessibleName}
                 data-active={isActive ? '' : undefined}
-                className={`w-full text-left text-xs rounded px-2 py-1.5 cursor-pointer outline-none hover:bg-slate-700 focus-visible:outline-[2px_solid_var(--color-accent)] focus-visible:outline-offset-[-2px] ${
+                className={`w-full text-left text-xs rounded px-2 py-1.5 cursor-pointer outline-none hover:bg-slate-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--color-accent)] ${
                   selected ? 'text-white font-semibold' : 'text-slate-300'
                 }`}
                 onClick={(event) => {
