@@ -231,8 +231,11 @@ jobs:
   # Runs the Playwright RUNNER with no browser: every spec here is Node-importable logic or
   # a source assertion (no `page`/`browser` fixture anywhere in the tier), so there is no
   # `playwright install` step and no navigation or service-worker timing to race. That is
-  # why this one CAN sit in the required `ci` gate where e2e-web and pwa-web deliberately
-  # do not — it is browserless, and so has no flake surface.
+  # why this one CAN sit in the `ci` aggregate where e2e-web and pwa-web deliberately did
+  # not until #1594 — it is browserless, and so has no flake surface. (Note, corrected by
+  # #1594: `ci` itself is not a required status check under ruleset 19205904 — verified
+  # 2026-07-28, see the `ci` job's comment — so "required `ci` gate" was never accurate for
+  # any job listed here, this one included.)
   #
   # Only packages/schema/dist is needed (36 specs import @campfire/schema), so it builds
   # that directly rather than `needs: build`, matching `coverage`: the job starts
@@ -335,15 +338,19 @@ jobs:
   # makes it legible on the PR, and keeps it independently promotable to the
   # required set once it has a stability record.
   #
-  # Issue #1594: this job (and the four e2e-web shards) used to be excluded from
-  # the `ci` aggregate on the theory that a browser check waiting on
-  # service-worker activation shouldn't block every PR. That left a standing
-  # trap instead: `ci: success` could sit next to `e2e-web (1/4): failure` (see
-  # #1547), and anyone reading `ci` as "CI passed" was reading it wrong. Both
-  # are already required checks in their own right, so folding them into `ci`
-  # adds no new gating — it only makes the aggregate's name true. See the `ci`
-  # job below for the tradeoff this reintroduces (more slow jobs => more
-  # superseded-push noise) and why that's an acceptable, non-gating cost.
+  # Issue #1594: this job used to be excluded from the `ci` aggregate on the
+  # theory that a browser check waiting on service-worker activation
+  # shouldn't block every PR. That reasoning assumed `ci` gates merges; it
+  # does not (see the `ci` job below — `pwa-web` and `ci` itself are both
+  # absent from ruleset 19205904's required-status-checks list, verified
+  # 2026-07-28). The actual reason to fold this in is narrower: `ci: success`
+  # could sit next to `e2e-web (1/4): failure` (#1547) and mislead a reader
+  # who assumes `ci` means "CI passed." Adding `pwa-web` here costs nothing in
+  # gating either way — it was never gating, and still isn't — it only makes
+  # the aggregate's name match what it actually reports. See the `ci` job
+  # below for the tradeoff this reintroduces (more slow jobs => more
+  # superseded-push noise) and why that's an acceptable cost for a
+  # non-gating, widely-read signal.
   pwa-web:
     name: pwa-web
     needs: build
@@ -391,14 +398,41 @@ jobs:
           path: apps/web/playwright-report/
           if-no-files-found: ignore
 
-  # Aggregate required status check for the branch ruleset (context name: "ci",
-  # required by ruleset 19205904 — do NOT rename this job; renaming it silently
-  # makes that ruleset requirement unsatisfiable). Since #1594's investigation,
-  # `ci` now genuinely aggregates every required gate, including the four
-  # e2e-web shards and pwa-web (previously excluded — see #1547 for the
-  # `ci: success` next to `e2e-web (1/4): failure` trap that left). All eight
-  # dependencies below are already required checks individually, so this adds
-  # no new gating; it only makes the aggregate's name honest.
+  # Widely-read aggregate CI signal (context name: "ci") — but NOT itself a
+  # required status check. Verified 2026-07-28 against the live ruleset, not
+  # assumed:
+  #   gh api repos/AwsomeFox/campfire/rulesets/19205904 --jq \
+  #     '.rules[] | select(.type=="required_status_checks") | .parameters.required_status_checks[].context'
+  # returns exactly: lint, coverage, build, build-test (22.x),
+  # build-test (24.x), e2e-web (1/4..4/4). That's the repo's only ruleset
+  # (`gh api repos/AwsomeFox/campfire/rulesets --jq '.[] | {id,name}'` returns
+  # one row); classic branch protection is off (`gh api
+  # repos/AwsomeFox/campfire/branches/main/protection` 404s). `ci`, `pwa-web`,
+  # and `unit-web` are all ABSENT from that list — none of the three gate a
+  # merge on their own. (An earlier draft of this comment claimed renaming
+  # `ci` would make a ruleset requirement unsatisfiable; that was checked
+  # against the API for #1594 and was wrong — flagged and corrected here
+  # rather than left as an unverified guarantee, which is the exact defect
+  # class this repo keeps getting bitten by. Do not rename `ci` anyway
+  # without checking who/what keys off the name first — humans and bots read
+  # it as "did CI pass," even though nothing enforces that reading.)
+  #
+  # Since #1594's investigation, `ci` genuinely aggregates every gate anyone
+  # would expect it to, including the four e2e-web shards and pwa-web
+  # (previously excluded — see #1547 for the `ci: success` next to
+  # `e2e-web (1/4): failure` trap that left). Folding pwa-web/unit-web/e2e-web
+  # into `needs:` here adds no new GATING — but not because they're already
+  # required individually (pwa-web and unit-web are not); it's because `ci`
+  # itself was never a gate to begin with, so nothing added to its `needs:`
+  # changes what can merge. It only makes the aggregate's name match what it
+  # actually reports.
+  #
+  # Worth stating plainly because it's surprising: `unit-web` (added to this
+  # aggregate by #1583) has therefore never actually blocked a merge either —
+  # the web unit suite reaching "required" only through membership in a
+  # non-required `ci` job means it was never enforced. Whether that's
+  # deliberate or an oversight is a separate question, raised to the repo
+  # owner outside this PR — not decided here.
   #
   # Issue #1594 — what a `cancelled` dependency means here, backed by evidence:
   #
@@ -407,10 +441,13 @@ jobs:
   # the same ref. That produces a `ci: failure` on the SUPERSEDED sha whenever a
   # PR gets a review-fix push mid-run — which reads exactly like a real
   # regression and trains readers to assume any red `ci` is spurious, which is
-  # the habit that lets a genuine failure sit unexamined.
+  # the habit that lets a genuine failure sit unexamined. That reading habit is
+  # the entire cost here: since `ci` never gated a merge on any sha (verified
+  # above), a confusing red was always a legibility problem, never a
+  # merge-safety one — but it's a real cost precisely because `ci` is a
+  # widely-read signal that people reasonably assume means something.
   #
-  # The premise that this failure actually blocks merging was checked directly
-  # against the API, not assumed:
+  # This was checked directly against the API, not assumed:
   #   - Run 30374145136 (PR #1689, sha 91dcb176f9): `coverage` came back
   #     `cancelled` while every other job (build, lint, both build-test shards,
   #     unit-web, all 4 e2e-web shards, pwa-web) had already completed
@@ -419,10 +456,7 @@ jobs:
   #   - That sha was already superseded: `gh pr view 1689` on the PR's actual
   #     head showed `ci: SUCCESS` and `coverage: SUCCESS` in
   #     `statusCheckRollup`, with `mergeStateStatus: BLOCKED` from a missing
-  #     review, not from checks. GitHub's required-check rollup is keyed to the
-  #     head sha; a check run on an abandoned sha is structurally invisible to
-  #     it. So the red `ci` here never gated anything — it's a display/legibility
-  #     problem, not a merge-safety one.
+  #     review, not from checks.
   #
   # That ruled out "fix" attempts that change whether `ci` runs at all. Run
   # 30378726387 (sha 5ea218310e) is the proof: when `build` failed, its
@@ -432,17 +466,20 @@ jobs:
   # required checks — it does not block merging. So making `ci` itself skip on
   # a cancelled dependency (e.g. `if: ${{ !cancelled() }}`, or excluding
   # `coverage`'s result from the `if:`) would silently turn today's honest-but-
-  # confusing red into a GREEN required check while coverage was never actually
-  # verified. That is strictly worse than the bug. Do not "fix" this by making
-  # the job skip — re-derive from runs 30374145136 / 30378726387 above rather
-  # than re-deriving from first principles if this comes up again.
+  # confusing red into a GREEN check while coverage was never actually
+  # verified — worse than the bug even though `ci` doesn't gate, because a
+  # green `ci` is exactly the false "all clear" a reader acts on. Do not "fix"
+  # this by making the job skip — re-derive from runs 30374145136 /
+  # 30378726387 above rather than from first principles if this comes up
+  # again.
   #
   # The fix actually shipped: keep `if: always()` and keep failing on any real
   # `failure` (a mixed cancelled+failure state stays an ordinary loud red — see
   # below). The only change is that a *cancelled-only, no-failure* state still
-  # fails (so the required check stays un-green — right call under GitHub's
-  # skip-passes semantics) but writes a self-explaining summary so a reader
-  # doesn't have to re-derive the diagnosis via `git log origin/<branch>`.
+  # fails `ci` (so it stays red rather than silently reporting `skipped`/green
+  # — right call under GitHub's skip-passes semantics, even though `ci` isn't
+  # itself required) but writes a self-explaining summary so a reader doesn't
+  # have to re-derive the diagnosis via `git log origin/<branch>`.
   ci:
     name: ci
     if: always()
