@@ -84,6 +84,7 @@ import { parseDdbId, fetchDdbCharacter, mapDdbCharacter, type DdbFetch } from '.
 import type { DdbCharacterImport } from '@campfire/schema';
 
 type CharacterCreateInput = z.infer<typeof CharacterCreate>;
+type SyncDb = Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
 type CharacterUpdateInput = z.infer<typeof CharacterUpdate>;
 type HpPatchInput = z.infer<typeof HpPatch>;
 /** Stable object serialization for idempotency identity; object key order never changes the intent. */
@@ -708,6 +709,27 @@ export class CharactersService {
         this.emitEncounterUpdatedIfVisible(campaignId, encounterId);
       }
     }
+  }
+
+  /**
+   * The party-recovery path needs the sheet and tracker copies to be one unit of
+   * work.  The ordinary sync helpers are deliberately async/post-write for the
+   * interactive patch paths; these small synchronous twins are for the single
+   * recovery transaction only.  They return encounter ids so SSE can be emitted
+   * after commit (never from a transaction that might roll back).
+   */
+  private syncRecoveryCombatantsInTx(tx: SyncDb, campaignId: number, characterId: number, hpCurrent: number, deathState: string, conditionsJson: string, sheetUpdatedAt: string): number[] {
+    const rows = tx.select({ combatant: combatants, encounterId: encounters.id })
+      .from(combatants).innerJoin(encounters, eq(combatants.encounterId, encounters.id))
+      .where(and(eq(encounters.campaignId, campaignId), eq(combatants.characterId, characterId), ne(encounters.status, 'ended'))).all();
+    for (const { combatant } of rows) {
+      tx.update(combatants).set({
+        hpCurrent: clampHpCurrent(hpCurrent, combatant.hpMax), deathState,
+        ...conditionWriteSetFromNames(fromJsonText<string[]>(conditionsJson, []), combatant.conditionInstances),
+        sheetSyncedUpdatedAt: sheetUpdatedAt,
+      }).where(eq(combatants.id, combatant.id)).run();
+    }
+    return rows.map((row) => row.encounterId);
   }
 
   /**
@@ -1866,26 +1888,32 @@ export class CharactersService {
     if (linked.some((row) => row.characterId != null && ids.includes(row.characterId)) && !input.acknowledgeRunningCombatants) throw new ConflictException('A running combatant will be synchronized; acknowledgement is required.');
     const storedPlan = fromJsonText<{ failures?: unknown[] }>(batch.planJson, {});
     if ((storedPlan.failures?.length ?? 0) > 0) throw new BadRequestException('A recovery preview with ineligible participants cannot be applied.');
-    const rows = await this.db.select().from(characters).where(and(eq(characters.campaignId, campaignId), notDeleted(characters.deletedAt)));
-    const current = new Map(rows.map((row) => [row.id, row]));
-    if (before.some((snapshot) => current.get(snapshot.id)?.updatedAt !== snapshot.updatedAt)) throw new ConflictException('A participant changed after this preview; preview recovery again.');
+    // An idempotency key belongs to the actor's intent, not a preview token.  A
+    // retry after a transport failure may have created a second equivalent preview;
+    // replay that result, but never let the same key apply a different intent.
+    const [sameKey] = await this.db.select().from(partyRestBatches).where(and(eq(partyRestBatches.campaignId, campaignId), eq(partyRestBatches.actorUserId, user.id), eq(partyRestBatches.idempotencyKey, input.idempotencyKey))).limit(1);
+    if (sameKey && sameKey.id !== batch.id) {
+      if (sameKey.requestFingerprint !== batch.requestFingerprint) throw new ConflictException('Idempotency key was already used for a different recovery intent.');
+      if (sameKey.status === 'applied') return fromJsonText<PartyRecoveryApplyResult>(sameKey.resultJson, { batchId: sameKey.id, kind: 'long', ruleSystem: '', characterIds: [] });
+      throw new ConflictException('Idempotency key is already in use by an unfinished recovery.');
+    }
     const at = nowIso();
+    const touchedEncounterIds = new Set<number>();
+    const resultBody: PartyRecoveryApplyResult = { batchId: batch.id, kind: plan.kind, ruleSystem: plan.ruleSystem, characterIds: ids };
     this.db.transaction((tx) => {
       for (const item of plan.plans) {
         const expected = before.find((snapshot) => snapshot.id === item.characterId)!.updatedAt;
         const result = tx.update(characters).set({ hpCurrent: item.hpAfter, hpTemp: item.hpTempAfter, deathState: item.deathStateAfter, deathSaveSuccesses: item.deathSaveSuccessesAfter, deathSaveFailures: item.deathSaveFailuresAfter, conditions: toJsonText(item.conditionsAfter), spellSlots: toJsonText(item.spellSlotsAfter), resources: toJsonText(item.resourcesAfter), updatedAt: at }).where(and(eq(characters.id, item.characterId), eq(characters.campaignId, campaignId), eq(characters.updatedAt, expected))).run();
         if (result.changes !== 1) throw new ConflictException('A participant changed while recovery was applying.');
+        for (const encounterId of this.syncRecoveryCombatantsInTx(tx, campaignId, item.characterId, item.hpAfter, item.deathStateAfter, toJsonText(item.conditionsAfter), at)) touchedEncounterIds.add(encounterId);
       }
-      const result = tx.update(partyRestBatches).set({ status: 'applied', idempotencyKey: input.idempotencyKey, afterJson: toJsonText(plan.plans), resultJson: toJsonText({ batchId: batch.id, kind: plan.kind, ruleSystem: plan.ruleSystem, characterIds: ids }), appliedAt: at }).where(and(eq(partyRestBatches.id, batch.id), eq(partyRestBatches.status, 'previewed'))).run();
+      const result = tx.update(partyRestBatches).set({ status: 'applied', idempotencyKey: input.idempotencyKey, afterJson: toJsonText(plan.plans), resultJson: toJsonText(resultBody), appliedAt: at }).where(and(eq(partyRestBatches.id, batch.id), eq(partyRestBatches.status, 'previewed'))).run();
       if (result.changes !== 1) throw new ConflictException('Recovery preview was applied concurrently.');
+      this.audit.logInTx(tx, { actor: auditActor(user), actorRole: role, action: 'party.rest.apply', entityType: 'party_rest_batch', entityId: batch.id, campaignId, detail: JSON.stringify({ batchId: batch.id, characterIds: ids, idempotencyKey: input.idempotencyKey, kind: plan.kind }) });
     });
-    for (const item of plan.plans) {
-      await this.syncActiveCombatants(item.characterId, item.hpAfter, undefined, { campaignId, deathState: item.deathStateAfter as RestCharacterState['deathState'] }).catch(() => undefined);
-      await this.syncActiveCombatantConditions(item.characterId, toJsonText(item.conditionsAfter), { campaignId }).catch(() => undefined);
-    }
-    await this.audit.log({ actor: auditActor(user), actorRole: role, action: 'party.rest.apply', entityType: 'party_rest_batch', entityId: batch.id, campaignId, detail: JSON.stringify({ batchId: batch.id, characterIds: ids, idempotencyKey: input.idempotencyKey, kind: plan.kind }) });
+    for (const encounterId of touchedEncounterIds) this.emitEncounterUpdatedIfVisible(campaignId, encounterId);
     this.events.emit({ type: 'party.rest.updated', campaignId, batchId: batch.id, characterIds: ids });
-    return { batchId: batch.id, kind: plan.kind, ruleSystem: plan.ruleSystem, characterIds: ids };
+    return resultBody;
   }
 
   async undoPartyRecovery(campaignId: number, batchId: number, idempotencyKey: string, user: RequestUser, role: Role) {
@@ -1900,13 +1928,25 @@ export class CharactersService {
     if (batch.status !== 'applied') throw new ConflictException('Only an applied recovery can be undone.');
     const before = fromJsonText<Array<{ id: number; hpCurrent: number; hpTemp: number; deathState: string; deathSaveSuccesses: number; deathSaveFailures: number; conditions: string; spellSlots: string; resources: string }>>(batch.beforeJson, []);
     const after = fromJsonText<Array<{ characterId: number; hpAfter: number; hpTempAfter: number; deathStateAfter: string; deathSaveSuccessesAfter: number; deathSaveFailuresAfter: number; conditionsAfter: string[]; spellSlotsAfter: Record<string, SpellSlotLevel>; resourcesAfter: Record<string, CharacterResource> }>>(batch.afterJson, []);
-    const rows = await this.db.select().from(characters).where(and(eq(characters.campaignId, campaignId), notDeleted(characters.deletedAt)));
-    const current = new Map(rows.map((row) => [row.id, row]));
-    if (after.some((item) => { const row = current.get(item.characterId); return !row || row.hpCurrent !== item.hpAfter || row.hpTemp !== item.hpTempAfter || row.deathState !== item.deathStateAfter || row.conditions !== toJsonText(item.conditionsAfter) || row.spellSlots !== toJsonText(item.spellSlotsAfter) || row.resources !== toJsonText(item.resourcesAfter); })) throw new ConflictException('A participant changed after this recovery; undo would overwrite it.');
     const at = nowIso();
     const undoResult = { batchId, undone: true };
-    this.db.transaction((tx) => { for (const snapshot of before) { const result = tx.update(characters).set({ hpCurrent: snapshot.hpCurrent, hpTemp: snapshot.hpTemp, deathState: snapshot.deathState, deathSaveSuccesses: snapshot.deathSaveSuccesses, deathSaveFailures: snapshot.deathSaveFailures, conditions: snapshot.conditions, spellSlots: snapshot.spellSlots, resources: snapshot.resources, updatedAt: at }).where(and(eq(characters.id, snapshot.id), eq(characters.campaignId, campaignId))).run(); if (result.changes !== 1) throw new ConflictException('A participant disappeared while undoing recovery.'); } const result = tx.update(partyRestBatches).set({ status: 'undone', undoneAt: at, undoIdempotencyKey: idempotencyKey, undoResultJson: toJsonText(undoResult) }).where(and(eq(partyRestBatches.id, batchId), eq(partyRestBatches.status, 'applied'))).run(); if (result.changes !== 1) throw new ConflictException('Recovery was undone concurrently.'); });
-    await this.audit.log({ actor: auditActor(user), actorRole: role, action: 'party.rest.undo', entityType: 'party_rest_batch', entityId: batchId, campaignId, detail: JSON.stringify({ batchId, characterIds: before.map((s) => s.id), idempotencyKey }) });
+    const touchedEncounterIds = new Set<number>();
+    this.db.transaction((tx) => {
+      // Compare the exact recorded after-state *inside* this transaction, then
+      // include it in every update predicate.  A concurrent sheet write therefore
+      // makes the whole undo roll back instead of resurrecting stale state.
+      for (const snapshot of before) {
+        const item = after.find((candidate) => candidate.characterId === snapshot.id);
+        if (!item) throw new ConflictException('Recovery snapshot is incomplete.');
+        const result = tx.update(characters).set({ hpCurrent: snapshot.hpCurrent, hpTemp: snapshot.hpTemp, deathState: snapshot.deathState, deathSaveSuccesses: snapshot.deathSaveSuccesses, deathSaveFailures: snapshot.deathSaveFailures, conditions: snapshot.conditions, spellSlots: snapshot.spellSlots, resources: snapshot.resources, updatedAt: at }).where(and(eq(characters.id, snapshot.id), eq(characters.campaignId, campaignId), eq(characters.hpCurrent, item.hpAfter), eq(characters.hpTemp, item.hpTempAfter), eq(characters.deathState, item.deathStateAfter), eq(characters.deathSaveSuccesses, item.deathSaveSuccessesAfter), eq(characters.deathSaveFailures, item.deathSaveFailuresAfter), eq(characters.conditions, toJsonText(item.conditionsAfter)), eq(characters.spellSlots, toJsonText(item.spellSlotsAfter)), eq(characters.resources, toJsonText(item.resourcesAfter)))).run();
+        if (result.changes !== 1) throw new ConflictException('A participant changed after this recovery; undo would overwrite it.');
+        for (const encounterId of this.syncRecoveryCombatantsInTx(tx, campaignId, snapshot.id, snapshot.hpCurrent, snapshot.deathState, snapshot.conditions, at)) touchedEncounterIds.add(encounterId);
+      }
+      const result = tx.update(partyRestBatches).set({ status: 'undone', undoneAt: at, undoIdempotencyKey: idempotencyKey, undoResultJson: toJsonText(undoResult) }).where(and(eq(partyRestBatches.id, batchId), eq(partyRestBatches.status, 'applied'))).run();
+      if (result.changes !== 1) throw new ConflictException('Recovery was undone concurrently.');
+      this.audit.logInTx(tx, { actor: auditActor(user), actorRole: role, action: 'party.rest.undo', entityType: 'party_rest_batch', entityId: batchId, campaignId, detail: JSON.stringify({ batchId, characterIds: before.map((s) => s.id), idempotencyKey }) });
+    });
+    for (const encounterId of touchedEncounterIds) this.emitEncounterUpdatedIfVisible(campaignId, encounterId);
     for (const snapshot of before) this.emitCharacterUpdated(campaignId, snapshot.id, user.id);
     return undoResult;
   }
