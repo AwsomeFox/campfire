@@ -104,7 +104,7 @@ describe('rest mechanics (#1041, e2e)', () => {
     const id = await batteredCharacter('Combat rest');
     const now = new Date().toISOString();
     const [encounter] = await db.insert(encounters).values({ campaignId, name: 'Running rest', status: 'running', createdAt: now, updatedAt: now }).returning();
-    await db.insert(combatants).values({ encounterId: encounter.id, kind: 'character', characterId: id, name: 'Combat rest', hpCurrent: 5, hpMax: 40, createdAt: now, updatedAt: now });
+    await db.insert(combatants).values({ encounterId: encounter.id, kind: 'character', characterId: id, name: 'Combat rest', hpCurrent: 5, hpMax: 40 });
     const preview = await characters.previewPartyRecovery(campaignId, { kind: 'long', characterIds: [id] }, dmUser, 'dm');
     expect(preview.runningCombatantCharacterIds).toContain(id);
     await expect(characters.applyPartyRecovery(campaignId, { previewToken: preview.previewToken, idempotencyKey: 'combat-ack-rest', acknowledgeRunningCombatants: false }, dmUser, 'dm')).rejects.toMatchObject({ status: 409 });

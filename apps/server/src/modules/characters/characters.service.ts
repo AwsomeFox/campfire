@@ -193,6 +193,7 @@ export interface RestPartyResult {
   ruleSystem: string;
   characters: RestPartyCharacterResult[];
 }
+export interface PartyRecoveryApplyResult { batchId: number; kind: RestKind | 'custom'; ruleSystem: string; characterIds: number[]; }
 
 @Injectable()
 export class CharactersService {
@@ -1851,12 +1852,12 @@ export class CharactersService {
     return { previewToken, request, ruleSystem: plan.ruleSystem, failures: plan.failures, characters: deltas, runningCombatantCharacterIds };
   }
 
-  async applyPartyRecovery(campaignId: number, input: { previewToken: string; idempotencyKey: string; acknowledgeRunningCombatants: boolean }, user: RequestUser, role: Role) {
+  async applyPartyRecovery(campaignId: number, input: { previewToken: string; idempotencyKey: string; acknowledgeRunningCombatants: boolean }, user: RequestUser, role: Role): Promise<PartyRecoveryApplyResult> {
     if (!roleAtLeast(role, 'dm')) throw new ForbiddenException('Only a DM can rest the party.');
     const [batch] = await this.db.select().from(partyRestBatches).where(and(eq(partyRestBatches.campaignId, campaignId), eq(partyRestBatches.previewToken, input.previewToken))).limit(1);
     if (!batch) throw new NotFoundException('Recovery preview not found.');
     if (batch.actorUserId !== user.id) throw new ForbiddenException('Only the DM who created this recovery preview can apply it.');
-    if (batch.status === 'applied' && batch.idempotencyKey === input.idempotencyKey) return fromJsonText(batch.resultJson, {});
+    if (batch.status === 'applied' && batch.idempotencyKey === input.idempotencyKey) return fromJsonText<PartyRecoveryApplyResult>(batch.resultJson, { batchId: batch.id, kind: 'long', ruleSystem: '', characterIds: [] });
     if (batch.status !== 'previewed' || (batch.idempotencyKey && batch.idempotencyKey !== input.idempotencyKey)) throw new ConflictException('Recovery preview was already used for another intent.');
     const before = fromJsonText<Array<{ id: number; updatedAt: string }>>(batch.beforeJson, []);
     const plan = fromJsonText<{ kind: RestKind; ruleSystem: string; plans: Array<{ characterId: number; characterName: string; hpAfter: number; hpTempAfter: number; deathStateAfter: string; deathSaveSuccessesAfter: number; deathSaveFailuresAfter: number; conditionsAfter: string[]; spellSlotsAfter: Record<string, SpellSlotLevel>; resourcesAfter: Record<string, CharacterResource> }> }>(batch.planJson, { kind: 'short', ruleSystem: '', plans: [] });
