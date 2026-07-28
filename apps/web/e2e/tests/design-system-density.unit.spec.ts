@@ -81,7 +81,64 @@ const DRIFT_PATTERNS: ReadonlyArray<{ name: string; pattern: RegExp; why: string
     why: 'use <Btn density="xs"> / add cf-density-xs instead of !min-h-0 on .btn — ' +
       '.btn aliases to the ramp default and !min-h-0 zeroes that out entirely (issue #1695)',
   },
+  {
+    name: 'inline minHeight:0 override on a .btn/cf-btn control',
+    // The four patterns above only see the retired idiom when it is spelled as a
+    // Tailwind class (!min-h-0) inside a className string. The IDENTICAL override
+    // survives completely invisible to all of them when spelled as an inline style
+    // instead — found live in CharacterPage.tsx during this PR's own review (a
+    // `<button className="btn btn-ghost" style={{ ..., minHeight: 0, ... }}>`,
+    // exactly the shape 'legacy .btn geometry override' above exists to ban, just
+    // in a form the regex could not see). A guard that only covers the className
+    // form is worse than no guard — it reports clean while the banned idiom
+    // persists. Matches className/style in either JSX attribute order.
+    pattern:
+      /<[a-zA-Z][^>]*\bclassName="[^"]*\b(?:btn|cf-btn)\b[^"]*"[^>]*\bstyle=\{\{[^}]*\bminHeight:\s*0\b[^}]*\}\}[^>]*>|<[a-zA-Z][^>]*\bstyle=\{\{[^}]*\bminHeight:\s*0\b[^}]*\}\}[^>]*\bclassName="[^"]*\b(?:btn|cf-btn)\b[^"]*"[^>]*>/,
+    why: 'the !min-h-0 idiom expressed as an inline style instead of a Tailwind class — ' +
+      'invisible to the className-scoped patterns above. Use <Btn density="xs"> or drop the ' +
+      'inline minHeight override; do not zero a .btn/cf-btn control\'s height via inline style',
+  },
 ];
+
+/**
+ * Pre-existing, already-reported instances of the pattern just above (issue #1683
+ * review) — every one this new pattern found repo-wide, not just the one site the
+ * review named. Each measured via getComputedStyle (apps/web/e2e/lib/
+ * computedStyle.ts) against the real compiled CSS, not inferred from source:
+ *
+ *   - CharacterPage.tsx "+ add" condition button (btn btn-ghost, fontSize 12,
+ *     padding '4px 10px'): 24.39px. NOT under the 24px WCAG 2.2 SC 2.5.8 floor —
+ *     clears it by 0.39px of coincidental padding/line-height math, the same
+ *     "clears without enforcing" shape already documented for .cf-target-24 + .btn
+ *     elsewhere in this file.
+ *   - RegionMap.tsx, all 4 sites (btn-ghost x3 + bare btn x1, all fontSize 11,
+ *     padding '2px 8px'): 19.19px. LIVE VIOLATION — under the 24px floor.
+ *   - RunSessionPage.tsx's map-derivatives retry button (btn btn-ghost, fontSize 11,
+ *     padding '2px 8px' — identical shape to RegionMap's): 19.19px. LIVE VIOLATION.
+ *   - DiceTray.tsx (cf-btn cf-btn-ghost, fontSize 12.5, padding '4px 12px'):
+ *     29.38px. Not a violation.
+ *   - CampaignSettingsPage.tsx, both sites (btn-secondary + btn-ghost, fontSize
+ *     12.5, padding '4px 12px'): 25px each. Not a violation, but only by 1px.
+ *
+ * None of these are fixed in this PR — #1692's job is the density API, not an a11y
+ * sweep, and the two live violations especially need their own tracked fix, not a
+ * drive-by inside an unrelated PR. Reported to the orchestrator to file separately.
+ * Allowlisted here ONLY for this one new pattern, by name, not added to
+ * `HEIGHT_SHRINK_ALLOWED_FILES` (which exempts a file from ALL of the
+ * className-based patterns above; none of these files carry those).
+ */
+const INLINE_MIN_HEIGHT_ZERO_ALLOWED: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  [
+    'inline minHeight:0 override on a .btn/cf-btn control',
+    new Set([
+      resolve(ROOT, 'features/characters/CharacterPage.tsx'),
+      resolve(ROOT, 'features/dashboard/RegionMap.tsx'),
+      resolve(ROOT, 'features/encounters/RunSessionPage.tsx'),
+      resolve(ROOT, 'features/dice/DiceTray.tsx'),
+      resolve(ROOT, 'features/settings/CampaignSettingsPage.tsx'),
+    ]),
+  ],
+]);
 
 /**
  * The retired height-shrink idiom (issue #1683): `!min-h-0` and the small
@@ -216,6 +273,7 @@ test.describe('Design-system density (#674, #1683)', () => {
       if (file.endsWith('design-system-density.unit.spec.ts')) continue;
       const text = READ(file);
       for (const { name, pattern, why } of DRIFT_PATTERNS) {
+        if (INLINE_MIN_HEIGHT_ZERO_ALLOWED.get(name)?.has(file)) continue;
         if (pattern.test(text)) {
           offenders.push(`${file.replace(ROOT + '/', '')}: ${name} (${why})`);
         }

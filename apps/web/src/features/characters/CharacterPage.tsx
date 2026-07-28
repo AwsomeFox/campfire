@@ -1232,7 +1232,10 @@ function XpCard({
             + Award XP
           </Btn>
           {!atCap && !levellingUp && (
-            <Btn density="xs"
+            // No density prop (issue #1683 review, same reasoning as Award XP above):
+            // this row's other primary action, not a dense inline control — the inline
+            // minHeight: 44 already governs, so xs would be a no-op reading as "24px".
+            <Btn
               ghost={!ready}
               className="ml-auto"
               style={{ minHeight: 44 }}
@@ -2203,8 +2206,12 @@ function HpEditor({
       aria-label={`${name} hit points`}
       data-testid="character-hp-editor"
     >
+      {/* No density prop (issue #1683 review): a fixed 52×44 HP-delta control
+          cluster, sized to match its sibling "Full heal" button below (also no
+          density, also inline minHeight: 44) — deliberately NOT dense. xs would
+          be a no-op (inline style governs) and misleadingly suggest a 24px floor. */}
       {([-5, -1, 1, 5] as const).map((step) => (
-        <Btn density="xs"
+        <Btn
           key={step}
           className=""
           style={{ minWidth: 52, minHeight: 44 }}
