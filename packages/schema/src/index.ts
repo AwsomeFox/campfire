@@ -11724,7 +11724,7 @@ const LibraryBulkTargets = z.array(LibraryEntityRef).min(1).max(500).superRefine
 });
 export const LibraryBulkOperation = z.enum(['add_tag', 'remove_tag', 'add_collection', 'remove_collection', 'move_collection', 'set_visibility', 'set_status', 'move_inventory_owner', 'archive', 'restore']);
 /** Discriminated so an action can never receive ambiguous or ignored fields. */
-export const LibraryBulkRequest = z.discriminatedUnion('operation', [
+const LibraryBulkRequestBase = z.discriminatedUnion('operation', [
   z.object({ operation: z.literal('add_tag'), targets: LibraryBulkTargets, taxonomyId: Id }).strict(),
   z.object({ operation: z.literal('remove_tag'), targets: LibraryBulkTargets, taxonomyId: Id }).strict(),
   z.object({ operation: z.literal('add_collection'), targets: LibraryBulkTargets, taxonomyId: Id }).strict(),
@@ -11732,11 +11732,15 @@ export const LibraryBulkRequest = z.discriminatedUnion('operation', [
   z.object({ operation: z.literal('move_collection'), targets: LibraryBulkTargets, taxonomyId: Id }).strict(),
   z.object({ operation: z.literal('set_visibility'), targets: LibraryBulkTargets, visibility: z.enum(['public', 'hidden']) }).strict(),
   z.object({ operation: z.literal('set_status'), targets: LibraryBulkTargets, status: z.string().trim().min(1).max(80) }).strict(),
-  z.object({ operation: z.literal('move_inventory_owner'), targets: LibraryBulkTargets, ownerType: z.literal('party'), characterId: z.null().optional() }).strict(),
-  z.object({ operation: z.literal('move_inventory_owner'), targets: LibraryBulkTargets, ownerType: z.literal('character'), characterId: Id }).strict(),
+  z.object({ operation: z.literal('move_inventory_owner'), targets: LibraryBulkTargets, ownerType: z.enum(['party', 'character']), characterId: Id.nullable().optional() }).strict(),
   z.object({ operation: z.literal('archive'), targets: LibraryBulkTargets }).strict(),
   z.object({ operation: z.literal('restore'), targets: LibraryBulkTargets }).strict(),
 ]);
+export const LibraryBulkRequest = LibraryBulkRequestBase.superRefine((value, ctx) => {
+  if (value.operation !== 'move_inventory_owner') return;
+  if (value.ownerType === 'character' && value.characterId == null) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['characterId'], message: 'characterId is required for character ownership' });
+  if (value.ownerType === 'party' && value.characterId != null) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['characterId'], message: 'party ownership cannot include characterId' });
+});
 export type LibraryBulkRequest = z.infer<typeof LibraryBulkRequest>;
 export const LibraryBulkResult = z.object({ operationId: Id, applied: z.number().int().nonnegative(), undoAvailable: z.boolean() });
 export type LibraryBulkResult = z.infer<typeof LibraryBulkResult>;

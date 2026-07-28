@@ -10,7 +10,7 @@ import {
   type Role,
 } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { campaignLibraryCollections, campaignLibraryMonsters, campaignLibraryTags } from '../../db/schema';
+import { campaignLibraryCollections, campaignLibraryEntityTaxonomy, campaignLibraryMonsters, campaignLibraryTags } from '../../db/schema';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
@@ -68,6 +68,63 @@ export class CampaignLibraryService {
   async createCollection(campaignId: number, input: CampaignLibraryCollectionCreate): Promise<CampaignLibraryCollection> {
     await this.assertParent(campaignLibraryCollections, campaignId, input.parentCollectionId); const ts = nowIso();
     const [row] = await this.db.insert(campaignLibraryCollections).values({ campaignId, name: input.name.trim(), aliasesJson: toJsonText(input.aliases ?? []), color: input.color ?? '#64748b', description: input.description ?? '', parentCollectionId: input.parentCollectionId ?? null, createdAt: ts, updatedAt: ts }).returning().all(); return this.collection(row);
+  }
+
+  private async tagRowOrThrow(campaignId: number, id: number) {
+    const [row] = await this.db.select().from(campaignLibraryTags).where(and(eq(campaignLibraryTags.id, id), eq(campaignLibraryTags.campaignId, campaignId))).limit(1);
+    if (!row) throw new NotFoundException(`Tag ${id} not found in campaign ${campaignId}`);
+    return row;
+  }
+
+  private async collectionRowOrThrow(campaignId: number, id: number) {
+    const [row] = await this.db.select().from(campaignLibraryCollections).where(and(eq(campaignLibraryCollections.id, id), eq(campaignLibraryCollections.campaignId, campaignId))).limit(1);
+    if (!row) throw new NotFoundException(`Collection ${id} not found in campaign ${campaignId}`);
+    return row;
+  }
+
+  async updateTag(campaignId: number, id: number, input: CampaignLibraryTagUpdate): Promise<CampaignLibraryTag> {
+    await this.tagRowOrThrow(campaignId, id);
+    if (input.parentTagId !== undefined) await this.assertParent(campaignLibraryTags, campaignId, input.parentTagId, id);
+    const patch: Partial<typeof campaignLibraryTags.$inferInsert> = { updatedAt: nowIso() };
+    if (input.name !== undefined) patch.name = input.name.trim();
+    if (input.aliases !== undefined) patch.aliasesJson = toJsonText(input.aliases);
+    if (input.color !== undefined) patch.color = input.color;
+    if (input.description !== undefined) patch.description = input.description;
+    if (input.parentTagId !== undefined) patch.parentTagId = input.parentTagId;
+    const [row] = await this.db.update(campaignLibraryTags).set(patch).where(and(eq(campaignLibraryTags.id, id), eq(campaignLibraryTags.campaignId, campaignId))).returning().all();
+    return this.tag(row);
+  }
+
+  async updateCollection(campaignId: number, id: number, input: CampaignLibraryCollectionUpdate): Promise<CampaignLibraryCollection> {
+    await this.collectionRowOrThrow(campaignId, id);
+    if (input.parentCollectionId !== undefined) await this.assertParent(campaignLibraryCollections, campaignId, input.parentCollectionId, id);
+    const patch: Partial<typeof campaignLibraryCollections.$inferInsert> = { updatedAt: nowIso() };
+    if (input.name !== undefined) patch.name = input.name.trim();
+    if (input.aliases !== undefined) patch.aliasesJson = toJsonText(input.aliases);
+    if (input.color !== undefined) patch.color = input.color;
+    if (input.description !== undefined) patch.description = input.description;
+    if (input.parentCollectionId !== undefined) patch.parentCollectionId = input.parentCollectionId;
+    const [row] = await this.db.update(campaignLibraryCollections).set(patch).where(and(eq(campaignLibraryCollections.id, id), eq(campaignLibraryCollections.campaignId, campaignId))).returning().all();
+    return this.collection(row);
+  }
+
+  /** Delete is intentionally destructive in alpha: taxonomy references are removed, children become roots. */
+  async removeTag(campaignId: number, id: number): Promise<void> {
+    await this.tagRowOrThrow(campaignId, id);
+    this.db.transaction((tx) => {
+      tx.delete(campaignLibraryEntityTaxonomy).where(and(eq(campaignLibraryEntityTaxonomy.campaignId, campaignId), eq(campaignLibraryEntityTaxonomy.tagId, id))).run();
+      tx.update(campaignLibraryTags).set({ parentTagId: null, updatedAt: nowIso() }).where(and(eq(campaignLibraryTags.campaignId, campaignId), eq(campaignLibraryTags.parentTagId, id))).run();
+      tx.delete(campaignLibraryTags).where(and(eq(campaignLibraryTags.id, id), eq(campaignLibraryTags.campaignId, campaignId))).run();
+    });
+  }
+
+  async removeCollection(campaignId: number, id: number): Promise<void> {
+    await this.collectionRowOrThrow(campaignId, id);
+    this.db.transaction((tx) => {
+      tx.delete(campaignLibraryEntityTaxonomy).where(and(eq(campaignLibraryEntityTaxonomy.campaignId, campaignId), eq(campaignLibraryEntityTaxonomy.collectionId, id))).run();
+      tx.update(campaignLibraryCollections).set({ parentCollectionId: null, updatedAt: nowIso() }).where(and(eq(campaignLibraryCollections.campaignId, campaignId), eq(campaignLibraryCollections.parentCollectionId, id))).run();
+      tx.delete(campaignLibraryCollections).where(and(eq(campaignLibraryCollections.id, id), eq(campaignLibraryCollections.campaignId, campaignId))).run();
+    });
   }
 
   async getRowOrThrow(id: number, campaignId?: number) {

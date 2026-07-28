@@ -1,12 +1,12 @@
 import { Body, Controller, Delete, Get, Param, ParseIntPipe, Patch, Post, Query, Res } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
-import { CampaignLibraryMonsterCreate } from '@campfire/schema';
+import { CampaignLibraryMonsterCreate, CampaignLibraryCollectionCreate, CampaignLibraryTagCreate } from '@campfire/schema';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { CampaignLibraryService } from './campaign-library.service';
-import { CampaignLibraryMonsterCreateDto, CampaignLibraryMonsterUpdateDto } from './campaign-library.dto';
+import { CampaignLibraryCollectionCreateDto, CampaignLibraryCollectionUpdateDto, CampaignLibraryMonsterCreateDto, CampaignLibraryMonsterUpdateDto, CampaignLibraryTagCreateDto, CampaignLibraryTagUpdateDto } from './campaign-library.dto';
 
 @ApiTags('campaign-library')
 @Controller('campaigns/:campaignId/library/monsters')
@@ -51,6 +51,58 @@ export class CampaignLibraryController {
     const role = await this.access.requireRole(user, campaignId, 'dm');
     res.status(201);
     return this.library.clone(id, name ?? '', user, role, campaignId);
+  }
+}
+
+@ApiTags('campaign-library')
+@Controller('campaigns/:campaignId/library')
+export class CampaignLibraryTaxonomyController {
+  constructor(private readonly library: CampaignLibraryService, private readonly access: CampaignAccessService) {}
+
+  @Get('tags')
+  async listTags(@Param('campaignId', ParseIntPipe) campaignId: number, @CurrentUser() user: RequestUser) {
+    await this.access.requireMember(user, campaignId);
+    return this.library.listTags(campaignId);
+  }
+
+  @Post('tags')
+  async createTag(@Param('campaignId', ParseIntPipe) campaignId: number, @Body() body: CampaignLibraryTagCreateDto, @CurrentUser() user: RequestUser, @Res({ passthrough: true }) res: Response) {
+    await this.access.requireRole(user, campaignId, 'dm'); res.status(201);
+    return this.library.createTag(campaignId, CampaignLibraryTagCreate.parse(body));
+  }
+
+  @Patch('tags/:id')
+  async updateTag(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('id', ParseIntPipe) id: number, @Body() body: CampaignLibraryTagUpdateDto, @CurrentUser() user: RequestUser) {
+    await this.access.requireRole(user, campaignId, 'dm');
+    return this.library.updateTag(campaignId, id, body);
+  }
+
+  @Delete('tags/:id')
+  async removeTag(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    await this.access.requireRole(user, campaignId, 'dm'); await this.library.removeTag(campaignId, id); return { ok: true };
+  }
+
+  @Get('collections')
+  async listCollections(@Param('campaignId', ParseIntPipe) campaignId: number, @CurrentUser() user: RequestUser) {
+    await this.access.requireMember(user, campaignId);
+    return this.library.listCollections(campaignId);
+  }
+
+  @Post('collections')
+  async createCollection(@Param('campaignId', ParseIntPipe) campaignId: number, @Body() body: CampaignLibraryCollectionCreateDto, @CurrentUser() user: RequestUser, @Res({ passthrough: true }) res: Response) {
+    await this.access.requireRole(user, campaignId, 'dm'); res.status(201);
+    return this.library.createCollection(campaignId, CampaignLibraryCollectionCreate.parse(body));
+  }
+
+  @Patch('collections/:id')
+  async updateCollection(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('id', ParseIntPipe) id: number, @Body() body: CampaignLibraryCollectionUpdateDto, @CurrentUser() user: RequestUser) {
+    await this.access.requireRole(user, campaignId, 'dm');
+    return this.library.updateCollection(campaignId, id, body);
+  }
+
+  @Delete('collections/:id')
+  async removeCollection(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    await this.access.requireRole(user, campaignId, 'dm'); await this.library.removeCollection(campaignId, id); return { ok: true };
   }
 }
 

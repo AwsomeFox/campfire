@@ -1,0 +1,52 @@
+import request from 'supertest';
+import { and, eq } from 'drizzle-orm';
+import { closeTestApp, createTestApp, type TestAppContext } from './test-app';
+import { DB, type DrizzleDb } from '../src/db/db.module';
+import { campaignLibraryEntityTaxonomy } from '../src/db/schema';
+
+describe('campaign library taxonomy (issue #742)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'library-dm' };
+  const player = { 'x-dev-role': 'player', 'x-dev-user': 'library-player' };
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const response = await request(ctx.app.getHttpServer()).post('/api/v1/campaigns').set(dm).send({ name: 'Taxonomy' });
+    expect(response.status).toBe(201);
+    campaignId = response.body.id;
+  });
+  afterAll(async () => closeTestApp(ctx));
+
+  it('persists aliases, color, description and safely re-roots/de-references deleted tags', async () => {
+    const server = ctx.app.getHttpServer();
+    const parent = await request(server).post(`/api/v1/campaigns/${campaignId}/library/tags`).set(dm).send({ name: 'People', aliases: ['NPCs'], color: '#123abc', description: 'Characters' });
+    expect(parent.status).toBe(201);
+    expect(parent.body).toMatchObject({ aliases: ['NPCs'], color: '#123abc', description: 'Characters', parentTagId: null });
+    const child = await request(server).post(`/api/v1/campaigns/${campaignId}/library/tags`).set(dm).send({ name: 'Villains', parentTagId: parent.body.id });
+    expect(child.status).toBe(201);
+    const cycle = await request(server).patch(`/api/v1/campaigns/${campaignId}/library/tags/${parent.body.id}`).set(dm).send({ parentTagId: child.body.id });
+    expect(cycle.status).toBe(400);
+    const db = ctx.app.get<DrizzleDb>(DB);
+    await db.insert(campaignLibraryEntityTaxonomy).values({ campaignId, entityType: 'npc', entityId: 999, tagId: parent.body.id, collectionId: null, createdAt: new Date().toISOString() });
+    expect((await request(server).delete(`/api/v1/campaigns/${campaignId}/library/tags/${parent.body.id}`).set(dm)).status).toBe(200);
+    const tags = await request(server).get(`/api/v1/campaigns/${campaignId}/library/tags`).set(dm);
+    expect(tags.body).toEqual([expect.objectContaining({ id: child.body.id, parentTagId: null })]);
+    expect(await db.select().from(campaignLibraryEntityTaxonomy).where(and(eq(campaignLibraryEntityTaxonomy.campaignId, campaignId), eq(campaignLibraryEntityTaxonomy.tagId, parent.body.id)))).toEqual([]);
+  });
+
+  it('enforces campaign scope and DM writes for collection lifecycle', async () => {
+    const server = ctx.app.getHttpServer();
+    expect((await request(server).post(`/api/v1/campaigns/${campaignId}/library/collections`).set(player).send({ name: 'Secret' })).status).toBe(403);
+    const parent = await request(server).post(`/api/v1/campaigns/${campaignId}/library/collections`).set(dm).send({ name: 'Act One' });
+    const child = await request(server).post(`/api/v1/campaigns/${campaignId}/library/collections`).set(dm).send({ name: 'Scene', parentCollectionId: parent.body.id });
+    const patched = await request(server).patch(`/api/v1/campaigns/${campaignId}/library/collections/${child.body.id}`).set(dm).send({ aliases: ['Intro'], color: '#abcdef', description: 'Opening scene' });
+    expect(patched.status).toBe(200);
+    expect(patched.body).toMatchObject({ aliases: ['Intro'], color: '#abcdef', description: 'Opening scene' });
+    expect((await request(server).delete(`/api/v1/campaigns/${campaignId}/library/collections/${parent.body.id}`).set(dm)).status).toBe(200);
+    const collections = await request(server).get(`/api/v1/campaigns/${campaignId}/library/collections`).set(dm);
+    expect(collections.body).toEqual([expect.objectContaining({ id: child.body.id, parentCollectionId: null })]);
+    const other = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Other taxonomy' });
+    expect((await request(server).patch(`/api/v1/campaigns/${other.body.id}/library/collections/${child.body.id}`).set(dm).send({ name: 'Wrong campaign' })).status).toBe(404);
+  });
+});
