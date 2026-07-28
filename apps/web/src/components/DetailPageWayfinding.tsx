@@ -51,7 +51,7 @@ export function DetailPageWayfinding({
         <Link
           to={to}
           state={returnState}
-          className="btn btn-ghost !min-h-0 !py-1.5 text-xs"
+          className="btn btn-ghost !min-h-[24px] !py-1.5 text-xs"
           style={{ width: 'fit-content' }}
         >
           {label}

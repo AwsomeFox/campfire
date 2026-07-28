@@ -753,14 +753,14 @@ function ScheduleItem({
         {happeningNow && (
           <div className="flex gap-2 flex-wrap">
             {isDm && (
-              <Link to={`/c/${campaignId}/encounters`} className="btn btn-ghost !min-h-0 !py-1 text-xs">
+              <Link to={`/c/${campaignId}/encounters`} className="btn btn-ghost !min-h-[24px] !py-1 text-xs">
                 Encounters
               </Link>
             )}
-            <Link to={`/c/${campaignId}/screen`} className="btn btn-ghost !min-h-0 !py-1 text-xs">
+            <Link to={`/c/${campaignId}/screen`} className="btn btn-ghost !min-h-[24px] !py-1 text-xs">
               Player display
             </Link>
-            <Link to={`/c/${campaignId}/notes`} className="btn btn-ghost !min-h-0 !py-1 text-xs">
+            <Link to={`/c/${campaignId}/notes`} className="btn btn-ghost !min-h-[24px] !py-1 text-xs">
               Session notes
             </Link>
           </div>

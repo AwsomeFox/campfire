@@ -137,8 +137,9 @@ export function NotesQuickRail({
           action={
             canMemberWrite ? (
               <Btn
+                density="compact"
                 type="button"
-                className="!min-h-0 !py-1.5 text-xs btn-primary"
+                className="text-xs btn-primary"
                 onClick={() => {
                   const input = document.getElementById('dashboard-quick-note-input');
                   input?.focus();
@@ -196,7 +197,7 @@ export function NotesQuickRail({
           aria-keyshortcuts={quickCaptureHint.ariaKeyshortcuts}
           title={`Quick note${quickCaptureHint.titleSuffix}`}
         />
-        <Btn type="submit" className="!min-h-0 !py-2 text-sm shrink-0" disabled={saving || !quickNote.trim()}>
+        <Btn density="compact" type="submit" className="text-sm shrink-0" disabled={saving || !quickNote.trim()}>
           {dest === 'inbox' ? 'Send' : 'Save'}
         </Btn>
       </form>

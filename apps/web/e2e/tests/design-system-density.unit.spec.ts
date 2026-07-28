@@ -54,6 +54,14 @@ const DRIFT_PATTERNS: ReadonlyArray<{ name: string; pattern: RegExp; why: string
       'floor directly in nocturne.css (issue #1693) — !min-h-0 zeroes that floor with ' +
       '!important and nothing in the ramp catches the regression',
   },
+  {
+    name: 'legacy .btn geometry override',
+    // Matches className/class strings that contain both `btn` and `!min-h-0`
+    // regardless of class token ordering, excluding `cf-btn` (issue #1695).
+    pattern: /\bclass(?:Name)?=["'`][^"'`\n]*(?=\bbtn\b)[^"'`\n]*!min-h-0|\bclass(?:Name)?=["'`][^"'`\n]*!min-h-0[^"'`\n]*(?=\bbtn\b)/,
+    why: 'use !min-h-[24px] (WCAG 2.2 SC 2.5.8 floor) instead of !min-h-0 on .btn — ' +
+      '.btn aliases to the ramp default and !min-h-0 zeroes that out entirely (issue #1695)',
+  },
 ];
 
 test.describe('Design-system density (#674)', () => {

@@ -5966,7 +5966,7 @@ function CombatantRow({
                 {onUseLegendary && (
                   <button
                     type="button"
-                    className="btn btn-ghost !min-h-0 !py-0.5 text-[11px]"
+                    className="btn btn-ghost !min-h-[24px] !py-0.5 text-[11px]"
                     disabled={busy || legendaryActions.used >= legendaryActions.max}
                     onClick={onUseLegendary}
                   >
@@ -5976,7 +5976,7 @@ function CombatantRow({
                 {onReleaseLegendary && (
                   <button
                     type="button"
-                    className="btn btn-ghost !min-h-0 !py-0.5 text-[11px]"
+                    className="btn btn-ghost !min-h-[24px] !py-0.5 text-[11px]"
                     disabled={busy}
                     onClick={onReleaseLegendary}
                   >
@@ -6659,7 +6659,7 @@ function CombatantRow({
                   <span style={{ display: 'inline-flex', gap: 2, marginLeft: 2 }}>
                     <button
                       type="button"
-                      className="btn btn-ghost !min-h-0 !py-0 !px-1 text-[10px]"
+                      className="btn btn-ghost !min-h-[24px] !py-0 !px-1 text-[10px]"
                       disabled={busy || (combatant.rpCurrent ?? 0) <= 0}
                       title="Decrease Resolve Points"
                       onClick={() => onPatchCombatant({ rpDelta: -1 })}
@@ -6668,7 +6668,7 @@ function CombatantRow({
                     </button>
                     <button
                       type="button"
-                      className="btn btn-ghost !min-h-0 !py-0 !px-1 text-[10px]"
+                      className="btn btn-ghost !min-h-[24px] !py-0 !px-1 text-[10px]"
                       disabled={busy || (combatant.rpCurrent ?? 0) >= combatant.rpMax}
                       title="Increase Resolve Points"
                       onClick={() => onPatchCombatant({ rpDelta: 1 })}
