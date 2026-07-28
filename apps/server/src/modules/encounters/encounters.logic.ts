@@ -1,8 +1,10 @@
 import {
   Dnd5eAdapter,
   LEGENDARY_ACTION_SLOT,
+  LEGENDARY_ACTIONS_PER_ROUND,
   LAIR_INITIATIVE_COUNT,
   MAX_PENDING_CONCENTRATION_CHECKS,
+  actionEconomyForAdapter,
   computeDnd5eEncounterDifficulty,
   crToXp,
   encounterMultiplier,
@@ -27,11 +29,47 @@ import type {
   EncounterWarning,
   HpBand,
   PendingConcentrationCheck,
+  RuleSystemAdapter,
   TurnPrompt,
 } from '@campfire/schema';
 
 /** Re-export difficulty primitives so existing unit-test imports keep working. */
 export { parseCr, crToXp, xpThresholdsForLevel, encounterMultiplier };
+
+/**
+ * The maximum uses of one action-economy slot a combatant has this turn, or `null` when this
+ * is a `cost.slot` / turn-state key the adapter's own {@link actionEconomyForAdapter} model
+ * doesn't declare and isn't the legendary-action slot either (issue #1674, mirroring #1637's
+ * `actionEconomySlotMax` in `action-resolver.service.ts`).
+ *
+ * `null` is deliberately NOT "unbounded is fine" — callers that DO want to bound this slot must
+ * still refuse to invent a cap for an unrecognised key, matching this resolver's "refuse rather
+ * than guess" convention elsewhere (an unknown AC, an unknown hit-die size): a wrong invented
+ * limit could reject a legitimate homebrew slot key that predates this check.
+ *
+ * The legendary-action slot is the one key every adapter's economy model deliberately omits —
+ * it is a per-MONSTER capability (does THIS statblock have a Legendary Actions section?), not a
+ * per-system one (#618) — so the caller passes in whether the combatant's mapped statblock has
+ * one; this function does not do statblock lookups itself so it stays usable both inside and
+ * outside a DB transaction (`encounters.service.ts` computes this outside the transaction,
+ * `action-resolver.service.ts` inside it — different structural shape, same rule).
+ *
+ * This is the SINGLE shared rule for bounding any action-economy slot in the encounters module
+ * — both `updateCombatantTurnState`'s direct-patch path and the action-resolver's `apply_action`
+ * spend path consume it, so "how many actions/reactions/legendary actions does this combatant
+ * have" cannot drift between the two entry points.
+ */
+export function actionEconomySlotMax(
+  adapter: Pick<RuleSystemAdapter, 'actionEconomy'>,
+  slot: string,
+  hasLegendaryActions: boolean,
+): number | null {
+  if (slot === LEGENDARY_ACTION_SLOT) {
+    return hasLegendaryActions ? LEGENDARY_ACTIONS_PER_ROUND : 0;
+  }
+  const declared = actionEconomyForAdapter(adapter).slots.find((s) => s.key === slot);
+  return declared ? declared.max : null;
+}
 
 /** Display label for a combatant whose linked NPC is currently hidden from non-DMs (#374/#869). */
 export const UNKNOWN_COMBATANT_LABEL = 'Unknown combatant';
