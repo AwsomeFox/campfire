@@ -412,8 +412,14 @@
      let effective height fall however small the content/padding happened to
      be (the mechanism behind the #428/#1456/#1488 regressions). Mechanically
      enforced: design-system-density.unit.spec.ts parses this value and fails
-     the build below 24px. Do not lower it. */
+     the build below 24px. Do not lower it.
+     SC 2.5.8 is a 24×24 minimum, both axes — min-height alone only enforces
+     one (issue #1692 review, Codex): a glyph-only xs control with reduced
+     horizontal padding (e.g. RunSessionPage's Resolve Point −/+ buttons) can
+     clear the height floor while its width stays well under 24px. min-width
+     closes that gap the same way. */
   --cf-density-xs-control-min-height: 24px;
+  --cf-density-xs-control-min-width: 24px;
   --cf-density-compact-control-min-height: 36px;
   --cf-density-default-control-min-height: 44px;
   --cf-density-comfortable-control-min-height: 44px;
@@ -1364,6 +1370,7 @@ h1, h2, h3, h4, h5, h6 {
   font-size: var(--cf-density-xs-control-font-size);
   padding: var(--cf-density-xs-control-padding-y) var(--cf-density-xs-control-padding-x);
   min-height: var(--cf-density-xs-control-min-height);
+  min-width: var(--cf-density-xs-control-min-width);
 }
 .cf-btn.cf-density-compact {
   font-size: var(--cf-density-compact-control-font-size);
@@ -1385,6 +1392,7 @@ h1, h2, h3, h4, h5, h6 {
 .btn.cf-density-xs,
 .btn.btn-density-xs {
   min-height: var(--cf-density-xs-control-min-height);
+  min-width: var(--cf-density-xs-control-min-width);
   padding: var(--cf-density-xs-control-padding-y) var(--cf-density-xs-control-padding-x);
   font-size: var(--cf-density-xs-control-font-size);
 }

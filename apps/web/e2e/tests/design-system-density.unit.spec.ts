@@ -133,9 +133,9 @@ const DRIFT_PATTERNS: ReadonlyArray<{ name: string; pattern: RegExp; why: string
  * If you are here because #1722 closed and this comment still exists, that is
  * itself a bug: either the fix didn't actually remove the corresponding entry
  * below, or the issue closed without one. Allowlisted here ONLY for this one new
- * pattern, by name, not added to `HEIGHT_SHRINK_ALLOWED_FILES` (which exempts a
- * file from ALL of the className-based patterns above; none of these files carry
- * those).
+ * pattern, by name, not added to `HEIGHT_SHRINK_ALLOWED` (which is itself keyed
+ * by exact match, not by file, for the same reason — see its own comment; none
+ * of these files carry any of the className-based patterns above).
  */
 const INLINE_MIN_HEIGHT_ZERO_ALLOWED: ReadonlyMap<string, ReadonlySet<string>> = new Map([
   [
@@ -177,14 +177,29 @@ const RETIRED_HEIGHT_SHRINK_RE =
  *     with its own geometry, not built on cf-btn/cf-card — pulling it onto
  *     the density ramp is out of scope here; flagged to the coordinator as a
  *     followup candidate instead of forced through.
- * Any NEW match outside these files must add its own `xs`/`compact` density
- * (or a documented reason here) — this allowlist must not grow silently.
+ *
+ * Keyed by the EXACT matched string, not the file (issue #1692 review, Codex):
+ * a whole-file skip would also hide any NEW, unreviewed violation introduced
+ * anywhere else in one of these four files — as it currently does for
+ * OidcCard.tsx and StorageCard.tsx, which carry other shared buttons besides
+ * their one reviewed decorative exception. Any match in one of these files
+ * that ISN'T exactly one of the strings below still fails the test.
+ * Any NEW allowance must add its own exact string here, with a reason (or the
+ * site should get a real `xs`/`compact` density instead) — this allowlist
+ * must not grow silently.
  */
-const HEIGHT_SHRINK_ALLOWED_FILES = new Set(
-  ['features/admin/OidcCard.tsx', 'features/admin/StorageCard.tsx', 'features/characters/CharacterSheetNav.tsx', 'features/sessions/RsvpChooser.tsx'].map(
-    (p) => resolve(ROOT, p),
-  ),
-);
+const HEIGHT_SHRINK_ALLOWED: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  [resolve(ROOT, 'features/admin/OidcCard.tsx'), new Set(['className="cf-chip cf-chip-private !py-0 !text-[9px]"'])],
+  [resolve(ROOT, 'features/admin/StorageCard.tsx'), new Set(['className="cf-chip cf-chip-failed ml-2 !py-0 !text-[9px]"'])],
+  [
+    resolve(ROOT, 'features/characters/CharacterSheetNav.tsx'),
+    new Set(['className="tag tag-accent text-[9px] !py-0 !px-1.5"']),
+  ],
+  [
+    resolve(ROOT, 'features/sessions/RsvpChooser.tsx'),
+    new Set(['className="seg-opt cf-schedule-rsvp-opt !py-1 !px-2.5 text-xs"']),
+  ],
+]);
 
 test.describe('Design-system density (#674, #1683)', () => {
   test('density tokens and modifiers are defined in index.css', () => {
@@ -232,6 +247,36 @@ test.describe('Design-system density (#674, #1683)', () => {
     expect(match, '--cf-density-xs-control-min-height must be a literal px value').not.toBeNull();
     const px = Number(match![1]);
     expect(px, 'xs control-min-height must be >= 24px (WCAG 2.2 SC 2.5.8)').toBeGreaterThanOrEqual(24);
+  });
+
+  /**
+   * WCAG 2.2 SC 2.5.8 is a 24×24 minimum, both axes (issue #1692 review, Codex) —
+   * the test above only pinned height. A glyph-only xs control with reduced
+   * horizontal padding (e.g. RunSessionPage's Resolve Point −/+ buttons,
+   * `!px-1 text-[10px] cf-density-xs`) can clear the height floor while its
+   * width stays well under 24px. Same treatment as the height token: parse the
+   * actual declared value, and confirm both `.cf-btn.cf-density-xs` and
+   * `.btn.cf-density-xs` actually apply it (a token existing in :root proves
+   * nothing about whether any rule consumes it).
+   */
+  test('the xs control-min-width floor is at least 24px and is applied by both .cf-btn and .btn', () => {
+    const css = READ(INDEX_CSS);
+    const match = css.match(/--cf-density-xs-control-min-width:\s*([0-9.]+)px\s*;/);
+    expect(match, '--cf-density-xs-control-min-width must be a literal px value').not.toBeNull();
+    const px = Number(match![1]);
+    expect(px, 'xs control-min-width must be >= 24px (WCAG 2.2 SC 2.5.8)').toBeGreaterThanOrEqual(24);
+
+    const cfBtnRule = /\.cf-btn\.cf-density-xs\s*\{[^}]*\}/.exec(css);
+    expect(cfBtnRule, '.cf-btn.cf-density-xs rule must exist').not.toBeNull();
+    expect(cfBtnRule![0], '.cf-btn.cf-density-xs must set min-width').toMatch(
+      /min-width:\s*var\(--cf-density-xs-control-min-width\)/,
+    );
+
+    const btnRule = /\.btn\.cf-density-xs,\s*\n\s*\.btn\.btn-density-xs\s*\{[^}]*\}/.exec(css);
+    expect(btnRule, '.btn.cf-density-xs rule must exist').not.toBeNull();
+    expect(btnRule![0], '.btn.cf-density-xs must set min-width').toMatch(
+      /min-width:\s*var\(--cf-density-xs-control-min-width\)/,
+    );
   });
 
   test('seg-opt (outside the ramp) pins its own 24px WCAG 2.2 SC 2.5.8 floor (#1693)', () => {
@@ -298,18 +343,22 @@ test.describe('Design-system density (#674, #1683)', () => {
    * above — this fires on the retired idiom ANYWHERE in a className-ish
    * string, on any element, not only ones already carrying a cf-btn marker
    * class (that narrower scope is exactly what let 305 non-cf-btn-adjacent
-   * sites accumulate before this issue). `HEIGHT_SHRINK_ALLOWED_FILES` is the
-   * complete, reviewed exception list — see its own comment.
+   * sites accumulate before this issue). `HEIGHT_SHRINK_ALLOWED` is the
+   * complete, reviewed exception list, keyed by exact match — see its own
+   * comment for why a whole-file skip was wrong here.
    */
   test('no !important height-shrink override outside the density API', () => {
     const offenders: string[] = [];
     for (const file of SOURCES) {
       if (file.endsWith('design-system-density.unit.spec.ts')) continue;
-      if (HEIGHT_SHRINK_ALLOWED_FILES.has(file)) continue;
+      const allowedForFile = HEIGHT_SHRINK_ALLOWED.get(file);
       const text = READ(file);
       const matches = text.match(RETIRED_HEIGHT_SHRINK_RE);
       if (matches) {
-        for (const m of matches) offenders.push(`${file.replace(ROOT + '/', '')}: ${m}`);
+        for (const m of matches) {
+          if (allowedForFile?.has(m)) continue;
+          offenders.push(`${file.replace(ROOT + '/', '')}: ${m}`);
+        }
       }
     }
     expect(

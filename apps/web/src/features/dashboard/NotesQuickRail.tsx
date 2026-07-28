@@ -196,7 +196,9 @@ export function NotesQuickRail({
           aria-keyshortcuts={quickCaptureHint.ariaKeyshortcuts}
           title={`Quick note${quickCaptureHint.titleSuffix}`}
         />
-        <Btn density="xs" type="submit" className="text-sm shrink-0" disabled={saving || !quickNote.trim()}>
+        {/* compact, not xs (issue #1692 review — Codex): the quick-note form's only
+            submit control, not a dense inline row action. */}
+        <Btn density="compact" type="submit" className="text-sm shrink-0" disabled={saving || !quickNote.trim()}>
           {dest === 'inbox' ? 'Send' : 'Save'}
         </Btn>
       </form>

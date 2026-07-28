@@ -1210,7 +1210,13 @@ function XpCard({
                 if (e.key === 'Enter') void addXp();
               }}
               placeholder="XP…"
-              className="cf-input !w-24 text-sm cf-density-xs"
+              // No cf-density-xs (issue #1692 review — Devin): same shape as the
+              // adjacent "+ Award XP" button's dropped density prop, and just as much
+              // a no-op for height (the inline minHeight: 44 / padding below already
+              // govern) — but NOT a no-op for font-size, which cf-density-xs was
+              // silently shrinking below the text-sm this className already asks for,
+              // making the XP field's text visibly smaller than the rest of its row.
+              className="cf-input !w-24 text-sm"
               style={{ minHeight: 44, padding: '4px 10px' }}
             />
             <p id={xpHelpId} className="text-[11px] text-secondary m-0 max-w-[16rem]">

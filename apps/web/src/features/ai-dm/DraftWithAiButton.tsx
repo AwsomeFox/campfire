@@ -18,6 +18,7 @@ import { Link } from 'react-router-dom';
 import type { CoDmDraftResult, CoDmDraftTarget } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { Btn, TextArea } from '../../components/ui';
+import type { UiDensity } from '../../components/density';
 import { isKnownAiGate } from './aiGate';
 import { AiGateExplainer } from './AiSetupChecklist';
 import { GameIcon } from '../../components/GameIcon';
@@ -84,6 +85,13 @@ export function DraftWithAiButton({
   target,
   label = 'Draft with AI',
   className = 'text-xs',
+  // Issue #1692 review (Codex): this trigger is shared across both dense per-row
+  // contexts (an arc card's own "Draft beat with AI") AND header/page-level triggers
+  // that are sometimes someone's SOLE way to reach the function (StorylinesPage's
+  // empty-state header button) — the UiDensity contract explicitly forbids xs for
+  // the latter. Default to compact (safe everywhere); callers in a genuinely dense
+  // row opt into xs explicitly instead of it being baked in for everyone.
+  density = 'compact',
   arcId,
   disabled = false,
   disabledTitle,
@@ -96,6 +104,7 @@ export function DraftWithAiButton({
   target: CoDmDraftTarget;
   label?: string;
   className?: string;
+  density?: UiDensity;
   /** When target is `beat`, pin drafted beat(s) to this arc (#1307). */
   arcId?: number;
   disabled?: boolean;
@@ -122,7 +131,7 @@ export function DraftWithAiButton({
       {showTrigger && (
         <Btn
           ghost
-          density="xs"
+          density={density}
           className={`${className}${disabled ? ' opacity-50 cursor-not-allowed' : ''}`}
           onClick={() => {
             if (disabled) return;
@@ -328,11 +337,13 @@ function DraftWithAiModal({
               </div>
             )}
 
+            {/* compact, not xs (issue #1692 review — Codex): this dialog's Cancel/
+                Draft pair is its only submission control, not a dense inline row. */}
             <div className="flex items-center justify-end gap-2">
-              <Btn density="xs" ghost className="text-xs" onClick={onClose} disabled={busy}>
+              <Btn density="compact" ghost className="text-xs" onClick={onClose} disabled={busy}>
                 Cancel
               </Btn>
-              <Btn density="xs" className="text-xs" onClick={() => void submit()} disabled={busy || !prompt.trim()}>
+              <Btn density="compact" className="text-xs" onClick={() => void submit()} disabled={busy || !prompt.trim()}>
                 {busy ? 'Drafting…' : `Draft ${multi && count > 1 ? `${count} ${noun}s` : noun}`}
               </Btn>
             </div>

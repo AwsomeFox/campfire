@@ -1874,9 +1874,15 @@ function AddRecapForm({
               </>
             )}
           </p>
+          {/* compact, not xs (issue #1692 review — Codex + repo owner): "Publish recap"
+              is this form's primary submit action, not a dense inline row/toolbar
+              control — the UiDensity contract this PR adds explicitly reserves xs
+              for the latter. compact also better matches the original !py-2 sizing
+              here, which was already more generous than the !py-1/!py-1.5 sites
+              that became xs elsewhere in this codemod. */}
           <div className="flex flex-wrap gap-2 sm:shrink-0">
             {onCancel && (
-              <Btn density="xs"
+              <Btn density="compact"
                 ghost
                 type="button"
                 className="text-sm"
@@ -1888,7 +1894,7 @@ function AddRecapForm({
                 Cancel
               </Btn>
             )}
-            <Btn density="xs" type="submit" className="text-sm" disabled={saving}>
+            <Btn density="compact" type="submit" className="text-sm" disabled={saving}>
               {saving ? 'Publishing…' : 'Publish recap'}
             </Btn>
           </div>
