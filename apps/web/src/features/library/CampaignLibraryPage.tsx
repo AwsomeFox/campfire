@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { api, API, ApiError } from '../../lib/api';
 import { Btn, Card, ErrorNote, TextInput } from '../../components/ui';
@@ -19,8 +19,24 @@ export default function CampaignLibraryPage() {
   const [search, setSearch] = useState<Search | null>(null); const [tags, setTags] = useState<Taxonomy[]>([]); const [collections, setCollections] = useState<Taxonomy[]>([]); const [templates, setTemplates] = useState<Template[]>([]);
   const [filters, setFilters] = useState({ q: '', type: '', tagId: '', collectionId: '', visibility: '', status: '', owner: '' }); const [selected, setSelected] = useState(new Set<string>()); const [operationId, setOperationId] = useState<number | null>(null); const [error, setError] = useState<string | null>(null); const [notice, setNotice] = useState('');
   const [taxKind, setTaxKind] = useState<'tags' | 'collections'>('tags'); const [tax, setTax] = useState({ name: '', aliases: '', color: '#64748b', description: '', parent: '' }); const [editingId, setEditingId] = useState<number | null>(null); const [statusValue, setStatusValue] = useState(''); const [characterId, setCharacterId] = useState(''); const [templateName, setTemplateName] = useState('');
-  const load = useCallback(async () => { try { const query = libraryQuery(filters); const [result, nextTags, nextCollections, nextTemplates] = await Promise.all([api.get<Search>(`${API}/campaigns/${campaignId}/library/search?${query}`), api.get<Taxonomy[]>(`${API}/campaigns/${campaignId}/library/tags`), api.get<Taxonomy[]>(`${API}/campaigns/${campaignId}/library/collections`), isDm ? api.get<Template[]>(`${API}/campaigns/${campaignId}/library/templates`) : Promise.resolve([])]); setSearch(result); setTags(nextTags); setCollections(nextCollections); setTemplates(nextTemplates); } catch (e) { setError(e instanceof ApiError ? e.message : 'Could not load library'); } }, [campaignId, filters, isDm]);
-  useEffect(() => { void load(); }, [load]);
+  // A request-sequence guard so a slower, earlier response (e.g. from a fast
+  // keystroke burst) can never overwrite the result of a request issued later.
+  const requestSeq = useRef(0);
+  const load = useCallback(async () => {
+    const seq = ++requestSeq.current;
+    try {
+      const query = libraryQuery(filters);
+      const [result, nextTags, nextCollections, nextTemplates] = await Promise.all([api.get<Search>(`${API}/campaigns/${campaignId}/library/search?${query}`), api.get<Taxonomy[]>(`${API}/campaigns/${campaignId}/library/tags`), api.get<Taxonomy[]>(`${API}/campaigns/${campaignId}/library/collections`), isDm ? api.get<Template[]>(`${API}/campaigns/${campaignId}/library/templates`) : Promise.resolve([])]);
+      if (seq !== requestSeq.current) return;
+      setSearch(result); setTags(nextTags); setCollections(nextCollections); setTemplates(nextTemplates);
+    } catch (e) {
+      if (seq !== requestSeq.current) return;
+      setError(e instanceof ApiError ? e.message : 'Could not load library');
+    }
+  }, [campaignId, filters, isDm]);
+  // Debounce filter-driven reloads (every keystroke otherwise re-triggers a
+  // full-campaign search); the explicit Filter button still calls load() directly.
+  useEffect(() => { const timer = setTimeout(() => { void load(); }, 300); return () => clearTimeout(timer); }, [load]);
   const targets = useMemo(() => libraryTargets(selected), [selected]);
   const setFilter = (key: keyof typeof filters, value: string) => setFilters((old) => ({ ...old, [key]: value }));
   const post = async (path: string, body?: unknown) => { try { const result = await api.post<{ operationId?: number }>(`${API}/campaigns/${campaignId}/library/${path}`, body); if (result.operationId) { setOperationId(result.operationId); setNotice(`Applied operation ${result.operationId}.`); } else setNotice('Saved.'); await load(); return result; } catch (e) { setError(e instanceof ApiError ? e.message : 'Update failed'); return null; } };
