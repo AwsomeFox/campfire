@@ -2,12 +2,12 @@
   "tracked": [
     {
       "pr": 1627,
-      "status": "babysitting",
+      "status": "merged",
       "url": "https://github.com/AwsomeFox/campfire/pull/1627",
       "headBranch": "fix/issue-1587",
       "baseBranch": "main",
-      "updatedAt": "2026-07-28T10:02:00Z",
-      "notes": "Tracking started. MERGEABLE (no conflicts with main). Copilot review threads already resolved after address-comments commit 4ff72b2f (Logger.error stack string + sqlite handle cleanup in afterEach). CI in progress after synchronize; mergeStateStatus BLOCKED pending required checks."
+      "updatedAt": "2026-07-28T10:34:40Z",
+      "notes": "Merged via squash f84338c0. Review threads were already resolved (Logger.error stack + sqlite handle cleanup in 4ff72b2f). Required CI green (lint/coverage/build/build-test/e2e). No conflicts with main."
     }
   ]
 }
