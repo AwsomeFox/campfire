@@ -88,6 +88,16 @@ describe('rest mechanics (#1041, e2e)', () => {
     await expect(characters.applyPartyRecovery(campaignId, { previewToken: preview.previewToken, idempotencyKey: 'different-apply-key', acknowledgeRunningCombatants: true }, dmUser, 'dm')).rejects.toMatchObject({ status: 409 });
   });
 
+  it('rejects a stale preview without writing any selected participant', async () => {
+    const a = await batteredCharacter('Stale A');
+    const b = await batteredCharacter('Stale B');
+    const preview = await characters.previewPartyRecovery(campaignId, { kind: 'long', characterIds: [a, b] }, dmUser, 'dm');
+    await db.update(charactersTable).set({ hpCurrent: 7, updatedAt: new Date().toISOString() }).where(eq(charactersTable.id, b));
+    await expect(characters.applyPartyRecovery(campaignId, { previewToken: preview.previewToken, idempotencyKey: 'stale-party-apply', acknowledgeRunningCombatants: true }, dmUser, 'dm')).rejects.toMatchObject({ status: 409 });
+    const [aAfter] = await db.select().from(charactersTable).where(eq(charactersTable.id, a));
+    expect(aAfter.hpCurrent).toBe(5);
+  });
+
   /** Mark a character dead without going through a route that may not accept the field. */
   async function kill(id: number): Promise<void> {
     await db.update(charactersTable).set({ deathState: 'dead' }).where(eq(charactersTable.id, id));
