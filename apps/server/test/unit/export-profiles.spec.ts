@@ -219,7 +219,7 @@ describe('allowlist projection (#586)', () => {
 
   it('collects the organized-play running DM (via membership) and sweeps it out of free text (#588)', () => {
     // #1548: `assignedDmUserId` itself no longer reaches `collectPrivateIdentifiers` at all —
-    // ExportService now builds `raw.scheduledSessions` via `ScheduledSessionExport.array().parse(...)`,
+    // ExportService now builds `raw.scheduledSessions` via `toScheduledSessionExport(...)`,
     // which omits every organized-play decoration field (including assignedDmUserId) BEFORE `raw`
     // is constructed, so scanning for it here would be a no-op on real data (see the comment on
     // the removed `add(s.assignedDmUserId)` call in export-redaction.ts). That's fine because the

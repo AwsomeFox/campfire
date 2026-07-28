@@ -1330,7 +1330,12 @@ export type ScheduledSession = z.infer<typeof ScheduledSession>;
  * adopt a night into someone else's series, or a `roomId` that skipped its
  * double-booking check.
  */
-const ORGANIZED_PLAY_OMIT = {
+/**
+ * Organized-play decoration keys that campaign export/import deliberately does
+ * not carry (issue #1548). Shared by {@link ScheduledSessionCreate}'s omit list
+ * and {@link toScheduledSessionExport}'s strip list so the two cannot drift.
+ */
+export const ORGANIZED_PLAY_OMIT = {
   seriesId: true,
   occurrenceIndex: true,
   venueId: true,
@@ -1475,6 +1480,26 @@ export type ScheduledSessionWithRsvps = z.infer<typeof ScheduledSessionWithRsvps
  */
 export const ScheduledSessionExport = ScheduledSessionWithRsvps.omit(ORGANIZED_PLAY_OMIT);
 export type ScheduledSessionExport = z.infer<typeof ScheduledSessionExport>;
+
+/**
+ * Drop organized-play decoration from a scheduled-session row for campaign export.
+ *
+ * Deliberately does **not** re-validate through {@link ScheduledSessionExport}.parse:
+ * `importCampaign` writes schedule fields through a closed insert literal into SQLite
+ * without enforcing Zod bounds (e.g. title length, RSVP status enum), so a previously
+ * exportable imported campaign can hold out-of-schema values. Re-parsing here would
+ * turn every JSON / mdzip / export-preview path into a 500 for those campaigns.
+ * Export's job is to project trusted stored rows; validation belongs at write boundaries.
+ */
+export function toScheduledSessionExport(
+  row: ScheduledSessionWithRsvps,
+): ScheduledSessionExport {
+  const out: Record<string, unknown> = { ...row };
+  for (const key of Object.keys(ORGANIZED_PLAY_OMIT) as Array<keyof typeof ORGANIZED_PLAY_OMIT>) {
+    delete out[key];
+  }
+  return out as ScheduledSessionExport;
+}
 
 /**
  * Paginated past-schedule list (issue #612). Most-recent ended nights first.

@@ -8,7 +8,7 @@ import path from 'node:path';
 import { Transform, type Writable } from 'node:stream';
 import { finished, pipeline } from 'node:stream/promises';
 import { eq } from 'drizzle-orm';
-import { ScheduledSessionExport } from '@campfire/schema';
+import { toScheduledSessionExport } from '@campfire/schema';
 import type { EncounterEvent, EncounterWithCombatants } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { aiDmSeats, aiScribeConfigs, aiScribeJobs } from '../../db/schema';
@@ -407,9 +407,11 @@ export class ExportService {
       // ruling on #1548, campaign export/import stays scoped to the campaign, not
       // install-level scheduling/venue/room resources, so that decoration is
       // dropped HERE rather than carried and silently discarded on import.
-      // `ScheduledSessionExport` strips it via `.omit(ORGANIZED_PLAY_OMIT)` — the
-      // exact field set import's create literal already never reads.
-      scheduledSessions: ScheduledSessionExport.array().parse(scheduledSessionList),
+      // `toScheduledSessionExport` strips via {@link ORGANIZED_PLAY_OMIT} — the
+      // exact field set import's create literal already never reads — without
+      // re-parsing the row through Zod (imported campaigns can hold out-of-schema
+      // values that SQLite accepted; export must not 500 on those).
+      scheduledSessions: scheduledSessionList.map(toScheduledSessionExport),
       sessionAttendance: sessionAttendanceList,
       diceRolls: diceRollList,
       // Issue #1078: AI seat + scribe config (DM-authored steering, NOT runtime counters or provider keys).
