@@ -1,10 +1,11 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, count, desc, eq, isNotNull, isNull, lt, sql } from 'drizzle-orm';
+import { and, count, desc, eq, inArray, isNotNull, isNull, lt, sql } from 'drizzle-orm';
 import type { z } from 'zod';
-import { InventoryItemCreate, InventoryItemUpdate, TreasuryPatch } from '@campfire/schema';
-import type { InventoryItem, Treasury, Role } from '@campfire/schema';
+import { CompendiumRef, CompendiumSnapshot, InventoryFromCompendium, InventoryItem, InventoryItemCreate, InventoryItemUpdate, TreasuryPatch } from '@campfire/schema';
+import type { Treasury, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { inventoryItems, inventoryQtyIdempotency, partyTreasury, characters } from '../../db/schema';
+import { inventoryItems, inventoryQtyIdempotency, partyTreasury, characters, ruleEntries, rulePacks } from '../../db/schema';
+import { buildCompendiumRef, buildCompendiumSnapshot, compendiumRefKey, computeRuleEntryContentHash } from '../campaigns/compendium-import';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { AuditService } from '../audit/audit.service';
@@ -14,6 +15,7 @@ import type { RequestUser } from '../../common/user.types';
 
 type InventoryItemCreateInput = z.infer<typeof InventoryItemCreate>;
 type InventoryItemUpdateInput = z.infer<typeof InventoryItemUpdate>;
+type InventoryFromCompendiumInput = z.infer<typeof InventoryFromCompendium>;
 type TreasuryPatchInput = z.infer<typeof TreasuryPatch>;
 
 type CoinKey = 'cp' | 'sp' | 'ep' | 'gp' | 'pp';
@@ -46,7 +48,20 @@ function qtyFingerprint(input: InventoryItemUpdateInput): string {
   return `${qtyPart}|${restPart}`;
 }
 
+function sanitizeCompendiumSnapshot(value: unknown): CompendiumSnapshot | null {
+  const parsed = CompendiumSnapshot.safeParse(value);
+  if (!parsed.success) return null;
+  // Keep body/license/source; blank only a non-http(s) external URL.
+  if (parsed.data.sourceUrl && !/^https?:\/\//i.test(parsed.data.sourceUrl)) {
+    return { ...parsed.data, sourceUrl: '' };
+  }
+  return parsed.data;
+}
+
 function toDomain(row: typeof inventoryItems.$inferSelect): InventoryItem {
+  const parsedRef = CompendiumRef.safeParse(row.compendiumRef ? safeJson(row.compendiumRef) : null);
+  const ref = parsedRef.success ? parsedRef.data : null;
+  const snapshot = row.compendiumSnapshot ? sanitizeCompendiumSnapshot(safeJson(row.compendiumSnapshot)) : null;
   return {
     id: row.id,
     campaignId: row.campaignId,
@@ -56,12 +71,18 @@ function toDomain(row: typeof inventoryItems.$inferSelect): InventoryItem {
     qty: row.qty,
     notes: row.notes,
     iconSlug: row.iconSlug,
+    ruleEntryId: row.ruleEntryId ?? null,
+    compendiumRef: ref,
+    compendiumSnapshot: snapshot,
+    compendiumState: InventoryItem.shape.compendiumState.safeParse(row.compendiumState).success ? InventoryItem.shape.compendiumState.parse(row.compendiumState) : null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     deletedAt: row.deletedAt ?? null,
     deletedBy: row.deletedBy ?? null,
   };
 }
+
+function safeJson(value: string): unknown { try { return JSON.parse(value); } catch { return null; } }
 
 function treasuryToDomain(row: typeof partyTreasury.$inferSelect): Treasury {
   return {
@@ -90,7 +111,7 @@ export class InventoryService {
       .select()
       .from(inventoryItems)
       .where(and(eq(inventoryItems.campaignId, campaignId), notDeleted(inventoryItems.deletedAt)));
-    return rows.map(toDomain);
+    return this.withCompendiumStates(rows);
   }
 
   /**
@@ -128,7 +149,36 @@ export class InventoryService {
   }
 
   async getOrThrow(id: number): Promise<InventoryItem> {
-    return toDomain(await this.getRowOrThrow(id));
+    return this.withCompendiumState(await this.getRowOrThrow(id));
+  }
+
+  /** Compute volatile linked_updated without mutating snapshots or player-owned fields. */
+  private async withCompendiumState(row: typeof inventoryItems.$inferSelect): Promise<InventoryItem> {
+    const [item] = await this.withCompendiumStates([row]);
+    return item;
+  }
+
+  /** Batch-resolve rule entries so list endpoints avoid N+1 SELECTs. */
+  private async withCompendiumStates(rows: Array<typeof inventoryItems.$inferSelect>): Promise<InventoryItem[]> {
+    const items = rows.map(toDomain);
+    const linkedIds = [
+      ...new Set(
+        items
+          .filter((item) => item.compendiumRef && item.compendiumState === 'linked' && item.ruleEntryId != null)
+          .map((item) => item.ruleEntryId as number),
+      ),
+    ];
+    if (linkedIds.length === 0) return items;
+    const entries = await this.db.select().from(ruleEntries).where(inArray(ruleEntries.id, linkedIds));
+    const byId = new Map(entries.map((entry) => [entry.id, entry]));
+    for (const item of items) {
+      if (!item.compendiumRef || item.compendiumState !== 'linked' || item.ruleEntryId == null) continue;
+      const entry = byId.get(item.ruleEntryId);
+      if (!entry || computeRuleEntryContentHash(entry) !== item.compendiumRef.contentHash) {
+        item.compendiumState = 'linked_updated';
+      }
+    }
+    return items;
   }
 
   /**
@@ -206,6 +256,86 @@ export class InventoryService {
       campaignId,
     });
     return toDomain(row);
+  }
+
+  async acquireFromCompendium(campaignId: number, input: InventoryFromCompendiumInput, user: RequestUser, role: Role): Promise<InventoryItem> {
+    const ownerType = input.ownerType ?? 'party';
+    const characterId = input.characterId ?? null;
+    const character = await this.assertCanWriteOwner(ownerType, characterId, campaignId, user, role);
+    if (ownerType === 'character' && character == null) {
+      throw new BadRequestException(`characterId ${characterId} does not exist in this campaign`);
+    }
+    const [entry] = await this.db.select().from(ruleEntries).where(eq(ruleEntries.id, input.ruleEntryId)).limit(1);
+    if (!entry || entry.type !== 'item') throw new BadRequestException('ruleEntryId must identify an installed item entry');
+    const [pack] = await this.db.select().from(rulePacks).where(eq(rulePacks.id, entry.packId)).limit(1);
+    if (!pack) throw new NotFoundException('The rule entry pack is not installed');
+    const ref = buildCompendiumRef(entry, pack);
+    const snapshot = sanitizeCompendiumSnapshot(buildCompendiumSnapshot(entry));
+    if (!snapshot) throw new BadRequestException('ruleEntryId must identify a play-safe item entry');
+    const fingerprint = JSON.stringify({ campaignId, ruleEntryId: entry.id, ownerType, characterId, qty: input.qty, notes: input.notes, duplicateMode: input.duplicateMode });
+    let row!: typeof inventoryItems.$inferSelect; let replayed = false;
+    this.db.transaction((tx) => {
+      if (input.idempotencyKey) {
+        const [prior] = tx.select().from(inventoryQtyIdempotency).where(eq(inventoryQtyIdempotency.key, input.idempotencyKey)).limit(1).all();
+        if (prior) {
+          if (prior.userId !== user.id || prior.fingerprint !== fingerprint) throw new ConflictException({ code: 'IDEMPOTENCY_KEY_REUSE' });
+          row = JSON.parse(prior.responseJson) as typeof inventoryItems.$inferSelect;
+          replayed = true;
+          return;
+        }
+      }
+      const candidates = tx.select().from(inventoryItems).where(and(eq(inventoryItems.campaignId, campaignId), eq(inventoryItems.ownerType, ownerType), characterId == null ? isNull(inventoryItems.characterId) : eq(inventoryItems.characterId, characterId), isNull(inventoryItems.deletedAt))).all();
+      const existing = candidates.find((candidate) => {
+        const candidateRef = CompendiumRef.safeParse(candidate.compendiumRef ? safeJson(candidate.compendiumRef) : null);
+        return candidateRef.success && compendiumRefKey(candidateRef.data) === compendiumRefKey(ref);
+      });
+      if (existing && input.duplicateMode === 'confirm') throw new ConflictException({ code: 'INVENTORY_COMPENDIUM_DUPLICATE', existing: toDomain(existing) });
+      const ts = nowIso();
+      if (existing && input.duplicateMode === 'increment') {
+        [row] = tx.update(inventoryItems).set({ qty: sql`${inventoryItems.qty} + ${input.qty}`, notes: input.notes ? sql`CASE WHEN ${inventoryItems.notes} = '' THEN ${input.notes} ELSE ${inventoryItems.notes} END` : undefined, updatedAt: ts }).where(eq(inventoryItems.id, existing.id)).returning().all();
+      } else {
+        [row] = tx.insert(inventoryItems).values({ campaignId, ownerType, characterId, name: entry.name, qty: input.qty, notes: input.notes, iconSlug: entry.iconSlug ?? '', ruleEntryId: entry.id, compendiumRef: JSON.stringify(ref), compendiumSnapshot: JSON.stringify(snapshot), compendiumState: 'linked', createdAt: ts, updatedAt: ts }).returning().all();
+      }
+      if (input.idempotencyKey) tx.insert(inventoryQtyIdempotency).values({ key: input.idempotencyKey, itemId: row.id, userId: user.id, fingerprint, responseJson: JSON.stringify(row), createdAt: ts }).run();
+    });
+    if (!replayed) await this.audit.log({ actor: auditActor(user), actorRole: role, action: 'item.acquire_compendium', entityType: 'inventory_item', entityId: row.id, campaignId });
+    return this.withCompendiumState(row);
+  }
+
+  async refreshCompendium(id: number, user: RequestUser, role: Role): Promise<InventoryItem> {
+    const existing = await this.getRowOrThrow(id); await this.assertCanWriteOwner(existing.ownerType as 'party' | 'character', existing.characterId, existing.campaignId, user, role);
+    if (!existing.ruleEntryId) throw new BadRequestException('This item is detached from the compendium');
+    const [entry] = await this.db.select().from(ruleEntries).where(eq(ruleEntries.id, existing.ruleEntryId)).limit(1);
+    if (!entry || entry.type !== 'item') throw new NotFoundException('The linked source item is unavailable');
+    const [pack] = await this.db.select().from(rulePacks).where(eq(rulePacks.id, entry.packId)).limit(1); if (!pack) throw new NotFoundException('The linked source pack is unavailable');
+    const snapshot = sanitizeCompendiumSnapshot(buildCompendiumSnapshot(entry));
+    if (!snapshot) throw new BadRequestException('The linked source item is not play-safe');
+    const [row] = await this.db.update(inventoryItems).set({ compendiumRef: JSON.stringify(buildCompendiumRef(entry, pack)), compendiumSnapshot: JSON.stringify(snapshot), compendiumState: 'linked', updatedAt: nowIso() }).where(eq(inventoryItems.id, id)).returning();
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'item.refresh_compendium',
+      entityType: 'inventory_item',
+      entityId: id,
+      campaignId: existing.campaignId,
+    });
+    return this.withCompendiumState(row);
+  }
+
+  async setCompendiumState(id: number, state: 'overridden' | 'detached', user: RequestUser, role: Role): Promise<InventoryItem> {
+    const existing = await this.getRowOrThrow(id); await this.assertCanWriteOwner(existing.ownerType as 'party' | 'character', existing.characterId, existing.campaignId, user, role);
+    if (!existing.compendiumSnapshot) throw new BadRequestException('This item has no compendium snapshot');
+    const [row] = await this.db.update(inventoryItems).set({ compendiumState: state, ruleEntryId: state === 'detached' ? null : existing.ruleEntryId, updatedAt: nowIso() }).where(eq(inventoryItems.id, id)).returning();
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'item.compendium_state',
+      entityType: 'inventory_item',
+      entityId: id,
+      campaignId: existing.campaignId,
+      detail: state,
+    });
+    return this.withCompendiumState(row);
   }
 
   async update(id: number, input: InventoryItemUpdateInput, user: RequestUser, role: Role): Promise<InventoryItem> {

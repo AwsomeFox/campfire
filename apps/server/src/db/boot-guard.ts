@@ -83,7 +83,8 @@ export function sentinelFilePath(dataDir: string): string {
 }
 
 /** Read and parse the sentinel. Returns `present:false` when the file is absent and `present:true, sentinel:undefined` when it exists but is corrupt. */
-function readSentinel(sentinelFile: string): { present: boolean; sentinel: InstallSentinel | undefined } {
+/** Safe, read-only sentinel parser shared by boot and diagnostics. */
+export function readInstallSentinel(sentinelFile: string): { present: boolean; sentinel: InstallSentinel | undefined } {
   let raw: string;
   try {
     raw = fs.readFileSync(sentinelFile, 'utf8');
@@ -160,7 +161,7 @@ export type BootGuardOutcome =
 export function assertDataMount(dataDir: string, dbFile: string): BootGuardOutcome {
   const sentinelFile = sentinelFilePath(dataDir);
   const dbExists = fs.existsSync(dbFile);
-  const { present: sentinelFilePresent, sentinel } = readSentinel(sentinelFile);
+  const { present: sentinelFilePresent, sentinel } = readInstallSentinel(sentinelFile);
   const sentinelExists = sentinel !== undefined;
   const allowFreshDb = process.env[ALLOW_FRESH_DB_ENV] === '1';
 

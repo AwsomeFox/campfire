@@ -1,6 +1,7 @@
 import { Inject, Injectable, Logger, NotFoundException, type OnApplicationBootstrap } from '@nestjs/common';
 import { and, count, desc, eq, exists, gte, inArray, isNotNull, isNull, lt, lte, notInArray, or, sql, type SQL } from 'drizzle-orm';
 import {
+  MEMBERSHIP_NOTIFICATION_TYPES,
   NOTIFICATION_CATEGORIES,
   QuietHours,
   defaultNotificationMode,
@@ -753,8 +754,24 @@ export class NotificationsService implements OnApplicationBootstrap {
   }
 
   async unreadCount(user: RequestUser): Promise<number> {
+    return (await this.unreadSummary(user)).count;
+  }
+
+  /**
+   * Issue #1590 — the bell-badge poll's payload, extended with a discriminator the account-wide
+   * `/me` refresh needs. `count` alone cannot tell "a recap posted" from "your role changed and
+   * every cached membership in this tab is now wrong": both just increment a number. This adds
+   * `membershipChanged` — true when at least one UNREAD row is one of
+   * {@link MEMBERSHIP_NOTIFICATION_TYPES} — computed in the SAME query and over the SAME
+   * user-scoped row set `count` already reads, so it discloses nothing new: this endpoint has
+   * never returned anyone's notifications but the caller's own.
+   *
+   * `unreadCount` (above) stays a bare number for its one other caller, the `get_unread_notification_count`
+   * MCP tool — an AI agent has no `/me` cache to invalidate, so the flag would be dead weight there.
+   */
+  async unreadSummary(user: RequestUser): Promise<{ count: number; membershipChanged: boolean }> {
     const userId = numericUserId(user.id);
-    if (userId === null) return 0;
+    if (userId === null) return { count: 0, membershipChanged: false };
     const blocked = await blockedTargetsOf(this.db, user.id, null);
     const conditions: SQL[] = [
       eq(notifications.userId, userId),
@@ -763,12 +780,19 @@ export class NotificationsService implements OnApplicationBootstrap {
       NotificationsService.quarantinedCommentFilter(),
     ];
     if (blocked.size > 0) conditions.push(NotificationsService.blockedActorFilter([...blocked]));
+    const membershipTypeMatch = sql.join(
+      MEMBERSHIP_NOTIFICATION_TYPES.map((type) => sql`${notifications.type} = ${type}`),
+      sql` OR `,
+    );
     const [row] = await this.db
-      .select({ value: count() })
+      .select({
+        value: count(),
+        membershipSignal: sql<number>`max(case when ${membershipTypeMatch} then 1 else 0 end)`,
+      })
       .from(notifications)
       .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
       .where(and(...conditions));
-    return row?.value ?? 0;
+    return { count: row?.value ?? 0, membershipChanged: (row?.membershipSignal ?? 0) === 1 };
   }
 
   /** Recipient-only; someone else's notification 404s (not 403) so ids don't leak. */

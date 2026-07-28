@@ -1,10 +1,10 @@
-import { Body, Controller, Delete, Get, HttpCode, Param, ParseIntPipe, Patch, Post } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, HttpCode, Param, ParseIntPipe, Patch, Post } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { InventoryService } from './inventory.service';
-import { InventoryItemCreateDto, InventoryItemUpdateDto, TreasuryPatchDto } from './inventory.dto';
+import { InventoryFromCompendiumDto, InventoryItemCreateDto, InventoryItemUpdateDto, TreasuryPatchDto } from './inventory.dto';
 
 @ApiTags('inventory')
 @Controller('campaigns/:campaignId/inventory')
@@ -41,6 +41,13 @@ export class CampaignInventoryController {
   ) {
     const role = await this.access.requireRole(user, campaignId, 'player');
     return this.inventory.create(campaignId, body, user, role);
+  }
+
+  @Post('from-compendium')
+  @ApiOperation({ summary: 'Acquire an installed compendium item', description: 'player role required. Captures a play-safe provenance snapshot; duplicate confirmation is required unless duplicateMode is increment or separate.' })
+  async fromCompendium(@Param('campaignId', ParseIntPipe) campaignId: number, @Body() body: InventoryFromCompendiumDto, @CurrentUser() user: RequestUser) {
+    const role = await this.access.requireRole(user, campaignId, 'player');
+    return this.inventory.acquireFromCompendium(campaignId, body, user, role);
   }
 }
 
@@ -126,5 +133,22 @@ export class InventoryController {
     const row = await this.inventory.getRowOrThrow(id, { includeDeleted: true });
     const role = await this.access.requireRole(user, row.campaignId, 'player');
     return this.inventory.restore(id, user, role);
+  }
+
+  @Post(':id/compendium/refresh')
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Refresh a linked inventory item from its installed compendium source', description: 'player role required. Updates the stored snapshot and clears linked_updated; local qty/notes are preserved.' })
+  async refresh(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const row = await this.inventory.getRowOrThrow(id); const role = await this.access.requireRole(user, row.campaignId, 'player');
+    return this.inventory.refreshCompendium(id, user, role);
+  }
+
+  @Post(':id/compendium/:state')
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Mark a linked inventory item overridden or detached', description: 'player role required. overridden keeps the local link; detached clears ruleEntryId while retaining the play-safe snapshot.' })
+  async compendiumState(@Param('id', ParseIntPipe) id: number, @Param('state') state: 'overridden' | 'detached', @CurrentUser() user: RequestUser) {
+    if (state !== 'overridden' && state !== 'detached') throw new BadRequestException('Unsupported compendium state');
+    const row = await this.inventory.getRowOrThrow(id); const role = await this.access.requireRole(user, row.campaignId, 'player');
+    return this.inventory.setCompendiumState(id, state, user, role);
   }
 }
