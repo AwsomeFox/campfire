@@ -4118,6 +4118,23 @@ function migrateCharacterConditionInstances1047(sqlite: Database.Database): void
   sqlite.exec('ALTER TABLE characters ADD COLUMN condition_instances TEXT');
 }
 
+/** Issue #735: current attachment provenance fields. Additive only; no legacy format shim. */
+function migrateAttachmentMetadata735(sqlite: Database.Database): void {
+  const exists = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='attachments'").get();
+  if (!exists) return;
+  const columns = new Set((sqlite.prepare('PRAGMA table_info(attachments)').all() as Array<{ name: string }>).map((c) => c.name));
+  const additions: Array<[string, string]> = [
+    ['title', "TEXT NOT NULL DEFAULT ''"], ['caption', "TEXT NOT NULL DEFAULT ''"], ['alt_text', "TEXT NOT NULL DEFAULT ''"],
+    ['creator', "TEXT NOT NULL DEFAULT ''"], ['source_url', "TEXT NOT NULL DEFAULT ''"], ['license', "TEXT NOT NULL DEFAULT ''"],
+    ['rights', "TEXT NOT NULL DEFAULT ''"], ['attribution', "TEXT NOT NULL DEFAULT ''"], ['checksum_sha256', 'TEXT'],
+  ];
+  for (const [name, definition] of additions) if (!columns.has(name)) sqlite.exec(`ALTER TABLE attachments ADD COLUMN ${name} ${definition}`);
+  sqlite.exec(`CREATE TABLE IF NOT EXISTS attachment_metadata_revisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, attachment_id INTEGER NOT NULL REFERENCES attachments(id) ON DELETE CASCADE,
+    actor_user_id TEXT NOT NULL, before_json TEXT NOT NULL, after_json TEXT NOT NULL, created_at TEXT NOT NULL
+  ); CREATE INDEX IF NOT EXISTS idx_attachment_metadata_revisions_attachment ON attachment_metadata_revisions(attachment_id, id);`);
+}
+
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
   { name: '0001_users_oidc', run: migrateUsersTableForOidc },
   { name: '0002_campaigns_rule_system', run: migrateCampaignsTableForRuleSystem },
@@ -4389,7 +4406,12 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // This one is NOT purely additive, unlike its neighbours: it REPLACES two partial unique
   // indexes. It must therefore never be reordered above 0040, which creates the originals.
   { name: '0135_ai_provider_config_fallback_role_1052', run: migrateAiProviderConfigFallbackRole1052 },
-  { name: '0137_inventory_compendium_738', run: migrateInventoryItemsCompendium738 },
+  // #735 is additive but belongs at the execution tail: attachment provenance is
+  // independent of earlier table work and migration arrays are read chronologically.
+  { name: '0137_attachment_metadata_735', run: migrateAttachmentMetadata735 },
+  // #738: additive inventory provenance columns; 0139 avoids colliding with
+  // 0137 (#735) and 0138 (#1051) already used earlier in this array.
+  { name: '0139_inventory_compendium_738', run: migrateInventoryItemsCompendium738 },
 ];
 
 /**

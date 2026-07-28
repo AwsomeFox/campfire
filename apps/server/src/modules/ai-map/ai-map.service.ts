@@ -350,7 +350,19 @@ export class AiMapService {
     const attachment = await this.attachments.createGenerated(
       campaignId,
       'map',
-      { filename, mime: stored.mime, bytes: stored.buf },
+      { filename, mime: stored.mime, bytes: stored.buf, metadata: {
+        title: body.filename ?? `AI map (${preview.seed})`,
+        // The prompt can contain private DM prep, so it is deliberately kept in
+        // the restricted audit trail and never copied into player-visible alt text.
+        altText: 'AI-generated battle map',
+        creator: preview.provenance.label,
+        sourceUrl: '',
+        // Generation origin is not a licence. Leave this unknown unless a real
+        // provider/output licence is supplied, and retain the caveat in rights.
+        license: '',
+        rights: 'Review provider terms before redistribution.',
+        attribution: preview.provenance.label,
+      } },
       user,
       role,
       auditDetail,

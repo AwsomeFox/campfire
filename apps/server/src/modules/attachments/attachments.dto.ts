@@ -1,6 +1,6 @@
 import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
-import { AttachmentKind, StorageQuotaUpdate } from '@campfire/schema';
+import { AttachmentKind, AttachmentSourceUrl, StorageQuotaUpdate } from '@campfire/schema';
 
 /**
  * multipart/form-data upload body. The file itself arrives via FileInterceptor
@@ -13,9 +13,15 @@ import { AttachmentKind, StorageQuotaUpdate } from '@campfire/schema';
 export const AttachmentUploadFields = z
   .object({
     kind: AttachmentKind,
+    title: z.string().trim().max(255).optional(), caption: z.string().trim().max(2_000).optional(), altText: z.string().trim().max(1_000).optional(),
+    creator: z.string().trim().max(255).optional(), sourceUrl: AttachmentSourceUrl.optional(),
+    license: z.string().trim().max(255).optional(), rights: z.string().trim().max(1_000).optional(), attribution: z.string().trim().max(1_000).optional(),
   })
   .strict();
 export class AttachmentUploadDto extends createZodDto(AttachmentUploadFields) {}
+
+export const AttachmentMetadataUpdate = AttachmentUploadFields.omit({ kind: true }).extend({ updatedAt: z.string().datetime() }).strict();
+export class AttachmentMetadataUpdateDto extends createZodDto(AttachmentMetadataUpdate) {}
 
 /** Body for PUT /admin/storage/campaigns/:campaignId/quota (issue #24). */
 export class StorageQuotaDto extends createZodDto(StorageQuotaUpdate.strict()) {}

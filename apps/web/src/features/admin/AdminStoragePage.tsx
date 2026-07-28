@@ -8,6 +8,7 @@ import { StorageCard } from './StorageCard';
 import { BackupCard } from './BackupCard';
 import { ServerBackupWorkflowCard } from './ServerBackupWorkflowCard';
 import { GameIcon } from '../../components/GameIcon';
+import { DataRepairCard } from './DataRepairCard';
 
 export default function AdminStoragePage() {
   useTranslation();
@@ -18,6 +19,7 @@ export default function AdminStoragePage() {
         <StorageCard />
         <ServerBackupWorkflowCard />
         <BackupCard />
+        <DataRepairCard />
       </div>
     </RequireServerAdmin>
   );

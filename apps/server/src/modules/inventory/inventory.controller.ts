@@ -137,6 +137,7 @@ export class InventoryController {
 
   @Post(':id/compendium/refresh')
   @HttpCode(200)
+  @ApiOperation({ summary: 'Refresh a linked inventory item from its installed compendium source', description: 'player role required. Updates the stored snapshot and clears linked_updated; local qty/notes are preserved.' })
   async refresh(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.inventory.getRowOrThrow(id); const role = await this.access.requireRole(user, row.campaignId, 'player');
     return this.inventory.refreshCompendium(id, user, role);
@@ -144,6 +145,7 @@ export class InventoryController {
 
   @Post(':id/compendium/:state')
   @HttpCode(200)
+  @ApiOperation({ summary: 'Mark a linked inventory item overridden or detached', description: 'player role required. overridden keeps the local link; detached clears ruleEntryId while retaining the play-safe snapshot.' })
   async compendiumState(@Param('id', ParseIntPipe) id: number, @Param('state') state: 'overridden' | 'detached', @CurrentUser() user: RequestUser) {
     if (state !== 'overridden' && state !== 'detached') throw new BadRequestException('Unsupported compendium state');
     const row = await this.inventory.getRowOrThrow(id); const role = await this.access.requireRole(user, row.campaignId, 'player');

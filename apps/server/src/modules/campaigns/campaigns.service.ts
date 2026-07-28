@@ -13,6 +13,7 @@ import {
   CampaignImport,
   CampaignPurge,
   CampaignUpdate,
+  AttachmentMetadata,
   CAMPAIGN_CLONE_PREVIEW_FORMAT_VERSION,
   AiExternalContentPolicy,
   NarrationLanguage,
@@ -250,6 +251,15 @@ export interface ImportAttachmentFile {
   filename: string;
   mime: string;
   bytes: Buffer;
+  title: string;
+  caption: string;
+  altText: string;
+  creator: string;
+  sourceUrl: string;
+  license: string;
+  rights: string;
+  attribution: string;
+  checksumSha256: string | null;
 }
 
 // ---- defensive readers for an imported export document (issue #120) ----
@@ -1222,6 +1232,15 @@ export class CampaignsService {
             filename: a.filename,
             mime: a.mime,
             size: a.size,
+            title: a.title,
+            caption: a.caption,
+            altText: a.altText,
+            creator: a.creator,
+            sourceUrl: a.sourceUrl,
+            license: a.license,
+            rights: a.rights,
+            attribution: a.attribution,
+            checksumSha256: a.checksumSha256,
             hidden: a.hidden,
             state: ATTACHMENT_STATE_COMMITTED,
             createdAt: ts,
@@ -2094,6 +2113,15 @@ export class CampaignsService {
             filename: a.filename,
             mime: a.mime,
             size: a.bytes.length,
+            title: a.title,
+            caption: a.caption,
+            altText: a.altText,
+            creator: a.creator,
+            sourceUrl: a.sourceUrl,
+            license: a.license,
+            rights: a.rights,
+            attribution: a.attribution,
+            checksumSha256: crypto.createHash('sha256').update(a.bytes).digest('hex'),
             // Secure default (#97): maps/images land DM-only, portraits stay player-visible.
             hidden: a.kind !== 'portrait',
             createdAt: ts,
@@ -3046,12 +3074,31 @@ export class CampaignsService {
         attachmentsSkipped += 1;
         continue;
       }
+      const checksumSha256 = crypto.createHash('sha256').update(bytes).digest('hex');
+      const declaredChecksum = str(a.checksumSha256);
+      if (declaredChecksum && declaredChecksum !== checksumSha256) {
+        attachmentsSkipped += 1;
+        continue;
+      }
+      // Archives are untrusted input too. Parse provenance through the same bounded
+      // current contract used by uploads/patches so an unsafe URL never becomes a
+      // clickable Handouts link after import.
+      const metadata = AttachmentMetadata.safeParse({
+        title: str(a.title), caption: str(a.caption), altText: str(a.altText), creator: str(a.creator),
+        sourceUrl: str(a.sourceUrl), license: str(a.license), rights: str(a.rights), attribution: str(a.attribution),
+        checksumSha256: declaredChecksum || null,
+      });
+      if (!metadata.success) {
+        attachmentsSkipped += 1;
+        continue;
+      }
       attachmentFiles.push({
         srcId,
         kind: str(a.kind, 'image'),
         filename: sanitizeAttachmentFilename(str(a.filename, `attachment-${srcId}`)),
         mime,
         bytes,
+        ...metadata.data,
       });
     }
 

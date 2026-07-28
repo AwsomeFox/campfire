@@ -1385,6 +1385,15 @@ export const attachments = sqliteTable('attachments', {
   filename: text('filename').notNull(),
   mime: text('mime').notNull(),
   size: integer('size').notNull(),
+  title: text('title').notNull().default(''),
+  caption: text('caption').notNull().default(''),
+  altText: text('alt_text').notNull().default(''),
+  creator: text('creator').notNull().default(''),
+  sourceUrl: text('source_url').notNull().default(''),
+  license: text('license').notNull().default(''),
+  rights: text('rights').notNull().default(''),
+  attribution: text('attribution').notNull().default(''),
+  checksumSha256: text('checksum_sha256'),
   // Per-attachment visibility / staged reveal (issue #97). hidden=1 => DM-only:
   // the file bytes and the row are withheld from non-DM members until revealed.
   // New map/image uploads default hidden; portraits default visible. Migrated via
