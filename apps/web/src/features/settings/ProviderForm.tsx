@@ -23,6 +23,7 @@ import { api, ApiError, API } from '../../lib/api';
 import { AiProviderPrivacyNotice } from '../../components/AiProviderPrivacyNotice';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { SkeletonConditionalRegion } from '../../components/ui';
+import { useSaveFeedback } from '../../components/SaveFeedback';
 
 const PROVIDER_TYPES: AiProviderConfigType[] = ['openai', 'anthropic', 'gemini', 'mock'];
 
@@ -31,6 +32,14 @@ interface ProviderDraft {
   model: string;
   baseUrl: string;
   apiKey: string;
+}
+
+function isProviderDraftDirty(provider: AiProviderConfigView | null, draft: ProviderDraft): boolean {
+  return draft.providerType !== (provider?.providerType ?? 'openai') ||
+    draft.model !== (provider?.model ?? '') ||
+    draft.baseUrl !== (provider?.baseUrl ?? '') ||
+    // API keys are write-only: any non-blank value represents an unsaved rotation.
+    draft.apiKey !== '';
 }
 
 /**
@@ -70,9 +79,8 @@ export function ProviderForm({
   const [model, setModel] = useState('');
   const [baseUrl, setBaseUrl] = useState('');
   const [apiKey, setApiKey] = useState(''); // write-only; blank keeps the stored key
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const feedback = useSaveFeedback(`${scope === 'server' ? 'Server' : 'Campaign'} AI provider`);
+  const saving = feedback.state === 'saving';
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [fetchingModels, setFetchingModels] = useState(false);
   const [modelsError, setModelsError] = useState<string | null>(null);
@@ -112,7 +120,7 @@ export function ProviderForm({
     setTestResult(null);
     setTestError(null);
     setTesting(false);
-    setSaved(false);
+    feedback.syncDirty(isProviderDraftDirty(provider, nextDraft));
     if (field === 'providerType') setProviderType(value as AiProviderConfigType);
     else if (field === 'model') setModel(value);
     else if (field === 'baseUrl') setBaseUrl(value);
@@ -160,13 +168,12 @@ export function ProviderForm({
 
   async function save() {
     if (!model.trim()) {
-      setError('A model is required.');
+      feedback.fail('A model is required.');
       return;
     }
     invalidateTestForAction();
-    setSaving(true);
-    setError(null);
-    setSaved(false);
+    if (saving) return;
+    feedback.begin();
     try {
       const body: Record<string, unknown> = { providerType, model: model.trim() };
       if (baseUrl.trim()) body.baseUrl = baseUrl.trim();
@@ -175,19 +182,16 @@ export function ProviderForm({
       const updated = await api.put<AiProviderConfigView>(`${API}${basePath}`, body);
       hydrate(updated); // also drops the plaintext key and fingerprints the saved draft
       onChanged?.(updated);
-      setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
+      feedback.succeed();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't save the provider.");
-    } finally {
-      setSaving(false);
+      feedback.fail(err instanceof ApiError ? err.message : "Couldn't save the provider.");
     }
   }
 
   async function test() {
     if (!model.trim()) {
       invalidateTestForAction();
-      setError('A model is required.');
+      feedback.fail('A model is required.');
       return;
     }
     const body: AiProviderTestRequest = {
@@ -201,7 +205,7 @@ export function ProviderForm({
     setTesting(true);
     setTestResult(null);
     setTestError(null);
-    setError(null);
+    feedback.reset();
     try {
       const r = await api.post<AiProviderTestResult>(`${API}${basePath}/test`, body);
       if (currentDraftFingerprint.current === fingerprint) setTestResult(r);
@@ -237,13 +241,14 @@ export function ProviderForm({
   async function remove() {
     invalidateTestForAction();
     setRemoving(true);
-    setError(null);
+    feedback.begin();
     try {
       await api.delete(`${API}${basePath}`);
       hydrate(null);
       onChanged?.(null);
+      feedback.succeed();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't remove the provider.");
+      feedback.fail(err instanceof ApiError ? err.message : "Couldn't remove the provider.");
     } finally {
       setRemoving(false);
     }
@@ -252,15 +257,16 @@ export function ProviderForm({
   async function clearStoredKey() {
     invalidateTestForAction();
     setClearing(true);
-    setError(null);
+    feedback.begin();
     try {
       const updated = await api.delete<AiProviderConfigView>(`${API}${basePath}/key`);
       setProvider(updated);
       editDraft('apiKey', '');
       setConfirmClear(false);
       onChanged?.(updated);
+      feedback.succeed();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't clear the stored key.");
+      feedback.fail(err instanceof ApiError ? err.message : "Couldn't clear the stored key.");
     } finally {
       setClearing(false);
     }
@@ -335,6 +341,8 @@ export function ProviderForm({
               id={`ai-provider-type-${scope}`}
               className="input"
               value={providerType}
+              disabled={saving || clearing || removing}
+              aria-describedby={feedback.statusId}
               onChange={(e) => editDraft('providerType', e.target.value)}
             >
               {PROVIDER_TYPES.map((t) => (
@@ -349,6 +357,8 @@ export function ProviderForm({
                 id={`ai-provider-model-${scope}`}
                 className="input"
                 value={model}
+                aria-describedby={feedback.statusId}
+                disabled={saving || clearing || removing}
                 onChange={(e) => editDraft('model', e.target.value)}
                 placeholder="e.g. gpt-4o-mini"
                 list={`ai-provider-models-${scope}`}
@@ -358,7 +368,7 @@ export function ProviderForm({
                 type="button"
                 className="btn btn-secondary"
                 style={{ fontSize: 11, whiteSpace: 'nowrap', padding: '4px 8px' }}
-                disabled={fetchingModels}
+                disabled={fetchingModels || saving || clearing || removing}
                 onClick={() => void fetchModels()}
                 title="Fetch available models from the provider"
               >
@@ -380,6 +390,8 @@ export function ProviderForm({
             id={`ai-provider-baseurl-${scope}`}
             className="input"
             value={baseUrl}
+            disabled={saving || clearing || removing}
+            aria-describedby={feedback.statusId}
             onChange={(e) => editDraft('baseUrl', e.target.value)}
             placeholder="Leave blank for the provider default"
           />
@@ -393,8 +405,9 @@ export function ProviderForm({
             className="input"
             type="password"
             autoComplete="off"
-            aria-describedby={`ai-provider-key-help-${scope}`}
+            aria-describedby={`ai-provider-key-help-${scope} ${feedback.statusId}`}
             value={apiKey}
+            disabled={saving || clearing || removing}
             onChange={(e) => editDraft('apiKey', e.target.value)}
             placeholder={provider?.configured ? '•••• (unchanged)' : 'Paste a key to set it'}
           />
@@ -407,7 +420,6 @@ export function ProviderForm({
           Test connection is safe and non-mutating: it sends the visible draft to the provider test endpoint without
           saving provider settings or returning any key material.
         </p>
-        {error && <p className="text-sm" style={{ color: '#f87171' }}>{error}</p>}
         {testError && <p role="alert" className="text-sm" style={{ color: '#f87171' }}>Test failed: {testError}</p>}
         {testResult && (
           <div
@@ -456,7 +468,7 @@ export function ProviderForm({
             <button
               className="btn btn-danger"
               style={{ fontSize: 12.5 }}
-              disabled={removing || clearing}
+              disabled={removing || clearing || saving}
               aria-busy={removing || undefined}
               onClick={() => void remove()}
             >
@@ -467,13 +479,13 @@ export function ProviderForm({
             <button
               className="btn btn-secondary"
               style={{ fontSize: 12.5, color: '#fbbf24', borderColor: 'rgba(251,191,36,0.4)' }}
-              disabled={clearing || removing}
+              disabled={clearing || removing || saving}
               onClick={() => setConfirmClear(true)}
             >
               {clearing ? 'Clearing…' : 'Clear stored key'}
             </button>
           )}
-          {saved && <span className="text-muted" style={{ fontSize: 12 }}>Saved.</span>}
+          {feedback.announcement}
         </div>
       </div>
       {confirmClear && provider?.configured && (

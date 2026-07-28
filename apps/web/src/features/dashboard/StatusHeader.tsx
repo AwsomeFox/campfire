@@ -12,6 +12,7 @@ import { AiModeBadge } from '../ai-dm/AiModeBadge';
 import { GameIcon } from '../../components/GameIcon';
 import { CampaignCover } from '../../components/CampaignCover';
 import { TermHelp } from '../../components/TermHelp';
+import { useSaveFeedback } from '../../components/SaveFeedback';
 
 const DANGER_LABEL: Record<DangerLevel, string> = {
   low: 'Low',
@@ -40,12 +41,10 @@ export function StatusHeader({
   const [name, setName] = useState(campaign.name);
   const [description, setDescription] = useState(campaign.description);
   const [dangerLevel, setDangerLevel] = useState<DangerLevel>(campaign.dangerLevel);
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const feedback = useSaveFeedback('Campaign details');
+  const saving = feedback.state === 'saving';
 
-  // Inline editor status line mirrors the Settings card: a transient "Saved."
-  // confirmation after a successful write, cleared by a short timer.
+  // Inline editor and Settings share the same durable explicit-save lifecycle.
   const dirty = isCampaignMetadataDirty(campaign, { name, description, dangerLevel });
   // Issue #760: block Switch campaign while the inline dashboard editor is dirty.
   useUnsavedWork(`dashboard-metadata:${campaignId}`, editing && dirty);
@@ -54,8 +53,7 @@ export function StatusHeader({
     setName(campaign.name);
     setDescription(campaign.description);
     setDangerLevel(campaign.dangerLevel);
-    setError(null);
-    setSaved(false);
+    feedback.reset();
     setEditing(true);
   }
 
@@ -64,31 +62,25 @@ export function StatusHeader({
     setName(campaign.name);
     setDescription(campaign.description);
     setDangerLevel(campaign.dangerLevel);
-    setError(null);
-    setSaved(false);
+    feedback.reset();
     setEditing(false);
   }
 
   async function save() {
     if (!name.trim()) {
-      setError('Campaign name is required.');
+      feedback.fail('Campaign name is required.');
       return;
     }
-    setSaving(true);
-    setError(null);
-    setSaved(false);
+    if (saving) return;
+    feedback.begin();
     try {
       await api.patch(`${API}/campaigns/${campaignId}`, { name: name.trim(), description, dangerLevel });
-      setSaved(true);
-      setEditing(false);
+      feedback.succeed();
       onChange();
-      setTimeout(() => setSaved(false), 2000);
     } catch (err) {
       // Preserve the in-flight values on failure so a transient 5xx doesn't
       // silently discard what the DM typed (issue #750 acceptance criterion).
-      setError(err instanceof ApiError ? err.message : "Couldn't save changes.");
-    } finally {
-      setSaving(false);
+      feedback.fail(err instanceof ApiError ? err.message : "Couldn't save changes.");
     }
   }
 
@@ -100,14 +92,14 @@ export function StatusHeader({
           name={name}
           description={description}
           dangerLevel={dangerLevel}
-          onNameChange={setName}
-          onDescriptionChange={setDescription}
-          onDangerLevelChange={setDangerLevel}
-          error={error}
+          onNameChange={(value) => { setName(value); feedback.syncDirty(isCampaignMetadataDirty(campaign, { name: value, description, dangerLevel })); }}
+          onDescriptionChange={(value) => { setDescription(value); feedback.syncDirty(isCampaignMetadataDirty(campaign, { name, description: value, dangerLevel })); }}
+          onDangerLevelChange={(value) => { setDangerLevel(value); feedback.syncDirty(isCampaignMetadataDirty(campaign, { name, description, dangerLevel: value })); }}
+          describedBy={feedback.statusId}
           disabled={saving}
         />
         <div className="flex gap-2 justify-end items-center">
-          {saved && <span className="text-muted" style={{ fontSize: 12 }}>Saved.</span>}
+          {feedback.announcement}
           <Btn ghost onClick={cancel} disabled={saving}>
             Cancel
           </Btn>
@@ -183,12 +175,7 @@ export function StatusHeader({
           </>
         )}
       </div>
-      {error && <p role="alert" className="text-xs text-rose-400" style={{ width: '100%', margin: 0 }}>{error}</p>}
-      {saved && (
-        <p role="status" className="text-xs" style={{ width: '100%', margin: 0, color: 'var(--color-success, #34d399)' }}>
-          Saved.
-        </p>
-      )}
+      {feedback.announcement}
       </div>
     </section>
   );

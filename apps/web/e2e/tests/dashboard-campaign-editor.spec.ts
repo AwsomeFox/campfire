@@ -132,6 +132,7 @@ test.describe('dashboard campaign quick edit (#750)', () => {
     await expect(save).toBeEnabled();
     await nameField.fill(campaign.name);
     await expect(save).toBeDisabled();
+    await expect(editor.getByRole('status')).toHaveText('');
 
     await editor.getByRole('button', { name: 'Cancel' }).click();
   });
@@ -172,24 +173,55 @@ test.describe('dashboard campaign quick edit (#750)', () => {
     await editor.getByRole('button', { name: 'Cancel' }).click();
   });
 
-  test('shows a transient saved confirmation and closes the editor on success', async ({ page, browser }) => {
+  test('keeps one durable, accessible save lifecycle through slow failure, retry, and the next edit', async ({ page, browser }) => {
     test.skip(!campaign, 'campaign fixture unavailable');
     const resetCtx = await browser.newContext({ storageState: stateFor('dm') });
     try { await resetCampaign(resetCtx.request, campaign); } finally { await resetCtx.close(); }
+
+    let calls = 0;
+    let releaseFirst!: () => void;
+    const firstRequest = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    await page.route(`**/api/v1/campaigns/${campaign.id}`, async (route) => {
+      if (route.request().method() !== 'PATCH') return route.continue();
+      calls += 1;
+      if (calls === 1) {
+        await firstRequest;
+        return route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ message: 'E2E756 slow outage' }) });
+      }
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ...campaign, name: 'E2E756 saved name' }) });
+    });
 
     await page.goto(`/c/${campaign.id}`);
     await page.getByRole('button', { name: '✎ Edit' }).click();
     const editor = page.getByRole('region', { name: 'Edit campaign details' });
 
     const nameField = editor.getByRole('textbox', { name: /^Name/ });
-    await nameField.fill('E2E750 saved name');
+    await nameField.fill('E2E756 saved name');
     await editor.getByRole('button', { name: 'Save' }).click();
 
-    await expect(editor).toBeHidden();
-    await expect(page.getByRole('heading', { name: 'E2E750 saved name' })).toBeVisible();
-    // Saved. confirmation lives on the header row for the brief window after close.
-    await expect(page.getByText('Saved.', { exact: true })).toBeVisible();
-    await expect(page.getByText('Saved.', { exact: true })).toBeHidden();
+    // A slow request locks every editable field and prevents a second PATCH.
+    await expect(editor.getByRole('button', { name: 'Saving…' })).toBeDisabled();
+    await expect(nameField).toBeDisabled();
+    await editor.getByRole('button', { name: 'Saving…' }).click({ force: true });
+    expect(calls).toBe(1);
+    releaseFirst();
+
+    await expect(editor.getByRole('alert')).toHaveCount(1);
+    await expect(editor.getByRole('alert')).toContainText('E2E756 slow outage');
+    await expect(nameField).toHaveValue('E2E756 saved name');
+    await editor.getByRole('button', { name: 'Save' }).click();
+    await expect(editor).toBeVisible();
+    await expect(editor.getByRole('status')).toContainText(/Campaign details saved .+2026|Campaign details saved/);
+    const savedText = await editor.getByRole('status').textContent();
+    await page.waitForTimeout(50);
+    await expect(editor.getByRole('status')).toHaveText(savedText ?? '');
+
+    // The next edit clears the durable success and returns to dirty, without another request.
+    await nameField.fill('E2E756 saved name revised');
+    await expect(editor.getByRole('status')).toContainText('unsaved changes');
+    expect(calls).toBe(2);
+    await page.unroute(`**/api/v1/campaigns/${campaign.id}`);
+    await editor.getByRole('button', { name: 'Cancel' }).click();
   });
 
   test('mirrors the labeled structure used by the Settings general card', async ({ page, browser }) => {

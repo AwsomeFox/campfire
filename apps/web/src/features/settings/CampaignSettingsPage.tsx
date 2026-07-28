@@ -69,6 +69,7 @@ import {
 } from '../../lib/routeBoundRecord';
 import { useUnsavedWork } from '../../lib/useUnsavedWork';
 import { PageTitle } from '../../components/PageTitle';
+import { useSaveFeedback } from '../../components/SaveFeedback';
 
 export default function CampaignSettingsPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
@@ -1193,9 +1194,8 @@ function GeneralCard({
   const [aiExternalContentPolicy, setAiExternalContentPolicy] = useState<AiExternalContentPolicy>(
     campaign.aiExternalContentPolicy,
   );
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [saved, setSaved] = useState(false);
+  const feedback = useSaveFeedback('Campaign details');
+  const saving = feedback.state === 'saving';
 
   const metadataDirty = isCampaignMetadataDirty(campaign, { name, description, dangerLevel });
   const dirty =
@@ -1207,14 +1207,13 @@ function GeneralCard({
 
   async function save() {
     if (!name.trim()) {
-      setError('Campaign name is required.');
+      feedback.fail('Campaign name is required.');
       return;
     }
     // Issue #853: refuse to PATCH B with form state opened against A.
     if (!assertMutationTarget(campaign.id, campaignId).ok) return;
-    setSaving(true);
-    setError(null);
-    setSaved(false);
+    if (saving) return;
+    feedback.begin();
     try {
       const updated = await api.patch<Campaign>(`${API}/campaigns/${campaignId}`, {
         name: name.trim(),
@@ -1224,12 +1223,9 @@ function GeneralCard({
         aiExternalContentPolicy,
       });
       onSaved(updated);
-      setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
+      feedback.succeed();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't save changes.");
-    } finally {
-      setSaving(false);
+      feedback.fail(err instanceof ApiError ? err.message : "Couldn't save changes.");
     }
   }
 
@@ -1246,10 +1242,10 @@ function GeneralCard({
         name={name}
         description={description}
         dangerLevel={dangerLevel}
-        onNameChange={setName}
-        onDescriptionChange={setDescription}
-        onDangerLevelChange={setDangerLevel}
-        error={error}
+        onNameChange={(value) => { setName(value); feedback.syncDirty(isCampaignMetadataDirty(campaign, { name: value, description, dangerLevel }) || dmControlsProgression !== campaign.dmControlsProgression || aiExternalContentPolicy !== campaign.aiExternalContentPolicy); }}
+        onDescriptionChange={(value) => { setDescription(value); feedback.syncDirty(isCampaignMetadataDirty(campaign, { name, description: value, dangerLevel }) || dmControlsProgression !== campaign.dmControlsProgression || aiExternalContentPolicy !== campaign.aiExternalContentPolicy); }}
+        onDangerLevelChange={(value) => { setDangerLevel(value); feedback.syncDirty(isCampaignMetadataDirty(campaign, { name, description, dangerLevel: value }) || dmControlsProgression !== campaign.dmControlsProgression || aiExternalContentPolicy !== campaign.aiExternalContentPolicy); }}
+        describedBy={feedback.statusId}
         disabled={saving}
       />
       <div className="field">
@@ -1257,7 +1253,9 @@ function GeneralCard({
           <input
             type="checkbox"
             checked={dmControlsProgression}
-            onChange={(e) => setDmControlsProgression(e.target.checked)}
+            disabled={saving}
+            aria-describedby={feedback.statusId}
+            onChange={(e) => { const value = e.target.checked; setDmControlsProgression(value); feedback.syncDirty(metadataDirty || value !== campaign.dmControlsProgression || aiExternalContentPolicy !== campaign.aiExternalContentPolicy); }}
           />
           <span>DM controls progression</span>
         </label>
@@ -1272,7 +1270,8 @@ function GeneralCard({
           id="settings-ai-external-policy"
           className="cf-select"
           value={aiExternalContentPolicy}
-          onChange={(e) => setAiExternalContentPolicy(e.target.value as AiExternalContentPolicy)}
+          aria-describedby={feedback.statusId}
+          onChange={(e) => { const value = e.target.value as AiExternalContentPolicy; setAiExternalContentPolicy(value); feedback.syncDirty(metadataDirty || dmControlsProgression !== campaign.dmControlsProgression || value !== campaign.aiExternalContentPolicy); }}
           disabled={saving}
         >
           <option value="member_consent">Allow member-consented source notes</option>
@@ -1287,7 +1286,7 @@ function GeneralCard({
         <button className="btn btn-primary" disabled={saving || !dirty} onClick={save}>
           {saving ? 'Saving…' : 'Save changes'}
         </button>
-        {saved && <span className="text-muted" style={{ fontSize: 12 }}>Saved.</span>}
+        {feedback.announcement}
       </div>
     </div>
   );
