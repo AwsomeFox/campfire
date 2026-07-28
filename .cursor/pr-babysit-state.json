@@ -3,11 +3,12 @@
     {
       "pr": 1690,
       "url": "https://github.com/AwsomeFox/campfire/pull/1690",
-      "status": "babysitting",
+      "status": "merged",
       "headBranch": "devin/oidc-discovery-nonjson-1612",
       "baseBranch": "main",
       "title": "fix(auth): distinguish non-JSON OIDC discovery responses from unreachable endpoints (#1612)",
-      "updatedAt": "2026-07-28T15:45:00Z"
+      "updatedAt": "2026-07-28T16:30:00Z",
+      "notes": "Merged after CI green; no conflicts; no open review threads; approved by cursor approval agent"
     }
   ]
 }
