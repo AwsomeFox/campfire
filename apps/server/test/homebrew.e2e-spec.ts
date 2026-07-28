@@ -18,6 +18,9 @@ describe('campaign homebrew (e2e)', () => {
     const preview = await request(server).post(`/api/v1/campaigns/${campaignId}/homebrew/import/preview`).set(dm).send({ entries: [body] }); expect(preview.body.entries[0].conflict.id).toBe(created.body.id);
     const skipped = await request(server).post(`/api/v1/campaigns/${campaignId}/homebrew/import/apply`).set(dm).send({ entries: [body], strategy: 'skip' }); expect(skipped.body.skipped).toBe(1);
     const duplicated = await request(server).post(`/api/v1/campaigns/${campaignId}/homebrew/import/apply`).set(dm).send({ entries: [body], strategy: 'duplicate' }); expect(duplicated.body.created).toBe(1);
+    const beforeRollback = await request(server).get(`/api/v1/campaigns/${campaignId}/homebrew`).set(dm);
+    const rollback = await request(server).post(`/api/v1/campaigns/${campaignId}/homebrew/import/apply`).set(dm).send({ entries: [{ ...body, slug: 'would-rollback' }, { ...body, slug: 'bad-raw', dataJson: '[]' }], strategy: 'duplicate' }); expect(rollback.status).toBe(400);
+    const afterRollback = await request(server).get(`/api/v1/campaigns/${campaignId}/homebrew`).set(dm); expect(afterRollback.body).toHaveLength(beforeRollback.body.length);
     const archived = await request(server).post(`/api/v1/campaigns/${campaignId}/homebrew/${created.body.id}/archive`).set(dm).send({}); expect(archived.status).toBe(201);
     const listed = await request(server).get(`/api/v1/campaigns/${campaignId}/homebrew`).set(dm); expect(listed.body.some((entry: { id: number }) => entry.id === created.body.id)).toBe(false);
   });

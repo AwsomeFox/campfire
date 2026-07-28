@@ -4270,7 +4270,7 @@ export class EncountersService {
           const entryRows = tx
             .select({ id: ruleEntries.id, dataJson: ruleEntries.dataJson })
             .from(ruleEntries)
-            .where(and(inArray(ruleEntries.id, ruleEntryIds), isNull(ruleEntries.campaignId)))
+            .where(and(inArray(ruleEntries.id, ruleEntryIds), or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, fresh.campaignId))))
             .all();
           for (const entry of entryRows) {
             const data = fromJsonText<Record<string, unknown>>(entry.dataJson ?? null, {});
@@ -4511,7 +4511,7 @@ export class EncountersService {
         const entryRows = tx
           .select({ id: ruleEntries.id, dataJson: ruleEntries.dataJson })
           .from(ruleEntries)
-          .where(and(inArray(ruleEntries.id, ruleEntryIds), isNull(ruleEntries.campaignId)))
+          .where(and(inArray(ruleEntries.id, ruleEntryIds), or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, fresh.campaignId))))
           .all();
         for (const entry of entryRows) {
           const data = fromJsonText<Record<string, unknown>>(entry.dataJson ?? null, {});
