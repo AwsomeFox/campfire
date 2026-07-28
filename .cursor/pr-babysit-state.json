@@ -6,8 +6,8 @@
       "url": "https://github.com/AwsomeFox/campfire/pull/1655",
       "headBranch": "fix/issue-742",
       "baseBranch": "main",
-      "updatedAt": "2026-07-28T12:35:00Z",
-      "notes": "Head d3001530: lint, Codex, Devin (409, type facets, audit CRUD, scoped undo, per-dimension facets). All known threads resolved. Local library e2e 18/18. Awaiting CI green to merge."
+      "updatedAt": "2026-07-28T12:55:00Z",
+      "notes": "Head b7837904: main merge (0140 migration, 249 MCP tools) + prior review fixes. MERGEABLE; no unresolved threads. Awaiting CI green to merge."
     }
   ]
 }
