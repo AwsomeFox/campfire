@@ -43,6 +43,14 @@ export class NoProviderConfiguredError extends Error {
   }
 }
 
+/** Thrown when the provider responded, but not with the classifier JSON contract. */
+export class InvalidInboxSweepClassificationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InvalidInboxSweepClassificationError';
+  }
+}
+
 export const INBOX_SWEEP_CLASSIFIER = Symbol('INBOX_SWEEP_CLASSIFIER');
 
 /** DI seam (mirrors AI_DM_PROVIDER) so orchestration is testable without a live model. */
@@ -143,7 +151,12 @@ export class AiInboxSweepClassifier implements InboxSweepClassifier {
       maxTokens: config.params?.maxTokens ?? 600,
     });
 
-    const parsed = ClassificationSchema.parse(extractJsonObject(result.text));
-    return parsed;
+    try {
+      return ClassificationSchema.parse(extractJsonObject(result.text));
+    } catch (err) {
+      throw new InvalidInboxSweepClassificationError(
+        `invalid classifier response: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 }

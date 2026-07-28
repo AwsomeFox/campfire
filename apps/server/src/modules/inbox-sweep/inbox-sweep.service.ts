@@ -23,6 +23,7 @@ import { AiProviderConfigService } from '../ai-provider-config/ai-provider-confi
 import type { AiProviderConfig } from '../ai-dm/providers';
 import {
   INBOX_SWEEP_CLASSIFIER,
+  InvalidInboxSweepClassificationError,
   NoProviderConfiguredError,
   type InboxSweepClassification,
   type InboxSweepClassifier,
@@ -248,18 +249,24 @@ export class InboxSweepService {
           });
           return { job: jobToDomain(disabledJob), items: results };
         }
-        const outcome = await this.recordError(
-          campaignId,
-          job.id,
-          item.id,
-          `classification failed: ${err instanceof Error ? err.message : String(err)}`,
-          user,
-          role,
-        );
-        results.push(outcome);
-        if (outcome.outcome === 'proposed') proposed++;
-        else if (outcome.outcome === 'errored') errored++;
-        else skipped++;
+        const reason = `classification failed: ${err instanceof Error ? err.message : String(err)}`;
+        if (err instanceof InvalidInboxSweepClassificationError) {
+          const outcome = await this.recordError(campaignId, job.id, item.id, reason, user, role);
+          results.push(outcome);
+          if (outcome.outcome === 'proposed') proposed++;
+          else if (outcome.outcome === 'errored') errored++;
+          else skipped++;
+        } else {
+          errored++;
+          results.push({
+            noteId: item.id,
+            outcome: 'errored',
+            entityType: null,
+            entityId: null,
+            proposalId: null,
+            reason,
+          });
+        }
         continue;
       }
 

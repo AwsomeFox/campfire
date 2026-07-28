@@ -8,6 +8,7 @@ import { AiProviderConfigService } from '../src/modules/ai-provider-config/ai-pr
 import type { AiProviderConfig } from '../src/modules/ai-dm/providers';
 import {
   INBOX_SWEEP_CLASSIFIER,
+  InvalidInboxSweepClassificationError,
   NoProviderConfiguredError,
   type InboxSweepCapture,
   type InboxSweepClassification,
@@ -33,6 +34,7 @@ class ScriptedClassifier implements InboxSweepClassifier {
   script = new Map<string, InboxSweepClassification>();
   calls: Array<{ capture: InboxSweepCapture; context: InboxSweepContext; config?: AiProviderConfig | null }> = [];
   noProvider = false;
+  failWith: Error | null = null;
   beforeReturn: (() => Promise<void>) | null = null;
 
   async classify(
@@ -43,6 +45,7 @@ class ScriptedClassifier implements InboxSweepClassifier {
     this.calls.push({ capture, context, config });
     if (this.noProvider) throw new NoProviderConfiguredError();
     if (this.beforeReturn) await this.beforeReturn();
+    if (this.failWith) throw this.failWith;
     const scripted = this.script.get(capture.body);
     if (!scripted) throw new Error(`no scripted classification for: ${capture.body}`);
     return scripted;
@@ -68,6 +71,7 @@ describe('inbox sweep (e2e)', () => {
     classifier.script.clear();
     classifier.calls = [];
     classifier.noProvider = false;
+    classifier.failWith = null;
     classifier.beforeReturn = null;
   });
 
@@ -485,6 +489,49 @@ describe('inbox sweep (e2e)', () => {
     const stillOpen = inbox.body.items.find((i: { id: number }) => i.id === noteId);
     expect(stillOpen).toBeDefined();
     expect(stillOpen.resolved).toBe(false);
+  });
+
+  it('leaves transient classifier failures open and unledgered for retry', async () => {
+    const campaignId = await newCampaign('Sweep Transient Classifier Failure');
+    const noteId = await submitInbox(campaignId, 'Provider rate-limited this classification.');
+    classifier.failWith = new Error('provider returned 429');
+
+    const res = await request(server).post(`/api/v1/campaigns/${campaignId}/inbox/sweep`).set(dm);
+    expect(res.status).toBe(201);
+    expect(res.body.job.itemsErrored).toBe(1);
+    expect(res.body.items[0]).toMatchObject({ noteId, outcome: 'errored', proposalId: null });
+    expect(res.body.items[0].reason).toContain('provider returned 429');
+
+    const inbox = await request(server).get(`/api/v1/campaigns/${campaignId}/inbox`).set(dm);
+    const stillOpen = inbox.body.items.find((i: { id: number }) => i.id === noteId);
+    expect(stillOpen).toBeDefined();
+    expect(stillOpen.resolved).toBe(false);
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const ledger = await db.select().from(inboxSweepItems).where(eq(inboxSweepItems.noteId, noteId));
+    expect(ledger).toHaveLength(0);
+  });
+
+  it('records invalid classifier responses as terminal errored outcomes', async () => {
+    const campaignId = await newCampaign('Sweep Invalid Classifier Response');
+    const noteId = await submitInbox(campaignId, 'Provider returned malformed classifier JSON.');
+    classifier.failWith = new InvalidInboxSweepClassificationError('invalid classifier response: bad JSON');
+
+    const res = await request(server).post(`/api/v1/campaigns/${campaignId}/inbox/sweep`).set(dm);
+    expect(res.status).toBe(201);
+    expect(res.body.job.itemsErrored).toBe(1);
+    expect(res.body.items[0]).toMatchObject({ noteId, outcome: 'errored', proposalId: null });
+
+    const inbox = await request(server).get(`/api/v1/campaigns/${campaignId}/inbox?resolved=true`).set(dm);
+    const resolved = inbox.body.items.find((i: { id: number }) => i.id === noteId);
+    expect(resolved).toBeDefined();
+    expect(resolved.resolved).toBe(true);
+    expect(resolved.resolvedNote).toContain('bad JSON');
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const [ledger] = await db.select().from(inboxSweepItems).where(eq(inboxSweepItems.noteId, noteId)).limit(1);
+    expect(ledger.outcome).toBe('errored');
+    expect(ledger.reason).toContain('bad JSON');
   });
 
   it('records and resolves deterministic classifier errors so they do not retry forever', async () => {
