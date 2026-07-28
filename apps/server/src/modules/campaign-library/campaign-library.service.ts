@@ -180,19 +180,27 @@ export class CampaignLibraryService {
       const config = request.operation === 'set_visibility'
         ? { allowed: new Set(['quest', 'npc', 'faction', 'encounter', 'timeline_event', 'attachment']), field: 'hidden' }
         : request.operation === 'set_status'
-          ? { allowed: new Set(['quest', 'npc', 'location', 'faction', 'encounter']), field: 'status' }
+          ? { allowed: new Set(['quest', 'npc', 'location', 'faction']), field: 'status' }
           : request.operation === 'move_inventory_owner'
             ? { allowed: new Set(['inventory_item']), field: 'owner' }
-            : { allowed: new Set(['quest', 'npc', 'location', 'faction', 'encounter', 'timeline_event', 'inventory_item']), field: 'deleted_at' };
+            : { allowed: new Set(['quest', 'npc', 'location', 'faction', 'timeline_event', 'inventory_item']), field: 'deleted_at' };
       const table = (type: string) => ({ quest: 'quests', npc: 'npcs', location: 'locations', faction: 'factions', encounter: 'encounters', timeline_event: 'timeline_events', inventory_item: 'inventory_items', attachment: 'attachments' } as Record<string, string>)[type];
       const snapshots: Array<{ entityType: string; entityId: number; value: unknown }> = [];
       if (request.operation === 'move_inventory_owner' && request.ownerType === 'character' && !tx.get(sql`select id from characters where id=${request.characterId!} and campaign_id=${campaignId}`)) throw new BadRequestException('Character owner must belong to this campaign');
       for (const target of request.targets) {
         if (!config.allowed.has(target.entityType)) throw new BadRequestException(`${request.operation} is not supported for ${target.entityType}`);
         const name = table(target.entityType);
+        if (request.operation === 'set_status') {
+          const allowed = target.entityType === 'quest' ? ['available', 'active', 'completed', 'failed']
+            : target.entityType === 'npc' ? ['friendly', 'neutral', 'hostile']
+              : target.entityType === 'faction' ? ['allied', 'friendly', 'neutral', 'unfriendly', 'hostile']
+                : ['unexplored', 'known', 'visited'];
+          if (!allowed.includes(request.status)) throw new BadRequestException(`${request.status} is not a valid ${target.entityType} status`);
+        }
+        const field = request.operation === 'set_status' ? (target.entityType === 'npc' ? 'disposition' : target.entityType === 'faction' ? 'standing' : 'status') : config.field;
         const row = request.operation === 'move_inventory_owner'
           ? tx.get(sql`select owner_type as ownerType, character_id as characterId from ${sql.raw(name)} where id=${target.entityId} and campaign_id=${campaignId}`)
-          : tx.get(sql`select ${sql.raw(config.field)} as value from ${sql.raw(name)} where id=${target.entityId} and campaign_id=${campaignId}`);
+          : tx.get(sql`select ${sql.raw(field)} as value from ${sql.raw(name)} where id=${target.entityId} and campaign_id=${campaignId}`);
         if (!row) throw new NotFoundException(`${target.entityType} ${target.entityId} not found in this campaign`);
         snapshots.push({ entityType: target.entityType, entityId: target.entityId, value: row });
       }

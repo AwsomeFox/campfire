@@ -2,7 +2,7 @@ import request from 'supertest';
 import { and, eq } from 'drizzle-orm';
 import { closeTestApp, createTestApp, type TestAppContext } from './test-app';
 import { DB, type DrizzleDb } from '../src/db/db.module';
-import { auditLog, campaignLibraryEntityTaxonomy, locations, npcs, quests } from '../src/db/schema';
+import { auditLog, campaignLibraryEntityTaxonomy, inventoryItems, locations, npcs, quests } from '../src/db/schema';
 
 describe('campaign library taxonomy (issue #742)', () => {
   let ctx: TestAppContext;
@@ -120,5 +120,22 @@ describe('campaign library taxonomy (issue #742)', () => {
     expect((await request(server).post(`/api/v1/campaigns/${campaignId}/library/bulk`).set(dm).send({ operation: 'add_tag', taxonomyId: foreignTag.body.id, targets: [{ entityType: 'quest', entityId: ownQuest.id }] })).status).toBe(404);
     const localTag = await request(server).post(`/api/v1/campaigns/${campaignId}/library/tags`).set(dm).send({ name: 'Local tag' });
     expect((await request(server).post(`/api/v1/campaigns/${campaignId}/library/bulk`).set(dm).send({ operation: 'add_tag', taxonomyId: localTag.body.id, targets: [{ entityType: 'quest', entityId: otherQuest.id }] })).status).toBe(404);
+  });
+
+  it('adapts visibility, status, archive and inventory-owner writes and rejects unsupported mixed types before writes', async () => {
+    const server = ctx.app.getHttpServer(); const db = ctx.app.get<DrizzleDb>(DB); const ts = new Date().toISOString();
+    const [quest] = await db.insert(quests).values({ campaignId, title: 'Adapter quest', status: 'available', hidden: false, createdAt: ts, updatedAt: ts }).returning();
+    const [item] = await db.insert(inventoryItems).values({ campaignId, name: 'Adapter item', ownerType: 'party', createdAt: ts, updatedAt: ts }).returning();
+    const target = [{ entityType: 'quest', entityId: quest.id }];
+    expect((await request(server).post(`/api/v1/campaigns/${campaignId}/library/bulk`).set(dm).send({ operation: 'set_visibility', visibility: 'hidden', targets: target })).status).toBe(201);
+    expect((await db.select().from(quests).where(eq(quests.id, quest.id))).at(0)?.hidden).toBe(true);
+    expect((await request(server).post(`/api/v1/campaigns/${campaignId}/library/bulk`).set(dm).send({ operation: 'set_status', status: 'completed', targets: target })).status).toBe(201);
+    expect((await db.select().from(quests).where(eq(quests.id, quest.id))).at(0)?.status).toBe('completed');
+    expect((await request(server).post(`/api/v1/campaigns/${campaignId}/library/bulk`).set(dm).send({ operation: 'archive', targets: target })).status).toBe(201);
+    expect((await db.select().from(quests).where(eq(quests.id, quest.id))).at(0)?.deletedAt).not.toBeNull();
+    expect((await request(server).post(`/api/v1/campaigns/${campaignId}/library/bulk`).set(dm).send({ operation: 'move_inventory_owner', ownerType: 'party', targets: [{ entityType: 'inventory_item', entityId: item.id }] })).status).toBe(201);
+    expect((await db.select().from(inventoryItems).where(eq(inventoryItems.id, item.id))).at(0)?.ownerType).toBe('party');
+    const bad = await request(server).post(`/api/v1/campaigns/${campaignId}/library/bulk`).set(dm).send({ operation: 'set_visibility', visibility: 'hidden', targets: [{ entityType: 'quest', entityId: quest.id }, { entityType: 'location', entityId: 123456 }] });
+    expect(bad.status).toBe(400);
   });
 });
