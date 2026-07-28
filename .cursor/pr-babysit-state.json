@@ -6,8 +6,8 @@
       "url": "https://github.com/AwsomeFox/campfire/pull/1655",
       "headBranch": "fix/issue-742",
       "baseBranch": "main",
-      "updatedAt": "2026-07-28T11:35:00Z",
-      "notes": "Head 4121275f: lint fix + Codex review fixes (location current invariant, template status reset, taxonomy undo conflict fence). Three Codex threads resolved. Awaiting CI run 30354933651 (coverage ~35-40m)."
+      "updatedAt": "2026-07-28T11:41:00Z",
+      "notes": "Head 190c09c8: lint + Codex fixes + Devin 409 duplicate taxonomy names. All review threads resolved. Local library e2e 16/16. Awaiting CI after latest push."
     }
   ]
 }
