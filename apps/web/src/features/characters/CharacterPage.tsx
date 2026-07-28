@@ -2336,6 +2336,12 @@ function ConditionsRow({
 
   const excludeKey = excludeName?.trim().toLowerCase();
   const visibleConditions = excludeKey ? character.conditions.filter((c) => c.trim().toLowerCase() !== excludeKey) : character.conditions;
+  // Issue #1643 review (Codex): the leveled track (e.g. Exhaustion) is excluded from this
+  // list because it has its own widget above, NOT because it isn't active — so when it's the
+  // ONLY condition on the sheet, `visibleConditions` goes empty and this used to print "None
+  // — feeling fine." directly under an active "Exhaustion 3", visibly contradicting itself.
+  // Gate the empty state on whether the excluded track is ALSO inactive.
+  const excludedTrackActive = excludeKey ? character.conditions.some((c) => c.trim().toLowerCase() === excludeKey) : false;
 
   return (
     <div className="flex items-center gap-1.5 flex-wrap">
@@ -2363,7 +2369,9 @@ function ConditionsRow({
           )}
         </span>
       ))}
-      {visibleConditions.length === 0 && <span className="text-muted text-xs">None — feeling fine.</span>}
+      {visibleConditions.length === 0 && !excludedTrackActive && (
+        <span className="text-muted text-xs">None — feeling fine.</span>
+      )}
       {canEdit &&
         (adding ? (
           <form

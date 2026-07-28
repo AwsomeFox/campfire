@@ -26,6 +26,8 @@ test.describe('character sheet surfaces Exhaustion as a level (#1643)', () => {
     await expect(page.getByLabel('0 of 6 — Exhaustion level')).toBeVisible();
     await expect(lower).toBeDisabled();
     await expect(raise).toBeEnabled();
+    // Baseline: with no conditions at all, the empty state DOES render.
+    await expect(page.getByText('None — feeling fine.')).toBeVisible();
 
     const raiseReq = page.waitForResponse(
       (res) => res.url().includes(`/api/v1/characters/${navigation.characterId}/conditions/level`) && res.request().method() === 'POST',
@@ -33,6 +35,12 @@ test.describe('character sheet surfaces Exhaustion as a level (#1643)', () => {
     await raise.click();
     await raiseReq;
     await expect(page.getByLabel('1 of 6 — Exhaustion level')).toBeVisible();
+
+    // Review finding on #1662: Exhaustion is the ONLY condition on this fresh sheet, and
+    // it's excluded from the plain chip list (has its own widget above), so the chip list's
+    // "None — feeling fine." empty state must NOT also render here — that would visibly
+    // contradict the active "1 of 6 — Exhaustion level" right above it.
+    await expect(page.getByText('None — feeling fine.')).toHaveCount(0);
 
     // Exhaustion at level 1 does NOT also show up as a plain removable chip — it has its
     // own level control now, not a second, disagreeing "remove entirely" control.
@@ -45,5 +53,7 @@ test.describe('character sheet surfaces Exhaustion as a level (#1643)', () => {
     await lowerReq;
     await expect(page.getByLabel('0 of 6 — Exhaustion level')).toBeVisible();
     await expect(lower).toBeDisabled();
+    // Back to level 0 (removed entirely) — the empty state reappears.
+    await expect(page.getByText('None — feeling fine.')).toBeVisible();
   });
 });
