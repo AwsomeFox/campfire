@@ -6,8 +6,8 @@
       "url": "https://github.com/AwsomeFox/campfire/pull/1655",
       "headBranch": "fix/issue-742",
       "baseBranch": "main",
-      "updatedAt": "2026-07-28T11:20:00Z",
-      "notes": "Tracking started on cursor/pull-request-babysitting-f5ec. PR MERGEABLE; CI in progress after open; no review threads yet."
+      "updatedAt": "2026-07-28T11:25:00Z",
+      "notes": "Lint fix pushed as 9580b813 (unused characters import; no-unused-expressions in CampaignLibraryPage). Awaiting CI re-run and review threads. MERGEABLE; Approval Agent left non-blocking high-risk COMMENT."
     }
   ]
 }
