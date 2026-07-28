@@ -4164,13 +4164,19 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
   // never a denylist of what is "permanent" — see the RestModel docs for why that direction is
   // the safe one when conditions are bare strings with no metadata (#1047).
   //
-  // These four are the 5e conditions a long rest ends on its own: exhaustion drops a level,
-  // and the three that PHB rest/unconsciousness rules resolve without an external cure. The
-  // conditions deliberately ABSENT are the ones that need a specific remedy — petrified,
+  // These three are the 5e conditions a long rest ends OUTRIGHT on its own — the PHB rest/
+  // unconsciousness rules resolve them without an external cure. Exhaustion is deliberately
+  // ABSENT from this list (issue #1641 — it used to be here, which was the bug: this allowlist
+  // can only express "removed entirely", and 5e's actual rule is "a long rest reduces
+  // exhaustion by ONE LEVEL", not to zero). Exhaustion's presence is instead read off
+  // `leveledConditionTrackFor('dnd5e')` (`leveled-conditions.ts`, issue #1643) by
+  // `restConditionOutcome`, which decrements it by one stack on a long rest and only fully
+  // removes it once that reaches 0 — see `rest.ts` for the mechanics. The conditions
+  // deliberately absent from BOTH lists are the ones that need a specific remedy — petrified,
   // paralyzed, charmed, poisoned, restrained, grappled, blinded, deafened, invisible — because
   // a rest that silently ended a Medusa's petrification would erase the DM's scene.
   restModel: {
-    clearedByLongRest: ['Exhaustion', 'Unconscious', 'Prone', 'Frightened'],
+    clearedByLongRest: ['Unconscious', 'Prone', 'Frightened'],
     clearedByShortRest: [],
     // 5e hit dice are per-class (d6 sorcerer … d12 barbarian) and the class die is NOT stored
     // on the sheet in this repo, so there is no honest default: `null` makes a short rest that

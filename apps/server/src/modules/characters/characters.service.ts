@@ -30,6 +30,7 @@ import {
   planPartyRest,
   type RestAdapter,
   type RestCharacterState,
+  type RestConditionState,
   type RestKind,
   // #422/#1578 — the adapter-owned resource vocabulary (standard pools + the character's own
   // custom ones), so the surface never hardcodes one system's resource names.
@@ -58,7 +59,12 @@ import { auditLog, campaigns, characters, checkRequests, combatants, encounters 
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { fromJsonText, toJsonText } from '../../common/json';
-import { conditionWriteSetFromNames, sheetConditionWriteSetFromNames } from '../../common/conditions';
+import {
+  conditionWriteSetFromNames,
+  readConditionInstances,
+  sheetConditionWriteSetFromInstances,
+  sheetConditionWriteSetFromNames,
+} from '../../common/conditions';
 import { redactSecret, redactSecrets } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
@@ -157,6 +163,8 @@ export interface RestPartyCharacterResult {
   resourcesRecovered: string[];
   conditionsCleared: string[];
   conditionsKept: string[];
+  /** Conditions whose `stacks` the rest reduced by one rather than clearing (issue #1641). */
+  conditionsDecremented: { name: string; stacksBefore: number; stacksAfter: number }[];
   logLine: string;
 }
 
@@ -1496,6 +1504,12 @@ export class CharactersService {
     const targets = characterIds.map((id) => byId.get(id)!);
     for (const row of targets) this.assertCanWrite(row, user, role);
 
+    // Issue #1641: a rest needs each condition's `stacks` (5e Exhaustion's LEVEL), not just its
+    // bare name, to be able to decrement rather than clear it — `readConditionInstances` unions
+    // the structured `conditionInstances` column with any bare `conditions` name that has no
+    // instance yet (pre-#1047 rows), so this is complete even for a character never touched
+    // since before that migration.
+    const priorInstances = new Map(targets.map((row) => [row.id, readConditionInstances(row.conditionInstances, row.conditions)]));
     const states: RestCharacterState[] = targets.map((row) => ({
       id: row.id,
       name: row.name,
@@ -1506,7 +1520,7 @@ export class CharactersService {
       deathState: row.deathState as RestCharacterState['deathState'],
       deathSaveSuccesses: row.deathSaveSuccesses,
       deathSaveFailures: row.deathSaveFailures,
-      conditions: fromJsonText<string[]>(row.conditions, []),
+      conditions: priorInstances.get(row.id)!.map((inst): RestConditionState => ({ name: inst.name, stacks: inst.stacks })),
       stats: fromJsonText<Record<string, number>>(row.stats, {}),
       spellSlots: fromJsonText<Record<string, SpellSlotLevel>>(row.spellSlots, {}),
       resources: fromJsonText<Record<string, CharacterResource>>(row.resources, {}),
@@ -1524,9 +1538,28 @@ export class CharactersService {
       });
     }
 
+    // Pre-existing defect fixed here, not introduced by #1641: this write used to set only the
+    // legacy `conditions` name column and never touched `conditionInstances`, violating the
+    // single-writer invariant documented in common/conditions.ts (its own audit grep —
+    // `conditions: toJsonText` outside that file — would have caught it). Concretely: any rest
+    // that cleared a condition left a stale instance behind in `conditionInstances`, so the
+    // combat tracker / character-sheet level display (#1662) could still show a condition the
+    // sheet itself claims is gone. #1641 cannot avoid touching this either way — a decremented
+    // `stacks` value has nowhere honest to persist except that same structured column — so it is
+    // fixed here rather than left half-migrated a second time.
+    const nameKey = (name: string) => name.trim().toLowerCase();
     const at = nowIso();
     this.db.transaction((tx) => {
       for (const p of plan.plans) {
+        const clearedSet = new Set(p.conditionsCleared.map(nameKey));
+        const decrementedStacks = new Map(p.conditionsDecremented.map((d) => [nameKey(d.name), d.stacksAfter]));
+        const nextInstances = (priorInstances.get(p.characterId) ?? [])
+          .filter((inst) => !clearedSet.has(nameKey(inst.name)))
+          .map((inst) => {
+            const stacksAfter = decrementedStacks.get(nameKey(inst.name));
+            return stacksAfter === undefined ? inst : { ...inst, stacks: stacksAfter };
+          });
+        const conditionWriteSet = sheetConditionWriteSetFromInstances(nextInstances);
         tx.update(characters)
           .set({
             hpCurrent: p.hpAfter,
@@ -1534,7 +1567,7 @@ export class CharactersService {
             deathState: p.deathStateAfter,
             deathSaveSuccesses: p.deathSaveSuccessesAfter,
             deathSaveFailures: p.deathSaveFailuresAfter,
-            conditions: toJsonText(p.conditionsAfter),
+            ...conditionWriteSet,
             spellSlots: toJsonText(p.spellSlotsAfter),
             resources: toJsonText(p.resourcesAfter),
             updatedAt: at,
@@ -1553,7 +1586,12 @@ export class CharactersService {
         campaignId,
         deathState: p.deathStateAfter,
       }).catch(() => undefined);
-      await this.syncActiveCombatantConditions(p.characterId, toJsonText(p.conditionsAfter), {
+      // Name-only, matching this mirror's existing (pre-#1641) contract: `conditionsAfter` now
+      // carries `{ name, stacks }` (issue #1641), but `syncActiveCombatantConditions` reconciles
+      // by NAME against the target combatant's own prior instance and does not touch `stacks` —
+      // widening it to also propagate a decremented level onto an active combat mirror is a
+      // separate, combat-tracker-side change, not this issue's.
+      await this.syncActiveCombatantConditions(p.characterId, toJsonText(p.conditionsAfter.map((c) => c.name)), {
         campaignId,
       }).catch(() => undefined);
     }
@@ -1572,6 +1610,7 @@ export class CharactersService {
         hitDiceSpent: plan.plans.reduce((n, p) => n + p.hitDiceSpent, 0),
         conditionsCleared: plan.plans.flatMap((p) => p.conditionsCleared),
         conditionsKept: plan.plans.flatMap((p) => p.conditionsKept),
+        conditionsDecremented: plan.plans.flatMap((p) => p.conditionsDecremented),
       }),
     });
 
@@ -1596,6 +1635,7 @@ export class CharactersService {
         // Surfaced deliberately: the DM must be able to see what a night's sleep did NOT fix
         // without diffing two sheets. See the allowlist rationale in packages/schema/src/rest.ts.
         conditionsKept: p.conditionsKept,
+        conditionsDecremented: p.conditionsDecremented,
         logLine: describeRestForLog(p, kind),
       })),
     };
