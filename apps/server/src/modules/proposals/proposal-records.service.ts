@@ -3,7 +3,7 @@ import { and, desc, eq, isNull } from 'drizzle-orm';
 import { AiGenerationProvenance } from '@campfire/schema';
 import type { EntityType, Proposal, ProposalAction, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { proposals, quests, npcs, locations, sessions, characters, factions, storyBeats, auditLog } from '../../db/schema';
+import { proposals, quests, npcs, locations, sessions, characters, factions, storyBeats, auditLog, ruleEntries } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { notDeleted } from '../../common/soft-delete';
@@ -32,7 +32,7 @@ import { hashProposalSnapshot } from './proposal-snapshot';
 // standalone rather than derived from EntityType. Factions (issue #1056) are also
 // proposable for Co-DM drafting and are create-only in v1 (direct faction writes remain
 // DM-gated; the proposal queue is the co-DM intermediary).
-export type ProposableEntityType = Exclude<EntityType, 'campaign'> | 'map' | 'story_beat';
+export type ProposableEntityType = Exclude<EntityType, 'campaign'> | 'map' | 'story_beat' | 'rule_entry';
 type ProposalTx = Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
 type ProposalDb = DrizzleDb | ProposalTx;
 type ProposalAttribution = {
@@ -42,7 +42,7 @@ type ProposalAttribution = {
   generationProvenance?: AiGenerationProvenance | null;
 };
 
-const PROPOSABLE_ENTITY_TYPES: ProposableEntityType[] = ['quest', 'npc', 'location', 'session', 'character', 'encounter', 'map', 'faction', 'story_beat'];
+const PROPOSABLE_ENTITY_TYPES: ProposableEntityType[] = ['quest', 'npc', 'location', 'session', 'character', 'encounter', 'map', 'faction', 'story_beat', 'rule_entry'];
 
 export function isProposableEntityType(value: string): value is ProposableEntityType {
   return (PROPOSABLE_ENTITY_TYPES as string[]).includes(value);
@@ -418,6 +418,11 @@ export class ProposalRecordsService {
           createdAt: row.createdAt,
           updatedAt: row.updatedAt,
         };
+      }
+      case 'rule_entry': {
+        const [row] = await this.db.select().from(ruleEntries).where(and(eq(ruleEntries.id, entityId), eq(ruleEntries.campaignId, campaignId))).limit(1);
+        if (!row) throw new NotFoundException(`Homebrew rule entry ${entityId} not found`);
+        return { id: row.id, slug: row.slug, name: row.name, type: row.type, summary: row.summary, body: row.body, dataJson: row.dataJson, rightsStatus: row.rightsStatus, license: row.license, attribution: row.attribution, author: row.author, sourceUrl: row.sourceUrl, iconSlug: row.iconSlug, updatedAt: row.updatedAt, archivedAt: row.archivedAt };
       }
     }
   }

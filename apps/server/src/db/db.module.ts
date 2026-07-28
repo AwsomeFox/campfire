@@ -1398,6 +1398,31 @@ function migrateRuleEntriesTableForLicensing(sqlite: Database.Database): void {
   if (!has('source_url')) sqlite.exec("ALTER TABLE rule_entries ADD COLUMN source_url TEXT NOT NULL DEFAULT ''");
 }
 
+/** Campaign-private compendium rows and their immutable edit history (issue #741). */
+function migrateCampaignHomebrew741(sqlite: Database.Database): void {
+  const exists = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='rule_entries'").get();
+  if (!exists) return;
+  const columns = sqlite.prepare('PRAGMA table_info(rule_entries)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  if (!has('campaign_id')) sqlite.exec('ALTER TABLE rule_entries ADD COLUMN campaign_id INTEGER REFERENCES campaigns(id) ON DELETE CASCADE');
+  if (!has('rights_status')) sqlite.exec("ALTER TABLE rule_entries ADD COLUMN rights_status TEXT NOT NULL DEFAULT 'open_licensed'");
+  if (!has('archived_at')) sqlite.exec('ALTER TABLE rule_entries ADD COLUMN archived_at TEXT');
+  if (!has('provenance')) sqlite.exec("ALTER TABLE rule_entries ADD COLUMN provenance TEXT NOT NULL DEFAULT ''");
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS rule_entry_revisions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      rule_entry_id INTEGER NOT NULL REFERENCES rule_entries(id) ON DELETE CASCADE,
+      campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+      actor TEXT NOT NULL, before_json TEXT NOT NULL, after_json TEXT NOT NULL, created_at TEXT NOT NULL
+    );
+    DROP INDEX IF EXISTS idx_rule_entries_pack_type_slug;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_rule_entries_pack_type_slug ON rule_entries(pack_id, type, slug) WHERE campaign_id IS NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_rule_entries_campaign_slug ON rule_entries(campaign_id, slug) WHERE campaign_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_rule_entries_campaign ON rule_entries(campaign_id);
+    CREATE INDEX IF NOT EXISTS idx_rule_entry_revisions_entry ON rule_entry_revisions(rule_entry_id, id);
+  `);
+}
+
 /**
  * Migration for DBs created before inventory items could carry a bundled entity
  * icon (issue #307): `inventory_items.icon_slug` didn't exist. Plain ADD COLUMN
@@ -4445,6 +4470,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // This one is NOT purely additive, unlike its neighbours: it REPLACES two partial unique
   // indexes. It must therefore never be reordered above 0040, which creates the originals.
   { name: '0135_ai_provider_config_fallback_role_1052', run: migrateAiProviderConfigFallbackRole1052 },
+  { name: '0136_campaign_homebrew_741', run: migrateCampaignHomebrew741 },
   // #735 is additive but belongs at the execution tail: attachment provenance is
   // independent of earlier table work and migration arrays are read chronologically.
   { name: '0137_attachment_metadata_735', run: migrateAttachmentMetadata735 },
