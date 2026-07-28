@@ -44,7 +44,6 @@ import type {
   ConditionInstance,
   CharacterAction,
   CharacterResource,
-  ConditionInstance,
   Role,
   SkillRank,
   SpellSlotLevel,
