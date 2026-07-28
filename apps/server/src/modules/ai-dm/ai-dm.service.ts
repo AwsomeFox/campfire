@@ -355,7 +355,12 @@ export class AiDmService implements OnApplicationBootstrap {
         // One malformed/corrupt seat must not stop every other campaign's proactive narration
         // from rehydrating — log and move on, the same defensive shape as getActionQueueDepth's
         // seat read elsewhere in this module.
-        this.logger.error(`Failed to rehydrate the proactive watcher for campaign ${campaignId} after restart`, err);
+        const message = err instanceof Error ? err.message : String(err);
+        const trace = err instanceof Error ? err.stack : undefined;
+        this.logger.error(
+          `Failed to rehydrate the proactive watcher for campaign ${campaignId} after restart: ${message}`,
+          trace,
+        );
       }
     }
   }
