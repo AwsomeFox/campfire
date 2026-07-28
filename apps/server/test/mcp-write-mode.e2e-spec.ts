@@ -102,6 +102,15 @@ describe('Issue #393: mutating MCP tools honor token write-mode (e2e)', () => {
     { name: 'set_session_attendance', args: () => ({ sessionId, characterIds: [] }) },
     { name: 'update_session_zero', args: () => ({ campaignId, lines: ['must not land'] }) },
     { name: 'restore_revision', args: () => ({ entityType: 'session_zero', entityId: campaignId, revisionId: 999_999 }) },
+    { name: 'duplicate_campaign_homebrew', args: () => ({ campaignId, entryId: 999_999 }) },
+    { name: 'archive_campaign_homebrew', args: () => ({ campaignId, entryId: 999_999 }) },
+    {
+      name: 'apply_campaign_homebrew_import',
+      args: () => ({
+        campaignId,
+        input: { entries: [{ slug: 'wm393-import', name: 'WM393 Import', type: 'item', rightsStatus: 'private_original' }], strategy: 'skip' },
+      }),
+    },
   ];
 
   describe('a propose-scoped token is refused a direct call to each formerly-leaky tool', () => {
@@ -141,6 +150,39 @@ describe('Issue #393: mutating MCP tools honor token write-mode (e2e)', () => {
       const character = await dmAgent.get(`/api/v1/characters/${characterId}`);
       expect(character.status).toBe(200);
     });
+
+    it('create_campaign_homebrew is COERCED to a proposal, not a direct create', async () => {
+      const client = await mcpClient(proposeToken);
+      const result = await client.callTool({
+        name: 'create_campaign_homebrew',
+        arguments: { campaignId, entry: { slug: 'wm393-spark', name: 'WM393 Spark', type: 'spell', rightsStatus: 'private_original' } },
+      });
+      expect(result.isError).toBeFalsy();
+      const body = parseResult(result) as { status: string; action: string; entityType: string };
+      expect(body.status).toBe('pending');
+      expect(body.action).toBe('create');
+      expect(body.entityType).toBe('rule_entry');
+      const listed = await dmAgent.get(`/api/v1/campaigns/${campaignId}/homebrew`);
+      expect(listed.body.some((entry: { slug: string }) => entry.slug === 'wm393-spark')).toBe(false);
+    });
+
+    it('update_campaign_homebrew is COERCED to a proposal, not a direct update', async () => {
+      const created = await dmAgent
+        .post(`/api/v1/campaigns/${campaignId}/homebrew`)
+        .send({ slug: 'wm393-edit', name: 'WM393 Edit', type: 'item', rightsStatus: 'private_original' });
+      expect(created.status).toBe(201);
+      const client = await mcpClient(proposeToken);
+      const result = await client.callTool({
+        name: 'update_campaign_homebrew',
+        arguments: { campaignId, entryId: created.body.id, patch: { name: 'Hijacked Homebrew', expectedUpdatedAt: created.body.updatedAt } },
+      });
+      expect(result.isError).toBeFalsy();
+      const body = parseResult(result) as { status: string; action: string };
+      expect(body.status).toBe('pending');
+      expect(body.action).toBe('update');
+      const current = await dmAgent.get(`/api/v1/campaigns/${campaignId}/homebrew/${created.body.id}`);
+      expect(current.body.name).toBe('WM393 Edit');
+    });
   });
 
   describe('a none-scoped (read-only) token is refused EVERY formerly-leaky write', () => {
@@ -148,6 +190,11 @@ describe('Issue #393: mutating MCP tools honor token write-mode (e2e)', () => {
       ...directOnlyCalls,
       { name: 'delete_session', args: () => ({ sessionId }) },
       { name: 'delete_character', args: () => ({ characterId }) },
+      {
+        name: 'create_campaign_homebrew',
+        args: () => ({ campaignId, entry: { slug: 'wm393-none', name: 'WM393 None', type: 'item', rightsStatus: 'private_original' } }),
+      },
+      { name: 'update_campaign_homebrew', args: () => ({ campaignId, entryId: 999_999, patch: { name: 'nope' } }) },
     ];
     it.each(allWrites)('$name is 403 for a none token', async ({ name, args }) => {
       const client = await mcpClient(noneToken);

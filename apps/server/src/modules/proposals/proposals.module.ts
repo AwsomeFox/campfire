@@ -11,6 +11,7 @@ import { EncountersModule } from '../encounters/encounters.module';
 import { MapsModule } from '../maps/maps.module';
 import { FactionsModule } from '../factions/factions.module';
 import { StorylinesModule } from '../storylines/storylines.module';
+import { RulesModule } from '../rules/rules.module';
 import { ProposalRecordsModule } from './proposal-records.module';
 import { ProposalsService } from './proposals.service';
 import { CampaignProposalsController, ProposalsController } from './proposals.controller';
@@ -30,6 +31,7 @@ import { CampaignProposalsController, ProposalsController } from './proposals.co
     MapsModule,
     FactionsModule,
     StorylinesModule,
+    RulesModule,
   ],
   controllers: [CampaignProposalsController, ProposalsController],
   providers: [ProposalsService],

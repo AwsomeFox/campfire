@@ -15,7 +15,9 @@ import type { DrizzleDb } from '../../db/db.module';
 import { ruleEntries, rulePacks } from '../../db/schema';
 import { stableStringify } from '../proposals/proposal-snapshot';
 
-type RuleEntryRow = typeof ruleEntries.$inferSelect;
+// Portable compendium hashing intentionally needs only these fields. Keeping this
+// structural also permits fixtures/exports created before campaign-homebrew columns.
+type RuleEntryRow = Pick<typeof ruleEntries.$inferSelect, 'id' | 'slug' | 'type' | 'name' | 'summary' | 'body' | 'dataJson' | 'source' | 'license' | 'attribution' | 'author' | 'sourceUrl'>;
 type RulePackRow = typeof rulePacks.$inferSelect;
 
 /** Portable fields hashed for cross-install identity — excludes server-local ids and DM icon overrides. */
