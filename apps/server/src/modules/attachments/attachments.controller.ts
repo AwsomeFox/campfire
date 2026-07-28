@@ -392,7 +392,13 @@ export class AttachmentsController {
   @ApiResponse({ status: 200, description: 'Metadata removed; filesystem erasure verified unless filesPending is true.' })
   async remove(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.attachmentsService.getRowOrThrow(id);
-    const role = await this.access.requireMember(user, row.campaignId, { write: true });
+    // Issue #1636: `requireMember(..., { write: true })` only asserts the CAMPAIGN is
+    // writable, not that the CALLER has write authority — it returns a viewer's role
+    // unchanged. The service's ownership check below (`uploaderUserId === user.id`) is
+    // untouched by a role change, so a member demoted from player to viewer kept the
+    // ability to delete files they uploaded while a player. requireRole('player') closes
+    // that; the service-layer uploader-or-dm check still applies on top.
+    const role = await this.access.requireRole(user, row.campaignId, 'player');
     const outcome = await this.attachmentsService.remove(id, user, role);
     return { filesPending: outcome.filesPending, pendingPaths: outcome.pendingPaths };
   }

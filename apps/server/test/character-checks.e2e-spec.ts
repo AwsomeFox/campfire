@@ -280,4 +280,49 @@ describe('DM check requests (e2e)', () => {
     const res = await request(server).post(`/api/v1/check-requests/${requestId}/roll`).set(viewer).send({});
     expect(res.status).toBe(403);
   });
+
+  // Issue #1636: `POST /check-requests/:id/roll` was gated only by
+  // `requireMember(..., { write: true })`, which asserts the CAMPAIGN is writable, not
+  // that the CALLER has write authority — it returns a viewer's role unchanged.
+  // Downstream, `assertCanWrite` is dm-or-owner, and `character.ownerUserId` is
+  // untouched by a role change, so a member demoted from player to viewer who still
+  // owns the targeted character could roll — and thereby consume and resolve — a
+  // DM's pending check request. Dev-auth's role header IS the effective role for a
+  // given request (no DB membership row backs it), so sending the SAME dev-user with
+  // a different `x-dev-role` on the second request faithfully simulates "demoted mid-
+  // session, same identity" without needing a real membership PATCH.
+  it('the owning character\'s player demoted to viewer mid-session loses roll authority on the very next request, and the request stays pending (#1636)', async () => {
+    const server = ctx.app.getHttpServer();
+    const created = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/check-requests`)
+      .set(dm)
+      .send({ characterIds: [characterId], checkId: 'save:DEX', dc: 10 });
+    expect(created.status).toBe(201);
+    const requestId = created.body[0].id;
+
+    // Same identity (owner-1) as the character's owner, but now presenting as viewer —
+    // the demotion.
+    const demotedOwner = { 'x-dev-role': 'viewer', 'x-dev-user': 'owner-1' };
+    const res = await request(server).post(`/api/v1/check-requests/${requestId}/roll`).set(demotedOwner).send({});
+    expect(res.status).toBe(403);
+
+    // State assertion (the point of the issue): the request must still be pending, and
+    // no roll was recorded against it — a 403 with a completed roll+resolve underneath
+    // it would be the bug this test pins.
+    const list = await request(server)
+      .get(`/api/v1/campaigns/${campaignId}/check-requests?status=pending`)
+      .set(dm);
+    expect(list.status).toBe(200);
+    const pinned = list.body.find((r: { id: number }) => r.id === requestId);
+    expect(pinned).toBeTruthy();
+    expect(pinned.status).toBe('pending');
+    expect(pinned.rollId).toBeNull();
+
+    // Still owned by the (still-player, in a real deployment) 'owner-1' identity: the
+    // ORIGINAL role (player) can still answer it, proving the 403 above was really the
+    // role floor and not some unrelated breakage.
+    const rolled = await request(server).post(`/api/v1/check-requests/${requestId}/roll`).set(owner).send({});
+    expect(rolled.status).toBe(201);
+    expect(rolled.body.request.status).toBe('resolved');
+  });
 });
