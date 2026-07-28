@@ -382,12 +382,22 @@ export class InboxSweepService {
         await this.tryResolve(noteId, user, role, concurrent.reason, link.entityType, link.entityId);
         return this.resultFromLedger(noteId, concurrent);
       }
+      const message = err instanceof Error ? err.message : String(err);
       if (!isUniqueConstraintError(err)) {
-        this.logger.warn(
-          `Failed to persist skip ledger for inbox item ${noteId}: ${err instanceof Error ? err.message : String(err)}`,
-        );
+        this.logger.warn(`Failed to persist skip ledger for inbox item ${noteId}: ${message}`);
       }
-      throw err;
+      // Same graceful-degradation contract as the create/update path in applyClassification's
+      // catch: a single item's ledger-write failure must never abort the whole sweep loop and
+      // strand every remaining item without a result. errored outcomes are deliberately not
+      // persisted to the ledger, so this item is simply retried on the next sweep.
+      return {
+        noteId,
+        outcome: 'errored',
+        entityType: null,
+        entityId: null,
+        proposalId: null,
+        reason: `failed to record skip: ${message}`,
+      };
     }
     await this.tryResolve(noteId, user, role, reason, null, null);
     return { noteId, outcome: 'skipped', entityType: null, entityId: null, proposalId: null, reason };

@@ -87,6 +87,16 @@ function buildSystemPrompt(context: InboxSweepContext): string {
 }
 
 function extractJsonObject(text: string): unknown {
+  // Providers are instructed to respond with ONLY the JSON object, so the common case is
+  // the whole (trimmed) response parsing cleanly — try that first rather than always doing
+  // first-`{`/last-`}` slicing, which can span the wrong boundaries if the model wraps the
+  // object in prose that itself contains braces.
+  const trimmed = text.trim();
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    // fall through to brace-slicing below
+  }
   const start = text.indexOf('{');
   const end = text.lastIndexOf('}');
   if (start === -1 || end === -1 || end < start) {
