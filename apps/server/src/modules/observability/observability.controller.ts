@@ -29,11 +29,27 @@ export class ObservabilityController {
   }
 
   @Get('diagnostics')
+  @ApiOperation({
+    summary: 'Storage and database diagnostics snapshot',
+    description:
+      'Server-admin only. Bounded, cached diagnostics covering database writeability, schema/migration status, storage identity, disk/WAL usage, and the most recent quick/integrity check results.',
+  })
+  @ApiResponse({ status: 200, description: 'Current storage diagnostics snapshot.' })
   diagnosticsSnapshot() { return this.diagnostics.snapshot(); }
 
   @Post('diagnostics/quick-check')
+  @ApiOperation({
+    summary: 'Run a quick database integrity check',
+    description: 'Server-admin only. Triggers a bounded, fast integrity check (PRAGMA quick_check) and returns its result.',
+  })
+  @ApiResponse({ status: 201, description: 'Result of the quick integrity check.' })
   async quickCheck() { const result = await this.diagnostics.runIntegrity('quick'); this.diagnostics.snapshot(); return result; }
 
   @Post('diagnostics/integrity-check')
+  @ApiOperation({
+    summary: 'Run a full database integrity check',
+    description: 'Server-admin only. Triggers a full integrity check (PRAGMA integrity_check) and returns its result.',
+  })
+  @ApiResponse({ status: 201, description: 'Result of the full integrity check.' })
   async integrityCheck() { const result = await this.diagnostics.runIntegrity('full'); this.diagnostics.snapshot(); return result; }
 }
