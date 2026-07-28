@@ -90,6 +90,7 @@ describe('StorageDiagnosticsService (issue #724)', () => {
     const service = new StorageDiagnosticsService({ raw } as never, probe({
       statfs: () => { throw new Error('unsupported'); },
       writeProbe: () => { throw Object.assign(new Error('full'), { code: 'SQLITE_FULL' }); },
+      readSentinel: () => ({ present: true, sentinel: undefined }),
     }));
     expect((service as unknown as { diskCheck(): { code: string } }).diskCheck().code).toBe('DISK_SPACE_UNKNOWN');
     expect((service as unknown as { writeCheck(): { code: string } }).writeCheck().code).toBe('WRITE_ENOSPC');
@@ -110,7 +111,7 @@ describe('StorageDiagnosticsService (issue #724)', () => {
     expect((service as unknown as { uploadsCheck(): { code: string } }).uploadsCheck().code).toBe('UPLOADS_MISSING');
   });
 
-  it('fails closed for missing, malformed, and mismatched install sentinels', () => {
+  it('fails closed for missing or malformed install sentinels', () => {
     const raw = (holder() as unknown as { raw: { prepare: jest.Mock } }).raw;
     raw.prepare.mockImplementation((sql: string) => ({
       get: jest.fn(() => sql.includes('server_meta') ? 'instance-a' : undefined), all: jest.fn(() => []), pluck: jest.fn(function () { return this; }), run: jest.fn(),
@@ -118,11 +119,27 @@ describe('StorageDiagnosticsService (issue #724)', () => {
     for (const readSentinel of [
       () => ({ present: false, sentinel: undefined }),
       () => ({ present: true, sentinel: undefined }),
-      () => ({ present: true, sentinel: { instanceId: 'different', createdAt: '2026-01-01T00:00:00.000Z', sentinelVersion: 1 } }),
     ]) {
       const service = new StorageDiagnosticsService({ raw } as never, probe({ readSentinel }));
       expect((service as unknown as { identityCheck(): { code: string } }).identityCheck().code).toBe('STORAGE_IDENTITY_INVALID');
     }
+  });
+
+  it('accepts a valid physical-install sentinel even when server_meta has a distinct logical UUID', () => {
+    const raw = (holder() as unknown as { raw: { prepare: jest.Mock } }).raw;
+    raw.prepare.mockImplementation((sql: string) => ({
+      // This query must not be reached by identityCheck; the logical DB/cache
+      // identity is deliberately unrelated to the physical data mount UUID.
+      get: jest.fn(() => sql.includes('server_meta') ? 'logical-db-uuid' : undefined), all: jest.fn(() => []), pluck: jest.fn(function () { return this; }), run: jest.fn(),
+    }));
+    const service = new StorageDiagnosticsService({ raw } as never, probe());
+    expect((service as unknown as { identityCheck(): { code: string } }).identityCheck().code).toBe('STORAGE_IDENTITY_OK');
+    expect(raw.prepare).not.toHaveBeenCalledWith(expect.stringContaining('server_meta'));
+  });
+
+  it('fails identity validation when the expected DB path is not a regular file', () => {
+    const service = new StorageDiagnosticsService(holder(), probe({ stat: () => ({ isFile: () => false } as fs.Stats) }));
+    expect((service as unknown as { identityCheck(): { code: string } }).identityCheck().code).toBe('STORAGE_IDENTITY_INVALID');
   });
 
   it('detects a missing latest migration and missing or empty app-version metadata', () => {
