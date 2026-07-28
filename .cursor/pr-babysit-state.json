@@ -4,7 +4,8 @@
       "pr": 1649,
       "status": "babysitting",
       "url": "https://github.com/AwsomeFox/campfire/pull/1649",
-      "updatedAt": "2026-07-28T11:40:00Z"
+      "updatedAt": "2026-07-28T12:22:07Z",
+      "note": "fixed concurrent skip race; awaiting CI; other new Kilo threads by-design"
     }
   ]
 }
