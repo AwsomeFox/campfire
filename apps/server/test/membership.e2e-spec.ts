@@ -1029,6 +1029,7 @@ describe('membership revocation notifies account-wide (e2e, real cookie sessions
   let adminAgent: ReturnType<typeof request.agent>;
   let dmAgent: ReturnType<typeof request.agent>;
   let playerAgent: ReturnType<typeof request.agent>;
+  let dmId: number;
   let playerId: number;
   let campaignId: number;
 
@@ -1039,7 +1040,8 @@ describe('membership revocation notifies account-wide (e2e, real cookie sessions
     adminAgent = request.agent(server);
     await adminAgent.post('/api/v1/auth/setup').send({ username: 'revoke-admin', password: 'admin-password-1' });
 
-    await adminAgent.post('/api/v1/users').send({ username: 'revoke-dm', password: 'revoke-dm-password', serverRole: 'user' });
+    const createDm = await adminAgent.post('/api/v1/users').send({ username: 'revoke-dm', password: 'revoke-dm-password', serverRole: 'user' });
+    dmId = createDm.body.id;
     dmAgent = request.agent(server);
     await dmAgent.post('/api/v1/auth/login').send({ username: 'revoke-dm', password: 'revoke-dm-password' });
 
@@ -1088,6 +1090,39 @@ describe('membership revocation notifies account-wide (e2e, real cookie sessions
     // The acting dm is not the target and gets no self-notification.
     const dmCount = await dmAgent.get('/api/v1/notifications/unread-count');
     expect(dmCount.body.membershipChanged).toBe(false);
+  });
+
+  it('a removed member who blocked the acting dm still receives the revocation signal (Codex/#597 review)', async () => {
+    // #597's block-based suppression exists to stop an ABUSER'S content reaching someone who
+    // blocked them; removed_from_campaign carries no actor content and exists purely so the
+    // removed member's other tabs learn their access changed. Gating it on the block would
+    // silently strand that member's cached membership stale in exactly the case that matters —
+    // see the comment on the notifyUser(..., null, ...) call in members.service.ts#remove.
+    const addRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: playerId, role: 'player' });
+    expect(addRes.status).toBe(201);
+    const memberId = addRes.body.id;
+
+    const blockRes = await playerAgent.post(`/api/v1/campaigns/${campaignId}/safety/blocks`).send({ targetUserId: String(dmId) });
+    expect(blockRes.status).toBe(201);
+    expect(blockRes.body.kind).toBe('block');
+
+    const removeRes = await dmAgent.delete(`/api/v1/campaigns/${campaignId}/members/${memberId}`);
+    expect(removeRes.status).toBe(204);
+
+    const notes = await playerAgent.get('/api/v1/notifications');
+    const items = Array.isArray(notes.body) ? notes.body : notes.body.items;
+    const removed = items.find(
+      (n: { type: string; campaignId: number; title: string }) =>
+        n.type === 'removed_from_campaign' && n.campaignId === campaignId && n.title.includes('removed'),
+    );
+    expect(removed).toBeDefined();
+
+    const playerCount = await playerAgent.get('/api/v1/notifications/unread-count');
+    expect(playerCount.body.membershipChanged).toBe(true);
+
+    // Leaving the block in place is fine for the rest of this describe block: the fix under
+    // test means removed_from_campaign no longer consults it at all, and no other notification
+    // types pass between this player and this dm in the remaining tests below.
   });
 
   it('self-leave notifies the leaving user too (their OTHER open tabs, not this request) with distinct copy', async () => {

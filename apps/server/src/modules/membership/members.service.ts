@@ -1023,6 +1023,18 @@ export class MembersService {
     // default self-suppression (correct for a DM acting on someone ELSE) would silence it
     // exactly when it is needed. A DM removing SOMEONE ELSE never hits this branch (actor !==
     // recipient there), so the default suppression still applies for that case as normal.
+    //
+    // Actor passed as `null` (Codex review): `notifyUser` forwards the actor's id to
+    // NotificationsService.dispatch()'s block-based suppression (#597) — deliberate for
+    // ordinary sender-authored notifications, so an abuser can't reach someone who blocked
+    // them by choosing a different event type. But this signal carries no actor content; it
+    // exists purely so the removed member's OTHER tabs learn their access changed. Gating it
+    // on whether the removed member blocked the DM who removed them defeats that purpose in
+    // exactly the case that matters most: the member's cached membership silently goes stale
+    // with no signal ever reaching them. `opts.selfLeave` (computed by the controller as
+    // `actor === recipient`, BEFORE this method runs) already fully covers the self-suppression
+    // check `notifyUser` would otherwise use `actor` for, so passing `null` here does not
+    // reintroduce a self-notification.
     const [campaignRow] = await this.db
       .select({ name: campaigns.name })
       .from(campaigns)
@@ -1032,7 +1044,7 @@ export class MembersService {
     await this.notifications.notifyUser(
       existing.userId,
       campaignId,
-      actor,
+      null,
       {
         type: 'removed_from_campaign',
         title: opts?.selfLeave ? `You left ${campaignName}` : `You were removed from ${campaignName}`,
