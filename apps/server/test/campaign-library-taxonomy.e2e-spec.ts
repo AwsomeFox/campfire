@@ -171,4 +171,15 @@ describe('campaign library taxonomy (issue #742)', () => {
     expect(current.find((row) => row.id === rows[0].id)?.hidden).toBe(true); // first inverse was rolled back
     expect(current.find((row) => row.id === rows[1].id)?.hidden).toBe(false);
   });
+
+  it('allows exactly one concurrent undo claimant', async () => {
+    const server = ctx.app.getHttpServer(); const db = ctx.app.get<DrizzleDb>(DB); const ts = new Date().toISOString();
+    const [quest] = await db.insert(quests).values({ campaignId, title: 'Concurrent undo', createdAt: ts, updatedAt: ts }).returning();
+    const tag = await request(server).post(`/api/v1/campaigns/${campaignId}/library/tags`).set(dm).send({ name: 'Concurrent' });
+    const bulk = await request(server).post(`/api/v1/campaigns/${campaignId}/library/bulk`).set(dm).send({ operation: 'add_tag', taxonomyId: tag.body.id, targets: [{ entityType: 'quest', entityId: quest.id }] });
+    const responses = await Promise.all([1, 2].map(() => request(server).post(`/api/v1/campaigns/${campaignId}/library/bulk/${bulk.body.operationId}/undo`).set(dm)));
+    expect(responses.map((response) => response.status)).toEqual([201, 201]);
+    expect(responses.filter((response) => response.body.alreadyUndone === false)).toHaveLength(1);
+    expect(responses.filter((response) => response.body.alreadyUndone === true)).toHaveLength(1);
+  });
 });
