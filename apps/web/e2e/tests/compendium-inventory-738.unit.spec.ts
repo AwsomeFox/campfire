@@ -17,6 +17,8 @@ test.describe('compendium inventory UI (#738)', () => {
   test('inventory renders provenance, play-safe details, and link actions', () => {
     expect(inventory).toContain('data-testid="compendium-inventory-source"');
     expect(inventory).toContain('committed.compendiumSnapshot.body');
+    expect(inventory).toContain('Open in Compendium');
+    expect(inventory).toContain('committed.ruleEntryId != null');
     expect(inventory).toContain("compendiumAction('refresh')");
     expect(inventory).toContain("compendiumAction('overridden')");
     expect(inventory).toContain("compendiumAction('detached')");
