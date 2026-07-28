@@ -43,6 +43,7 @@ describe('member export field policy (e2e, issue #1680)', () => {
   let ctx: TestAppContext;
   let dmAgent: ReturnType<typeof request.agent>;
   let playerAgent: ReturnType<typeof request.agent>;
+  let otherPlayerAgent: ReturnType<typeof request.agent>;
   let campaignId: number;
   let playerId: string;
   let dmId: string;
@@ -59,6 +60,10 @@ describe('member export field policy (e2e, issue #1680)', () => {
       .post('/api/v1/users')
       .send({ username: 'mep-player', password: 'player-password-1', serverRole: 'user' });
     const playerNumericId = createPlayer.body.id as number;
+    const createOtherPlayer = await dmAgent
+      .post('/api/v1/users')
+      .send({ username: 'mep-other-player', password: 'other-player-password-1', serverRole: 'user' });
+    const otherPlayerNumericId = createOtherPlayer.body.id as number;
     // Membership rows key on the numeric user id (Id); characters/notes/proposals key
     // ownerUserId/authorUserId/proposerUserId on String(users.id) — same convention the
     // rest of the app uses (see Character.ownerUserId's own doc comment).
@@ -66,6 +71,10 @@ describe('member export field policy (e2e, issue #1680)', () => {
 
     playerAgent = request.agent(server);
     await playerAgent.post('/api/v1/auth/login').send({ username: 'mep-player', password: 'player-password-1' });
+    otherPlayerAgent = request.agent(server);
+    await otherPlayerAgent
+      .post('/api/v1/auth/login')
+      .send({ username: 'mep-other-player', password: 'other-player-password-1' });
 
     const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'Member Export Field Policy' });
     campaignId = campRes.body.id;
@@ -73,6 +82,10 @@ describe('member export field policy (e2e, issue #1680)', () => {
       .post(`/api/v1/campaigns/${campaignId}/members`)
       .send({ userId: playerNumericId, role: 'player' });
     expect(memberRes.status).toBe(201);
+    const otherMemberRes = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/members`)
+      .send({ userId: otherPlayerNumericId, role: 'player' });
+    expect(otherMemberRes.status).toBe(201);
   });
 
   afterAll(async () => {
@@ -133,9 +146,10 @@ describe('member export field policy (e2e, issue #1680)', () => {
 
     // Player proposes an update — captures the FULL unredacted snapshot server-side
     // for DM review (captureAuthorizedSnapshot), including dmSecret.
+    const proposedPayloadSecret = 'the obsidian vault code is 5678';
     const proposeRes = await playerAgent
       .patch(`/api/v1/quests/${questId}?proposed=true`)
-      .send({ title: 'Quest With A Secret (player suggestion)' });
+      .send({ title: 'Quest With A Secret (player suggestion)', dmSecret: proposedPayloadSecret });
     expect(proposeRes.status).toBe(202);
     const proposalId = proposeRes.body.proposal.id;
 
@@ -148,14 +162,18 @@ describe('member export field policy (e2e, issue #1680)', () => {
     expect(proposal.snapshot).not.toBeNull();
     expect(proposal.snapshot.dmSecret).toBe('');
     expect(JSON.stringify(proposal.snapshot)).not.toContain('vault code');
+    expect(proposal.payload).not.toBeNull();
+    expect(proposal.payload.dmSecret).toBe('');
     expect(JSON.stringify(proposal.payload)).not.toContain('vault code');
 
     // Sanity: the DM's own view of the SAME proposal (via the DM-only campaign proposals
-    // list, not member export) still carries the real snapshot — proving the projection
-    // is role-gated on egress, not a destructive rewrite of the stored row.
+    // list, not member export) still carries the real snapshot and payload — proving
+    // the projection is role-gated on egress, not a destructive rewrite of the stored row.
     const dmProposals = await dmAgent.get(`/api/v1/campaigns/${campaignId}/proposals?status=pending`);
     const dmSideProposal = dmProposals.body.find((p: { id: number }) => p.id === proposalId);
+    expect(dmSideProposal).toBeDefined();
     expect(dmSideProposal.snapshot.dmSecret).toBe('the vault code is 1234');
+    expect(dmSideProposal.payload.dmSecret).toBe(proposedPayloadSecret);
   });
 
   it('only includes notes the caller AUTHORED, not a whisper sent TO them by someone else', async () => {
@@ -182,6 +200,52 @@ describe('member export field policy (e2e, issue #1680)', () => {
     // an authorization failure hiding a real bug).
     const live = await playerAgent.get(`/api/v1/campaigns/${campaignId}/notes`);
     expect(live.body.items.some((n: { body: string }) => n.body === 'a dm whisper the player can read live')).toBe(true);
+  });
+
+  it('only includes comments the caller AUTHORED on anchors still visible to their role', async () => {
+    const visibleQuest = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/quests`)
+      .send({ title: 'Comment Export Visible Quest', hidden: false });
+    expect(visibleQuest.status).toBe(201);
+
+    const ownVisibleComment = await playerAgent
+      .post(`/api/v1/campaigns/${campaignId}/comments`)
+      .send({ entityType: 'quest', entityId: visibleQuest.body.id, body: 'my visible export comment' });
+    expect(ownVisibleComment.status).toBe(201);
+    const otherVisibleComment = await otherPlayerAgent
+      .post(`/api/v1/campaigns/${campaignId}/comments`)
+      .send({ entityType: 'quest', entityId: visibleQuest.body.id, body: 'other member visible export comment' });
+    expect(otherVisibleComment.status).toBe(201);
+
+    const hiddenLaterQuest = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/quests`)
+      .send({ title: 'Comment Export Hidden Later Quest', hidden: false });
+    expect(hiddenLaterQuest.status).toBe(201);
+    const ownHiddenAnchorComment = await playerAgent
+      .post(`/api/v1/campaigns/${campaignId}/comments`)
+      .send({ entityType: 'quest', entityId: hiddenLaterQuest.body.id, body: 'my now-hidden anchor comment' });
+    expect(ownHiddenAnchorComment.status).toBe(201);
+    const hideQuest = await dmAgent.patch(`/api/v1/quests/${hiddenLaterQuest.body.id}`).send({ hidden: true });
+    expect(hideQuest.status).toBe(200);
+
+    // Confirm the hidden-anchor comment still exists for the DM, so its absence below
+    // proves role-based anchor filtering instead of a failed seed.
+    const dmHiddenThread = await dmAgent
+      .get(`/api/v1/campaigns/${campaignId}/comments`)
+      .query({ entityType: 'quest', entityId: hiddenLaterQuest.body.id });
+    expect(dmHiddenThread.status).toBe(200);
+    expect(JSON.stringify(dmHiddenThread.body)).toContain('my now-hidden anchor comment');
+    const playerHiddenThread = await playerAgent
+      .get(`/api/v1/campaigns/${campaignId}/comments`)
+      .query({ entityType: 'quest', entityId: hiddenLaterQuest.body.id });
+    expect(playerHiddenThread.status).toBe(404);
+
+    const res = await playerAgent.get(`/api/v1/campaigns/${campaignId}/export/me`);
+    expect(res.status).toBe(200);
+    const comments = res.body.comments as Array<{ id: number; body: string }>;
+    expect(comments.some((c) => c.id === ownVisibleComment.body.id && c.body === 'my visible export comment')).toBe(true);
+    expect(comments.some((c) => c.id === otherVisibleComment.body.id)).toBe(false);
+    expect(comments.some((c) => c.id === ownHiddenAnchorComment.body.id)).toBe(false);
   });
 
   it('never exposes campaign-wide fields (members, audit) through the member export', async () => {
