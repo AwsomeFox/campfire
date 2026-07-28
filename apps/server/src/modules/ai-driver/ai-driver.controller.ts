@@ -28,13 +28,25 @@ import { WriteModeExempt } from '../../common/decorators/proposable.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
-import { AiDriverService, toPublicAiDmSessionState } from './ai-driver.service';
+import { AiDriverService, toPublicAiDmSessionState, type AiDmTurnRunResult } from './ai-driver.service';
 import { AiDmStreamService } from './ai-driver-stream.service';
 import { ProactiveService } from './proactive.service';
 import { DriverGroundingService } from './driver-grounding.service';
 import { AiDmTranscriptService } from './ai-driver-transcript.service';
-import { GroundingProjectionInterceptor } from './grounding-projection.interceptor';
+import { GroundingProjectionInterceptor, markHttpProjected, type HttpProjected } from './grounding-projection.interceptor';
 import { projectAiDmStreamEventForRole } from './ai-driver-stream-projection';
+
+/**
+ * `AiDmTurnRunResult` carries `grounding?: GroundingVerdict` (#1639). This controller's
+ * `@UseInterceptors(GroundingProjectionInterceptor)` redacts it for every response, but
+ * that is a runtime property of the class, invisible to the type checker. Every handler
+ * below that returns a turn result declares this return type instead of the plain one,
+ * so returning the driver's raw result directly (skipping `markHttpProjected`) is a
+ * compile error — see `grounding-projection.interceptor.ts` for exactly what that does
+ * and does not prove, and `test/unit/grounding-http-brand.spec.ts` for the compile-level
+ * proof.
+ */
+type AiDmTurnRunResultHttp = HttpProjected<AiDmTurnRunResult>;
 
 /** Player action submitted to the AI DM seat (POST /ai-dm/message). */
 const AiDmMessageRequest = z
@@ -250,7 +262,7 @@ export class AiDriverController {
     @Param('id', ParseIntPipe) id: number,
     @Body() body: AiDmMessageDto,
     @CurrentUser() user: RequestUser,
-  ) {
+  ): Promise<AiDmTurnRunResultHttp> {
     await this.access.requireRole(user, id, 'player');
     const turn = await this.driver.runTurn(id, user, body.input, {
       scene: body.scene,
@@ -271,7 +283,9 @@ export class AiDriverController {
     // whole controller, and this was the ONLY handler that ever had the inline version — which is
     // precisely why start-session could ship without it and leak. Two mechanisms for one
     // guarantee is how the guarantee drifts, so there is deliberately only one left.
-    return turn;
+    //
+    // #1639 — `markHttpProjected` does not itself redact; see grounding-projection.interceptor.ts.
+    return markHttpProjected(turn);
   }
 
   @Get('session')
@@ -333,9 +347,9 @@ export class AiDriverController {
   @ApiResponse({ status: 201, description: 'The greeting turn summary.' })
   @ApiResponse({ status: 409, description: 'A lifecycle turn is already in progress, or the AI is mid-turn.' })
   @ApiResponse({ status: 503, description: 'Seat paused, under human control, or no provider configured.' })
-  async startSession(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+  async startSession(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser): Promise<AiDmTurnRunResultHttp> {
     const role = await this.access.requireRole(user, id, 'player');
-    return this.driver.startSession(id, user, role);
+    return markHttpProjected(await this.driver.startSession(id, user, role));
   }
 
   @Post('wrap-up')
@@ -354,9 +368,9 @@ export class AiDriverController {
   // Same 503 surface as `startSession`: a wrap-up is an ordinary `runTurn`, so a paused seat, a
   // human takeover, or a missing provider refuses it exactly as it refuses a player action.
   @ApiResponse({ status: 503, description: 'Seat paused, under human control, or no provider configured.' })
-  async wrapUp(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+  async wrapUp(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser): Promise<AiDmTurnRunResultHttp> {
     const role = await this.access.requireRole(user, id, 'dm');
-    return this.driver.wrapUpSession(id, user, role);
+    return markHttpProjected(await this.driver.wrapUpSession(id, user, role));
   }
 
   @Post('collaborative')
@@ -408,9 +422,9 @@ export class AiDriverController {
       'A successful replay clears the stuck state. 409 if there is no prior turn to retry; 403 if the budget is exhausted.',
   })
   @ApiResponse({ status: 201, description: 'The replayed turn summary.' })
-  async nudge(@Param('id', ParseIntPipe) id: number, @Body() body: AiDmNudgeDto, @CurrentUser() user: RequestUser) {
+  async nudge(@Param('id', ParseIntPipe) id: number, @Body() body: AiDmNudgeDto, @CurrentUser() user: RequestUser): Promise<AiDmTurnRunResultHttp> {
     const role = await this.access.requireRole(user, id, 'player');
-    return this.driver.nudge(id, user, body.hint, role);
+    return markHttpProjected(await this.driver.nudge(id, user, body.hint, role));
   }
 
   @Post('flag')
@@ -420,9 +434,9 @@ export class AiDriverController {
     description: 'Player+. Injects the objection into context and re-runs the turn so the AI must re-decide. Audited + notified.',
   })
   @ApiResponse({ status: 201, description: 'The re-decided turn summary.' })
-  async flag(@Param('id', ParseIntPipe) id: number, @Body() body: AiDmFlagDto, @CurrentUser() user: RequestUser) {
+  async flag(@Param('id', ParseIntPipe) id: number, @Body() body: AiDmFlagDto, @CurrentUser() user: RequestUser): Promise<AiDmTurnRunResultHttp> {
     const role = await this.access.requireRole(user, id, 'player');
-    return this.driver.flag(id, user, body.objection, role);
+    return markHttpProjected(await this.driver.flag(id, user, body.objection, role));
   }
 
   @Post('vote')

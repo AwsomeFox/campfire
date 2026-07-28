@@ -13,11 +13,12 @@ import { useTranslation } from 'react-i18next';
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { api, API, translateApiError } from '../../lib/api';
-import type { RuleEntry, RulePack, RuleSearchFacet, RuleSearchPage } from '@campfire/schema';
+import type { RuleEntry, RulePack, RuleSearchFacet, RuleSearchPage, HomebrewRuleEntryInput } from '@campfire/schema';
 import { Card, ErrorNote, Skeleton } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
 import { ruleEntryIconSlug } from '../../lib/ruleEntryIcon';
 import { useCampaign, useCampaigns } from '../../app/CampaignContext';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { PageTitle } from '../../components/PageTitle';
 import { TermHelp } from '../../components/TermHelp';
 import {
@@ -35,6 +36,7 @@ import {
   parseCompendiumTypeParam,
   type CompendiumUrlType,
 } from './compendiumA11y';
+import { importExpectedUpdatedAt, serializeHomebrewEditor, shouldRenderCompendiumResults } from './homebrewEditor';
 
 type TypeChip = { key: CompendiumUrlType; label: string; count?: number };
 
@@ -67,6 +69,7 @@ export default function CompendiumPage() {
   const id = Number(campaignId);
   const [searchParams, setSearchParams] = useSearchParams();
   const campaign = useCampaign(Number.isFinite(id) ? id : undefined);
+  const { isDm, canDmWrite } = useCampaignAccess();
   const { loading: campaignsLoading, error: campaignsError, refresh: refreshCampaigns } = useCampaigns();
   const campaignPack = campaign?.ruleSystem || '';
   // The campaign record comes from the shared campaigns list; if that list failed
@@ -128,6 +131,16 @@ export default function CompendiumPage() {
   const [facets, setFacets] = useState<RuleSearchFacet[]>([]);
   const [total, setTotal] = useState<number | null>(null);
   const [hasMore, setHasMore] = useState(false);
+  const [homebrewCount, setHomebrewCount] = useState(0);
+  const [authoring, setAuthoring] = useState(false);
+  const [rawMode, setRawMode] = useState(false);
+  const [draft, setDraft] = useState({ name: '', slug: '', type: 'spell', summary: '', body: '', rightsStatus: 'private_original', license: '', attribution: '', sourceUrl: '', dataJson: '{}' });
+  const [authorError, setAuthorError] = useState<string | null>(null);
+  const [structuredData, setStructuredData] = useState<Record<string, string>>({ level: '', school: '', castingTime: '', range: '', duration: '', ac: '', hp: '', cr: '', abilities: '', actions: '', category: '', rarity: '', weight: '', value: '' });
+  type ImportPreviewRow = { index: number; slug: string; valid: boolean; conflict: { id: number; updatedAt: string } | null; entry: HomebrewRuleEntryInput };
+  const [importPreview, setImportPreview] = useState<ImportPreviewRow[] | null>(null);
+  const [importEntries, setImportEntries] = useState<unknown[] | null>(null);
+  const [importStrategy, setImportStrategy] = useState<'skip' | 'replace' | 'duplicate'>('skip');
   const [nextCursor, setNextCursor] = useState<string | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -135,6 +148,8 @@ export default function CompendiumPage() {
   const [packsLoading, setPacksLoading] = useState(true);
   const [reloadToken, setReloadToken] = useState(0);
   const fetchGeneration = useRef(0);
+  /** Filtered homebrew rows prepended into results — kept so loadMore can keep Showing X of Y stable. */
+  const listedHomebrewCount = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -164,14 +179,6 @@ export default function CompendiumPage() {
     // otherwise campaignPack is transiently '' and we'd fire an UNSCOPED search
     // that flashes entries from outside this campaign's rule system.
     if (campaign === undefined) return;
-    if (noRuleSystemChosen || noPacksInstalled) {
-      setResults([]);
-      setFacets([]);
-      setTotal(0);
-      setHasMore(false);
-      setNextCursor(undefined);
-      return;
-    }
     let cancelled = false;
     const gen = ++fetchGeneration.current;
     (async () => {
@@ -183,11 +190,20 @@ export default function CompendiumPage() {
         if (type !== 'all') params.set('type', type);
         if (campaignPack) params.set('pack', campaignPack);
         if (urlCursor) params.set('cursor', urlCursor);
-        const page = await api.get<RuleSearchPage>(`${API}/rules/search?${params.toString()}`);
+        const [page, homebrew] = await Promise.all([
+          campaignPack ? api.get<RuleSearchPage>(`${API}/rules/search?${params.toString()}`) : Promise.resolve<RuleSearchPage>({ items: [], total: 0, hasMore: false, limit: 50, facets: [] }),
+          api.get<RuleEntry[]>(`${API}/campaigns/${id}/homebrew`),
+        ]);
+        const needle = searchQuery.trim().toLowerCase();
+        const campaignEntries = homebrew.filter((entry) =>
+          (type === 'all' || entry.type === type) && (!needle || `${entry.name} ${entry.summary} ${entry.body}`.toLowerCase().includes(needle)),
+        );
+        setHomebrewCount(homebrew.length);
         if (cancelled || gen !== fetchGeneration.current) return;
-        setResults(page.items);
+        listedHomebrewCount.current = campaignEntries.length;
+        setResults([...campaignEntries, ...page.items]);
         setFacets(page.facets ?? []);
-        setTotal(page.total);
+        setTotal(page.total + campaignEntries.length);
         setHasMore(page.hasMore);
         setNextCursor(page.nextCursor);
       } catch (err) {
@@ -232,7 +248,8 @@ export default function CompendiumPage() {
       // primary fetch and replace the accumulated list with a single page.
       setResults((prev) => [...(prev ?? []), ...page.items]);
       setFacets(page.facets ?? []);
-      setTotal(page.total);
+      // page.total is pack-only; keep the homebrew rows that the primary fetch prepended.
+      setTotal(page.total + listedHomebrewCount.current);
       setHasMore(page.hasMore);
       setNextCursor(page.nextCursor);
     } catch (err) {
@@ -320,6 +337,35 @@ export default function CompendiumPage() {
     focusChip(next);
   }
 
+  async function saveHomebrew() {
+    setAuthorError(null);
+    const serialized = serializeHomebrewEditor(draft, structuredData, rawMode); if (!serialized.ok) { setAuthorError(serialized.error); return; }
+    const payload = serialized.value;
+    try {
+      const proposed = !isDm;
+      await api.post(`${API}/campaigns/${id}/homebrew${proposed ? '?proposed=true' : ''}`, payload);
+      setAuthoring(false); setDraft({ name: '', slug: '', type: 'spell', summary: '', body: '', rightsStatus: 'private_original', license: '', attribution: '', sourceUrl: '', dataJson: '{}' });
+      setReloadToken((n) => n + 1);
+    } catch (err) { setAuthorError(translateApiError(err, t, { fallbackKey: 'compendium.errors.search' })); }
+  }
+
+  async function chooseImport(file: File | undefined) {
+    if (!file) return;
+    try {
+      const parsed: unknown = JSON.parse(await file.text());
+      const entries = Array.isArray(parsed) ? parsed : (parsed as { entries?: unknown[] }).entries;
+      if (!Array.isArray(entries)) throw new Error('Expected a JSON array or { entries: [...] }');
+      const preview = await api.post<{ entries: ImportPreviewRow[] }>(`${API}/campaigns/${id}/homebrew/import/preview`, { entries });
+      setImportEntries(entries); setImportPreview(preview.entries);
+    } catch (err) { setAuthorError(err instanceof Error ? err.message : 'Could not read import file'); }
+  }
+  async function applyImport() {
+    if (!importEntries) return;
+    const expectedUpdatedAt = importExpectedUpdatedAt(importPreview ?? []);
+    try { await api.post(`${API}/campaigns/${id}/homebrew/import/apply`, { entries: importEntries, strategy: importStrategy, expectedUpdatedAt: importStrategy === 'replace' ? expectedUpdatedAt : undefined }); setImportEntries(null); setImportPreview(null); setReloadToken((n) => n + 1); }
+    catch (err) { setAuthorError(translateApiError(err, t, { fallbackKey: 'compendium.errors.search' })); }
+  }
+
   if (!Number.isFinite(id)) {
     return (
       <div className="max-w-4xl mx-auto px-4 mt-5">
@@ -345,6 +391,32 @@ export default function CompendiumPage() {
       </div>
 
       <div className="flex flex-col gap-1.5">
+        <div className="flex gap-2 flex-wrap">
+          <button className="btn btn-ghost" type="button" onClick={() => setAuthoring((v) => !v)}>{isDm && canDmWrite ? 'Add homebrew' : 'Propose homebrew'}</button>
+          {isDm && canDmWrite && <label className="btn btn-ghost" style={{ cursor: 'pointer' }}>Import JSON<input aria-label="Import homebrew JSON" type="file" accept="application/json,.json" hidden onChange={(e) => chooseImport(e.target.files?.[0])} /></label>}
+        </div>
+        {authoring && (
+          <Card>
+            <h2 style={{ margin: 0, fontSize: 15 }}>{isDm && canDmWrite ? 'Campaign homebrew' : 'Homebrew proposal'}</h2>
+            <div className="flex gap-2 flex-wrap">
+              <input className="input" placeholder="Name" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value, slug: draft.slug || e.target.value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') })} />
+              <input className="input" placeholder="stable-slug" value={draft.slug} onChange={(e) => setDraft({ ...draft, slug: e.target.value })} />
+              <select className="input" value={draft.type} onChange={(e) => setDraft({ ...draft, type: e.target.value })}><option value="spell">Spell</option><option value="monster">Monster</option><option value="item">Item</option><option value="other">Other</option></select>
+            </div>
+            <input className="input" placeholder="Summary" value={draft.summary} onChange={(e) => setDraft({ ...draft, summary: e.target.value })} />
+            <textarea className="input" placeholder="Markdown details" value={draft.body} onChange={(e) => setDraft({ ...draft, body: e.target.value })} />
+            <label><input type="checkbox" checked={rawMode} onChange={(e) => setRawMode(e.target.checked)} /> Raw JSON data</label>
+            {!rawMode && <div className="flex gap-2 flex-wrap" aria-label="Structured homebrew fields">
+              {(draft.type === 'spell' ? [['level', 'Level'], ['school', 'School'], ['castingTime', 'Casting time'], ['range', 'Range'], ['duration', 'Duration']] : draft.type === 'monster' ? [['ac', 'AC'], ['hp', 'HP'], ['cr', 'CR'], ['abilities', 'Abilities'], ['actions', 'Actions (JSON array)']] : draft.type === 'item' ? [['category', 'Category'], ['rarity', 'Rarity'], ['weight', 'Weight'], ['value', 'Value']] : []).map(([key, label]) => <input key={key} className="input" aria-label={label} placeholder={label} value={structuredData[key] ?? ''} onChange={(e) => setStructuredData({ ...structuredData, [key]: e.target.value })} />)}
+            </div>}
+            {rawMode && <textarea className="input" aria-label="Homebrew JSON object" value={draft.dataJson} onChange={(e) => setDraft({ ...draft, dataJson: e.target.value })} />}
+            <select className="input" value={draft.rightsStatus} onChange={(e) => setDraft({ ...draft, rightsStatus: e.target.value })}><option value="private_original">Private original — no license required</option><option value="permission_granted">Permission granted</option><option value="open_licensed">Open licensed</option></select>
+            {draft.rightsStatus !== 'private_original' && <><input className="input" placeholder="License" value={draft.license} onChange={(e) => setDraft({ ...draft, license: e.target.value })} /><input className="input" placeholder="Attribution" value={draft.attribution} onChange={(e) => setDraft({ ...draft, attribution: e.target.value })} /><input className="input" placeholder="https:// source URL" value={draft.sourceUrl} onChange={(e) => setDraft({ ...draft, sourceUrl: e.target.value })} /></>}
+            {authorError && <ErrorNote message={authorError} />}
+            <button className="btn btn-primary" type="button" onClick={saveHomebrew}>{isDm && canDmWrite ? 'Save homebrew' : 'Submit proposal'}</button>
+          </Card>
+        )}
+        {importPreview && <Card><h2 style={{ margin: 0, fontSize: 15 }}>Import preview</h2><div>{importPreview.map((row) => <p key={`${row.index}-${row.slug}`} className="text-muted" style={{ margin: 0 }}>{row.slug}: {row.conflict ? `conflict with #${row.conflict.id} — ${importStrategy}` : 'new entry'}</p>)}</div><select className="input" value={importStrategy} onChange={(e) => setImportStrategy(e.target.value as typeof importStrategy)}><option value="skip">Skip conflicts</option><option value="replace">Replace conflicts</option><option value="duplicate">Duplicate conflicts</option></select><button className="btn btn-primary" type="button" onClick={applyImport}>Apply import</button></Card>}
         <label htmlFor={COMPENDIUM_SEARCH_ID} style={{ fontSize: 12, fontWeight: 600 }}>
           {COMPENDIUM_SEARCH_LABEL}
         </label>
@@ -423,23 +495,10 @@ export default function CompendiumPage() {
           <Card>
             <Skeleton lines={4} />
           </Card>
-        ) : noRuleSystemChosen ? (
+        ) : !shouldRenderCompendiumResults({ campaignResolved: campaign !== undefined, homebrewCount, hasGlobalPack: Boolean(campaignPack && !noPacksInstalled) }) ? (
           <div className="card items-center text-center" style={{ padding: 24 }}>
-            <p style={{ margin: 0, fontSize: 13, color: 'var(--color-neutral-200)' }}>
-              No rule system chosen for this campaign.
-            </p>
-            <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 12 }}>
-              Pick one in Settings, or ask an admin to install a pack.
-            </p>
-          </div>
-        ) : noPacksInstalled ? (
-          <div className="card items-center text-center" style={{ padding: 24 }}>
-            <p style={{ margin: 0, fontSize: 13, color: 'var(--color-neutral-200)' }}>
-              No rule system installed for this campaign yet.
-            </p>
-            <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 12 }}>
-              A server admin can install one from Server admin → Rule systems, then pick it in Campaign settings.
-            </p>
+            <p style={{ margin: 0, fontSize: 13, color: 'var(--color-neutral-200)' }}>No rule system or campaign homebrew yet.</p>
+            <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 12 }}>Create homebrew above, or select an installed rule system in Campaign settings.</p>
           </div>
         ) : (
           <>

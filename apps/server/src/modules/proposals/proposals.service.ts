@@ -19,6 +19,8 @@ import {
   StoryBeatUpdate,
   ProposalApprove,
   ProposalResolve,
+  HomebrewRuleEntryInput,
+  HomebrewRuleEntryUpdate,
 } from '@campfire/schema';
 import type { Proposal, ProposalAction, Role } from '@campfire/schema';
 import { fromJsonText } from '../../common/json';
@@ -35,6 +37,7 @@ import { EncountersService } from '../encounters/encounters.service';
 import { MapsService } from '../maps/maps.service';
 import { FactionsService } from '../factions/factions.service';
 import { StorylinesService } from '../storylines/storylines.service';
+import { RulesService } from '../rules/rules.service';
 import { ProposalRecordsService, isProposableEntityType, type ProposableEntityType } from './proposal-records.service';
 import { assertProposalTargetFresh } from './proposal-snapshot';
 
@@ -69,6 +72,7 @@ const CREATE_SCHEMAS: Record<ProposableEntityType, z.ZodTypeAny> = {
   // same schema only to keep the Record total (an update proposal is never filed for them).
   encounter: EncounterGenerate.strict(),
   map: GenerateMapParams.strict(),
+  rule_entry: HomebrewRuleEntryInput,
 };
 const UPDATE_SCHEMAS: Record<ProposableEntityType, z.ZodTypeAny> = {
   quest: QuestUpdate.strict(),
@@ -80,6 +84,7 @@ const UPDATE_SCHEMAS: Record<ProposableEntityType, z.ZodTypeAny> = {
   story_beat: StoryBeatUpdate.strict(),
   encounter: EncounterGenerate.strict(),
   map: GenerateMapParams.strict(),
+  rule_entry: HomebrewRuleEntryUpdate.strict(),
 };
 
 @Injectable()
@@ -97,6 +102,7 @@ export class ProposalsService {
     private readonly maps: MapsService,
     private readonly factions: FactionsService,
     private readonly storylines: StorylinesService,
+    private readonly rules?: RulesService,
   ) {}
 
   async listForCampaign(
@@ -236,6 +242,12 @@ export class ProposalsService {
               role,
             ),
           remove: (id: number, user: RequestUser, role: Role) => this.storylines.removeBeat(id, user, role),
+        };
+      case 'rule_entry':
+        return {
+          create: (campaignId: number, payload: Record<string, unknown>, user: RequestUser) => this.rules!.createCampaignHomebrew(campaignId, payload, user),
+          update: (id: number, payload: Record<string, unknown>, user: RequestUser) => this.rules!.updateCampaignHomebrewFromProposal(id, payload, user),
+          remove: () => Promise.reject(new BadRequestException('Homebrew archive proposals are not supported yet')),
         };
     }
   }
