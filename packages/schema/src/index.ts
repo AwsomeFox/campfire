@@ -1381,7 +1381,12 @@ export type ScheduledSession = z.infer<typeof ScheduledSession>;
  * adopt a night into someone else's series, or a `roomId` that skipped its
  * double-booking check.
  */
-const ORGANIZED_PLAY_OMIT = {
+/**
+ * Organized-play decoration keys that campaign export/import deliberately does
+ * not carry (issue #1548). Shared by {@link ScheduledSessionCreate}'s omit list
+ * and {@link toScheduledSessionExport}'s strip list so the two cannot drift.
+ */
+export const ORGANIZED_PLAY_OMIT = {
   seriesId: true,
   occurrenceIndex: true,
   venueId: true,
@@ -1503,6 +1508,49 @@ export type RsvpSet = z.infer<typeof RsvpSet>;
 
 export const ScheduledSessionWithRsvps = ScheduledSession.extend({ rsvps: z.array(SessionRsvp) });
 export type ScheduledSessionWithRsvps = z.infer<typeof ScheduledSessionWithRsvps>;
+
+/**
+ * Campaign-export shape for a scheduled session (issue #1548).
+ *
+ * `CampaignsService.importCampaign` has never restored organized-play decoration —
+ * it inserts scheduled sessions from a closed literal that writes only the legacy
+ * fields (`scheduledAt`, `durationMinutes`, `title`, `location`, `notes`, `status`,
+ * `cancelledAt`, `cancellationReason`), the same "drop install-local/cross-collection
+ * ids" discipline it already applies to `cancelledBy` and `sessionId`. A campaign
+ * export carrying `seriesId`/`venueId`/`roomId`/etc. anyway made an organized-play
+ * campaign's export LOOK like a full backup of its scheduling, when restoring it
+ * silently flattened every occurrence into a one-off — the export promised more than
+ * import could ever deliver. Per the maintainer's ruling on #1548: campaign
+ * export/import cares about the campaign, not install-level scheduling/venue/room
+ * resources, so the fix is to stop exporting decoration import was never going to
+ * restore, rather than teach import to restore it.
+ *
+ * Reuses {@link ORGANIZED_PLAY_OMIT} — the exact field set import already never
+ * reads on the CREATE path — rather than a second hand-maintained list that could
+ * drift from it.
+ */
+export const ScheduledSessionExport = ScheduledSessionWithRsvps.omit(ORGANIZED_PLAY_OMIT);
+export type ScheduledSessionExport = z.infer<typeof ScheduledSessionExport>;
+
+/**
+ * Drop organized-play decoration from a scheduled-session row for campaign export.
+ *
+ * Deliberately does **not** re-validate through {@link ScheduledSessionExport}.parse:
+ * `importCampaign` writes schedule fields through a closed insert literal into SQLite
+ * without enforcing Zod bounds (e.g. title length, RSVP status enum), so a previously
+ * exportable imported campaign can hold out-of-schema values. Re-parsing here would
+ * turn every JSON / mdzip / export-preview path into a 500 for those campaigns.
+ * Export's job is to project trusted stored rows; validation belongs at write boundaries.
+ */
+export function toScheduledSessionExport(
+  row: ScheduledSessionWithRsvps,
+): ScheduledSessionExport {
+  const out: Record<string, unknown> = { ...row };
+  for (const key of Object.keys(ORGANIZED_PLAY_OMIT) as Array<keyof typeof ORGANIZED_PLAY_OMIT>) {
+    delete out[key];
+  }
+  return out as ScheduledSessionExport;
+}
 
 /**
  * Paginated past-schedule list (issue #612). Most-recent ended nights first.
@@ -2683,6 +2731,54 @@ export const InboxResolve = z
   .refine((v) => (v.entityType == null) === (v.entityId == null), {
     message: 'entityType and entityId must be provided together',
   });
+
+/**
+ * Inbox sweep (issue #1644) — server-side orchestration that reads a campaign's OPEN
+ * scribe-inbox captures, infers create/update/dismiss, and files PENDING PROPOSALS ONLY
+ * (never a direct canon write). Entity types are deliberately the four bootstrapped by
+ * `get_campaign_summary`/`CampaignsService.summary` — objective ticks, HP, and combat
+ * writes are explicitly unsupported and always skip with a stated reason.
+ */
+export const InboxSweepEntityType = z.enum(['quest', 'npc', 'location', 'character']);
+export type InboxSweepEntityType = z.infer<typeof InboxSweepEntityType>;
+
+/** Per-item outcome (issue #1644) — must survive to the caller, never just logged. */
+export const InboxSweepOutcome = z.enum(['proposed', 'skipped', 'errored']);
+export type InboxSweepOutcome = z.infer<typeof InboxSweepOutcome>;
+
+export const InboxSweepItemResult = z.object({
+  noteId: Id,
+  outcome: InboxSweepOutcome,
+  entityType: InboxSweepEntityType.nullable(),
+  entityId: Id.nullable(),
+  proposalId: Id.nullable(),
+  reason: z.string().min(1),
+});
+export type InboxSweepItemResult = z.infer<typeof InboxSweepItemResult>;
+
+/** `disabled` = no AI provider configured for the campaign (campaign or server default). */
+export const InboxSweepJobStatus = z.enum(['succeeded', 'disabled']);
+export type InboxSweepJobStatus = z.infer<typeof InboxSweepJobStatus>;
+
+export const InboxSweepJob = z.object({
+  id: Id,
+  campaignId: Id,
+  status: InboxSweepJobStatus,
+  itemsTotal: z.number().int().nonnegative(),
+  itemsProposed: z.number().int().nonnegative(),
+  itemsSkipped: z.number().int().nonnegative(),
+  itemsErrored: z.number().int().nonnegative(),
+  detail: z.string(),
+  createdBy: z.string(),
+  createdAt: z.string(),
+});
+export type InboxSweepJob = z.infer<typeof InboxSweepJob>;
+
+export const InboxSweepResult = z.object({
+  job: InboxSweepJob,
+  items: z.array(InboxSweepItemResult),
+});
+export type InboxSweepResult = z.infer<typeof InboxSweepResult>;
 
 /** Default page size for notes + inbox list endpoints (issue #608). */
 export const NOTES_LIST_DEFAULT_LIMIT = 50;

@@ -33,6 +33,14 @@ import { hashProposalSnapshot } from './proposal-snapshot';
 // proposable for Co-DM drafting and are create-only in v1 (direct faction writes remain
 // DM-gated; the proposal queue is the co-DM intermediary).
 export type ProposableEntityType = Exclude<EntityType, 'campaign'> | 'map' | 'story_beat' | 'rule_entry';
+type ProposalTx = Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
+type ProposalDb = DrizzleDb | ProposalTx;
+type ProposalAttribution = {
+  proposer: string;
+  proposerUserId?: string;
+  proposerToken?: string | null;
+  generationProvenance?: AiGenerationProvenance | null;
+};
 
 const PROPOSABLE_ENTITY_TYPES: ProposableEntityType[] = ['quest', 'npc', 'location', 'session', 'character', 'encounter', 'map', 'faction', 'story_beat', 'rule_entry'];
 
@@ -183,6 +191,108 @@ export class ProposalRecordsService {
   }
 
   /**
+   * Create a proposal and a caller-owned sidecar row in one DB transaction.
+   * Audit and notifications intentionally remain post-commit, matching `create()`.
+   */
+  async createWithTransaction<T>(
+    campaignId: number,
+    entityType: ProposableEntityType,
+    entityId: number | null,
+    action: ProposalAction,
+    payload: Record<string, unknown>,
+    user: RequestUser,
+    role: Role,
+    work: (tx: ProposalTx, proposalRow: typeof proposals.$inferSelect) => T,
+    attribution?: ProposalAttribution,
+  ): Promise<{ proposal: Proposal; result: T }> {
+    const attr = (attribution ?? user.proposalAttribution) as ProposalAttribution | undefined;
+
+    const { row, result } = this.db.transaction((tx) => {
+      const row = this.insertProposalRow(tx, campaignId, entityType, entityId, action, payload, user, role, attr);
+      const result = work(tx, row);
+      return { row, result };
+    });
+
+    await this.recordCreatedSideEffects(row, campaignId, entityType, entityId, action, user, role);
+    return { proposal: projectProposal(toDomain(row), role), result };
+  }
+
+  private insertProposalRow(
+    db: ProposalDb,
+    campaignId: number,
+    entityType: ProposableEntityType,
+    entityId: number | null,
+    action: ProposalAction,
+    payload: Record<string, unknown>,
+    user: RequestUser,
+    role: Role,
+    attr: ProposalAttribution | undefined,
+  ): typeof proposals.$inferSelect {
+    const snapshot =
+      action !== 'create' && entityId !== null
+        ? this.captureAuthorizedSnapshotInDb(db, campaignId, entityType, entityId, role)
+        : null;
+    const baseUpdatedAt =
+      snapshot !== null && typeof snapshot.updatedAt === 'string' ? snapshot.updatedAt : null;
+    const baseSnapshotHash = snapshot !== null ? hashProposalSnapshot(snapshot) : null;
+    const ts = nowIso();
+
+    return db
+      .insert(proposals)
+      .values({
+        campaignId,
+        entityType,
+        entityId,
+        action,
+        payload: toJsonText(payload),
+        snapshot: snapshot === null ? null : toJsonText(snapshot),
+        baseUpdatedAt,
+        baseSnapshotHash,
+        proposer: attr ? attr.proposer : user.name,
+        proposerUserId: attr?.proposerUserId ?? user.id,
+        proposerToken: attr ? (attr.proposerToken ?? null) : user.tokenContext ? user.tokenContext.name : null,
+        generationProvenance: attr?.generationProvenance ? toJsonText(attr.generationProvenance) : null,
+        status: 'pending',
+        resolvedBy: '',
+        note: '',
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .returning()
+      .get();
+  }
+
+  private async recordCreatedSideEffects(
+    row: typeof proposals.$inferSelect,
+    campaignId: number,
+    entityType: ProposableEntityType,
+    entityId: number | null,
+    action: ProposalAction,
+    user: RequestUser,
+    role: Role,
+  ): Promise<void> {
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'proposal.create',
+      entityType: row.entityType,
+      entityId: row.id,
+      campaignId,
+      detail: `${action} ${entityType}${entityId ? ` #${entityId}` : ''}`,
+    });
+
+    const roles = await this.notifications.memberRoles(campaignId);
+    for (const [memberId, memberRole] of roles) {
+      if (memberRole !== 'dm' || String(memberId) === user.id) continue;
+      await this.notifications.notifyUser(memberId, campaignId, user, {
+        type: 'proposal_submitted',
+        title: `${user.name || 'A member'} proposed a ${action} to a ${entityType}`,
+        actorName: user.name,
+      });
+    }
+  }
+
+  /**
    * Load the target's current authorized snapshot for approve-time stale checks
    * (issue #681). Returns null when the entity no longer exists (deleted).
    */
@@ -313,6 +423,137 @@ export class ProposalRecordsService {
         const [row] = await this.db.select().from(ruleEntries).where(and(eq(ruleEntries.id, entityId), eq(ruleEntries.campaignId, campaignId))).limit(1);
         if (!row) throw new NotFoundException(`Homebrew rule entry ${entityId} not found`);
         return { id: row.id, slug: row.slug, name: row.name, type: row.type, summary: row.summary, body: row.body, dataJson: row.dataJson, rightsStatus: row.rightsStatus, license: row.license, attribution: row.attribution, author: row.author, sourceUrl: row.sourceUrl, iconSlug: row.iconSlug, updatedAt: row.updatedAt, archivedAt: row.archivedAt };
+      }
+    }
+  }
+
+  private captureAuthorizedSnapshotInDb(
+    db: ProposalDb,
+    campaignId: number,
+    entityType: ProposableEntityType,
+    entityId: number,
+    role: Role,
+  ): Record<string, unknown> | null {
+    switch (entityType) {
+      case 'quest': {
+        const row = db
+          .select()
+          .from(quests)
+          .where(and(eq(quests.id, entityId), eq(quests.campaignId, campaignId), notDeleted(quests.deletedAt)))
+          .limit(1)
+          .get();
+        if (!row) throw new NotFoundException(`Quest ${entityId} not found`);
+        const domain = questToDomain(row);
+        if (!isVisibleTo(domain, role)) throw new NotFoundException(`Quest ${entityId} not found`);
+        return { ...domain };
+      }
+      case 'npc': {
+        const row = db
+          .select()
+          .from(npcs)
+          .where(and(eq(npcs.id, entityId), eq(npcs.campaignId, campaignId), notDeleted(npcs.deletedAt)))
+          .limit(1)
+          .get();
+        if (!row) throw new NotFoundException(`NPC ${entityId} not found`);
+        const domain = npcToDomain(row);
+        if (!isVisibleTo(domain, role)) throw new NotFoundException(`NPC ${entityId} not found`);
+        return { ...domain };
+      }
+      case 'location': {
+        const row = db
+          .select()
+          .from(locations)
+          .where(and(eq(locations.id, entityId), eq(locations.campaignId, campaignId), notDeleted(locations.deletedAt)))
+          .limit(1)
+          .get();
+        if (!row) throw new NotFoundException(`Location ${entityId} not found`);
+        if (role !== 'dm' && row.status === 'unexplored') {
+          throw new NotFoundException(`Location ${entityId} not found`);
+        }
+        return { ...locationToDomain(row) };
+      }
+      case 'session': {
+        const row = db
+          .select()
+          .from(sessions)
+          .where(and(eq(sessions.id, entityId), eq(sessions.campaignId, campaignId), notDeleted(sessions.deletedAt)))
+          .limit(1)
+          .get();
+        if (!row) throw new NotFoundException(`Session ${entityId} not found`);
+        return { ...sessionToDomain(row) };
+      }
+      case 'character': {
+        const row = db
+          .select()
+          .from(characters)
+          .where(and(eq(characters.id, entityId), eq(characters.campaignId, campaignId), notDeleted(characters.deletedAt)))
+          .limit(1)
+          .get();
+        if (!row) throw new NotFoundException(`Character ${entityId} not found`);
+        return { ...characterToDomain(row) };
+      }
+      case 'encounter':
+      case 'map':
+        return null;
+      case 'faction': {
+        const row = db
+          .select()
+          .from(factions)
+          .where(and(eq(factions.id, entityId), eq(factions.campaignId, campaignId)))
+          .limit(1)
+          .get();
+        if (!row) throw new NotFoundException(`Faction ${entityId} not found`);
+        if (role !== 'dm' && row.hidden) throw new NotFoundException(`Faction ${entityId} not found`);
+        return { ...row };
+      }
+      case 'story_beat': {
+        const row = db
+          .select()
+          .from(storyBeats)
+          .where(and(eq(storyBeats.id, entityId), eq(storyBeats.campaignId, campaignId)))
+          .limit(1)
+          .get();
+        if (!row) throw new NotFoundException(`Story beat ${entityId} not found`);
+        return {
+          id: row.id,
+          campaignId: row.campaignId,
+          arcId: row.arcId,
+          title: row.title,
+          body: row.body,
+          status: row.status,
+          sortOrder: row.sortOrder,
+          sessionId: row.sessionId,
+          questId: row.questId,
+          encounterId: row.encounterId,
+          createdAt: row.createdAt,
+          updatedAt: row.updatedAt,
+        };
+      }
+      case 'rule_entry': {
+        const row = db
+          .select()
+          .from(ruleEntries)
+          .where(and(eq(ruleEntries.id, entityId), eq(ruleEntries.campaignId, campaignId)))
+          .limit(1)
+          .get();
+        if (!row) throw new NotFoundException(`Homebrew rule entry ${entityId} not found`);
+        return {
+          id: row.id,
+          slug: row.slug,
+          name: row.name,
+          type: row.type,
+          summary: row.summary,
+          body: row.body,
+          dataJson: row.dataJson,
+          rightsStatus: row.rightsStatus,
+          license: row.license,
+          attribution: row.attribution,
+          author: row.author,
+          sourceUrl: row.sourceUrl,
+          iconSlug: row.iconSlug,
+          updatedAt: row.updatedAt,
+          archivedAt: row.archivedAt,
+        };
       }
     }
   }
