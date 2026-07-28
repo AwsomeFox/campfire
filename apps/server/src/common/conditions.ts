@@ -145,6 +145,36 @@ export function conditionWriteSetFromInstances(
   return { conditions: toJsonText(deriveConditionNames(bounded)), conditionInstances: toJsonText(bounded) };
 }
 
+/**
+ * Sheet → live combatant when the sheet already computed authoritative instances
+ * (e.g. `adjustConditionLevel` moving Exhaustion stacks — issue #1643).
+ *
+ * Name-authoritative reconcile (`conditionWriteSetFromNames`) deliberately PRESERVES a
+ * surviving combatant instance's `stacks`, which is correct for presence-only sheet
+ * patches but wrong when the sheet just changed the level: an existing Exhaustion would
+ * keep its old stacks, and a newly added one would land at stacks: 1 even if the sheet
+ * was set to 3. Here the sheet's instances are SoT for presence and stacks; combat-scoped
+ * fields (duration, save timing, sourceCombatantId, …) on a matching prior combatant
+ * instance are kept so a mid-fight timer isn't wiped by a level-only sheet write.
+ */
+export function conditionWriteSetMergingSheetStacks(
+  sheetInstances: readonly ConditionInstance[],
+  priorCombatantInstancesText: string | null,
+): { conditions: string; conditionInstances: string } {
+  const prior = parseConditionInstancesText(priorCombatantInstancesText);
+  const priorByKey = new Map(prior.map((i) => [i.name.trim().toLowerCase(), i] as const));
+  const merged: ConditionInstance[] = [];
+  const seen = new Set<string>();
+  for (const sheetInst of sheetInstances) {
+    const key = sheetInst.name.trim().toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    const priorInst = priorByKey.get(key);
+    merged.push(priorInst ? { ...priorInst, stacks: sheetInst.stacks } : sheetInst);
+  }
+  return conditionWriteSetFromInstances(merged);
+}
+
 /* ── the sheet boundary (issue #1047) ────────────────────────────────────────────────────
  *
  * `characters` carries the SAME `ConditionInstance` shape as `combatants`, deliberately —

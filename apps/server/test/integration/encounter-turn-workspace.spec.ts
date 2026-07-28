@@ -784,13 +784,13 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
       expect(JSON.parse(row.turnState ?? '{}').used?.action ?? 0).toBe(0);
     });
 
-    it('moveFt rejects movement past the adapter movement slot max, but a negative correction still floors at 0', async () => {
+    it('moveFt tracks movement past the adapter default, while a negative correction still floors at 0', async () => {
       dataDir = makeTempDataDir();
       const { orm, service } = build();
       const { encounterId, c1 } = seed(orm);
 
-      const body = await expectRejected(service.updateCombatantTurnState(encounterId, c1, { moveFt: 45 }, dmUser, 'dm'));
-      expect(body).toMatchObject({ code: 'action_economy_exhausted', slot: 'movement', remaining: 30, max: 30 });
+      const moved = await service.updateCombatantTurnState(encounterId, c1, { moveFt: 45 }, dmUser, 'dm');
+      expect(moved.turnState.movementUsedFt).toBe(45);
 
       // A decrement (correcting overcounted movement) is never rejected — floors at 0.
       const corrected = await service.updateCombatantTurnState(encounterId, c1, { moveFt: -100 }, dmUser, 'dm');

@@ -32,6 +32,7 @@ function pc(partial: Partial<Character> & Pick<Character, 'id' | 'name' | 'statu
     deathSaveSuccesses: 0,
     deathSaveFailures: 0,
     conditions: [],
+    conditionInstances: [],
     saveProficiencies: [],
     skills: {},
     actions: [],

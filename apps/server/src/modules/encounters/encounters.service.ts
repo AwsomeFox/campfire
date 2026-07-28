@@ -4918,10 +4918,13 @@ export class EncountersService {
       // derived above (outside the transaction, unlike the resolver's in-transaction lookup —
       // different structural shape, same rule per #1637/#1674's shared reasoning).
       //
-      // Convention (#1570/#1571, extended by #1637): spends error, restores clamp. `useSlot` /
-      // `setSlotUsed` past the slot's max is a 400 carrying `code`/`slot`/`remaining`/`max` in
-      // the exact shape #1637 established; `releaseSlot` / a negative `moveFt` correction keeps
-      // flooring at 0 with no error, matching `applySpellSlotDelta`'s refund asymmetry.
+      // Convention (#1570/#1571, extended by #1637): count-based spends error, restores clamp.
+      // `useSlot` / `setSlotUsed` past the slot's max is a 400 carrying
+      // `code`/`slot`/`remaining`/`max` in the exact shape #1637 established; `releaseSlot`
+      // keeps flooring at 0 with no error, matching `applySpellSlotDelta`'s refund asymmetry.
+      // Movement is tracked as a distance, not a fixed spendable slot: adapter movement `max`
+      // is an advisory/default display value and cannot represent per-combatant speed, Dash,
+      // or gridless systems where `max === 0` means "undefined/unbounded".
       const hasLegendaryActions = legendaryMax > 0;
       const rejectSlotOverflow = (slot: string, usedBefore: number, max: number): never => {
         const remaining = Math.max(0, max - usedBefore);
@@ -4974,12 +4977,6 @@ export class EncountersService {
       if (patch.resetMovement) turnState.movementUsedFt = 0;
       if (patch.moveFt !== undefined) {
         const next = turnState.movementUsedFt + patch.moveFt;
-        if (patch.moveFt > 0) {
-          const movementSlot = actionEconomyForAdapter(adapter).slots.find((s) => s.kind === 'movement');
-          if (movementSlot && next > movementSlot.max) {
-            rejectSlotOverflow(movementSlot.key, turnState.movementUsedFt, movementSlot.max);
-          }
-        }
         turnState.movementUsedFt = Math.max(0, next);
       }
 

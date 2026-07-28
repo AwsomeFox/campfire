@@ -1,5 +1,12 @@
 {
   "characters": {
+    "conditionLevel": {
+      "raise": "زيادة",
+      "lower": "خفض",
+      "level": "{{level}} من {{max}} — مستوى {{name}}",
+      "count": "{{level}}/{{max}}",
+      "updateError": "تعذّر تحديث {{name}}."
+    },
     "resources": {
       "spend": "إنفاق",
       "restore": "استعادة",
