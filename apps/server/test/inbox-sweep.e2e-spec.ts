@@ -228,6 +228,49 @@ describe('inbox sweep (e2e)', () => {
     expect(npcProposals).toHaveLength(1);
   });
 
+  it('does not 500 when two sweeps race on the same dismiss/skip item', async () => {
+    const campaignId = await newCampaign('Sweep Concurrent Dismiss');
+    const noteId = await submitInbox(campaignId, 'Just a joke about the tavern cat — no canon change.');
+    classifier.script.set('Just a joke about the tavern cat — no canon change.', {
+      action: 'dismiss',
+      entityType: null,
+      targetId: null,
+      fields: {},
+      reason: 'no canon change needed',
+    });
+
+    let seen = 0;
+    let release!: () => void;
+    const bothClassified = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    classifier.beforeReturn = async () => {
+      seen += 1;
+      if (seen === 2) release();
+      await bothClassified;
+    };
+
+    const [first, second] = await Promise.all([
+      request(server).post(`/api/v1/campaigns/${campaignId}/inbox/sweep`).set(dm),
+      request(server).post(`/api/v1/campaigns/${campaignId}/inbox/sweep`).set(dm),
+    ]);
+
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(201);
+    expect(classifier.calls).toHaveLength(2);
+    expect([first.body.job.itemsSkipped, second.body.job.itemsSkipped].some((n) => n >= 1)).toBe(true);
+
+    const inbox = await request(server).get(`/api/v1/campaigns/${campaignId}/inbox?resolved=true`).set(dm);
+    const resolved = inbox.body.items.find((i: { id: number }) => i.id === noteId);
+    expect(resolved).toBeDefined();
+    expect(resolved.resolved).toBe(true);
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const ledger = await db.select().from(inboxSweepItems).where(eq(inboxSweepItems.noteId, noteId));
+    expect(ledger).toHaveLength(1);
+    expect(ledger[0].outcome).toBe('skipped');
+  });
+
   it('withholds external-provider captures until the author has external AI consent', async () => {
     const campaignId = await newCampaign('Sweep External Consent');
     const noteId = await submitInbox(campaignId, 'Please add a quest from a non-consenting author.');

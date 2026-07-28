@@ -38,6 +38,20 @@ const ENTITY_SCHEMAS: Record<InboxSweepEntityType, { create: z.ZodTypeAny; updat
 const UNSUPPORTED_WRITE_REASON =
   'objective ticks, HP changes, and combat/initiative writes are not handled by the inbox sweep — resolve this item directly';
 
+/**
+ * better-sqlite3 throws a synchronous Error with `.code` set to SQLITE_CONSTRAINT_*
+ * on a unique-index race. Concurrent sweeps can both miss the ledger row, classify the
+ * same open note as skip/dismiss, and race the UNIQUE(campaign_id, note_id) insert —
+ * recover via findLedger instead of letting that surface as a 500 (same local-helper
+ * convention as encounters/members/rules/organized-play).
+ */
+function isUniqueConstraintError(err: unknown): boolean {
+  const code = (err as { code?: string } | undefined)?.code;
+  if (code === 'SQLITE_CONSTRAINT_UNIQUE' || code === 'SQLITE_CONSTRAINT_PRIMARYKEY') return true;
+  const message = err instanceof Error ? err.message : '';
+  return /UNIQUE constraint failed/i.test(message);
+}
+
 type InboxSweepEgress = 'external' | 'local';
 
 interface ExternalAiGate {
@@ -269,16 +283,12 @@ export class InboxSweepService {
         classification.action === 'unsupported'
           ? classification.reason || UNSUPPORTED_WRITE_REASON
           : `entity type "${classification.entityType ?? 'unknown'}" is not supported by the inbox sweep`;
-      await this.persistLedger(campaignId, jobId, noteId, 'skipped', null, null, null, reason);
-      await this.tryResolve(noteId, user, role, reason, null, null);
-      return { noteId, outcome: 'skipped', entityType: null, entityId: null, proposalId: null, reason };
+      return this.recordSkip(campaignId, jobId, noteId, reason, user, role);
     }
 
     if (classification.action === 'dismiss') {
       const reason = classification.reason || 'no canon change needed';
-      await this.persistLedger(campaignId, jobId, noteId, 'skipped', null, null, null, reason);
-      await this.tryResolve(noteId, user, role, reason, null, null);
-      return { noteId, outcome: 'skipped', entityType: null, entityId: null, proposalId: null, reason };
+      return this.recordSkip(campaignId, jobId, noteId, reason, user, role);
     }
 
     // action is 'create' or 'update', entityType is one of the four supported types.
@@ -347,6 +357,40 @@ export class InboxSweepService {
       const reason = `failed to file ${classification.action} proposal: ${err instanceof Error ? err.message : String(err)}`;
       return { noteId, outcome: 'errored', entityType: null, entityId: null, proposalId: null, reason };
     }
+  }
+
+  /**
+   * Persist a skipped ledger row + resolve the inbox item. Concurrent sweeps can race
+   * the UNIQUE(campaign_id, note_id) insert on the skip/dismiss path the same way the
+   * create/update path races proposal+ledger — recover from the winner's row instead of
+   * letting the constraint error abort the whole job.
+   */
+  private async recordSkip(
+    campaignId: number,
+    jobId: number,
+    noteId: number,
+    reason: string,
+    user: RequestUser,
+    role: Role,
+  ): Promise<InboxSweepItemResult> {
+    try {
+      await this.persistLedger(campaignId, jobId, noteId, 'skipped', null, null, null, reason);
+    } catch (err) {
+      const concurrent = await this.findLedger(campaignId, noteId);
+      if (concurrent) {
+        const link = this.resolveLinkForPrior(concurrent);
+        await this.tryResolve(noteId, user, role, concurrent.reason, link.entityType, link.entityId);
+        return this.resultFromLedger(noteId, concurrent);
+      }
+      if (!isUniqueConstraintError(err)) {
+        this.logger.warn(
+          `Failed to persist skip ledger for inbox item ${noteId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      throw err;
+    }
+    await this.tryResolve(noteId, user, role, reason, null, null);
+    return { noteId, outcome: 'skipped', entityType: null, entityId: null, proposalId: null, reason };
   }
 
   /** Best-effort: the ledger row above is what makes a re-sweep idempotent, not this. */
