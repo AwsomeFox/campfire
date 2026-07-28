@@ -205,7 +205,9 @@ export function ProviderForm({
     setTesting(true);
     setTestResult(null);
     setTestError(null);
-    feedback.reset();
+    // Test connection is non-mutating — keep/recompute dirty so unsaved drafts
+    // do not look idle/discarded while the probe runs.
+    feedback.syncDirty(isProviderDraftDirty(provider, { providerType, model, baseUrl, apiKey }));
     try {
       const r = await api.post<AiProviderTestResult>(`${API}${basePath}/test`, body);
       if (currentDraftFingerprint.current === fingerprint) setTestResult(r);

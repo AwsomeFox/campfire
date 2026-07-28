@@ -41,24 +41,37 @@ export function StatusHeader({
   const [name, setName] = useState(campaign.name);
   const [description, setDescription] = useState(campaign.description);
   const [dangerLevel, setDangerLevel] = useState<DangerLevel>(campaign.dangerLevel);
+  // Local baseline so a successful PATCH clears dirty even if the parent summary
+  // reload is slow or fails (DashboardPage fires load() without awaiting it).
+  const [baseline, setBaseline] = useState({
+    name: campaign.name,
+    description: campaign.description,
+    dangerLevel: campaign.dangerLevel,
+  });
   const feedback = useSaveFeedback('Campaign details');
   const saving = feedback.state === 'saving';
 
   // Inline editor and Settings share the same durable explicit-save lifecycle.
-  const dirty = isCampaignMetadataDirty(campaign, { name, description, dangerLevel });
+  const dirty = isCampaignMetadataDirty(baseline, { name, description, dangerLevel });
   // Issue #760: block Switch campaign while the inline dashboard editor is dirty.
   useUnsavedWork(`dashboard-metadata:${campaignId}`, editing && dirty);
 
   function startEdit() {
-    setName(campaign.name);
-    setDescription(campaign.description);
-    setDangerLevel(campaign.dangerLevel);
+    const nextBaseline = {
+      name: campaign.name,
+      description: campaign.description,
+      dangerLevel: campaign.dangerLevel,
+    };
+    setBaseline(nextBaseline);
+    setName(nextBaseline.name);
+    setDescription(nextBaseline.description);
+    setDangerLevel(nextBaseline.dangerLevel);
     feedback.reset();
     setEditing(true);
   }
 
   function cancel() {
-    // Reset to baseline so reopening never shows stale edits (issue #750).
+    // Reset to the live campaign prop so reopening never shows stale edits (issue #750).
     setName(campaign.name);
     setDescription(campaign.description);
     setDangerLevel(campaign.dangerLevel);
@@ -74,7 +87,22 @@ export function StatusHeader({
     if (saving) return;
     feedback.begin();
     try {
-      await api.patch(`${API}/campaigns/${campaignId}`, { name: name.trim(), description, dangerLevel });
+      const updated = await api.patch<Campaign>(`${API}/campaigns/${campaignId}`, {
+        name: name.trim(),
+        description,
+        dangerLevel,
+      });
+      // Re-baseline from the persisted response before claiming Saved — do not
+      // wait on the fire-and-forget parent reload.
+      const nextBaseline = {
+        name: updated.name,
+        description: updated.description,
+        dangerLevel: updated.dangerLevel,
+      };
+      setBaseline(nextBaseline);
+      setName(nextBaseline.name);
+      setDescription(nextBaseline.description);
+      setDangerLevel(nextBaseline.dangerLevel);
       feedback.succeed();
       onChange();
     } catch (err) {
@@ -92,9 +120,9 @@ export function StatusHeader({
           name={name}
           description={description}
           dangerLevel={dangerLevel}
-          onNameChange={(value) => { setName(value); feedback.syncDirty(isCampaignMetadataDirty(campaign, { name: value, description, dangerLevel })); }}
-          onDescriptionChange={(value) => { setDescription(value); feedback.syncDirty(isCampaignMetadataDirty(campaign, { name, description: value, dangerLevel })); }}
-          onDangerLevelChange={(value) => { setDangerLevel(value); feedback.syncDirty(isCampaignMetadataDirty(campaign, { name, description, dangerLevel: value })); }}
+          onNameChange={(value) => { setName(value); feedback.syncDirty(isCampaignMetadataDirty(baseline, { name: value, description, dangerLevel })); }}
+          onDescriptionChange={(value) => { setDescription(value); feedback.syncDirty(isCampaignMetadataDirty(baseline, { name, description: value, dangerLevel })); }}
+          onDangerLevelChange={(value) => { setDangerLevel(value); feedback.syncDirty(isCampaignMetadataDirty(baseline, { name, description, dangerLevel: value })); }}
           describedBy={feedback.statusId}
           disabled={saving}
         />

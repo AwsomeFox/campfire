@@ -212,6 +212,8 @@ test.describe('dashboard campaign quick edit (#750)', () => {
     await editor.getByRole('button', { name: 'Save' }).click();
     await expect(editor).toBeVisible();
     await expect(editor.getByRole('status')).toContainText(/Campaign details saved .+2026|Campaign details saved/);
+    // Dirty clears from the PATCH response baseline even if summary reload is slow.
+    await expect(editor.getByRole('button', { name: 'Save' })).toBeDisabled();
     const savedText = await editor.getByRole('status').textContent();
     await page.waitForTimeout(50);
     await expect(editor.getByRole('status')).toHaveText(savedText ?? '');
@@ -219,6 +221,7 @@ test.describe('dashboard campaign quick edit (#750)', () => {
     // The next edit clears the durable success and returns to dirty, without another request.
     await nameField.fill('E2E756 saved name revised');
     await expect(editor.getByRole('status')).toContainText('unsaved changes');
+    await expect(editor.getByRole('button', { name: 'Save' })).toBeEnabled();
     expect(calls).toBe(2);
     await page.unroute(`**/api/v1/campaigns/${campaign.id}`);
     await editor.getByRole('button', { name: 'Cancel' }).click();
