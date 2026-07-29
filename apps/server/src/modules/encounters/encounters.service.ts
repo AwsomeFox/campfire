@@ -5887,7 +5887,8 @@ export class EncountersService {
     const batchPlan = fromJsonText<{ placements: Array<{ combatantId:number; x:number; y:number }>; mapAspect: number }>(batch.planJson, { placements: [], mapAspect: 1 });
     const plan = batchPlan.placements;
     const result = { batchId: batch.id, undoToken: batch.previewToken, placements: plan };
-    this.db.transaction(tx => {
+    try {
+      this.db.transaction(tx => {
       for (const slice of before) { const r = tx.select().from(combatants).where(eq(combatants.id, slice.id)).get(); if (!r || r.tokenX !== slice.tokenX || r.tokenY !== slice.tokenY || r.tokenSize !== slice.tokenSize) throw new ConflictException('Token positions changed; refresh preview'); }
       // Preview's obstacle snapshot is only advisory: an unselected token may have
       // moved while the operator reviewed the plan. Re-check it under the same write
@@ -5915,7 +5916,14 @@ export class EncountersService {
       this.audit.logInTx(tx, { actor: auditActor(user), actorRole: role, action: 'encounter.token_batch.apply', entityType: 'encounter', entityId: encounterId, campaignId: batch.campaignId, detail: `${plan.length} token placements` });
       const changed = tx.update(encounterTokenBatches).set({ status: 'applied', applyKey: input.idempotencyKey, afterJson: toJsonText(plan), resultJson: toJsonText(result), appliedAt: nowIso() }).where(and(eq(encounterTokenBatches.id, batch.id), eq(encounterTokenBatches.status, 'previewed'))).run();
       if (changed.changes !== 1) throw new ConflictException('Token batch was applied concurrently');
-    });
+      });
+    } catch (err) {
+      // Two concurrent applies with the same idempotency key for different previews race
+      // past the keyOwner pre-check; convert the partial unique-index violation to the
+      // deterministic conflict response instead of a 500.
+      if (isUniqueConstraintError(err)) throw new ConflictException('Idempotency key was already used for a different token batch');
+      throw err;
+    }
     this.emitEncounterEvent('encounter.updated', batch.campaignId, encounterId, false);
     return result;
   }
