@@ -1892,7 +1892,8 @@ function boundedJsonProjection(text: string, maxChars: number): { text: string; 
   } catch {
     return null;
   }
-  const complete = JSON.stringify(parsed);
+  const complete = tryJsonStringify(parsed);
+  if (complete === undefined) return null;
   if (complete.length <= maxChars) return { text: complete, truncated: false };
   const budget = { attempts: 0, exhausted: false };
   const projected = projectJsonValue(parsed, maxChars, budget);
@@ -1900,7 +1901,8 @@ function boundedJsonProjection(text: string, maxChars: number): { text: string; 
   // otherwise multiply the binary-search work at each level; use the existing raw-prefix
   // fallback when the fixed projection budget is exhausted.
   if (budget.exhausted) return null;
-  return { text: JSON.stringify(projected), truncated: true };
+  const projectedText = tryJsonStringify(projected);
+  return projectedText === undefined ? null : { text: projectedText, truncated: true };
 }
 
 const JSON_PROJECTION_MAX_DEPTH = 6;
@@ -1908,19 +1910,37 @@ const JSON_PROJECTION_MAX_ATTEMPTS = 4_096;
 
 type JsonProjectionBudget = { attempts: number; exhausted: boolean };
 
+/** JSON.stringify can overflow on deeply nested untrusted JSON; callers use the bounded raw fallback then. */
+function tryJsonStringify(value: unknown): string | undefined {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return undefined;
+  }
+}
+
 function projectJsonValue(value: unknown, maxChars: number, budget: JsonProjectionBudget, depth = 0): unknown {
   if (budget.exhausted || depth > JSON_PROJECTION_MAX_DEPTH || ++budget.attempts > JSON_PROJECTION_MAX_ATTEMPTS) {
     budget.exhausted = true;
     return null;
   }
-  const serialized = JSON.stringify(value);
+  const serialized = tryJsonStringify(value);
+  if (serialized === undefined) {
+    budget.exhausted = true;
+    return null;
+  }
   if (serialized !== undefined && serialized.length <= maxChars) return value;
   if (typeof value === 'string') {
     let low = 0;
     let high = value.length;
     while (low < high) {
       const middle = Math.ceil((low + high) / 2);
-      if (JSON.stringify(value.slice(0, middle)).length <= maxChars) low = middle;
+      const candidate = tryJsonStringify(value.slice(0, middle));
+      if (candidate === undefined) {
+        budget.exhausted = true;
+        return '';
+      }
+      if (candidate.length <= maxChars) low = middle;
       else high = middle - 1;
     }
     return value.slice(0, low);
@@ -1929,7 +1949,12 @@ function projectJsonValue(value: unknown, maxChars: number, budget: JsonProjecti
     const projected: unknown[] = [];
     for (const child of value) {
       const exact = [...projected, child];
-      if (JSON.stringify(exact).length <= maxChars) {
+      const rendered = tryJsonStringify(exact);
+      if (rendered === undefined) {
+        budget.exhausted = true;
+        return projected;
+      }
+      if (rendered.length <= maxChars) {
         projected.push(child);
         continue;
       }
@@ -1949,7 +1974,12 @@ function projectJsonValue(value: unknown, maxChars: number, budget: JsonProjecti
     const projected: Record<string, unknown> = {};
     for (const [key, child] of Object.entries(value)) {
       const exact = { ...projected, [key]: child };
-      if (JSON.stringify(exact).length <= maxChars) {
+      const rendered = tryJsonStringify(exact);
+      if (rendered === undefined) {
+        budget.exhausted = true;
+        return projected;
+      }
+      if (rendered.length <= maxChars) {
         projected[key] = child;
         continue;
       }
@@ -1984,7 +2014,11 @@ function projectChildWithinBudget(
     const middle = Math.floor((low + high) / 2);
     const candidate = projectJsonValue(value, middle, budget, depth);
     if (budget.exhausted) return undefined;
-    const rendered = JSON.stringify(container(candidate));
+    const rendered = tryJsonStringify(container(candidate));
+    if (rendered === undefined) {
+      budget.exhausted = true;
+      return undefined;
+    }
     if (rendered !== undefined && rendered.length <= maxChars) {
       best = candidate;
       low = middle + 1;

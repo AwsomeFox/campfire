@@ -131,9 +131,10 @@ describe('untrusted AI prompt data fencing (#1496)', () => {
   });
 
   it('falls back to the bounded raw prefix for deeply nested oversized JSON', () => {
-    let nested: unknown = 'x'.repeat(MAX_UNTRUSTED_PROMPT_DATA_CHARS + 1);
-    for (let depth = 0; depth < 10; depth += 1) nested = { [`level${depth}`]: nested };
-    const payload = JSON.stringify(nested);
+    const depth = 10_000;
+    const payload = '{"level":'.repeat(depth)
+      + JSON.stringify('x'.repeat(MAX_UNTRUSTED_PROMPT_DATA_CHARS + 1))
+      + '}'.repeat(depth);
 
     const visible = visibleUntrustedPromptData(payload);
     const fenced = wrapUntrustedPromptData(payload);
