@@ -75,7 +75,7 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
 
     const npcRes = await dmAgent
       .post(`/api/v1/campaigns/${campaignId}/npcs`)
-      .send({ name: 'Bartender', locationId, factionId, dmSecret: 'secretly a lich' });
+      .send({ name: 'Bartender', locationId, factionId, disposition: 'hostile', dmSecret: 'secretly a lich' });
     npcId = npcRes.body.id;
 
     const questRes = await dmAgent
@@ -119,6 +119,11 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
       .post(`/api/v1/campaigns/${campaignId}/encounters`)
       .send({ name: 'Goblin Ambush', locationId, questId, sessionId });
     await dmAgent.post(`/api/v1/encounters/${encRes.body.id}/combatants`).send({ kind: 'monster', name: 'Goblin', hpMax: 7 });
+    const npcCombatant = await dmAgent
+      .post(`/api/v1/encounters/${encRes.body.id}/combatants`)
+      .send({ kind: 'npc', npcId, hpMax: 10 });
+    expect(npcCombatant.status).toBe(201);
+    expect(npcCombatant.body.npcDispositionSnapshot).toBe('hostile');
 
     await dmAgent
       .post(`/api/v1/campaigns/${campaignId}/notes`)
@@ -192,6 +197,10 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
     expect(hpDrop.status).toBe(201);
     expect(hpDrop.body.deathState).toBe('dying');
     const sourceHero = (await dmAgent.get(`/api/v1/characters/${heroId}`)).body;
+    // The clone begins a new encounter, so its NPC combatant must use this
+    // current allegiance rather than the historical hostile snapshot.
+    const npcPatch = await dmAgent.patch(`/api/v1/npcs/${npcId}`).send({ disposition: 'friendly' });
+    expect(npcPatch.status).toBe(200);
 
     try {
       const res = await dmAgent.post(`/api/v1/campaigns/${campaignId}/clone`).send({});
@@ -225,6 +234,7 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
       expect(clonedNpcs.body[0].id).not.toBe(npcId);
       expect(clonedNpcs.body[0].locationId).toBe(locs.body[0].id);
       expect(clonedNpcs.body[0].factionId).toBe(clonedFactions.body[0].id);
+      expect(clonedNpcs.body[0].disposition).toBe('friendly');
       expect(clonedNpcs.body[0].dmSecret).toBe('secretly a lich');
 
       // Quests copied with giverNpcId remapped, status + objectives preserved.
@@ -309,7 +319,7 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
       expect(clonedRemote.portraitUrl).toBe('https://images.example.test/remote-voice.png');
 
       // Encounters copied with combatants (Hero + Remote Voice were auto-added on
-      // encounter create, so there are 3). The character combatant's characterId
+      // encounter create, so there are 4). The character combatant's characterId
       // must be remapped to the cloned character. Location/quest/session links
       // (issue #864) must also remap into the clone — never keep the source
       // campaign's ids.
@@ -322,7 +332,7 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
       expect(encDetail.body.locationId).not.toBe(locationId);
       expect(encDetail.body.questId).not.toBe(questId);
       expect(encDetail.body.sessionId).not.toBe(sessionId);
-      expect(encDetail.body.combatants.length).toBe(3);
+      expect(encDetail.body.combatants.length).toBe(4);
       // Issue #548: cloned encounters are fresh prep, not a snapshot of live combat.
       expect(encDetail.body.status).toBe('preparing');
       expect(encDetail.body.round).toBe(0);
@@ -336,6 +346,9 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
       }
       expect(goblin.hpCurrent).toBe(goblin.hpMax);
       expect(goblin.conditions).toEqual([]);
+      const bartender = encDetail.body.combatants.find((c: { name: string }) => c.name === 'Bartender');
+      expect(bartender).toBeDefined();
+      expect(bartender.npcDispositionSnapshot).toBeNull();
       const hero = encDetail.body.combatants.find((c: { name: string }) => c.name === 'Hero');
       expect(hero.kind).toBe('character');
       expect(hero.characterId).toBe(clonedHero.id);

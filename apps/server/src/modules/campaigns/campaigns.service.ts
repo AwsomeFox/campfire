@@ -1503,7 +1503,9 @@ export class CampaignsService {
                 kind: c.kind,
                 characterId: mappedCharacterId,
                 npcId: c.npcId != null ? (npcMap.get(c.npcId) ?? null) : null,
-                npcDispositionSnapshot: c.npcDispositionSnapshot,
+                // Clones reset encounters to fresh prep, so they must derive NPC
+                // allegiance from the cloned NPC rather than retain played history.
+                npcDispositionSnapshot: null,
                 name: c.name,
                 initiative: null,
                 initMod: c.initMod,
