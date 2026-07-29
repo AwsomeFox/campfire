@@ -105,6 +105,17 @@ describe('encounter aftermath logic (issue #473)', () => {
     expect(xp.suggestedPerCharacter! * 8 + xp.undistributedXp!).toBe(xp.suggestedPartyTotal);
   });
 
+  it('does not publish a zero-XP award hand-off when the party is larger than the XP pool', () => {
+    const difficulty = computeDnd5eEncounterDifficulty({ partyLevels: [1], monsterChallengeRatings: [0] });
+    const xp = suggestedXpFromDifficulty(difficulty, 20);
+    expect(xp).toMatchObject({
+      suggestedPartyTotal: 10,
+      suggestedPerCharacter: null,
+      undistributedXp: 10,
+    });
+    expect(xp.warnings.some((warning) => /award manually/i.test(warning))).toBe(true);
+  });
+
   it('leaves a single-monster award unchanged and declines unsupported rulesets (issue #1454)', () => {
     const loneMonster = suggestedXpFromDifficulty(
       computeDnd5eEncounterDifficulty({ partyLevels: [3], monsterChallengeRatings: [2] }),

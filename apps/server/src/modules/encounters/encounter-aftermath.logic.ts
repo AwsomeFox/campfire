@@ -138,6 +138,17 @@ export function suggestedXpFromDifficulty(
   // more XP than the encounter contains.
   const perCharacter = Math.floor(difficulty.totalMonsterXp / characterCombatantCount);
   const undistributedXp = difficulty.totalMonsterXp - perCharacter * characterCombatantCount;
+  if (perCharacter === 0) {
+    warnings.push('XP total is too small to split evenly across the party — award manually.');
+    return {
+      supported: true,
+      suggestedPartyTotal: difficulty.totalMonsterXp,
+      suggestedPerCharacter: null,
+      undistributedXp,
+      difficultyLabel: difficulty.label,
+      warnings,
+    };
+  }
   return {
     supported: true,
     suggestedPartyTotal: difficulty.totalMonsterXp,
