@@ -1423,6 +1423,7 @@ export class ActionResolverService {
       // resource mutation so a stale player action is atomically rejected.
       const liveEncounter = tx.select().from(encounters).where(eq(encounters.id, encounter.id)).get();
       if (!liveEncounter) throw new NotFoundException(`Encounter ${encounter.id} not found.`);
+      if (role !== 'dm' && resolution.turnRound !== liveEncounter.round) throw new ForbiddenException('Action preview is from a previous turn.');
       this.assertPlayerActiveTurn(liveEncounter, actor, role);
       committedEncounter = liveEncounter;
 
