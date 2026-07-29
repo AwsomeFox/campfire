@@ -10,11 +10,8 @@ import type { DiceRoll } from '@campfire/schema';
 import { RolledDice } from '../features/dice/RolledDice';
 import { RolledTerms } from '../features/dice/RolledTerms';
 import { d20Flavor, d20TotalClasses } from '../lib/d20Flavor';
-<<<<<<< HEAD
 import { UIIcon } from './UIIcon';
-=======
 import { Btn } from './ui';
->>>>>>> 7a204076d (refactor(web): migrate raw cf-btn <button> sites to <Btn> (issue #1713 Part A))
 
 const AUTO_DISMISS_MS = 15000;
 
