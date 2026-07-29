@@ -91,16 +91,15 @@ export function RollResultToast({
           {t('dice.applyDamage')}
         </Btn>
       )}
-      <Btn
+      <button
         type="button"
-        ghost
         aria-label={t('dice.dismissRollToast')}
         onClick={dismiss}
         className="cf-dismiss-target cf-roll-result-toast__dismiss"
         data-testid="roll-result-toast-dismiss"
       >
         <UIIcon name="close" size="sm" />
-      </Btn>
+      </button>
     </div>
   );
 }

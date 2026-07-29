@@ -114,6 +114,78 @@ function extractAttrValue(tag: string, name: string): string | null {
 }
 
 /**
+ * Collect string-literal contents from a JSX expression text. Handles single/double
+ * quoted strings and template literals, including interpolations like `${cond ? 'a' : ''}`.
+ */
+function extractStringFragments(text: string): string[] {
+  const fragments: string[] = [];
+
+  function consumeFrom(start: number, quote: string): number {
+    let i = start + 1;
+    let content = '';
+    let escaped = false;
+    while (i < text.length) {
+      const c = text[i];
+      if (c === '\\') {
+        escaped = !escaped;
+        content += c;
+        i++;
+        continue;
+      }
+      if (c === quote && !escaped) {
+        i++; // skip closing quote
+        if (content.length) fragments.push(content);
+        return i;
+      }
+      if (quote === '`' && !escaped && c === '$' && text[i + 1] === '{') {
+        // Template literal interpolation: text before it is a literal fragment;
+        // any quoted strings inside the interpolation are fragments too.
+        if (content.length) fragments.push(content);
+        content = '';
+        i += 2; // skip '${'
+        let depth = 1;
+        let j = i;
+        let innerQuote: string | null = null;
+        while (j < text.length && depth > 0) {
+          const ch = text[j];
+          if (innerQuote) {
+            if (ch === '\\') { j++; }
+            else if (ch === innerQuote) innerQuote = null;
+          } else if (ch === '"' || ch === "'" || ch === '`') {
+            innerQuote = ch;
+          } else if (ch === '{') {
+            depth++;
+          } else if (ch === '}') {
+            depth--;
+          }
+          j++;
+        }
+        const inner = text.slice(i, j - 1);
+        fragments.push(...extractStringFragments(inner));
+        i = j;
+        continue;
+      }
+      content += c;
+      escaped = false;
+      i++;
+    }
+    if (content.length) fragments.push(content);
+    return i;
+  }
+
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i];
+    if (c === '"' || c === "'" || c === '`') {
+      i = consumeFrom(i, c);
+      continue;
+    }
+    i++;
+  }
+  return fragments;
+}
+
+/**
  * Whitespace-delimited class tokens actually assignable to this tag's `className`,
  * rather than a substring match over the whole opening tag — a `data-testid=` value,
  * a `title=`, or an unrelated class like `cf-btn-group` must never trip this. Handles
@@ -124,16 +196,13 @@ function extractAttrValue(tag: string, name: string): string | null {
 function classNameTokens(tag: string): string[] {
   const raw = extractAttrValue(tag, 'className');
   if (raw == null) return [];
-  const literals: string[] = [];
-  const quoteRe = /(['"`])((?:\\.|(?!\1).)*)\1/g;
-  let match: RegExpExecArray | null;
-  while ((match = quoteRe.exec(raw))) {
-    literals.push(match[2]);
-  }
-  const text = literals.length > 0 ? literals.join(' ') : raw;
-  return text.split(/\s+/).filter(Boolean);
+  const fragments = extractStringFragments(raw);
+  const text = fragments.length > 0 ? fragments.join(' ') : raw;
+  return text
+    .split(/\s+/)
+    .map((t) => t.replace(/^["'`]+|["'`]+$/g, ''))
+    .filter((t) => /^[\w-]+$/.test(t));
 }
-
 function hasCfBtnClass(tag: string): boolean {
   return classNameTokens(tag).includes('cf-btn');
 }
@@ -171,6 +240,16 @@ test.describe('classNameTokens / hasCfBtnClass (Codex review on #1729)', () => {
   test('does NOT flag a related-but-distinct class token like cf-btn-group', () => {
     expect(hasCfBtnClass('<button className="cf-btn-group flex items-center">')).toBe(false);
     expect(classNameTokens('<button className="cf-btn-group">')).toEqual(['cf-btn-group']);
+  });
+
+  test('catches cf-btn inside template-literal and ternary interpolations', () => {
+    expect(hasCfBtnClass('<button className={`base ${active ? \'cf-btn\' : \'\'}`}>')).toBe(true);
+    expect(hasCfBtnClass('<button className={`${cond ? \'cf-btn\' : \'\'}`}>')).toBe(true);
+    expect(hasCfBtnClass('<button className={cond ? "cf-btn" : ""}>')).toBe(true);
+    expect(classNameTokens('<button className={`base ${active ? \'cf-btn\' : \'\'}`}>')).toEqual([
+      'base',
+      'cf-btn',
+    ]);
   });
 
   test('ui.tsx\'s own Btn definition would still be caught by the tokenizer if it weren\'t exempted by file path', () => {
