@@ -1108,6 +1108,31 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.hpCurrent).toBe(60);
   });
 
+  it('#1451 review: a same-named replacement at the saved index is rejected before its permissive spec can validate', () => {
+    const { orm, service, encounterId, actor, drake, aliceChar } = seed();
+    const beforePreview = orm.select().from(characters).where(eq(characters.id, aliceChar.id)).get()!;
+    const beforeActions = JSON.parse(beforePreview.actions ?? '[]');
+    // Character sheets allow duplicate names. Add a second, permissive "Greatsword" before
+    // previewing the original, then swap their positions before apply.
+    beforeActions.splice(1, 0, { ...fireball(21), name: 'Greatsword' });
+    orm.update(characters).set({ actions: JSON.stringify(beforeActions) }).where(eq(characters.id, aliceChar.id)).run();
+    const preview = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: false }),
+      alice,
+      'player',
+    );
+    const character = orm.select().from(characters).where(eq(characters.id, aliceChar.id)).get()!;
+    const actions = JSON.parse(character.actions ?? '[]');
+    [actions[0], actions[1]] = [actions[1], actions[0]];
+    orm.update(characters).set({ actions: JSON.stringify(actions) }).where(eq(characters.id, aliceChar.id)).run();
+
+    expect(() => service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), alice, 'player')).toThrow(
+      /changed or moved/i,
+    );
+    expect(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.hpCurrent).toBe(60);
+  });
+
   it('#1451: an unknown chainId is rejected, and a chainId from a different encounter is rejected', () => {
     const { orm, service, campaignId, encounterId, actor, drake } = seed();
     expect(() => service.apply(encounterId, ActionApplyRequest.parse({ chainId: 'chain-never-resolved' }), alice, 'player')).toThrow(

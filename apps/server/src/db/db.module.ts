@@ -4339,7 +4339,7 @@ function migrateActionPendingResolutions1451(sqlite: Database.Database): void {
     CREATE TABLE IF NOT EXISTS action_pending_resolutions (
       id TEXT PRIMARY KEY, encounter_id INTEGER NOT NULL REFERENCES encounters(id) ON DELETE CASCADE,
       campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE, actor_combatant_id INTEGER NOT NULL,
-      action_name TEXT NOT NULL DEFAULT '', action_index INTEGER, awaiting_confirmation INTEGER NOT NULL DEFAULT 0,
+      action_name TEXT NOT NULL DEFAULT '', action_index INTEGER, action_fingerprint TEXT, awaiting_confirmation INTEGER NOT NULL DEFAULT 0,
       resolution_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_action_pending_resolutions_encounter ON action_pending_resolutions(encounter_id);
@@ -4347,6 +4347,9 @@ function migrateActionPendingResolutions1451(sqlite: Database.Database): void {
   const columns = sqlite.prepare('PRAGMA table_info(action_pending_resolutions)').all() as Array<{ name: string }>;
   if (!columns.some((column) => column.name === 'action_index')) {
     sqlite.exec('ALTER TABLE action_pending_resolutions ADD COLUMN action_index INTEGER');
+  }
+  if (!columns.some((column) => column.name === 'action_fingerprint')) {
+    sqlite.exec('ALTER TABLE action_pending_resolutions ADD COLUMN action_fingerprint TEXT');
   }
 }
 

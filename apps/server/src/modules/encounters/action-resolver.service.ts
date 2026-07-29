@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { and, desc, eq, inArray, isNull, lt, or } from 'drizzle-orm';
 import {
@@ -88,6 +88,24 @@ type ResolvedActionEconomyCost = {
   kind: ActionEconomySlotKind | 'legendary';
   max: number | null;
 };
+
+/** A sheet action has no durable id. Store a canonical content fingerprint with a pending
+ * resolution so apply() can reject a same-named replacement after an edit or reorder. */
+function actionFingerprint(action: unknown): string {
+  const canonicalize = (value: unknown): string => {
+    if (Array.isArray(value)) return `[${value.map(canonicalize).join(',')}]`;
+    if (value && typeof value === 'object') {
+      const record = value as Record<string, unknown>;
+      return `{${Object.keys(record)
+        .sort()
+        .map((key) => `${JSON.stringify(key)}:${canonicalize(record[key])}`)
+        .join(',')}}`;
+    }
+    return JSON.stringify(value) ?? 'undefined';
+  };
+
+  return createHash('sha256').update(canonicalize(action)).digest('hex');
+}
 
 /**
  * Structured action resolver (issue #414) — the server orchestration around the pure,
@@ -384,13 +402,13 @@ export class ActionResolverService {
     actor: typeof combatants.$inferSelect,
     req: ActionResolveRequest,
     campaignId: number,
-  ): { spec: ActionSpec; name: string; actionIndex: number | null } {
+  ): { spec: ActionSpec; name: string; actionIndex: number | null; actionFingerprint: string | null } {
     if (req.spec) {
       const spec = ActionSpec.parse(req.spec);
       if (!isResolvableSpec(spec)) {
         throw new BadRequestException('The inline action spec has no resolvable mode/DC/attack — fall back to a statblock rather than inventing numbers.');
       }
-      return { spec, name: req.actionName ?? 'Action', actionIndex: null };
+      return { spec, name: req.actionName ?? 'Action', actionIndex: null, actionFingerprint: null };
     }
     const character = this.linkedCharacter(actor);
     if (character) {
@@ -411,7 +429,7 @@ export class ActionResolverService {
           `"${name}" has no resolvable structured spec — fall back to its statblock (toHit/damage/notes) rather than inventing numbers.`,
         );
       }
-      return { spec: parsed.data, name, actionIndex: idx };
+      return { spec: parsed.data, name, actionIndex: idx, actionFingerprint: actionFingerprint(raw) };
     }
     const statActions = this.combatantActions(actor, campaignId);
     let idx = req.actionIndex ?? -1;
@@ -434,7 +452,7 @@ export class ActionResolverService {
         `"${action.name}" has no resolvable structured spec — fall back to its statblock (toHit/damage/notes) rather than inventing numbers.`,
       );
     }
-    return { spec: parsed.data, name: action.name, actionIndex: idx };
+    return { spec: parsed.data, name: action.name, actionIndex: idx, actionFingerprint: actionFingerprint(action) };
   }
 
   // -------------------------------------------------------------------------
@@ -520,7 +538,7 @@ export class ActionResolverService {
     }
 
     const adapter = this.adapterForCampaign(encounter.campaignId);
-    const { spec, name, actionIndex } = this.resolveSpec(actor, req, encounter.campaignId);
+    const { spec, name, actionIndex, actionFingerprint: selectedActionFingerprint } = this.resolveSpec(actor, req, encounter.campaignId);
     const { policy, canApply } = this.policyFor(encounter.campaignId, actor, user, role);
 
     // Validate target legality (count + at least one when the action needs a target).
@@ -569,7 +587,7 @@ export class ActionResolverService {
     // initially automatic preview into that same kind of pending human decision; the driver marks
     // that persisted chain with `retainPendingChainForConfirmation()` when it queues the approval.
     const chainId = this.mintChainId();
-    this.persistPendingResolution(encounter, actor, chainId, resolution, actionIndex, !canApply);
+    this.persistPendingResolution(encounter, actor, chainId, resolution, actionIndex, selectedActionFingerprint, !canApply);
 
     let applied = false;
     let undoToken: ActionUndoToken | null = null;
@@ -1048,6 +1066,7 @@ export class ActionResolverService {
     chainId: string,
     resolution: ActionResolution,
     actionIndex: number | null,
+    actionFingerprint: string | null,
     awaitingConfirmation: boolean,
   ): void {
     this.db
@@ -1059,6 +1078,7 @@ export class ActionResolverService {
         actorCombatantId: actor.id,
         actionName: resolution.actionName,
         actionIndex,
+        actionFingerprint,
         awaitingConfirmation,
         resolutionJson: toJsonText(resolution),
         createdAt: nowIso(),
@@ -1282,7 +1302,7 @@ export class ActionResolverService {
     // This mirrors exactly what the pre-#1451 `apply()` already did; `action_pending_resolutions`
     // does not persist `targetsAllow` at all (unlike `action_apply_chains`, which UNDO
     // deliberately snapshots — undo restores a thing that already happened under the old rule).
-    const { spec } = this.resolveSpec(actor, {
+    const { spec, actionFingerprint: currentActionFingerprint } = this.resolveSpec(actor, {
       actorCombatantId: pending.actorCombatantId,
       actionName: pending.actionName,
       // `actionName` is not unique on character sheets. Persisting the selected index keeps
@@ -1302,6 +1322,10 @@ export class ActionResolverService {
       this.assertTargetAllowed(spec.targets.allow, actor, target, resolution.actionName);
     }
     this.assertResolutionWithinSpecBounds(spec, resolution);
+    if (pending.actionFingerprint && currentActionFingerprint !== pending.actionFingerprint) {
+      this.auditRejectedApply(encounter, req.chainId, user, role, 'action_changed_or_moved');
+      throw new BadRequestException(`Action "${pending.actionName}" changed or moved before it could be applied.`);
+    }
 
     const undoToken = this.applyInternal(encounter, resolution, actor, user, role, spec.targets.allow, pending.id);
     return { undoToken };
