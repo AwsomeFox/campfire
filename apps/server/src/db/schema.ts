@@ -2190,12 +2190,21 @@ export const actionApplyChains = sqliteTable('action_apply_chains', {
 // table's growth. An abandoned (never-applied) row is swept by
 // `ActionResolverService.sweepStalePendingResolutions` on a TTL + per-encounter cap, so growth
 // is bounded even for a preview nobody ever applies.
+//
+// `awaitingConfirmation` (review, second pass): true when this resolution was minted under a
+// dm-confirmed/player-declares policy (`!canApply` at resolve time) — the ONLY way it is ever
+// applied is a LATER, separate DM `apply()` call, which may legitimately take a long time. Such
+// a row is exempt from the age-based TTL entirely (a DM reviewing a queue must never have a
+// legitimate declaration vanish out from under them), though it is still subject to the
+// per-encounter cap — evicting one is audited and never silent, unlike an ordinary abandoned
+// preview. See `sweepStalePendingResolutions`'s doc comment for the full reasoning.
 export const actionPendingResolutions = sqliteTable('action_pending_resolutions', {
   id: text('id').primaryKey(), // the chain id (see ActionResolverService.resolve)
   encounterId: integer('encounter_id').notNull(),
   campaignId: integer('campaign_id').notNull(),
   actorCombatantId: integer('actor_combatant_id').notNull(),
   actionName: text('action_name').notNull().default(''),
+  awaitingConfirmation: integer('awaiting_confirmation', { mode: 'boolean' }).notNull().default(false),
   // The full server-computed ActionResolution (issue #414's byte-identical-preview payload),
   // serialized. This — not anything the client sends — is what `applyInternal` ever writes.
   resolutionJson: text('resolution_json').notNull().default('{}'),

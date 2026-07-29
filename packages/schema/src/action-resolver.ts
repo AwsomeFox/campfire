@@ -773,20 +773,18 @@ export type ActionResolveResult = z.infer<typeof ActionResolveResult>;
  * resolution the caller supplies, so a player can no longer inflate `totalDamage`, per-target
  * deltas, or inject `conditionsAfter`/effect payloads that were never in the resolved spec.
  *
- * `actionName`/`actorCombatantId` are OPTIONAL and DISPLAY-ONLY (issue #1451 review). Under
- * collaborative handoff (#1051) an `apply_action` MCP call can be queued for DM confirmation
- * before it runs; the confirmation UI (`apps/web/.../toolConfirmationSummary.ts`) can only
- * describe the call from the arguments it was actually given, and after this fix those
- * arguments carry nothing but a chain id. The AI driver is told to echo these two fields back
- * from `resolve_action`'s response purely so the confirmation reads "Apply Fireball by Ember"
- * instead of an opaque chain id — `ActionResolverService.apply()` NEVER reads either field; the
- * actor, the action, and every number applied come exclusively from the persisted resolution
- * `chainId` looks up.
+ * DELIBERATELY chainId-only — no caller-supplied display fields (issue #1451 review, second
+ * pass). An earlier revision added optional `actionName`/`actorCombatantId` here so a queued
+ * `apply_action` DM confirmation could show more than an opaque chain id. That was wrong: the
+ * confirmation prompt is what a human DM approves, and `apply()` executes whatever `chainId`
+ * identifies regardless of what these fields said — a caller could label a damaging chain as a
+ * harmless action by a different actor and obtain approval under a false summary. The
+ * confirmation now derives its label SERVER-SIDE from the persisted `action_pending_resolutions`
+ * row (see `ActionResolverService.describePendingChain` and its call site in
+ * `AiDriverService`), never from anything the request carries.
  */
 export const ActionApplyRequest = z.object({
   chainId: z.string().min(1).max(64),
-  actionName: z.string().max(120).optional(),
-  actorCombatantId: z.number().int().optional(),
 });
 export type ActionApplyRequest = z.infer<typeof ActionApplyRequest>;
 

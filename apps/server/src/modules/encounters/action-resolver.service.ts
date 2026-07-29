@@ -543,16 +543,23 @@ export class ActionResolverService {
     // accumulate a permanent row, since the table used to be pruned only on apply. Sweeping
     // this encounter's stale/excess rows on every resolve call bounds growth to (live
     // encounters) × (TTL window of resolve traffic) rather than "however many times anyone has
-    // ever previewed" — see sweepStalePendingResolutions's doc comment for the two mechanisms.
-    this.sweepStalePendingResolutions(encounter.id);
+    // ever previewed" — see sweepStalePendingResolutions's doc comment for the state-dependent
+    // lifetime this now enforces.
+    this.sweepStalePendingResolutions(encounter);
 
     // Mint the chain id HERE, at resolve time, and persist the EXACT resolution the server
     // just computed — regardless of whether this call also commits it. This is the only copy
     // `/actions/apply` will ever read: a later apply takes `{ chainId }` alone, so a
     // client-edited `totalDamage` (or an injected condition/effect never in the action spec)
     // in the request body is simply never consulted.
+    //
+    // `awaitingConfirmation = !canApply`: when the campaign policy prevents THIS caller from
+    // applying immediately, the only way this resolution is ever consumed is a later, separate
+    // DM `apply()` call — a genuine declaration, exempt from the TTL (see the sweep's doc
+    // comment). When canApply is true (automatic policy, or the DM), an unconsumed row is an
+    // ordinary, disposable preview.
     const chainId = this.mintChainId();
-    this.persistPendingResolution(encounter, actor, chainId, resolution);
+    this.persistPendingResolution(encounter, actor, chainId, resolution, !canApply);
 
     let applied = false;
     let undoToken: ActionUndoToken | null = null;
@@ -922,41 +929,99 @@ export class ActionResolverService {
   private static readonly MAX_PENDING_RESOLUTIONS_PER_ENCOUNTER = 200;
 
   /**
-   * Issue #1451 (review — Devin + Codex P1): every resolve used to insert a permanent row that
-   * was only ever marked consumed, never deleted or expired — a player who repeatedly previews
-   * (and never applies) could grow `action_pending_resolutions` without bound, a real problem
-   * for a product whose whole design is one SQLite volume. Two mechanisms close both directions
-   * of that vector, and neither can be defeated by simply never applying:
+   * Issue #1451 (review — Devin + Codex P1, then corrected against Devin's follow-up): every
+   * resolve used to insert a permanent row that was only ever marked consumed, never deleted or
+   * expired — a player who repeatedly previews (and never applies) could grow
+   * `action_pending_resolutions` without bound, a real problem for a product whose whole design
+   * is one SQLite volume. The first fix bounded EVERY row by age + count uniformly — but that
+   * broke the dm-confirmed/player-declares workflow: a player's legitimate declaration, sitting
+   * in the table awaiting a DM's `apply()`, is indistinguishable by shape from an abandoned
+   * preview, and a DM can legitimately take longer than any fixed TTL to get to their queue. A
+   * declaration silently evaporating out from under a player is a worse failure than the disk
+   * growth this exists to bound.
    *
-   *  - TTL: any row older than {@link PENDING_RESOLUTION_TTL_MS} for this encounter is deleted
-   *    here, on every resolve — long enough for a DM to review a dm-confirmed/player-declares
-   *    declaration, short enough that an abandoned preview cannot outlive it.
-   *  - CAP: even within the TTL window, a rapid-fire spam burst is bounded by deleting the
-   *    OLDEST rows once this encounter holds {@link MAX_PENDING_RESOLUTIONS_PER_ENCOUNTER}.
+   * INVARIANT CHOSEN (state this in review — see the PR body): lifetime now depends on STATE,
+   * not just age.
+   *  - `awaitingConfirmation = false` (an ordinary preview under automatic policy, disposable and
+   *    free to re-derive): TTL-eligible, AND silently evicted by the per-encounter cap — matches
+   *    the original fix's reasoning, since re-previewing costs nothing.
+   *  - `awaitingConfirmation = true` (a declaration only a LATER, different caller's `apply()`
+   *    can ever consume): EXEMPT from the TTL entirely — no age-based expiry, ever. It is still
+   *    subject to the SAME per-encounter cap (an unbounded declaration queue reopens the exact
+   *    growth vector this whole fix exists to close), but evicting one is AUDITED and never
+   *    silent (`encounter.action.declaration_evicted`), mirroring the established, already-loud
+   *    pattern `AiDriverService.announceEvictedConfirmation` (#1558) uses for the AI driver's own
+   *    confirmation queue eviction.
    *
    * A CONSUMED resolution does not rely on either of these — `applyInternal` deletes its row
-   * immediately (see the transaction there), so this sweep only ever has abandoned previews
-   * left to reclaim.
+   * immediately (see the transaction there), so this sweep only ever has abandoned previews and
+   * pending declarations left to reclaim.
    */
-  private sweepStalePendingResolutions(encounterId: number): void {
+  private sweepStalePendingResolutions(encounter: typeof encounters.$inferSelect): void {
     const cutoff = new Date(Date.now() - ActionResolverService.PENDING_RESOLUTION_TTL_MS).toISOString();
+    // TTL: ONLY ordinary previews expire by age. A declaration awaiting DM confirmation must
+    // survive indefinitely by age alone.
     this.db
       .delete(actionPendingResolutions)
-      .where(and(eq(actionPendingResolutions.encounterId, encounterId), lt(actionPendingResolutions.createdAt, cutoff)))
+      .where(
+        and(
+          eq(actionPendingResolutions.encounterId, encounter.id),
+          lt(actionPendingResolutions.createdAt, cutoff),
+          eq(actionPendingResolutions.awaitingConfirmation, false),
+        ),
+      )
       .run();
 
+    this.capPendingResolutions(encounter, false);
+    this.capPendingResolutions(encounter, true);
+  }
+
+  /** Evict the oldest rows in one (encounter, awaitingConfirmation) partition past the cap. */
+  private capPendingResolutions(encounter: typeof encounters.$inferSelect, awaitingConfirmation: boolean): void {
     const rows = this.db
-      .select({ id: actionPendingResolutions.id })
+      .select({
+        id: actionPendingResolutions.id,
+        actionName: actionPendingResolutions.actionName,
+        actorCombatantId: actionPendingResolutions.actorCombatantId,
+      })
       .from(actionPendingResolutions)
-      .where(eq(actionPendingResolutions.encounterId, encounterId))
+      .where(
+        and(
+          eq(actionPendingResolutions.encounterId, encounter.id),
+          eq(actionPendingResolutions.awaitingConfirmation, awaitingConfirmation),
+        ),
+      )
       .orderBy(desc(actionPendingResolutions.createdAt))
       .all();
-    if (rows.length >= ActionResolverService.MAX_PENDING_RESOLUTIONS_PER_ENCOUNTER) {
-      const evictIds = rows.slice(ActionResolverService.MAX_PENDING_RESOLUTIONS_PER_ENCOUNTER - 1).map((r) => r.id);
-      if (evictIds.length > 0) {
-        this.db.delete(actionPendingResolutions).where(inArray(actionPendingResolutions.id, evictIds)).run();
-      }
+    if (rows.length < ActionResolverService.MAX_PENDING_RESOLUTIONS_PER_ENCOUNTER) return;
+    const evicted = rows.slice(ActionResolverService.MAX_PENDING_RESOLUTIONS_PER_ENCOUNTER - 1);
+    if (evicted.length === 0) return;
+    this.db
+      .delete(actionPendingResolutions)
+      .where(inArray(actionPendingResolutions.id, evicted.map((r) => r.id)))
+      .run();
+    if (!awaitingConfirmation) return; // an ordinary preview is cheap to re-derive — no audit needed.
+    // A DECLARATION never disappears in silence (issue #1451 review) — same treatment #1558
+    // gives the AI driver's own confirmation-queue eviction.
+    for (const row of evicted) {
+      void this.audit
+        .log({
+          actor: 'system:action-pending-resolution-sweep',
+          actorRole: 'dm',
+          action: 'encounter.action.declaration_evicted',
+          entityType: 'encounter',
+          entityId: encounter.id,
+          campaignId: encounter.campaignId,
+          detail: JSON.stringify({
+            chainId: row.id,
+            actionName: row.actionName,
+            actorCombatantId: row.actorCombatantId,
+            reason: `encounter reached its ${ActionResolverService.MAX_PENDING_RESOLUTIONS_PER_ENCOUNTER}-declaration cap — never applied`,
+          }),
+        })
+        .catch(() => undefined);
     }
+    if (!encounter.hidden) this.events.emit({ type: 'encounter.updated', campaignId: encounter.campaignId, encounterId: encounter.id });
   }
 
   /**
@@ -972,6 +1037,7 @@ export class ActionResolverService {
     actor: typeof combatants.$inferSelect,
     chainId: string,
     resolution: ActionResolution,
+    awaitingConfirmation: boolean,
   ): void {
     this.db
       .insert(actionPendingResolutions)
@@ -981,6 +1047,7 @@ export class ActionResolverService {
         campaignId: encounter.campaignId,
         actorCombatantId: actor.id,
         actionName: resolution.actionName,
+        awaitingConfirmation,
         resolutionJson: toJsonText(resolution),
         createdAt: nowIso(),
       })
@@ -1089,6 +1156,35 @@ export class ActionResolverService {
   }
 
   /**
+   * Issue #1451 review (Codex P1, second pass): a READ-ONLY, DISPLAY-ONLY lookup for a DM
+   * confirmation prompt under collaborative handoff (#1051) — resolves the human-readable
+   * `actionName`/`actorCombatantId` for a pending chain STRICTLY from the same persisted
+   * `action_pending_resolutions` row `apply()` itself reads, never from anything a caller
+   * supplies. `ActionApplyRequest` deliberately carries no display fields of its own (an earlier
+   * revision added optional caller-supplied ones and that was the vulnerability: the confirmation
+   * prompt is what a human approves, and `apply()` executes whatever `chainId` identifies
+   * regardless of what a caller-controlled label said). `AiDriverService` calls this when queuing
+   * an `apply_action` confirmation so the prompt can say "Apply Fireball by Ember" instead of an
+   * opaque chain id, using ONLY server-derived truth. Returns `null` for an unknown chain or one
+   * scoped to a different encounter — the confirmation then falls back to a generic label rather
+   * than guessing. Must never be used to authorize or determine WHAT gets applied — that remains
+   * exclusively `apply()`'s own re-read of this same row.
+   */
+  describePendingChain(encounterId: number, chainId: string): { actionName: string; actorCombatantId: number } | null {
+    const pending = this.db
+      .select({
+        encounterId: actionPendingResolutions.encounterId,
+        actionName: actionPendingResolutions.actionName,
+        actorCombatantId: actionPendingResolutions.actorCombatantId,
+      })
+      .from(actionPendingResolutions)
+      .where(eq(actionPendingResolutions.id, chainId))
+      .get();
+    if (!pending || pending.encounterId !== encounterId) return null;
+    return { actionName: pending.actionName, actorCombatantId: pending.actorCombatantId };
+  }
+
+  /**
    * Apply a previously resolved action chain (issue #414 confirm path). `chainId` is a LOOKUP
    * KEY, not a source of truth (issue #1451): the resolution applied is always the exact one
    * `resolve()` computed and persisted server-side (`action_pending_resolutions`), never
@@ -1100,11 +1196,12 @@ export class ActionResolverService {
    * spec: none of that is read from anywhere the caller can influence. The applier must still be
    * the DM, or the actor's owning player under an automatic policy.
    *
-   * `req.actionName`/`req.actorCombatantId`, if present, are DISPLAY-ONLY advisory context for
-   * a DM confirmation prompt under collaborative handoff (issue #1051) — see
-   * {@link ActionApplyRequest}'s doc comment. This method never reads either field; every value
-   * that determines WHAT gets applied and to WHOM comes exclusively from the persisted
-   * `action_pending_resolutions` row `req.chainId` looks up.
+   * `req` carries `chainId` ONLY (issue #1451 review, second pass) — an earlier revision also
+   * accepted optional caller-supplied `actionName`/`actorCombatantId` for a DM confirmation
+   * prompt under collaborative handoff (#1051), but that let a caller label a damaging chain
+   * with a harmless-looking action/actor and obtain approval under a false summary; the
+   * confirmation now derives its label server-side instead — see
+   * {@link ActionResolverService.describePendingChain}.
    *
    * Issue #1451 review: the actual single-use claim happens inside `applyInternal`'s
    * transaction (a conditional delete, mirroring `undo()`'s `action_apply_chains.undone_at`

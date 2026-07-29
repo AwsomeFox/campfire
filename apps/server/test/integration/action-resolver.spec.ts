@@ -1,8 +1,8 @@
 import fs from 'node:fs';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { ActionApplyRequest, ActionResolveRequest, ActionSpec, ActionUndoToken, CombatantTurnState } from '@campfire/schema';
 import { openDatabase } from '../../src/db/db.module';
-import { actionApplyChains, actionPendingResolutions, campaigns, characters, combatants, encounterEvents, encounters, ruleEntries, rulePacks } from '../../src/db/schema';
+import { actionApplyChains, actionPendingResolutions, auditLog, campaigns, characters, combatants, encounterEvents, encounters, ruleEntries, rulePacks } from '../../src/db/schema';
 import { AuditService } from '../../src/modules/audit/audit.service';
 import { CampaignEventsService } from '../../src/modules/events/campaign-events.service';
 import { ActionResolverService } from '../../src/modules/encounters/action-resolver.service';
@@ -1249,24 +1249,116 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(drakeRow.hpCurrent).toBe(60 - honestDamage); // damage landed exactly once, never twice
   });
 
-  it('#1451 review: actionName/actorCombatantId on the apply request are DISPLAY-ONLY and never influence what gets applied', () => {
-    const { service, encounterId, actor, drake } = seed();
+  it('#1451 review (Codex P1, second pass): ActionApplyRequest carries chainId only — a forged actionName/actorCombatantId is stripped at parse, not merely ignored at apply', () => {
+    // The confirmation-spoofing vector this closes lived in the AI-driver confirmation queue,
+    // not here (see apps/server/test/ai-dm-tool-confirmation-lifecycle.e2e-spec.ts for that
+    // regression) — but the schema itself must not even shape-accept these fields, so a future
+    // caller cannot quietly reintroduce them as a "just read it for display" shortcut.
+    const parsed = ActionApplyRequest.parse({
+      chainId: 'chain-whatever',
+      actionName: 'Nonexistent Spell',
+      actorCombatantId: 999999,
+    });
+    expect(parsed).toEqual({ chainId: 'chain-whatever' });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Issue #1451 review, second pass (Devin) — the growth-bound fix above must not silently
+  // expire a legitimate declaration awaiting DM confirmation under dm-confirmed/player-declares
+  // policy. Lifetime now depends on state, not just age.
+  // ---------------------------------------------------------------------------
+
+  it('#1451 review (Devin, corrected): a declaration awaiting DM confirmation is NOT evicted by the TTL, no matter how old', () => {
+    const { orm, service, encounterId, actor, drake } = seed({ requireDmTurnConfirmation: true });
     const preview = service.resolve(
       encounterId,
       ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: false }),
       alice,
       'player',
     );
+    expect(preview.canApply).toBe(false); // a genuine declaration, not an ordinary preview
 
-    const forgedDisplay = ActionApplyRequest.parse({
-      chainId: preview.chainId,
-      actionName: 'Nonexistent Spell',
-      actorCombatantId: 999999,
-    });
-    const { undoToken } = service.apply(encounterId, forgedDisplay, alice, 'player');
-    // The REAL actor/action from the persisted resolution applied — the decoy display fields
-    // (a spell that doesn't exist, a bogus actor id) were never read for authorization or effect.
-    expect(undoToken.actionName).toBe('Greatsword');
-    expect(undoToken.actorCombatantId).toBe(actor);
+    // Backdate it WAY past the ordinary-preview TTL — a real DM confirmation queue can easily
+    // sit unattended longer than 30 minutes.
+    orm
+      .update(actionPendingResolutions)
+      .set({ createdAt: new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString() }) // 6 hours old
+      .where(eq(actionPendingResolutions.id, preview.chainId))
+      .run();
+
+    // Any subsequent resolve on this encounter runs the sweep — a declaration must survive it.
+    service.resolve(encounterId, ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: false }), alice, 'player');
+
+    const row = orm.select().from(actionPendingResolutions).where(eq(actionPendingResolutions.id, preview.chainId)).get();
+    expect(row).toBeTruthy();
+
+    // And the DM can still apply it.
+    const { undoToken } = service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), dmUser, 'dm');
+    expect(undoToken).toBeTruthy();
+  });
+
+  it('#1451 review (Devin, corrected): an ordinary abandoned preview (automatic policy) is still TTL-swept — only declarations are exempt', () => {
+    const { orm, service, encounterId, actor, drake } = seed(); // default policy: automatic
+    const preview = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: false }),
+      alice,
+      'player',
+    );
+    expect(preview.canApply).toBe(true); // an ordinary, disposable preview — NOT a declaration
+
+    orm
+      .update(actionPendingResolutions)
+      .set({ createdAt: new Date(Date.now() - 31 * 60 * 1000).toISOString() })
+      .where(eq(actionPendingResolutions.id, preview.chainId))
+      .run();
+
+    service.resolve(encounterId, ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: false }), alice, 'player');
+
+    expect(orm.select().from(actionPendingResolutions).where(eq(actionPendingResolutions.id, preview.chainId)).get()).toBeUndefined();
+  });
+
+  it('#1451 review (Devin, corrected): the per-encounter cap still bounds declarations, but eviction is audited — never silent', async () => {
+    const { orm, service, campaignId, encounterId, actor, drake } = seed({ requireDmTurnConfirmation: true });
+    const now = Date.now();
+    for (let i = 0; i < 205; i++) {
+      orm
+        .insert(actionPendingResolutions)
+        .values({
+          id: `chain-decl-cap-test-${i}`,
+          encounterId,
+          campaignId,
+          actorCombatantId: actor,
+          actionName: 'Greatsword',
+          awaitingConfirmation: true,
+          resolutionJson: '{}',
+          createdAt: new Date(now - (205 - i) * 1000).toISOString(),
+        })
+        .run();
+    }
+
+    service.resolve(encounterId, ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: false }), alice, 'player');
+
+    const after = orm
+      .select()
+      .from(actionPendingResolutions)
+      .where(and(eq(actionPendingResolutions.encounterId, encounterId), eq(actionPendingResolutions.awaitingConfirmation, true)))
+      .all();
+    expect(after.length).toBeLessThanOrEqual(200);
+    expect(after.some((r) => r.id === 'chain-decl-cap-test-0')).toBe(false); // oldest, evicted
+
+    // The eviction audit write is fire-and-forget (matches every other audit call in this
+    // service) — flush pending microtasks before reading it back.
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // Never silent (issue #1451 review): the eviction is audited.
+    const evicted = orm
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.campaignId, campaignId), eq(auditLog.action, 'encounter.action.declaration_evicted')))
+      .all();
+    expect(evicted.length).toBeGreaterThan(0);
+    expect(String(evicted[0].detail)).toContain('chain-decl-cap-test-0');
+    expect(String(evicted[0].detail)).toContain('never applied');
   });
 });

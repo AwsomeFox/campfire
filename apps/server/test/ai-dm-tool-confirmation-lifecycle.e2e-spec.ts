@@ -142,6 +142,51 @@ describe('ai-dm tool confirmations — reaching a DM who is not looking (#1558)'
     expect(String(evicted[0].detail)).toContain('never executed');
   });
 
+  // Issue #1451 review (Codex P1, second pass) — collaborative handoff (#1051) queues
+  // apply_action for DM confirmation. A caller-controlled actionName/actorCombatantId in the
+  // queued args would let the model label a damaging chain as a harmless action by a different
+  // actor and get it approved under a false summary: the DM approves the DISPLAYED label, but
+  // apply() executes whatever chainId actually identifies. This must never survive into the
+  // stored confirmation.
+  it('#1451: a forged actionName/actorCombatantId on a queued apply_action call never reaches the stored confirmation', async () => {
+    const campaignId = await armed('No Spoofed Confirmation Labels');
+    const driver = h.ctx.app.get(AiDriverService);
+    driver.setCollaborative(campaignId, true);
+
+    h.script({
+      text: 'Casting.',
+      toolCalls: [
+        {
+          id: 'c1',
+          name: 'apply_action',
+          arguments: {
+            encounterId: 1,
+            chainId: 'chain-does-not-exist',
+            // Forged — an attempt to make the DM approve believing this is harmless and
+            // targets a friendly actor, regardless of what the chainId actually resolves to.
+            actionName: 'Prestidigitation (harmless cantrip)',
+            actorCombatantId: 999999,
+          },
+        },
+      ],
+      usage: { promptTokens: 6, completionTokens: 4, totalTokens: 10 },
+    });
+    h.script({ text: 'Waiting on the DM.', usage: { promptTokens: 4, completionTokens: 3, totalTokens: 7 } });
+
+    const res = await h.sendMessage(campaignId, { input: 'cast something' });
+    expect(res.status).toBe(201);
+
+    const queue = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/tool-confirmations`).set(dm);
+    expect(queue.body).toHaveLength(1);
+    expect(queue.body[0].tool).toBe('apply_action');
+    // Only encounterId/chainId survive from the model's own call — the schema no longer even
+    // accepts a display field, and the confirmation-queueing path rebuilds args from scratch
+    // rather than trusting anything else the call carried. Because this chainId does not exist,
+    // no server-derived display fields are added either — an unknown chain gets a generic label,
+    // never a caller-supplied one.
+    expect(queue.body[0].args).toEqual({ encounterId: 1, chainId: 'chain-does-not-exist' });
+  });
+
   it('approving through the endpoint the UI now calls actually resolves the queue', async () => {
     const campaignId = await armed('Resolve Clears');
     h.script({

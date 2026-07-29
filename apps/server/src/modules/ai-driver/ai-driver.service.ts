@@ -14,6 +14,7 @@ import { McpToolsService, type DriverTool, type DriverToolset } from '../mcp/mcp
 import { CampaignsService } from '../campaigns/campaigns.service';
 import { RulesService } from '../rules/rules.service';
 import { EncountersService } from '../encounters/encounters.service';
+import { ActionResolverService } from '../encounters/action-resolver.service';
 import { MembersService } from '../membership/members.service';
 import { CharactersService } from '../characters/characters.service';
 import { TableSafetyService } from '../safety/table-safety.service';
@@ -2136,6 +2137,13 @@ export class AiDriverService {
      * `?.` guards on every use below express.
      */
     @Optional() private readonly safety?: TableSafetyService,
+    /**
+     * Issue #1451 review — DISPLAY-ONLY lookup for a queued `apply_action` DM confirmation
+     * (see `describePendingChain`'s doc comment). Appended last, same reasoning as `safety`
+     * above: several specs construct this service positionally, and this dependency is not
+     * needed for any of them to still exercise the paths they test — `?.` guards its one use.
+     */
+    @Optional() private readonly actionResolver?: ActionResolverService,
   ) {
     // Mode-switch teardown without an AiDm→AiDriver DI edge (forwardRef blows the stack here).
     this.aiDm.registerDriverSessionTeardown((campaignId) => this.teardownSession(campaignId));
@@ -5281,10 +5289,32 @@ export class AiDriverService {
       // (1c) Confirm-policy tools (#474): queue for DM review instead of executing directly.
       if (tool?.mutating && policyDecision?.policy === 'confirm') {
         noteDriverConfirmToolAttempt(session);
+        // Issue #1451 review (Codex P1, second pass): `apply_action`'s queued confirmation must
+        // describe what will ACTUALLY execute, never anything the calling model supplied — a
+        // caller-controlled label displayed while `apply()` executes whatever the chainId
+        // identifies is a confirmation-spoofing vector (approve a label, not the call). Rebuild
+        // this tool's queued args from scratch: only `encounterId`/`chainId` survive from the
+        // model's own call, and the display fields come exclusively from the persisted
+        // resolution that same chainId will make `apply()` read (`describePendingChain` is a
+        // read-only lookup of that same row — never a source of authorization).
+        let queuedArgs = args;
+        if (call.name === 'apply_action') {
+          const argEncounterId = typeof args.encounterId === 'number' ? args.encounterId : Number(args.encounterId);
+          const argChainId = typeof args.chainId === 'string' ? args.chainId : undefined;
+          const described =
+            argChainId && Number.isFinite(argEncounterId)
+              ? (this.actionResolver?.describePendingChain(argEncounterId, argChainId) ?? null)
+              : null;
+          queuedArgs = {
+            encounterId: args.encounterId,
+            chainId: args.chainId,
+            ...(described ? { actionName: described.actionName, actorCombatantId: described.actorCombatantId } : {}),
+          };
+        }
         const pending = this.queueToolConfirmation(
           session,
           call,
-          args,
+          queuedArgs,
           sessionProfile,
           policyDecision.policy,
           actor,
