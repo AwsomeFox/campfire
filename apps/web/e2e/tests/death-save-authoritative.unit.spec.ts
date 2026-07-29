@@ -16,3 +16,10 @@ test('death-save requests carry one retry-safe action key', () => {
   expect(runSessionSource).toContain('const deathSaveRoll = useKeyedMutation({');
   expect(runSessionSource).toContain('api.post(`${API}/encounters/${eid}/combatants/${combatantId}/death-save`, { idempotencyKey })');
 });
+
+test('a death-save request only disables its own combatant', () => {
+  expect(runSessionSource).toContain('markCombatantPending(combatantId, true);');
+  expect(runSessionSource).toContain('markCombatantPending(combatantId, false);');
+  expect(runSessionSource).toContain('busy={pendingCombatantIds.has(c.id) || reconcileBlocks}');
+  expect(runSessionSource).not.toContain('busy={pendingCombatantIds.has(c.id) || deathSaveRoll.isPending || reconcileBlocks}');
+});

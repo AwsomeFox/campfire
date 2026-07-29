@@ -1994,9 +1994,15 @@ export default function RunSessionPage() {
   const deathSaveRoll = useKeyedMutation({
     mutationFn: ({ combatantId, idempotencyKey }: { combatantId: number; idempotencyKey: string }) =>
       api.post(`${API}/encounters/${eid}/combatants/${combatantId}/death-save`, { idempotencyKey }),
-    onMutate: () => setActionError(null),
+    onMutate: ({ combatantId }) => {
+      setActionError(null);
+      markCombatantPending(combatantId, true);
+    },
     onError: reportError,
-    onSettled: () => invalidateEncounter(queryClient, eid),
+    onSettled: (_data, _err, { combatantId }) => {
+      markCombatantPending(combatantId, false);
+      invalidateEncounter(queryClient, eid);
+    },
   });
 
   const patchCombatantTurnState = useCallback(
@@ -3082,7 +3088,7 @@ export default function RunSessionPage() {
           ruleSystem={campaign?.ruleSystem}
           currentTurnState={currentCombatant?.turnState}
           actionsDisabled={riskyBlocked}
-          deathSavePending={deathSaveRoll.isPending}
+          deathSavePending={currentCombatantId != null && pendingCombatantIds.has(currentCombatantId)}
           onRollDeathSave={rollDeathSave}
           onUseSuggestedAction={
             currentCombatantId != null && (isDm || (canPlayerWrite && turnWorkspace?.isYourTurn === true))
@@ -3330,7 +3336,7 @@ export default function RunSessionPage() {
                       ? (actionIndex, actionName, spec) => onUseActionRequested(c.id, c.name, actionIndex, actionName, spec)
                       : undefined
                   }
-                  busy={pendingCombatantIds.has(c.id) || deathSaveRoll.isPending || reconcileBlocks}
+                  busy={pendingCombatantIds.has(c.id) || reconcileBlocks}
                   conditionSuggestions={conditionSuggestions}
                   conditionSourceOptions={canDmWrite ? orderedCombatants.map((source) => ({ id: source.id, name: source.name })) : [{ id: c.id, name: c.name }]}
                   defaultConditionSourceCombatantId={currentCombatantId ?? c.id}
