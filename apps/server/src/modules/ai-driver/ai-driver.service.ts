@@ -5310,11 +5310,15 @@ export class AiDriverService {
         // delayed confirmation; it is never a source of authorization.
         let queuedArgs = args;
         let retainedActionChain: { encounterId: number; chainId: string } | undefined;
+        // Confirmation IDs are provider-supplied and Gemini restarts them at call_0 on each
+        // response. Dedupe before retaining: if this key already owns a decision, the incoming
+        // call is ignored and must not pin an unrelated new chain with nobody able to release it.
+        const confirmationAlreadyQueued = this.hasPendingToolConfirmation(session, call);
         if (call.name === 'apply_action') {
           const argEncounterId = typeof args.encounterId === 'number' ? args.encounterId : Number(args.encounterId);
           const argChainId = typeof args.chainId === 'string' ? args.chainId : undefined;
           const described =
-            argChainId && Number.isFinite(argEncounterId)
+            !confirmationAlreadyQueued && argChainId && Number.isFinite(argEncounterId)
               ? (this.actionResolver?.retainPendingChainForConfirmation(argEncounterId, argChainId) ?? null)
               : null;
           queuedArgs = {
@@ -5323,7 +5327,8 @@ export class AiDriverService {
             ...(described ? { actionName: described.actionName, actorCombatantId: described.actorCombatantId } : {}),
           };
           if (
-            argChainId
+            !confirmationAlreadyQueued
+            && argChainId
             && Number.isFinite(argEncounterId)
             && (described?.promoted || this.hasRetainedActionChain(session, argEncounterId, argChainId))
           ) {
@@ -5676,22 +5681,6 @@ export class AiDriverService {
     const existing = session.pendingToolConfirmations[key];
     if (existing) return existing;
 
-    const keysByAge = Object.keys(session.pendingToolConfirmations).sort((a, b) =>
-      session.pendingToolConfirmations![a].requestedAt.localeCompare(session.pendingToolConfirmations![b].requestedAt),
-    );
-    while (keysByAge.length >= MAX_PENDING_TOOL_CONFIRMATIONS) {
-      const oldest = keysByAge.shift()!;
-      const evicted = session.pendingToolConfirmations[oldest];
-      delete session.pendingToolConfirmations[oldest];
-      // #1558 — EVICTION MUST BE LOUD. This is the same failure #1042 found for grants lost to a
-      // restart: an irreversible write a DM was asked to approve, dropped with no audit row and
-      // no signal. It used to be near-unreachable at 20 pending; collaborative handoff (#1051)
-      // queues roughly four per combat turn, so five turns of an inattentive DM now silently
-      // discards their oldest decision. Same treatment as #1042's discarded grants: one audit
-      // row naming the call, and a signal that reconciles the DM's queue.
-      if (evicted) this.announceEvictedConfirmation(session, evicted);
-    }
-
     const pending: AiDmPendingToolConfirmation = {
       id: `confirm-${++this.confirmationSeq}`,
       tool: call.name,
@@ -5706,11 +5695,33 @@ export class AiDriverService {
       ...(retainedActionChain ? { retainedActionChain } : {}),
     };
     session.pendingToolConfirmations[key] = pending;
+    // Insert the incoming owner BEFORE cap eviction. If it continues a chain owned by the
+    // oldest confirmation, `releaseRetainedActionChain()` now sees the replacement ownership
+    // in the final map and cannot briefly make a still-queued chain TTL-eligible.
+    const keysByAge = Object.keys(session.pendingToolConfirmations).sort((a, b) =>
+      session.pendingToolConfirmations![a].requestedAt.localeCompare(session.pendingToolConfirmations![b].requestedAt),
+    );
+    while (keysByAge.length > MAX_PENDING_TOOL_CONFIRMATIONS) {
+      const oldest = keysByAge.shift()!;
+      const evicted = session.pendingToolConfirmations[oldest];
+      delete session.pendingToolConfirmations[oldest];
+      // #1558 — EVICTION MUST BE LOUD. This is the same failure #1042 found for grants lost to a
+      // restart: an irreversible write a DM was asked to approve, dropped with no audit row and
+      // no signal. It used to be near-unreachable at 20 pending; collaborative handoff (#1051)
+      // queues roughly four per combat turn, so five turns of an inattentive DM now silently
+      // discards their oldest decision. Same treatment as #1042's discarded grants: one audit
+      // row naming the call, and a signal that reconciles the DM's queue.
+      if (evicted) this.announceEvictedConfirmation(session, evicted);
+    }
     // #1042: a queued confirmation is an irreversible write waiting on a human. If the process
     // dies before the DM answers, the next boot has to be able to tell them it was discarded —
     // which it can only do from a persisted record.
     this.persistControlState(session);
     return pending;
+  }
+
+  private hasPendingToolConfirmation(session: AiDmSessionState, call: AiToolCall): boolean {
+    return !!session.pendingToolConfirmations?.[pendingConfirmationKey(call.name, call.id)];
   }
 
   private async triggerEmergencyPause(

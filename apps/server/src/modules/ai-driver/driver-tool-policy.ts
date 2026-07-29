@@ -55,7 +55,8 @@ export interface AiDmPendingToolConfirmation {
   turnNumber: number;
   /**
    * Internal lifecycle marker for a chain this confirmation temporarily kept beyond preview TTL.
-   * It is present only when this confirmation changed `awaitingConfirmation` from false to true.
+   * It is shared by every queued confirmation for that chain, so release waits for the final
+   * owner even when an earlier confirmation performed the false-to-true transition.
    */
   retainedActionChain?: { encounterId: number; chainId: string };
 }

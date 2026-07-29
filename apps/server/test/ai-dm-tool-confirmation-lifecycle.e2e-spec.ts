@@ -292,6 +292,84 @@ describe('ai-dm tool confirmations — reaching a DM who is not looking (#1558)'
     release.mockRestore();
   });
 
+  it('#1451 review: a repeated provider call ID is deduplicated before it can retain an unrelated chain', async () => {
+    const campaignId = await armed('Deduplicate Before Retaining');
+    const driver = h.ctx.app.get(AiDriverService);
+    const resolver = h.ctx.app.get(ActionResolverService);
+    driver.setCollaborative(campaignId, true);
+    const retain = jest
+      .spyOn(resolver, 'retainPendingChainForConfirmation')
+      .mockReturnValue({ actionName: 'Fireball', actorCombatantId: 42, promoted: true });
+
+    h.script({
+      text: 'One provider response reuses its synthetic call ID.',
+      toolCalls: [
+        { id: 'call_0', name: 'apply_action', arguments: { encounterId: 1, chainId: 'chain-first' } },
+        { id: 'call_0', name: 'apply_action', arguments: { encounterId: 1, chainId: 'chain-unowned' } },
+      ],
+      usage: { promptTokens: 6, completionTokens: 4, totalTokens: 10 },
+    });
+    h.script({ text: 'Waiting on the DM.', usage: { promptTokens: 4, completionTokens: 3, totalTokens: 7 } });
+    await h.sendMessage(campaignId, { input: 'cast it' });
+
+    expect(retain).toHaveBeenCalledTimes(1);
+    expect(retain).toHaveBeenCalledWith(1, 'chain-first');
+    const queue = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/tool-confirmations`).set(dm);
+    expect(queue.body).toHaveLength(1);
+    expect(queue.body[0].args.chainId).toBe('chain-first');
+    retain.mockRestore();
+  });
+
+  it('#1451 review: cap eviction keeps a replacement confirmation as the chain retention owner', async () => {
+    const campaignId = await armed('Retain Through Cap Eviction');
+    const driver = h.ctx.app.get(AiDriverService);
+    const resolver = h.ctx.app.get(ActionResolverService);
+    driver.setCollaborative(campaignId, true);
+    const retain = jest
+      .spyOn(resolver, 'retainPendingChainForConfirmation')
+      .mockReturnValue({ actionName: 'Fireball', actorCombatantId: 42, promoted: false });
+    const release = jest.spyOn(resolver, 'releasePendingChainForConfirmation');
+    const session = driver.getSession(campaignId);
+    const pendingMap: Record<string, unknown> = {};
+    for (let i = 0; i < MAX_PENDING_TOOL_CONFIRMATIONS; i += 1) {
+      pendingMap[`begin_encounter:seed_${i}`] = {
+        id: `confirm-seed-${i}`,
+        tool: 'begin_encounter',
+        args: { encounterId: i },
+        toolCallId: `seed_${i}`,
+        profile: 'live',
+        policy: 'confirm',
+        requestedAt: `2026-07-27T10:00:${String(i).padStart(2, '0')}.000Z`,
+        actor: `ai-dm-seat:${campaignId}`,
+        triggeredBy: 'player-1',
+        turnNumber: i,
+        ...(i === 0 ? { retainedActionChain: { encounterId: 1, chainId: 'chain-cap-replacement' } } : {}),
+      };
+    }
+    (session as unknown as { pendingToolConfirmations: Record<string, unknown> }).pendingToolConfirmations = pendingMap;
+
+    h.script({
+      text: 'Replace the oldest chain owner.',
+      toolCalls: [{ id: 'call-new', name: 'apply_action', arguments: { encounterId: 1, chainId: 'chain-cap-replacement' } }],
+      usage: { promptTokens: 6, completionTokens: 4, totalTokens: 10 },
+    });
+    h.script({ text: 'Waiting on the DM.', usage: { promptTokens: 4, completionTokens: 3, totalTokens: 7 } });
+    await h.sendMessage(campaignId, { input: 'cast it' });
+
+    expect(release).not.toHaveBeenCalledWith(1, 'chain-cap-replacement');
+    const queue = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/tool-confirmations`).set(dm);
+    const replacement = queue.body.find((confirmation: { args: { chainId?: string } }) => confirmation.args.chainId === 'chain-cap-replacement');
+    expect(replacement).toBeDefined();
+    const rejected = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/ai-dm/tool-confirmation`)
+      .set(dm)
+      .send({ action: 'reject', confirmationId: replacement.id });
+    expect(rejected.status).toBe(201);
+    expect(release).toHaveBeenCalledWith(1, 'chain-cap-replacement');
+    retain.mockRestore();
+    release.mockRestore();
+  });
+
   it('approving through the endpoint the UI now calls actually resolves the queue', async () => {
     const campaignId = await armed('Resolve Clears');
     h.script({
