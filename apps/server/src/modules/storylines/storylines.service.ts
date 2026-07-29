@@ -73,6 +73,17 @@ function branchToDomain(row: typeof storyBranches.$inferSelect): StoryBranch {
 }
 
 /**
+ * A cascade gets an ISO-8601 marker in a namespace that ordinary soft deletes
+ * (which use `nowIso()`'s millisecond precision) cannot produce.  Keeping the
+ * marker in `deletedAt` preserves the existing schema while allowing restore to
+ * distinguish a cascade from an independently deleted beat in the same
+ * millisecond.  The arc id makes markers for concurrent cascades distinct too.
+ */
+function arcCascadeDeletedAt(arcId: number): string {
+  return nowIso().replace('Z', `${String(arcId).padStart(12, '0')}Z`);
+}
+
+/**
  * Storylines (issue #27): a DM-only branching arc/beat planner. Every method here
  * is reached only through routes/tools that already asserted `dm` role, so no
  * redaction/hidden-filtering is needed — the whole surface is DM prep content and
@@ -198,7 +209,7 @@ export class StorylinesService {
 
   async removeArc(id: number, user: RequestUser, role: Role): Promise<void> {
     const existing = await this.getArcRowOrThrow(id);
-    const ts = nowIso();
+    const ts = arcCascadeDeletedAt(id);
     // Soft-delete (issue #701): stamp the arc and every beat in one transaction so
     // topology (branches) and prose revisions survive for restore. Only beats live at
     // this moment receive the cascade timestamp, which is the restoration marker.

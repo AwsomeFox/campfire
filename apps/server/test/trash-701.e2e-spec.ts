@@ -3,6 +3,7 @@ import { eq } from 'drizzle-orm';
 import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
 import { DB, type DrizzleDb } from '../src/db/db.module';
 import { combatants, encounterEvents, storyBranches } from '../src/db/schema';
+import * as time from '../src/common/time';
 
 // Covers soft-delete/restore for factions, story arcs/beats, and encounters (issue #701).
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'trash-701-dm' };
@@ -99,6 +100,32 @@ describe('trash consistency — factions, storylines, encounters (e2e, issue #70
     await request(server).delete(`/api/v1/arcs/${arcId}`).set(dm);
     const restoreBeat = await request(server).post(`/api/v1/beats/${beat.body.id}/restore`).set(dm);
     expect(restoreBeat.status).toBe(409);
+  });
+
+  it('does not restore a beat independently deleted in the same millisecond as its arc', async () => {
+    const server = ctx.app.getHttpServer();
+    const arcRes = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/arcs`)
+      .set(dm)
+      .send({ title: 'Independent-delete Arc' });
+    const arcId = arcRes.body.id;
+    const independent = await request(server).post(`/api/v1/arcs/${arcId}/beats`).set(dm).send({ title: 'Keep trashed' });
+    const cascaded = await request(server).post(`/api/v1/arcs/${arcId}/beats`).set(dm).send({ title: 'Restore with arc' });
+
+    const nowIso = jest.spyOn(time, 'nowIso').mockReturnValue('2026-07-29T16:32:08.000Z');
+    try {
+      expect((await request(server).delete(`/api/v1/beats/${independent.body.id}`).set(dm)).status).toBe(200);
+      expect((await request(server).delete(`/api/v1/arcs/${arcId}`).set(dm)).status).toBe(200);
+      expect((await request(server).post(`/api/v1/arcs/${arcId}/restore`).set(dm)).status).toBe(201);
+    } finally {
+      nowIso.mockRestore();
+    }
+
+    const restored = await request(server).get(`/api/v1/arcs/${arcId}`).set(dm);
+    expect(restored.status).toBe(200);
+    expect(restored.body.beats).toHaveLength(1);
+    expect(restored.body.beats[0].id).toBe(cascaded.body.id);
+    expect((await request(server).post(`/api/v1/beats/${independent.body.id}/restore`).set(dm)).status).toBe(201);
   });
 
   it('encounter soft-delete preserves combatants, events, and revisions; restore round-trips', async () => {
