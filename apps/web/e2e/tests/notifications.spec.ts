@@ -583,12 +583,12 @@ test('restores a new unread count after mark-all-read across tabs', async ({ bro
   releaseStaleCount();
   await expect(second.getByRole('button', { name: 'Notifications', exact: true })).toBeVisible();
 
+  // A second tab's new count request starts after read-all, so its positive
+  // response is fresh server evidence rather than the released stale request.
   unreadCount = 1;
-  await first.keyboard.press('Escape');
-  await expect(first.getByRole('dialog', { name: 'Notifications' })).toHaveCount(0);
-  await first.getByRole('link', { name: 'Quests', exact: true }).click();
-  await expect(first.getByRole('button', { name: 'Notifications (1 unread)' })).toBeVisible();
+  await second.getByRole('link', { name: 'Dashboard', exact: true }).click();
   await expect(second.getByRole('button', { name: 'Notifications (1 unread)' })).toBeVisible();
+  await expect(first.getByRole('button', { name: 'Notifications (1 unread)' })).toBeVisible();
 
   await context.close();
 });

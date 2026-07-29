@@ -68,6 +68,8 @@ const NOTIFICATIONS_COUNT_ID = 'notifications-dialog-item-count';
 type CountSnapshot = {
   count: number;
   refreshedAt: number;
+  /** When the server request began; distinguishes a stale in-flight response from new evidence. */
+  requestedAt?: number;
   /**
    * Issue #1590 — carried through the snapshot (not just the raw API response) so a tab that
    * receives this via BroadcastChannel/localStorage, not just the one that made the fetch,
@@ -177,6 +179,12 @@ function parseSnapshot(value: string | null): CountSnapshot | null {
       return {
         count: parsed.count,
         refreshedAt: parsed.refreshedAt,
+        // Snapshots written before request timing was recorded are not fresh
+        // evidence after a read-all, so leave them untrusted until this tab
+        // fetches a new count itself.
+        requestedAt: typeof parsed.requestedAt === 'number' && Number.isFinite(parsed.requestedAt)
+          ? parsed.requestedAt
+          : undefined,
         membershipChanged: parsed.membershipChanged === true,
       };
     }
@@ -357,18 +365,22 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
 
   const applySnapshot = useCallback((snapshot: CountSnapshot) => {
     // A remote tab can publish a stale positive snapshot in the narrow window
-    // before it receives our read-all broadcast. Do not let that snapshot undo
-    // local read-all suppression; discard its cache entry so the next refresh
-    // must obtain fresh server evidence before showing a badge again.
+    // before it receives our read-all broadcast. Reject only evidence requested
+    // before the read-all; a later request that returns positive is a genuinely
+    // new unread notification and must restore the badge.
     if (allReadAtRef.current !== null && snapshot.count > 0) {
-      if (storageKey) {
-        try {
-          localStorage.removeItem(storageKey);
-        } catch {
-          /* storage may be unavailable */
+      const readAt = Date.parse(allReadAtRef.current);
+      if (!Number.isFinite(readAt) || snapshot.requestedAt === undefined || snapshot.requestedAt <= readAt) {
+        if (storageKey) {
+          try {
+            localStorage.removeItem(storageKey);
+          } catch {
+            /* storage may be unavailable */
+          }
         }
+        return;
       }
-      return;
+      allReadAtRef.current = null;
     }
     if ((latestSnapshotRef.current?.refreshedAt ?? 0) > snapshot.refreshedAt) return;
     latestSnapshotRef.current = snapshot;
@@ -422,6 +434,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
 
     const load = async () => {
       if (!isDocumentActive()) return;
+      const requestedAt = Date.now();
       const res = await api.get<NotificationUnreadCount>(`${API}/notifications/unread-count`, {
         signal: controller.signal,
       });
@@ -430,17 +443,16 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
       }
       // A read-all increments countGenerationRef through cancelCountRequest(), so
       // any request that began before the mutation (including one in another tab)
-      // cannot reach this point. A positive response here is therefore fresh
-      // evidence that a new unread notification arrived; timestamp comparison is
-      // insufficient because both requests can start in the same millisecond.
-      if (res.count > 0) {
+      // cannot reach this point. A positive response from a request that began
+      // after read-all is fresh evidence that new unread work arrived.
+      if (res.count > 0 && allReadAtRef.current !== null && requestedAt > Date.parse(allReadAtRef.current)) {
         allReadAtRef.current = null;
       }
       if (allReadAtRef.current !== null) {
         publishSnapshot({ count: 0, refreshedAt: Date.now(), membershipChanged: false });
         return;
       }
-      publishSnapshot({ count: res.count, refreshedAt: Date.now(), membershipChanged: res.membershipChanged });
+      publishSnapshot({ count: res.count, refreshedAt: Date.now(), requestedAt, membershipChanged: res.membershipChanged });
     };
 
     const run = async () => {
