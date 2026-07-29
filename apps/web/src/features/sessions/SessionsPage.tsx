@@ -931,7 +931,14 @@ function SessionDetail({
         <h2
           ref={detailHeadingRef}
           tabIndex={-1}
-          className="text-xl font-extrabold text-white m-0 focus:outline-none"
+          // Issue #1684 sweep: focus lands here programmatically (see the
+          // useEffect above) after a mobile "select a session" tap — the same
+          // "pointer-driven landing" shape nocturne.css's #login-title:focus
+          // comment documents, where :focus-visible's heuristic often does not
+          // apply. Use plain :focus with an explicit ring (not focus:outline-none)
+          // so the landing is never invisible, matching that established
+          // convention instead of diverging from it.
+          className="text-xl font-extrabold text-white m-0 focus:outline focus:outline-2 focus:outline-offset-[-2px] focus:outline-[var(--color-accent)]"
         >
           {session.title || 'Untitled session'}
         </h2>
