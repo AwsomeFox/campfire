@@ -45,14 +45,16 @@ function main() {
   const rootPackage = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
   const ci = readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8');
   const jobBlock = (name) => {
-    const match = ci.match(new RegExp(`^  ${name}:\\n([\\s\\S]*?)(?=^  [\\w-]+:\\n|$)`, 'm'));
+    const match = ci.match(new RegExp(`^  ${name}:\\n([\\s\\S]*?)(?=^  [\\w-]+:\\n|(?![\\s\\S]))`, 'm'));
     return match?.[1] ?? '';
   };
   const errors = [];
   if (webPackage.scripts?.['test:unit'] !== `playwright test --config ${unitConfig}`) errors.push(`apps/web test:unit must invoke ${unitConfig}`);
   if (!rootPackage.scripts?.['test:all']?.includes('test:unit:web')) errors.push('root test:all must invoke test:unit:web');
-  if (!/Run web unit specs[\s\S]*?npm run test:unit -w apps\/web/.test(jobBlock('unit-web'))) errors.push('CI unit-web job must invoke web test:unit');
-  if (!/needs:\s*\[[^\]]*unit-web/.test(jobBlock('ci'))) errors.push('aggregate ci must depend on unit-web');
+  const unitWeb = jobBlock('unit-web');
+  const aggregateCi = jobBlock('ci');
+  if (!unitWeb.includes('Run web unit specs') || !unitWeb.includes('npm run test:unit -w apps/web')) errors.push('CI unit-web job must invoke web test:unit');
+  if (!/needs:\s*\[[^\]]*unit-web/.test(aggregateCi)) errors.push('aggregate ci must depend on unit-web');
 
   const onDisk = new Set(walk(testsDir));
   const listed = listedUnitFiles();
