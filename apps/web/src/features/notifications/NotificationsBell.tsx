@@ -400,7 +400,6 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
 
     const controller = new AbortController();
     const generation = ++countGenerationRef.current;
-    const requestedAt = Date.now();
 
     const load = async () => {
       if (!isDocumentActive()) return;
@@ -410,11 +409,12 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
       if (countGenerationRef.current !== generation) {
         return;
       }
-      // A pre-read-all request can return an old positive count after another tab
-      // broadcasts the mutation. Only a request started after read-all proves the
-      // positive count is fresh enough to release the local suppression.
-      const allReadAt = allReadAtRef.current;
-      if (res.count > 0 && (allReadAt === null || requestedAt >= Date.parse(allReadAt))) {
+      // A read-all increments countGenerationRef through cancelCountRequest(), so
+      // any request that began before the mutation (including one in another tab)
+      // cannot reach this point. A positive response here is therefore fresh
+      // evidence that a new unread notification arrived; timestamp comparison is
+      // insufficient because both requests can start in the same millisecond.
+      if (res.count > 0) {
         allReadAtRef.current = null;
       }
       if (allReadAtRef.current !== null) {
@@ -535,12 +535,13 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
         idSet.has(item.id) ? { ...item, readAt: null } : item
       )) ?? previous);
     } else if (message.type === 'read-all') {
+      cancelCountRequest();
       allReadAtRef.current = message.readAt;
       setItems((previous) => previous?.map((item) => (
         item.readAt ? item : { ...item, readAt: message.readAt }
       )) ?? previous);
     }
-  }, []);
+  }, [cancelCountRequest]);
 
   useEffect(() => {
     mountedRef.current = true;

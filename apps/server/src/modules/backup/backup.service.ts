@@ -682,8 +682,11 @@ export class BackupService implements OnApplicationBootstrap {
           // attempts, but an incomplete archive is not a restore-complete success.
           // Keep the prior known-good cadence record while retention bounds older
           // recoverable-but-partial archives without letting them displace it.
-          await this.writeFailureCadence(previous, attemptAt, intervalMs, message, disk, estimatedBytes);
-          this.logger.warn(`${message} Pruned ${prune.count} older archive(s), ${prune.bytes} bytes.`);
+          await this.writeFailureCadence(previous, attemptAt, intervalMs, message, disk, estimatedBytes, prune);
+          this.logger.warn(
+            `${message} Pruned ${prune.count} older archive(s), ${prune.bytes} bytes.` +
+              (prune.error ? ` Retention errors: ${prune.error}` : ''),
+          );
           return;
         }
         const prune = await this.pruneVerifiedScheduledBackups(
@@ -844,6 +847,7 @@ export class BackupService implements OnApplicationBootstrap {
     message: string,
     disk: BackupDiskStatus | null,
     estimatedBytes: number,
+    prune?: { count: number; bytes: number; error: string },
   ): Promise<void> {
     const nextRunAt = new Date(Date.now() + this.failureBackoffMs(previous, intervalMs)).toISOString();
     await this.writeCadence({
@@ -856,7 +860,7 @@ export class BackupService implements OnApplicationBootstrap {
       lastArchiveName: previous?.lastArchiveName ?? null,
       lastVerifiedAt: previous?.lastVerifiedAt ?? null,
       consecutiveFailures: (previous?.consecutiveFailures ?? 0) + 1,
-      metrics: this.metricsAfterFailure(previous?.metrics, disk, estimatedBytes),
+      metrics: this.metricsAfterFailure(previous?.metrics, disk, estimatedBytes, prune),
     });
   }
 
@@ -881,13 +885,18 @@ export class BackupService implements OnApplicationBootstrap {
     previous: BackupCadenceMetrics | undefined,
     disk: BackupDiskStatus | null,
     estimatedBytes: number,
+    prune?: { count: number; bytes: number; error: string },
   ): BackupCadenceMetrics {
     const metrics = this.normalizeMetrics(previous);
     return {
       ...metrics,
       failureCount: metrics.failureCount + 1,
+      pruneCount: metrics.pruneCount + (prune?.count ?? 0),
+      prunedBytes: metrics.prunedBytes + (prune?.bytes ?? 0),
       lastFreeBytes: disk?.freeBytes ?? null,
       lastEstimatedBytes: estimatedBytes,
+      lastPruneAt: prune?.count ? nowIso() : metrics.lastPruneAt,
+      lastPruneError: prune ? prune.error : metrics.lastPruneError,
     };
   }
 
