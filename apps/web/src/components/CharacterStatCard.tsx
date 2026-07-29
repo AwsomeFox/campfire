@@ -14,7 +14,7 @@
  * total is handed up via `onApplyDamage` so the encounter can apply it to a target.
  * Without a `campaignId` the card is read-only, so it stays reusable elsewhere.
  */
-import { type CSSProperties, type ReactNode, useMemo, useState } from 'react';
+import { type CSSProperties, type ReactNode, useEffect, useMemo, useState } from 'react';
 import type { Character, RollCheckDefinition } from '@campfire/schema';
 import {
   ruleSystemAdapter,
@@ -91,6 +91,7 @@ export function CharacterStatCard({
   character,
   ruleSystem,
   defaultOpen = false,
+  openOnActiveTurn = false,
   campaignId,
   onError,
   onApplyDamage,
@@ -99,6 +100,8 @@ export function CharacterStatCard({
   character: Character;
   ruleSystem: string | null;
   defaultOpen?: boolean;
+  /** Open when this character becomes the active combatant, without collapsing it on later turns. */
+  openOnActiveTurn?: boolean;
   /** When set, the card becomes interactive: rolls post to this campaign's shared feed. */
   campaignId?: number;
   onError?: (msg: string | null) => void;
@@ -107,7 +110,7 @@ export function CharacterStatCard({
   /** Issue #414: open the structured action Use flow for a resolvable action index. */
   onUseAction?: (actionIndex: number) => void;
 }) {
-  const { open, buttonProps, regionProps } = useDisclosure({
+  const { open, setOpen, buttonProps, regionProps } = useDisclosure({
     initialOpen: defaultOpen,
     focusManagement: false,
     regionLabel: `${character.name} character sheet`,
@@ -116,6 +119,12 @@ export function CharacterStatCard({
   const isStarfinder = adapter.id === STARFINDER_ADAPTER_ID || ruleSystem?.startsWith('starfinder') || false;
   const roller = useRoller(campaignId ?? 0, onError ?? NOOP);
   const interactive = campaignId != null;
+
+  // Active turns can change while this card stays mounted. Open the relevant sheet when
+  // that happens, but leave a player or DM in control of collapsing it afterwards.
+  useEffect(() => {
+    if (openOnActiveTurn) setOpen(true);
+  }, [openOnActiveTurn, setOpen]);
 
   // Issue #415: the adapter-owned roll catalog is the SINGLE source of truth for every
   // rollable check — the same list (and math) the character sheet renders. Skills include

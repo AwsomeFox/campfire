@@ -415,6 +415,8 @@ export function TurnWorkspace({
                   <button
                     type="button"
                     className="btn btn-secondary !min-h-8 text-xs shrink-0"
+                    disabled={actionsDisabled}
+                    data-testid="suggested-action-use"
                     onClick={() => onUseSuggestedAction(a.actionIndex!, a.name, a.spec!)}
                   >
                     Use
