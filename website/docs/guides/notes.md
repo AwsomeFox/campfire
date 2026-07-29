@@ -43,7 +43,7 @@ quest, update an NPC, or drop a line in a recap. Resolving clears it from the qu
 !!! tip "Sweep it instead of resolving one by one"
     Click **Sweep inbox** at the top of the Scribe inbox page — no AI client or
     token needed, just an AI provider configured for the campaign (Campaign
-    settings -> AI). It reads every open item and proposes the quest/NPC/recap
+    settings -> AI). It reads every open item and proposes the quest/NPC/location/character
     updates for you to approve, turning a pile of one-liners into structured canon.
     Prefer your own assistant? [Connect one](../ai/connect.md) (with a direct-write DM token) and ask it to sweep
     the inbox — it calls the exact same `sweep_inbox` operation the button does.
