@@ -90,6 +90,7 @@ import {
   shouldInvalidateInlineCharacters,
 } from './inlineCharacterCards';
 import { isDown } from './encounterEndedSummary';
+import { reconcileFogSyncState } from './fogSyncState';
 import { EncounterAftermathPanel } from './EncounterAftermathPanel';
 import { TurnWorkspace } from './TurnWorkspace';
 import { initials as tokenInitials } from '../../lib/avatarText';
@@ -3698,17 +3699,20 @@ export function BattleMap({
     // arrive before the PATCH settles. Keep the local edit and its active drag/undo state
     // authoritative during that interval; on settle the parent clears this marker and the
     // fresh server snapshot becomes the new baseline.
-    if (pendingFog !== undefined) {
-      lastLocalFogRef.current = pendingFog;
+    const sync = reconcileFogSyncState({
+      serverFog: encounter.fog,
+      localFog: lastLocalFogRef.current,
+      pendingFog,
+    });
+    if (!sync.resetLocalUi) {
+      lastLocalFogRef.current = sync.fog;
       return;
     }
-    if (!fogStatesEqual(encounter.fog, lastLocalFogRef.current)) {
-      lastLocalFogRef.current = encounter.fog;
-      fogUndoStackRef.current.reset();
-      setSelectedFogRegionId(null);
-      setFogRegionDrag(null);
-      syncFogUndoUi();
-    }
+    lastLocalFogRef.current = sync.fog;
+    fogUndoStackRef.current.reset();
+    setSelectedFogRegionId(null);
+    setFogRegionDrag(null);
+    syncFogUndoUi();
   }, [encounter.fog, pendingFog, syncFogUndoUi]);
 
   const undoFogEdit = useCallback(() => {

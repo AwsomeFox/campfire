@@ -4,6 +4,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { test, expect } from '@playwright/test';
+import { reconcileFogSyncState } from '../../src/features/encounters/fogSyncState';
 
 const RUN_SESSION = resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx');
 const FOG_GRID = resolve(__dirname, '../../src/features/encounters/fogGridReveal.ts');
@@ -32,12 +33,16 @@ test.describe('fog editor (issue #472)', () => {
     expect(source).toMatch(/Erase|erase/);
   });
 
-  test('optimistically retains fog edits across polls until their versioned write settles', () => {
-    const source = readFileSync(RUN_SESSION, 'utf8');
-    expect(source).toMatch(/expectedUpdatedAt/);
-    expect(source).toMatch(/isStaleWrite/);
-    expect(source).toMatch(/setQueryData<EncounterWithCombatants>/);
-    expect(source).toMatch(/pendingFog/);
-    expect(source).toMatch(/fogStatesEqual\(current, settledFog\)/);
+  test('a stale poll cannot reset fog undo/drag state while its PATCH is pending', () => {
+    const local = { enabled: true, revealed: [{ id: 'local', x: 10, y: 10, w: 20, h: 20 }] };
+    const staleServer = { enabled: true, revealed: [] };
+    expect(reconcileFogSyncState({ serverFog: staleServer, localFog: local, pendingFog: local })).toEqual({
+      fog: local,
+      resetLocalUi: false,
+    });
+    expect(reconcileFogSyncState({ serverFog: staleServer, localFog: local, pendingFog: undefined })).toEqual({
+      fog: staleServer,
+      resetLocalUi: true,
+    });
   });
 });
