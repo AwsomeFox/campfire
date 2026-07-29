@@ -526,6 +526,7 @@ describe('ai-dm driver — #1499 characterId ownership, scene, and step/token ca
   let playerAId: number;
   let playerBId: number;
   let agentA: ReturnType<typeof request.agent>;
+  let agentB: ReturnType<typeof request.agent>;
   let characterAId: number;
   let characterBId: number;
   let foreignCharacterId: number;
@@ -551,11 +552,14 @@ describe('ai-dm driver — #1499 characterId ownership, scene, and step/token ca
     playerAId = createA.body.id;
     playerBId = createB.body.id;
 
-    // Only player A needs a logged-in agent — every test below drives the ownership
-    // boundary from A's perspective (attempting/using A's vs B's characterId) or the DM's.
     agentA = request.agent(h.server);
     const loginA = await agentA.post('/api/v1/auth/login').send({ username: 'sec-1499-player-a', password: 'password-1499-player-a' });
     expect(loginA.status).toBe(201);
+    // B needs its own agent too — the ownerUserId-reassignment regression test at the end
+    // authenticates as B once ownership is transferred to them.
+    agentB = request.agent(h.server);
+    const loginB = await agentB.post('/api/v1/auth/login').send({ username: 'sec-1499-player-b', password: 'password-1499-player-b' });
+    expect(loginB.status).toBe(201);
 
     // A character each, owned by A and B respectively, in the shared campaign.
     const charA = await request(h.server)
@@ -708,5 +712,35 @@ describe('ai-dm driver — #1499 characterId ownership, scene, and step/token ca
     const lastReq = h.mock.received.at(-1)!;
     // Not clamped down to the player default (1024) — the DM's requested ceiling is honored.
     expect(lastReq.maxTokens).toBeGreaterThan(1024);
+  });
+
+  // Runs LAST — it reassigns characterAId's canonical owner, which every test above assumes
+  // is still player A.
+  it('ownership follows characters.ownerUserId, NOT the stale campaign_members.characterId seat link', async () => {
+    // The DM reassigns Aldric's owner directly (a supported flow, membership.e2e-spec.ts)
+    // WITHOUT touching member A's `characterId`, which is left still pointing at Aldric —
+    // the denormalized seat link is now stale.
+    const reassign = await request(h.server)
+      .patch(`/api/v1/characters/${characterAId}`)
+      .set(dm)
+      .send({ ownerUserId: String(playerBId) });
+    expect(reassign.status).toBe(200);
+    expect(reassign.body.ownerUserId).toBe(String(playerBId));
+
+    // The ACTUAL new owner (B) may now speak as Aldric, even though B's member row was
+    // never linked to Aldric's characterId.
+    h.script({ text: 'Aldric, now played by B, swings again.' });
+    const asNewOwner = await agentB
+      .post(`/api/v1/campaigns/${campaignId}/ai-dm/message`)
+      .send({ input: 'I swing again.', characterId: characterAId });
+    expect(asNewOwner.status).toBe(201);
+
+    // The STALE former owner (A) — still the member whose `characterId` seat link points at
+    // Aldric — is now refused. Authorizing off that stale seat link would let A keep
+    // speaking as a character they no longer own.
+    const asStaleOwner = await agentA
+      .post(`/api/v1/campaigns/${campaignId}/ai-dm/message`)
+      .send({ input: 'I swing again.', characterId: characterAId });
+    expect(asStaleOwner.status).toBe(403);
   });
 });

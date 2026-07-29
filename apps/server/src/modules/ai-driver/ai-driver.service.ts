@@ -17,7 +17,7 @@ import { EncountersService } from '../encounters/encounters.service';
 import { MembersService } from '../membership/members.service';
 import { CharactersService } from '../characters/characters.service';
 import { TableSafetyService } from '../safety/table-safety.service';
-import type { AiDmSeat, NarrationLanguage, Role, RuleEntry, RulePack } from '@campfire/schema';
+import type { AiDmSeat, Character, NarrationLanguage, Role, RuleEntry, RulePack } from '@campfire/schema';
 import {
   AI_DM_PROMPT_HISTORY_MAX_DIGEST,
   AI_DM_PROMPT_HISTORY_MAX_MESSAGES,
@@ -3164,26 +3164,38 @@ export class AiDriverService {
     // Issue #1499 — verify the caller may speak as `characterId` FIRST, before any state
     // change (turn-slot reservation, action queueing, or the `player.action` transcript
     // row below all mutate shared state). The lookup used to run much later purely to pick
-    // a display name for the speaker prefix, and never compared the resolved member to the
-    // caller at all — so any player could put words in another player's character's mouth,
-    // and the fabricated line would enter the shared transcript as if that player sent it.
-    // A `dm` may speak as any character IN THIS CAMPAIGN (they can already author anything);
-    // anyone else may only speak as a character they own, same rule as
-    // `CharactersService.assertCanWrite`. Resolved once and reused below for the prefix, so
-    // a rejected attempt does exactly nothing observable.
-    let speakingAsMember: Awaited<ReturnType<typeof this.members.listForCampaign>>[number] | null = null;
+    // a display name for the speaker prefix, and never compared anything to the caller at
+    // all — so any player could put words in another player's character's mouth, and the
+    // fabricated line would enter the shared transcript as if that player sent it.
+    //
+    // Authorize against the character's CANONICAL owner — `characters.ownerUserId`, the
+    // same field `CharactersService.assertCanWrite` uses — NOT the denormalized
+    // `campaign_members.characterId` seat link. A DM may reassign a character's owner
+    // directly (`PATCH /characters/:id {ownerUserId}`, independent of any member's seat
+    // link) without also repointing that member's `characterId`; authorizing off the seat
+    // link would then let the STALE former owner keep speaking as the character while the
+    // real new owner was rejected — inverting the exact property this fix requires.
+    // A `dm` may still speak as any character IN THIS CAMPAIGN (they can already author
+    // anything). Resolved once and reused below for the prefix, so a rejected attempt does
+    // exactly nothing observable.
+    let speakingAsCharacter: Character | null = null;
     if (opts.characterId !== undefined) {
-      const membersList = await this.members.listForCampaign(campaignId);
-      const member = membersList.find((m) => m.characterId === opts.characterId) ?? null;
-      // No member of THIS campaign owns that character id — either it belongs to another
-      // campaign entirely, or it is not linked to any seat here. Either way, not speakable.
-      if (!member) {
+      let character: Character | null = null;
+      try {
+        character = await this.characters.getOrThrow(opts.characterId, 'player');
+      } catch {
+        character = null;
+      }
+      // Not found (soft-deleted counts as not found), or it belongs to a DIFFERENT
+      // campaign entirely — either way, not speakable here.
+      if (!character || character.campaignId !== campaignId) {
         throw new ForbiddenException('That character does not belong to this campaign.');
       }
-      if (opts.callerRole !== 'dm' && String(member.userId) !== String(triggeredBy.id)) {
-        throw new ForbiddenException('You may only speak as a character you own.');
+      if (opts.callerRole !== 'dm') {
+        const owns = character.ownerUserId != null && String(character.ownerUserId) === String(triggeredBy.id);
+        if (!owns) throw new ForbiddenException('You may only speak as a character you own.');
       }
-      speakingAsMember = member;
+      speakingAsCharacter = character;
     }
 
     // Gate: experimental flag on + seat enabled + budget remaining (throws otherwise).
@@ -3451,13 +3463,20 @@ export class AiDriverService {
       promptPhaseFor(opts.lifecycle, session.phase),
     );
 
-    // #1499: `speakingAsMember` was already resolved AND ownership-checked above; this only
-    // fetches the character's display name for the prefix.
+    // #1499: `speakingAsCharacter` was already resolved AND ownership-checked above
+    // (against `characters.ownerUserId`, the canonical field). This only looks up the
+    // OWNING member's display name for the prefix — by `ownerUserId`, the same field that
+    // authorized the turn, not by the denormalized `characterId` seat link, which may
+    // point at a different (stale) member than the character's actual current owner.
     let speakerPrefix = '';
-    if (opts.characterId !== undefined && speakingAsMember) {
+    if (speakingAsCharacter) {
       try {
-        const character = await this.characters.getOrThrow(opts.characterId, 'player');
-        speakerPrefix = `[${character.name}, played by ${speakingAsMember.displayName ?? speakingAsMember.username}]`;
+        const membersList = await this.members.listForCampaign(campaignId);
+        const owningMember = speakingAsCharacter.ownerUserId != null
+          ? membersList.find((m) => String(m.userId) === String(speakingAsCharacter!.ownerUserId))
+          : undefined;
+        const speakerName = owningMember?.displayName || owningMember?.username || triggeredBy.name || 'a player';
+        speakerPrefix = `[${speakingAsCharacter.name}, played by ${speakerName}]`;
       } catch {
         // Fallback: no server-side prefix, client-side prefix in input is used
       }
