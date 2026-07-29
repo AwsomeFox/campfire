@@ -2298,16 +2298,16 @@ export default function RunSessionPage() {
         <div className="flex-1" />
         {isDm && (
           <>
-            <div className="flex items-center gap-1.5 flex-wrap" role="group" aria-label="Player display">
+            <div className="flex basis-full lg:basis-auto w-full lg:w-auto items-center gap-1.5 flex-wrap" role="group" aria-label="Player display">
               {/* Open synchronously from this button's click stack. The newly minted
                   #547 capability navigates only that separate window, never the DM cockpit. */}
-              <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={openPlayerDisplay}>
+              <Btn ghost className="cf-target-44 text-xs" onClick={openPlayerDisplay}>
                 <GameIcon slug="tv" size={13} className="inline align-text-bottom mr-1" />Open display
               </Btn>
-              <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={copyPlayerDisplayLink}>
+              <Btn ghost className="cf-target-44 text-xs" onClick={copyPlayerDisplayLink}>
                 Copy link
               </Btn>
-              <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={reconnectPlayerDisplay}>
+              <Btn ghost className="cf-target-44 text-xs" onClick={reconnectPlayerDisplay}>
                 Reconnect/focus
               </Btn>
               <span
