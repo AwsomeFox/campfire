@@ -22,7 +22,7 @@ import { api, API, ApiError, translateApiError } from '../../lib/api';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { useCampaign } from '../../app/CampaignContext';
 import { archivedWriteBlockedReason } from '../../app/campaignAccess';
-import { bumpPendingProposalsBadge, setInboxCountBadge } from '../../lib/proposalsBadgeBus';
+import { bumpPendingProposalsBadge, setPendingProposalsBadge, setInboxCountBadge } from '../../lib/proposalsBadgeBus';
 import { Card, Chip, Btn, TextArea, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
 import { GameIcon } from '../../components/GameIcon';
@@ -301,12 +301,26 @@ export default function InboxPage() {
       // Server-truth reconciliation still happens on the next route change (Layout's
       // effect); this just makes the badge catch up without waiting for that.
       // Use newlyProposed so a re-swept/recovered prior row doesn't inflate the badge;
-      // fall back to itemsProposed for mocked/legacy responses.
-      const newlyProposed = result.job.itemsNewlyProposed ?? result.job.itemsProposed;
-      if (newlyProposed > 0) bumpPendingProposalsBadge(newlyProposed, sweepCid);
+      // fall back to a delta bump for mocked/legacy responses that don't include it.
+      const newlyProposed = result.job.itemsNewlyProposed;
+      if (newlyProposed === undefined) {
+        const delta = result.job.itemsProposed;
+        if (delta > 0) bumpPendingProposalsBadge(delta, sweepCid);
+      }
       const freshOpenTotal = await load();
       if (sweepCid === cidRef.current && freshOpenTotal !== undefined) {
         setInboxCountBadge(freshOpenTotal, sweepCid);
+      }
+      // After a real sweep, re-fetch the authoritative pending count so concurrent
+      // sweeps (where the losing side gets a recovered outcome with itemsNewlyProposed 0)
+      // don't leave the badge stale or double-counted.
+      if (sweepCid === cidRef.current && newlyProposed !== undefined) {
+        try {
+          const pending = await api.get<unknown[]>(`${API}/campaigns/${sweepCid}/proposals?status=pending`);
+          if (sweepCid === cidRef.current) setPendingProposalsBadge(pending.length, sweepCid);
+        } catch {
+          // Badge will reconcile on the next route change; don't surface here.
+        }
       }
     } catch (e) {
       if (sweepCid !== cidRef.current) return;
@@ -551,24 +565,21 @@ function SweepResultCard({
   const { t } = useTranslation();
   const { job, items } = result;
 
-  if (job.status === 'disabled') {
-    return (
-      <div className="cf-inset p-3 space-y-1.5">
-        <p className="m-0 text-sm text-amber-200">{job.detail || t('notes.sweepNoProvider')}</p>
-        <div className="flex items-center gap-3">
-          <Link to={`/c/${campaignId}/settings#ai-dm-provider`} className="text-xs text-purple-400 hover:underline">
-            {t('notes.sweepOpenAiSettings')}
-          </Link>
-          <button type="button" className="text-xs text-secondary hover:text-white" onClick={onDismiss}>
-            {t('notes.sweepDismiss')}
-          </button>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <Card density="default" className="space-y-2.5">
+      {job.status === 'disabled' && (
+        <div className="cf-inset p-3 space-y-1.5 border-amber-600/40">
+          <p className="m-0 text-sm text-amber-200">{job.detail || t('notes.sweepNoProvider')}</p>
+          <div className="flex items-center gap-3">
+            <Link to={`/c/${campaignId}/settings#ai-dm-provider`} className="text-xs text-purple-400 hover:underline">
+              {t('notes.sweepOpenAiSettings')}
+            </Link>
+            <button type="button" className="text-xs text-secondary hover:text-white" onClick={onDismiss}>
+              {t('notes.sweepDismiss')}
+            </button>
+          </div>
+        </div>
+      )}
       <div className="flex items-center justify-between gap-2 flex-wrap">
         <p className="m-0 text-sm">
           {t('notes.sweepSummary', {
@@ -578,9 +589,11 @@ function SweepResultCard({
             errored: job.itemsErrored,
           })}
         </p>
-        <button type="button" className="text-xs text-secondary hover:text-white shrink-0" onClick={onDismiss}>
-          {t('notes.sweepDismiss')}
-        </button>
+        {job.status !== 'disabled' && (
+          <button type="button" className="text-xs text-secondary hover:text-white shrink-0" onClick={onDismiss}>
+            {t('notes.sweepDismiss')}
+          </button>
+        )}
       </div>
       {job.itemsProposed > 0 && (
         <Link to={`/c/${campaignId}/proposals`} className="text-xs text-purple-400 hover:underline">

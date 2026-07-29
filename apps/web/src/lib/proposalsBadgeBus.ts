@@ -27,10 +27,30 @@ export function bumpPendingProposalsBadge(delta: number, campaignId: number): vo
   for (const listener of proposalListeners) listener(delta, campaignId);
 }
 
-/** Called by Layout to subscribe; returns an unsubscribe function. */
+/** Called by Layout to subscribe to delta bumps; returns an unsubscribe function. */
 export function onPendingProposalsBadgeBump(listener: BumpListener): () => void {
   proposalListeners.add(listener);
   return () => proposalListeners.delete(listener);
+}
+
+/**
+ * Same campaign-scoped absolute count pattern as `setInboxCountBadge`: after a sweep
+ * the page can hand Layout the authoritative pending total it just fetched, rather
+ * than relying on a delta that can be mis-attributed across concurrent sweeps.
+ */
+type SetProposalsListener = (total: number, campaignId: number) => void;
+
+const proposalSetListeners = new Set<SetProposalsListener>();
+
+/** Called by a producer with the authoritative pending proposals count. */
+export function setPendingProposalsBadge(total: number, campaignId: number): void {
+  for (const listener of proposalSetListeners) listener(total, campaignId);
+}
+
+/** Called by Layout to subscribe to absolute counts; returns an unsubscribe function. */
+export function onPendingProposalsBadgeSet(listener: SetProposalsListener): () => void {
+  proposalSetListeners.add(listener);
+  return () => proposalSetListeners.delete(listener);
 }
 
 /**
