@@ -356,12 +356,26 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
   }, [storageKey]);
 
   const applySnapshot = useCallback((snapshot: CountSnapshot) => {
+    // A remote tab can publish a stale positive snapshot in the narrow window
+    // before it receives our read-all broadcast. Do not let that snapshot undo
+    // local read-all suppression; discard its cache entry so the next refresh
+    // must obtain fresh server evidence before showing a badge again.
+    if (allReadAtRef.current !== null && snapshot.count > 0) {
+      if (storageKey) {
+        try {
+          localStorage.removeItem(storageKey);
+        } catch {
+          /* storage may be unavailable */
+        }
+      }
+      return;
+    }
     if ((latestSnapshotRef.current?.refreshedAt ?? 0) > snapshot.refreshedAt) return;
     latestSnapshotRef.current = snapshot;
     snapshotVersionRef.current += 1;
     applyCount(snapshot.count);
     applyMembershipSignal(snapshot.membershipChanged, snapshot.count);
-  }, [applyCount, applyMembershipSignal]);
+  }, [applyCount, applyMembershipSignal, storageKey]);
 
   const publishSnapshot = useCallback((snapshot: CountSnapshot) => {
     latestSnapshotRef.current = snapshot;
