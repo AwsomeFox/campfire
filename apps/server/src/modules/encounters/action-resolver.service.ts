@@ -7,6 +7,7 @@ import {
   ActionResolveResult,
   ActionSpec,
   ActionTargetAllow,
+  ActionUndoTarget,
   ActionUndoToken,
   ARCHMAGE_ADAPTER_ID,
   DND5E_ADAPTER_ID,
@@ -63,7 +64,7 @@ import {
 } from '@campfire/schema';
 
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { campaigns, characters, combatants, encounterEvents, encounters, ruleEntries } from '../../db/schema';
+import { actionApplyChains, campaigns, characters, combatants, encounterEvents, encounters, ruleEntries } from '../../db/schema';
 import { CampaignEventsService } from '../events/campaign-events.service';
 import { AuditService } from '../audit/audit.service';
 import { TableSafetyService } from '../safety/table-safety.service';
@@ -537,7 +538,7 @@ export class ActionResolverService {
     let applied = false;
     let undoToken: ActionUndoToken | null = null;
     if (req.commit && canApply) {
-      undoToken = this.applyInternal(encounter, resolution, actor, user, role);
+      undoToken = this.applyInternal(encounter, resolution, actor, user, role, spec.targets.allow);
       applied = true;
     }
     return ActionResolveResult.parse({ resolution, applied, canApply, policy, undoToken });
@@ -910,7 +911,7 @@ export class ActionResolverService {
       const target = this.combatantRowOrThrow(encounterId, t.combatantId);
       this.assertTargetAllowed(spec.targets.allow, actor, target, resolution.actionName);
     }
-    const undoToken = this.applyInternal(encounter, resolution, actor, user, role);
+    const undoToken = this.applyInternal(encounter, resolution, actor, user, role, spec.targets.allow);
     return { undoToken };
   }
 
@@ -921,6 +922,12 @@ export class ActionResolverService {
     actor: typeof combatants.$inferSelect,
     user: RequestUser,
     role: Role,
+    /**
+     * Issue #1449: the spec's target-allow rule at apply time, persisted alongside the chain
+     * snapshot so `undo()` can re-run `assertTargetAllowed` without having to re-resolve the
+     * action (which may no longer exist on the sheet by the time undo runs).
+     */
+    targetsAllow: ActionTargetAllow,
   ): ActionUndoToken {
     const round = encounter.round;
     const chainId = `chain-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -1186,6 +1193,29 @@ export class ActionResolverService {
           .where(eq(characters.id, spellSlotSpend.characterId))
           .run();
       }
+
+      // Issue #1449: persist the pre-apply snapshot server-side, keyed by chainId, so undo()
+      // can restore from THIS row rather than trusting the client-echoed undo token. Written in
+      // the SAME transaction as the state it snapshots — a failed insert here rolls back the
+      // whole apply rather than leaving state that was written but can never be safely undone.
+      tx.insert(actionApplyChains)
+        .values({
+          id: chainId,
+          encounterId: encounter.id,
+          campaignId: encounter.campaignId,
+          actorCombatantId: actor.id,
+          actionName: resolution.actionName,
+          targetsAllow,
+          costSlot: resolution.costSlot,
+          costCount: resolution.costCount,
+          spellLevelSpent: resolution.spellLevelSpent,
+          concentrationBefore,
+          pendingConcentrationChecksBeforeJson: toJsonText(pendingConcentrationChecksBefore),
+          startedConcentration: resolution.startsConcentration,
+          targetsJson: toJsonText(undoTargets),
+          createdAt: nowIso(),
+        })
+        .run();
     });
 
     // Persist correlated combat-log chain after commit (a log failure must not roll back the apply).
@@ -1220,16 +1250,68 @@ export class ActionResolverService {
     });
   }
 
+  /** Audit a rejected undo attempt (issue #1449) — this endpoint used to succeed silently on forged input. */
+  private auditRejectedUndo(
+    encounter: typeof encounters.$inferSelect,
+    token: ActionUndoToken,
+    user: RequestUser,
+    role: Role,
+    reason: string,
+  ): void {
+    void this.audit
+      .log({
+        actor: auditActor(user),
+        actorRole: role,
+        action: 'encounter.action.undo_rejected',
+        entityType: 'encounter',
+        entityId: encounter.id,
+        campaignId: encounter.campaignId,
+        detail: JSON.stringify({ reason, chainId: token.chainId, claimedActorCombatantId: token.actorCombatantId }),
+      })
+      .catch(() => undefined);
+  }
+
   /**
    * Reverse an applied resolution (issue #414 undo). Restores each target's HP / temp HP /
    * death-save state / conditions to the pre-apply snapshot, removes the effects the apply
    * added, and refunds the actor's action-economy slot, spell slot, and concentration. The DM
    * may undo any resolution; a player only one whose actor is their own character.
+   *
+   * Issue #1449: `token` is a LOOKUP KEY, not a source of truth. Only `token.chainId` is
+   * trusted; every other field the client echoes back (actor, targets, hpBefore, costs,
+   * concentration) is ignored in favor of the `action_apply_chains` row `apply()` persisted
+   * for that exact chain. A token naming an unrelated combatant, a chain from a different
+   * encounter, or a chain that was never applied here (or already undone) is rejected before
+   * any state is touched.
    */
   undo(encounterId: number, token: ActionUndoToken, user: RequestUser, role: Role): { ok: true } {
     const encounter = this.encounterRowOrThrow(encounterId);
-    if (token.encounterId !== encounterId) throw new BadRequestException('Undo token is for a different encounter.');
-    const actor = this.combatantRowOrThrow(encounterId, token.actorCombatantId);
+    if (token.encounterId !== encounterId) {
+      this.auditRejectedUndo(encounter, token, user, role, 'cross_encounter_token');
+      throw new BadRequestException('Undo token is for a different encounter.');
+    }
+    if (!token.chainId) {
+      this.auditRejectedUndo(encounter, token, user, role, 'missing_chain_id');
+      throw new BadRequestException('Undo token has no chain id.');
+    }
+    const chain = this.db.select().from(actionApplyChains).where(eq(actionApplyChains.id, token.chainId)).get();
+    if (!chain) {
+      this.auditRejectedUndo(encounter, token, user, role, 'unknown_chain_id');
+      throw new BadRequestException('This action was never applied on this server (unknown chain).');
+    }
+    if (chain.encounterId !== encounterId) {
+      this.auditRejectedUndo(encounter, token, user, role, 'cross_encounter_chain');
+      throw new BadRequestException('This chain belongs to a different encounter.');
+    }
+    if (chain.undoneAt) {
+      this.auditRejectedUndo(encounter, token, user, role, 'already_undone');
+      throw new BadRequestException('This action was already undone.');
+    }
+
+    // The actor and every target below come from the STORED chain, never from `token` — see
+    // doc comment above. `combatantRowOrThrow` scopes the actor read to this encounter,
+    // matching the apply-side check the original vulnerability report called out.
+    const actor = this.combatantRowOrThrow(encounterId, chain.actorCombatantId);
     const adapter = this.adapterForCampaign(encounter.campaignId);
     if (role !== 'dm') {
       // Issue #1450 defense in depth: undo() never routes through policyFor, so it needs
@@ -1237,26 +1319,68 @@ export class ActionResolverService {
       // to viewer keeps `characters.ownerUserId`, so the ownership check below would
       // otherwise still pass for them.
       if (!roleAtLeast(role, 'player')) {
+        this.auditRejectedUndo(encounter, token, user, role, 'viewer_role');
         throw new ForbiddenException('Viewers may not undo combat actions.');
       }
       if (actor.kind !== 'character' || !this.isCharacterOwnedBy(actor, user)) {
+        this.auditRejectedUndo(encounter, token, user, role, 'not_actor_owner');
         throw new ForbiddenException('Only the DM may undo a monster/NPC action.');
       }
     }
 
+    const targetsAllowParsed = ActionTargetAllow.safeParse(chain.targetsAllow);
+    const targetsAllow: ActionTargetAllow = targetsAllowParsed.success ? targetsAllowParsed.data : 'any';
+    const storedTargets = fromJsonText<ActionUndoTarget[]>(chain.targetsJson, []);
+    // Issue #1449: re-run the same target-allow gate `apply()` enforced at commit time, for
+    // defense in depth — every stored target that still EXISTS is scoped to this encounter
+    // and legality-checked before anything is written. A target combatant can legitimately
+    // be removed from the fight between apply and undo (removeCombatant is ordinary DM
+    // cleanup, e.g. clearing out a killed monster); skip it here rather than throw, matching
+    // the revert loop below (`if (!fresh) continue`) — a REMOVED target is not the same as a
+    // FORGED one, and only the latter should ever block an otherwise-legitimate undo.
+    for (const t of storedTargets) {
+      const target = this.db
+        .select()
+        .from(combatants)
+        .where(and(eq(combatants.id, t.combatantId), eq(combatants.encounterId, encounterId)))
+        .get();
+      if (!target) continue;
+      this.assertTargetAllowed(targetsAllow, actor, target, chain.actionName);
+    }
+
+    const pendingConcentrationChecksBefore = fromJsonText<PendingConcentrationCheck[]>(
+      chain.pendingConcentrationChecksBeforeJson,
+      [],
+    );
+
     this.db.transaction((tx) => {
-      for (const t of token.targets) {
-        const fresh = tx.select().from(combatants).where(eq(combatants.id, t.combatantId)).get();
+      // Claim the chain (single-use) FIRST, inside the same transaction as the revert. A
+      // concurrent second undo either sees `undoneAt` already set above and never reaches
+      // here, or loses this conditional UPDATE (0 rows changed) and is rejected instead of
+      // double-reverting the same chain.
+      const claimed = tx
+        .update(actionApplyChains)
+        .set({ undoneAt: nowIso() })
+        .where(and(eq(actionApplyChains.id, chain.id), isNull(actionApplyChains.undoneAt)))
+        .run();
+      if (claimed.changes === 0) {
+        throw new BadRequestException('This action was already undone.');
+      }
+
+      for (const t of storedTargets) {
+        const fresh = tx
+          .select()
+          .from(combatants)
+          .where(and(eq(combatants.id, t.combatantId), eq(combatants.encounterId, encounterId)))
+          .get();
         if (!fresh) continue;
         const effects = fromJsonText<Array<Record<string, unknown>>>(fresh.activeEffects, []);
         const keptEffects = effects.filter((e) => !t.effectIdsAdded.includes(String(e.id)));
         const targetTurnState = CombatantTurnState.parse(fromJsonText<unknown>(fresh.turnState, null) ?? {});
-        if (token.chainId) {
-          const checkId = `action-${token.chainId}-${fresh.id}`;
-          targetTurnState.pendingConcentrationChecks = targetTurnState.pendingConcentrationChecks.filter(
-            (check) => check.id !== checkId,
-          );
-        }
+        const checkId = `action-${chain.id}-${fresh.id}`;
+        targetTurnState.pendingConcentrationChecks = targetTurnState.pendingConcentrationChecks.filter(
+          (check) => check.id !== checkId,
+        );
         tx.update(combatants)
           .set({
             hpCurrent: t.hpBefore,
@@ -1296,7 +1420,7 @@ export class ActionResolverService {
             .run();
         }
       }
-      // Refund the actor's resources.
+      // Refund the actor's resources — from the STORED chain, never the client token.
       // #1637 review: this is the mirror image of the apply-side spend, and was ALREADY correct
       // — a refund can only ever SUBTRACT from `used`, and `Math.max(0, ...)` already floors it
       // at zero, so there is no "goes out of range" direction here the way the unguarded spend
@@ -1307,26 +1431,26 @@ export class ActionResolverService {
       const actorFresh = tx.select().from(combatants).where(eq(combatants.id, actor.id)).get();
       if (actorFresh) {
         const turnState = CombatantTurnState.parse(fromJsonText<unknown>(actorFresh.turnState, null) ?? {});
-        if (token.costSlot && token.costCount > 0) {
+        if (chain.costSlot && chain.costCount > 0) {
           this.refundActionEconomyCost(
             turnState,
-            this.resolveActionEconomyCost(actorFresh, adapter, token.costSlot),
-            token.costCount,
+            this.resolveActionEconomyCost(actorFresh, adapter, chain.costSlot),
+            chain.costCount,
           );
         }
-        if (token.startedConcentration) {
-          turnState.concentration = token.concentrationBefore;
-          turnState.pendingConcentrationChecks = token.pendingConcentrationChecksBefore.map((check) => ({
+        if (chain.startedConcentration) {
+          turnState.concentration = chain.concentrationBefore;
+          turnState.pendingConcentrationChecks = pendingConcentrationChecksBefore.map((check) => ({
             ...check,
           }));
         }
         tx.update(combatants).set({ turnState: toJsonText(turnState) }).where(eq(combatants.id, actor.id)).run();
       }
-      if (token.spellLevelSpent > 0 && actor.characterId !== null) {
+      if (chain.spellLevelSpent > 0 && actor.characterId !== null) {
         const character = tx.select().from(characters).where(eq(characters.id, actor.characterId)).get();
         if (character) {
           const slots = fromJsonText<Record<string, { max: number; used: number }>>(character.spellSlots, {});
-          const slot = slots[String(token.spellLevelSpent)];
+          const slot = slots[String(chain.spellLevelSpent)];
           if (slot) {
             slot.used = Math.max(0, (slot.used ?? 0) - 1);
             tx.update(characters).set({ spellSlots: toJsonText(slots), updatedAt: nowIso() }).where(eq(characters.id, actor.characterId)).run();
@@ -1347,15 +1471,27 @@ export class ActionResolverService {
         actorId: actor.id,
         target: null,
         targetId: null,
-        detail: `undid ${token.actionName}`,
+        detail: `undid ${chain.actionName}`,
         chainId: undoChainId,
         parentEventId: null,
         phase: 'undo',
         performedByJson: JSON.stringify(performedBy),
-        metadataJson: token.chainId ? JSON.stringify({ actionName: token.actionName, undoOfChainId: token.chainId }) : JSON.stringify({ actionName: token.actionName }),
+        metadataJson: JSON.stringify({ actionName: chain.actionName, undoOfChainId: chain.id }),
         createdAt: nowIso(),
       })
       .run();
+
+    void this.audit
+      .log({
+        actor: auditActor(user),
+        actorRole: role,
+        action: 'encounter.action.undo',
+        entityType: 'combatant',
+        entityId: actor.id,
+        campaignId: encounter.campaignId,
+        detail: JSON.stringify({ action: chain.actionName, chainId: chain.id, targets: storedTargets.map((t) => t.combatantId) }),
+      })
+      .catch(() => undefined);
 
     if (!encounter.hidden) this.events.emit({ type: 'encounter.updated', campaignId: encounter.campaignId, encounterId: encounter.id });
     return { ok: true };

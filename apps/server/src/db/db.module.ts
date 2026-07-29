@@ -4293,6 +4293,30 @@ function migrateEncounterTokenBatches761(sqlite: Database.Database): void {
   `);
 }
 
+/**
+ * Issue #1449: server-side snapshot of an applied action chain, keyed by the same chainId
+ * `ActionResolverService.applyInternal` already mints for the combat-log correlation (issue
+ * #426). Undo used to trust the client-supplied `ActionUndoToken` verbatim — including which
+ * combatants to write and their pre-apply HP — with only `actorCombatantId` scoped to the
+ * encounter. Persisting the real pre-apply snapshot here lets `undo()` key off `chainId` alone
+ * and ignore the client's `targets`/`hpBefore` payload entirely, closing the forged-token class
+ * of attack rather than just re-scoping the read. `undone_at` makes a chain single-use.
+ */
+function migrateActionApplyChains1449(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS action_apply_chains (
+      id TEXT PRIMARY KEY, encounter_id INTEGER NOT NULL REFERENCES encounters(id) ON DELETE CASCADE,
+      campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE, actor_combatant_id INTEGER NOT NULL,
+      action_name TEXT NOT NULL DEFAULT '', targets_allow TEXT NOT NULL DEFAULT 'any',
+      cost_slot TEXT NOT NULL DEFAULT '', cost_count INTEGER NOT NULL DEFAULT 0, spell_level_spent INTEGER NOT NULL DEFAULT 0,
+      concentration_before TEXT, pending_concentration_checks_before_json TEXT NOT NULL DEFAULT '[]',
+      started_concentration INTEGER NOT NULL DEFAULT 0, targets_json TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL, undone_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_action_apply_chains_encounter ON action_apply_chains(encounter_id);
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
   { name: '0001_users_oidc', run: migrateUsersTableForOidc },
   { name: '0002_campaigns_rule_system', run: migrateCampaignsTableForRuleSystem },
@@ -4580,6 +4604,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0141_campaign_library_management_742', run: migrateCampaignLibraryManagement742 },
   { name: '0142_encounter_token_batches_761', run: migrateEncounterTokenBatches761 },
   { name: '0143_party_rest_batches_759', run: migratePartyRestBatches759 },
+  { name: '0144_action_apply_chains_1449', run: migrateActionApplyChains1449 },
 ];
 
 /**

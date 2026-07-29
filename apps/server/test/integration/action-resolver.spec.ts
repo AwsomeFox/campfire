@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import { eq } from 'drizzle-orm';
-import { ActionResolveRequest, ActionSpec, CombatantTurnState } from '@campfire/schema';
+import { ActionResolveRequest, ActionSpec, ActionUndoToken, CombatantTurnState } from '@campfire/schema';
 import { openDatabase } from '../../src/db/db.module';
-import { campaigns, characters, combatants, encounterEvents, encounters, ruleEntries, rulePacks } from '../../src/db/schema';
+import { actionApplyChains, campaigns, characters, combatants, encounterEvents, encounters, ruleEntries, rulePacks } from '../../src/db/schema';
 import { AuditService } from '../../src/modules/audit/audit.service';
 import { CampaignEventsService } from '../../src/modules/events/campaign-events.service';
 import { ActionResolverService } from '../../src/modules/encounters/action-resolver.service';
@@ -782,5 +782,174 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(() =>
       service.resolve(encounterId, ActionResolveRequest.parse({ actorCombatantId: actor, spec: { mode: 'attack' }, targetIds: [] }), alice, 'player'),
     ).toThrow(/no resolvable|statblock/i);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Issue #1449 — undo() must not trust the client-echoed token. Only chainId is a lookup
+  // key; the server-persisted snapshot (action_apply_chains) is the sole source of truth
+  // for who gets touched and what their pre-apply values were.
+  // ---------------------------------------------------------------------------
+
+  it('#1449: an undo chain minted in a different encounter (same campaign) is rejected, and the victim in that other encounter is unchanged', () => {
+    const { orm, service, campaignId, encounterId, actor, drake } = seed();
+    // Alice applies a real, legitimate attack in HER OWN encounter — a genuine chainId.
+    const applied = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: true }),
+      alice,
+      'player',
+    );
+    const realToken = applied.undoToken!;
+    expect(realToken.chainId).toBeTruthy();
+
+    // A second, unrelated encounter in the SAME campaign, with its own victim combatant.
+    const ts = new Date().toISOString();
+    const [otherEncounter] = orm
+      .insert(encounters)
+      .values({ campaignId, name: 'Other Fight', status: 'running', round: 1, turnIndex: 0, createdAt: ts, updatedAt: ts })
+      .returning()
+      .all();
+    const [victim] = orm
+      .insert(combatants)
+      .values({ encounterId: otherEncounter.id, kind: 'monster', name: 'Innocent Bystander', initiative: 5, hpCurrent: 25, hpMax: 25, sortOrder: 0 })
+      .returning()
+      .all();
+
+    // Forge a token: reuse the REAL chainId, but claim it belongs to the other encounter and
+    // name the victim there as the target with maximally damaging hpBefore/deathState values.
+    const forged = ActionUndoToken.parse({
+      ...realToken,
+      encounterId: otherEncounter.id,
+      actorCombatantId: victim.id,
+      targets: [
+        { combatantId: victim.id, hpBefore: 0, hpTempBefore: 0, deathStateBefore: 'dead', deathSaveSuccessesBefore: 3, deathSaveFailuresBefore: 3, conditionsBefore: [], effectIdsAdded: [] },
+      ],
+    });
+
+    expect(() => service.undo(otherEncounter.id, forged, alice, 'player')).toThrow(/different encounter/i);
+    expect(orm.select().from(combatants).where(eq(combatants.id, victim.id)).get()!.hpCurrent).toBe(25);
+    // The genuine chain must still be intact (not marked undone by the rejected attempt).
+    const chainRow = orm.select().from(actionApplyChains).where(eq(actionApplyChains.id, realToken.chainId!)).get();
+    expect(chainRow?.undoneAt).toBeFalsy();
+  });
+
+  it('#1449: an undo chain minted in a different campaign is rejected, and the victim character sheet is unchanged', () => {
+    const { orm, service, encounterId, actor, drake } = seed();
+    const applied = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: true }),
+      alice,
+      'player',
+    );
+    const realToken = applied.undoToken!;
+
+    // An entirely separate campaign, with its own encounter and a victim CHARACTER.
+    const ts = new Date().toISOString();
+    const [otherCampaign] = orm
+      .insert(campaigns)
+      .values({ name: 'Other Campaign', ruleSystem: '', createdAt: ts, updatedAt: ts })
+      .returning()
+      .all();
+    const [victimChar] = orm
+      .insert(characters)
+      .values({ campaignId: otherCampaign.id, ownerUserId: bob.id, name: 'Victim PC', level: 1, stats: '{}', ac: 10, hpCurrent: 12, hpMax: 12, createdAt: ts, updatedAt: ts })
+      .returning()
+      .all();
+    const [otherEncounter] = orm
+      .insert(encounters)
+      .values({ campaignId: otherCampaign.id, name: 'Other Campaign Fight', status: 'running', round: 1, turnIndex: 0, createdAt: ts, updatedAt: ts })
+      .returning()
+      .all();
+    const [victimCombatant] = orm
+      .insert(combatants)
+      .values({ encounterId: otherEncounter.id, kind: 'character', characterId: victimChar.id, name: 'Victim PC', initiative: 5, hpCurrent: 12, hpMax: 12, sortOrder: 0 })
+      .returning()
+      .all();
+
+    const forged = ActionUndoToken.parse({
+      ...realToken,
+      encounterId: otherEncounter.id,
+      actorCombatantId: victimCombatant.id,
+      targets: [
+        { combatantId: victimCombatant.id, hpBefore: 0, hpTempBefore: 0, deathStateBefore: 'dead', deathSaveSuccessesBefore: 3, deathSaveFailuresBefore: 3, conditionsBefore: [], effectIdsAdded: [] },
+      ],
+    });
+
+    // The DM role is used here to isolate the assertion to chain/encounter scoping rather
+    // than the actor-ownership gate (a non-DM would already be rejected on ownership too).
+    expect(() => service.undo(otherEncounter.id, forged, dmUser, 'dm')).toThrow(/different encounter/i);
+    expect(orm.select().from(combatants).where(eq(combatants.id, victimCombatant.id)).get()!.hpCurrent).toBe(12);
+    expect(orm.select().from(characters).where(eq(characters.id, victimChar.id)).get()!.hpCurrent).toBe(12);
+  });
+
+  it('#1449: replaying a valid undo token a second time is rejected', () => {
+    const { orm, service, encounterId, actor, drake } = seed();
+    const applied = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: true }),
+      alice,
+      'player',
+    );
+    // Deliberately NOT gated on the (random) attack roll's hit/miss outcome: apply() mints
+    // and persists an action_apply_chains row, and spends the actor's action-economy slot,
+    // on a miss exactly as on a hit — a miss just deals zero damage. Gating this test on
+    // "only meaningful on a landed hit" would make the replay-protection assertion below
+    // silently never run on any test execution where the d20 came up low, which is itself
+    // a tracked defect class (issue #1484): an assertion that can pass without ever having
+    // exercised the behaviour it exists to verify.
+    service.undo(encounterId, applied.undoToken!, alice, 'player');
+    expect(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.hpCurrent).toBe(60);
+
+    expect(() => service.undo(encounterId, applied.undoToken!, alice, 'player')).toThrow(/already (been )?undone/i);
+    // Still restored to the post-first-undo value — a second undo must not touch it again.
+    expect(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.hpCurrent).toBe(60);
+  });
+
+  it('#1449: an undo token with an unknown chainId is rejected', () => {
+    const { service, encounterId, actor } = seed();
+    const bogus = ActionUndoToken.parse({
+      encounterId,
+      actorCombatantId: actor,
+      actionName: 'Greatsword',
+      chainId: 'chain-never-applied',
+      targets: [],
+      costSlot: 'action',
+      costCount: 1,
+    });
+    expect(() => service.undo(encounterId, bogus, alice, 'player')).toThrow(/unknown chain|never applied/i);
+  });
+
+  it('#1449: undo still succeeds and restores the surviving target when the OTHER target was removed from the encounter after apply', () => {
+    const { orm, service, encounterId, actor, drake, bob, aliceChar } = seed();
+    // Fireball (actionIndex 2, DC 21 -> always fails -> full damage) hits both the drake and
+    // Bob's PC — an ordinary multi-target AoE, and a real level-3 spell-slot spend.
+    const applied = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 2, targetIds: [drake, bob], commit: true }),
+      alice,
+      'player',
+    );
+    expect(applied.applied).toBe(true);
+    const drakeTarget = applied.resolution.targets.find((t) => t.combatantId === drake)!;
+    const bobTarget = applied.resolution.targets.find((t) => t.combatantId === bob)!;
+    expect(drakeTarget.totalDamage).toBeGreaterThan(0);
+    expect(bobTarget.totalDamage).toBeGreaterThan(0);
+    // Bob took damage (8d6 fire can exceed his 30 HP and clamp/drop him — the exact number
+    // isn't the point here, only that undo restores him to his exact PRE-apply snapshot).
+    expect(orm.select().from(combatants).where(eq(combatants.id, bob)).get()!.hpCurrent).toBeLessThan(30);
+
+    // The DM ordinarily removes a dead/cleared monster from the encounter — the drake is
+    // gone by the time anyone undoes the fireball. This must NOT block restoring Bob.
+    orm.delete(combatants).where(eq(combatants.id, drake)).run();
+    expect(orm.select().from(combatants).where(eq(combatants.id, drake)).get()).toBeUndefined();
+
+    expect(() => service.undo(encounterId, applied.undoToken!, alice, 'player')).not.toThrow();
+
+    // Bob (the surviving target) is fully restored.
+    expect(orm.select().from(combatants).where(eq(combatants.id, bob)).get()!.hpCurrent).toBe(30);
+    // The actor's spent level-3 spell slot is refunded — not left consumed forever.
+    const aliceCharAfter = orm.select().from(characters).where(eq(characters.id, aliceChar.id)).get()!;
+    const slots = JSON.parse(aliceCharAfter.spellSlots ?? '{}');
+    expect(slots['3'].used).toBe(0);
   });
 });
