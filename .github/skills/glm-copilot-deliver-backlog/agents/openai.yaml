@@ -1,0 +1,4 @@
+interface:
+  display_name: "GLM Copilot Backlog Delivery"
+  short_description: "Deliver GitHub backlogs with GLM Copilot agents"
+  default_prompt: "Use $glm-copilot-deliver-backlog to drain prioritized pull requests and issues through verified merges."

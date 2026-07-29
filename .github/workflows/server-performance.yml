@@ -1,0 +1,47 @@
+# Timing-sensitive server benchmarks are deliberately separate from required
+# pull-request CI. GitHub-hosted runners have variable neighbours and CPU
+# scheduling, so a single p95 sample is useful regression signal but not a
+# deterministic merge gate.
+
+name: Server performance
+
+on:
+  schedule:
+    # Run off the hour to avoid GitHub's busiest scheduling window.
+    - cron: '43 5 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: server-performance
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  search-fts:
+    name: search FTS p95
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          cache: npm
+      - name: Restore node_modules
+        id: modcache
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            apps/*/node_modules
+            packages/*/node_modules
+          # Match ci.yml so nightly runs can reuse the same native dependency
+          # cache rather than reinstalling better-sqlite3.
+          key: node-modules-24x-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.ImageVersion }}-${{ hashFiles('package-lock.json') }}
+      - name: Install
+        if: steps.modcache.outputs.cache-hit != 'true'
+        run: npm ci
+      - name: Run server performance benchmarks
+        run: npm run test:perf -w apps/server

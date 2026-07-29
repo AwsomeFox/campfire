@@ -13,5 +13,7 @@ data/
 .env.local
 .DS_Store
 *.tsbuildinfo
+# Nested worktrees used by VS Code Copilot backlog workers.
+/.copilot-worktrees/
 # Internal agent-tooling state, not project content (issue #1662 review: Devin).
 .cursor/pr-babysit-state.json

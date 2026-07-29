@@ -228,11 +228,12 @@ jobs:
           path: apps/server/coverage/
           if-no-files-found: warn
 
-  # Server integration + e2e + performance specs, without coverage
-  # instrumentation. These tests consume the shared server dist (notably OIDC,
-  # which launches dist/main.js) and are sharded to keep the required CI path
-  # inside the 5-10 minute target. If this tier outgrows that budget, it can move
-  # to a nightly workflow without slowing unit coverage.
+  # Server integration + e2e specs, without coverage instrumentation. These
+  # tests consume the shared server dist (notably OIDC, which launches
+  # dist/main.js) and are sharded to keep the required CI path inside the 5-10
+  # minute target. Timing-sensitive `*.perf.spec.ts` benchmarks run in
+  # server-performance.yml instead, so shared-runner variance cannot block an
+  # unrelated PR.
   server-tests:
     name: server-tests (${{ matrix.shard }}/4)
     needs: build

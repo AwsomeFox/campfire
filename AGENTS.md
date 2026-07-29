@@ -88,8 +88,8 @@ Before any autonomous backlog run, read
 win the shared GitHub comment lease before it creates a branch or worktree,
 edits code, pushes, or dispatches a worker. The `agent: claimed` and
 tool-specific labels are visibility aids, not locks. Skip work with a live claim
-from Codex, Claude Code, ZCode, or Kimi Code. Every merge also requires the
-repository-wide lease on closed coordination issue #1732.
+from Codex, Claude Code, ZCode, Kimi Code, or VS Code Copilot. Every merge also
+requires the repository-wide lease on closed coordination issue #1732.
 
 Use the tool's project skill for multi-PR or multi-issue unattended delivery:
 
@@ -97,6 +97,7 @@ Use the tool's project skill for multi-PR or multi-issue unattended delivery:
 - Claude Code: `/gh-deliver-backlog`
 - ZCode: `$gh-deliver-backlog`
 - Kimi Code: `/skill:gh-deliver-backlog`
+- VS Code Copilot with GLM: `/glm-deliver-backlog`
 
 Each skill owns queue ordering, a four-worker maximum, CI/review loops, and
 serialized landing. Workers use separate branches and worktrees and never
