@@ -7,7 +7,7 @@ import { CampaignAccessService } from '../membership/campaign-access.service';
 import { contentDispositionHeader } from '../attachments/filename';
 import { DERIVATIVE_VARIANT_NAMES, isDerivativeVariantName } from '../attachments/image-derivatives';
 import { EncountersService } from './encounters.service';
-import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterEscalationUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, EncounterNextTurnDto, RollRequestDto, ActionRollRequestDto, ManualRollRequestDto, MapPingDto, ActionResolveRequestDto, ActionResolutionDto, ActionUndoTokenDto } from './encounters.dto';
+import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterEscalationUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, EncounterNextTurnDto, RollRequestDto, ActionRollRequestDto, ManualRollRequestDto, MapPingDto, ActionResolveRequestDto, ActionResolutionDto, ActionUndoTokenDto, TokenBatchPreviewDto, TokenBatchApplyDto, TokenBatchUndoDto, SavedTokenFormationDto } from './encounters.dto';
 import { EncounterMapService } from './encounter-map.service';
 import { ActionResolverService } from './action-resolver.service';
 import type { Request, Response } from 'express';
@@ -22,6 +22,22 @@ export class CampaignEncountersController {
     private readonly encounters: EncountersService,
     private readonly access: CampaignAccessService,
   ) {}
+
+  @Get('token-formations')
+  @ApiOperation({ summary: 'List saved token formations', description: 'Any campaign member may list formations.' })
+  async listTokenFormations(@Param('campaignId', ParseIntPipe) campaignId: number, @CurrentUser() user: RequestUser) {
+    const role = await this.access.requireMember(user, campaignId); return this.encounters.listTokenFormations(campaignId, role);
+  }
+  @Post('token-formations')
+  @ApiOperation({ summary: 'Save a token formation', description: 'dm role required. Creates a named, reusable token layout for the campaign.' })
+  async createTokenFormation(@Param('campaignId', ParseIntPipe) campaignId: number, @Body() body: SavedTokenFormationDto, @CurrentUser() user: RequestUser) {
+    const role = await this.access.requireRole(user, campaignId, 'dm'); return this.encounters.createTokenFormation(campaignId, body, user, role);
+  }
+  @Delete('token-formations/:formationId')
+  @ApiOperation({ summary: 'Delete a token formation', description: 'dm role required.' })
+  async deleteTokenFormation(@Param('campaignId', ParseIntPipe) campaignId: number, @Param('formationId', ParseIntPipe) formationId: number, @CurrentUser() user: RequestUser) {
+    const role = await this.access.requireRole(user, campaignId, 'dm'); return this.encounters.deleteTokenFormation(campaignId, formationId, role);
+  }
 
   @Post()
   @ApiOperation({ summary: 'Create an encounter', description: 'dm role required. Auto-adds the campaign party as combatants, with initMod derived from each character\'s DEX.' })
@@ -492,6 +508,22 @@ export class EncountersController {
     const row = await this.encounters.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'player');
     return this.encounters.updateCombatant(id, cid, body, user, role);
+  }
+
+  @Post(':id/token-batches/preview') @HttpCode(200)
+  @ApiOperation({ summary: 'Preview a token batch placement', description: 'dm role required. Returns the computed placements without applying them.' })
+  async previewTokenBatch(@Param('id', ParseIntPipe) id: number, @Body() body: TokenBatchPreviewDto, @CurrentUser() user: RequestUser) {
+    const row = await this.encounters.getRowOrThrow(id); const role = await this.access.requireRole(user, row.campaignId, 'dm'); return this.encounters.previewTokenBatch(id, body, user, role);
+  }
+  @Post(':id/token-batches/apply')
+  @ApiOperation({ summary: 'Apply a token batch placement', description: 'dm role required. Idempotently places tokens using the preview token.' })
+  async applyTokenBatch(@Param('id', ParseIntPipe) id: number, @Body() body: TokenBatchApplyDto, @CurrentUser() user: RequestUser) {
+    const row = await this.encounters.getRowOrThrow(id); const role = await this.access.requireRole(user, row.campaignId, 'dm'); return this.encounters.applyTokenBatch(id, body, user, role);
+  }
+  @Post(':id/token-batches/undo')
+  @ApiOperation({ summary: 'Undo a token batch placement', description: 'dm role required. Reverts the tokens placed by the matching apply call.' })
+  async undoTokenBatch(@Param('id', ParseIntPipe) id: number, @Body() body: TokenBatchUndoDto, @CurrentUser() user: RequestUser) {
+    const row = await this.encounters.getRowOrThrow(id); const role = await this.access.requireRole(user, row.campaignId, 'dm'); return this.encounters.undoTokenBatch(id, body, user, role);
   }
 
   @Delete(':id/combatants/:cid')

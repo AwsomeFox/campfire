@@ -133,6 +133,7 @@ import {
 } from './combatLogAccessibility';
 import { makeActionError, type ActionErrorState } from './encounterActionError';
 import { FOG_HIDDEN_TOKEN_LABEL, partitionMapTokens } from './mapTokenPlacement';
+import { planFormationPlacement, planCollisionFreePlacement, resolveDesiredFormation, selectBy, toggleTokenSelection, tokensInLasso, tokensInRectangle, translateGroup } from './mapTokenBatch';
 import { gridCellRevealRect } from './fogGridReveal';
 import { combatantsInAoe, type AoeHitLayout, type AoeHitTestContext } from './aoeHitTest';
 import {
@@ -1912,6 +1913,40 @@ export default function RunSessionPage() {
   // Move a combatant's token on the battle map. The server clamps to 0–100 and gates on
   // role (DM moves any; a player only their own character's token).
   const moveToken = (combatantId: number, x: number, y: number) => patchCombatant(combatantId, { tokenX: x, tokenY: y });
+  const tokenUndoKeys = useRef(new Map<string, string>());
+  const tokenBatchApplyIntents = useRef(new Map<string, { previewToken: string; idempotencyKey: string }>());
+  // Batch map changes deliberately use the preview/apply protocol rather than a loop of
+  // individual PATCHes: either every token lands or the roster remains unchanged.
+  const batchMoveTokens = useCallback(async (placements: Array<{ combatantId: number; x: number; y: number }>, mapAspect: number) => {
+    const intentKey = JSON.stringify({ placements, mapAspect });
+    let intent = tokenBatchApplyIntents.current.get(intentKey);
+    if (!intent) {
+      const preview = await api.post<{ previewToken: string }>(`${API}/encounters/${eid}/token-batches/preview`, { placements, mapAspect });
+      intent = { previewToken: preview.previewToken, idempotencyKey: newOperationId() };
+      tokenBatchApplyIntents.current.set(intentKey, intent);
+    }
+    try {
+      const applied = await api.post<{ undoToken: string }>(`${API}/encounters/${eid}/token-batches/apply`, {
+        previewToken: intent.previewToken,
+        idempotencyKey: intent.idempotencyKey,
+      });
+      tokenBatchApplyIntents.current.delete(intentKey);
+      await invalidateEncounter(queryClient, eid);
+      return applied;
+    } catch (err) {
+      // A definitive 4xx means the preview is stale; drop the intent so the next
+      // attempt creates a fresh preview. Keep it for ambiguous network failures.
+      if (err instanceof ApiError) tokenBatchApplyIntents.current.delete(intentKey);
+      throw err;
+    }
+  }, [eid, queryClient]);
+  const undoTokenBatch = useCallback(async (undoToken: string) => {
+    const idempotencyKey = tokenUndoKeys.current.get(undoToken) ?? newOperationId();
+    tokenUndoKeys.current.set(undoToken, idempotencyKey);
+    await api.post(`${API}/encounters/${eid}/token-batches/undo`, { undoToken, idempotencyKey });
+    tokenUndoKeys.current.delete(undoToken);
+    await invalidateEncounter(queryClient, eid);
+  }, [eid, queryClient]);
   // Unplace a token (issue #271): clear its position back to null so it returns to the
   // "Unplaced" tray WITHOUT deleting the combatant (its HP/conditions/initiative survive).
   // An explicit null is required — `undefined` would be a no-op patch server-side.
@@ -2457,6 +2492,8 @@ export default function RunSessionPage() {
           canMoveToken={canEditCombatant}
           onSetMap={setEncounterMap}
           onMoveToken={moveToken}
+          onBatchTokens={batchMoveTokens}
+          onUndoTokenBatch={undoTokenBatch}
           onUnplaceToken={unplaceToken}
           onSetTokenSize={setTokenSize}
           onSetGrid={setEncounterGrid}
@@ -2976,7 +3013,7 @@ function clampGridPercent(value: number): number {
   return Math.max(1, Math.min(100, value));
 }
 
-type MapTool = 'move' | 'measure' | 'reveal' | 'erase' | 'select' | 'ping' | 'calibrate';
+type MapTool = 'move' | 'token-select' | 'measure' | 'reveal' | 'erase' | 'select' | 'ping' | 'calibrate';
 
 /** One draggable calibration anchor (issue #417). Origin sets the grid offset; cell sets cell w/h. */
 type CalibrateAnchor = 'origin' | 'cell';
@@ -3056,6 +3093,8 @@ export function BattleMap({
   canMoveToken,
   onSetMap,
   onMoveToken,
+  onBatchTokens,
+  onUndoTokenBatch,
   onUnplaceToken,
   onSetTokenSize,
   onSetGrid,
@@ -3082,6 +3121,8 @@ export function BattleMap({
   canMoveToken: (c: Combatant) => boolean;
   onSetMap: (attachmentId: number | null) => void;
   onMoveToken: (combatantId: number, x: number, y: number) => void;
+  onBatchTokens?: (placements: Array<{ combatantId: number; x: number; y: number }>, mapAspect: number) => Promise<{ undoToken: string }>;
+  onUndoTokenBatch?: (undoToken: string) => Promise<void>;
   onUnplaceToken: (combatantId: number) => void;
   onSetTokenSize?: (combatantId: number, size: TokenSize) => void;
   onSetGrid: (patch: EncounterGridPatch) => void;
@@ -3120,6 +3161,8 @@ export function BattleMap({
   type MapPoint = { x: number; y: number };
   type ActiveMapGesture =
     | { kind: 'token'; pointerId: number; captureTarget: Element; tokenId: number; point: MapPoint | null }
+    | { kind: 'token-select'; pointerId: number; captureTarget: Element; start: MapPoint; end: MapPoint; additive: boolean }
+    | { kind: 'token-lasso'; pointerId: number; captureTarget: Element; points: MapPoint[]; additive: boolean }
     | { kind: 'aoe'; pointerId: number; captureTarget: Element; templateId: string; point: MapPoint }
     | { kind: 'fog'; mode: 'reveal' | 'erase'; pointerId: number; captureTarget: Element; start: MapPoint; end: MapPoint }
     | { kind: 'fog-region'; pointerId: number; captureTarget: Element; regionId: string; start: MapPoint; last: MapPoint }
@@ -3157,6 +3200,18 @@ export function BattleMap({
   const [aoeDrag, setAoeDrag] = useState<{ id: string; x: number; y: number } | null>(null);
   // Keyboard-accessible token selection and numeric editing state (issue #419).
   const [selectedTokenId, setSelectedTokenId] = useState<number | null>(null);
+  // This is intentionally a Set rather than a colour-only visual state: the adjacent
+  // named checkbox list remains the complete keyboard/touch alternative.
+  const [selectedTokenIds, setSelectedTokenIds] = useState<Set<number>>(new Set());
+  const [tokenSelectionRect, setTokenSelectionRect] = useState<{ start: MapPoint; end: MapPoint } | null>(null);
+  const [tokenLasso, setTokenLasso] = useState<MapPoint[] | null>(null);
+  const [tokenBatchUndo, setTokenBatchUndo] = useState<string | null>(null);
+  const [formationName, setFormationName] = useState('');
+  const formationsQuery = useQuery({
+    queryKey: ['token-formations', campaignId],
+    queryFn: () => api.get<Array<{ id: number; name: string; layoutJson: string }>>(`${API}/campaigns/${campaignId}/encounters/token-formations`),
+    enabled: effectiveIsDm,
+  });
   const [tokenEdit, setTokenEdit] = useState<{ x: string; y: string } | null>(null);
   // Live calibration-anchor drag (issue #417): a local map-percent override for the anchor
   // being dragged, committed to the encounter (a grid PATCH) on release so the overlay,
@@ -3201,6 +3256,8 @@ export function BattleMap({
     } else {
       setRuler(null);
     }
+    if (kind === 'token-select') setTokenSelectionRect(null);
+    if (kind === 'token-lasso') setTokenLasso(null);
   }, []);
 
   const cancelActiveGesture = useCallback(
@@ -3333,6 +3390,13 @@ export function BattleMap({
     () => computeContainedRect({ w: surfaceW, h: surfaceH }, imgNatural),
     [surfaceW, surfaceH, imgNatural],
   );
+  // Percent coordinates use independent map-width/map-height axes. This actual
+  // rendered height/width ratio is persisted with every batch preview so server
+  // preview, apply, and undo validate the same physical footprint geometry.
+  const tokenPlanningAspect = mapRect && mapRect.width > 0 ? mapRect.height / mapRect.width : 1;
+  // When a map is attached but still loading, the fallback surface aspect is wrong for
+  // non-square maps. Disable batch placement until the intrinsic image size is known.
+  const tokenPlanningReady = encounter.mapAttachmentId == null || imgNatural != null;
 
   // Grid calibration (issue #417): resolve the persisted grid fields into ONE normalized
   // transform, then apply the live anchor-drag override so the overlay/snap/ruler preview
@@ -3706,6 +3770,9 @@ export function BattleMap({
     if (!e.isPrimary || activeGestureRef.current || tool !== 'move' || !mapImageUrl || !canMoveToken(c)) return;
     e.currentTarget.focus();
     setSelectedTokenId(c.id);
+    // Modifier toggles exactly once on pointer-down. A plain drag of a selected
+    // member retains the existing group; a plain press of another token selects it.
+    setSelectedTokenIds(current => (e.metaKey || e.ctrlKey || e.shiftKey) ? toggleTokenSelection(current, c.id, true) : (current.has(c.id) ? current : new Set([c.id])));
     e.preventDefault();
     e.stopPropagation();
     // Token handles live on the map layer; clamp so a press on the token edge still binds.
@@ -3762,6 +3829,19 @@ export function BattleMap({
           y: pct.y,
         }),
       };
+      return;
+    }
+    if (tool === 'token-select' && effectiveIsDm) {
+      e.currentTarget.setPointerCapture?.(e.pointerId);
+      successfulPointerUpRef.current = null;
+      const additive = e.metaKey || e.ctrlKey || e.shiftKey;
+      if (e.altKey) {
+        activeGestureRef.current = { kind: 'token-lasso', pointerId: e.pointerId, captureTarget: e.currentTarget, points: [pct], additive };
+        setTokenLasso([pct]);
+      } else {
+        activeGestureRef.current = { kind: 'token-select', pointerId: e.pointerId, captureTarget: e.currentTarget, start: pct, end: pct, additive };
+        setTokenSelectionRect({ start: pct, end: pct });
+      }
       return;
     }
     if (tool === 'measure' && canMeasure) {
@@ -3839,6 +3919,15 @@ export function BattleMap({
     if (gesture.kind === 'token') {
       gesture.point = pct;
       setDragPos(pct);
+    } else if (gesture.kind === 'token-select') {
+      gesture.end = pct;
+      setTokenSelectionRect({ start: gesture.start, end: pct });
+    } else if (gesture.kind === 'token-lasso') {
+      const last = gesture.points[gesture.points.length - 1];
+      if (Math.hypot(last.x - pct.x, last.y - pct.y) >= 1) {
+        gesture.points.push(pct);
+        setTokenLasso([...gesture.points]);
+      }
     } else if (gesture.kind === 'aoe') {
       gesture.point = pct;
       setAoeDrag({ id: gesture.templateId, ...pct });
@@ -3913,8 +4002,28 @@ export function BattleMap({
       const raw = finalPoint ?? gesture.point;
       if (raw) {
         const pt = snapPoint(raw);
-        onMoveToken(gesture.tokenId, pt.x, pt.y);
+        const group = translateGroup(encounter.combatants, selectedTokenIds, gesture.tokenId, pt, gridOn ? Math.max(1, gridSize ?? 5) : 5, tokenPlanningAspect);
+        // Player movement remains a single permitted token. A DM multi-drag is one
+        // server-authoritative atomic batch, never a partial PATCH loop.
+        if (effectiveIsDm && group.length > 1 && onBatchTokens) void onBatchTokens(group.map(item => ({ combatantId: item.id, x: item.x, y: item.y })), tokenPlanningAspect).then(result => {
+          setTokenBatchUndo(result.undoToken); announce(`${group.length} tokens moved together`);
+        }).catch(error => onError(error instanceof Error ? error.message : 'Unable to move selected tokens'));
+        else onMoveToken(gesture.tokenId, pt.x, pt.y);
       }
+      return;
+    }
+    if (gesture.kind === 'token-select') {
+      const end = finalPoint ?? gesture.end;
+      const picked = tokensInRectangle(encounter.combatants, gesture.start, end);
+      setSelectedTokenIds(current => gesture.additive ? new Set([...current, ...picked]) : picked);
+      announce(`${picked.size} tokens selected`);
+      return;
+    }
+    if (gesture.kind === 'token-lasso') {
+      const points = [...gesture.points, ...(finalPoint ? [finalPoint] : [])];
+      const picked = tokensInLasso(encounter.combatants, points);
+      setSelectedTokenIds(current => gesture.additive ? new Set([...current, ...picked]) : picked);
+      announce(`${picked.size} tokens selected`);
       return;
     }
     if (gesture.kind === 'aoe') {
@@ -4298,6 +4407,7 @@ export function BattleMap({
             aria-label="Map tools"
           >
             {modeBtn('move', 'Move')}
+            {effectiveCanDmWrite && modeBtn('token-select', 'Tokens', false, 'Drag a rectangle to select tokens; hold Alt to lasso; Shift, Ctrl, or Command adds.')}
             {modeBtn('measure', 'Measure', !canMeasure, canMeasure ? measureToolHelp(gridType) : 'Set a grid scale first')}
             {modeBtn('ping', 'Ping', false, 'Tap or activate the map to ping a spot for everyone')}
             {effectiveCanDmWrite && modeBtn('reveal', 'Reveal', undefined, 'Click-drag to reveal a fog region. Shift-click a grid cell when the grid is on.')}
@@ -4984,7 +5094,8 @@ export function BattleMap({
                           cellPx,
                           gridType,
                         });
-                  const tokenLabel = `${c.name}${c.tokenSize !== 'medium' ? ` (${c.tokenSize})` : ''}${isCharacter ? ', player character' : ''} token`;
+                  const selectedForBatch = selectedTokenIds.has(c.id);
+                  const tokenLabel = `${c.name}${c.tokenSize !== 'medium' ? ` (${c.tokenSize})` : ''}${isCharacter ? ', player character' : ''} token${selectedForBatch ? ', selected' : ''}`;
                   return (
                     <div
                       key={c.id}
@@ -5003,6 +5114,7 @@ export function BattleMap({
                         touchAction: 'none',
                         cursor: movable ? 'grab' : 'default',
                         opacity: isDragging ? 0.85 : 1,
+                        outline: selectedForBatch ? '3px solid var(--color-accent)' : undefined,
                         zIndex: isDragging ? 10 : 2,
                       }}
                       onPointerDown={(e) => onTokenPointerDown(e, c)}
@@ -5185,6 +5297,12 @@ export function BattleMap({
                     }}
                   />
                 )}
+                {tokenSelectionRect && (() => {
+                  const left = Math.min(tokenSelectionRect.start.x, tokenSelectionRect.end.x);
+                  const top = Math.min(tokenSelectionRect.start.y, tokenSelectionRect.end.y);
+                  return <div data-testid="map-token-selection-rect" className="absolute" style={{ left: `${left}%`, top: `${top}%`, width: `${Math.abs(tokenSelectionRect.end.x - tokenSelectionRect.start.x)}%`, height: `${Math.abs(tokenSelectionRect.end.y - tokenSelectionRect.start.y)}%`, border: '2px dashed var(--color-accent)', background: 'rgba(56,189,248,.12)', pointerEvents: 'none', zIndex: 11 }} />;
+                })()}
+                {tokenLasso && tokenLasso.length > 1 && <svg className="absolute inset-0 w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none" style={{ pointerEvents: 'none', zIndex: 11 }}><polyline data-testid="map-token-selection-lasso" points={tokenLasso.map(p => `${p.x},${p.y}`).join(' ')} fill="rgba(56,189,248,.12)" stroke="var(--color-accent)" strokeWidth="0.35" vectorEffect="non-scaling-stroke" /></svg>}
 
                 {selectedFogRegionId && fogOn && (
                   (() => {
@@ -5278,11 +5396,82 @@ export function BattleMap({
             <style>{'@keyframes cfPing{0%{transform:translate(-50%,-50%) scale(.4);opacity:.9}70%{opacity:.55}100%{transform:translate(-50%,-50%) scale(3);opacity:0}}'}</style>
           </div>
 
-          {!isCast && (unplaced.length > 0 || hiddenByFog.length > 0) && (
+          {!isCast && (unplaced.length > 0 || hiddenByFog.length > 0 || (effectiveIsDm && placed.length > 0)) && (
             <div className="flex flex-col gap-2" style={{ padding: '0 14px 10px' }} data-testid="map-token-trays">
+              {effectiveIsDm && (
+                <div className="flex flex-wrap gap-2 items-center" aria-label="Token multi-selection controls">
+                  <span aria-live="polite" className="text-muted" style={{ fontSize: 11 }}>
+                    {selectedTokenIds.size} token{selectedTokenIds.size === 1 ? '' : 's'} selected
+                  </span>
+                  <button type="button" className="cf-chip" onClick={() => setSelectedTokenIds(new Set())}>Clear selection</button>
+                  <button type="button" className="cf-chip" onClick={() => setSelectedTokenIds(selectBy(placed, c => c.kind === 'character'))}>Select party</button>
+                  <button type="button" className="cf-chip" onClick={() => setSelectedTokenIds(selectBy(placed, c => c.kind !== 'character'))}>Select enemies</button>
+                  <button type="button" className="cf-chip" onClick={() => setSelectedTokenIds(selectBy(placed, c => c.kind === 'monster'))}>Select monsters</button>
+                  <button type="button" className="cf-chip" onClick={() => setSelectedTokenIds(selectBy(placed, c => c.kind === 'npc'))}>Select NPCs</button>
+                  {(['line', 'cluster', 'sides'] as const).map(kind => <button key={kind} type="button" className="cf-chip" disabled={!tokenPlanningReady || selectedTokenIds.size === 0 || !onBatchTokens} onClick={() => {
+                    const chosen = placed.filter(c => selectedTokenIds.has(c.id));
+                    let plan: Array<{ combatantId: number; x: number; y: number }>;
+                    try { plan = planFormationPlacement(encounter.combatants, selectedTokenIds, kind, { x: 50, y: 50 }, gridOn ? Math.max(1, gridSize ?? 5) : 5, gridOn && gridType === 'hex' ? 'hex' : 'square', tokenPlanningAspect, calibration, mapRect).map(p => ({ combatantId: p.id, x: p.x, y: p.y })); }
+                    catch (error) { onError(error instanceof Error ? error.message : 'Unable to plan formation'); return; }
+                    if (!onBatchTokens) return;
+                    if (!window.confirm(`Preview ${kind} formation: ${plan.length} included, ${chosen.length - plan.length} omitted. Apply this atomic placement?`)) return;
+                    void onBatchTokens(plan, tokenPlanningAspect).then(result => { setTokenBatchUndo(result.undoToken); announce(`${kind} formation preview applied: ${plan.length} included`); }).catch(error => onError(error instanceof Error ? error.message : 'Unable to place formation'));
+                  }}>{kind === 'sides' ? 'Party / enemy sides' : `${kind[0].toUpperCase()}${kind.slice(1)}`}</button>)}
+                  <details>
+                    <summary className="cf-chip" style={{ cursor: 'pointer' }}>Selected tokens</summary>
+                    <div role="group" aria-label="Selected token list" className="flex flex-col gap-1" style={{ maxHeight: 150, overflow: 'auto', padding: 6 }}>
+                      {placed.map(c => <label key={c.id}><input type="checkbox" checked={selectedTokenIds.has(c.id)} onChange={() => setSelectedTokenIds(current => toggleTokenSelection(current, c.id, true))} /> {c.name}</label>)}
+                    </div>
+                  </details>
+                  <TextInput aria-label="Saved formation name" value={formationName} onChange={(e) => setFormationName(e.target.value)} placeholder="Formation name" style={{ width: 130 }} />
+                  <button type="button" className="cf-chip" disabled={!tokenPlanningReady || !formationName.trim() || selectedTokenIds.size === 0} onClick={() => {
+                    const chosen = placed.filter(c => selectedTokenIds.has(c.id));
+                    const anchor = chosen[0]; if (!anchor || anchor.tokenX == null || anchor.tokenY == null) return;
+                    void api.post(`${API}/campaigns/${campaignId}/encounters/token-formations`, { name: formationName, slots: chosen.map(c => ({ side: c.kind === 'character' ? 'party' : 'enemy', kind: c.kind, x: (c.tokenX ?? anchor.tokenX!) - anchor.tokenX!, y: (c.tokenY ?? anchor.tokenY!) - anchor.tokenY! })) }).then(() => {
+                      setFormationName(''); void formationsQuery.refetch(); announce('Formation saved');
+                    }).catch(error => onError(error instanceof Error ? error.message : 'Unable to save formation'));
+                  }}>Save formation</button>
+                  {(formationsQuery.data ?? []).map(formation => <span key={formation.id} className="flex gap-1 items-center"><button type="button" className="cf-chip" disabled={!tokenPlanningReady} onClick={() => {
+                    try {
+                      const slots = JSON.parse(formation.layoutJson) as Array<{ side: 'party' | 'enemy' | 'any'; kind?: string; x: number; y: number }>;
+                      const remaining = [...placed.filter(c => selectedTokenIds.size === 0 || selectedTokenIds.has(c.id))];
+                      const assigned = slots.flatMap(slot => {
+                        const index = remaining.findIndex(c => (slot.side === 'any' || (slot.side === 'party') === (c.kind === 'character')) && (!slot.kind || c.kind === slot.kind));
+                        if (index < 0) return []; const [c] = remaining.splice(index, 1); return [{ token: c, desired: { x: 50 + slot.x, y: 50 + slot.y } }];
+                      });
+                      const plan = resolveDesiredFormation(encounter.combatants, assigned, gridOn ? Math.max(1, gridSize ?? 5) : 5, gridOn && gridType === 'hex' ? 'hex' : 'square', tokenPlanningAspect, calibration, mapRect).map(p => ({ combatantId: p.id, x: p.x, y: p.y }));
+                      if (!plan.length) throw new Error('No selected tokens match this formation');
+                      if (!onBatchTokens) return;
+                      if (!window.confirm(`Preview ${formation.name}: ${plan.length} included, ${remaining.length} omitted. Apply this atomic placement?`)) return;
+                      void onBatchTokens(plan, tokenPlanningAspect).then(result => { setTokenBatchUndo(result.undoToken); announce(`${formation.name} placed`); }).catch(error => onError(error instanceof Error ? error.message : 'Unable to place formation'));
+                    } catch (error) { onError(error instanceof Error ? error.message : 'Invalid saved formation'); }
+                  }}>{formation.name}</button><button type="button" aria-label={`Delete ${formation.name} formation`} className="cf-chip" onClick={() => void api.delete(`${API}/campaigns/${campaignId}/encounters/token-formations/${formation.id}`).then(() => void formationsQuery.refetch())}><UIIcon name="close" size="xs" /></button></span>)}
+                </div>
+              )}
               {unplaced.length > 0 && (
                 <div className="flex flex-wrap gap-2 items-center">
                   <span className="text-muted" style={{ fontSize: 11 }}>Unplaced:</span>
+                  {effectiveIsDm && (
+                    <button
+                      type="button"
+                      className="cf-chip"
+                      data-testid="map-token-place-all"
+                      disabled={!tokenPlanningReady || busy}
+                      onClick={() => {
+                        try {
+                          // Planning completes before the first write, so an impossible map
+                          // never quietly places only a prefix of the tray.
+                          const plan = planCollisionFreePlacement(encounter.combatants, { x: 50, y: 50 }, gridOn ? Math.max(1, gridSize ?? 5) : 5, gridOn && gridType === 'hex' ? 'hex' : 'square', tokenPlanningAspect, calibration, mapRect);
+                          if (!onBatchTokens) return;
+                          void onBatchTokens(plan.map(item => ({ combatantId: item.id, x: item.x, y: item.y })), tokenPlanningAspect).then(result => {
+                            setTokenBatchUndo(result.undoToken); announce(`${plan.length} tokens placed with collision-free spacing`);
+                          }).catch(error => onError(error instanceof Error ? error.message : 'Unable to place all tokens'));
+                        } catch (error) {
+                          onError(error instanceof Error ? error.message : 'Unable to find collision-free positions');
+                        }
+                      }}
+                    >Place all</button>
+                  )}
                   {unplaced.map((c) => {
                     const movable = effectiveCanMoveToken(c);
                     return (
@@ -5350,6 +5539,18 @@ export function BattleMap({
           </>
           )}
         </>
+      )}
+      {tokenBatchUndo && (
+        <UndoSnackbar
+          key={tokenBatchUndo}
+          message="Token batch applied."
+          successMessage="Token batch undone."
+          onUndo={async () => {
+            await (onUndoTokenBatch?.(tokenBatchUndo) ?? Promise.resolve());
+            setTokenBatchUndo(null);
+          }}
+          onExpire={() => setTokenBatchUndo(null)}
+        />
       )}
     </div>
   );

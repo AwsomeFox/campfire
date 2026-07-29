@@ -2094,6 +2094,39 @@ CREATE INDEX IF NOT EXISTS idx_inventory_qty_idempotency_item ON inventory_qty_i
 CREATE INDEX IF NOT EXISTS idx_inventory_qty_idempotency_created ON inventory_qty_idempotency(created_at);
 CREATE INDEX IF NOT EXISTS idx_encounter_op_idempotency_created ON encounter_op_idempotency(created_at);
 CREATE INDEX IF NOT EXISTS idx_encounter_op_idempotency_encounter ON encounter_op_idempotency(encounter_id);
+
+-- Issue #761: current-format atomic map token batches and reusable campaign formations.
+CREATE TABLE IF NOT EXISTS encounter_token_batches (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  encounter_id INTEGER NOT NULL REFERENCES encounters(id) ON DELETE CASCADE,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  actor_id TEXT NOT NULL,
+  preview_token TEXT NOT NULL UNIQUE,
+  fingerprint TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'previewed',
+  before_json TEXT NOT NULL,
+  plan_json TEXT NOT NULL,
+  after_json TEXT,
+  result_json TEXT,
+  apply_key TEXT,
+  undo_key TEXT,
+  created_at TEXT NOT NULL,
+  applied_at TEXT,
+  undone_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_encounter_token_batches_encounter ON encounter_token_batches(encounter_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_encounter_token_batches_actor_apply ON encounter_token_batches(actor_id, apply_key) WHERE apply_key IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_encounter_token_batches_actor_undo ON encounter_token_batches(actor_id, undo_key) WHERE undo_key IS NOT NULL;
+CREATE TABLE IF NOT EXISTS campaign_token_formations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  layout_json TEXT NOT NULL,
+  created_by TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(campaign_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_campaign_token_formations_campaign ON campaign_token_formations(campaign_id);
 -- #577: the grounding review card reads a campaign's most recent claims, newest first.
 CREATE INDEX IF NOT EXISTS idx_ai_driver_grounding_campaign
   ON ai_driver_grounding_claims(campaign_id, id);
