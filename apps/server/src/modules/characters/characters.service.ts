@@ -1127,13 +1127,17 @@ export class CharactersService {
       // Only mirror hpMax when this PATCH actually supplied it; otherwise pass
       // undefined so a death-slice edit (deathState/death-saves/hpTemp) preserves
       // a DM-adjusted, encounter-local combatant hpMax that EncountersService
-      // deliberately never writes back to the sheet (review on #1492).
+      // deliberately never writes back to the sheet (review on #1492). Each
+      // death-slice field is threaded only when its input key was supplied too,
+      // so an HP-only edit cannot push the sheet's stale deathState/death-saves/
+      // hpTemp onto a live combatant (Devin review on #1492) — the combatant row
+      // is authoritative during a fight and only reconciled on /end.
       await this.syncActiveCombatants(id, row.hpCurrent, input.hpMax !== undefined ? row.hpMax : undefined, {
         campaignId: existing.campaignId,
-        deathState: row.deathState,
-        deathSaveSuccesses: row.deathSaveSuccesses,
-        deathSaveFailures: row.deathSaveFailures,
-        hpTemp: row.hpTemp,
+        ...(input.deathState !== undefined ? { deathState: row.deathState } : {}),
+        ...(input.deathSaveSuccesses !== undefined ? { deathSaveSuccesses: row.deathSaveSuccesses } : {}),
+        ...(input.deathSaveFailures !== undefined ? { deathSaveFailures: row.deathSaveFailures } : {}),
+        ...(input.hpTemp !== undefined ? { hpTemp: row.hpTemp } : {}),
       });
     }
     // Issue #486: PATCH conditions must also land on the live tracker.
