@@ -993,6 +993,7 @@ export default function RunSessionPage() {
   const [actionError, setActionError] = useState<ActionErrorState>(null);
   const [encounterPatchConflict, setEncounterPatchConflict] = useState<string | null>(null);
   const [pendingFog, setPendingFog] = useState<ScopedPendingFog | undefined>(undefined);
+  const pendingEncounterPatches = useRef(new Map<string, QueuedEncounterPatch>());
   // A damage/heal amount just rolled from a character card, awaiting a one-tap target
   // pick (issue: wire actions → dice → damage). Cleared on apply or dismiss.
   const [pendingApply, setPendingApply] = useState<{
@@ -1189,7 +1190,13 @@ export default function RunSessionPage() {
   // anything a dropped stream missed. The ~5s cadence matches the pre-SSE poll.
   const encounterQuery = useQuery({
     queryKey: queryKeys.encounter(eid),
-    queryFn: () => api.get<EncounterWithCombatants>(`${API}/encounters/${eid}`),
+    queryFn: async () =>
+      reconcileEncounterPatchResponse(
+        await api.get<EncounterWithCombatants>(`${API}/encounters/${eid}`),
+        pendingEncounterPatches.current.values(),
+        '',
+        eid,
+      ),
     enabled: Number.isFinite(eid),
     refetchInterval: 5_000,
   });
@@ -1908,7 +1915,6 @@ export default function RunSessionPage() {
   // Battle map (issue #39): attach/clear the encounter's map image (DM only). Also the seam
   // for the VTT grid config + fog of war writes (issue #40) — all DM-only PATCHes to the
   // encounter; the SSE `encounter.updated` signal then propagates them to every other client.
-  const pendingEncounterPatches = useRef(new Map<string, QueuedEncounterPatch>());
   const encounterPatchQueue = useRef<Promise<void>>(Promise.resolve());
   const encounterPatchSequence = useRef(0);
   const activeEncounterIdRef = useRef(eid);
@@ -1990,7 +1996,7 @@ export default function RunSessionPage() {
       const wake = gridDefaultRetryOnFree.current.get(variables.pendingKey);
       if (wake) gridDefaultRetryOnFree.current.delete(variables.pendingKey);
       if (wake && error && !variables.defaultAttemptKey) wake();
-      if (!hasLaterPendingFog && variables.encounterId === activeEncounterIdRef.current && Object.prototype.hasOwnProperty.call(variables.patch, 'fog')) {
+      if (!hasLaterPendingFog && Object.prototype.hasOwnProperty.call(variables.patch, 'fog')) {
         const settledFog = variables.patch.fog as FogState | null;
         setPendingFog((current) =>
           current?.encounterId === variables.encounterId && fogStatesEqual(current.fog, settledFog) ? undefined : current,
