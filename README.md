@@ -46,6 +46,32 @@ packages/schema  @campfire/schema — Zod domain contract (single source of trut
 design/          Approved HTML design mockups + design tokens
 ```
 
+## Autonomous backlog agents
+
+This repository includes one end-to-end backlog workflow for four agent
+runtimes. They may run simultaneously: each must win a 90-minute lease in the
+issue's single `## Agent Workpad` comment before it creates implementation
+state. `agent: claimed` plus one of `agent: codex`, `agent: claude`,
+`agent: zcode`, or `agent: kimi` makes ownership visible; the comment lease is
+the actual lock. Leases renew every 30 minutes, deterministic comment ordering
+settles races, and a second short lease on closed coordination issue
+[#1732](https://github.com/AwsomeFox/campfire/issues/1732) serializes merges
+across all runtimes.
+
+| Runtime | Coordinator and workers | Start it |
+|---|---|---|
+| Codex | GPT-5.6 Sol coordinator; four GPT-5.6 Terra workers | Open this repository in Codex and paste: `$gh-deliver-backlog Deliver the entire current backlog in priority order. Continue until every in-scope item is merged or externally blocked.` |
+| Claude Code | Opus 5 coordinator; four Sonnet 5 worktree workers | Start a new Claude Code session in Auto mode and paste: `/gh-deliver-backlog Deliver the entire current backlog in priority order. Continue until every in-scope item is merged or externally blocked.` |
+| ZCode | GLM-5.2 coordinator and up to four `general-purpose` workers | Open the repository in ZCode, select GLM-5.2 with Max thought level, enable Goal mode and Full Access (or Auto Edit), refresh/enable the project skill if needed, then paste: `$gh-deliver-backlog Deliver the entire current backlog in priority order. Continue until every in-scope item is merged or externally blocked.` |
+| Kimi Code | K3 coordinator and four project `issue-worker` subagents | Run `KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY=4 kimi --auto -m k3`, choose max effort, then paste: `/skill:gh-deliver-backlog Deliver the entire current backlog in priority order. Continue until every in-scope item is merged or externally blocked.` |
+
+Authenticate `gh` before starting any runtime. Kimi Code also needs `kimi login`
+once. The project configuration lives in `.codex/`, `.claude/`, `.zcode/`, and
+`.kimi-code/`; all four workflows share
+`.agents/references/agent-claim-protocol.md` and the repository rules in
+`AGENTS.md`. Existing branches, worktrees, and legacy Codex or Claude workpads
+are treated as reservations, so upgrading an in-progress run is safe.
+
 ## Dev setup
 
 Prereqs: **Node ≥ 22**, **[just](https://github.com/casey/just)** (`brew install just`).
