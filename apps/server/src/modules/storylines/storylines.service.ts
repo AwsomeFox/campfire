@@ -234,11 +234,22 @@ export class StorylinesService {
   /** Restore a trashed arc and only the beats soft-deleted by its cascade (issue #701). */
   async restoreArc(id: number, user: RequestUser, role: Role): Promise<StoryArcWithBeats> {
     const existing = await this.getArcRowOrThrow(id, true);
-    const cascadeDeletedAt = existing.deletedAt;
-    if (cascadeDeletedAt == null) throw new NotFoundException(`Story arc ${id} is not in the trash`);
     const ts = nowIso();
     this.db.transaction((tx) => {
-      tx.update(storyArcs).set({ deletedAt: null, updatedAt: ts }).where(eq(storyArcs.id, id)).run();
+      // The arc may have been restored and trashed again after the outer lookup.
+      // Re-read its cascade marker inside this synchronous transaction so we restore
+      // the beats from the same deletion that we clear on the arc.
+      const current = tx
+        .select({ deletedAt: storyArcs.deletedAt })
+        .from(storyArcs)
+        .where(eq(storyArcs.id, id))
+        .get();
+      if (!current || current.deletedAt == null) throw new NotFoundException(`Story arc ${id} is not in the trash`);
+      const cascadeDeletedAt = current.deletedAt;
+      tx.update(storyArcs)
+        .set({ deletedAt: null, updatedAt: ts })
+        .where(and(eq(storyArcs.id, id), eq(storyArcs.deletedAt, cascadeDeletedAt)))
+        .run();
       tx.update(storyBeats)
         .set({ deletedAt: null, updatedAt: ts })
         .where(and(eq(storyBeats.arcId, id), eq(storyBeats.deletedAt, cascadeDeletedAt)))
