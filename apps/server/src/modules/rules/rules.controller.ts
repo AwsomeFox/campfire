@@ -167,6 +167,7 @@ export class RulesController {
   @ServerRoles('admin')
   @ApiOperation({ summary: 'Uninstall a rule pack', description: 'Server-admin only. Removes an unused pack and its entries; packs selected by campaigns are blocked to avoid silently changing live campaign rules.' })
   @ApiResponse({ status: 200, description: 'Uninstalled.' })
+  @ApiResponse({ status: 409, description: 'Pack is selected by one or more campaigns and cannot be uninstalled.' })
   async uninstall(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     await this.rules.uninstall(id, user);
     return { ok: true };

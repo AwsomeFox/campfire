@@ -34,6 +34,8 @@ describe('rule entries FTS startup repair', () => {
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `).run(pack.id, 'newly-indexed', 'Newly Indexed', 'spell', 'NewlyIndexed1507', '', ts, ts);
       expect(first.sqlite.prepare('SELECT rowid FROM rule_entries_fts WHERE rule_entries_fts MATCH ?').all('NewlyIndexed1507')).toHaveLength(1);
+      // A database created before the repair has no one-time upgrade marker.
+      first.sqlite.prepare("DELETE FROM __db_meta WHERE key = 'rule_entries_fts_repair_v1'").run();
     } finally {
       first.sqlite.close();
     }
@@ -43,6 +45,7 @@ describe('rule entries FTS startup repair', () => {
       expect(reopened.ftsAvailable).toBe(true);
       expect(reopened.sqlite.prepare('SELECT rowid FROM rule_entries_fts WHERE rule_entries_fts MATCH ?').all('LegacyNeedle1507')).toHaveLength(1);
       expect(reopened.sqlite.prepare('SELECT rowid FROM rule_entries_fts WHERE rule_entries_fts MATCH ?').all('NewlyIndexed1507')).toHaveLength(1);
+      expect(reopened.sqlite.prepare("SELECT value FROM __db_meta WHERE key = 'rule_entries_fts_repair_v1'").get()).toEqual({ value: 'complete' });
     } finally {
       reopened.sqlite.close();
       fs.rmSync(dataDir, { recursive: true, force: true });
