@@ -756,8 +756,27 @@ export const ActionResolveResult = z.object({
   canApply: z.boolean(),
   policy: ActionApplyPolicy,
   undoToken: ActionUndoToken.nullable().default(null),
+  /**
+   * Issue #1451: a lookup key into the EXACT resolution the server just computed and
+   * persisted server-side (`action_pending_resolutions`), minted on every resolve regardless
+   * of whether this call also committed it. `/actions/apply` takes this alone — never a
+   * client-echoed resolution — so the applied numbers can only ever be the server's own roll.
+   */
+  chainId: z.string().min(1).max(64),
 });
 export type ActionResolveResult = z.infer<typeof ActionResolveResult>;
+
+/**
+ * Request to apply a previously resolved action chain (issue #414 confirm path; issue #1451).
+ * `chainId` is a LOOKUP KEY only — the server re-reads its own persisted resolution for that
+ * chain (`action_pending_resolutions`, written by `resolve()`) rather than trusting any
+ * resolution the caller supplies, so a player can no longer inflate `totalDamage`, per-target
+ * deltas, or inject `conditionsAfter`/effect payloads that were never in the resolved spec.
+ */
+export const ActionApplyRequest = z.object({
+  chainId: z.string().min(1).max(64),
+});
+export type ActionApplyRequest = z.infer<typeof ActionApplyRequest>;
 
 // ---------------------------------------------------------------------------
 // Pure resolver math.

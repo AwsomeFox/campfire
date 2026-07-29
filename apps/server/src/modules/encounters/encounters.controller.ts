@@ -7,7 +7,7 @@ import { CampaignAccessService } from '../membership/campaign-access.service';
 import { contentDispositionHeader } from '../attachments/filename';
 import { DERIVATIVE_VARIANT_NAMES, isDerivativeVariantName } from '../attachments/image-derivatives';
 import { EncountersService } from './encounters.service';
-import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterEscalationUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, EncounterNextTurnDto, RollRequestDto, ActionRollRequestDto, ManualRollRequestDto, MapPingDto, ActionResolveRequestDto, ActionResolutionDto, ActionUndoTokenDto, TokenBatchPreviewDto, TokenBatchApplyDto, TokenBatchUndoDto, SavedTokenFormationDto } from './encounters.dto';
+import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterEscalationUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, EncounterNextTurnDto, RollRequestDto, ActionRollRequestDto, ManualRollRequestDto, MapPingDto, ActionResolveRequestDto, ActionApplyRequestDto, ActionUndoTokenDto, TokenBatchPreviewDto, TokenBatchApplyDto, TokenBatchUndoDto, SavedTokenFormationDto } from './encounters.dto';
 import { EncounterMapService } from './encounter-map.service';
 import { ActionResolverService } from './action-resolver.service';
 import type { Request, Response } from 'express';
@@ -750,16 +750,19 @@ export class EncountersController {
 
   @Post(':id/actions/apply')
   @ApiOperation({
-    summary: 'Apply a previewed action resolution (issue #414 confirm path)',
+    summary: 'Apply a resolved action chain (issue #414 confirm path)',
     description:
-      'Requires at least the player role (issue #1450). Commits a resolution returned by /actions/resolve, applying its rolled ' +
-      'consequences verbatim so the committed result equals the preview. The DM may apply any resolution; a player only ' +
-      'their own character’s action under an automatic policy. Returns an undo token that reverses the whole apply.',
+      'Requires at least the player role (issue #1450). Pass the `chainId` returned by /actions/resolve — a LOOKUP KEY ' +
+      'only (issue #1451): the server re-reads the exact resolution it computed and persisted at resolve time, so a ' +
+      'caller cannot inflate damage, alter a per-target delta, or inject a condition/effect never in the resolved spec. ' +
+      'The DM may apply any resolution; a player only their own character’s action under an automatic policy. Returns ' +
+      'an undo token that reverses the whole apply.',
   })
   @ApiResponse({ status: 200, description: 'Applied; returns the undo token.' })
+  @ApiResponse({ status: 400, description: 'Unknown, cross-encounter, or already-applied chainId.' })
   @ApiResponse({ status: 403, description: 'Not permitted to apply under the campaign policy.' })
   @HttpCode(200)
-  async applyAction(@Param('id', ParseIntPipe) id: number, @Body() body: ActionResolutionDto, @CurrentUser() user: RequestUser) {
+  async applyAction(@Param('id', ParseIntPipe) id: number, @Body() body: ActionApplyRequestDto, @CurrentUser() user: RequestUser) {
     const row = await this.encounters.getRowOrThrow(id);
     // Issue #1450: see resolveAction — write:true does not assert caller authority.
     const role = await this.access.requireRole(user, row.campaignId, 'player');

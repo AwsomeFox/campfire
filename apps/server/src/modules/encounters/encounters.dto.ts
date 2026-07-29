@@ -1,5 +1,5 @@
 import { createZodDto } from 'nestjs-zod';
-import { EncounterCreate, EncounterGenerate, EncounterPreviewRequest, EncounterCommit, EncounterUpdate, EncounterEscalationUpdate, EncounterReopen, CombatantCreate, CombatantUpdate, CombatantTurnStatePatch, EncounterEndTurn, EncounterNextTurn, RollRequest, ActionRollRequest, ManualRollRequest, MapPing, ExpectedUpdatedAt, ActionResolveRequest, ActionResolution, ActionUndoToken, TokenBatchPreviewRequest, TokenBatchApply, TokenBatchUndo, SavedTokenFormation } from '@campfire/schema';
+import { EncounterCreate, EncounterGenerate, EncounterPreviewRequest, EncounterCommit, EncounterUpdate, EncounterEscalationUpdate, EncounterReopen, CombatantCreate, CombatantUpdate, CombatantTurnStatePatch, EncounterEndTurn, EncounterNextTurn, RollRequest, ActionRollRequest, ManualRollRequest, MapPing, ExpectedUpdatedAt, ActionResolveRequest, ActionApplyRequest, ActionUndoToken, TokenBatchPreviewRequest, TokenBatchApply, TokenBatchUndo, SavedTokenFormation } from '@campfire/schema';
 
 export class EncounterCreateDto extends createZodDto(EncounterCreate.strict()) {}
 // Encounter generator request (issue #304). .strict() so an unknown/misspelled key 400s
@@ -53,9 +53,12 @@ export class EncounterNextTurnDto extends createZodDto(EncounterNextTurn.strict(
 export class CombatantTurnStatePatchDto extends createZodDto(CombatantTurnStatePatch.strict()) {}
 // Issue #414: structured action resolver. Resolve (with optional atomic commit), apply a
 // previewed resolution (DM confirm path), and undo an applied resolution. Not .strict() on
-// the nested resolution/token — they echo server-produced objects with many defaulted fields.
+// the nested undo token — it echoes a server-produced object with many defaulted fields.
 export class ActionResolveRequestDto extends createZodDto(ActionResolveRequest.strict()) {}
-export class ActionResolutionDto extends createZodDto(ActionResolution) {}
+// Issue #1451: apply takes a chain-id LOOKUP KEY only, never a client-supplied resolution — see
+// ActionResolverService.apply's doc comment for why the prior `ActionResolutionDto` body shape
+// was the vulnerability.
+export class ActionApplyRequestDto extends createZodDto(ActionApplyRequest.strict()) {}
 export class ActionUndoTokenDto extends createZodDto(ActionUndoToken) {}
 export class TokenBatchPreviewDto extends createZodDto(TokenBatchPreviewRequest.strict()) {}
 export class TokenBatchApplyDto extends createZodDto(TokenBatchApply.strict()) {}

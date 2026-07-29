@@ -203,7 +203,7 @@ describe('action resolver (e2e HTTP)', () => {
       const res = await request(server)
         .post(`/api/v1/encounters/${encounterId}/actions/apply`)
         .set(viewer)
-        .send(previewRes.body.resolution);
+        .send({ chainId: previewRes.body.chainId });
       expect(res.status).toBe(403);
     });
 
@@ -282,5 +282,108 @@ describe('action resolver (e2e HTTP)', () => {
         .send(resolveRes.body.undoToken);
       expect(undo.status).toBe(200);
     });
+  });
+
+  // Issue #1451 — /actions/apply used to take the FULL ActionResolution from the request
+  // body and write its totalDamage/effects verbatim. It now takes { chainId } only and
+  // re-reads the resolution the server itself computed and persisted at resolve time, so
+  // neither of these forged wire shapes (the exact pre-fix exploit) is even well-formed
+  // input anymore — both are refused before any combatant state changes.
+  describe('issue #1451: /actions/apply trusts only the chainId, never a client-supplied resolution', () => {
+    it('a forged body carrying an inflated totalDamage (the pre-fix exploit shape) is rejected, and the monster HP is untouched', async () => {
+      const server = ctx.app.getHttpServer();
+      const before = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+      const monsterBefore = before.body.combatants.find((c: { id: number }) => c.id === monsterId).hpCurrent;
+
+      const previewRes = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/actions/resolve`)
+        .set(player)
+        .send({ actorCombatantId: actorId, actionIndex: 0, targetIds: [monsterId], commit: false });
+      expect(previewRes.status).toBe(200);
+
+      // The exact pre-#1451 exploit: re-POST the previewed resolution with totalDamage
+      // edited to a one-shot amount. There is no `chainId` field here at all — this is a
+      // straight port of what the vulnerable client used to send.
+      const forged = {
+        ...previewRes.body.resolution,
+        targets: previewRes.body.resolution.targets.map((t: Record<string, unknown>) => ({ ...t, totalDamage: 999999 })),
+      };
+      const res = await request(server).post(`/api/v1/encounters/${encounterId}/actions/apply`).set(player).send(forged);
+      expect(res.status).toBe(400);
+
+      const after = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+      const monsterAfter = after.body.combatants.find((c: { id: number }) => c.id === monsterId).hpCurrent;
+      expect(monsterAfter).toBe(monsterBefore);
+    });
+
+    it('a forged body injecting a condition/effect never in the action spec is rejected, and the monster gains no condition', async () => {
+      const server = ctx.app.getHttpServer();
+      const previewRes = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/actions/resolve`)
+        .set(player)
+        .send({ actorCombatantId: actorId, actionIndex: 0, targetIds: [monsterId], commit: false });
+      expect(previewRes.status).toBe(200);
+      expect(previewRes.body.resolution.targets[0].effects).toEqual([]); // Scorching Ray declares none
+
+      const forged = {
+        ...previewRes.body.resolution,
+        targets: previewRes.body.resolution.targets.map((t: Record<string, unknown>) => ({
+          ...t,
+          effects: [{ condition: 'stunned', rounds: null, saveEnds: false, ongoingDamage: 0 }],
+        })),
+      };
+      const res = await request(server).post(`/api/v1/encounters/${encounterId}/actions/apply`).set(player).send(forged);
+      expect(res.status).toBe(400);
+
+      const after = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+      const monster = after.body.combatants.find((c: { id: number }) => c.id === monsterId);
+      expect(monster.conditions ?? []).toEqual([]);
+    });
+
+    it('applying the real chainId still lands only the honest server-rolled damage', async () => {
+      const server = ctx.app.getHttpServer();
+      const before = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+      const monsterBefore = before.body.combatants.find((c: { id: number }) => c.id === monsterId).hpCurrent;
+
+      const previewRes = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/actions/resolve`)
+        .set(player)
+        .send({ actorCombatantId: actorId, actionIndex: 0, targetIds: [monsterId], commit: false });
+      expect(previewRes.status).toBe(200);
+      const chainId = previewRes.body.chainId;
+      expect(chainId).toBeTruthy();
+      const honestDamage = previewRes.body.resolution.targets[0].totalDamage;
+      expect(honestDamage).toBe(6); // flat 6 fire, no resistance — deterministic (see scorchingRay fixture)
+
+      const applyRes = await request(server).post(`/api/v1/encounters/${encounterId}/actions/apply`).set(player).send({ chainId });
+      expect(applyRes.status).toBe(200);
+
+      const after = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+      const monsterAfter = after.body.combatants.find((c: { id: number }) => c.id === monsterId).hpCurrent;
+      expect(monsterAfter).toBe(monsterBefore - honestDamage);
+
+      // Clean up via undo so later tests see a known HP baseline.
+      const undo = await request(server).post(`/api/v1/encounters/${encounterId}/actions/undo`).set(player).send(applyRes.body.undoToken);
+      expect(undo.status).toBe(200);
+    });
+  });
+
+  // Issue #1451 regression guard: the vulnerability report's own comparison — the ordinary
+  // combatant PATCH path already forbids a player from writing an unowned combatant's HP.
+  // This must keep holding regardless of anything the action resolver does.
+  it('#1451 regression: a player still cannot reach an unowned combatant’s HP via PATCH /combatants/:cid', async () => {
+    const server = ctx.app.getHttpServer();
+    const before = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const monsterBefore = before.body.combatants.find((c: { id: number }) => c.id === monsterId).hpCurrent;
+
+    const res = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}/combatants/${monsterId}`)
+      .set(player)
+      .send({ hpSet: 0 });
+    expect(res.status).toBe(403);
+
+    const after = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const monsterAfter = after.body.combatants.find((c: { id: number }) => c.id === monsterId).hpCurrent;
+    expect(monsterAfter).toBe(monsterBefore);
   });
 });

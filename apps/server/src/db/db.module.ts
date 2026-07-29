@@ -4317,6 +4317,29 @@ function migrateActionApplyChains1449(sqlite: Database.Database): void {
   `);
 }
 
+/**
+ * Issue #1451: server-side snapshot of a RESOLVED action chain, keyed by the same chainId
+ * `ActionResolverService.resolve()` mints for every resolution (preview or committed). Before
+ * this, `/actions/apply` took the FULL `ActionResolution` from the request body and wrote its
+ * `totalDamage`/`healing`/`effects` verbatim — a player could inflate a previewed 6-damage hit
+ * to an arbitrary number (or inject a condition never in the action spec) by re-POSTing an
+ * edited copy of the object the preview handed them. `apply()` now takes `{ chainId }` only and
+ * re-reads the resolution from THIS table; the caller's copy is never consulted. `consumed_at`
+ * makes a resolution single-use, the same replay guard `action_apply_chains.undone_at` (#1449)
+ * already established for undo.
+ */
+function migrateActionPendingResolutions1451(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS action_pending_resolutions (
+      id TEXT PRIMARY KEY, encounter_id INTEGER NOT NULL REFERENCES encounters(id) ON DELETE CASCADE,
+      campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE, actor_combatant_id INTEGER NOT NULL,
+      action_name TEXT NOT NULL DEFAULT '', targets_allow TEXT NOT NULL DEFAULT 'any',
+      resolution_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, consumed_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_action_pending_resolutions_encounter ON action_pending_resolutions(encounter_id);
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
   { name: '0001_users_oidc', run: migrateUsersTableForOidc },
   { name: '0002_campaigns_rule_system', run: migrateCampaignsTableForRuleSystem },
@@ -4605,6 +4628,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0142_encounter_token_batches_761', run: migrateEncounterTokenBatches761 },
   { name: '0143_party_rest_batches_759', run: migratePartyRestBatches759 },
   { name: '0144_action_apply_chains_1449', run: migrateActionApplyChains1449 },
+  { name: '0145_action_pending_resolutions_1451', run: migrateActionPendingResolutions1451 },
 ];
 
 /**

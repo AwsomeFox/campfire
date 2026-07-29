@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import { eq } from 'drizzle-orm';
-import { ActionResolveRequest, ActionSpec, ActionUndoToken, CombatantTurnState } from '@campfire/schema';
+import { ActionApplyRequest, ActionResolveRequest, ActionSpec, ActionUndoToken, CombatantTurnState } from '@campfire/schema';
 import { openDatabase } from '../../src/db/db.module';
-import { actionApplyChains, campaigns, characters, combatants, encounterEvents, encounters, ruleEntries, rulePacks } from '../../src/db/schema';
+import { actionApplyChains, actionPendingResolutions, campaigns, characters, combatants, encounterEvents, encounters, ruleEntries, rulePacks } from '../../src/db/schema';
 import { AuditService } from '../../src/modules/audit/audit.service';
 import { CampaignEventsService } from '../../src/modules/events/campaign-events.service';
 import { ActionResolverService } from '../../src/modules/encounters/action-resolver.service';
@@ -712,7 +712,7 @@ describe('action resolver (real SQLite, service layer)', () => {
       .set({ turnState: JSON.stringify({ concentration: 'Storm' }) })
       .where(eq(combatants.id, drake))
       .run();
-    const { undoToken } = service.apply(encounterId, preview.resolution, dmUser, 'dm');
+    const { undoToken } = service.apply(encounterId, { chainId: preview.chainId }, dmUser, 'dm');
     const dmg = preview.resolution.targets[0].totalDamage;
     expect(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.hpCurrent).toBe(60 - dmg);
     expect(undoToken.targets[0].hpBefore).toBe(60);
@@ -951,5 +951,156 @@ describe('action resolver (real SQLite, service layer)', () => {
     const aliceCharAfter = orm.select().from(characters).where(eq(characters.id, aliceChar.id)).get()!;
     const slots = JSON.parse(aliceCharAfter.spellSlots ?? '{}');
     expect(slots['3'].used).toBe(0);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Issue #1451 — apply() must not trust a client-supplied resolution. `chainId` is a
+  // LOOKUP KEY into the exact resolution `resolve()` computed and persisted server-side
+  // (`action_pending_resolutions`); nothing else the caller supplies is ever read. Fireball
+  // (actionIndex 2) at DC 21 vs the drake's +0 save is used throughout: the save ALWAYS
+  // fails, so the drake ALWAYS takes damage (halved for its fire resistance, but never
+  // zero) — a deterministic, non-RNG-dependent target for these security assertions.
+  // ---------------------------------------------------------------------------
+
+  it('#1451: a player cannot inflate totalDamage by editing the resolution — apply() only ever reads req.chainId', () => {
+    const { orm, service, encounterId, actor, drake } = seed();
+    const preview = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionName: 'Fireball', actionIndex: 2, targetIds: [drake], commit: false }),
+      alice,
+      'player',
+    );
+    expect(preview.applied).toBe(false);
+    const honestDamage = preview.resolution.targets[0].totalDamage;
+    expect(honestDamage).toBeGreaterThan(0); // DC 21 always fails vs +0 -> always damages (resisted, never zero)
+
+    // Forge the exact pre-#1451 exploit shape: the full resolution, edited to a one-shot
+    // amount, with the REAL chainId tacked on as an attacker using today's request shape
+    // would try. Cast through `unknown` to bypass the type system exactly as an untyped
+    // HTTP/MCP body would arrive — `apply()`'s signature only destructures `req.chainId`.
+    const forged = {
+      chainId: preview.chainId,
+      ...preview.resolution,
+      targets: preview.resolution.targets.map((t) => ({ ...t, totalDamage: 999999 })),
+    } as unknown as ActionApplyRequest;
+
+    const { undoToken } = service.apply(encounterId, forged, alice, 'player');
+    expect(undoToken.targets[0].hpBefore).toBe(60);
+    const drakeRow = orm.select().from(combatants).where(eq(combatants.id, drake)).get()!;
+    // The HONEST server-derived damage landed — never the forged 999999.
+    expect(drakeRow.hpCurrent).toBe(60 - honestDamage);
+  });
+
+  it('#1451: a player cannot inject a condition/effect never in the resolved spec — apply() never reads it from the caller', () => {
+    const { orm, service, encounterId, actor, drake } = seed();
+    const preview = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionName: 'Fireball', actionIndex: 2, targetIds: [drake], commit: false }),
+      alice,
+      'player',
+    );
+    expect(preview.resolution.targets[0].effects).toEqual([]); // this fireball declares no effects at all
+
+    const forged = {
+      chainId: preview.chainId,
+      ...preview.resolution,
+      targets: preview.resolution.targets.map((t) => ({
+        ...t,
+        effects: [{ condition: 'stunned', rounds: null, saveEnds: false, ongoingDamage: 0 }],
+      })),
+    } as unknown as ActionApplyRequest;
+
+    service.apply(encounterId, forged, alice, 'player');
+    const drakeRow = orm.select().from(combatants).where(eq(combatants.id, drake)).get()!;
+    expect(JSON.parse(drakeRow.conditions ?? '[]')).toEqual([]); // the injected condition never landed
+  });
+
+  it('#1451: DM apply(chainId) commits a result byte-identical to the resolve() preview', () => {
+    const { orm, service, encounterId, actor, drake } = seed();
+    const preview = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionName: 'Fireball', actionIndex: 2, targetIds: [drake], commit: false }),
+      alice,
+      'player',
+    );
+    expect(preview.applied).toBe(false);
+    expect(preview.chainId).toBeTruthy();
+
+    const { undoToken } = service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), dmUser, 'dm');
+
+    // Every field the table read in the preview is exactly what got committed — nothing
+    // re-derived or drifted between resolve and apply.
+    expect(undoToken.actionName).toBe(preview.resolution.actionName);
+    expect(undoToken.costSlot).toBe(preview.resolution.costSlot);
+    expect(undoToken.costCount).toBe(preview.resolution.costCount);
+    expect(undoToken.spellLevelSpent).toBe(preview.resolution.spellLevelSpent);
+    expect(undoToken.targets[0].hpBefore).toBe(60);
+    const drakeTarget = preview.resolution.targets[0];
+    const drakeRow = orm.select().from(combatants).where(eq(combatants.id, drake)).get()!;
+    expect(drakeRow.hpCurrent).toBe(60 - drakeTarget.totalDamage);
+  });
+
+  it('#1451 cheap backstop: a persisted resolution altered to exceed what the dice spec could ever roll is rejected even via a legitimate chainId', () => {
+    const { orm, service, encounterId, actor, drake } = seed();
+    const preview = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionName: 'Fireball', actionIndex: 2, targetIds: [drake], commit: false }),
+      alice,
+      'player',
+    );
+    const chainId = preview.chainId;
+
+    // Simulate a compromised/altered persisted row — something no REST or MCP caller can
+    // ever write, but the dice-spec backstop should still catch (issue #1451 acceptance:
+    // "bound damage/heal magnitude ... as a cheap backstop even on the DM path").
+    const row = orm.select().from(actionPendingResolutions).where(eq(actionPendingResolutions.id, chainId)).get()!;
+    const tampered = JSON.parse(row.resolutionJson);
+    tampered.targets[0].totalDamage = 999999;
+    orm.update(actionPendingResolutions).set({ resolutionJson: JSON.stringify(tampered) }).where(eq(actionPendingResolutions.id, chainId)).run();
+
+    expect(() => service.apply(encounterId, ActionApplyRequest.parse({ chainId }), dmUser, 'dm')).toThrow(/dice spec bounds/i);
+    // Rejected before the transaction opened — nothing was written.
+    const drakeRow = orm.select().from(combatants).where(eq(combatants.id, drake)).get()!;
+    expect(drakeRow.hpCurrent).toBe(60);
+  });
+
+  it('#1451: an unknown chainId is rejected, and a chainId from a different encounter is rejected', () => {
+    const { orm, service, campaignId, encounterId, actor, drake } = seed();
+    expect(() => service.apply(encounterId, ActionApplyRequest.parse({ chainId: 'chain-never-resolved' }), alice, 'player')).toThrow(
+      /unknown|never (computed|applied)/i,
+    );
+
+    const preview = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: false }),
+      alice,
+      'player',
+    );
+    const ts = new Date().toISOString();
+    const [otherEncounter] = orm
+      .insert(encounters)
+      .values({ campaignId, name: 'Other Fight', status: 'running', round: 1, turnIndex: 0, createdAt: ts, updatedAt: ts })
+      .returning()
+      .all();
+    expect(() => service.apply(otherEncounter.id, ActionApplyRequest.parse({ chainId: preview.chainId }), alice, 'player')).toThrow(
+      /different encounter/i,
+    );
+    // The genuine chain is untouched — still applicable from its real encounter.
+    const applied = service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), alice, 'player');
+    expect(applied.undoToken).toBeTruthy();
+  });
+
+  it('#1451: replaying the same chainId at /actions/apply a second time is rejected (single-use)', () => {
+    const { service, encounterId, actor, drake } = seed();
+    const preview = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: false }),
+      alice,
+      'player',
+    );
+    service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), alice, 'player');
+    expect(() => service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), alice, 'player')).toThrow(
+      /already (been )?applied/i,
+    );
   });
 });

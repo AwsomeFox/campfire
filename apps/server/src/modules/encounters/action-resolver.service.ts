@@ -2,6 +2,7 @@ import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundEx
 import { and, eq, isNull, or } from 'drizzle-orm';
 import {
   ActionApplyPolicy,
+  ActionApplyRequest,
   ActionResolution,
   ActionResolveRequest,
   ActionResolveResult,
@@ -64,14 +65,14 @@ import {
 } from '@campfire/schema';
 
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { actionApplyChains, campaigns, characters, combatants, encounterEvents, encounters, ruleEntries } from '../../db/schema';
+import { actionApplyChains, actionPendingResolutions, campaigns, characters, combatants, encounterEvents, encounters, ruleEntries } from '../../db/schema';
 import { CampaignEventsService } from '../events/campaign-events.service';
 import { AuditService } from '../audit/audit.service';
 import { TableSafetyService } from '../safety/table-safety.service';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { conditionWriteSetFromNames, readConditionInstances, sheetConditionWriteSetFromNames } from '../../common/conditions';
 import { nowIso } from '../../common/time';
-import { rollDice } from '../../common/dice';
+import { rollDice, parseCompoundDiceExpr } from '../../common/dice';
 import { auditActor, roleAtLeast } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import {
@@ -535,13 +536,27 @@ export class ActionResolverService {
     }
 
     const resolution = this.buildResolution(spec, name, actor, resolvedTargets);
+
+    // Issue #1451: mint the chain id HERE, at resolve time, and persist the EXACT resolution
+    // the server just computed — regardless of whether this call also commits it. This is the
+    // only copy `/actions/apply` will ever read: a later apply takes `{ chainId }` alone, so a
+    // client-edited `totalDamage` (or an injected condition/effect never in the action spec)
+    // in the request body is simply never consulted.
+    const chainId = this.mintChainId();
+    this.persistPendingResolution(encounter, actor, chainId, spec.targets.allow, resolution);
+
     let applied = false;
     let undoToken: ActionUndoToken | null = null;
     if (req.commit && canApply) {
-      undoToken = this.applyInternal(encounter, resolution, actor, user, role, spec.targets.allow);
+      // Cheap backstop (issue #1451), even though this resolution is already the server's own
+      // roll: bound each target's damage/heal/temp-HP against what this exact dice spec could
+      // ever produce, so a future caller of applyInternal (or a bug in this round trip) cannot
+      // silently commit a number the spec itself could never have rolled.
+      this.assertResolutionWithinSpecBounds(spec, resolution);
+      undoToken = this.applyInternal(encounter, resolution, actor, user, role, spec.targets.allow, chainId);
       applied = true;
     }
-    return ActionResolveResult.parse({ resolution, applied, canApply, policy, undoToken });
+    return ActionResolveResult.parse({ resolution, applied, canApply, policy, undoToken, chainId });
   }
 
   /** Resolve a single target: roll attack or the target's save, classify, roll damage, apply defences. */
@@ -879,39 +894,202 @@ export class ActionResolverService {
   // Apply (atomic) + undo
   // -------------------------------------------------------------------------
 
+  /** Mint a chain id — the correlation key shared by the pending-resolution row, the apply-chain
+   *  undo snapshot, and the combat-log entries for one resolve/apply (issues #414, #426, #1449). */
+  private mintChainId(): string {
+    return `chain-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
   /**
-   * Apply a previously-previewed resolution (issue #414 confirm path). The applier must be the
-   * DM, or the actor's owning player under an automatic policy. Because the applier is trusted
-   * (a DM can already set arbitrary combatant HP), the echoed resolution's rolled numbers are
-   * applied verbatim so the committed result is byte-identical to the preview the table read.
+   * Issue #1451: persist the exact resolution `resolve()` just computed, keyed by `chainId`.
+   * This is the ONLY copy `apply()` will ever read back — the request body `/actions/apply`
+   * receives later carries nothing but the chain id, so a client cannot smuggle a different
+   * `totalDamage`, an injected condition, or an unresolved effect payload into the apply step.
    */
-  apply(encounterId: number, resolution: ActionResolution, user: RequestUser, role: Role): { undoToken: ActionUndoToken } {
+  private persistPendingResolution(
+    encounter: typeof encounters.$inferSelect,
+    actor: typeof combatants.$inferSelect,
+    chainId: string,
+    targetsAllow: ActionTargetAllow,
+    resolution: ActionResolution,
+  ): void {
+    this.db
+      .insert(actionPendingResolutions)
+      .values({
+        id: chainId,
+        encounterId: encounter.id,
+        campaignId: encounter.campaignId,
+        actorCombatantId: actor.id,
+        actionName: resolution.actionName,
+        targetsAllow,
+        resolutionJson: toJsonText(resolution),
+        createdAt: nowIso(),
+      })
+      .run();
+  }
+
+  /**
+   * Issue #1451: a cheap, deliberately PERMISSIVE upper bound on what a dice expression could
+   * ever total, used only to catch a resolution wildly outside anything the action's spec could
+   * legitimately roll. Ignores keep/drop reduction and negative modifiers (both only ever LOWER
+   * a real roll) so a legitimate result can never trip it — this is a backstop, not a re-derivation.
+   */
+  private maxDiceExprTotal(expr: string): number {
+    if (!expr || !expr.trim()) return 0;
+    let terms: ReturnType<typeof parseCompoundDiceExpr>;
+    try {
+      terms = parseCompoundDiceExpr(expr);
+    } catch {
+      return 0; // not a resolvable dice expression — the spec can't legitimately produce a number here
+    }
+    let max = 0;
+    for (const t of terms) {
+      max += t.kind === 'die' ? t.count * t.sides : Math.max(0, t.value);
+    }
+    return max;
+  }
+
+  /**
+   * The maximum damage ONE target's branch could ever take (issue #1451): each part's dice+flat
+   * ceiling, times 4 to cover the worst realistic stack of multipliers this resolver can apply —
+   * a critical hit doubling the total (the larger of the two supported crit rules,
+   * {@link CriticalDamageRule}) AND a vulnerability doubling it again on top. Generous on
+   * purpose; it exists to catch an order-of-magnitude-inflated number, not to re-derive the roll.
+   */
+  private maxBranchDamage(branch: OutcomeBranch): number {
+    const partsMax = branch.damage.reduce((sum, p) => sum + this.maxDiceExprTotal(p.formula) + Math.max(0, p.flat), 0);
+    return partsMax * 4;
+  }
+
+  /** The widest damage/heal/temp-HP bound across every outcome branch this spec declares. */
+  private specDamageBounds(spec: ActionSpec): { maxDamage: number; maxHealing: number; maxTempHp: number } {
+    let maxDamage = 0;
+    let maxHealing = 0;
+    let maxTempHp = 0;
+    for (const branch of Object.values(spec.outcomes)) {
+      if (!branch) continue;
+      maxDamage = Math.max(maxDamage, this.maxBranchDamage(branch));
+      maxHealing = Math.max(maxHealing, this.maxDiceExprTotal(branch.healing));
+      maxTempHp = Math.max(maxTempHp, this.maxDiceExprTotal(branch.tempHp));
+    }
+    return { maxDamage, maxHealing, maxTempHp };
+  }
+
+  /**
+   * Issue #1451 cheap backstop: bound every target's damage/healing/temp-HP against what this
+   * action's OWN dice spec could ever roll, on BOTH the player and the DM path — even though
+   * (after this fix) the resolution being applied is always the server's own, never a
+   * client-echoed one. Defense in depth against a bug in that round trip, not the primary gate.
+   */
+  private assertResolutionWithinSpecBounds(spec: ActionSpec, resolution: ActionResolution): void {
+    const { maxDamage, maxHealing, maxTempHp } = this.specDamageBounds(spec);
+    for (const t of resolution.targets) {
+      if (t.totalDamage > maxDamage) {
+        throw new BadRequestException(
+          `"${resolution.actionName}" cannot deal ${t.totalDamage} damage — its dice spec bounds a single target's damage at ${maxDamage}.`,
+        );
+      }
+      if (t.healing > maxHealing) {
+        throw new BadRequestException(
+          `"${resolution.actionName}" cannot heal ${t.healing} — its dice spec bounds healing at ${maxHealing}.`,
+        );
+      }
+      if (t.tempHp > maxTempHp) {
+        throw new BadRequestException(
+          `"${resolution.actionName}" cannot grant ${t.tempHp} temp HP — its dice spec bounds it at ${maxTempHp}.`,
+        );
+      }
+    }
+  }
+
+  /** Audit a rejected apply attempt (issue #1451) — mirrors auditRejectedUndo (issue #1449). */
+  private auditRejectedApply(
+    encounter: typeof encounters.$inferSelect,
+    chainId: string,
+    user: RequestUser,
+    role: Role,
+    reason: string,
+  ): void {
+    void this.audit
+      .log({
+        actor: auditActor(user),
+        actorRole: role,
+        action: 'encounter.action.apply_rejected',
+        entityType: 'encounter',
+        entityId: encounter.id,
+        campaignId: encounter.campaignId,
+        detail: JSON.stringify({ reason, chainId }),
+      })
+      .catch(() => undefined);
+  }
+
+  /**
+   * Apply a previously resolved action chain (issue #414 confirm path). `chainId` is a LOOKUP
+   * KEY, not a source of truth (issue #1451): the resolution applied is always the exact one
+   * `resolve()` computed and persisted server-side (`action_pending_resolutions`), never
+   * anything the request body carries. Before this fix, `apply()` took the full
+   * `ActionResolution` from the client and wrote its `totalDamage`/`healing`/`effects` verbatim
+   * — trusting the applier was "safe" because a DM can already set arbitrary HP, which is false
+   * for the player who can also reach this route under an automatic policy. Now a player cannot
+   * inflate damage, alter a per-target delta, or inject a condition/effect never in the resolved
+   * spec: none of that is read from anywhere the caller can influence. The applier must still be
+   * the DM, or the actor's owning player under an automatic policy.
+   */
+  apply(encounterId: number, req: ActionApplyRequest, user: RequestUser, role: Role): { undoToken: ActionUndoToken } {
     const encounter = this.encounterRowOrThrow(encounterId);
     // #599: applying a resolution writes damage, conditions, and death saves to the board. That
     // is play advancing, and it is precisely what someone raising an X-Card mid-swing is asking
     // to stop. `resolve` (the preview) stays open — computing a number nobody has committed is
     // harmless, and blocking it would only hide from the table what was about to happen.
     this.safety?.assertNotHeld(encounter.campaignId);
-    const actor = this.combatantRowOrThrow(encounterId, resolution.actorCombatantId);
+
+    const pending = this.db.select().from(actionPendingResolutions).where(eq(actionPendingResolutions.id, req.chainId)).get();
+    if (!pending) {
+      this.auditRejectedApply(encounter, req.chainId, user, role, 'unknown_chain_id');
+      throw new BadRequestException('This resolution was never computed on this server (unknown chain).');
+    }
+    if (pending.encounterId !== encounterId) {
+      this.auditRejectedApply(encounter, req.chainId, user, role, 'cross_encounter_chain');
+      throw new BadRequestException('This chain belongs to a different encounter.');
+    }
+    if (pending.consumedAt) {
+      this.auditRejectedApply(encounter, req.chainId, user, role, 'already_applied');
+      throw new BadRequestException('This resolution has already been applied.');
+    }
+
+    const resolution = ActionResolution.parse(fromJsonText<unknown>(pending.resolutionJson, {}));
+    const actor = this.combatantRowOrThrow(encounterId, pending.actorCombatantId);
     const isDm = role === 'dm';
     if (!isDm) {
       if (actor.kind !== 'character' || !this.isCharacterOwnedBy(actor, user)) {
+        this.auditRejectedApply(encounter, req.chainId, user, role, 'not_actor_owner');
         throw new ForbiddenException('Only the DM may apply a monster/NPC action.');
       }
       const { canApply } = this.policyFor(encounter.campaignId, actor, user, role);
-      if (!canApply) throw new ForbiddenException('This campaign requires the DM to apply action consequences.');
+      if (!canApply) {
+        this.auditRejectedApply(encounter, req.chainId, user, role, 'policy_forbids');
+        throw new ForbiddenException('This campaign requires the DM to apply action consequences.');
+      }
     }
+
+    // Defense in depth: re-validate target legality (and the damage/heal backstop) against the
+    // CURRENT spec, exactly as resolve() would if it ran again right now — the actor's sheet may
+    // have changed between resolve and apply.
     const { spec } = this.resolveSpec(actor, {
-      actorCombatantId: resolution.actorCombatantId,
-      actionName: resolution.actionName,
+      actorCombatantId: pending.actorCombatantId,
+      actionName: pending.actionName,
       targetIds: [],
       commit: false,
     }, encounter.campaignId);
+    const targetsAllowParsed = ActionTargetAllow.safeParse(pending.targetsAllow);
+    const targetsAllow: ActionTargetAllow = targetsAllowParsed.success ? targetsAllowParsed.data : 'any';
     for (const t of resolution.targets) {
       const target = this.combatantRowOrThrow(encounterId, t.combatantId);
-      this.assertTargetAllowed(spec.targets.allow, actor, target, resolution.actionName);
+      this.assertTargetAllowed(targetsAllow, actor, target, resolution.actionName);
     }
-    const undoToken = this.applyInternal(encounter, resolution, actor, user, role, spec.targets.allow);
+    this.assertResolutionWithinSpecBounds(spec, resolution);
+
+    const undoToken = this.applyInternal(encounter, resolution, actor, user, role, targetsAllow, pending.id);
     return { undoToken };
   }
 
@@ -928,9 +1106,15 @@ export class ActionResolverService {
      * action (which may no longer exist on the sheet by the time undo runs).
      */
     targetsAllow: ActionTargetAllow,
+    /**
+     * Issue #1451: the SAME chain id `resolve()` minted for this resolution's
+     * `action_pending_resolutions` row — reused here (rather than minting a fresh one) so one
+     * id correlates the pending resolution, the apply-chain undo snapshot, and the combat-log
+     * entries for a single resolve/apply. Claimed (marked consumed) inside this transaction.
+     */
+    chainId: string,
   ): ActionUndoToken {
     const round = encounter.round;
-    const chainId = `chain-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     const performedBy = this.performedByFrom(user, role);
     const adapter = this.adapterForCampaign(encounter.campaignId);
     const ruleSystem = adapter.id;
@@ -1215,6 +1399,17 @@ export class ActionResolverService {
           targetsJson: toJsonText(undoTargets),
           createdAt: nowIso(),
         })
+        .run();
+
+      // Issue #1451: claim the pending resolution (single-use) IN THE SAME TRANSACTION as the
+      // state it authorized — a concurrent second apply for this chainId either sees
+      // `consumedAt` already set at the top of `apply()` and never reaches here, or loses this
+      // conditional UPDATE (0 rows changed), which is fine to ignore: the row already existed
+      // (resolve() always inserts one before this can run) and the write below is purely a
+      // replay-protection marker, not something this apply depends on to proceed correctly.
+      tx.update(actionPendingResolutions)
+        .set({ consumedAt: nowIso() })
+        .where(and(eq(actionPendingResolutions.id, chainId), isNull(actionPendingResolutions.consumedAt)))
         .run();
     });
 

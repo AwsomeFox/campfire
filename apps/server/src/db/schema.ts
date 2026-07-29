@@ -2170,6 +2170,34 @@ export const actionApplyChains = sqliteTable('action_apply_chains', {
   undoneAt: text('undone_at'),
 });
 
+// Issue #1451: server-side snapshot of a RESOLVED (not-yet-necessarily-applied) action chain,
+// keyed on the same chainId `ActionResolverService.resolve()` mints for every resolution. This
+// closes the sibling hole to #1449: before this, `POST /actions/apply` took the FULL
+// `ActionResolution` straight from the request body and applied its `totalDamage`/`healing`/
+// `effects` verbatim — a player could preview a legitimate 6-damage hit, then re-POST that same
+// object to `/actions/apply` with `totalDamage: 999999` (or an injected condition never in the
+// action spec) against a target they were otherwise allowed to hit, one-shotting it. `apply()`
+// now takes `{ chainId }` only and re-reads the resolution FROM THIS TABLE — the caller's copy
+// of the resolution is never consulted, so the numbers that land are always the server's own
+// roll. `consumedAt` makes a resolution single-use: replaying the same chainId at `/actions/
+// apply` after it has already been applied 400s rather than re-applying (or double-applying)
+// the same consequences.
+export const actionPendingResolutions = sqliteTable('action_pending_resolutions', {
+  id: text('id').primaryKey(), // the chain id (see ActionResolverService.resolve)
+  encounterId: integer('encounter_id').notNull(),
+  campaignId: integer('campaign_id').notNull(),
+  actorCombatantId: integer('actor_combatant_id').notNull(),
+  actionName: text('action_name').notNull().default(''),
+  // The ActionTargetAllow the spec declared AT RESOLVE TIME, replayed at apply for defense in
+  // depth (mirrors action_apply_chains.targetsAllow, the same field undo() already trusts).
+  targetsAllow: text('targets_allow').notNull().default('any'),
+  // The full server-computed ActionResolution (issue #414's byte-identical-preview payload),
+  // serialized. This — not anything the client sends — is what `applyInternal` ever writes.
+  resolutionJson: text('resolution_json').notNull().default('{}'),
+  createdAt: text('created_at').notNull(),
+  consumedAt: text('consumed_at'),
+});
+
 // Issue #580: per-intent idempotency for non-idempotent encounter mutations (HP deltas and
 // turn advancement). The row is written inside the SAME synchronous better-sqlite3
 // transaction as the effect it guards, so claim and effect commit or roll back together.

@@ -2217,6 +2217,19 @@ CREATE TABLE IF NOT EXISTS action_apply_chains (
   created_at TEXT NOT NULL, undone_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_action_apply_chains_encounter ON action_apply_chains(encounter_id);
+
+-- Issue #1451: server-side snapshot of a RESOLVED action chain, keyed by the same chainId
+-- resolve() mints for every resolution (preview or committed). /actions/apply takes
+-- { chainId } only and re-reads the resolution from THIS row rather than trusting a
+-- client-echoed ActionResolution — closing the inflated-damage/injected-condition forgery
+-- this table exists to prevent. consumed_at makes a resolution single-use.
+CREATE TABLE IF NOT EXISTS action_pending_resolutions (
+  id TEXT PRIMARY KEY, encounter_id INTEGER NOT NULL REFERENCES encounters(id) ON DELETE CASCADE,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE, actor_combatant_id INTEGER NOT NULL,
+  action_name TEXT NOT NULL DEFAULT '', targets_allow TEXT NOT NULL DEFAULT 'any',
+  resolution_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, consumed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_action_pending_resolutions_encounter ON action_pending_resolutions(encounter_id);
 ${CAMPAIGN_MODULES_DDL}`;
 
 /**
