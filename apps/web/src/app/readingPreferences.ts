@@ -4,33 +4,22 @@ import type { TextSize } from '@campfire/schema';
 export const READING_MODE_ATTRIBUTE = 'data-reading-mode';
 
 /**
- * HTML attribute consumed by the body-zoom rule in index.css. Only 'large' has
- * a rule today (`:root[data-text-size='large'] body { zoom: 1.15; }`); the
- * attribute is still set for every non-default mode so a future 'comfortable'
- * rule can match without another integration change.
- */
-export const TEXT_SIZE_ATTRIBUTE = 'data-text-size';
-
-/**
  * Apply one account's reading mode to this document only. Default removes the
- * attributes so signed-out/account-switch transitions cannot inherit another
+ * attribute so signed-out/account-switch transitions cannot inherit another
  * user's setting.
  *
- * Two attributes are driven from the same TextSize preference:
- *  - `data-reading-mode` selects the semantic reading tokens (type scale, leading).
- *  - `data-text-size` is what the body-zoom rule in index.css matches for the
- *    "Large" preference. It used to be written only by the comment, never by
- *    code, so the Large preference silently did nothing (issue #1534).
- *
- * This deliberately does not alter the root font size beyond those two
- * attribute-driven mechanisms.
+ * `TextSize` tunes prose and other reading surfaces ONLY — never controls,
+ * maps, or VTT geometry (see the contract in packages/schema/src/index.ts).
+ * The preference drives a single attribute, `data-reading-mode`, which the
+ * `.reading-surface` token rules in index.css consume (`--type-reading`,
+ * `--leading-reading`, ...). It deliberately does not alter root/body scale or
+ * CSS zoom: an earlier `data-text-size` body-zoom rule contradicted that
+ * contract and has been removed (issue #1534 part 2).
  */
 export function applyReadingPreference(root: HTMLElement, mode: TextSize): void {
   if (mode === 'default') {
     root.removeAttribute(READING_MODE_ATTRIBUTE);
-    root.removeAttribute(TEXT_SIZE_ATTRIBUTE);
     return;
   }
   root.setAttribute(READING_MODE_ATTRIBUTE, mode);
-  root.setAttribute(TEXT_SIZE_ATTRIBUTE, mode);
 }

@@ -61,33 +61,47 @@ test.describe('Error-swallowing callers announce success only on real success (#
     expect(handleUndoBlock).toContain("Could not restore unread status.");
   });
 
-  test('PreferencesPage selectDiceTheme reverts optimistic state on failure', () => {
-    // The dice-theme picker optimistically sets local state before the
-    // await; on failure it must roll the control back to the prior theme
-    // rather than leaving the UI on a theme the server rejected.
+  test('PreferencesPage selectDiceTheme reverts optimistic state on failure, but not over a newer selection', () => {
+    // The dice-theme picker optimistically sets local state before the await;
+    // on failure it must roll the control back to the prior theme rather than
+    // leaving the UI on a theme the server rejected — BUT only if no newer
+    // selection has superseded this request, otherwise a stale failure would
+    // clobber a newer, successfully persisted choice (#1534 review).
     const fnStart = PREFS_PAGE_SOURCE.indexOf('async function selectDiceTheme');
     expect(fnStart).toBeGreaterThan(-1);
-    const fnBlock = PREFS_PAGE_SOURCE.slice(fnStart, fnStart + 500);
+    const fnBlock = PREFS_PAGE_SOURCE.slice(fnStart, fnStart + 1000);
     expect(fnBlock).toContain('previous');
     expect(fnBlock).toMatch(/setSelectedDiceTheme\(previous\)/);
+    // The latest-request guard that prevents a stale rollback.
+    expect(fnBlock).toMatch(/latestDiceThemeRequest/);
   });
 });
 
-test.describe('Large text-size preference applies its CSS rule (#1534 part 2)', () => {
-  test('applyReadingPreference sets the data-text-size attribute', () => {
-    expect(READING_PREFS_SOURCE).toContain("data-text-size");
-    expect(READING_PREFS_SOURCE).toContain('TEXT_SIZE_ATTRIBUTE');
-    // Non-default modes set BOTH attributes.
-    expect(READING_PREFS_SOURCE).toMatch(/setAttribute\(TEXT_SIZE_ATTRIBUTE/);
-    // Default removes BOTH attributes so account-switch resets cleanly.
-    expect(READING_PREFS_SOURCE).toMatch(/removeAttribute\(TEXT_SIZE_ATTRIBUTE\)/);
+test.describe('Large text-size preference stays scoped to reading surfaces (#1534 part 2)', () => {
+  test('applyReadingPreference drives data-reading-mode only, never a body-zoom attribute', () => {
+    // The TextSize contract (packages/schema) scopes the preference to prose
+    // and reading surfaces ONLY — never controls, maps, or VTT geometry. It
+    // drives the single data-reading-mode attribute consumed by the
+    // .reading-surface token rules. The executable attribute calls must
+    // reference ONLY READING_MODE_ATTRIBUTE — never a separate text-size
+    // attribute that would activate a whole-body zoom. (Asserting on the
+    // executable setAttribute/removeAttribute calls, not on bare substrings
+    // that may appear in explanatory comments.)
+    expect(READING_PREFS_SOURCE).toContain('READING_MODE_ATTRIBUTE');
+    // No executable attribute write references a text-size attribute.
+    expect(READING_PREFS_SOURCE).not.toMatch(/(set|remove)Attribute\([^)]*text-size/i);
   });
 
-  test('the index.css body-zoom rule still matches data-text-size large', () => {
-    // The CSS rule the attribute is now wired to. If this rule is ever
-    // removed, the Large preference would silently do nothing again —
-    // update both halves together.
-    expect(INDEX_CSS_SOURCE).toContain(":root[data-text-size='large'] body");
-    expect(INDEX_CSS_SOURCE).toMatch(/zoom:\s*1\.15/);
+  test('the contract-violating body-zoom rule has been removed from index.css', () => {
+    // The dead whole-body zoom rule contradicted the TextSize contract (it
+    // scaled the whole chrome like browser zoom, instead of only reading
+    // surfaces). The executable selector must stay gone; "Large" is delivered
+    // by the data-reading-mode reading tokens, not by body zoom. The regex
+    // targets an executable rule, not explanatory prose.
+    expect(INDEX_CSS_SOURCE).not.toMatch(/^\s*:root\[data-text-size=/m);
+    // No executable CSS rule applies a numeric zoom to the body element.
+    expect(INDEX_CSS_SOURCE).not.toMatch(/(^|\})[^\n}]*\bbody\b[^\n{]*\{[^}]*zoom:\s*[\d.]+/);
+    // The reading tokens that actually deliver Large are still present.
+    expect(INDEX_CSS_SOURCE).toContain(":root[data-reading-mode='large']");
   });
 });
