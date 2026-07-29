@@ -528,6 +528,45 @@ test('coordinates polling and read state between tabs', async ({ browser }) => {
   await context.close();
 });
 
+test('restores a new unread count after mark-all-read across tabs', async ({ browser }) => {
+  const { campaignId } = seed();
+  const context: BrowserContext = await browser.newContext({
+    storageState: stateFor('player'),
+    serviceWorkers: 'block',
+  });
+  let unreadCount = 2;
+  const item = notification('A newly arrived recap', 9911);
+
+  await context.route(COUNT_URL, (route: Route) => route.fulfill({ json: { count: unreadCount } }));
+  await context.route(LIST_URL, (route) => route.fulfill({ json: [item] }));
+  await context.route('**/api/v1/notifications/mark-read', async (route: Route) => {
+    const body = route.request().postDataJSON() as { all?: boolean };
+    if (body.all) unreadCount = 0;
+    await route.fulfill({ json: { updated: 1, updatedIds: [item.id] } });
+  });
+
+  const first = await context.newPage();
+  const second = await context.newPage();
+  await first.goto(`/c/${campaignId}`);
+  await second.goto(`/c/${campaignId}`);
+  await expect(first.getByRole('button', { name: 'Notifications (2 unread)' })).toBeVisible();
+  await expect(second.getByRole('button', { name: 'Notifications (2 unread)' })).toBeVisible();
+
+  await first.getByRole('button', { name: /Notifications/ }).click();
+  await first.getByRole('button', { name: 'Mark all (2) read' }).click();
+  const confirm = first.getByRole('dialog').filter({ hasText: 'Mark all 2 notifications as read?' });
+  await confirm.getByRole('button', { name: 'Mark all 2 read' }).click();
+  await expect(first.getByRole('button', { name: 'Notifications', exact: true })).toBeVisible();
+  await expect(second.getByRole('button', { name: 'Notifications', exact: true })).toBeVisible();
+
+  unreadCount = 1;
+  await first.getByRole('link', { name: 'Quests', exact: true }).click();
+  await expect(first.getByRole('button', { name: 'Notifications (1 unread)' })).toBeVisible();
+  await expect(second.getByRole('button', { name: 'Notifications (1 unread)' })).toBeVisible();
+
+  await context.close();
+});
+
 test.describe('Issue #550: Notification Center, pagination, confirmation, and undo', () => {
   test.use({ storageState: stateFor('player'), serviceWorkers: 'block' });
 
@@ -609,4 +648,3 @@ test.describe('Issue #550: Notification Center, pagination, confirmation, and un
     await expect(page.getByRole('button', { name: 'Load more notifications' })).toHaveCount(0);
   });
 });
-

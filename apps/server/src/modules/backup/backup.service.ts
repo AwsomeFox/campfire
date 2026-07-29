@@ -1087,8 +1087,9 @@ export class BackupService implements OnApplicationBootstrap {
    *      `changed` (restoring would leave the DB inconsistent with the file).
    *   5. Scan the live uploads/ tree once more and record any files that are NOT
    *      referenced by any committed attachment row as `orphans`.
-   *   6. Fail loudly if any file went missing (ENOENT) or changed under capture;
-   *      partial / inconsistent archives should not silently claim success.
+   *   6. Record missing files in the manifest and fail loudly if a file changed
+   *      under capture; missing files are already absent from the live server,
+   *      while changed bytes would make the archive internally inconsistent.
    *   7. #496: When the running server relies on an auto-generated
    *      `DATA_DIR/ai-config.key` and the caller supplies a `keyPassphrase`, the
    *      keyfile is wrapped in an AES-256-GCM envelope (scrypt(passphrase, salt))
@@ -1359,11 +1360,16 @@ export class BackupService implements OnApplicationBootstrap {
       }
       zip.append(manifestJson, { name: MANIFEST_ENTRY });
 
-      // Fail loudly if any file was missing or changed under capture — partial /
-      // inconsistent archives should never silently claim success (#828 AC). Orphans
-      // are informational and don't block the archive: they're either reserved uploads
-      // (recoverable on restore) or concurrent writes after the generation boundary.
-      if (missing > 0 || changed > 0) {
+      // Missing files are already unavailable in the live server and are recorded in
+      // manifest.reconciliation. Changed files, however, make the captured bytes
+      // inconsistent with the snapshot and must still abort this archive.
+      if (missing > 0) {
+        this.logger.warn(
+          `Backup reconciliation found ${missing} attachment file(s) missing from storage; recording them in the manifest.`,
+        );
+      }
+
+      if (changed > 0) {
         throw new Error(
           `Backup failed reconciliation: ${missing} missing, ${changed} changed attachment file(s). ` +
             `Backup generation ${reconciliation.generation} — see manifest.reconciliation for details.`,
@@ -1469,7 +1475,8 @@ export class BackupService implements OnApplicationBootstrap {
   private validateManifestAttachmentsAgainstSnapshot(manifest: BackupManifest, dbPath: string): void {
     const byId = new Map(manifest.attachments.map((record) => [record.id, record]));
     const db = new Database(dbPath, { readonly: true, fileMustExist: true });
-    let count = 0;
+    let capturedCount = 0;
+    let missingCount = 0;
     try {
       try {
         for (const row of db.prepare(
@@ -1477,12 +1484,16 @@ export class BackupService implements OnApplicationBootstrap {
         ).iterate() as Iterable<{ id: number; campaignId: number; mime: string; size: number; hidden: number }>) {
           const record = byId.get(row.id);
           const expectedPath = path.relative(uploadsRoot(resolveDataDir()), this.attachments.filePath(row)).split(path.sep).join('/');
-          if (!record || record.campaignId !== row.campaignId || record.mime !== row.mime ||
+          if (!record) {
+            missingCount++;
+            continue;
+          }
+          if (record.campaignId !== row.campaignId || record.mime !== row.mime ||
             record.size !== row.size || record.hidden !== (row.hidden === 1) || record.path !== expectedPath) {
             throw new BadRequestException('Invalid backup archive — manifest attachments do not match database snapshot');
           }
           byId.delete(row.id);
-          count++;
+          capturedCount++;
         }
       } catch (err) {
         // The earlier integrity probe intentionally accepts any SQLite database
@@ -1494,7 +1505,11 @@ export class BackupService implements OnApplicationBootstrap {
         throw err;
       }
     } finally { db.close(); }
-    if (count !== manifest.attachments.length || byId.size !== 0) {
+    if (
+      capturedCount !== manifest.attachments.length ||
+      missingCount !== manifest.reconciliation.missing ||
+      byId.size !== 0
+    ) {
       throw new BadRequestException('Invalid backup archive — manifest attachments do not match database snapshot');
     }
   }

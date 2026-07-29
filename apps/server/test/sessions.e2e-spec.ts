@@ -104,6 +104,42 @@ describe('sessions (e2e) — sessionCount + duplicate number', () => {
   });
 });
 
+describe('sessions (e2e) — retries ignore trashed sessions (#1491)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const created = await request(ctx.app.getHttpServer()).post('/api/v1/campaigns').set(dm).send({ name: 'Trashed retry campaign' });
+    campaignId = created.body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('creates a new session instead of deduplicating to a trashed matching recap', async () => {
+    const server = ctx.app.getHttpServer();
+    const input = { recap: 'This retry must not return a trashed recap.' };
+    const first = await request(server).post(`/api/v1/campaigns/${campaignId}/sessions`).set(dm).send(input);
+    expect(first.status).toBe(201);
+    expect((await request(server).delete(`/api/v1/sessions/${first.body.id}`).set(dm)).status).toBe(200);
+
+    const retry = await request(server).post(`/api/v1/campaigns/${campaignId}/sessions`).set(dm).send(input);
+    expect(retry.status).toBe(201);
+    expect(retry.body.id).not.toBe(first.body.id);
+    expect((await request(server).get(`/api/v1/sessions/${retry.body.id}`).set(dm)).status).toBe(200);
+  });
+
+  it('allows reusing a trashed session number', async () => {
+    const server = ctx.app.getHttpServer();
+    const first = await request(server).post(`/api/v1/campaigns/${campaignId}/sessions`).set(dm).send({ number: 77 });
+    expect(first.status).toBe(201);
+    expect((await request(server).delete(`/api/v1/sessions/${first.body.id}`).set(dm)).status).toBe(200);
+    expect((await request(server).post(`/api/v1/campaigns/${campaignId}/sessions`).set(dm).send({ number: 77 })).status).toBe(201);
+  });
+});
+
 /**
  * Issue #59: sessions carry a DM-only dmSecret (prep notes on a session record)
  * with the same strip-for-non-DM redaction as quests/NPCs/locations. The recap

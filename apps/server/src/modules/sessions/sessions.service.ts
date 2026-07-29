@@ -374,8 +374,8 @@ export class SessionsService {
   /** Session `number` must be unique within a campaign — 409 on a duplicate. */
   private async assertNumberAvailable(campaignId: number, number: number, excludeId?: number): Promise<void> {
     const conflict = excludeId
-      ? and(eq(sessions.campaignId, campaignId), eq(sessions.number, number), ne(sessions.id, excludeId))
-      : and(eq(sessions.campaignId, campaignId), eq(sessions.number, number));
+      ? and(eq(sessions.campaignId, campaignId), eq(sessions.number, number), ne(sessions.id, excludeId), notDeleted(sessions.deletedAt))
+      : and(eq(sessions.campaignId, campaignId), eq(sessions.number, number), notDeleted(sessions.deletedAt));
     const [row] = await this.db.select({ id: sessions.id }).from(sessions).where(conflict).limit(1);
     if (row) throw new ConflictException(`Session number ${number} already exists in this campaign`);
   }
@@ -422,7 +422,7 @@ export class SessionsService {
         const [newest] = tx
           .select()
           .from(sessions)
-          .where(eq(sessions.campaignId, campaignId))
+          .where(and(eq(sessions.campaignId, campaignId), notDeleted(sessions.deletedAt)))
           .orderBy(desc(sessions.number))
           .limit(1)
           .all();
@@ -456,7 +456,7 @@ export class SessionsService {
       const [conflict] = tx
         .select({ id: sessions.id })
         .from(sessions)
-        .where(and(eq(sessions.campaignId, campaignId), eq(sessions.number, input.number)))
+        .where(and(eq(sessions.campaignId, campaignId), eq(sessions.number, input.number), notDeleted(sessions.deletedAt)))
         .limit(1)
         .all();
       if (conflict) throw new ConflictException(`Session number ${input.number} already exists in this campaign`);

@@ -214,6 +214,21 @@ describe('storylines (e2e)', () => {
     expect((await request(server).get(`/api/v1/beats/${beatId}`).set(dm)).status).toBe(404);
   });
 
+  it('restoring an arc leaves beats trashed before the arc deletion in the trash', async () => {
+    const server = ctx.app.getHttpServer();
+    const arc = await request(server).post(`/api/v1/campaigns/${campaignId}/arcs`).set(dm).send({ title: 'Selective restore' });
+    const firstBeat = await request(server).post(`/api/v1/arcs/${arc.body.id}/beats`).set(dm).send({ title: 'Discarded idea' });
+    const cascadeBeat = await request(server).post(`/api/v1/arcs/${arc.body.id}/beats`).set(dm).send({ title: 'Keep with arc' });
+
+    expect((await request(server).delete(`/api/v1/beats/${firstBeat.body.id}`).set(dm)).status).toBe(200);
+    expect((await request(server).delete(`/api/v1/arcs/${arc.body.id}`).set(dm)).status).toBe(200);
+
+    const restored = await request(server).post(`/api/v1/arcs/${arc.body.id}/restore`).set(dm);
+    expect(restored.status).toBe(201);
+    expect(restored.body.beats.map((beat: { id: number }) => beat.id)).toEqual([cascadeBeat.body.id]);
+    expect((await request(server).get(`/api/v1/beats/${firstBeat.body.id}`).set(dm)).status).toBe(404);
+  });
+
   // Issue #264: a beat links to the play record it corresponds to (session/quest/encounter),
   // the links validate same-campaign membership, and they round-trip on read.
   it('links a beat to session/quest/encounter, rejects cross-campaign refs, and round-trips', async () => {

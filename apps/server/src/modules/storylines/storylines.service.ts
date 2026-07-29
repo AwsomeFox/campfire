@@ -200,10 +200,13 @@ export class StorylinesService {
     const existing = await this.getArcRowOrThrow(id);
     const ts = nowIso();
     // Soft-delete (issue #701): stamp the arc and every beat in one transaction so
-    // topology (branches) and prose revisions survive for restore. Beats hidden by an
-    // arc cascade are restored together when the arc is restored.
+    // topology (branches) and prose revisions survive for restore. Only beats live at
+    // this moment receive the cascade timestamp, which is the restoration marker.
     this.db.transaction((tx) => {
-      tx.update(storyBeats).set({ deletedAt: ts, updatedAt: ts }).where(eq(storyBeats.arcId, id)).run();
+      tx.update(storyBeats)
+        .set({ deletedAt: ts, updatedAt: ts })
+        .where(and(eq(storyBeats.arcId, id), notDeleted(storyBeats.deletedAt)))
+        .run();
       tx.update(storyArcs).set({ deletedAt: ts, updatedAt: ts }).where(eq(storyArcs.id, id)).run();
     });
     await this.audit.log({
@@ -217,14 +220,18 @@ export class StorylinesService {
     });
   }
 
-  /** Restore a trashed arc and every beat soft-deleted with it (issue #701). */
+  /** Restore a trashed arc and only the beats soft-deleted by its cascade (issue #701). */
   async restoreArc(id: number, user: RequestUser, role: Role): Promise<StoryArcWithBeats> {
     const existing = await this.getArcRowOrThrow(id, true);
-    if (existing.deletedAt == null) throw new NotFoundException(`Story arc ${id} is not in the trash`);
+    const cascadeDeletedAt = existing.deletedAt;
+    if (cascadeDeletedAt == null) throw new NotFoundException(`Story arc ${id} is not in the trash`);
     const ts = nowIso();
     this.db.transaction((tx) => {
       tx.update(storyArcs).set({ deletedAt: null, updatedAt: ts }).where(eq(storyArcs.id, id)).run();
-      tx.update(storyBeats).set({ deletedAt: null, updatedAt: ts }).where(eq(storyBeats.arcId, id)).run();
+      tx.update(storyBeats)
+        .set({ deletedAt: null, updatedAt: ts })
+        .where(and(eq(storyBeats.arcId, id), eq(storyBeats.deletedAt, cascadeDeletedAt)))
+        .run();
     });
     await this.audit.log({
       actor: auditActor(user),

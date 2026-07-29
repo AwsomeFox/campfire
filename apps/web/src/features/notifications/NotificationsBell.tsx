@@ -409,6 +409,10 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
       if (countGenerationRef.current !== generation) {
         return;
       }
+      // "Mark all read" only suppresses the count that was already in flight.
+      // A positive server count proves a new notification arrived afterwards, so
+      // clear the local suppression before publishing it to every open tab.
+      if (res.count > 0) allReadAtRef.current = null;
       if (allReadAtRef.current !== null) {
         publishSnapshot({ count: 0, refreshedAt: Date.now(), membershipChanged: false });
         return;

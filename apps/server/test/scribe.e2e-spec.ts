@@ -485,6 +485,29 @@ describe('AI scribe — post-session sweep (e2e)', () => {
     expect(proposals.body).toHaveLength(1);
   });
 
+  it('retries a failed post-session run for the same night and only marks success complete', async () => {
+    await harness.enableExperimental();
+    const campaignId = await ownedCampaign('Scribe failed post-session retry');
+    await harness.configureSeat(campaignId, { enabled: true, tokenBudget: 5000 });
+    await seedResolvedInbox(harness, campaignId, 'The party found the missing map.');
+    await request(harness.server).put(`${API}/campaigns/${campaignId}/scribe`).set(dm).send({ postSession: true });
+    const scheduled = await request(harness.server)
+      .post(`${API}/campaigns/${campaignId}/schedule`)
+      .set(dm)
+      .send({ scheduledAt: new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString(), durationMinutes: 60, title: 'Retry night' });
+
+    const svc = harness.ctx.app.get(ScribeService);
+    harness.script({ text: '' });
+    const failed = (await svc.sweep()).find((result) => result.job.campaignId === campaignId);
+    expect(failed?.job).toMatchObject({ status: 'failed', scheduledSessionId: scheduled.body.id });
+
+    harness.script({ text: 'The recovered map showed a safe path through the marsh.' });
+    const retried = (await svc.sweep()).find((result) => result.job.campaignId === campaignId);
+    expect(retried?.job).toMatchObject({ status: 'succeeded', scheduledSessionId: scheduled.body.id });
+
+    expect((await svc.sweep()).some((result) => result.job.campaignId === campaignId)).toBe(false);
+  });
+
   it('scopes post-session material to one scheduled game night (#499)', async () => {
     await harness.enableExperimental();
     const campaignId = await ownedCampaign('Scribe Session Scope');

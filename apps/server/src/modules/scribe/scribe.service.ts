@@ -598,20 +598,22 @@ export class ScribeService implements OnApplicationBootstrap {
         .from(aiScribeJobs)
         .where(and(eq(aiScribeJobs.campaignId, campaignId), eq(aiScribeJobs.status, 'succeeded')))
         .orderBy(desc(aiScribeJobs.id));
-      for (const prior of priorSucceeded) {
-        if (prior.proposalId === null) continue;
-        const [prop] = await this.db.select().from(proposals).where(eq(proposals.id, prior.proposalId)).limit(1);
-        if (!prop) continue;
-        if (prop.status === 'pending') {
+      const newestSucceeded = priorSucceeded[0];
+      if (newestSucceeded?.proposalId !== null && newestSucceeded?.proposalId !== undefined) {
+        const [prop] = await this.db.select().from(proposals).where(eq(proposals.id, newestSucceeded.proposalId)).limit(1);
+        if (prop?.status === 'pending') {
           return this.record(campaignId, trigger, user, 'skipped', {
             detail: 'a scribe recap proposal is already pending review',
-            proposalId: prior.proposalId,
+            proposalId: newestSucceeded.proposalId,
             sourceHash,
             scope,
             sourceStats: stats,
             sourcePreview,
           });
         }
+      }
+      for (const prior of priorSucceeded) {
+        if (prior.proposalId === null) continue;
         if (prior.sourceHash === sourceHash) {
           return this.record(campaignId, trigger, user, 'skipped', {
             detail: 'identical source already drafted',
@@ -966,7 +968,7 @@ export class ScribeService implements OnApplicationBootstrap {
   }
 
   /**
-   * Oldest ended scheduled session without a prior post_session job (#499).
+   * Oldest ended scheduled session without a terminal post_session job (#499).
    *
    * Only EFFECTIVELY-scheduled nights are draftable (#504): a cancelled night was never
    * played, and a completed one already has the recap this run would draft. That is
@@ -984,10 +986,18 @@ export class ScribeService implements OnApplicationBootstrap {
       .where(and(eq(scheduledSessions.campaignId, campaignId), scheduleLiveSql()))
       .orderBy(asc(scheduledSessions.scheduledAt), asc(scheduledSessions.id));
 
+    // A no-material window is terminal: its bounded session window cannot gain
+    // source material later. Failed and skipped jobs stay eligible for retry.
     const processed = await this.db
       .select({ scheduledSessionId: aiScribeJobs.scheduledSessionId })
       .from(aiScribeJobs)
-      .where(and(eq(aiScribeJobs.campaignId, campaignId), eq(aiScribeJobs.trigger, 'post_session')));
+      .where(
+        and(
+          eq(aiScribeJobs.campaignId, campaignId),
+          eq(aiScribeJobs.trigger, 'post_session'),
+          inArray(aiScribeJobs.status, ['succeeded', 'no_material']),
+        ),
+      );
     const done = new Set(processed.map((r) => r.scheduledSessionId).filter((id): id is number => id != null));
 
     for (let i = 0; i < rows.length; i++) {
@@ -1015,6 +1025,7 @@ export class ScribeService implements OnApplicationBootstrap {
           eq(aiScribeJobs.campaignId, campaignId),
           eq(aiScribeJobs.trigger, 'post_session'),
           eq(aiScribeJobs.scheduledSessionId, scheduledSessionId),
+          inArray(aiScribeJobs.status, ['succeeded', 'no_material']),
         ),
       )
       .limit(1);
@@ -1109,8 +1120,10 @@ export class ScribeService implements OnApplicationBootstrap {
     } = {},
   ): Promise<ScribeRunResult> {
     const scheduledSessionId =
-      extra.scheduledSessionId ??
-      (extra.scope && isSessionScope(extra.scope) ? extra.scope.scheduledSessionId : null);
+      status === 'skipped'
+        ? null
+        : extra.scheduledSessionId ??
+          (extra.scope && isSessionScope(extra.scope) ? extra.scope.scheduledSessionId : null);
     const [row] = await this.db
       .insert(aiScribeJobs)
       .values({
