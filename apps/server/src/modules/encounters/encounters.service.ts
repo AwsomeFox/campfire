@@ -5930,8 +5930,6 @@ export class EncountersService {
 
   async undoTokenBatch(encounterId: number, input: { undoToken: string; idempotencyKey: string }, user: RequestUser, role: Role) {
     if (role !== 'dm') throw new ForbiddenException('Only dm may undo a token batch');
-    const encounter = await this.getRowOrThrow(encounterId);
-    this.assertMutable(encounter);
     const batch = this.db.select().from(encounterTokenBatches).where(eq(encounterTokenBatches.previewToken, input.undoToken)).get();
     if (!batch || batch.encounterId !== encounterId || batch.actorId !== user.id) throw new NotFoundException('Token batch not found');
     const keyOwner = this.db.select().from(encounterTokenBatches).where(and(eq(encounterTokenBatches.actorId, user.id), eq(encounterTokenBatches.undoKey, input.idempotencyKey))).get();
@@ -5940,9 +5938,12 @@ export class EncountersService {
       if (batch.undoKey !== input.idempotencyKey) throw new ConflictException('Idempotency key was reused for a different undo');
       return { ok: true, idempotent: true };
     }
+    const encounter = await this.getRowOrThrow(encounterId);
+    this.assertMutable(encounter);
     if (batch.status !== 'applied') throw new ConflictException('Token batch cannot be undone');
     const before = fromJsonText<Array<{ id:number; tokenX:number|null; tokenY:number|null; tokenSize?: string | null }>>(batch.beforeJson, []); const after = fromJsonText<Array<{ combatantId:number; x:number; y:number }>>(batch.afterJson, []); const batchPlan = fromJsonText<{ placements: Array<{ combatantId:number; x:number; y:number }>; mapAspect: number }>(batch.planJson, { placements: [], mapAspect: 1 });
-    this.db.transaction(tx => {
+    try {
+      this.db.transaction(tx => {
       for (const p of after) {
         const row = tx.select().from(combatants).where(eq(combatants.id, p.combatantId)).get();
         if (!row || row.tokenX !== p.x || row.tokenY !== p.y) throw new ConflictException('A token changed after this batch');
@@ -5971,7 +5972,11 @@ export class EncountersService {
       this.audit.logInTx(tx, { actor: auditActor(user), actorRole: role, action: 'encounter.token_batch.undo', entityType: 'encounter', entityId: encounterId, campaignId: batch.campaignId, detail: `${before.length} token placements` });
       const changed = tx.update(encounterTokenBatches).set({ status:'undone', undoKey: input.idempotencyKey, undoneAt:nowIso() }).where(and(eq(encounterTokenBatches.id,batch.id), eq(encounterTokenBatches.status, 'applied'))).run();
       if (changed.changes !== 1) throw new ConflictException('Token batch changed concurrently');
-    });
+      });
+    } catch (err) {
+      if (isUniqueConstraintError(err)) throw new ConflictException('Idempotency key was already used for a different token undo');
+      throw err;
+    }
     this.emitEncounterEvent('encounter.updated', batch.campaignId, encounterId, false); return { ok:true };
   }
 }
