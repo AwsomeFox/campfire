@@ -575,7 +575,7 @@ export class ActionResolverService {
     // encounters) × (TTL window of resolve traffic) rather than "however many times anyone has
     // ever previewed" — see sweepStalePendingResolutions's doc comment for the state-dependent
     // lifetime this now enforces.
-    this.sweepStalePendingResolutions(encounter);
+    this.sweepStalePendingResolutions(encounter, !canApply);
 
     // Mint the chain id HERE, at resolve time, and persist the EXACT resolution the server
     // just computed — regardless of whether this call also commits it. This is the only copy
@@ -987,7 +987,7 @@ export class ActionResolverService {
    * immediately (see the transaction there), so this sweep only ever has abandoned previews and
    * pending declarations left to reclaim.
    */
-  private sweepStalePendingResolutions(encounter: typeof encounters.$inferSelect): void {
+  private sweepStalePendingResolutions(encounter: typeof encounters.$inferSelect, incomingAwaitingConfirmation: boolean): void {
     const cutoff = new Date(Date.now() - ActionResolverService.PENDING_RESOLUTION_TTL_MS).toISOString();
     // TTL: ONLY ordinary previews expire by age. A declaration awaiting DM confirmation must
     // survive indefinitely by age alone.
@@ -1002,12 +1002,20 @@ export class ActionResolverService {
       )
       .run();
 
-    this.capPendingResolutions(encounter, false);
-    this.capPendingResolutions(encounter, true);
+    this.capPendingResolutions(encounter, false, incomingAwaitingConfirmation === false);
+    this.capPendingResolutions(encounter, true, incomingAwaitingConfirmation === true);
   }
 
-  /** Evict the oldest rows in one (encounter, awaitingConfirmation) partition past the cap. */
-  private capPendingResolutions(encounter: typeof encounters.$inferSelect, awaitingConfirmation: boolean): void {
+  /**
+   * Evict the oldest rows in one (encounter, awaitingConfirmation) partition past the cap.
+   * Reserve a slot only for the partition the imminent insert will join; a full other
+   * partition is valid and must remain untouched.
+   */
+  private capPendingResolutions(
+    encounter: typeof encounters.$inferSelect,
+    awaitingConfirmation: boolean,
+    reserveSlotForIncoming: boolean,
+  ): void {
     const rows = this.db
       .select({
         id: actionPendingResolutions.id,
@@ -1023,8 +1031,9 @@ export class ActionResolverService {
       )
       .orderBy(desc(actionPendingResolutions.createdAt))
       .all();
-    if (rows.length < ActionResolverService.MAX_PENDING_RESOLUTIONS_PER_ENCOUNTER) return;
-    const evicted = rows.slice(ActionResolverService.MAX_PENDING_RESOLUTIONS_PER_ENCOUNTER - 1);
+    const maximumExistingRows = ActionResolverService.MAX_PENDING_RESOLUTIONS_PER_ENCOUNTER - (reserveSlotForIncoming ? 1 : 0);
+    if (rows.length <= maximumExistingRows) return;
+    const evicted = rows.slice(maximumExistingRows);
     if (evicted.length === 0) return;
     this.db
       .delete(actionPendingResolutions)

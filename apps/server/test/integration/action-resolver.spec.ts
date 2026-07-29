@@ -1480,4 +1480,76 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(String(evicted[0].detail)).toContain('chain-decl-cap-test-0');
     expect(String(evicted[0].detail)).toContain('never applied');
   });
+
+  it('#1451 review (Devin): a full declaration partition is preserved when an ordinary preview arrives', () => {
+    const { orm, service, campaignId, encounterId, actor, drake } = seed();
+    const now = Date.now();
+    for (let i = 0; i < 200; i++) {
+      orm
+        .insert(actionPendingResolutions)
+        .values({
+          id: `chain-full-declaration-${i}`,
+          encounterId,
+          campaignId,
+          actorCombatantId: actor,
+          actionName: 'Greatsword',
+          awaitingConfirmation: true,
+          resolutionJson: '{}',
+          createdAt: new Date(now - (200 - i) * 1000).toISOString(),
+        })
+        .run();
+    }
+
+    const preview = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: false }),
+      alice,
+      'player',
+    );
+
+    const declarations = orm
+      .select()
+      .from(actionPendingResolutions)
+      .where(and(eq(actionPendingResolutions.encounterId, encounterId), eq(actionPendingResolutions.awaitingConfirmation, true)))
+      .all();
+    expect(declarations).toHaveLength(200);
+    expect(declarations.map((row) => row.id)).toEqual(expect.arrayContaining(Array.from({ length: 200 }, (_, i) => `chain-full-declaration-${i}`)));
+    expect(orm.select().from(actionPendingResolutions).where(eq(actionPendingResolutions.id, preview.chainId)).get()?.awaitingConfirmation).toBe(false);
+  });
+
+  it('#1451 review (Devin): an incoming declaration reserves one slot and remains capped at 200', () => {
+    const { orm, service, campaignId, encounterId, actor, drake } = seed({ requireDmTurnConfirmation: true });
+    const now = Date.now();
+    for (let i = 0; i < 200; i++) {
+      orm
+        .insert(actionPendingResolutions)
+        .values({
+          id: `chain-declaration-reserve-${i}`,
+          encounterId,
+          campaignId,
+          actorCombatantId: actor,
+          actionName: 'Greatsword',
+          awaitingConfirmation: true,
+          resolutionJson: '{}',
+          createdAt: new Date(now - (200 - i) * 1000).toISOString(),
+        })
+        .run();
+    }
+
+    const declaration = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: false }),
+      alice,
+      'player',
+    );
+
+    const declarations = orm
+      .select()
+      .from(actionPendingResolutions)
+      .where(and(eq(actionPendingResolutions.encounterId, encounterId), eq(actionPendingResolutions.awaitingConfirmation, true)))
+      .all();
+    expect(declarations).toHaveLength(200);
+    expect(declarations.some((row) => row.id === 'chain-declaration-reserve-0')).toBe(false);
+    expect(declarations.some((row) => row.id === declaration.chainId)).toBe(true);
+  });
 });
