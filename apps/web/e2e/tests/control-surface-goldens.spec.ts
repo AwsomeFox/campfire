@@ -48,17 +48,18 @@ test.describe('control surface goldens (#1694)', () => {
     // created additional active campaigns. Snapshot the grid as if the DM owns only
     // the seeded campaign by archiving any other active campaigns, then restore them.
     const seededId = seed().campaignId;
-    const campaigns = (await (await page.request.get('/api/v1/campaigns')).json()) as Campaign[];
     const archived: Array<{ id: number; status: Campaign['status'] }> = [];
-    for (const c of campaigns) {
-      if (c.id !== seededId && c.status === 'active') {
-        const resp = await page.request.patch(`/api/v1/campaigns/${c.id}`, { data: { status: 'completed' } });
-        expect(resp.ok()).toBe(true);
-        archived.push({ id: c.id, status: c.status });
-      }
-    }
 
     try {
+      const campaigns = (await (await page.request.get('/api/v1/campaigns')).json()) as Campaign[];
+      for (const c of campaigns) {
+        if (c.id !== seededId && c.status === 'active') {
+          const resp = await page.request.patch(`/api/v1/campaigns/${c.id}`, { data: { status: 'completed' } });
+          expect(resp.ok()).toBe(true);
+          archived.push({ id: c.id, status: c.status });
+        }
+      }
+
       await page.goto('/');
       const grid = page.getByTestId('home-campaign-grid');
       await expect(grid).toBeVisible();
