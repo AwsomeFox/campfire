@@ -278,6 +278,7 @@ function combatantToDomain(row: typeof combatants.$inferSelect): Combatant {
     kind: row.kind as Combatant['kind'],
     characterId: row.characterId,
     npcId: row.npcId,
+    npcDispositionSnapshot: row.npcDispositionSnapshot,
     name: row.name,
     initiative: row.initiative,
     initMod: row.initMod,

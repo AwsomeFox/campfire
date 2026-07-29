@@ -248,7 +248,7 @@ export const PUBLISHABLE_FIELDS = {
     'gridOffsetX', 'gridOffsetY', 'gridCellHeight', 'gridRotation', 'gridOpacity', 'combatants',
   ],
   combatant: [
-    'id', 'encounterId', 'kind', 'characterId', 'npcId', 'name', 'initMod', 'initiativeGroup',
+    'id', 'encounterId', 'kind', 'characterId', 'npcId', 'npcDispositionSnapshot', 'name', 'initMod', 'initiativeGroup',
     'hpMax', 'spMax', 'rpMax', 'eac', 'kac', 'sortOrder', 'tokenX', 'tokenY', 'tokenSize',
     'statblockJson', 'compendiumRef', 'compendiumSnapshot', 'ruleEntryId',
   ],

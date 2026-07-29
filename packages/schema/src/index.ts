@@ -9848,6 +9848,8 @@ export const Combatant = z.object({
   // Set for kind==='npc': the campaign NPC this combatant represents (identity/icon;
   // its NPC page + dmSecret stay DM-gated as usual). Null for characters/monsters.
   npcId: Id.nullable().default(null),
+  // Nullable when captured; omitted by legacy persisted/exported combatants.
+  npcDispositionSnapshot: z.string().max(40).nullable().optional(),
   name: z.string().min(1).max(120),
   initiative: z.number().int().nullable().default(null),
   initMod: z.number().int().default(0),
