@@ -1,5 +1,6 @@
-import { expect, test } from '@playwright/test';
+import { expect, request, test } from '@playwright/test';
 import { seed, stateFor } from './seed';
+import { CREDS } from '../global-setup';
 import { CONNECTING_GRACE_MS } from '../../src/features/encounters/encounterSyncState';
 
 /**
@@ -241,6 +242,102 @@ test('the stale banner remains visible for the duration of an active override', 
     if (encounterId != null) {
       await writer.request.post(`/api/v1/encounters/${encounterId}/end`).catch(() => undefined);
       await writer.request.delete(`/api/v1/encounters/${encounterId}`).catch(() => undefined);
+    }
+    await Promise.all([reader.close(), writer.close()]);
+  }
+});
+
+/**
+ * Issue #1446 fix (Codex P2): "continue anyway" is a DM decision per the issue text — a
+ * player must never see or be able to grant it, since doing so would re-enable mutations
+ * against their OWN owned combatant (HP, death saves, actions) from possibly-stale state.
+ */
+test('a player never sees or can grant the override, and their owned combatant stays blocked', async ({ browser }) => {
+  const { baseURL, campaignId } = seed();
+  const writer = await browser.newContext({ storageState: stateFor('dm'), serviceWorkers: 'block' });
+  const reader = await browser.newContext({ storageState: stateFor('player'), serviceWorkers: 'block' });
+  const page = await reader.newPage();
+
+  let encounterId: number | null = null;
+  let characterId: number | null = null;
+  let releaseEvents: () => void = () => {};
+
+  try {
+    const playerCtx = await request.newContext({ baseURL });
+    await playerCtx.post('/api/v1/auth/login', { data: CREDS.player });
+    const me = await (await playerCtx.get('/api/v1/me')).json();
+    const playerUserId = String(me.user.id);
+    await playerCtx.dispose();
+
+    const live = await (await writer.request.get(`/api/v1/campaigns/${campaignId}/encounters?status=running`)).json();
+    for (const e of live as { id: number }[]) {
+      await writer.request.post(`/api/v1/encounters/${e.id}/end`);
+    }
+
+    const character = await (
+      await writer.request.post(`/api/v1/campaigns/${campaignId}/characters`, {
+        data: {
+          name: 'Override Guard Test PC',
+          className: 'Fighter',
+          level: 3,
+          ownerUserId: playerUserId,
+          hpCurrent: 20,
+          hpMax: 20,
+          stats: { DEX: 12 },
+        },
+      })
+    ).json();
+    characterId = character.id;
+
+    // A new encounter auto-adds every active party PC — the owned combatant we need.
+    const enc = await (
+      await writer.request.post(`/api/v1/campaigns/${campaignId}/encounters`, {
+        data: { name: 'E2E1446 Player Guard', hidden: false },
+      })
+    ).json();
+    encounterId = enc.id;
+    const heroCombatant = (enc.combatants as Array<{ id: number; characterId: number | null }>).find(
+      (c) => c.characterId === characterId,
+    );
+    if (!heroCombatant) throw new Error('expected auto-added hero combatant');
+
+    await writer.request.post(`/api/v1/encounters/${encounterId}/roll-initiative`);
+    await writer.request.post(`/api/v1/encounters/${encounterId}/start`);
+
+    const neverConnect = new Promise<void>((resolve) => {
+      releaseEvents = resolve;
+    });
+    await reader.route(`**/api/v1/campaigns/${campaignId}/events`, async (route) => {
+      await neverConnect;
+      await route.abort('connectionfailed');
+    });
+
+    await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
+
+    const syncChip = page.getByTestId('encounter-sync-chip');
+    await expect(syncChip).toHaveText('Offline', { timeout: CONNECTING_GRACE_MS + 8_000 });
+    // The banner is still informational for a player…
+    await expect(page.getByTestId('encounter-sync-banner')).toBeVisible();
+    // …but the DM-only "continue anyway" affordance is never offered to them, no matter
+    // how long the outage lasts.
+    await page.waitForTimeout(2_000);
+    await expect(page.getByTestId('encounter-sync-override-prompt')).toHaveCount(0);
+    await expect(page.getByTestId('encounter-sync-override-confirm')).toHaveCount(0);
+    await expect(page.getByTestId('encounter-sync-override-active')).toHaveCount(0);
+
+    // With no way to grant an override, the player's OWN combatant stays non-editable —
+    // the HP steppers (canEdit-gated) do not appear even though it is their character.
+    const heroRow = page.getByTestId(`combatant-row-${heroCombatant.id}`);
+    await expect(heroRow).toBeVisible();
+    await expect(heroRow.getByTestId('hp-steppers')).toHaveCount(0);
+  } finally {
+    releaseEvents();
+    if (encounterId != null) {
+      await writer.request.post(`/api/v1/encounters/${encounterId}/end`).catch(() => undefined);
+      await writer.request.delete(`/api/v1/encounters/${encounterId}`).catch(() => undefined);
+    }
+    if (characterId != null) {
+      await writer.request.delete(`/api/v1/characters/${characterId}`).catch(() => undefined);
     }
     await Promise.all([reader.close(), writer.close()]);
   }

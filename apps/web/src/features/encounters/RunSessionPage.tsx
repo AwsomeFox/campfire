@@ -1312,8 +1312,13 @@ export default function RunSessionPage() {
     setEncounterSyncOverride((prev) => settleEncounterOverride(prev, encounterSync));
   }, [encounterSync]);
   const riskyBlocked = encounterActionsBlocked(encounterSync, encounterSyncOverride);
+  // Issue #1446 fix: the "continue anyway" acknowledgement is a DM decision (per the
+  // issue text) — a player confirming it would re-enable their own owned-combatant HP /
+  // death-save / action mutations against possibly-stale data. Gate the affordance to
+  // canDmWrite so a player has no path to ever set encounterSyncOverride.active; they stay
+  // blocked (with the informational banner) for the duration of the outage.
   const encounterSyncOverrideOfferable =
-    encounterOverrideOfferable(encounterSync) && !encounterSyncOverride.active;
+    canDmWrite && encounterOverrideOfferable(encounterSync) && !encounterSyncOverride.active;
   const encounterSyncBanner = encounterSyncBannerMessage(encounterSync);
   const encounterSyncChip = encounterSyncChipLabel(encounterSync);
   const encounterSyncLastSyncTitle = useMemo(() => {
@@ -2609,10 +2614,10 @@ export default function RunSessionPage() {
               </>
             )}
             {lifecycle.end && (
-              // Issue #1446: ending the encounter carries no conflict risk (it is a
-              // final, idempotent-in-effect state transition, not a turn-order race) —
-              // never gate it on stream health.
-              <Btn ghost danger disabled={headerBusy} onClick={() => setConfirmEnd(true)}>
+              // Issue #1446: End writes an HP/condition/death-state snapshot back to each
+              // linked character sheet (cross-entity, no CAS guard) — genuinely conflict-prone,
+              // so it stays gated (confirmable via the override, not ungated outright).
+              <Btn ghost danger disabled={headerBusy || riskyBlocked} onClick={() => setConfirmEnd(true)}>
                 End
               </Btn>
             )}
@@ -2632,8 +2637,12 @@ export default function RunSessionPage() {
               </Btn>
             )}
             {lifecycle.delete && (
-              // Issue #1446: delete/cancel carries no conflict risk — never gate on stream health.
-              <Btn ghost danger disabled={headerBusy} onClick={() => setConfirmDelete(true)}>
+              // Issue #1446: delete has no revision/CAS guard server-side and clears the
+              // campaign's active-encounter pointer — a stale tab can trash an encounter
+              // another DM/the AI driver is actively updating. Racing a destructive,
+              // effectively unrecoverable action is worse than racing a turn advance, so
+              // this stays gated (confirmable via the override, not ungated outright).
+              <Btn ghost danger disabled={headerBusy || riskyBlocked} onClick={() => setConfirmDelete(true)}>
                 {encounter.status === 'preparing' ? 'Cancel' : 'Delete'}
               </Btn>
             )}
@@ -2658,7 +2667,9 @@ export default function RunSessionPage() {
           a stuck stream (proxy buffering, a terminated long-lived connection, …) must not
           brick combat permanently. Granting the override does not touch the banner above,
           which stays visible for as long as the stream is unhealthy so the DM never loses
-          track of which mode they're in. */}
+          track of which mode they're in. DM-only (canDmWrite): the issue frames "continue
+          anyway" as a DM decision — a player has no path to grant it, so a player's own
+          combatant mutations stay blocked for the whole outage. */}
       {encounterSyncOverrideOfferable && (
         <div
           role="status"
@@ -2672,13 +2683,18 @@ export default function RunSessionPage() {
             ghost
             className="text-xs"
             data-testid="encounter-sync-override-confirm"
-            onClick={() => setEncounterSyncOverride(confirmEncounterOverride())}
+            onClick={() => {
+              // Defense in depth alongside the canDmWrite gate above — never let a
+              // non-DM grant the override even if this handler is somehow reachable.
+              if (!canDmWrite) return;
+              setEncounterSyncOverride(confirmEncounterOverride());
+            }}
           >
             {t('encounters.sync.overrideConfirm')}
           </Btn>
         </div>
       )}
-      {encounterSyncOverride.active && encounterSync !== 'live' && (
+      {canDmWrite && encounterSyncOverride.active && encounterSync !== 'live' && (
         <span className="tag tag-accent" data-testid="encounter-sync-override-active" style={{ fontSize: 11 }}>
           {t('encounters.sync.overrideActive')}
         </span>
@@ -2707,9 +2723,9 @@ export default function RunSessionPage() {
               {encounter.escalationDieOverride != null ? ` · override +${encounter.escalationDieOverride}` : ''}
             </span>
             {canDmWrite && (
-              // Issue #1446: the escalation die is a DM-unilateral value (no other
-              // write races it), so hold/override/clear carry no conflict risk — never
-              // gate them on stream health.
+              // Issue #1446 re-audit: updateEscalationDie only writes encounters.escalationDie*
+              // (no cross-entity write, no shared pointer, no CAS-worthy concurrent writer other
+              // than the DM themself) — genuinely local, so hold/override/clear stay ungated.
               <div className="flex items-center gap-2 flex-wrap ml-auto">
                 <Btn density="xs"
                   ghost
