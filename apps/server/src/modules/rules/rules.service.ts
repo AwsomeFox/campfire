@@ -757,7 +757,6 @@ export class RulesService implements OnModuleInit {
         return;
       }
       const { outcome, added, skippedExisting, changed, removed, sourceHash, sourceVersion, preview, ...pack } = result;
-      const isIncremental = outcome === 'updated';
       this.markJobCompleted(
         jobId,
         outcome,

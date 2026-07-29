@@ -170,7 +170,7 @@ describe('Issue #737: persistent import job state (e2e)', () => {
 
       try {
         const res = await request(server)
-          .post('/api/v1/rules/packs/install')
+          .post('/api/v1/rules/packs/upload')
           .set(admin)
           .send({
             source: 'upload',

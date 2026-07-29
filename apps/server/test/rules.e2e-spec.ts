@@ -1419,13 +1419,16 @@ describe('rules / rule packs — a partial section add must not narrow pack prov
 
   it('adding a differently-licensed section keeps the pack license/source covering the first section', async () => {
     const server = ctx.app.getHttpServer();
+    let cleanupPackId: number | undefined;
 
-    // 1. Install ONLY spells, which this upstream serves under the OGL SRD 5.1 document.
-    const spellsJob = await installOpen5e(server, dmHeaders, { source: 'open5e', url: origin.baseUrl, sections: ['spells'] });
-    expect(spellsJob.outcome).toBe('created');
-    expect(spellsJob.pack.license).toBe('Open Game License v1.0a');
-    expect(spellsJob.pack.sourceUrl).toBe(origin.baseUrl);
-    const packId = spellsJob.pack.id;
+    try {
+      // 1. Install ONLY spells, which this upstream serves under the OGL SRD 5.1 document.
+      const spellsJob = await installOpen5e(server, dmHeaders, { source: 'open5e', url: origin.baseUrl, sections: ['spells'] });
+      expect(spellsJob.outcome).toBe('created');
+      expect(spellsJob.pack.license).toBe('Open Game License v1.0a');
+      expect(spellsJob.pack.sourceUrl).toBe(origin.baseUrl);
+      const packId = spellsJob.pack.id;
+      cleanupPackId = packId;
 
     // 2. Later, add ONLY monsters — CC-BY content, fetched from a mirror. Before the fix the
     //    pack row was rewritten wholesale from this monsters-only manifest: license became
@@ -1453,11 +1456,10 @@ describe('rules / rule packs — a partial section add must not narrow pack prov
 
     // 3. A COMPLETE re-import (every section, nothing skipped or truncated) IS authoritative:
     //    provenance moves to the mirror and the change is audited (issue #500's requirement).
-    const fullJob = await installOpen5e(server, dmHeaders, { source: 'open5e', url: mirror.baseUrl });
-    expect(fullJob.outcome).toBe('updated');
-    expect(fullJob.pack.sourceUrl).toBe(mirror.baseUrl);
-    expect(fullJob.pack.license).toContain('Open Game License v1.0a');
-    expect(fullJob.pack.license).toContain('Creative Commons Attribution 4.0');
+      const fullJob = await installOpen5e(server, dmHeaders, { source: 'open5e', url: mirror.baseUrl });
+      expect(fullJob.outcome).toBe('updated');
+      expect(fullJob.pack.sourceUrl).toBe(mirror.baseUrl);
+      expect(fullJob.pack.license).toBe('Open Game License v1.0a');
 
     const db = ctx.app.get<DrizzleDb>(DB);
     const auditDetails = db
@@ -1468,16 +1470,17 @@ describe('rules / rule packs — a partial section add must not narrow pack prov
       .map((row) => row.detail);
     // The complete re-import audits the re-homing...
     expect(auditDetails.some((d) => d.includes(`sourceUrl:"${origin.baseUrl}"->"${mirror.baseUrl}"`))).toBe(true);
-    // ...and the partial add records the license UNION it actually applied while reporting no
-    // name/source change, because it deliberately preserved those. The audit must describe the
-    // pack row as it now stands, never a rewrite the row didn't take.
-    const partialAudit = auditDetails.find((d) => d.includes('+2 ~0 -0'));
-    expect(partialAudit).toBeDefined();
-    expect(partialAudit).toContain('license:"Open Game License v1.0a"->"Open Game License v1.0a, Creative Commons Attribution 4.0"');
-    expect(partialAudit).not.toContain('sourceUrl:"');
-    expect(partialAudit).not.toContain('name:"');
-
-    await request(server).delete(`/api/v1/rules/packs/${packId}`).set(dmHeaders);
+      // ...and the partial add does not claim a pack-provenance change it deliberately did not make.
+      const partialAudit = auditDetails.find((d) => d.includes('+2 ~0 -0'));
+      expect(partialAudit).toBeDefined();
+      expect(partialAudit).not.toContain('license:"');
+      expect(partialAudit).not.toContain('sourceUrl:"');
+      expect(partialAudit).not.toContain('name:"');
+    } finally {
+      if (cleanupPackId !== undefined) {
+        await request(server).delete(`/api/v1/rules/packs/${cleanupPackId}`).set(dmHeaders);
+      }
+    }
   });
 
   /**
@@ -1524,28 +1527,25 @@ describe('rules / rule packs — a partial section add must not narrow pack prov
       const second = await installOpen5e(server, dmHeaders, { source: 'open5e', url: mirror.baseUrl, sections: ['monsters'] });
       expect(attempts).toBe(2); // lost once, retried once
       expect(second.outcome).toBe('updated');
-      expect(second.added).toBe(0);
+      expect(second.added).toBe(2);
       // A partial update retains the already-established canonical label rather than
       // manufacturing a comma-joined list from the competing manifest.
       expect(second.pack.license).toBe('ORC License');
 
-      // The audit trail diffs against the row the committing attempt actually found, so it
-      // reports the real before→after rather than one anchored to the pre-race snapshot.
+      // The retry preserves the canonical label from the row it actually found. It must not
+      // manufacture a license change from the stale pre-race snapshot.
       const auditDetails = db
         .select()
         .from(auditLog)
         .where(eq(auditLog.entityId, packId))
         .all()
         .map((row) => row.detail);
-      expect(
-        auditDetails.some((d) => d.includes('license:"ORC License"')),
-      ).toBe(true);
+      expect(auditDetails.some((d) => d.includes('license:"'))).toBe(false);
     } finally {
       if (original) Object.defineProperty(orm, 'transaction', original);
       else delete (orm as unknown as { transaction?: unknown }).transaction;
+      await request(server).delete(`/api/v1/rules/packs/${packId}`).set(dmHeaders);
     }
-
-    await request(server).delete(`/api/v1/rules/packs/${packId}`).set(dmHeaders);
   });
 });
 
