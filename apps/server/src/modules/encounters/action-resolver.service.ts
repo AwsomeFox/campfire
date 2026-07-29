@@ -1392,7 +1392,6 @@ export class ActionResolverService {
      */
     chainId: string,
   ): ActionUndoToken {
-    const round = encounter.round;
     const performedBy = this.performedByFrom(user, role);
     const adapter = this.adapterForCampaign(encounter.campaignId);
     const ruleSystem = adapter.id;
@@ -1400,6 +1399,7 @@ export class ActionResolverService {
     let concentrationBefore: string | null = null;
     let pendingConcentrationChecksBefore: PendingConcentrationCheck[] = [];
     const consequenceLogs: Array<{ type: 'damage' | 'heal' | 'condition' | 'death' | 'effect' | 'note' | 'resource_changed'; target?: string; targetId?: number; detail: string }> = [];
+    let committedEncounter = encounter;
 
     this.db.transaction((tx) => {
       // Issue #1451 review (Kilo, MUST FIX): claim the pending resolution FIRST, atomically,
@@ -1416,6 +1416,15 @@ export class ActionResolverService {
       if (claimed.changes === 0) {
         throw new BadRequestException('This resolution is unknown or has already been applied.');
       }
+
+      // The outer authorize check improves feedback for previews, but cannot authorize a
+      // write: another request can advance the encounter between that check and this
+      // transaction. Re-read the turn inside the transaction before any consequence or
+      // resource mutation so a stale player action is atomically rejected.
+      const liveEncounter = tx.select().from(encounters).where(eq(encounters.id, encounter.id)).get();
+      if (!liveEncounter) throw new NotFoundException(`Encounter ${encounter.id} not found.`);
+      this.assertPlayerActiveTurn(liveEncounter, actor, role);
+      committedEncounter = liveEncounter;
 
       // #1571 — VALIDATE THE SPELL SLOT SPEND FIRST, before any target consequence (damage,
       // saves, conditions) is written. `patchSpellSlots` (the standalone spend path, #1039)
@@ -1510,7 +1519,7 @@ export class ActionResolverService {
             conditionInstances: combatants.conditionInstances,
           })
           .from(combatants)
-          .where(eq(combatants.encounterId, encounter.id))
+          .where(eq(combatants.encounterId, liveEncounter.id))
           .all();
         for (const candidate of encounterCombatants) {
           if (fromJsonText<{ concentration?: string | null }>(candidate.turnState, {}).concentration != null) {
@@ -1608,7 +1617,7 @@ export class ActionResolverService {
           .run();
 
         // Mirror the HP/condition slice onto a linked, live character sheet (issue #711/#486).
-        if (fresh.kind === 'character' && fresh.characterId !== null && encounter.status !== 'ended') {
+        if (fresh.kind === 'character' && fresh.characterId !== null && liveEncounter.status !== 'ended') {
           const sheetRow = tx
             .select({ conditionInstances: characters.conditionInstances })
             .from(characters)
@@ -1696,7 +1705,7 @@ export class ActionResolverService {
     });
 
     // Persist correlated combat-log chain after commit (a log failure must not roll back the apply).
-    this.persistActionChain(encounter, round, actor, chainId, performedBy, ruleSystem, resolution, consequenceLogs);
+    this.persistActionChain(committedEncounter, committedEncounter.round, actor, chainId, performedBy, ruleSystem, resolution, consequenceLogs);
 
     void this.audit
       .log({
@@ -1705,15 +1714,15 @@ export class ActionResolverService {
         action: 'encounter.action.resolve',
         entityType: 'combatant',
         entityId: actor.id,
-        campaignId: encounter.campaignId,
+        campaignId: committedEncounter.campaignId,
         detail: JSON.stringify({ action: resolution.actionName, targets: resolution.targets.map((t) => t.combatantId) }),
       })
       .catch(() => undefined);
 
-    if (!encounter.hidden) this.events.emit({ type: 'encounter.updated', campaignId: encounter.campaignId, encounterId: encounter.id });
+    if (!committedEncounter.hidden) this.events.emit({ type: 'encounter.updated', campaignId: committedEncounter.campaignId, encounterId: committedEncounter.id });
 
     return ActionUndoToken.parse({
-      encounterId: encounter.id,
+      encounterId: committedEncounter.id,
       actorCombatantId: actor.id,
       actionName: resolution.actionName,
       chainId,

@@ -4487,7 +4487,7 @@ export class McpToolsService {
         'compare vs AC / DC, classify the outcome (5e hit/miss/crit or PF2e degrees), and return a per-target PREVIEW ' +
         'with player-safe text separated from DM-only mechanics. Identify the action by actionName/actionIndex on the ' +
         'actor\'s sheet (see list_usable_actions) OR pass an inline `spec` for a monster / ad-hoc action. A player may ' +
-        'resolve only their OWN character\'s action (a monster/NPC action is DM-only) but may target anyone — so a ' +
+        'resolve only their OWN active character\'s action (a monster/NPC action is DM-only) but may target anyone — so a ' +
         'player can finish an attack against a monster end-to-end. Pass commit:true to apply atomically in the same ' +
         'call when the campaign policy permits (automatic); otherwise the result is a declaration the DM applies via ' +
         'apply_action (dm-confirmed / player-declares). An unsupported action shape is refused (fall back to its ' +
@@ -4511,7 +4511,7 @@ export class McpToolsService {
       'Apply a resolved action chain (issue #414 confirm path): pass the `chainId` returned by resolve_action — a ' +
         'LOOKUP KEY only (issue #1451). The server re-reads the exact resolution it computed and persisted at resolve ' +
         'time, so a caller cannot inflate damage, alter a per-target delta, or inject a condition/effect never in the ' +
-        'resolved spec. The DM may apply any resolution; a player only their own character\'s action under an ' +
+        'resolved spec. The DM may apply any resolution; a player only their own active character\'s action under an ' +
         'automatic policy. Returns an undo token that reverses the whole apply. Under collaborative handoff this call ' +
         'may be queued for DM confirmation; the confirmation prompt describes it from the server\'s own persisted ' +
         'resolution, never from anything this call passes.',

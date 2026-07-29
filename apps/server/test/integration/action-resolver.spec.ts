@@ -696,6 +696,33 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(service.apply(encounterId, preview.resolution, dmUser, 'dm').undoToken).toBeDefined();
   });
 
+  it('rechecks a player turn inside the apply transaction before writing consequences or resources', () => {
+    const { orm, service, encounterId, actor, drake, aliceChar } = seed();
+    const preview = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 2, targetIds: [drake], commit: false }),
+      alice,
+      'player',
+    );
+    const internals = service as unknown as { applyInternal: (...args: unknown[]) => unknown };
+    const originalApplyInternal = internals.applyInternal;
+    internals.applyInternal = (...args) => {
+      // Model the DM advancing between apply's outer authorization and its write transaction.
+      orm.update(encounters).set({ currentCombatantId: drake }).where(eq(encounters.id, encounterId)).run();
+      return originalApplyInternal.apply(service, args);
+    };
+
+    try {
+      expect(() => service.apply(encounterId, preview.resolution, alice, 'player')).toThrow(/active turn/i);
+    } finally {
+      internals.applyInternal = originalApplyInternal;
+    }
+
+    expect(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.hpCurrent).toBe(60);
+    expect(JSON.parse(orm.select().from(combatants).where(eq(combatants.id, actor)).get()!.turnState ?? '{}').used?.action ?? 0).toBe(0);
+    expect(JSON.parse(orm.select().from(characters).where(eq(characters.id, aliceChar.id)).get()!.spellSlots)).toEqual({ '3': { max: 2, used: 0 } });
+  });
+
   it('the DM resolves a monster action against a player via an inline spec', () => {
     const { orm, service, encounterId, drake, bob: bobCombat } = seed();
     const res = service.resolve(
