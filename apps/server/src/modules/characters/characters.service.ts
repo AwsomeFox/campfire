@@ -1136,7 +1136,11 @@ export class CharactersService {
       input.deathState !== undefined ||
       input.deathSaveSuccesses !== undefined ||
       input.deathSaveFailures !== undefined ||
-      input.hpTemp !== undefined
+      input.hpTemp !== undefined ||
+      input.spCurrent !== undefined ||
+      input.spMax !== undefined ||
+      input.rpCurrent !== undefined ||
+      input.rpMax !== undefined
     ) {
       // Only mirror hpMax when this PATCH actually supplied it; otherwise pass
       // undefined so a death-slice edit (deathState/death-saves/hpTemp) preserves
@@ -1152,6 +1156,10 @@ export class CharactersService {
         ...(input.deathSaveSuccesses !== undefined ? { deathSaveSuccesses: row.deathSaveSuccesses } : {}),
         ...(input.deathSaveFailures !== undefined ? { deathSaveFailures: row.deathSaveFailures } : {}),
         ...(input.hpTemp !== undefined ? { hpTemp: row.hpTemp } : {}),
+        ...(input.spCurrent !== undefined ? { spCurrent: row.spCurrent } : {}),
+        ...(input.spMax !== undefined ? { spMax: row.spMax } : {}),
+        ...(input.rpCurrent !== undefined ? { rpCurrent: row.rpCurrent } : {}),
+        ...(input.rpMax !== undefined ? { rpMax: row.rpMax } : {}),
       });
     }
     // Issue #486: PATCH conditions must also land on the live tracker.
