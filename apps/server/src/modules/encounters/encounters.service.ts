@@ -87,6 +87,7 @@ type CombatantTransactionHook = (
 /** Narrow extension point for an action whose idempotent response is not just a combatant. */
 type CombatantUpdateTransactionOptions = {
   beforeWriteInTransaction?: CombatantTransactionHook;
+  afterWriteInTransaction?: (tx: SyncDb, committed: Combatant) => void;
   operation?: EncounterOpClaim['operation'];
   operationFingerprint?: unknown;
   operationResponse?: (combatant: Combatant) => unknown;
@@ -3174,6 +3175,21 @@ export class EncountersService {
           // `updateCombatant` applies this server-only face after the hook returns.
           deathSavePatch.deathSaveRoll = result.total;
         },
+        afterWriteInTransaction: (tx, committed) => {
+          // This audit evidence is part of the authoritative action: commit it with
+          // the combatant outcome, dice row, and idempotency replay response, or roll
+          // all four back. A retry then never returns a committed effect without its
+          // required actor record.
+          this.audit.logInTx(tx, {
+            actor: auditActor(user),
+            actorRole: role,
+            action: 'encounter.combatant.death_save_roll',
+            entityType: 'combatant',
+            entityId: combatantId,
+            campaignId: encounter.campaignId,
+            detail: `${committed.name}: d20 ${roll!.total}`,
+          });
+        },
         operationResponse: (committed) => ({ combatant: committed, roll: roll! }),
         replayCombatant: (response) => {
           const candidate = response as Partial<{ combatant: Combatant; roll: DiceRoll }>;
@@ -3186,16 +3202,6 @@ export class EncountersService {
     if (replayed) return replayed;
     if (roll === null) throw new Error('Death-save dice roll was not persisted');
     const persistedRoll = roll as DiceRoll;
-
-    await this.audit.log({
-      actor: auditActor(user),
-      actorRole: role,
-      action: 'encounter.combatant.death_save_roll',
-      entityType: 'combatant',
-      entityId: combatantId,
-      campaignId: encounter.campaignId,
-      detail: `${combatant.name}: d20 ${persistedRoll.total}`,
-    });
 
     return { combatant: updated, roll: persistedRoll };
   }
@@ -3685,6 +3691,8 @@ export class EncountersService {
             .where(eq(combatants.id, combatantId))
             .run();
         }
+
+        options?.afterWriteInTransaction?.(tx, combatantToDomain(row));
 
         // The claim lands LAST but in the SAME transaction as everything above, carrying the
         // exact response body this call will return. Both commit or neither does — there is

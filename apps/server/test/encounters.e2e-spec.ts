@@ -12,6 +12,7 @@ import {
   encounterEvents as encounterEventsTable,
 } from '../src/db/schema';
 import { CampaignEventsService } from '../src/modules/events/campaign-events.service';
+import { AuditService } from '../src/modules/audit/audit.service';
 import { EncountersService } from '../src/modules/encounters/encounters.service';
 import { RollsService } from '../src/modules/rolls/rolls.service';
 
@@ -3142,6 +3143,27 @@ describe('encounters — issue #1462: authoritative death-save rolls (e2e)', () 
       expect(feed.body.filter((roll: { label?: string }) => roll.label === 'Nyx · death save')).toHaveLength(0);
     } finally {
       recordSpy.mockRestore();
+    }
+  });
+
+  it('rolls back the death-save outcome when its required audit entry cannot persist', async () => {
+    const server = ctx.app.getHttpServer();
+    await setDying();
+    const audit = ctx.app.get(AuditService);
+    const auditSpy = jest.spyOn(audit, 'logInTx').mockImplementation(() => {
+      throw new Error('simulated audit storage failure');
+    });
+    try {
+      const res = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}/death-save`)
+        .set(player)
+        .send({ idempotencyKey: 'death-save-audit-failure' });
+      expect(res.status).toBe(500);
+      expect(await current()).toMatchObject({ hpCurrent: 0, deathState: 'dying', deathSaveSuccesses: 0, deathSaveFailures: 0 });
+      const feed = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(player);
+      expect(feed.body.filter((roll: { label?: string }) => roll.label === 'Nyx · death save')).toHaveLength(0);
+    } finally {
+      auditSpy.mockRestore();
     }
   });
 
