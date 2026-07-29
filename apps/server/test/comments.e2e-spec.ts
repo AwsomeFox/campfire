@@ -849,6 +849,8 @@ describe('comments / threaded discussion (e2e)', () => {
   describe('anchored-entity secrecy', () => {
     let hiddenQuestId: number;
     let hiddenNpcId: number;
+    let hiddenEncounterId: number;
+    let hiddenEncounterCommentId: number;
 
     beforeAll(async () => {
       const server = ctx.app.getHttpServer();
@@ -867,6 +869,22 @@ describe('comments / threaded discussion (e2e)', () => {
         .post(`/api/v1/campaigns/${campaignId}/comments`)
         .set(dm)
         .send({ entityType: 'quest', entityId: hiddenQuestId, body: 'DM-only plotting on a hidden quest' });
+      hiddenEncounterId = (
+        await request(server)
+          .post(`/api/v1/campaigns/${campaignId}/encounters`)
+          .set(dm)
+          .send({ name: 'Hidden Anchor Ambush', hidden: true })
+      ).body.id;
+      hiddenEncounterCommentId = (
+        await request(server)
+          .post(`/api/v1/campaigns/${campaignId}/comments`)
+          .set(dm)
+          .send({
+            entityType: 'encounter',
+            entityId: hiddenEncounterId,
+            body: 'DM-only details for the hidden ambush',
+          })
+      ).body.id;
     });
 
     it('non-DM cannot LIST comments on a hidden quest/npc (404, existence not leaked)', async () => {
@@ -913,6 +931,49 @@ describe('comments / threaded discussion (e2e)', () => {
         .set(dm)
         .send({ entityType: 'npc', entityId: hiddenNpcId, body: 'Reminder: reveal at session 5' });
       expect(create.status).toBe(201);
+    });
+
+    it('hidden encounter comments are readable to the DM but not directly retrievable by non-DMs', async () => {
+      const server = ctx.app.getHttpServer();
+      const dmRead = await request(server).get(`/api/v1/comments/${hiddenEncounterCommentId}`).set(dm);
+      expect(dmRead.status).toBe(200);
+      expect(dmRead.body.body).toBe('DM-only details for the hidden ambush');
+
+      for (const headers of [authorPlayer, otherPlayer, viewer]) {
+        const direct = await request(server).get(`/api/v1/comments/${hiddenEncounterCommentId}`).set(headers);
+        expect(direct.status).toBe(404);
+        expect(JSON.stringify(direct.body)).not.toContain('DM-only details for the hidden ambush');
+
+        const thread = await request(server)
+          .get(`/api/v1/campaigns/${campaignId}/comments`)
+          .query({ entityType: 'encounter', entityId: hiddenEncounterId })
+          .set(headers);
+        expect(thread.status).toBe(404);
+      }
+    });
+
+    it('comments on a trashed encounter are inaccessible to everyone', async () => {
+      const server = ctx.app.getHttpServer();
+      const encounter = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Trashed Anchor Encounter', hidden: false });
+      const comment = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/comments`)
+        .set(dm)
+        .send({ entityType: 'encounter', entityId: encounter.body.id, body: 'This encounter is in the trash now' });
+      expect(comment.status).toBe(201);
+      await request(server).delete(`/api/v1/encounters/${encounter.body.id}`).set(dm).expect(200);
+
+      for (const headers of [dm, authorPlayer, otherPlayer, viewer]) {
+        const direct = await request(server).get(`/api/v1/comments/${comment.body.id}`).set(headers);
+        expect(direct.status).toBe(404);
+        const thread = await request(server)
+          .get(`/api/v1/campaigns/${campaignId}/comments`)
+          .query({ entityType: 'encounter', entityId: encounter.body.id })
+          .set(headers);
+        expect(thread.status).toBe(404);
+      }
     });
 
     it('once revealed, a non-DM can list/create on the (formerly hidden) entity', async () => {
@@ -1096,6 +1157,13 @@ describe('comments / threaded discussion (e2e)', () => {
           authorPlayer,
         );
         expect(listed?.body).toBe(anchor.body);
+
+        // Direct comment reads use the same anchor gate as thread reads. Keeping
+        // this parity assertion over every EntityType protects that shared rule
+        // from drifting as a new anchor type is added.
+        const direct = await request(server).get(`/api/v1/comments/${created.body.id}`).set(authorPlayer);
+        expect(direct.status).toBe(200);
+        expect(direct.body.body).toBe(anchor.body);
       }
     });
   });
