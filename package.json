@@ -19,7 +19,7 @@
     "test:e2e": "npm run build && npm run test:e2e -w apps/web",
     "test:e2e:nobuild": "npm run test:e2e -w apps/web",
     "test:unit:web": "npm run build -w packages/schema && npm run test:unit -w apps/web",
-    "test:all": "npm run check:version && npm run check:mcp-catalog && npm run check:i18n && npm run check:e2e-spec-coverage && npm run lint && npm run typecheck && npm run test && npm run test:unit:web && npm run build && npm run test:pwa:dist -w apps/web && npm run test:e2e:typecheck -w apps/web && npm run test:e2e:nobuild",
+    "test:all": "npm run build -w packages/schema && npm run check:version && npm run check:mcp-catalog && npm run check:i18n && npm run check:e2e-spec-coverage && npm run lint && npm run typecheck && npm run test && npm run test:unit:web && npm run build && npm run test:pwa:dist -w apps/web && npm run test:e2e:typecheck -w apps/web && npm run test:e2e:nobuild",
     "check:version": "node scripts/check-version-sync.mjs",
     "check:mcp-catalog": "node scripts/check-mcp-catalog-sync.mjs",
     "generate:mcp-catalog": "node scripts/generate-mcp-catalog-surfaces.mjs",
