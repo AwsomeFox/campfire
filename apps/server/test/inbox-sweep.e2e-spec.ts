@@ -583,16 +583,19 @@ describe('inbox sweep (e2e)', () => {
     const res = await request(server).post(`/api/v1/campaigns/${campaignId}/inbox/sweep`).set(dm);
     expect(res.status).toBe(201);
     expect(res.body.job.itemsTotal).toBe(TOTAL);
+    expect(res.body.job.itemsSkipped).toBe(TOTAL);
+    expect(res.body.job.itemsProposed).toBe(0);
     expect(res.body.items).toHaveLength(TOTAL);
 
-    const byNoteId = new Map<number, { body?: string }>(
-      res.body.items.map((item: { noteId: number; body?: string }) => [item.noteId, item]),
+    const byNoteId = new Map<number, { body?: string; outcome?: string }>(
+      res.body.items.map((item: { noteId: number; body?: string; outcome?: string }) => [item.noteId, item]),
     );
     // Every item, including the ones a 50-item client page would never have loaded,
     // carries its own capture body straight from the server response.
     noteIds.forEach((noteId, i) => {
       const item = byNoteId.get(noteId);
       expect(item).toBeDefined();
+      expect(item?.outcome).toBe('skipped');
       expect(item?.body).toBe(`Bulk sweep capture ${i} — unique text so the label can't come from anywhere else`);
     });
   });
@@ -632,7 +635,8 @@ describe('inbox sweep (e2e)', () => {
 
     const res = await request(server).post(`/api/v1/campaigns/${campaignId}/inbox/sweep`).set(dm);
     expect(res.status).toBe(201);
-    expect(res.body.items[0]).toMatchObject({ noteId, body });
+    expect(classifier.calls).toHaveLength(0);
+    expect(res.body.items[0]).toMatchObject({ noteId, body, outcome: 'proposed' });
   });
 
   it('reports a disabled job with a stated reason when no AI provider is configured, and touches nothing', async () => {
