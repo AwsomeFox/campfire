@@ -558,18 +558,7 @@ export class SessionsService {
       // 400. Evaluated here, a rejected relink leaves the recap completely unchanged.
       this.scheduling.assertCanLinkSession(input.scheduledSessionId!, id);
     }
-    // Commit an immutable prose version when the recap actually changes (#157/#813):
-    // close the prior tip (real author preserved) and open a tip for the new prose.
-    if (input.recap !== undefined && input.recap !== existing.recap) {
-      await this.revisions.commitProseVersion({
-        entityType: 'session',
-        entityId: id,
-        campaignId: existing.campaignId,
-        priorProse: existing.recap,
-        nextProse: input.recap,
-        user,
-      });
-    }
+    const recapChanged = input.recap !== undefined && input.recap !== existing.recap;
     const { scheduledSessionId, ...restInput } = input;
     // `scheduledSessionId` is never written by the plain patch: linkSessionInTx /
     // unlinkSessionInTx own that column so both sides of the relationship always move
@@ -595,6 +584,19 @@ export class SessionsService {
           .limit(1)
           .all();
         if (conflict) throw new ConflictException(`Session number ${input.number} already exists in this campaign`);
+      }
+      // Commit an immutable prose version only after every in-transaction guard.
+      // A rejected number or schedule update must not leave revision history for
+      // recap text that never reached the session row.
+      if (recapChanged) {
+        this.revisions.commitProseVersionInTx(tx, {
+          entityType: 'session',
+          entityId: id,
+          campaignId: existing.campaignId,
+          priorProse: existing.recap,
+          nextProse: input.recap!,
+          user,
+        });
       }
       const [updated] = tx
         .update(sessions)

@@ -155,6 +155,26 @@ describe('sessions (e2e) — retries ignore trashed sessions (#1491)', () => {
 
     expect((await request(server).post(`/api/v1/sessions/${trashed.body.id}/restore`).set(dm)).status).toBe(409);
   });
+
+  it('rolls back recap revisions when a duplicate-number PATCH is rejected', async () => {
+    const server = ctx.app.getHttpServer();
+    const original = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/sessions`).set(dm)
+      .send({ number: 80, recap: 'Original recap' });
+    const conflict = await request(server).post(`/api/v1/campaigns/${campaignId}/sessions`).set(dm).send({ number: 81 });
+    expect(original.status).toBe(201);
+    expect(conflict.status).toBe(201);
+
+    const beforeRevisions = await request(server).get(`/api/v1/revisions/session/${original.body.id}`).set(dm);
+    expect(beforeRevisions.body).toEqual([]);
+    const rejected = await request(server)
+      .patch(`/api/v1/sessions/${original.body.id}`).set(dm)
+      .send({ number: 81, recap: 'Must not create a revision' });
+    expect(rejected.status).toBe(409);
+
+    expect((await request(server).get(`/api/v1/sessions/${original.body.id}`).set(dm)).body.recap).toBe('Original recap');
+    expect((await request(server).get(`/api/v1/revisions/session/${original.body.id}`).set(dm)).body).toEqual([]);
+  });
 });
 
 /**
