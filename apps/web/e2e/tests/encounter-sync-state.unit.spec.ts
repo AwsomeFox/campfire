@@ -1,16 +1,23 @@
 /**
- * Run-session encounter sync indicator + guarded actions (issue #471).
+ * Run-session encounter sync indicator + guarded actions (issue #471, extended by #1446).
  */
 import { expect, test } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
+  CONNECTING_GRACE_MS,
+  confirmEncounterOverride,
   deriveEncounterSyncState,
+  ENCOUNTER_OVERRIDE_INACTIVE,
+  encounterActionsBlocked,
+  encounterOverrideOfferable,
   encounterResyncAdvanced,
   encounterRiskyActionsBlocked,
   encounterSyncBannerMessage,
   encounterSyncChipLabel,
   encounterSyncRevisionFromUpdatedAt,
+  isConnectingGraceElapsed,
+  settleEncounterOverride,
 } from '../../src/features/encounters/encounterSyncState';
 
 const RUN_SESSION_PAGE = resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx');
@@ -86,9 +93,111 @@ test.describe('encounter sync state (issue #471)', () => {
   test('RunSessionPage wires encounter sync state and guarded actions', () => {
     const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
     expect(source).toMatch(/deriveEncounterSyncState/);
-    expect(source).toMatch(/encounterRiskyActionsBlocked/);
+    expect(source).toMatch(/encounterActionsBlocked/);
     expect(source).toMatch(/data-testid="encounter-sync-chip"/);
     expect(source).toMatch(/data-testid="encounter-sync-banner"/);
     expect(source).toMatch(/setResyncPending\(true\)/);
+    // Issue #1446: the override affordance and its persistence must be wired, not just defined.
+    expect(source).toMatch(/data-testid="encounter-sync-override-prompt"/);
+    expect(source).toMatch(/data-testid="encounter-sync-override-confirm"/);
+    expect(source).toMatch(/confirmEncounterOverride/);
+    expect(source).toMatch(/settleEncounterOverride/);
+  });
+});
+
+/**
+ * Issue #1446 — the stale-sync gate had no override, so an environment where SSE never
+ * connects made combat permanently unrunnable. These cover the override state machine
+ * and the first-load `connecting` grace timeout in isolation from the component.
+ */
+test.describe('encounter sync override + connecting grace (issue #1446)', () => {
+  test('first-load connecting degrades to an overridable offline only after the grace period', () => {
+    // Still within grace: stays `connecting`, not yet overridable.
+    expect(
+      deriveEncounterSyncState({
+        eventStatus: 'connecting',
+        readStale: false,
+        resyncPending: false,
+        connectingGraceElapsed: false,
+      }),
+    ).toBe('connecting');
+    expect(encounterOverrideOfferable('connecting')).toBe(false);
+
+    // Past grace: an environment where SSE never connects must not block forever —
+    // it now reads the same as a confirmed outage and becomes overridable.
+    expect(
+      deriveEncounterSyncState({
+        eventStatus: 'connecting',
+        readStale: false,
+        resyncPending: false,
+        connectingGraceElapsed: true,
+      }),
+    ).toBe('offline');
+    expect(encounterOverrideOfferable('offline')).toBe(true);
+
+    // A null eventStatus (never even attempted) is treated the same as 'connecting'.
+    expect(
+      deriveEncounterSyncState({
+        eventStatus: null,
+        readStale: false,
+        resyncPending: false,
+        connectingGraceElapsed: true,
+      }),
+    ).toBe('offline');
+  });
+
+  test('isConnectingGraceElapsed is a pure, boundary-correct time check', () => {
+    expect(isConnectingGraceElapsed(null, Date.now())).toBe(false);
+    const since = 1_000;
+    expect(isConnectingGraceElapsed(since, since + CONNECTING_GRACE_MS - 1)).toBe(false);
+    expect(isConnectingGraceElapsed(since, since + CONNECTING_GRACE_MS)).toBe(true);
+    expect(isConnectingGraceElapsed(since, since + CONNECTING_GRACE_MS + 5_000)).toBe(true);
+  });
+
+  test('override affordance is never offered while live, and never during the initial connecting grace', () => {
+    expect(encounterOverrideOfferable('live')).toBe(false);
+    expect(encounterOverrideOfferable('connecting')).toBe(false);
+    expect(encounterOverrideOfferable('reconnecting')).toBe(true);
+    expect(encounterOverrideOfferable('offline')).toBe(true);
+    expect(encounterOverrideOfferable('stale')).toBe(true);
+  });
+
+  test('override state machine: live -> reconnecting -> offline -> live -> stale (re-confirm required)', () => {
+    let override = ENCOUNTER_OVERRIDE_INACTIVE;
+    expect(override.active).toBe(false);
+    expect(encounterActionsBlocked('live', override)).toBe(false);
+
+    // Stream drops: actions are blocked until the DM explicitly confirms.
+    expect(encounterActionsBlocked('reconnecting', override)).toBe(true);
+    override = confirmEncounterOverride();
+    expect(override.active).toBe(true);
+    expect(encounterActionsBlocked('reconnecting', override)).toBe(false);
+
+    // Settling on every sync-state change is a no-op while still not live — a DM mid-combat
+    // must not be asked to reconfirm on every reconnect/offline flop.
+    override = settleEncounterOverride(override, 'reconnecting');
+    expect(override.active).toBe(true);
+    override = settleEncounterOverride(override, 'offline');
+    expect(override.active).toBe(true);
+    expect(encounterActionsBlocked('offline', override)).toBe(false);
+
+    // Stream recovers: the override is consumed (session-scoped to ONE outage).
+    override = settleEncounterOverride(override, 'live');
+    expect(override.active).toBe(false);
+    expect(encounterActionsBlocked('live', override)).toBe(false);
+
+    // A LATER, separate outage must be re-confirmed — it does not silently sail through
+    // on the earlier confirmation (this is the actual "cannot confirm 17 times" AND
+    // "cannot clobber via a stale confirmation" balance the issue asks for).
+    expect(encounterActionsBlocked('stale', override)).toBe(true);
+    expect(encounterOverrideOfferable('stale')).toBe(true);
+  });
+
+  test('encounterRiskyActionsBlocked (base primitive) is unaffected by the override layer', () => {
+    // encounterActionsBlocked composes on top of this — the base "not live" check itself
+    // must stay override-agnostic so callers that intentionally never honor an override
+    // (none currently do, but the primitive is still a correct standalone building block).
+    expect(encounterRiskyActionsBlocked('live')).toBe(false);
+    expect(encounterRiskyActionsBlocked('offline')).toBe(true);
   });
 });

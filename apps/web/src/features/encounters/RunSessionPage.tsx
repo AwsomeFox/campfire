@@ -190,12 +190,19 @@ import {
   isLifecycleConfirmValid,
 } from './encounterLifecycleActions';
 import {
+  CONNECTING_GRACE_MS,
+  confirmEncounterOverride,
   deriveEncounterSyncState,
-  encounterRiskyActionsBlocked,
+  ENCOUNTER_OVERRIDE_INACTIVE,
+  encounterActionsBlocked,
+  encounterOverrideOfferable,
   encounterSyncBannerMessage,
   encounterSyncChipClass,
   encounterSyncChipLabel,
   encounterSyncRevisionFromUpdatedAt,
+  isConnectingGraceElapsed,
+  settleEncounterOverride,
+  type EncounterOverrideState,
   type EncounterSyncRevision,
 } from './encounterSyncState';
 import { ENCOUNTER_LIFECYCLE_STEPS, preparingGuidance } from './postCreateGuidance';
@@ -1052,6 +1059,12 @@ export default function RunSessionPage() {
   const [encounterReadStale, setEncounterReadStale] = useState(false);
   const [resyncPending, setResyncPending] = useState(false);
   const [syncRevision, setSyncRevision] = useState<EncounterSyncRevision | null>(null);
+  // Issue #1446: session-scoped "continue anyway" override for the stale-sync gate, and
+  // the first-load `connecting` grace timer that lets a genuine SSE outage (never
+  // connects at all) become overridable instead of blocking forever.
+  const [encounterSyncOverride, setEncounterSyncOverride] = useState<EncounterOverrideState>(ENCOUNTER_OVERRIDE_INACTIVE);
+  const connectingSinceRef = useRef<number | null>(null);
+  const [connectingGraceElapsed, setConnectingGraceElapsed] = useState(false);
   // The player display is deliberately a separate browsing context: navigating this
   // cockpit to `/screen` used to strand the DM without initiative or turn controls.
   // Keep only the window handle and non-secret status here; cast capabilities never
@@ -1263,13 +1276,44 @@ export default function RunSessionPage() {
     eventStatus,
     charactersQuery.isFetching && !charactersQuery.isLoading,
   );
+  // Issue #1446: track how long the CURRENT first-load `connecting` attempt has run so a
+  // genuine "SSE never connects" outage degrades to overridable after a bounded grace
+  // period rather than blocking forever. The effect body only re-fires when `eventStatus`
+  // itself changes, so the `setTimeout` set here still fires later even though nothing
+  // else re-renders while the stream stays stuck connecting.
+  useEffect(() => {
+    const isConnectingLike = eventStatus === null || eventStatus === 'connecting';
+    if (!isConnectingLike) {
+      connectingSinceRef.current = null;
+      setConnectingGraceElapsed(false);
+      return;
+    }
+    if (connectingSinceRef.current == null) connectingSinceRef.current = Date.now();
+    if (isConnectingGraceElapsed(connectingSinceRef.current, Date.now())) {
+      setConnectingGraceElapsed(true);
+      return;
+    }
+    const remaining = CONNECTING_GRACE_MS - (Date.now() - connectingSinceRef.current);
+    const timer = setTimeout(() => setConnectingGraceElapsed(true), remaining);
+    return () => clearTimeout(timer);
+  }, [eventStatus]);
+
   const encounterSync = deriveEncounterSyncState({
     eventStatus,
     readStale: encounterReadStale,
     resyncPending,
     staleIdentity,
+    connectingGraceElapsed,
   });
-  const riskyBlocked = encounterRiskyActionsBlocked(encounterSync);
+  // Issue #1446: a confirmed override is scoped to ONE outage — consumed the moment the
+  // stream is live again, so a later, separate outage prompts again rather than silently
+  // sailing through on a stale confirmation from a previous disconnect.
+  useEffect(() => {
+    setEncounterSyncOverride((prev) => settleEncounterOverride(prev, encounterSync));
+  }, [encounterSync]);
+  const riskyBlocked = encounterActionsBlocked(encounterSync, encounterSyncOverride);
+  const encounterSyncOverrideOfferable =
+    encounterOverrideOfferable(encounterSync) && !encounterSyncOverride.active;
   const encounterSyncBanner = encounterSyncBannerMessage(encounterSync);
   const encounterSyncChip = encounterSyncChipLabel(encounterSync);
   const encounterSyncLastSyncTitle = useMemo(() => {
@@ -1313,6 +1357,12 @@ export default function RunSessionPage() {
     setResyncPending(false);
     setSyncRevision(null);
     setEventStatus(null);
+    // Issue #1446: a "continue anyway" override (and the connecting-grace timer) is
+    // scoped to this encounter's session — navigating to a different encounter must not
+    // carry over an unconfirmed stale-state acknowledgement.
+    setEncounterSyncOverride(ENCOUNTER_OVERRIDE_INACTIVE);
+    connectingSinceRef.current = null;
+    setConnectingGraceElapsed(false);
   }, [eid]);
 
   // Live updates over SSE (issue #4) — players waiting for the DM to hit "Start" (or
@@ -2559,7 +2609,10 @@ export default function RunSessionPage() {
               </>
             )}
             {lifecycle.end && (
-              <Btn ghost danger disabled={headerBusy || riskyBlocked} onClick={() => setConfirmEnd(true)}>
+              // Issue #1446: ending the encounter carries no conflict risk (it is a
+              // final, idempotent-in-effect state transition, not a turn-order race) —
+              // never gate it on stream health.
+              <Btn ghost danger disabled={headerBusy} onClick={() => setConfirmEnd(true)}>
                 End
               </Btn>
             )}
@@ -2579,7 +2632,8 @@ export default function RunSessionPage() {
               </Btn>
             )}
             {lifecycle.delete && (
-              <Btn ghost danger disabled={headerBusy || riskyBlocked} onClick={() => setConfirmDelete(true)}>
+              // Issue #1446: delete/cancel carries no conflict risk — never gate on stream health.
+              <Btn ghost danger disabled={headerBusy} onClick={() => setConfirmDelete(true)}>
                 {encounter.status === 'preparing' ? 'Cancel' : 'Delete'}
               </Btn>
             )}
@@ -2598,6 +2652,36 @@ export default function RunSessionPage() {
         >
           {encounterSyncBanner}
         </p>
+      )}
+
+      {/* Issue #1446: while not live, conflict-prone actions are blocked but confirmable —
+          a stuck stream (proxy buffering, a terminated long-lived connection, …) must not
+          brick combat permanently. Granting the override does not touch the banner above,
+          which stays visible for as long as the stream is unhealthy so the DM never loses
+          track of which mode they're in. */}
+      {encounterSyncOverrideOfferable && (
+        <div
+          role="status"
+          aria-live="polite"
+          data-testid="encounter-sync-override-prompt"
+          className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm flex items-center gap-2 flex-wrap"
+        >
+          <span>{t('encounters.sync.overridePrompt')}</span>
+          <Btn
+            density="xs"
+            ghost
+            className="text-xs"
+            data-testid="encounter-sync-override-confirm"
+            onClick={() => setEncounterSyncOverride(confirmEncounterOverride())}
+          >
+            {t('encounters.sync.overrideConfirm')}
+          </Btn>
+        </div>
+      )}
+      {encounterSyncOverride.active && encounterSync !== 'live' && (
+        <span className="tag tag-accent" data-testid="encounter-sync-override-active" style={{ fontSize: 11 }}>
+          {t('encounters.sync.overrideActive')}
+        </span>
       )}
 
       {isArchmage && encounter.status === 'running' && (
@@ -2623,11 +2707,14 @@ export default function RunSessionPage() {
               {encounter.escalationDieOverride != null ? ` · override +${encounter.escalationDieOverride}` : ''}
             </span>
             {canDmWrite && (
+              // Issue #1446: the escalation die is a DM-unilateral value (no other
+              // write races it), so hold/override/clear carry no conflict risk — never
+              // gate them on stream health.
               <div className="flex items-center gap-2 flex-wrap ml-auto">
                 <Btn density="xs"
                   ghost
                   className="text-xs"
-                  disabled={headerBusy || riskyBlocked}
+                  disabled={headerBusy}
                   onClick={() => toggleEscalationHold(!encounter.escalationDieHeld)}
                 >
                   {encounter.escalationDieHeld ? 'Resume auto' : 'Hold'}
@@ -2643,7 +2730,7 @@ export default function RunSessionPage() {
                 <Btn density="xs"
                   ghost
                   className="text-xs"
-                  disabled={headerBusy || riskyBlocked || escalationOverrideDraft.trim() === ''}
+                  disabled={headerBusy || escalationOverrideDraft.trim() === ''}
                   onClick={applyEscalationOverride}
                 >
                   Override
@@ -2652,7 +2739,7 @@ export default function RunSessionPage() {
                   <Btn density="xs"
                     ghost
                     className="text-xs"
-                    disabled={headerBusy || riskyBlocked}
+                    disabled={headerBusy}
                     onClick={clearEscalationOverride}
                   >
                     Clear
