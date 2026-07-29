@@ -829,6 +829,7 @@ function isStoredSecretApproval(value: unknown): value is AiDmSecretReadApproval
 
 function isStoredPendingConfirmation(value: unknown): value is AiDmPendingToolConfirmation {
   const rec = recordOf(value);
+  const retainedActionChain = rec?.retainedActionChain === undefined ? undefined : recordOf(rec.retainedActionChain);
   return !!rec
     && typeof rec.id === 'string'
     && typeof rec.tool === 'string'
@@ -839,7 +840,9 @@ function isStoredPendingConfirmation(value: unknown): value is AiDmPendingToolCo
     && typeof rec.requestedAt === 'string'
     && typeof rec.actor === 'string'
     && typeof rec.triggeredBy === 'string'
-    && Number.isInteger(rec.turnNumber);
+    && Number.isInteger(rec.turnNumber)
+    && (retainedActionChain === undefined
+      || (Number.isInteger(retainedActionChain?.encounterId) && typeof retainedActionChain?.chainId === 'string'));
 }
 
 /** Parse a persisted JSON map of grants, keeping only the entries that validate (#1042). */
@@ -2437,6 +2440,11 @@ export class AiDriverService {
   private announceRestartReconciliation(session: AiDmSessionState, r: RestartReconciliation): void {
     const campaignId = session.campaignId;
     const parts: string[] = [];
+
+    // A restart deliberately discards confirmations rather than restoring a stale authority
+    // grant. Undo the matching temporary action-chain retention at the same time, otherwise an
+    // abandoned collaborative preview is permanently exempt from the pending-resolution TTL.
+    for (const confirmation of r.confirmationsDiscarded) this.releaseRetainedActionChain(confirmation);
 
     if (r.voteExpired) {
       parts.push('an open table vote lapsed');
@@ -5299,6 +5307,7 @@ export class AiDriverService {
         // persisted chain as awaiting this human decision, so its preview TTL cannot race the
         // delayed confirmation; it is never a source of authorization.
         let queuedArgs = args;
+        let retainedActionChain: { encounterId: number; chainId: string } | undefined;
         if (call.name === 'apply_action') {
           const argEncounterId = typeof args.encounterId === 'number' ? args.encounterId : Number(args.encounterId);
           const argChainId = typeof args.chainId === 'string' ? args.chainId : undefined;
@@ -5311,6 +5320,9 @@ export class AiDriverService {
             chainId: args.chainId,
             ...(described ? { actionName: described.actionName, actorCombatantId: described.actorCombatantId } : {}),
           };
+          if (described?.promoted && argChainId && Number.isFinite(argEncounterId)) {
+            retainedActionChain = { encounterId: argEncounterId, chainId: argChainId };
+          }
         }
         const pending = this.queueToolConfirmation(
           session,
@@ -5320,6 +5332,7 @@ export class AiDriverService {
           policyDecision.policy,
           actor,
           triggeredBy.id,
+          retainedActionChain,
         );
         const pendingText = JSON.stringify({
           status: 'pending_dm_confirmation',
@@ -5619,6 +5632,7 @@ export class AiDriverService {
    * #1042 established, is that a grant may be discarded but never in silence.
    */
   private announceEvictedConfirmation(campaignId: number, evicted: AiDmPendingToolConfirmation): void {
+    this.releaseRetainedActionChain(evicted);
     void this.audit
       .log({
         actor: `ai-dm-seat:${campaignId}`,
@@ -5648,6 +5662,7 @@ export class AiDriverService {
     policy: DriverToolPolicyClass,
     actor: string,
     triggeredBy: string,
+    retainedActionChain?: { encounterId: number; chainId: string },
   ): AiDmPendingToolConfirmation {
     session.pendingToolConfirmations = session.pendingToolConfirmations ?? {};
     const key = pendingConfirmationKey(call.name, call.id);
@@ -5681,6 +5696,7 @@ export class AiDriverService {
       actor,
       triggeredBy,
       turnNumber: session.turnCount,
+      ...(retainedActionChain ? { retainedActionChain } : {}),
     };
     session.pendingToolConfirmations[key] = pending;
     // #1042: a queued confirmation is an irreversible write waiting on a human. If the process
@@ -5980,6 +5996,13 @@ export class AiDriverService {
     return Object.values(session.pendingToolConfirmations ?? {});
   }
 
+  /** Release only a chain this confirmation itself promoted into the retained state. */
+  private releaseRetainedActionChain(confirmation: AiDmPendingToolConfirmation): void {
+    const retained = confirmation.retainedActionChain;
+    if (!retained) return;
+    this.actionResolver?.releasePendingChainForConfirmation(retained.encounterId, retained.chainId);
+  }
+
   /**
    * Approve or reject a queued confirm-policy tool call (#474). Approval executes the stored
    * args under the seat principal with full audit provenance; rejection drops the pending entry.
@@ -6010,6 +6033,7 @@ export class AiDriverService {
     this.persistControlState(session);
 
     if (action === 'reject') {
+      this.releaseRetainedActionChain(pending);
       await this.audit.log({
         actor: auditActor(granter),
         actorRole: role,
@@ -6033,6 +6057,9 @@ export class AiDriverService {
     const seatPrincipal = this.seatPrincipal(campaignId);
     const seatToolset = this.mcpTools.buildToolset(seatPrincipal);
     const res = await seatToolset.call(pending.tool, pending.args);
+    // A failed approved call also consumed its confirmation without consuming its action chain.
+    // Let the ordinary preview sweep reclaim it instead of leaving an immortal pending row.
+    if (res.isError) this.releaseRetainedActionChain(pending);
 
     if (!res.isError && DRIVER_LOOT_COMBAT_LOG_TOOLS.has(pending.tool)) {
       const detail = formatDriverLootCombatLogDetail(pending.tool, pending.args);

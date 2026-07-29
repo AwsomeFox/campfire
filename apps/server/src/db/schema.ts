@@ -2204,6 +2204,9 @@ export const actionPendingResolutions = sqliteTable('action_pending_resolutions'
   campaignId: integer('campaign_id').notNull(),
   actorCombatantId: integer('actor_combatant_id').notNull(),
   actionName: text('action_name').notNull().default(''),
+  // Sheet/statblock action selected at resolve time. Names are not unique on a sheet, so
+  // apply() uses this to revalidate against the same current action rather than its first name match.
+  actionIndex: integer('action_index'),
   awaitingConfirmation: integer('awaiting_confirmation', { mode: 'boolean' }).notNull().default(false),
   // The full server-computed ActionResolution (issue #414's byte-identical-preview payload),
   // serialized. This — not anything the client sends — is what `applyInternal` ever writes.

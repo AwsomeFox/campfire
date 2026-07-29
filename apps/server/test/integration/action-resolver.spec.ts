@@ -1064,6 +1064,29 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(drakeRow.hpCurrent).toBe(60);
   });
 
+  it('#1451 review: duplicate action names retain their selected actionIndex for current-spec bounds validation', () => {
+    const { orm, service, encounterId, actor, drake, aliceChar } = seed();
+    const character = orm.select().from(characters).where(eq(characters.id, aliceChar.id)).get()!;
+    const actions = JSON.parse(character.actions ?? '[]');
+    // Both entries have the same display name. The first's small bound would reject a perfectly
+    // valid result from the second if apply() fell back to actionName instead of the saved index.
+    actions.push(
+      { ...fireball(21), name: 'Twin Fire', spec: { ...fireball(21).spec, outcomes: { failure: { damage: [{ formula: '1d4', type: 'fire' }] } } } },
+      { ...fireball(21), name: 'Twin Fire', spec: { ...fireball(21).spec, outcomes: { failure: { damage: [{ formula: '20d6', type: 'fire' }] } } } },
+    );
+    orm.update(characters).set({ actions: JSON.stringify(actions) }).where(eq(characters.id, aliceChar.id)).run();
+
+    const preview = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 4, targetIds: [drake], commit: false }),
+      alice,
+      'player',
+    );
+    expect(preview.resolution.targets[0].totalDamage).toBeGreaterThan(4);
+
+    expect(() => service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), alice, 'player')).not.toThrow();
+  });
+
   it('#1451: an unknown chainId is rejected, and a chainId from a different encounter is rejected', () => {
     const { orm, service, campaignId, encounterId, actor, drake } = seed();
     expect(() => service.apply(encounterId, ActionApplyRequest.parse({ chainId: 'chain-never-resolved' }), alice, 'player')).toThrow(
@@ -1191,10 +1214,9 @@ describe('action resolver (real SQLite, service layer)', () => {
 
     // The sheet is edited between preview and apply: Fireball narrows from a 6-target AoE to a
     // single-enemy hit. Validating against a resolve-time snapshot (the pre-review bug) would
-    // still let this stale, wider chain through; the CURRENT spec must not. `apply()` re-looks
-    // up the action by NAME (it has no resolve-time actionIndex to replay), and the fixture
-    // carries two sheet entries both named "Fireball" (DC 1 and DC 21) — narrow BOTH so the
-    // assertion holds regardless of which same-named entry that lookup lands on.
+    // still let this stale, wider chain through; the CURRENT spec must not. The fixture carries
+    // two sheet entries both named "Fireball" (DC 1 and DC 21), so narrow BOTH rather than
+    // accidentally testing an unrelated duplicate-action selection detail.
     const beforeChar = orm.select().from(characters).where(eq(characters.id, aliceChar.id)).get()!;
     const actions = JSON.parse(beforeChar.actions ?? '[]');
     for (const a of actions) if (a.name === 'Fireball') a.spec.targets = { count: 1, allow: 'enemy' };

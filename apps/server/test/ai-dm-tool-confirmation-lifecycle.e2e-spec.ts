@@ -102,6 +102,8 @@ describe('ai-dm tool confirmations — reaching a DM who is not looking (#1558)'
   it('audits a confirmation the queue cap pushes out instead of dropping it in silence', async () => {
     const campaignId = await armed('Evict Loudly');
     const driver = h.ctx.app.get(AiDriverService);
+    const resolver = h.ctx.app.get(ActionResolverService);
+    const release = jest.spyOn(resolver, 'releasePendingChainForConfirmation');
     const session = driver.getSession(campaignId);
 
     // Fill the queue to its cap by hand — driving 20 real turns would test the model, not this.
@@ -118,6 +120,7 @@ describe('ai-dm tool confirmations — reaching a DM who is not looking (#1558)'
         actor: `ai-dm-seat:${campaignId}`,
         triggeredBy: 'player-1',
         turnNumber: i,
+        ...(i === 0 ? { retainedActionChain: { encounterId: 7, chainId: 'chain-evicted' } } : {}),
       };
     }
     (session as unknown as { pendingToolConfirmations: Record<string, unknown> }).pendingToolConfirmations = pendingMap;
@@ -141,6 +144,8 @@ describe('ai-dm tool confirmations — reaching a DM who is not looking (#1558)'
     expect(evicted).toHaveLength(1);
     expect(String(evicted[0].detail)).toContain('confirm-seed-0'); // the oldest
     expect(String(evicted[0].detail)).toContain('never executed');
+    expect(release).toHaveBeenCalledWith(7, 'chain-evicted');
+    release.mockRestore();
   });
 
   // Issue #1451 review (Codex P1, second pass) — collaborative handoff (#1051) queues
@@ -195,7 +200,7 @@ describe('ai-dm tool confirmations — reaching a DM who is not looking (#1558)'
     driver.setCollaborative(campaignId, true);
     const retain = jest
       .spyOn(resolver, 'retainPendingChainForConfirmation')
-      .mockReturnValue({ actionName: 'Fireball', actorCombatantId: 42 });
+      .mockReturnValue({ actionName: 'Fireball', actorCombatantId: 42, promoted: true });
 
     h.script({
       text: 'Holding the spell for approval.',
@@ -216,6 +221,35 @@ describe('ai-dm tool confirmations — reaching a DM who is not looking (#1558)'
       actorCombatantId: 42,
     });
     retain.mockRestore();
+  });
+
+  it('#1451: rejecting a collaborative apply_action confirmation releases its temporary chain retention', async () => {
+    const campaignId = await armed('Release Rejected Action Confirmation');
+    const driver = h.ctx.app.get(AiDriverService);
+    const resolver = h.ctx.app.get(ActionResolverService);
+    driver.setCollaborative(campaignId, true);
+    const retain = jest
+      .spyOn(resolver, 'retainPendingChainForConfirmation')
+      .mockReturnValue({ actionName: 'Fireball', actorCombatantId: 42, promoted: true });
+    const release = jest.spyOn(resolver, 'releasePendingChainForConfirmation');
+
+    h.script({
+      text: 'Holding the spell for approval.',
+      toolCalls: [{ id: 'c-release', name: 'apply_action', arguments: { encounterId: 1, chainId: 'chain-release-on-reject' } }],
+      usage: { promptTokens: 6, completionTokens: 4, totalTokens: 10 },
+    });
+    h.script({ text: 'Waiting on the DM.', usage: { promptTokens: 4, completionTokens: 3, totalTokens: 7 } });
+    await h.sendMessage(campaignId, { input: 'cast it' });
+
+    const queued = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/tool-confirmations`).set(dm);
+    const rejected = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/ai-dm/tool-confirmation`)
+      .set(dm)
+      .send({ action: 'reject', confirmationId: queued.body[0].id });
+    expect(rejected.status).toBe(201);
+    expect(release).toHaveBeenCalledWith(1, 'chain-release-on-reject');
+    retain.mockRestore();
+    release.mockRestore();
   });
 
   it('approving through the endpoint the UI now calls actually resolves the queue', async () => {

@@ -380,13 +380,17 @@ export class ActionResolverService {
   }
 
   /** Resolve the structured spec for an action request: inline spec, sheet action, or statblock action. */
-  private resolveSpec(actor: typeof combatants.$inferSelect, req: ActionResolveRequest, campaignId: number): { spec: ActionSpec; name: string } {
+  private resolveSpec(
+    actor: typeof combatants.$inferSelect,
+    req: ActionResolveRequest,
+    campaignId: number,
+  ): { spec: ActionSpec; name: string; actionIndex: number | null } {
     if (req.spec) {
       const spec = ActionSpec.parse(req.spec);
       if (!isResolvableSpec(spec)) {
         throw new BadRequestException('The inline action spec has no resolvable mode/DC/attack — fall back to a statblock rather than inventing numbers.');
       }
-      return { spec, name: req.actionName ?? 'Action' };
+      return { spec, name: req.actionName ?? 'Action', actionIndex: null };
     }
     const character = this.linkedCharacter(actor);
     if (character) {
@@ -404,7 +408,7 @@ export class ActionResolverService {
           `"${name}" has no resolvable structured spec — fall back to its statblock (toHit/damage/notes) rather than inventing numbers.`,
         );
       }
-      return { spec: parsed.data, name };
+      return { spec: parsed.data, name, actionIndex: idx };
     }
     const statActions = this.combatantActions(actor, campaignId);
     let idx = req.actionIndex ?? -1;
@@ -424,7 +428,7 @@ export class ActionResolverService {
         `"${action.name}" has no resolvable structured spec — fall back to its statblock (toHit/damage/notes) rather than inventing numbers.`,
       );
     }
-    return { spec: parsed.data, name: action.name };
+    return { spec: parsed.data, name: action.name, actionIndex: idx };
   }
 
   // -------------------------------------------------------------------------
@@ -510,7 +514,7 @@ export class ActionResolverService {
     }
 
     const adapter = this.adapterForCampaign(encounter.campaignId);
-    const { spec, name } = this.resolveSpec(actor, req, encounter.campaignId);
+    const { spec, name, actionIndex } = this.resolveSpec(actor, req, encounter.campaignId);
     const { policy, canApply } = this.policyFor(encounter.campaignId, actor, user, role);
 
     // Validate target legality (count + at least one when the action needs a target).
@@ -559,7 +563,7 @@ export class ActionResolverService {
     // initially automatic preview into that same kind of pending human decision; the driver marks
     // that persisted chain with `retainPendingChainForConfirmation()` when it queues the approval.
     const chainId = this.mintChainId();
-    this.persistPendingResolution(encounter, actor, chainId, resolution, !canApply);
+    this.persistPendingResolution(encounter, actor, chainId, resolution, actionIndex, !canApply);
 
     let applied = false;
     let undoToken: ActionUndoToken | null = null;
@@ -1037,6 +1041,7 @@ export class ActionResolverService {
     actor: typeof combatants.$inferSelect,
     chainId: string,
     resolution: ActionResolution,
+    actionIndex: number | null,
     awaitingConfirmation: boolean,
   ): void {
     this.db
@@ -1047,6 +1052,7 @@ export class ActionResolverService {
         campaignId: encounter.campaignId,
         actorCombatantId: actor.id,
         actionName: resolution.actionName,
+        actionIndex,
         awaitingConfirmation,
         resolutionJson: toJsonText(resolution),
         createdAt: nowIso(),
@@ -1165,12 +1171,16 @@ export class ActionResolverService {
    * cannot authorize or determine WHAT gets applied: `apply()` exclusively re-reads this same
    * row for that purpose.
    */
-  retainPendingChainForConfirmation(encounterId: number, chainId: string): { actionName: string; actorCombatantId: number } | null {
+  retainPendingChainForConfirmation(
+    encounterId: number,
+    chainId: string,
+  ): { actionName: string; actorCombatantId: number; promoted: boolean } | null {
     const pending = this.db
       .select({
         encounterId: actionPendingResolutions.encounterId,
         actionName: actionPendingResolutions.actionName,
         actorCombatantId: actionPendingResolutions.actorCombatantId,
+        awaitingConfirmation: actionPendingResolutions.awaitingConfirmation,
       })
       .from(actionPendingResolutions)
       .where(eq(actionPendingResolutions.id, chainId))
@@ -1182,7 +1192,22 @@ export class ActionResolverService {
       .set({ awaitingConfirmation: true })
       .where(and(eq(actionPendingResolutions.id, chainId), eq(actionPendingResolutions.encounterId, encounterId)))
       .run();
-    return { actionName: pending.actionName, actorCombatantId: pending.actorCombatantId };
+    return {
+      actionName: pending.actionName,
+      actorCombatantId: pending.actorCombatantId,
+      // Only the transition made for this confirmation is reversible when the confirmation
+      // disappears. A player declaration already awaiting a DM must remain retained.
+      promoted: !pending.awaitingConfirmation,
+    };
+  }
+
+  /** Release the temporary TTL exemption created for a collaborative AI confirmation. */
+  releasePendingChainForConfirmation(encounterId: number, chainId: string): void {
+    this.db
+      .update(actionPendingResolutions)
+      .set({ awaitingConfirmation: false })
+      .where(and(eq(actionPendingResolutions.id, chainId), eq(actionPendingResolutions.encounterId, encounterId)))
+      .run();
   }
 
   /**
@@ -1254,6 +1279,9 @@ export class ActionResolverService {
     const { spec } = this.resolveSpec(actor, {
       actorCombatantId: pending.actorCombatantId,
       actionName: pending.actionName,
+      // `actionName` is not unique on character sheets. Persisting the selected index keeps
+      // this current-spec validation paired with the exact action previewed by resolve().
+      ...(pending.actionIndex !== null ? { actionIndex: pending.actionIndex } : {}),
       targetIds: [],
       commit: false,
     }, encounter.campaignId);
