@@ -772,9 +772,21 @@ export type ActionResolveResult = z.infer<typeof ActionResolveResult>;
  * chain (`action_pending_resolutions`, written by `resolve()`) rather than trusting any
  * resolution the caller supplies, so a player can no longer inflate `totalDamage`, per-target
  * deltas, or inject `conditionsAfter`/effect payloads that were never in the resolved spec.
+ *
+ * `actionName`/`actorCombatantId` are OPTIONAL and DISPLAY-ONLY (issue #1451 review). Under
+ * collaborative handoff (#1051) an `apply_action` MCP call can be queued for DM confirmation
+ * before it runs; the confirmation UI (`apps/web/.../toolConfirmationSummary.ts`) can only
+ * describe the call from the arguments it was actually given, and after this fix those
+ * arguments carry nothing but a chain id. The AI driver is told to echo these two fields back
+ * from `resolve_action`'s response purely so the confirmation reads "Apply Fireball by Ember"
+ * instead of an opaque chain id — `ActionResolverService.apply()` NEVER reads either field; the
+ * actor, the action, and every number applied come exclusively from the persisted resolution
+ * `chainId` looks up.
  */
 export const ActionApplyRequest = z.object({
   chainId: z.string().min(1).max(64),
+  actionName: z.string().max(120).optional(),
+  actorCombatantId: z.number().int().optional(),
 });
 export type ActionApplyRequest = z.infer<typeof ActionApplyRequest>;
 

@@ -4512,7 +4512,11 @@ export class McpToolsService {
         'LOOKUP KEY only (issue #1451). The server re-reads the exact resolution it computed and persisted at resolve ' +
         'time, so a caller cannot inflate damage, alter a per-target delta, or inject a condition/effect never in the ' +
         'resolved spec. The DM may apply any resolution; a player only their own character\'s action under an ' +
-        'automatic policy. Returns an undo token that reverses the whole apply.',
+        'automatic policy. Returns an undo token that reverses the whole apply. Also pass back `actionName` and ' +
+        '`actorCombatantId` from resolve_action\'s response when you have them — this call can be queued for DM ' +
+        'confirmation under collaborative handoff, and those two fields are what let the confirmation prompt say ' +
+        '"Apply Fireball by Ember" instead of an opaque chain id. DISPLAY ONLY: they are never used to decide what ' +
+        'gets applied or to whom, only to describe the pending call to a human.',
       { encounterId: Id.describe('Encounter id'), ...ActionApplyRequest.shape },
       async ({ encounterId, ...fields }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);

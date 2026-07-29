@@ -1103,4 +1103,170 @@ describe('action resolver (real SQLite, service layer)', () => {
       /already (been )?applied/i,
     );
   });
+
+  // ---------------------------------------------------------------------------
+  // Issue #1451 review round — Devin/Codex/Kilo findings on the original PR.
+  // ---------------------------------------------------------------------------
+
+  it('#1451 review: a consumed resolution is DELETED, not merely flagged — action_pending_resolutions does not grow unbounded', () => {
+    const { orm, service, encounterId, actor, drake } = seed();
+    const preview = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: false }),
+      alice,
+      'player',
+    );
+    expect(orm.select().from(actionPendingResolutions).where(eq(actionPendingResolutions.id, preview.chainId)).get()).toBeTruthy();
+
+    service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), alice, 'player');
+
+    expect(orm.select().from(actionPendingResolutions).where(eq(actionPendingResolutions.id, preview.chainId)).get()).toBeUndefined();
+  });
+
+  it('#1451 review: an abandoned (never-applied) preview is swept out by TTL on the next resolve for its encounter', () => {
+    const { orm, service, campaignId, encounterId, actor, drake } = seed();
+    // Simulate a preview from 31 minutes ago that the player never applied — inserted directly
+    // so the test does not depend on real wall-clock time.
+    const staleId = 'chain-stale-review-test';
+    orm
+      .insert(actionPendingResolutions)
+      .values({
+        id: staleId,
+        encounterId,
+        campaignId,
+        actorCombatantId: actor,
+        actionName: 'Greatsword',
+        resolutionJson: '{}',
+        createdAt: new Date(Date.now() - 31 * 60 * 1000).toISOString(),
+      })
+      .run();
+    expect(orm.select().from(actionPendingResolutions).where(eq(actionPendingResolutions.id, staleId)).get()).toBeTruthy();
+
+    // ANY resolve on this encounter sweeps its own stale rows — the player need not touch the
+    // abandoned preview at all for it to be reclaimed.
+    service.resolve(encounterId, ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: false }), alice, 'player');
+
+    expect(orm.select().from(actionPendingResolutions).where(eq(actionPendingResolutions.id, staleId)).get()).toBeUndefined();
+  });
+
+  it('#1451 review: an encounter that accumulates too many pending resolutions has the oldest evicted (per-encounter cap)', () => {
+    const { orm, service, campaignId, encounterId, actor, drake } = seed();
+    const now = Date.now();
+    for (let i = 0; i < 205; i++) {
+      orm
+        .insert(actionPendingResolutions)
+        .values({
+          id: `chain-cap-review-test-${i}`,
+          encounterId,
+          campaignId,
+          actorCombatantId: actor,
+          actionName: 'Greatsword',
+          resolutionJson: '{}',
+          // Ascending: index 0 is the OLDEST row, index 204 the newest of the synthetic batch —
+          // all well within the TTL, so only the per-encounter CAP can evict any of these.
+          createdAt: new Date(now - (205 - i) * 1000).toISOString(),
+        })
+        .run();
+    }
+    expect(orm.select().from(actionPendingResolutions).where(eq(actionPendingResolutions.encounterId, encounterId)).all()).toHaveLength(205);
+
+    service.resolve(encounterId, ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: false }), alice, 'player');
+
+    const after = orm.select().from(actionPendingResolutions).where(eq(actionPendingResolutions.encounterId, encounterId)).all();
+    expect(after.length).toBeLessThanOrEqual(200);
+    // The globally oldest synthetic row is gone; a recent one from the same batch survives.
+    expect(after.some((r) => r.id === 'chain-cap-review-test-0')).toBe(false);
+    expect(after.some((r) => r.id === 'chain-cap-review-test-204')).toBe(true);
+  });
+
+  it('#1451 review (Codex): an action narrowed to FEWER targets between resolve and apply cannot still apply its old wider target set', () => {
+    const { orm, service, encounterId, actor, drake, bob, aliceChar } = seed();
+    const preview = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 2, targetIds: [drake, bob], commit: false }),
+      alice,
+      'player',
+    );
+    expect(preview.resolution.targets).toHaveLength(2);
+
+    // The sheet is edited between preview and apply: Fireball narrows from a 6-target AoE to a
+    // single-enemy hit. Validating against a resolve-time snapshot (the pre-review bug) would
+    // still let this stale, wider chain through; the CURRENT spec must not. `apply()` re-looks
+    // up the action by NAME (it has no resolve-time actionIndex to replay), and the fixture
+    // carries two sheet entries both named "Fireball" (DC 1 and DC 21) — narrow BOTH so the
+    // assertion holds regardless of which same-named entry that lookup lands on.
+    const beforeChar = orm.select().from(characters).where(eq(characters.id, aliceChar.id)).get()!;
+    const actions = JSON.parse(beforeChar.actions ?? '[]');
+    for (const a of actions) if (a.name === 'Fireball') a.spec.targets = { count: 1, allow: 'enemy' };
+    orm.update(characters).set({ actions: JSON.stringify(actions) }).where(eq(characters.id, aliceChar.id)).run();
+
+    expect(() => service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), alice, 'player')).toThrow(
+      /targets at most/i,
+    );
+    expect(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.hpCurrent).toBe(60);
+    expect(orm.select().from(combatants).where(eq(combatants.id, bob)).get()!.hpCurrent).toBe(30);
+  });
+
+  it('#1451 review (Codex): an action narrowed to SELF-only between resolve and apply cannot still hit its old enemy target', () => {
+    const { orm, service, encounterId, actor, drake, aliceChar } = seed();
+    const preview = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: false }),
+      alice,
+      'player',
+    );
+    expect(preview.resolution.targets).toHaveLength(1);
+
+    const beforeChar = orm.select().from(characters).where(eq(characters.id, aliceChar.id)).get()!;
+    const actions = JSON.parse(beforeChar.actions ?? '[]');
+    actions[0].spec.targets = { count: 1, allow: 'self' };
+    orm.update(characters).set({ actions: JSON.stringify(actions) }).where(eq(characters.id, aliceChar.id)).run();
+
+    expect(() => service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), alice, 'player')).toThrow(
+      /may only target/i,
+    );
+    expect(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.hpCurrent).toBe(60);
+  });
+
+  it('#1451 review (Kilo, TOCTOU): two "simultaneous" applies of the same chainId — exactly one succeeds and damage lands exactly once', async () => {
+    const { orm, service, encounterId, actor, drake } = seed();
+    const preview = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionName: 'Fireball', actionIndex: 2, targetIds: [drake], commit: false }),
+      alice,
+      'player',
+    );
+    const honestDamage = preview.resolution.targets[0].totalDamage;
+    expect(honestDamage).toBeGreaterThan(0); // DC 21 always fails vs +0 -> always damages (resisted, never zero)
+
+    const attempt = () =>
+      Promise.resolve().then(() => service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), alice, 'player'));
+    const results = await Promise.allSettled([attempt(), attempt()]);
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    expect(results.filter((r) => r.status === 'rejected')).toHaveLength(1);
+
+    const drakeRow = orm.select().from(combatants).where(eq(combatants.id, drake)).get()!;
+    expect(drakeRow.hpCurrent).toBe(60 - honestDamage); // damage landed exactly once, never twice
+  });
+
+  it('#1451 review: actionName/actorCombatantId on the apply request are DISPLAY-ONLY and never influence what gets applied', () => {
+    const { service, encounterId, actor, drake } = seed();
+    const preview = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: false }),
+      alice,
+      'player',
+    );
+
+    const forgedDisplay = ActionApplyRequest.parse({
+      chainId: preview.chainId,
+      actionName: 'Nonexistent Spell',
+      actorCombatantId: 999999,
+    });
+    const { undoToken } = service.apply(encounterId, forgedDisplay, alice, 'player');
+    // The REAL actor/action from the persisted resolution applied — the decoy display fields
+    // (a spell that doesn't exist, a bogus actor id) were never read for authorization or effect.
+    expect(undoToken.actionName).toBe('Greatsword');
+    expect(undoToken.actorCombatantId).toBe(actor);
+  });
 });

@@ -2179,23 +2179,27 @@ export const actionApplyChains = sqliteTable('action_apply_chains', {
 // action spec) against a target they were otherwise allowed to hit, one-shotting it. `apply()`
 // now takes `{ chainId }` only and re-reads the resolution FROM THIS TABLE — the caller's copy
 // of the resolution is never consulted, so the numbers that land are always the server's own
-// roll. `consumedAt` makes a resolution single-use: replaying the same chainId at `/actions/
-// apply` after it has already been applied 400s rather than re-applying (or double-applying)
-// the same consequences.
+// roll.
+//
+// No `targetsAllow` column (review): unlike `action_apply_chains` — which UNDO deliberately
+// snapshots, because undo restores a thing that already happened under the OLD rule — `apply()`
+// always re-validates targeting against the CURRENT spec, never a resolve-time snapshot.
+//
+// No `consumedAt` column (review): a row is DELETED, not flagged, the instant it is claimed
+// (`applyInternal`'s transaction) — this doubles as the single-use replay guard AND bounds this
+// table's growth. An abandoned (never-applied) row is swept by
+// `ActionResolverService.sweepStalePendingResolutions` on a TTL + per-encounter cap, so growth
+// is bounded even for a preview nobody ever applies.
 export const actionPendingResolutions = sqliteTable('action_pending_resolutions', {
   id: text('id').primaryKey(), // the chain id (see ActionResolverService.resolve)
   encounterId: integer('encounter_id').notNull(),
   campaignId: integer('campaign_id').notNull(),
   actorCombatantId: integer('actor_combatant_id').notNull(),
   actionName: text('action_name').notNull().default(''),
-  // The ActionTargetAllow the spec declared AT RESOLVE TIME, replayed at apply for defense in
-  // depth (mirrors action_apply_chains.targetsAllow, the same field undo() already trusts).
-  targetsAllow: text('targets_allow').notNull().default('any'),
   // The full server-computed ActionResolution (issue #414's byte-identical-preview payload),
   // serialized. This — not anything the client sends — is what `applyInternal` ever writes.
   resolutionJson: text('resolution_json').notNull().default('{}'),
   createdAt: text('created_at').notNull(),
-  consumedAt: text('consumed_at'),
 });
 
 // Issue #580: per-intent idempotency for non-idempotent encounter mutations (HP deltas and

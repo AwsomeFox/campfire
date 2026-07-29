@@ -2222,12 +2222,15 @@ CREATE INDEX IF NOT EXISTS idx_action_apply_chains_encounter ON action_apply_cha
 -- resolve() mints for every resolution (preview or committed). /actions/apply takes
 -- { chainId } only and re-reads the resolution from THIS row rather than trusting a
 -- client-echoed ActionResolution — closing the inflated-damage/injected-condition forgery
--- this table exists to prevent. consumed_at makes a resolution single-use.
+-- this table exists to prevent. No targets_allow (apply always re-validates against the
+-- CURRENT spec) and no consumed_at (a row is DELETED, not flagged, the instant it is claimed —
+-- both the replay guard and how this table's growth stays bounded; see
+-- ActionResolverService.sweepStalePendingResolutions for the TTL/cap that reclaims an
+-- abandoned, never-applied row).
 CREATE TABLE IF NOT EXISTS action_pending_resolutions (
   id TEXT PRIMARY KEY, encounter_id INTEGER NOT NULL REFERENCES encounters(id) ON DELETE CASCADE,
   campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE, actor_combatant_id INTEGER NOT NULL,
-  action_name TEXT NOT NULL DEFAULT '', targets_allow TEXT NOT NULL DEFAULT 'any',
-  resolution_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, consumed_at TEXT
+  action_name TEXT NOT NULL DEFAULT '', resolution_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_action_pending_resolutions_encounter ON action_pending_resolutions(encounter_id);
 ${CAMPAIGN_MODULES_DDL}`;

@@ -4324,17 +4324,22 @@ function migrateActionApplyChains1449(sqlite: Database.Database): void {
  * `totalDamage`/`healing`/`effects` verbatim — a player could inflate a previewed 6-damage hit
  * to an arbitrary number (or inject a condition never in the action spec) by re-POSTing an
  * edited copy of the object the preview handed them. `apply()` now takes `{ chainId }` only and
- * re-reads the resolution from THIS table; the caller's copy is never consulted. `consumed_at`
- * makes a resolution single-use, the same replay guard `action_apply_chains.undone_at` (#1449)
- * already established for undo.
+ * re-reads the resolution from THIS table; the caller's copy is never consulted.
+ *
+ * No `targets_allow` column: `apply()` always re-validates targeting against the CURRENT spec,
+ * never a resolve-time snapshot (review — see ActionResolverService.apply's doc comment).
+ *
+ * No `consumed_at` column: a row is DELETED, not flagged, the instant `applyInternal` claims it
+ * — a single atomic step that is both the replay guard (mirrors `action_apply_chains.undone_at`
+ * from #1449, just via delete) and how this table's growth stays bounded. An abandoned row is
+ * swept on a TTL + per-encounter cap (`ActionResolverService.sweepStalePendingResolutions`).
  */
 function migrateActionPendingResolutions1451(sqlite: Database.Database): void {
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS action_pending_resolutions (
       id TEXT PRIMARY KEY, encounter_id INTEGER NOT NULL REFERENCES encounters(id) ON DELETE CASCADE,
       campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE, actor_combatant_id INTEGER NOT NULL,
-      action_name TEXT NOT NULL DEFAULT '', targets_allow TEXT NOT NULL DEFAULT 'any',
-      resolution_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, consumed_at TEXT
+      action_name TEXT NOT NULL DEFAULT '', resolution_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_action_pending_resolutions_encounter ON action_pending_resolutions(encounter_id);
   `);
