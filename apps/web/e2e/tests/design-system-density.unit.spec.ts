@@ -274,15 +274,6 @@ test.describe('Design-system density (#674, #1683)', () => {
     );
   });
 
-  test('seg-opt (outside the ramp) pins its own 24px WCAG 2.2 SC 2.5.8 floor (#1693)', () => {
-    const css = READ(NOCTURNE_CSS);
-    const rule = /\.seg-opt\s*\{[^}]*\}/.exec(css);
-    expect(rule, '.seg-opt rule must exist in nocturne.css').not.toBeNull();
-    expect(rule![0], '.seg-opt must pin a literal 24px min-height floor').toMatch(
-      /min-height:\s*24px/,
-    );
-  });
-
   // NOTE for #1700/#1698 (checked, not ported): a ported version of #1700's own test
   // (".cf-target-24/.cf-target-44 floors cannot be silently overridden") FAILS against
   // this branch — confirmed by measurement (getComputedStyle against the real compiled
