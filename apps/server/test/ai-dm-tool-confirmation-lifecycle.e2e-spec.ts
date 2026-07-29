@@ -252,6 +252,46 @@ describe('ai-dm tool confirmations — reaching a DM who is not looking (#1558)'
     release.mockRestore();
   });
 
+  it('#1451: duplicate confirmations retain a shared chain until the final confirmation disappears', async () => {
+    const campaignId = await armed('Retain Duplicate Action Confirmations');
+    const driver = h.ctx.app.get(AiDriverService);
+    const resolver = h.ctx.app.get(ActionResolverService);
+    driver.setCollaborative(campaignId, true);
+    const retain = jest
+      .spyOn(resolver, 'retainPendingChainForConfirmation')
+      .mockReturnValueOnce({ actionName: 'Fireball', actorCombatantId: 42, promoted: true })
+      .mockReturnValueOnce({ actionName: 'Fireball', actorCombatantId: 42, promoted: false });
+    const release = jest.spyOn(resolver, 'releasePendingChainForConfirmation');
+
+    h.script({
+      text: 'Holding duplicate calls for approval.',
+      toolCalls: [
+        { id: 'c-duplicate-1', name: 'apply_action', arguments: { encounterId: 1, chainId: 'chain-duplicate-confirmation' } },
+        { id: 'c-duplicate-2', name: 'apply_action', arguments: { encounterId: 1, chainId: 'chain-duplicate-confirmation' } },
+      ],
+      usage: { promptTokens: 6, completionTokens: 4, totalTokens: 10 },
+    });
+    h.script({ text: 'Waiting on the DM.', usage: { promptTokens: 4, completionTokens: 3, totalTokens: 7 } });
+    await h.sendMessage(campaignId, { input: 'cast it' });
+
+    const queued = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/tool-confirmations`).set(dm);
+    expect(queued.body).toHaveLength(2);
+    for (const confirmation of queued.body) {
+      const rejected = await request(h.server)
+        .post(`/api/v1/campaigns/${campaignId}/ai-dm/tool-confirmation`)
+        .set(dm)
+        .send({ action: 'reject', confirmationId: confirmation.id });
+      expect(rejected.status).toBe(201);
+      if (confirmation === queued.body[0]) {
+        expect(release).not.toHaveBeenCalled();
+      }
+    }
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(release).toHaveBeenCalledWith(1, 'chain-duplicate-confirmation');
+    retain.mockRestore();
+    release.mockRestore();
+  });
+
   it('approving through the endpoint the UI now calls actually resolves the queue', async () => {
     const campaignId = await armed('Resolve Clears');
     h.script({

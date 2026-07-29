@@ -1087,6 +1087,27 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(() => service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), alice, 'player')).not.toThrow();
   });
 
+  it('#1451 review: a selected action shifted to a different name before apply is rejected', () => {
+    const { orm, service, encounterId, actor, drake, aliceChar } = seed();
+    const preview = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: false }),
+      alice,
+      'player',
+    );
+    const character = orm.select().from(characters).where(eq(characters.id, aliceChar.id)).get()!;
+    const actions = JSON.parse(character.actions ?? '[]');
+    // The old index 0 now identifies a different, permissive action. Applying the saved
+    // Greatsword resolution against that replacement would validate the wrong current spec.
+    actions.unshift({ ...fireball(21), name: 'Replacement Action' });
+    orm.update(characters).set({ actions: JSON.stringify(actions) }).where(eq(characters.id, aliceChar.id)).run();
+
+    expect(() => service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), alice, 'player')).toThrow(
+      /changed or moved/i,
+    );
+    expect(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.hpCurrent).toBe(60);
+  });
+
   it('#1451: an unknown chainId is rejected, and a chainId from a different encounter is rejected', () => {
     const { orm, service, campaignId, encounterId, actor, drake } = seed();
     expect(() => service.apply(encounterId, ActionApplyRequest.parse({ chainId: 'chain-never-resolved' }), alice, 'player')).toThrow(

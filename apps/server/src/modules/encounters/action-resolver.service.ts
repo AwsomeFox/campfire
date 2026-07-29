@@ -402,6 +402,9 @@ export class ActionResolverService {
       }
       const raw = actions[idx];
       const name = String(raw?.name ?? 'Action');
+      if (req.actionIndex !== undefined && req.actionName && name !== req.actionName) {
+        throw new BadRequestException(`Action "${req.actionName}" changed or moved before it could be applied.`);
+      }
       const parsed = ActionSpec.safeParse(raw?.spec);
       if (!parsed.success || !isResolvableSpec(parsed.data)) {
         throw new BadRequestException(
@@ -422,6 +425,9 @@ export class ActionResolverService {
       throw new NotFoundException(`Action ${req.actionName ?? req.actionIndex} not found on this combatant.`);
     }
     const action = statActions[idx];
+    if (req.actionIndex !== undefined && req.actionName && action.name !== req.actionName) {
+      throw new BadRequestException(`Action "${req.actionName}" changed or moved before it could be applied.`);
+    }
     const parsed = ActionSpec.safeParse(action.spec);
     if (!parsed.success || !isResolvableSpec(parsed.data)) {
       throw new BadRequestException(

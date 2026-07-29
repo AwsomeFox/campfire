@@ -2444,7 +2444,9 @@ export class AiDriverService {
     // A restart deliberately discards confirmations rather than restoring a stale authority
     // grant. Undo the matching temporary action-chain retention at the same time, otherwise an
     // abandoned collaborative preview is permanently exempt from the pending-resolution TTL.
-    for (const confirmation of r.confirmationsDiscarded) this.releaseRetainedActionChain(confirmation);
+    for (const retained of this.distinctRetainedActionChains(r.confirmationsDiscarded)) {
+      this.actionResolver?.releasePendingChainForConfirmation(retained.encounterId, retained.chainId);
+    }
 
     if (r.voteExpired) {
       parts.push('an open table vote lapsed');
@@ -5320,7 +5322,11 @@ export class AiDriverService {
             chainId: args.chainId,
             ...(described ? { actionName: described.actionName, actorCombatantId: described.actorCombatantId } : {}),
           };
-          if (described?.promoted && argChainId && Number.isFinite(argEncounterId)) {
+          if (
+            argChainId
+            && Number.isFinite(argEncounterId)
+            && (described?.promoted || this.hasRetainedActionChain(session, argEncounterId, argChainId))
+          ) {
             retainedActionChain = { encounterId: argEncounterId, chainId: argChainId };
           }
         }
@@ -5631,8 +5637,9 @@ export class AiDriverService {
    * exist (restart, handled loudly by #1042; and this cap). The consistent answer, and the one
    * #1042 established, is that a grant may be discarded but never in silence.
    */
-  private announceEvictedConfirmation(campaignId: number, evicted: AiDmPendingToolConfirmation): void {
-    this.releaseRetainedActionChain(evicted);
+  private announceEvictedConfirmation(session: AiDmSessionState, evicted: AiDmPendingToolConfirmation): void {
+    const campaignId = session.campaignId;
+    this.releaseRetainedActionChain(session, evicted);
     void this.audit
       .log({
         actor: `ai-dm-seat:${campaignId}`,
@@ -5682,7 +5689,7 @@ export class AiDriverService {
       // queues roughly four per combat turn, so five turns of an inattentive DM now silently
       // discards their oldest decision. Same treatment as #1042's discarded grants: one audit
       // row naming the call, and a signal that reconciles the DM's queue.
-      if (evicted) this.announceEvictedConfirmation(session.campaignId, evicted);
+      if (evicted) this.announceEvictedConfirmation(session, evicted);
     }
 
     const pending: AiDmPendingToolConfirmation = {
@@ -5996,11 +6003,27 @@ export class AiDriverService {
     return Object.values(session.pendingToolConfirmations ?? {});
   }
 
-  /** Release only a chain this confirmation itself promoted into the retained state. */
-  private releaseRetainedActionChain(confirmation: AiDmPendingToolConfirmation): void {
+  /** Whether another pending confirmation still owns this temporary chain retention. */
+  private hasRetainedActionChain(session: AiDmSessionState, encounterId: number, chainId: string): boolean {
+    return Object.values(session.pendingToolConfirmations ?? {}).some(
+      (confirmation) => confirmation.retainedActionChain?.encounterId === encounterId && confirmation.retainedActionChain.chainId === chainId,
+    );
+  }
+
+  /** Release only the last confirmation's ownership of a temporary chain retention. */
+  private releaseRetainedActionChain(session: AiDmSessionState, confirmation: AiDmPendingToolConfirmation): void {
     const retained = confirmation.retainedActionChain;
-    if (!retained) return;
+    if (!retained || this.hasRetainedActionChain(session, retained.encounterId, retained.chainId)) return;
     this.actionResolver?.releasePendingChainForConfirmation(retained.encounterId, retained.chainId);
+  }
+
+  private distinctRetainedActionChains(confirmations: AiDmPendingToolConfirmation[]): Array<{ encounterId: number; chainId: string }> {
+    const retained = new Map<string, { encounterId: number; chainId: string }>();
+    for (const confirmation of confirmations) {
+      const chain = confirmation.retainedActionChain;
+      if (chain) retained.set(`${chain.encounterId}:${chain.chainId}`, chain);
+    }
+    return [...retained.values()];
   }
 
   /**
@@ -6033,7 +6056,7 @@ export class AiDriverService {
     this.persistControlState(session);
 
     if (action === 'reject') {
-      this.releaseRetainedActionChain(pending);
+      this.releaseRetainedActionChain(session, pending);
       await this.audit.log({
         actor: auditActor(granter),
         actorRole: role,
@@ -6059,7 +6082,7 @@ export class AiDriverService {
     const res = await seatToolset.call(pending.tool, pending.args);
     // A failed approved call also consumed its confirmation without consuming its action chain.
     // Let the ordinary preview sweep reclaim it instead of leaving an immortal pending row.
-    if (res.isError) this.releaseRetainedActionChain(pending);
+    if (res.isError) this.releaseRetainedActionChain(session, pending);
 
     if (!res.isError && DRIVER_LOOT_COMBAT_LOG_TOOLS.has(pending.tool)) {
       const detail = formatDriverLootCombatLogDetail(pending.tool, pending.args);
