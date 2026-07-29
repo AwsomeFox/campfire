@@ -3062,6 +3062,117 @@ describe('encounters — issue #57: temp HP / death saves / overkill (e2e)', () 
 });
 
 // ---------------------------------------------------------------------------
+// Issue #1462 — the d20 that resolves a death save must be the one in the
+// campaign's shared dice tray. The face is server-owned: neither REST nor MCP
+// callers may submit it through the generic combatant PATCH.
+// ---------------------------------------------------------------------------
+
+describe('encounters — issue #1462: authoritative death-save rolls (e2e)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let encounterId: number;
+  let heroCombatantId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'One True d20' })).body.id;
+    await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Nyx', hpCurrent: 12, hpMax: 12, ownerUserId: 'dev:p-1' });
+    const encounter = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Last Breath', hidden: false });
+    encounterId = encounter.body.id;
+    heroCombatantId = encounter.body.combatants[0].id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  async function setDying(): Promise<void> {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}`)
+      .set(dm)
+      .send({ hpSet: 0 });
+    expect(res.status).toBe(200);
+    expect(res.body.deathState).toBe('dying');
+  }
+
+  async function setConscious(): Promise<void> {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}`)
+      .set(dm)
+      .send({ hpSet: 12 });
+    expect(res.status).toBe(200);
+  }
+
+  it('rejects a caller-selected deathSaveRoll on the generic PATCH', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}`)
+      .set(player)
+      .send({ deathSaveRoll: 20 });
+    expect(res.status).toBe(400);
+  });
+
+  it('uses exactly the logged natural 1 to add two failures', async () => {
+    const server = ctx.app.getHttpServer();
+    await setDying();
+    const service = ctx.app.get(EncountersService);
+    const rollSpy = jest.spyOn(service as any, 'rollDeathSaveD20').mockReturnValue({ expr: '1d20', rolls: [1], total: 1 });
+
+    const res = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}/death-save`)
+      .set(player)
+      .send({});
+
+    expect(res.status).toBe(201);
+    expect(rollSpy).toHaveBeenCalledTimes(1);
+    expect(res.body.roll).toMatchObject({ expr: '1d20', rolls: [1], total: 1, label: 'Nyx · death save' });
+    expect(res.body.combatant).toMatchObject({ deathState: 'dying', deathSaveSuccesses: 0, deathSaveFailures: 2 });
+
+    const feed = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(player);
+    const matching = feed.body.filter((roll: { label?: string }) => roll.label === 'Nyx · death save');
+    expect(matching).toHaveLength(1);
+    expect(matching[0]).toMatchObject({ expr: '1d20', rolls: [1], total: 1 });
+    const audits = await ctx.app
+      .get<DrizzleDb>(DB)
+      .select()
+      .from(auditLog)
+      .where(eq(auditLog.action, 'encounter.combatant.death_save_roll'));
+    expect(audits).toEqual(expect.arrayContaining([expect.objectContaining({ campaignId, entityId: heroCombatantId, actor: 'dev:p-1' })]));
+    rollSpy.mockRestore();
+  });
+
+  it('uses exactly the logged natural 20 to revive the character', async () => {
+    const server = ctx.app.getHttpServer();
+    await setConscious();
+    await setDying();
+    const service = ctx.app.get(EncountersService);
+    const rollSpy = jest.spyOn(service as any, 'rollDeathSaveD20').mockReturnValue({ expr: '1d20', rolls: [20], total: 20 });
+
+    const res = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}/death-save`)
+      .set(player)
+      .send({});
+
+    expect(res.status).toBe(201);
+    expect(rollSpy).toHaveBeenCalledTimes(1);
+    expect(res.body.roll).toMatchObject({ expr: '1d20', rolls: [20], total: 20, label: 'Nyx · death save' });
+    expect(res.body.combatant).toMatchObject({ hpCurrent: 1, deathState: 'none', deathSaveSuccesses: 0, deathSaveFailures: 0 });
+
+    const feed = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(player);
+    const matching = feed.body.filter((roll: { label?: string }) => roll.label === 'Nyx · death save');
+    expect(matching).toHaveLength(2);
+    expect(matching[0]).toMatchObject({ expr: '1d20', rolls: [20], total: 20 });
+    rollSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Issue #114 — combatant identity: count-add distinguishable copies, and
 // rename / hpMax / initMod edits via CombatantUpdate.
 // ---------------------------------------------------------------------------

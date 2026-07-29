@@ -4314,8 +4314,7 @@ export class McpToolsService {
       'update_combatant',
       'Update a combatant mid-fight: hpDelta (relative) or hpSet (absolute, exclusive with hpDelta), hpTemp ' +
         '(temp-HP pool, absorbs damage first), deathSaveSuccesses/deathSaveFailures (0–3; 3 failures = dead, 3 ' +
-        'successes = stable), deathSaveRoll (a d20 death-save result; 5e crit/fumble rules: nat 1 = two failures, ' +
-        'nat 20 = revive at 1 HP, 10–19 = one success, 2–9 = one failure), addConditions/removeConditions. ' +
+        'successes = stable), addConditions/removeConditions. Use roll_death_save for a server-authoritative d20. ' +
         'addConditions for a non-DM must use the active rule system\'s condition vocabulary (400 otherwise); ' +
         'the DM may mint custom condition labels. ' +
         'actorId (optional): the combatant who dealt the damage/heal/death, used to attribute the combat-log ' +
@@ -4331,6 +4330,19 @@ export class McpToolsService {
         const role = await this.access.requireRole(user, row.campaignId, 'player');
         const validated = CombatantUpdate.parse(fields);
         return this.encounters.updateCombatant(encounterId as number, combatantId as number, validated, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'roll_death_save',
+      'Roll exactly one server-authoritative d20 for a dying character combatant. The same face drives the 5e death-save outcome and one shared dice-log entry; callers cannot choose the result.',
+      { encounterId: Id.describe('Encounter id'), combatantId: Id.describe('Dying character combatant id — from get_encounter') },
+      async ({ encounterId, combatantId }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'player');
+        return this.encounters.rollDeathSave(encounterId as number, combatantId as number, user, role);
       },
     );
 

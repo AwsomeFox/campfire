@@ -7,7 +7,7 @@ import { CampaignAccessService } from '../membership/campaign-access.service';
 import { contentDispositionHeader } from '../attachments/filename';
 import { DERIVATIVE_VARIANT_NAMES, isDerivativeVariantName } from '../attachments/image-derivatives';
 import { EncountersService } from './encounters.service';
-import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterEscalationUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, EncounterNextTurnDto, RollRequestDto, ActionRollRequestDto, ManualRollRequestDto, MapPingDto, ActionResolveRequestDto, ActionApplyRequestDto, ActionUndoTokenDto, TokenBatchPreviewDto, TokenBatchApplyDto, TokenBatchUndoDto, SavedTokenFormationDto } from './encounters.dto';
+import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterEscalationUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, DeathSaveRollDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, EncounterNextTurnDto, RollRequestDto, ActionRollRequestDto, ManualRollRequestDto, MapPingDto, ActionResolveRequestDto, ActionApplyRequestDto, ActionUndoTokenDto, TokenBatchPreviewDto, TokenBatchApplyDto, TokenBatchUndoDto, SavedTokenFormationDto } from './encounters.dto';
 import { EncounterMapService } from './encounter-map.service';
 import { ActionResolverService } from './action-resolver.service';
 import type { Request, Response } from 'express';
@@ -508,6 +508,26 @@ export class EncountersController {
     const row = await this.encounters.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'player');
     return this.encounters.updateCombatant(id, cid, body, user, role);
+  }
+
+  @Post(':id/combatants/:cid/death-save')
+  @ApiOperation({
+    summary: 'Roll a death save',
+    description:
+      'The server rolls exactly one d20 for a dying character combatant, applies that same face to the 5e death-save lifecycle, audits the write, and records one matching campaign-shared dice-log entry. The caller cannot provide a die result.',
+  })
+  @ApiResponse({ status: 201, description: 'The updated combatant and the single authoritative dice-log roll.' })
+  @ApiResponse({ status: 400, description: 'Combatant is not a dying character.' })
+  @ApiResponse({ status: 403, description: 'Not the DM or owning player, or campaign is archived.' })
+  async rollDeathSave(
+    @Param('id', ParseIntPipe) id: number,
+    @Param('cid', ParseIntPipe) cid: number,
+    @Body() _body: DeathSaveRollDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireRole(user, row.campaignId, 'player');
+    return this.encounters.rollDeathSave(id, cid, user, role);
   }
 
   @Post(':id/token-batches/preview') @HttpCode(200)

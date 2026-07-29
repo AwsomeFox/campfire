@@ -78,6 +78,8 @@ type EncounterEscalationUpdateInput = z.infer<typeof EncounterEscalationUpdate>;
 type EncounterReopenInput = z.infer<typeof EncounterReopen>;
 type CombatantCreateInput = z.infer<typeof CombatantCreate>;
 type CombatantUpdateInput = z.infer<typeof CombatantUpdate>;
+/** Server-only field: public REST/MCP schemas deliberately cannot supply a death-save face. */
+type CombatantInternalUpdateInput = CombatantUpdateInput & { deathSaveRoll?: number };
 type RollRequestInput = z.infer<typeof RollRequest>;
 type ActionRollRequestInput = z.infer<typeof ActionRollRequest>;
 type ManualRollRequestInput = z.infer<typeof ManualRollRequest>;
@@ -3106,10 +3108,57 @@ export class EncountersService {
    * (hpDelta, hpSet, hpTemp, deathSave counters, add/removeConditions), and only on a
    * combatant whose characterId links to a character THEY own — everything else 403s.
    */
+  async rollDeathSave(
+    encounterId: number,
+    combatantId: number,
+    user: RequestUser,
+    role: Role,
+  ): Promise<{ combatant: Combatant; roll: DiceRoll }> {
+    const encounter = await this.getRowOrThrow(encounterId);
+    this.assertMutable(encounter);
+    const combatant = await this.getCombatantRowOrThrow(encounterId, combatantId);
+
+    // Keep the action narrow and authoritative: the endpoint is only meaningful for an
+    // actual dying character. The generic PATCH still permits manual DM counter edits,
+    // but never a client-selected die face.
+    if (combatant.kind !== 'character' || combatant.hpCurrent !== 0 || combatant.deathState !== 'dying') {
+      throw new BadRequestException('Only a dying character at 0 HP can roll a death save');
+    }
+    if (role !== 'dm') {
+      if (combatant.characterId === null) throw new ForbiddenException('Only dm may modify this combatant');
+      const [character] = await this.db.select().from(characters).where(eq(characters.id, combatant.characterId)).limit(1);
+      if (!character || character.ownerUserId !== user.id) {
+        throw new ForbiddenException('Only dm or the owning player may roll this death save');
+      }
+    }
+
+    const result = this.rollDeathSaveD20();
+    result.label = `${combatant.name} · death save`;
+    const updated = await this.updateCombatant(encounterId, combatantId, { deathSaveRoll: result.total }, user, role);
+    const roll = await this.rolls.record(encounter.campaignId, result, user);
+
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'encounter.combatant.death_save_roll',
+      entityType: 'combatant',
+      entityId: combatantId,
+      campaignId: encounter.campaignId,
+      detail: `${combatant.name}: d20 ${result.total}`,
+    });
+
+    return { combatant: updated, roll };
+  }
+
+  /** Kept as a seam for deterministic death-save endpoint regressions. */
+  private rollDeathSaveD20(): RollResult {
+    return rollDice('1d20');
+  }
+
   async updateCombatant(
     encounterId: number,
     combatantId: number,
-    patch: CombatantUpdateInput,
+    patch: CombatantInternalUpdateInput,
     user: RequestUser,
     role: Role,
   ): Promise<Combatant> {

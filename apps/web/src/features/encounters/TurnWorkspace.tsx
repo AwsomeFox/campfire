@@ -38,7 +38,6 @@ interface TurnWorkspaceProps {
   /** When true, conflict-prone turn controls stay disabled (issue #471). */
   actionsDisabled?: boolean;
   onRollDeathSave?: (combatant: { id: number; name: string }) => void;
-  onPatchCombatant?: (combatantId: number, patch: Record<string, unknown>) => void;
   /** Issue #425: DM uses a suggested monster action from the turn workspace. */
   onUseSuggestedAction?: (actionIndex: number, actionName: string, spec: ActionSpec) => void;
 }
@@ -93,7 +92,6 @@ export function TurnWorkspace({
   currentTurnState,
   actionsDisabled = false,
   onRollDeathSave,
-  onPatchCombatant,
   onUseSuggestedAction,
 }: TurnWorkspaceProps) {
   const { t } = useTranslation();
@@ -216,14 +214,9 @@ export function TurnWorkspace({
               className="btn btn-primary min-h-[44px] min-w-[44px] px-4 py-2 font-bold text-sm flex items-center gap-1.5"
               data-testid="turn-roll-death-save"
               aria-label={`Roll a death save for ${turn.current.name}`}
-              disabled={controlsDisabled}
+              disabled={controlsDisabled || !onRollDeathSave}
               onClick={() => {
-                if (onRollDeathSave && turn.current) {
-                  onRollDeathSave({ id: turn.current.combatantId, name: turn.current.name });
-                } else if (onPatchCombatant && turn.current) {
-                  const face = 1 + Math.floor(Math.random() * 20);
-                  onPatchCombatant(turn.current.combatantId, { deathSaveRoll: face });
-                }
+                if (onRollDeathSave && turn.current) onRollDeathSave({ id: turn.current.combatantId, name: turn.current.name });
               }}
             >
               🎲 Roll Death Save
