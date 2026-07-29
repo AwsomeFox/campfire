@@ -1944,6 +1944,16 @@ export class CharactersService {
     const undoResult = { batchId, undone: true };
     const touchedEncounterIds = new Set<number>();
     this.db.transaction((tx) => {
+      // An older batch must never undo through a newer overlapping recovery,
+      // even when both happened to produce identical sheet values (two long
+      // rests are the common case). Batch ids are allocated at preview time,
+      // so every later applied recovery has a greater id.
+      const later = tx.select({ afterJson: partyRestBatches.afterJson }).from(partyRestBatches)
+        .where(and(eq(partyRestBatches.campaignId, campaignId), eq(partyRestBatches.status, 'applied'), sql`${partyRestBatches.id} > ${batchId}`)).all();
+      const targetIds = new Set(before.map((snapshot) => snapshot.id));
+      if (later.some((row) => fromJsonText<Array<{ characterId: number }>>(row.afterJson, []).some((item) => targetIds.has(item.characterId)))) {
+        throw new ConflictException('A later recovery changed a participant; undo the newest recovery first.');
+      }
       // Compare the exact recorded after-state *inside* this transaction, then
       // include it in every update predicate.  A concurrent sheet write therefore
       // makes the whole undo roll back instead of resurrecting stale state.
