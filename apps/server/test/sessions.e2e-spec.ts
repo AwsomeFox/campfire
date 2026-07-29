@@ -140,6 +140,21 @@ describe('sessions (e2e) — retries ignore trashed sessions (#1491)', () => {
     expect(replacement.status).toBe(201);
     expect((await request(server).post(`/api/v1/sessions/${first.body.id}/restore`).set(dm)).status).toBe(409);
   });
+
+  it('prevents restoring a trashed session after PATCH reuses its number', async () => {
+    const server = ctx.app.getHttpServer();
+    const trashed = await request(server).post(`/api/v1/campaigns/${campaignId}/sessions`).set(dm).send({ number: 78 });
+    expect(trashed.status).toBe(201);
+    expect((await request(server).delete(`/api/v1/sessions/${trashed.body.id}`).set(dm)).status).toBe(200);
+
+    const live = await request(server).post(`/api/v1/campaigns/${campaignId}/sessions`).set(dm).send({ number: 79 });
+    expect(live.status).toBe(201);
+    const patched = await request(server).patch(`/api/v1/sessions/${live.body.id}`).set(dm).send({ number: 78 });
+    expect(patched.status).toBe(200);
+    expect(patched.body.number).toBe(78);
+
+    expect((await request(server).post(`/api/v1/sessions/${trashed.body.id}/restore`).set(dm)).status).toBe(409);
+  });
 });
 
 /**

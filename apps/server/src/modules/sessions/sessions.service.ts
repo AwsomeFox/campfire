@@ -371,15 +371,6 @@ export class SessionsService {
     return row.title ? `Session ${row.number}: ${row.title}` : `Session ${row.number}`;
   }
 
-  /** Session `number` must be unique within a campaign — 409 on a duplicate. */
-  private async assertNumberAvailable(campaignId: number, number: number, excludeId?: number): Promise<void> {
-    const conflict = excludeId
-      ? and(eq(sessions.campaignId, campaignId), eq(sessions.number, number), ne(sessions.id, excludeId), notDeleted(sessions.deletedAt))
-      : and(eq(sessions.campaignId, campaignId), eq(sessions.number, number), notDeleted(sessions.deletedAt));
-    const [row] = await this.db.select({ id: sessions.id }).from(sessions).where(conflict).limit(1);
-    if (row) throw new ConflictException(`Session number ${number} already exists in this campaign`);
-  }
-
   async create(campaignId: number, input: SessionCreateInput, user: RequestUser, role: Role): Promise<Session> {
     const ts = nowIso();
     const recap = input.recap ?? '';
@@ -546,9 +537,6 @@ export class SessionsService {
     // Optimistic concurrency (#157): 409 if the caller's expectedUpdatedAt is stale,
     // BEFORE any write or revision snapshot, so a losing writer never clobbers.
     this.revisions.assertNotStale(existing, opts?.expectedUpdatedAt);
-    if (input.number !== undefined) {
-      await this.assertNumberAvailable(existing.campaignId, input.number, id);
-    }
     const shouldLinkSchedule = input.scheduledSessionId != null && input.scheduledSessionId !== existing.scheduledSessionId;
     // An explicit `scheduledSessionId: null` is an UNLINK, not a plain column write —
     // it has to clear the schedule's side too, or the schedule stays 'completed' with
@@ -590,6 +578,24 @@ export class SessionsService {
     // nothing, and a committed edit never leaves a half-link.
     const updatePatch = shouldLinkSchedule || shouldUnlinkSchedule ? restInput : input;
     const written = this.db.transaction((tx) => {
+      // Keep the live-number guard in the same synchronous SQLite transaction as
+      // the write. Otherwise a concurrent restore can pass its own guard after
+      // this pre-check but before this PATCH commits, leaving two live sessions
+      // with one number.
+      if (input.number !== undefined) {
+        const [conflict] = tx
+          .select({ id: sessions.id })
+          .from(sessions)
+          .where(and(
+            eq(sessions.campaignId, existing.campaignId),
+            eq(sessions.number, input.number),
+            ne(sessions.id, id),
+            notDeleted(sessions.deletedAt),
+          ))
+          .limit(1)
+          .all();
+        if (conflict) throw new ConflictException(`Session number ${input.number} already exists in this campaign`);
+      }
       const [updated] = tx
         .update(sessions)
         .set({ ...updatePatch, updatedAt: nowIso() })
