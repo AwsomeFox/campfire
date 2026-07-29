@@ -1870,10 +1870,7 @@ export function appendUntrustedToolResult(
  * projection was retrieved but never shown to the model and cannot support a citation.
  */
 export function visibleUntrustedPromptData(input: string): string {
-  const text = input ?? '';
-  if (text.length <= MAX_UNTRUSTED_PROMPT_DATA_CHARS) return text;
-  const projected = boundedJsonProjection(text, MAX_UNTRUSTED_PROMPT_DATA_CHARS);
-  return projected ?? text.slice(0, MAX_UNTRUSTED_PROMPT_DATA_CHARS);
+  return untrustedPromptDataView(input).text;
 }
 
 /**
@@ -1881,14 +1878,23 @@ export function visibleUntrustedPromptData(input: string): string {
  * rather than returning an invalid raw substring. Stop at the first partial child to preserve
  * source order: later values were not visible and must not become citeable.
  */
-function boundedJsonProjection(text: string, maxChars: number): string | null {
+function untrustedPromptDataView(input: string): { text: string; truncated: boolean } {
+  const text = input ?? '';
+  if (text.length <= MAX_UNTRUSTED_PROMPT_DATA_CHARS) return { text, truncated: false };
+  const projection = boundedJsonProjection(text, MAX_UNTRUSTED_PROMPT_DATA_CHARS);
+  return projection ?? { text: text.slice(0, MAX_UNTRUSTED_PROMPT_DATA_CHARS), truncated: true };
+}
+
+function boundedJsonProjection(text: string, maxChars: number): { text: string; truncated: boolean } | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch {
     return null;
   }
-  return JSON.stringify(projectJsonValue(parsed, maxChars));
+  const complete = JSON.stringify(parsed);
+  if (complete.length <= maxChars) return { text: complete, truncated: false };
+  return { text: JSON.stringify(projectJsonValue(parsed, maxChars)), truncated: true };
 }
 
 function projectJsonValue(value: unknown, maxChars: number): unknown {
@@ -1961,8 +1967,9 @@ function projectChildWithinBudget(
 function fenceUntrustedPromptText(input: string, start: string, end: string, maxChars?: number): string {
   const original = input ?? '';
   let bounded = original;
-  if (maxChars !== undefined && original.length > maxChars) {
-    bounded = `${visibleUntrustedPromptData(original)}\n[TRUNCATED_UNTRUSTED_DATA]`;
+  if (maxChars !== undefined) {
+    const view = untrustedPromptDataView(original);
+    bounded = view.truncated ? `${view.text}\n[TRUNCATED_UNTRUSTED_DATA]` : view.text;
   }
   const neutralized = bounded
     // Drop control chars (keep normal whitespace) that could scramble the framing.
