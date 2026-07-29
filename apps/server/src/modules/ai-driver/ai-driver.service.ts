@@ -1894,10 +1894,25 @@ function boundedJsonProjection(text: string, maxChars: number): { text: string; 
   }
   const complete = JSON.stringify(parsed);
   if (complete.length <= maxChars) return { text: complete, truncated: false };
-  return { text: JSON.stringify(projectJsonValue(parsed, maxChars)), truncated: true };
+  const budget = { attempts: 0, exhausted: false };
+  const projected = projectJsonValue(parsed, maxChars, budget);
+  // Projection is intentionally best-effort. A deeply nested attacker-controlled value would
+  // otherwise multiply the binary-search work at each level; use the existing raw-prefix
+  // fallback when the fixed projection budget is exhausted.
+  if (budget.exhausted) return null;
+  return { text: JSON.stringify(projected), truncated: true };
 }
 
-function projectJsonValue(value: unknown, maxChars: number): unknown {
+const JSON_PROJECTION_MAX_DEPTH = 6;
+const JSON_PROJECTION_MAX_ATTEMPTS = 4_096;
+
+type JsonProjectionBudget = { attempts: number; exhausted: boolean };
+
+function projectJsonValue(value: unknown, maxChars: number, budget: JsonProjectionBudget, depth = 0): unknown {
+  if (budget.exhausted || depth > JSON_PROJECTION_MAX_DEPTH || ++budget.attempts > JSON_PROJECTION_MAX_ATTEMPTS) {
+    budget.exhausted = true;
+    return null;
+  }
   const serialized = JSON.stringify(value);
   if (serialized !== undefined && serialized.length <= maxChars) return value;
   if (typeof value === 'string') {
@@ -1918,7 +1933,13 @@ function projectJsonValue(value: unknown, maxChars: number): unknown {
         projected.push(child);
         continue;
       }
-      const partial = projectChildWithinBudget(child, maxChars, (candidate) => [...projected, candidate]);
+      const partial = projectChildWithinBudget(
+        child,
+        maxChars,
+        (candidate) => [...projected, candidate],
+        budget,
+        depth + 1,
+      );
       if (partial !== undefined) projected.push(partial);
       break;
     }
@@ -1932,7 +1953,13 @@ function projectJsonValue(value: unknown, maxChars: number): unknown {
         projected[key] = child;
         continue;
       }
-      const partial = projectChildWithinBudget(child, maxChars, (candidate) => ({ ...projected, [key]: candidate }));
+      const partial = projectChildWithinBudget(
+        child,
+        maxChars,
+        (candidate) => ({ ...projected, [key]: candidate }),
+        budget,
+        depth + 1,
+      );
       if (partial !== undefined) projected[key] = partial;
       break;
     }
@@ -1945,14 +1972,18 @@ function projectChildWithinBudget(
   value: unknown,
   maxChars: number,
   container: (candidate: unknown) => unknown,
+  budget: JsonProjectionBudget,
+  depth: number,
 ): unknown | undefined {
   if (typeof value !== 'string' && !Array.isArray(value) && (value === null || typeof value !== 'object')) return undefined;
   let low = 0;
   let high = maxChars;
   let best: unknown | undefined;
   while (low <= high) {
+    if (budget.exhausted) return undefined;
     const middle = Math.floor((low + high) / 2);
-    const candidate = projectJsonValue(value, middle);
+    const candidate = projectJsonValue(value, middle, budget, depth);
+    if (budget.exhausted) return undefined;
     const rendered = JSON.stringify(container(candidate));
     if (rendered !== undefined && rendered.length <= maxChars) {
       best = candidate;

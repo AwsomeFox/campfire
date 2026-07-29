@@ -5,6 +5,7 @@ import {
   AiDriverService,
   MAX_UNTRUSTED_PROMPT_DATA_CHARS,
   appendUntrustedToolResult,
+  visibleUntrustedPromptData,
   wrapUntrustedPlayerInput,
   wrapUntrustedPromptData,
 } from '../../src/modules/ai-driver/ai-driver.service';
@@ -125,6 +126,20 @@ describe('untrusted AI prompt data fencing (#1496)', () => {
     const fenced = wrapUntrustedPromptData(payload);
 
     expect(fenced).toContain('＃ ');
+    expect(fenced).toContain('[TRUNCATED_UNTRUSTED_DATA]');
+    expect(fenced.length).toBeLessThanOrEqual(MAX_UNTRUSTED_PROMPT_DATA_CHARS + 100);
+  });
+
+  it('falls back to the bounded raw prefix for deeply nested oversized JSON', () => {
+    let nested: unknown = 'x'.repeat(MAX_UNTRUSTED_PROMPT_DATA_CHARS + 1);
+    for (let depth = 0; depth < 10; depth += 1) nested = { [`level${depth}`]: nested };
+    const payload = JSON.stringify(nested);
+
+    const visible = visibleUntrustedPromptData(payload);
+    const fenced = wrapUntrustedPromptData(payload);
+
+    expect(visible).toHaveLength(MAX_UNTRUSTED_PROMPT_DATA_CHARS);
+    expect(() => JSON.parse(visible)).toThrow();
     expect(fenced).toContain('[TRUNCATED_UNTRUSTED_DATA]');
     expect(fenced.length).toBeLessThanOrEqual(MAX_UNTRUSTED_PROMPT_DATA_CHARS + 100);
   });
