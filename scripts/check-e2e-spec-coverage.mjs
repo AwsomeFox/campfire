@@ -1,25 +1,26 @@
 #!/usr/bin/env node
 /**
  * CI guard for issue #1453 — every `apps/web/e2e/tests/*.spec.*` file must be
- * picked up by EXACTLY ONE Playwright config, so an orphaned spec file (one
- * matched by zero configs, silently dead) or a duplicated one (matched by more
- * than one config, silently run twice or racing on shared state) cannot recur.
+ * picked up by EXACTLY ONE Playwright config, AND that config must actually be
+ * invoked by some npm script or CI workflow — so an orphaned spec file (matched
+ * by zero configs, or matched only by a config nothing ever runs) cannot recur.
  *
  * Background: `apps/web/pw-unit.config.ts` and `apps/web/playwright.unit.config.ts`
  * both existed with the same `testDir`/`testMatch` shape, but only the latter was
  * ever wired to an npm script or CI job. Every `*.unit.spec.ts` file (currently
  * ~185) silently never ran under ANY config for a long stretch of this repo's
- * history. This check makes that class of defect fail fast instead of rotting
- * unnoticed: it inspects every Playwright config file that targets
- * `apps/web/e2e/tests` and fails if any spec file is matched by zero or by more
- * than one of them.
+ * history. Matching-only coverage is not sufficient to catch that: a config with
+ * the right `testMatch` that nothing invokes is exactly as dead as no config at
+ * all, so this also verifies every tests-scoped config is actually run by a
+ * `playwright test` invocation somewhere in `apps/web/package.json`'s scripts or
+ * `.github/workflows/ci.yml` — the two places this repo actually runs Playwright.
  *
  * Deliberately static (regex-based), matching this repo's other `check:*`
  * scripts (see check-version-sync.mjs, check-mcp-catalog-sync.mjs) — no ts-node
  * or dynamic `import()` of the .ts config files required.
  */
 import { readFileSync, readdirSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -73,6 +74,47 @@ function listSpecFiles() {
     .filter((name) => /\.spec\.(js|ts|mjs|mts)$/.test(name));
 }
 
+/** Playwright's default config filename when no `--config`/`-c` flag is given. */
+const DEFAULT_CONFIG = 'playwright.config.ts';
+
+/** Split a shell-ish blob into individual commands on `&&`, `;`, and newlines. */
+function splitCommands(text) {
+  return text
+    .split(/&&|;|\r?\n/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Basenames of every Playwright config actually invoked by a `playwright test`
+ * command found in `sources` — a `--config`/`-c <path>` flag names that config;
+ * its absence means the invocation runs Playwright's default config.
+ */
+function invokedConfigBasenames(sources) {
+  const invoked = new Set();
+  for (const text of sources) {
+    for (const cmd of splitCommands(text)) {
+      if (!/\bplaywright\s+test\b/.test(cmd)) continue;
+      const m = cmd.match(/(?:--config|-c)\s+(\S+)/);
+      invoked.add(m ? basename(m[1]) : DEFAULT_CONFIG);
+    }
+  }
+  return invoked;
+}
+
+/**
+ * Every place this repo actually shells out to Playwright: apps/web's own npm
+ * scripts (root scripts only ever proxy into these via `npm run <x> -w apps/web`,
+ * so the literal `playwright test` invocation always lives here) plus the CI
+ * workflow, which also invokes Playwright directly in a couple of steps
+ * (`e2e-web`'s sharded run, the first-run project) without going through npm.
+ */
+function loadInvocationSources() {
+  const webPkg = JSON.parse(readFileSync(join(webDir, 'package.json'), 'utf8'));
+  const ciYml = readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8');
+  return [...Object.values(webPkg.scripts ?? {}), ciYml];
+}
+
 function main() {
   const configs = loadTestsConfigs();
   if (configs.length === 0) {
@@ -92,6 +134,21 @@ function main() {
     } else if (matching.length > 1) {
       errors.push(
         `${name}: matched by ${matching.length} configs (${matching.map((c) => c.file).join(', ')}) — runs more than once / configs overlap`,
+      );
+    }
+  }
+
+  // A config can match every spec file perfectly and still be exactly as dead as
+  // an orphaned spec if nothing ever runs it — this is the failure mode that let
+  // ~185 unit specs sit behind pw-unit.config.ts/playwright.unit.config.ts
+  // unexecuted for a long stretch of this repo's history. Verify each tests-scoped
+  // config is invoked by an actual `playwright test` command in apps/web's npm
+  // scripts or the CI workflow, not just present with a matching `testMatch`.
+  const invoked = invokedConfigBasenames(loadInvocationSources());
+  for (const { file } of configs) {
+    if (!invoked.has(file)) {
+      errors.push(
+        `${file}: matches spec files but is never invoked by a \`playwright test\` command in apps/web/package.json scripts or .github/workflows/ci.yml — it would run zero specs`,
       );
     }
   }
