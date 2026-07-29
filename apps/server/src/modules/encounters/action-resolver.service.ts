@@ -1332,10 +1332,19 @@ export class ActionResolverService {
     const targetsAllow: ActionTargetAllow = targetsAllowParsed.success ? targetsAllowParsed.data : 'any';
     const storedTargets = fromJsonText<ActionUndoTarget[]>(chain.targetsJson, []);
     // Issue #1449: re-run the same target-allow gate `apply()` enforced at commit time, for
-    // defense in depth — every stored target is scoped to THIS encounter and legality-checked
-    // before anything is written, matching `apply()`'s own pre-validation pass.
+    // defense in depth — every stored target that still EXISTS is scoped to this encounter
+    // and legality-checked before anything is written. A target combatant can legitimately
+    // be removed from the fight between apply and undo (removeCombatant is ordinary DM
+    // cleanup, e.g. clearing out a killed monster); skip it here rather than throw, matching
+    // the revert loop below (`if (!fresh) continue`) — a REMOVED target is not the same as a
+    // FORGED one, and only the latter should ever block an otherwise-legitimate undo.
     for (const t of storedTargets) {
-      const target = this.combatantRowOrThrow(encounterId, t.combatantId);
+      const target = this.db
+        .select()
+        .from(combatants)
+        .where(and(eq(combatants.id, t.combatantId), eq(combatants.encounterId, encounterId)))
+        .get();
+      if (!target) continue;
       this.assertTargetAllowed(targetsAllow, actor, target, chain.actionName);
     }
 

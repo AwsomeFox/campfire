@@ -914,4 +914,38 @@ describe('action resolver (real SQLite, service layer)', () => {
     });
     expect(() => service.undo(encounterId, bogus, alice, 'player')).toThrow(/unknown chain|never applied/i);
   });
+
+  it('#1449: undo still succeeds and restores the surviving target when the OTHER target was removed from the encounter after apply', () => {
+    const { orm, service, encounterId, actor, drake, bob, aliceChar } = seed();
+    // Fireball (actionIndex 2, DC 21 -> always fails -> full damage) hits both the drake and
+    // Bob's PC — an ordinary multi-target AoE, and a real level-3 spell-slot spend.
+    const applied = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 2, targetIds: [drake, bob], commit: true }),
+      alice,
+      'player',
+    );
+    expect(applied.applied).toBe(true);
+    const drakeTarget = applied.resolution.targets.find((t) => t.combatantId === drake)!;
+    const bobTarget = applied.resolution.targets.find((t) => t.combatantId === bob)!;
+    expect(drakeTarget.totalDamage).toBeGreaterThan(0);
+    expect(bobTarget.totalDamage).toBeGreaterThan(0);
+    // Bob took damage (8d6 fire can exceed his 30 HP and clamp/drop him — the exact number
+    // isn't the point here, only that undo restores him to his exact PRE-apply snapshot).
+    expect(orm.select().from(combatants).where(eq(combatants.id, bob)).get()!.hpCurrent).toBeLessThan(30);
+
+    // The DM ordinarily removes a dead/cleared monster from the encounter — the drake is
+    // gone by the time anyone undoes the fireball. This must NOT block restoring Bob.
+    orm.delete(combatants).where(eq(combatants.id, drake)).run();
+    expect(orm.select().from(combatants).where(eq(combatants.id, drake)).get()).toBeUndefined();
+
+    expect(() => service.undo(encounterId, applied.undoToken!, alice, 'player')).not.toThrow();
+
+    // Bob (the surviving target) is fully restored.
+    expect(orm.select().from(combatants).where(eq(combatants.id, bob)).get()!.hpCurrent).toBe(30);
+    // The actor's spent level-3 spell slot is refunded — not left consumed forever.
+    const aliceCharAfter = orm.select().from(characters).where(eq(characters.id, aliceChar.id)).get()!;
+    const slots = JSON.parse(aliceCharAfter.spellSlots ?? '{}');
+    expect(slots['3'].used).toBe(0);
+  });
 });
