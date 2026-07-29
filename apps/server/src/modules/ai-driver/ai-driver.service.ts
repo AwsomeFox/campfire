@@ -646,6 +646,20 @@ export interface RunTurnOptions {
   maxTokens?: number;
   proactive?: boolean;
   characterId?: number;
+  /**
+   * The CALLER's effective campaign role, as resolved server-side by the controller
+   * (issue #1499). Never trust a client-supplied role: this must always come from
+   * `CampaignAccessService.requireRole`/`requireMember`, not from the request body.
+   * Governs three player-supplied fields on the same endpoint that were previously
+   * enforced only client-side (or not at all):
+   *  - `characterId`: a non-`dm` caller may only speak as a character they own.
+   *  - `scene`: ignored unless the caller is a `dm`.
+   *  - `maxSteps`/`maxTokens`: capped at the campaign default for a non-`dm` caller
+   *    rather than the `dm`'s hard ceiling.
+   * Left undefined by trusted internal callers (proactive triggers, lifecycle
+   * turns, stuck-ladder levers) that never set the fields above from client input.
+   */
+  callerRole?: Role;
   narrationLanguage?: NarrationLanguage;
   /**
    * Optimistic-echo correlation token minted by the submitting client (#572). Echoed back
@@ -3147,6 +3161,31 @@ export class AiDriverService {
     input: string,
     opts: RunTurnOptions = {},
   ): Promise<AiDmTurnRunResult> {
+    // Issue #1499 — verify the caller may speak as `characterId` FIRST, before any state
+    // change (turn-slot reservation, action queueing, or the `player.action` transcript
+    // row below all mutate shared state). The lookup used to run much later purely to pick
+    // a display name for the speaker prefix, and never compared the resolved member to the
+    // caller at all — so any player could put words in another player's character's mouth,
+    // and the fabricated line would enter the shared transcript as if that player sent it.
+    // A `dm` may speak as any character IN THIS CAMPAIGN (they can already author anything);
+    // anyone else may only speak as a character they own, same rule as
+    // `CharactersService.assertCanWrite`. Resolved once and reused below for the prefix, so
+    // a rejected attempt does exactly nothing observable.
+    let speakingAsMember: Awaited<ReturnType<typeof this.members.listForCampaign>>[number] | null = null;
+    if (opts.characterId !== undefined) {
+      const membersList = await this.members.listForCampaign(campaignId);
+      const member = membersList.find((m) => m.characterId === opts.characterId) ?? null;
+      // No member of THIS campaign owns that character id — either it belongs to another
+      // campaign entirely, or it is not linked to any seat here. Either way, not speakable.
+      if (!member) {
+        throw new ForbiddenException('That character does not belong to this campaign.');
+      }
+      if (opts.callerRole !== 'dm' && String(member.userId) !== String(triggeredBy.id)) {
+        throw new ForbiddenException('You may only speak as a character you own.');
+      }
+      speakingAsMember = member;
+    }
+
     // Gate: experimental flag on + seat enabled + budget remaining (throws otherwise).
     const seat = await this.aiDm.assertRunnable(campaignId);
 
@@ -3412,22 +3451,13 @@ export class AiDriverService {
       promptPhaseFor(opts.lifecycle, session.phase),
     );
 
+    // #1499: `speakingAsMember` was already resolved AND ownership-checked above; this only
+    // fetches the character's display name for the prefix.
     let speakerPrefix = '';
-    if (opts.characterId) {
+    if (opts.characterId !== undefined && speakingAsMember) {
       try {
-        const membersList = await this.members.listForCampaign(campaignId);
-        const member = membersList.find(m => m.characterId === opts.characterId);
-        let character = null;
-        if (member && opts.characterId) {
-          try {
-            character = await this.characters.getOrThrow(opts.characterId, 'player');
-          } catch {
-            character = null;
-          }
-        }
-        if (character && member) {
-          speakerPrefix = `[${character.name}, played by ${member.displayName ?? member.username}]`;
-        }
+        const character = await this.characters.getOrThrow(opts.characterId, 'player');
+        speakerPrefix = `[${character.name}, played by ${speakingAsMember.displayName ?? speakingAsMember.username}]`;
       } catch {
         // Fallback: no server-side prefix, client-side prefix in input is used
       }
@@ -3462,7 +3492,10 @@ export class AiDriverService {
     }
 
     // status is already 'running' (reserved synchronously above, #381).
-    if (opts.scene !== undefined) session.scene = opts.scene;
+    // #1499: `scene` is a table-wide broadcast setting — only a DM may change it. The DTO
+    // accepts it from any player (the UI merely hides the field behind `isDm`, which is
+    // client-side only), so a non-DM's value is silently ignored here rather than applied.
+    if (opts.scene !== undefined && opts.callerRole === 'dm') session.scene = opts.scene;
     this.persistControlState(session);
     resetDriverTurnCounters(session);
     // #572: one correlation id for everything this turn persists, so a client rebuilding
@@ -3474,8 +3507,12 @@ export class AiDriverService {
       ...(opts.proactive ? { trigger: 'proactive' } : {}),
     });
 
-    const maxSteps = clamp(opts.maxSteps ?? DEFAULT_MAX_STEPS, 1, HARD_MAX_STEPS);
-    const perStepCap = clamp(opts.maxTokens ?? DEFAULT_STEP_MAX_TOKENS, 1, 4096);
+    // #1499: a non-DM caller's step/token caps are clamped to the campaign DEFAULT rather than
+    // the DM's HARD ceiling. Letting any player dial both knobs to their max (HARD_MAX_STEPS x
+    // 4096 tokens/step) let a single message cost roughly 8x an ordinary turn.
+    const isDmCaller = opts.callerRole === 'dm';
+    const maxSteps = clamp(opts.maxSteps ?? DEFAULT_MAX_STEPS, 1, isDmCaller ? HARD_MAX_STEPS : DEFAULT_MAX_STEPS);
+    const perStepCap = clamp(opts.maxTokens ?? DEFAULT_STEP_MAX_TOKENS, 1, isDmCaller ? 4096 : DEFAULT_STEP_MAX_TOKENS);
 
     let totalTokens = 0;
     let budgetRemaining = seat.budgetRemaining;

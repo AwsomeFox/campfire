@@ -106,7 +106,7 @@ export interface AiEvalHarness {
   /** POST player input to the driver runtime (#312) — runs a streamed, tool-executing turn. */
   sendMessage(
     campaignId: number,
-    body: { input: string; scene?: string; maxSteps?: number; maxTokens?: number },
+    body: { input: string; scene?: string; maxSteps?: number; maxTokens?: number; characterId?: number },
     headers?: Record<string, string>,
   ): Promise<request.Response>;
   /** Read the driver session state. */
