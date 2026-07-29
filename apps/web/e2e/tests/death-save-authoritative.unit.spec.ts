@@ -23,3 +23,14 @@ test('a death-save request only disables its own combatant', () => {
   expect(runSessionSource).toContain('busy={pendingCombatantIds.has(c.id) || reconcileBlocks}');
   expect(runSessionSource).not.toContain('busy={pendingCombatantIds.has(c.id) || deathSaveRoll.isPending || reconcileBlocks}');
 });
+
+test('an ambiguous death-save outcome reconciles before allowing another roll', () => {
+  expect(runSessionSource).toContain('if (isAmbiguousOutcome(err)) enterReconciling();');
+  expect(runSessionSource).toContain('busy={pendingCombatantIds.has(c.id) || reconcileBlocks}');
+  expect(runSessionSource).toContain('deathSavePending={currentCombatantId != null && (pendingCombatantIds.has(currentCombatantId) || reconcileBlocks)}');
+});
+
+test('terminal death-save states retain pips without exposing an invalid roll action', () => {
+  expect(runSessionSource).toContain("canRoll={combatant.deathState === 'dying'}");
+  expect(runSessionSource).toContain('{canEdit && canRoll && (');
+});

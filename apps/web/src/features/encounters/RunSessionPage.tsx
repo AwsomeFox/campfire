@@ -809,6 +809,7 @@ function DeathSaveTracker({
   successes,
   failures,
   canEditPermission,
+  canRoll,
   busy,
   syncBlocked,
   syncBlockedReason,
@@ -828,6 +829,8 @@ function DeathSaveTracker({
    * disables (not unmounts) on it, same as every other write control in the row.
    */
   canEditPermission: boolean;
+  /** Terminal states retain their pips but cannot make another authoritative roll. */
+  canRoll: boolean;
   busy: boolean;
   /** Issue #1746: the encounter sync gate is blocking conflict-prone writes right now. */
   syncBlocked: boolean;
@@ -869,7 +872,7 @@ function DeathSaveTracker({
           onSet={onSet}
         />
       </span>
-      {canEditPermission && (
+      {canEditPermission && canRoll && (
         <button
           type="button"
           className="btn btn-ghost cf-target-44"
@@ -1998,7 +2001,10 @@ export default function RunSessionPage() {
       setActionError(null);
       markCombatantPending(combatantId, true);
     },
-    onError: reportError,
+    onError: (err) => {
+      if (isAmbiguousOutcome(err)) enterReconciling();
+      else reportError(err);
+    },
     onSettled: (_data, _err, { combatantId }) => {
       markCombatantPending(combatantId, false);
       invalidateEncounter(queryClient, eid);
@@ -3088,7 +3094,7 @@ export default function RunSessionPage() {
           ruleSystem={campaign?.ruleSystem}
           currentTurnState={currentCombatant?.turnState}
           actionsDisabled={riskyBlocked}
-          deathSavePending={currentCombatantId != null && pendingCombatantIds.has(currentCombatantId)}
+          deathSavePending={currentCombatantId != null && (pendingCombatantIds.has(currentCombatantId) || reconcileBlocks)}
           onRollDeathSave={rollDeathSave}
           onUseSuggestedAction={
             currentCombatantId != null && (isDm || (canPlayerWrite && turnWorkspace?.isYourTurn === true))
@@ -6897,6 +6903,7 @@ function CombatantRow({
               successes={combatant.deathSaveSuccesses ?? 0}
               failures={combatant.deathSaveFailures ?? 0}
               canEditPermission={canEditPermission}
+              canRoll={combatant.deathState === 'dying'}
               busy={busy}
               syncBlocked={syncBlocked}
               syncBlockedReason={syncBlockedReason}

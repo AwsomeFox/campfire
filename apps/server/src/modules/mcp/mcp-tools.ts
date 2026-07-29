@@ -4346,7 +4346,7 @@ export class McpToolsService {
       },
       async ({ encounterId, combatantId, idempotencyKey }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
-        const role = await this.access.requireRole(user, row.campaignId, 'player');
+        const role = await this.access.requireRole(user, row.campaignId, 'player', { allowArchived: true });
         return this.encounters.rollDeathSave(encounterId as number, combatantId as number, idempotencyKey as string, user, role);
       },
     );

@@ -526,7 +526,9 @@ export class EncountersController {
     @CurrentUser() user: RequestUser,
   ) {
     const row = await this.encounters.getRowOrThrow(id);
-    const role = await this.access.requireRole(user, row.campaignId, 'player');
+    // A same-key retry only replays an already-committed response. Let the service
+    // distinguish that safe read from a fresh write after membership is established.
+    const role = await this.access.requireRole(user, row.campaignId, 'player', { allowArchived: true });
     return this.encounters.rollDeathSave(id, cid, body.idempotencyKey, user, role);
   }
 
