@@ -925,8 +925,12 @@ export class CharactersService {
     // Issue #1492: enforce the adapter's level cap on the PATCH path too, not just levelUp.
     // `levelUp` already honors `adapter.maxLevel` (5e=20, 13th Age=10, …), but a direct PATCH
     // could otherwise write any level the (widened) schema bound allows, bypassing the ceiling.
-    // An Infinity cap (Open Legend, OSR) never rejects.
-    if (input.level !== undefined) {
+    // Only an INCREASE above the cap is rejected: a sheet editor resends the current level on
+    // every save, so a character already over the cap after a rule-system downgrade (5e → 13th
+    // Age, cap 10) must still be editable for unrelated fields (name/notes). The character can't
+    // be pushed HIGHER past the cap, and levelUp's own cap check still applies. An Infinity cap
+    // (Open Legend, OSR) never rejects.
+    if (input.level !== undefined && input.level > existing.level) {
       CharactersService.assertLevelWithinCap(input.level, (await this.adapterForCampaign(existing.campaignId)).maxLevel);
     }
 
@@ -977,7 +981,16 @@ export class CharactersService {
     if (input.deathSaveFailures !== undefined) {
       update.deathSaveFailures = clampDeathSaveCount(input.deathSaveFailures);
     }
-    if (input.resources !== undefined) update.resources = toJsonText(input.resources);
+    // Clamp each pool's `used` to [0, max] — mirrors the spellSlots clamp just below and the
+    // dedicated POST :id/resources path (issue #1039: "spending a resource you do not have must
+    // fail loudly"), so a PATCH can never persist more used than a pool holds.
+    if (input.resources !== undefined) {
+      const clampedResources: Record<string, CharacterResource> = {};
+      for (const [key, resource] of Object.entries(input.resources)) {
+        clampedResources[key] = { ...resource, used: Math.max(0, Math.min(resource.max, resource.used)) };
+      }
+      update.resources = toJsonText(clampedResources);
+    }
     if (input.conditions !== undefined) {
       Object.assign(update, sheetConditionWriteSetFromNames(input.conditions, existing.conditionInstances));
     }

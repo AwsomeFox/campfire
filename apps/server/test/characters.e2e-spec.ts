@@ -1126,12 +1126,19 @@ describe('PATCH /characters/:id persists deathState/hpTemp/death-saves/resources
     expect(rejected.status).toBe(400);
   });
 
-  it('resources persist on the general PATCH', async () => {
+  it('resources persist on the general PATCH (and clamp used into [0, max])', async () => {
     const res = await dbUpdate(server, dm1492, charId, {
       resources: { ki: { max: 5, used: 2, name: 'Ki Points', recharge: 'short-rest' } },
     });
     expect(res.status).toBe(200);
     expect(res.body.resources).toMatchObject({ ki: { max: 5, used: 2, name: 'Ki Points', recharge: 'short-rest' } });
+    // Mirrors the spellSlots clamp and the dedicated POST :id/resources invariant (#1039): a pool
+    // can never be persisted as more-spent-than-it-holds.
+    const clamped = await dbUpdate(server, dm1492, charId, {
+      resources: { ki: { max: 5, used: 20 } },
+    });
+    expect(clamped.status).toBe(200);
+    expect(clamped.body.resources).toMatchObject({ ki: { max: 5, used: 5 } });
   });
 });
 
@@ -1223,6 +1230,35 @@ describe('character level cap matches the rule-system adapter (issue #1492)', ()
       .send({ name: 'Just Right', level: 5, hpMax: 10, hpCurrent: 10 });
     expect(ok.status).toBe(201);
     expect(ok.body.level).toBe(5);
+  });
+
+  it('a character already over the cap (after a rule-system downgrade) stays editable for unrelated fields', async () => {
+    // Start in an uncapped system, level the character past 13th Age's cap of 10.
+    const camp = await request(server).post('/api/v1/campaigns').set(capDm).send({ name: 'Downgrade Camp' });
+    expect(camp.status).toBe(201);
+    await db.update(campaigns).set({ ruleSystem: 'basic-fantasy' }).where(eq(campaigns.id, camp.body.id)).run();
+
+    const char = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/characters`)
+      .set(capDm)
+      .send({ name: 'High Level', level: 15, hpMax: 40, hpCurrent: 40 });
+    expect(char.status).toBe(201);
+    expect(char.body.level).toBe(15);
+
+    // Downgrade the campaign to 13th Age (cap 10). The character is now over the new cap.
+    await db.update(campaigns).set({ ruleSystem: 'archmage' }).where(eq(campaigns.id, camp.body.id)).run();
+
+    // A sheet edit that resends the current level (level: 15, unchanged) alongside an unrelated
+    // field must still succeed — the editor resends level on every save. Only an INCREASE above
+    // the cap is rejected.
+    const reEdit = await dbUpdate(server, capDm, char.body.id, { level: 15, notes: 'still playing' });
+    expect(reEdit.status).toBe(200);
+    expect(reEdit.body.level).toBe(15);
+    expect(reEdit.body.notes).toBe('still playing');
+
+    // Pushing the over-cap character HIGHER is still rejected.
+    const higher = await dbUpdate(server, capDm, char.body.id, { level: 16 });
+    expect(higher.status).toBe(400);
   });
 });
 
