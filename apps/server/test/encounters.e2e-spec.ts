@@ -4383,6 +4383,34 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
     expect(diff.body.label).toBe('Deadly');
   });
 
+  it('includes NPC combatants with statblocks in difficulty and XP estimates (issue #1454)', async () => {
+    const server = ctx.app.getHttpServer();
+    const npcOnly = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'NPC-only fight', hidden: false });
+    const addNpc = await request(server)
+      .post(`/api/v1/encounters/${npcOnly.body.id}/combatants`)
+      .set(dm)
+      .send({ kind: 'npc', ruleEntryId: cr10EntryId });
+    expect(addNpc.status).toBe(201);
+
+    const npcDifficulty = await request(server).get(`/api/v1/encounters/${npcOnly.body.id}/difficulty`).set(dm);
+    expect(npcDifficulty.body).toMatchObject({ status: 'ok', monsterCount: 1, totalMonsterXp: 5900, adjustedXp: 5900 });
+
+    const mixed = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Mixed fight', hidden: false });
+    const addMonster = await request(server)
+      .post(`/api/v1/encounters/${mixed.body.id}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', ruleEntryId: cr10EntryId });
+    const addMixedNpc = await request(server)
+      .post(`/api/v1/encounters/${mixed.body.id}/combatants`)
+      .set(dm)
+      .send({ kind: 'npc', ruleEntryId: cr10EntryId });
+    expect(addMonster.status).toBe(201);
+    expect(addMixedNpc.status).toBe(201);
+
+    const mixedDifficulty = await request(server).get(`/api/v1/encounters/${mixed.body.id}/difficulty`).set(dm);
+    expect(mixedDifficulty.body).toMatchObject({ status: 'ok', monsterCount: 2, totalMonsterXp: 11800, adjustedXp: 17700 });
+  });
+
   // Issue #304: first-party encounter generator. Reuses the 4×L5 party + CR-10 ogre above,
   // plus a weaker CR-2 goblin seeded here so a "medium" group build has something to pick.
   describe('encounter generator (issue #304)', () => {

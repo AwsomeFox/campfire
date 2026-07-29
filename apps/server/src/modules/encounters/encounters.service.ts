@@ -1913,11 +1913,11 @@ export class EncountersService {
     }
     const partyLevels = characterIds.map((id) => levelById.get(id) ?? 1);
 
-    // Monster CRs: from each monster-combatant's linked rule entry statblock. A monster
+    // Enemy CRs: every non-character combatant's linked rule entry statblock. An enemy
     // combatant with no ruleEntryId (or an entry lacking a CR) contributes a null CR
     // rather than being dropped, so missing data can surface as unknown (issue #429).
-    const monsterCombatants = combatantRows.filter((c) => c.kind === 'monster');
-    const ruleEntryIds = monsterCombatants.map((c) => c.ruleEntryId).filter((id): id is number => id !== null);
+    const enemyCombatants = combatantRows.filter((c) => c.kind !== 'character');
+    const ruleEntryIds = enemyCombatants.map((c) => c.ruleEntryId).filter((id): id is number => id !== null);
     const crById = new Map<number, number | null>();
     if (ruleEntryIds.length > 0) {
       const entryRows = await this.db
@@ -1930,7 +1930,7 @@ export class EncountersService {
         crById.set(r.id, parseCr(adapter.mapStatblock(data).challengeRating));
       }
     }
-    const monsterCrs = monsterCombatants.map((c) => (c.ruleEntryId !== null ? (crById.get(c.ruleEntryId) ?? null) : null));
+    const monsterCrs = enemyCombatants.map((c) => (c.ruleEntryId !== null ? (crById.get(c.ruleEntryId) ?? null) : null));
 
     return estimateEncounterDifficultyForRuleSystem(ruleSystem, {
       partyLevels,
@@ -1985,6 +1985,7 @@ export class EncountersService {
         supported: xp.supported,
         suggestedPartyTotal: xp.suggestedPartyTotal,
         suggestedPerCharacter: xp.suggestedPerCharacter,
+        undistributedXp: xp.undistributedXp,
         difficultyLabel: xp.difficultyLabel,
         warnings: xp.warnings,
       },

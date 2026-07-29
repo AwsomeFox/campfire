@@ -1,5 +1,5 @@
 import type { EncounterEvent } from '@campfire/schema';
-import { computeDnd5eEncounterDifficulty } from '@campfire/schema';
+import { computeDnd5eEncounterDifficulty, unsupportedEncounterDifficulty } from '@campfire/schema';
 import {
   aftermathOutcome,
   buildEncounterAftermathRecapDraft,
@@ -79,12 +79,49 @@ describe('encounter aftermath logic (issue #473)', () => {
     expect(recapDraft).toContain('## Combat highlights');
   });
 
-  it('suggests per-character XP from difficulty', () => {
-    const difficulty = computeDnd5eEncounterDifficulty({ partyLevels: [3, 3], monsterChallengeRatings: [2, 2] });
-    const xp = suggestedXpFromDifficulty(difficulty, 2);
-    expect(xp.supported).toBe(true);
-    expect(xp.suggestedPartyTotal).toBeGreaterThan(0);
-    expect(xp.suggestedPerCharacter).toBeGreaterThan(0);
+  it('awards raw XP rather than the difficulty multiplier for six goblins and four PCs (issue #1454)', () => {
+    const difficulty = computeDnd5eEncounterDifficulty({
+      partyLevels: [3, 3, 3, 3],
+      monsterChallengeRatings: [0.25, 0.25, 0.25, 0.25, 0.25, 0.25],
+    });
+    const xp = suggestedXpFromDifficulty(difficulty, 4);
+    expect(difficulty.adjustedXp).toBe(600);
+    expect(xp).toMatchObject({
+      supported: true,
+      suggestedPartyTotal: 300,
+      suggestedPerCharacter: 75,
+      undistributedXp: 0,
+    });
+  });
+
+  it('floors an uneven XP split and surfaces its remainder (issue #1454)', () => {
+    const difficulty = computeDnd5eEncounterDifficulty({ partyLevels: [1], monsterChallengeRatings: [0.25, 0.25] });
+    const xp = suggestedXpFromDifficulty(difficulty, 8);
+    expect(xp).toMatchObject({
+      suggestedPartyTotal: 100,
+      suggestedPerCharacter: 12,
+      undistributedXp: 4,
+    });
+    expect(xp.suggestedPerCharacter! * 8 + xp.undistributedXp!).toBe(xp.suggestedPartyTotal);
+  });
+
+  it('leaves a single-monster award unchanged and declines unsupported rulesets (issue #1454)', () => {
+    const loneMonster = suggestedXpFromDifficulty(
+      computeDnd5eEncounterDifficulty({ partyLevels: [3], monsterChallengeRatings: [2] }),
+      1,
+    );
+    expect(loneMonster).toMatchObject({ suggestedPartyTotal: 450, suggestedPerCharacter: 450, undistributedXp: 0 });
+
+    const unsupported = suggestedXpFromDifficulty(
+      unsupportedEncounterDifficulty('Example rules', { partyLevels: [3], monsterChallengeRatings: [2] }),
+      1,
+    );
+    expect(unsupported).toMatchObject({
+      supported: false,
+      suggestedPartyTotal: null,
+      suggestedPerCharacter: null,
+      undistributedXp: null,
+    });
   });
 
   it('selectCombatLogHighlights prefers notable events', () => {

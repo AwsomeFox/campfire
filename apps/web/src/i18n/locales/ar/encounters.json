@@ -86,7 +86,8 @@
       "updateQuestHint": "Open the linked quest objectives.",
       "openSession": "Open linked session",
       "openSessionHint": "Review session details and recap.",
-      "xpSuggested": "Suggested award: {{amount}} XP each ({{label}}, {{total}} adjusted total).",
+      "xpSuggested": "Suggested award: {{amount}} XP each ({{label}}, {{total}} total).",
+      "xpRemainder": "{{remainder}} XP remains undistributed after the even split.",
       "xpManual": "XP guidance: {{label}} — award manually for this ruleset."
     },
     "driver": {

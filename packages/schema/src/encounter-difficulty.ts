@@ -50,8 +50,8 @@ export const EncounterDifficulty = z.object({
   }),
   partySize: z.number().int().nonnegative(), // number of PC (character) combatants counted
   partyLevels: z.array(z.number().int()), // the PC levels that fed the thresholds
-  monsterCount: z.number().int().nonnegative(), // number of monster combatants counted
-  totalMonsterXp: z.number().int().nonnegative(), // raw summed monster XP (pre-multiplier)
+  monsterCount: z.number().int().nonnegative(), // number of hostile non-character combatants counted
+  totalMonsterXp: z.number().int().nonnegative(), // raw summed hostile-combatant XP (pre-multiplier)
   multiplier: z.number(), // 5e encounter multiplier for the monster count
   adjustedXp: z.number().int().nonnegative(), // totalMonsterXp * multiplier, compared to thresholds
   /** Monsters that contributed no CR/XP (manual / incomplete statblocks). */
