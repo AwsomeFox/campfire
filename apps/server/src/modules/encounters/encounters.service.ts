@@ -1917,25 +1917,30 @@ export class EncountersService {
     }
     const partyLevels = characterIds.map((id) => levelById.get(id) ?? 1);
 
-    // Enemy CRs: monsters plus linked NPCs whose campaign disposition is hostile. NPC
-    // combatants do not carry encounter-side allegiance, so resolve it from their linked
-    // campaign NPC instead of counting friendly/neutral party allies as enemies.
+    // Enemy CRs: monsters plus NPCs whose captured/current campaign disposition is
+    // hostile. A non-DM must not learn a hidden NPC's allegiance or statblock through
+    // this aggregate, so hidden (and unlinked) NPC combatants fail closed for that view.
     const npcCombatants = combatantRows.filter((c) => c.kind === 'npc' && c.npcId !== null);
     const npcIds = npcCombatants.map((c) => c.npcId as number);
     const hostileNpcIds = new Set<number>();
+    const hiddenNpcIds = new Set<number>();
     if (npcIds.length > 0) {
       const npcRows = await this.db
-        .select({ id: npcs.id, disposition: npcs.disposition })
+        .select({ id: npcs.id, disposition: npcs.disposition, hidden: npcs.hidden })
         .from(npcs)
         .where(and(inArray(npcs.id, npcIds), eq(npcs.campaignId, encounterRow.campaignId)));
       for (const npc of npcRows) {
         if (npc.disposition.trim().toLowerCase() === 'hostile') hostileNpcIds.add(npc.id);
+        if (npc.hidden) hiddenNpcIds.add(npc.id);
       }
     }
-    const enemyCombatants = combatantRows.filter((c) =>
-      c.kind === 'monster' || (c.kind === 'npc' && ((c.npcDispositionSnapshot ?? (c.npcId !== null && hostileNpcIds.has(c.npcId) ? 'hostile' : ''))
-        .trim().toLowerCase() === 'hostile')),
-    );
+    const dmView = viewerRole === undefined || viewerRole === 'dm';
+    const enemyCombatants = combatantRows.filter((c) => {
+      if (c.kind === 'monster') return true;
+      if (c.kind !== 'npc' || (!dmView && (c.npcId === null || hiddenNpcIds.has(c.npcId)))) return false;
+      const disposition = c.npcDispositionSnapshot ?? (c.npcId !== null && hostileNpcIds.has(c.npcId) ? 'hostile' : '');
+      return disposition.trim().toLowerCase() === 'hostile';
+    });
     // An enemy combatant with no ruleEntryId (or an entry lacking a CR) contributes a null CR
     // rather than being dropped, so missing data can surface as unknown (issue #429).
     const ruleEntryIds = enemyCombatants.map((c) => c.ruleEntryId).filter((id): id is number => id !== null);

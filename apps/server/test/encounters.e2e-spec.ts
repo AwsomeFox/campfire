@@ -4479,6 +4479,32 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
     expect(legacyDifficulty.body).toMatchObject({ monsterCount: 0, totalMonsterXp: 0 });
   });
 
+  it('withholds hidden hostile NPCs from non-DM difficulty aggregates (issue #1454)', async () => {
+    const server = ctx.app.getHttpServer();
+    const hiddenNpcId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/npcs`)
+        .set(dm)
+        .send({ name: 'Hidden antagonist', hidden: true, disposition: 'hostile' })
+    ).body.id;
+    const encounter = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Visible fight with hidden antagonist', hidden: false });
+    await request(server)
+      .post(`/api/v1/encounters/${encounter.body.id}/combatants`)
+      .set(dm)
+      .send({ kind: 'npc', npcId: hiddenNpcId, ruleEntryId: cr10EntryId });
+
+    const dmDifficulty = await request(server).get(`/api/v1/encounters/${encounter.body.id}/difficulty`).set(dm);
+    expect(dmDifficulty.body).toMatchObject({ monsterCount: 1, totalMonsterXp: 5900 });
+
+    for (const headers of [player, viewer]) {
+      const nonDmDifficulty = await request(server).get(`/api/v1/encounters/${encounter.body.id}/difficulty`).set(headers);
+      expect(nonDmDifficulty.body).toMatchObject({ monsterCount: 0, totalMonsterXp: 0 });
+    }
+  });
+
   // Issue #304: first-party encounter generator. Reuses the 4×L5 party + CR-10 ogre above,
   // plus a weaker CR-2 goblin seeded here so a "medium" group build has something to pick.
   describe('encounter generator (issue #304)', () => {
