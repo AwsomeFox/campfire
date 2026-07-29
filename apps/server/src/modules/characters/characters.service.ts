@@ -871,10 +871,11 @@ export class CharactersService {
       input.deathSaveFailures !== undefined ? clampDeathSaveCount(input.deathSaveFailures) : 0;
     // Derive the lifecycle status from the death state the same way update() does: a character
     // created with `deathState: 'dead'` and no explicit `status` is dead, not active, so it is
-    // excluded from future encounter auto-add (which selects only `active` PCs). An explicit
-    // status always wins (resolveCharacterCreateStatus already honored it above); this only
-    // adjusts the derived default.
-    const effectiveStatus = status === 'active' && deathState === 'dead' ? 'dead' : status;
+    // excluded from future encounter auto-add (which selects only `active` PCs). Gated on
+    // `input.status === undefined` (mirroring update()'s gate) so an explicit status — including
+    // an explicit `active` alongside a dead death state — is never silently overridden.
+    const effectiveStatus =
+      input.status === undefined && status === 'active' && deathState === 'dead' ? 'dead' : status;
     if (input.resources !== undefined) {
       for (const [key, resource] of Object.entries(input.resources)) {
         if (resource.used < 0 || resource.used > resource.max) {
@@ -1079,6 +1080,13 @@ export class CharactersService {
       }
       const existingResources = fromJsonText<Record<string, CharacterResource>>(existing.resources, {});
       const merged: Record<string, CharacterResource> = { ...existingResources };
+      // NOTE: `CharacterResource.used` carries a zod `.default(0)`, so a caller who omits `used`
+      // on a supplied pool (e.g. a rename-only `{ ki: { max: 5, name: 'Renamed' } }`) has it
+      // materialized to `0` by CharacterUpdate.parse BEFORE reaching this merge. The field-level
+      // spread then writes that `0` over the existing `used`. A caller changing a pool MUST
+      // therefore re-send `used` to preserve its current spend (the same "send the value you
+      // want" contract the dedicated POST :id/resources path implies). A presence-preserving
+      // partial-pool schema would fix this but is a larger schema change tracked separately.
       for (const [key, supplied] of Object.entries(input.resources)) {
         merged[key] = { ...(existingResources[key] ?? { max: supplied.max, used: 0 }), ...supplied };
       }

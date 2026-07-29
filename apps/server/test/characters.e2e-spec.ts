@@ -1032,6 +1032,16 @@ describe('characters (e2e)', () => {
         .send({ name: 'Retired Veteran', deathState: 'dead', status: 'retired' });
       expect(explicitStatus.status).toBe(201);
       expect(explicitStatus.body.status).toBe('retired'); // explicit choice wins
+      // An EXPLICIT `status: 'active'` alongside `deathState: 'dead'` is also honored — the
+      // derivation only fires when status is omitted, so a caller who deliberately marks a dead
+      // PC active keeps active (mirrors update()'s `input.status === undefined` gate).
+      const explicitActive = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(dm)
+        .send({ name: 'Active Corpse', deathState: 'dead', status: 'active' });
+      expect(explicitActive.status).toBe(201);
+      expect(explicitActive.body.deathState).toBe('dead');
+      expect(explicitActive.body.status).toBe('active'); // explicit active wins
     });
   });
 });
