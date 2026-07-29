@@ -14,6 +14,7 @@ import { McpToolsService, type DriverTool, type DriverToolset } from '../mcp/mcp
 import { CampaignsService } from '../campaigns/campaigns.service';
 import { RulesService } from '../rules/rules.service';
 import { EncountersService } from '../encounters/encounters.service';
+import { ActionResolverService } from '../encounters/action-resolver.service';
 import { MembersService } from '../membership/members.service';
 import { CharactersService } from '../characters/characters.service';
 import { TableSafetyService } from '../safety/table-safety.service';
@@ -828,6 +829,7 @@ function isStoredSecretApproval(value: unknown): value is AiDmSecretReadApproval
 
 function isStoredPendingConfirmation(value: unknown): value is AiDmPendingToolConfirmation {
   const rec = recordOf(value);
+  const retainedActionChain = rec?.retainedActionChain === undefined ? undefined : recordOf(rec.retainedActionChain);
   return !!rec
     && typeof rec.id === 'string'
     && typeof rec.tool === 'string'
@@ -838,7 +840,9 @@ function isStoredPendingConfirmation(value: unknown): value is AiDmPendingToolCo
     && typeof rec.requestedAt === 'string'
     && typeof rec.actor === 'string'
     && typeof rec.triggeredBy === 'string'
-    && Number.isInteger(rec.turnNumber);
+    && Number.isInteger(rec.turnNumber)
+    && (retainedActionChain === undefined
+      || (Number.isInteger(retainedActionChain?.encounterId) && typeof retainedActionChain?.chainId === 'string'));
 }
 
 /** Parse a persisted JSON map of grants, keeping only the entries that validate (#1042). */
@@ -2136,6 +2140,13 @@ export class AiDriverService {
      * `?.` guards on every use below express.
      */
     @Optional() private readonly safety?: TableSafetyService,
+    /**
+     * Issue #1451 review — marks a queued `apply_action` chain as awaiting human confirmation
+     * and derives its display label from the persisted chain. Appended last, same reasoning as `safety`
+     * above: several specs construct this service positionally, and this dependency is not
+     * needed for any of them to still exercise the paths they test — `?.` guards its one use.
+     */
+    @Optional() private readonly actionResolver?: ActionResolverService,
   ) {
     // Mode-switch teardown without an AiDm→AiDriver DI edge (forwardRef blows the stack here).
     this.aiDm.registerDriverSessionTeardown((campaignId) => this.teardownSession(campaignId));
@@ -2429,6 +2440,13 @@ export class AiDriverService {
   private announceRestartReconciliation(session: AiDmSessionState, r: RestartReconciliation): void {
     const campaignId = session.campaignId;
     const parts: string[] = [];
+
+    // A restart deliberately discards confirmations rather than restoring a stale authority
+    // grant. Undo the matching temporary action-chain retention at the same time, otherwise an
+    // abandoned collaborative preview is permanently exempt from the pending-resolution TTL.
+    for (const retained of this.distinctRetainedActionChains(r.confirmationsDiscarded)) {
+      this.actionResolver?.releasePendingChainForConfirmation(retained.encounterId, retained.chainId);
+    }
 
     if (r.voteExpired) {
       parts.push('an open table vote lapsed');
@@ -4434,6 +4452,7 @@ export class AiDriverService {
           sessionProfile,
           generationSignal,
           actor,
+          seatPrincipal,
           triggeredBy,
           seatToolset,
           contextToolset,
@@ -5128,6 +5147,7 @@ export class AiDriverService {
     sessionProfile: DriverSessionProfile,
     generationSignal: AbortSignal,
     actor: string,
+    seatPrincipal: RequestUser,
     triggeredBy: RequestUser,
     seatToolset: DriverToolset,
     contextToolset: DriverToolset,
@@ -5281,14 +5301,51 @@ export class AiDriverService {
       // (1c) Confirm-policy tools (#474): queue for DM review instead of executing directly.
       if (tool?.mutating && policyDecision?.policy === 'confirm') {
         noteDriverConfirmToolAttempt(session);
+        // Issue #1451 review (Codex P1, second pass): `apply_action`'s queued confirmation must
+        // describe what will ACTUALLY execute, never anything the calling model supplied — a
+        // caller-controlled label displayed while `apply()` executes whatever the chainId
+        // identifies is a confirmation-spoofing vector (approve a label, not the call). Rebuild
+        // this tool's queued args from scratch: only `encounterId`/`chainId` survive from the
+        // model's own call, and the display fields come exclusively from the persisted
+        // resolution that same chainId will make `apply()` read. That lookup also marks the
+        // persisted chain as awaiting this human decision, so its preview TTL cannot race the
+        // delayed confirmation; it is never a source of authorization.
+        let queuedArgs = args;
+        let retainedActionChain: { encounterId: number; chainId: string } | undefined;
+        // Confirmation IDs are provider-supplied and Gemini restarts them at call_0 on each
+        // response. Dedupe before retaining: if this key already owns a decision, the incoming
+        // call is ignored and must not pin an unrelated new chain with nobody able to release it.
+        const confirmationAlreadyQueued = this.hasPendingToolConfirmation(session, call);
+        if (call.name === 'apply_action') {
+          const argEncounterId = typeof args.encounterId === 'number' ? args.encounterId : Number(args.encounterId);
+          const argChainId = typeof args.chainId === 'string' ? args.chainId : undefined;
+          const described =
+            !confirmationAlreadyQueued && argChainId && Number.isFinite(argEncounterId)
+              ? (this.actionResolver?.retainPendingChainForConfirmation(argEncounterId, argChainId, seatPrincipal, 'dm') ?? null)
+              : null;
+          queuedArgs = {
+            encounterId: args.encounterId,
+            chainId: args.chainId,
+            ...(described ? { actionName: described.actionName, actorCombatantId: described.actorCombatantId } : {}),
+          };
+          if (
+            !confirmationAlreadyQueued
+            && argChainId
+            && Number.isFinite(argEncounterId)
+            && (described?.promoted || this.hasRetainedActionChain(session, argEncounterId, argChainId))
+          ) {
+            retainedActionChain = { encounterId: argEncounterId, chainId: argChainId };
+          }
+        }
         const pending = this.queueToolConfirmation(
           session,
           call,
-          args,
+          queuedArgs,
           sessionProfile,
           policyDecision.policy,
           actor,
           triggeredBy.id,
+          retainedActionChain,
         );
         const pendingText = JSON.stringify({
           status: 'pending_dm_confirmation',
@@ -5587,7 +5644,9 @@ export class AiDriverService {
    * exist (restart, handled loudly by #1042; and this cap). The consistent answer, and the one
    * #1042 established, is that a grant may be discarded but never in silence.
    */
-  private announceEvictedConfirmation(campaignId: number, evicted: AiDmPendingToolConfirmation): void {
+  private announceEvictedConfirmation(session: AiDmSessionState, evicted: AiDmPendingToolConfirmation): void {
+    const campaignId = session.campaignId;
+    this.releaseRetainedActionChain(session, evicted);
     void this.audit
       .log({
         actor: `ai-dm-seat:${campaignId}`,
@@ -5617,27 +5676,12 @@ export class AiDriverService {
     policy: DriverToolPolicyClass,
     actor: string,
     triggeredBy: string,
+    retainedActionChain?: { encounterId: number; chainId: string },
   ): AiDmPendingToolConfirmation {
     session.pendingToolConfirmations = session.pendingToolConfirmations ?? {};
     const key = pendingConfirmationKey(call.name, call.id);
     const existing = session.pendingToolConfirmations[key];
     if (existing) return existing;
-
-    const keysByAge = Object.keys(session.pendingToolConfirmations).sort((a, b) =>
-      session.pendingToolConfirmations![a].requestedAt.localeCompare(session.pendingToolConfirmations![b].requestedAt),
-    );
-    while (keysByAge.length >= MAX_PENDING_TOOL_CONFIRMATIONS) {
-      const oldest = keysByAge.shift()!;
-      const evicted = session.pendingToolConfirmations[oldest];
-      delete session.pendingToolConfirmations[oldest];
-      // #1558 — EVICTION MUST BE LOUD. This is the same failure #1042 found for grants lost to a
-      // restart: an irreversible write a DM was asked to approve, dropped with no audit row and
-      // no signal. It used to be near-unreachable at 20 pending; collaborative handoff (#1051)
-      // queues roughly four per combat turn, so five turns of an inattentive DM now silently
-      // discards their oldest decision. Same treatment as #1042's discarded grants: one audit
-      // row naming the call, and a signal that reconciles the DM's queue.
-      if (evicted) this.announceEvictedConfirmation(session.campaignId, evicted);
-    }
 
     const pending: AiDmPendingToolConfirmation = {
       id: `confirm-${++this.confirmationSeq}`,
@@ -5650,13 +5694,36 @@ export class AiDriverService {
       actor,
       triggeredBy,
       turnNumber: session.turnCount,
+      ...(retainedActionChain ? { retainedActionChain } : {}),
     };
     session.pendingToolConfirmations[key] = pending;
+    // Insert the incoming owner BEFORE cap eviction. If it continues a chain owned by the
+    // oldest confirmation, `releaseRetainedActionChain()` now sees the replacement ownership
+    // in the final map and cannot briefly make a still-queued chain TTL-eligible.
+    const keysByAge = Object.keys(session.pendingToolConfirmations).sort((a, b) =>
+      session.pendingToolConfirmations![a].requestedAt.localeCompare(session.pendingToolConfirmations![b].requestedAt),
+    );
+    while (keysByAge.length > MAX_PENDING_TOOL_CONFIRMATIONS) {
+      const oldest = keysByAge.shift()!;
+      const evicted = session.pendingToolConfirmations[oldest];
+      delete session.pendingToolConfirmations[oldest];
+      // #1558 — EVICTION MUST BE LOUD. This is the same failure #1042 found for grants lost to a
+      // restart: an irreversible write a DM was asked to approve, dropped with no audit row and
+      // no signal. It used to be near-unreachable at 20 pending; collaborative handoff (#1051)
+      // queues roughly four per combat turn, so five turns of an inattentive DM now silently
+      // discards their oldest decision. Same treatment as #1042's discarded grants: one audit
+      // row naming the call, and a signal that reconciles the DM's queue.
+      if (evicted) this.announceEvictedConfirmation(session, evicted);
+    }
     // #1042: a queued confirmation is an irreversible write waiting on a human. If the process
     // dies before the DM answers, the next boot has to be able to tell them it was discarded —
     // which it can only do from a persisted record.
     this.persistControlState(session);
     return pending;
+  }
+
+  private hasPendingToolConfirmation(session: AiDmSessionState, call: AiToolCall): boolean {
+    return !!session.pendingToolConfirmations?.[pendingConfirmationKey(call.name, call.id)];
   }
 
   private async triggerEmergencyPause(
@@ -5949,6 +6016,29 @@ export class AiDriverService {
     return Object.values(session.pendingToolConfirmations ?? {});
   }
 
+  /** Whether another pending confirmation still owns this temporary chain retention. */
+  private hasRetainedActionChain(session: AiDmSessionState, encounterId: number, chainId: string): boolean {
+    return Object.values(session.pendingToolConfirmations ?? {}).some(
+      (confirmation) => confirmation.retainedActionChain?.encounterId === encounterId && confirmation.retainedActionChain.chainId === chainId,
+    );
+  }
+
+  /** Release only the last confirmation's ownership of a temporary chain retention. */
+  private releaseRetainedActionChain(session: AiDmSessionState, confirmation: AiDmPendingToolConfirmation): void {
+    const retained = confirmation.retainedActionChain;
+    if (!retained || this.hasRetainedActionChain(session, retained.encounterId, retained.chainId)) return;
+    this.actionResolver?.releasePendingChainForConfirmation(retained.encounterId, retained.chainId);
+  }
+
+  private distinctRetainedActionChains(confirmations: AiDmPendingToolConfirmation[]): Array<{ encounterId: number; chainId: string }> {
+    const retained = new Map<string, { encounterId: number; chainId: string }>();
+    for (const confirmation of confirmations) {
+      const chain = confirmation.retainedActionChain;
+      if (chain) retained.set(`${chain.encounterId}:${chain.chainId}`, chain);
+    }
+    return [...retained.values()];
+  }
+
   /**
    * Approve or reject a queued confirm-policy tool call (#474). Approval executes the stored
    * args under the seat principal with full audit provenance; rejection drops the pending entry.
@@ -5979,6 +6069,7 @@ export class AiDriverService {
     this.persistControlState(session);
 
     if (action === 'reject') {
+      this.releaseRetainedActionChain(session, pending);
       await this.audit.log({
         actor: auditActor(granter),
         actorRole: role,
@@ -6001,7 +6092,17 @@ export class AiDriverService {
 
     const seatPrincipal = this.seatPrincipal(campaignId);
     const seatToolset = this.mcpTools.buildToolset(seatPrincipal);
-    const res = await seatToolset.call(pending.tool, pending.args);
+    // `apply_action` confirmations carry trusted labels for the DM's review UI, but those
+    // labels are not part of the executable MCP schema. Keep this boundary explicit instead
+    // of relying on the action resolver to ignore surplus caller-facing fields.
+    const executionArgs =
+      pending.tool === 'apply_action'
+        ? { encounterId: pending.args.encounterId, chainId: pending.args.chainId }
+        : pending.args;
+    const res = await seatToolset.call(pending.tool, executionArgs);
+    // A failed approved call also consumed its confirmation without consuming its action chain.
+    // Let the ordinary preview sweep reclaim it instead of leaving an immortal pending row.
+    if (res.isError) this.releaseRetainedActionChain(session, pending);
 
     if (!res.isError && DRIVER_LOOT_COMBAT_LOG_TOOLS.has(pending.tool)) {
       const detail = formatDriverLootCombatLogDetail(pending.tool, pending.args);

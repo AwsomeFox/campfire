@@ -2217,6 +2217,26 @@ CREATE TABLE IF NOT EXISTS action_apply_chains (
   created_at TEXT NOT NULL, undone_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_action_apply_chains_encounter ON action_apply_chains(encounter_id);
+
+-- Issue #1451: server-side snapshot of a RESOLVED action chain, keyed by the same chainId
+-- resolve() mints for every resolution (preview or committed). /actions/apply takes
+-- { chainId } only and re-reads the resolution from THIS row rather than trusting a
+-- client-echoed ActionResolution — closing the inflated-damage/injected-condition forgery
+-- this table exists to prevent. No targets_allow (apply always re-validates against the
+-- CURRENT spec) and no consumed_at (a row is DELETED, not flagged, the instant it is claimed —
+-- both the replay guard and how this table's growth stays bounded). awaiting_confirmation marks
+-- a resolution needing a later human decision — dm-confirmed/player-declares policy or a queued
+-- collaborative-AI apply_action — exempt from the age-based TTL (a DM's review queue must not
+-- silently lose a legitimate declaration), still subject to the per-encounter cap but evicted
+-- loudly (audited), unlike an ordinary abandoned preview. See
+-- ActionResolverService.sweepStalePendingResolutions for the full reasoning.
+CREATE TABLE IF NOT EXISTS action_pending_resolutions (
+  id TEXT PRIMARY KEY, encounter_id INTEGER NOT NULL REFERENCES encounters(id) ON DELETE CASCADE,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE, actor_combatant_id INTEGER NOT NULL,
+  action_name TEXT NOT NULL DEFAULT '', action_index INTEGER, action_fingerprint TEXT, awaiting_confirmation INTEGER NOT NULL DEFAULT 0,
+  resolution_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_action_pending_resolutions_encounter ON action_pending_resolutions(encounter_id);
 ${CAMPAIGN_MODULES_DDL}`;
 
 /**

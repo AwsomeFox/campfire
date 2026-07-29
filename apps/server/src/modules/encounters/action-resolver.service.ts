@@ -1,7 +1,9 @@
+import { createHash, randomUUID } from 'node:crypto';
 import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
-import { and, eq, isNull, or } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, lt, or } from 'drizzle-orm';
 import {
   ActionApplyPolicy,
+  ActionApplyRequest,
   ActionResolution,
   ActionResolveRequest,
   ActionResolveResult,
@@ -64,14 +66,14 @@ import {
 } from '@campfire/schema';
 
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { actionApplyChains, campaigns, characters, combatants, encounterEvents, encounters, ruleEntries } from '../../db/schema';
+import { actionApplyChains, actionPendingResolutions, campaigns, characters, combatants, encounterEvents, encounters, ruleEntries } from '../../db/schema';
 import { CampaignEventsService } from '../events/campaign-events.service';
 import { AuditService } from '../audit/audit.service';
 import { TableSafetyService } from '../safety/table-safety.service';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { conditionWriteSetFromNames, readConditionInstances, sheetConditionWriteSetFromNames } from '../../common/conditions';
 import { nowIso } from '../../common/time';
-import { rollDice } from '../../common/dice';
+import { rollDice, parseCompoundDiceExpr } from '../../common/dice';
 import { auditActor, roleAtLeast } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import {
@@ -86,6 +88,24 @@ type ResolvedActionEconomyCost = {
   kind: ActionEconomySlotKind | 'legendary';
   max: number | null;
 };
+
+/** A sheet action has no durable id. Store a canonical content fingerprint with a pending
+ * resolution so apply() can reject a same-named replacement after an edit or reorder. */
+function actionFingerprint(action: unknown): string {
+  const canonicalize = (value: unknown): string => {
+    if (Array.isArray(value)) return `[${value.map(canonicalize).join(',')}]`;
+    if (value && typeof value === 'object') {
+      const record = value as Record<string, unknown>;
+      return `{${Object.keys(record)
+        .sort()
+        .map((key) => `${JSON.stringify(key)}:${canonicalize(record[key])}`)
+        .join(',')}}`;
+    }
+    return JSON.stringify(value) ?? 'undefined';
+  };
+
+  return createHash('sha256').update(canonicalize(action)).digest('hex');
+}
 
 /**
  * Structured action resolver (issue #414) — the server orchestration around the pure,
@@ -378,13 +398,19 @@ export class ActionResolverService {
   }
 
   /** Resolve the structured spec for an action request: inline spec, sheet action, or statblock action. */
-  private resolveSpec(actor: typeof combatants.$inferSelect, req: ActionResolveRequest, campaignId: number): { spec: ActionSpec; name: string } {
+  private resolveSpec(
+    actor: typeof combatants.$inferSelect,
+    req: ActionResolveRequest,
+    campaignId: number,
+  ): { spec: ActionSpec; name: string; actionIndex: number | null; actionFingerprint: string | null } {
     if (req.spec) {
       const spec = ActionSpec.parse(req.spec);
       if (!isResolvableSpec(spec)) {
         throw new BadRequestException('The inline action spec has no resolvable mode/DC/attack — fall back to a statblock rather than inventing numbers.');
       }
-      return { spec, name: req.actionName ?? 'Action' };
+      // Empty string distinguishes an intentionally inline action from a legacy row with no
+      // fingerprint. Inline actions have no sheet identity to compare at apply time.
+      return { spec, name: req.actionName ?? 'Action', actionIndex: null, actionFingerprint: '' };
     }
     const character = this.linkedCharacter(actor);
     if (character) {
@@ -396,13 +422,16 @@ export class ActionResolverService {
       }
       const raw = actions[idx];
       const name = String(raw?.name ?? 'Action');
+      if (req.actionIndex !== undefined && req.actionName && name !== req.actionName) {
+        throw new BadRequestException(`Action "${req.actionName}" changed or moved before it could be applied.`);
+      }
       const parsed = ActionSpec.safeParse(raw?.spec);
       if (!parsed.success || !isResolvableSpec(parsed.data)) {
         throw new BadRequestException(
           `"${name}" has no resolvable structured spec — fall back to its statblock (toHit/damage/notes) rather than inventing numbers.`,
         );
       }
-      return { spec: parsed.data, name };
+      return { spec: parsed.data, name, actionIndex: idx, actionFingerprint: actionFingerprint(raw) };
     }
     const statActions = this.combatantActions(actor, campaignId);
     let idx = req.actionIndex ?? -1;
@@ -416,13 +445,16 @@ export class ActionResolverService {
       throw new NotFoundException(`Action ${req.actionName ?? req.actionIndex} not found on this combatant.`);
     }
     const action = statActions[idx];
+    if (req.actionIndex !== undefined && req.actionName && action.name !== req.actionName) {
+      throw new BadRequestException(`Action "${req.actionName}" changed or moved before it could be applied.`);
+    }
     const parsed = ActionSpec.safeParse(action.spec);
     if (!parsed.success || !isResolvableSpec(parsed.data)) {
       throw new BadRequestException(
         `"${action.name}" has no resolvable structured spec — fall back to its statblock (toHit/damage/notes) rather than inventing numbers.`,
       );
     }
-    return { spec: parsed.data, name: action.name };
+    return { spec: parsed.data, name: action.name, actionIndex: idx, actionFingerprint: actionFingerprint(action) };
   }
 
   // -------------------------------------------------------------------------
@@ -508,7 +540,7 @@ export class ActionResolverService {
     }
 
     const adapter = this.adapterForCampaign(encounter.campaignId);
-    const { spec, name } = this.resolveSpec(actor, req, encounter.campaignId);
+    const { spec, name, actionIndex, actionFingerprint: selectedActionFingerprint } = this.resolveSpec(actor, req, encounter.campaignId);
     const { policy, canApply } = this.policyFor(encounter.campaignId, actor, user, role);
 
     // Validate target legality (count + at least one when the action needs a target).
@@ -535,13 +567,42 @@ export class ActionResolverService {
     }
 
     const resolution = this.buildResolution(spec, name, actor, resolvedTargets);
+
+    // Issue #1451 (review): bound action_pending_resolutions growth BEFORE inserting another
+    // row — every resolve (including a preview the player never applies) would otherwise
+    // accumulate a permanent row, since the table used to be pruned only on apply. Sweeping
+    // this encounter's stale/excess rows on every resolve call bounds growth to (live
+    // encounters) × (TTL window of resolve traffic) rather than "however many times anyone has
+    // ever previewed" — see sweepStalePendingResolutions's doc comment for the state-dependent
+    // lifetime this now enforces.
+    this.sweepStalePendingResolutions(encounter, !canApply, user, role);
+
+    // Mint the chain id HERE, at resolve time, and persist the EXACT resolution the server
+    // just computed — regardless of whether this call also commits it. This is the only copy
+    // `/actions/apply` will ever read: a later apply takes `{ chainId }` alone, so a
+    // client-edited `totalDamage` (or an injected condition/effect never in the action spec)
+    // in the request body is simply never consulted.
+    //
+    // When the campaign policy prevents THIS caller from applying immediately, the only way this
+    // resolution is ever consumed is a later, separate DM `apply()` call — a genuine declaration,
+    // exempt from the TTL (see the sweep's doc comment). A collaborative AI handoff can turn an
+    // initially automatic preview into that same kind of pending human decision; the driver marks
+    // that persisted chain with `retainPendingChainForConfirmation()` when it queues the approval.
+    const chainId = this.mintChainId();
+    this.persistPendingResolution(encounter, actor, chainId, resolution, actionIndex, selectedActionFingerprint, !canApply);
+
     let applied = false;
     let undoToken: ActionUndoToken | null = null;
     if (req.commit && canApply) {
-      undoToken = this.applyInternal(encounter, resolution, actor, user, role, spec.targets.allow);
+      // Cheap backstop (issue #1451), even though this resolution is already the server's own
+      // roll: bound each target's damage/heal/temp-HP against what this exact dice spec could
+      // ever produce, so a future caller of applyInternal (or a bug in this round trip) cannot
+      // silently commit a number the spec itself could never have rolled.
+      this.assertResolutionWithinSpecBounds(spec, resolution);
+      undoToken = this.applyInternal(encounter, resolution, actor, user, role, spec.targets.allow, chainId);
       applied = true;
     }
-    return ActionResolveResult.parse({ resolution, applied, canApply, policy, undoToken });
+    return ActionResolveResult.parse({ resolution, applied, canApply, policy, undoToken, chainId });
   }
 
   /** Resolve a single target: roll attack or the target's save, classify, roll damage, apply defences. */
@@ -880,38 +941,423 @@ export class ActionResolverService {
   // -------------------------------------------------------------------------
 
   /**
-   * Apply a previously-previewed resolution (issue #414 confirm path). The applier must be the
-   * DM, or the actor's owning player under an automatic policy. Because the applier is trusted
-   * (a DM can already set arbitrary combatant HP), the echoed resolution's rolled numbers are
-   * applied verbatim so the committed result is byte-identical to the preview the table read.
+   * Mint a chain id — the correlation key shared by the pending-resolution row, the apply-chain
+   * undo snapshot, and the combat-log entries for one resolve/apply (issues #414, #426, #1449).
+   *
+   * Issue #1451 review: this is a LOOKUP KEY, not a credential — `apply()` re-authorizes the
+   * caller against the chain's stored actor/encounter on every call regardless of who supplies
+   * a (real or guessed) chainId, so guessability does not bypass authorization. `randomUUID()`
+   * is used anyway as cheap insurance over the previous `Math.random()` suffix.
    */
-  apply(encounterId: number, resolution: ActionResolution, user: RequestUser, role: Role): { undoToken: ActionUndoToken } {
+  private mintChainId(): string {
+    return `chain-${randomUUID()}`;
+  }
+
+  /** Issue #1451 (review): bound how long an unconsumed preview lives, and how many any one
+   *  encounter can accumulate — see {@link sweepStalePendingResolutions}. */
+  private static readonly PENDING_RESOLUTION_TTL_MS = 30 * 60 * 1000; // 30 minutes
+  private static readonly MAX_PENDING_RESOLUTIONS_PER_ENCOUNTER = 200;
+
+  /**
+   * Issue #1451 (review — Devin + Codex P1, then corrected against Devin's follow-up): every
+   * resolve used to insert a permanent row that was only ever marked consumed, never deleted or
+   * expired — a player who repeatedly previews (and never applies) could grow
+   * `action_pending_resolutions` without bound, a real problem for a product whose whole design
+   * is one SQLite volume. The first fix bounded EVERY row by age + count uniformly — but that
+   * broke the dm-confirmed/player-declares workflow: a player's legitimate declaration, sitting
+   * in the table awaiting a DM's `apply()`, is indistinguishable by shape from an abandoned
+   * preview, and a DM can legitimately take longer than any fixed TTL to get to their queue. A
+   * declaration silently evaporating out from under a player is a worse failure than the disk
+   * growth this exists to bound.
+   *
+   * INVARIANT CHOSEN (state this in review — see the PR body): lifetime now depends on STATE,
+   * not just age.
+   *  - `awaitingConfirmation = false` (an ordinary preview under automatic policy, disposable and
+   *    free to re-derive): TTL-eligible, AND silently evicted by the per-encounter cap — matches
+   *    the original fix's reasoning, since re-previewing costs nothing.
+   *  - `awaitingConfirmation = true` (a declaration only a LATER, different caller's `apply()`
+   *    can ever consume): EXEMPT from the TTL entirely — no age-based expiry, ever. It is still
+   *    subject to the SAME per-encounter cap (an unbounded declaration queue reopens the exact
+   *    growth vector this whole fix exists to close), but evicting one is AUDITED and never
+   *    silent (`encounter.action.declaration_evicted`), mirroring the established, already-loud
+   *    pattern `AiDriverService.announceEvictedConfirmation` (#1558) uses for the AI driver's own
+   *    confirmation queue eviction.
+   *
+   * A CONSUMED resolution does not rely on either of these — `applyInternal` deletes its row
+   * immediately (see the transaction there), so this sweep only ever has abandoned previews and
+   * pending declarations left to reclaim.
+   */
+  private sweepStalePendingResolutions(
+    encounter: typeof encounters.$inferSelect,
+    incomingAwaitingConfirmation: boolean,
+    user: RequestUser,
+    role: Role,
+  ): void {
+    const cutoff = new Date(Date.now() - ActionResolverService.PENDING_RESOLUTION_TTL_MS).toISOString();
+    // TTL: ONLY ordinary previews expire by age. A declaration awaiting DM confirmation must
+    // survive indefinitely by age alone.
+    this.db
+      .delete(actionPendingResolutions)
+      .where(
+        and(
+          eq(actionPendingResolutions.encounterId, encounter.id),
+          lt(actionPendingResolutions.createdAt, cutoff),
+          eq(actionPendingResolutions.awaitingConfirmation, false),
+        ),
+      )
+      .run();
+
+    this.capPendingResolutions(encounter, false, incomingAwaitingConfirmation === false, user, role);
+    this.capPendingResolutions(encounter, true, incomingAwaitingConfirmation === true, user, role);
+  }
+
+  /**
+   * Evict the oldest rows in one (encounter, awaitingConfirmation) partition past the cap.
+   * Reserve a slot only for the partition the imminent insert will join; a full other
+   * partition is valid and must remain untouched.
+   */
+  private capPendingResolutions(
+    encounter: typeof encounters.$inferSelect,
+    awaitingConfirmation: boolean,
+    reserveSlotForIncoming: boolean,
+    user: RequestUser,
+    role: Role,
+  ): void {
+    const rows = this.db
+      .select({
+        id: actionPendingResolutions.id,
+        actionName: actionPendingResolutions.actionName,
+        actorCombatantId: actionPendingResolutions.actorCombatantId,
+      })
+      .from(actionPendingResolutions)
+      .where(
+        and(
+          eq(actionPendingResolutions.encounterId, encounter.id),
+          eq(actionPendingResolutions.awaitingConfirmation, awaitingConfirmation),
+        ),
+      )
+      .orderBy(desc(actionPendingResolutions.createdAt))
+      .all();
+    const maximumExistingRows = ActionResolverService.MAX_PENDING_RESOLUTIONS_PER_ENCOUNTER - (reserveSlotForIncoming ? 1 : 0);
+    if (rows.length <= maximumExistingRows) return;
+    const evicted = rows.slice(maximumExistingRows);
+    if (evicted.length === 0) return;
+    this.db
+      .delete(actionPendingResolutions)
+      .where(inArray(actionPendingResolutions.id, evicted.map((r) => r.id)))
+      .run();
+    if (!awaitingConfirmation) return; // an ordinary preview is cheap to re-derive — no audit needed.
+    // A DECLARATION never disappears in silence (issue #1451 review) — same treatment #1558
+    // gives the AI driver's own confirmation-queue eviction.
+    for (const row of evicted) {
+      void this.audit
+        .log({
+          actor: auditActor(user),
+          actorRole: role,
+          action: 'encounter.action.declaration_evicted',
+          entityType: 'encounter',
+          entityId: encounter.id,
+          campaignId: encounter.campaignId,
+          detail: JSON.stringify({
+            chainId: row.id,
+            actionName: row.actionName,
+            actorCombatantId: row.actorCombatantId,
+            reason: `encounter reached its ${ActionResolverService.MAX_PENDING_RESOLUTIONS_PER_ENCOUNTER}-declaration cap — never applied`,
+          }),
+        })
+        .catch(() => undefined);
+    }
+    if (!encounter.hidden) this.events.emit({ type: 'encounter.updated', campaignId: encounter.campaignId, encounterId: encounter.id });
+  }
+
+  /**
+   * Issue #1451: persist the exact resolution `resolve()` just computed, keyed by `chainId`.
+   * This is the ONLY copy `apply()` will ever read back — the request body `/actions/apply`
+   * receives later carries nothing but the chain id, so a client cannot smuggle a different
+   * `totalDamage`, an injected condition, or an unresolved effect payload into the apply step.
+   * Not keyed on `targetsAllow` (unlike `action_apply_chains`): `apply()` re-validates targeting
+   * against the CURRENT spec, never a resolve-time snapshot — see `apply()`'s doc comment.
+   */
+  private persistPendingResolution(
+    encounter: typeof encounters.$inferSelect,
+    actor: typeof combatants.$inferSelect,
+    chainId: string,
+    resolution: ActionResolution,
+    actionIndex: number | null,
+    actionFingerprint: string | null,
+    awaitingConfirmation: boolean,
+  ): void {
+    this.db
+      .insert(actionPendingResolutions)
+      .values({
+        id: chainId,
+        encounterId: encounter.id,
+        campaignId: encounter.campaignId,
+        actorCombatantId: actor.id,
+        actionName: resolution.actionName,
+        actionIndex,
+        actionFingerprint,
+        awaitingConfirmation,
+        resolutionJson: toJsonText(resolution),
+        createdAt: nowIso(),
+      })
+      .run();
+  }
+
+  /**
+   * Issue #1451: a cheap, deliberately PERMISSIVE upper bound on what a dice expression could
+   * ever total, used only to catch a resolution wildly outside anything the action's spec could
+   * legitimately roll. Ignores keep/drop reduction and negative modifiers (both only ever LOWER
+   * a real roll) so a legitimate result can never trip it — this is a backstop, not a re-derivation.
+   *
+   * Issue #1451 review (Kilo): a formula this backstop cannot parse returns `Infinity` — NO
+   * bound from this term — rather than 0. This is a backstop, not the primary control (the
+   * primary control is that `apply()` only ever writes the server's own persisted resolution),
+   * so it must fail OPEN on an internal parsing surprise, not silently reject every legitimate
+   * damage/heal number for a branch it merely failed to parse.
+   */
+  private maxDiceExprTotal(expr: string): number {
+    if (!expr || !expr.trim()) return 0;
+    let terms: ReturnType<typeof parseCompoundDiceExpr>;
+    try {
+      terms = parseCompoundDiceExpr(expr);
+    } catch {
+      return Infinity;
+    }
+    let max = 0;
+    for (const t of terms) {
+      max += t.kind === 'die' ? t.count * t.sides : Math.max(0, t.value);
+    }
+    return max;
+  }
+
+  /**
+   * The maximum damage ONE target's branch could ever take (issue #1451): each part's dice+flat
+   * ceiling, times 4 to cover the worst realistic stack of multipliers this resolver can apply —
+   * a critical hit doubling the total (the larger of the two supported crit rules,
+   * {@link CriticalDamageRule}) AND a vulnerability doubling it again on top. Generous on
+   * purpose; it exists to catch an order-of-magnitude-inflated number, not to re-derive the roll.
+   */
+  private maxBranchDamage(branch: OutcomeBranch): number {
+    const partsMax = branch.damage.reduce((sum, p) => sum + this.maxDiceExprTotal(p.formula) + Math.max(0, p.flat), 0);
+    return partsMax * 4;
+  }
+
+  /** The widest damage/heal/temp-HP bound across every outcome branch this spec declares. */
+  private specDamageBounds(spec: ActionSpec): { maxDamage: number; maxHealing: number; maxTempHp: number } {
+    let maxDamage = 0;
+    let maxHealing = 0;
+    let maxTempHp = 0;
+    for (const branch of Object.values(spec.outcomes)) {
+      if (!branch) continue;
+      maxDamage = Math.max(maxDamage, this.maxBranchDamage(branch));
+      maxHealing = Math.max(maxHealing, this.maxDiceExprTotal(branch.healing));
+      maxTempHp = Math.max(maxTempHp, this.maxDiceExprTotal(branch.tempHp));
+    }
+    return { maxDamage, maxHealing, maxTempHp };
+  }
+
+  /**
+   * Issue #1451 cheap backstop: bound every target's damage/healing/temp-HP against what this
+   * action's OWN dice spec could ever roll, on BOTH the player and the DM path — even though
+   * (after this fix) the resolution being applied is always the server's own, never a
+   * client-echoed one. Defense in depth against a bug in that round trip, not the primary gate.
+   */
+  private assertResolutionWithinSpecBounds(spec: ActionSpec, resolution: ActionResolution): void {
+    const { maxDamage, maxHealing, maxTempHp } = this.specDamageBounds(spec);
+    for (const t of resolution.targets) {
+      if (t.totalDamage > maxDamage) {
+        throw new BadRequestException(
+          `"${resolution.actionName}" cannot deal ${t.totalDamage} damage — its dice spec bounds a single target's damage at ${maxDamage}.`,
+        );
+      }
+      if (t.healing > maxHealing) {
+        throw new BadRequestException(
+          `"${resolution.actionName}" cannot heal ${t.healing} — its dice spec bounds healing at ${maxHealing}.`,
+        );
+      }
+      if (t.tempHp > maxTempHp) {
+        throw new BadRequestException(
+          `"${resolution.actionName}" cannot grant ${t.tempHp} temp HP — its dice spec bounds it at ${maxTempHp}.`,
+        );
+      }
+    }
+  }
+
+  /** Audit a rejected apply attempt (issue #1451) — mirrors auditRejectedUndo (issue #1449). */
+  private auditRejectedApply(
+    encounter: typeof encounters.$inferSelect,
+    chainId: string,
+    user: RequestUser,
+    role: Role,
+    reason: string,
+  ): void {
+    void this.audit
+      .log({
+        actor: auditActor(user),
+        actorRole: role,
+        action: 'encounter.action.apply_rejected',
+        entityType: 'encounter',
+        entityId: encounter.id,
+        campaignId: encounter.campaignId,
+        detail: JSON.stringify({ reason, chainId }),
+      })
+      .catch(() => undefined);
+  }
+
+  /**
+   * Transition an otherwise-disposable preview into a pending human decision when the AI driver
+   * queues `apply_action` for collaborative confirmation. This is deliberately a transition on
+   * the persisted chain, rather than a guess based on the AI seat's `canApply`: collaborative
+   * handoff defers the write even when that seat has automatic-policy authority. Returns the
+   * server-derived `actionName`/`actorCombatantId` used by the confirmation prompt, never any
+   * caller-provided display fields. Returns null for an unknown or cross-encounter chain. This
+   * cannot authorize or determine WHAT gets applied: `apply()` exclusively re-reads this same
+   * row for that purpose.
+   */
+  retainPendingChainForConfirmation(
+    encounterId: number,
+    chainId: string,
+    user: RequestUser,
+    role: Role,
+  ): { actionName: string; actorCombatantId: number; promoted: boolean } | null {
+    const pending = this.db
+      .select({
+        encounterId: actionPendingResolutions.encounterId,
+        actionName: actionPendingResolutions.actionName,
+        actorCombatantId: actionPendingResolutions.actorCombatantId,
+        awaitingConfirmation: actionPendingResolutions.awaitingConfirmation,
+      })
+      .from(actionPendingResolutions)
+      .where(eq(actionPendingResolutions.id, chainId))
+      .get();
+    if (!pending || pending.encounterId !== encounterId) return null;
+
+    // A collaborative confirmation promotes an existing disposable preview into the declaration
+    // partition. That is an incoming declaration just as much as resolve() creating one is, so
+    // reserve capacity before the transition rather than letting confirmations grow past the cap.
+    if (!pending.awaitingConfirmation) {
+      this.capPendingResolutions(this.encounterRowOrThrow(encounterId), true, true, user, role);
+    }
+    this.db
+      .update(actionPendingResolutions)
+      .set({ awaitingConfirmation: true })
+      .where(and(eq(actionPendingResolutions.id, chainId), eq(actionPendingResolutions.encounterId, encounterId)))
+      .run();
+    return {
+      actionName: pending.actionName,
+      actorCombatantId: pending.actorCombatantId,
+      // Only the transition made for this confirmation is reversible when the confirmation
+      // disappears. A player declaration already awaiting a DM must remain retained.
+      promoted: !pending.awaitingConfirmation,
+    };
+  }
+
+  /** Release the temporary TTL exemption created for a collaborative AI confirmation. */
+  releasePendingChainForConfirmation(encounterId: number, chainId: string): void {
+    this.db
+      .update(actionPendingResolutions)
+      .set({ awaitingConfirmation: false })
+      .where(and(eq(actionPendingResolutions.id, chainId), eq(actionPendingResolutions.encounterId, encounterId)))
+      .run();
+  }
+
+  /**
+   * Apply a previously resolved action chain (issue #414 confirm path). `chainId` is a LOOKUP
+   * KEY, not a source of truth (issue #1451): the resolution applied is always the exact one
+   * `resolve()` computed and persisted server-side (`action_pending_resolutions`), never
+   * anything the request body carries. Before this fix, `apply()` took the full
+   * `ActionResolution` from the client and wrote its `totalDamage`/`healing`/`effects` verbatim
+   * — trusting the applier was "safe" because a DM can already set arbitrary HP, which is false
+   * for the player who can also reach this route under an automatic policy. Now a player cannot
+   * inflate damage, alter a per-target delta, or inject a condition/effect never in the resolved
+   * spec: none of that is read from anywhere the caller can influence. The applier must still be
+   * the DM, or the actor's owning player under an automatic policy.
+   *
+   * `req` carries `chainId` ONLY (issue #1451 review, second pass) — an earlier revision also
+   * accepted optional caller-supplied `actionName`/`actorCombatantId` for a DM confirmation
+   * prompt under collaborative handoff (#1051), but that let a caller label a damaging chain
+   * with a harmless-looking action/actor and obtain approval under a false summary; the
+   * confirmation now derives its label server-side instead — see
+   * {@link ActionResolverService.retainPendingChainForConfirmation}.
+   *
+   * Issue #1451 review: the actual single-use claim happens inside `applyInternal`'s
+   * transaction (a conditional delete, mirroring `undo()`'s `action_apply_chains.undone_at`
+   * guard from #1449) — a concurrent second apply for this chainId either loses the lookup
+   * below (already deleted) or loses that transactional claim, never both writing state.
+   */
+  apply(encounterId: number, req: ActionApplyRequest, user: RequestUser, role: Role): { undoToken: ActionUndoToken } {
     const encounter = this.encounterRowOrThrow(encounterId);
     // #599: applying a resolution writes damage, conditions, and death saves to the board. That
     // is play advancing, and it is precisely what someone raising an X-Card mid-swing is asking
     // to stop. `resolve` (the preview) stays open — computing a number nobody has committed is
     // harmless, and blocking it would only hide from the table what was about to happen.
     this.safety?.assertNotHeld(encounter.campaignId);
-    const actor = this.combatantRowOrThrow(encounterId, resolution.actorCombatantId);
+
+    const pending = this.db.select().from(actionPendingResolutions).where(eq(actionPendingResolutions.id, req.chainId)).get();
+    if (!pending) {
+      // Unknown AND already-consumed collapse to the same outcome (issue #1451 review): a
+      // consumed resolution's row is deleted, not flagged, so there is nothing left to
+      // distinguish "never existed" from "already applied" — both are equally not appliable.
+      this.auditRejectedApply(encounter, req.chainId, user, role, 'unknown_or_consumed_chain');
+      throw new BadRequestException('This resolution is unknown or has already been applied.');
+    }
+    if (pending.encounterId !== encounterId) {
+      this.auditRejectedApply(encounter, req.chainId, user, role, 'cross_encounter_chain');
+      throw new BadRequestException('This chain belongs to a different encounter.');
+    }
+
+    const resolution = ActionResolution.parse(fromJsonText<unknown>(pending.resolutionJson, {}));
+    const actor = this.combatantRowOrThrow(encounterId, pending.actorCombatantId);
     const isDm = role === 'dm';
     if (!isDm) {
       if (actor.kind !== 'character' || !this.isCharacterOwnedBy(actor, user)) {
+        this.auditRejectedApply(encounter, req.chainId, user, role, 'not_actor_owner');
         throw new ForbiddenException('Only the DM may apply a monster/NPC action.');
       }
       const { canApply } = this.policyFor(encounter.campaignId, actor, user, role);
-      if (!canApply) throw new ForbiddenException('This campaign requires the DM to apply action consequences.');
+      if (!canApply) {
+        this.auditRejectedApply(encounter, req.chainId, user, role, 'policy_forbids');
+        throw new ForbiddenException('This campaign requires the DM to apply action consequences.');
+      }
     }
-    const { spec } = this.resolveSpec(actor, {
-      actorCombatantId: resolution.actorCombatantId,
-      actionName: resolution.actionName,
+    if (pending.actionFingerprint === null) {
+      this.auditRejectedApply(encounter, req.chainId, user, role, 'legacy_action_without_fingerprint');
+      throw new BadRequestException('This resolution was created before action identity verification; resolve the action again.');
+    }
+
+    // Issue #1451 review (Codex): validate against the CURRENT spec's targeting rule AND target
+    // count, never a resolve-time snapshot — an action edited between preview and apply (e.g.
+    // restricted to `self`, or to fewer targets) must not still apply its OLD, wider targeting.
+    // This mirrors exactly what the pre-#1451 `apply()` already did; `action_pending_resolutions`
+    // does not persist `targetsAllow` at all (unlike `action_apply_chains`, which UNDO
+    // deliberately snapshots — undo restores a thing that already happened under the old rule).
+    const { spec, actionFingerprint: currentActionFingerprint } = this.resolveSpec(actor, {
+      actorCombatantId: pending.actorCombatantId,
+      actionName: pending.actionName,
+      // `actionName` is not unique on character sheets. Persisting the selected index keeps
+      // this current-spec validation paired with the exact action previewed by resolve().
+      ...(pending.actionIndex !== null ? { actionIndex: pending.actionIndex } : {}),
       targetIds: [],
       commit: false,
     }, encounter.campaignId);
+    if (spec.targets.count > 0 && resolution.targets.length > spec.targets.count) {
+      this.auditRejectedApply(encounter, req.chainId, user, role, 'target_count_narrowed');
+      throw new BadRequestException(
+        `"${resolution.actionName}" now targets at most ${spec.targets.count}, but this resolution has ${resolution.targets.length}.`,
+      );
+    }
     for (const t of resolution.targets) {
       const target = this.combatantRowOrThrow(encounterId, t.combatantId);
       this.assertTargetAllowed(spec.targets.allow, actor, target, resolution.actionName);
     }
-    const undoToken = this.applyInternal(encounter, resolution, actor, user, role, spec.targets.allow);
+    this.assertResolutionWithinSpecBounds(spec, resolution);
+    if (pending.actionIndex !== null && currentActionFingerprint !== pending.actionFingerprint) {
+      this.auditRejectedApply(encounter, req.chainId, user, role, 'action_changed_or_moved');
+      throw new BadRequestException(`Action "${pending.actionName}" changed or moved before it could be applied.`);
+    }
+
+    const undoToken = this.applyInternal(encounter, resolution, actor, user, role, spec.targets.allow, pending.id);
     return { undoToken };
   }
 
@@ -928,9 +1374,15 @@ export class ActionResolverService {
      * action (which may no longer exist on the sheet by the time undo runs).
      */
     targetsAllow: ActionTargetAllow,
+    /**
+     * Issue #1451: the SAME chain id `resolve()` minted for this resolution's
+     * `action_pending_resolutions` row — reused here (rather than minting a fresh one) so one
+     * id correlates the pending resolution, the apply-chain undo snapshot, and the combat-log
+     * entries for a single resolve/apply. Claimed (marked consumed) inside this transaction.
+     */
+    chainId: string,
   ): ActionUndoToken {
     const round = encounter.round;
-    const chainId = `chain-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     const performedBy = this.performedByFrom(user, role);
     const adapter = this.adapterForCampaign(encounter.campaignId);
     const ruleSystem = adapter.id;
@@ -940,6 +1392,21 @@ export class ActionResolverService {
     const consequenceLogs: Array<{ type: 'damage' | 'heal' | 'condition' | 'death' | 'effect' | 'note' | 'resource_changed'; target?: string; targetId?: number; detail: string }> = [];
 
     this.db.transaction((tx) => {
+      // Issue #1451 review (Kilo, MUST FIX): claim the pending resolution FIRST, atomically,
+      // inside this transaction — not via a pre-transaction `SELECT` + `consumedAt` flag, which
+      // is a TOCTOU: two concurrent `apply()` calls for the same chainId could both observe an
+      // unconsumed row before either transaction committed, and both go on to write damage.
+      // Deleting the row IS the claim (there is no separate `consumedAt` column to race on): a
+      // concurrent second apply either already lost the pre-transaction lookup in `apply()`
+      // (row gone) or loses THIS delete (0 rows affected) and rolls back before touching any
+      // combatant state — mirrors `undo()`'s `action_apply_chains.undone_at` conditional-update
+      // guard (#1449) exactly, just via delete instead of a flag (issue #1451's growth-bound
+      // fix also wants the row gone once consumed, not kept forever).
+      const claimed = tx.delete(actionPendingResolutions).where(eq(actionPendingResolutions.id, chainId)).run();
+      if (claimed.changes === 0) {
+        throw new BadRequestException('This resolution is unknown or has already been applied.');
+      }
+
       // #1571 — VALIDATE THE SPELL SLOT SPEND FIRST, before any target consequence (damage,
       // saves, conditions) is written. `patchSpellSlots` (the standalone spend path, #1039)
       // fails loudly on overspend instead of silently clamping; this used to be a second,

@@ -9,7 +9,6 @@ import { useMemo, useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import type {
   ActionApplyPolicy,
-  ActionResolution,
   ActionResolveResult,
   ActionSpec,
   ActionTargetAllow,
@@ -101,8 +100,11 @@ export function ActionUsePanel({
   });
 
   const commit = useMutation({
-    mutationFn: (resolution: ActionResolution) =>
-      api.post<{ undoToken: ActionUndoToken }>(`${API}/encounters/${encounterId}/actions/apply`, resolution).then((r) => ({
+    // Issue #1451: apply takes the chainId returned by resolve — a lookup key only. The
+    // server re-reads the exact resolution it computed and persisted at resolve time rather
+    // than trusting anything the client echoes back.
+    mutationFn: (chainId: string) =>
+      api.post<{ undoToken: ActionUndoToken }>(`${API}/encounters/${encounterId}/actions/apply`, { chainId }).then((r) => ({
         ...preview!,
         applied: true,
         undoToken: r.undoToken,
@@ -212,7 +214,7 @@ export function ActionUsePanel({
               <Btn
                 data-testid="action-use-apply"
                 disabled={applyDisabled || commit.isPending || preview.applied}
-                onClick={() => commit.mutate(preview.resolution)}
+                onClick={() => commit.mutate(preview.chainId)}
               >
                 {commit.isPending ? 'Applying…' : 'Apply'}
               </Btn>

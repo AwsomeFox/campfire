@@ -53,6 +53,12 @@ export interface AiDmPendingToolConfirmation {
   /** Player who triggered the turn. */
   triggeredBy: string;
   turnNumber: number;
+  /**
+   * Internal lifecycle marker for a chain this confirmation temporarily kept beyond preview TTL.
+   * It is shared by every queued confirmation for that chain, so release waits for the final
+   * owner even when an earlier confirmation performed the false-to-true transition.
+   */
+  retainedActionChain?: { encounterId: number; chainId: string };
 }
 
 /** Tool-name prefixes the driver seat may never call — every hard delete, even proposed. */

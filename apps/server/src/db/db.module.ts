@@ -4317,6 +4317,71 @@ function migrateActionApplyChains1449(sqlite: Database.Database): void {
   `);
 }
 
+/**
+ * Issue #1451: server-side snapshot of a RESOLVED action chain, keyed by the same chainId
+ * `ActionResolverService.resolve()` mints for every resolution (preview or committed). Before
+ * this, `/actions/apply` took the FULL `ActionResolution` from the request body and wrote its
+ * `totalDamage`/`healing`/`effects` verbatim — a player could inflate a previewed 6-damage hit
+ * to an arbitrary number (or inject a condition never in the action spec) by re-POSTing an
+ * edited copy of the object the preview handed them. `apply()` now takes `{ chainId }` only and
+ * re-reads the resolution from THIS table; the caller's copy is never consulted.
+ *
+ * No `targets_allow` column: `apply()` always re-validates targeting against the CURRENT spec,
+ * never a resolve-time snapshot (review — see ActionResolverService.apply's doc comment).
+ *
+ * No `consumed_at` column: a row is DELETED, not flagged, the instant `applyInternal` claims it
+ * — a single atomic step that is both the replay guard (mirrors `action_apply_chains.undone_at`
+ * from #1449, just via delete) and how this table's growth stays bounded. An abandoned row is
+ * swept on a TTL + per-encounter cap (`ActionResolverService.sweepStalePendingResolutions`).
+ */
+function migrateActionPendingResolutions1451(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS action_pending_resolutions (
+      id TEXT PRIMARY KEY, encounter_id INTEGER NOT NULL REFERENCES encounters(id) ON DELETE CASCADE,
+      campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE, actor_combatant_id INTEGER NOT NULL,
+      action_name TEXT NOT NULL DEFAULT '', action_index INTEGER, action_fingerprint TEXT, awaiting_confirmation INTEGER NOT NULL DEFAULT 0,
+      resolution_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_action_pending_resolutions_encounter ON action_pending_resolutions(encounter_id);
+  `);
+  const columns = sqlite.prepare('PRAGMA table_info(action_pending_resolutions)').all() as Array<{ name: string }>;
+  if (!columns.some((column) => column.name === 'action_index')) {
+    sqlite.exec('ALTER TABLE action_pending_resolutions ADD COLUMN action_index INTEGER');
+  }
+}
+
+/**
+ * Follow-up for #1451's action fingerprint. Do not fold this into the originally shipped
+ * 0145 migration: installs that already recorded that name skip it forever. This distinct
+ * tail migration upgrades precisely that earlier table shape.
+ */
+function migrateActionPendingFingerprint1451(sqlite: Database.Database): void {
+  const columns = sqlite.prepare('PRAGMA table_info(action_pending_resolutions)').all() as Array<{ name: string }>;
+  if (columns.length === 0) return;
+  if (!columns.some((column) => column.name === 'awaiting_confirmation')) {
+    sqlite.exec('ALTER TABLE action_pending_resolutions ADD COLUMN awaiting_confirmation INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!columns.some((column) => column.name === 'action_index')) {
+    sqlite.exec('ALTER TABLE action_pending_resolutions ADD COLUMN action_index INTEGER');
+  }
+  if (!columns.some((column) => column.name === 'action_fingerprint')) {
+    sqlite.exec('ALTER TABLE action_pending_resolutions ADD COLUMN action_fingerprint TEXT');
+  }
+  // Migrations run before fresh-install bootstrap creates campaigns. Only existing installs can
+  // contain legacy rows, and deleting from this FK-owning table before its parent exists makes
+  // SQLite resolve the missing parent during DELETE. Skip the empty fresh shape; bootstrap then
+  // creates the complete schema. Existing installs fail closed by discarding the ambiguous rows.
+  const hasCampaignsTable = !!sqlite
+    .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'campaigns'")
+    .get();
+  if (hasCampaignsTable) {
+    // A row from before fingerprinting cannot be paired unambiguously with a current action.
+    // They are disposable previews/declarations, never applied state, so fail closed rather
+    // than allowing the same-named replacement ambiguity this migration closes.
+    sqlite.exec('DELETE FROM action_pending_resolutions WHERE action_fingerprint IS NULL');
+  }
+}
+
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
   { name: '0001_users_oidc', run: migrateUsersTableForOidc },
   { name: '0002_campaigns_rule_system', run: migrateCampaignsTableForRuleSystem },
@@ -4605,6 +4670,11 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0142_encounter_token_batches_761', run: migrateEncounterTokenBatches761 },
   { name: '0143_party_rest_batches_759', run: migratePartyRestBatches759 },
   { name: '0144_action_apply_chains_1449', run: migrateActionApplyChains1449 },
+  { name: '0145_action_pending_resolutions_1451', run: migrateActionPendingResolutions1451 },
+  // This must remain after the original 0145 entry and retain its never-before-recorded full
+  // name. `runMigrations` dedupes by name, so an already-recorded original migration cannot
+  // safely acquire this later ALTER in place.
+  { name: '0145_action_pending_fingerprint_1451', run: migrateActionPendingFingerprint1451 },
 ];
 
 /**
