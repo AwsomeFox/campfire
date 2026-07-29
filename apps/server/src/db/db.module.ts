@@ -88,12 +88,23 @@ function setupRuleEntriesFts(sqlite: Database.Database): boolean {
     sqlite.exec(RULE_ENTRIES_FTS_SQL);
     // External-content FTS tables read their content table for SELECT count(*),
     // so that count cannot distinguish a populated-but-unindexed legacy table.
-    // Rebuild whenever a pre-existing compendium is opened with FTS5 available:
-    // the command is idempotent and repairs the historical no-FTS -> FTS upgrade.
+    // A short-lived FTS5 vocabulary table exposes actual indexed terms (unlike
+    // external-content SELECT count(*)); rebuild only when the populated index
+    // has no terms, which is the historical no-FTS -> FTS upgrade state.
     const entries = sqlite.prepare('SELECT count(*) AS count FROM rule_entries').get() as { count: number };
     if (entries.count > 0) {
-      sqlite.exec("INSERT INTO rule_entries_fts(rule_entries_fts) VALUES ('rebuild')");
-      dbLog.log(`rebuilt rule_entries FTS index for ${entries.count} existing entries`);
+      let hasIndexedTerms = false;
+      try {
+        sqlite.exec('DROP TABLE IF EXISTS rule_entries_fts_vocab');
+        sqlite.exec("CREATE VIRTUAL TABLE rule_entries_fts_vocab USING fts5vocab(rule_entries_fts, 'row')");
+        hasIndexedTerms = !!sqlite.prepare('SELECT 1 FROM rule_entries_fts_vocab LIMIT 1').get();
+      } finally {
+        sqlite.exec('DROP TABLE IF EXISTS rule_entries_fts_vocab');
+      }
+      if (!hasIndexedTerms) {
+        sqlite.exec("INSERT INTO rule_entries_fts(rule_entries_fts) VALUES ('rebuild')");
+        dbLog.log(`rebuilt rule_entries FTS index for ${entries.count} existing entries`);
+      }
     }
     return true;
   } catch {
