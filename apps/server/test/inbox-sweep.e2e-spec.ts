@@ -694,6 +694,8 @@ describe('inbox sweep (e2e)', () => {
     expect(res.body.job.itemsProposed).toBe(2);
     // Only the genuinely new proposal (for newNoteId) should move the badge.
     expect(res.body.job.itemsNewlyProposed).toBe(1);
+    expect(res.body.job.itemsNewlySkipped).toBe(0);
+    expect(res.body.job.itemsNewlyErrored).toBe(0);
     expect(classifier.calls).toHaveLength(1);
     expect(classifier.calls[0].capture.noteId).toBe(newNoteId);
 >>>>>>> 3d3e275d9 (fix(inbox-sweep): distinguish new vs recovered ledger rows in sweep counts (#1717))
