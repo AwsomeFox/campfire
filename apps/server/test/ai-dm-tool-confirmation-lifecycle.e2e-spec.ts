@@ -211,7 +211,7 @@ describe('ai-dm tool confirmations — reaching a DM who is not looking (#1558)'
 
     const res = await h.sendMessage(campaignId, { input: 'cast it' });
     expect(res.status).toBe(201);
-    expect(retain).toHaveBeenCalledWith(1, 'chain-delayed-approval');
+    expect(retain).toHaveBeenCalledWith(1, 'chain-delayed-approval', expect.objectContaining({ id: `ai-dm-seat:${campaignId}` }), 'dm');
 
     const queue = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/tool-confirmations`).set(dm);
     expect(queue.body[0].args).toEqual({
@@ -384,7 +384,7 @@ describe('ai-dm tool confirmations — reaching a DM who is not looking (#1558)'
     await h.sendMessage(campaignId, { input: 'cast it' });
 
     expect(retain).toHaveBeenCalledTimes(1);
-    expect(retain).toHaveBeenCalledWith(1, 'chain-first');
+    expect(retain).toHaveBeenCalledWith(1, 'chain-first', expect.objectContaining({ id: `ai-dm-seat:${campaignId}` }), 'dm');
     const queue = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/tool-confirmations`).set(dm);
     expect(queue.body).toHaveLength(1);
     expect(queue.body[0].args.chainId).toBe('chain-first');

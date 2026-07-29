@@ -1420,7 +1420,7 @@ describe('action resolver (real SQLite, service layer)', () => {
     // Collaborative handoff queues apply_action even though its AI seat can apply automatically.
     // The queue transition, not the original caller's policy, must pin this exact server-owned
     // chain until the human DM has a chance to approve it.
-    expect(service.retainPendingChainForConfirmation(encounterId, preview.chainId)).toMatchObject({
+    expect(service.retainPendingChainForConfirmation(encounterId, preview.chainId, dmUser, 'dm')).toMatchObject({
       actionName: 'Greatsword',
       actorCombatantId: actor,
     });
@@ -1439,6 +1439,10 @@ describe('action resolver (real SQLite, service layer)', () => {
 
   it('#1451 review (Devin, corrected): the per-encounter cap still bounds declarations, but eviction is audited — never silent', async () => {
     const { orm, service, campaignId, encounterId, actor, drake } = seed({ requireDmTurnConfirmation: true });
+    const tokenAlice: RequestUser = {
+      ...alice,
+      tokenContext: { tokenId: 1, name: 'alice-action-token', scope: 'player', writeScope: 'direct', campaignId, adminEnabled: false },
+    };
     const now = Date.now();
     for (let i = 0; i < 205; i++) {
       orm
@@ -1456,7 +1460,7 @@ describe('action resolver (real SQLite, service layer)', () => {
         .run();
     }
 
-    service.resolve(encounterId, ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: false }), alice, 'player');
+    service.resolve(encounterId, ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: false }), tokenAlice, 'player');
 
     const after = orm
       .select()
@@ -1477,6 +1481,7 @@ describe('action resolver (real SQLite, service layer)', () => {
       .where(and(eq(auditLog.campaignId, campaignId), eq(auditLog.action, 'encounter.action.declaration_evicted')))
       .all();
     expect(evicted.length).toBeGreaterThan(0);
+    expect(evicted[0].actor).toBe('token:alice-action-token');
     expect(String(evicted[0].detail)).toContain('chain-decl-cap-test-0');
     expect(String(evicted[0].detail)).toContain('never applied');
   });
@@ -1578,7 +1583,14 @@ describe('action resolver (real SQLite, service layer)', () => {
       'player',
     );
 
-    expect(service.retainPendingChainForConfirmation(encounterId, preview.chainId)?.promoted).toBe(true);
+    const aiSeat: RequestUser = {
+      id: `ai-dm-seat:${campaignId}`,
+      name: 'AI Dungeon Master',
+      serverRole: 'user',
+      devRole: 'dm',
+      tokenContext: { tokenId: 0, name: `ai-dm-seat:${campaignId}`, scope: 'dm', writeScope: 'direct', campaignId, adminEnabled: false },
+    };
+    expect(service.retainPendingChainForConfirmation(encounterId, preview.chainId, aiSeat, 'dm')?.promoted).toBe(true);
     const declarations = orm
       .select()
       .from(actionPendingResolutions)
@@ -1594,5 +1606,6 @@ describe('action resolver (real SQLite, service layer)', () => {
       .where(and(eq(auditLog.campaignId, campaignId), eq(auditLog.action, 'encounter.action.declaration_evicted')))
       .all();
     expect(evicted.some((entry) => String(entry.detail).includes('chain-promotion-cap-0'))).toBe(true);
+    expect(evicted.some((entry) => entry.actor === `token:ai-dm-seat:${campaignId}`)).toBe(true);
   });
 });

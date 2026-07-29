@@ -4452,6 +4452,7 @@ export class AiDriverService {
           sessionProfile,
           generationSignal,
           actor,
+          seatPrincipal,
           triggeredBy,
           seatToolset,
           contextToolset,
@@ -5146,6 +5147,7 @@ export class AiDriverService {
     sessionProfile: DriverSessionProfile,
     generationSignal: AbortSignal,
     actor: string,
+    seatPrincipal: RequestUser,
     triggeredBy: RequestUser,
     seatToolset: DriverToolset,
     contextToolset: DriverToolset,
@@ -5319,7 +5321,7 @@ export class AiDriverService {
           const argChainId = typeof args.chainId === 'string' ? args.chainId : undefined;
           const described =
             !confirmationAlreadyQueued && argChainId && Number.isFinite(argEncounterId)
-              ? (this.actionResolver?.retainPendingChainForConfirmation(argEncounterId, argChainId) ?? null)
+              ? (this.actionResolver?.retainPendingChainForConfirmation(argEncounterId, argChainId, seatPrincipal, 'dm') ?? null)
               : null;
           queuedArgs = {
             encounterId: args.encounterId,
