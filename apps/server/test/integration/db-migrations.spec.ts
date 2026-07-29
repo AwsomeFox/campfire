@@ -2047,4 +2047,45 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       again.sqlite.close();
     }
   });
+
+  it('adds action_fingerprint when an installation already recorded the earlier 0145 migration (#1451)', () => {
+    expect(MIGRATION_NAMES).toContain('0145_action_pending_resolutions_1451');
+    expect(MIGRATION_NAMES).toContain('0145_action_pending_fingerprint_1451');
+    expect(MIGRATION_NAMES.indexOf('0145_action_pending_fingerprint_1451')).toBeGreaterThan(
+      MIGRATION_NAMES.indexOf('0145_action_pending_resolutions_1451'),
+    );
+
+    dataDir = makeTempDataDir();
+    const seeded = openDatabase(dataDir);
+    seeded.sqlite.close();
+
+    // Reproduce an install that upgraded through the earlier PR head: its original 0145 is
+    // recorded and its table has action_index, but the later fingerprint column does not.
+    const legacy = new Database(dbFilePath(dataDir));
+    try {
+      legacy.exec('ALTER TABLE action_pending_resolutions DROP COLUMN action_fingerprint');
+      legacy.prepare('DELETE FROM __migrations WHERE name = ?').run('0145_action_pending_fingerprint_1451');
+      expect(columnNames(legacy, 'action_pending_resolutions')).not.toContain('action_fingerprint');
+      expect(
+        (legacy.prepare('SELECT name FROM __migrations WHERE name = ?').get('0145_action_pending_resolutions_1451') as { name?: string })
+          ?.name,
+      ).toBe('0145_action_pending_resolutions_1451');
+      expect(
+        legacy.prepare('SELECT name FROM __migrations WHERE name = ?').get('0145_action_pending_fingerprint_1451'),
+      ).toBeUndefined();
+    } finally {
+      legacy.close();
+    }
+
+    const upgraded = openDatabase(dataDir);
+    try {
+      expect(columnNames(upgraded.sqlite, 'action_pending_resolutions')).toContain('action_fingerprint');
+      expect(
+        (upgraded.sqlite.prepare('SELECT name FROM __migrations WHERE name = ?').get('0145_action_pending_fingerprint_1451') as { name?: string })
+          ?.name,
+      ).toBe('0145_action_pending_fingerprint_1451');
+    } finally {
+      upgraded.sqlite.close();
+    }
+  });
 });

@@ -4348,7 +4348,16 @@ function migrateActionPendingResolutions1451(sqlite: Database.Database): void {
   if (!columns.some((column) => column.name === 'action_index')) {
     sqlite.exec('ALTER TABLE action_pending_resolutions ADD COLUMN action_index INTEGER');
   }
-  if (!columns.some((column) => column.name === 'action_fingerprint')) {
+}
+
+/**
+ * Follow-up for #1451's action fingerprint. Do not fold this into the originally shipped
+ * 0145 migration: installs that already recorded that name skip it forever. This distinct
+ * tail migration upgrades precisely that earlier table shape.
+ */
+function migrateActionPendingFingerprint1451(sqlite: Database.Database): void {
+  const columns = sqlite.prepare('PRAGMA table_info(action_pending_resolutions)').all() as Array<{ name: string }>;
+  if (columns.length > 0 && !columns.some((column) => column.name === 'action_fingerprint')) {
     sqlite.exec('ALTER TABLE action_pending_resolutions ADD COLUMN action_fingerprint TEXT');
   }
 }
@@ -4642,6 +4651,10 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0143_party_rest_batches_759', run: migratePartyRestBatches759 },
   { name: '0144_action_apply_chains_1449', run: migrateActionApplyChains1449 },
   { name: '0145_action_pending_resolutions_1451', run: migrateActionPendingResolutions1451 },
+  // This must remain after the original 0145 entry and retain its never-before-recorded full
+  // name. `runMigrations` dedupes by name, so an already-recorded original migration cannot
+  // safely acquire this later ALTER in place.
+  { name: '0145_action_pending_fingerprint_1451', run: migrateActionPendingFingerprint1451 },
 ];
 
 /**
