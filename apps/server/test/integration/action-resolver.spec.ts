@@ -1133,6 +1133,26 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.hpCurrent).toBe(60);
   });
 
+  it('#1451 review: a fingerprint-less legacy pending row is never applied', () => {
+    const { orm, service, encounterId, actor, drake } = seed();
+    const preview = service.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: actor, actionIndex: 0, targetIds: [drake], commit: false }),
+      alice,
+      'player',
+    );
+    orm
+      .update(actionPendingResolutions)
+      .set({ actionFingerprint: null })
+      .where(eq(actionPendingResolutions.id, preview.chainId))
+      .run();
+
+    expect(() => service.apply(encounterId, ActionApplyRequest.parse({ chainId: preview.chainId }), alice, 'player')).toThrow(
+      /created before action identity verification/i,
+    );
+    expect(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.hpCurrent).toBe(60);
+  });
+
   it('#1451: an unknown chainId is rejected, and a chainId from a different encounter is rejected', () => {
     const { orm, service, campaignId, encounterId, actor, drake } = seed();
     expect(() => service.apply(encounterId, ActionApplyRequest.parse({ chainId: 'chain-never-resolved' }), alice, 'player')).toThrow(

@@ -408,7 +408,9 @@ export class ActionResolverService {
       if (!isResolvableSpec(spec)) {
         throw new BadRequestException('The inline action spec has no resolvable mode/DC/attack — fall back to a statblock rather than inventing numbers.');
       }
-      return { spec, name: req.actionName ?? 'Action', actionIndex: null, actionFingerprint: null };
+      // Empty string distinguishes an intentionally inline action from a legacy row with no
+      // fingerprint. Inline actions have no sheet identity to compare at apply time.
+      return { spec, name: req.actionName ?? 'Action', actionIndex: null, actionFingerprint: '' };
     }
     const character = this.linkedCharacter(actor);
     if (character) {
@@ -1295,6 +1297,10 @@ export class ActionResolverService {
         throw new ForbiddenException('This campaign requires the DM to apply action consequences.');
       }
     }
+    if (pending.actionFingerprint === null) {
+      this.auditRejectedApply(encounter, req.chainId, user, role, 'legacy_action_without_fingerprint');
+      throw new BadRequestException('This resolution was created before action identity verification; resolve the action again.');
+    }
 
     // Issue #1451 review (Codex): validate against the CURRENT spec's targeting rule AND target
     // count, never a resolve-time snapshot — an action edited between preview and apply (e.g.
@@ -1322,7 +1328,7 @@ export class ActionResolverService {
       this.assertTargetAllowed(spec.targets.allow, actor, target, resolution.actionName);
     }
     this.assertResolutionWithinSpecBounds(spec, resolution);
-    if (pending.actionFingerprint && currentActionFingerprint !== pending.actionFingerprint) {
+    if (pending.actionIndex !== null && currentActionFingerprint !== pending.actionFingerprint) {
       this.auditRejectedApply(encounter, req.chainId, user, role, 'action_changed_or_moved');
       throw new BadRequestException(`Action "${pending.actionName}" changed or moved before it could be applied.`);
     }

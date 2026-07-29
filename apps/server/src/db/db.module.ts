@@ -4357,8 +4357,28 @@ function migrateActionPendingResolutions1451(sqlite: Database.Database): void {
  */
 function migrateActionPendingFingerprint1451(sqlite: Database.Database): void {
   const columns = sqlite.prepare('PRAGMA table_info(action_pending_resolutions)').all() as Array<{ name: string }>;
-  if (columns.length > 0 && !columns.some((column) => column.name === 'action_fingerprint')) {
+  if (columns.length === 0) return;
+  if (!columns.some((column) => column.name === 'awaiting_confirmation')) {
+    sqlite.exec('ALTER TABLE action_pending_resolutions ADD COLUMN awaiting_confirmation INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!columns.some((column) => column.name === 'action_index')) {
+    sqlite.exec('ALTER TABLE action_pending_resolutions ADD COLUMN action_index INTEGER');
+  }
+  if (!columns.some((column) => column.name === 'action_fingerprint')) {
     sqlite.exec('ALTER TABLE action_pending_resolutions ADD COLUMN action_fingerprint TEXT');
+  }
+  // Migrations run before fresh-install bootstrap creates campaigns. Only existing installs can
+  // contain legacy rows, and deleting from this FK-owning table before its parent exists makes
+  // SQLite resolve the missing parent during DELETE. Skip the empty fresh shape; bootstrap then
+  // creates the complete schema. Existing installs fail closed by discarding the ambiguous rows.
+  const hasCampaignsTable = !!sqlite
+    .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'campaigns'")
+    .get();
+  if (hasCampaignsTable) {
+    // A row from before fingerprinting cannot be paired unambiguously with a current action.
+    // They are disposable previews/declarations, never applied state, so fail closed rather
+    // than allowing the same-named replacement ambiguity this migration closes.
+    sqlite.exec('DELETE FROM action_pending_resolutions WHERE action_fingerprint IS NULL');
   }
 }
 

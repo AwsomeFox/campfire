@@ -2048,7 +2048,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     }
   });
 
-  it('adds action_fingerprint when an installation already recorded the earlier 0145 migration (#1451)', () => {
+  it('reconciles every pending-resolution column and invalidates legacy rows when earlier 0145 is recorded (#1451)', () => {
     expect(MIGRATION_NAMES).toContain('0145_action_pending_resolutions_1451');
     expect(MIGRATION_NAMES).toContain('0145_action_pending_fingerprint_1451');
     expect(MIGRATION_NAMES.indexOf('0145_action_pending_fingerprint_1451')).toBeGreaterThan(
@@ -2059,13 +2059,25 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     const seeded = openDatabase(dataDir);
     seeded.sqlite.close();
 
-    // Reproduce an install that upgraded through the earlier PR head: its original 0145 is
-    // recorded and its table has action_index, but the later fingerprint column does not.
+    // Reproduce the earliest 0145 table: the original migration is recorded, but none of the
+    // later confirmation/index/fingerprint columns exist and an unresolved legacy row remains.
     const legacy = new Database(dbFilePath(dataDir));
     try {
+      legacy.pragma('foreign_keys = OFF');
       legacy.exec('ALTER TABLE action_pending_resolutions DROP COLUMN action_fingerprint');
+      legacy.exec('ALTER TABLE action_pending_resolutions DROP COLUMN action_index');
+      legacy.exec('ALTER TABLE action_pending_resolutions DROP COLUMN awaiting_confirmation');
       legacy.prepare('DELETE FROM __migrations WHERE name = ?').run('0145_action_pending_fingerprint_1451');
-      expect(columnNames(legacy, 'action_pending_resolutions')).not.toContain('action_fingerprint');
+      legacy
+        .prepare(
+          `INSERT INTO action_pending_resolutions
+            (id, encounter_id, campaign_id, actor_combatant_id, action_name, resolution_json, created_at)
+           VALUES ('legacy-pending-row', 1, 1, 1, 'Greatsword', '{}', '2026-01-01T00:00:00.000Z')`,
+        )
+        .run();
+      expect(columnNames(legacy, 'action_pending_resolutions')).not.toEqual(
+        expect.arrayContaining(['awaiting_confirmation', 'action_index', 'action_fingerprint']),
+      );
       expect(
         (legacy.prepare('SELECT name FROM __migrations WHERE name = ?').get('0145_action_pending_resolutions_1451') as { name?: string })
           ?.name,
@@ -2079,11 +2091,57 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
 
     const upgraded = openDatabase(dataDir);
     try {
-      expect(columnNames(upgraded.sqlite, 'action_pending_resolutions')).toContain('action_fingerprint');
+      expect(columnNames(upgraded.sqlite, 'action_pending_resolutions')).toEqual(
+        expect.arrayContaining(['awaiting_confirmation', 'action_index', 'action_fingerprint']),
+      );
+      expect(
+        upgraded.sqlite.prepare("SELECT id FROM action_pending_resolutions WHERE id = 'legacy-pending-row'").get(),
+      ).toBeUndefined();
       expect(
         (upgraded.sqlite.prepare('SELECT name FROM __migrations WHERE name = ?').get('0145_action_pending_fingerprint_1451') as { name?: string })
           ?.name,
       ).toBe('0145_action_pending_fingerprint_1451');
+    } finally {
+      upgraded.sqlite.close();
+    }
+  });
+
+  it('reconciles the intermediate awaiting-confirmation 0145 shape (#1451)', () => {
+    dataDir = makeTempDataDir();
+    const seeded = openDatabase(dataDir);
+    seeded.sqlite.close();
+
+    // A later reviewed head had awaiting_confirmation but not the selected-action index or
+    // fingerprint. The tail migration must preserve that shape's compatibility too.
+    const legacy = new Database(dbFilePath(dataDir));
+    try {
+      legacy.pragma('foreign_keys = OFF');
+      legacy.exec('ALTER TABLE action_pending_resolutions DROP COLUMN action_fingerprint');
+      legacy.exec('ALTER TABLE action_pending_resolutions DROP COLUMN action_index');
+      legacy.prepare('DELETE FROM __migrations WHERE name = ?').run('0145_action_pending_fingerprint_1451');
+      legacy
+        .prepare(
+          `INSERT INTO action_pending_resolutions
+            (id, encounter_id, campaign_id, actor_combatant_id, action_name, awaiting_confirmation, resolution_json, created_at)
+           VALUES ('legacy-awaiting-row', 1, 1, 1, 'Greatsword', 1, '{}', '2026-01-01T00:00:00.000Z')`,
+        )
+        .run();
+      expect(columnNames(legacy, 'action_pending_resolutions')).toContain('awaiting_confirmation');
+      expect(columnNames(legacy, 'action_pending_resolutions')).not.toEqual(
+        expect.arrayContaining(['action_index', 'action_fingerprint']),
+      );
+    } finally {
+      legacy.close();
+    }
+
+    const upgraded = openDatabase(dataDir);
+    try {
+      expect(columnNames(upgraded.sqlite, 'action_pending_resolutions')).toEqual(
+        expect.arrayContaining(['awaiting_confirmation', 'action_index', 'action_fingerprint']),
+      );
+      expect(
+        upgraded.sqlite.prepare("SELECT id FROM action_pending_resolutions WHERE id = 'legacy-awaiting-row'").get(),
+      ).toBeUndefined();
     } finally {
       upgraded.sqlite.close();
     }
