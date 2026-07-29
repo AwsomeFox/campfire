@@ -15,7 +15,8 @@
  * Parser buffer-overrun recovery is separate ({@link CampaignEventsHandlers.onStreamRecovery})
  * — the TCP/HTTP connection stayed up. A proven 401 signals session expiry
  * (issue #885) and stops until reauth bumps the resume epoch; a campaign-scoped
- * 403 stops without clearing identity (retrying won't help).
+ * 403 OR 404 (issue #1707 — trash yields 404 for a still-a-member subscriber, see
+ * `CampaignEventsHandlers.onForbidden`) stops without clearing identity (retrying won't help).
  */
 import { useEffect, useRef, useSyncExternalStore } from 'react';
 import type { CampaignEvent } from '@campfire/schema';
@@ -36,12 +37,21 @@ export interface CampaignEventsHandlers {
   /** Lets last-known-data surfaces distinguish a healthy stream from a dropped/offline one. */
   onStatusChange?: (status: CampaignEventsStatus) => void;
   /**
-   * Fires the instant this campaign's stream 403s (issue #1640) — the subscriber is no
-   * longer a member (removed, or the campaign was trashed). See `sseReconnect.ts`'s
-   * `onForbidden` for the full mechanism: the server closes the stream reactively
-   * (#527/#867) the moment revocation happens, so a tab with this campaign open learns
-   * about it on the very next reconnect attempt, not on the next unrelated request that
-   * happens to 403.
+   * Fires the instant this campaign's stream terminally loses access (issue #1640, widened
+   * by #1707) — the subscriber is no longer a member (removed), OR the campaign itself was
+   * trashed. See `sseReconnect.ts`'s `onForbidden` for the full mechanism: the server closes
+   * the stream reactively the moment either happens (#527 for revocation, #867 for trash), so
+   * a tab with this campaign open learns about it on the very next reconnect attempt, not on
+   * the next unrelated request that happens to fail.
+   *
+   * Two different statuses on that reconnect, both routed here: revocation (member removed,
+   * campaign still exists) yields 403; trash (campaign gone, but a still-intact
+   * `campaignMembers` row means THIS user still resolves as a member per
+   * `assertLifecycleAccess`) yields 404 instead — see that function's own docstring
+   * ("Trashed + member → 404, matching GET /campaigns/:id"). `treatNotFoundAsForbidden: true`
+   * below is what folds the 404 case in; it is opt-in on `startSseReconnectLoop` specifically
+   * for this endpoint, not a change to the shared 401/403 classifier, because a 404 is
+   * genuinely retryable on other streams (e.g. the AI-DM stream).
    */
   onForbidden?: () => void;
 }
@@ -111,6 +121,10 @@ export function useCampaignEvents(campaignId: number | undefined, handlers: Camp
     const loop = startSseReconnectLoop({
       url: `${API}/campaigns/${campaignId}/events`,
       trackBrowserOnline: true,
+      // Issue #1707: a trashed campaign's reconnect 404s for a still-a-member subscriber
+      // (not 403 — see this hook's `onForbidden` doc above), and that 404 must be just as
+      // terminal here as a 403, or a stale tab retries a dead endpoint forever.
+      treatNotFoundAsForbidden: true,
       onData: (data) => {
         try {
           const parsed: unknown = JSON.parse(data);

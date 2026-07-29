@@ -75,17 +75,32 @@ export interface SseReconnectOptions {
   onStreamRecovery?: () => void;
   onStatusChange?: (status: SseStreamStatus) => void;
   /**
-   * Fires on a PROVEN 403 connect response specifically (issue #1640) — distinct from
+   * Fires on a PROVEN 403 connect response (issue #1640) — distinct from
    * `onStatusChange('stopped')`, which also covers a proven 401 (session expiry, handled
    * separately via {@link signalSessionExpired}). A campaign-scoped stream 403s when the
-   * subscriber is no longer a member (removed, or the campaign was trashed) — see
-   * `events.controller.ts`'s `membership.revoked`/`campaign.trashed` teardown (#527/#867),
-   * which closes the stream just before a reconnect attempt would hit this. Callers that
-   * care WHY a campaign stream stopped (as opposed to merely THAT it stopped) use this
-   * rather than reimplementing the 401-vs-403 split `classifyStreamConnectStatus` already
-   * makes here.
+   * subscriber is no longer a member and the campaign itself still exists (removed by a DM
+   * while the campaign lives on) — see `events.controller.ts`'s `membership.revoked` teardown
+   * (#527). Callers that care WHY a campaign stream stopped (as opposed to merely THAT it
+   * stopped) use this rather than reimplementing the 401-vs-403 split
+   * `classifyStreamConnectStatus` already makes here.
+   *
+   * Issue #1707: also fires on a 404 when {@link SseReconnectOptions.treatNotFoundAsForbidden}
+   * is set. `assertLifecycleAccess` (`campaign-access.service.ts`) returns 404, not 403, for a
+   * MEMBER reconnecting to a TRASHED campaign — deliberately, to keep a trashed campaign
+   * indistinguishable from a never-existed one — so the campaign-events endpoint's own 404 is
+   * just as terminal as its 403 and belongs behind the same callback, not the generic
+   * retry-forever `!res.ok` path below. This is opt-in per caller (not folded into
+   * `classifyStreamConnectStatus`, which stays global) because a 404 is genuinely transient
+   * elsewhere — e.g. the AI-DM stream (`useAiDmStream.ts`) — and conflating the two there would
+   * misclassify a retryable condition as permanent.
    */
   onForbidden?: () => void;
+  /**
+   * Issue #1707 — opt-in: see {@link SseReconnectOptions.onForbidden}. Only the campaign-events
+   * hook (`useCampaignEvents.ts`) sets this; every other caller keeps 404's existing
+   * retry-forever behavior.
+   */
+  treatNotFoundAsForbidden?: boolean;
   /**
    * When true, the loop waits while `navigator.onLine` is false, aborts the
    * active request on `offline`, and wakes reconnect delays on `online`.
@@ -239,7 +254,10 @@ export function startSseReconnectLoop(options: SseReconnectOptions): SseReconnec
             disposed = true;
             return;
           }
-          if (auth === 'forbidden') {
+          // Issue #1707: opt-in — see `treatNotFoundAsForbidden`'s doc comment above for why a
+          // 404 is terminal here specifically (only when the caller says so) and not folded
+          // into `classifyStreamConnectStatus` itself.
+          if (auth === 'forbidden' || (res.status === 404 && options.treatNotFoundAsForbidden)) {
             cancelResponseBody(res);
             activeResponse = null;
             setStatus('stopped');

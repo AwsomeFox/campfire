@@ -526,13 +526,16 @@ function LayoutContent() {
   // Issue #437: live promote/demote — refresh /me when this user's campaign role
   // changes over SSE (and fan out to other tabs). Keeps the current route.
   // Issue #637: reuse the same stream for live-encounter chrome refresh.
-  // Issue #1640: live revocation — this campaign's stream just 403'd, which happens the
-  // moment this user is removed (or the campaign is trashed, #867). Unlike a role change,
-  // there is no membership left to re-render chrome from — show the SAME "lost access"
-  // screen the stale-access effect below already renders for "navigated into a campaign
-  // you don't have access to", rather than leaving this tab live on a page whose every
-  // subsequent request would now 403. refreshAuth/refreshCampaigns also run so the
-  // dashboard and nav are correct the moment "Back to your campaigns" is used.
+  // Issue #1640 (widened by #1707): live loss of access — this campaign's stream just
+  // terminated with a proven, non-retryable connect failure: 403 the moment this user is
+  // removed, or 404 the moment the campaign itself is trashed (a still-intact membership row
+  // resolves a role, so `assertLifecycleAccess` 404s rather than 403s a member — see
+  // `useMembershipLiveSync.ts`'s `onRevoked` doc for why both land on this same callback).
+  // Unlike a role change, there is no membership left to re-render chrome from — show the
+  // SAME "lost access" screen the stale-access effect below already renders for "navigated
+  // into a campaign you don't have access to", rather than leaving this tab live on a page
+  // whose every subsequent request would now fail the same way. refreshAuth/refreshCampaigns
+  // also run so the dashboard and nav are correct the moment "Back to your campaigns" is used.
   useMembershipLiveSync(Number.isFinite(campaignId) ? campaignId : undefined, {
     onEncounterChange: () => void refreshLiveEncounter(),
     onReconnect: () => void refreshLiveEncounter(),

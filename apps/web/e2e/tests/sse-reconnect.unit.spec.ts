@@ -361,6 +361,64 @@ test.describe('startSseReconnectLoop — reconnect / abort / unmount (#800)', ()
     loop.dispose();
   });
 
+  test('404 does NOT fire onForbidden by default — a 404 is genuinely retryable on other streams (issue #1707)', async () => {
+    const fake = createFakeClock();
+    const statuses: SseStreamStatus[] = [];
+    let forbiddenCount = 0;
+    let connects = 0;
+    const loop = startSseReconnectLoop({
+      url: 'http://example.test/events',
+      clock: fake.clock,
+      fetchFn: async () => {
+        connects += 1;
+        return new Response(new ReadableStream(), { status: 404 });
+      },
+      onData: () => undefined,
+      onStatusChange: (s) => statuses.push(s),
+      onForbidden: () => {
+        forbiddenCount += 1;
+      },
+    });
+    await waitFor(() => statuses.includes('reconnecting'), fake);
+    fake.flushNext();
+    await waitFor(() => connects >= 2, fake);
+    expect(forbiddenCount).toBe(0);
+    expect(statuses).not.toContain('stopped');
+    loop.dispose();
+  });
+
+  test('404 fires onForbidden when treatNotFoundAsForbidden is set — the campaign-events stream opts in because a trashed campaign 404s a still-a-member subscriber (issue #1707)', async () => {
+    const fake = createFakeClock();
+    let bodyCancelled = false;
+    const statuses: SseStreamStatus[] = [];
+    let forbiddenCount = 0;
+    const loop = startSseReconnectLoop({
+      url: 'http://example.test/events',
+      clock: fake.clock,
+      treatNotFoundAsForbidden: true,
+      fetchFn: async () => {
+        const body = new ReadableStream({
+          start() {
+            /* unconsumed body — must be cancelled on the terminal 404 */
+          },
+          cancel() {
+            bodyCancelled = true;
+          },
+        });
+        return new Response(body, { status: 404 });
+      },
+      onData: () => undefined,
+      onStatusChange: (s) => statuses.push(s),
+      onForbidden: () => {
+        forbiddenCount += 1;
+      },
+    });
+    await waitFor(() => statuses.includes('stopped'), fake);
+    expect(bodyCancelled).toBe(true);
+    expect(forbiddenCount).toBe(1);
+    loop.dispose();
+  });
+
   test('failed connect cancels an unconsumed response body', async () => {
     const fake = createFakeClock();
     let bodyCancelled = false;
