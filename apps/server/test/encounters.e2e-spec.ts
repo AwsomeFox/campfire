@@ -3247,6 +3247,46 @@ describe('encounters — issue #1462: authoritative death-save rolls (e2e)', () 
       rollSpy.mockRestore();
     }
   });
+
+  it('retries cleanly after an atomic audit failure without leaving a committed unaudited death save', async () => {
+    const server = ctx.app.getHttpServer();
+    await setConscious();
+    await setDying();
+    const beforeRolls = (await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(player)).body
+      .filter((roll: { label?: string }) => roll.label === 'Nyx · death save').length;
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const beforeAudits = (await db.select().from(auditLog).where(eq(auditLog.action, 'encounter.combatant.death_save_roll'))).length;
+    const audit = ctx.app.get(AuditService);
+    const auditSpy = jest.spyOn(audit, 'logInTx').mockImplementationOnce(() => {
+      throw new Error('simulated transient audit storage failure');
+    });
+    const service = ctx.app.get(EncountersService);
+    const rollSpy = jest.spyOn(service as any, 'rollDeathSaveD20').mockReturnValue({ expr: '1d20', rolls: [10], total: 10 });
+    const body = { idempotencyKey: 'death-save-audit-retry' };
+    try {
+      const failed = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}/death-save`)
+        .set(player)
+        .send(body);
+      expect(failed.status).toBe(500);
+      expect(await current()).toMatchObject({ hpCurrent: 0, deathState: 'dying', deathSaveSuccesses: 0, deathSaveFailures: 0 });
+
+      const retry = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}/death-save`)
+        .set(player)
+        .send(body);
+      expect(retry.status).toBe(201);
+      expect(rollSpy).toHaveBeenCalledTimes(2);
+      const afterRolls = (await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(player)).body
+        .filter((roll: { label?: string }) => roll.label === 'Nyx · death save').length;
+      expect(afterRolls).toBe(beforeRolls + 1);
+      const afterAudits = (await db.select().from(auditLog).where(eq(auditLog.action, 'encounter.combatant.death_save_roll'))).length;
+      expect(afterAudits).toBe(beforeAudits + 1);
+    } finally {
+      auditSpy.mockRestore();
+      rollSpy.mockRestore();
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
