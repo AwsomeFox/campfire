@@ -890,9 +890,13 @@ describe('action resolver (real SQLite, service layer)', () => {
       alice,
       'player',
     );
-    const target = applied.resolution.targets[0];
-    if (target.outcome !== 'hit' && target.outcome !== 'crit') return; // only meaningful on a landed hit
-
+    // Deliberately NOT gated on the (random) attack roll's hit/miss outcome: apply() mints
+    // and persists an action_apply_chains row, and spends the actor's action-economy slot,
+    // on a miss exactly as on a hit — a miss just deals zero damage. Gating this test on
+    // "only meaningful on a landed hit" would make the replay-protection assertion below
+    // silently never run on any test execution where the d20 came up low, which is itself
+    // a tracked defect class (issue #1484): an assertion that can pass without ever having
+    // exercised the behaviour it exists to verify.
     service.undo(encounterId, applied.undoToken!, alice, 'player');
     expect(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.hpCurrent).toBe(60);
 
