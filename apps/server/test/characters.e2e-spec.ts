@@ -1169,19 +1169,36 @@ describe('PATCH /characters/:id persists deathState/hpTemp/death-saves/resources
     expect(merged.body.resources.sorcery).toMatchObject({ max: 4, used: 1, name: 'Sorcery Points', recharge: 'long-rest' });
   });
 
-  it('clearing deathState to none on a dead character flips lifecycle status back to active', async () => {
-    // Seed a dead character (lifecycle status + death state), then revive via the general PATCH
-    // without redundantly sending status — matching patchHp / encounter /end, which both flip
-    // status dead -> active on a definitive revive so the PC is re-included in encounter auto-add.
-    const dead = await dbUpdate(server, dm1492, charId, { status: 'dead', deathState: 'dead', hpCurrent: 0 });
-    expect(dead.status).toBe(200);
-    expect(dead.body.status).toBe('dead');
-    expect(dead.body.deathState).toBe('dead');
+  it('death-state transitions synchronize lifecycle status (dead->dead, none+hp>0->active, respects explicit status)', async () => {
+    // Mirror patchHp (issue #711) and the encounter /end reconciliation. Each transition below
+    // runs WITHOUT sending status, so the auto-flip is what's under test — except case 4, which
+    // proves an explicit status wins.
+    // 1. deathState: 'dead' (no status sent) on an active PC flips lifecycle status to 'dead'
+    //    (excludes from future encounter auto-add, which selects only active PCs).
+    const killed = await dbUpdate(server, dm1492, charId, { deathState: 'dead', hpCurrent: 0 });
+    expect(killed.status).toBe(200);
+    expect(killed.body.deathState).toBe('dead');
+    expect(killed.body.status).toBe('dead');
+    // 2. deathState: 'none' with positive HP on a previously-dead PC flips status back to active.
     const revived = await dbUpdate(server, dm1492, charId, { deathState: 'none', deathSaveFailures: 0, hpCurrent: 5 });
     expect(revived.status).toBe(200);
     expect(revived.body.deathState).toBe('none');
     expect(revived.body.status).toBe('active');
     expect(revived.body.hpCurrent).toBe(5);
+    // 3. deathState: 'none' at 0 HP does NOT revive the lifecycle status — a 0-HP character is
+    //    not alive (matches /end's `revived = !dead && hpCurrent > 0`). Seed dead again first.
+    await dbUpdate(server, dm1492, charId, { deathState: 'dead', hpCurrent: 0 });
+    const clearedAtZero = await dbUpdate(server, dm1492, charId, { deathState: 'none', deathSaveFailures: 0 });
+    expect(clearedAtZero.status).toBe(200);
+    expect(clearedAtZero.body.deathState).toBe('none');
+    expect(clearedAtZero.body.status).toBe('dead'); // unchanged — not a revive
+    // 4. An explicit status is never overwritten by the auto-flip: reviving to 'retired' lands
+    //    as 'retired', not 'active'.
+    await dbUpdate(server, dm1492, charId, { deathState: 'dead', hpCurrent: 0 });
+    const retired = await dbUpdate(server, dm1492, charId, { deathState: 'none', status: 'retired', hpCurrent: 5 });
+    expect(retired.status).toBe(200);
+    expect(retired.body.deathState).toBe('none');
+    expect(retired.body.status).toBe('retired'); // explicit choice wins
   });
 });
 

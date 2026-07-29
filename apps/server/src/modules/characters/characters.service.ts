@@ -995,14 +995,24 @@ export class CharactersService {
     if (input.hpTemp !== undefined) update.hpTemp = Math.max(0, input.hpTemp);
     if (input.deathState !== undefined) {
       update.deathState = input.deathState;
-      // Synchronize the lifecycle status on a definitive revive, matching patchHp (issue #711)
-      // and the encounter /end reconciliation: a character explicitly cleared to
-      // `deathState: 'none'` while its lifecycle `status` is `'dead'` is alive again, so flip
-      // the status back to `'active'` so the next encounter's auto-add (which selects only
-      // `active` PCs) picks them up. Without this, a DM reviving a dead PC from the sheet would
-      // leave them excluded from future fights despite being alive.
-      if (input.deathState === 'none' && existing.status === 'dead') {
-        update.status = 'active';
+      // Synchronize the lifecycle status on a definitive death transition, matching patchHp
+      // (issue #711) and the encounter /end reconciliation exactly:
+      //   - `deathState: 'dead'` -> lifecycle status `'dead'` (so a sheet declaring a PC dead
+      //     excludes them from future encounter auto-add, which selects only `active` PCs).
+      //   - `deathState: 'none'` + positive HP on a previously-`dead` PC -> `'active'` (the
+      //     revive). HP > 0 is required, matching /end's `revived = !dead && hpCurrent > 0`: a
+      //     0-HP character cleared to `none` (e.g. a death-save reset) is not "alive" and must
+      //     not become auto-addable. `dying`/`stable` carry no lifecycle flip — the death STATE
+      //     lives in deathState, not status.
+      // The auto-flip is GATED on `input.status === undefined` so an explicit caller choice
+      // (e.g. reviving to `retired`/`inactive`) is never silently overwritten.
+      if (input.status === undefined) {
+        const finalHpCurrent = update.hpCurrent !== undefined ? update.hpCurrent : existing.hpCurrent;
+        if (input.deathState === 'dead') {
+          update.status = 'dead';
+        } else if (input.deathState === 'none' && finalHpCurrent > 0 && existing.status === 'dead') {
+          update.status = 'active';
+        }
       }
     }
     if (input.deathSaveSuccesses !== undefined) {
