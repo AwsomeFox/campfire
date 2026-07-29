@@ -1782,7 +1782,12 @@ describe('encounters — lifecycle write serialization (issue #1461, e2e)', () =
       request(server).post(`/api/v1/encounters/${encounterId}/end`).set(dm).send({}),
       request(server).post(`/api/v1/encounters/${encounterId}/end`).set({ ...dm, 'x-dev-user': 'dm-2' }).send({}),
     ]);
-    expect([firstEnd.status, secondEnd.status].sort()).toEqual([201, 409]);
+    // A request that reaches the end transaction after the winner returns 409, while
+    // one that observes the already-ended encounter before entering it retains the
+    // established 400 endpoint contract. Either path must leave exactly one winner.
+    const endStatuses = [firstEnd.status, secondEnd.status];
+    expect(endStatuses.filter((status) => status === 201)).toHaveLength(1);
+    expect([400, 409]).toContain(endStatuses.find((status) => status !== 201));
     expect((await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm)).body.status).toBe('ended');
   });
 });
