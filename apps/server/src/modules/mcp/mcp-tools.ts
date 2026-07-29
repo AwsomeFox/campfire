@@ -3886,8 +3886,11 @@ export class McpToolsService {
         advantage: z.enum(['normal', 'advantage', 'disadvantage']).optional().describe('Roll mode; defaults to normal'),
       },
       async ({ characterId, ability, dc, advantage }) => {
-        const character = await this.characters.getRowOrThrow(characterId as number);
-        const role = await this.access.requireMember(user, character.campaignId, { write: true });
+        // Issue #1479: `requireMember(..., { write: true })` alone let any campaign
+        // member roll a save as a character they did not own. `assertCharacterWritable`
+        // is the shared seam (also used by the REST controller and `roll_check`) —
+        // player-or-above membership AND dm-or-owner.
+        const { row: character, role } = await this.characters.assertCharacterWritable(characterId as number, user);
         const abilityKey = ability as 'STR' | 'DEX' | 'CON' | 'INT' | 'WIS' | 'CHA';
         const dcNum = dc as number;
         const rollMode = (advantage as 'normal' | 'advantage' | 'disadvantage' | undefined) ?? 'normal';
@@ -3960,8 +3963,9 @@ export class McpToolsService {
     // #415: roll_check — resolve + roll a catalog check server-side. The server computes the
     // modifier + dice expression from the rule-system adapter (the caller only names a
     // checkId + mode), rolls, records to the shared dice log with a transparent breakdown,
-    // and returns the outcome (and PF2e degree of success when a DC is given). Members may
-    // call this; the roll is audited and visible in the campaign feed.
+    // and returns the outcome (and PF2e degree of success when a DC is given). The dm or the
+    // owning player may call this (issue #1479); the roll is audited and visible in the
+    // campaign feed.
     this.writeTool(
       server,
       user,
@@ -3981,8 +3985,11 @@ export class McpToolsService {
         consequence: CheckRollRequest.shape.consequence,
       },
       async ({ characterId, checkId, mode, dc, consequence }) => {
-        const character = await this.characters.getRowOrThrow(characterId as number);
-        const role = await this.access.requireMember(user, character.campaignId, { write: true });
+        // Issue #1479: `requireMember(..., { write: true })` alone let any campaign
+        // member roll (and attach `consequence` text) as a character they did not own.
+        // `assertCharacterWritable` is the shared seam (also used by the REST controller
+        // and the `saving_throw` tool) — player-or-above membership AND dm-or-owner.
+        const { role } = await this.characters.assertCharacterWritable(characterId as number, user);
         return this.characters.rollCheck(
           characterId as number,
           {

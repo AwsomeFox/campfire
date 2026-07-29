@@ -317,17 +317,24 @@ export class CharactersController {
   @ApiOperation({
     summary: 'Roll a catalog check for a character',
     description:
-      'Any campaign member (write). Rolls a check from the character\'s roll catalog (issue #415): the SERVER resolves the authoritative modifier + dice expression from the rule-system adapter (the client only names a `checkId` and roll `mode`), rolls with the shared crypto roller, records the result to the campaign dice log with a transparent breakdown label, and — for a system that reports degrees of success (PF2e) with a DC — returns the degree/outcome. Advantage/disadvantage apply only where the system supports them.',
+      'dm or the owning player (issue #1479 — previously any campaign member with campaign-level write access, which let a member roll as a character they did not own). Rolls a check from the character\'s roll catalog (issue #415): the SERVER resolves the authoritative modifier + dice expression from the rule-system adapter (the client only names a `checkId` and roll `mode`), rolls with the shared crypto roller, records the result to the campaign dice log with a transparent breakdown label, and — for a system that reports degrees of success (PF2e) with a DC — returns the degree/outcome. Advantage/disadvantage apply only where the system supports them.',
   })
   @ApiResponse({ status: 201, description: 'The resolved check + persisted roll (with breakdown and, for PF2e, degree of success).' })
+  @ApiResponse({ status: 403, description: 'Not the dm or the owning player.' })
   @ApiResponse({ status: 404, description: 'No such check id in the character\'s catalog.' })
   async rollCheck(
     @Param('id', ParseIntPipe) id: number,
     @Body() body: CheckRollRequestDto,
     @CurrentUser() user: RequestUser,
   ) {
-    const row = await this.characters.getRowOrThrow(id);
-    const role = await this.access.requireMember(user, row.campaignId, { write: true });
+    // Issue #1479: `requireMember(..., { write: true })` alone only asserted the CAMPAIGN
+    // accepts writes, not that THIS caller may write as THIS character — a viewer, or a
+    // player who does not own the target character, could roll (and attach arbitrary
+    // `consequence` text) as any character in the campaign. `assertCharacterWritable` is
+    // the shared seam (also used by the MCP `roll_check`/`saving_throw` tools) that
+    // requires player-or-above membership AND dm-or-owner in one call; `rollCheck` itself
+    // repeats the dm-or-owner half as defense in depth.
+    const { role } = await this.characters.assertCharacterWritable(id, user);
     return this.characters.rollCheck(id, body, user, role);
   }
 

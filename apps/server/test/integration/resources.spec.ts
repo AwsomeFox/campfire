@@ -2,6 +2,8 @@ import { BadRequestException } from '@nestjs/common';
 import { openDatabase } from '../../src/db/db.module';
 import { characters, combatants, encounters, encounterEvents, campaigns } from '../../src/db/schema';
 import { CharactersService } from '../../src/modules/characters/characters.service';
+import { CampaignAccessService } from '../../src/modules/membership/campaign-access.service';
+import { RoleResolver } from '../../src/modules/membership/role-resolver.service';
 import { EncountersService } from '../../src/modules/encounters/encounters.service';
 import { AuditService } from '../../src/modules/audit/audit.service';
 import { ModerationService } from '../../src/modules/moderation/moderation.service';
@@ -40,7 +42,8 @@ describe('inline spell slots & character resources (issue #422)', () => {
     const attachments = new AttachmentsService(db, audit, fsDeletion, new AttachmentDerivativesService(db));
     const campaignLibrary = new CampaignLibraryService(db, audit);
 
-    charactersService = new CharactersService(db, audit, revisions, events, rolls);
+    const access = new CampaignAccessService(db, new RoleResolver(db));
+    charactersService = new CharactersService(db, audit, revisions, events, rolls, access);
     encountersService = new EncountersService(db, audit, events, rolls, revisions, attachments, campaignLibrary);
   });
 
