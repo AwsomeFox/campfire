@@ -857,6 +857,28 @@ export class CharactersService {
     // without explicit HP keep the legacy 10/10 default for API back-compat.
     const hpMax = input.hpMax ?? (isDraft ? 0 : 10);
     const hpCurrent = clampHpCurrent(input.hpCurrent ?? (isDraft ? 0 : hpMax), Math.max(0, hpMax));
+    // Issue #1492: write the death/temp-HP subsystem and bounded resources on CREATE too, not
+    // just update(). CharacterCreate spreads these as valid optional keys, and MCP
+    // upsert_character's create branch (mcp-tools.ts) parses CharacterCreate and lands here, so
+    // a DM/AI creating a character with a starting death state or resource pool must not get a
+    // 201 back while the row keeps schema defaults. Same clamps/validation as update(): hpTemp
+    // >= 0, death saves in [0, 3], resources overspend rejected (#1039).
+    const hpTemp = input.hpTemp !== undefined ? Math.max(0, input.hpTemp) : 0;
+    const deathState = input.deathState ?? 'none';
+    const deathSaveSuccesses =
+      input.deathSaveSuccesses !== undefined ? clampDeathSaveCount(input.deathSaveSuccesses) : 0;
+    const deathSaveFailures =
+      input.deathSaveFailures !== undefined ? clampDeathSaveCount(input.deathSaveFailures) : 0;
+    if (input.resources !== undefined) {
+      for (const [key, resource] of Object.entries(input.resources)) {
+        if (resource.used < 0 || resource.used > resource.max) {
+          throw new BadRequestException(
+            `Resource '${key}' overspend/overrestore: used (${resource.used}) must be in [0, max (${resource.max})]`,
+          );
+        }
+      }
+    }
+    const resources = toJsonText(input.resources ?? {});
 
     const [row] = await this.db
       .insert(characters)
@@ -876,10 +898,15 @@ export class CharactersService {
         kac: clampAc(input.kac ?? null),
         hpCurrent,
         hpMax,
+        hpTemp,
+        deathState,
+        deathSaveSuccesses,
+        deathSaveFailures,
         spCurrent: input.spCurrent ?? 0,
         spMax: input.spMax ?? 0,
         rpCurrent: input.rpCurrent ?? 0,
         rpMax: input.rpMax ?? 0,
+        resources,
         ...sheetConditionWriteSetFromNames(input.conditions ?? [], null),
         saveProficiencies: toJsonText(input.saveProficiencies ?? []),
         skills: toJsonText(input.skills ?? {}),
@@ -1028,13 +1055,14 @@ export class CharactersService {
     // silent clamp would return 200 after persisting a different pool than requested. A
     // negative `used` (over-restore) is rejected for the mirror reason.
     //
-    // MERGE, not wholesale replace: the supplied pools are overlaid on the existing map so a
-    // caller (notably MCP `upsert_character`, which advertises `resources` as optional) that
-    // sends only one pool updates it without erasing the others and their `name`/`recharge`
-    // metadata. This matches the `stats` merge above and the dedicated POST :id/resources
-    // path's single-pool-adjust semantic; the fields that ARE genuine full-snapshot replaces
-    // (`skills`/`actions`/`spellSlots`) are documented as such, but `resources` pools carry
-    // per-pool config the caller would not want to re-send on every edit.
+    // MERGE, not wholesale replace: the supplied pools are overlaid on the existing map AND each
+    // supplied pool is field-merged over its existing entry, so a caller (notably MCP
+    // `upsert_character`, which advertises `resources` as optional) that sends only one pool — or
+    // only some fields of one pool (e.g. just `used`) — updates it without erasing the others or
+    // the touched pool's `name`/`recharge` metadata. This matches the `stats` merge above and the
+    // dedicated POST :id/resources path's single-pool-adjust semantic; the fields that ARE genuine
+    // full-snapshot replaces (`skills`/`actions`/`spellSlots`) are documented as such, but
+    // `resources` pools carry per-pool config the caller would not want to re-send on every edit.
     if (input.resources !== undefined) {
       for (const [key, resource] of Object.entries(input.resources)) {
         if (resource.used < 0 || resource.used > resource.max) {
@@ -1043,10 +1071,11 @@ export class CharactersService {
           );
         }
       }
-      const merged: Record<string, CharacterResource> = {
-        ...fromJsonText<Record<string, CharacterResource>>(existing.resources, {}),
-        ...input.resources,
-      };
+      const existingResources = fromJsonText<Record<string, CharacterResource>>(existing.resources, {});
+      const merged: Record<string, CharacterResource> = { ...existingResources };
+      for (const [key, supplied] of Object.entries(input.resources)) {
+        merged[key] = { ...(existingResources[key] ?? { max: supplied.max, used: 0 }), ...supplied };
+      }
       update.resources = toJsonText(merged);
     }
     if (input.conditions !== undefined) {

@@ -984,6 +984,39 @@ describe('characters (e2e)', () => {
       expect(res.body.status).toBe('draft');
       expect(res.body.ac).toBe(18);
     });
+
+    it('create persists death state, temp HP, death saves, and resource pools (issue #1492)', async () => {
+      // The same five fields update() now writes must also land on CREATE — CharacterCreate
+      // spreads them as valid optional keys, and MCP upsert_character's create branch routes
+      // here, so a DM/AI creating a character with a starting death state or resource pool must
+      // not get a 201 back while the row keeps schema defaults.
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(dm)
+        .send({
+          name: 'Pre-Wounded Hero',
+          hpMax: 20,
+          hpCurrent: 0,
+          hpTemp: 5,
+          deathState: 'dying',
+          deathSaveSuccesses: 1,
+          deathSaveFailures: 2,
+          resources: { ki: { max: 5, used: 2, name: 'Ki Points', recharge: 'short-rest' } },
+        });
+      expect(res.status).toBe(201);
+      expect(res.body.hpTemp).toBe(5);
+      expect(res.body.deathState).toBe('dying');
+      expect(res.body.deathSaveSuccesses).toBe(1);
+      expect(res.body.deathSaveFailures).toBe(2);
+      expect(res.body.resources).toMatchObject({ ki: { max: 5, used: 2, name: 'Ki Points', recharge: 'short-rest' } });
+      // An overspend at create is rejected (#1039 contract), not silently clamped/stored.
+      const overspend = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(dm)
+        .send({ name: 'Bad Pool', resources: { rage: { max: 3, used: 9 } } });
+      expect(overspend.status).toBe(400);
+    });
   });
 });
 
@@ -1167,6 +1200,15 @@ describe('PATCH /characters/:id persists deathState/hpTemp/death-saves/resources
     expect(merged.status).toBe(200);
     expect(merged.body.resources.ki).toMatchObject({ max: 5, used: 2, name: 'Ki Points', recharge: 'short-rest' });
     expect(merged.body.resources.sorcery).toMatchObject({ max: 4, used: 1, name: 'Sorcery Points', recharge: 'long-rest' });
+    // PER-POOL field merge: updating only `used` on an existing pool preserves its name/recharge,
+    // so a caller adjusting a single field doesn't strip the pool's display config.
+    const spendKi = await dbUpdate(server, dm1492, charId, {
+      resources: { ki: { max: 5, used: 3 } },
+    });
+    expect(spendKi.status).toBe(200);
+    expect(spendKi.body.resources.ki).toMatchObject({ max: 5, used: 3, name: 'Ki Points', recharge: 'short-rest' });
+    // The untouched sorcery pool survives too.
+    expect(spendKi.body.resources.sorcery).toMatchObject({ max: 4, used: 1, name: 'Sorcery Points', recharge: 'long-rest' });
   });
 
   it('death-state transitions synchronize lifecycle status (dead->dead, none+hp>0->active, respects explicit status)', async () => {
