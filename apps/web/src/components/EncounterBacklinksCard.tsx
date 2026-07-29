@@ -3,6 +3,7 @@ import type { EncounterBacklink } from '@campfire/schema';
 import { Card } from './ui';
 import { GameIcon } from './GameIcon';
 import { entityHref } from '../lib/entityLinks';
+import { UI_ICON_SIZE } from '../lib/uiIcons';
 
 const STATUS_LABEL: Record<EncounterBacklink['status'], string> = {
   preparing: 'Preparing',
@@ -31,7 +32,7 @@ export function EncounterBacklinksCard({
             className="cf-inset cf-card-hover p-3"
           >
             <p className="flex items-center gap-1.5 text-sm font-bold text-rose-400">
-              <GameIcon slug="crossed-swords" size={13} />
+              <GameIcon slug="crossed-swords" size={UI_ICON_SIZE.xs} />
               {enc.name}
             </p>
             <p className="text-xs text-slate-400">{STATUS_LABEL[enc.status]}</p>

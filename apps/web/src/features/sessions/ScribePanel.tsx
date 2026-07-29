@@ -28,6 +28,7 @@ import { useDisclosure } from '../../components/useDisclosure';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { GameIcon } from '../../components/GameIcon';
 import { TermHelp } from '../../components/TermHelp';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 const TRIGGER_LABEL: Record<ScribeTrigger, string> = {
   on_demand: 'Manual run',
@@ -253,7 +254,7 @@ export function ScribePanel({ campaignId, isDm }: { campaignId: number; isDm: bo
   return (
     <Card className="space-y-3">
       <div className="flex items-center gap-2 flex-wrap">
-        <span className="flex leading-none"><GameIcon slug="feather" size={18} /></span>
+        <span className="flex leading-none"><GameIcon slug="feather" size={UI_ICON_SIZE.md} /></span>
         <h2 className="font-bold text-white text-sm m-0">AI Scribe</h2>
         <TermHelp termId="scribe" />
         {latest && (

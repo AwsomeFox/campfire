@@ -14,6 +14,7 @@ import {
   readCampaignOnboardingPrefs,
   type CampaignOnboardingPrefs,
 } from './campaignOnboardingState';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 export function CampaignOnboardingCard({
   campaignId,
@@ -95,7 +96,7 @@ export function CampaignOnboardingCard({
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="flex items-start gap-3 min-w-0">
           <span className="flex shrink-0 text-[var(--color-accent)]" aria-hidden>
-            <GameIcon slug="campfire" size={22} />
+            <GameIcon slug="campfire" size={UI_ICON_SIZE.lg} />
           </span>
           <div className="min-w-0">
             <p id="campaign-onboarding-title" className="font-bold text-[var(--color-text)]">

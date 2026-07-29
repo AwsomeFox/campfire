@@ -206,6 +206,7 @@ import {
   type PinchGesture,
 } from './mapViewport';
 import { tokenDiameterPx } from './tokenFootprint';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 const STATUS_LABEL: Record<string, string> = {
   preparing: 'Preparing',
@@ -430,7 +431,7 @@ function DifficultyBadge({ difficulty }: { difficulty: EncounterDifficulty | nul
     >
       <div className="inline-flex items-center gap-1">
         <span className="tag" style={style}>
-          <GameIcon slug="crossed-swords" size={12} className="inline align-text-bottom mr-1" />
+          <GameIcon slug="crossed-swords" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />
           {difficulty.label}
         </span>
         <button
@@ -442,7 +443,7 @@ function DifficultyBadge({ difficulty }: { difficulty: EncounterDifficulty | nul
           {...detailsButtonProps}
           onClick={(e) => toggleDetails?.(e)}
         >
-          <GameIcon slug="info" size={12} aria-hidden="true" />
+          <GameIcon slug="info" size={UI_ICON_SIZE.xs} aria-hidden="true" />
         </button>
       </div>
       {open && (
@@ -579,10 +580,10 @@ function EncounterLinks({
           to={entityHref(campaignId, { type: 'location', id: encounter.locationId })}
           className="tag tag-outline hover:border-accent"
         >
-          <GameIcon slug="treasure-map" size={11} className="inline align-text-bottom mr-1" />
+          <GameIcon slug="treasure-map" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />
           {locDisplay}
         </Link> : <span className="tag tag-outline text-muted">
-          <GameIcon slug="treasure-map" size={11} className="inline align-text-bottom mr-1" />
+          <GameIcon slug="treasure-map" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />
           Location #{encounter.locationId} (unavailable)
         </span>
       )}
@@ -591,10 +592,10 @@ function EncounterLinks({
           to={entityHref(campaignId, { type: 'quest', id: encounter.questId })}
           className="tag tag-outline hover:border-accent"
         >
-          <GameIcon slug="scroll-unfurled" size={11} className="inline align-text-bottom mr-1" />
+          <GameIcon slug="scroll-unfurled" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />
           {questDisplay}
         </Link> : <span className="tag tag-outline text-muted">
-          <GameIcon slug="scroll-unfurled" size={11} className="inline align-text-bottom mr-1" />
+          <GameIcon slug="scroll-unfurled" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />
           Quest #{encounter.questId} (unavailable)
         </span>
       )}
@@ -603,10 +604,10 @@ function EncounterLinks({
           to={entityHref(campaignId, { type: 'session', id: encounter.sessionId })}
           className="tag tag-outline hover:border-accent"
         >
-          <GameIcon slug="book-cover" size={11} className="inline align-text-bottom mr-1" />
+          <GameIcon slug="book-cover" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />
           {sessDisplay}
         </Link> : <span className="tag tag-outline text-muted">
-          <GameIcon slug="book-cover" size={11} className="inline align-text-bottom mr-1" />
+          <GameIcon slug="book-cover" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />
           Session #{encounter.sessionId} (unavailable)
         </span>
       )}
@@ -2185,7 +2186,7 @@ export default function RunSessionPage() {
               className="text-xs"
               onClick={() => navigate(`/c/${cid}/screen`)}
             >
-              <GameIcon slug="tv" size={13} className="inline align-text-bottom mr-1" />Cast
+              <GameIcon slug="tv" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />Cast
             </Btn>
             <TermHelp termId="cast" />
           </>
@@ -5945,7 +5946,7 @@ function CombatantRow({
         ) : (
           <div style={{ fontSize: 14, display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
             <span style={down ? { textDecoration: 'line-through' } : undefined}>
-              {down && <GameIcon slug="death-skull" size={14} className="inline align-text-bottom mr-1.5" />}
+              {down && <GameIcon slug="death-skull" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1.5" />}
               {combatant.name}
             </span>
             <span className={kindTagClass}>
@@ -6613,7 +6614,7 @@ function CombatantRow({
             {combatant.hpTemp != null && combatant.hpTemp > 0 && (
               <div style={{ textAlign: 'right', marginBottom: 2 }}>
                 <span className="tag tag-accent" title="Temporary HP — absorbs damage first">
-                  <GameIcon slug="shield" size={10} className="inline align-text-bottom mr-1" />{combatant.hpTemp}
+                  <GameIcon slug="shield" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />{combatant.hpTemp}
                 </span>
               </div>
             )}
@@ -6906,7 +6907,7 @@ function CombatLog({ events }: { events: EncounterEvent[] }) {
                 <li key={chainKey} style={{ display: 'flex', flexDirection: 'column', gap: 2, fontSize: 12.5, lineHeight: 1.4 }}>
                   <div style={{ display: 'flex', gap: 8, alignItems: 'baseline' }}>
                     <span aria-hidden="true" style={{ flex: 'none' }}>
-                      {EVENT_ICON[iconType] ? <GameIcon slug={EVENT_ICON[iconType]} size={13} /> : '•'}
+                      {EVENT_ICON[iconType] ? <GameIcon slug={EVENT_ICON[iconType]} size={UI_ICON_SIZE.xs} /> : '•'}
                     </span>
                     {head.round > 0 && (
                       <span className="tag tag-neutral" style={{ fontSize: 9, flex: 'none' }}>

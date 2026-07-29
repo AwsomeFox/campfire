@@ -9,6 +9,7 @@ import { chipClass, type ChipVariant } from './chipVariants';
 import { densityClass, elevClass, type UiDensity, type UiElevation } from './density';
 import { SKELETON_TEST_IDS } from './loadingSkeletonState';
 import { useDialog } from './useDialog';
+import { UI_ICON_SIZE } from '../lib/uiIcons';
 export type { ChipVariant } from './chipVariants';
 export type { UiDensity, UiElevation } from './density';
 
@@ -217,7 +218,7 @@ export function DmPanel({ children, density = 'default' }: { children: ReactNode
   return (
     <div className={`cf-dm-panel ${densityClass(density)} space-y-1.5`}>
       <p className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-[var(--color-accent)]">
-        <GameIcon slug="padlock" size={13} reserveSpace /> DM only
+        <GameIcon slug="padlock" size={UI_ICON_SIZE.xs} reserveSpace /> DM only
       </p>
       <div className="text-sm text-[var(--color-neutral-300)]">{children}</div>
     </div>

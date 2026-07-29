@@ -25,6 +25,7 @@ import { GameIcon } from '../../components/GameIcon';
 import { UIIcon } from '../../components/UIIcon';
 import { useDialog } from '../../components/useDialog';
 import { useDraftWithAiAvailable } from './useDraftWithAiAvailable';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 /** Targets that support drafting N items at once (mirrors CoDmService's MULTI_TARGETS). */
 const MULTI_TARGETS = new Set<CoDmDraftTarget>(['npc', 'location', 'beat', 'quest', 'faction']);
@@ -144,7 +145,7 @@ export function DraftWithAiButton({
           aria-disabled={disabled || undefined}
           title={disabled ? disabledTitle : undefined}
         >
-          <GameIcon slug="sparkles" size={12} className="inline align-text-bottom mr-1" />{label}
+          <GameIcon slug="sparkles" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />{label}
         </Btn>
       )}
       {open && (
@@ -243,7 +244,7 @@ function DraftWithAiModal({
         <div className="flex items-start justify-between gap-2">
           <div>
             <h2 id={titleId} className="flex items-center gap-2 text-base font-extrabold text-white m-0">
-              <GameIcon slug="sparkles" size={16} /> {TARGET_TITLE[target]}
+              <GameIcon slug="sparkles" size={UI_ICON_SIZE.sm} /> {TARGET_TITLE[target]}
             </h2>
             <p id={descriptionId} className="text-muted text-xs m-0 mt-1">
               Describe what you want — the AI DM drafts it and files {multi ? 'pending proposals' : 'a pending proposal'} for

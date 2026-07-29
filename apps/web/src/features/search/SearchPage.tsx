@@ -13,7 +13,7 @@ import type { SearchResponse, SearchResult } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { Card, EmptyState, ErrorNote, Skeleton, TextInput } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
-import { ENTITY_ICON } from '../../lib/uiIcons';
+import { ENTITY_ICON, UI_ICON_SIZE } from '../../lib/uiIcons';
 import { searchResultHref } from '../../lib/entityLinks';
 
 const typeLabel: Record<SearchResult['type'], string> = {
@@ -188,7 +188,7 @@ export default function SearchPage() {
             .map((t) => (
               <div key={t} className="space-y-2">
                 <h2 className="text-sm font-semibold text-slate-200 flex items-center gap-1.5">
-                  <span className="inline-flex text-[var(--color-accent)]"><GameIcon slug={typeIcon[t]} size={16} /></span>
+                  <span className="inline-flex text-[var(--color-accent)]"><GameIcon slug={typeIcon[t]} size={UI_ICON_SIZE.sm} /></span>
                   {typeLabel[t]}
                   <span className="text-muted font-normal">({grouped.get(t)!.length})</span>
                 </h2>

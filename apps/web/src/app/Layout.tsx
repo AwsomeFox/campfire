@@ -61,6 +61,7 @@ import {
   type NavGroup,
   type NavItem,
 } from './campaignNav';
+import { UI_ICON_SIZE } from '../lib/uiIcons';
 
 function MaybeCampaignCommands({ campaignId, children }: { campaignId?: number; children: ReactNode }) {
   if (campaignId === undefined) return <>{children}</>;
@@ -1090,16 +1091,16 @@ function LayoutContent() {
       {campaignId !== undefined && (
         <nav className="cf-tabbar">
           <NavLink to={`/c/${campaignId}`} end className={({ isActive }) => (isActive ? 'active' : '')}>
-            <span className="ico"><GameIcon slug="campfire" size={20} /></span>Home
+            <span className="ico"><GameIcon slug="campfire" size={UI_ICON_SIZE.md} /></span>Home
           </NavLink>
           <NavLink to={`/c/${campaignId}/quests`} className={({ isActive }) => (isActive ? 'active' : '')}>
-            <span className="ico"><GameIcon slug="scroll-unfurled" size={20} /></span>Quests
+            <span className="ico"><GameIcon slug="scroll-unfurled" size={UI_ICON_SIZE.md} /></span>Quests
           </NavLink>
           <NavLink to={`/c/${campaignId}/party`} className={({ isActive }) => (isActive ? 'active' : '')}>
-            <span className="ico"><GameIcon slug="shield" size={20} /></span>Party
+            <span className="ico"><GameIcon slug="shield" size={UI_ICON_SIZE.md} /></span>Party
           </NavLink>
           <NavLink to={`/c/${campaignId}/notes`} className={({ isActive }) => (isActive ? 'active' : '')}>
-            <span className="ico"><GameIcon slug="quill-ink" size={20} /></span>{t('nav.notes')}
+            <span className="ico"><GameIcon slug="quill-ink" size={UI_ICON_SIZE.md} /></span>{t('nav.notes')}
           </NavLink>
           {liveEncounter ? (
             <NavLink
@@ -1109,7 +1110,7 @@ function LayoutContent() {
               aria-label={t('nav.liveEncounterTab', { round: liveEncounter.round })}
             >
               <span className="ico cf-tabbar-live-indicator">
-                <GameIcon slug="crossed-swords" size={20} />
+                <GameIcon slug="crossed-swords" size={UI_ICON_SIZE.md} />
               </span>
               {t('nav.live')}
             </NavLink>

@@ -73,6 +73,7 @@ import {
 import { RsvpChooser } from './RsvpChooser';
 import { StaleWriteConflict, type ConflictField } from '../../components/StaleWriteConflict';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 interface ScheduleDraft {
   scheduledAt: string;
@@ -278,7 +279,7 @@ export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: 
         >
           <div className="flex items-start gap-2.5">
             <span className="flex leading-none pt-0.5 text-[var(--color-neutral-400)]">
-              <GameIcon slug="calendar" size={18} />
+              <GameIcon slug="calendar" size={UI_ICON_SIZE.md} />
             </span>
             <div className="min-w-0 flex-1 space-y-1">
               <p className="text-sm font-semibold m-0" style={{ fontFamily: 'var(--font-heading)' }}>
@@ -634,7 +635,7 @@ function ScheduleItem({
           {schedule.title && <span className="text-muted text-sm">{schedule.title}</span>}
           <span className="text-muted text-xs ml-auto">{formatDuration(schedule.durationMinutes)}</span>
         </div>
-        {schedule.location && <p className="flex items-center gap-1 text-muted text-xs m-0"><GameIcon slug="position-marker" size={11} /> {schedule.location}</p>}
+        {schedule.location && <p className="flex items-center gap-1 text-muted text-xs m-0"><GameIcon slug="position-marker" size={UI_ICON_SIZE.xs} /> {schedule.location}</p>}
         {schedule.notes && <Markdown className="!text-sm !text-[color:var(--color-text)]">{schedule.notes}</Markdown>}
 
         {canMemberWrite && (
@@ -1281,7 +1282,7 @@ function FeedCard({
   return (
     <Card className="space-y-2.5">
       <div className="flex items-center gap-2">
-        <span className="flex items-center gap-2 text-sm font-bold text-white"><GameIcon slug="calendar" size={16} /> Calendar feed</span>
+        <span className="flex items-center gap-2 text-sm font-bold text-white"><GameIcon slug="calendar" size={UI_ICON_SIZE.sm} /> Calendar feed</span>
         <div className="flex-1" />
         {canDmWrite && absoluteUrl && (
           <>

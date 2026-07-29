@@ -13,6 +13,7 @@ import { GameIcon } from '../../components/GameIcon';
 import { CampaignCover } from '../../components/CampaignCover';
 import { TermHelp } from '../../components/TermHelp';
 import { useSaveFeedback } from '../../components/SaveFeedback';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 const DANGER_LABEL: Record<DangerLevel, string> = {
   low: 'Low',
@@ -192,7 +193,7 @@ export function StatusHeader({
               className="btn btn-ghost"
               style={{ fontSize: 12, textDecoration: 'none' }}
             >
-              <GameIcon slug="tv" size={14} className="inline align-text-bottom mr-1" />Cast
+              <GameIcon slug="tv" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />Cast
             </Link>
             <TermHelp termId="cast" />
             {canDmWrite && (

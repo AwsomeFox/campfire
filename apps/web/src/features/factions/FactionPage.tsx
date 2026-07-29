@@ -39,6 +39,7 @@ import {
   formatStandingChip,
   standingVariant,
 } from './standing';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 export default function FactionPage() {
   const { t } = useTranslation();
@@ -322,7 +323,7 @@ export default function FactionPage() {
             <Chip variant={standingVariant(faction.standing)}>
               {formatStandingChip(faction.standing, faction.reputation, t)}
             </Chip>
-            {isDm && faction.hidden && <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players</span></Chip>}
+            {isDm && faction.hidden && <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={UI_ICON_SIZE.xs} /> Hidden from players</span></Chip>}
             {canDmWrite && (
               <div className="flex gap-2 ml-auto">
                 <EntitySecrecyControls
@@ -354,7 +355,7 @@ export default function FactionPage() {
 
               {faction.goals && (
                 <Card className="space-y-2">
-                  <h2 className="flex items-center gap-2 font-bold text-white text-sm"><GameIcon slug="target-arrows" size={16} /> Goals</h2>
+                  <h2 className="flex items-center gap-2 font-bold text-white text-sm"><GameIcon slug="target-arrows" size={UI_ICON_SIZE.sm} /> Goals</h2>
                   <Markdown>{faction.goals}</Markdown>
                 </Card>
               )}
@@ -393,7 +394,7 @@ export default function FactionPage() {
                         }}
                         className="cf-inset cf-card-hover p-3"
                       >
-                        <p className="flex items-center gap-1.5 text-sm font-bold text-amber-400"><GameIcon slug="hooded-figure" size={13} /> {npc.name}</p>
+                        <p className="flex items-center gap-1.5 text-sm font-bold text-amber-400"><GameIcon slug="hooded-figure" size={UI_ICON_SIZE.xs} /> {npc.name}</p>
                         {npc.role && <p className="text-[11.5px] text-secondary truncate">{npc.role}</p>}
                       </a>
                     ))}
@@ -541,7 +542,7 @@ export default function FactionPage() {
             as="textarea"
             label={
               <span className="inline-flex items-center gap-1">
-                <GameIcon slug="target-arrows" size={11} /> Goals (markdown)
+                <GameIcon slug="target-arrows" size={UI_ICON_SIZE.xs} /> Goals (markdown)
               </span>
             }
             value={form.goals}

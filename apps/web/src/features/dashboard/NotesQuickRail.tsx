@@ -6,7 +6,7 @@ import { NOTES_RECENT_LIMIT } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { Chip, TextInput, Btn, ErrorNote, EmptyState, Skeleton, type ChipVariant } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
-import { NOTE_VISIBILITY_ICON } from '../../lib/uiIcons';
+import { NOTE_VISIBILITY_ICON, UI_ICON_SIZE } from '../../lib/uiIcons';
 import { Markdown } from '../../components/Markdown';
 import { EntityPicker, type EntityLink } from '../notes/EntityPicker';
 import { useKeyboardCommandHint } from '../../components/KeyboardCommandProvider';
@@ -161,7 +161,7 @@ export function NotesQuickRail({
           >
             <Markdown className="!text-[color:var(--color-neutral-200)]">{n.body}</Markdown>
             <div style={{ display: 'flex', gap: 6, marginTop: 5, alignItems: 'center' }}>
-              <Chip variant={visMeta[n.visibility].chip}><span className="inline-flex items-center gap-1"><GameIcon slug={visMeta[n.visibility].slug} size={12} /> {visMeta[n.visibility].label}</span></Chip>
+              <Chip variant={visMeta[n.visibility].chip}><span className="inline-flex items-center gap-1"><GameIcon slug={visMeta[n.visibility].slug} size={UI_ICON_SIZE.xs} /> {visMeta[n.visibility].label}</span></Chip>
               <span className="text-muted" style={{ fontSize: 'var(--type-meta)' }}>
                 {timeAgo(n.updatedAt)}
               </span>
@@ -175,10 +175,10 @@ export function NotesQuickRail({
       {!isDm && (
         <div className="flex gap-1.5 pt-1">
           <button type="button" onClick={() => setDest('private')} style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer' }}>
-            <Chip variant={dest === 'private' ? 'active' : 'private'}><span className="inline-flex items-center gap-1"><GameIcon slug="padlock" size={12} /> Private note</span></Chip>
+            <Chip variant={dest === 'private' ? 'active' : 'private'}><span className="inline-flex items-center gap-1"><GameIcon slug="padlock" size={UI_ICON_SIZE.xs} /> Private note</span></Chip>
           </button>
           <button type="button" onClick={() => setDest('inbox')} style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer' }}>
-            <Chip variant={dest === 'inbox' ? 'active' : 'dm'}><span className="inline-flex items-center gap-1"><GameIcon slug="envelope" size={12} /> To DM inbox</span></Chip>
+            <Chip variant={dest === 'inbox' ? 'active' : 'dm'}><span className="inline-flex items-center gap-1"><GameIcon slug="envelope" size={UI_ICON_SIZE.xs} /> To DM inbox</span></Chip>
           </button>
         </div>
       )}

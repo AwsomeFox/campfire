@@ -9,13 +9,14 @@ import { BackupCard } from './BackupCard';
 import { ServerBackupWorkflowCard } from './ServerBackupWorkflowCard';
 import { GameIcon } from '../../components/GameIcon';
 import { DataRepairCard } from './DataRepairCard';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 export default function AdminStoragePage() {
   useTranslation();
   return (
     <RequireServerAdmin>
       <div className="max-w-4xl mx-auto px-4 mt-5 space-y-5 pb-20 md:pb-10">
-        <h1 className="flex items-center gap-2 text-xl font-extrabold text-white"><GameIcon slug="database" size={20} /> Storage</h1>
+        <h1 className="flex items-center gap-2 text-xl font-extrabold text-white"><GameIcon slug="database" size={UI_ICON_SIZE.md} /> Storage</h1>
         <StorageCard />
         <ServerBackupWorkflowCard />
         <BackupCard />

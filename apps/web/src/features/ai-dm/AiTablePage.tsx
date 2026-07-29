@@ -94,6 +94,7 @@ import { AI_TABLE_FIELD, AI_TABLE_PREFIX } from '../../components/formFieldLabel
 import { Btn, Card, Chip, EmptyState, Skeleton, type ChipVariant } from '../../components/ui';
 import { formatUsdRangeValue } from './costEstimate';
 import { CostDisclosure } from './CostDisclosure';
+import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 /** Seat status → chip variant for the header status pill. */
 const STATUS_VARIANT: Record<'idle' | 'narrating' | 'paused' | 'human' | 'collaborative', ChipVariant> = {
@@ -998,7 +999,7 @@ export default function AiTablePage() {
           className="cf-inset p-3 flex items-center gap-2 text-sm"
           style={{ color: 'var(--color-neutral-200)' }}
         >
-          <span className="flex text-[var(--color-accent)]"><GameIcon slug="crossed-swords" size={16} /></span>
+          <span className="flex text-[var(--color-accent)]"><GameIcon slug="crossed-swords" size={UI_ICON_SIZE.sm} /></span>
           <span className="font-semibold">{t('table.liveEncounterTitle')}</span>
           {currentCombatantName && (
             <span className="text-secondary">· {t('table.liveEncounterTurn', { name: currentCombatantName })}</span>

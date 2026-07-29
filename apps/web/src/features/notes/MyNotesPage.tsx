@@ -32,7 +32,7 @@ import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 import { ReportButton } from '../moderation/ReportDialog';
 import { EntityPicker, type EntityLink } from './EntityPicker';
 import { GameIcon } from '../../components/GameIcon';
-import { ENTITY_ICON, NOTE_VISIBILITY_ICON } from '../../lib/uiIcons';
+import { ENTITY_ICON, NOTE_VISIBILITY_ICON, UI_ICON_SIZE } from '../../lib/uiIcons';
 import { noteTargetHref, entityTargetProps } from '../../lib/entityLinks';
 import { scrollBehavior } from '../../lib/prefersReducedMotion';
 import {
@@ -420,16 +420,16 @@ export default function MyNotesPage() {
           All
         </FilterChip>
         <FilterChip active={filter === 'private'} variant="private" onClick={() => setFilter('private')}>
-          <span className="inline-flex items-center gap-1"><GameIcon slug="padlock" size={12} /> Private</span>
+          <span className="inline-flex items-center gap-1"><GameIcon slug="padlock" size={UI_ICON_SIZE.xs} /> Private</span>
         </FilterChip>
         <FilterChip active={filter === 'dm_shared'} variant="dm" onClick={() => setFilter('dm_shared')}>
-          <span className="inline-flex items-center gap-1"><GameIcon slug="top-hat" size={12} /> DM</span>
+          <span className="inline-flex items-center gap-1"><GameIcon slug="top-hat" size={UI_ICON_SIZE.xs} /> DM</span>
         </FilterChip>
         <FilterChip active={filter === 'party_shared'} variant="party" onClick={() => setFilter('party_shared')}>
-          <span className="inline-flex items-center gap-1"><GameIcon slug="meeple" size={12} /> Party</span>
+          <span className="inline-flex items-center gap-1"><GameIcon slug="meeple" size={UI_ICON_SIZE.xs} /> Party</span>
         </FilterChip>
         <FilterChip active={filter === 'whisper'} variant="whisper" onClick={() => setFilter('whisper')}>
-          <span className="inline-flex items-center gap-1"><GameIcon slug={NOTE_VISIBILITY_ICON.whisper} size={12} /> Whisper</span>
+          <span className="inline-flex items-center gap-1"><GameIcon slug={NOTE_VISIBILITY_ICON.whisper} size={UI_ICON_SIZE.xs} /> Whisper</span>
         </FilterChip>
       </div>
 
@@ -471,7 +471,7 @@ export default function MyNotesPage() {
             <EntityPicker campaignId={cid} onChange={setAttach} resetKey={attachResetKey} disabled={saving} />
           </div>
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="inline-flex items-center gap-1 text-[11px] text-secondary"><GameIcon slug={NOTE_VISIBILITY_ICON.whisper} size={12} /> Whisper to:</span>
+            <span className="inline-flex items-center gap-1 text-[11px] text-secondary"><GameIcon slug={NOTE_VISIBILITY_ICON.whisper} size={UI_ICON_SIZE.xs} /> Whisper to:</span>
             <select
               value={whisperTo}
               onChange={(e) => setWhisperTo(e.target.value)}
@@ -580,7 +580,7 @@ export default function MyNotesPage() {
       <p className="text-[11px] text-secondary">
         Notes are per-user: the DM cannot read private notes (API-enforced). Sharing a note with the DM notifies them
         (it shows in their notification bell) and lands under their &quot;Shared with me&quot;; shared-with-party notes
-        appear on entity pages for everyone. A <GameIcon slug={NOTE_VISIBILITY_ICON.whisper} size={12} className="inline align-text-bottom" /> whisper reaches exactly one player (plus the DM) — the per-player
+        appear on entity pages for everyone. A <GameIcon slug={NOTE_VISIBILITY_ICON.whisper} size={UI_ICON_SIZE.xs} className="inline align-text-bottom" /> whisper reaches exactly one player (plus the DM) — the per-player
         secret channel for &quot;only the rogue notices the trap door&quot;. Body edits do not re-notify.
       </p>
 
@@ -744,7 +744,7 @@ function NoteCard({
             {isWhisper ? (
               // No tap-to-cycle: a whisper is bound to its recipient, so the badge is a
               // static indicator (re-targeting happens in edit, not by cycling).
-              <Chip variant="whisper"><span className="inline-flex items-center gap-1"><GameIcon slug={NOTE_VISIBILITY_ICON.whisper} size={12} /> {whisperLabel}</span></Chip>
+              <Chip variant="whisper"><span className="inline-flex items-center gap-1"><GameIcon slug={NOTE_VISIBILITY_ICON.whisper} size={UI_ICON_SIZE.xs} /> {whisperLabel}</span></Chip>
             ) : editable && isBadgeVisibility(liveNote.visibility) && onVisibilityChange ? (
               <NoteVisibilityMenuButton
                 noteId={liveNote.id}
@@ -755,19 +755,19 @@ function NoteCard({
             ) : editable ? (
               <Chip variant={meta.chip}>
                 <span className="inline-flex items-center gap-1">
-                  <GameIcon slug={meta.slug} size={12} /> {meta.label}
+                  <GameIcon slug={meta.slug} size={UI_ICON_SIZE.xs} /> {meta.label}
                 </span>
               </Chip>
             ) : (
               <>
-                <Chip variant={meta.chip}><span className="inline-flex items-center gap-1"><GameIcon slug={meta.slug} size={12} /> {meta.label}</span></Chip>
+                <Chip variant={meta.chip}><span className="inline-flex items-center gap-1"><GameIcon slug={meta.slug} size={UI_ICON_SIZE.xs} /> {meta.label}</span></Chip>
                 <span className="text-[11px] text-secondary">from {liveNote.authorName || liveNote.authorUserId}</span>
               </>
             )}
             <div className="ml-auto flex items-center gap-2">
               {liveNote.entityType && (
                 <Link to={anchorHref} className="inline-flex items-center gap-1 text-[11px] text-amber-400 hover:underline">
-                  <GameIcon slug={entityIcon[liveNote.entityType]} size={12} /> {entityLabel(liveNote)}
+                  <GameIcon slug={entityIcon[liveNote.entityType]} size={UI_ICON_SIZE.xs} /> {entityLabel(liveNote)}
                 </Link>
               )}
               <span className="text-[11px] text-timestamp">{timeAgo(liveNote.createdAt)}</span>
@@ -1022,7 +1022,7 @@ function NoteEditor({
                 }
               >
                 <span className="inline-flex items-center gap-1">
-                  <GameIcon slug={visMeta[v].slug} size={12} /> {visMeta[v].short}
+                  <GameIcon slug={visMeta[v].slug} size={UI_ICON_SIZE.xs} /> {visMeta[v].short}
                 </span>
               </button>
             );
@@ -1039,7 +1039,7 @@ function NoteEditor({
             as="select"
             label={
               <span className="inline-flex items-center gap-1">
-                <GameIcon slug={NOTE_VISIBILITY_ICON.whisper} size={12} /> Whisper to
+                <GameIcon slug={NOTE_VISIBILITY_ICON.whisper} size={UI_ICON_SIZE.xs} /> Whisper to
               </span>
             }
             labelClassName="text-[11px] text-slate-400"

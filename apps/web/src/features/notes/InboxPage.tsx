@@ -28,7 +28,7 @@ import { Markdown } from '../../components/Markdown';
 import { GameIcon } from '../../components/GameIcon';
 import { TermHelp } from '../../components/TermHelp';
 import { firstGrapheme } from '../../lib/avatarText';
-import { ENTITY_ICON } from '../../lib/uiIcons';
+import { ENTITY_ICON, UI_ICON_SIZE } from '../../lib/uiIcons';
 import { entityHref as targetHref, entityTargetProps } from '../../lib/entityLinks';
 
 interface InboxListState {
@@ -667,7 +667,7 @@ function ResolvedItem({ campaignId, item }: { campaignId: number; item: Note }) 
         <p className="text-[10px] font-bold text-emerald-500 uppercase tracking-widest m-0">{t('notes.resolvedInto')}</p>
         {item.entityType && href && (
           <Link to={href} className="inline-flex items-center gap-1.5 text-xs text-purple-400 hover:underline">
-            <GameIcon slug={entityIcon[item.entityType]} size={13} /> {capitalize(item.entityType)}
+            <GameIcon slug={entityIcon[item.entityType]} size={UI_ICON_SIZE.xs} /> {capitalize(item.entityType)}
             {item.entityId !== null && item.entityType !== 'campaign' ? ` #${item.entityId}` : ''} →
           </Link>
         )}
