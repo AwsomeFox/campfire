@@ -5388,7 +5388,9 @@ export function BattleMap({
                   <button type="button" className="cf-chip" onClick={() => setSelectedTokenIds(selectBy(placed, c => c.kind === 'npc'))}>Select NPCs</button>
                   {(['line', 'cluster', 'sides'] as const).map(kind => <button key={kind} type="button" className="cf-chip" disabled={selectedTokenIds.size === 0 || !onBatchTokens} onClick={() => {
                     const chosen = placed.filter(c => selectedTokenIds.has(c.id));
-                    const plan = planFormationPlacement(encounter.combatants, selectedTokenIds, kind, { x: 50, y: 50 }, gridOn ? Math.max(1, gridSize ?? 5) : 5, gridOn && gridType === 'hex' ? 'hex' : 'square').map(p => ({ combatantId: p.id, x: p.x, y: p.y }));
+                    let plan: Array<{ combatantId: number; x: number; y: number }>;
+                    try { plan = planFormationPlacement(encounter.combatants, selectedTokenIds, kind, { x: 50, y: 50 }, gridOn ? Math.max(1, gridSize ?? 5) : 5, gridOn && gridType === 'hex' ? 'hex' : 'square').map(p => ({ combatantId: p.id, x: p.x, y: p.y })); }
+                    catch (error) { onError(error instanceof Error ? error.message : 'Unable to plan formation'); return; }
                     if (!onBatchTokens) return;
                     if (!window.confirm(`Preview ${kind} formation: ${plan.length} included, ${chosen.length - plan.length} omitted. Apply this atomic placement?`)) return;
                     void onBatchTokens(plan).then(result => { setTokenBatchUndo(result.undoToken); announce(`${kind} formation preview applied: ${plan.length} included`); }).catch(error => onError(error instanceof Error ? error.message : 'Unable to place formation'));
@@ -5518,6 +5520,7 @@ export function BattleMap({
       )}
       {tokenBatchUndo && (
         <UndoSnackbar
+          key={tokenBatchUndo}
           message="Token batch applied."
           successMessage="Token batch undone."
           onUndo={async () => {
